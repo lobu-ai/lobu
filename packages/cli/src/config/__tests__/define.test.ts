@@ -32,11 +32,16 @@ describe("secret", () => {
 });
 
 describe("authoring producers", () => {
-  test("rejects removed tool pre-approvals with the policy migration path", () => {
+  test.each([
+    { preApproved: ["/mcp/lobu-memory/tools/*"] },
+    { allowed: [], strict: true },
+    { allowed: ["query_sdk"], denied: ["run_sdk"] },
+    {},
+  ])("rejects removed agent tool settings: %j", (tools) => {
     expect(() =>
       defineAgent({
         id: "worker",
-        tools: { preApproved: ["/mcp/lobu-memory/tools/*"] },
+        tools,
       } as unknown as Omit<Agent, "kind">)
     ).toThrow("Settings → Policies");
   });

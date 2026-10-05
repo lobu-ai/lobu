@@ -1000,14 +1000,6 @@ export interface NetworkConfig {
   denied?: string[];
 }
 
-/** Worker-side tool permissions. */
-export interface ToolsConfig {
-  allowed?: string[];
-  denied?: string[];
-  /** Reject tool calls that aren't in `allowed`. */
-  strict?: boolean;
-}
-
 export interface Agent {
   readonly kind: "agent";
   id: string;
@@ -1027,7 +1019,6 @@ export interface Agent {
   skills?: Skill[];
   providers?: ProviderConfig[];
   network?: NetworkConfig;
-  tools?: ToolsConfig;
   /** Guardrails enabled for this agent, by registered name. */
   guardrails?: string[];
   /** Nix packages provisioned into the worker environment. */
@@ -1041,9 +1032,9 @@ export interface Agent {
 }
 
 export function defineAgent(config: Omit<Agent, "kind">): Agent {
-  if (config.tools && "preApproved" in config.tools) {
+  if ("tools" in config) {
     throw new Error(
-      `Agent '${config.id}' declares removed 'tools.preApproved'. Delete it from your config; connector approvals are managed in Settings → Policies.`
+      `Agent '${config.id}' declares removed 'tools' settings. Delete this block; action permissions are managed in Settings → Policies.`
     );
   }
   return { ...config, kind: "agent" };

@@ -615,9 +615,9 @@ describe("computeDiff — deepEqual is key-order agnostic", () => {
       buildAgent("triage", {
         metadata: { agentId: "triage", name: "Triage" },
         settings: {
-          toolsConfig: {
-            allowedTools: ["bash"],
-            deniedTools: ["delete"],
+          networkConfig: {
+            allowedDomains: ["api.example.com"],
+            deniedDomains: ["denied.example.com"],
           },
         },
       }),
@@ -631,9 +631,9 @@ describe("computeDiff — deepEqual is key-order agnostic", () => {
           "triage",
           {
             // Same values, different object-key order.
-            toolsConfig: {
-              deniedTools: ["delete"],
-              allowedTools: ["bash"],
+            networkConfig: {
+              deniedDomains: ["denied.example.com"],
+              allowedDomains: ["api.example.com"],
             },
             updatedAt: 0,
           },

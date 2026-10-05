@@ -2,7 +2,7 @@
  * The turn's workspace tools, run under Node against the same just-bash build
  * the guest bundles. Local bash and the file tools share one filesystem; a
  * pinned remote bash does not. The file tools keep pi's contracts (paths,
- * limits, notices), and bash policy runs before either shell executes.
+ * limits, notices), and package-install protection runs before either shell executes.
  */
 import { describe, expect, test } from "bun:test";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
@@ -61,25 +61,19 @@ describe("createWorkspace tools", () => {
     expect(curl).toContain("Command exited with code");
   });
 
-  test("enforces the bash policy and the package-install block before running anything", async () => {
-    const t = toolMap(
-      createWorkspace(["bash", "ls"], { allowAll: false, allowPrefixes: ["echo ", "ls"], denyPrefixes: ["rm "] }).tools
-    );
+  test("blocks package installation before running any command segment", async () => {
+    const t = toolMap(createWorkspace(["bash"]).tools);
     expect(await run(t.bash, { command: "echo ok" })).toBe("ok\n");
-    await expect(run(t.bash, { command: "rm -rf /" })).rejects.toThrow("Bash command denied by policy");
-    await expect(run(t.bash, { command: "cat /etc/passwd" })).rejects.toThrow("Bash command not allowed by policy");
-    await expect(run(t.bash, { command: "echo hi && pip install requests" })).rejects.toThrow(
-      "not allowed by policy"
-    );
-    const open = toolMap(createWorkspace(["bash"]).tools);
-    await expect(run(open.bash, { command: "pip install requests" })).rejects.toThrow("DIRECT PACKAGE INSTALL BLOCKED");
+    for (const command of ["pip install requests", "echo hi && pip install requests", "apt update", "brew install jq", "nix profile install nixpkgs#jq"]) {
+      await expect(run(t.bash, { command })).rejects.toThrow("DIRECT PACKAGE INSTALL BLOCKED");
+    }
   });
 
   test("describes a remote bash separately from the in-memory file workspace", async () => {
     const remote = {
       exec: async () => ({ status: 200, stdout: "remote\n", stderr: "", exitCode: 0 }),
     };
-    const t = toolMap(createWorkspace(["bash", "read"], undefined, remote).tools);
+    const t = toolMap(createWorkspace(["bash", "read"], remote).tools);
     expect(t.bash.description).toContain("pinned remote sandbox");
     expect(t.bash.description).toContain("does not share the file tools' in-memory workspace");
     expect(t.bash.description).not.toContain("workspace has no network access");

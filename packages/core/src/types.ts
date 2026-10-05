@@ -78,7 +78,7 @@ export interface ConversationMessage {
   timestamp: number;
 }
 
-// Agent-settings nested types (NetworkConfig, NixConfig, ToolsConfig,
+// Agent-settings nested types (NetworkConfig, NixConfig,
 // SkillConfig, SkillsConfig, AgentInlineGuardrail, ThinkingLevel) now live in
 // ./contracts/agent-settings.ts as the single TypeBox-schema source (Static<typeof ...>). They are re-exported
 // from there at the bottom of this file so the @lobu/core public surface and
@@ -142,7 +142,7 @@ export interface HistoryMessage {
   messageId?: string;
 }
 
-// NetworkConfig / NixConfig / ToolsConfig now come from
+// NetworkConfig / NixConfig now come from
 // ./contracts/agent-settings (re-exported at the bottom).
 
 interface MemoryFlushOptions {
@@ -166,8 +166,6 @@ export interface AgentOptions {
   model?: string;
   maxTokens?: number;
   temperature?: number;
-  allowedTools?: string | string[];
-  disallowedTools?: string | string[];
   timeoutMinutes?: number | string;
   compaction?: AgentCompactionOptions;
   // Additional settings passed through from gateway (can be nested objects)
@@ -361,5 +359,4 @@ export type {
   SkillConfig,
   SkillsConfig,
   ThinkingLevel,
-  ToolsConfig,
 } from "./contracts/agent-settings";

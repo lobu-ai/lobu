@@ -41,13 +41,6 @@ export const NixConfigSchema = Type.Object({
 });
 export type NixConfig = Static<typeof NixConfigSchema>;
 
-export const ToolsConfigSchema = Type.Object({
-  allowedTools: Type.Optional(Type.Array(Type.String())),
-  deniedTools: Type.Optional(Type.Array(Type.String())),
-  strictMode: Type.Optional(Type.Boolean()),
-});
-export type ToolsConfig = Static<typeof ToolsConfigSchema>;
-
 // GuardrailStage lives in guardrails/types.ts as the canonical union. The
 // schema mirrors it exactly; if the union grows, the _StageCheck assertion
 // below fails at compile time. (TypeBox can't derive from a TS type at
@@ -156,7 +149,6 @@ export const AgentSettingsStoredSchema = Type.Object({
   userMd: Type.Optional(Type.String()),
   identityMd: Type.Optional(Type.String()),
   skillsConfig: Type.Optional(SkillsConfigSchema),
-  toolsConfig: Type.Optional(ToolsConfigSchema),
   guardrails: Type.Optional(Type.Array(Type.String())),
   guardrailsInline: Type.Optional(Type.Array(AgentInlineGuardrailSchema)),
   sandboxId: Type.Optional(Type.String()),

@@ -228,8 +228,8 @@ const lunchFinalize = defineAutomation({
 });
 
 // This declaration owns only the existing agent's metadata. `lobu apply`
-// diffs a settings field only when the config declares it, so the live model,
-// tools, and skills stay unmanaged here.
+// diffs a settings field only when the config declares it, so the live model
+// and skills stay unmanaged here.
 const developer = defineAgent({
   id: "developer",
   name: "Developer",
@@ -272,11 +272,6 @@ const productOps = defineAgent({
   description:
     "Summarizes Lobu production activity from organization-owned read-only feeds",
   providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
-  tools: {
-    // Script execution uses SDK permissions directly; interactive turns stay tool-free.
-    allowed: [],
-    strict: true,
-  },
 });
 
 // Reuse the Lobu Team read-only database credentials already stored in Lobu.

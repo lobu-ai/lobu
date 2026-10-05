@@ -137,41 +137,28 @@ export type AgentTurnGatewayTool =
  */
 export type AgentTurnMediaTool = 'upload_file' | 'generate_image' | 'generate_audio';
 
-/**
- * The agent's bash prefix policy, in the shape `@lobu/core/tool-policy`
- * enforces. Restated rather than imported on purpose: this file is the
- * host-side contract, and a type import here would be the first step toward a
- * value import from the same module, which the guest bundle cannot take.
- */
-export interface AgentTurnBashPolicy {
-  allowAll: boolean;
-  allowPrefixes: string[];
-  denyPrefixes: string[];
-}
-
 /** The tools of a turn and where they are called. */
 export interface AgentTurnTools {
   /** Gateway base URL, mount path included; the MCP route hangs off it. */
   gatewayUrl: string;
   definitions: AgentTurnTool[];
   /**
-   * Workspace tools the agent's policy admits. They run inside the isolate
+   * Workspace tools available for this turn. They run inside the isolate
    * against a filesystem that lives for this turn only.
    */
   builtin?: AgentTurnBuiltinTool[];
-  bashPolicy?: AgentTurnBashPolicy;
   /**
    * The conversation is pinned to a remote runtime sandbox: `bash` runs there
    * through the host, not in the in-memory workspace. Absent → local bash.
    */
   remoteRuntime?: { providerId: string };
   /**
-   * Gateway tools the agent's policy admits, by name. Their routing lives in
+   * Gateway tools available for this turn, by name. Their routing lives in
    * the plugin package, so the wire carries only the names.
    */
   gateway?: AgentTurnGatewayTool[];
   /**
-   * Media tools the agent's policy admits, by name. Same contract as
+   * Media tools available for this turn, by name. Same contract as
    * `gateway`: names only, because the routing lives in the plugin package.
    * `upload_file` additionally needs `builtin` to include a workspace tool —
    * with no filesystem there is no file to show — and the guest drops it if

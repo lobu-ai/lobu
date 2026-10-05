@@ -294,7 +294,7 @@ export interface DesiredAgent {
   /**
    * Settings payload destined for `PATCH /:agentId/config`. Built by the mapper
    * + agent-dir loader: networkConfig, skillsConfig,
-   * guardrails, toolsConfig, nixConfig,
+   * guardrails, nixConfig,
    * models (ordered `<provider>/<model>` refs),
    * identityMd/soulMd/userMd.
    */

@@ -591,7 +591,6 @@ const SETTINGS_FIELDS: Array<keyof AgentSettings> = [
   "networkConfig",
   "nixConfig",
   "skillsConfig",
-  "toolsConfig",
   "guardrails",
   "models",
   "soulMd",

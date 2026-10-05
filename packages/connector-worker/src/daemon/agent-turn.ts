@@ -406,15 +406,6 @@ export async function executeAgentTurnRun(
                   })),
                   ...(turn.tools.builtin ? { builtin: turn.tools.builtin } : {}),
         ...(turn.tools.remote_runtime ? { remoteRuntime: { providerId: turn.tools.remote_runtime.provider_id } } : {}),
-                  ...(turn.tools.bash_policy
-                    ? {
-                        bashPolicy: {
-                          allowAll: turn.tools.bash_policy.allow_all,
-                          allowPrefixes: turn.tools.bash_policy.allow_prefixes,
-                          denyPrefixes: turn.tools.bash_policy.deny_prefixes,
-                        },
-                      }
-                    : {}),
                   // Names only; the guest selects them out of the plugin
                   // package, which is where their routing and schemas live.
                   // Without the conversation they address there is nothing to

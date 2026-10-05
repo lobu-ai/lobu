@@ -171,6 +171,11 @@ function deepMerge<T extends Record<string, any>>(
 export function buildGatewayConfig(
   overrides?: DeepPartial<GatewayConfig>
 ): GatewayConfig {
+  for (const key of ["ALLOWED_TOOLS", "DISALLOWED_TOOLS"]) {
+    if (process.env[key]?.trim()) {
+      throw new Error(`${key} was removed. Configure action permissions in Settings → Policies.`);
+    }
+  }
   logger.debug("Building gateway configuration from environment variables");
 
   // DATABASE_URL is required; the queue / cache / probe paths read it directly
@@ -203,8 +208,6 @@ export function buildGatewayConfig(
     : "";
   const config: GatewayConfig = {
     agentDefaults: {
-      allowedTools: process.env.ALLOWED_TOOLS?.split(","),
-      disallowedTools: process.env.DISALLOWED_TOOLS?.split(","),
       runtime: process.env.AGENT_RUNTIME || process.env.AGENT_DEFAULT_RUNTIME,
       model: process.env.AGENT_DEFAULT_MODEL,
       timeoutMinutes: process.env.TIMEOUT_MINUTES

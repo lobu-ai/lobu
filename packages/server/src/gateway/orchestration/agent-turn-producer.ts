@@ -29,22 +29,16 @@
 import {
   AgentErrorCode,
   type AgentErrorContext,
-  type AgentOptions,
-  buildToolPolicy,
   createLogger,
-  enforceBashCommandPolicy,
   generateWorkerToken,
   getErrorMessage,
   type InstructionContext,
   isExplicitCancelMessage,
-  isToolAllowedByPolicy,
   type MessagePayload,
   resolveMemoryFlushConfig,
   renderAlwaysOnToolPolicyRulesFor,
   renderBaselineAgentPolicy,
   resolveSdkCompat,
-  type ToolPolicy,
-  type ToolsConfig,
   verifyWorkerToken,
 } from "@lobu/core";
 import type { AgentTurnPollPayload } from "@lobu/core/contracts/worker/protocol";
@@ -217,7 +211,7 @@ export interface AgentTurnDeps {
   catalog?: ProviderCatalogService;
   /**
    * The gateway's MCP surface: which servers this agent has, and their tools.
-   * Absent → the turn runs with no tools (logged once per turn).
+   * Absent → the turn receives only standard tools (logged once per turn).
    */
   mcp?: {
     configService: McpConfigService;
@@ -384,17 +378,9 @@ function skillDirectoryName(name: string): string | null {
 /** Whether this tool manifest has a command that can open seeded files. */
 function canReadSeededFiles(
   builtin: readonly BuiltinTool[],
-  policy: ToolPolicy,
   remoteBash: boolean
 ): boolean {
-  if (builtin.includes("read")) return true;
-  if (!builtin.includes("bash") || remoteBash) return false;
-  try {
-    enforceBashCommandPolicy("cat input/attachment", policy.bashPolicy);
-    return true;
-  } catch {
-    return false;
-  }
+  return builtin.includes("read") || (builtin.includes("bash") && !remoteBash);
 }
 
 /**
@@ -742,23 +728,9 @@ async function resolveTurnProvider(
 }
 
 /**
- * The agent's tool policy, built from `agentOptions.toolsConfig`,
- * `allowedTools` and `disallowedTools` through the shared policy builder.
- */
-function turnToolPolicy(options: AgentOptions | undefined): ToolPolicy {
-  return buildToolPolicy({
-    toolsConfig: options?.toolsConfig as ToolsConfig | undefined,
-    allowedTools: options?.allowedTools,
-    disallowedTools: options?.disallowedTools,
-  });
-}
-
-/**
  * The tools this turn may call: every tool of every MCP server the agent has,
- * filtered through the agent's tool policy. Discovery is per server and
- * best-effort: a server that fails to list contributes nothing and one log
- * line. Filtering can only withhold a tool; it never grants one the agent's
- * patterns deny.
+ * discovered per server. A server that fails to list contributes nothing and
+ * one log line. The gateway authorizes each call at its execution boundary.
  */
 async function resolveTurnTools(
   mcp: NonNullable<AgentTurnDeps["mcp"]>,
@@ -767,7 +739,6 @@ async function resolveTurnTools(
     organizationId: string;
     gatewayUrl: string;
     workerToken: string;
-    policy: ToolPolicy;
   }
 ): Promise<{
   tools: TurnTools | undefined;
@@ -798,10 +769,10 @@ async function resolveTurnTools(
       continue;
     }
     const { mcpId, tools, instructions: serverInstructions } = outcome.value;
-    if (serverInstructions) instructions.push(serverInstructions);
+    if (serverInstructions && tools.some((tool) => tool.name?.trim())) instructions.push(serverInstructions);
     for (const tool of tools) {
       const name = tool.name?.trim();
-      if (!name || !isToolAllowedByPolicy(name, args.policy)) continue;
+      if (!name) continue;
       definitions.push({
         mcp_id: mcpId,
         name,
@@ -814,10 +785,7 @@ async function resolveTurnTools(
     tools: definitions.length > 0 ? { gateway_url: args.gatewayUrl, definitions } : undefined,
     instructions,
     failedServers,
-    // Read off the SERVER list, not the tool list: the memory hooks call
-    // `search_memory`/`save_memory` directly, and those two are routinely
-    // filtered out of the model's own manifest by the tool policy without the
-    // server being any less reachable.
+    // Memory hooks call the server directly, independently of tool discovery.
     hasMemoryServer: servers.some((server) => server.id === MEMORY_MCP_ID),
   };
 }
@@ -886,6 +854,11 @@ export async function enqueueAgentTurn(
     // with no agent or no org is not a turn. These stay silent `undefined`.
     if (!data.agentId || isExplicitCancelMessage(data)) return;
     if (!data.organizationId) return;
+    for (const key of ["toolsConfig", "allowedTools", "disallowedTools"]) {
+      if (Object.hasOwn(data.agentOptions ?? {}, key)) {
+        return { error: `${key} was removed. Configure action permissions in Settings → Policies.` };
+      }
+    }
 
     // The turn's attachments, resolved host-side out of the gateway's own
     // artifact store. Done BEFORE the empty-text check, because an
@@ -997,7 +970,6 @@ export async function enqueueAgentTurn(
     // Memory is off unless the agent actually has the server its hooks call.
     let hasMemoryServer = false;
     let mcpInstructions: string[] = [];
-    const policy = turnToolPolicy(data.agentOptions);
     // Resolve the durable correlation once: turn triggers have no completion
     // handshake, while windows must be able to read and complete their bounds.
     const automationContext = parseAutomationRunConversationId(data.conversationId)
@@ -1007,17 +979,11 @@ export async function enqueueAgentTurn(
           agentId: data.agentId,
         })
       : null;
-    if (automationContext?.requiresWindowCompletion) {
-      const excluded = AUTOMATION_REQUIRED_TOOLS.filter((name) => !isToolAllowedByPolicy(name, policy));
-      if (excluded.length > 0) {
-        return { error: `Automation tool policy excludes ${excluded.join(", ")}. Allow these tools in the agent's tool policy.` };
-      }
-    }
     let failedServers: string[] = [];
     if (!deps.mcp) {
       logger.info(
         { agentId: data.agentId },
-        "Agent turn: the MCP surface is not wired, so the turn runs without tools"
+        "Agent turn: the MCP surface is not wired, so the turn has only standard tools"
       );
     } else {
       const resolved = await resolveTurnTools(deps.mcp, {
@@ -1025,7 +991,6 @@ export async function enqueueAgentTurn(
         organizationId: data.organizationId,
         gatewayUrl,
         workerToken,
-        policy,
       });
       tools = resolved.tools;
       mcpInstructions = resolved.instructions;
@@ -1045,50 +1010,27 @@ export async function enqueueAgentTurn(
       }
     }
 
-    // The workspace tools the policy admits. `bash` carries its prefix policy
-    // with it; the file tools need none beyond being admitted.
-    const builtin = WORKSPACE_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
-    // The gateway tools the policy admits through the same shared builder, so
-    // an agent that denies `ask_user` does not receive it.
-    const gateway = GATEWAY_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
-    // The media tools the policy admits, through the same builder again.
-    const media = MEDIA_TOOLS.filter((name) => isToolAllowedByPolicy(name, policy));
-    if (builtin.length > 0 || gateway.length > 0 || media.length > 0) {
-      tools = {
-        gateway_url: gatewayUrl,
-        // Accumulated, not replaced: an agent can have MCP tools and workspace
-        // tools and conversation tools, and dropping the MCP set here is how
-        // the model silently loses the 90% of calls that go through it.
-        definitions: tools?.definitions ?? [],
-        ...(builtin.length > 0 ? { builtin } : {}),
-        ...(builtin.includes("bash") && deps.runtime?.runtimeProviderId
-          ? { remote_runtime: { provider_id: deps.runtime.runtimeProviderId } }
-          : {}),
-        ...(builtin.includes("bash")
-          ? {
-              bash_policy: {
-                allow_all: policy.bashPolicy.allowAll,
-                allow_prefixes: policy.bashPolicy.allowPrefixes,
-                deny_prefixes: policy.bashPolicy.denyPrefixes,
-              },
-            }
-          : {}),
-        // The conversation rides with them: every one of these tools addresses
-        // a channel, and the guest must never infer routing. Both families
-        // need it, so it is emitted once for either.
-        ...(gateway.length > 0 ? { gateway: [...gateway] } : {}),
-        ...(media.length > 0 ? { media: [...media] } : {}),
-        ...(gateway.length > 0 || media.length > 0
-          ? {
-              conversation: {
-                channel_id: data.channelId,
-                conversation_id: data.conversationId,
-                platform: data.platform,
-              },
-            }
-          : {}),
-      };
-    }
+    // Standard tools are available to every turn. Each external action still
+    // authorizes its principal and target at the gateway execution boundary.
+    const builtin = [...WORKSPACE_TOOLS];
+    const gateway = [...GATEWAY_TOOLS];
+    const media = [...MEDIA_TOOLS];
+    tools = {
+      gateway_url: gatewayUrl,
+      definitions: tools?.definitions ?? [],
+      builtin,
+      ...(deps.runtime?.runtimeProviderId
+        ? { remote_runtime: { provider_id: deps.runtime.runtimeProviderId } }
+        : {}),
+      gateway,
+      media,
+      // Pin routing for the conversation and media tools; the guest must not infer it.
+      conversation: {
+        channel_id: data.channelId,
+        conversation_id: data.conversationId,
+        platform: data.platform,
+      },
+    };
 
     const settings = await agentSettings.getSettings(data.agentId, {
       organizationId: data.organizationId,
@@ -1121,12 +1063,6 @@ export async function enqueueAgentTurn(
       })
       .slice(0, TURN_SKILLS_MAX);
 
-    if (hasMemoryServer && !tools) {
-      logger.info(
-        { agentId: data.agentId },
-        "Agent turn: the agent has the memory server but the turn carries no tools, so it runs without memory"
-      );
-    }
     // The platform's identity block, from the same provider the platform
     // adapter registered for the retired lane. `orgScoped` is true by
     // construction: a turn with no org returned above. The connection id rides
@@ -1186,11 +1122,10 @@ export async function enqueueAgentTurn(
         // came from: an MCP server's `search_memory` earns the thread-history
         // rule exactly as the conversation plugin's `send_message` earns the
         // channel-participation one.
-        [...(tools?.definitions ?? []).map((tool) => tool.name), ...gateway, ...media, ...builtin],
+        [...tools.definitions.map((tool) => tool.name), ...gateway, ...media, ...builtin],
         (() => {
           const canRead = canReadSeededFiles(
             builtin,
-            policy,
             Boolean(deps.runtime?.runtimeProviderId)
           );
           return {
@@ -1229,15 +1164,12 @@ export async function enqueueAgentTurn(
         ...(provider.reasoning !== undefined ? { reasoning: provider.reasoning } : {}),
         ...(provider.compat ? { compat: provider.compat } : {}),
       },
-      ...(tools ? { tools } : {}),
+      tools,
       // The memory hooks, when the agent has the server they call. They are
       // not tools and carry no schema: the guest runs
       // `@lobu/plugin-memory`'s own two hooks over the MCP route the turn
       // already uses.
-      // The hooks reach the MCP route through `tools.gateway_url`, so a turn
-      // that carries no tools cannot recall or capture; say so here rather
-      // than promise a hook the guest would drop.
-      ...(hasMemoryServer && tools
+      ...(hasMemoryServer
         ? { memory: { mcp_id: MEMORY_MCP_ID, agent_id: data.agentId } }
         : {}),
       // DENY-ALL. A connector's allowlist defaults open; an agent turn's does
@@ -1293,7 +1225,7 @@ export async function enqueueAgentTurn(
         model: provider.modelId,
         images: attachments.images.length,
         files: attachments.files.length,
-        tools: tools?.definitions.length ?? 0,
+        tools: tools.definitions.length,
         workspaceTools: builtin,
         gatewayTools: gateway,
         mediaTools: media,

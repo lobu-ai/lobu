@@ -4,7 +4,7 @@
 
 export * from "./agent-policy";
 export * from "./tool-trace-summary";
-export * from "./tool-policy";
+export * from "./shell-safety";
 export * from "./turn-control";
 export * from "./memory-flush";
 // Agent store interface (unified storage abstraction)
@@ -126,7 +126,6 @@ export type {
   SuggestedPrompt,
   ThinkingLevel,
   ThreadResponsePayload,
-  ToolsConfig,
 } from "./types";
 export { hasCredentialSource } from "./types";
 export { SUGGESTION_LIMITS, sanitizeSuggestionPrompts } from "./types";

@@ -129,9 +129,6 @@ export async function resolveAgentOptions(
       ...(packages.length > 0 ? { packages } : {}),
     };
   }
-  if (settings.toolsConfig) {
-    mergedOptions.toolsConfig = settings.toolsConfig;
-  }
   if (settings.verboseLogging !== undefined) {
     mergedOptions.verboseLogging = settings.verboseLogging;
   }
