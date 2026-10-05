@@ -2464,7 +2464,7 @@ function compileEntitySegmentFilter(
 		);
 	} catch (error) {
 		throw new ToolUserError(
-			`Segment '${segmentName}' has an invalid predicate: ${error instanceof Error ? error.message : String(error)}`,
+			`Segment '${segmentName}' has an invalid predicate: ${getErrorMessage(error)}`,
 			400,
 			"VALIDATION",
 		);

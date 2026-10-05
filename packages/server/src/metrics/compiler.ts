@@ -208,7 +208,7 @@ export function compileMetricSql(input: CompileMetricInput): string {
 }
 
 /**
- * The one lowering of an `on: "entity"` segment: membership of `ent.id` in
+ * The one lowering of an `on: "entity"` segment: membership of `idColumn` in
  * the type's entities matching the org-authored predicate. The predicate runs
  * against a single-table `entities` scope so its unqualified columns
  * (`metadata`, `name`, …) resolve to the entity row. The caller passes the
