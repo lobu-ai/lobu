@@ -263,6 +263,12 @@ function withFixture(
       `${root}/package.json`,
       JSON.stringify({ version: "19.2.0" })
     );
+    // The CLI publish manifest lists the vendored Ora's dependencies.
+    mkdirSync(`${root}/node_modules/ora`, { recursive: true });
+    copyFileSync(
+      new URL("../../node_modules/ora/package.json", import.meta.url),
+      `${root}/node_modules/ora/package.json`
+    );
     for (const key of ["server", "device", "postgres", "embeddings"]) {
       const dir = `${root}/dist/runtime-components/${key}`;
       mkdirSync(dir, { recursive: true });

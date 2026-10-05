@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const cli = resolve(import.meta.dir, "../../bin/lobu.js");
+// The artifact smoke runs this same flow against the isolated npm install.
+const cli =
+  process.env.LOBU_TEST_CLI ?? resolve(import.meta.dir, "../../bin/lobu.js");
 
 describe("device-code login under Node", () => {
   for (const columns of [0, 80]) {
@@ -107,7 +109,7 @@ describe("device-code login under Node", () => {
         const timer = setTimeout(() => {
           timedOut = true;
           child.kill("SIGKILL");
-        }, 10_000);
+        }, 30_000);
         const exitCode = await new Promise<number | null>((resolve, reject) => {
           child.on("error", reject);
           child.on("close", resolve);
@@ -127,6 +129,7 @@ describe("device-code login under Node", () => {
           ],
         });
         expect(stdout + stderr).toContain("Logged in to lobu.");
+        expect(stderr).toContain("Waiting for authorization...");
         const saved = JSON.parse(
           await readFile(join(scratch, ".config/lobu/credentials.json"), "utf8")
         );
@@ -141,6 +144,6 @@ describe("device-code login under Node", () => {
         server.stop(true);
         await rm(scratch, { recursive: true, force: true });
       }
-    }, 15_000);
+    }, 45_000);
   }
 });

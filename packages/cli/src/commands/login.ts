@@ -226,13 +226,9 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
     process.stdout.isTTY === true &&
     process.stdin.isTTY === true &&
     !options.quiet;
-  // `script` can provide a TTY with zero columns. Ora divides by the width
-  // when counting lines, then loops forever clearing Infinity lines. Keep
-  // polling interactive, but only animate when stderr has a usable width.
-  const spinner =
-    isInteractive && process.stderr.columns > 0
-      ? ora("Waiting for authorization...").start()
-      : null;
+  const spinner = isInteractive
+    ? ora("Waiting for authorization...").start()
+    : null;
 
   // Cap the wait at the server-advertised lifetime AND our local ceiling.
   // The local ceiling guards against a misconfigured issuer handing us an

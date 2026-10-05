@@ -55,6 +55,7 @@
     "node": ">=22 <25 || >=26"
   },
   "patchedDependencies": {
+    "ora@8.2.0": "patches/ora@8.2.0.patch",
     "postgres@3.4.9": "patches/postgres@3.4.9.patch"
   }
 }

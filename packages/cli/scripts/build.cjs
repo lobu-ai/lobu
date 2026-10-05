@@ -51,6 +51,10 @@ if (fs.existsSync(providersSrc)) {
 // runtime connector source/manifests ship — internal tests are filtered out.
 copyDirIfExists("../connectors/src", "dist/connectors", excludeTests);
 
+// npm does not apply Bun patches. Publish the patched Ora package itself so
+// every spinner gets the zero-width terminal fix, including Node-only installs.
+copyDirIfExists(path.dirname(require.resolve("ora")), "dist/vendor/ora");
+
 // The CLI carries configuration/compilation, not the server or native runtime.
 // Runtime packages are generated beside (outside) the CLI's publishable dist.
 async function buildRuntimeArtifacts() {

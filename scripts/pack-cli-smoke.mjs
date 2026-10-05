@@ -134,6 +134,15 @@ run("node", [cliPath, "--help"], destination, env);
 run("node", [cliPath, "daemon", "--help"], destination, env);
 assert.equal(existsSync(cacheRoot), false, "help must not install any runtime");
 
+// Exercise the packed dependency under Node, outside workspace resolution and
+// without relying on Bun to apply the repository's patches at install time.
+run(
+  "bun",
+  ["test", join(root, "packages/cli/src/__tests__/login-device-code.test.ts")],
+  root,
+  { ...env, LOBU_TEST_CLI: cliPath }
+);
+
 // Install the exact component tarballs into a separate cache, through the
 // shipping installer. No workspace resolution or published siblings stand in.
 const { ensureComponent } = await import(

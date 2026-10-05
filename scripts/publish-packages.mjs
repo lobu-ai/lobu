@@ -52,7 +52,7 @@ const PACKAGES = [
   // ahead of the CLI entry, which is published last.
   { dir: "packages/views", transform: rewriteWorkspaceRefs },
   // Advance the CLI entry point only after every sibling package succeeds.
-  { dir: "packages/cli", transform: rewriteWorkspaceRefs },
+  { dir: "packages/cli", transform: transformCliPublish },
 ];
 
 // Published package names that don't use the @lobu/ scope. The unscoped
@@ -254,6 +254,20 @@ function transformCorePublish(pkg) {
       }
     }
   }
+  return rewriteWorkspaceRefs(pkg);
+}
+
+function transformCliPublish(pkg) {
+  // Carry the repository's Ora patch through npm installs without install hooks.
+  // npm links local packages without installing their dependencies.
+  const ora = JSON.parse(
+    readFileSync(path.join(REPO_ROOT, "node_modules/ora/package.json"), "utf8")
+  );
+  pkg.dependencies = {
+    ...ora.dependencies,
+    ...pkg.dependencies,
+    ora: "file:dist/vendor/ora",
+  };
   return rewriteWorkspaceRefs(pkg);
 }
 
