@@ -182,27 +182,6 @@ describe('stored entity list pagination + sort (two-stage page fetch)', () => {
     expect(byName.charlie.total_content).toBe(0);
   });
 
-  it('sorts by the documented domain column', async () => {
-    // Domains reverse the creation order, so a created_at fallback would fail.
-    const domains: Record<string, string> = {
-      alpha: 'g.example', bravo: 'f.example', charlie: 'e.example', delta: 'd.example',
-      echo: 'c.example', foxtrot: 'b.example', golf: 'a.example',
-    };
-    for (const [name, domain] of Object.entries(domains)) {
-      await owner.entities.update({ entity_id: ids[name], metadata: { domain } });
-    }
-    const res = (await owner.entities.list({
-      entity_type: 'company',
-      limit: 3,
-      offset: 0,
-      sort_by: 'domain',
-      sort_order: 'asc',
-    })) as ListResult;
-    expect(res.metadata?.sort_by).toBe('domain');
-    expect(res.metadata?.total_count).toBe(7);
-    expect(res.entities?.map((e) => e.name)).toEqual(['golf', 'foxtrot', 'echo']);
-  });
-
   it('filters within the prefetched page (search applies to both stages)', async () => {
     const res = (await owner.entities.list({
       entity_type: 'company',

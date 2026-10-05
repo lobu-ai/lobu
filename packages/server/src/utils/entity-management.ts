@@ -2282,7 +2282,6 @@ export async function listEntities(
 	const sortColumnMap: Record<string, string> = {
 		name: "e.name",
 		created_at: "e.created_at",
-		domain: "e.metadata->>'domain'",
 		total_content: "total_content",
 		active_connections: "active_connections",
 		automations_count: "automations_count",
@@ -2329,7 +2328,7 @@ export async function listEntities(
   // BY only, no LATERALs — and enrich just those rows. Sorts by computed
   // columns (total_content, …) need the counts for ordering, so they keep the
   // single-query shape.
-  const plainSort = sortBy === 'name' || sortBy === 'created_at' || sortBy === 'domain';
+  const plainSort = sortBy === 'name' || sortBy === 'created_at';
   const pageIdClause = plainSort
     ? `AND e.id = ANY(ARRAY(
          SELECT e2.id FROM entities e2

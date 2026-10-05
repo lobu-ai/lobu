@@ -285,32 +285,43 @@ describe('metric compiler — alias resolver golden', () => {
     expect(noDedupe).not.toContain('__seg0');
   });
 
-  it('sums the same deduped outflow when the segment applies after dedupe', async () => {
-    const sql = getTestDb();
-    await sql`
-      UPDATE entity_types
-      SET metrics_config = jsonb_set(metrics_config, '{segments,outflow,appliedBefore}', '"aggregate"')
-      WHERE slug = 'company' AND organization_id = ${orgId}
-    `;
-    try {
-      const rows = await runMetric({
-        organizationId: orgId,
-        entityType: 'company',
-        measure: 'spend',
-        by: ['currency'],
-        excludeMemberEntities: false,
-      });
-      const byCur = Object.fromEntries(rows.map((r) => [r.currency as string, Number(r.spend)]));
-      expect(byCur.GBP).toBeCloseTo(98.35, 2);
-      expect(byCur.USD).toBeCloseTo(23.93, 2);
-    } finally {
+  it.each(['dedupe', 'aggregate', undefined] as const)(
+    'executes table-qualified event segments with appliedBefore=%s',
+    async (appliedBefore) => {
+      const sql = getTestDb();
+      const metrics = {
+        ...METRICS,
+        segments: {
+          outflow: {
+            ...METRICS.segments.outflow,
+            where: "events.id > 0 AND events.metadata->>'direction'='out'",
+            appliedBefore,
+          },
+        },
+      };
       await sql`
-        UPDATE entity_types
-        SET metrics_config = jsonb_set(metrics_config, '{segments,outflow,appliedBefore}', '"dedupe"')
+        UPDATE entity_types SET metrics_config = ${sql.json(metrics)}
         WHERE slug = 'company' AND organization_id = ${orgId}
       `;
+      try {
+        const rows = await runMetric({
+          organizationId: orgId,
+          entityType: 'company',
+          measure: 'spend',
+          by: ['currency'],
+          excludeMemberEntities: false,
+        });
+        const byCur = Object.fromEntries(rows.map((r) => [r.currency as string, Number(r.spend)]));
+        expect(byCur.GBP).toBeCloseTo(98.35, 2);
+        expect(byCur.USD).toBeCloseTo(23.93, 2);
+      } finally {
+        await sql`
+          UPDATE entity_types SET metrics_config = ${sql.json(METRICS)}
+          WHERE slug = 'company' AND organization_id = ${orgId}
+        `;
+      }
     }
-  });
+  );
 
   it('matches equal identifiers only within the event tenant scope', async () => {
     const tenantA = await createTestEntity({

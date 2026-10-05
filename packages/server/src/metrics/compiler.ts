@@ -110,7 +110,7 @@ export function compileMetricSql(input: CompileMetricInput): string {
     const seg = metrics.segments?.[name];
     if (!seg) throw new MetricCompileError(`segment "${name}" is not declared`);
     if (seg.on === "entity") {
-      entitySegWheres.push(entitySegmentPredicate("ent.id", entityTypeId, seg.where));
+      entitySegWheres.push(entitySegmentPredicate(entityTypeId, seg.where));
     } else if (hasDedupe && (seg.appliedBefore ?? "aggregate") === "aggregate") {
       postDedupeSegWheres.push(seg.where);
     } else {
@@ -136,7 +136,10 @@ export function compileMetricSql(input: CompileMetricInput): string {
     measure.where ? `(${measure.where})` : null,
     ...preDedupeSegWheres,
   ].filter(Boolean);
-  const evt = `SELECT * FROM events${
+  // Evaluate authored predicates where `events` is still in scope, then carry
+  // their flags through dedupe so qualified and unqualified columns both work.
+  const segFlagCols = postDedupeSegWheres.map((w, i) => `(${w}) AS __seg${i}`);
+  const evt = `SELECT ${["*", ...segFlagCols].join(", ")} FROM events${
     innerWhere.length ? ` WHERE ${innerWhere.join(" AND ")}` : ""
   }`;
 
@@ -170,15 +173,14 @@ export function compileMetricSql(input: CompileMetricInput): string {
   const measureExprSel = measure.expr ? `(${measure.expr}) AS __m` : null;
   const dimSels = dims.map((d) => `(${d.expr}) AS ${d.col}`);
   const distinct = hasDedupe ? "DISTINCT " : "";
-  // A post-dedupe segment is projected as a flag next to the dedupe tuple and
-  // filtered on the deduped relation (the event columns are gone by then).
-  const segFlagCols = postDedupeSegWheres.map((w, i) => `(${w}) AS __seg${i}`);
+  // Post-dedupe segment flags ride next to the dedupe tuple and are filtered
+  // on the deduped relation (the event columns are gone by then).
   const relationCols = [
     "ea.entity_id",
     ...dimSels,
     ...(measureExprSel ? [measureExprSel] : []),
     ...dedupeCols,
-    ...segFlagCols,
+    ...postDedupeSegWheres.map((_, i) => `evt.__seg${i}`),
   ].join(", ");
   const fieldExpr = `evt.${eventSet.field}`;
   const aliasMatch = identityNamespaceSql
@@ -225,19 +227,15 @@ export function compileMetricSql(input: CompileMetricInput): string {
 }
 
 /**
- * The one lowering of an `on: "entity"` segment: membership of `idColumn` in
+ * The one lowering of an `on: "entity"` segment: membership of `ent.id` in
  * the type's entities matching the org-authored predicate. The predicate runs
  * against a single-table `entities` scope so its unqualified columns
  * (`metadata`, `name`, …) resolve to the entity row. The caller passes the
  * whole statement through `validateAndScopeQuery`, which org-scopes the inner
  * `entities` reference like any other.
  */
-function entitySegmentPredicate(
-  idColumn: string,
-  entityTypeId: number,
-  where: string,
-): string {
-  return `${idColumn} IN (SELECT id FROM entities WHERE entity_type_id = ${Number(entityTypeId)} AND (${where}))`;
+function entitySegmentPredicate(entityTypeId: number, where: string): string {
+  return `ent.id IN (SELECT id FROM entities WHERE entity_type_id = ${Number(entityTypeId)} AND (${where}))`;
 }
 
 /**
