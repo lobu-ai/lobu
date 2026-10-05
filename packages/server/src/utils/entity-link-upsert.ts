@@ -795,33 +795,57 @@ async function createEntityWithIdentities(
   }
   if (entityId === null) return null;
 
-  let attached = await insertIdentities(sql, {
-    orgId: params.orgId,
-    entityId,
-    connectorKey: params.connectorKey,
-    connectionId: params.connectionId,
-    identities: persisted,
-  });
+  const provisionalId = entityId;
+  let attached: AttachedIdentity[] = [];
+  const lostClaim = new Error('Concurrent identity claim');
+  try {
+    attached = await sql.savepoint(async (sp) => {
+      const claimed = await insertIdentities(sp, {
+        orgId: params.orgId,
+        entityId: provisionalId,
+        connectorKey: params.connectorKey,
+        connectionId: params.connectionId,
+        identities: persisted,
+      });
+      const claimedKeys = new Set(claimed.map(identityKey));
+      if (claimed.length === 0 || governingIdentities(params.identities).some(
+        (id) => !id.matchOnly && !claimedKeys.has(identityKey(id))
+      )) throw lostClaim;
+      return claimed;
+    });
+  } catch (error) {
+    if (error !== lostClaim) throw error;
+    // Rollback releases BOTH rival identity locks and provisional secondary
+    // claims before recovery locks the winner. Deleting rows alone retains
+    // those locks and can deadlock an ordinary entity-first update.
+  }
   const eventOnlyIdentities: AttachedIdentity[] = [];
-  const attachedKeys = new Set(attached.map(identityKey));
-  if (
-    attached.length === 0 ||
-    governingIdentities(params.identities).some(
-      (id) => !id.matchOnly && !attachedKeys.has(identityKey(id))
-    )
-  ) {
+  if (attached.length === 0) {
     // A secondary claim does not make a create successful when a concurrent
     // writer won its primary. Drop this turn's provisional row and its claims,
     // then apply the ordinary tier rule to the committed owners. Deleted or
     // ambiguous owners fail closed; a recycled secondary never wins a primary.
     await hardDeleteEntityRows({ tx: sql, ids: [entityId] });
-    const matches = await lookupMatches(sql, {
+    let matches = await lookupMatches(sql, {
       orgId: params.orgId,
       identities: [params.identities],
     });
     const winner = resolveIdentityTier(params.identities, matches);
     if (typeof winner !== 'number') return null;
     entityId = winner;
+    // Match the normal update path's entity-before-identity lock order.
+    const owner = await sql<{ id: number }>`
+      SELECT id FROM entities
+      WHERE id = ${entityId} AND organization_id = ${params.orgId}
+        AND deleted_at IS NULL
+      FOR UPDATE
+    `;
+    if (owner.length === 0) return null;
+    matches = await lookupMatches(sql, {
+      orgId: params.orgId,
+      identities: [params.identities],
+    });
+    if (resolveIdentityTier(params.identities, matches) !== winner) return null;
     attached = await insertIdentities(sql, {
       orgId: params.orgId,
       entityId,

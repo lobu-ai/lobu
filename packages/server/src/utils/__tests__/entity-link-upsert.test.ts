@@ -870,12 +870,17 @@ describe('applyEventAttributions', () => {
           ],
         });
       }
+      const item = {
+        origin_type: 'msg',
+        metadata: { actor_id: 'actor-1', handle, tenant: 'tenant-a' } as Record<string, unknown>,
+      };
       const result = await applyEventAttributions({
         connectorKey: 'synthetic-actors',
         orgId: org.id,
-        items: [{ origin_type: 'msg', metadata: { actor_id: 'actor-1', handle, tenant: 'tenant-a' } }],
+        items: [item],
         rules: { msg: [rule] },
       }, tx);
+      expect(item.metadata.actor_handle).toBe(handle);
       return result.entityIdsByItem.get(0)?.[0] ?? null;
     };
 
@@ -890,11 +895,41 @@ describe('applyEventAttributions', () => {
       return result;
     });
     await Promise.race([inserted, first]);
-    const second = sql.begin((tx) => resolve(tx as unknown as DbClient, 'second-handle'));
+    let signalSecondInserted!: () => void;
+    let secondInsertObserved = false;
+    const secondInserted = new Promise<void>((resolve) => { signalSecondInserted = resolve; });
+    let releaseSecond!: () => void;
+    const mayRecover = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const second = sql.begin((tx) => {
+      let firstInsert = true;
+      const observe = (client: DbClient): DbClient => new Proxy(client, {
+        apply(target, receiver, args) {
+          const query = Reflect.apply(target, receiver, args);
+          if (firstInsert && Array.isArray(args[0]) && args[0].join('').includes('INSERT INTO entity_identities')) {
+            firstInsert = false;
+            return Promise.resolve(query).then(async (rows) => {
+              secondInsertObserved = true;
+              signalSecondInserted();
+              await mayRecover;
+              return rows;
+            });
+          }
+          return query;
+        },
+        get(target, property, receiver) {
+          if (property === 'savepoint') {
+            return (fn: (sp: DbClient) => Promise<unknown>) => target.savepoint((sp) => fn(observe(sp)));
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      return resolve(observe(tx as unknown as DbClient), 'second-handle');
+    });
     // Observe B waiting on A's uncommitted identity. This proves B's lookup
     // missed the primary, rather than hoping Promise.all happens to race.
     const settled = Promise.all([first, second]);
     settled.catch(() => {});
+    let third: Promise<unknown> | undefined;
     try {
       let blocked = false;
       const deadline = Date.now() + 10_000;
@@ -911,11 +946,33 @@ describe('applyEventAttributions', () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       expect(blocked, 'second transaction must reach the conflicting identity insert').toBe(true);
+      releaseFirst();
+      const owner = await first;
+      await Promise.race([secondInserted, second]);
+      expect(secondInsertObserved).toBe(true);
+      // C is an ordinary existing-owner update: it locks the entity before
+      // identities. B's recovery must use that order too, without retaining a
+      // lock on A's identity from its failed claim attempt.
+      let signalThirdLocked!: () => void;
+      const thirdLocked = new Promise<void>((resolve) => { signalThirdLocked = resolve; });
+      third = sql.begin(async (tx) => {
+        await tx`SELECT id FROM entities WHERE id = ${owner!} FOR UPDATE`;
+        signalThirdLocked();
+        return applyEventAttributions({
+          connectorKey: 'synthetic-actors', orgId: org.id,
+          items: [{ origin_type: 'msg', metadata: { actor_id: 'actor-1', handle: 'second-handle', tenant: 'tenant-a' } }],
+          rules: { msg: [rule] },
+        }, tx as unknown as DbClient);
+      });
+      third.catch(() => {});
+      await Promise.race([thirdLocked, third]);
     } finally {
       releaseFirst();
-      await settled;
+      releaseSecond();
+      await Promise.allSettled([first, second, third]);
     }
     const [owner, recovered] = await settled;
+    await third;
     expect(owner).not.toBeNull();
     expect(recovered).toBe(owner);
 
