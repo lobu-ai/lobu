@@ -59,6 +59,7 @@ import {
 	deriveBrowserActionContext,
 	deriveSdkBrowserActionContext,
 } from "../../../../worker-api/browser-action-context";
+import { requestSourceAttribution } from "../../../../worker-api/device-source-attribution";
 import { resolveRunInitiator } from "../../../initiator";
 import type { ToolContext } from "../../../registry";
 import { getOrgUrlContext } from "../../../view-urls";
@@ -709,7 +710,11 @@ export async function handleExecute(
 		mcpActivity: currentMcpActivityAttribution(ctx),
 		actionOrigin: await resolveActionOrigin(ctx),
 	};
-	runMetadata = { ...runMetadata, approval_notification: notificationContext };
+	runMetadata = {
+		...runMetadata,
+		approval_notification: notificationContext,
+		source_attribution: requestSourceAttribution(ctx),
+	};
 	const shouldQueue = policy.effect === "approval";
 	const activation = args.activation
 		? {

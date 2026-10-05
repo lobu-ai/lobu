@@ -29,6 +29,28 @@ function fakeClient() {
 }
 
 describe('native bridge run forwarding', () => {
+  test('preserves server attribution separately from caller-controlled input', async () => {
+    const source = { agent_id: 'synthetic-agent', agent_name: 'Research agent', client_name: 'Registered client' };
+    let forwarded: Record<string, unknown> | undefined;
+    const bridge = {
+      run: async ({ job }: { job: Record<string, unknown> }) => {
+        forwarded = job;
+        return {};
+      },
+    } as never;
+    await executeNativeBridgeRun(fakeClient(), bridge, {
+      run_id: 41,
+      run_type: 'action',
+      action_key: 'observe',
+      source_attribution: source,
+      action_input: { source_attribution: { agent_name: 'Impersonated agent' }, status_message: 'Checking a window' },
+    } as never);
+    expect(forwarded?.source_attribution).toEqual(source);
+    expect(forwarded?.action_input).toEqual({
+      source_attribution: { agent_name: 'Impersonated agent' }, status_message: 'Checking a window',
+    });
+  });
+
   test('forwards sync chunks in order and completes once with the final checkpoint', async () => {
     const client = fakeClient() as {
       calls: Record<string, unknown[]>;
