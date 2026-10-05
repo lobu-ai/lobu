@@ -7,7 +7,8 @@
  */
 
 import { deriveToolActorSource } from './apply-context';
-import { slugify } from "@lobu/core";
+import type { EntityMetrics } from "@lobu/connector-sdk";
+import { classifyToolError, getErrorMessage, slugify } from "@lobu/core";
 import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
 import { feedLinkedToBusinessEntitySql } from "../authz/channel-about";
 import type {
@@ -33,6 +34,8 @@ import {
 } from "../authz/entity-policy";
 import { type DbClient, getDb, pgBigintArray, pgTextArray } from "../db/client";
 import type { Env } from "../index";
+import { entitySegmentPredicate } from "../metrics/compiler";
+import { isAdminOrOwnerRole, isInProcessSystemCall } from "../tools/access-control";
 import { querySqlImpl } from "../tools/admin/query_sql";
 import type { ToolContext } from "../tools/registry";
 import { entityLinkMatchSql } from "./content-search";
@@ -47,8 +50,9 @@ import {
 	type EntityTransactionHookContext,
 	getEntityHooks,
 } from "./entity-hooks";
-import { ToolUserError } from "./errors";
+import { ToolUserError, toolErrorHttpStatus } from "./errors";
 import { EntityPolicyDenialError } from "./entity-write-denial-audit";
+import { validateAndScopeQuery } from "./execute-data-sources";
 import logger from "./logger";
 import { requireWriteAccess } from "./organization-access";
 import { RESERVED_ENTITY_TYPE_SLUGS } from "./reserved";
@@ -2166,6 +2170,7 @@ export async function listEntities(
 		category?: string;
 		main_market?: string;
 		market?: string;
+		segment?: string;
 		limit?: number;
 		offset?: number;
 		sort_by?: string;
@@ -2198,12 +2203,21 @@ export async function listEntities(
 		};
 	}
 
+	if (filters.segment && !filters.entity_type) {
+		throw new ToolUserError(
+			"segment requires entity_type: a segment is declared on one entity type.",
+			400,
+			"VALIDATION",
+		);
+	}
+
 	// Derived ("view") entity types have no rows in `entities` — their rows come
 	// from `backing_sql`. Return them in the standard list shape so the frontend
 	// renders them with the normal table (no derived-specific UI path).
+	let segmentFilter: { sql: string; params: unknown[] } | null = null;
 	if (filters.entity_type) {
 		const etRows = await sql`
-      SELECT backing_sql, backing_source
+      SELECT id, backing_sql, backing_source, metrics_config
       FROM entity_types
       WHERE slug = ${filters.entity_type}
         AND organization_id = ${ctx.organizationId}
@@ -2211,6 +2225,22 @@ export async function listEntities(
       LIMIT 1
     `;
 		const backingSql = etRows[0]?.backing_sql as string | null | undefined;
+		if (filters.segment) {
+			if (backingSql) {
+				throw new ToolUserError(
+					`Derived entity type '${filters.entity_type}' has no stored entities to segment; filter its backing SQL instead.`,
+					400,
+					"VALIDATION",
+				);
+			}
+			segmentFilter = compileEntitySegmentFilter(
+				filters.entity_type,
+				etRows[0] ? Number(etRows[0].id) : null,
+				(etRows[0]?.metrics_config ?? null) as EntityMetrics | null,
+				filters.segment,
+				ctx,
+			);
+		}
 		if (backingSql) {
 			return listDerivedEntities(
 				filters.entity_type,
@@ -2223,8 +2253,10 @@ export async function listEntities(
 	}
 
 	const conditions: string[] = ["{e}.deleted_at IS NULL"];
-	const params: unknown[] = [];
-	let paramIdx = 1;
+	// The scoped segment statement numbers its own placeholders from $1, so its
+	// params lead the list and every other filter binds after them.
+	const params: unknown[] = segmentFilter ? [...segmentFilter.params] : [];
+	let paramIdx = params.length + 1;
 
 	// Organization filter
 	conditions.push(`{e}.organization_id = $${paramIdx++}`);
@@ -2275,6 +2307,8 @@ export async function listEntities(
 			.map((c) =>
 				c.replace(/\{e\}\./g, `${eAlias}.`).replace(/\{et\}\./g, `${etAlias}.`),
 			)
+			// Authored SQL may contain literal "{e}." or "{et}." text.
+			.concat(segmentFilter ? [`${eAlias}.id IN (${segmentFilter.sql})`] : [])
 			.join(" AND ");
 
 	const whereClause = renderWhere("e", "et");
@@ -2315,11 +2349,6 @@ export async function listEntities(
     WHERE ${whereClause}
   `;
 
-  const totalCountResult = await sql.unsafe<{ total_count: number }>(
-    `SELECT CAST(COUNT(*) AS INTEGER) as total_count ${baseQuery}`,
-    params
-  );
-
   // Two-stage page fetch. The four per-row count LATERALs make enrichment
   // expensive (~ms..100ms per row), and with ORDER BY + LIMIT the planner
   // still evaluates them for EVERY filter-matching row before the top-N sort
@@ -2339,8 +2368,7 @@ export async function listEntities(
        ))`
     : '';
 
-  const result = await sql.unsafe<CreatedEntity>(
-    `SELECT
+  const pageQuery = `SELECT
       e.id, et.slug AS entity_type, e.name, e.slug, e.parent_id, e.metadata, e.created_at,
       COALESCE(tc.cnt, 0) as total_content,
       COALESCE(ac.cnt, 0) as active_connections,
@@ -2351,9 +2379,36 @@ export async function listEntities(
     ${pageIdClause}
     ORDER BY ${orderBy}
     LIMIT ${limit + 1}
-    ${plainSort ? '' : `OFFSET ${offset}`}`,
-    params
-  );
+    ${plainSort ? '' : `OFFSET ${offset}`}`;
+  const fetchPage = async (db: DbClient) => {
+    const totalCountResult = await db.unsafe<{ total_count: number }>(
+      `SELECT CAST(COUNT(*) AS INTEGER) as total_count ${baseQuery}`,
+      params
+    );
+    const result = await db.unsafe<CreatedEntity>(pageQuery, params);
+    return { totalCountResult, result };
+  };
+  // Parsing and scoping do not prevent function side effects or expensive
+  // expressions. Run authored predicates with the SQL tools' execution limits.
+  const { totalCountResult, result } = segmentFilter
+    ? await sql
+        .begin(async (tx) => {
+          await tx.unsafe('SET TRANSACTION READ ONLY');
+          await tx.unsafe("SET LOCAL statement_timeout = '5s'");
+          return fetchPage(tx);
+        })
+        .catch((error: unknown) => {
+          // A SQLSTATE fault (bad cast, read-only violation, timeout) is the
+          // authored predicate's, not the server's; anything else rethrows.
+          const code = classifyToolError({ pgCode: (error as { code?: string } | null)?.code });
+          if (code !== 'VALIDATION' && code !== 'UPSTREAM_TIMEOUT') throw error;
+          throw new ToolUserError(
+            `Segment '${filters.segment}' failed: ${getErrorMessage(error)}`,
+            toolErrorHttpStatus(code),
+            code,
+          );
+        })
+    : await fetchPage(sql);
 
   const hasMore = result.length > limit;
   const entities = hasMore
@@ -2363,6 +2418,66 @@ export async function listEntities(
   const totalCount = Number(totalCountResult[0]?.total_count || 0);
 
   return { entities, hasMore, totalCount, limit, offset, sortBy, sortOrder: normalizedSortOrder };
+}
+
+/**
+ * Lower a named `on: "entity"` segment to an org-scoped id subquery for the
+ * entity list. The predicate is org-authored SQL, so it goes through the same
+ * lowering ({@link entitySegmentPredicate}) and the same parse / validate /
+ * org-scope pass ({@link validateAndScopeQuery}) as a metric's entity segment.
+ * A list is a request path, so the predicate may read `entities` only: any
+ * other table (events above all) would put a history walk behind every page.
+ */
+function compileEntitySegmentFilter(
+	entityType: string,
+	entityTypeId: number | null,
+	metrics: EntityMetrics | null,
+	segmentName: string,
+	ctx: ToolContext,
+): { sql: string; params: unknown[] } {
+	const segment = metrics?.segments?.[segmentName];
+	if (entityTypeId === null || !segment) {
+		throw new ToolUserError(
+			`Segment '${segmentName}' is not declared on entity type '${entityType}'.`,
+			400,
+			"VALIDATION",
+		);
+	}
+	if (segment.on !== "entity") {
+		throw new ToolUserError(
+			`Segment '${segmentName}' filters events (on: '${segment.on}'), not entities; only on: 'entity' segments can narrow an entity list.`,
+			400,
+			"VALIDATION",
+		);
+	}
+	let scoped: ReturnType<typeof validateAndScopeQuery>;
+	try {
+		scoped = validateAndScopeQuery(
+			`SELECT seg.id FROM entities seg WHERE ${entitySegmentPredicate("seg.id", entityTypeId, segment.where)}`,
+			ctx.organizationId,
+			{
+				userId: ctx.userId ?? null,
+				// Match metric SQL: the outer type gate does not authorize nested
+				// predicates to read protected member metadata.
+				excludeMemberEntities: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),
+			},
+		);
+	} catch (error) {
+		throw new ToolUserError(
+			`Segment '${segmentName}' has an invalid predicate: ${getErrorMessage(error)}`,
+			400,
+			"VALIDATION",
+		);
+	}
+	const otherTables = scoped.tableRefs.filter((table) => table !== "entities");
+	if (otherTables.length > 0) {
+		throw new ToolUserError(
+			`Segment '${segmentName}' reads ${[...new Set(otherTables)].join(", ")}; an entity-list segment may only filter on entities columns.`,
+			400,
+			"VALIDATION",
+		);
+	}
+	return { sql: scoped.sql, params: scoped.params };
 }
 
 /**

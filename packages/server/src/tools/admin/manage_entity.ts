@@ -1311,6 +1311,7 @@ async function handleList(
 				category: args.category,
 				main_market: args.main_market,
 				market: args.market,
+				segment: args.segment,
 				limit: args.limit,
 				offset: args.offset,
 				sort_by: args.sort_by,

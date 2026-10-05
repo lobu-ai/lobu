@@ -103,7 +103,7 @@ export function compileMetricSql(input: CompileMetricInput): string {
     const seg = metrics.segments?.[name];
     if (!seg) throw new MetricCompileError(`segment "${name}" is not declared`);
     if (seg.on === "entity") {
-      entitySegWheres.push(entitySegmentPredicate(entityTypeId, seg.where));
+      entitySegWheres.push(entitySegmentPredicate("ent.id", entityTypeId, seg.where));
     } else {
       segWheres.push(`(${seg.where})`);
     }
@@ -208,15 +208,19 @@ export function compileMetricSql(input: CompileMetricInput): string {
 }
 
 /**
- * The one lowering of an `on: "entity"` segment: membership of `ent.id` in
+ * The one lowering of an `on: "entity"` segment: membership of `idColumn` in
  * the type's entities matching the org-authored predicate. The predicate runs
  * against a single-table `entities` scope so its unqualified columns
  * (`metadata`, `name`, …) resolve to the entity row. The caller passes the
  * whole statement through `validateAndScopeQuery`, which org-scopes the inner
  * `entities` reference like any other.
  */
-function entitySegmentPredicate(entityTypeId: number, where: string): string {
-  return `ent.id IN (SELECT id FROM entities WHERE entity_type_id = ${Number(entityTypeId)} AND (${where}))`;
+export function entitySegmentPredicate(
+  idColumn: string,
+  entityTypeId: number,
+  where: string,
+): string {
+  return `${idColumn} IN (SELECT id FROM entities WHERE entity_type_id = ${Number(entityTypeId)} AND (${where}))`;
 }
 
 /**

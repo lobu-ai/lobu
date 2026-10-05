@@ -1169,6 +1169,10 @@ export type ManageEntityData = {
          */
         market?: string;
         /**
+         * [list] Name of an on:'entity' segment declared on entity_type (metrics_config.segments). Narrows the list to entities matching its predicate. Requires entity_type.
+         */
+        segment?: string;
+        /**
          * Page size (default: 100, max: 500)
          */
         limit?: number;
