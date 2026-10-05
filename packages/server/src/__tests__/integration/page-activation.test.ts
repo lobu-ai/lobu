@@ -142,6 +142,7 @@ describe("page-activated operation runs", () => {
 			action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {}, setTitle: async () => {} },
 			tabs: { query: async () => [], get: async (id: number) => ({ id, groupId: -1, windowId: 1 }) },
 			tabGroups: { query: async () => [] },
+			debugger: { getTargets: async () => [] },
 		};
 		(globalThis as any).chrome = chrome;
 		let calls = 0;
