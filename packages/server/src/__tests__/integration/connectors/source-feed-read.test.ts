@@ -132,6 +132,7 @@ describe('hybrid feed capability contract', () => {
     expect(Number((runCount as { n: number }).n)).toBeGreaterThan(0);
 
     const result = await readSourceFeed({
+      deadlineAt: Date.now() + 30_000,
       scope: ownerScope(),
       feedId: hybridFeedId,
       query: 'ap',
@@ -148,21 +149,21 @@ describe('hybrid feed capability contract', () => {
 
   it('fails closed when the selected feed definition lacks read', async () => {
     await expect(
-      readSourceFeed({ scope: ownerScope(), feedId: syncOnlyFeedId }),
+      readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: ownerScope(), feedId: syncOnlyFeedId }),
     ).rejects.toThrow(/does not support source reads/i);
   });
 
   it('enforces connection visibility and feed lifecycle before source access', async () => {
     await expect(
-      readSourceFeed({ scope: memberScope(), feedId: privateFeedId }),
+      readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: memberScope(), feedId: privateFeedId }),
     ).rejects.toThrow(/not found or not accessible/i);
 
-    const ownerResult = await readSourceFeed({ scope: ownerScope(), feedId: privateFeedId });
+    const ownerResult = await readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: ownerScope(), feedId: privateFeedId });
     expect(ownerResult.rows).toHaveLength(3);
 
     await getTestDb()`UPDATE feeds SET status = 'paused' WHERE id = ${privateFeedId}`;
     await expect(
-      readSourceFeed({ scope: ownerScope(), feedId: privateFeedId }),
+      readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: ownerScope(), feedId: privateFeedId }),
     ).rejects.toThrow(/not found or not accessible/i);
   }, 60_000);
 });

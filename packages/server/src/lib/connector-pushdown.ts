@@ -205,10 +205,10 @@ export interface ReadSourceFeedParams {
   limit?: number;
   offset?: number;
   sort?: { column: string; order: 'asc' | 'desc' };
-  /** Caller cancellation, threaded into device and HTTP transports. */
+  /** Caller cancellation, threaded into device, HTTP, and compiled-connector transports. */
   signal?: AbortSignal;
   /** Absolute wall-clock deadline. Compiled connectors are killed at this deadline. */
-  deadlineAt?: number;
+  deadlineAt: number;
 }
 
 /** Result from {@link readSourceFeed} — live rows, never persisted. */
@@ -228,9 +228,8 @@ function deadlineError(feedId: number): Error & { exitReason: 'timeout' } {
   });
 }
 
-function remainingReadMs(p: ReadSourceFeedParams): number | undefined {
+function remainingReadMs(p: ReadSourceFeedParams): number {
   if (p.signal?.aborted) throw deadlineError(p.feedId);
-  if (p.deadlineAt === undefined) return undefined;
   const remaining = Math.trunc(p.deadlineAt - Date.now());
   if (remaining <= 0) throw deadlineError(p.feedId);
   return remaining;
@@ -515,8 +514,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     ...dbEgressConfig(),
   };
 
-  const timeoutMs = remainingReadMs(p) ?? 30_000;
-  const deadlineAt = Date.now() + timeoutMs;
+  const timeoutMs = remainingReadMs(p);
   const controller = new AbortController();
   const onAbort = () => controller.abort();
   p.signal?.addEventListener('abort', onAbort, { once: true });
@@ -540,7 +538,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
         createdByUserId: p.scope.principal, automationId: p.automationId,
         runMetadata: { [SOURCE_FEED_READ_METADATA_KEY]: true }, db: tx,
       });
-      await tx`UPDATE runs SET feed_id = ${feed.id}, expires_at = ${new Date(deadlineAt)},
+      await tx`UPDATE runs SET feed_id = ${feed.id}, expires_at = ${new Date(p.deadlineAt)},
         connector_version = ${feed.pinned_version ?? feed.definition_version},
         connector_artifact_hash = ${feed.selected_artifact_hash}
         WHERE id = ${run.runId} AND organization_id = ${p.scope.organizationId}`;

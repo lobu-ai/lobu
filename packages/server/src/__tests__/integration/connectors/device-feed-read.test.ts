@@ -261,6 +261,7 @@ describe('device-backed source feed read', () => {
 
   it('dispatches to the paired device, returns live rows, and retains nothing', async () => {
     const reading = readSourceFeed({
+      deadlineAt: Date.now() + 30_000,
       scope: scope(),
       feedId,
       query: 'invoice',
@@ -339,7 +340,7 @@ describe('device-backed source feed read', () => {
     await setDeviceLastSeen('1 hour');
 
     try {
-      const result = await readSourceFeed({ scope: scope(), feedId });
+      const result = await readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: scope(), feedId });
       expect(result.rows).toEqual([{ source: 'historical-compiled' }]);
       expect(await readRunRows()).toEqual([]);
     } finally {
@@ -354,7 +355,7 @@ describe('device-backed source feed read', () => {
   }, 30_000);
 
   it('surfaces a device-side failure and still scrubs the run', async () => {
-    const reading = readSourceFeed({ scope: scope(), feedId, query: 'payslip' });
+    const reading = readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: scope(), feedId, query: 'payslip' });
     await respondAsDevice({ status: 'failed', error_message: 'Full Disk Access denied' });
 
     await expect(reading).rejects.toThrow(/failed on the paired device: Full Disk Access denied/);
@@ -364,7 +365,7 @@ describe('device-backed source feed read', () => {
   }, 30_000);
 
   it('rejects a malformed device reply rather than reporting an empty result', async () => {
-    const reading = readSourceFeed({ scope: scope(), feedId });
+    const reading = readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: scope(), feedId });
     await respondAsDevice({ status: 'success', action_output: { unexpected: true } });
 
     await expect(reading).rejects.toThrow(/malformed/);
@@ -380,7 +381,7 @@ describe('device-backed source feed read', () => {
       throw new Error('connection terminated unexpectedly');
     });
     await expect(
-      readSourceFeed({ scope: scope(), feedId, query: 'mortgage' })
+      readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: scope(), feedId, query: 'mortgage' })
     ).rejects.toThrow(/connection terminated unexpectedly/);
 
     const runs = await readRunRows();
@@ -399,7 +400,7 @@ describe('device-backed source feed read', () => {
       throw new Error('connection terminated unexpectedly');
     });
     await expect(
-      readSourceFeed({ scope: scope(), feedId, query: 'tenancy deposit' })
+      readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: scope(), feedId, query: 'tenancy deposit' })
     ).rejects.toThrow(/connection terminated unexpectedly/);
 
     const [abandoned] = await readRunRows();
@@ -483,7 +484,7 @@ describe('device-backed source feed read', () => {
 
   it('fails fast with a diagnosis when the paired device is offline', async () => {
     await setDeviceLastSeen('30 minutes');
-    await expect(readSourceFeed({ scope: scope(), feedId })).rejects.toThrow(
+    await expect(readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: scope(), feedId })).rejects.toThrow(
       /is unavailable: device "Test Mac" is offline \(last polled 30m ago\)/
     );
     // No run parked for the 60s queue budget — the server already knew.
@@ -502,7 +503,7 @@ describe('device-backed source feed read', () => {
         },
       })} WHERE id = ${deviceWorkerId}::uuid
     `;
-    await expect(readSourceFeed({ scope: scope(), feedId })).rejects.toThrow(/selected connector manifest.*eligible device/i);
+    await expect(readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: scope(), feedId })).rejects.toThrow(/selected connector manifest.*eligible device/i);
     expect(await readRunRows()).toHaveLength(0);
   });
 
@@ -513,7 +514,7 @@ describe('device-backed source feed read', () => {
       WHERE connector_key = ${CONNECTOR_KEY} AND version = ${CONNECTOR_VERSION}
     `;
     await sql`UPDATE device_workers SET connector_manifests = '{}'::jsonb WHERE id = ${deviceWorkerId}::uuid`;
-    const reading = readSourceFeed({ scope: scope(), feedId });
+    const reading = readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: scope(), feedId });
     const result = reading.then(value => ({ value }), error => ({ error }));
     await respondAsDevice({
       status: 'success',
@@ -556,7 +557,7 @@ describe('device-backed source feed read', () => {
     `) as Array<{ id: string }>;
 
     try {
-      const error = await readSourceFeed({ scope: scope(), feedId }).then(
+      const error = await readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: scope(), feedId }).then(
         () => new Error('expected the read to be refused'),
         (err: unknown) => err as Error
       );
@@ -596,7 +597,7 @@ describe('device-backed source feed read', () => {
     `;
     await sql`UPDATE feeds SET status = 'paused' WHERE id = ${feedId}`;
 
-    const error = await readSourceFeed({ scope: scope(), feedId }).then(
+    const error = await readSourceFeed({ deadlineAt: Date.now() + 30_000, scope: scope(), feedId }).then(
       () => null,
       (err: unknown) => err as { code?: string; retryable?: boolean; message: string }
     );
@@ -727,6 +728,7 @@ async function countRuns(organizationId: string): Promise<number> {
 
 async function readFails(organizationId: string, feedId: number): Promise<Error> {
   const error = await readSourceFeed({
+    deadlineAt: Date.now() + 30_000,
     scope: scopeIn(organizationId),
     feedId,
     query: 'live',
@@ -846,6 +848,7 @@ describe('unpinned device source-feed reads are a personal-org lane', () => {
     expect(home.organization_id).not.toBe(personalOrgId);
 
     const reading = readSourceFeed({
+      deadlineAt: Date.now() + 30_000,
       scope: scopeIn(personalOrgId),
       feedId: personalFeedId,
       query: 'live',
@@ -885,6 +888,7 @@ describe('unpinned device source-feed reads are a personal-org lane', () => {
     `;
 
     const reading = readSourceFeed({
+      deadlineAt: Date.now() + 30_000,
       scope: scopeIn(teamOrgId),
       feedId: teamFeedId,
       query: 'live',
