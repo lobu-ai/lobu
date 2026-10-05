@@ -235,9 +235,9 @@ organization rules and an opaque `revision`; `PUT` accepts `{ revision, rules }`
 and replaces that collection atomically. A stale revision returns HTTP 409.
 Unchanged saved rules can be retained or removed after their targets disappear;
 new rules and changed decisions require valid targets.
-The generic single-rule write endpoint no longer accepts organization connector
-rules. Agent restrictions and other policy classes retain their existing APIs
-and are preserved by collection replacements. An empty `rules` array removes
+The generic single-rule write endpoint rejects organization connector rules.
+Agent restrictions and other policy classes retain their existing APIs and are
+preserved by collection replacements. An empty `rules` array removes
 organization connector rules, so unmatched actions require Ask.
 
 Each rule has an `effect` (`auto`, `approval`, or `deny`) and optional scope:

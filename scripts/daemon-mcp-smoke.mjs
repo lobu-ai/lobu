@@ -427,7 +427,7 @@ async function main() {
     );
   });
   // A disposable local owner's real web session authorizes subsequent tests.
-  // Tokens never change connector policies or approve operations.
+  // Device and worker tokens never change connector policies or approve operations.
   const policyPath = `/api/${org.slug}/write-permissions/connector-actions`;
   const policies = await json(policyPath, { headers: sessionHeaders });
   await json(policyPath, {

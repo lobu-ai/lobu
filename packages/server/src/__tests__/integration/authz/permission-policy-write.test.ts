@@ -87,10 +87,10 @@ function request(
 }
 
 async function orgRules(rules: Record<string, unknown>[]) {
-  const url = `http://localhost/api/${org.slug}/write-permissions/connector-actions`;
-  const headers = { Cookie: cookie, "Content-Type": "application/json", Origin: "http://localhost" };
-  const current = await (await app.fetch(new Request(url, { headers }), env)).json();
-  return app.fetch(new Request(url, { method: "PUT", headers, body: JSON.stringify({ revision: current.revision, rules }) }), env);
+	const url = `http://localhost/api/${org.slug}/write-permissions/connector-actions`;
+	const headers = { Cookie: cookie, "Content-Type": "application/json", Origin: "http://localhost" };
+	const current = await (await app.fetch(new Request(url, { headers }), env)).json();
+	return app.fetch(new Request(url, { method: "PUT", headers, body: JSON.stringify({ revision: current.revision, rules }) }), env);
 }
 
 beforeAll(async () => {
@@ -116,7 +116,8 @@ beforeEach(async () => {
 });
 
 describe("permission policy HTTP writes", () => {
-	it.each([agentId])("requires a human session for connector policy writes and deletes (agent=%s)", async (agent) => {
+	it("requires a human session for agent connector restriction writes and deletes", async () => {
+		const agent = agentId;
 		expect((await request("PUT", connectorPolicy, { agent })).status).toBe(200);
 		for (const token of [oauth, pat]) {
 			const headers = { Authorization: `Bearer ${token}` };
@@ -155,15 +156,15 @@ describe("permission policy HTTP writes", () => {
 		).toEqual({ deleted: true });
 	});
 
-  it("rejects org connector writes through the retired single-rule path without changing saved rules", async () => {
-    expect((await orgRules([{ effect: "deny" }])).status).toBe(200);
-    for (const method of ["PUT", "DELETE"]) {
-      const response = await request(method, connectorPolicy);
-      expect(response.status).toBe(400);
-      expect((await response.json()).message).toContain("connector-actions");
-    }
-    expect((await listEntityApprovalPolicies(org.id, "connector_action"))[0].effects.execute).toBe("deny");
-  });
+	it("rejects org connector writes through the single-rule path without changing saved rules", async () => {
+		expect((await orgRules([{ effect: "deny" }])).status).toBe(200);
+		for (const method of ["PUT", "DELETE"]) {
+			const response = await request(method, connectorPolicy);
+			expect(response.status).toBe(400);
+			expect((await response.json()).message).toContain("connector-actions");
+		}
+		expect((await listEntityApprovalPolicies(org.id, "connector_action"))[0].effects.execute).toBe("deny");
+	});
 
 	it("preserves OAuth admin access for other policy classes", async () => {
 		const headers = { Authorization: `Bearer ${oauth}` };
@@ -246,7 +247,8 @@ describe("permission policy HTTP writes", () => {
 		expect(await resolve()).toBe("deny");
 	});
 
-	it.each([agentId])("rejects malformed updates/deletes without erasing rules (agent=%s)", async (agent) => {
+	it("rejects malformed agent restriction updates/deletes without erasing rules", async () => {
+		const agent = agentId;
 		expect((await request("PUT", connectorPolicy, { agent })).status).toBe(200);
 		for (const body of [
 			null,
@@ -434,7 +436,7 @@ describe("permission policy HTTP writes", () => {
 		const saved = await orgRules([{ connection_id: connection.id, operation_category: "write", effect: "auto" }]);
 		expect(saved.status).toBe(200);
 		expect((await saved.json()).rules).toEqual([{ connection_id: connection.id, operation_category: "write", effect: "auto" }]);
-    const policy = (await listEntityApprovalPolicies(org.id, "connector_action")).find(row => row.connectionId === connection.id)!;
+		const policy = (await listEntityApprovalPolicies(org.id, "connector_action")).find(row => row.connectionId === connection.id)!;
 		const input = { connection_id: String(connection.id), operation_key: "classify", agent_id: agentId };
 		const inspect = () => request("GET", input, { explain: true });
 		expect(await (await inspect()).json()).toEqual({ effect: "auto", rule_ids: [policy.id], reason: "matched_rule" });

@@ -230,7 +230,11 @@ export async function writePermissionPolicy(c: Context) {
 	} catch (error) {
 		return invalid(c, (error as Error).message);
 	}
-	// Only human administrators can change connector execution authority.
+	const agentId = c.req.param("agentId") ?? null;
+	if (policy.resourceClass === "connector_action" && !agentId) {
+		return invalid(c, "Manage organization connector rules through /write-permissions/connector-actions.");
+	}
+	// Only human administrators can change agent connector restrictions.
 	if (
 		policy.resourceClass === "connector_action" &&
 		(c.get("authSource") !== "session" || !c.get("user")?.id || c.get("mcpAuthInfo"))
@@ -238,14 +242,10 @@ export async function writePermissionPolicy(c: Context) {
 		return c.json(
 			{
 				error: "forbidden",
-				message: "Changing connector policies requires a human web session.",
+				message: "Changing agent connector restrictions requires a human web session.",
 			},
 			403,
 		);
-	}
-	const agentId = c.req.param("agentId") ?? null;
-	if (policy.resourceClass === "connector_action" && !agentId) {
-		return invalid(c, "Manage organization connector rules through /write-permissions/connector-actions.");
 	}
 	policy.principalKind = agentId ? "agent" : null;
 	policy.principalId = agentId;
