@@ -3,7 +3,6 @@
 
 import type { FeedOperation } from '@lobu/connector-sdk';
 
-export type { FeedOperation } from '@lobu/connector-sdk';
 export type FeedStore = "events" | "channel_messages";
 export type FeedStatus = "active" | "paused" | "error";
 

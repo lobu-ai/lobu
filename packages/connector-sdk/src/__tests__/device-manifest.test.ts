@@ -25,12 +25,11 @@ const validSpec = () => ({
 });
 
 describe('defineDeviceConnector', () => {
-  test('preserves source observation capabilities and rejects competing checkpoint writers', () => {
+  test('rejects source observation on metadata-only device manifests', () => {
     const spec = validSpec();
     const feed = spec.feeds.events;
     const observed = { ...spec, feeds: { events: { ...feed, operations: ['read', 'observe'] } } };
-    expect(serializeDeviceConnector(defineDeviceConnector(observed as never)).feeds_schema.events)
-      .toMatchObject({ operations: ['read', 'observe'] });
+    expect(() => defineDeviceConnector(observed as never)).toThrow('invalid feed operations');
     expect(() => defineDeviceConnector({ ...spec, feeds: { events: { ...feed, operations: ['sync', 'observe'] } } } as never))
       .toThrow('invalid feed operations');
   });

@@ -125,6 +125,8 @@ directly because their executable handlers live elsewhere.
   It publishes the additional `observe` operation. The current transport starts
   and drains browser listeners only while an active, authorized Automation
   subscribes to the connection's events.
+  Native device manifests still advertise only `sync`/`read`; their protocol
+  does not execute observation handlers.
 - **Both** lets a connector maintain a small, searchable index while retaining
   an explicit path to source-owned detail. Gmail can sync a filtered set of
   threads yet search the wider mailbox on demand; SQL and warehouse connectors

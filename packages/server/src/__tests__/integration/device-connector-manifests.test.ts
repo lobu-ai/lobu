@@ -395,14 +395,12 @@ function capabilitiesFor(manifests: Array<Record<string, unknown>>): Record<stri
 }
 
 describe('device connector manifests', () => {
-  it('accepts source observation metadata and rejects competing checkpoint writers', () => {
+  it('rejects source observation capabilities without a native observation protocol', () => {
     const validate = (operations: string[]) => validateDeviceConnectorManifests({
       platform: 'macos', capabilities: ['screentime'],
       manifests: [manifest({ feeds_schema: { items: { key: 'items', name: 'Items', operations } } })],
     });
-    const observed = validate(['read', 'observe']);
-    expect(observed.accepted).toBe(true);
-    expect(observed.manifests[0].manifest.feeds_schema.items).toMatchObject({ operations: ['read', 'observe'] });
+    expect(validate(['read', 'observe']).accepted).toBe(false);
     expect(validate(['sync', 'observe']).accepted).toBe(false);
   });
 

@@ -41,7 +41,8 @@ export interface DeviceFeedDefinition extends DeviceManifestSchema {
   name: string;
   description?: string;
   userManaged?: boolean;
-  operations: FeedOperation[];
+  /** Native device execution currently supports sync/read, not source observation. */
+  operations: Array<Exclude<FeedOperation, 'observe'>>;
   configSchema?: DeviceManifestSchema;
   eventKinds?: Record<string, DeviceManifestSchema>;
 }
@@ -186,8 +187,7 @@ function validateFeeds(feeds: DeviceConnectorDefinition['feeds']): void {
     if (
       !Array.isArray(feed.operations) ||
       feed.operations.length === 0 ||
-      !feed.operations.every((operation) => operation === 'sync' || operation === 'read' || operation === 'observe') ||
-      (feed.operations.includes('sync') && feed.operations.includes('observe')) ||
+      !feed.operations.every((operation) => operation === 'sync' || operation === 'read') ||
       new Set(feed.operations).size !== feed.operations.length
     ) {
       throw new Error(`invalid feed operations '${key}'`);
