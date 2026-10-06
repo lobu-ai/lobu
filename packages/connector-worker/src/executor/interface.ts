@@ -56,6 +56,7 @@ export type ExecutorJob = {
       mode: 'query';
       query: string;
       exactMatch?: QueryContext['exactMatch'];
+      selection?: QueryContext['selection'];
       config: Record<string, unknown>;
       credentials: SyncCredentials | null;
       sessionState: Record<string, unknown> | null;

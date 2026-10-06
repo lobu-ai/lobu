@@ -86,7 +86,8 @@ export const ManageEntitySchemaSchema = Type.Object({
   ),
   metadata_schema: Type.Optional(
     Type.Record(Type.String(), Type.Unknown(), {
-      description: "[create/update] JSON Schema for metadata validation",
+      description:
+        "[create/update] JSON Schema for metadata validation. Entity property annotations: x-facet: true exposes scalar enum values as collection filters; x-sidebar: true also exposes those values as navigation shortcuts. x-enum-labels maps stringified enum values to display labels. x-table-label or title labels the attribute. These annotations do not grant access or define separate segments.",
     })
   ),
   list_scope: Type.Optional(

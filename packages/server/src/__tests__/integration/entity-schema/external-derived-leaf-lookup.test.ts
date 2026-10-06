@@ -5,6 +5,7 @@ import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
   createTestOrganization,
+  createTestConnectorDefinition,
   createTestUser,
   ownerToolContext,
 } from '../../setup/test-fixtures';
@@ -12,6 +13,7 @@ import { resolvePath } from '../../../tools/resolve_path';
 import { TestApiClient } from '../../setup/test-mcp-client';
 import { createIsolateConnectorCompiler } from '@lobu/connector-worker/compile';
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
+import { querySqlImpl } from '../../../tools/admin/query_sql';
 
 const SOURCE_SQL = `SELECT n AS id, 'source-' || n AS slug, 'Row ' || n AS name
   FROM generate_series(1, 20001) n`;
@@ -191,15 +193,41 @@ describe('external derived record lookup', () => {
       import { defineConnector } from '@lobu/connector-sdk';
       export default defineConnector({
         key: 'supported_exact', name: 'Supported exact', version: '0.0.1',
-        queryCapabilities: { exactMatch: true },
-        query: async (ctx) => ({ rows: [{ filter: ctx.exactMatch, limit: ctx.limit, offset: ctx.offset }] })
+        queryCapabilities: { exactMatch: true, selection: true },
+        query: async (ctx) => ({ rows: [{ filter: ctx.exactMatch, selection: ctx.selection, limit: ctx.limit, offset: ctx.offset }] })
       });
     `);
     const exactMatch = { columns: ['slug', 'id'], value: 'source-id' };
+    const selection = { search: 'literal %', filters: [{ field: 'seats', op: 'gte' as const, value: 100 }] };
     const result = await executeCompiledConnector({ compiledCode, job: {
-      mode: 'query', query: 'SELECT 1', exactMatch,
+      mode: 'query', query: 'SELECT 1', exactMatch, selection,
       config: {}, credentials: null, sessionState: null, env: {}, limit: 1, offset: 0,
     } });
-    expect(result).toMatchObject({ mode: 'query', rows: [{ filter: exactMatch, limit: 1, offset: 0 }] });
+    expect(result).toMatchObject({ mode: 'query', rows: [{ filter: exactMatch, selection, limit: 1, offset: 0 }] });
+  });
+
+  it('marks unfiltered collections for exact source totals without counting ordinary SQL reads', async () => {
+    const key = 'collection-count-fixture';
+    const compiledCode = await createIsolateConnectorCompiler().compileConnectorForIsolateFromSource(`
+      import { defineConnector } from '@lobu/connector-sdk';
+      export default defineConnector({
+        key: '${key}', name: 'Collection count fixture', version: '1.0.0',
+        queryCapabilities: { selection: true },
+        query: async (ctx) => ({ rows: [{ slug: 'source-1', name: 'First', collection: ctx.selection !== undefined }],
+          ...(ctx.selection !== undefined ? { total: 17 } : {}) })
+      });
+    `);
+    await createTestConnectorDefinition({ key, name: 'Collection count fixture', organization_id: orgId });
+    const db = getTestDb();
+    await db`UPDATE connector_versions SET compiled_code = ${compiledCode} WHERE connector_key = ${key}`;
+    await db`INSERT INTO connections (organization_id, connector_key, slug, display_name, status, visibility, created_by)
+      VALUES (${orgId}, ${key}, 'count-source', 'Count source', 'active', 'org', ${userId})`;
+    const context = ownerToolContext(orgId, userId);
+    const collection = await queryDerivedEntityView('SELECT 1', 'count-source', { limit: 1, offset: 0 }, context);
+    expect(collection.rows).toEqual([{ slug: 'source-1', name: 'First', collection: true }]);
+    expect(collection.total_count).toBe(17);
+    expect(collection.has_more).toBe(true);
+    const ordinary = await querySqlImpl({ sql: 'SELECT 1', connection: 'count-source', limit: 1 }, {}, context);
+    expect(ordinary.rows[0].collection).toBe(false);
   });
 });

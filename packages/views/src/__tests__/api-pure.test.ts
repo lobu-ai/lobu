@@ -305,6 +305,30 @@ describe("queryResult guardrails", () => {
 });
 
 describe("coerceScope", () => {
+  test("keeps collection context separate from record and event scopes", () => {
+    const collection = {
+      search: "Alpha",
+      filters: [{ field: "tier", op: "eq", value: "large" }],
+    };
+    expect(coerceScope({ type: "account", collection })).toEqual({
+      type: "account",
+      collection,
+    });
+    for (const scope of [
+      { collection },
+      { type: "account", entity: "alpha", collection },
+      { type: "account", event: 7, collection },
+    ]) {
+      expect(() => coerceScope(scope)).toThrow(/Collection/);
+    }
+    expect(() =>
+      coerceScope({ type: "account", collection: "invalid" })
+    ).toThrow();
+    const raw = { filters: [{ field: "tier", op: "unknown", value: 1 }] };
+    expect(
+      coerceScope({ type: "account", collection: raw }).collection
+    ).toEqual(raw);
+  });
   test("keeps an event subject: the host seeds scope.event on an event page", () => {
     expect(coerceScope({ event: 4309390 })).toEqual({ event: 4309390 });
     expect(coerceScope({ type: "deal", entity: 7 })).toEqual({

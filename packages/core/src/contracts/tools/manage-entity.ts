@@ -1,6 +1,7 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { ApprovalAttributionSchema } from "../interaction-envelope";
 import type { ActionInput } from "./action-input";
+import { AttributeFiltersSchema } from "./collection-selection";
 import { paginationFields } from "./pagination";
 
 function SortOrderField(description: string) {
@@ -200,6 +201,7 @@ export const ListEntitiesAction = Type.Object({
     description: "Paginated entity list with filters.",
   }),
   entity_type: Type.Optional(EntityType),
+  filters: Type.Optional(AttributeFiltersSchema),
   parent_id: Type.Optional(
     Type.Union([Type.Number(), Type.Null()], {
       description:

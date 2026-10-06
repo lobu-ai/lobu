@@ -1,3 +1,7 @@
+import {
+  type CollectionSelection,
+  selectionImplies,
+} from "./collection-selection";
 import type { ViewAttachment } from "./manage-views";
 
 type EventAttachment = Extract<ViewAttachment, { event_kind: string }>;
@@ -21,12 +25,15 @@ export function isTabAttachment(attachment: ViewAttachment): boolean {
 export function matchesType(
   attachment: ViewAttachment,
   typeSlug: string,
-  placement: ViewPlacement
+  placement: ViewPlacement,
+  selection: CollectionSelection = {}
 ): boolean {
   return (
     !isEventAttachment(attachment) &&
     "type" in attachment &&
     attachment.type === typeSlug &&
+    attachment.surface !== "record" &&
+    (!attachment.when || selectionImplies(selection, attachment.when)) &&
     (attachment.placement ?? "tab") === placement
   );
 }
@@ -43,7 +50,11 @@ export function matchesRecord(
       ? attachment.entity === record.id
       : record.parentId === null && attachment.entity === record.slug;
   }
-  return matchesType(attachment, record.type, placement);
+  return (
+    "type" in attachment &&
+    attachment.type === record.type &&
+    attachment.surface !== "collection"
+  );
 }
 
 export function hasWorkspaceAttachment(

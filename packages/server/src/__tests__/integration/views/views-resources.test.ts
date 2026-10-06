@@ -297,6 +297,20 @@ describe('views resources + open_view + invoke_view_action', () => {
 		);
 	});
 
+	it('roundtrips shared collection selection independently of view params', async () => {
+		const collection = { search: 'Acme', filters: [{ field: 'tier', op: 'eq', value: 'large' }] };
+		const result = await rpc('tools/call', {
+			name: 'open_view', arguments: { key: 'board', scope: { type: 'company', collection }, params: { by: 'stage' } },
+		});
+		expect(result.structuredContent.scope).toEqual({ type: 'company', collection });
+		expect(result.structuredContent.params).toEqual({ by: 'stage' });
+		const url = new URL(result.structuredContent.url);
+		expect(JSON.parse(url.searchParams.get('$collection')!)).toEqual(collection);
+		for (const scope of [{ collection }, { type: 'company', entity: entityId, collection }]) {
+			await expect(executeTool('open_view', { key: 'board', scope }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
+		}
+	});
+
 	it('open_view fills param defaults and rejects mistyped params', async () => {
 		const result = await rpc('tools/call', {
 			name: 'open_view',
@@ -309,6 +323,25 @@ describe('views resources + open_view + invoke_view_action', () => {
 				arguments: { key: 'board', scope: { type: 'company' }, params: { by: 42 } },
 			})
 		).rejects.toThrow(/must be a string/);
+	});
+
+	it('honors conditional collection attachments and reserves the shared query key', async () => {
+		const declaration = {
+			action: 'set', key: 'large-accounts', name: 'Large accounts', description: 'Selected accounts',
+			source_code: VIEW_SOURCE,
+			attach: [{ type: 'company', surface: 'collection', when: { tier: 'large' } }],
+		};
+		await executeTool('manage_views', declaration, TEST_ENV, ownerCtx);
+		const collection = { filters: [{ field: 'tier', op: 'eq', value: 'large' }] };
+		const matching = await rpc('tools/call', {
+			name: 'open_view', arguments: { key: 'large-accounts', scope: { type: 'company', collection } },
+		});
+		expect(matching.structuredContent.scope.collection).toEqual(collection);
+		for (const scope of [{ type: 'company' }, { entity: entityId }]) {
+			await expect(executeTool('open_view', { key: 'large-accounts', scope }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
+		}
+		await expect(executeTool('manage_views', { ...declaration, params: { '$collection': { type: 'string' } } }, TEST_ENV, ownerCtx)).rejects.toThrow(/reserved/);
+		await executeTool('manage_views', { action: 'remove', key: 'large-accounts' }, TEST_ENV, ownerCtx);
 	});
 
 	it('open_view refuses an unscoped non-workspace view instead of inferring its type', async () => {

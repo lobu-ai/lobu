@@ -38,6 +38,7 @@ interface ConnectorQueryParams {
   /** Read-only SQL to push down (a derived entity's backing_sql, or a feed query). */
   query: string;
   exactMatch?: QueryContext['exactMatch'];
+  selection?: QueryContext['selection'];
   /** Owner/admin callers see every connection; members only org-visible or their
    * own. A full management-tier bypass. */
   isAdmin: boolean;
@@ -145,6 +146,7 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
       mode: 'query',
       query: p.query,
       exactMatch: p.exactMatch,
+      selection: p.selection,
       // Same merge as feed-sync / worker poll: connection.config under
       // credentials + caller overrides (any connector-level config).
       // ONLY the connection's own credentials reach ctx.config — deliberately NOT
