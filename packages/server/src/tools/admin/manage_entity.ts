@@ -2313,6 +2313,7 @@ async function handleListLinks(
 							? "incoming"
 							: undefined,
 				signal: ctx.abortSignal,
+				automationId: ctx.actingAutomationId,
 			},
 		);
 		return {

@@ -180,14 +180,13 @@ function activityStreams(feeds: SourceFeed[], type: string) {
 /**
  * One page of a record's events across every attributing read feed, newest
  * first and at most `limit` long. Streams are merged by occurred_at; the
- * cursor resumes each stream after its last consumed row. Unconsumed rows
- * stay at the source; no page buffers or deleted-anchor recovery are needed.
- * A failing feed is reported, never shown as "no activity", and resumes where it stopped.
+ * cursor resumes each stream after its last consumed row, so unconsumed rows
+ * stay at the source. A failing feed is reported, never shown as "no activity", and resumes where it stopped.
  */
 export async function readSourceRecordActivity(
   scope: AuthzScope,
   record: SourceRecordRef,
-  options: { limit: number; cursor?: string; signal?: AbortSignal }
+  options: { limit: number; cursor?: string; signal?: AbortSignal; automationId?: number | null }
 ) {
   const feeds = await loadSourceFeeds(scope, record.type);
   const resume = decodeCursor(options.cursor);
@@ -211,7 +210,8 @@ export async function readSourceRecordActivity(
             },
             READ_TIMEOUT_MS,
             scope,
-            options.signal
+            options.signal,
+            options.automationId
           );
           if (page.rows.length > 0 && !page.row_cursors) {
             throw new Error("This feed cannot resume after individual rows; merged record activity requires exact row cursors.");
@@ -338,6 +338,7 @@ export async function readSourceRecordLinks(
     relationshipType?: string;
     direction?: "outgoing" | "incoming";
     signal?: AbortSignal;
+    automationId?: number | null;
   }
 ) {
   const feeds = await loadSourceFeeds(scope, record.type);
@@ -388,63 +389,70 @@ export async function readSourceRecordLinks(
   }
 
   const failures: SourceReadFailure[] = [];
+  // Relationships sharing a feed and path read its source pages once, and a
+  // failing stream is reported once.
+  const streams = new Map<string, Promise<Array<Record<string, unknown>> | null>>();
+  const readStream = async (feed: SourceFeed, path: string) => {
+    try {
+      const rows: Array<Record<string, unknown>> = [];
+      let cursor: string | undefined;
+      for (let pageNumber = 0; ; pageNumber += 1) {
+        if (pageNumber === MAX_LINK_PAGES) {
+          throw new Error(
+            `more than ${MAX_LINK_PAGES} source pages; relationships beyond them were not read`
+          );
+        }
+        const page = await readSourceFeedPage(
+          {
+            feed_id: feed.feedId,
+            match: { path, values: [record.key] },
+            limit: LINK_PAGE_SIZE,
+            cursor,
+          },
+          READ_TIMEOUT_MS,
+          scope,
+          options.signal,
+          options.automationId
+        );
+        rows.push(...page.rows);
+        cursor = page.next_cursor;
+        if (!cursor) return rows;
+      }
+    } catch (error) {
+      failures.push({ feed_id: feed.feedId, error: getErrorMessage(error) });
+      return null;
+    }
+  };
   const links = new Map<string, SourceRecordLink>();
   await Promise.all(
     reads.map(async (read) => {
-      try {
-        const rows: Array<Record<string, unknown>> = [];
-        let cursor: string | undefined;
-        for (let pageNumber = 0; ; pageNumber += 1) {
-          if (pageNumber === MAX_LINK_PAGES) {
-            throw new Error(
-              `more than ${MAX_LINK_PAGES * LINK_PAGE_SIZE} events; relationships beyond them were not read`
-            );
-          }
-          const page = await readSourceFeedPage(
-            {
-              feed_id: read.feed.feedId,
-              match: { path: read.path, values: [record.key] },
-              limit: LINK_PAGE_SIZE,
-              cursor,
-            },
-            READ_TIMEOUT_MS,
-            scope,
-            options.signal
-          );
-          rows.push(...page.rows);
-          cursor = page.next_cursor;
-          if (!cursor) break;
-        }
-        for (const row of rows) {
-          if (row.origin_type !== read.kind) continue;
-          const otherKey = (read.other.target.identities ?? [])
-            .map((identity) => getValueAtPath(row, identity.eventPath))
-            .find((value) => value != null && String(value).trim() !== "");
-          if (otherKey == null || !read.other.target.entityType) continue;
-          const key = String(otherKey).trim();
-          const name = read.other.target.titlePath
-            ? getValueAtPath(row, read.other.target.titlePath)
-            : null;
-          const link: SourceRecordLink = {
-            relationship_type: read.type,
-            direction: read.direction,
-            entity_type: read.other.target.entityType,
-            key,
-            name:
-              name == null || String(name).trim() === "" ? key : String(name),
-            occurred_at: occurredAt(row),
-            source_url: row.source_url == null ? null : String(row.source_url),
-          };
-          const id = `${link.relationship_type}:${link.direction}:${link.entity_type}:${key}`;
-          const existing = links.get(id);
-          if (!existing || existing.occurred_at < link.occurred_at)
-            links.set(id, link);
-        }
-      } catch (error) {
-        failures.push({
-          feed_id: read.feed.feedId,
-          error: getErrorMessage(error),
-        });
+      const stream = `${read.feed.feedId}:${read.path}`;
+      if (!streams.has(stream)) streams.set(stream, readStream(read.feed, read.path));
+      const rows = await streams.get(stream)!;
+      for (const row of rows ?? []) {
+        if (row.origin_type !== read.kind) continue;
+        const otherKey = (read.other.target.identities ?? [])
+          .map((identity) => getValueAtPath(row, identity.eventPath))
+          .find((value) => value != null && String(value).trim() !== "");
+        if (otherKey == null || !read.other.target.entityType) continue;
+        const key = String(otherKey).trim();
+        const name = read.other.target.titlePath
+          ? getValueAtPath(row, read.other.target.titlePath)
+          : null;
+        const link: SourceRecordLink = {
+          relationship_type: read.type,
+          direction: read.direction,
+          entity_type: read.other.target.entityType,
+          key,
+          name:
+            name == null || String(name).trim() === "" ? key : String(name),
+          occurred_at: occurredAt(row),
+          source_url: row.source_url == null ? null : String(row.source_url),
+        };
+        const id = `${link.relationship_type}:${link.direction}:${link.entity_type}:${key}`;
+        const existing = links.get(id);
+        if (!existing || existing.occurred_at < link.occurred_at)
+          links.set(id, link);
       }
     })
   );

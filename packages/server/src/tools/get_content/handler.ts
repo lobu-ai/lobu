@@ -947,6 +947,7 @@ async function readRecordContent(args: GetContentArgs, ctx: ToolContext): Promis
     limit: pageLimit,
     cursor: record_cursor,
     signal: ctx.abortSignal,
+    automationId: ctx.actingAutomationId,
   });
   return {
     content: result.events,

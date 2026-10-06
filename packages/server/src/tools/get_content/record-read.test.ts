@@ -95,6 +95,19 @@ describe("record read admission", () => {
     expect(readActivity).toHaveBeenCalledOnce();
   });
 
+  it("preserves the requesting Automation for Activity and relationship source admission", async () => {
+    const automationContext = { ...ctx, actingAutomationId: 42 };
+    await getContent({ record }, {} as Env, automationContext);
+    await manageEntity({ action: "list_links", record }, {} as Env, automationContext);
+    for (const read of [readActivity, readLinks]) {
+      expect(read).toHaveBeenCalledWith(
+        expect.anything(),
+        record,
+        expect.objectContaining({ automationId: 42 })
+      );
+    }
+  });
+
   it.each([
     { offset: 10 },
     { confidence_min: 0.9 },

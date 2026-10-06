@@ -340,6 +340,7 @@ page consumes only part of this feed's page. Keep ordering keys immutable
 throughout a traversal. This does not promise a snapshot of a changing source.
 Page-token-only providers can keep ordinary feed reads; they must not invent
 row checkpoints from offsets. Record Activity reports their missing capability
-instead of silently repeating or skipping events. Relationships come from the event kind's `relationships`: the
-other attribution's identity is the peer's key and its `titlePath` the peer's
-name. A path not in `matchPaths` is rejected, never filtered after the read.
+instead of silently repeating or skipping events. Relationships come from the
+event kind's `relationships`: the other attribution's identity is the peer's
+key and its `titlePath` the peer's name. A path not in `matchPaths` is
+rejected, never filtered after the read.

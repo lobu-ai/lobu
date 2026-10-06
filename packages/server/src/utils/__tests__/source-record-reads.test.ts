@@ -64,6 +64,18 @@ afterAll(() => {
   vi.resetModules();
 });
 
+it.each(["readSourceRecordActivity", "readSourceRecordLinks"] as const)(
+  "%s preserves the Automation identity across source pages",
+  async (method) => {
+    readPage.mockResolvedValue({ rows: [] });
+    const options = { limit: 10, automationId: 42 };
+    await reads[method](scope, record, options);
+    expect(readPage).toHaveBeenCalledWith(
+      expect.anything(), expect.any(Number), scope, undefined, 42
+    );
+  }
+);
+
 it("does not attribute another event kind just because it shares an identity path", async () => {
   readPage.mockResolvedValue({
     row_cursors: ["valid", "unrelated"],
@@ -141,6 +153,7 @@ it("keeps a failed stream in the continuation so a retry resumes it", async () =
     expect.objectContaining({ cursor: undefined }),
     expect.anything(),
     scope,
+    undefined,
     undefined
   );
   expect(retried.events.map((event) => event.origin_id)).toEqual(["valid"]);
@@ -309,6 +322,36 @@ it("filters relationships by type and direction before the limit", async () => {
     direction: "outgoing",
   });
   expect(new Set(outgoing.links.map((link) => link.relationship_type))).toEqual(new Set(["knows"]));
+});
+
+it("reads a stream shared by several relationships once and reports its failure once", async () => {
+  feeds = [
+    {
+      ...feed,
+      feed_schema: {
+        ...feed.feed_schema,
+        eventKinds: {
+          linked: {
+            attributions: [account, contact],
+            relationships: [
+              { type: "knows", from: "account", to: "contact" },
+              { type: "owns", from: "contact", to: "account" },
+            ],
+          },
+        },
+      },
+    },
+  ];
+  pagedSource({ 1: [linked("rel", "2026-01-01T00:00:00Z", "c7")] });
+  const result = await reads.readSourceRecordLinks(scope, record, { limit: 10 });
+  expect(result.links.map((link) => link.relationship_type).sort()).toEqual(["knows", "owns"]);
+  expect(readPage).toHaveBeenCalledOnce();
+
+  readPage.mockClear();
+  readPage.mockRejectedValueOnce(new Error("source down"));
+  const failed = await reads.readSourceRecordLinks(scope, record, { limit: 10 });
+  expect(failed.failures).toEqual([{ feed_id: 1, error: "source down" }]);
+  expect(readPage).toHaveBeenCalledOnce();
 });
 
 it("neither repeats nor skips a row when the source changes between pages", async () => {
