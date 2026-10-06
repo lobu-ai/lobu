@@ -14,6 +14,7 @@
  * - recollect_feed: Clear a feed's sync cursor so the next sync starts over
  */
 
+import type { FeedOperation } from '@lobu/connector-sdk';
 import {
   getErrorMessage,
   isRetryable,
@@ -491,7 +492,7 @@ async function handleListFeeds(
       deviceWorkerId: feed.device_worker_id as string | null,
     });
     const semantics = deriveFeedHealthSemantics({
-      operations: feed.operations as Array<'sync' | 'read' | 'observe'> | null,
+      operations: feed.operations as FeedOperation[] | null,
       store:
         parseJsonObject(feed.config).store === 'channel_messages'
           ? 'channel_messages'

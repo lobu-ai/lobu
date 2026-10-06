@@ -9,7 +9,7 @@ import * as subscriptions from '../../runs/source-feed-subscriptions';
 import { SOURCE_FEED_OBSERVATION_TASK } from '../../scheduled/task-definitions';
 import { SOURCE_FEED_OBSERVE_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY } from '../../lib/device-feed-read-protocol';
 import { resolveRunConnectorPolicy } from '../../authz/operation-run-policy';
-import { resolveActingPrincipal } from '../../authz/entity-policy';
+import { resolveActingPrincipal, upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { manageFeeds } from '../../tools/admin/manage_feeds';
 import type { Env } from '../../index';
 import type { ToolContext } from '../../tools/registry';
@@ -51,6 +51,8 @@ async function observedFixture() {
     automation_events = ${sql.json([{ key: 'message.created', label: 'New message', resourceType: 'message' }])}
     WHERE organization_id = ${org.id}`;
   await sql`UPDATE feeds SET schedule = NULL, next_run_at = NULL`;
+  await upsertEntityApprovalPolicy(org.id, { resourceClass: 'connector_action', connectorKey: 'synthetic.source',
+    operationCategory: 'read', effects: { execute: 'auto' } });
   const agent = await createTestAgent({ organizationId: org.id, ownerUserId: user.id });
   const [{ id }] = await sql`SELECT nextval('automations_id_seq') AS id`;
   const automationId = Number(id);
@@ -78,7 +80,7 @@ describe('source feed notifications', () => {
       .toMatchObject({ due: true, consecutive_failures: 0, last_error: null });
     expect(await commitSourceFeedObservation(sql, task, null, {
       changes: [{ event_type: 'message.created', resource_ref: 'out-of-scope', delivery_id: 'old-scope' }], checkpoint: { cursor: 'old' },
-    }, {})).toBe(false);
+    }, {})).toBeNull();
     expect(await sql`SELECT id FROM runs WHERE automation_id IS NOT NULL`).toHaveLength(0);
     await reconcileSourceFeedObservations(sql, device.id, [org.id], feeds.map(feed => Number(feed.id)));
     expect(await sql`SELECT id FROM runs WHERE action_key = ${SOURCE_FEED_OBSERVATION_TASK}`).toHaveLength(1);
@@ -120,15 +122,44 @@ describe('source feed notifications', () => {
     const ack = { binding_id: 'synthetic-binding', epoch: 'synthetic-epoch', records: [{ id: 'source-42', revision: 1 }] };
     const result = { changes: [{ event_type: 'message.created', resource_ref: 'source-42', resource_type: 'message', delivery_id: 'change-42' }],
       checkpoint: { cursor: 'next', source_ack: ack } };
-    expect(await commitSourceFeedObservation(sql, task, null, result, {})).toBe(true);
+    expect(await commitSourceFeedObservation(sql, task, null, result, {})).toHaveLength(1);
     expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(0);
     const runs = await sql`SELECT id, approved_input FROM runs WHERE organization_id = ${org.id} AND automation_id IS NOT NULL`;
     expect(runs).toHaveLength(1);
     expect(JSON.stringify(runs[0].approved_input)).toContain('source-42');
-    expect(await commitSourceFeedObservation(sql, task, null, result, {})).toBe(false);
-    expect(await commitSourceFeedObservation(sql, task, result.checkpoint, result, {})).toBe(true);
+    expect(await commitSourceFeedObservation(sql, task, null, result, {})).toBeNull();
+    expect(await commitSourceFeedObservation(sql, task, result.checkpoint, result, {})).not.toBeNull();
     expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id} AND automation_id IS NOT NULL`).toHaveLength(1);
     expect((await receiveFeedNotifications(sql, [{ ...notice, changed: false }], device.id, [org.id]))[0].ack).toEqual(ack);
+  });
+
+  it('excludes foreign private feeds before resolving owners during reconciliation', async () => {
+    const { sql, org, device, connection, automationId } = await observedFixture();
+    const other = await createTestUser();
+    await sql`UPDATE connections SET visibility = 'private', created_by = ${other.id} WHERE id = ${connection.id}`;
+    await sql`UPDATE automations SET triggers = ${sql.json([{ kind: 'event', connector_key: 'synthetic.source',
+      event_types: ['message.created'], execution: 'turn', active_run: 'queue', output: 'silent' }])} WHERE id = ${automationId}`;
+    const resolveSubscriptions = vi.spyOn(subscriptions, 'sourceFeedSubscriptions');
+    try {
+      await reconcileSourceFeedObservations(sql, device.id, [org.id], []);
+      expect(resolveSubscriptions).not.toHaveBeenCalled();
+      expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id}`).toHaveLength(0);
+    } finally {
+      resolveSubscriptions.mockRestore();
+    }
+  });
+
+  it.each(['deny', 'approval'] as const)('revokes source subscriptions when organization policy requires %s', async (effect) => {
+    const { sql, org, device, connection, notice, task, automationId } = await observedFixture();
+    expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id, automationId)).toHaveLength(1);
+    await upsertEntityApprovalPolicy(org.id, { resourceClass: 'connector_action', connectionId: Number(connection.id),
+      operationCategory: 'read', effects: { execute: effect } });
+    expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id, automationId)).toEqual([]);
+    expect((await receiveFeedNotifications(sql, [notice], device.id, [org.id]))[0].active).toBe(false);
+    expect(await commitSourceFeedObservation(sql, task, null, {
+      changes: [{ event_type: 'message.created', resource_ref: 'blocked', delivery_id: 'blocked' }], checkpoint: null,
+    }, {})).toBeNull();
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id}`).toHaveLength(0);
   });
 
   it('rolls back the whole batch on an undeclared event and retains the prior checkpoint', async () => {
@@ -147,7 +178,7 @@ describe('source feed notifications', () => {
     const { sql, org, feeds } = await observedFixture();
     const result = { changes: [{ event_type: 'message.created', resource_ref: 'source-42', delivery_id: 'change-42' }], checkpoint: { cursor: 'next' } };
     for (const feed of feeds) {
-      expect(await commitSourceFeedObservation(sql, { organizationId: org.id, feedId: Number(feed.id) }, null, result, {})).toBe(true);
+      expect(await commitSourceFeedObservation(sql, { organizationId: org.id, feedId: Number(feed.id) }, null, result, {})).not.toBeNull();
     }
     expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id} AND run_type = 'automation'`).toHaveLength(1);
   });

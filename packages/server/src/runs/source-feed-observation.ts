@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { assertFeedObservation, type ConnectorAutomationEvent, type FeedObserveResult } from '@lobu/connector-sdk';
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
-import { findMatchingAutomationActivations, queueAutomationActivations } from '../automations/activation';
+import { dispatchAutomationRunsBestEffort, findMatchingAutomationActivations, queueAutomationActivations } from '../automations/activation';
 import { getDb, pgTextArray, type DbClient } from '../db/client';
 import { createSourceReadBridge } from '../lib/source-read-bridge';
 import { enqueueTasksInTransaction } from '../scheduled/task-scheduler';
@@ -11,7 +11,7 @@ import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed'
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
 import { feedBackoff } from '../connectors/feed-backoff';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
-import { sourceFeedSubscriptions } from './source-feed-subscriptions';
+import { sourceFeedSubscriptionSelection, sourceFeedSubscriptions } from './source-feed-subscriptions';
 
 export interface SourceFeedObservationTask { organizationId: string; feedId: number }
 
@@ -40,11 +40,7 @@ export async function reconcileSourceFeedObservations(sql: DbClient, deviceId: s
       AND c.status = 'active' AND c.deleted_at IS NULL AND f.status = 'active' AND f.deleted_at IS NULL
       AND (f.next_run_at IS NULL OR f.next_run_at <= now())
       AND d.feeds_schema->f.feed_key->'operations' ? 'observe'
-      -- Cheap candidate filter; sourceFeedSubscriptions still checks the full trigger and owner authority.
-      AND EXISTS (SELECT 1 FROM automations a WHERE a.organization_id = f.organization_id
-        AND a.status = 'active' AND a.current_version_id IS NOT NULL
-        AND (a.managed_agent_id IS NOT NULL OR a.device_worker_id IS NOT NULL)
-        AND a.triggers @> jsonb_build_array(jsonb_build_object('kind', 'event', 'connector_key', c.connector_key)))
+      AND EXISTS (${sourceFeedSubscriptionSelection(sql)})
   `;
   for (const feed of feeds) {
     if (boundFeedIds.includes(Number(feed.id)) && !feed.retry_due) continue;
@@ -63,7 +59,7 @@ export async function reconcileSourceFeedObservations(sql: DbClient, deviceId: s
 export async function commitSourceFeedObservation(
   sql: DbClient, task: SourceFeedObservationTask, previous: Record<string, unknown> | null,
   result: FeedObserveResult, config: Record<string, unknown>,
-): Promise<boolean> {
+): Promise<Array<{ runId: number; status: string }> | null> {
   assertFeedObservation(result);
   return sql.begin(async tx => {
     const [feed] = await tx`
@@ -73,11 +69,12 @@ export async function commitSourceFeedObservation(
       WHERE f.id = ${task.feedId} AND f.organization_id = ${task.organizationId}
         AND f.checkpoint IS NOT DISTINCT FROM ${previous === null ? null : tx.json(previous)}::jsonb
         AND COALESCE(f.config, '{}'::jsonb) = ${tx.json(config)}::jsonb
-      FOR UPDATE OF f, c
+      FOR UPDATE OF f
     `;
-    if (!feed) return false; // A newer checkpoint or configuration superseded this attempt.
+    if (!feed) return null; // A newer checkpoint or configuration superseded this attempt.
     const subscriptions = await sourceFeedSubscriptions(tx, task.organizationId, task.feedId);
-    if (!subscriptions.length) return false;
+    if (!subscriptions.length) return null;
+    const queued: Array<{ runId: number; status: string }> = [];
     const allowed = new Set(subscriptions.map(subscription => subscription.automationId));
     const eventKeys = new Set((feed.automation_events as ConnectorAutomationEvent[] | null ?? []).map(event => event.key));
     for (const change of result.changes) {
@@ -90,12 +87,12 @@ export async function commitSourceFeedObservation(
         attributes: { feed_id: task.feedId, feed_key: String(feed.feed_key) },
       };
       const matches = await findMatchingAutomationActivations(task.organizationId, signal, tx);
-      await queueAutomationActivations({ matches: matches.filter(match => allowed.has(match.automationId)), signal, db: tx });
+      queued.push(...await queueAutomationActivations({ matches: matches.filter(match => allowed.has(match.automationId)), signal, db: tx }));
     }
     await tx`UPDATE feeds SET checkpoint = ${result.checkpoint === null ? null : tx.json(result.checkpoint)},
       consecutive_failures = 0, last_error = NULL, next_run_at = ${result.hasMore ? tx`now()` : null}
       WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}`;
-    return true;
+    return queued;
   });
 }
 
@@ -148,8 +145,10 @@ export async function runSourceFeedObservation(task: SourceFeedObservationTask):
         }, hooks: { onHttpFetch: auth.onHttpFetch, onChromeDispatch: browser.onChromeDispatch, signal: controller.signal }, timeoutMs,
       });
       if (result.mode !== 'observe') throw new Error('Expected source observation result');
-      if (!(await commitSourceFeedObservation(sql, task, checkpoint, result, config))) break;
+      const queued = await commitSourceFeedObservation(sql, task, checkpoint, result, config);
+      if (queued === null) break;
       checkpoint = result.checkpoint;
+      await dispatchAutomationRunsBestEffort(queued);
       if (!result.hasMore) break;
     }
     status = 'completed';

@@ -63,13 +63,17 @@ export async function receiveFeedNotifications(
           d.feeds_schema->f.feed_key->'webhook' IS NOT NULL
           AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
           AND d.feeds_schema->f.feed_key->'operations' @> '["sync"]'::jsonb))
-        FOR UPDATE OF f, c
       `;
       if (rows.length === 0) return { active: false };
+      if (rows[0].observes && !(await sourceFeedSubscriptions(tx, rows[0].organization_id, notice.feed_id)).length) return { active: false };
+      // Resolve subscription authority before locking the checkpoint. Only this
+      // feed's scheduling/ack mutation needs serialization, not its connection.
+      const [locked] = await tx`SELECT checkpoint FROM feeds WHERE id = ${notice.feed_id}
+        AND organization_id = ${rows[0].organization_id} AND status = 'active' AND deleted_at IS NULL FOR UPDATE`;
+      if (!locked) return { active: false };
       if (rows[0].observes) {
-        if (!(await sourceFeedSubscriptions(tx, rows[0].organization_id, notice.feed_id)).length) return { active: false };
         if (notice.changed) await enqueueSourceFeedObservation(tx, rows[0].organization_id, notice.feed_id);
-        return { active: true, ack: savedSourceAck(rows[0].checkpoint) };
+        return { active: true, ack: savedSourceAck(locked.checkpoint) };
       }
       if (notice.changed) {
         // Never use a live event to defeat failure backoff. A manual feed that
@@ -78,7 +82,7 @@ export async function receiveFeedNotifications(
           SELECT id FROM feeds WHERE id = ${notice.feed_id}
         `);
       }
-      return { active: true, ack: savedSourceAck(rows[0].checkpoint) };
+      return { active: true, ack: savedSourceAck(locked.checkpoint) };
     });
     receipts.push({ feed_id: notice.feed_id, connection_id: notice.connection_id, feed_key: notice.feed_key, notification_id: notice.notification_id, ...received });
   }
@@ -116,8 +120,8 @@ export async function sourceFeedContextForRun(
         AND d.feeds_schema->f.feed_key->'operations' ? 'observe'))
   `;
   if (!row) return undefined;
-  if (row.run_type === 'action' && !(await sourceFeedSubscriptions(sql, organizationId, Number(row.feed_id)))
-    .some(subscription => subscription.automationId === Number(row.automation_id))) return undefined;
+  if (row.run_type === 'action'
+    && !(await sourceFeedSubscriptions(sql, organizationId, Number(row.feed_id), Number(row.automation_id))).length) return undefined;
   return {
     dry_run: row.dry_run === true,
     connection_id: Number(row.connection_id),

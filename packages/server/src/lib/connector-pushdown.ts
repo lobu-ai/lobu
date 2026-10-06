@@ -262,8 +262,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   const sql = getDb();
   let sourceSubscription = false;
   if (p.scope.principal === null && p.automationId != null) {
-    const subscription = (await sourceFeedSubscriptions(sql, p.scope.organizationId, p.feedId))
-      .find(candidate => candidate.automationId === p.automationId);
+    const [subscription] = await sourceFeedSubscriptions(sql, p.scope.organizationId, p.feedId, p.automationId);
     if (subscription) {
       p = { ...p, scope: { ...p.scope, principal: subscription.principal, agentId: subscription.agentId } };
       sourceSubscription = true;

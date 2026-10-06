@@ -64,6 +64,7 @@
  * `connectors/connector-health.ts`, the one place that acts on it.
  */
 
+import type { FeedOperation } from '@lobu/connector-sdk';
 import {
   type FeedHealthSemantics,
   deriveFeedHealthSemantics,
@@ -380,10 +381,10 @@ export interface ConnectionHealthRow {
 
 const FEED_OPERATIONS = new Set(['sync', 'read', 'observe']);
 
-function parseOperations(value: unknown): Array<'sync' | 'read' | 'observe'> | null {
+function parseOperations(value: unknown): FeedOperation[] | null {
   if (!Array.isArray(value)) return null;
   return value.filter(
-    (operation): operation is 'sync' | 'read' | 'observe' =>
+    (operation): operation is FeedOperation =>
       typeof operation === 'string' && FEED_OPERATIONS.has(operation)
   );
 }

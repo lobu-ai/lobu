@@ -92,9 +92,8 @@ export async function resolveRunConnectorPolicy(params: {
     const actor = await resolveStoredActingPrincipal(sql, params.organizationId, run.policy_principal_kind, run.policy_principal_id);
     if (!actor.ownerResolved) return unavailable();
     if (run.action_key === SOURCE_FEED_OBSERVE_ACTION_KEY || run.run_metadata?.[SOURCE_FEED_SUBSCRIPTION_METADATA_KEY] === true) {
-      const subscriptions = run.feed_id == null ? [] : await sourceFeedSubscriptions(sql, params.organizationId, Number(run.feed_id));
-      if (!subscriptions.some(subscription => subscription.automationId === Number(run.automation_id)
-        && subscription.principal === run.created_by_user_id)) return unavailable();
+      const subscriptions = run.feed_id == null ? [] : await sourceFeedSubscriptions(sql, params.organizationId, Number(run.feed_id), Number(run.automation_id));
+      if (subscriptions[0]?.principal !== run.created_by_user_id) return unavailable();
       if (run.action_key === SOURCE_FEED_OBSERVE_ACTION_KEY) return { effect: 'auto', ruleIds: [], reason: 'parent_approval' };
     }
     return await isSourceReadFeedStillReadable(sql, params.organizationId, run)

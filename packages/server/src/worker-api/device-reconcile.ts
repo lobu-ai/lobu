@@ -9,6 +9,7 @@
  * creating runs nothing can claim.
  */
 
+import type { FeedOperation } from '@lobu/connector-sdk';
 import { parseJsonObject } from '@lobu/core';
 import { getDb, pgTextArray } from '../db/client';
 import { findExistingPersonalOrg } from '../auth/personal-org-provisioning';
@@ -50,7 +51,7 @@ import {
  */
 interface ManifestFeed {
   name?: string;
-  operations?: Array<'sync' | 'read' | 'observe'>;
+  operations?: FeedOperation[];
 }
 
 /**

@@ -197,16 +197,17 @@ type ConnectorFeedSpec = {
     metadataSchema?: object;
   }>;
 } & (
-  | { sync: FeedSyncHandler; read?: FeedReadHandler }
-  | { sync?: FeedSyncHandler; read: FeedReadHandler }
+  | { sync: FeedSyncHandler; read?: FeedReadHandler; observe?: never }
+  | { sync?: never; read: FeedReadHandler; observe?: FeedObserveHandler }
 );
 ```
 
 The record key becomes the feed key. A `sync` handler publishes
 `operations: ['sync']`, a `read` handler publishes `['read']`, and defining both
-publishes `['sync', 'read']`. Metadata-only device or MCP connector definitions
-declare `operations` explicitly because their executable handlers live outside
-the connector process.
+publishes `['sync', 'read']`. An `observe` handler adds `'observe'` to a
+read-only feed; it never pairs with `sync`, whose checkpoint it would share.
+Metadata-only device or MCP connector definitions declare `operations`
+explicitly because their executable handlers live outside the connector process.
 
 `configSchema` describes the persisted feed instance, not one operation. Its
 top-level `required` fields are therefore enforced for read-only, sync-only,

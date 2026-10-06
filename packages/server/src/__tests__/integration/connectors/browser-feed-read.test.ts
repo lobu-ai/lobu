@@ -15,7 +15,6 @@ import { addUserToOrganization, createTestAgent, createTestOrganization, createT
 import { post } from '../../setup/test-helpers';
 import * as sourceObservations from '../../../runs/source-feed-observation';
 import * as sourceNotifications from '../../../runs/feed-notifications';
-import { dispatchPendingAutomationRuns } from '../../../automations/automation';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 
 const SOURCE_KEY = 'browser-read-fixture';
@@ -147,6 +146,8 @@ describe('compiled browser source reads', () => {
     const [feed] = await sql`INSERT INTO feeds (organization_id, connection_id, feed_key, status, config)
       VALUES (${orgId}, ${connectionId}, 'items', 'active', '{}'::jsonb) RETURNING id`;
     feedId = Number(feed.id);
+    await upsertEntityApprovalPolicy(orgId, { resourceClass: 'connector_action', connectorKey: SOURCE_KEY,
+      operationCategory: 'read', effects: { execute: 'auto' } });
   });
   afterAll(cleanupTestDatabase);
   afterEach(() => vi.restoreAllMocks());
@@ -235,7 +236,8 @@ describe('compiled browser source reads', () => {
     expect(steps.every(step => step.status === 'completed' && step.action_output === null && step.action_input.scrubbed)).toBe(true);
 
     const sourceRunId = Number(activations[0].id);
-    expect(await dispatchPendingAutomationRuns({ runIds: [sourceRunId] })).toMatchObject({ dispatched: 1, failed: 0 });
+    expect(await sql`SELECT id FROM runs WHERE parent_run_id = ${sourceRunId} AND action_key = 'automation-script'`)
+      .toHaveLength(1); // Observation dispatches immediately, without a scheduler tick.
     const [scriptTask] = await sql`UPDATE runs SET status = 'claimed', claimed_by = 'synthetic-script-worker', claimed_at = now()
       WHERE parent_run_id = ${sourceRunId} AND action_key = 'automation-script' RETURNING id`;
     const executing = runAutomationScriptTask({ organizationId: orgId, automationId: Number(automation.id), sourceRunId },

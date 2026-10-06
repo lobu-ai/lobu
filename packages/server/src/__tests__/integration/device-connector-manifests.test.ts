@@ -11,6 +11,7 @@ import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
 import { TestApiClient } from '../setup/test-mcp-client';
 import {
   deviceManifestHash,
+  validateDeviceConnectorManifests,
   type DeviceConnectorManifest,
 } from '../../worker-api/device-manifests';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
@@ -394,6 +395,17 @@ function capabilitiesFor(manifests: Array<Record<string, unknown>>): Record<stri
 }
 
 describe('device connector manifests', () => {
+  it('accepts source observation metadata and rejects competing checkpoint writers', () => {
+    const validate = (operations: string[]) => validateDeviceConnectorManifests({
+      platform: 'macos', capabilities: ['screentime'],
+      manifests: [manifest({ feeds_schema: { items: { key: 'items', name: 'Items', operations } } })],
+    });
+    const observed = validate(['read', 'observe']);
+    expect(observed.accepted).toBe(true);
+    expect(observed.manifests[0].manifest.feeds_schema.items).toMatchObject({ operations: ['read', 'observe'] });
+    expect(validate(['sync', 'observe']).accepted).toBe(false);
+  });
+
   beforeEach(async () => {
     await cleanupTestDatabase();
     delete process.env.LOBU_CLOUD_MODE;

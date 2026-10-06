@@ -171,7 +171,8 @@ A batch contains at most 1,000 references. Changes cannot contain message
 bodies, media, or arbitrary attributes. Checkpoints hold bounded source cursors
 and acknowledgement metadata, never source content. Replays must reuse the
 same connection-scoped `delivery_id`, including across overlapping feeds. The
-server queues matching Automations and advances the checkpoint atomically.
+server queues matching Automations and advances the checkpoint atomically,
+then dispatches those Automations immediately after commit.
 `hasMore` requests an immediate continuation; failures retain the previous
 checkpoint and use the existing retry backoff.
 
@@ -181,6 +182,9 @@ not periodically import content. With no subscriber, the listener is revoked.
 An authorized headless Automation may read its subscribed private feed; this
 does not grant it access to other private feeds. Browser reads retain the
 Automation principal for connector policy and scrub temporary operation payloads.
+Background observation requires Auto permission for reads on the source connector.
+Ask or Block policies revoke the subscription; a background listener cannot
+approve its own access.
 
 Automations explicitly decide whether to save original content, persist a
 derived result, or only act. Observation references and Automation run records

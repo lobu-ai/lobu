@@ -1,3 +1,5 @@
+import type { FeedOperation } from './connector-types.js';
+
 export type DeviceManifestSchema = Record<string, unknown>;
 
 export interface DeviceConnectorManifest {
@@ -39,7 +41,7 @@ export interface DeviceFeedDefinition extends DeviceManifestSchema {
   name: string;
   description?: string;
   userManaged?: boolean;
-  operations: Array<'sync' | 'read'>;
+  operations: FeedOperation[];
   configSchema?: DeviceManifestSchema;
   eventKinds?: Record<string, DeviceManifestSchema>;
 }
@@ -184,7 +186,8 @@ function validateFeeds(feeds: DeviceConnectorDefinition['feeds']): void {
     if (
       !Array.isArray(feed.operations) ||
       feed.operations.length === 0 ||
-      !feed.operations.every((operation) => operation === 'sync' || operation === 'read') ||
+      !feed.operations.every((operation) => operation === 'sync' || operation === 'read' || operation === 'observe') ||
+      (feed.operations.includes('sync') && feed.operations.includes('observe')) ||
       new Set(feed.operations).size !== feed.operations.length
     ) {
       throw new Error(`invalid feed operations '${key}'`);
@@ -232,6 +235,8 @@ function validateAuthSchema(authSchema: DeviceManifestSchema | undefined): void 
 function rejectExecutableHandlers(specification: DeviceConnectorSpec): void {
   const executableNames = [
     'sync',
+    'read',
+    'observe',
     'execute',
     'authenticate',
     'query',
@@ -245,8 +250,10 @@ function rejectExecutableHandlers(specification: DeviceConnectorSpec): void {
     }
   }
   for (const [feedKey, feed] of Object.entries(specification.feeds ?? {})) {
-    if (typeof (feed as unknown as Record<string, unknown>).sync === 'function') {
-      throw new Error(`device connector feed '${feedKey}' cannot contain a sync handler`);
+    for (const operation of ['sync', 'read', 'observe']) {
+      if (typeof (feed as unknown as Record<string, unknown>)[operation] === 'function') {
+        throw new Error(`device connector feed '${feedKey}' cannot contain a ${operation} handler`);
+      }
     }
   }
   for (const [actionKey, action] of Object.entries(specification.actions ?? {})) {

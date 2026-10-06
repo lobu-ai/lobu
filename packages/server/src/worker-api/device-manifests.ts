@@ -462,10 +462,11 @@ function validateFeedOperations(
     if (
       !Array.isArray(operations) ||
       operations.length === 0 ||
-      !operations.every((operation) => operation === 'sync' || operation === 'read') ||
+      !operations.every((operation) => operation === 'sync' || operation === 'read' || operation === 'observe') ||
+      (operations.includes('sync') && operations.includes('observe')) ||
       new Set(operations).size !== operations.length
     ) {
-      throw new Error(`feeds_schema.${feedKey}.operations must contain unique sync/read values`);
+      throw new Error(`feeds_schema.${feedKey}.operations must contain unique sync/read/observe values and cannot combine sync with observe`);
     }
   }
 }

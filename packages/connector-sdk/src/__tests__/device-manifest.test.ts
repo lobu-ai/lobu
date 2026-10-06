@@ -25,6 +25,16 @@ const validSpec = () => ({
 });
 
 describe('defineDeviceConnector', () => {
+  test('preserves source observation capabilities and rejects competing checkpoint writers', () => {
+    const spec = validSpec();
+    const feed = spec.feeds.events;
+    const observed = { ...spec, feeds: { events: { ...feed, operations: ['read', 'observe'] } } };
+    expect(serializeDeviceConnector(defineDeviceConnector(observed as never)).feeds_schema.events)
+      .toMatchObject({ operations: ['read', 'observe'] });
+    expect(() => defineDeviceConnector({ ...spec, feeds: { events: { ...feed, operations: ['sync', 'observe'] } } } as never))
+      .toThrow('invalid feed operations');
+  });
+
   test('serializes no implementation marker and never executable handlers', () => {
     const definition = defineDeviceConnector(validSpec());
     const manifest = serializeDeviceConnector(definition);
@@ -64,6 +74,11 @@ describe('defineDeviceConnector', () => {
   });
 
   test('rejects executable handlers and malformed feed/action schemas', () => {
+    for (const operation of ['read', 'observe']) {
+      expect(() => defineDeviceConnector({ ...validSpec(),
+        feeds: { events: { ...validSpec().feeds.events, [operation]: async () => ({}) } },
+      } as never)).toThrow(`${operation} handler`);
+    }
     expect(() =>
       defineDeviceConnector({
         ...validSpec(),

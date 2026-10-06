@@ -80,6 +80,8 @@
  * unattended event-driven feed from a human-triggered one.
  */
 
+import type { FeedOperation } from '@lobu/connector-sdk';
+
 /**
  * SQL for the `webhook_driven` input below — the single definition of what
  * counts as a dispatchable webhook route.
@@ -135,7 +137,7 @@ type FeedAttentionState =
 
 interface FeedHealthSemanticsInput {
   /** Operations derived from the selected connector feed handlers. */
-  operations?: Array<'sync' | 'read' | 'observe'> | null;
+  operations?: FeedOperation[] | null;
   /** Storage plane. Channel feeds read transcripts rather than connector events. */
   store?: 'events' | 'channel_messages' | null;
   /** `feeds.status` — 'active' | 'paused' | 'error'. */
