@@ -120,6 +120,43 @@ describe('GoogleCalendarConnector full sync', () => {
     expect(result.status).toBe('complete');
   });
 
+  // Google omits nextSyncToken from any events.list response whose query sets
+  // orderBy, so an ordered bootstrap never lets the feed go incremental.
+  test.each(['events', 'changes'])(
+    '%s bootstraps without ordering and reuses the returned sync token',
+    async (feedKey) => {
+      const connector = new GoogleCalendarConnector();
+      const { client, urls } = fakeHttp([
+        { items: [calEvent('a', '2026-01-01T10:00:00Z')], nextSyncToken: 'SYNC_TOKEN' },
+        { items: [], nextSyncToken: 'NEXT_SYNC_TOKEN' },
+      ]);
+      connector.client = () => client;
+
+      const ctx = {
+        feedKey,
+        config: { calendar_id: 'primary', max_results: 100 },
+        credentials: { accessToken: 'tok' },
+      };
+      const bootstrap = await runSync(connector, { ...ctx, checkpoint: {} });
+
+      const first = new URL(urls[0]);
+      expect(first.searchParams.get('singleEvents')).toBe('true');
+      expect(first.searchParams.get('timeMin')).toBeTruthy();
+      expect(first.searchParams.has('orderBy')).toBe(false);
+      expect(bootstrap.checkpoint.sync_token).toBe('SYNC_TOKEN');
+
+      const incremental = await runSync(connector, { ...ctx, checkpoint: bootstrap.checkpoint });
+      const next = new URL(urls[1]);
+      expect(next.searchParams.get('syncToken')).toBe('SYNC_TOKEN');
+      // Google binds the bootstrap's non-window parameters to the token it mints.
+      expect(next.searchParams.get('singleEvents')).toBe('true');
+      expect(next.searchParams.has('orderBy')).toBe(false);
+      expect(next.searchParams.has('timeMin')).toBe(false);
+      expect(next.searchParams.has('timeMax')).toBe(false);
+      expect(incremental.checkpoint.sync_token).toBe('NEXT_SYNC_TOKEN');
+    }
+  );
+
   test.each(['events', 'changes'])(
     'resumes a capped %s bootstrap without dropping unread events',
     async (feedKey) => {
