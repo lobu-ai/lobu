@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createGithubWebhookDelivery, deliverGithubConnectorConnectionWebhook } from '../../gateway/routes/public/app-webhooks';
 import { receiveFeedNotifications, requestFeedSync, sourceFeedContextForRun } from '../../runs/feed-notifications';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { addUserToOrganization, createTestAgent, createTestOrganization, createTestUser } from '../setup/test-fixtures';
 import { commitSourceFeedObservation, reconcileSourceFeedObservations } from '../../runs/source-feed-observation';
 import { sourceFeedSubscriptions } from '../../runs/source-feed-subscriptions';
+import * as subscriptions from '../../runs/source-feed-subscriptions';
 import { SOURCE_FEED_OBSERVATION_TASK } from '../../scheduled/task-definitions';
 import { SOURCE_FEED_OBSERVE_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY } from '../../lib/device-feed-read-protocol';
 import { resolveRunConnectorPolicy } from '../../authz/operation-run-policy';
@@ -98,6 +99,13 @@ describe('source feed notifications', () => {
     await reconcileSourceFeedObservations(sql, device.id, [org.id], []);
     const initial = await sql`SELECT id FROM runs WHERE action_key = ${SOURCE_FEED_OBSERVATION_TASK}`;
     expect(initial).toHaveLength(2); // Two explicitly configured feed instances.
+    const resolveSubscriptions = vi.spyOn(subscriptions, 'sourceFeedSubscriptions');
+    try {
+      await reconcileSourceFeedObservations(sql, device.id, [org.id], []);
+      expect(resolveSubscriptions).not.toHaveBeenCalled(); // Pending observation already owns authorization and setup.
+    } finally {
+      resolveSubscriptions.mockRestore();
+    }
     await receiveFeedNotifications(sql, [notice], device.id, [org.id]);
     await reconcileSourceFeedObservations(sql, device.id, [org.id], []);
     expect(await sql`SELECT id FROM runs WHERE action_key = ${SOURCE_FEED_OBSERVATION_TASK}`).toHaveLength(2);

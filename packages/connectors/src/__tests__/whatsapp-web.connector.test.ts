@@ -214,6 +214,30 @@ describe("WhatsApp live source reads", () => {
 });
 
 describe("WhatsApp source observation scope", () => {
+  it.each(["all", "group", "individual"] as const)("keeps undelivered records pending under the %s filter", async (chatFilter) => {
+    const eligible = Array.from({ length: 1001 }, (_, index) => ({ revision: 1,
+      payload: { id: `pending-${index}`, timestamp: 2001, is_group: chatFilter === "group" } }));
+    const discarded = [
+      { revision: 1, payload: { id: "source-error", source_error: "synthetic recovery" } },
+      { revision: 1, payload: { id: "old", timestamp: 0 } },
+      ...(chatFilter === "all" ? [] : [{ revision: 1, payload: { id: "outside-scope", timestamp: 2001, is_group: chatFilter !== "group" } }]),
+    ];
+    const page = makeDispatcher({ probe: READY,
+      observe_messages: { ok: true, after: 900, references: [], hasMore: false },
+      feed_listen: { bridge_id: "synthetic-feed", binding_id: "synthetic-feed", epoch: "synthetic-epoch", token: "synthetic-token", records: [...eligible, ...discarded] },
+    });
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.observation = { after: 100, started_at: 2000, chat_filter: chatFilter };
+    const result = await connector.observe({ feedKey: "live_messages", config: { chat_filter: chatFilter },
+      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } });
+    expect(result.changes).toHaveLength(1000);
+    expect(result.hasMore).toBe(true);
+    expect(result.checkpoint).toMatchObject({ source_ack: { records: expect.arrayContaining([
+      { id: "pending-0", revision: 1 }, ...discarded.map(row => ({ id: row.payload.id, revision: 1 })),
+    ]) } });
+    expect(JSON.stringify(result.checkpoint)).not.toContain('"pending-1000"');
+  });
+
   it("starts a fresh baseline when the chat filter changes", async () => {
     const requests: Array<Record<string, unknown>> = [];
     const page = makeDispatcher({ probe: READY, observe_messages: (request) => {

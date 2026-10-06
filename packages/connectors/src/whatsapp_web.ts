@@ -983,6 +983,10 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     const replay = await invokeAdapter<{
       after: number; references: Array<{ id: string; timestamp: number; is_group: boolean }>; hasMore: boolean;
     }>(dispatcher, tabId, { op: "observe_messages", input: { after: baseline.after, started_at: startedAt, chat_filter: chatFilter } });
+    const outsideScope = (reference: { timestamp?: number; is_group?: boolean }) =>
+      (reference.timestamp ?? 0) < startedAt
+      || (chatFilter === "group" && !reference.is_group)
+      || (chatFilter === "individual" && Boolean(reference.is_group));
     const references = new Map(replay.references.map(reference => [reference.id, reference]));
     for (const row of observed.records) {
       if (typeof row.payload.id !== "string" || !row.payload.id || !Number.isSafeInteger(row.revision) || row.revision < 1) {
@@ -990,9 +994,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       }
       if (row.payload.source_error) continue; // The successful source replay above recovered the buffer.
       if (typeof row.payload.timestamp !== "number") throw new Error("Invalid WhatsApp source reference");
-      if (row.payload.timestamp < startedAt) continue;
-      if (chatFilter === "group" && !row.payload.is_group) continue;
-      if (chatFilter === "individual" && row.payload.is_group) continue;
+      if (outsideScope(row.payload)) continue;
       references.set(row.payload.id, { id: row.payload.id, timestamp: row.payload.timestamp, is_group: row.payload.is_group === true });
     }
     // A page can contain 500 replay refs plus 1000 buffered refs. Acknowledge
@@ -1009,9 +1011,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         observation: { after: replay.after, started_at: startedAt, chat_filter: chatFilter },
         source_ack: { binding_id: observed.binding_id, epoch: observed.epoch,
           records: observed.records.filter(row => row.payload.source_error || selectedIds.has(row.payload.id)
-            || (row.payload.timestamp ?? 0) < startedAt
-            || (chatFilter === "group" && !row.payload.is_group)
-            || (chatFilter === "individual" && row.payload.is_group))
+            || outsideScope(row.payload))
             .map(row => ({ id: row.payload.id, revision: row.revision })) },
       },
     };

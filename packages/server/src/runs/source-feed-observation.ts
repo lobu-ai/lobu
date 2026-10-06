@@ -38,14 +38,22 @@ export async function reconcileSourceFeedObservations(sql: DbClient, deviceId: s
     JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
     WHERE c.device_worker_id = ${deviceId}::uuid AND c.organization_id = ANY(${pgTextArray(orgIds)}::text[])
       AND c.status = 'active' AND c.deleted_at IS NULL AND f.status = 'active' AND f.deleted_at IS NULL
+      AND (f.next_run_at IS NULL OR f.next_run_at <= now())
       AND d.feeds_schema->f.feed_key->'operations' ? 'observe'
       -- Cheap candidate filter; sourceFeedSubscriptions still checks the full trigger and owner authority.
       AND EXISTS (SELECT 1 FROM automations a WHERE a.organization_id = f.organization_id
         AND a.status = 'active' AND a.current_version_id IS NOT NULL
+        AND (a.managed_agent_id IS NOT NULL OR a.device_worker_id IS NOT NULL)
         AND a.triggers @> jsonb_build_array(jsonb_build_object('kind', 'event', 'connector_key', c.connector_key)))
   `;
   for (const feed of feeds) {
     if (boundFeedIds.includes(Number(feed.id)) && !feed.retry_due) continue;
+    // An active task already owns this feed; skip the owner/visibility scans
+    // while it waits for its browser binding (served by the partial active-task index).
+    const [pending] = await sql`SELECT id FROM runs
+      WHERE idempotency_key = ${observationTaskKey(feed.organization_id, Number(feed.id))}
+        AND status IN ('pending', 'claimed', 'running')`;
+    if (pending) continue;
     if (!(await sourceFeedSubscriptions(sql, feed.organization_id, Number(feed.id))).length) continue;
     await sql.begin(tx => enqueueSourceFeedObservation(tx, feed.organization_id, Number(feed.id)));
   }
