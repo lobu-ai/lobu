@@ -7,6 +7,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { AutomationSource } from '@lobu/core/contracts/tools/manage-automations';
 import { dispatchPendingAutomationRuns, materializeDueAutomationRuns } from '../../../automations/automation';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 import type { DbClient } from '../../../db/client';
@@ -19,7 +20,7 @@ import { TestWorkspace } from '../../setup/test-mcp-client';
 const WINDOW_START = '2026-01-01T00:00:00.000Z';
 const WINDOW_END = '2026-01-01T06:00:00.000Z';
 
-async function seedAutomation(executor: 'script' | 'agent', skipIfUnchanged = false) {
+async function seedAutomation(executor: 'script' | 'agent', skipIfUnchanged = false, sources?: AutomationSource[]) {
   const workspace = await TestWorkspace.create({ name: `Window Bound ${executor}` });
   const agent = await createTestAgent({
     organizationId: workspace.org.id,
@@ -32,12 +33,12 @@ async function seedAutomation(executor: 'script' | 'agent', skipIfUnchanged = fa
     name: 'Window Bound',
     managed_agent_id: agent.agentId,
     triggers: [{ kind: 'schedule', cron: '*/5 * * * *', execution: 'window', skip_if_unchanged: skipIfUnchanged }],
-    ...(skipIfUnchanged ? { sources: [{ name: 'empty', query: 'SELECT id FROM events WHERE false' }] } : {}),
+    ...(sources ? { sources } : skipIfUnchanged ? { sources: [{ name: 'empty', query: 'SELECT id FROM events WHERE false' }] } : {}),
     ...(executor === 'script'
       ? { execution_config: { executor: { kind: 'script', source: 'export default async () => ({});' } } }
       : { prompt: 'Summarize the window.' }),
   } as never)) as { automation_id: string };
-  return { orgId: workspace.org.id, agentId: agent.agentId, automationId: Number(created.automation_id) };
+  return { workspace, orgId: workspace.org.id, agentId: agent.agentId, automationId: Number(created.automation_id) };
 }
 
 /** `count` live events, one per second from the window start. */
@@ -97,6 +98,109 @@ async function scheduleState(automationId: number): Promise<{ next_window_start:
 describe('script executor window bound', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
+  });
+
+  it.each(['scheduled', 'manual'] as const)('keeps context-only %s scripts on their intended window without a backlog chain', async (dispatchSource) => {
+    const seed = await seedAutomation('script', false, [
+      { name: 'state', query: 'SELECT 1 AS id', context: true },
+    ]);
+    await seedArrivals(seed.orgId, 250);
+    const sql = getTestDb();
+    await sql`UPDATE automations SET next_window_start = ${WINDOW_START}::timestamptz WHERE id = ${seed.automationId}`;
+    const run = await createAutomationRun({
+      organizationId: seed.orgId,
+      agentId: seed.agentId,
+      automationId: seed.automationId,
+      windowStart: WINDOW_START,
+      windowEnd: WINDOW_END,
+      dispatchSource,
+      sourceFingerprint: 'current-state-fingerprint',
+      ...(dispatchSource === 'scheduled' ? { expectedWindowStart: WINDOW_START } : {}),
+    });
+    expect(await claimedWindow(run.runId)).toEqual({ start: WINDOW_START, end: WINDOW_END });
+    const [queued] = await sql`SELECT approved_input FROM runs WHERE id = ${run.runId}`;
+    expect(queued.approved_input.source_fingerprint).toBe('current-state-fingerprint');
+    expect(queued.approved_input.window_truncated).toBeUndefined();
+
+    await completeScriptRun(seed.orgId, seed.automationId, run.runId);
+
+    expect(await scheduleState(seed.automationId)).toEqual({ next_window_start: WINDOW_END, due: false });
+    const runs = await sql`SELECT id FROM runs WHERE automation_id = ${seed.automationId} AND run_type = 'automation'`;
+    expect(runs.map((row) => Number(row.id))).toEqual([run.runId]);
+    const tasks = await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId} AND action_key = 'automation-script'`;
+    expect(tasks).toHaveLength(1);
+    expect(await materializeDueAutomationRuns(TEST_ENV)).toMatchObject({ runsCreated: 0 });
+  });
+
+  it('keeps mixed context and event sources bounded', async () => {
+    const seed = await seedAutomation('script', false, [
+      { name: 'state', query: 'SELECT 1 AS id', context: true },
+      { name: 'arrivals', query: 'SELECT id FROM events' },
+    ]);
+    const stamps = await seedArrivals(seed.orgId, 250);
+    const run = await createAutomationRun({
+      organizationId: seed.orgId,
+      automationId: seed.automationId,
+      windowStart: WINDOW_START,
+      windowEnd: WINDOW_END,
+      dispatchSource: 'scheduled',
+    });
+    expect((await claimedWindow(run.runId)).end).toBe(stamps[200].toISOString());
+  });
+
+  it('keeps an existing run pinned while a new version switches from context to events', async () => {
+    const seed = await seedAutomation('script', false, [
+      { name: 'state', query: 'SELECT 1 AS id', context: true },
+    ]);
+    const stamps = await seedArrivals(seed.orgId, 250);
+    const params = {
+      organizationId: seed.orgId,
+      automationId: seed.automationId,
+      windowStart: WINDOW_START,
+      windowEnd: WINDOW_END,
+      dispatchSource: 'scheduled' as const,
+    };
+    const first = await createAutomationRun(params);
+    const sql = getTestDb();
+    const [before] = await sql`SELECT approved_input FROM runs WHERE id = ${first.runId}`;
+    await seed.workspace.owner.automations.createVersion({
+      automation_id: String(seed.automationId),
+      sources: [{ name: 'arrivals', query: 'SELECT id FROM events' }],
+    });
+    expect(await createAutomationRun(params)).toMatchObject({ runId: first.runId, created: false });
+    const [after] = await sql`SELECT approved_input FROM runs WHERE id = ${first.runId}`;
+    expect(after.approved_input).toEqual(before.approved_input);
+    expect((await claimedWindow(first.runId)).end).toBe(WINDOW_END);
+
+    // Replay the same arrival range under the new version through the manual
+    // lane so its own idempotency key is distinct from the scheduled run.
+    await sql`UPDATE runs SET status = 'completed' WHERE id = ${first.runId}`;
+    const next = await createAutomationRun({ ...params, dispatchSource: 'manual' });
+    const [nextRow] = await sql`SELECT approved_input FROM runs WHERE id = ${next.runId}`;
+    expect(nextRow.approved_input.version_id).not.toBe(before.approved_input.version_id);
+    expect((await claimedWindow(next.runId)).end).toBe(stamps[200].toISOString());
+  });
+
+  it('uses normalized entity-reference context without requiring the custom-SQL flag', async () => {
+    const seed = await seedAutomation('script');
+    await seed.workspace.owner.entity_schema.createType({
+      slug: 'synthetic-state',
+      name: 'Synthetic state',
+      metadata_schema: { type: 'object', properties: {} },
+    });
+    await seed.workspace.owner.automations.createVersion({
+      automation_id: String(seed.automationId),
+      sources: [{ name: 'state', query: '@entity:synthetic-state' }],
+    });
+    await seedArrivals(seed.orgId, 250);
+    const run = await createAutomationRun({
+      organizationId: seed.orgId,
+      automationId: seed.automationId,
+      windowStart: WINDOW_START,
+      windowEnd: WINDOW_END,
+      dispatchSource: 'scheduled',
+    });
+    expect((await claimedWindow(run.runId)).end).toBe(WINDOW_END);
   });
 
   it.each(['scheduled', 'manual'] as const)('bounds %s windows and leaves the rest to the next run', async (dispatchSource) => {

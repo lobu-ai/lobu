@@ -16,7 +16,9 @@ import {
   type AutomationEventTrigger,
   type AutomationWorkspaceEventTrigger,
   type AutomationScriptExecutor,
+  type AutomationSource,
 } from '@lobu/core/contracts/tools/manage-automations';
+import { normalizeAutomationSources } from '../automations/source-refs';
 import type { ConnectorTriggerSignal } from '@lobu/connector-sdk';
 import {
   claimAutomationCooldown,
@@ -710,19 +712,20 @@ async function createAutomationRunWithClient(
   // replica can complete that window after fingerprinting but before this
   // INSERT, allowing the old range to be materialized again. The executor is
   // pinned with the run alongside the version, never reloaded mid-run.
-  const versionRows = params.expectedWindowStart
-    ? await sql<{ current_version_id: unknown; next_window_start: string | Date | null; executor: unknown }>`
-        SELECT current_version_id, next_window_start, execution_config->'executor' AS executor
-        FROM automations
-        WHERE id = ${params.automationId}
-        FOR UPDATE
-      `
-    : await sql<{ current_version_id: unknown; next_window_start: string | Date | null; executor: unknown }>`
-        SELECT current_version_id, next_window_start, execution_config->'executor' AS executor
-        FROM automations
-        WHERE id = ${params.automationId}
-        LIMIT 1
-      `;
+  const versionRows = await sql<{
+    current_version_id: unknown;
+    next_window_start: string | Date | null;
+    executor: unknown;
+    sources: AutomationSource[] | null;
+    version_sources: AutomationSource[] | null;
+  }>`
+    SELECT a.current_version_id, a.next_window_start, a.execution_config->'executor' AS executor,
+           a.sources, v.version_sources
+    FROM automations a
+    LEFT JOIN automation_versions v ON v.id = a.current_version_id
+    WHERE a.id = ${params.automationId}
+    ${params.expectedWindowStart ? sql`FOR UPDATE OF a` : sql`LIMIT 1`}
+  `;
   const currentWindowStart = versionRows[0]?.next_window_start == null
     ? null
     : new Date(versionRows[0].next_window_start).toISOString();
@@ -739,10 +742,18 @@ async function createAutomationRunWithClient(
       : null;
 
   const executor = versionRows[0]?.executor as AutomationRunPayload['executor'] | undefined;
-  const windowEnd =
-    executor?.kind === 'script' && params.dispatchSource !== 'event'
-      ? await boundScriptArrivalWindowEnd(sql, params.organizationId, params.windowStart, params.windowEnd)
-      : params.windowEnd;
+  let windowEnd = params.windowEnd;
+  if (executor?.kind === 'script' && params.dispatchSource !== 'event') {
+    // Match source reads: a nonempty version source list wins; otherwise use
+    // the assignment's sources. Freeze the resulting bounds with this run.
+    const versionSources = versionRows[0]?.version_sources ?? [];
+    const sources = versionSources.length > 0 ? versionSources : versionRows[0]?.sources ?? [];
+    const normalized = await normalizeAutomationSources(sql, params.organizationId, sources);
+    // Context-only scripts do not consume stored arrivals.
+    if (sources.length === 0 || normalized.some((source) => source.kind === 'event' || source.kind === 'feed')) {
+      windowEnd = await boundScriptArrivalWindowEnd(sql, params.organizationId, params.windowStart, params.windowEnd);
+    }
+  }
 
   // device_worker_id + agent_kind get persisted into approved_input so the
   // server-side dispatcher (#802) can skip device-pinned rows from the SQL
