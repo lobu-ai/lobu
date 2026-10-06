@@ -20,6 +20,8 @@ import type { ConnectionListInput } from "@lobu/core/contracts/tools/manage-conn
 import type {
   EntityCreateInput,
   EntityDeleteInput,
+  EntityDiscoverDuplicatesInput,
+  EntityDiscoverDuplicatesResult,
   EntityGetInput,
   EntityLinkInput,
   EntityListInput,
@@ -173,6 +175,7 @@ export interface ReactionClient {
   };
 
   entities: {
+    discoverDuplicates(input: EntityDiscoverDuplicatesInput): Promise<EntityDiscoverDuplicatesResult>;
     list(filter?: EntityListInput): Promise<unknown>;
     get(input: EntityGetInput): Promise<unknown>;
     create(input: EntityCreateInput): Promise<{ id: number }>;

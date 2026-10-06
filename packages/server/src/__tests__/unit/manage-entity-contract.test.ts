@@ -236,6 +236,7 @@ describe("manage_entity wire schema", () => {
 			"list",
 			"get",
 			"list_links",
+			"discover_duplicates",
 		]);
 		expect(listedFor("write")?.inputSchema.properties.action.enum).toEqual([
 			"create",
@@ -246,6 +247,7 @@ describe("manage_entity wire schema", () => {
 			"unlink",
 			"update_link",
 			"list_links",
+			"discover_duplicates",
 		]);
 		expect(listedFor("admin")?.inputSchema.properties.action.enum).toEqual([
 			"create",
@@ -258,6 +260,7 @@ describe("manage_entity wire schema", () => {
 			"update_link",
 			"list_links",
 			"merge",
+			"discover_duplicates",
 			"resolve_duplicates",
 			"unmerge",
 		]);

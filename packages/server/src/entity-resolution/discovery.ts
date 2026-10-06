@@ -1,6 +1,9 @@
+import type { EntityDiscoverDuplicatesResult } from "@lobu/core/contracts/tools/manage-entity";
 import { type DbClient, pgBigintArray } from "../db/client";
+import { ToolUserError } from "../utils/errors";
 import { loadLiveEntityIdentities } from "./identities";
 import {
+	assessEntityResolution,
 	normalizedResolutionRuleKeys,
 	readEntityResolutionRules,
 	type ResolutionIdentity,
@@ -24,26 +27,11 @@ function populatedFieldCount(candidate: ResolutionCandidate): number {
 	}).length;
 }
 
-/**
- * Build connected duplicate components from schema-declared identity rules.
- * This is intentionally server-side: reaction scripts submit IDs only and can
- * neither forge normalized evidence nor carry a second policy implementation.
- */
-export function discoverEntityResolutionGroups(input: {
+function buildResolutionComponents(input: {
 	metadataSchema: unknown;
 	entityTypeSlug?: string | null;
 	candidates: ResolutionCandidate[];
-	maxGroupSize?: number;
-	maxGroups?: number;
-	maxOperations?: number;
-}): {
-	groups: ResolutionGroup[];
-	oversizedGroupCount: number;
-	deferredCandidateCount: number;
-} {
-	const maxGroupSize = input.maxGroupSize ?? 26;
-	const maxGroups = input.maxGroups ?? 199;
-	const maxOperations = input.maxOperations ?? 199;
+}) {
 	const candidates = new Map(
 		input.candidates.map((candidate) => [candidate.id, candidate]),
 	);
@@ -94,6 +82,31 @@ export function discoverEntityResolutionGroups(input: {
 		component.push(candidate);
 		components.set(root, component);
 	}
+
+	return { components, identitiesByCandidate };
+}
+
+/**
+ * Build connected duplicate components from schema-declared identity rules.
+ * This is intentionally server-side: reaction scripts submit IDs only and can
+ * neither forge normalized evidence nor carry a second policy implementation.
+ */
+export function discoverEntityResolutionGroups(input: {
+	metadataSchema: unknown;
+	entityTypeSlug?: string | null;
+	candidates: ResolutionCandidate[];
+	maxGroupSize?: number;
+	maxGroups?: number;
+	maxOperations?: number;
+}): {
+	groups: ResolutionGroup[];
+	oversizedGroupCount: number;
+	deferredCandidateCount: number;
+} {
+	const maxGroupSize = input.maxGroupSize ?? 26;
+	const maxGroups = input.maxGroups ?? 199;
+	const maxOperations = input.maxOperations ?? 199;
+	const { components, identitiesByCandidate } = buildResolutionComponents(input);
 
 	let oversizedGroupCount = 0;
 	let deferredCandidateCount = 0;
@@ -244,5 +257,87 @@ export async function discoverWorkspaceResolutionGroups(
 		groups,
 		oversizedGroupCount,
 		deferredCandidateCount,
+	};
+}
+
+/** Full current-state matching; only the output is paged, never the match input. */
+export async function discoverWorkspaceResolutionPage(
+	db: DbClient,
+	input: { organizationId: string; entityType: string; limit?: number; cursor?: string },
+): Promise<EntityDiscoverDuplicatesResult> {
+	let after = 0;
+	if (input.cursor) {
+		try {
+			const cursor = JSON.parse(Buffer.from(input.cursor, "base64url").toString("utf8"));
+			if (cursor.v !== 1 || cursor.org !== input.organizationId ||
+				cursor.type !== input.entityType || !Number.isSafeInteger(cursor.after) || cursor.after < 1) {
+				throw new Error();
+			}
+			after = cursor.after;
+		} catch {
+			throw new ToolUserError("Invalid duplicate discovery cursor for this workspace and entity type", 400);
+		}
+	}
+	const [type] = await db<{ id: number; metadata_schema: unknown }>`
+		SELECT id, metadata_schema FROM entity_types
+		WHERE organization_id = ${input.organizationId} AND slug = ${input.entityType}
+		  AND deleted_at IS NULL
+	`;
+	if (!type) throw new ToolUserError(`Entity type '${input.entityType}' not found`, 404);
+	const rows = await db<{ id: number; metadata: Record<string, unknown> }>`
+		SELECT id, metadata FROM entities
+		WHERE organization_id = ${input.organizationId} AND entity_type_id = ${type.id}
+		  AND deleted_at IS NULL AND merged_into IS NULL
+		ORDER BY id
+	`;
+	const identities = await loadLiveEntityIdentities(db, {
+		organizationId: input.organizationId,
+		entityIds: rows.map((row) => Number(row.id)),
+	});
+	const candidates = rows.map((row) => ({
+		id: Number(row.id), metadata: row.metadata ?? {},
+		identities: identities.get(Number(row.id)) ?? [],
+	}));
+	const policy = { metadataSchema: type.metadata_schema, entityTypeSlug: input.entityType };
+	const { components } = buildResolutionComponents({ ...policy, candidates });
+	const remaining = [...components.entries()]
+		.filter(([id, members]) => id > after && members.length > 1)
+		.sort(([left], [right]) => left - right);
+	const page: EntityDiscoverDuplicatesResult["components"] = [];
+	let decisions = 0;
+	for (const [componentId, members] of remaining) {
+		if (page.length >= (input.limit ?? 50)) break;
+		const discovered = discoverEntityResolutionGroups({ ...policy, candidates: members });
+		const oversized = discovered.oversizedGroupCount > 0;
+		const group = discovered.groups[0];
+		const decisionCount = group?.loserIds.length ?? 0;
+		if (decisions + decisionCount > 199) break;
+		const byId = new Map(members.map((candidate) => [candidate.id, candidate]));
+		page.push({
+			component_id: componentId,
+			candidate_count: members.length,
+			candidate_entity_ids: oversized ? [] : members.map((candidate) => candidate.id).sort((a, b) => a - b),
+			oversized,
+			deferred_candidates: oversized ? members.length : discovered.deferredCandidateCount,
+			decisions: group ? group.loserIds.map((loserId) => ({
+				winner_entity_id: group.winnerId,
+				loser_entity_id: loserId,
+				fingerprint: assessEntityResolution({
+					...policy, winner: byId.get(group.winnerId)!, losers: [byId.get(loserId)!],
+				}).fingerprint,
+			})) : [],
+		});
+		decisions += decisionCount;
+	}
+	const last = page.at(-1);
+	return {
+		action: "discover_duplicates",
+		candidates_scanned: candidates.length,
+		components: page,
+		next_cursor: last && remaining.length > page.length
+			? Buffer.from(JSON.stringify({
+				v: 1, org: input.organizationId, type: input.entityType, after: last.component_id,
+			})).toString("base64url")
+			: null,
 	};
 }

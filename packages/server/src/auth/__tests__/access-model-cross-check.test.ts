@@ -188,8 +188,12 @@ function declaredRuntimeTier(
 	// callers, so they stay out of PUBLIC_READ_ACTIONS.
 	const authenticatedViewsRead = tool === "manage_views" &&
 		(action === "list" || action === "get");
+	// Duplicate identity relationships are authenticated reads, as documented
+	// beside manage_entity in tool-access.ts, never PUBLIC_READ_ACTIONS.
+	const authenticatedDuplicateDiscoveryRead = tool === "manage_entity" &&
+		action === "discover_duplicates";
 	const isExplicitlyDeclared = authenticatedConversationRead ||
-		authenticatedViewsRead ||
+		authenticatedViewsRead || authenticatedDuplicateDiscoveryRead ||
 		OWNER_ADMIN_ACTIONS[tool]?.has(action) ||
 		MEMBER_WRITE_ACTIONS[tool]?.has(action) ||
 		PUBLIC_READ_ACTIONS[tool]?.has(action);
@@ -213,6 +217,11 @@ describe("access-model cross-check", () => {
 			expect(getRequiredAccessLevel("manage_views", { action }, false)).toBe("read");
 			expect(isPublicReadable("manage_views", { action })).toBe(false);
 		}
+	});
+
+	it("keeps duplicate discovery authenticated while reporting read tier", () => {
+		expect(getRequiredAccessLevel("manage_entity", { action: "discover_duplicates" }, false)).toBe("read");
+		expect(isPublicReadable("manage_entity", { action: "discover_duplicates" })).toBe(false);
 	});
 
 	it("no manage_* action is declared in conflicting tiers", () => {

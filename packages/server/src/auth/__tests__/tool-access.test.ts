@@ -799,7 +799,7 @@ query_sdk: read ?=read
 query_sql: read ?=read
 run_sdk: write ?=write
 open_view: read ?=read
-manage_entity: create=write update=write list=read+public get=read+public delete=admin link=write unlink=write update_link=write list_links=read+public merge=admin resolve_duplicates=admin unmerge=admin ?=read
+manage_entity: create=write update=write list=read+public get=read+public delete=admin link=write unlink=write update_link=write list_links=read+public merge=admin discover_duplicates=read resolve_duplicates=admin unmerge=admin ?=read
 manage_entity_schema: list=read+public get=read+public create=admin update=admin delete=admin audit=read+public add_rule=admin remove_rule=admin list_rules=read+public ?=read
 manage_connections: list_connector_groups=read+public list=read+public get=read+public create=write setup_options=read+public connect=write connect_managed=write update=write apply_chat_connection=admin delete=admin reauthenticate=write test=admin install_connector=admin uninstall_connector=admin get_connector_source=admin validate_connector_source=admin update_connector_source=admin rollback_connector_version=admin toggle_connector_login=admin update_connector_auth=admin update_connector_default_config=admin set_channel_about=admin ?=read
 manage_catalog: list_catalog=read+public list_installed=read+public ?=read

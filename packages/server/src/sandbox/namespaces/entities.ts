@@ -8,6 +8,8 @@
 import type {
 	EntityCreateInput,
 	EntityDeleteInput,
+	EntityDiscoverDuplicatesInput,
+	EntityDiscoverDuplicatesResult,
 	EntityGetInput,
 	EntityLinkInput,
 	EntityListInput,
@@ -24,6 +26,7 @@ import { createActionCaller } from "./action-call";
 
 export interface EntitiesNamespace {
 	manage(input: Record<string, unknown>): Promise<unknown>;
+	discoverDuplicates(input: EntityDiscoverDuplicatesInput): Promise<EntityDiscoverDuplicatesResult>;
 	list(filter?: EntityListInput): Promise<unknown>;
 	get(input: EntityGetInput): Promise<unknown>;
 	create(input: EntityCreateInput): Promise<unknown>;
@@ -44,6 +47,7 @@ export function buildEntitiesNamespace(
 
 	return {
 		manage,
+		discoverDuplicates: method("discover_duplicates"),
 		list: method("list"),
 		get: method("get"),
 		create: method("create"),
