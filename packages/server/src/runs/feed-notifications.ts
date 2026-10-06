@@ -20,6 +20,66 @@ function savedSourceAck(checkpoint: Record<string, unknown> | null) {
 }
 
 type FeedNotification = NonNullable<PollRequest['feed_notifications']>[number];
+type NotificationFeed = {
+  organization_id: string;
+  connector_key: string;
+  version: string | null;
+  automation_events: Array<{ key: string }> | null;
+  event_types: string[] | null;
+  source_only: boolean;
+};
+
+/** Called under the feed lock; references and replay progress commit together. */
+async function receiveSourceReferenceDelivery(
+  tx: DbClient,
+  notice: FeedNotification,
+  feed: NotificationFeed,
+  config: unknown,
+  allowed: Set<number>,
+): Promise<ReceivedNotification> {
+  const delivery = notice.subscription;
+  if (!delivery || delivery.scope_key !== sourceFeedScopeKey(config, feed.version)) return { active: false };
+  const declared = new Set((feed.automation_events ?? []).map(event => event.key));
+  const eventTypes = new Set(feed.event_types ?? []);
+  if (Buffer.byteLength(JSON.stringify(delivery)) > 256 * 1024
+    || delivery.records.reduce((count, record) => count + record.payload.events.length, 0) > 1000
+    || delivery.records.some(record => record.payload.events.some(event =>
+      !declared.has(event.event_type) || !eventTypes.has(event.event_type)
+      || (event.occurred_at && !Number.isFinite(Date.parse(event.occurred_at)))))) {
+    // Revoke the bad binding before any writes. The next setup replays from the
+    // unchanged source cursor instead of retrying this malformed buffer forever.
+    logger.warn({ feedId: notice.feed_id }, 'Revoking invalid source reference delivery');
+    return { active: false };
+  }
+  const queued: Array<{ runId: number; status: string }> = [];
+  for (const { payload } of delivery.records) {
+    for (const event of payload.events) {
+      const deliveryId = createHash('sha256').update(JSON.stringify([
+        feed.organization_id, notice.connection_id, event.event_type, event.id,
+      ])).digest('hex');
+      const signal = {
+        connector_key: feed.connector_key, connection_id: notice.connection_id,
+        event_type: event.event_type, resource_ref: event.resource_ref, resource_type: event.resource_type,
+        occurred_at: event.occurred_at, delivery_id: `source:${deliveryId}`,
+        label: `Source ${event.event_type}`,
+        input_text: `Source change ${event.event_type}: ${JSON.stringify(event.resource_ref)}. Read its content from the source when needed.`,
+      };
+      const matches = await findMatchingAutomationActivations(feed.organization_id, signal, tx);
+      queued.push(...await queueAutomationActivations({ signal, matches: matches.filter(match => allowed.has(match.automationId)), db: tx }));
+    }
+    // A lost receipt may replay an older page. Delivering it is harmless;
+    // its cursor may advance only from the position it actually read.
+    if (payload.checkpoint) await tx`UPDATE feeds
+      SET checkpoint = jsonb_build_object('cursor', ${tx.json(payload.checkpoint.next)}::jsonb)
+      WHERE id = ${notice.feed_id} AND organization_id = ${feed.organization_id}
+        AND checkpoint->'cursor' IS NOT DISTINCT FROM ${payload.checkpoint.previous === null ? null : tx.json(payload.checkpoint.previous)}::jsonb`;
+  }
+  // The browser retains this hint after acknowledgments, so a finishing
+  // setup task cannot consume and lose the next replay request.
+  if (delivery.needs_rebind && delivery.records.length === 0) await enqueueSourceFeedListener(tx, feed.organization_id, notice.feed_id);
+  return { active: true, queued, ack: { binding_id: delivery.binding_id, epoch: delivery.epoch,
+    records: delivery.records.map(record => ({ id: record.payload.id, revision: record.revision })) } };
+}
 
 /** Caller owns source routing; this is the single scheduling mutation. */
 export async function requestFeedSync(sql: DbClient, selection: DbQuery) {
@@ -53,8 +113,8 @@ export async function receiveFeedNotifications(
     // One transaction owns both eligibility and any due write. For a changed
     // notification, its receipt means committed scheduling, not ingestion.
     const received = await sql.begin(async (tx): Promise<ReceivedNotification> => {
-      const rows = await tx`
-        SELECT f.id, f.organization_id, f.checkpoint, c.connector_key,
+      const rows = await tx<NotificationFeed>`
+        SELECT f.organization_id, c.connector_key,
           COALESCE(f.pinned_version, d.version) AS version,
           d.automation_events,
           d.feeds_schema->f.feed_key->'webhook'->'events' AS event_types,
@@ -82,45 +142,8 @@ export async function receiveFeedNotifications(
         AND organization_id = ${feed.organization_id} AND status = 'active' AND deleted_at IS NULL FOR UPDATE`;
       if (!locked) return { active: false };
       if (feed.source_only) {
-        const delivery = notice.subscription;
-        if (!delivery || delivery.scope_key !== sourceFeedScopeKey(locked.config, feed.version)) return { active: false };
-        if (Buffer.byteLength(JSON.stringify(delivery)) > 256 * 1024
-          || delivery.records.reduce((count, record) => count + record.payload.events.length, 0) > 1000) {
-          throw new Error('Invalid source reference delivery');
-        }
-        const allowed = new Set(subscriptions.map(subscription => subscription.automationId));
-        const declared = new Set((feed.automation_events ?? []).map((event: { key: string }) => event.key));
-        const eventTypes = new Set(feed.event_types ?? []);
-        const queued: Array<{ runId: number; status: string }> = [];
-        for (const { payload } of delivery.records) {
-          for (const event of payload.events) {
-            if (!declared.has(event.event_type) || !eventTypes.has(event.event_type)) throw new Error('Undeclared source Automation event');
-            if (event.occurred_at && !Number.isFinite(Date.parse(event.occurred_at))) throw new Error('Invalid source event timestamp');
-            const deliveryId = createHash('sha256').update(JSON.stringify([
-              feed.organization_id, notice.connection_id, event.event_type, event.id,
-            ])).digest('hex');
-            const signal = {
-              connector_key: String(feed.connector_key), connection_id: notice.connection_id,
-              event_type: event.event_type, resource_ref: event.resource_ref, resource_type: event.resource_type,
-              occurred_at: event.occurred_at, delivery_id: `source:${deliveryId}`,
-              label: `Source ${event.event_type}`,
-              input_text: `Source change ${event.event_type}: ${JSON.stringify(event.resource_ref)}. Read its content from the source when needed.`,
-            };
-            const matches = await findMatchingAutomationActivations(feed.organization_id, signal, tx);
-            queued.push(...await queueAutomationActivations({ signal, matches: matches.filter(match => allowed.has(match.automationId)), db: tx }));
-          }
-          // A lost receipt may replay an older page. Delivering it is harmless;
-          // its cursor may advance only from the position it actually read.
-          if (payload.checkpoint) await tx`UPDATE feeds
-            SET checkpoint = jsonb_build_object('cursor', ${tx.json(payload.checkpoint.next)}::jsonb)
-            WHERE id = ${notice.feed_id} AND organization_id = ${feed.organization_id}
-              AND checkpoint->'cursor' IS NOT DISTINCT FROM ${payload.checkpoint.previous === null ? null : tx.json(payload.checkpoint.previous)}::jsonb`;
-        }
-        // The browser retains this hint after acknowledgments, so a finishing
-        // setup task cannot consume and lose the next replay request.
-        if (delivery.needs_rebind && delivery.records.length === 0) await enqueueSourceFeedListener(tx, feed.organization_id, notice.feed_id);
-        return { active: true, queued, ack: { binding_id: delivery.binding_id, epoch: delivery.epoch,
-          records: delivery.records.map(record => ({ id: record.payload.id, revision: record.revision })) } };
+        return receiveSourceReferenceDelivery(tx, notice, feed, locked.config,
+          new Set(subscriptions.map(subscription => subscription.automationId)));
       }
       if (notice.changed) {
         // Never use a live event to defeat failure backoff. A manual feed that

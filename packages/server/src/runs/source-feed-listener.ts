@@ -102,7 +102,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
     await executeCompiledConnector({
       compiledCode, job: {
         mode: 'observe', feedId: task.feedId, feedKey: feed.feed_key, checkpoint,
-        config: { ...mergeExecutionConfig(feed.connection_config, auth.connectionCredentials, feed.config ?? {}), ...dbEgressConfig() },
+        config: { ...mergeExecutionConfig(feed.connection_config, auth.connectionCredentials, config), ...dbEgressConfig() },
         credentials: auth.credentials, sessionState: auth.sessionState, httpAuth: auth.httpAuth, env: dbEgressConfig(),
       }, hooks: { onHttpFetch: auth.onHttpFetch, onChromeDispatch: browser.onChromeDispatch, signal: controller.signal }, timeoutMs,
     });

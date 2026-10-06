@@ -6,6 +6,7 @@ import { addUserToOrganization, createTestAgent, createTestOrganization, createT
 import { enqueueSourceFeedListener, reconcileSourceFeedListeners } from '../../runs/source-feed-listener';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from '../../runs/source-feed-subscriptions';
 import * as subscriptions from '../../runs/source-feed-subscriptions';
+import * as activation from '../../automations/activation';
 import { SOURCE_FEED_LISTENER_TASK } from '../../scheduled/task-definitions';
 import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY } from '../../lib/device-feed-read-protocol';
 import { resolveRunConnectorPolicy } from '../../authz/operation-run-policy';
@@ -213,12 +214,20 @@ describe('source feed notifications', () => {
     expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id}`).toHaveLength(0);
   });
 
-  it('rolls back the whole batch on an undeclared event and retains the prior checkpoint', async () => {
+  it.each(['undeclared event', 'invalid timestamp', 'oversized delivery', 'too many events'])('revokes a binding with %s without advancing its checkpoint', async (invalid) => {
     const { sql, org, device, notice } = await subscribedFixture();
     const subscription = referenceDelivery();
-    subscription.records[0].payload.events.push({ id: 'bad', event_type: 'undeclared', resource_ref: 'bad' });
-    expect(await receiveFeedNotifications(sql, [{ ...notice, subscription }], device.id, [org.id])).toEqual([]);
-    expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${notice.feed_id}`)[0].checkpoint).toBeNull();
+    const events = subscription.records[0].payload.events;
+    if (invalid === 'undeclared event') events.push({ id: 'bad', event_type: 'undeclared', resource_ref: 'bad' });
+    if (invalid === 'invalid timestamp') Object.assign(events[0], { occurred_at: 'invalid' });
+    if (invalid === 'oversized delivery') events[0].resource_ref = 'x'.repeat(256 * 1024);
+    if (invalid === 'too many events') subscription.records[0].payload.events = Array(1001).fill(events[0]);
+    const checkpoint = { cursor: { after: 0 } };
+    await sql`UPDATE feeds SET checkpoint = ${sql.json(checkpoint)} WHERE id = ${notice.feed_id}`;
+    const receipts = await receiveFeedNotifications(sql, [{ ...notice, subscription }], device.id, [org.id]);
+    expect(receipts).toEqual([expect.objectContaining({ feed_id: notice.feed_id, active: false })]);
+    expect(receipts[0]).not.toHaveProperty('ack');
+    expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${notice.feed_id}`)[0].checkpoint).toEqual(checkpoint);
     expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id}`).toHaveLength(0);
   });
 
@@ -231,10 +240,29 @@ describe('source feed notifications', () => {
       { ...notice, subscription: invalid },
       { ...notice, feed_id: secondFeed, subscription: referenceDelivery() },
     ], device.id, [org.id]);
-    expect(receipts).toHaveLength(1);
-    expect(receipts[0]).toMatchObject({ feed_id: secondFeed, active: true });
+    expect(receipts).toHaveLength(2);
+    expect(receipts[0]).toMatchObject({ feed_id: notice.feed_id, active: false });
+    expect(receipts[1]).toMatchObject({ feed_id: secondFeed, active: true });
     expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(1);
     expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${notice.feed_id}`)[0].checkpoint).toBeNull();
+  });
+
+  it('retains a valid delivery after a database failure while other bindings progress', async () => {
+    const { sql, org, device, notice, feeds } = await subscribedFixture();
+    const queue = vi.spyOn(activation, 'queueAutomationActivations').mockRejectedValueOnce(new Error('Synthetic database failure'));
+    try {
+      const receipts = await receiveFeedNotifications(sql, [
+        { ...notice, subscription: referenceDelivery() },
+        { ...notice, feed_id: Number(feeds[1].id), subscription: referenceDelivery() },
+      ], device.id, [org.id]);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toMatchObject({ feed_id: Number(feeds[1].id), active: true });
+      expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${notice.feed_id}`)[0].checkpoint).toBeNull();
+      expect((await receiveFeedNotifications(sql, [{ ...notice, subscription: referenceDelivery() }], device.id, [org.id]))[0].active).toBe(true);
+      expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(1);
+    } finally {
+      queue.mockRestore();
+    }
   });
 
   it('delivers the same source change once when configured feeds overlap', async () => {

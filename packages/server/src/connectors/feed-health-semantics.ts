@@ -308,8 +308,8 @@ export function deriveFeedHealthSemantics(
 
   // Source feeds have no sync lifecycle, but observation can fail independently.
   if (
-    input.operations?.includes('read') &&
-    !input.operations.includes('sync')
+    input.operations?.includes('read') === true &&
+    input.operations.includes('sync') === false
   ) {
     const attention = nonCollectorAttention(input);
     return {
