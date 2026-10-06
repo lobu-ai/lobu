@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ClientSDK } from "../sandbox/client-sdk";
 import { runScript } from "../sandbox/run-script";
+import { parseAutomationSourceRef } from "../automations/source-refs";
 import {
 	compileReactionScript,
 	extractReactionInputSchema,
@@ -13,10 +14,13 @@ const script = String(template.detail.reaction_script);
 async function executeReaction(
 	pages: Array<Record<string, unknown>>,
 	sources = [{ name: "assets", query: "@entity:asset" }],
+	automationId: unknown = 7,
 ) {
 	const calls: Record<string, unknown>[] = [];
+	let queryCalls = 0;
 	const sdk = {
 		query: async (query: string) => {
+			queryCalls += 1;
 			expect(query).toBe("SELECT sources FROM automations WHERE id = 7");
 			return [{ sources }];
 		},
@@ -36,9 +40,9 @@ async function executeReaction(
 	} as unknown as ClientSDK;
 	const result = await runScript({
 		source: script, sdk,
-		context: { automation: { id: 7, version: 2 } },
+		context: { automation: { id: automationId, version: 2 } },
 	});
-	return { calls, result };
+	return { calls, result, queryCalls };
 }
 
 describe("duplicate merge Automation template", () => {
@@ -82,6 +86,19 @@ describe("duplicate merge Automation template", () => {
 		expect(result.returnValue).toEqual({ oversized_groups: 1, deferred_candidates: 0 });
 	});
 
+	it("accepts entity references with the source parser's whitespace and prefix casing", async () => {
+		const query = "  @ENTITY: asset  ";
+		expect(parseAutomationSourceRef(query)).toEqual({ type: "entity", value: "asset" });
+		const { calls, result } = await executeReaction([
+			{ components: [], next_cursor: null },
+		], [
+			{ name: "assets", query },
+			{ name: "same_assets", query: "@entity:asset" },
+		]);
+		expect(result.success, result.error?.message).toBe(true);
+		expect(calls).toEqual([{ action: "discover_duplicates", entity_type: "asset" }]);
+	});
+
 	it("reports a failed later page as failure after earlier work, never as a complete sweep", async () => {
 		const { calls, result } = await executeReaction([
 			{ components: [{ candidate_entity_ids: [1, 2], oversized: false }], next_cursor: "unavailable" },
@@ -89,6 +106,16 @@ describe("duplicate merge Automation template", () => {
 		expect(result.success).toBe(false);
 		expect(result.error?.message).toContain("Unexpected discovery page");
 		expect(calls.filter((call) => call.action === "resolve_duplicates")).toHaveLength(1);
+	});
+
+	it("rejects invalid Automation IDs before querying or mutating", async () => {
+		for (const id of [0, -1, 1.5, "7", "7 OR 1=1", Number.MAX_SAFE_INTEGER + 1]) {
+			const { calls, result, queryCalls } = await executeReaction([], undefined, id);
+			expect(result.success).toBe(false);
+			expect(result.error?.message).toContain("valid Automation ID");
+			expect(queryCalls).toBe(0);
+			expect(calls).toEqual([]);
+		}
 	});
 
 	it("fails visibly before mutations for unsupported or absent configured sources", async () => {

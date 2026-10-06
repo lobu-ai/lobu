@@ -192,6 +192,8 @@ export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
 	// semantics; legitimate external access is via `query_sdk` / `run_sdk`.
 	read_knowledge: null,
 	get_automation: null,
+	// discover_duplicates deliberately falls through to authenticated READ tier;
+	// it exposes identity relationships and must never be public-readable.
 	manage_entity: new Set(["list", "get", "list_links"]),
 	manage_entity_schema: new Set(["list", "get", "audit", "list_rules"]),
 	manage_connections: new Set(["list", "list_connector_groups", "get", "setup_options"]),

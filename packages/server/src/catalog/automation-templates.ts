@@ -138,7 +138,7 @@ export const AUTOMATION_CATALOG_TEMPLATES: CatalogEntry[] = [
 			// normalization, auto/review policy, suppression, and merge limits.
 			sources: [{ name: "people", query: "@entity:person" }],
 			prompt:
-				"Review every row in sources.people. Explain likely duplicate groups in analysis_summary and put name-only, alias-only, handle-only, oversized, or otherwise uncertain groups in uncertain_groups with why. Do not call entity tools or emit backlog tasks. After analysis, the deterministic reaction discovers complete components across every configured entity source and submits whole components to the server; source context pages do not bound discovery. The configured entity type's x-lobu-resolution policy decides which normalized identities auto-merge and which require human review. Without that extension, normalized email and phone matches remain review-only and never auto-merge.\n",
+				"Review the available entity rows in the configured sources. Explain likely duplicate groups in analysis_summary and put name-only, alias-only, handle-only, oversized, or otherwise uncertain groups in uncertain_groups with why. Do not call entity tools or emit backlog tasks. After analysis, the deterministic reaction discovers complete components across every configured entity source and submits whole components to the server; source context pages do not bound discovery. The configured entity type's x-lobu-resolution policy decides which normalized identities auto-merge and which require human review. For person entities without that extension, normalized email and phone matches remain review-only and never auto-merge; other entity types require an explicit policy.\n",
 			reaction_script: `export const input = {
 	type: "object",
 	properties: {
@@ -150,13 +150,17 @@ export const AUTOMATION_CATALOG_TEMPLATES: CatalogEntry[] = [
 };
 
 export default async function reaction(ctx, client) {
+	if (!Number.isSafeInteger(ctx.automation.id) || ctx.automation.id < 1) {
+		throw new Error("Duplicate discovery requires a valid Automation ID");
+	}
+	// security-allowed: validated positive safe integer; client.query accepts SQL strings only.
 	const [assignment] = await client.query(
 		"SELECT sources FROM automations WHERE id = " + ctx.automation.id,
 	);
 	if (!assignment) throw new Error("Duplicate discovery Automation was not found");
 	const sources = assignment.sources ?? [];
 	const types = [...new Set(sources.map((source) => {
-		const match = /^@entity:([a-zA-Z0-9_$-]+)$/.exec(source.query ?? "");
+		const match = /^@entity:\\s*([a-z][a-z0-9_-]*)$/i.exec((source.query ?? "").trim());
 		if (!match) throw new Error("Duplicate discovery requires an @entity:<type> source");
 		return match[1];
 	}))];
