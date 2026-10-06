@@ -13,7 +13,12 @@ describe("duplicate entity resolution configuration", () => {
     );
     expect(automation).toBeDefined();
     expect(automation?.triggers).toEqual([
-      { kind: "schedule", cron: "0 6 * * *", timezone: "Europe/London" },
+      {
+        kind: "schedule",
+        cron: "0 6 * * *",
+        timezone: "Europe/London",
+        skip_if_unchanged: false,
+      },
     ]);
   });
 

@@ -16,6 +16,8 @@ import {
   field,
   Type,
 } from "@lobu/cli/config";
+import { duplicateCandidateQuery } from "./duplicate-report.reaction.ts";
+import type DuplicateReportReaction from "./duplicate-report.reaction.ts";
 import type GoogleTakeoutConnector from "./google-takeout.connector.ts";
 import type HackerNewsConnector from "./hackernews.connector.ts";
 import type InstagramTakeoutConnector from "./instagram-takeout.connector.ts";
@@ -44,7 +46,7 @@ const hourlyTaskCollaboratorSkill = defineSkill({
 const duplicateEntityResolutionRealV3FinalSkill = defineSkill({
   name: "duplicate-entity-resolution-real-v3-final",
   content:
-    "Review every row in sources.people. Explain likely duplicate groups in analysis_summary and put name-only, alias-only, handle-only, oversized, or otherwise uncertain groups in uncertain_groups with why. Do not call entity tools or emit backlog tasks. After analysis, the deterministic reaction submits only candidate IDs to the server. The person entity type's x-lobu-resolution policy decides which normalized identities auto-merge and which require human review. Without that extension, normalized email and phone matches remain review-only and never auto-merge.\n",
+    "Review the supplied sources.people context for this reporting-only Automation. State whether that context is complete; the reaction independently reads all candidate pages. Explain likely duplicate groups in analysis_summary and put uncertain groups in uncertain_groups with why. Names, aliases, handles, email and phone strings are candidate evidence, not proof of shared ownership. Do not call entity tools, merge contacts, or emit backlog tasks. The deterministic reaction re-reads all current candidates, saves the evidence, and sends one notification per distinct report.\n",
 });
 
 const eventBackedPollsSkill = defineSkill({
@@ -1488,22 +1490,22 @@ const duplicateEntityResolution = defineAutomation({
   slug: "duplicate-entity-resolution-real-v3-final",
   name: "Duplicate entity resolution — real contacts",
   tags: ["identity", "deduplication", "world-model"],
-  // Adopted from prod, where this cadence was set outside the config. Apply
-  // treats Automation `triggers` as always-managed (diff.ts), so LEAVING THIS
-  // OUT does not mean "unmanaged" the way an omitted feed `schedule` does — it
-  // projects to `[]` and would clear the cron, leaving the Automation
-  // unreachable. `execution`, `active_run` and `skip_if_unchanged` are omitted
-  // because the stored row carries exactly the schema defaults (verified:
-  // execution=window, active_run=coalesce, skip_if_unchanged=true).
-  triggers: [every("0 6 * * *", { timezone: "Europe/London" })],
-  sources: {
-    // context-only: duplicate candidates for analysis (not window body)
-    people: context(
-      "SELECT * FROM (SELECT id AS id, name AS name, name_key AS name_key, match_reason AS match_reason, metadata AS metadata, created_at AS created_at, updated_at AS updated_at\nFROM (\n  SELECT id, name, metadata, created_at, updated_at,\n    regexp_replace(lower(trim(name)),'[^a-z0-9]','','g') AS name_key,\n    nullif(lower(trim(metadata->>'email')),'') AS em,\n    nullif(regexp_replace(coalesce(metadata->>'phone',''),'[^0-9]','','g'),'') AS ph,\n    COUNT(*) OVER (PARTITION BY regexp_replace(lower(trim(name)),'[^a-z0-9]','','g')) AS name_grp,\n    COUNT(*) OVER (PARTITION BY nullif(lower(trim(metadata->>'email')),'')) AS email_grp,\n    COUNT(*) OVER (PARTITION BY nullif(regexp_replace(coalesce(metadata->>'phone',''),'[^0-9]','','g'),'')) AS phone_grp,\n    CASE\n      WHEN nullif(lower(trim(metadata->>'email')),'') IS NOT NULL\n           AND COUNT(*) OVER (PARTITION BY nullif(lower(trim(metadata->>'email')),'')) > 1 THEN 'email:' || lower(trim(metadata->>'email'))\n      WHEN length(nullif(regexp_replace(coalesce(metadata->>'phone',''),'[^0-9]','','g'),'')) >= 7\n           AND COUNT(*) OVER (PARTITION BY nullif(regexp_replace(coalesce(metadata->>'phone',''),'[^0-9]','','g'),'')) > 1 THEN 'phone:' || regexp_replace(coalesce(metadata->>'phone',''),'[^0-9]','','g')\n      ELSE 'name:' || regexp_replace(lower(trim(name)),'[^a-z0-9]','','g')\n    END AS match_reason\n  FROM entities\n  WHERE entity_type='person' AND deleted_at IS NULL AND merged_into IS NULL\n    AND trim(coalesce(name,'')) <> ''\n) s\nWHERE (s.name_grp > 1 AND s.name_key <> '')\n   OR (s.em IS NOT NULL AND s.email_grp > 1)\n   OR (s.ph IS NOT NULL AND length(s.ph) >= 7 AND s.phone_grp > 1)\nORDER BY s.match_reason, s.id\nLIMIT 200) real_candidates WHERE COALESCE(metadata->>'email','') NOT LIKE '%@example.test'"
-    ),
-  },
+  // The reaction fingerprints current evidence, including edits on old rows.
+  // A source-window unchanged check cannot replace that comparison.
+  triggers: [
+    every("0 6 * * *", {
+      timezone: "Europe/London",
+      skip_if_unchanged: false,
+    }),
+  ],
+  sources: { people: context(duplicateCandidateQuery) },
+  prompt:
+    "Review the supplied sources.people context for this reporting-only Automation. State whether that context is complete; the reaction independently reads all candidate pages. Follow the pinned skill.",
   reactionsGuidance:
-    "Explain uncertainty; never decide identity from names, aliases, or handles. The server-side entity type policy is the only merge authority.",
+    "Explain uncertainty; never merge contacts or submit candidates for merging. The reaction only saves a report and notification.",
+  reaction: reactionFromFile<typeof DuplicateReportReaction>(
+    "./duplicate-report.reaction.ts"
+  ),
   skills: ["duplicate-entity-resolution-real-v3-final"],
 });
 
