@@ -148,6 +148,8 @@ describe('GoogleCalendarConnector full sync', () => {
       const incremental = await runSync(connector, { ...ctx, checkpoint: bootstrap.checkpoint });
       const next = new URL(urls[1]);
       expect(next.searchParams.get('syncToken')).toBe('SYNC_TOKEN');
+      // Google binds the bootstrap's non-window parameters to the token it mints.
+      expect(next.searchParams.get('singleEvents')).toBe('true');
       expect(next.searchParams.has('orderBy')).toBe(false);
       expect(next.searchParams.has('timeMin')).toBe(false);
       expect(next.searchParams.has('timeMax')).toBe(false);

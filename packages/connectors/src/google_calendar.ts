@@ -488,7 +488,9 @@ export default class GoogleCalendarConnector extends ConnectorRuntime<Record<str
         ? new URLSearchParams({
             maxResults: '250',
             syncToken,
-            ...(durableChanges ? { singleEvents: 'true', showDeleted: 'true' } : {}),
+            // Google binds the bootstrap's remaining parameters to the token: repeat them.
+            singleEvents: 'true',
+            ...(durableChanges ? { showDeleted: 'true' } : {}),
           })
         : durableChanges
           ? new URLSearchParams({
