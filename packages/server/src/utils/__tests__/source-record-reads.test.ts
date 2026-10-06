@@ -17,6 +17,7 @@ const contact = {
 };
 const feed = {
   feed_id: 1,
+  connection_id: 10,
   connector_key: "test_source",
   feed_schema: {
     matchPaths: ["metadata.account_id"],
@@ -118,10 +119,14 @@ it.each([
   { "1:metadata.account_id": 1 },
   { "1:metadata.account_id": {} },
 ])("rejects malformed cursor streams: %j", async (cursor) => {
+  readPage.mockRejectedValueOnce(new Error("retry"));
+  const first = await reads.readSourceRecordActivity(scope, record, { limit: 10 });
+  const payload = JSON.parse(Buffer.from(first.next_cursor!, "base64url").toString("utf8"));
+  readPage.mockClear();
   await expect(
     reads.readSourceRecordActivity(scope, record, {
       limit: 10,
-      cursor: Buffer.from(JSON.stringify(cursor)).toString("base64url"),
+      cursor: Buffer.from(JSON.stringify({ ...payload, streams: cursor })).toString("base64url"),
     })
   ).rejects.toThrow(/Invalid record activity cursor/);
   expect(readPage).not.toHaveBeenCalled();
@@ -469,4 +474,66 @@ it("reports page-only feeds as unsupported for merged activity without breaking 
   expect(result.events).toEqual([]);
   expect(result.failures).toEqual([{ feed_id: 1, error: expect.stringContaining("exact row cursors") }]);
   expect(result.next_cursor).toBeDefined();
+});
+
+it.each([
+  [{ feed_ids: [2] }, [2]],
+  [{ connection_ids: [10] }, [1, 3]],
+  [{ platforms: ["other_source"] }, [3]],
+  [{ platforms: ["test_source"], connection_ids: [10], feed_ids: [1, 2, 3] }, [1]],
+  [{ connection_ids: [10], feed_ids: [2] }, []],
+  [{ platforms: ["missing_source"] }, []],
+  [{ platforms: ["   "] }, [1, 2, 3]],
+  [{ connection_ids: [999] }, []],
+  [{ feed_ids: [999] }, []],
+  [{ platforms: [], connection_ids: [], feed_ids: [] }, [1, 2, 3]],
+])("narrows authorized feeds before remote reads: %j", async (filters, expected) => {
+  feeds = [feed, { ...feed, feed_id: 2, connection_id: 20 }, { ...feed, feed_id: 3, connector_key: "other_source" }];
+  readPage.mockResolvedValue({ rows: [] });
+  const result = await reads.readSourceRecordActivity(scope, record, { limit: 10, ...filters });
+  expect(readPage.mock.calls.map(([read]) => read.feed_id).sort()).toEqual(expected);
+  expect(result.failures).toEqual([]);
+});
+
+it("retains selected feeds across exact-cursor pagination", async () => {
+  feeds = [feed, { ...feed, feed_id: 2 }];
+  pagedSource({
+    1: [linked("excluded", "2026-01-09T00:00:00Z")],
+    2: [linked("e3", "2026-01-03T00:00:00Z"), linked("e2", "2026-01-02T00:00:00Z"), linked("e1", "2026-01-01T00:00:00Z")],
+  });
+  const options = { limit: 2, feed_ids: [2], connection_ids: [10], platforms: ["test_source"] };
+  const first = await reads.readSourceRecordActivity(scope, record, options);
+  const second = await reads.readSourceRecordActivity(scope, record, { ...options, cursor: first.next_cursor });
+  expect(first.events.map((row) => row.origin_id)).toEqual(["e3", "e2"]);
+  expect(second.events.map((row) => row.origin_id)).toEqual(["e1"]);
+  expect(second.next_cursor).toBeUndefined();
+  expect(readPage.mock.calls.every(([read]) => read.feed_id === 2)).toBe(true);
+});
+
+it.each([
+  { record: { type: "account", key: "a2" } },
+  { record: { type: "other", key: "a1" } },
+  { scope: { ...scope, organizationId: "other-org" } },
+  { options: { feed_ids: [1] } },
+  { options: { platforms: ["other_source"] } },
+  { options: { connection_ids: [20] } },
+])("rejects a continuation used with a different record or selection: %j", async (change) => {
+  pagedSource({ 1: [linked("e2", "2026-01-02T00:00:00Z"), linked("e1", "2026-01-01T00:00:00Z")] });
+  const first = await reads.readSourceRecordActivity(scope, record, { limit: 1 });
+  expect(first.next_cursor).toBeDefined();
+  readPage.mockClear();
+  await expect(reads.readSourceRecordActivity(change.scope ?? scope, change.record ?? record, {
+    limit: 1, cursor: first.next_cursor, ...change.options,
+  })).rejects.toThrow(/cursor.*record or filters/i);
+  expect(readPage).not.toHaveBeenCalled();
+});
+
+it("accepts reordered and duplicate filter selections in a continuation", async () => {
+  pagedSource({ 1: [linked("e2", "2026-01-02T00:00:00Z"), linked("e1", "2026-01-01T00:00:00Z")] });
+  const first = await reads.readSourceRecordActivity(scope, record, { limit: 1, feed_ids: [2, 1, 1], platforms: ["test_source", "other"] });
+  const second = await reads.readSourceRecordActivity(scope, record, {
+    limit: 2, feed_ids: [1, 2], platforms: ["other", "test_source"], cursor: first.next_cursor,
+  });
+  expect(second.events.map((row) => row.origin_id)).toEqual(["e1"]);
+  expect(second.next_cursor).toBeUndefined();
 });

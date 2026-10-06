@@ -150,6 +150,41 @@ describe('source-backed record reads', () => {
     expect(await counts()).toEqual(before);
   }, 60_000);
 
+  it('filters the live read and its continuation by connector, connection, and feed', async () => {
+    const filters = { platforms: [CONNECTOR_KEY], connection_ids: [privateConnectionId], feed_ids: [feedId] };
+    const first = await getContent({ record: { type: 'company', key: 'c1' }, ...filters, limit: 2 }, {} as Env, owner);
+    expect(first.content.map((item) => (item as { origin_id: string }).origin_id)).toEqual(['e4', 'e2']);
+    const second = await getContent(
+      { record: { type: 'company', key: 'c1' }, ...filters, limit: 2, record_cursor: first.record_cursor },
+      {} as Env, owner,
+    );
+    expect(second.content.map((item) => (item as { origin_id: string }).origin_id)).toEqual(['e1']);
+    expect(second.page.has_more).toBe(false);
+    await expect(getContent(
+      { record: { type: 'company', key: 'c1' }, ...filters, feed_ids: [], record_cursor: first.record_cursor },
+      {} as Env, owner,
+    )).rejects.toThrow(/cursor.*record or filters/i);
+  }, 60_000);
+
+  it('never widens unknown or inaccessible source selections', async () => {
+    const record = { type: 'company', key: 'c1' };
+    for (const filters of [
+      { platforms: ['unknown_connector'], feed_ids: [feedId] },
+      { connection_ids: [-1], feed_ids: [feedId] },
+      { connection_ids: [privateConnectionId], feed_ids: [-1] },
+    ]) {
+      const read = await getContent({ record, ...filters }, {} as Env, owner);
+      expect(read.content).toEqual([]);
+      expect(read.record_failures).toBeUndefined();
+    }
+    const privateRead = await getContent(
+      { record, platforms: [CONNECTOR_KEY], connection_ids: [privateConnectionId], feed_ids: [feedId] },
+      {} as Env, member,
+    );
+    expect(privateRead.content).toEqual([]);
+    expect(privateRead.record_failures).toBeUndefined();
+  }, 60_000);
+
   it('ends when the last page exactly fills the limit', async () => {
     const page = await getContent({ record: { type: 'company', key: 'c1' }, limit: 3 }, {} as Env, owner);
     expect(page.content.map((item) => (item as { origin_id: string }).origin_id)).toEqual(['e4', 'e2', 'e1']);
