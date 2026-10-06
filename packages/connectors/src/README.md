@@ -198,14 +198,15 @@ type ConnectorFeedSpec = {
   }>;
 } & (
   | { sync: FeedSyncHandler; read?: FeedReadHandler; observe?: never }
-  | { sync?: never; read: FeedReadHandler; observe?: FeedObserveHandler }
+  | { sync?: never; read: FeedReadHandler; observe?: (ctx: FeedObserveContext) => Promise<void> }
 );
 ```
 
 The record key becomes the feed key. A `sync` handler publishes
 `operations: ['sync']`, a `read` handler publishes `['read']`, and defining both
-publishes `['sync', 'read']`. An `observe` handler adds `'observe'` to a
-read-only feed; it never pairs with `sync`, whose checkpoint it would share.
+publishes `['sync', 'read']`. An optional `observe(ctx): Promise<void>` hook
+attaches browser listeners for a read-only trigger feed. It returns no data
+and does not add a public operation; notifications use existing subscriptions.
 Metadata-only device or MCP connector definitions declare `operations`
 explicitly because their executable handlers live outside the connector process.
 

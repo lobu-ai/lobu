@@ -142,14 +142,11 @@ async function main() {
               ' must implement sync and/or read on its feed definition.'
             );
           }
-          if (typeof observe === 'function') {
-            if (typeof sync === 'function') {
-              throw new Error(
-                'Connector feed ' + JSON.stringify(feedKey) +
-                ' cannot implement both sync and observe; they would share one feed checkpoint.'
-              );
-            }
-            operations.push('observe');
+          if (typeof observe === 'function' && typeof sync === 'function') {
+            throw new Error(
+              'Connector feed ' + JSON.stringify(feedKey) +
+              ' cannot implement both sync and observe; they would share one feed checkpoint.'
+            );
           }
           return [feedKey, { ...serializable, operations }];
         }));

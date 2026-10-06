@@ -11,7 +11,6 @@ import type {
   ConnectorWebhookSchema,
   EventEnvelope,
   FeedReadMatch,
-  FeedObserveResult,
   QueryContext,
   SyncCredentials,
   WebhookRegistration,
@@ -43,6 +42,17 @@ export type ExecutorJob = {
       mode: 'action';
       actionKey: string;
       actionInput: Record<string, unknown>;
+      config: Record<string, unknown>;
+      credentials: SyncCredentials | null;
+      sessionState: Record<string, unknown> | null;
+      env: Record<string, string | undefined>;
+    }
+  | {
+      /** Listener setup only; records are delivered by the browser notification transport. */
+      mode: 'observe';
+      feedId: number;
+      feedKey: string;
+      checkpoint: Record<string, unknown> | null;
       config: Record<string, unknown>;
       credentials: SyncCredentials | null;
       sessionState: Record<string, unknown> | null;
@@ -83,16 +93,6 @@ export type ExecutorJob = {
       offset?: number;
       sort?: { column: string; order: 'asc' | 'desc' };
       match?: FeedReadMatch;
-    }
-  | {
-      mode: 'observe';
-      feedKey: string;
-      feedId?: number | null;
-      config: Record<string, unknown>;
-      checkpoint: Record<string, unknown> | null;
-      credentials: SyncCredentials | null;
-      sessionState: Record<string, unknown> | null;
-      env: Record<string, string | undefined>;
     }
   | {
       // Subscribe with the provider at connect time so deliveries flow to
@@ -137,7 +137,7 @@ export type ExecutorJob = {
  * connector commits them, never collected onto the result.
  */
 export type ExecutorResult =
-  | ({ mode: 'observe' } & FeedObserveResult)
+  | { mode: 'observe' }
   | {
       mode: 'sync';
       /** How the pass ended; see the SDK's `SyncResult.status`. */

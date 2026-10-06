@@ -13,7 +13,7 @@ import { deviceManifestHash, type DeviceConnectorManifest } from '../../../worke
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { addUserToOrganization, createTestAgent, createTestOrganization, createTestUser } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
-import * as sourceObservations from '../../../runs/source-feed-observation';
+import * as sourceListeners from '../../../runs/source-feed-listener';
 import * as sourceNotifications from '../../../runs/feed-notifications';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 
@@ -28,9 +28,9 @@ const SOURCE = `
     automationEvents: [{ key: 'message.created', label: 'New message', resourceType: 'message' }],
     feeds: { items: {
       key: 'items', name: 'Items',
+      webhook: { mode: 'trigger', events: ['message.created'] },
       observe: async (ctx) => {
-        const page = await ctx.sessionState.chrome_dispatcher.dispatch('feed_listen', {});
-        return { changes: page.references, checkpoint: { source_ack: page.ack } };
+        await ctx.sessionState.chrome_dispatcher.dispatch('feed_listen', {});
       },
       read: async (ctx) => {
         if (ctx.query === 'plain') return { rows: [{ id: 'plain' }], hasMore: false };
@@ -130,7 +130,7 @@ describe('compiled browser source reads', () => {
       await sql`INSERT INTO connector_definitions
         (key, name, version, organization_id, status, runtime, required_capability, feeds_schema, actions_schema, auth_schema, automation_events)
         VALUES (${key}, ${key}, ${VERSION}, ${orgId}, 'active', ${isChrome ? sql.json(CHROME.runtime!) : null},
-          ${isChrome ? 'browser.debugger' : null}, ${sql.json(isChrome ? {} : { items: { key: 'items', operations: ['read', 'observe'] } })},
+          ${isChrome ? 'browser.debugger' : null}, ${sql.json(isChrome ? {} : { items: { key: 'items', operations: ['read'], webhook: { mode: 'trigger', events: ['message.created'] } } })},
           ${sql.json(isChrome ? CHROME.actions_schema! : {})}, ${sql.json({ methods: [{ type: 'none' }] })},
           ${sql.json(isChrome ? [] : [{ key: 'message.created', label: 'New message', resourceType: 'message' }])})`;
       await sql`INSERT INTO connector_versions
@@ -152,16 +152,16 @@ describe('compiled browser source reads', () => {
   afterAll(cleanupTestDatabase);
   afterEach(() => vi.restoreAllMocks());
 
-  it('extracts read/observe capabilities and rejects competing checkpoint writers', async () => {
-    expect((await extractConnectorMetadata(compiled.compiledCode)).feeds).toMatchObject({ items: { operations: ['read', 'observe'] } });
-    const invalid = await compileConnectorSource(SOURCE.replace("name: 'Items',", "name: 'Items', sync: async () => ({ status: 'complete' }),"));
-    await expect(extractConnectorMetadata(invalid.compiledCode)).rejects.toThrow('cannot implement both sync and observe');
+  it('publishes only read capability while preserving listener setup', async () => {
+    expect((await extractConnectorMetadata(compiled.compiledCode)).feeds).toMatchObject({
+      items: { operations: ['read'], webhook: { mode: 'trigger', events: ['message.created'] } },
+    });
   });
 
   it.each(['notification receipts', 'observation reconciliation'])('keeps browser polling available when %s fails', async (phase) => {
     const failed = phase === 'notification receipts'
       ? vi.spyOn(sourceNotifications, 'receiveFeedNotifications')
-      : vi.spyOn(sourceObservations, 'reconcileSourceFeedObservations');
+      : vi.spyOn(sourceListeners, 'reconcileSourceFeedListeners');
     failed.mockRejectedValueOnce(new Error('Synthetic source activity failure'));
     const response = await post('/api/workers/poll', { body: {
       worker_id: WORKER_ID, platform: 'chrome-extension', app_version: '9.9.0', capacity_available: 0,
@@ -197,10 +197,11 @@ describe('compiled browser source reads', () => {
     };`;
     await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: 'script', source: script } })}
       WHERE id = ${automation.id}`;
-    const observed = sourceObservations.runSourceFeedObservation({ organizationId: orgId, feedId });
+    const observed = sourceListeners.runSourceFeedListener({ organizationId: orgId, feedId });
     let finished = false;
     observed.finally(() => { finished = true; }).catch(() => {});
     let answered = false;
+    let scopeKey = '';
     const ack = { binding_id: 'synthetic-observation-binding', epoch: 'synthetic-epoch', records: [{ id: 'source-item', revision: 1 }] };
     for (let attempt = 0; attempt < 70 && !finished; attempt++) {
       const response = await post('/api/workers/poll', { body: {
@@ -211,9 +212,11 @@ describe('compiled browser source reads', () => {
       const job = await response.json();
       if (job?.run_id && job.operation_key === 'feed_listen') {
         expect(job.feed_context).toMatchObject({ feed_id: feedId, connection_id: connectionId, dry_run: false });
+        scopeKey = job.feed_context.subscription.scope_key;
+        expect((await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${feedId}`)[0].due).toBe(true);
         const completed = await post('/api/workers/complete-action', { body: {
           run_id: job.run_id, worker_id: WORKER_ID, status: 'success', action_output: {
-            references: [{ event_type: 'message.created', resource_type: 'message', resource_ref: 'source-item', delivery_id: 'message-1' }], ack,
+            listening: true,
           },
         } });
         expect(completed.status).toBe(200);
@@ -224,10 +227,27 @@ describe('compiled browser source reads', () => {
     }
     await observed;
     expect(answered).toBe(true);
-    const [feed] = await sql`SELECT checkpoint, items_collected, schedule FROM feeds WHERE id = ${feedId}`;
-    expect(feed.checkpoint).toEqual({ source_ack: ack });
+    const notification = await post('/api/workers/poll', { body: {
+      worker_id: WORKER_ID, platform: 'chrome-extension', app_version: '9.9.0',
+      capabilities: { 'browser.debugger': true, 'browser.tabs': true },
+      feed_notifications: [{ feed_id: feedId, connection_id: connectionId, feed_key: 'items',
+        notification_id: 'synthetic-delivery', changed: true, subscription: {
+          scope_key: scopeKey, binding_id: ack.binding_id, epoch: ack.epoch, needs_rebind: false,
+          records: [{ revision: 1, payload: { id: 'source-item',
+            events: [{ id: 'message-1', event_type: 'message.created', resource_type: 'message', resource_ref: 'source-item' }],
+            checkpoint: { previous: null, next: { after: 1 } },
+          } }],
+        } }],
+    } });
+    expect(notification.status).toBe(200);
+    expect((await notification.json()).feed_notification_receipts).toEqual([
+      expect.objectContaining({ active: true, ack }),
+    ]);
+    const [feed] = await sql`SELECT checkpoint, items_collected, schedule, next_run_at FROM feeds WHERE id = ${feedId}`;
+    expect(feed.checkpoint).toEqual({ cursor: { after: 1 } });
     expect(Number(feed.items_collected)).toBe(0);
     expect(feed.schedule).toBeNull();
+    expect(feed.next_run_at).toBeNull();
     expect(await sql`SELECT id FROM events WHERE organization_id = ${orgId}`).toHaveLength(0);
     const activations = await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND run_type = 'automation'`;
     expect(activations).toHaveLength(1);

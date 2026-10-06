@@ -253,9 +253,10 @@ async function handleListFeeds(
   // intentionally separate from this sync-health filter.
   if (args.health) {
     where = sql`${where} AND f.status = 'active' AND c.status <> 'paused'`;
-    const selectedOperations = sql`
+    const selectedFeed = sql`
       COALESCE((
-        SELECT health_cd.feeds_schema -> f.feed_key -> 'operations'
+        SELECT jsonb_build_object('operations', health_cd.feeds_schema -> f.feed_key -> 'operations',
+          'webhook_driven', ${sql.unsafe(feedWebhookDrivenSql('health_cd', 'f'))})
         FROM connector_definitions health_cd
         WHERE health_cd.key = c.connector_key
           AND health_cd.organization_id = f.organization_id
@@ -274,15 +275,16 @@ async function handleListFeeds(
                  health_cd.updated_at DESC,
                  health_cd.id DESC
         LIMIT 1
-      ), '[]'::jsonb)
+      ), '{}'::jsonb)
     `;
+    const selectedOperations = sql`${selectedFeed}->'operations'`;
     const sourceOnly = sql`
       ${selectedOperations} @> '["read"]'::jsonb
       AND NOT (${selectedOperations} @> '["sync"]'::jsonb)
-      AND NOT (${selectedOperations} @> '["observe"]'::jsonb)
+      AND NOT (COALESCE((${selectedFeed}->>'webhook_driven')::boolean, false))
     `;
-    // Observation uses the failure counter, never the legacy sync attempt status.
-    const failedSync = sql`NOT (${selectedOperations} @> '["observe"]'::jsonb) AND f.last_sync_status = 'failed'`;
+    // Listener setup uses the failure counter, never the legacy sync attempt status.
+    const failedSync = sql`${selectedOperations} @> '["sync"]'::jsonb AND f.last_sync_status = 'failed'`;
     const overdue = sql`
       ${selectedOperations} @> '["sync"]'::jsonb
       AND COALESCE(f.schedule, '') <> ''
@@ -1028,7 +1030,10 @@ async function handleUpdateFeed(
         : null;
     // Scope edits and resumes must wake an already-bound source listener too.
     // This is a one-shot retry clock; source feeds still have no sync cadence.
-    const restartObservation = operations.includes('observe') && (hasConfigArg || resuming);
+    const definition = (feedRow.feeds_schema as Record<string, FeedDefinition> | null)?.[String(feedRow.feed_key)];
+    const restartListener = !canSync && operations.includes('read') && definition?.webhook != null
+      && (definition.webhook.mode ?? 'trigger') === 'trigger'
+      && (hasConfigArg || resuming);
 
     const updated = await tx`
       UPDATE feeds
@@ -1038,14 +1043,14 @@ async function handleUpdateFeed(
           config = CASE WHEN ${hasConfigArg} THEN ${tx.json(effectiveConfig ?? {})}::jsonb ELSE config END,
           schedule = CASE WHEN ${hasScheduleArg} THEN ${nextSchedule ?? null} ELSE schedule END,
           timezone = CASE WHEN ${hasTimezoneArg} THEN ${args.timezone ?? null} ELSE timezone END,
-          next_run_at = CASE WHEN ${restartObservation} THEN NOW() WHEN ${recomputeNextRun} THEN ${nextRunAtVal}::timestamptz ELSE next_run_at END,
+          next_run_at = CASE WHEN ${restartListener} THEN NOW() WHEN ${recomputeNextRun} THEN ${nextRunAtVal}::timestamptz ELSE next_run_at END,
           last_error = CASE
-            WHEN ${restartObservation} THEN NULL
+            WHEN ${restartListener} THEN NULL
             WHEN ${hasStatusArg} AND last_error = ${OAUTH_SCOPE_PAUSE_LAST_ERROR} THEN NULL
             ELSE last_error
           END,
-          consecutive_failures = CASE WHEN ${resuming || restartObservation} THEN 0 ELSE consecutive_failures END,
-          first_failure_at = CASE WHEN ${resuming || restartObservation} THEN NULL ELSE first_failure_at END,
+          consecutive_failures = CASE WHEN ${resuming || restartListener} THEN 0 ELSE consecutive_failures END,
+          first_failure_at = CASE WHEN ${resuming || restartListener} THEN NULL ELSE first_failure_at END,
           updated_at = NOW()
       WHERE id = ${args.feed_id} AND organization_id = ${organizationId}
       RETURNING ${tx.unsafe(publicFeedColumnList())}

@@ -4,7 +4,7 @@ import type { AuthzScope } from '../authz/scope';
 import { getDb } from '../db/client';
 import { createConnectorOperationRun } from '../runs/queue-service';
 import { dispatchChromeActionToExtension } from '../worker-api/dispatch-chrome-action';
-import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_OBSERVE_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY } from './device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY } from './device-feed-read-protocol';
 import { scrubSourceReadRun } from './source-read-run';
 
 export function sourceReadDeadlineError(feedId: number): Error & { exitReason: 'timeout' } {
@@ -23,7 +23,7 @@ export function createSourceReadBridge(
     definition_version: string | null;
     selected_artifact_hash: string | null;
   },
-  p: { scope: AuthzScope; automationId?: number | null; feedId: number; deadlineAt: number; observation?: boolean; sourceSubscription?: boolean },
+  p: { scope: AuthzScope; automationId?: number | null; feedId: number; deadlineAt: number; sourceSubscription?: boolean },
   signal: AbortSignal,
 ) {
   const sql = getDb();
@@ -38,7 +38,7 @@ export function createSourceReadBridge(
     return sql.begin(async (tx) => {
       const run = await createConnectorOperationRun({
         organizationId: p.scope.organizationId, connectionId: Number(feed.connection_id),
-        connectorKey: feed.connector_key, operationKey: p.observation ? SOURCE_FEED_OBSERVE_ACTION_KEY : DEVICE_FEED_READ_ACTION_KEY,
+        connectorKey: feed.connector_key, operationKey: DEVICE_FEED_READ_ACTION_KEY,
         operationInput: { feed_key: feed.feed_key }, approvalMode: 'inline',
         policyPrincipalKind: actor.kind, policyPrincipalId: actor.id,
         createdByUserId: p.scope.principal, automationId: p.automationId,

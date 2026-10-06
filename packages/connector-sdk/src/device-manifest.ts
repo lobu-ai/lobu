@@ -1,5 +1,3 @@
-import type { FeedOperation } from './connector-types.js';
-
 export type DeviceManifestSchema = Record<string, unknown>;
 
 export interface DeviceConnectorManifest {
@@ -41,8 +39,7 @@ export interface DeviceFeedDefinition extends DeviceManifestSchema {
   name: string;
   description?: string;
   userManaged?: boolean;
-  /** Native device execution currently supports sync/read, not source observation. */
-  operations: Array<Exclude<FeedOperation, 'observe'>>;
+  operations: Array<'sync' | 'read'>;
   configSchema?: DeviceManifestSchema;
   eventKinds?: Record<string, DeviceManifestSchema>;
 }
@@ -235,8 +232,6 @@ function validateAuthSchema(authSchema: DeviceManifestSchema | undefined): void 
 function rejectExecutableHandlers(specification: DeviceConnectorSpec): void {
   const executableNames = [
     'sync',
-    'read',
-    'observe',
     'execute',
     'authenticate',
     'query',
@@ -250,10 +245,8 @@ function rejectExecutableHandlers(specification: DeviceConnectorSpec): void {
     }
   }
   for (const [feedKey, feed] of Object.entries(specification.feeds ?? {})) {
-    for (const operation of ['sync', 'read', 'observe']) {
-      if (typeof (feed as unknown as Record<string, unknown>)[operation] === 'function') {
-        throw new Error(`device connector feed '${feedKey}' cannot contain a ${operation} handler`);
-      }
+    if (typeof (feed as unknown as Record<string, unknown>).sync === 'function') {
+      throw new Error(`device connector feed '${feedKey}' cannot contain a sync handler`);
     }
   }
   for (const [actionKey, action] of Object.entries(specification.actions ?? {})) {

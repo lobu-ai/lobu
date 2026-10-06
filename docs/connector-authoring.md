@@ -119,14 +119,6 @@ directly because their executable handlers live elsewhere.
   persist those events for local search, entities, relationships, and Automations.
 - **`read`** pushes filtering and pagination to the source and returns rows to
   the caller without persisting them.
-- **`observe`** is optional alongside a read handler (never a sync handler,
-  whose feed checkpoint it would share). It reports source references for the
-  connector's declared `automationEvents`, independently of content ingestion.
-  It publishes the additional `observe` operation. The current transport starts
-  and drains browser listeners only while an active, authorized Automation
-  subscribes to the connection's events.
-  Native device manifests still advertise only `sync`/`read`; their protocol
-  does not execute observation handlers.
 - **Both** lets a connector maintain a small, searchable index while retaining
   an explicit path to source-owned detail. Gmail can sync a filtered set of
   threads yet search the wider mailbox on demand; SQL and warehouse connectors
@@ -152,35 +144,41 @@ timeout, and one failure does not discard successful results from the others.
 
 ### Source subscriptions without a content mirror
 
-An `observe(ctx)` handler receives the feed configuration, credentials, browser
-dispatcher and last checkpoint, but no `commit` function. Return:
+A browser feed can combine `read` with `webhook: { mode: "trigger",
+events: ["message.created"] }` and an optional `observe(ctx): Promise<void>`
+setup hook. The hook attaches the connector-owned listener and replays missed
+references after reconnects. It returns no data and adds no public feed operation.
+
+The hook receives the last committed source cursor in `ctx.checkpoint` and
+the browser dispatcher. Call `feed_listen` to obtain a scoped bridge/token,
+then publish reference batches through the existing page transport:
 
 ```ts
-return {
-  changes: [{
-    event_type: "message.created", // declared in connector.automationEvents
+{
+  id: stableBatchId,
+  events: [{
+    id: stableSourceChangeId,
+    event_type: "message.created", // also declared in automationEvents
     resource_type: "message",
     resource_ref: sourceMessageId,
-    delivery_id: stableSourceChangeId,
     occurred_at: sourceTimestamp,
   }],
-  checkpoint: nextSourceCheckpoint,
-  hasMore: false,
-};
+  checkpoint: { previous: lastCursor, next: nextCursor }, // replay batches only
+  more: false,
+}
 ```
 
-A batch contains at most 1,000 references. Changes cannot contain message
-bodies, media, or arbitrary attributes. Checkpoints hold bounded source cursors
-and acknowledgement metadata, never source content. Replays must reuse the
-same connection-scoped `delivery_id`, including across overlapping feeds. The
-server queues matching Automations and advances the checkpoint atomically,
-then dispatches those Automations immediately after commit.
-`hasMore` requests an immediate continuation; failures retain the previous
-checkpoint and use the existing retry backoff.
+Each batch contains at most 500 references and 128 KiB. The browser sends
+bounded batches through its normal worker poll. The server queues matching
+Automations using the existing delivery dedupe and batching, and advances
+the cursor in the same transaction. Only its committed acknowledgment removes
+the batch from the browser buffer. Stable change IDs must be identical across
+overlapping feeds. References contain no message bodies, media or attributes;
+opaque cursors contain only bounded source positions. `more: true` asks for
+another setup/replay pass when a bounded replay cannot finish.
 
-Browser connectors use `feed_listen` and connector-owned listeners. The paired
-device's normal poll carries wakeups and committed acknowledgements; it does
-not periodically import content. With no subscriber, the listener is revoked.
+With no authorized subscriber, the listener is revoked. Healthy bindings
+deliver directly without running the connector again or scheduling imports.
 An authorized headless Automation may read its subscribed private feed; this
 does not grant it access to other private feeds. Browser reads retain the
 Automation principal for connector policy and scrub temporary operation payloads.

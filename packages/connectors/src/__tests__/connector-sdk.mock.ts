@@ -90,7 +90,7 @@ export function connectorSdkMock() {
         {
           sync?: (ctx: unknown) => Promise<unknown>;
           read?: (ctx: unknown) => Promise<unknown>;
-          observe?: (ctx: unknown) => Promise<unknown>;
+          observe?: (ctx: unknown) => Promise<void>;
         }
       >;
     };
@@ -105,21 +105,17 @@ export function connectorSdkMock() {
       return handler(ctx);
     }
 
+    async observe(ctx: { feedKey: string }): Promise<void> {
+      const handler = this.definition.feeds?.[ctx.feedKey]?.observe;
+      if (!handler) throw new Error("Feed has no listener setup");
+      await handler(ctx);
+    }
+
     async read(ctx: { feedKey: string }): Promise<unknown> {
       const handler = this.definition.feeds?.[ctx.feedKey]?.read;
       if (!handler) {
         throw new Error(
           `${this.definition.key} feed '${ctx.feedKey}' does not support source reads`,
-        );
-      }
-      return handler(ctx);
-    }
-
-    async observe(ctx: { feedKey: string }): Promise<unknown> {
-      const handler = this.definition.feeds?.[ctx.feedKey]?.observe;
-      if (!handler) {
-        throw new Error(
-          `${this.definition.key} feed '${ctx.feedKey}' does not support observation`,
         );
       }
       return handler(ctx);

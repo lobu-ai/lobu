@@ -168,10 +168,10 @@ describe("list_feeds health filter and true total", () => {
 		return runList({ connection_id: connectionId, ...args });
 	}
 
-	it("shows observation failures and recovery in both health filters and attention", async () => {
+	it("shows listener failures and recovery in both health filters and attention", async () => {
 		const sql = getTestDb();
 		await createTestConnectorDefinition({ key: "synthetic.observed", name: "Observed", organization_id: orgId,
-			feeds_schema: { items: { operations: ["read", "observe"] } } });
+			feeds_schema: { items: { operations: ["read"], webhook: { mode: "trigger", events: ["message.created"] } } } });
 		const conn = await createTestConnection({ organization_id: orgId, connector_key: "synthetic.observed", createDefaultFeed: false });
 		const [row] = await sql`INSERT INTO feeds (organization_id, connection_id, feed_key, status, consecutive_failures, last_sync_status)
 			VALUES (${orgId}, ${conn.id}, 'items', 'active', 1, 'failed') RETURNING id`;

@@ -67,7 +67,7 @@ import {
 import { reconcileDeviceCapabilities } from './device-reconcile';
 import { deviceSourceAttributionForRun } from './device-source-attribution';
 import { sourceFeedContextForRun, receiveFeedNotifications } from '../runs/feed-notifications';
-import { reconcileSourceFeedObservations } from '../runs/source-feed-observation';
+import { reconcileSourceFeedListeners } from '../runs/source-feed-listener';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import { resolveConnectorCode } from '../utils/ensure-connector-installed';
 import { resolveDeviceClaimableOrgs } from '../utils/device-claimable-orgs';
@@ -772,7 +772,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         : feedNotifications.map((notice) => ({ feed_id: notice.feed_id, connection_id: notice.connection_id, feed_key: notice.feed_key, notification_id: notice.notification_id, active: false })) };
     }
     if (isUserScopedWorker && deviceWorkerId && effectivePlatform === 'chrome-extension') {
-      await reconcileSourceFeedObservations(sql, deviceWorkerId, orgScopeIds, feedNotifications.map(notice => notice.feed_id));
+      await reconcileSourceFeedListeners(sql, deviceWorkerId, orgScopeIds, feedNotifications.map(notice => notice.feed_id));
     }
   } catch (error) {
     // The source retains unacknowledged records for retry. Optional source work

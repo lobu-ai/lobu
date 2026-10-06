@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { FeedSourceAckSchema, type PollRequest } from '@lobu/core/contracts/worker/protocol';
 import { Value } from '@sinclair/typebox/value';
 import type { DbClient, DbQuery } from '../db/client';
@@ -5,9 +6,13 @@ import { pgTextArray } from '../db/client';
 import { feedBackoff } from '../connectors/feed-backoff';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { notifyWorkerWork } from './worker-wakeup';
-import { enqueueSourceFeedObservation } from './source-feed-observation';
-import { sourceFeedSubscriptions } from './source-feed-subscriptions';
-import { SOURCE_FEED_OBSERVE_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY } from '../lib/device-feed-read-protocol';
+import { enqueueSourceFeedListener } from './source-feed-listener';
+import { sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY } from '../lib/device-feed-read-protocol';
+import { findMatchingAutomationActivations, queueAutomationActivations, dispatchAutomationRunsBestEffort } from '../automations/activation';
+import logger from '../utils/logger';
+
+type ReceivedNotification = { active: boolean; ack?: unknown; queued?: Array<{ runId: number; status: string }> };
 
 function savedSourceAck(checkpoint: Record<string, unknown> | null) {
   const ack = checkpoint?.source_ack;
@@ -43,13 +48,17 @@ export async function receiveFeedNotifications(
   orgScopeIds: string[],
 ): Promise<Array<{ feed_id: number; connection_id: number; feed_key: string; notification_id: string; active: boolean; ack?: unknown }>> {
   const receipts: Array<{ feed_id: number; connection_id: number; feed_key: string; notification_id: string; active: boolean; ack?: unknown }> = [];
+  const activations: Array<{ runId: number; status: string }> = [];
   for (const notice of notifications) {
     // One transaction owns both eligibility and any due write. For a changed
     // notification, its receipt means committed scheduling, not ingestion.
-    const received = await sql.begin(async (tx) => {
+    const received = await sql.begin(async (tx): Promise<ReceivedNotification> => {
       const rows = await tx`
-        SELECT f.id, f.organization_id, f.checkpoint,
-          d.feeds_schema->f.feed_key->'operations' ? 'observe' AS observes
+        SELECT f.id, f.organization_id, f.checkpoint, c.connector_key,
+          COALESCE(f.pinned_version, d.version) AS version,
+          d.automation_events,
+          d.feeds_schema->f.feed_key->'webhook'->'events' AS event_types,
+          NOT (d.feeds_schema->f.feed_key->'operations' ? 'sync') AS source_only
         FROM feeds f
         JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
         JOIN LATERAL (${feedDefinitionSelection(tx)}) d ON true
@@ -59,21 +68,59 @@ export async function receiveFeedNotifications(
           AND c.status = 'active' AND c.deleted_at IS NULL
           AND f.status = 'active' AND f.deleted_at IS NULL
           AND f.feed_key = ${notice.feed_key}
-          AND (d.feeds_schema->f.feed_key->'operations' ? 'observe' OR (
-          d.feeds_schema->f.feed_key->'webhook' IS NOT NULL
+          AND d.feeds_schema->f.feed_key->'webhook' IS NOT NULL
           AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
-          AND d.feeds_schema->f.feed_key->'operations' @> '["sync"]'::jsonb))
+          AND d.feeds_schema->f.feed_key->'operations' ?| ARRAY['sync', 'read']
       `;
       if (rows.length === 0) return { active: false };
-      if (rows[0].observes && !(await sourceFeedSubscriptions(tx, rows[0].organization_id, notice.feed_id)).length) return { active: false };
+      const feed = rows[0];
+      const subscriptions = feed.source_only ? await sourceFeedSubscriptions(tx, feed.organization_id, notice.feed_id) : [];
+      if (feed.source_only && !subscriptions.length) return { active: false };
       // Resolve subscription authority before locking the checkpoint. Only this
       // feed's scheduling/ack mutation needs serialization, not its connection.
-      const [locked] = await tx`SELECT checkpoint FROM feeds WHERE id = ${notice.feed_id}
-        AND organization_id = ${rows[0].organization_id} AND status = 'active' AND deleted_at IS NULL FOR UPDATE`;
+      const [locked] = await tx`SELECT checkpoint, config FROM feeds WHERE id = ${notice.feed_id}
+        AND organization_id = ${feed.organization_id} AND status = 'active' AND deleted_at IS NULL FOR UPDATE`;
       if (!locked) return { active: false };
-      if (rows[0].observes) {
-        if (notice.changed) await enqueueSourceFeedObservation(tx, rows[0].organization_id, notice.feed_id);
-        return { active: true, ack: savedSourceAck(locked.checkpoint) };
+      if (feed.source_only) {
+        const delivery = notice.subscription;
+        if (!delivery || delivery.scope_key !== sourceFeedScopeKey(locked.config, feed.version)) return { active: false };
+        if (Buffer.byteLength(JSON.stringify(delivery)) > 256 * 1024
+          || delivery.records.reduce((count, record) => count + record.payload.events.length, 0) > 1000) {
+          throw new Error('Invalid source reference delivery');
+        }
+        const allowed = new Set(subscriptions.map(subscription => subscription.automationId));
+        const declared = new Set((feed.automation_events ?? []).map((event: { key: string }) => event.key));
+        const eventTypes = new Set(feed.event_types ?? []);
+        const queued: Array<{ runId: number; status: string }> = [];
+        for (const { payload } of delivery.records) {
+          for (const event of payload.events) {
+            if (!declared.has(event.event_type) || !eventTypes.has(event.event_type)) throw new Error('Undeclared source Automation event');
+            if (event.occurred_at && !Number.isFinite(Date.parse(event.occurred_at))) throw new Error('Invalid source event timestamp');
+            const deliveryId = createHash('sha256').update(JSON.stringify([
+              feed.organization_id, notice.connection_id, event.event_type, event.id,
+            ])).digest('hex');
+            const signal = {
+              connector_key: String(feed.connector_key), connection_id: notice.connection_id,
+              event_type: event.event_type, resource_ref: event.resource_ref, resource_type: event.resource_type,
+              occurred_at: event.occurred_at, delivery_id: `source:${deliveryId}`,
+              label: `Source ${event.event_type}`,
+              input_text: `Source change ${event.event_type}: ${JSON.stringify(event.resource_ref)}. Read its content from the source when needed.`,
+            };
+            const matches = await findMatchingAutomationActivations(feed.organization_id, signal, tx);
+            queued.push(...await queueAutomationActivations({ signal, matches: matches.filter(match => allowed.has(match.automationId)), db: tx }));
+          }
+          // A lost receipt may replay an older page. Delivering it is harmless;
+          // its cursor may advance only from the position it actually read.
+          if (payload.checkpoint) await tx`UPDATE feeds
+            SET checkpoint = jsonb_build_object('cursor', ${tx.json(payload.checkpoint.next)}::jsonb)
+            WHERE id = ${notice.feed_id} AND organization_id = ${feed.organization_id}
+              AND checkpoint->'cursor' IS NOT DISTINCT FROM ${payload.checkpoint.previous === null ? null : tx.json(payload.checkpoint.previous)}::jsonb`;
+        }
+        // The browser retains this hint after acknowledgments, so a finishing
+        // setup task cannot consume and lose the next replay request.
+        if (delivery.needs_rebind && delivery.records.length === 0) await enqueueSourceFeedListener(tx, feed.organization_id, notice.feed_id);
+        return { active: true, queued, ack: { binding_id: delivery.binding_id, epoch: delivery.epoch,
+          records: delivery.records.map(record => ({ id: record.payload.id, revision: record.revision })) } };
       }
       if (notice.changed) {
         // Never use a live event to defeat failure backoff. A manual feed that
@@ -83,13 +130,22 @@ export async function receiveFeedNotifications(
         `);
       }
       return { active: true, ack: savedSourceAck(locked.checkpoint) };
+    }).catch(error => {
+      // No receipt: this binding keeps its batch for retry. Other bindings on
+      // the device must still make progress, including already-committed ones.
+      logger.warn({ err: error, feedId: notice.feed_id }, 'Source notification delivery failed');
+      return null;
     });
-    receipts.push({ feed_id: notice.feed_id, connection_id: notice.connection_id, feed_key: notice.feed_key, notification_id: notice.notification_id, ...received });
+    if (!received) continue;
+    const { queued, ...receipt } = received;
+    activations.push(...queued ?? []);
+    receipts.push({ feed_id: notice.feed_id, connection_id: notice.connection_id, feed_key: notice.feed_key, notification_id: notice.notification_id, ...receipt });
   }
+  await dispatchAutomationRunsBestEffort(activations);
   return receipts;
 }
 
-/** Only an active parent sync can authorize a device to observe its source feed. */
+/** A running sync or authorized subscription setup owns its browser binding. */
 export async function sourceFeedContextForRun(
   sql: DbClient,
   parentRunId: number | null,
@@ -98,8 +154,9 @@ export async function sourceFeedContextForRun(
 ) {
   if (parentRunId == null || deviceWorkerId == null) return undefined;
   const [row] = await sql`
-    SELECT f.id AS feed_id, f.connection_id, f.feed_key, f.checkpoint, r.dry_run,
-           c.device_worker_id, r.run_type, r.automation_id
+    SELECT f.id AS feed_id, f.connection_id, f.feed_key, f.checkpoint, f.config, r.dry_run,
+           c.device_worker_id, r.run_type, r.automation_id, r.connector_version,
+           d.feeds_schema->f.feed_key->'webhook'->'events' AS event_types
     FROM runs r
     JOIN feeds f ON f.id = r.feed_id AND f.organization_id = r.organization_id
     JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
@@ -113,11 +170,14 @@ export async function sourceFeedContextForRun(
       AND ((r.run_type = 'sync' AND d.feeds_schema->f.feed_key->'webhook' IS NOT NULL
       AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
       AND d.feeds_schema->f.feed_key->'operations' @> '["sync"]'::jsonb)
-      OR (r.run_type = 'action' AND r.action_key = ${SOURCE_FEED_OBSERVE_ACTION_KEY}
+      OR (r.run_type = 'action' AND r.action_key = ${DEVICE_FEED_READ_ACTION_KEY}
         AND r.run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true'
+        AND r.run_metadata->>${SOURCE_FEED_SUBSCRIPTION_METADATA_KEY} = 'true'
         AND r.parent_run_id IS NULL AND r.approval_status IN ('auto', 'approved')
         AND r.expires_at > now() AND NOT r.dry_run
-        AND d.feeds_schema->f.feed_key->'operations' ? 'observe'))
+        AND d.feeds_schema->f.feed_key->'operations' ? 'read'
+        AND NOT (d.feeds_schema->f.feed_key->'operations' ? 'sync')
+        AND d.feeds_schema->f.feed_key->'webhook' IS NOT NULL))
   `;
   if (!row) return undefined;
   if (row.run_type === 'action'
@@ -129,5 +189,8 @@ export async function sourceFeedContextForRun(
     feed_key: String(row.feed_key),
     device_worker_id: String(row.device_worker_id),
     ack: row.dry_run ? null : savedSourceAck(row.checkpoint),
+    ...(row.run_type === 'action' ? { subscription: {
+      scope_key: sourceFeedScopeKey(row.config, row.connector_version), event_types: row.event_types ?? [],
+    } } : {}),
   };
 }

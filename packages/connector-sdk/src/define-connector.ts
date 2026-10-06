@@ -39,7 +39,7 @@ import type {
   AuthResult,
   ConnectorDefinition,
   FeedDefinition,
-  FeedObserveHandler,
+  FeedObserveContext,
   FeedReadHandler,
   FeedSyncHandler,
   QueryContext,
@@ -63,13 +63,12 @@ export type ConnectorFeedSpec<
     | {
         sync: FeedSyncHandler<C, F>;
         read?: FeedReadHandler<F>;
-        /** Observation shares the feed checkpoint, so it never pairs with sync. */
         observe?: never;
       }
     | {
         sync?: never;
         read: FeedReadHandler<F>;
-        observe?: FeedObserveHandler<C, F>;
+        observe?: (ctx: FeedObserveContext<C, F>) => Promise<void>;
       }
   );
 

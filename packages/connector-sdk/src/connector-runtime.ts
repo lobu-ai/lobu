@@ -11,7 +11,6 @@ import type {
   AuthContext,
   AuthResult,
   FeedObserveContext,
-  FeedObserveResult,
   FeedReadContext,
   FeedReadResult,
   QueryContext,
@@ -25,7 +24,6 @@ import type {
   WebhookRegistrationContext,
 } from './connector-types.js';
 import { assertFeedReadWindow, validateFeedReadWindow } from './feed-read-window.js';
-import { assertFeedObservation } from './feed-observation.js';
 
 /**
  * ConnectorRuntime is the base class for all connectors.
@@ -101,15 +99,11 @@ export abstract class ConnectorRuntime<C = Record<string, unknown>, F = Record<s
     return result;
   }
 
-  /** Observe source changes for active subscriptions, without copying source content. */
-  async observe(ctx: FeedObserveContext<C, F>): Promise<FeedObserveResult<C>> {
+  /** Attach/reconnect the connector-owned listener; reference delivery bypasses this hook. */
+  async observe(ctx: FeedObserveContext<C, F>): Promise<void> {
     const handler = this.definition.feeds?.[ctx.feedKey]?.observe;
-    if (!handler) {
-      throw new Error(`${this.definition.key} feed '${ctx.feedKey}' does not support observation`);
-    }
-    const result = await handler(ctx);
-    assertFeedObservation(result);
-    return result;
+    if (!handler) throw new Error(`${this.definition.key} feed '${ctx.feedKey}' has no source listener`);
+    await handler(ctx);
   }
 
   /**

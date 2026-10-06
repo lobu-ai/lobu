@@ -1,4 +1,3 @@
-import type { FeedOperation } from '@lobu/connector-sdk';
 import { getDb, pgBigintArray } from '../../../db/client';
 import { formatAjvError, getAjv } from '../../../utils/ajv-singleton';
 import { exceedsValidationLimits } from '../../../utils/metadata-limits';
@@ -11,13 +10,14 @@ export interface FeedDefinition {
     properties?: Record<string, unknown>;
     [keyword: string]: unknown;
   } | null;
-  operations?: FeedOperation[];
+  operations?: Array<'sync' | 'read'>;
+  webhook?: { mode?: 'trigger' | 'store'; events: string[] };
 }
 
 export function feedOperations(
   feedsSchema: Record<string, FeedDefinition> | null,
   feedKey: string
-): FeedOperation[] {
+): Array<'sync' | 'read'> {
   const definition = feedsSchema?.[feedKey];
   return Array.isArray(definition?.operations) ? definition.operations : [];
 }

@@ -1,7 +1,6 @@
 import { getDb } from "../db/client.js";
 import { runtimeConnectionIdToSlug } from "../lobu/stores/connections-projection.js";
-import type { FeedOperation } from "@lobu/connector-sdk";
-import type { FeedSpec, FeedStatus, FeedStore } from "./types.js";
+import type { FeedOperation, FeedSpec, FeedStatus, FeedStore } from "./types.js";
 
 interface FeedRow {
 	id: string;

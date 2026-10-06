@@ -20,7 +20,6 @@
  * `supportsExecute` and publish a read seam as a user-invokable operation.
  */
 export const DEVICE_FEED_READ_ACTION_KEY = '__lobu_feed_read';
-export const SOURCE_FEED_OBSERVE_ACTION_KEY = '__lobu_feed_observe';
 
 /** Server-owned provenance for a compiled source read and its browser steps. */
 export const SOURCE_FEED_READ_METADATA_KEY = 'source_feed_read';

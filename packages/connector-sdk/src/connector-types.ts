@@ -1006,33 +1006,11 @@ export interface WebhookRegistration {
 // Feed source reads + connection queries
 // =============================================================================
 
-export type FeedOperation = 'sync' | 'read' | 'observe';
+export type FeedOperation = 'sync' | 'read';
 
-/** Reference-only source notification. Content is fetched through the feed's read handler. */
-export interface FeedChange {
-  event_type: string;
-  resource_ref: string;
-  /** Stable source change identity within a connection, reused across replays and overlapping feeds. */
-  delivery_id: string;
-  resource_type?: string;
-  occurred_at?: string;
-}
-
-/** An active Automation subscription owns observation; no content commit is available. */
+/** Installs/reconnects a source listener. Delivery uses the existing browser feed transport. */
 export type FeedObserveContext<C = Record<string, unknown>, F = Record<string, unknown>> =
   Omit<SyncContext<C, F>, 'commit' | 'entityIds'>;
-
-export interface FeedObserveResult<C = Record<string, unknown>> {
-  changes: FeedChange[];
-  /** Advanced atomically with Automation delivery, never before it. */
-  checkpoint: C | null;
-  /** More buffered changes can be drained immediately, without a polling schedule. */
-  hasMore?: boolean;
-}
-
-export type FeedObserveHandler<C = Record<string, unknown>, F = Record<string, unknown>> = (
-  ctx: FeedObserveContext<C, F>
-) => Promise<FeedObserveResult<C>>;
 
 /** Fixed half-open source-time bounds, preserved across every page of a read. */
 export interface FeedReadWindow {
@@ -1112,7 +1090,8 @@ export interface RuntimeFeedDefinition<
 > extends Omit<FeedDefinition, 'operations'> {
   sync?: FeedSyncHandler<C, F>;
   read?: FeedReadHandler<F>;
-  observe?: FeedObserveHandler<C, F>;
+  /** Setup only: emits no result and does not add a feed operation. */
+  observe?: (ctx: FeedObserveContext<C, F>) => Promise<void>;
 }
 
 /** Runtime-only connector definition. Metadata extraction strips handlers. */

@@ -33,7 +33,7 @@
  * surfaces cannot disagree about the same feed. Only collector feeds
  * (`scheduled` / `no_schedule`) are folded; `streaming` and `source_only` have
  * no sync lifecycle to roll up, exactly as `classifyFeed` already excludes them
- * from its expected set. A failed source observer still degrades the connection
+ * from its expected set. A failed source listener still degrades the connection
  * without entering these collection ratios.
  *
  * Reading the feed set is O(feeds-per-connection) over a bounded config table,
@@ -64,7 +64,6 @@
  * `connectors/connector-health.ts`, the one place that acts on it.
  */
 
-import type { FeedOperation } from '@lobu/connector-sdk';
 import {
   type FeedHealthSemantics,
   deriveFeedHealthSemantics,
@@ -379,12 +378,12 @@ export interface ConnectionHealthRow {
   feed_health?: unknown;
 }
 
-const FEED_OPERATIONS = new Set(['sync', 'read', 'observe']);
+const FEED_OPERATIONS = new Set(['sync', 'read']);
 
-function parseOperations(value: unknown): FeedOperation[] | null {
+function parseOperations(value: unknown): Array<'sync' | 'read'> | null {
   if (!Array.isArray(value)) return null;
   return value.filter(
-    (operation): operation is FeedOperation =>
+    (operation): operation is 'sync' | 'read' =>
       typeof operation === 'string' && FEED_OPERATIONS.has(operation)
   );
 }

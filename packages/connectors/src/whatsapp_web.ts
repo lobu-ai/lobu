@@ -18,7 +18,6 @@ import {
   type FeedReadContext,
   type FeedReadResult,
   type FeedObserveContext,
-  type FeedObserveResult,
   type RuntimeConnectorDefinition,
   type SyncContext,
   type SyncResult,
@@ -646,6 +645,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
           "Read messages directly from WhatsApp Web without importing history, using literal text search or id:<message ID>. Active Automations can subscribe to new-message references. Requires the paired browser to be online and signed in; reconnects replay messages still available in WhatsApp's local history.",
         read: (ctx) => this.readMessages(ctx),
         observe: (ctx) => this.observeMessages(ctx),
+        webhook: { mode: "trigger", events: ["message.created"] },
         configSchema: {
           type: "object",
           properties: {
@@ -956,65 +956,50 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     },
   };
 
-  private async observeMessages(ctx: FeedObserveContext<BrowserCheckpoint, WhatsAppWebConfig>): Promise<FeedObserveResult<BrowserCheckpoint>> {
+  private async observeMessages(ctx: FeedObserveContext<BrowserCheckpoint, WhatsAppWebConfig>): Promise<void> {
     const dispatcher = requireExtensionDispatcher(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     const chatFilter = ctx.config.chat_filter ?? "all";
-    // A new scope starts at the current source position, just like a new subscription.
     const previous = ctx.checkpoint?.observation?.chat_filter === chatFilter ? ctx.checkpoint.observation : undefined;
     const startedAt = previous?.started_at ?? Math.floor(Date.now() / 1000);
-    // Capture the starting position before attaching. Replay then covers the
-    // gap between this snapshot and listener installation, including reconnects.
-    const baseline = previous ?? {
-      ...(await invokeAdapter<{ after: number }>(dispatcher, tabId, { op: "observe_messages", input: {} })),
-      started_at: startedAt, chat_filter: chatFilter,
-    };
-    const observed = await dispatcher.dispatch<{
-      bridge_id: string; binding_id: string; epoch: string; token: string; listening?: boolean;
-      records: Array<{ revision: number; payload: { id: string; timestamp?: number; is_group?: boolean; source_error?: string } }>;
+    // Snapshot before attaching so replay covers messages arriving during setup.
+    let after = previous?.after ?? (await invokeAdapter<{ after: number }>(
+      dispatcher, tabId, { op: "observe_messages", input: {} })).after;
+    const binding = await dispatcher.dispatch<{
+      bridge_id: string; token: string; listening?: boolean; subscription?: { scope_key: string };
     }>("feed_listen", { tab_id: tabId });
-    if (!observed.bridge_id || !Array.isArray(observed.records) || observed.listening === false) {
-      throw new Error("A live browser feed binding is required for WhatsApp observation");
+    if (!binding.bridge_id || !binding.token || !binding.subscription || binding.listening === false) {
+      throw new Error("A browser supporting source subscriptions is required for WhatsApp");
     }
     await invokeAdapter(dispatcher, tabId, {
-      op: "listen", bridge_id: observed.bridge_id, token: observed.token, references_only: true,
+      op: "listen", bridge_id: binding.bridge_id, token: binding.token, references_only: true,
       chat_filter: chatFilter, recent_since: startedAt, minimum_timestamp: startedAt,
     });
-    const replay = await invokeAdapter<{
-      after: number; references: Array<{ id: string; timestamp: number; is_group: boolean }>; hasMore: boolean;
-    }>(dispatcher, tabId, { op: "observe_messages", input: { after: baseline.after, started_at: startedAt, chat_filter: chatFilter } });
-    const outsideScope = (reference: { timestamp?: number; is_group?: boolean }) =>
-      (reference.timestamp ?? 0) < startedAt
-      || (chatFilter === "group" && !reference.is_group)
-      || (chatFilter === "individual" && Boolean(reference.is_group));
-    const references = new Map(replay.references.map(reference => [reference.id, reference]));
-    for (const row of observed.records) {
-      if (typeof row.payload.id !== "string" || !row.payload.id || !Number.isSafeInteger(row.revision) || row.revision < 1) {
-        throw new Error("Invalid WhatsApp buffered reference");
-      }
-      if (row.payload.source_error) continue; // The successful source replay above recovered the buffer.
-      if (typeof row.payload.timestamp !== "number") throw new Error("Invalid WhatsApp source reference");
-      if (outsideScope(row.payload)) continue;
-      references.set(row.payload.id, { id: row.payload.id, timestamp: row.payload.timestamp, is_group: row.payload.is_group === true });
-    }
-    // A page can contain 500 replay refs plus 1000 buffered refs. Acknowledge
-    // only selected buffer records; the durable remainder wakes another drain.
-    const selected = [...references.values()].slice(0, 1000);
-    const selectedIds = new Set(selected.map(reference => reference.id));
-    return {
-      changes: selected.map(reference => ({ event_type: "message.created", resource_type: "message",
-        resource_ref: reference.id, delivery_id: reference.id, occurred_at: new Date(reference.timestamp * 1000).toISOString() })),
-      hasMore: replay.hasMore || references.size > selected.length,
-      checkpoint: {
+    let cursor = ctx.checkpoint ?? null;
+    for (let page = 0; page < 10; page++) {
+      const replay = await invokeAdapter<{
+        after: number; references: Array<{ id: string; timestamp: number }>; hasMore: boolean;
+      }>(dispatcher, tabId, { op: "observe_messages", input: { after, started_at: startedAt, chat_filter: chatFilter } });
+      const next: BrowserCheckpoint = {
         schema: "owletto.whatsapp.browser.v1", adapter_version: WHATSAPP_ADAPTER_VERSION,
         head: {}, backfill: { complete: true, cursor_chat_jid: null, inventory: [], chats: {} },
         observation: { after: replay.after, started_at: startedAt, chat_filter: chatFilter },
-        source_ack: { binding_id: observed.binding_id, epoch: observed.epoch,
-          records: observed.records.filter(row => row.payload.source_error || selectedIds.has(row.payload.id)
-            || outsideScope(row.payload))
-            .map(row => ({ id: row.payload.id, revision: row.revision })) },
-      },
-    };
+      };
+      await invokeAdapter(dispatcher, tabId, {
+        op: "publish_changes", bridge_id: binding.bridge_id, token: binding.token,
+        batch: {
+          id: `replay:${chatFilter}:${startedAt}:${after}:${replay.after}`,
+          events: replay.references.map(reference => ({ id: reference.id, event_type: "message.created",
+            resource_type: "message", resource_ref: reference.id,
+            occurred_at: new Date(reference.timestamp * 1000).toISOString() })),
+          checkpoint: { previous: cursor, next },
+          more: replay.hasMore && page === 9,
+        },
+      });
+      if (!replay.hasMore) return;
+      cursor = next;
+      after = replay.after;
+    }
   }
 
   private async syncMessages(

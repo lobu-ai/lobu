@@ -1,9 +1,15 @@
+import { createHash } from 'node:crypto';
 import { compileConnectionColumnVisibility } from '../authz/connection-visibility';
 import { listEntityApprovalPolicies, resolveActingPrincipal } from '../authz/entity-policy';
 import { evaluateConnectorPolicy } from '../authz/connector-policy';
 import type { DbClient } from '../db/client';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
-import { SOURCE_FEED_OBSERVE_ACTION_KEY } from '../lib/device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY } from '../lib/device-feed-read-protocol';
+
+/** The same source configuration key fences listener setup and incoming deliveries. */
+export function sourceFeedScopeKey(config: unknown, version: string | null): string {
+  return createHash('sha256').update(JSON.stringify([config ?? {}, version])).digest('hex');
+}
 
 export interface SourceFeedSubscription {
   automationId: number;
@@ -43,7 +49,7 @@ export async function sourceFeedSubscriptions(sql: DbClient, organizationId: str
     WHERE f.id = ${feedId} AND f.organization_id = ${organizationId}
       AND f.status = 'active' AND f.deleted_at IS NULL
       AND c.status = 'active' AND c.deleted_at IS NULL
-      AND d.feeds_schema->f.feed_key->'operations' ? 'observe'
+      AND d.feeds_schema->f.feed_key->'operations' ? 'read'
     ORDER BY subscription.id
   `;
   if (!rows.length) return [];
@@ -54,7 +60,7 @@ export async function sourceFeedSubscriptions(sql: DbClient, organizationId: str
     const subscriptionId = Number(row.id);
     const actor = await resolveActingPrincipal(sql, { organizationId, sessionAutomationId: subscriptionId });
     const policy = evaluateConnectorPolicy({ organizationId, connectionId: Number(row.connection_id), actor, policies,
-      operation: { connector_key: row.connector_key, operation_key: SOURCE_FEED_OBSERVE_ACTION_KEY, kind: 'read' } });
+      operation: { connector_key: row.connector_key, operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' } });
     // Background subscriptions cannot grant themselves approval. A policy change
     // revokes the listener, delegated reads, and commit authority together.
     if (policy.effect !== 'auto') continue;

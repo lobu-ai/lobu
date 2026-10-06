@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 17;
+  const ADAPTER_VERSION = 18;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const SYSTEM_TYPES = new Set([
     "gp2",
@@ -103,6 +103,7 @@ export function whatsAppWebAdapterProgram() {
     };
     state.token = request.token;
     state.request = request;
+    state.post = (entry) => post(state, entry);
     const observe = (model, kind) => {
       if (state.error) return;
       const sequence = ++state.sequence;
@@ -115,6 +116,11 @@ export function whatsAppWebAdapterProgram() {
         // Loading historical models also emits add. Changes to old messages
         // still pass; they are exactly what the recent collection window misses.
         if (kind === "add" && record.timestamp < state.request.recent_since) return;
+        if (request.references_only) record = {
+          id: record.id,
+          events: [{ id: record.id, event_type: "message.created", resource_ref: record.id,
+            resource_type: "message", occurred_at: new Date(record.timestamp * 1000).toISOString() }],
+        };
         const previous = state.pending.get(record.id);
         const seen = state.fingerprints.get(record.id);
         if (seen && seen.sequence >= sequence) return;
@@ -148,9 +154,13 @@ export function whatsAppWebAdapterProgram() {
     state.onReply = (event) => {
       if (event.source !== window || event.origin !== location.origin || event.data?.token !== state.token) return;
       if (event.data.type === "lobu-feed-record:stop") { detach(state.id); return; }
-      if (event.data.type !== "lobu-feed-record:ack" || !event.data.ok) return;
+      if (event.data.type !== "lobu-feed-record:ack") return;
       for (const [id, entry] of state.pending) {
-        if (entry.sequence === event.data.sequence) { state.pendingBytes -= entry.bytes; state.pending.delete(id); break; }
+        if (entry.sequence !== event.data.sequence) continue;
+        if (event.data.ok) {
+          state.pendingBytes -= entry.bytes; state.pending.delete(id); entry.resolve?.();
+        } else entry.reject?.(new Error("Browser rejected the source reference batch"));
+        break;
       }
     };
     listeners.set(state.id, state);
@@ -170,6 +180,28 @@ export function whatsAppWebAdapterProgram() {
     });
     for (const entry of state.pending.values()) post(state, entry);
     return { ok: true, listening: true };
+  }
+
+  // Replay shares the live listener's durable browser buffer. Await its receipt,
+  // not server delivery: the server advances the cursor only with its own commit.
+  async function publishChanges(request) {
+    const state = listeners.get(request.bridge_id);
+    if (!state?.request.references_only || state.token !== request.token) throw new Error("Source listener is unavailable");
+    const record = request.batch;
+    const bytes = new TextEncoder().encode(JSON.stringify(record)).length;
+    const previous = state.pending.get(record.id);
+    if (bytes > 128 * 1024 || state.pendingBytes - (previous?.bytes ?? 0) + bytes > 16 * 1024 * 1024 ||
+      (state.pending.size >= 10_000 && !previous)) throw new Error("Source replay buffer is full");
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Source replay was not accepted by the browser")), 10_000);
+      const entry = { record, bytes, sequence: ++state.sequence,
+        resolve: () => { clearTimeout(timer); resolve(); },
+        reject: (error) => { clearTimeout(timer); reject(error); } };
+      state.pendingBytes += bytes - (previous?.bytes ?? 0);
+      state.pending.set(record.id, entry);
+      state.post(entry);
+    });
+    return { ok: true };
   }
 
   function requireFirst(names) {
@@ -1894,6 +1926,7 @@ export function whatsAppWebAdapterProgram() {
           : { ok: false, error: status };
       }
       if (request.op === "listen") return listen(request);
+      if (request.op === "publish_changes") return await publishChanges(request);
       if (request.op === "observe_messages") return { ok: true, ...(await observeMessages(request.input)) };
       const capabilities = operationCapabilities();
       if (capabilities[request.op] !== true) {

@@ -36,7 +36,7 @@ describe("in-gateway connector execution never hands connector code the gateway 
 			"connect/webhook-registration.ts",
 			"lib/connector-pushdown.ts",
 			"lib/feed-sync.ts",
-			"runs/source-feed-observation.ts",
+			"runs/source-feed-listener.ts",
 			"tools/admin/manage_operations/handlers/execute.ts",
 		]);
 	});

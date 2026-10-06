@@ -80,8 +80,6 @@
  * unattended event-driven feed from a human-triggered one.
  */
 
-import type { FeedOperation } from '@lobu/connector-sdk';
-
 /**
  * SQL for the `webhook_driven` input below — the single definition of what
  * counts as a dispatchable webhook route.
@@ -137,7 +135,7 @@ type FeedAttentionState =
 
 interface FeedHealthSemanticsInput {
   /** Operations derived from the selected connector feed handlers. */
-  operations?: FeedOperation[] | null;
+  operations?: Array<'sync' | 'read'> | null;
   /** Storage plane. Channel feeds read transcripts rather than connector events. */
   store?: 'events' | 'channel_messages' | null;
   /** `feeds.status` — 'active' | 'paused' | 'error'. */
@@ -310,13 +308,13 @@ export function deriveFeedHealthSemantics(
 
   // Source feeds have no sync lifecycle, but observation can fail independently.
   if (
-    (input.operations?.includes('read') || input.operations?.includes('observe')) &&
+    input.operations?.includes('read') &&
     !input.operations.includes('sync')
   ) {
     const attention = nonCollectorAttention(input);
     return {
       executionMode: "source_only",
-      attention: attention === "healthy" && input.operations.includes('observe') && (input.consecutive_failures ?? 0) > 0
+      attention: attention === "healthy" && input.webhook_driven && (input.consecutive_failures ?? 0) > 0
         ? "last_attempt_failed" : attention,
     };
   }

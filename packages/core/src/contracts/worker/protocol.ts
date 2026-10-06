@@ -185,13 +185,71 @@ export function defaultBackendCapacity(): Record<string, number> {
   return { [EXECUTION_BACKENDS.compiledConnector]: 1 };
 }
 
-/** Bounded source-activity hint included in a worker poll. */
+/** Source references only. Message bodies and arbitrary attributes never enter this transport. */
+const FeedReferenceEventSchema = Type.Object(
+  {
+    id: Type.String({ minLength: 1, maxLength: 1024 }),
+    event_type: Type.String({ minLength: 1, maxLength: 100 }),
+    resource_ref: Type.String({ minLength: 1, maxLength: 1024 }),
+    resource_type: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+    occurred_at: Type.Optional(Type.String({ maxLength: 64 })),
+  },
+  { additionalProperties: false }
+);
+
+/** A replay page stays atomic in the existing browser buffer and delivery transaction. */
+const FeedReferenceBatchSchema = Type.Object(
+  {
+    id: Type.String({ minLength: 1, maxLength: 1024 }),
+    events: Type.Array(FeedReferenceEventSchema, { maxItems: 500 }),
+    checkpoint: Type.Optional(
+      Type.Object(
+        {
+          previous: Type.Union([
+            Type.Record(Type.String(), Type.Unknown()),
+            Type.Null(),
+          ]),
+          next: Type.Record(Type.String(), Type.Unknown()),
+        },
+        { additionalProperties: false }
+      )
+    ),
+    more: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false }
+);
+
+const FeedSubscriptionNotificationSchema = Type.Object(
+  {
+    scope_key: Type.String({ minLength: 1, maxLength: 100 }),
+    binding_id: Type.String({ minLength: 1, maxLength: 200 }),
+    epoch: Type.String({ minLength: 1, maxLength: 200 }),
+    needs_rebind: Type.Boolean(),
+    records: Type.Array(
+      Type.Object(
+        {
+          revision: Type.Integer({
+            minimum: 1,
+            maximum: Number.MAX_SAFE_INTEGER,
+          }),
+          payload: FeedReferenceBatchSchema,
+        },
+        { additionalProperties: false }
+      ),
+      { maxItems: 25 }
+    ),
+  },
+  { additionalProperties: false }
+);
+
+/** Bounded source activity and optional reference deliveries included in a worker poll. */
 export const FeedNotificationSchema = Type.Object({
   feed_id: Type.Integer({ minimum: 1 }),
   connection_id: Type.Integer({ minimum: 1 }),
   feed_key: Type.String({ minLength: 1, maxLength: 200 }),
   notification_id: Type.String({ minLength: 1, maxLength: 200 }),
   changed: Type.Boolean(),
+  subscription: Type.Optional(FeedSubscriptionNotificationSchema),
 });
 
 /**
@@ -227,7 +285,7 @@ export const PollRequestSchema = Type.Object({
    */
   label: Type.Optional(Type.String()),
   connector_manifests: Type.Optional(Type.Unknown()),
-  /** Connector feed wake hints. Records still travel through normal sync. */
+  /** Connector feed wake hints, plus source-reference deliveries for subscribed read-only feeds. */
   feed_notifications: Type.Optional(
     Type.Array(FeedNotificationSchema, { maxItems: 64 })
   ),
@@ -748,6 +806,12 @@ export const PollResponseSchema = Type.Object({
       feed_key: Type.String(),
       device_worker_id: Type.String(),
       ack: Type.Union([FeedSourceAckSchema, Type.Null()]),
+      subscription: Type.Optional(
+        Type.Object({
+          scope_key: Type.String(),
+          event_types: Type.Array(Type.String()),
+        })
+      ),
     })
   ),
   page_activations: Type.Optional(

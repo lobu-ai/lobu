@@ -104,10 +104,7 @@ export type {
   Feed,
   FeedDefinition,
   FeedOperation,
-  FeedChange,
   FeedObserveContext,
-  FeedObserveHandler,
-  FeedObserveResult,
   FeedReadContext,
   FeedReadHandler,
   FeedReadResult,
@@ -306,4 +303,3 @@ export type {
   SocketOptions,
 } from './net.js';
 export { assertFeedReadWindow, validateFeedReadWindow } from './feed-read-window.js';
-export { assertFeedObservation } from './feed-observation.js';

@@ -320,15 +320,12 @@ const GUEST_RUNNER = String.raw`
     }
 
     if (job.mode === 'observe') {
-      var observed = await instance.observe({
-        feedId: job.feedId == null ? undefined : job.feedId,
-        feedKey: job.feedKey,
-        config: mergedConfig,
-        checkpoint: job.checkpoint,
-        credentials: job.credentials,
-        sessionState: withDispatcher(job.sessionState),
+      await instance.observe({
+        feedId: job.feedId, feedKey: job.feedKey, checkpoint: job.checkpoint,
+        config: mergedConfig, credentials: job.credentials, sessionState: withDispatcher(job.sessionState),
+        env: job.env
       });
-      return { mode: 'observe', changes: observed.changes, checkpoint: observed.checkpoint, hasMore: observed.hasMore };
+      return { mode: 'observe' };
     }
 
     if (job.mode === 'read') {

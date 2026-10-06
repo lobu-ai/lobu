@@ -264,8 +264,8 @@ describe("connections that legitimately have no collector feeds", () => {
 });
 
 describe("only collector feeds are folded", () => {
-	test("source observation failures degrade the connection without changing collector ratios", () => {
-		const failed = feed({ operations: ["read", "observe"], status: "active", consecutive_failures: 1 });
+	test("source listener failures degrade the connection without changing collector ratios", () => {
+		const failed = feed({ operations: ["read"], webhook_driven: true, status: "active", consecutive_failures: 1 });
 		expect(deriveConnectionHealthSemantics({ status: "active", feeds: [failed] })).toBe("degraded");
 		expect(deriveConnectionHealthSemantics({ status: "active", feeds: [failed, feed({ status: "active", schedule: "0 * * * *", last_sync_status: "success" })] })).toBe("degraded");
 	});
