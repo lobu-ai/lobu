@@ -304,11 +304,12 @@ const GUEST_RUNNER = String.raw`
     }
 
     if (job.mode === 'query') {
-      var supportsSelection = instance.definition.queryCapabilities && instance.definition.queryCapabilities.selection === true;
+      var queryCapabilities = instance.definition && instance.definition.queryCapabilities;
+      var supportsSelection = queryCapabilities && queryCapabilities.selection === true;
       if (job.selection && (job.selection.search || (job.selection.filters && job.selection.filters.length)) && !supportsSelection) {
         throw Object.assign(new Error('Connector does not support collection selection queries'), { status: 400 });
       }
-      if (job.exactMatch && !(instance.definition.queryCapabilities && instance.definition.queryCapabilities.exactMatch === true)) {
+      if (job.exactMatch && !(queryCapabilities && queryCapabilities.exactMatch === true)) {
         throw Object.assign(new Error('Connector does not support exact-match queries'), { status: 400 });
       }
       var queryResult = await instance.query({

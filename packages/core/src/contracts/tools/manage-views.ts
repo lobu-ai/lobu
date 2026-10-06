@@ -34,7 +34,11 @@ const ViewPlacementSchema = Type.Optional(
 // type attachment and render as a type tab.
 const NoEventKind = Type.Optional(Type.Never());
 const TypeSubject = {
-  type: Type.String({ minLength: 1, maxLength: 120 }),
+  type: Type.String({
+    minLength: 1,
+    maxLength: 120,
+    description: "Entity-type slug this view attaches to.",
+  }),
   placement: ViewPlacementSchema,
   event_kind: NoEventKind,
 };
