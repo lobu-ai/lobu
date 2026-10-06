@@ -135,7 +135,7 @@ type FeedAttentionState =
 
 interface FeedHealthSemanticsInput {
   /** Operations derived from the selected connector feed handlers. */
-  operations?: Array<'sync' | 'read'> | null;
+  operations?: Array<'sync' | 'read' | 'observe'> | null;
   /** Storage plane. Channel feeds read transcripts rather than connector events. */
   store?: 'events' | 'channel_messages' | null;
   /** `feeds.status` — 'active' | 'paused' | 'error'. */

@@ -24,15 +24,15 @@ function install(rows: ReturnType<typeof sourceRow>[], missingDatabase = false) 
       expect(mode).toBe("readonly");
       return { objectStore: () => ({ index: (index: string) => {
         expect(index).toBe("rowId");
-        return { openCursor: (range: { upper: number; open: boolean } | null, direction: string) => {
-          expect(direction).toBe("prev");
-          const selected = rows.filter((row) => !range || row.rowId < range.upper)
-            .sort((a, b) => b.rowId - a.rowId);
+        return { openCursor: (range: { upper?: number; lower?: number; open: boolean } | null, direction: string) => {
+          expect(["prev", "next"]).toContain(direction);
+          const selected = rows.filter((row) => !range || (range.upper !== undefined ? row.rowId < range.upper : row.rowId > range.lower!))
+            .sort((a, b) => direction === "prev" ? b.rowId - a.rowId : a.rowId - b.rowId);
           const request: any = {};
           let offset = 0;
           const advance = () => queueMicrotask(() => {
             const row = selected[offset++];
-            request.result = row ? { key: row.rowId, value: { id: row.id, rowId: row.rowId }, continue: advance } : null;
+            request.result = row ? { key: row.rowId, value: { id: row.id, rowId: row.rowId, t: row.model.attributes.t, type: row.model.attributes.type }, continue: advance } : null;
             request.onsuccess();
           });
           advance();
@@ -64,7 +64,7 @@ function install(rows: ReturnType<typeof sourceRow>[], missingDatabase = false) 
       queueMicrotask(() => missingDatabase ? request.onupgradeneeded() : request.onsuccess());
       return request;
     } },
-    IDBKeyRange: { upperBound: (upper: number, open: boolean) => {
+    IDBKeyRange: { lowerBound: (lower: number, open: boolean) => ({ lower, open }), upperBound: (upper: number, open: boolean) => {
       expect(open).toBe(true);
       return { upper, open };
     } },
@@ -75,6 +75,9 @@ function install(rows: ReturnType<typeof sourceRow>[], missingDatabase = false) 
       op: "read_messages", adapter_version: WHATSAPP_ADAPTER_VERSION, input,
     }),
     requested,
+    observe: (input: Record<string, unknown> = {}) => globals.__owlettoWhatsAppAdapterV1.invoke({
+      op: "observe_messages", adapter_version: WHATSAPP_ADAPTER_VERSION, input,
+    }),
     cancel: () => { canceled = true; },
     omit: () => { omit = true; },
     closed: () => closed,
@@ -83,6 +86,50 @@ function install(rows: ReturnType<typeof sourceRow>[], missingDatabase = false) 
 }
 
 describe("WhatsApp source-owned history reads", () => {
+  it("replays inserts after a source cursor across reconnects without exporting content", async () => {
+    const rows = [sourceRow(1)];
+    const page = install(rows);
+    expect(await page.observe()).toMatchObject({ after: 1, references: [] });
+    expect(page.requested).toHaveLength(0);
+    rows.push(sourceRow(2, "private offline message"));
+    const reconnected = install(rows);
+    const result = await reconnected.observe({ after: 1, started_at: 1_787_358_200, chat_filter: "all" });
+    expect(result).toMatchObject({ ok: true, after: 2, hasMore: false, references: [
+      { id: "synthetic-2", timestamp: 1_787_358_202, is_group: false },
+    ] });
+    expect(JSON.stringify(result)).not.toContain("private offline message");
+    expect(reconnected.requested).toHaveLength(0);
+    expect((await reconnected.observe({ after: 2, started_at: 1_787_358_200 })).references).toEqual([]);
+  });
+
+  it("pages a reconnect burst without skipping messages", async () => {
+    const page = install(Array.from({ length: 501 }, (_, i) => sourceRow(i + 1)));
+    const first = await page.observe({ after: 0, started_at: 1_787_358_200 });
+    expect(first).toMatchObject({ after: 500, hasMore: true });
+    expect(first.references).toHaveLength(500);
+    const last = await page.observe({ after: first.after, started_at: 1_787_358_200 });
+    expect(last).toMatchObject({ after: 501, hasMore: false, references: [{ id: "synthetic-501" }] });
+  });
+
+  it("does not let a timestamp-zero placeholder block later message references", async () => {
+    const placeholder = sourceRow(1);
+    placeholder.model.attributes.t = 0;
+    const page = install([placeholder, sourceRow(2)]);
+    expect(await page.observe({ after: 0, started_at: 1_787_358_200 })).toMatchObject({
+      ok: true, after: 2, references: [{ id: 'synthetic-2' }], hasMore: false,
+    });
+  });
+
+  it("skips status entries during replay without requesting private message models", async () => {
+    const status = sourceRow(1);
+    status.model.id.remote = 'status@broadcast';
+    const page = install([status, sourceRow(2)]);
+    page.omit(); // Native message loading is deliberately unavailable.
+    expect(await page.observe({ after: 0, started_at: 1_787_358_200 })).toMatchObject({
+      ok: true, after: 2, references: [{ id: 'synthetic-2' }], hasMore: false,
+    });
+    expect(page.requested).toHaveLength(0);
+  });
   it("refuses to create an empty database when source history is unavailable", async () => {
     const page = install([], true);
     const result = await page.read();

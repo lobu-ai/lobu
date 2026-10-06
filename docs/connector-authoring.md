@@ -119,6 +119,12 @@ directly because their executable handlers live elsewhere.
   persist those events for local search, entities, relationships, and Automations.
 - **`read`** pushes filtering and pagination to the source and returns rows to
   the caller without persisting them.
+- **`observe`** is optional alongside a read handler (never a sync handler,
+  whose feed checkpoint it would share). It reports source references for the
+  connector's declared `automationEvents`, independently of content ingestion.
+  It publishes the additional `observe` operation. The
+  current transport starts and drains browser listeners only while an active,
+  authorized Automation subscribes to the connection's events.
 - **Both** lets a connector maintain a small, searchable index while retaining
   an explicit path to source-owned detail. Gmail can sync a filtered set of
   threads yet search the wider mailbox on demand; SQL and warehouse connectors
@@ -141,6 +147,51 @@ const result = await client.feeds.readMany({
 `search_memory` remains local and reports visible, unqueried source feeds in its
 coverage result. Each `readMany` entry is independently bounded by the per-feed
 timeout, and one failure does not discard successful results from the others.
+
+### Source subscriptions without a content mirror
+
+An `observe(ctx)` handler receives the feed configuration, credentials, browser
+dispatcher and last checkpoint, but no `commit` function. Return:
+
+```ts
+return {
+  changes: [{
+    event_type: "message.created", // declared in connector.automationEvents
+    resource_type: "message",
+    resource_ref: sourceMessageId,
+    delivery_id: stableSourceChangeId,
+    occurred_at: sourceTimestamp,
+  }],
+  checkpoint: nextSourceCheckpoint,
+  hasMore: false,
+};
+```
+
+A batch contains at most 1,000 references. Changes cannot contain message
+bodies, media, or arbitrary attributes. Checkpoints hold bounded source cursors
+and acknowledgement metadata, never source content. Replays must reuse the
+same connection-scoped `delivery_id`, including across overlapping feeds. The server queues matching Automations and
+advances the checkpoint atomically. `hasMore` requests an immediate continuation;
+failures retain the previous checkpoint and use the existing retry backoff.
+
+Browser connectors use `feed_listen` and connector-owned listeners. The paired
+device's normal poll carries wakeups and committed acknowledgements; it does
+not periodically import content. With no subscriber, the listener is revoked.
+An authorized headless Automation may read its subscribed private feed; this
+does not grant it access to other private feeds. Browser reads retain the
+Automation principal for connector policy and scrub temporary operation payloads.
+
+Automations explicitly decide whether to save original content, persist a
+derived result, or only act. Observation references and Automation run records
+remain durable. A model-based Automation can also retain content in its normal
+transcript; observation does not change that retention contract.
+
+Realtime delivery requires the browser and source session to be available.
+Connector authors must implement reconnect replay from source-owned cursors.
+WhatsApp replays newly inserted messages still present in its local source
+history; edits and deletions are not advertised as new-message events. Sources
+without a listener, webhook or replayable change API cannot promise lossless
+realtime subscriptions merely by implementing an on-demand `read` handler.
 
 ### What a feed sync must get right
 

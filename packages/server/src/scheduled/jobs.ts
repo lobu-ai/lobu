@@ -25,6 +25,7 @@ import type { AutomationDigestTaskPayload } from '../automations/digest-enqueue'
 import { runAutomationDigestTask } from '../automations/digest-task';
 import type { AutomationScriptTaskPayload } from '../automations/script-enqueue';
 import { runAutomationScriptTask } from '../automations/script-task';
+import { runSourceFeedObservation, type SourceFeedObservationTask } from '../runs/source-feed-observation';
 import { checkStalledExecutions } from './check-stalled-executions';
 import { runConnectorHealthCheck } from '../connectors/connector-health';
 import { retryPendingFeedAutoPausedSignals } from '../automations/platform-events';
@@ -40,6 +41,7 @@ import {
   AUTOMATION_REACTION_TASK,
   AUTOMATION_DIGEST_TASK,
   AUTOMATION_SCRIPT_TASK,
+  SOURCE_FEED_OBSERVATION_TASK,
   NOTIFICATION_DELIVERY_TASK,
   INTERACTIVE_EVENT_CARD_REFRESH_TASK,
   WORKSPACE_EVENT_ACTIVATION_TASK,
@@ -481,6 +483,10 @@ function registerMaintenanceTasks(
       ctx.taskRunId,
       ctx.attempt
     );
+  });
+
+  scheduler.register(SOURCE_FEED_OBSERVATION_TASK, async (ctx) => {
+    await runSourceFeedObservation(ctx.payload as SourceFeedObservationTask);
   });
 
   // The Automation reaction script. Queued inside `complete_window`'s window

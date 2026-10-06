@@ -304,7 +304,7 @@ interface FeedHealthRow {
    *  worker row is gone entirely. */
   device_stale: boolean | null;
   feed_id: string | null;
-  operations: Array<'sync' | 'read'> | null;
+  operations: Array<'sync' | 'read' | 'observe'> | null;
   /** Connector declares a webhook route for this feed key — the dispatch path
    *  that re-arms `next_run_at` without a cron. */
   webhook_driven: boolean | null;

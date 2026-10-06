@@ -50,7 +50,7 @@ import {
  */
 interface ManifestFeed {
   name?: string;
-  operations?: Array<'sync' | 'read'>;
+  operations?: Array<'sync' | 'read' | 'observe'>;
 }
 
 /**

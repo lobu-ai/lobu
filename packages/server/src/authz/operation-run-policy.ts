@@ -1,5 +1,6 @@
 import { type DbClient, getDb } from '../db/client';
-import { DEVICE_FEED_READ_ACTION_KEY, isSourceFeedRead } from '../lib/device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_OBSERVE_ACTION_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, isSourceFeedRead } from '../lib/device-feed-read-protocol';
+import { sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
 import { getOperationForConnection } from '../operations/connector-operations';
 import { supersedeActionEvent } from '../tools/admin/approval-events';
 import { connectorApprovalMetadata } from '../operations/operation-run-card';
@@ -84,12 +85,18 @@ export async function resolveRunConnectorPolicy(params: {
   const sql = params.sql ?? getDb();
   const run = await loadPolicyRun(sql, params.organizationId, params.runId);
   if (!run) return unavailable();
-  if (run.action_key === DEVICE_FEED_READ_ACTION_KEY && isSourceFeedRead(run.run_metadata)) {
+  if ([DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_OBSERVE_ACTION_KEY].includes(run.action_key ?? '') && isSourceFeedRead(run.run_metadata)) {
     if (run.run_type !== 'action' || run.parent_run_id !== null || run.status !== 'running'
       || !['auto', 'approved'].includes(run.approval_status)
       || !run.expires_at || new Date(run.expires_at).getTime() <= Date.now()) return unavailable();
     const actor = await resolveStoredActingPrincipal(sql, params.organizationId, run.policy_principal_kind, run.policy_principal_id);
     if (!actor.ownerResolved) return unavailable();
+    if (run.action_key === SOURCE_FEED_OBSERVE_ACTION_KEY || run.run_metadata?.[SOURCE_FEED_SUBSCRIPTION_METADATA_KEY] === true) {
+      const subscriptions = run.feed_id == null ? [] : await sourceFeedSubscriptions(sql, params.organizationId, Number(run.feed_id));
+      if (!subscriptions.some(subscription => subscription.automationId === Number(run.automation_id)
+        && subscription.principal === run.created_by_user_id)) return unavailable();
+      if (run.action_key === SOURCE_FEED_OBSERVE_ACTION_KEY) return { effect: 'auto', ruleIds: [], reason: 'parent_approval' };
+    }
     return await isSourceReadFeedStillReadable(sql, params.organizationId, run)
       ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();
   }

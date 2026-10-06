@@ -10,13 +10,13 @@ export interface FeedDefinition {
     properties?: Record<string, unknown>;
     [keyword: string]: unknown;
   } | null;
-  operations?: Array<'sync' | 'read'>;
+  operations?: Array<'sync' | 'read' | 'observe'>;
 }
 
 export function feedOperations(
   feedsSchema: Record<string, FeedDefinition> | null,
   feedKey: string
-): Array<'sync' | 'read'> {
+): Array<'sync' | 'read' | 'observe'> {
   const definition = feedsSchema?.[feedKey];
   return Array.isArray(definition?.operations) ? definition.operations : [];
 }

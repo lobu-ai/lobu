@@ -15,7 +15,7 @@
 
 import type { EventEnvelope } from "@lobu/connector-sdk";
 
-export const WHATSAPP_ADAPTER_VERSION = 15;
+export const WHATSAPP_ADAPTER_VERSION = 17;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 const WHATSAPP_SOURCE = "whatsapp_web";
 const RECENT_OVERLAP_SECONDS = 15 * 60;
@@ -106,6 +106,8 @@ export interface BrowserCheckpoint {
   dirty?: DirtyMarker[];
   diagnostics?: Record<string, unknown>;
   last_run_at?: string;
+  /** Reference-only observation position in WhatsApp's own local message store. */
+  observation?: { after: number; started_at: number; chat_filter: ChatFilter };
   /** Exact buffered revisions included in the last successful sync. */
   source_ack?: {
     binding_id: string;

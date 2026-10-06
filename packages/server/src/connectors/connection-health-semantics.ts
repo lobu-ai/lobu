@@ -373,12 +373,12 @@ export interface ConnectionHealthRow {
   feed_health?: unknown;
 }
 
-const FEED_OPERATIONS = new Set(['sync', 'read']);
+const FEED_OPERATIONS = new Set(['sync', 'read', 'observe']);
 
-function parseOperations(value: unknown): Array<'sync' | 'read'> | null {
+function parseOperations(value: unknown): Array<'sync' | 'read' | 'observe'> | null {
   if (!Array.isArray(value)) return null;
   return value.filter(
-    (operation): operation is 'sync' | 'read' =>
+    (operation): operation is 'sync' | 'read' | 'observe' =>
       typeof operation === 'string' && FEED_OPERATIONS.has(operation)
   );
 }

@@ -488,7 +488,7 @@ async function handleListFeeds(
       deviceWorkerId: feed.device_worker_id as string | null,
     });
     const semantics = deriveFeedHealthSemantics({
-      operations: feed.operations as Array<'sync' | 'read'> | null,
+      operations: feed.operations as Array<'sync' | 'read' | 'observe'> | null,
       store:
         parseJsonObject(feed.config).store === 'channel_messages'
           ? 'channel_messages'

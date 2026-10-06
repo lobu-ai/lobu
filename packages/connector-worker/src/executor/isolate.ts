@@ -319,6 +319,18 @@ const GUEST_RUNNER = String.raw`
       return { mode: 'query', rows: (queryResult && queryResult.rows) || [], columns: queryResult && queryResult.columns, total: queryResult && queryResult.total };
     }
 
+    if (job.mode === 'observe') {
+      var observed = await instance.observe({
+        feedId: job.feedId == null ? undefined : job.feedId,
+        feedKey: job.feedKey,
+        config: mergedConfig,
+        checkpoint: job.checkpoint,
+        credentials: job.credentials,
+        sessionState: withDispatcher(job.sessionState),
+      });
+      return { mode: 'observe', changes: observed.changes, checkpoint: observed.checkpoint, hasMore: observed.hasMore };
+    }
+
     if (job.mode === 'read') {
       var readResult = await instance.read({
         feedId: job.feedId === null ? undefined : job.feedId, feedKey: job.feedKey, query: job.query, cursor: job.cursor,

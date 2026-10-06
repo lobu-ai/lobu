@@ -11,6 +11,7 @@ import type {
   ConnectorWebhookSchema,
   EventEnvelope,
   FeedReadMatch,
+  FeedObserveResult,
   QueryContext,
   SyncCredentials,
   WebhookRegistration,
@@ -84,6 +85,16 @@ export type ExecutorJob = {
       match?: FeedReadMatch;
     }
   | {
+      mode: 'observe';
+      feedKey: string;
+      feedId?: number | null;
+      config: Record<string, unknown>;
+      checkpoint: Record<string, unknown> | null;
+      credentials: SyncCredentials | null;
+      sessionState: Record<string, unknown> | null;
+      env: Record<string, string | undefined>;
+    }
+  | {
       // Subscribe with the provider at connect time so deliveries flow to
       // `callbackUrl` (`/api/v1/webhooks/:connectionId`). Runs once per
       // connection, not per delivery. Returns the provider subscription id +
@@ -126,6 +137,7 @@ export type ExecutorJob = {
  * connector commits them, never collected onto the result.
  */
 export type ExecutorResult =
+  | ({ mode: 'observe' } & FeedObserveResult)
   | {
       mode: 'sync';
       /** How the pass ended; see the SDK's `SyncResult.status`. */

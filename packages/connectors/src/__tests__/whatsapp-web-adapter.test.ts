@@ -922,6 +922,31 @@ describe("WhatsApp source observation", () => {
   }
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+  it("observes new-message references without reading or exporting the body", async () => {
+    const source = install();
+    await source.listen("reference-token", { references_only: true });
+    const attributes = { id: { id: "synthetic-message", remote: "15550000000@c.us" }, type: "chat", t: 1100,
+      get body(): string { throw new Error("The observer must not read content"); } };
+    source.emitModel("add", { attributes });
+    await settle();
+    expect(source.posts.map(post => post.record)).toEqual([{ id: "synthetic-message", timestamp: 1100, is_group: false }]);
+    source.emitModel("change", { attributes });
+    await settle();
+    expect(source.posts).toHaveLength(1);
+  });
+
+  it("observes placeholder hydration while excluding changes to pre-subscription history", async () => {
+    const source = install();
+    await source.listen("reference-token", { references_only: true, minimum_timestamp: 1000 });
+    source.emit("add", "placeholder", 0);
+    source.emit("change", "old edit", 900);
+    await settle();
+    expect(source.posts).toHaveLength(0);
+    source.emit("change", "hydrated private body", 1100);
+    await settle();
+    expect(source.posts.map(post => post.record)).toEqual([{ id: "synthetic-message", timestamp: 1100, is_group: false }]);
+  });
+
   it("ignores historical hydration while retaining changes to old messages", async () => {
     const source = install();
     await source.listen();

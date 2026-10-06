@@ -39,6 +39,7 @@ import type {
   AuthResult,
   ConnectorDefinition,
   FeedDefinition,
+  FeedObserveHandler,
   FeedReadHandler,
   FeedSyncHandler,
   QueryContext,
@@ -62,10 +63,13 @@ export type ConnectorFeedSpec<
     | {
         sync: FeedSyncHandler<C, F>;
         read?: FeedReadHandler<F>;
+        /** Observation shares the feed checkpoint, so it never pairs with sync. */
+        observe?: never;
       }
     | {
-        sync?: FeedSyncHandler<C, F>;
+        sync?: never;
         read: FeedReadHandler<F>;
+        observe?: FeedObserveHandler<C, F>;
       }
   );
 
@@ -149,6 +153,7 @@ function buildDefinition(spec: ConnectorSpec): RuntimeConnectorDefinition {
           eventKinds: feed.eventKinds,
           sync: feed.sync,
           read: feed.read,
+          observe: feed.observe,
           readWindowAxis: feed.readWindowAxis,
           matchPaths: feed.matchPaths,
         },
