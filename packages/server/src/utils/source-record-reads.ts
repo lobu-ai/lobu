@@ -42,12 +42,12 @@ interface SourceFeed {
 }
 
 /** A record of a source-backed type: its type slug plus the source key. */
-export interface SourceRecordRef {
+interface SourceRecordRef {
   type: string;
   key: string;
 }
 
-export interface SourceReadFailure {
+interface SourceReadFailure {
   feed_id: number;
   error: string;
 }
@@ -336,7 +336,7 @@ export async function readSourceRecordActivity(
   };
 }
 
-export interface SourceRecordLink {
+interface SourceRecordLink {
   relationship_type: string;
   direction: "outgoing" | "incoming";
   entity_type: string;
