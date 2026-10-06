@@ -157,6 +157,62 @@ function messagesFeed() {
   return { ...feed, sync: feed.sync };
 }
 
+describe("WhatsApp live source reads", () => {
+  it("declares a source-only feed without sync, observations, or event ingestion", () => {
+    const feed = connector.definition.feeds.live_messages;
+    expect(typeof feed.read).toBe("function");
+    expect("sync" in feed).toBe(false);
+    expect("webhook" in feed).toBe(false);
+    expect("eventKinds" in feed).toBe(false);
+  });
+
+  it("reads through the browser without syncing or downloading media", async () => {
+    const page = makeDispatcher({
+      probe: READY,
+      read_messages: { ok: true, results: [message("live-message")], nextCursor: "next-page", hasMore: true },
+    });
+    const result = await connector.read({
+      feedKey: "live_messages", config: { chat_filter: "individual" }, credentials: null,
+      query: "hello", limit: 10, sessionState: { chrome_dispatcher: page.dispatcher },
+    });
+    expect(result.rows).toMatchObject([{ id: "live-message", text: "hello" }]);
+    expect(result.nextCursor).toBe("next-page");
+    expect(result.hasMore).toBe(true);
+    expect(page.adapterOps).toEqual(["probe", "read_messages"]);
+    expect(page.calls.some((call) => call.action === "feed_listen")).toBe(false);
+  });
+
+  it("preserves the continuation of an empty filtered page", async () => {
+    const page = makeDispatcher({ probe: READY,
+      read_messages: { ok: true, results: [], nextCursor: "next-page", hasMore: true },
+    });
+    const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null,
+      cursor: "previous-page", sessionState: { chrome_dispatcher: page.dispatcher },
+    });
+    expect(result).toMatchObject({ rows: [], nextCursor: "next-page", hasMore: true });
+  });
+
+  it("fails a source read instead of reporting unavailable history as empty", async () => {
+    const page = makeDispatcher({ probe: READY,
+      read_messages: { ok: false, error: { state: "operation_failed", reason: "Source message could not be loaded" } },
+    });
+    await expect(connector.read({ feedKey: "live_messages", config: {}, credentials: null,
+      sessionState: { chrome_dispatcher: page.dispatcher },
+    })).rejects.toThrow("Source message could not be loaded");
+  });
+
+  it("rejects unsupported sorting and offset pagination before dispatch", async () => {
+    const page = makeDispatcher();
+    const ctx = { feedKey: "live_messages", config: {}, credentials: null,
+      sessionState: { chrome_dispatcher: page.dispatcher },
+    };
+    await expect(connector.read({ ...ctx, offset: 10 })).rejects.toThrow("cursor");
+    await expect(connector.read({ ...ctx, sort: { column: "occurred_at", order: "desc" } })).rejects.toThrow("sorting");
+    await expect(connector.read({ ...ctx, window: { start: "2026-08-22T00:00:00Z", end: "2026-08-23T00:00:00Z" } })).rejects.toThrow("window");
+    expect(page.calls).toHaveLength(0);
+  });
+});
+
 // ── canonical identity and cutover (verbatim from the extension suite) ──
 
 describe("canonical WhatsApp identity and cutover", () => {
@@ -794,8 +850,8 @@ describe("sync over the generic chrome bridge", () => {
     );
   });
 
-  it("bumps the WhatsApp connector version for page observation semantics", () => {
-    expect(connector.definition.version).toBe("1.0.4");
+  it("bumps the WhatsApp connector version for live source reads", () => {
+    expect(connector.definition.version).toBe("1.0.5");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
