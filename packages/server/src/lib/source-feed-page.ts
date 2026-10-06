@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { FeedReadWindow } from '@lobu/connector-sdk';
+import type { FeedReadMatch, FeedReadWindow } from '@lobu/connector-sdk';
 import type { AuthzScope } from '../authz/scope';
 import { readSourceFeed } from './connector-pushdown';
 
@@ -10,6 +10,7 @@ export interface SourceFeedPageRequest {
   limit?: number;
   sort?: { column: string; order: 'asc' | 'desc' };
   window?: FeedReadWindow;
+  match?: FeedReadMatch;
   sourceRevision?: string;
 }
 
@@ -25,9 +26,10 @@ function sourceRequestHash(
   query: string | undefined,
   sort: { column: string; order: 'asc' | 'desc' } | undefined,
   window?: FeedReadWindow,
+  match?: FeedReadMatch,
 ): string {
   return createHash('sha256')
-    .update(JSON.stringify({ query: query?.trim() ?? '', sort: sort ?? null, ...(window ? { window } : {}) }))
+    .update(JSON.stringify({ query: query?.trim() ?? '', sort: sort ?? null, ...(window ? { window } : {}), ...(match ? { match } : {}) }))
     .digest('base64url')
     .slice(0, 16);
 }
@@ -46,6 +48,7 @@ function decodeSourceCursor(
   query: string | undefined,
   sort: { column: string; order: 'asc' | 'desc' } | undefined,
   window?: FeedReadWindow,
+  match?: FeedReadMatch,
 ): { position: number; sourceCursor?: string } {
   if (!cursor) return { position: 0 };
   let parsed: SourceCursor;
@@ -64,7 +67,7 @@ function decodeSourceCursor(
     (parsed.source_cursor !== undefined &&
       (typeof parsed.source_cursor !== 'string' ||
         parsed.source_cursor.length === 0)) ||
-    parsed.request_hash !== sourceRequestHash(query, sort, window)
+    parsed.request_hash !== sourceRequestHash(query, sort, window, match)
   ) {
     throw new SourceCursorError(
       'Source cursor does not match this feed read request',
@@ -83,12 +86,13 @@ function encodeSourceCursor(
   sort: { column: string; order: 'asc' | 'desc' } | undefined,
   sourceCursor?: string,
   window?: FeedReadWindow,
+  match?: FeedReadMatch,
 ): string {
   const payload: SourceCursor = {
     v: 1,
     feed_id: feedId,
     position,
-    request_hash: sourceRequestHash(query, sort, window),
+    request_hash: sourceRequestHash(query, sort, window, match),
     ...(sourceCursor ? { source_cursor: sourceCursor } : {}),
   };
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -112,6 +116,7 @@ export async function readSourceFeedPage(
     read.query,
     read.sort,
     read.window,
+    read.match,
   );
   const controller = new AbortController();
   const deadlineAt = Date.now() + timeoutMs;
@@ -130,6 +135,7 @@ export async function readSourceFeedPage(
     offset,
     sort: read.sort,
     window: read.window,
+    match: read.match,
     sourceRevision: read.sourceRevision,
     signal: controller.signal,
     deadlineAt,
@@ -152,12 +158,20 @@ export async function readSourceFeedPage(
       throw new Error('Source reader returned malformed rows.');
     }
     if (result.rows.length > limit) throw new Error('Source reader exceeded the requested page limit.');
+    if (result.rowCursors !== undefined && (
+      !Array.isArray(result.rowCursors) || result.rowCursors.length !== result.rows.length ||
+      result.rowCursors.some((cursor) => typeof cursor !== 'string' || !cursor.trim() || cursor === page.sourceCursor) ||
+      new Set(result.rowCursors).size !== result.rowCursors.length
+    )) throw new Error('Source reader returned malformed row cursors.');
     if (result.nextCursor !== undefined &&
         (typeof result.nextCursor !== 'string' || !result.nextCursor.trim())) {
       throw new Error('Source reader returned a malformed continuation cursor.');
     }
     if (read.window && result.hasMore && !result.nextCursor) {
       throw new Error('Windowed source reader reported more results without a continuation cursor.');
+    }
+    if (read.match && result.hasMore && !result.nextCursor) {
+      throw new Error('Matched source reader reported more results without a continuation cursor.');
     }
     if (result.nextCursor && result.nextCursor === page.sourceCursor) {
       throw new Error('Source reader returned a non-advancing cursor.');
@@ -169,7 +183,9 @@ export async function readSourceFeedPage(
     let hasMore: boolean;
     if (result.nextCursor !== undefined) {
       hasMore = true;
-    } else if (page.sourceCursor !== undefined) {
+    } else if (page.sourceCursor !== undefined || read.match) {
+      // A matched read pages only by its own cursor (see FeedReadContext.match):
+      // an invented offset would be ignored and re-read the same page forever.
       hasMore = false;
     } else if (result.hasMore !== undefined) {
       hasMore = result.hasMore;
@@ -182,6 +198,9 @@ export async function readSourceFeedPage(
       feed_id: read.feed_id,
       ok: true as const,
       rows: result.rows,
+      row_cursors: result.rowCursors?.map((cursor, index) => encodeSourceCursor(
+        read.feed_id, page.position + index + 1, read.query, read.sort, cursor, read.window, read.match,
+      )),
       columns: result.columns,
       window: result.window,
       sourceRevision: result.sourceRevision,
@@ -195,6 +214,7 @@ export async function readSourceFeedPage(
               read.sort,
               result.nextCursor,
               read.window,
+              read.match,
             ),
           }
         : {}),

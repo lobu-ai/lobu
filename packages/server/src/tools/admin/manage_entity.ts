@@ -91,7 +91,9 @@ import {
 	applyUnmerge,
 	previewMerge,
 } from "../../utils/entity-merge";
+import { authzScopeFromToolContext } from "../../authz/scope";
 import { ToolUserError } from "../../utils/errors";
+import { readSourceRecordLinks } from "../../utils/source-record-reads";
 import {
 	EntityPolicyDenialError,
 	type EntityWriteDenialDescription,
@@ -2281,6 +2283,48 @@ async function handleListLinks(
 	args: Static<typeof ListLinksAction>,
 	ctx: ToolContext,
 ): Promise<ManageEntityResult> {
+	if (args.record) {
+		if (args.entity_id !== undefined) {
+			throw new ToolUserError("Pass entity_id or record, not both.", 400);
+		}
+		const unsupported = [
+			args.offset ? "offset" : null,
+			args.include_deleted ? "include_deleted" : null,
+			args.source !== undefined ? "source" : null,
+			args.confidence_min !== undefined ? "confidence_min" : null,
+		].filter(Boolean);
+		if (unsupported.length) {
+			throw new ToolUserError(
+				`record cannot be combined with ${unsupported.join(", ")}.`,
+				400,
+			);
+		}
+		await assertEntityReadAllowed(args, ctx, args.record.type);
+		const result = await readSourceRecordLinks(
+			authzScopeFromToolContext(ctx),
+			args.record,
+			{
+				limit: Math.min(Math.max(args.limit ?? 100, 1), 500),
+				relationshipType: args.relationship_type_slug,
+				direction:
+					args.direction === "outbound"
+						? "outgoing"
+						: args.direction === "inbound"
+							? "incoming"
+							: undefined,
+				signal: ctx.abortSignal,
+				automationId: ctx.actingAutomationId,
+			},
+		);
+		return {
+			action: "list_links",
+			record_links: result.links,
+			record_failures: result.failures,
+		};
+	}
+	if (args.entity_id === undefined) {
+		throw new ToolUserError("list_links needs entity_id or record.", 400);
+	}
 	const sql = getDb();
 	const typeRows = await sql<{ entity_type: string }>`
 		SELECT et.slug AS entity_type

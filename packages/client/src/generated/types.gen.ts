@@ -1402,7 +1402,14 @@ export type ManageEntityData = {
         /**
          * [get/update/delete/list_links/merge/unmerge] Entity ID to operate on
          */
-        entity_id: number;
+        entity_id?: number;
+        /**
+         * [list_links] A record of a source-backed entity type, instead of entity_id. Its relationships are read live from the event kinds that declare them; stores nothing.
+         */
+        record?: {
+          type: string;
+          key: string;
+        };
         /**
          * [list_links] Direction filter. Default both.
          */
@@ -1771,6 +1778,22 @@ export type ManageEntityResponses = {
         action: "unlink";
         success: boolean;
         message: string;
+      }
+    | {
+        action: "list_links";
+        record_links: Array<{
+          relationship_type: string;
+          direction: "outgoing" | "incoming";
+          entity_type: string;
+          key: string;
+          name: string;
+          occurred_at: string;
+          source_url: string | null;
+        }>;
+        record_failures: Array<{
+          feed_id: number;
+          error: string;
+        }>;
       }
     | {
         action: "list_links";
@@ -6068,9 +6091,26 @@ export type ReadKnowledgeData = {
      */
     query?: string;
     /**
-     * Entity ID to filter by. Required unless automation_id is provided.
+     * Entity ID to filter by. Required unless automation_id or record is provided.
      */
     entity_id?: number;
+    /**
+     * A record of a source-backed entity type. Reads its events live from every read feed attributing to the type; stores nothing. Combine only with limit and record_cursor.
+     */
+    record?: {
+      /**
+       * Source-backed entity type slug
+       */
+      type: string;
+      /**
+       * The record's source key (its URL slug)
+       */
+      key: string;
+    };
+    /**
+     * record_cursor from the preceding record read, to continue it.
+     */
+    record_cursor?: string;
     /**
      * Persisted Automation ID (`automation_id`) to fetch content for. With run_id, uses that run's queued version/window; otherwise computes the Automation's pending window. Returns window_token for complete_window action.
      */
@@ -6305,6 +6345,11 @@ export type ReadKnowledgeResponses = {
             feed_id?: number;
           };
     };
+    record_cursor?: string;
+    record_failures?: Array<{
+      feed_id: number;
+      error: string;
+    }>;
     entities?: Array<unknown>;
     unprocessed_ranges?: Array<unknown>;
     reactions_guidance?: string;

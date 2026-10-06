@@ -513,6 +513,13 @@ export interface FeedDefinition {
   /** Declares that live reads can honor fixed windows on this source timestamp. */
   readWindowAxis?: string;
   /**
+   * Event paths a live read can filter by exact value (`FeedReadContext.match`).
+   * A feed that declares them returns EventEnvelope-shaped rows, newest first,
+   * so its event-kind attributions and relationships resolve against read rows
+   * exactly as they do against synced events.
+   */
+  matchPaths?: string[];
+  /**
    * Routes inbound app-webhook deliveries to this feed. Lives on the feed (not
    * the connector's webhook schema) because feeds_schema is the persisted,
    * server-readable surface — the app-webhook router reads this to dispatch a
@@ -1031,10 +1038,29 @@ export interface FeedReadContext<F = Record<string, unknown>> {
   limit?: number;
   offset?: number;
   sort?: { column: string; order: 'asc' | 'desc' };
+  /**
+   * Exact-value filter on one of the feed's declared `matchPaths`. A matched
+   * read pages only by `nextCursor`: a result without one is the last page.
+   * Source-native page tokens are supported. Merged record activity also
+   * needs `FeedReadResult.rowCursors` to resume a partially consumed page.
+   */
+  match?: FeedReadMatch;
+}
+
+export interface FeedReadMatch {
+  path: string;
+  values: string[];
 }
 
 export interface FeedReadResult {
   rows: Record<string, unknown>[];
+  /**
+   * Optional exact resume token after each row, in the same order as `rows`.
+   * Supply only when the source can seek past a stable row key even if that
+   * row is deleted. Enables merging partially consumed pages across feeds.
+   * Ordinary page-token readers omit this; never synthesize it from offsets.
+   */
+  rowCursors?: string[];
   columns?: { name: string; type: string }[];
   total?: number;
   /** Source-native continuation token. The platform wraps this before exposing it. */

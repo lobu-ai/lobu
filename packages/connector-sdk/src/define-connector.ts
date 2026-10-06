@@ -150,6 +150,7 @@ function buildDefinition(spec: ConnectorSpec): RuntimeConnectorDefinition {
           sync: feed.sync,
           read: feed.read,
           readWindowAxis: feed.readWindowAxis,
+          matchPaths: feed.matchPaths,
         },
       ]),
     );

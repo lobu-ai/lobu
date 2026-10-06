@@ -24,7 +24,9 @@ import {
   TEMPLATE_ACTION_CAPABILITY_META_KEY,
 } from '../../interactions/template-action-capability';
 import { getLobuCoreServices } from '../../lobu/gateway';
+import { authzScopeFromToolContext } from '../../authz/scope';
 import { ToolUserError } from '../../utils/errors';
+import { readSourceRecordActivity } from '../../utils/source-record-reads';
 import {
   getNormalizedScoreContent,
   getNormalizedScoreContentCount,
@@ -32,7 +34,7 @@ import {
 import { searchContentByText } from '../../utils/content-search';
 import { parseDateAlias, toEndOfDay } from '../../utils/date-aliases';
 import logger from '../../utils/logger';
-import { requireReadAccess } from '../../utils/organization-access';
+import { requireOrgReadAccess, requireReadAccess } from '../../utils/organization-access';
 import { resolvePublicGatewayUrl } from '../../utils/public-origin';
 import { rewriteQueries } from '../../utils/query-rewriter';
 import {
@@ -238,6 +240,10 @@ async function getContentImpl(
   const sql = getDb();
   const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
 
+  if (args.record_cursor && !args.record) {
+    throw new ToolUserError('record_cursor requires record.', 400);
+  }
+
   // Validate entity access if entity_id provided (auth query stays on PG)
   if (args.entity_id) {
     await requireReadAccess(pgSql, args.entity_id, ctx);
@@ -277,6 +283,7 @@ async function getContentImpl(
     });
     if (actor.kind !== 'user') {
       const typeSlugs = new Set<string>();
+      if (args.record) typeSlugs.add(args.record.type);
       if (args.entity_types?.length) {
         for (const t of args.entity_types) {
           if (typeof t === 'string' && t.trim()) typeSlugs.add(t.trim());
@@ -346,6 +353,11 @@ async function getContentImpl(
         }
       }
     }
+  }
+
+  if (args.record) {
+    await requireOrgReadAccess(pgSql, ctx);
+    return readRecordContent(args, ctx);
   }
 
   // Resolve the existing composite identity after every caller-specific read
@@ -913,4 +925,35 @@ async function getContentImpl(
     logger.error({ err: error }, 'get_content error:');
     throw error;
   }
+}
+
+/**
+ * A source-backed record's events, read live. The record has no stored row,
+ * so no other read_knowledge filter applies to it.
+ */
+async function readRecordContent(args: GetContentArgs, ctx: ToolContext): Promise<GetContentResult> {
+  const { record, record_cursor, limit, ...rest } = args;
+  // Schema defaults arrive filled in; anything else the caller set is a filter
+  // this read cannot honor, and is refused rather than silently ignored.
+  const extra = Object.entries(rest).filter(([key, value]) => {
+    const schema = GetContentSchema.properties[key as keyof typeof GetContentSchema.properties];
+    return value !== undefined && (!schema || !('default' in schema) || value !== schema.default);
+  });
+  if (extra.length > 0) {
+    throw new ToolUserError(`record cannot be combined with ${extra.map(([key]) => key).join(', ')}.`, 400);
+  }
+  const pageLimit = Math.max(1, Math.min(100, Math.trunc(limit ?? 50)));
+  const result = await readSourceRecordActivity(authzScopeFromToolContext(ctx), record!, {
+    limit: pageLimit,
+    cursor: record_cursor,
+    signal: ctx.abortSignal,
+    automationId: ctx.actingAutomationId,
+  });
+  return {
+    content: result.events,
+    total: result.events.length,
+    page: { limit: pageLimit, offset: 0, has_more: Boolean(result.next_cursor) },
+    ...(result.next_cursor ? { record_cursor: result.next_cursor } : {}),
+    ...(result.failures.length ? { record_failures: result.failures } : {}),
+  };
 }

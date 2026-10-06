@@ -107,6 +107,7 @@ export type {
   FeedReadContext,
   FeedReadHandler,
   FeedReadResult,
+  FeedReadMatch,
   FeedReadWindow,
   FeedReadWindowCoverage,
   FeedSyncHandler,

@@ -10,6 +10,7 @@ import type {
   AuthResult,
   ConnectorWebhookSchema,
   EventEnvelope,
+  FeedReadMatch,
   QueryContext,
   SyncCredentials,
   WebhookRegistration,
@@ -80,6 +81,7 @@ export type ExecutorJob = {
       limit?: number;
       offset?: number;
       sort?: { column: string; order: 'asc' | 'desc' };
+      match?: FeedReadMatch;
     }
   | {
       // Subscribe with the provider at connect time so deliveries flow to
@@ -148,6 +150,7 @@ export type ExecutorResult =
   | {
       mode: 'read';
       rows: Record<string, unknown>[];
+      rowCursors?: string[];
       columns?: { name: string; type: string }[];
       total?: number;
       nextCursor?: string;

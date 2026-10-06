@@ -21,9 +21,34 @@ export const GetContentSchema = Type.Object({
     })
   ),
   entity_id: Type.Optional(
-    Type.Number({
+    Type.Integer({
+      minimum: 1,
       description:
-        "Entity ID to filter by. Required unless automation_id is provided.",
+        "Entity ID to filter by. Required unless automation_id or record is provided.",
+    })
+  ),
+  record: Type.Optional(
+    Type.Object(
+      {
+        type: Type.String({
+          minLength: 1,
+          description: "Source-backed entity type slug",
+        }),
+        key: Type.String({
+          minLength: 1,
+          description: "The record's source key (its URL slug)",
+        }),
+      },
+      {
+        description:
+          "A record of a source-backed entity type. Reads its events live from every read feed attributing to the type; stores nothing. Combine only with limit and record_cursor.",
+      }
+    )
+  ),
+  record_cursor: Type.Optional(
+    Type.String({
+      description:
+        "record_cursor from the preceding record read, to continue it.",
     })
   ),
   automation_id: Type.Optional(

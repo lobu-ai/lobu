@@ -623,7 +623,7 @@ async function handleReadFeeds(
   const results = await Promise.all(
     args.reads.slice(0, 10).map(async (read) => {
       try {
-        const { window: _window, sourceRevision: _revision, ...result } =
+        const { window: _window, sourceRevision: _revision, row_cursors: _rowCursors, ...result } =
           await readSourceFeedPage(read, timeoutMs, authzScopeFromToolContext(ctx), ctx.abortSignal, ctx.actingAutomationId);
         return result;
       } catch (err) {
