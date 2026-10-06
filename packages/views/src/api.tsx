@@ -50,6 +50,8 @@
  * ```
  */
 
+import type { CollectionSelection } from "@lobu/core/contracts/tools/collection-selection";
+import type { ViewAttachment } from "@lobu/core/contracts/tools/manage-views";
 import {
   createContext,
   type ReactNode,
@@ -96,6 +98,10 @@ export interface Scope {
   type?: string;
   entity?: number | string;
   event?: number;
+  /** Shared collection selection; absent on record, event and workspace pages.
+   * Pass search/filters/segment to entities.list alongside entity_type: type.
+   * Host selection does not replace view-specific sort/layout params. */
+  collection?: CollectionSelection;
 }
 
 export interface ParamDef {
@@ -105,15 +111,15 @@ export interface ParamDef {
 
 /**
  * Where a view appears: exactly one subject per entry. `{ type }`,
- * `{ entity }` and `{ workspace: true }` take a `placement`; an event
+ * `{ entity }` and `{ workspace: true }` take a `placement`. Type attachments
+ * may declare surface: "collection" (tab only) or "record" (tab/overview).
+ * Collection `when` equalities must all be present in scope.collection.filters;
+ * they control discoverability, never authorization. Omitted surface preserves
+ * legacy collection and record matching. An event
  * attachment `{ event_kind, type }` matches events of that kind linked to at
  * least one entity of `type`, renders on the event's page, and takes none.
  */
-export type Attachment =
-  | { type: string; placement?: "tab" | "overview" }
-  | { entity: number | string; placement?: "tab" | "overview" }
-  | { workspace: true; placement?: "tab" | "overview" }
-  | { event_kind: string; type: string };
+export type Attachment = ViewAttachment;
 
 export interface ViewDefinition {
   /** View key: the single namespace of keys (no `custom:` prefix). Required —
@@ -533,6 +539,21 @@ export function coerceScope(raw: unknown): Scope {
   }
   if (typeof scope.event === "number" && Number.isInteger(scope.event)) {
     out.event = scope.event;
+  }
+  if (scope.collection !== undefined) {
+    if (!out.type || out.entity !== undefined || out.event !== undefined) {
+      throw new Error("Collection selection requires a type page");
+    }
+    if (
+      !scope.collection ||
+      typeof scope.collection !== "object" ||
+      Array.isArray(scope.collection)
+    ) {
+      throw new Error("Collection selection must be an object");
+    }
+    // The host validates selection. Preserve it for the validating read API;
+    // never drop an unfamiliar filter and silently widen the collection.
+    out.collection = scope.collection as CollectionSelection;
   }
   return out;
 }

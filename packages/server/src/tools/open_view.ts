@@ -18,6 +18,7 @@ import { requireWorkspaceContext } from "./access-control";
 import { getContent } from "./get_content/handler";
 import type { AccountToolContext, ToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
+import { COLLECTION_QUERY_KEY, CollectionSelectionSchema, type CollectionSelection } from "@lobu/core/contracts/tools/collection-selection";
 
 const ParamValueSchema = Type.Union([Type.String(), Type.Number(), Type.Boolean()]);
 
@@ -26,6 +27,7 @@ export const OpenViewSchema = Type.Object(
 		key: ViewKeySchema,
 		scope: Type.Optional(
 			Type.Object({
+				collection: Type.Optional(CollectionSelectionSchema),
 				type: Type.Optional(
 					Type.String({ minLength: 1, description: "Entity-type slug the view opens for." })
 				),
@@ -54,6 +56,7 @@ export const OpenViewSchema = Type.Object(
 export const OpenViewResultSchema = Type.Object({
 	view: Type.String(),
 	scope: Type.Object({
+		collection: Type.Optional(CollectionSelectionSchema),
 		type: Type.Optional(Type.String()),
 		entity: Type.Optional(Type.Integer()),
 		event: Type.Optional(Type.Integer()),
@@ -179,7 +182,7 @@ async function resolveEventViewPath(
  */
 async function resolveViewPath(
 	view: StoredView,
-	scope: { type?: string; entity?: number },
+	scope: { type?: string; entity?: number; collection?: CollectionSelection },
 	orgSlug: string,
 	organizationId: string
 ): Promise<{ pathname: string; card: boolean }> {
@@ -234,7 +237,7 @@ async function resolveViewPath(
 			throw new ToolUserError(`Entity type '${scope.type}' not found`, 404);
 		}
 		const type = scope.type;
-		if (view.attach.some((a) => matchesType(a, type, "tab"))) {
+		if (view.attach.some((a) => matchesType(a, type, "tab", scope.collection))) {
 			return { pathname: `/${orgSlug}/${scope.type}${suffix}`, card: false };
 		}
 		throw new ToolUserError(
@@ -275,6 +278,9 @@ async function openViewImpl(
 		throw new ToolUserError(`Unknown view: ${args.key}`, 404);
 	}
 	const scope = args.scope ?? {};
+	if (scope.collection !== undefined && (!scope.type || scope.entity !== undefined || scope.event !== undefined)) {
+		throw new ToolUserError("Collection selection requires scope.type without entity or event", 400);
+	}
 	const orgSlug =
 		(await getOrganizationSlug(target.organizationId)) ?? target.organizationId;
 	if (
@@ -315,8 +321,9 @@ async function openViewImpl(
 	const origin = resolvePublicOrigin(
 		ctx.requestUrl ?? ctx.baseUrl ?? "http://127.0.0.1"
 	);
-	// The view is the path; the query string is its params and nothing else.
+	// The view is the path; shared collection selection has its own reserved key.
 	const search = new URLSearchParams();
+	if (scope.collection !== undefined) search.set(COLLECTION_QUERY_KEY, JSON.stringify(scope.collection));
 	if (!card) {
 		for (const [k, v] of Object.entries(params)) search.set(k, String(v));
 	}
@@ -324,6 +331,7 @@ async function openViewImpl(
 	return {
 		view: args.key,
 		scope: {
+			...(scope.collection !== undefined ? { collection: scope.collection } : {}),
 			...(scope.type !== undefined ? { type: scope.type } : {}),
 			...(scope.entity !== undefined ? { entity: scope.entity } : {}),
 			...(scope.event !== undefined ? { event: scope.event } : {}),

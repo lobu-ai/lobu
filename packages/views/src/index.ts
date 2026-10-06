@@ -5,6 +5,10 @@
  * frame. The module declares itself with `defineView` and mounts once with
  * `mountView`; hooks bridge params, scope, reads and actions to the host.
  */
+export type {
+  AttributeFilter,
+  CollectionSelection,
+} from "@lobu/core/contracts/tools/collection-selection";
 export { ViewBridge } from "./bridge.js";
 export type {
   BridgeOptions,

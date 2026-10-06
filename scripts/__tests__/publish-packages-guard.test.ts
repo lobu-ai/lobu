@@ -570,6 +570,19 @@ describe("@lobu/views packed dist (consumer fixture)", () => {
   it("loads the published export with only peers present", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "lobu-views-consumer-"));
     try {
+      // The public declarations reuse core's contract types. Build that
+      // dependency even in the format-lint job's clean checkout; the runtime
+      // consumer below still receives only the tarball and React peers.
+      const core = spawnSync(
+        process.execPath,
+        [
+          join(REPO_ROOT, "node_modules/typescript/bin/tsc"),
+          "-p",
+          join(REPO_ROOT, "packages/core/tsconfig.json"),
+        ],
+        { encoding: "utf8" }
+      );
+      expect(core.status, `${core.stdout}${core.stderr}`).toBe(0);
       const packed = join(scratch, "packed");
       mkdirSync(join(packed, "dist"), { recursive: true });
       const tsc = spawnSync(
@@ -585,7 +598,7 @@ describe("@lobu/views packed dist (consumer fixture)", () => {
         ],
         { encoding: "utf8" }
       );
-      expect(tsc.status).toBe(0);
+      expect(tsc.status, `${tsc.stdout}${tsc.stderr}`).toBe(0);
       const manifest = JSON.parse(
         readFileSync(join(REPO_ROOT, "packages/views/package.json"), "utf8")
       );

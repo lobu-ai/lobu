@@ -917,6 +917,22 @@ export type OpenViewData = {
      * Required unless the view is attached to the workspace. Pass scope.type, scope.entity, or scope.event to select its subject.
      */
     scope?: {
+      collection?: {
+        search?: string;
+        filters?: Array<
+          | {
+              field: string;
+              op: "eq" | "neq";
+              value: string | number | boolean | null;
+            }
+          | {
+              field: string;
+              op: "lt" | "lte" | "gt" | "gte";
+              value: string | number;
+            }
+        >;
+        segment?: string;
+      };
       /**
        * Entity-type slug the view opens for.
        */
@@ -971,6 +987,22 @@ export type OpenViewResponses = {
   200: {
     view: string;
     scope: {
+      collection?: {
+        search?: string;
+        filters?: Array<
+          | {
+              field: string;
+              op: "eq" | "neq";
+              value: string | number | boolean | null;
+            }
+          | {
+              field: string;
+              op: "lt" | "lte" | "gt" | "gte";
+              value: string | number;
+            }
+        >;
+        segment?: string;
+      };
       type?: string;
       entity?: number;
       event?: number;
@@ -1148,6 +1180,18 @@ export type ManageEntityData = {
          * Entity type as defined in your workspace
          */
         entity_type?: string;
+        filters?: Array<
+          | {
+              field: string;
+              op: "eq" | "neq";
+              value: string | number | boolean | null;
+            }
+          | {
+              field: string;
+              op: "lt" | "lte" | "gt" | "gte";
+              value: string | number;
+            }
+        >;
         /**
          * [list] Parent filter: omit for all entities, null for roots, or an ID for that parent's children.
          */
@@ -1886,7 +1930,7 @@ export type ManageEntitySchemaData = {
      */
     description?: string;
     /**
-     * [create/update] JSON Schema for metadata validation
+     * [create/update] JSON Schema for metadata validation. Entity property annotations: x-facet: true exposes scalar enum values as collection filters; x-sidebar: true also exposes those values as navigation shortcuts. x-enum-labels maps stringified enum values to display labels. x-table-label or title labels the attribute. These annotations do not grant access or define separate segments.
      */
     metadata_schema?: {
       [key: string]: unknown;
@@ -6506,6 +6550,33 @@ export type ManageViewsData = {
                */
               placement?: "tab" | "overview";
               event_kind?: unknown;
+              surface?: unknown;
+              when?: unknown;
+            }
+          | {
+              /**
+               * Entity-type slug this view attaches to.
+               */
+              type: string;
+              /**
+               * Type-attached views render as a full tab or an Overview card.
+               */
+              placement?: "tab" | "overview";
+              event_kind?: unknown;
+              surface: "record";
+              when?: unknown;
+            }
+          | {
+              /**
+               * Entity-type slug this view attaches to.
+               */
+              type: string;
+              placement?: "tab";
+              event_kind?: unknown;
+              surface: "collection";
+              when?: {
+                [key: string]: string | number | boolean | null;
+              };
             }
           | {
               /**
@@ -6517,6 +6588,8 @@ export type ManageViewsData = {
                */
               placement?: "tab" | "overview";
               event_kind?: unknown;
+              surface?: unknown;
+              when?: unknown;
             }
           | {
               /**
@@ -6528,6 +6601,8 @@ export type ManageViewsData = {
                */
               placement?: "tab" | "overview";
               event_kind?: unknown;
+              surface?: unknown;
+              when?: unknown;
             }
           | {
               /**
@@ -6658,6 +6733,33 @@ export type ManageViewsResponses = {
                  */
                 placement?: "tab" | "overview";
                 event_kind?: unknown;
+                surface?: unknown;
+                when?: unknown;
+              }
+            | {
+                /**
+                 * Entity-type slug this view attaches to.
+                 */
+                type: string;
+                /**
+                 * Type-attached views render as a full tab or an Overview card.
+                 */
+                placement?: "tab" | "overview";
+                event_kind?: unknown;
+                surface: "record";
+                when?: unknown;
+              }
+            | {
+                /**
+                 * Entity-type slug this view attaches to.
+                 */
+                type: string;
+                placement?: "tab";
+                event_kind?: unknown;
+                surface: "collection";
+                when?: {
+                  [key: string]: string | number | boolean | null;
+                };
               }
             | {
                 /**
@@ -6669,6 +6771,8 @@ export type ManageViewsResponses = {
                  */
                 placement?: "tab" | "overview";
                 event_kind?: unknown;
+                surface?: unknown;
+                when?: unknown;
               }
             | {
                 /**
@@ -6680,6 +6784,8 @@ export type ManageViewsResponses = {
                  */
                 placement?: "tab" | "overview";
                 event_kind?: unknown;
+                surface?: unknown;
+                when?: unknown;
               }
             | {
                 /**
@@ -6754,6 +6860,33 @@ export type ManageViewsResponses = {
                  */
                 placement?: "tab" | "overview";
                 event_kind?: unknown;
+                surface?: unknown;
+                when?: unknown;
+              }
+            | {
+                /**
+                 * Entity-type slug this view attaches to.
+                 */
+                type: string;
+                /**
+                 * Type-attached views render as a full tab or an Overview card.
+                 */
+                placement?: "tab" | "overview";
+                event_kind?: unknown;
+                surface: "record";
+                when?: unknown;
+              }
+            | {
+                /**
+                 * Entity-type slug this view attaches to.
+                 */
+                type: string;
+                placement?: "tab";
+                event_kind?: unknown;
+                surface: "collection";
+                when?: {
+                  [key: string]: string | number | boolean | null;
+                };
               }
             | {
                 /**
@@ -6765,6 +6898,8 @@ export type ManageViewsResponses = {
                  */
                 placement?: "tab" | "overview";
                 event_kind?: unknown;
+                surface?: unknown;
+                when?: unknown;
               }
             | {
                 /**
@@ -6776,6 +6911,8 @@ export type ManageViewsResponses = {
                  */
                 placement?: "tab" | "overview";
                 event_kind?: unknown;
+                surface?: unknown;
+                when?: unknown;
               }
             | {
                 /**
@@ -6857,6 +6994,33 @@ export type ManageViewsResponses = {
                  */
                 placement?: "tab" | "overview";
                 event_kind?: unknown;
+                surface?: unknown;
+                when?: unknown;
+              }
+            | {
+                /**
+                 * Entity-type slug this view attaches to.
+                 */
+                type: string;
+                /**
+                 * Type-attached views render as a full tab or an Overview card.
+                 */
+                placement?: "tab" | "overview";
+                event_kind?: unknown;
+                surface: "record";
+                when?: unknown;
+              }
+            | {
+                /**
+                 * Entity-type slug this view attaches to.
+                 */
+                type: string;
+                placement?: "tab";
+                event_kind?: unknown;
+                surface: "collection";
+                when?: {
+                  [key: string]: string | number | boolean | null;
+                };
               }
             | {
                 /**
@@ -6868,6 +7032,8 @@ export type ManageViewsResponses = {
                  */
                 placement?: "tab" | "overview";
                 event_kind?: unknown;
+                surface?: unknown;
+                when?: unknown;
               }
             | {
                 /**
@@ -6879,6 +7045,8 @@ export type ManageViewsResponses = {
                  */
                 placement?: "tab" | "overview";
                 event_kind?: unknown;
+                surface?: unknown;
+                when?: unknown;
               }
             | {
                 /**

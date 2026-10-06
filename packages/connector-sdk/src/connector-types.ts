@@ -9,6 +9,7 @@
 // contract — see that file for why connector-sdk, not core). Imported for local
 // use (ReflectResult) and re-exported below for connector authors.
 import type { EntityTypeContribution, ReflectedMeasure } from './metrics.js';
+import type { AttributeFilter } from '@lobu/core/contracts/tools/collection-selection';
 import type {
   ConnectorAutomationEvent,
   ConnectorAutomationSignalDraft,
@@ -45,7 +46,7 @@ export interface ConnectorDefinition {
   /** Available action definitions (keyed by action_key) */
   actions?: Record<string, ActionDefinition>;
   /** Query filters implemented by this connector. Unsupported filters fail before query(). */
-  queryCapabilities?: { exactMatch?: boolean };
+  queryCapabilities?: { exactMatch?: boolean; selection?: boolean };
   /** Connector-normalized events that can activate Automations. */
   automationEvents?: ConnectorAutomationEvent[];
   /**
@@ -1097,6 +1098,17 @@ export interface QueryContext<F = Record<string, unknown>> {
    * connector, which owns its source dialect. Requires queryCapabilities.exactMatch.
    */
   exactMatch?: { columns: string[]; value: string };
+  /**
+   * Shared collection predicates, applied before sorting and pagination.
+   * Search is a literal case-insensitive substring of the projected name.
+   * Attribute filters are ANDed, use typed values, and treat absent fields as
+   * null. The connector owns dialect-safe encoding and must reject unknown
+   * columns. An empty object identifies an unfiltered collection read, allowing
+   * a source to return its population total without counting ordinary SQL reads.
+   * Requires queryCapabilities.selection for nonempty predicates; old sources
+ * keep their unfiltered query semantics when the selection is empty.
+   */
+  selection?: { search?: string; filters?: AttributeFilter[] };
 }
 
 /** Result from ConnectorRuntime.query(). Rows are returned to the caller, never persisted. */

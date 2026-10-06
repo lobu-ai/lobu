@@ -354,7 +354,7 @@ export default class PostgresConnector extends ConnectorRuntime {
     description:
       'Bring your own PostgreSQL database as memory, read a configured feed directly, or run governed connection-level SQL.',
     version: '1.1.0',
-    queryCapabilities: { exactMatch: true },
+    queryCapabilities: { exactMatch: true, selection: true },
     faviconDomain: 'postgresql.org',
     authSchema: {
       methods: [
@@ -588,11 +588,36 @@ export default class PostgresConnector extends ConnectorRuntime {
           });
           where = `WHERE CASE ${cases.join(' ')} ELSE FALSE END`;
         }
+        if (ctx.selection?.search || ctx.selection?.filters?.length) {
+          const projection = await tx.unsafe(`SELECT * FROM (\n${baseSql}\n) q LIMIT 0`);
+          const names = new Set(projection.columns.map((column) => column.name));
+          const requireColumn = (field: string) => {
+            if (!names.has(field)) throw Object.assign(new Error(`Unknown selection attribute: ${field}`), { status: 400 });
+          };
+          const predicates: string[] = [];
+          if (ctx.selection.search) {
+            requireColumn('name');
+            const escaped = ctx.selection.search.replace(/[!%_]/g, '!$&');
+            predicates.push(`q."name"::text ILIKE ${bind(`%${escaped}%`)} ESCAPE '!'`);
+          }
+          for (const filter of ctx.selection.filters ?? []) {
+            requireColumn(filter.field);
+            const actual = `COALESCE(to_jsonb(q) -> ${bind(filter.field)}, 'null'::jsonb)`;
+            const expected = `${bind(JSON.stringify(filter.value))}::jsonb`;
+            if (filter.op === 'eq' || filter.op === 'neq') {
+              predicates.push(`${actual} ${filter.op === 'eq' ? '=' : '<>'} ${expected}`);
+            } else {
+              const operator = { lt: '<', lte: '<=', gt: '>', gte: '>=' }[filter.op];
+              predicates.push(`(jsonb_typeof(${actual}) = jsonb_typeof(${expected}) AND ${actual} ${operator} ${expected})`);
+            }
+          }
+          if (predicates.length) where += `${where ? ' AND' : 'WHERE'} ${predicates.join(' AND ')}`;
+        }
         const wrapped = `SELECT * FROM (\n${baseSql}\n) q\n${where}\n${orderBy}\nLIMIT ${limit} OFFSET ${offset}`;
         const rows = await tx.unsafe(wrapped, params);
         // Record lookup needs only its bounded result, never a full-source count.
         if (ctx.exactMatch) return { data: rows, total: undefined };
-        const counted = (await tx.unsafe(countSql)) as unknown as Array<{ n: number }>;
+        const counted = (await tx.unsafe(`${countSql}\n${where}`, params)) as unknown as Array<{ n: number }>;
         return { data: rows, total: counted[0]?.n };
       })) as unknown as {
         data: Array<Record<string, unknown>> & { columns?: Array<{ name: string; type: number }> };

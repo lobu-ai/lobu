@@ -294,6 +294,35 @@ describe('entity schema CRUD', () => {
       expect(got.entity_type).toBeNull();
     });
 
+    it('validates collection display annotations before persisting a type', async () => {
+      for (const [annotation, value] of [
+        ['x-facet', 'yes'],
+        ['x-sidebar', 1],
+        ['x-enum-labels', { active: 42 }],
+      ] as const) {
+        const slug = `bad-${annotation}`;
+        const err = await owner.entity_schema.createType({
+          slug,
+          name: 'Invalid display config',
+          metadata_schema: { type: 'object', properties: {
+            status: { type: 'string', enum: ['active'], [annotation]: value },
+          } },
+        }).then(() => null).catch((e: unknown) => e as Error & { httpStatus?: number });
+        expect(err?.httpStatus).toBe(422);
+        expect(err?.message).toContain(`metadata_schema.properties.status.${annotation}`);
+        const got = await owner.entity_schema.getType(slug) as { entity_type: unknown };
+        expect(got.entity_type).toBeNull();
+      }
+      await owner.entity_schema.createType({
+        slug: 'facet-asset', name: 'Facet asset',
+        metadata_schema: { type: 'object', properties: {
+          status: { type: 'string', enum: ['active'], 'x-facet': true,
+            'x-sidebar': true, 'x-enum-labels': { active: 'Active assets' } },
+        } },
+      });
+      await owner.entity_schema.deleteType({ slug: 'facet-asset' });
+    });
+
     it('lists user-created types alongside system types', async () => {
       await owner.entity_schema.createType({ slug: 'lst-asset', name: 'Lst' });
       const list = (await owner.entity_schema.listTypes()) as {

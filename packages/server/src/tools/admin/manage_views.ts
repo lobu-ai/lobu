@@ -150,7 +150,7 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
   for (const [name, decl] of Object.entries(args.params ?? {})) {
     if (isShellOwnedParam(name)) {
       throw new ToolUserError(
-        `Param '${name}' is reserved: the web shell's peek pane reads peek and peek_* on every page`,
+        `Param '${name}' is reserved for the web shell's collection selection or peek pane`,
         400
       );
     }

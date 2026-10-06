@@ -10,6 +10,8 @@ import { deriveToolActorSource } from './apply-context';
 import type { EntityMetrics } from "@lobu/connector-sdk";
 import { classifyToolError, getErrorMessage, slugify } from "@lobu/core";
 import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
+import type { AttributeFilter } from "@lobu/core/contracts/tools/collection-selection";
+import { attributeFilterSql, validateAttributeFilters } from "./attribute-filters";
 import { feedLinkedToBusinessEntitySql } from "../authz/channel-about";
 import type {
 	ValidatedEntityRowInsert,
@@ -101,27 +103,27 @@ export async function countStoredEntitiesOfType(
 export async function queryDerivedEntityView(
 	backingSql: string,
 	backingSource: string | undefined,
-	page: { limit: number; offset: number; search?: string },
+	page: { limit: number; offset: number; search?: string; filters?: AttributeFilter[] },
 	ctx: ToolContext,
 	options?: { preservePageRows?: boolean; exactSlug?: string },
 ): Promise<Awaited<ReturnType<typeof querySqlImpl>>> {
-	// Search pushes down only on the internal path (the connection path rejects
-	// search_term); external derived views simply ignore the search box.
-	const search =
-		page.search && !backingSource
-			? { search_term: page.search, search_columns: ["name"] as string[] }
-			: {};
+	// External sources receive typed selection and own dialect-safe pushdown.
 	return querySqlImpl(
 		{
 			sql: backingSql,
 			connection: backingSource,
 			limit: page.limit,
 			offset: page.offset,
-			...search,
 		},
 		undefined,
 		ctx,
 		{
+			// An empty selection still identifies a collection read: capable
+			// sources can return its total without counting ordinary event reads.
+			// Record lookups remain bounded and carry no collection selection.
+			...(options?.exactSlug === undefined || page.search || page.filters?.length ? {
+				selection: { filters: page.filters, search: page.search },
+			} : {}),
 			...(options?.preservePageRows
 				? { maxSerializedResultBytes: Number.POSITIVE_INFINITY }
 				: {}),
@@ -2171,6 +2173,7 @@ export async function listEntities(
 		main_market?: string;
 		market?: string;
 		segment?: string;
+		filters?: AttributeFilter[];
 		limit?: number;
 		offset?: number;
 		sort_by?: string;
@@ -2210,6 +2213,9 @@ export async function listEntities(
 			"VALIDATION",
 		);
 	}
+	if (filters.filters?.length && !filters.entity_type) {
+		throw new ToolUserError("Attribute filters require entity_type", 400, "VALIDATION");
+	}
 
 	// Derived ("view") entity types have no rows in `entities` — their rows come
 	// from `backing_sql`. Return them in the standard list shape so the frontend
@@ -2217,7 +2223,7 @@ export async function listEntities(
 	let segmentFilter: { sql: string; params: unknown[] } | null = null;
 	if (filters.entity_type) {
 		const etRows = await sql`
-      SELECT id, backing_sql, backing_source, metrics_config
+      SELECT id, backing_sql, backing_source, metrics_config, metadata_schema
       FROM entity_types
       WHERE slug = ${filters.entity_type}
         AND organization_id = ${ctx.organizationId}
@@ -2225,6 +2231,7 @@ export async function listEntities(
       LIMIT 1
     `;
 		const backingSql = etRows[0]?.backing_sql as string | null | undefined;
+		if (filters.filters?.length) validateAttributeFilters(filters.filters, etRows[0]?.metadata_schema);
 		if (filters.segment) {
 			if (backingSql) {
 				throw new ToolUserError(
@@ -2246,7 +2253,7 @@ export async function listEntities(
 				filters.entity_type,
 				backingSql,
 				(etRows[0]?.backing_source as string | null | undefined) ?? undefined,
-				{ limit, offset, search: filters.search },
+				{ limit, offset, search: filters.search, filters: filters.filters },
 				ctx,
 			);
 		}
@@ -2278,9 +2285,9 @@ export async function listEntities(
 
 	if (filters.search) {
 		conditions.push(
-			`({e}.name ILIKE $${paramIdx} OR {e}.metadata->>'domain' ILIKE $${paramIdx})`,
+			`({e}.name ILIKE $${paramIdx} ESCAPE '!' OR {e}.metadata->>'domain' ILIKE $${paramIdx} ESCAPE '!')`,
 		);
-		params.push(`%${filters.search}%`);
+		params.push(`%${filters.search.replace(/[!%_]/g, '!$&')}%`);
 		paramIdx++;
 	}
 
@@ -2298,6 +2305,8 @@ export async function listEntities(
 		conditions.push(`{e}.metadata->>'market' = $${paramIdx++}`);
 		params.push(filters.market);
 	}
+
+	conditions.push(...attributeFilterSql(filters.filters ?? [], "{e}.metadata", params));
 
 	// Render the shared conditions for a given pair of table aliases. The
 	// outer query uses e/et; the page-id prefetch subquery below re-binds the
@@ -2523,7 +2532,7 @@ async function listDerivedEntities(
 	entityType: string,
 	backingSql: string,
 	backingSource: string | undefined,
-	page: { limit: number; offset: number; search?: string },
+	page: { limit: number; offset: number; search?: string; filters?: AttributeFilter[] },
 	ctx: ToolContext,
 ): Promise<{
   entities: CreatedEntity[];

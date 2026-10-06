@@ -304,12 +304,17 @@ const GUEST_RUNNER = String.raw`
     }
 
     if (job.mode === 'query') {
-      if (job.exactMatch && !(instance.definition.queryCapabilities && instance.definition.queryCapabilities.exactMatch === true)) {
+      var queryCapabilities = instance.definition && instance.definition.queryCapabilities;
+      var supportsSelection = queryCapabilities && queryCapabilities.selection === true;
+      if (job.selection && (job.selection.search || (job.selection.filters && job.selection.filters.length)) && !supportsSelection) {
+        throw Object.assign(new Error('Connector does not support collection selection queries'), { status: 400 });
+      }
+      if (job.exactMatch && !(queryCapabilities && queryCapabilities.exactMatch === true)) {
         throw Object.assign(new Error('Connector does not support exact-match queries'), { status: 400 });
       }
       var queryResult = await instance.query({
         query: job.query, config: mergedConfig, credentials: job.credentials, sessionState: job.sessionState,
-        limit: job.limit, offset: job.offset, sort: job.sort, exactMatch: job.exactMatch
+        limit: job.limit, offset: job.offset, sort: job.sort, exactMatch: job.exactMatch, selection: supportsSelection ? job.selection : undefined
       });
       return { mode: 'query', rows: (queryResult && queryResult.rows) || [], columns: queryResult && queryResult.columns, total: queryResult && queryResult.total };
     }

@@ -5,6 +5,30 @@ import { ViewAttachmentSchema } from "../contracts/tools/manage-views";
 const accepts = (attach: unknown) => Value.Check(ViewAttachmentSchema, attach);
 
 describe("ViewAttachmentSchema", () => {
+  it("accepts collection-only predicates and record-only attachments", () => {
+    expect(
+      accepts({
+        type: "account",
+        surface: "collection",
+        when: { tier: "gold" },
+      })
+    ).toBe(true);
+    expect(
+      accepts({ type: "account", surface: "record", placement: "overview" })
+    ).toBe(true);
+    expect(
+      accepts({ type: "account", surface: "record", when: { tier: "gold" } })
+    ).toBe(false);
+    expect(accepts({ type: "account", when: { tier: "gold" } })).toBe(false);
+    expect(accepts({ entity: 7, surface: "collection" })).toBe(false);
+    expect(
+      accepts({
+        type: "account",
+        surface: "collection",
+        placement: "overview",
+      })
+    ).toBe(false);
+  });
   it("accepts an event attachment: an event kind plus the linked entity type", () => {
     expect(accepts({ event_kind: "deal.won", type: "deal" })).toBe(true);
   });

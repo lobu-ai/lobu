@@ -1,5 +1,6 @@
 import { type Static, Type } from "@sinclair/typebox";
 import type { ActionInput } from "./action-input";
+import { CollectionWhenSchema } from "./collection-selection";
 import {
   SourceDependenciesSchema,
   SourceFilesSchema,
@@ -32,16 +33,33 @@ const ViewPlacementSchema = Type.Optional(
 // the key: otherwise `{ event_kind, type, placement }` would validate as a
 // type attachment and render as a type tab.
 const NoEventKind = Type.Optional(Type.Never());
+const TypeSubject = {
+  type: Type.String({
+    minLength: 1,
+    maxLength: 120,
+    description: "Entity-type slug this view attaches to.",
+  }),
+  placement: ViewPlacementSchema,
+  event_kind: NoEventKind,
+};
 
 export const ViewAttachmentSchema = Type.Union([
+  // Existing type declarations continue to appear on collections and records.
   Type.Object({
-    type: Type.String({
-      minLength: 1,
-      maxLength: 120,
-      description: "Entity-type slug this view attaches to.",
-    }),
-    placement: ViewPlacementSchema,
-    event_kind: NoEventKind,
+    ...TypeSubject,
+    surface: Type.Optional(Type.Never()),
+    when: Type.Optional(Type.Never()),
+  }),
+  Type.Object({
+    ...TypeSubject,
+    surface: Type.Literal("record"),
+    when: Type.Optional(Type.Never()),
+  }),
+  Type.Object({
+    ...TypeSubject,
+    surface: Type.Literal("collection"),
+    placement: Type.Optional(Type.Literal("tab")),
+    when: Type.Optional(CollectionWhenSchema),
   }),
   Type.Object({
     entity: Type.Union([Type.Integer(), Type.String()], {
@@ -49,6 +67,8 @@ export const ViewAttachmentSchema = Type.Union([
     }),
     placement: ViewPlacementSchema,
     event_kind: NoEventKind,
+    surface: Type.Optional(Type.Never()),
+    when: Type.Optional(Type.Never()),
   }),
   Type.Object({
     workspace: Type.Literal(true, {
@@ -56,6 +76,8 @@ export const ViewAttachmentSchema = Type.Union([
     }),
     placement: ViewPlacementSchema,
     event_kind: NoEventKind,
+    surface: Type.Optional(Type.Never()),
+    when: Type.Optional(Type.Never()),
   }),
   // An event subject: the view renders one event (scope.event) on the event's
   // own page, /events/<id>/-/views/<key>. It matches an event whose kind is
@@ -81,8 +103,8 @@ export const ViewAttachmentSchema = Type.Union([
 ]);
 export type ViewAttachment = Static<typeof ViewAttachmentSchema>;
 
-// Declared, typed URL params. Unknown params are ignored; `peek` and `peek_*`
-// are reserved (the web shell's peek pane reads them on every page).
+// Declared, typed URL params. Unknown params are ignored; `$collection`,
+// `peek` and `peek_*` are reserved for shared selection and the peek pane.
 export const ViewParamDeclSchema = Type.Object({
   type: Type.Union(
     [Type.Literal("string"), Type.Literal("number"), Type.Literal("boolean")],

@@ -1052,6 +1052,20 @@ function validateEntityMetadataSchemaDisplayConfig(
     if (tableLabel !== undefined && typeof tableLabel !== 'string') {
       throw invalidSchema(`metadata_schema.properties.${field}.x-table-label must be a string`);
     }
+
+    for (const annotation of ['x-facet', 'x-sidebar']) {
+      const enabled = (prop as Record<string, unknown>)[annotation];
+      if (enabled !== undefined && typeof enabled !== 'boolean') {
+        throw invalidSchema(`metadata_schema.properties.${field}.${annotation} must be a boolean`);
+      }
+    }
+    const enumLabels = (prop as Record<string, unknown>)['x-enum-labels'];
+    if (enumLabels !== undefined && (
+      !enumLabels || typeof enumLabels !== 'object' || Array.isArray(enumLabels) ||
+      Object.values(enumLabels).some(label => typeof label !== 'string')
+    )) {
+      throw invalidSchema(`metadata_schema.properties.${field}.x-enum-labels must map enum values to strings`);
+    }
   }
 }
 

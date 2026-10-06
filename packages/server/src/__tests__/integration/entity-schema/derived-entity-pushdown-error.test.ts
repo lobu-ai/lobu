@@ -97,4 +97,13 @@ describe('derived entity view over a failing connector query', () => {
     );
     expect(res.parsed?.code).toBe('VALIDATION');
   }, 180_000);
+
+  it('rejects unsupported collection search instead of returning an unfiltered list', async () => {
+    const res = await callTool('manage_entity', {
+      action: 'list', entity_type: 'external-view', search: 'selected',
+    });
+    expect(res.status).toBe(400);
+    expect(res.parsed?.error).toEqual(expect.stringContaining('Connector does not support collection selection queries'));
+    expect(res.parsed?.code).toBe('VALIDATION');
+  }, 180_000);
 });

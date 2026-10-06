@@ -8,6 +8,8 @@
 
 import { type Static, Type } from '@sinclair/typebox';
 import type { QueryContext } from '@lobu/connector-sdk';
+import { parseCollectionSelection } from '@lobu/core/contracts/tools/collection-selection';
+import { attributeFilterSql } from '../../utils/attribute-filters';
 import { authzScopeFromToolContext } from '../../authz/scope';
 import { getDb } from '../../db/client';
 import type { Env } from '../../index';
@@ -341,6 +343,7 @@ export async function querySqlImpl(
      * their connector can implement these semantics in its own dialect.
      */
     exactMatch?: QueryContext['exactMatch'];
+    selection?: QueryContext['selection'];
   }
 ): Promise<QuerySqlResult> {
   const startTime = Date.now();
@@ -379,6 +382,10 @@ export async function querySqlImpl(
       if (!COLUMN_NAME_RE.test(col)) return fail(`Invalid exact-match column name: ${col}`);
     }
   }
+  if (options?.selection) {
+    try { parseCollectionSelection(options.selection); }
+    catch { return fail('Invalid collection selection.', 'VALIDATION'); }
+  }
 
   // Dispatch resolves explicit targets before this workspace handler runs.
   const targetOrgId = ctx.organizationId;
@@ -407,6 +414,7 @@ export async function querySqlImpl(
         connectionSlug: args.connection,
         query: baseSql,
         exactMatch: options?.exactMatch,
+        selection: options?.selection,
         limit,
         offset,
         sort: args.sort_by
@@ -478,20 +486,27 @@ export async function querySqlImpl(
     return fail(getErrorMessage(err));
   }
 
-  // Build search + exact-match WHERE clause
+  // Build search + exact-match + attribute-filter WHERE clause. Collection
+  // search is a literal substring of `name`; search_term stays an ILIKE pattern.
   const whereClauses: string[] = [];
-  if (args.search_term) {
-    if (!args.search_columns?.length) {
+  const selectionSearch = options?.selection?.search;
+  const searchTerm = selectionSearch
+    ? selectionSearch.replace(/[!%_]/g, '!$&')
+    : args.search_term;
+  const searchColumns = selectionSearch ? ['name'] : args.search_columns;
+  if (searchTerm) {
+    if (!searchColumns?.length) {
       return fail('search_columns is required when search_term is set.');
     }
-    for (const col of args.search_columns) {
+    for (const col of searchColumns) {
       if (!COLUMN_NAME_RE.test(col)) {
         return fail(`Invalid search column name: ${col}`);
       }
     }
     const searchParamRef = `$${params.length + 1}`;
-    params.push(`%${args.search_term.toLowerCase()}%`);
-    const orClauses = args.search_columns.map((col) => `lower("${col}") LIKE ${searchParamRef}`);
+    params.push(`%${searchTerm.toLowerCase()}%`);
+    const escape = selectionSearch ? ` ESCAPE '!'` : '';
+    const orClauses = searchColumns.map((col) => `lower("${col}") LIKE ${searchParamRef}${escape}`);
     whereClauses.push(`(${orClauses.join(' OR ')})`);
   }
   if (options?.exactMatch) {
@@ -506,6 +521,7 @@ export async function querySqlImpl(
     // the caller's `derivedRowSlug` confirm and 404s rather than mis-resolving.)
     whereClauses.push(`btrim(COALESCE(${coalesced}), E' \\t\\n\\r\\f\\v') = ${matchParamRef}`);
   }
+  whereClauses.push(...attributeFilterSql(options?.selection?.filters ?? [], 'to_jsonb(_t)', params));
   const searchWhere = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
   const sortOrder = args.sort_order === 'desc' ? 'DESC' : 'ASC';

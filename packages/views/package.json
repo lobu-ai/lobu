@@ -27,6 +27,9 @@
     "test": "bun test src",
     "clean": "rm -rf dist"
   },
+  "dependencies": {
+    "@lobu/core": "workspace:*"
+  },
   "peerDependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

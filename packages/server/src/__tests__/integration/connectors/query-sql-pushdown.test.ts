@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { querySql } from '../../../tools/admin/query_sql';
+import { querySql, querySqlImpl } from '../../../tools/admin/query_sql';
 import type { ToolContext } from '../../../tools/registry';
 import { createAuthProfile } from '../../../utils/auth-profiles';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -81,6 +81,25 @@ describe('query_sql connection pushdown', () => {
     expect(res.error).toBeUndefined();
     expect(res.rows.map((r) => r.name)).toEqual(['a', 'b', 'c']);
     expect(Number(res.rows[0].amount)).toBe(10);
+  }, 60_000);
+
+  it('selects before paging and counts the same source population', async () => {
+    const args = { sql: 'SELECT name, amount FROM qsp_ext', connection: 'qsp-ext-db', sort_by: 'name', limit: 1 };
+    const options = { selection: { filters: [{ field: 'amount', op: 'gte' as const, value: 7 }] } };
+    const first = await querySqlImpl(args, {}, ctx, options);
+    expect(first.rows.map(row => row.name)).toEqual(['a']);
+    expect(first.total_count).toBe(2);
+    expect(first.has_more).toBe(true);
+    const last = await querySqlImpl({ ...args, offset: 1 }, {}, ctx, options);
+    expect(last.rows.map(row => row.name)).toEqual(['c']);
+    expect(last.total_count).toBe(2);
+    const beyond = await querySqlImpl({ ...args, offset: 5 }, {}, ctx, options);
+    expect(beyond.rows).toEqual([]);
+    expect(beyond.total_count).toBe(2);
+    const literal = await querySqlImpl(args, {}, ctx, { selection: { search: '%' } });
+    expect(literal.total_count).toBe(0);
+    await expect(querySqlImpl(args, {}, ctx, { selection: { filters: [{ field: 'missing', op: 'eq', value: 1 }] } })).rejects.toThrow(/Unknown selection attribute/);
+    await expect(querySqlImpl({ ...args, connection: 'qsp-priv-db' }, {}, memberCtx(), options)).rejects.toThrow(/not found or not accessible/i);
   }, 60_000);
 
   it('bounds oversized text and nested JSON on the external connection branch', async () => {
