@@ -850,8 +850,8 @@ describe("sync over the generic chrome bridge", () => {
     );
   });
 
-  it("bumps the WhatsApp connector version for live source reads", () => {
-    expect(connector.definition.version).toBe("1.0.5");
+  it("bumps the WhatsApp connector version for source subscriptions", () => {
+    expect(connector.definition.version).toBe("1.0.6");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
