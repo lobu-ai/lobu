@@ -20,16 +20,16 @@ describe('GoogleCalendarConnector authorization and operation policy', () => {
     expect(oauth.requiredScopes).toEqual([
       'https://www.googleapis.com/auth/calendar.readonly',
     ]);
-    expect(oauth.optionalScopes).toEqual([
-      'https://www.googleapis.com/auth/calendar.events',
-    ]);
-    for (const actionKey of ['create_event', 'update_event', 'delete_event']) {
+    expect(oauth.optionalScopes).toContain('https://www.googleapis.com/auth/calendar.events');
+    for (const actionKey of ['events_insert', 'events_patch', 'events_delete']) {
       expect(definition.actions[actionKey]).toMatchObject({
+        kind: 'write',
         requiredScopes: ['https://www.googleapis.com/auth/calendar.events'],
       });
     }
-    expect(definition.actions.get_event).toMatchObject({
+    expect(definition.actions.events_get).toMatchObject({
       kind: 'read',
+      requiredScopes: ['https://www.googleapis.com/auth/calendar.readonly'],
     });
   });
 });

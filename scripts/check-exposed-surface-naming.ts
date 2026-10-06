@@ -491,6 +491,9 @@ function isCanonicalScanException(file: string): boolean {
   return (
     CANONICAL_SCAN_EXCLUSIONS.has(file) ||
     file.startsWith("packages/owletto/.pi-subagents/artifacts/") ||
+    // Google Discovery documents, trimmed and pinned by
+    // packages/connectors/scripts/pin-google-discovery.ts; their prose is Google's.
+    file.startsWith("packages/connectors/src/_google/discovery/") ||
     file.startsWith("db/migrations/")
   );
 }

@@ -6,7 +6,8 @@
   "type": "module",
   "description": "Lobu memory connectors \u2014 third-party integration implementations built on @lobu/connector-sdk",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pin-google-discovery": "bun scripts/pin-google-discovery.ts"
   },
   "dependencies": {
     "@lobu/connector-sdk": "workspace:*",

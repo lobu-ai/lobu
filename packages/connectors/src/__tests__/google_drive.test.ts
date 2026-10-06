@@ -140,7 +140,7 @@ const fileGet = (file: Record<string, unknown>): Route => (url) =>
 // ---------------------------------------------------------------------------
 
 describe('GoogleDriveConnector authorization and operation policy', () => {
-  test('requests read-only Drive consent and exposes only read actions', () => {
+  test('connects read-only; every write needs a scope requested as an upgrade', () => {
     const definition = new GoogleDriveConnector().definition;
     const oauth = definition.authSchema.methods[0];
 
@@ -153,10 +153,12 @@ describe('GoogleDriveConnector authorization and operation policy', () => {
     // regression PR #1145 fixed for the whole google provider.
     expect(oauth.loginScopes).toEqual(['openid', 'email', 'profile']);
 
-    for (const actionKey of Object.keys(definition.actions)) {
-      expect(definition.actions[actionKey]).toMatchObject({
-        kind: 'read',
-      });
+    expect(definition.actions.download_file.kind).toBe('read');
+    expect(definition.actions.get_file.kind).toBe('read');
+    const writes = Object.values(definition.actions).filter((action) => action.kind === 'write');
+    expect(writes.map((action) => action.key)).toContain('files_create');
+    for (const write of writes) {
+      expect(write.requiredScopes).not.toContain('https://www.googleapis.com/auth/drive.readonly');
     }
   });
 });

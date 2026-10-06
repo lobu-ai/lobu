@@ -40,6 +40,19 @@ import {
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
+import { compileGoogleActions, executeGoogleAction, oauthScopes } from './_google/actions';
+import type { DiscoveryDocument } from './_google/discovery';
+import driveDiscovery from './_google/discovery/drive_v3.json';
+import { GOOGLE_API_POLICIES } from './_google/policies';
+
+/**
+ * Supported Drive API methods as actions, compiled from the pinned Discovery
+ * document. `download_file` and `get_file` stay hand-written: the first picks
+ * `files.export` or `alt=media` by MIME type, the second returns the feed's row
+ * shape — work the raw methods leave to the caller.
+ */
+const DRIVE_POLICY = GOOGLE_API_POLICIES.drive_v3;
+const DRIVE = compileGoogleActions(driveDiscovery as unknown as DiscoveryDocument, DRIVE_POLICY);
 
 // ---------------------------------------------------------------------------
 // Drive API types
@@ -325,7 +338,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
         {
           type: 'oauth',
           provider: 'google',
-          requiredScopes: ['https://www.googleapis.com/auth/drive.readonly'],
+          ...oauthScopes(DRIVE_POLICY),
           loginScopes: ['openid', 'email', 'profile'],
           clientIdKey: 'GOOGLE_CLIENT_ID',
           clientSecretKey: 'GOOGLE_CLIENT_SECRET',
@@ -405,6 +418,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       },
     },
     actions: {
+      ...DRIVE.actions,
       download_file: {
         key: 'download_file',
         kind: 'read',
@@ -831,7 +845,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
         case 'get_file':
           return await this.getFile(http, ctx.input);
         default:
-          return { success: false, error: `Unknown action: ${ctx.actionKey}` };
+          return await executeGoogleAction(DRIVE, ctx, http);
       }
     } catch (error) {
       return {

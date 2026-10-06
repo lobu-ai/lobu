@@ -76,10 +76,13 @@ describe("bundled connector lifecycle matrix", () => {
 		);
 		expect(actionCounts).toEqual({
 			github: 6,
-			"google.calendar": 4,
-			"google.drive": 2,
-			// +download_attachment; get_thread now names each message's files.
-			"google.gmail": 6,
+			// Google actions are compiled one per Discovery method
+			// (connectors/src/_google); a pinned-doc refresh moves these counts.
+			"google.calendar": 32,
+			// 61 compiled + download_file/get_file.
+			"google.drive": 63,
+			// 67 compiled + 6 hand-written (get_thread, send_email, …).
+			"google.gmail": 73,
 			"market.quotes": 1,
 			// outlook's first actions: list_attachments + download_attachment.
 			"microsoft.outlook": 2,
