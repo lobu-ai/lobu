@@ -158,7 +158,7 @@ function messagesFeed() {
 }
 
 describe("WhatsApp live source reads", () => {
-  it("declares a source-only feed without sync, observations, or event ingestion", () => {
+  it("declares a source-only feed without sync or event ingestion", () => {
     const feed = connector.definition.feeds.live_messages;
     expect(typeof feed.read).toBe("function");
     expect("sync" in feed).toBe(false);
@@ -210,6 +210,26 @@ describe("WhatsApp live source reads", () => {
     await expect(connector.read({ ...ctx, sort: { column: "occurred_at", order: "desc" } })).rejects.toThrow("sorting");
     await expect(connector.read({ ...ctx, window: { start: "2026-08-22T00:00:00Z", end: "2026-08-23T00:00:00Z" } })).rejects.toThrow("window");
     expect(page.calls).toHaveLength(0);
+  });
+});
+
+describe("WhatsApp source observation scope", () => {
+  it("starts a fresh baseline when the chat filter changes", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const page = makeDispatcher({ probe: READY, observe_messages: (request) => {
+      const input = (request as { input: Record<string, unknown> }).input;
+      requests.push(input);
+      return { ok: true, after: 900, references: [], hasMore: false };
+    } });
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.observation = { after: 100, started_at: 1, chat_filter: "individual" };
+    const result = await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
+      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toEqual({});
+    expect(requests[1]).toMatchObject({ after: 900, chat_filter: "group" });
+    expect(result.checkpoint?.observation).toMatchObject({ after: 900, chat_filter: "group" });
+    expect(result.changes).toEqual([]);
   });
 });
 

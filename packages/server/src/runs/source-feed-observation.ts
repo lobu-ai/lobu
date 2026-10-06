@@ -39,6 +39,10 @@ export async function reconcileSourceFeedObservations(sql: DbClient, deviceId: s
     WHERE c.device_worker_id = ${deviceId}::uuid AND c.organization_id = ANY(${pgTextArray(orgIds)}::text[])
       AND c.status = 'active' AND c.deleted_at IS NULL AND f.status = 'active' AND f.deleted_at IS NULL
       AND d.feeds_schema->f.feed_key->'operations' ? 'observe'
+      -- Cheap candidate filter; sourceFeedSubscriptions still checks the full trigger and owner authority.
+      AND EXISTS (SELECT 1 FROM automations a WHERE a.organization_id = f.organization_id
+        AND a.status = 'active' AND a.current_version_id IS NOT NULL
+        AND a.triggers @> jsonb_build_array(jsonb_build_object('kind', 'event', 'connector_key', c.connector_key)))
   `;
   for (const feed of feeds) {
     if (boundFeedIds.includes(Number(feed.id)) && !feed.retry_due) continue;
@@ -50,7 +54,7 @@ export async function reconcileSourceFeedObservations(sql: DbClient, deviceId: s
 /** Queue reference signals and advance the checkpoint in one transaction. */
 export async function commitSourceFeedObservation(
   sql: DbClient, task: SourceFeedObservationTask, previous: Record<string, unknown> | null,
-  result: FeedObserveResult,
+  result: FeedObserveResult, config: Record<string, unknown>,
 ): Promise<boolean> {
   assertFeedObservation(result);
   return sql.begin(async tx => {
@@ -60,9 +64,10 @@ export async function commitSourceFeedObservation(
       JOIN LATERAL (${feedDefinitionSelection(tx)}) d ON true
       WHERE f.id = ${task.feedId} AND f.organization_id = ${task.organizationId}
         AND f.checkpoint IS NOT DISTINCT FROM ${previous === null ? null : tx.json(previous)}::jsonb
+        AND COALESCE(f.config, '{}'::jsonb) = ${tx.json(config)}::jsonb
       FOR UPDATE OF f, c
     `;
-    if (!feed) return false; // A recovered worker already committed this checkpoint.
+    if (!feed) return false; // A newer checkpoint or configuration superseded this attempt.
     const subscriptions = await sourceFeedSubscriptions(tx, task.organizationId, task.feedId);
     if (!subscriptions.length) return false;
     const allowed = new Set(subscriptions.map(subscription => subscription.automationId));
@@ -116,6 +121,8 @@ export async function runSourceFeedObservation(task: SourceFeedObservationTask):
     observation: true,
   }, controller.signal);
   let status: 'completed' | 'failed' | 'timeout' = 'failed';
+  let checkpoint = feed.checkpoint as Record<string, unknown> | null;
+  const config = feed.config ?? {};
   try {
     const compiledCode = await resolveConnectorCodeForKey(feed.connector_key, task.organizationId, feed.pinned_version ?? feed.definition_version);
     const auth = await resolveExecutionAuth({
@@ -123,7 +130,6 @@ export async function runSourceFeedObservation(task: SourceFeedObservationTask):
       authProfileId: Number(feed.auth_profile_id) || null, appAuthProfileId: Number(feed.app_auth_profile_id) || null,
       credentialDb: sql, logContext: { feedId: String(task.feedId) }, logMessage: 'Failed to resolve source observation credentials',
     });
-    let checkpoint = feed.checkpoint as Record<string, unknown> | null;
     // Bound each task; unacknowledged browser records request the next drain.
     for (let page = 0; page < 10; page++) {
       const result = await executeCompiledConnector({
@@ -134,7 +140,7 @@ export async function runSourceFeedObservation(task: SourceFeedObservationTask):
         }, hooks: { onHttpFetch: auth.onHttpFetch, onChromeDispatch: browser.onChromeDispatch, signal: controller.signal }, timeoutMs,
       });
       if (result.mode !== 'observe') throw new Error('Expected source observation result');
-      if (!(await commitSourceFeedObservation(sql, task, checkpoint, result))) break;
+      if (!(await commitSourceFeedObservation(sql, task, checkpoint, result, config))) break;
       checkpoint = result.checkpoint;
       if (!result.hasMore) break;
     }
@@ -145,7 +151,9 @@ export async function runSourceFeedObservation(task: SourceFeedObservationTask):
       last_error = 'Source observation failed; inspect the observation run and paired source.',
       next_run_at = now() + (LEAST(${feedBackoff.maxMs}::bigint,
         ${feedBackoff.baseMs}::bigint * (2 ^ LEAST(consecutive_failures, 30))::bigint) || ' milliseconds')::interval
-      WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}`;
+      WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
+        AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb
+        AND checkpoint IS NOT DISTINCT FROM ${checkpoint === null ? null : sql.json(checkpoint)}::jsonb`;
     throw error;
   } finally {
     if (controller.signal.aborted) status = 'timeout';

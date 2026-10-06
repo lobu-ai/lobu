@@ -168,6 +168,28 @@ describe("list_feeds health filter and true total", () => {
 		return runList({ connection_id: connectionId, ...args });
 	}
 
+	it("shows observation failures and recovery in both health filters and attention", async () => {
+		const sql = getTestDb();
+		await createTestConnectorDefinition({ key: "synthetic.observed", name: "Observed", organization_id: orgId,
+			feeds_schema: { items: { operations: ["read", "observe"] } } });
+		const conn = await createTestConnection({ organization_id: orgId, connector_key: "synthetic.observed", createDefaultFeed: false });
+		const [row] = await sql`INSERT INTO feeds (organization_id, connection_id, feed_key, status, consecutive_failures, last_sync_status)
+			VALUES (${orgId}, ${conn.id}, 'items', 'active', 1, 'failed') RETURNING id`;
+		try {
+			const failing = await runList({ connection_id: conn.id, health: "failing" });
+			expect(failing.feeds).toHaveLength(1);
+			expect(failing.feeds[0].attention).toBe("last_attempt_failed");
+			expect((await runList({ connection_id: conn.id, health: "healthy" })).feeds).toHaveLength(0);
+			await sql`UPDATE feeds SET consecutive_failures = 0 WHERE id = ${row.id}`;
+			const healthy = await runList({ connection_id: conn.id, health: "healthy" });
+			expect(healthy.feeds).toHaveLength(1);
+			expect(healthy.feeds[0].attention).toBe("healthy");
+			expect((await runList({ connection_id: conn.id, health: "failing" })).feeds).toHaveLength(0);
+		} finally {
+			await sql`UPDATE feeds SET deleted_at = now() WHERE id = ${row.id}`;
+		}
+	});
+
 	it("reports the true total across pages, not the page length, with has_more", async () => {
 		const page1 = await list({ limit: 2, offset: 0 });
 		expect(page1.feeds).toHaveLength(2);

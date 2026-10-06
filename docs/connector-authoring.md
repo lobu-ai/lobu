@@ -122,9 +122,9 @@ directly because their executable handlers live elsewhere.
 - **`observe`** is optional alongside a read handler (never a sync handler,
   whose feed checkpoint it would share). It reports source references for the
   connector's declared `automationEvents`, independently of content ingestion.
-  It publishes the additional `observe` operation. The
-  current transport starts and drains browser listeners only while an active,
-  authorized Automation subscribes to the connection's events.
+  It publishes the additional `observe` operation. The current transport starts
+  and drains browser listeners only while an active, authorized Automation
+  subscribes to the connection's events.
 - **Both** lets a connector maintain a small, searchable index while retaining
   an explicit path to source-owned detail. Gmail can sync a filtered set of
   threads yet search the wider mailbox on demand; SQL and warehouse connectors
@@ -170,9 +170,10 @@ return {
 A batch contains at most 1,000 references. Changes cannot contain message
 bodies, media, or arbitrary attributes. Checkpoints hold bounded source cursors
 and acknowledgement metadata, never source content. Replays must reuse the
-same connection-scoped `delivery_id`, including across overlapping feeds. The server queues matching Automations and
-advances the checkpoint atomically. `hasMore` requests an immediate continuation;
-failures retain the previous checkpoint and use the existing retry backoff.
+same connection-scoped `delivery_id`, including across overlapping feeds. The
+server queues matching Automations and advances the checkpoint atomically.
+`hasMore` requests an immediate continuation; failures retain the previous
+checkpoint and use the existing retry backoff.
 
 Browser connectors use `feed_listen` and connector-owned listeners. The paired
 device's normal poll carries wakeups and committed acknowledgements; it does

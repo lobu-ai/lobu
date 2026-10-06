@@ -33,7 +33,8 @@
  * surfaces cannot disagree about the same feed. Only collector feeds
  * (`scheduled` / `no_schedule`) are folded; `streaming` and `source_only` have
  * no sync lifecycle to roll up, exactly as `classifyFeed` already excludes them
- * from its expected set.
+ * from its expected set. A failed source observer still degrades the connection
+ * without entering these collection ratios.
  *
  * Reading the feed set is O(feeds-per-connection) over a bounded config table,
  * which is the allowed shape. This module must never reach into `runs` or
@@ -203,6 +204,10 @@ export function deriveConnectionHealthSemantics(
   // connection_status), so the same intent read two different ways.
   if (input.status === "paused") {
     return "paused";
+  }
+
+  if (input.feeds.some(feed => feed.executionMode === "source_only" && feed.attention === "last_attempt_failed")) {
+    return "degraded";
   }
 
   // A chat transport carries no collector feeds by design, a consent-only

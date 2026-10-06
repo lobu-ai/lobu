@@ -960,8 +960,8 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     const dispatcher = requireExtensionDispatcher(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     const chatFilter = ctx.config.chat_filter ?? "all";
-    const previous = ctx.checkpoint?.observation;
-    if (previous && previous.chat_filter !== chatFilter) throw new Error("WhatsApp observation scope changed; reset its checkpoint before subscribing again");
+    // A new scope starts at the current source position, just like a new subscription.
+    const previous = ctx.checkpoint?.observation?.chat_filter === chatFilter ? ctx.checkpoint.observation : undefined;
     const startedAt = previous?.started_at ?? Math.floor(Date.now() / 1000);
     // Capture the starting position before attaching. Replay then covers the
     // gap between this snapshot and listener installation, including reconnects.

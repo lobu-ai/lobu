@@ -306,14 +306,16 @@ export function deriveFeedHealthSemantics(
     };
   }
 
-  // Read-only feeds are evaluated on demand; they have no sync lifecycle.
+  // Source feeds have no sync lifecycle, but observation can fail independently.
   if (
-    input.operations?.includes('read') === true &&
-    input.operations.includes('sync') === false
+    (input.operations?.includes('read') || input.operations?.includes('observe')) &&
+    !input.operations.includes('sync')
   ) {
+    const attention = nonCollectorAttention(input);
     return {
       executionMode: "source_only",
-      attention: nonCollectorAttention(input),
+      attention: attention === "healthy" && input.operations.includes('observe') && (input.consecutive_failures ?? 0) > 0
+        ? "last_attempt_failed" : attention,
     };
   }
 

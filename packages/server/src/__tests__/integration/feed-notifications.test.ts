@@ -9,12 +9,15 @@ import { SOURCE_FEED_OBSERVATION_TASK } from '../../scheduled/task-definitions';
 import { SOURCE_FEED_OBSERVE_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY } from '../../lib/device-feed-read-protocol';
 import { resolveRunConnectorPolicy } from '../../authz/operation-run-policy';
 import { resolveActingPrincipal } from '../../authz/entity-policy';
+import { manageFeeds } from '../../tools/admin/manage_feeds';
+import type { Env } from '../../index';
+import type { ToolContext } from '../../tools/registry';
 
 async function fixture() {
   const sql = getTestDb();
   const org = await createTestOrganization();
   const user = await createTestUser();
-  await addUserToOrganization(user.id, org.id);
+  await addUserToOrganization(user.id, org.id, 'owner');
   const [device] = await sql`
     INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id, last_seen_at)
     VALUES (${user.id}, 'synthetic-source-worker', 'headless', ${sql.json([])}, ${org.id}, now()) RETURNING id
@@ -64,6 +67,32 @@ async function observedFixture() {
 describe('source feed notifications', () => {
   beforeEach(cleanupTestDatabase);
 
+  it('wakes bound observers after scope changes and rejects results from the old configuration', async () => {
+    const { sql, org, user, device, notice, task, feeds } = await observedFixture();
+    const context = { organizationId: org.id, userId: user.id, memberRole: 'owner', scopes: ['mcp:read', 'mcp:write', 'mcp:admin'] } as ToolContext;
+    await sql`UPDATE feeds SET consecutive_failures = 2, last_error = 'synthetic failure', next_run_at = now() + interval '1 hour' WHERE id = ${notice.feed_id}`;
+    const updated = await manageFeeds({ action: 'update_feed', feed_id: notice.feed_id, config: { scope: 'new' } }, {} as Env, context);
+    expect(updated).not.toHaveProperty('error');
+    expect((await sql`SELECT next_run_at <= now() AS due, consecutive_failures, last_error FROM feeds WHERE id = ${notice.feed_id}`)[0])
+      .toMatchObject({ due: true, consecutive_failures: 0, last_error: null });
+    expect(await commitSourceFeedObservation(sql, task, null, {
+      changes: [{ event_type: 'message.created', resource_ref: 'out-of-scope', delivery_id: 'old-scope' }], checkpoint: { cursor: 'old' },
+    }, {})).toBe(false);
+    expect(await sql`SELECT id FROM runs WHERE automation_id IS NOT NULL`).toHaveLength(0);
+    await reconcileSourceFeedObservations(sql, device.id, [org.id], feeds.map(feed => Number(feed.id)));
+    expect(await sql`SELECT id FROM runs WHERE action_key = ${SOURCE_FEED_OBSERVATION_TASK}`).toHaveLength(1);
+  });
+
+  it('resuming observation clears failure backoff and marks the source due without adding a cadence', async () => {
+    const { sql, org, user, notice } = await observedFixture();
+    await sql`UPDATE feeds SET status = 'paused', consecutive_failures = 2, last_error = 'synthetic failure', next_run_at = now() + interval '1 hour' WHERE id = ${notice.feed_id}`;
+    const context = { organizationId: org.id, userId: user.id, memberRole: 'owner', scopes: ['mcp:read', 'mcp:write', 'mcp:admin'] } as ToolContext;
+    const updated = await manageFeeds({ action: 'update_feed', feed_id: notice.feed_id, status: 'active' }, {} as Env, context);
+    expect(updated).not.toHaveProperty('error');
+    expect((await sql`SELECT schedule, next_run_at <= now() AS due, consecutive_failures, last_error FROM feeds WHERE id = ${notice.feed_id}`)[0])
+      .toMatchObject({ schedule: null, due: true, consecutive_failures: 0, last_error: null });
+  });
+
   it('starts observation only for active subscriptions, dedupes wakes, and revokes the binding on pause', async () => {
     const { sql, org, device, notice, automationId } = await observedFixture();
     await reconcileSourceFeedObservations(sql, device.id, [org.id], []);
@@ -83,13 +112,13 @@ describe('source feed notifications', () => {
     const ack = { binding_id: 'synthetic-binding', epoch: 'synthetic-epoch', records: [{ id: 'source-42', revision: 1 }] };
     const result = { changes: [{ event_type: 'message.created', resource_ref: 'source-42', resource_type: 'message', delivery_id: 'change-42' }],
       checkpoint: { cursor: 'next', source_ack: ack } };
-    expect(await commitSourceFeedObservation(sql, task, null, result)).toBe(true);
+    expect(await commitSourceFeedObservation(sql, task, null, result, {})).toBe(true);
     expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(0);
     const runs = await sql`SELECT id, approved_input FROM runs WHERE organization_id = ${org.id} AND automation_id IS NOT NULL`;
     expect(runs).toHaveLength(1);
     expect(JSON.stringify(runs[0].approved_input)).toContain('source-42');
-    expect(await commitSourceFeedObservation(sql, task, null, result)).toBe(false);
-    expect(await commitSourceFeedObservation(sql, task, result.checkpoint, result)).toBe(true);
+    expect(await commitSourceFeedObservation(sql, task, null, result, {})).toBe(false);
+    expect(await commitSourceFeedObservation(sql, task, result.checkpoint, result, {})).toBe(true);
     expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id} AND automation_id IS NOT NULL`).toHaveLength(1);
     expect((await receiveFeedNotifications(sql, [{ ...notice, changed: false }], device.id, [org.id]))[0].ack).toEqual(ack);
   });
@@ -101,7 +130,7 @@ describe('source feed notifications', () => {
         { event_type: 'message.created', resource_ref: 'source-1', delivery_id: 'change-1' },
         { event_type: 'undeclared', resource_ref: 'source-2', delivery_id: 'change-2' },
       ], checkpoint: { cursor: 'must-not-commit' },
-    })).rejects.toThrow('undeclared Automation event');
+    }, {})).rejects.toThrow('undeclared Automation event');
     expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${task.feedId}`)[0].checkpoint).toBeNull();
     expect(await sql`SELECT id FROM runs WHERE organization_id = ${task.organizationId}`).toHaveLength(0);
   });
@@ -110,7 +139,7 @@ describe('source feed notifications', () => {
     const { sql, org, feeds } = await observedFixture();
     const result = { changes: [{ event_type: 'message.created', resource_ref: 'source-42', delivery_id: 'change-42' }], checkpoint: { cursor: 'next' } };
     for (const feed of feeds) {
-      expect(await commitSourceFeedObservation(sql, { organizationId: org.id, feedId: Number(feed.id) }, null, result)).toBe(true);
+      expect(await commitSourceFeedObservation(sql, { organizationId: org.id, feedId: Number(feed.id) }, null, result, {})).toBe(true);
     }
     expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id} AND run_type = 'automation'`).toHaveLength(1);
   });
