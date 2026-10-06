@@ -13,7 +13,8 @@ import { deviceManifestHash, type DeviceConnectorManifest } from '../../../worke
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { addUserToOrganization, createTestAgent, createTestOrganization, createTestUser } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
-import { runSourceFeedObservation } from '../../../runs/source-feed-observation';
+import * as sourceObservations from '../../../runs/source-feed-observation';
+import * as sourceNotifications from '../../../runs/feed-notifications';
 import { dispatchPendingAutomationRuns } from '../../../automations/automation';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 
@@ -156,6 +157,25 @@ describe('compiled browser source reads', () => {
     await expect(extractConnectorMetadata(invalid.compiledCode)).rejects.toThrow('cannot implement both sync and observe');
   });
 
+  it.each(['notification receipts', 'observation reconciliation'])('keeps browser polling available when %s fails', async (phase) => {
+    const failed = phase === 'notification receipts'
+      ? vi.spyOn(sourceNotifications, 'receiveFeedNotifications')
+      : vi.spyOn(sourceObservations, 'reconcileSourceFeedObservations');
+    failed.mockRejectedValueOnce(new Error('Synthetic source activity failure'));
+    const response = await post('/api/workers/poll', { body: {
+      worker_id: WORKER_ID, platform: 'chrome-extension', app_version: '9.9.0', capacity_available: 0,
+      capabilities: { 'browser.debugger': true, 'browser.tabs': true },
+      feed_notifications: phase === 'notification receipts'
+        ? [{ feed_id: feedId, connection_id: connectionId, feed_key: 'items', changed: true, notification_id: 'synthetic-poll-notice' }]
+        : [],
+    } });
+    expect(failed).toHaveBeenCalledOnce();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ next_poll_seconds: 10, page_activations: [] });
+    expect(body.feed_notification_receipts).toBeUndefined();
+  });
+
   it('runs a compiled observer through browser claim/completion into a durable Automation with no content events', async () => {
     const sql = getTestDb();
     const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId });
@@ -176,7 +196,7 @@ describe('compiled browser source reads', () => {
     };`;
     await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: 'script', source: script } })}
       WHERE id = ${automation.id}`;
-    const observed = runSourceFeedObservation({ organizationId: orgId, feedId });
+    const observed = sourceObservations.runSourceFeedObservation({ organizationId: orgId, feedId });
     let finished = false;
     observed.finally(() => { finished = true; }).catch(() => {});
     let answered = false;

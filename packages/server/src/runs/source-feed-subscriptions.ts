@@ -3,6 +3,7 @@ import type { ConnectorAutomationEvent, FeedDefinition } from '@lobu/connector-s
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
 import { resolveActingPrincipal } from '../authz/entity-policy';
 import type { DbClient } from '../db/client';
+import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 
 export interface SourceFeedSubscription {
   automationId: number;
@@ -16,12 +17,7 @@ export async function sourceFeedSubscriptions(sql: DbClient, organizationId: str
     SELECT c.id AS connection_id, c.connector_key, d.feeds_schema->f.feed_key AS definition,
            d.automation_events
     FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
-    JOIN LATERAL (
-      SELECT feeds_schema, automation_events FROM connector_definitions d
-      WHERE d.organization_id = c.organization_id AND d.key = c.connector_key
-        AND (d.status = 'active' OR d.version = f.pinned_version)
-      ORDER BY (d.version = f.pinned_version) DESC NULLS LAST, (d.status = 'active') DESC, d.id DESC LIMIT 1
-    ) d ON true
+    JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
     WHERE f.id = ${feedId} AND f.organization_id = ${organizationId}
       AND f.status = 'active' AND f.deleted_at IS NULL
       AND c.status = 'active' AND c.deleted_at IS NULL

@@ -764,13 +764,20 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   });
   // Receiving source activity is independent of the device's run capacity.
   // This also renews/revokes idle source bindings without opening a new API.
-  const feedReceiptMetadata = feedNotifications.length > 0
-    ? { feed_notification_receipts: isUserScopedWorker && deviceWorkerId
+  let feedReceiptMetadata: { feed_notification_receipts?: Awaited<ReturnType<typeof receiveFeedNotifications>> } = {};
+  try {
+    if (feedNotifications.length > 0) {
+      feedReceiptMetadata = { feed_notification_receipts: isUserScopedWorker && deviceWorkerId
         ? await receiveFeedNotifications(sql, feedNotifications, deviceWorkerId, orgScopeIds)
-        : feedNotifications.map((notice) => ({ feed_id: notice.feed_id, connection_id: notice.connection_id, feed_key: notice.feed_key, notification_id: notice.notification_id, active: false })) }
-    : {};
-  if (isUserScopedWorker && deviceWorkerId && effectivePlatform === 'chrome-extension') {
-    await reconcileSourceFeedObservations(sql, deviceWorkerId, orgScopeIds, feedNotifications.map(notice => notice.feed_id));
+        : feedNotifications.map((notice) => ({ feed_id: notice.feed_id, connection_id: notice.connection_id, feed_key: notice.feed_key, notification_id: notice.notification_id, active: false })) };
+    }
+    if (isUserScopedWorker && deviceWorkerId && effectivePlatform === 'chrome-extension') {
+      await reconcileSourceFeedObservations(sql, deviceWorkerId, orgScopeIds, feedNotifications.map(notice => notice.feed_id));
+    }
+  } catch (error) {
+    // The source retains unacknowledged records for retry. Optional source work
+    // must not prevent this device from claiming its other operations.
+    logger.warn({ deviceWorkerId, err: errorMessage(error) }, 'Source feed activity reconciliation failed');
   }
   if (capacityAvailable === 0) {
     return c.json({

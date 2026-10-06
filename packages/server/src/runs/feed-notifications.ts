@@ -3,6 +3,7 @@ import { Value } from '@sinclair/typebox/value';
 import type { DbClient, DbQuery } from '../db/client';
 import { pgTextArray } from '../db/client';
 import { feedBackoff } from '../connectors/feed-backoff';
+import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { notifyWorkerWork } from './worker-wakeup';
 import { enqueueSourceFeedObservation } from './source-feed-observation';
 import { sourceFeedSubscriptions } from './source-feed-subscriptions';
@@ -51,13 +52,7 @@ export async function receiveFeedNotifications(
           d.feeds_schema->f.feed_key->'operations' ? 'observe' AS observes
         FROM feeds f
         JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
-        JOIN LATERAL (
-          SELECT feeds_schema FROM connector_definitions d
-          WHERE d.organization_id = c.organization_id AND d.key = c.connector_key
-            AND (d.status = 'active' OR d.version = f.pinned_version)
-          ORDER BY (d.version = f.pinned_version) DESC NULLS LAST, (d.status = 'active') DESC, d.id DESC
-          LIMIT 1
-        ) d ON true
+        JOIN LATERAL (${feedDefinitionSelection(tx)}) d ON true
         WHERE f.id = ${notice.feed_id} AND c.id = ${notice.connection_id}
           AND c.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
           AND c.device_worker_id = ${deviceWorkerId}::uuid
@@ -104,13 +99,7 @@ export async function sourceFeedContextForRun(
     FROM runs r
     JOIN feeds f ON f.id = r.feed_id AND f.organization_id = r.organization_id
     JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
-    JOIN LATERAL (
-      SELECT feeds_schema FROM connector_definitions d
-      WHERE d.organization_id = c.organization_id AND d.key = c.connector_key
-        AND (d.status = 'active' OR d.version = f.pinned_version)
-      ORDER BY (d.version = f.pinned_version) DESC NULLS LAST, (d.status = 'active') DESC, d.id DESC
-      LIMIT 1
-    ) d ON true
+    JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
     WHERE r.id = ${parentRunId} AND r.organization_id = ${organizationId}
       AND r.status = 'running'
       AND r.connection_id = c.id

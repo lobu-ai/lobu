@@ -10,6 +10,7 @@ import { dbEgressConfig } from '../utils/cloud-mode';
 import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
 import { feedBackoff } from '../connectors/feed-backoff';
+import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { sourceFeedSubscriptions } from './source-feed-subscriptions';
 
 export interface SourceFeedObservationTask { organizationId: string; feedId: number }
@@ -34,11 +35,7 @@ export async function reconcileSourceFeedObservations(sql: DbClient, deviceId: s
   const feeds = await sql`
     SELECT f.id, f.organization_id, f.next_run_at <= now() AS retry_due FROM feeds f
     JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
-    JOIN LATERAL (
-      SELECT feeds_schema FROM connector_definitions d WHERE d.organization_id = c.organization_id AND d.key = c.connector_key
-        AND (d.status = 'active' OR d.version = f.pinned_version)
-      ORDER BY (d.version = f.pinned_version) DESC NULLS LAST, (d.status = 'active') DESC, d.id DESC LIMIT 1
-    ) d ON true
+    JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
     WHERE c.device_worker_id = ${deviceId}::uuid AND c.organization_id = ANY(${pgTextArray(orgIds)}::text[])
       AND c.status = 'active' AND c.deleted_at IS NULL AND f.status = 'active' AND f.deleted_at IS NULL
       AND d.feeds_schema->f.feed_key->'operations' ? 'observe'
@@ -60,11 +57,7 @@ export async function commitSourceFeedObservation(
     const [feed] = await tx`
       SELECT f.checkpoint, f.feed_key, f.connection_id, c.connector_key, d.automation_events
       FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
-      JOIN LATERAL (
-        SELECT automation_events FROM connector_definitions d WHERE d.organization_id = c.organization_id AND d.key = c.connector_key
-          AND (d.status = 'active' OR d.version = f.pinned_version)
-        ORDER BY (d.version = f.pinned_version) DESC NULLS LAST, (d.status = 'active') DESC, d.id DESC LIMIT 1
-      ) d ON true
+      JOIN LATERAL (${feedDefinitionSelection(tx)}) d ON true
       WHERE f.id = ${task.feedId} AND f.organization_id = ${task.organizationId}
         AND f.checkpoint IS NOT DISTINCT FROM ${previous === null ? null : tx.json(previous)}::jsonb
       FOR UPDATE OF f, c
@@ -106,11 +99,7 @@ export async function runSourceFeedObservation(task: SourceFeedObservationTask):
          AND (cv.organization_id = c.organization_id OR cv.organization_id IS NULL)
        ORDER BY cv.organization_id NULLS LAST LIMIT 1) AS selected_artifact_hash
     FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
-    JOIN LATERAL (
-      SELECT version FROM connector_definitions d WHERE d.organization_id = c.organization_id AND d.key = c.connector_key
-        AND (d.status = 'active' OR d.version = f.pinned_version)
-      ORDER BY (d.version = f.pinned_version) DESC NULLS LAST, (d.status = 'active') DESC, d.id DESC LIMIT 1
-    ) d ON true
+    JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
     WHERE f.id = ${task.feedId} AND f.organization_id = ${task.organizationId}
   `;
   if (!feed) return;
