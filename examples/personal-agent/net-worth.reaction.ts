@@ -1,21 +1,16 @@
 /**
  * Deterministic weekly household net-worth snapshot.
  *
- * Connector events remain the source of truth. This reaction normalizes the
+ * Connector events remain the source of truth. This script normalizes the
  * current connector books plus current balance-sheet observations, obtains
  * this week's security and FX marks through market.quotes, compares the result
  * with the prior immutable snapshot, and persists one bounded summary for the
  * ISO week.
  */
-import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
-
-export const input = {
-  type: "object",
-  properties: {
-    summary: { type: "string" },
-  },
-  required: ["summary"],
-} as const;
+import type {
+  AutomationScriptContext,
+  ReactionClient,
+} from "@lobu/connector-sdk";
 
 const PAGE_SIZE = 1_000;
 const QUOTE_BATCH_SIZE = 50;
@@ -1192,7 +1187,7 @@ function snapshotDigest(snapshot: FinancialSnapshot): string {
 }
 
 async function notifyNeedsAttention(
-  ctx: ReactionContext,
+  ctx: AutomationScriptContext,
   client: ReactionClient,
   reason: string
 ): Promise<void> {
@@ -1208,7 +1203,7 @@ async function notifyNeedsAttention(
 }
 
 export default async function runNetWorthSnapshot(
-  ctx: ReactionContext,
+  ctx: AutomationScriptContext,
   client: ReactionClient
 ): Promise<void> {
   const calculatedAt = isoTimestamp(ctx.window.window_end, "window_end");

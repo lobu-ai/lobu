@@ -28,7 +28,7 @@ import {
   linkedInInterestProfilePrompt,
 } from "./linkedin.prompts.ts";
 import type MidasConnector from "./midas.connector.ts";
-import type NetWorthReaction from "./net-worth.reaction.ts";
+import type NetWorthScript from "./net-worth.reaction.ts";
 import type PollVoteReaction from "./poll-vote.reaction.ts";
 import type RevolutTransactionsConnector from "./revolut-transactions.connector.ts";
 import type SpotifyConnector from "./spotify.connector.ts";
@@ -1445,13 +1445,13 @@ const midasNetWorth = defineAutomation({
   ],
   minCooldownSeconds: 300,
   tags: ["finance", "net-worth", "balance-sheet"],
-  prompt:
-    'The deterministic reaction performs this scheduled consolidated valuation. Return only {"summary":"Run the deterministic weekly net-worth snapshot."}; do not calculate values, create entities, or call connector operations yourself.',
-  reactionsGuidance:
-    "The reaction owns active-connection deduplication, current observation heads, security and weekly FX marks, penny-exact attribution, immutable snapshot persistence, and the notification. Missing FX fails closed.",
-  reaction: reactionFromFile<typeof NetWorthReaction>(
-    "./net-worth.reaction.ts"
-  ),
+  // The script reads current books itself. Context-only sources preserve the
+  // valuation window instead of capping it against unrelated event arrivals.
+  sources: {
+    valuation_clock: context("SELECT CURRENT_TIMESTAMP AS observed_at"),
+  },
+  executor: scriptFromFile<typeof NetWorthScript>("./net-worth.reaction.ts"),
+  reaction: null,
 });
 
 const hourlyTaskCollaborator = defineAutomation({
