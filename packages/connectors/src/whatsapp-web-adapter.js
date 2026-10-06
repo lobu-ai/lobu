@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 14;
+  const ADAPTER_VERSION = 15;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const SYSTEM_TYPES = new Set([
     "gp2",
@@ -692,6 +692,10 @@ export function whatsAppWebAdapterProgram() {
       names.some((name) => typeof module?.[name] === "function");
     return {
       collect: hasFunction(history, ["loadEarlierMsgs"]),
+      read_messages:
+        typeof indexedDB !== "undefined" &&
+        typeof requireFirst(["WAWebMsgKey"])?.fromString === "function" &&
+        typeof requireFirst(["WAWebCollections"])?.Msg?.getMessagesById === "function",
       download_media:
         hasFunction(media, ["downloadAndMaybeDecrypt"]) ||
         models(requireFirst(["WAWebCollections"])?.Msg).some(
@@ -1121,6 +1125,102 @@ export function whatsAppWebAdapterProgram() {
       await new Promise((resolve) => setTimeout(resolve, 50));
     } while (Date.now() < deadline);
     throw new Error(`WhatsApp did not confirm ${label}`);
+  }
+
+  /**
+   * Enumerate WhatsApp's own local history, not just the models loaded in the
+   * page. Opaque message bodies stay with WhatsApp: its native loader hydrates
+   * the selected keys. Each read scans at most one source page, so callers must
+   * follow cursors even when filtering leaves an empty page.
+   */
+  async function readMessages(input = {}) {
+    const query = String(input.query ?? "").trim();
+    const chatFilter = input.chat_filter ?? "all";
+    const limit = Math.min(100, Math.max(1, Math.trunc(Number(input.limit) || 50)));
+    let before = null;
+    if (input.cursor) {
+      const cursor = JSON.parse(input.cursor);
+      if (cursor.v !== 1 || !Number.isSafeInteger(cursor.before) || cursor.before <= 0 ||
+        cursor.query !== query || cursor.chat_filter !== chatFilter) {
+        throw new Error("Invalid WhatsApp source cursor or changed query scope");
+      }
+      before = cursor.before;
+    }
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open("model-storage");
+      // Never create an empty replacement database when WhatsApp changes its
+      // storage layout. That would turn unavailable history into false success.
+      request.onupgradeneeded = () => {
+        request.transaction.abort();
+        reject(new Error("WhatsApp source history database is unavailable"));
+      };
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error("WhatsApp source history database is blocked"));
+      request.onsuccess = () => resolve(request.result);
+    });
+    let sourceRows;
+    try {
+      sourceRows = await new Promise((resolve, reject) => {
+        const transaction = database.transaction("message", "readonly");
+        transaction.onabort = () => reject(transaction.error ?? new Error("WhatsApp source read aborted"));
+        const index = transaction.objectStore("message").index("rowId");
+        const range = before === null ? null : IDBKeyRange.upperBound(before, true);
+        const request = index.openCursor(range, "prev");
+        const rows = [];
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) { resolve(rows); return; }
+          if (!Number.isSafeInteger(cursor.key) || cursor.key <= 0 || typeof cursor.value.id !== "string") {
+            reject(new Error("WhatsApp source history has an unsupported key layout"));
+            return;
+          }
+          rows.push({ position: cursor.key, id: cursor.value.id });
+          if (rows.length > limit) resolve(rows);
+          else cursor.continue();
+        };
+      });
+    } finally {
+      database.close();
+    }
+    const hasMore = sourceRows.length > limit;
+    const page = sourceRows.slice(0, limit);
+    const keyModule = requireFirst(["WAWebMsgKey"]);
+    const collections = requireFirst(["WAWebCollections"]);
+    const exactId = query.startsWith("id:") ? query.slice(3) : null;
+    const selected = page.filter((row) => {
+      const key = keyModule.fromString(row.id);
+      if (exactId !== null && key.id !== exactId) return false;
+      const remote = widString(key.remote);
+      if (remote === "status@broadcast" || remote.endsWith("@newsletter")) return false;
+      const isGroup = remote.endsWith("@g.us");
+      return !(chatFilter === "group" && !isGroup) && !(chatFilter === "individual" && isGroup);
+    });
+    const results = [];
+    if (selected.length) {
+      const loaded = await collections.Msg.getMessagesById(selected.map((row) => row.id));
+      if (loaded?.canceled || !Array.isArray(loaded?.messages)) {
+        throw new Error("Source message loading was canceled or unavailable");
+      }
+      const byKey = new Map(loaded.messages.map((model) => [String(model.id ?? modelData(model).id), model]));
+      const names = nameIndex(collections);
+      for (const row of selected) {
+        const model = byKey.get(row.id);
+        if (!model) throw new Error("Source message could not be loaded; retry the read");
+        const message = await normalizeMessage(model, "snapshot", collections, names);
+        // The relay boundary drops placeholder rows without a stable timestamp.
+        // Skip them like search does; throwing would pin every later read to
+        // the same cursor.
+        if (!message || message.timestamp <= 0) continue;
+        if (exactId === null && query && !`${message.body}\n${message.caption}`.toLowerCase().includes(query.toLowerCase())) continue;
+        results.push(message);
+      }
+    }
+    return {
+      results,
+      hasMore,
+      ...(hasMore ? { nextCursor: JSON.stringify({ v: 1, before: page[page.length - 1].position, query, chat_filter: chatFilter }) } : {}),
+    };
   }
 
   async function searchMessages(input) {
@@ -1739,6 +1839,8 @@ export function whatsAppWebAdapterProgram() {
         };
       }
       if (request.op === "collect") return await collect(request);
+      if (request.op === "read_messages")
+        return { ok: true, ...(await readMessages(request.input)) };
       if (request.op === "download_media")
         return { ok: true, ...(await downloadMedia(request)) };
       if (request.op === "search_messages")

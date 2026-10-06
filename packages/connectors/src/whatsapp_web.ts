@@ -15,6 +15,8 @@ import {
   type ChromeActionDispatcher,
   ConnectorRuntime,
   type EventEnvelope,
+  type FeedReadContext,
+  type FeedReadResult,
   type RuntimeConnectorDefinition,
   type SyncContext,
   type SyncResult,
@@ -622,7 +624,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.4",
+    version: "1.0.5",
     faviconDomain: "whatsapp.com",
     // Implicit auth: the user is already signed into WhatsApp Web in the
     // paired Chrome. There is no artifact to relay — the QR is rendered by
@@ -631,6 +633,24 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     // the readiness probe with the exact remedy instead.
     authSchema: { methods: [{ type: "none" }] },
     feeds: {
+      live_messages: {
+        key: "live_messages",
+        name: "Live messages",
+        description:
+          "Read messages directly from the paired WhatsApp Web session without importing message history. Reads page through locally available history in source storage order, using literal text search or id:<message ID>. Requires the paired browser to be online and signed in. No background sync or message-triggered Automations.",
+        read: (ctx) => this.readMessages(ctx),
+        configSchema: {
+          type: "object",
+          properties: {
+            chat_filter: {
+              type: "string",
+              enum: ["all", "individual", "group"],
+              default: "all",
+              description: "Which chats to include.",
+            },
+          },
+        },
+      },
       messages: {
         sync: (ctx) => this.syncMessages(ctx),
         webhook: { events: ["message"], mode: "trigger" },
@@ -1140,6 +1160,45 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
 
     await ctx.commit(events, nextCheckpoint as unknown as BrowserCheckpoint);
     return { status: "complete" };
+  }
+
+  private async readMessages(ctx: FeedReadContext<WhatsAppWebConfig>): Promise<FeedReadResult> {
+    if (ctx.offset) throw new Error("WhatsApp live reads paginate with the returned cursor, not an offset.");
+    if (ctx.sort) throw new Error("WhatsApp live reads use source storage order; explicit sorting is not supported.");
+    // Source message time cannot represent edits, revokes, or delayed arrivals.
+    // Keep Automation change consumption on the existing durable event path.
+    if (ctx.window) throw new Error("WhatsApp live reads do not support change-time windows; use message events for Automation changes.");
+    const dispatcher = requireExtensionDispatcher(ctx);
+    const tabId = await readyWhatsAppTab(dispatcher);
+    const response = await invokeAdapter<{
+      results: unknown[];
+      nextCursor?: string;
+      hasMore: boolean;
+    }>(dispatcher, tabId, {
+      op: "read_messages",
+      input: {
+        query: ctx.query,
+        cursor: ctx.cursor,
+        limit: ctx.limit,
+        chat_filter: ctx.config.chat_filter ?? "all",
+      },
+    });
+    return {
+      rows: normalizedSearchResults(response.results),
+      columns: [
+        { name: "id", type: "string" },
+        { name: "chat_jid", type: "string" },
+        { name: "chat_name", type: "string" },
+        { name: "title", type: "string" },
+        { name: "text", type: "string" },
+        { name: "occurred_at", type: "string" },
+        { name: "from_me", type: "boolean" },
+        { name: "sender_jid", type: "string" },
+        { name: "quoted_id", type: "string" },
+      ],
+      nextCursor: response.nextCursor,
+      hasMore: response.hasMore,
+    };
   }
 
   async execute(ctx: ActionContext): Promise<ActionResult> {
