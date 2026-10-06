@@ -42,6 +42,23 @@ function processIsLive(pid: number): boolean {
   }
 }
 
+/**
+ * SIGKILL is asynchronous: the signalling call returns before the kernel has
+ * finished tearing the target down, so a liveness probe taken in the same tick
+ * can still see the process running (on Linux CI it does almost every time, for
+ * up to a few tens of ms). Asserting "dead" with an instant probe is therefore a
+ * race, not a check. Poll until the pid is gone, bounded, and let the caller
+ * assert the result so a process that really survives still fails the test.
+ */
+async function waitForProcessGone(pid: number, timeoutMs = 3_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processIsLive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return true;
+}
+
 function forceKill(pid: number, group = false): void {
   try {
     process.kill(group ? -pid : pid, 'SIGKILL');
@@ -132,7 +149,7 @@ describe('daemon-builtin os.shell', () => {
 
       expect(output.timed_out).toBe(true);
       expect(Number.isInteger(descendantPid)).toBe(true);
-      expect(processIsLive(descendantPid)).toBe(false);
+      expect(await waitForProcessGone(descendantPid)).toBe(true);
     } finally {
       if (descendantPid > 0 && processIsLive(descendantPid)) forceKill(descendantPid);
       rmSync(testDir, { recursive: true, force: true });
@@ -433,7 +450,7 @@ describe('daemon-builtin os.shell', () => {
       });
       expect(result.success).toBe(false);
       expect(result.timed_out).toBe(true);
-      if (process.platform !== 'darwin') expect(processIsLive(Number(result.stdout.trim()))).toBe(false);
+      if (process.platform !== 'darwin') expect(await waitForProcessGone(Number(result.stdout.trim()))).toBe(true);
       expect(Date.now() - started).toBeLessThan(4_000);
     } finally {
       if (previousBashFunction === undefined) delete process.env['BASH_FUNC_sleep%%'];
@@ -482,7 +499,7 @@ describe('daemon-builtin os.shell', () => {
       expect(output.timed_out).toBe(false);
 
       // The owned-group cleanup still happens -- no leaked daemon.
-      expect(processIsLive(descendantPid)).toBe(false);
+      expect(await waitForProcessGone(descendantPid)).toBe(true);
 
       // ...and the caller is told, rather than inferring it a minute later.
       expect(output.reaped_descendants).toBe(true);
