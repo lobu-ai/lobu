@@ -929,10 +929,10 @@ async function getContentImpl(
 
 /**
  * A source-backed record's events, read live. The record has no stored row,
- * so no other read_knowledge filter applies to it.
+ * so only connector/connection/feed selection applies alongside pagination.
  */
 async function readRecordContent(args: GetContentArgs, ctx: ToolContext): Promise<GetContentResult> {
-  const { record, record_cursor, limit, ...rest } = args;
+  const { record, record_cursor, limit, platforms, connection_ids, feed_ids, ...rest } = args;
   // Schema defaults arrive filled in; anything else the caller set is a filter
   // this read cannot honor, and is refused rather than silently ignored.
   const extra = Object.entries(rest).filter(([key, value]) => {
@@ -946,6 +946,9 @@ async function readRecordContent(args: GetContentArgs, ctx: ToolContext): Promis
   const result = await readSourceRecordActivity(authzScopeFromToolContext(ctx), record!, {
     limit: pageLimit,
     cursor: record_cursor,
+    platforms,
+    connection_ids,
+    feed_ids,
     signal: ctx.abortSignal,
     automationId: ctx.actingAutomationId,
   });

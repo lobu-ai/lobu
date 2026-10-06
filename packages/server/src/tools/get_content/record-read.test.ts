@@ -83,6 +83,9 @@ describe("record read admission", () => {
     { min_similarity: 0.9 },
     { sort_order: "asc" as const },
     { include_superseded: true },
+    { agent_id: "some-agent" },
+    { produced_by_automation_id: 12 },
+    { run_ids: [34] },
   ])("rejects a non-default unsupported activity filter: %j", async (filter) => {
     await expect(
       getContent({ record, ...filter }, {} as Env, ctx)
@@ -106,6 +109,14 @@ describe("record read admission", () => {
         expect.objectContaining({ automationId: 42 })
       );
     }
+  });
+
+  it("passes connector, connection and feed filters to the source read", async () => {
+    const filters = { platforms: ["test_source"], connection_ids: [7], feed_ids: [11] };
+    await getContent({ record, ...filters }, {} as Env, ctx);
+    expect(readActivity).toHaveBeenCalledWith(
+      expect.anything(), record, expect.objectContaining(filters)
+    );
   });
 
   it.each([
