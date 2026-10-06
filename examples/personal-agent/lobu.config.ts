@@ -1540,7 +1540,10 @@ const linkedInFeedFlagger = defineAutomation({
   ...linkedInAssistantDevice,
   // Half an hour after each 3-hourly home_feed sync.
   triggers: [every("30 */3 * * *", { timezone: "Europe/London" })],
-  sources: { posts: "@feed:home_feed" },
+  sources: {
+    posts:
+      "SELECT * FROM events WHERE connector_key = 'linkedin' AND feed_key = 'home_feed' ORDER BY occurred_at DESC",
+  },
   prompt: linkedInFeedFlaggerPrompt,
   reaction: reactionFromFile<typeof LinkedInFlagReaction>(
     "./linkedin-flag.reaction.ts"

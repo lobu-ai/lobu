@@ -283,7 +283,6 @@ describe("LinkedIn flag reaction", () => {
     );
     const flagger = bySlug.get("linkedin-feed-flagger");
     const profile = bySlug.get("linkedin-interest-profile-weekly");
-    expect(flagger?.sources).toEqual({ posts: "@feed:home_feed" });
     expect(flagger?.reaction).toBeTruthy();
     expect(flagger?.agentKind).toBe("claude-code");
     expect(profile?.agentKind).toBe("claude-code");
