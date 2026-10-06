@@ -133,7 +133,6 @@ import {
 import { validateEntityMetadata } from "../../utils/schema-validation";
 import { buildEntityUrl } from "../../utils/url-builder";
 import { trackAutomationReaction } from "../../utils/automation-reactions";
-import { requireOrgReadAccess } from "../../utils/organization-access";
 import { isAdminOrOwnerRole, isInProcessSystemCall } from "../access-control";
 import { MEMBER_ENTITY_TYPE_SLUG } from "../constants";
 import type { ToolContext } from "../registry";
@@ -1192,7 +1191,6 @@ async function handleDiscoverDuplicates(
 	if (!ctx.memberRole && !isInProcessSystemCall(ctx)) {
 		throw new ToolUserError("Duplicate discovery requires workspace membership", 403);
 	}
-	await requireOrgReadAccess(getDb(), ctx);
 	// Discovery can expose relationships inferred from member email addresses.
 	if (args.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberEmail(ctx.memberRole)) {
 		throw new ToolUserError("Member identity discovery requires workspace administrator access", 403);

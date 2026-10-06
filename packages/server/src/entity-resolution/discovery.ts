@@ -319,13 +319,13 @@ export async function discoverWorkspaceResolutionPage(
 			candidate_entity_ids: oversized ? [] : members.map((candidate) => candidate.id).sort((a, b) => a - b),
 			oversized,
 			deferred_candidates: oversized ? members.length : discovered.deferredCandidateCount,
-			decisions: (group?.loserIds ?? []).map((loserId) => ({
-				winner_entity_id: group!.winnerId,
+			decisions: group ? group.loserIds.map((loserId) => ({
+				winner_entity_id: group.winnerId,
 				loser_entity_id: loserId,
 				fingerprint: assessEntityResolution({
-					...policy, winner: byId.get(group!.winnerId)!, losers: [byId.get(loserId)!],
+					...policy, winner: byId.get(group.winnerId)!, losers: [byId.get(loserId)!],
 				}).fingerprint,
-			})),
+			})) : [],
 		});
 		decisions += decisionCount;
 	}

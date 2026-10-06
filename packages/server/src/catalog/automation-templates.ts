@@ -127,18 +127,18 @@ export const AUTOMATION_CATALOG_TEMPLATES: CatalogEntry[] = [
 	{
 		id: "duplicate-merge",
 		name: "Duplicate entity merge",
-		version: "4.0.0",
+		version: "3.0.0",
 		description:
 			"Find entities that are the same real-world thing and fold duplicates into one canonical record.",
 		detail: {
 			slug: "duplicate-merge",
-			triggers: [{ ...scheduleTrigger("0 3 * * *"), skip_if_unchanged: false }],
+			triggers: [scheduleTrigger("0 3 * * *")],
 			// A cross-entity Automation: its source surfaces people rather than events.
 			// The model explains findings; the entity-resolution module owns grouping,
 			// normalization, auto/review policy, suppression, and merge limits.
 			sources: [{ name: "people", query: "@entity:person" }],
 			prompt:
-				"Review the available entity rows in the configured sources. Explain likely duplicate groups in analysis_summary and put name-only, alias-only, handle-only, oversized, or otherwise uncertain groups in uncertain_groups with why. Do not call entity tools or emit backlog tasks. After analysis, the deterministic reaction discovers complete components across every configured entity source and submits whole components to the server; source context pages do not bound discovery. The configured entity type's x-lobu-resolution policy decides which normalized identities auto-merge and which require human review. For person entities without that extension, normalized email and phone matches remain review-only and never auto-merge; other entity types require an explicit policy.\n",
+				"Review every row in sources.people. Explain likely duplicate groups in analysis_summary and put name-only, alias-only, handle-only, oversized, or otherwise uncertain groups in uncertain_groups with why. Do not call entity tools or emit backlog tasks. After analysis, the deterministic reaction submits only candidate IDs to the server. The person entity type's x-lobu-resolution policy decides which normalized identities auto-merge and which require human review. Without that extension, normalized email and phone matches remain review-only and never auto-merge.\n",
 			reaction_script: `export const input = {
 	type: "object",
 	properties: {
@@ -150,38 +150,22 @@ export const AUTOMATION_CATALOG_TEMPLATES: CatalogEntry[] = [
 };
 
 export default async function reaction(ctx, client) {
-	if (!Number.isSafeInteger(ctx.automation.id) || ctx.automation.id < 1) {
-		throw new Error("Duplicate discovery requires a valid Automation ID");
+	const MAX_CANDIDATES = 5000;
+	const since = String(ctx.window.window_start).slice(0, 10);
+	const until = new Date(new Date(ctx.window.window_end).getTime() - 1).toISOString().slice(0, 10);
+	const knowledge = await client.knowledge.read({ automation_id: ctx.window.automation_id, since, until });
+	const candidates = Array.isArray(knowledge?.sources?.people) ? knowledge.sources.people : [];
+	const candidateIds = [...new Set(candidates
+		.map((candidate) => candidate?.id)
+		.filter((id) => Number.isSafeInteger(id) && id > 0))];
+	if (candidateIds.length < 2) return;
+	if (candidateIds.length > MAX_CANDIDATES) {
+		throw new Error("More than 5000 entities need duplicate discovery; no changes were queued");
 	}
-	// security-allowed: validated positive safe integer; client.query accepts SQL strings only.
-	const [assignment] = await client.query(
-		"SELECT sources FROM automations WHERE id = " + ctx.automation.id,
-	);
-	if (!assignment) throw new Error("Duplicate discovery Automation was not found");
-	const sources = assignment.sources ?? [];
-	const types = [...new Set(sources.map((source) => {
-		const match = /^@entity:\\s*([a-z][a-z0-9_-]*)$/i.exec((source.query ?? "").trim());
-		if (!match) throw new Error("Duplicate discovery requires an @entity:<type> source");
-		return match[1];
-	}))];
-	if (!types.length) throw new Error("Duplicate discovery requires an entity source");
-	let oversized = 0, deferred = 0;
-	for (const entity_type of types) {
-		let cursor;
-		do {
-			const page = await client.entities.discoverDuplicates({ entity_type, cursor });
-			oversized += page.components.filter((component) => component.oversized).length;
-			const candidateIds = page.components.flatMap((component) => component.candidate_entity_ids);
-			if (candidateIds.length) {
-				const result = await client.entities.manage({
-					action: "resolve_duplicates", candidate_entity_ids: candidateIds,
-				});
-				deferred += result.deferred_candidates;
-			}
-			cursor = page.next_cursor;
-		} while (cursor);
-	}
-	return { oversized_groups: oversized, deferred_candidates: deferred };
+	await client.entities.manage({
+		action: "resolve_duplicates",
+		candidate_entity_ids: candidateIds,
+	});
 }`,
 			reactions_guidance:
 				"Explain uncertainty; never decide identity from names, aliases, or handles. The server-side entity type policy is the only merge authority.",

@@ -1,8 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { EntityDiscoverDuplicatesResult } from "@lobu/core/contracts/tools/manage-entity";
-import type { ReactionContext } from "@lobu/connector-sdk";
-import { compileReactionScript, executeAutomationScript } from "../../../automations/reaction-executor";
-import { AUTOMATION_CATALOG_TEMPLATES } from "../../../catalog/automation-templates";
 import { createAutomationRun } from "../../../runs/queue-service";
 import { buildClientSDK } from "../../../sandbox/client-sdk";
 import { runScript } from "../../../sandbox/run-script";
@@ -51,7 +48,7 @@ async function setup() {
     const created = await workspace.owner.automations.create({
       slug: "synthetic-discovery", name: "Synthetic discovery",
       managed_agent_id: agent.agentId, prompt: "Explain only",
-      sources: [{ name: "people", query: "@entity:asset" }],
+      sources: [{ name: "assets", query: "@entity:asset" }],
       triggers: [{ kind: "schedule", cron: "0 3 * * *", skip_if_unchanged: false }],
     });
     const id = Number(created.automation_id);
@@ -59,19 +56,18 @@ async function setup() {
       organizationId: workspace.org.id, automationId: id, agentId: agent.agentId,
       windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-02T00:00:00Z", dispatchSource: "manual",
     });
-    const reactionContext: ReactionContext = {
-      organization_id: workspace.org.id, organization_slug: workspace.org.slug,
-      automation: { id, slug: "synthetic-discovery", name: "Synthetic discovery", version: 1 },
-      window: { automation_id: id, run_id: run.runId, window_start: "2026-01-01T00:00:00Z", window_end: "2026-01-02T00:00:00Z", content_analyzed: 0 },
-      entities: [], extracted_data: { analysis_summary: "", uncertain_groups: [] },
-    };
     const agentSdk = buildClientSDK({
-      ...context, userId: null, agentId: agent.agentId,
+      ...context, userId: null, memberRole: null, tokenType: "session", agentId: agent.agentId,
       actingAutomationId: id, actingRunId: run.runId,
     }, {} as Env);
-    return { id, reactionContext, agentSdk };
+    return { agentSdk };
   };
-  return { workspace, sql, seed, typeId: Number(type.entity_type_id), context, sdk, entity, discover, state, automation };
+  const readClient = async () => {
+    const oauth = await createTestOAuthClient();
+    const token = await createTestAccessToken(workspace.users.member.id, workspace.org.id, oauth.client_id, { scope: "mcp:read" });
+    return new TestMcpClient({ token: token.token, orgSlug: workspace.org.slug });
+  };
+  return { workspace, sql, seed, typeId: Number(type.entity_type_id), context, sdk, entity, discover, state, automation, readClient };
 }
 
 describe("complete duplicate discovery", () => {
@@ -95,9 +91,7 @@ describe("complete duplicate discovery", () => {
     expect(await h.state()).toEqual(before);
     const page = result.returnValue as EntityDiscoverDuplicatesResult;
     expect(page.components[0].candidate_entity_ids[1] - page.components[0].candidate_entity_ids[0]).toBe(5001);
-    const oauth = await createTestOAuthClient();
-    const token = await createTestAccessToken(h.workspace.users.member.id, h.workspace.org.id, oauth.client_id, { scope: "mcp:read" });
-    const wire = new TestMcpClient({ token: token.token, orgSlug: h.workspace.org.slug });
+    const wire = await h.readClient();
     const response = await wire.querySdk<{ success: boolean; return_value: unknown }>(
       'export default async (_, client) => client.entities.discoverDuplicates({ entity_type: "asset", limit: 1 });',
     );
@@ -183,6 +177,7 @@ describe("complete duplicate discovery", () => {
     }
     await expect(h.sdk.entities.discoverDuplicates({ entity_type: "missing-type" })).rejects.toMatchObject({ httpStatus: 404 });
     const { agentSdk } = await h.automation();
+    await expect(agentSdk.entities.discoverDuplicates({ entity_type: "asset" })).resolves.toMatchObject({ action: "discover_duplicates" });
     const [policy] = await h.sql`INSERT INTO write_approval_policies
       (organization_id, resource_class, principal_kind, entity_type_slug)
       VALUES (${h.workspace.org.id}, 'entity', NULL, 'asset') RETURNING id`;
@@ -250,44 +245,47 @@ describe("complete duplicate discovery", () => {
     expect(policyChanged.result).toMatchObject({ auto_merged: 1 });
   });
 
-  it("runs the compiled catalog sweep for a pair beyond the source context page", async () => {
+  it("traverses more than 199 decisions through member read-only MCP calls without domain writes", async () => {
     const h = await setup();
     await h.sql`INSERT INTO entities (organization_id, entity_type_id, name, slug, metadata, created_by)
-      SELECT ${h.workspace.org.id}, ${h.typeId}, 'Asset ' || n, 'distant-' || n,
-        jsonb_build_object('serial', CASE WHEN n IN (1, 5002) THEN 'shared' ELSE 'unique-' || n END),
-        ${h.workspace.users.owner.id}
-      FROM generate_series(1, 5002) n`;
-    const { id, reactionContext } = await h.automation();
-    await h.sql`UPDATE automations SET sources = '[{"name":"people","query":"@entity:asset"}]'::jsonb WHERE id = ${id}`;
-    const template = AUTOMATION_CATALOG_TEMPLATES.find((entry) => entry.id === "duplicate-merge")!;
-    const compiled = await compileReactionScript(String(template.detail.reaction_script));
-    const result = await executeAutomationScript({ compiledScript: compiled, context: reactionContext, env: { JWT_SECRET: "synthetic-discovery-test-secret" } });
-    expect(result.success, JSON.stringify(result)).toBe(true);
-    const [counts] = await h.sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${h.workspace.org.id}
-      AND action_key = 'entity_change' AND approval_status = 'pending'`;
-    expect(counts.n).toBe(1);
-  });
-
-  it("runs the compiled catalog sweep beyond 199 decisions using current assignment sources", async () => {
-    const h = await setup();
-    await h.sql`INSERT INTO entities (organization_id, entity_type_id, name, slug, metadata, created_by)
-      SELECT ${h.workspace.org.id}, ${h.typeId}, 'Asset ' || n, 'catalog-' || n,
+      SELECT ${h.workspace.org.id}, ${h.typeId}, 'Asset ' || n, 'paged-' || n,
         jsonb_build_object('serial', 'pair-' || ((n - 1) / 2)), ${h.workspace.users.owner.id}
       FROM generate_series(1, 402) n`;
-    const { id, reactionContext } = await h.automation();
-    // Legacy version snapshots do not own this assignment's current sources.
-    await h.sql`UPDATE automation_versions SET version_sources = '[{"name":"legacy","query":"@entity:wrong-type"}]'::jsonb
-      WHERE id = (SELECT current_version_id FROM automations WHERE id = ${id})`;
-    const template = AUTOMATION_CATALOG_TEMPLATES.find((entry) => entry.id === "duplicate-merge")!;
-    const compiled = await compileReactionScript(String(template.detail.reaction_script));
-    const result = await executeAutomationScript({ compiledScript: compiled, context: reactionContext, env: { JWT_SECRET: "synthetic-discovery-test-secret" } });
-    expect(result.success, JSON.stringify(result)).toBe(true);
-    const [counts] = await h.sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${h.workspace.org.id}
-      AND action_key = 'entity_change' AND approval_status = 'pending'`;
-    expect(counts.n).toBe(201);
-    const [merged] = await h.sql`SELECT count(*)::int AS n FROM entities
-      WHERE organization_id = ${h.workspace.org.id} AND merged_into IS NOT NULL`;
-    expect(merged.n).toBe(0);
-    expect(result.returnValue).toEqual({ oversized_groups: 0, deferred_candidates: 0 });
-  }, 120_000);
+    const wire = await h.readClient();
+    const before = await h.state();
+    const readPage = async (cursor?: string) => {
+      const input = JSON.stringify({ entity_type: "asset", limit: 100, cursor });
+      const response = await wire.querySdk<{ success: boolean; return_value: EntityDiscoverDuplicatesResult }>(
+        "export default async (_, client) => client.entities.discoverDuplicates(" + input + ");",
+      );
+      expect(response.success).toBe(true);
+      return response.return_value;
+    };
+    const pages: EntityDiscoverDuplicatesResult[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await readPage(cursor);
+      pages.push(page);
+      cursor = page.next_cursor ?? undefined;
+      if (cursor) {
+        expect(seenCursors.has(cursor)).toBe(false);
+        seenCursors.add(cursor);
+      }
+    } while (cursor);
+    expect(pages.map((page) => page.components.length)).toEqual([100, 100, 1]);
+    const components = pages.flatMap((page) => page.components);
+    expect(components.flatMap((component) => component.decisions)).toHaveLength(201);
+    const ids = components.flatMap((component) => component.candidate_entity_ids);
+    expect(ids).toHaveLength(402);
+    expect(new Set(ids).size).toBe(402);
+    expect(components.every((component) => component.candidate_entity_ids.length === 2)).toBe(true);
+    expect(await readPage()).toEqual(pages[0]);
+    // The MCP transport records every query_sdk call, including read-only calls.
+    const audit = await h.sql`SELECT id FROM events WHERE organization_id = ${h.workspace.org.id}
+      AND semantic_type = 'audit' AND origin_type = 'tool_invocation'
+      AND metadata->>'tool_name' = 'query_sdk'`;
+    expect(audit).toHaveLength(pages.length + 1);
+    expect(await h.state()).toEqual([{ ...before[0], events: before[0].events + audit.length }]);
+  });
 });
