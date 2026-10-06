@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
+import type {
+  AutomationScriptContext,
+  ReactionClient,
+} from "@lobu/connector-sdk";
 import runNetWorthSnapshot, {
   buildFinancialSnapshot,
   type ComponentEventRow,
@@ -143,16 +146,14 @@ function component(
   };
 }
 
-const ctx: ReactionContext = {
-  extracted_data: { summary: "Run the deterministic valuation." },
+const ctx: AutomationScriptContext = {
+  trigger_signals: [],
   entities: [],
   window: {
     run_id: 300,
     automation_id: 45,
     window_start: "2026-08-12T08:59:00.000Z",
     window_end: "2026-08-12T09:00:00.000Z",
-    granularity: "week",
-    content_analyzed: 0,
   },
   automation: {
     id: 45,
@@ -160,8 +161,8 @@ const ctx: ReactionContext = {
     name: "Net worth",
     version: 2,
   },
-  organization_id: "org-buremba",
-  organization_slug: "buremba",
+  organization_id: "synthetic-net-worth-org",
+  organization_slug: "synthetic-net-worth",
 };
 
 describe("financial snapshot builder", () => {
@@ -449,7 +450,7 @@ describe("financial snapshot builder", () => {
   });
 });
 
-describe("weekly net-worth reaction", () => {
+describe("weekly net-worth script", () => {
   test("reads both active sources, fetches quotes under run-scoped keys, and saves one versioned snapshot per week", async () => {
     const queries: string[] = [];
     const operationInputs: Array<{

@@ -20,9 +20,16 @@ describe("consolidated net-worth configuration", () => {
         skip_if_unchanged: false,
       },
     ]);
-    expect(automation?.reaction).toMatchObject({
+    expect(automation?.executor).toMatchObject({
+      kind: "scriptSource",
       path: "./net-worth.reaction.ts",
     });
+    expect(automation?.reaction).toBeNull();
+    expect(automation?.prompt).toBeUndefined();
+    expect(automation?.reactionsGuidance).toBeUndefined();
+    expect(Object.values(automation?.sources ?? {})).toEqual([
+      expect.objectContaining({ context: true }),
+    ]);
   });
 
   test("exposes the latest precomputed scalar and bounded drilldown as a derived entity", () => {
