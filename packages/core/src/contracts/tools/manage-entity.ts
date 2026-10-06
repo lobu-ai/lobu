@@ -74,9 +74,10 @@ const Metadata = Type.Record(Type.String(), Type.Unknown(), {
 
 // Carried by exactly the variants whose handler reads it: the principal seam
 // (`create`, `update`, `list`, `delete`, `merge`), the read gate that consults
-// it (`list_links`), and reaction tracking (`link`). `get` resolves its read
-// gate without one, and `unlink`/`update_link`/`resolve_duplicates`/`unmerge`
-// never consult it — declaring it there would advertise an inert field.
+// it (`list_links`), and reaction tracking (`link`). `get` and
+// `discover_duplicates` resolve their read gate without one, and
+// `unlink`/`update_link`/`resolve_duplicates`/`unmerge` never consult it —
+// declaring it there would advertise an inert field.
 const AutomationSource = Type.Object(
   {
     automation_id: Type.Number({
@@ -371,6 +372,30 @@ export const MergeEntitiesAction = Type.Object({
   automation_source: Type.Optional(AutomationSource),
 });
 
+export const DiscoverDuplicatesAction = Type.Object({
+  action: Type.Literal("discover_duplicates", {
+    description:
+      "Read whole duplicate components across all live entities of one type. Current-state sweep: changes behind the cursor are reconsidered next sweep. Writes nothing.",
+  }),
+  entity_type: EntityType,
+  limit: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      maximum: 100,
+      default: 50,
+      description:
+        "[discover_duplicates] Maximum whole components per page; also bounded to 199 proposed decisions.",
+    })
+  ),
+  cursor: Type.Optional(
+    Type.String({
+      maxLength: 2048,
+      description:
+        "[discover_duplicates] Opaque continuation from the preceding page, scoped to this workspace and entity type.",
+    })
+  ),
+});
+
 export const ResolveDuplicatesAction = Type.Object({
   action: Type.Literal("resolve_duplicates", {
     description:
@@ -404,6 +429,7 @@ export const ManageEntitySchema = Type.Union([
   UpdateLinkAction,
   ListLinksAction,
   MergeEntitiesAction,
+  DiscoverDuplicatesAction,
   ResolveDuplicatesAction,
   UnmergeEntityAction,
 ]);
@@ -422,6 +448,10 @@ export type EntityUpdateLinkInput = ActionInput<
   "update_link"
 >;
 export type EntityListLinksInput = ActionInput<ManageEntityArgs, "list_links">;
+export type EntityDiscoverDuplicatesInput = ActionInput<
+  ManageEntityArgs,
+  "discover_duplicates"
+>;
 
 // ============================================
 // Result Types
@@ -740,6 +770,33 @@ export const ManageEntityResultSchema = Type.Union([
     }),
   ]),
   Type.Object({
+    action: Type.Literal("discover_duplicates"),
+    candidates_scanned: Type.Integer(),
+    components: Type.Array(
+      Type.Object({
+        component_id: Type.Integer(),
+        candidate_count: Type.Integer(),
+        candidate_entity_ids: Type.Array(Type.Integer(), {
+          description:
+            "All component IDs for eligible components; empty for oversized components, which must not be partially submitted.",
+        }),
+        oversized: Type.Boolean(),
+        deferred_candidates: Type.Integer(),
+        decisions: Type.Array(
+          Type.Object({
+            winner_entity_id: Type.Integer(),
+            loser_entity_id: Type.Integer(),
+            fingerprint: Type.String({
+              description:
+                "Existing resolution assessment fingerprint for this pair and current evidence/policy; execution rechecks.",
+            }),
+          })
+        ),
+      })
+    ),
+    next_cursor: Type.Union([Type.String(), Type.Null()]),
+  }),
+  Type.Object({
     action: Type.Literal("resolve_duplicates"),
     candidates_scanned: Type.Integer(),
     groups_found: Type.Integer(),
@@ -763,3 +820,8 @@ export const ManageEntityResultSchema = Type.Union([
   }),
 ]);
 export type ManageEntityResult = Static<typeof ManageEntityResultSchema>;
+
+export type EntityDiscoverDuplicatesResult = Extract<
+  ManageEntityResult,
+  { action: "discover_duplicates" }
+>;

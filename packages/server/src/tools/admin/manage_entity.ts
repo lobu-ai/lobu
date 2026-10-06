@@ -15,6 +15,7 @@
  * - update_link: Update metadata/confidence/source on a relationship
  * - list_links: List relationships for an entity with filters
  * - merge: Fold confirmed duplicates into one canonical entity
+ * - discover_duplicates: Page whole duplicate components across one entity type (read-only)
  * - resolve_duplicates: Apply an entity type's configured resolution policy
  * - unmerge: Reverse a ledger-backed merge when its after-state is unchanged
  */
@@ -29,6 +30,7 @@ import {
 import {
 	CreateEntityAction,
 	DeleteEntityAction,
+	DiscoverDuplicatesAction,
 	GetEntityAction,
 	LinkEntitiesAction,
 	ListEntitiesAction,
@@ -68,7 +70,7 @@ import {
 	pgBigintArray,
 	pgTextArray,
 } from "../../db/client";
-import { discoverWorkspaceResolutionGroups } from "../../entity-resolution/discovery";
+import { discoverWorkspaceResolutionGroups, discoverWorkspaceResolutionPage } from "../../entity-resolution/discovery";
 import { loadLiveEntityIdentities } from "../../entity-resolution/identities";
 import {
 	assessEntityResolution,
@@ -131,7 +133,8 @@ import {
 import { validateEntityMetadata } from "../../utils/schema-validation";
 import { buildEntityUrl } from "../../utils/url-builder";
 import { trackAutomationReaction } from "../../utils/automation-reactions";
-import { isAdminOrOwnerRole } from "../access-control";
+import { requireOrgReadAccess } from "../../utils/organization-access";
+import { isAdminOrOwnerRole, isInProcessSystemCall } from "../access-control";
 import { MEMBER_ENTITY_TYPE_SLUG } from "../constants";
 import type { ToolContext } from "../registry";
 import {
@@ -306,6 +309,7 @@ const manageEntityTool = defineActionTool("manage_entity", {
 	update_link: action(UpdateLinkAction, handleUpdateLink),
 	list_links: action(ListLinksAction, handleListLinks),
 	merge: action(MergeEntitiesAction, handleMerge),
+	discover_duplicates: action(DiscoverDuplicatesAction, handleDiscoverDuplicates),
 	resolve_duplicates: action(ResolveDuplicatesAction, handleResolveDuplicates),
 	unmerge: action(UnmergeEntityAction, handleUnmerge),
 });
@@ -1179,6 +1183,25 @@ async function handleMerge(
 					: (resolution?.evidence ?? []),
 		},
 	};
+}
+
+async function handleDiscoverDuplicates(
+	args: Static<typeof DiscoverDuplicatesAction>,
+	ctx: ToolContext,
+): Promise<ManageEntityResult> {
+	if (!ctx.memberRole && !isInProcessSystemCall(ctx)) {
+		throw new ToolUserError("Duplicate discovery requires workspace membership", 403);
+	}
+	await requireOrgReadAccess(getDb(), ctx);
+	// Discovery can expose relationships inferred from member email addresses.
+	if (args.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberEmail(ctx.memberRole)) {
+		throw new ToolUserError("Member identity discovery requires workspace administrator access", 403);
+	}
+	await assertEntityReadAllowed(undefined, ctx, args.entity_type);
+	return discoverWorkspaceResolutionPage(getDb(), {
+		organizationId: ctx.organizationId, entityType: args.entity_type,
+		limit: args.limit, cursor: args.cursor,
+	});
 }
 
 async function handleResolveDuplicates(

@@ -1501,6 +1501,24 @@ export type ManageEntityData = {
       }
     | {
         /**
+         * Read whole duplicate components across all live entities of one type. Current-state sweep: changes behind the cursor are reconsidered next sweep. Writes nothing.
+         */
+        action: "discover_duplicates";
+        /**
+         * Entity type as defined in your workspace
+         */
+        entity_type: string;
+        /**
+         * [discover_duplicates] Maximum whole components per page; also bounded to 199 proposed decisions.
+         */
+        limit?: number;
+        /**
+         * [discover_duplicates] Opaque continuation from the preceding page, scoped to this workspace and entity type.
+         */
+        cursor?: string;
+      }
+    | {
+        /**
          * Discover duplicate components among candidate_entity_ids using the entity type's x-lobu-resolution policy, then auto-merge deterministic matches or queue review.
          */
         action: "resolve_duplicates";
@@ -1894,6 +1912,29 @@ export type ManageEntityResponses = {
             identifier: string;
           }>;
         };
+      }
+    | {
+        action: "discover_duplicates";
+        candidates_scanned: number;
+        components: Array<{
+          component_id: number;
+          candidate_count: number;
+          /**
+           * All component IDs for eligible components; empty for oversized components, which must not be partially submitted.
+           */
+          candidate_entity_ids: Array<number>;
+          oversized: boolean;
+          deferred_candidates: number;
+          decisions: Array<{
+            winner_entity_id: number;
+            loser_entity_id: number;
+            /**
+             * Existing resolution assessment fingerprint for this pair and current evidence/policy; execution rechecks.
+             */
+            fingerprint: string;
+          }>;
+        }>;
+        next_cursor: string | null;
       }
     | {
         action: "resolve_duplicates";

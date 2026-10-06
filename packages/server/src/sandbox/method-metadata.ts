@@ -91,6 +91,15 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
 		summary: "Raw manage_entity action wrapper. Prefer named methods.",
 		access: "admin",
 	},
+	"entities.discoverDuplicates": {
+		summary:
+			"Read complete duplicate components across all live entities and identity claims of one entity type. Page whole components with next_cursor; components over 26 candidates are explicitly withheld. Pages contain at most 199 proposed decisions. Current-state sweep: concurrent changes behind the cursor are reconsidered next sweep. Writes nothing; resolve_duplicates rechecks current evidence and policy.",
+		access: "read",
+		signature:
+			"entities.discoverDuplicates(input: { entity_type: string; limit?: number; cursor?: string }): Promise<{ action: 'discover_duplicates'; candidates_scanned: number; components: Array<{ component_id: number; candidate_count: number; candidate_entity_ids: number[]; oversized: boolean; deferred_candidates: number; decisions: Array<{ winner_entity_id: number; loser_entity_id: number; fingerprint: string }> }>; next_cursor: string | null }>",
+		example:
+			"const page = await client.entities.discoverDuplicates({ entity_type: '<entity-type>', limit: 50 });",
+	},
 	"entities.list": {
 		summary:
 			"List entities in the current organization with optional filters. Returns `{ action, entities, metadata }` where `entities` is the page and `metadata` carries `total_count`, `has_more`, `limit`, `offset`.",
