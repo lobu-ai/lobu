@@ -55,15 +55,26 @@ describe("built-in connector operation impact annotations", () => {
 			create_pull_request: "normal",
 			merge_pull_request: "high",
 		});
-		expectWriteImpact(googleCalendar, {
-			create_event: "normal",
-			update_event: "normal",
-			delete_event: "high",
-		});
-		expectWriteImpact(googleGmail, {
-			send_email: "normal",
-			create_draft: "normal",
-			reply: "normal",
-		});
+	});
+
+	// Google actions are compiled one per API method, so the write set is
+	// Discovery's; these pin the classes: DELETE is destructive, a POST that
+	// destroys data irreversibly is too, and a reversible one (trash) is not.
+	test.each([
+		["calendar", "events_delete", "high"],
+		["calendar", "calendars_clear", "high"],
+		["calendar", "events_insert", "normal"],
+		["calendar", "events_patch", "normal"],
+		["gmail", "users_messages_delete", "high"],
+		["gmail", "users_messages_batchDelete", "high"],
+		["gmail", "users_messages_trash", "normal"],
+		["gmail", "send_email", "normal"],
+		["gmail", "create_draft", "normal"],
+		["gmail", "reply", "normal"],
+	] as const)("google %s %s is %s impact", (api, key, impact) => {
+		const action = (api === "calendar" ? googleCalendar : googleGmail).actions?.[key];
+		expect(action).toBeDefined();
+		expect(action?.kind).not.toBe("read");
+		expect(action?.annotations?.destructiveHint === true).toBe(impact === "high");
 	});
 });

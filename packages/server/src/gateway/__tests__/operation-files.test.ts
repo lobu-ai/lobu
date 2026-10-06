@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { fileInputSchema, MAX_CONNECTOR_FILE_BYTES } from '@lobu/connector-sdk';
+import GoogleDriveConnector from '@lobu/connectors/google_drive';
 import { prepareOperationFiles, resolveOperationFiles } from '../../operations/file-inputs';
 import { ArtifactStore } from '../files/artifact-store';
 import { ingestInputFiles, inputArtifactId } from '../files/input-files';
@@ -78,5 +79,32 @@ describe('connector file authorization and resolution', () => {
     const [extra] = await upload('x');
     const largeSchema = { properties: { images: { type: 'array', items: fileInputSchema({ maxBytes: MAX_CONNECTOR_FILE_BYTES }) } } };
     await expect(prepareOperationFiles({ images: [file, extra] }, largeSchema, owner, env.artifactStore)).rejects.toThrow('12 MiB connector execution limit');
+  });
+
+  test('a Discovery-compiled Google upload sends the approved file byte for byte', async () => {
+    const bytes = Buffer.from([0x00, 0xff, 0x0d, 0x0a, 0x2d, 0x2d, 0x89, 0x50, 0x4e, 0x47]);
+    const [file] = await ingestInputFiles([{ name: 'pixel.png', mimeType: 'image/png', data: bytes }], owner, env.artifactStore, TEST_GATEWAY_URL);
+    const drive = new GoogleDriveConnector();
+    const schema = drive.definition.actions.files_create.inputSchema as Record<string, unknown>;
+    const prepared = await prepareOperationFiles({ body: { name: 'pixel.png' }, media: file }, schema, owner, env.artifactStore);
+    expect(prepared.claims.map((claim) => claim.path)).toEqual([['media']]);
+    const input = await resolveOperationFiles(prepared.input, { input_files: prepared.claims }, env.artifactStore);
+
+    const sent: Array<{ url: string; body: Uint8Array; contentType: string }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      sent.push({ url, body: init.body as Uint8Array, contentType: new Headers(init.headers).get('content-type') ?? '' });
+      return new Response(JSON.stringify({ id: 'F1', name: 'pixel.png' }), { headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    try {
+      const result = await drive.execute({ actionKey: 'files_create', input, credentials: { accessToken: 'token' }, config: {} } as never);
+      expect(result).toEqual({ success: true, output: { id: 'F1', name: 'pixel.png' } });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(sent[0].url).toStartWith('https://www.googleapis.com/upload/drive/v3/files?');
+    const boundary = sent[0].contentType.split('boundary=')[1];
+    const media = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Type: image/png\r\n\r\n`), bytes, Buffer.from(`\r\n--${boundary}--`)]);
+    expect(Buffer.from(sent[0].body).includes(media)).toBe(true);
   });
 });

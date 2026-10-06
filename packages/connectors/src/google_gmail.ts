@@ -23,7 +23,20 @@ import {
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
+import { compileGoogleActions, executeGoogleAction, oauthScopes } from './_google/actions';
+import type { DiscoveryDocument } from './_google/discovery';
+import gmailDiscovery from './_google/discovery/gmail_v1.json';
+import { GOOGLE_API_POLICIES } from './_google/policies';
 import TurndownService from 'turndown';
+
+/**
+ * Supported Gmail API methods as actions, compiled from the pinned Discovery
+ * document. The hand-written actions below stay: they compose several calls
+ * or decode MIME (`get_thread` returns readable bodies, `send_email` builds the
+ * RFC 2822 message) — work the raw methods leave to the caller.
+ */
+const GMAIL_POLICY = GOOGLE_API_POLICIES.gmail_v1;
+const GMAIL = compileGoogleActions(gmailDiscovery as unknown as DiscoveryDocument, GMAIL_POLICY);
 
 function createEmailBodyConverter(): TurndownService {
   const converter = new TurndownService({
@@ -167,15 +180,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         {
           type: 'oauth',
           provider: 'google',
-          requiredScopes: [
-            'https://www.googleapis.com/auth/gmail.readonly',
-            // compose covers drafts.create AND messages.send, so it is the single
-            // write scope for create_draft/reply/send_email. It must be required
-            // (not optional) — optional scopes are only requested when the caller
-            // explicitly asks for them, so an unadorned connect() would omit it
-            // and every write op would 403 insufficient-scope.
-            'https://www.googleapis.com/auth/gmail.compose',
-          ],
+          ...oauthScopes(GMAIL_POLICY),
           loginScopes: ['openid', 'email', 'profile'],
           clientIdKey: 'GOOGLE_CLIENT_ID',
           clientSecretKey: 'GOOGLE_CLIENT_SECRET',
@@ -323,6 +328,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       },
     },
     actions: {
+      ...GMAIL.actions,
       send_email: {
         key: 'send_email',
         name: 'Send Email',
@@ -637,7 +643,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         case 'download_attachment':
           return await this.downloadAttachment(http, ctx.input);
         default:
-          return { success: false, error: `Unknown action: ${ctx.actionKey}` };
+          return await executeGoogleAction(GMAIL, ctx, http);
       }
     } catch (error) {
       return {

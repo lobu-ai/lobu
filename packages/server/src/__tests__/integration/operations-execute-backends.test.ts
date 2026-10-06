@@ -31,10 +31,10 @@ const LOCAL = "demo.ops.backend.local";
 const MCP = "demo.ops.backend.mcp";
 const HTTP = "demo.ops.backend.http";
 const GOOGLE_CALENDAR_DELETE_ACTION = new GoogleCalendarConnector().definition
-	.actions?.delete_event;
+	.actions?.events_delete;
 
 if (!GOOGLE_CALENDAR_DELETE_ACTION) {
-	throw new Error("Google Calendar delete_event action is missing");
+	throw new Error("Google Calendar events_delete action is missing");
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -1083,7 +1083,7 @@ describe("operations.execute backend lifecycle", () => {
 				action: "execute",
 				connection_id: localConnectionId,
 				operation_key: "delete_event",
-				input: { event_id: "calendar-event-123" },
+				input: { eventId: "calendar-event-123" },
 			},
 			{} as Env,
 			ctx,
