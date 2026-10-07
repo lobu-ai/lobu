@@ -21,7 +21,7 @@ const logger = createLogger('acl-sync');
 export async function runAclSyncTick(coreServices: CoreServices): Promise<void> {
   const sources: Array<{ key: string; run: () => Promise<void> }> = [
     { key: 'slack', run: () => runSlackAclSyncTick(coreServices) },
-    { key: 'github', run: () => runGithubAclSyncTick(coreServices) },
+    { key: 'github', run: runGithubAclSyncTick },
   ];
   for (const source of sources) {
     try {

@@ -410,9 +410,7 @@ describe("acl observability", () => {
 				createDefaultFeed: false,
 			});
 
-			await runGithubAclSyncTick({
-				getAppInstallationStore: () => ({}),
-			} as unknown as Parameters<typeof runGithubAclSyncTick>[0]);
+			await runGithubAclSyncTick();
 
 			const [consentRow] = await sql`
         SELECT error_message FROM connections WHERE id = ${consentOnly.id}
@@ -451,9 +449,7 @@ describe("acl observability", () => {
       `;
 			expect(seeded?.error_message).not.toBeNull();
 
-			await runGithubAclSyncTick({
-				getAppInstallationStore: () => ({}),
-			} as unknown as Parameters<typeof runGithubAclSyncTick>[0]);
+			await runGithubAclSyncTick();
 
 			const [row] = await sql`
         SELECT error_message FROM connections WHERE id = ${conn.id}
@@ -483,9 +479,7 @@ describe("acl observability", () => {
         UPDATE connections SET error_message = ${formatAclErrorMessage("GitHub ACL sync unavailable: no repository feeds configured")} WHERE id = ${conn.id}
       `;
 
-			await runGithubAclSyncTick({
-				getAppInstallationStore: () => ({}),
-			} as unknown as Parameters<typeof runGithubAclSyncTick>[0]);
+			await runGithubAclSyncTick();
 
 			const [row] = await sql`
         SELECT error_message FROM connections WHERE id = ${conn.id}
@@ -539,9 +533,7 @@ describe("acl observability", () => {
         UPDATE connections SET error_message = 'oauth: token expired' WHERE id = ${conn.id}
       `;
 
-			await runGithubAclSyncTick({
-				getAppInstallationStore: () => ({}),
-			} as unknown as Parameters<typeof runGithubAclSyncTick>[0]);
+			await runGithubAclSyncTick();
 
 			const [row] = await sql`
         SELECT error_message FROM connections WHERE id = ${conn.id}

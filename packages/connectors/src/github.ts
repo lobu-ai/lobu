@@ -35,6 +35,7 @@ import {
   githubUserIdentityKey,
   normalizeGithubLogin,
   normalizeGithubRepoFullName,
+  resolveGithubToken,
 } from './github-identity.js';
 
 type GitHubContentType =
@@ -911,7 +912,7 @@ export default class GitHubConnector extends ConnectorRuntime {
   private async syncFeed(ctx: SyncContext): Promise<SyncResult> {
     const config = ctx.config as GitHubConfig;
     const repo = this.resolveRepo(config, {});
-    const token = this.resolveToken(ctx.credentials?.accessToken, config);
+    const token = resolveGithubToken(ctx.credentials?.accessToken, config);
     const contentType = (ctx.feedKey ?? 'issues') as GitHubContentType;
     // Cold start / checkpoint reset: resolveSince falls back to lookback_days
     // (default 365). Every PR in that window is first-seen and would flood
@@ -963,7 +964,7 @@ export default class GitHubConnector extends ConnectorRuntime {
     try {
       const config = ctx.config as GitHubConfig;
       const repo = this.resolveRepo(config, ctx.input);
-      const token = this.resolveToken(ctx.credentials?.accessToken, config);
+      const token = resolveGithubToken(ctx.credentials?.accessToken, config);
 
       if (!token) {
         return { success: false, error: 'GitHub action requires OAuth or GITHUB_TOKEN.' };
@@ -1046,7 +1047,7 @@ export default class GitHubConnector extends ConnectorRuntime {
       return { externalId: '', metadata: { delivery: 'app_installation', noop: true } };
     }
 
-    const token = this.resolveToken(ctx.credentials?.accessToken, ctx.config);
+    const token = resolveGithubToken(ctx.credentials?.accessToken, ctx.config);
     if (!token) {
       throw new Error('GitHub webhook registration requires OAuth or GITHUB_TOKEN.');
     }
@@ -1093,7 +1094,7 @@ export default class GitHubConnector extends ConnectorRuntime {
     const externalId = ctx.externalId;
     if (!externalId) return;
 
-    const token = this.resolveToken(ctx.credentials?.accessToken, ctx.config);
+    const token = resolveGithubToken(ctx.credentials?.accessToken, ctx.config);
     if (!token) return;
 
     const base = this.hooksApiUrl(ctx.config);
@@ -1123,20 +1124,6 @@ export default class GitHubConnector extends ConnectorRuntime {
     }
 
     return { owner, repo };
-  }
-
-  private resolveToken(oauthToken: string | undefined, config: GitHubConfig): string | null {
-    if (oauthToken && oauthToken.trim().length > 0) {
-      return oauthToken;
-    }
-
-    const envOverrides = config.env_overrides ?? {};
-    const configuredToken =
-      asString(envOverrides.GITHUB_TOKEN) ??
-      asString((config as Record<string, unknown>).GITHUB_TOKEN) ??
-      asString((config as Record<string, unknown>).github_token);
-
-    return configuredToken ?? null;
   }
 
   private resolveSince(checkpoint: Record<string, unknown> | null, lookbackDays: number): string {

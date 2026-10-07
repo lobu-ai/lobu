@@ -16,13 +16,12 @@
 
 import { createLogger } from '@lobu/core';
 import { getDb } from '../db/client.js';
-import { getInstallationTokenRegistry } from '../gateway/installation/registry.js';
-import type { CoreServices } from '../gateway/services/core-services.js';
-import type { AppInstallationStore } from '../lobu/stores/app-installation-store.js';
+import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context.js';
 import {
   type GithubRepoCollaborator,
   githubAclSource,
   githubReposToResources,
+  resolveGithubToken,
 } from '@lobu/connectors/github-identity';
 import {
   ACL_ERROR_MESSAGE_PREFIX,
@@ -50,6 +49,7 @@ export interface GithubAclSyncDeps {
   /** A repo's current collaborators. Throws on a GitHub-level error (fail-closed). */
   fetchCollaborators: (params: {
     organizationId: string;
+    connectionId: string;
     repo: GithubRepoRef;
   }) => Promise<GithubRepoCollaborator[]>;
 }
@@ -114,7 +114,7 @@ async function syncGithubConnectionAclLocked(
   try {
     const repoInputs = [];
     for (const repo of repos) {
-      const collaborators = await deps.fetchCollaborators({ organizationId, repo });
+      const collaborators = await deps.fetchCollaborators({ organizationId, connectionId, repo });
       repoInputs.push({ fullName: `${repo.owner}/${repo.repo}`, collaborators });
     }
     await buildAccessGraph({
@@ -198,11 +198,12 @@ async function fetchRepoCollaborators(
  * converge within the cadence and the gate's freshness window keeps a stalled
  * connection fail-closed. Runs on one replica per tick (the runs-queue claim).
  *
- * NOTE: the live token/collaborator path needs a real GitHub App install to
- * verify end to end; the sync LOGIC is covered by `__tests__/.../github-acl-sync`
- * driving {@link syncGithubConnectionAcl} with stubbed deps.
+ * NOTE: the live collaborator API needs an authorized connection to verify end
+ * to end; the sync LOGIC is covered by `__tests__/.../github-acl-sync` driving
+ * {@link syncGithubConnectionAcl} with stubbed deps, and the per-connection
+ * credential wiring by `__tests__/.../github-acl-connection-auth`.
  */
-export async function runGithubAclSyncTick(coreServices: CoreServices): Promise<void> {
+export async function runGithubAclSyncTick(): Promise<void> {
   const sql = getDb();
   // Residue release, BEFORE the sweep below. The exclusion stops NEW failures but
   // cannot undo old ones: `clearConnectionAclError` only clears behind a
@@ -243,8 +244,9 @@ export async function runGithubAclSyncTick(coreServices: CoreServices): Promise<
 	`;
   if (connections.length === 0) return;
 
-  const installStore = coreServices.getAppInstallationStore();
-
+  // One credential resolution per connection, not per repo: a managed grant or
+  // App mint is a network round trip.
+  const tokens = new Map<string, Promise<string | null>>();
   const deps: GithubAclSyncDeps = {
     listRepos: async ({ connectionId }) => {
       const rows = await sql<{ config: Record<string, unknown> | null }>`
@@ -252,10 +254,15 @@ export async function runGithubAclSyncTick(coreServices: CoreServices): Promise<
 			`;
       return repoRefsFromFeedConfigs(rows.map((r) => r.config));
     },
-    fetchCollaborators: async ({ organizationId, repo }) => {
-      const token = await resolveGithubInstallationToken(installStore, organizationId);
-      if (!token) throw new Error(`No GitHub installation token for org ${organizationId}`);
-      return fetchRepoCollaborators(token, repo);
+    fetchCollaborators: async ({ organizationId, connectionId, repo }) => {
+      let token = tokens.get(connectionId);
+      if (!token) {
+        token = resolveGithubConnectionToken(organizationId, connectionId);
+        tokens.set(connectionId, token);
+      }
+      const resolved = await token;
+      if (!resolved) throw new Error(`No GitHub credential for connection ${connectionId}`);
+      return fetchRepoCollaborators(resolved, repo);
     },
   };
 
@@ -282,25 +289,35 @@ export async function runGithubAclSyncTick(coreServices: CoreServices): Promise<
   });
 }
 
-/** Resolve an org's GitHub App installation token (collaborator-capable), minted
- * the same way the install flow does (`mintFor` over the install row with the
- * app-id/private-key env-var names). Returns null when the org has no active
- * GitHub install. */
-async function resolveGithubInstallationToken(
-  installStore: AppInstallationStore,
+/** ACL reads spend the SAME connection authority as feed reads — never an
+ * arbitrary org App installation, which would ignore OAuth/PAT connections and
+ * could carry a different installation's repository scope. The shared resolver
+ * keeps App precedence, refresh, managed grants and tenant binding in one place. */
+async function resolveGithubConnectionToken(
   organizationId: string,
+  connectionId: string,
 ): Promise<string | null> {
-  const installs = await installStore.listByProviderAndOrg('github', organizationId);
-  const install = installs.find((i) => i.status === 'active');
-  if (!install) return null;
-  const installWithKeys = {
-    ...install,
-    metadata: {
-      ...install.metadata,
-      appIdKey: install.metadata?.appIdKey ?? 'GITHUB_APP_ID',
-      privateKeyKey: install.metadata?.privateKeyKey ?? 'GITHUB_APP_PRIVATE_KEY',
-    },
-  };
-  const minted = await getInstallationTokenRegistry().mintFor(installWithKeys);
-  return minted.token;
+  const sql = getDb();
+  const [connection] = await sql<{
+    auth_profile_id: number | null;
+    app_auth_profile_id: number | null;
+    config: Record<string, unknown> | null;
+  }>`
+    SELECT auth_profile_id, app_auth_profile_id, config FROM connections
+    WHERE id = ${Number(connectionId)} AND organization_id = ${organizationId}
+      AND connector_key = 'github' AND status = 'active' AND deleted_at IS NULL
+  `;
+  if (!connection) return null;
+  const { credentials, connectionCredentials } = await resolveExecutionAuth({
+    organizationId,
+    connectionId: Number(connectionId),
+    authProfileId: connection.auth_profile_id,
+    appAuthProfileId: connection.app_auth_profile_id,
+    credentialDb: sql,
+    logMessage: 'Failed to resolve GitHub ACL credentials',
+  });
+  return resolveGithubToken(
+    credentials?.accessToken,
+    mergeExecutionConfig(connection.config, connectionCredentials),
+  );
 }
