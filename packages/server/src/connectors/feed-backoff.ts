@@ -10,14 +10,15 @@
  * the worker-reported outcome, the gateway failing a claimed run whose
  * connector bundle cannot be produced, and the reaper timing out a sync after
  * it crossed the worker-claim boundary), source wake scheduling
- * (runs/feed-notifications.ts), source listener retries
- * (runs/source-feed-listener.ts), and the `feed.auto_paused` signal
+ * (runs/feed-notifications.ts), and the `feed.auto_paused` signal
  * (automations/platform-events.ts) read the same numbers. It applies ONLY to a
  * run that was claimed for the feed. A never-claimed run is a dispatch failure
  * — the connector never ran — so check-stalled-executions.ts deliberately does
  * not consume this source-health budget. Manual feeds normally stay unscheduled
  * after failure; a retained source wake hint may re-arm one under this same
  * delay.
+ * Source listener setup reuses only the base delay and cap. It keeps retrying
+ * without hard-pausing, so a recovered browser/source can attach again.
  *
  *  1. Exponential backoff on `next_run_at` after a failure, so a failing feed
  *     retries progressively less often instead of every cadence.
