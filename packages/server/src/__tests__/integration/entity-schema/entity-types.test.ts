@@ -323,6 +323,19 @@ describe('entity schema CRUD', () => {
       await owner.entity_schema.deleteType({ slug: 'facet-asset' });
     });
 
+    it('validates collection presentation on both create and update', async () => {
+      const invalid = { 'x-lobu-collection': { table: { sort: { field: 'bad;field', order: 'asc' } } } };
+      await expect(owner.entity_schema.createType({
+        slug: 'invalid-collection', name: 'Invalid collection', metadata_schema: invalid,
+      })).rejects.toThrow(/metadata_schema.x-lobu-collection/);
+      const valid = { 'x-lobu-collection': { presets: [{ key: 'active', label: 'Active', selection: { filters: [{ field: 'status', op: 'eq', value: 'active' }] } }] } };
+      await owner.entity_schema.createType({ slug: 'collection-asset', name: 'Collection asset', metadata_schema: valid });
+      await expect(owner.entity_schema.updateType({ slug: 'collection-asset', metadata_schema: invalid })).rejects.toThrow(/metadata_schema.x-lobu-collection/);
+      const saved = await owner.entity_schema.getType('collection-asset') as { entity_type: { metadata_schema: unknown } };
+      expect(saved.entity_type.metadata_schema).toEqual(valid);
+      await owner.entity_schema.deleteType({ slug: 'collection-asset' });
+    });
+
     it('lists user-created types alongside system types', async () => {
       await owner.entity_schema.createType({ slug: 'lst-asset', name: 'Lst' });
       const list = (await owner.entity_schema.listTypes()) as {

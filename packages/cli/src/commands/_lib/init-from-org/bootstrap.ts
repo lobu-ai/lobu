@@ -428,6 +428,11 @@ function emitEntityType(
   if (e.properties && Object.keys(e.properties).length > 0) {
     fields.push(`properties: ${emitValue(e.properties, 1)}`);
   }
+  if (e.schemaExtras?.["x-lobu-collection"]) {
+    fields.push(
+      `collection: ${emitValue(e.schemaExtras["x-lobu-collection"], 1)}`
+    );
+  }
   // Declared metrics round-trip as the four top-level fields on defineEntityType
   // (not nested under `metrics`). Without this, `init --from-org` → `apply` would
   // diff metrics as a change and wipe them. (NOTE: `backing` has the same

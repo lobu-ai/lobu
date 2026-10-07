@@ -360,6 +360,12 @@ mountView(view, V);
 		await expect(
 			setView(SIMPLE_SOURCE, { key: "Custom:Name" })
 		).rejects.toThrow(/key/i);
+		// Collection selection and presentation state are shell-owned on every page.
+		for (const key of ["$collection", "$preset", "$table"]) {
+			await expect(
+				setView(SIMPLE_SOURCE, { params: { [key]: { type: "string" } } })
+			).rejects.toThrow(/reserved/);
+		}
 		// The shell's peek pane reads peek/peek_* on every page, view paths too.
 		await expect(
 			setView(SIMPLE_SOURCE, { params: { peek: { type: "string" } } })

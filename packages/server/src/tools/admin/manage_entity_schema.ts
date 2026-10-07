@@ -22,6 +22,7 @@ import {
   type RelationshipTypeRuleRow,
 } from '@lobu/core/contracts/tools/manage-entity-schema';
 import { Value } from '@sinclair/typebox/value';
+import { COLLECTION_PRESENTATION_KEY, parseCollectionPresentation } from '@lobu/core/contracts/tools/collection-presentation';
 import { validateEntityMetrics } from '@lobu/connector-sdk';
 import { isPlatformEventType, platformEventKinds } from '../../automations/platform-event-catalog';
 import { compileEntityRule } from '../../authz/entity-rule-executor';
@@ -1037,6 +1038,14 @@ function validateEntityMetadataSchemaDisplayConfig(
 ): void {
   if (!metadataSchema || typeof metadataSchema !== 'object' || Array.isArray(metadataSchema)) {
     return;
+  }
+
+  if (metadataSchema[COLLECTION_PRESENTATION_KEY] !== undefined) {
+    try {
+      parseCollectionPresentation(metadataSchema[COLLECTION_PRESENTATION_KEY]);
+    } catch (error) {
+      throw invalidSchema(`metadata_schema.${COLLECTION_PRESENTATION_KEY}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   const properties = metadataSchema.properties;

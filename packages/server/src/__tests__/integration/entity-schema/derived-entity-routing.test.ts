@@ -105,6 +105,33 @@ describe('derived entity routing (list + resolve_path)', () => {
     expect(Number(byName.acme.metadata.purchases)).toBe(2);
   });
 
+  it('accepts the entity table default sort without a source created_at column', async () => {
+    const result = await api.entities.list({ entity_type: 'spend-vendor', sort_by: 'created_at', sort_order: 'desc' }) as { entities: Array<{ name: string }> };
+    expect(result.entities.map(row => row.name).sort()).toEqual(['acme', 'globex']);
+  });
+
+  it('sorts the complete derived result before pagination in both directions', async () => {
+    for (const [order, first, second] of [['asc', 'acme', 'globex'], ['desc', 'globex', 'acme']] as const) {
+      const page = (offset: number) => api.entities.list({ entity_type: 'spend-vendor', sort_by: 'total_spend', sort_order: order, limit: 1, offset });
+      const a = await page(0) as { entities: Array<{ name: string }>; metadata: { sort_by: string; sort_order: string } };
+      const b = await page(1) as { entities: Array<{ name: string }> };
+      expect(a.entities.map(row => row.name)).toEqual([first]);
+      expect(b.entities.map(row => row.name)).toEqual([second]);
+      expect(a.metadata).toMatchObject({ sort_by: 'total_spend', sort_order: order });
+    }
+    const defaultOrder = await api.entities.list({ entity_type: 'spend-vendor', sort_by: 'total_spend', limit: 1 }) as { entities: Array<{ name: string }>; metadata: { sort_order: string } };
+    expect(defaultOrder.entities[0].name).toBe('globex');
+    expect(defaultOrder.metadata.sort_order).toBe('desc');
+    await expect(api.entities.list({ entity_type: 'spend-vendor', sort_by: 'name; DROP TABLE entities' })).rejects.toThrow(/sort_by/);
+  });
+
+  it('keeps equal sort values in canonical identity order across page boundaries', async () => {
+    const sql = "SELECT * FROM (VALUES ('b', 20), ('a', 20), ('c', 10)) AS rows(slug, amount)";
+    const pages = await Promise.all([0, 1, 2].map(offset => queryDerivedEntityView(sql, undefined,
+      { limit: 1, offset, sort_by: 'amount', sort_order: 'desc' }, ownerToolContext(orgAId, userId))));
+    expect(pages.flatMap(page => page.rows.map(row => row.slug))).toEqual(['a', 'b', 'c']);
+  });
+
   it('entity list reports the true derived total while schema list/get/bootstrap skip the live derived count', async () => {
     // Policy: the entity LIST runs the backing SQL anyway (it needs the rows),
     // so it reports the exact total via a single-pass window count. Schema

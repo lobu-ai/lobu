@@ -870,6 +870,7 @@ export class ApplyClient {
       backing,
       metrics,
       resolutionPolicy,
+      collection,
       rulesSource,
     } = entity;
     const payload: Record<string, unknown> = { slug };
@@ -879,6 +880,8 @@ export class ApplyClient {
       properties !== undefined ||
       required !== undefined ||
       resolutionPolicy !== undefined ||
+      collection !== undefined ||
+      clearFacets?.has("collection") ||
       clearFacets?.has("properties") ||
       clearFacets?.has("required") ||
       clearFacets?.has("resolutionPolicy")
@@ -891,6 +894,11 @@ export class ApplyClient {
       const extras: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(schemaExtras ?? {})) {
         if (HOISTED_SCHEMA_KEYS.has(key)) continue;
+        if (
+          key === "x-lobu-collection" &&
+          (collection !== undefined || clearFacets?.has("collection"))
+        )
+          continue;
         // The resolution policy is config-owned when declared, and removed under
         // prune — either way the declared/cleared value wins over out-of-band.
         if (
@@ -932,6 +940,9 @@ export class ApplyClient {
       payload.metadata_schema = {
         ...extras,
         ...(resolutionPolicy ?? {}),
+        ...(collection !== undefined
+          ? { "x-lobu-collection": collection }
+          : {}),
         type: "object",
         properties: effectiveProperties ?? {},
         ...(effectiveRequired && effectiveRequired.length > 0
