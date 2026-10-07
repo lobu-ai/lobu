@@ -47,6 +47,8 @@ import {
 import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
 
 const SOURCE_OBSERVATION_ERROR_ID = "whatsapp-web:source-observation-error";
+// Each durable browser record is limited to 128 KiB, including its checkpoint.
+const SOURCE_RECORD_MAX_BYTES = 128 * 1024;
 
 /**
  * How long a run waits for WhatsApp Web to finish hydrating before giving up.
@@ -985,17 +987,33 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         head: {}, backfill: { complete: true, cursor_chat_jid: null, inventory: [], chats: {} },
         observation: { after: replay.after, started_at: startedAt, chat_filter: chatFilter },
       };
-      await invokeAdapter(dispatcher, tabId, {
-        op: "publish_changes", bridge_id: binding.bridge_id, token: binding.token,
-        batch: {
-          id: `replay:${chatFilter}:${startedAt}:${after}:${replay.after}`,
-          events: replay.references.map(reference => ({ id: reference.id, event_type: "message.created",
-            resource_type: "message", resource_ref: reference.id,
-            occurred_at: new Date(reference.timestamp * 1000).toISOString() })),
-          checkpoint: { previous: cursor, next },
-          more: replay.hasMore && page === 9,
-        },
-      });
+      const events = replay.references.map(reference => ({
+        id: reference.id, event_type: "message.created", resource_type: "message",
+        resource_ref: reference.id, occurred_at: new Date(reference.timestamp * 1000).toISOString(),
+      }));
+      for (let offset = 0; ;) {
+        const batchThrough = (end: number) => ({
+          id: `replay:${chatFilter}:${startedAt}:${after}:${replay.after}:${offset}`,
+          events: events.slice(offset, end),
+          // Earlier chunks may be replayed after interruption; existing signal
+          // dedupe handles them. Advance only after the entire page is accepted.
+          ...(end === events.length ? { checkpoint: { previous: cursor, next } } : {}),
+          more: end === events.length && replay.hasMore && page === 9,
+        });
+        let end = Math.min(offset + 500, events.length);
+        let batch = batchThrough(end);
+        const size = () => new TextEncoder().encode(JSON.stringify(batch)).length;
+        while (size() > SOURCE_RECORD_MAX_BYTES && end - offset > 1) {
+          end = offset + Math.floor((end - offset) / 2);
+          batch = batchThrough(end);
+        }
+        if (size() > SOURCE_RECORD_MAX_BYTES) throw new Error("Source reference or checkpoint exceeds the browser record limit");
+        await invokeAdapter(dispatcher, tabId, {
+          op: "publish_changes", bridge_id: binding.bridge_id, token: binding.token, batch,
+        });
+        if (end === events.length) break;
+        offset = end;
+      }
       if (!replay.hasMore) return;
       cursor = next;
       after = replay.after;

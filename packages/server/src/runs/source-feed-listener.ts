@@ -30,7 +30,8 @@ export async function recordSourceFeedFailure(
     next_run_at = now() + (LEAST(${feedBackoff.maxMs}::bigint,
       ${feedBackoff.baseMs}::bigint * (2 ^ LEAST(consecutive_failures, 30))::bigint) || ' milliseconds')::interval
     WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
-      AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb`;
+      AND status = 'active' AND deleted_at IS NULL
+      ${config === undefined ? sql`` : sql`AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb`}`;
 }
 
 /** Both notification delivery and reconnect reconciliation use the same queue identity. */
@@ -82,66 +83,74 @@ export async function reconcileSourceFeedListeners(
           AND a.triggers @> jsonb_build_array(jsonb_build_object('kind', 'event', 'connector_key', c.connector_key)))
   `;
   for (const feed of feeds) {
-    // An active task already owns this feed; skip the owner/visibility scans
-    // while it waits for its browser binding (served by the partial active-task index).
-    const [pending] = await sql`SELECT id FROM runs
-      WHERE idempotency_key = ${listenerTaskKey(feed.organization_id, Number(feed.id))}
-        AND status IN ('pending', 'claimed', 'running')`;
-    if (pending) continue;
-    if (!(await sourceFeedSubscriptions(sql, feed.organization_id, Number(feed.id))).length) continue;
-    await sql.begin(tx => enqueueSourceFeedListener(tx, feed.organization_id, Number(feed.id)));
+    const task = { organizationId: feed.organization_id, feedId: Number(feed.id) };
+    try {
+      // An active task owns this feed; the partial active-task index avoids
+      // repeating its owner/visibility scans while it waits for the browser.
+      const [pending] = await sql`SELECT id FROM runs
+        WHERE idempotency_key = ${listenerTaskKey(task.organizationId, task.feedId)}
+          AND status IN ('pending', 'claimed', 'running')`;
+      if (pending) continue;
+      if (!(await sourceFeedSubscriptions(sql, task.organizationId, task.feedId)).length) continue;
+      await sql.begin(tx => enqueueSourceFeedListener(tx, task.organizationId, task.feedId));
+    } catch (error) {
+      await recordSourceFeedFailure(sql, task, undefined, 'Source listener reconciliation failed; retrying.');
+      throw error;
+    }
   }
 }
 
 export async function runSourceFeedListener(task: SourceFeedListenerTask): Promise<void> {
   const sql = getDb();
-  const [subscription] = await sourceFeedSubscriptions(sql, task.organizationId, task.feedId);
-  if (!subscription) return;
-
-  const [feed] = await sql`
-    SELECT f.id, f.connection_id, f.feed_key, f.config, f.checkpoint, f.pinned_version,
-      c.connector_key, c.config AS connection_config, c.auth_profile_id, c.app_auth_profile_id,
-      d.version AS definition_version,
-      (SELECT cv.compiled_code_hash FROM connector_versions cv
-       WHERE cv.connector_key = c.connector_key AND cv.version = COALESCE(f.pinned_version, d.version)
-         AND (cv.organization_id = c.organization_id OR cv.organization_id IS NULL)
-       ORDER BY cv.organization_id NULLS LAST LIMIT 1) AS selected_artifact_hash
-    FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
-    JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
-    WHERE f.id = ${task.feedId} AND f.organization_id = ${task.organizationId}
-  `;
-  if (!feed) return;
-
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), LISTENER_SETUP_TIMEOUT_MS);
-  const browser = createSourceReadBridge(
-    {
-      id: Number(feed.id),
-      connection_id: Number(feed.connection_id),
-      feed_key: String(feed.feed_key),
-      connector_key: String(feed.connector_key),
-      pinned_version: feed.pinned_version,
-      definition_version: feed.definition_version,
-      selected_artifact_hash: feed.selected_artifact_hash,
-    },
-    {
-      scope: {
-        organizationId: task.organizationId,
-        principal: subscription.principal,
-        agentId: subscription.agentId,
-      },
-      automationId: subscription.automationId,
-      feedId: task.feedId,
-      deadlineAt: Date.now() + LISTENER_SETUP_TIMEOUT_MS,
-      sourceSubscription: true,
-    },
-    controller.signal,
-  );
+  let browser: ReturnType<typeof createSourceReadBridge> | undefined;
   let status: 'completed' | 'failed' | 'timeout' = 'failed';
-  const checkpoint = feed.checkpoint?.cursor as Record<string, unknown> | null ?? null;
-  const config = feed.config ?? {};
+  let config: Record<string, unknown> | undefined;
 
   try {
+    const [subscription] = await sourceFeedSubscriptions(sql, task.organizationId, task.feedId);
+    if (!subscription) return;
+
+    const [feed] = await sql`
+      SELECT f.id, f.connection_id, f.feed_key, f.config, f.checkpoint, f.pinned_version,
+        c.connector_key, c.config AS connection_config, c.auth_profile_id, c.app_auth_profile_id,
+        d.version AS definition_version,
+        (SELECT cv.compiled_code_hash FROM connector_versions cv
+         WHERE cv.connector_key = c.connector_key AND cv.version = COALESCE(f.pinned_version, d.version)
+           AND (cv.organization_id = c.organization_id OR cv.organization_id IS NULL)
+         ORDER BY cv.organization_id NULLS LAST LIMIT 1) AS selected_artifact_hash
+      FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
+      JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
+      WHERE f.id = ${task.feedId} AND f.organization_id = ${task.organizationId}
+    `;
+    if (!feed) return;
+
+    browser = createSourceReadBridge(
+      {
+        id: Number(feed.id),
+        connection_id: Number(feed.connection_id),
+        feed_key: String(feed.feed_key),
+        connector_key: String(feed.connector_key),
+        pinned_version: feed.pinned_version,
+        definition_version: feed.definition_version,
+        selected_artifact_hash: feed.selected_artifact_hash,
+      },
+      {
+        scope: {
+          organizationId: task.organizationId,
+          principal: subscription.principal,
+          agentId: subscription.agentId,
+        },
+        automationId: subscription.automationId,
+        feedId: task.feedId,
+        deadlineAt: Date.now() + LISTENER_SETUP_TIMEOUT_MS,
+        sourceSubscription: true,
+      },
+      controller.signal,
+    );
+    const checkpoint = feed.checkpoint?.cursor as Record<string, unknown> | null ?? null;
+    config = feed.config ?? {};
     // Keep setup due until it completes. A gateway crash after binding the page
     // must still be recoverable when the abandoned task is reaped.
     const [started] = await sql`UPDATE feeds SET next_run_at = now()
@@ -202,6 +211,6 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
     if (controller.signal.aborted) status = 'timeout';
     controller.abort();
     clearTimeout(timer);
-    await browser.settle(status);
+    await browser?.settle(status);
   }
 }

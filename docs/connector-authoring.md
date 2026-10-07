@@ -168,7 +168,10 @@ then publish reference batches through the existing page transport:
 }
 ```
 
-Each batch contains at most 500 references and 128 KiB. The browser sends
+Each batch contains at most 500 references and 128 KiB, including its checkpoint.
+Split oversized source pages into ordered batches with stable IDs, and put the
+page checkpoint only on the final batch so interruption cannot skip references.
+The browser sends
 bounded batches through its normal worker poll; it accepts at most 64 listener
 bindings and reports every accepted binding on each poll. The server queues
 matching Automations using the existing delivery dedupe and batching, and

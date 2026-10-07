@@ -197,7 +197,7 @@ const FeedReferenceEventSchema = Type.Object(
   { additionalProperties: false }
 );
 
-/** A replay page stays atomic in the existing browser buffer and delivery transaction. */
+/** Each reference batch is atomic in the existing browser buffer and delivery transaction. */
 const FeedReferenceBatchSchema = Type.Object(
   {
     id: Type.String({ minLength: 1, maxLength: 1024 }),

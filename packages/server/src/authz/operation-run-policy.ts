@@ -9,6 +9,7 @@ import { insertEvent } from '../utils/insert-event';
 import type { ConnectorPolicyResult } from './connector-policy';
 import { resolveActingPrincipal, resolveConnectorPolicy, resolveStoredActingPrincipal } from './entity-policy';
 import { compileConnectionRowVisibility } from './connection-visibility';
+import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 
 /** Only the server's connector-to-browser bridge writes this marker. */
 export const CONNECTOR_PARENT_RUN_METADATA_KEY = 'connector_parent_run_id';
@@ -60,19 +61,15 @@ async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run
 
 async function isSourceReadFeedStillReadable(sql: DbClient, organizationId: string, run: PolicyRun): Promise<boolean> {
   const visibility = compileConnectionRowVisibility({ organizationId, principal: run.created_by_user_id }, 'c');
-  const feeds = await sql.unsafe(`
-    SELECT f.id FROM feeds f JOIN connections c ON c.id = f.connection_id
-    WHERE f.id = $1 AND f.organization_id = $2 AND f.connection_id = $3
+  const feeds = await sql`
+    SELECT f.id FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
+    JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
+    WHERE f.id = ${run.feed_id} AND f.organization_id = ${organizationId} AND f.connection_id = ${run.connection_id}
       AND f.status = 'active' AND f.deleted_at IS NULL
-      AND c.connector_key = $4 AND c.status = 'active' AND c.deleted_at IS NULL
-      ${visibility}
-      AND (SELECT cd.feeds_schema->f.feed_key->'operations' ? 'read' FROM connector_definitions cd
-        WHERE cd.key = c.connector_key AND cd.organization_id = f.organization_id
-          AND ((f.pinned_version IS NULL AND cd.status = 'active')
-            OR (f.pinned_version IS NOT NULL AND (cd.version = f.pinned_version OR cd.status = 'active')))
-        ORDER BY (cd.version = f.pinned_version) DESC, (cd.status = 'active') DESC,
-          cd.updated_at DESC, cd.id DESC LIMIT 1)
-  `, [run.feed_id, organizationId, run.connection_id, run.connector_key]);
+      AND c.connector_key = ${run.connector_key} AND c.status = 'active' AND c.deleted_at IS NULL
+      ${sql.unsafe(visibility)}
+      AND d.feeds_schema->f.feed_key->'operations' ? 'read'
+  `;
   return feeds.length > 0;
 }
 

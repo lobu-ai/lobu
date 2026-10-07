@@ -3,7 +3,7 @@ import { createGithubWebhookDelivery, deliverGithubConnectorConnectionWebhook } 
 import { receiveFeedNotifications, requestFeedSync, sourceFeedContextForRun } from '../../runs/feed-notifications';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { addUserToOrganization, createTestAgent, createTestOrganization, createTestUser } from '../setup/test-fixtures';
-import { enqueueSourceFeedListener, reconcileSourceFeedListeners } from '../../runs/source-feed-listener';
+import { enqueueSourceFeedListener, reconcileSourceFeedListeners, runSourceFeedListener } from '../../runs/source-feed-listener';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from '../../runs/source-feed-subscriptions';
 import * as subscriptions from '../../runs/source-feed-subscriptions';
 import * as activation from '../../automations/activation';
@@ -80,6 +80,23 @@ function referenceDelivery() {
 
 describe('source feed notifications', () => {
   beforeEach(cleanupTestDatabase);
+
+  it.each(['setup', 'reconciliation'])('backs off %s when subscription lookup fails before browser dispatch', async (stage) => {
+    const { sql, notice, task, org, device } = await subscribedFixture();
+    await sql`UPDATE feeds SET status = 'paused' WHERE organization_id = ${org.id} AND id <> ${notice.feed_id}`;
+    const lookup = vi.spyOn(subscriptions, 'sourceFeedSubscriptions').mockRejectedValueOnce(new Error('Synthetic lookup failure'));
+    try {
+      const operation = stage === 'setup' ? runSourceFeedListener(task)
+        : reconcileSourceFeedListeners(sql, device.id, [org.id], []);
+      await expect(operation).rejects.toThrow('Synthetic lookup failure');
+      const [feed] = await sql`SELECT consecutive_failures, last_error, next_run_at > now() AS deferred
+        FROM feeds WHERE id = ${notice.feed_id}`;
+      expect(feed).toMatchObject({ consecutive_failures: 1, deferred: true });
+      expect(feed.last_error).toBeTruthy();
+    } finally {
+      lookup.mockRestore();
+    }
+  });
 
   it('delivers reference batches directly to existing coalescing subscriptions without a source runner', async () => {
     const { sql, org, device, notice, automationId } = await subscribedFixture();
