@@ -18,7 +18,12 @@ export interface SourceFeedSubscription {
 }
 
 /** Resolve subscriptions through the persisted owner and canonical connection visibility. */
-export async function sourceFeedSubscriptions(sql: DbClient, organizationId: string, feedId: number, automationId?: number): Promise<SourceFeedSubscription[]> {
+export async function sourceFeedSubscriptions(
+  sql: DbClient,
+  organizationId: string,
+  feedId: number,
+  automationId?: number,
+): Promise<SourceFeedSubscription[]> {
   // Resource-ref match predicates are evaluated per change by the normal activation path.
   const rows = await sql`
     SELECT a.id, a.created_by, a.managed_agent_id, c.id AS connection_id, c.connector_key
@@ -37,7 +42,9 @@ export async function sourceFeedSubscriptions(sql: DbClient, organizationId: str
       AND a.triggers @> jsonb_build_array(jsonb_build_object('kind', 'event', 'connector_key', c.connector_key))
       AND EXISTS (
         SELECT 1 FROM jsonb_array_elements(a.triggers) trigger,
-          jsonb_array_elements_text(COALESCE(d.feeds_schema->f.feed_key->'webhook'->'events', '[]'::jsonb)) event
+          -- CASE, not COALESCE: a scalar or object events value must not raise (see feedWebhookDrivenSql).
+          jsonb_array_elements_text(CASE WHEN jsonb_typeof(d.feeds_schema->f.feed_key->'webhook'->'events') = 'array'
+            THEN d.feeds_schema->f.feed_key->'webhook'->'events' ELSE '[]'::jsonb END) event
         WHERE trigger->>'kind' = 'event' AND trigger->>'source' IS DISTINCT FROM 'workspace'
           AND trigger->>'connector_key' = c.connector_key
           AND (NOT trigger ? 'connection_id' OR trigger->'connection_id' = to_jsonb(c.id))
@@ -46,18 +53,35 @@ export async function sourceFeedSubscriptions(sql: DbClient, organizationId: str
     ORDER BY a.id
   `;
   if (!rows.length) return [];
+
   const policies = await listEntityApprovalPolicies(organizationId, 'connector_action', sql);
   const subscriptions: SourceFeedSubscription[] = [];
   for (const row of rows) {
     const principal = typeof row.created_by === 'string' ? row.created_by : null;
     const subscriptionId = Number(row.id);
-    const actor = await resolveActingPrincipal(sql, { organizationId, sessionAutomationId: subscriptionId });
-    const policy = evaluateConnectorPolicy({ organizationId, connectionId: Number(row.connection_id), actor, policies,
-      operation: { connector_key: row.connector_key, operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' } });
+    const actor = await resolveActingPrincipal(sql, {
+      organizationId,
+      sessionAutomationId: subscriptionId,
+    });
+    const policy = evaluateConnectorPolicy({
+      organizationId,
+      connectionId: Number(row.connection_id),
+      actor,
+      policies,
+      operation: {
+        connector_key: row.connector_key,
+        operation_key: DEVICE_FEED_READ_ACTION_KEY,
+        kind: 'read',
+      },
+    });
     // Background subscriptions cannot grant themselves approval. A policy change
     // revokes the listener, delegated reads, and commit authority together.
     if (policy.effect !== 'auto') continue;
-    subscriptions.push({ automationId: subscriptionId, principal, agentId: row.managed_agent_id ?? null });
+    subscriptions.push({
+      automationId: subscriptionId,
+      principal,
+      agentId: row.managed_agent_id ?? null,
+    });
   }
   return subscriptions;
 }

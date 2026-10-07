@@ -13,7 +13,11 @@ import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED
 import { findMatchingAutomationActivations, queueAutomationActivations, dispatchAutomationRunsBestEffort } from '../automations/activation';
 import logger from '../utils/logger';
 
-type ReceivedNotification = { active: boolean; ack?: unknown; queued?: Array<{ runId: number; status: string }> };
+type ReceivedNotification = {
+  active: boolean;
+  ack?: unknown;
+  queued?: Array<{ runId: number; status: string }>;
+};
 
 function savedSourceAck(checkpoint: Record<string, unknown> | null) {
   const ack = checkpoint?.source_ack;
@@ -64,14 +68,22 @@ async function receiveSourceReferenceDelivery(
         feed.organization_id, notice.connection_id, event.event_type, event.id,
       ])).digest('hex');
       const signal = {
-        connector_key: feed.connector_key, connection_id: notice.connection_id,
-        event_type: event.event_type, resource_ref: event.resource_ref, resource_type: event.resource_type,
-        occurred_at: event.occurred_at, delivery_id: `source:${deliveryId}`,
+        connector_key: feed.connector_key,
+        connection_id: notice.connection_id,
+        event_type: event.event_type,
+        resource_ref: event.resource_ref,
+        resource_type: event.resource_type,
+        occurred_at: event.occurred_at,
+        delivery_id: `source:${deliveryId}`,
         label: `Source ${event.event_type}`,
         input_text: `Source change ${event.event_type}: ${JSON.stringify(event.resource_ref)}. Read its content from the source when needed.`,
       };
       const matches = await findMatchingAutomationActivations(feed.organization_id, signal, tx);
-      queued.push(...await queueAutomationActivations({ signal, matches: matches.filter(match => allowed.has(match.automationId)), db: tx }));
+      queued.push(...await queueAutomationActivations({
+        signal,
+        matches: matches.filter(match => allowed.has(match.automationId)),
+        db: tx,
+      }));
     }
     // A lost receipt may replay an older page. Delivering it is harmless;
     // its cursor may advance only from the position it actually read.
@@ -83,8 +95,18 @@ async function receiveSourceReferenceDelivery(
   // The browser retains this hint after acknowledgments, so a finishing
   // setup task cannot consume and lose the next replay request.
   if (delivery.needs_rebind && delivery.records.length === 0) await enqueueSourceFeedListener(tx, feed.organization_id, notice.feed_id);
-  return { active: true, queued, ack: { binding_id: delivery.binding_id, epoch: delivery.epoch,
-    records: delivery.records.map(record => ({ id: record.payload.id, revision: record.revision })) } };
+  return {
+    active: true,
+    queued,
+    ack: {
+      binding_id: delivery.binding_id,
+      epoch: delivery.epoch,
+      records: delivery.records.map(record => ({
+        id: record.payload.id,
+        revision: record.revision,
+      })),
+    },
+  };
 }
 
 /** Caller owns source routing; this is the single scheduling mutation. */
@@ -148,8 +170,13 @@ export async function receiveFeedNotifications(
         AND organization_id = ${feed.organization_id} AND status = 'active' AND deleted_at IS NULL FOR UPDATE`;
       if (!locked) return { active: false };
       if (feed.source_only) {
-        return receiveSourceReferenceDelivery(tx, notice, feed, locked.config,
-          new Set(subscriptions.map(subscription => subscription.automationId)));
+        return receiveSourceReferenceDelivery(
+          tx,
+          notice,
+          feed,
+          locked.config,
+          new Set(subscriptions.map(subscription => subscription.automationId)),
+        );
       }
       if (notice.changed) {
         // Never use a live event to defeat failure backoff. A manual feed that
@@ -168,7 +195,13 @@ export async function receiveFeedNotifications(
     if (!received) continue;
     const { queued, ...receipt } = received;
     activations.push(...queued ?? []);
-    receipts.push({ feed_id: notice.feed_id, connection_id: notice.connection_id, feed_key: notice.feed_key, notification_id: notice.notification_id, ...receipt });
+    receipts.push({
+      feed_id: notice.feed_id,
+      connection_id: notice.connection_id,
+      feed_key: notice.feed_key,
+      notification_id: notice.notification_id,
+      ...receipt,
+    });
   }
   await dispatchAutomationRunsBestEffort(activations);
   return receipts;

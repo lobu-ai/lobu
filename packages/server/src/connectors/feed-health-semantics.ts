@@ -92,10 +92,12 @@
  * and a JSON-null webhook would all read as event-driven and hide exactly the
  * feed `no_trigger` exists to surface.
  *
- * Exported as one fragment because two readers must agree — `list_feeds`
- * (`tools/admin/manage_feeds.ts`) and the health scan
- * (`connectors/connector-health.ts`). Hand-copied jsonb predicates drift, and
- * drift here means the two surfaces silently disagree about one feed.
+ * Exported as one fragment because its readers must agree — `list_feeds`
+ * (`tools/admin/manage_feeds.ts`), the health scan
+ * (`connectors/connector-health.ts`), and device feed notification routing
+ * (`runs/feed-notifications.ts`, `runs/source-feed-listener.ts`). Hand-copied
+ * jsonb predicates drift, and drift here means those surfaces silently
+ * disagree about one feed.
  *
  * The type guard is a CASE, not `AND`, deliberately. Postgres does not promise
  * that `AND` short-circuits left-to-right ("Expression Evaluation Rules" — use

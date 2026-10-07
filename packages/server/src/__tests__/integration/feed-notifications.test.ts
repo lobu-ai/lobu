@@ -245,6 +245,14 @@ describe('source feed notifications', () => {
     }
   });
 
+  it.each([null, 'message.created', { key: 'message.created' }])('rejects malformed feed event metadata without throwing: %j', async (events) => {
+    const { sql, org, notice } = await subscribedFixture();
+    await sql`UPDATE connector_definitions SET feeds_schema = ${sql.json({
+      items: { operations: ['read'], webhook: { mode: 'trigger', events } },
+    })} WHERE organization_id = ${org.id}`;
+    expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id)).toEqual([]);
+  });
+
   it('does not listen to a feed when the Automation subscribes only to another connector event', async () => {
     const { sql, org, device, notice, automationId } = await subscribedFixture();
     await sql`UPDATE connector_definitions SET automation_events = ${sql.json([
