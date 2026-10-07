@@ -265,6 +265,7 @@ export type {
 // Every object input a `ReactionClient` method takes is the server contract's
 // own per-action type, re-exported so a script can name the argument it builds.
 export type { ConnectionListInput } from '@lobu/core/contracts/tools/manage-connections';
+export type { CollectionPresentation } from '@lobu/core/contracts/tools/collection-presentation';
 export type {
   EntityCreateInput,
   EntityDeleteInput,

@@ -16,6 +16,7 @@ import type {
   AutomationWorkspaceEventTrigger,
   ConnectorClass,
   ConnectorRuntime,
+  CollectionPresentation,
   Dimension,
   EventSet,
   Measure,
@@ -33,7 +34,6 @@ import {
   type TSchema,
   type TString,
 } from "@sinclair/typebox";
-import type { CollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import type { SecretRef } from "./secret.js";
 
 /** A connector referenced by its key, or by the class produced by `defineConnector`. */
