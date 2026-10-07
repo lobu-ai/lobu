@@ -3,16 +3,18 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { BROWSER_VERIFY_ACTION, BROWSER_VERIFY_OPERATION } from "@lobu/connector-sdk";
 import { chromium, type BrowserContext } from "playwright-vanilla";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { generateSecureToken, hashToken } from "../../auth/oauth/utils";
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { createConnectorOperationRun } from "../../runs/queue-service";
 import { ensureLiveBrowserProfile } from "../../utils/live-browser-profile";
+import { compileConnectorSource } from "../../utils/connector-compiler";
 import { dispatchChromeActionToExtension } from "../../worker-api/dispatch-chrome-action";
 import { requestSourceAttribution } from "../../worker-api/device-source-attribution";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
-import { createTestConnection, createTestConnectorDefinition, seedOwnerContext } from "../setup/test-fixtures";
+import { createTestConnection, createTestConnectorDefinition, createTestSession, seedOwnerContext } from "../setup/test-fixtures";
 import { post } from "../setup/test-helpers";
 
 declare const chrome: {
@@ -23,6 +25,7 @@ declare const chrome: {
 			query: Record<string, unknown>,
 		): Promise<Array<{ id: number; url?: string }>>;
 		get(id: number): Promise<{ id: number }>;
+		update(id: number, options: { active: boolean }): Promise<{ id: number }>;
 	};
 };
 
@@ -355,6 +358,63 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 		const steps = await sql`SELECT action_key, target_device_worker_id, status FROM runs WHERE parent_run_id = ${parent.runId} ORDER BY id`;
 		expect(steps.map((step) => step.action_key)).toEqual(["navigate", "evaluate", "evaluate"]);
 		expect(steps.every((step) => step.status === "completed" && step.target_device_worker_id === selected.deviceId)).toBe(true);
+		// Exercise the public SDK setup path against the real extension. The
+		// provider is the only fixture: a click signs in, and its page supplies
+		// the identity rather than a fabricated worker completion payload.
+		const setupKey = "synthetic.browser.setup";
+		const setupUrl = "https://account.example/signin";
+		await selected.browser.route(setupUrl, (route) => route.fulfill({
+			contentType: "text/html",
+			body: '<!doctype html><title>Provider sign-in fixture</title><button onclick="localStorage.setItem(\'signed-in\',\'yes\');this.textContent=\'Signed in\'">Sign in</button>',
+		}));
+		await createTestConnectorDefinition({ key: setupKey, name: "Browser setup fixture", organization_id: org.id,
+			feeds_schema: {}, auth_schema: { methods: [{ type: "browser", mode: "live" }] } });
+		const setupSource = await compileConnectorSource(`
+      import { defineConnector } from '@lobu/connector-sdk';
+      export default defineConnector({ key: '${setupKey}', name: 'Browser setup fixture', version: '1.0.0',
+        authSchema: { methods: [{ type: 'browser', mode: 'live' }] }, feeds: {},
+        browser: { origins: ['https://account.example'], accountProbe: {
+          url: '${setupUrl}', expression: 'localStorage.getItem("signed-in") === "yes" ? { accountId: "synthetic-setup-account" } : null',
+        } },
+      });
+    `);
+		await sql`UPDATE connector_versions SET compiled_code = ${setupSource.compiledCode}, compiled_code_hash = ${setupSource.compiledCodeHash}
+      WHERE connector_key = ${setupKey} AND version = '1.0.0'`;
+		await sql`UPDATE connector_definitions SET supports_execute = true, actions_schema = ${sql.json({ [BROWSER_VERIFY_OPERATION]: BROWSER_VERIFY_ACTION })},
+      browser = ${sql.json({ origins: ['https://account.example'], accountProbe: {
+        url: setupUrl, expression: 'localStorage.getItem("signed-in") === "yes" ? { accountId: "synthetic-setup-account" } : null',
+      } })} WHERE organization_id = ${org.id} AND key = ${setupKey}`;
+		await upsertEntityApprovalPolicy(org.id, {
+			resourceClass: "connector_action", connectorKey: setupKey, effects: { execute: "auto" },
+		});
+		const session = await createTestSession(user.id);
+		const sdk = async (script: string) => {
+			const response = await post(`/api/${org.slug}/run_sdk`, {
+				cookie: session.cookieHeader, body: { script },
+			});
+			expect(response.status).toBe(200);
+			const result = await response.json();
+			expect(result.success, JSON.stringify(result.error)).toBe(true);
+			return result.return_value;
+		};
+		await selected.control.evaluate((id) => chrome.tabs.update(id, { active: true }), userTab);
+		const pending = await sdk(`export default async (_ctx, client) => client.connections.connect(${JSON.stringify({ connector_key: setupKey, device_worker_id: selected.deviceId })})`);
+		expect(pending).toMatchObject({ status: "setup_required", setup_family: "browser" });
+		const providerTab = await selected.control.evaluate(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]);
+		expect(providerTab.url, JSON.stringify(pending)).toBe(setupUrl);
+		expect((await sql`SELECT status FROM connections WHERE id = ${pending.connection_id}`)[0].status).toBe("pending_auth");
+		const providerPage = selected.browser.pages().find((page) => page.url() === setupUrl)!;
+		await providerPage.getByRole("button", { name: "Sign in", exact: true }).click();
+		await selected.control.evaluate((id) => chrome.tabs.update(id, { active: true }), userTab);
+		const verified = await sdk(`export default async (_ctx, client) => client.operations.execute(${JSON.stringify({ connection_id: pending.connection_id, operation_key: "verify_browser", input: {} })})`);
+		expect(verified).toMatchObject({ status: "completed", output: { browser_ready: true, account_verified: true } });
+		const focusedAgain = await selected.control.evaluate(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]);
+		expect(focusedAgain.id).toBe(providerTab.id);
+		const bindings = await sql`SELECT c.status, c.device_worker_id, ap.auth_data->>'account_id' AS account_id
+      FROM connections c JOIN auth_profiles ap ON ap.id = c.auth_profile_id
+      WHERE c.organization_id = ${org.id} AND c.connector_key = ${setupKey}`;
+		expect(bindings).toEqual([{ status: "active", device_worker_id: selected.deviceId, account_id: "synthetic-setup-account" }]);
+		expect(await other.control.evaluate(async (url) => (await chrome.tabs.query({})).some((tab) => tab.url === url), setupUrl)).toBe(false);
 		expect(
 			await other.control.evaluate(() =>
 				chrome.tabs

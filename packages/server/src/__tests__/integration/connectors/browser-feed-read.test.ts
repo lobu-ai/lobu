@@ -14,6 +14,7 @@ import { createConnectorOperationRun } from '../../../runs/queue-service';
 import { dispatchChromeActionToExtension } from '../../../worker-api/dispatch-chrome-action';
 import { upsertConnectorDefinitionRecords } from '../../../utils/connector-definition-install';
 import { handleListAvailable } from '../../../tools/admin/manage_operations/handlers/list-available';
+import { qualifiedOperationKey } from '../../../tools/admin/manage_operations/handlers/shared';
 import { manageFeeds } from '../../../tools/admin/manage_feeds';
 import { getContent } from '../../../tools/get_content/handler';
 import * as sourceFeedPage from '../../../lib/source-feed-page';
@@ -62,6 +63,7 @@ const CHROME: DeviceConnectorManifest = {
   actions_schema: {
     evaluate: { key: 'evaluate', name: 'Evaluate', kind: 'read' },
     navigate: { key: 'navigate', name: 'Navigate', kind: 'write' },
+    focus_tab: { key: 'focus_tab', name: 'Focus tab', kind: 'write' },
     feed_listen: { key: 'feed_listen', name: 'Listen', kind: 'read' },
   },
 };
@@ -93,12 +95,13 @@ async function answerBrowser(reading: Promise<Record<string, any>>, answer = tru
     } });
     expect(response.status).toBe(200);
     const job = await response.json();
-    if (job?.run_id && ['evaluate', 'navigate'].includes(job.operation_key)) {
-      const probe = job.operation_key === 'navigate' || job.action_input.expression === 'self_probe';
+    if (job?.run_id && ['evaluate', 'navigate', 'focus_tab'].includes(job.operation_key)) {
+      const probe = job.operation_key !== 'evaluate' || job.action_input.expression === 'self_probe';
+      if (job.operation_key === 'focus_tab') expect(job.action_input).toMatchObject({ tab_id: 77, draw_attention: true });
       if (!probe) expect(job.action_input).toMatchObject({ expression: 'private query' });
       if (!answer) return job.run_id;
       const completion = await post('/api/workers/complete-action', { body: {
-        run_id: job.run_id, worker_id: WORKER_ID, status: 'success', action_output: job.operation_key === 'navigate' ? {tab_id: 77} : probe ? {value: identity ? {accountId: identity} : null} : {
+        run_id: job.run_id, worker_id: WORKER_ID, status: 'success', action_output: job.operation_key === 'navigate' ? {tab_id: 77} : job.operation_key === 'focus_tab' ? {focused: true, tab_id: 77} : probe ? {value: identity ? {accountId: identity} : null} : {
           rows: ROWS, attachments: [{ filename: 'private.txt', data: Buffer.from('private bytes').toString('base64'), mime_type: 'text/plain' }],
         },
       } });
@@ -613,6 +616,41 @@ describe('compiled browser source reads', () => {
     expect(available).toMatchObject({operations:expect.arrayContaining([expect.objectContaining({operation_key:'verify_browser',executable:true})])});
     const [saved] = await sql`SELECT status FROM connections WHERE id = ${result.connection_id}`;
     expect(saved.status).toBe('pending_auth');
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND action_key = 'focus_tab' AND status = 'completed'`).toHaveLength(1);
+  });
+
+  it.each(['create', 'connect'] as const)('%s keeps setup pending when focusing the provider is blocked', async (action) => {
+    await liveDefinition();
+    const sql = getTestDb();
+    await sql`DELETE FROM feeds WHERE id = ${feedId}`;
+    await sql`DELETE FROM connections WHERE id = ${connectionId}`;
+    await upsertEntityApprovalPolicy(orgId, {
+      resourceClass: 'connector_action', connectorKey: 'chrome', operationKey: qualifiedOperationKey('chrome', 'focus_tab'), effects: { execute: 'deny' },
+    });
+    const creating = manageConnections({ action, connector_key: SOURCE_KEY, device_worker_id: deviceId }, {} as Env, context()) as Promise<Record<string, any>>;
+    await answerBrowser(creating);
+    const result = await creating;
+    expect(result).toMatchObject({ status: 'setup_required', setup_family: 'browser' });
+    const [saved] = await sql`SELECT c.status, ap.status AS profile_status, ap.auth_data FROM connections c
+      JOIN auth_profiles ap ON ap.id = c.auth_profile_id WHERE c.id = ${result.connection_id}`;
+    expect(saved).toMatchObject({ status: 'pending_auth', profile_status: 'pending_auth', auth_data: { mode: 'live' } });
+    expect(saved.auth_data.account_id).toBeUndefined();
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND action_key = 'navigate' AND status = 'completed'`).toHaveLength(1);
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND action_key = 'evaluate'`).toHaveLength(0);
+  });
+
+  it('checks a live account during a source read without focusing its provider tab', async () => {
+    await liveDefinition();
+    const sql = getTestDb();
+    const profile = await ensureLiveBrowserProfile({ organizationId: orgId, connectorKey: SOURCE_KEY, deviceWorkerId: deviceId, userId });
+    await sql`UPDATE auth_profiles SET status = 'active', auth_data = ${sql.json({ mode: 'live', account_id: 'fixture-account' })} WHERE id = ${profile.id}`;
+    await sql`UPDATE connections SET auth_profile_id = ${profile.id} WHERE id = ${connectionId}`;
+    const reading = read();
+    await answerBrowser(reading);
+    expect((await reading).results[0]).toMatchObject({ ok: true, rows: ROWS });
+    const steps = await sql`SELECT action_key FROM runs WHERE organization_id = ${orgId} AND connector_key = 'chrome' ORDER BY id`;
+    expect(steps.map((step) => step.action_key)).toEqual(['navigate', 'evaluate', 'evaluate']);
+    await expectScrubbed();
   });
 
   it('refuses a forged live auth profile instead of treating a supplied timestamp as proof', async () => {

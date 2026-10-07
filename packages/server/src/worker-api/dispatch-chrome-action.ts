@@ -813,6 +813,12 @@ export async function dispatchChromeActionToExtension(params: {
     if (nav.status !== 'completed') return nav;
     const tabId = nav.output?.tab_id;
     if (typeof tabId !== 'number') return { status: 'failed', error_message: 'Browser account probe did not return a tab.' };
+    // Setup is interactive: the user needs to see the provider's sign-in page.
+    // Source reads and draft checks use the same probe without taking focus.
+    if (parent.action_key === BROWSER_VERIFY_OPERATION) {
+      const focused = await probeStep('focus_tab', { tab_id: tabId, draw_attention: true });
+      if (focused.status !== 'completed') return focused;
+    }
     const evaluated = await probeStep('evaluate', { tab_id: tabId, expression: probe.expression, await_promise: true });
     if (evaluated.status !== 'completed') return evaluated;
     const identity = evaluated.output?.value as { accountId?: unknown; displayName?: unknown } | null;
