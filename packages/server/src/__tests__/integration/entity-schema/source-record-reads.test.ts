@@ -7,6 +7,7 @@
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
+import { buildEntitiesNamespace } from '../../../sandbox/namespaces/entities';
 import { manageEntity } from '../../../tools/admin/manage_entity';
 import { manageFeeds } from '../../../tools/admin/manage_feeds';
 import { getContent } from '../../../tools/get_content';
@@ -212,6 +213,7 @@ describe('source-backed record reads', () => {
       record_links: [{ relationship_type: 'works_at', direction: 'incoming', entity_type: 'person', key: 'p1', name: 'Pat' }],
       record_failures: [],
     });
+    expect(companyLinks).not.toHaveProperty('next_cursor');
     const personLinks = await manageEntity(
       { action: 'list_links', record: { type: 'person', key: 'p1' } },
       {} as Env,
@@ -221,6 +223,39 @@ describe('source-backed record reads', () => {
       record_links: [{ relationship_type: 'works_at', direction: 'outgoing', entity_type: 'company', key: 'c1', name: 'Acme' }],
     });
   }, 60_000);
+
+  it('opts into cursor pagination through the public tool without persisting source records', async () => {
+    const before = await counts();
+    const record = { type: 'company', key: 'c1' };
+    const first = await buildEntitiesNamespace(owner, {} as Env).listLinks({ record, limit: 1, cursor: null }) as Awaited<ReturnType<typeof manageEntity>>;
+    expect(first).toMatchObject({ record_links: [{ key: 'p1' }], next_cursor: expect.any(String) });
+    if (!('next_cursor' in first)) throw new Error('Missing cursor contract');
+    const second = await manageEntity({ action: 'list_links', record, limit: 1, cursor: first.next_cursor }, {} as Env, owner);
+    expect(second).toMatchObject({ record_links: [], next_cursor: expect.any(String) });
+    if (!('next_cursor' in second)) throw new Error('Missing cursor contract');
+    const last = await manageEntity({ action: 'list_links', record, limit: 1, cursor: second.next_cursor }, {} as Env, owner);
+    expect(last).toMatchObject({ record_links: [], record_failures: [], next_cursor: null });
+    await expect(manageEntity({ action: 'list_links', record, cursor: first.next_cursor }, {} as Env, member)).rejects.toThrow(/cursor/i);
+    const privateRead = await manageEntity({ action: 'list_links', record, cursor: null }, {} as Env, member);
+    expect(privateRead).toMatchObject({ record_links: [], record_failures: [], next_cursor: null });
+    expect(await counts()).toEqual(before);
+  }, 60_000);
+
+  it('rechecks source availability before continuing a relationship cursor', async () => {
+    const record = { type: 'company', key: 'c1' };
+    const first = await manageEntity({ action: 'list_links', record, limit: 1, cursor: null }, {} as Env, owner);
+    if (!('next_cursor' in first)) throw new Error('Missing cursor contract');
+    await getTestDb()`UPDATE connections SET status = 'paused' WHERE id = ${privateConnectionId}`;
+    try {
+      await expect(manageEntity({ action: 'list_links', record, cursor: first.next_cursor }, {} as Env, owner)).rejects.toThrow(/cursor/i);
+    } finally {
+      await getTestDb()`UPDATE connections SET status = 'active' WHERE id = ${privateConnectionId}`;
+    }
+  }, 60_000);
+
+  it('does not reinterpret stored entity pagination as source cursors', async () => {
+    await expect(manageEntity({ action: 'list_links', entity_id: 1, cursor: null }, {} as Env, owner)).rejects.toThrow(/entity_id uses limit\/offset/);
+  });
 
   it("does not read a connection the caller cannot see", async () => {
     const read = await getContent({ record: { type: 'company', key: 'c1' } }, {} as Env, member);

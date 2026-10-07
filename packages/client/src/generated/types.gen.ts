@@ -1460,6 +1460,10 @@ export type ManageEntityData = {
          */
         offset?: number;
         /**
+         * [list_links, record only] Opt in to bounded source pagination with null, then pass next_cursor until it is null. Stop automatic pagination on record_failures; the cursor retains failed sources for an explicit retry. Omit for the legacy bounded list. Pages may be short or empty while next_cursor exists. Merge repeated links across pages by (relationship_type, direction, entity_type, key), keeping the newest occurred_at. Stored entity_id calls retain limit/offset pagination.
+         */
+        cursor?: string | null;
+        /**
          * Attribution source when mutation is triggered by an Automation reaction
          */
         automation_source?: {
@@ -1851,6 +1855,7 @@ export type ManageEntityResponses = {
           feed_id: number;
           error: string;
         }>;
+        next_cursor?: string | null;
       }
     | {
         action: "list_links";
