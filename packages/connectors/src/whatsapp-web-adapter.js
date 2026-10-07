@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 19;
+  const ADAPTER_VERSION = 20;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const MAX_RECORD_BYTES = 128 * 1024;
   const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -91,11 +91,13 @@ export function whatsAppWebAdapterProgram() {
       });
     };
     const resident = listeners.get(request.bridge_id);
-    const previous = resident?.request?.references_only === request.references_only ? resident : null;
+    const previous = resident?.request.references_only === request.references_only
+      && resident?.request.chat_filter === request.chat_filter
+      && resident?.request.minimum_timestamp === request.minimum_timestamp ? resident : null;
     detach(request.bridge_id);
     // A new listener identity fences pending normalization from the detached
-    // handlers. Keep unaccepted records, but retry a transient source failure
-    // by attaching fresh handlers to the current collection.
+    // handlers. Keep unaccepted records only within the same source scope, and
+    // retry transient failures by attaching fresh handlers to the collection.
     const state = {
       ...(previous ?? {
       id: request.bridge_id, collection, sequence: 0,

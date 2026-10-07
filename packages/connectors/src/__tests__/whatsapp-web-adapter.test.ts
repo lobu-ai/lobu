@@ -951,6 +951,31 @@ describe("WhatsApp source observation", () => {
     expect(await published).toMatchObject({ ok: false });
   });
 
+  it.each([
+    { chat_filter: "individual", minimum_timestamp: 1000 },
+    { chat_filter: "group", minimum_timestamp: 1200 },
+  ])("discards unaccepted references when the listener scope changes: %j", async (scope) => {
+    const source = install();
+    await source.listen("old-token", { references_only: true, chat_filter: "group", minimum_timestamp: 1000 });
+    source.emit("add", "private group message", 1100, "synthetic-group@g.us");
+    await settle();
+    expect(source.posts).toHaveLength(1);
+
+    await source.listen("new-token", { references_only: true, ...scope });
+    expect(source.posts).toHaveLength(1);
+  });
+
+  it("retries unaccepted references when reconnecting within the same scope", async () => {
+    const source = install();
+    const scope = { references_only: true, chat_filter: "group", minimum_timestamp: 1000 };
+    await source.listen("old-token", scope);
+    source.emit("add", "private group message", 1100, "synthetic-group@g.us");
+    await settle();
+    await source.listen("new-token", scope);
+    expect(source.posts).toHaveLength(2);
+    expect(source.posts[1]).toEqual({ ...source.posts[0], token: "new-token" });
+  });
+
   it("observes new-message references without reading or exporting the body", async () => {
     const source = install();
     await source.listen("reference-token", { references_only: true });
