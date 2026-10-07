@@ -1598,7 +1598,7 @@ export async function handleApprove(
 				"rejected",
 				`${pendingRun.action_key} — blocked by policy`,
 				why,
-				{ reason: why },
+				{ reject_reason: why },
 				reviewer,
 				tx,
 			);

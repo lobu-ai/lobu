@@ -943,6 +943,47 @@ describe("approval-run transition atomicity", () => {
 		},
 	);
 
+	it("policy rejection preserves the proposal reason and records why approval was blocked", async () => {
+		const queued = await manageOperations(
+			{ action: "execute", connection_id: connectionId, operation_key: "create_item", input: { name: "blocked item" } },
+			{} as Env,
+			humanCtx,
+		) as { run_id: number };
+		const sql = getTestDb();
+		const [before] = await sql`
+			SELECT metadata FROM current_event_records
+			WHERE run_id = ${queued.run_id} AND organization_id = ${orgId}
+				AND interaction_type = 'approval'
+		`;
+		try {
+			await upsertEntityApprovalPolicy(orgId, {
+				resourceClass: "connector_action",
+				connectionId,
+				effects: { execute: "deny" },
+			});
+			const result = await manageOperations(
+				{ action: "approve", run_id: queued.run_id },
+				{} as Env,
+				humanCtx,
+			);
+			expect(result).toMatchObject({ error: expect.stringContaining("Policy now blocks") });
+			const [after] = await sql`
+				SELECT metadata, interaction_status FROM current_event_records
+				WHERE run_id = ${queued.run_id} AND organization_id = ${orgId}
+					AND interaction_type = 'approval'
+			`;
+			expect(after.interaction_status).toBe("rejected");
+			expect(after.metadata.reject_reason).toBe("Policy now blocks 'create_item' for the requesting principal.");
+			expect(after.metadata.reason).toBe(before.metadata.reason);
+		} finally {
+			await upsertEntityApprovalPolicy(orgId, {
+				resourceClass: "connector_action",
+				connectionId,
+				effects: { execute: "approval" },
+			});
+		}
+	});
+
 	it("reject on a run with no approval card fails closed — the cancelled run write rolls back", async () => {
 		const sql = getTestDb();
 		// Corruption case: a pending connector-operation run whose approval card
