@@ -30,6 +30,10 @@ const TEST_ENV = {} as Env;
 const PROVIDER_TOKEN_URL = 'https://oauth-provider.example.com/token';
 const PROVIDER_USERINFO_URL = 'https://oauth-provider.example.com/userinfo';
 const originalFetch = globalThis.fetch;
+const IDENTITY_SCOPES = [
+  'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/userinfo.profile',
+];
 
 describe('OAuth callback downgrades a fresh personal connection to private (e2e)', () => {
   beforeAll(async () => {
@@ -52,9 +56,13 @@ describe('OAuth callback downgrades a fresh personal connection to private (e2e)
           access_token: 'fake-access-token-' + code,
           refresh_token: 'fake-refresh-token-' + code,
           expires_in: 3600,
-          scope: calendar
-            ? 'https://www.googleapis.com/auth/calendar.readonly'
-            : 'https://www.googleapis.com/auth/gmail.readonly',
+          scope: [
+            calendar
+              ? 'https://www.googleapis.com/auth/calendar.readonly'
+              : 'https://www.googleapis.com/auth/gmail.readonly',
+            ...IDENTITY_SCOPES,
+            'synthetic.sibling.read',
+          ].join(' '),
         });
       }
       if (url === PROVIDER_USERINFO_URL) {
@@ -187,7 +195,7 @@ describe('OAuth callback downgrades a fresh personal connection to private (e2e)
             {
               type: 'oauth',
               provider: 'cboauth',
-              requiredScopes: [grant.scope],
+              requiredScopes: [grant.scope, 'email', 'profile'],
               clientIdKey: 'CBOAUTH_CLIENT_ID',
               clientSecretKey: 'CBOAUTH_CLIENT_SECRET',
               tokenUrl: PROVIDER_TOKEN_URL,
@@ -221,7 +229,7 @@ describe('OAuth callback downgrades a fresh personal connection to private (e2e)
           clientSecretKey: 'CBOAUTH_CLIENT_SECRET',
           tokenUrl: PROVIDER_TOKEN_URL,
           userinfoUrl: PROVIDER_USERINFO_URL,
-          requestedScopes: [grant.scope],
+          requestedScopes: [grant.scope, 'email', 'profile'],
           pendingProfileMeta: {
             displayName: grant.connectorKey,
             slug: grant.slug,
@@ -244,6 +252,8 @@ describe('OAuth callback downgrades a fresh personal connection to private (e2e)
         ap.account_id,
         a."accountId" AS provider_account_id,
         a.scope,
+        ap.auth_data,
+        ap.status,
         a."accessToken" AS access_token
       FROM auth_profiles ap
       JOIN account a ON a.id = ap.account_id
@@ -255,20 +265,22 @@ describe('OAuth callback downgrades a fresh personal connection to private (e2e)
       account_id: string;
       provider_account_id: string;
       scope: string | null;
+      auth_data: { requested_scopes: string[]; granted_scopes: string[] };
+      status: string;
       access_token: string | null;
     }>;
 
     expect(accounts).toHaveLength(2);
     expect(accounts[0]?.account_id).not.toBe(accounts[1]?.account_id);
     for (const account of accounts) {
+      const grant = grants.find((entry) => entry.connectorKey === account.connector_key)!;
+      const expectedScopes = [grant.scope, ...IDENTITY_SCOPES];
       expect(account.provider_account_id.startsWith('lobu-connector:')).toBe(true);
+      expect(account.scope?.split(' ')).toEqual(expectedScopes);
+      expect(account.auth_data.granted_scopes).toEqual(expectedScopes);
+      expect(account.auth_data.requested_scopes).toEqual([grant.scope, 'email', 'profile']);
+      expect(account.status).toBe('active');
     }
-    expect(accounts.find((row) => row.connector_key === 'cb.calendar')?.scope).toBe(
-      'https://www.googleapis.com/auth/calendar.readonly'
-    );
-    expect(accounts.find((row) => row.connector_key === 'cb.gmail')?.scope).toBe(
-      'https://www.googleapis.com/auth/gmail.readonly'
-    );
     expect(accounts.find((row) => row.connector_key === 'cb.calendar')?.access_token).toBe(
       'fake-access-token-calendar-code'
     );
