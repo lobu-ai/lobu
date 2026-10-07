@@ -21,7 +21,7 @@
  */
 
 import { BROWSER_VERIFY_OPERATION, constrainBrowserInput } from '@lobu/connector-sdk';
-import { BROWSER_EXTENSION_UPDATE_REQUIRED, browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
+import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, BROWSER_EXTENSION_UPDATE_REQUIRED, browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
 import type { DispatchChromeActionRequest } from '@lobu/core/contracts/worker/protocol';
 import type { Context } from 'hono';
 import { resolveAutomationConnectionVisibilityUserId } from '../authz/automation-connection-visibility';
@@ -921,6 +921,7 @@ export async function dispatchChromeActionToExtension(params: {
           browser_context: browserContext,
           source_attribution: parent.run_metadata?.source_attribution,
           [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,
+          ...(params.skipAccountProbe ? { [BROWSER_ACCOUNT_PROBE_METADATA_KEY]: true } : {}),
           ...(sourceRead ? { [SOURCE_FEED_READ_METADATA_KEY]: true } : {}),
         },
         db: tx,

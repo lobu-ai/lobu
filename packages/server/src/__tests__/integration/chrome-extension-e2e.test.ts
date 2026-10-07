@@ -8,9 +8,11 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { generateSecureToken, hashToken } from "../../auth/oauth/utils";
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { createConnectorOperationRun } from "../../runs/queue-service";
+import { ensureLiveBrowserProfile } from "../../utils/live-browser-profile";
+import { dispatchChromeActionToExtension } from "../../worker-api/dispatch-chrome-action";
 import { requestSourceAttribution } from "../../worker-api/device-source-attribution";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
-import { createTestConnection, seedOwnerContext } from "../setup/test-fixtures";
+import { createTestConnection, createTestConnectorDefinition, seedOwnerContext } from "../setup/test-fixtures";
 import { post } from "../setup/test-helpers";
 
 declare const chrome: {
@@ -99,7 +101,7 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 		const manifest = JSON.parse(
 			await readFile(join(extension, "manifest.json"), "utf8"),
 		);
-		manifest.host_permissions = [`${origin}/*`];
+		manifest.host_permissions = [`${origin}/*`, "https://account.example/*"];
 		await writeFile(join(extension, "manifest.json"), JSON.stringify(manifest));
 		await writeFile(
 			join(extension, "probe.html"),
@@ -305,6 +307,54 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 		});
 		expect(denied.status).toBe("failed");
 		expect(denied.error_message).toMatch(/user's tab/);
+		// A live-account probe needs a scratch tab even when its parent draft
+		// was activated in a user tab. Exercise dispatch -> poll -> real Chrome,
+		// then prove the ordinary draft step still uses only the activated tab.
+		const draftUrl = "https://account.example/post/123";
+		await selected.browser.route("https://account.example/**", (route) =>
+			route.fulfill({ contentType: "text/html", body: '<!doctype html><title>Account fixture</title><textarea></textarea><button onclick="window.submits++">Send</button><script>window.submits=0</script>' }),
+		);
+		const draftPage = await selected.browser.newPage();
+		await draftPage.goto(draftUrl);
+		const draftTab = await selected.control.evaluate(async (url) =>
+			(await chrome.tabs.query({})).find((tab) => tab.url === url)?.id, draftUrl);
+		expect(draftTab).toBeTypeOf("number");
+		const connectorKey = "synthetic.browser.account";
+		await createTestConnectorDefinition({ key: connectorKey, name: "Account fixture", organization_id: org.id,
+			auth_schema: { methods: [{ type: "browser", mode: "live" }] } });
+		await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({ prepare_draft: { name: 'Prepare draft', kind: 'write' } })},
+      browser = ${sql.json({ origins: ['https://account.example'], accountProbe: {
+        url: 'https://account.example/account', expression: '({ accountId: "synthetic-account" })',
+      } })} WHERE organization_id = ${org.id} AND key = ${connectorKey}`;
+		await upsertEntityApprovalPolicy(org.id, {
+			resourceClass: "connector_action", connectorKey, effects: { execute: "auto" },
+		});
+		const account = await ensureLiveBrowserProfile({ organizationId: org.id, connectorKey,
+			deviceWorkerId: selected.deviceId, userId: user.id });
+		await sql`UPDATE auth_profiles SET status = 'active', auth_data = ${sql.json({ mode: 'live', account_id: 'synthetic-account' })} WHERE id = ${account.id}`;
+		const source = await createTestConnection({ organization_id: org.id, connector_key: connectorKey,
+			created_by: user.id, visibility: "private", createDefaultFeed: false });
+		await sql`UPDATE connections SET device_worker_id = ${selected.deviceId}::uuid, auth_profile_id = ${account.id} WHERE id = ${source.id}`;
+		const parent = await createConnectorOperationRun({ organizationId: org.id, connectionId: source.id,
+			connectorKey, operationKey: "prepare_draft", operationInput: {}, approvalMode: "inline",
+			policyPrincipalKind: "user", policyPrincipalId: user.id, createdByUserId: user.id,
+			activation: { kind: "page_visit", urls: [draftUrl], expiresInSeconds: 900 } });
+		await sql`UPDATE runs SET status = 'running', activated_at = now(),
+      activated_by_device_worker_id = ${selected.deviceId}::uuid, activation_tab_id = ${draftTab!},
+      run_metadata = run_metadata || ${sql.json({ page_activation_url: draftUrl })} WHERE id = ${parent.runId}`;
+		const staged = await dispatchChromeActionToExtension({ organizationId: org.id, parentRunId: parent.runId,
+			actionKey: "evaluate", actionInput: { tab_id: draftTab,
+				expression: 'document.querySelector("textarea").value="Review this draft"; document.querySelector("textarea").value',
+				browser_account_probe: true, activation_tab_id: 999999,
+			} });
+		expect(staged.status, staged.error_message ?? "account-checked draft failed").toBe("completed");
+		expect(staged.output?.value).toBe("Review this draft");
+		expect(draftPage.url()).toBe(draftUrl);
+		expect(await draftPage.locator("textarea").inputValue()).toBe("Review this draft");
+		expect(await draftPage.evaluate("window.submits")).toBe(0);
+		const steps = await sql`SELECT action_key, target_device_worker_id, status FROM runs WHERE parent_run_id = ${parent.runId} ORDER BY id`;
+		expect(steps.map((step) => step.action_key)).toEqual(["navigate", "evaluate", "evaluate"]);
+		expect(steps.every((step) => step.status === "completed" && step.target_device_worker_id === selected.deviceId)).toBe(true);
 		expect(
 			await other.control.evaluate(() =>
 				chrome.tabs

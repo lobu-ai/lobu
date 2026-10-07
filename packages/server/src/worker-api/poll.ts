@@ -5,7 +5,7 @@
  * platform binding, capability authorization, and multi-lane run claiming.
  */
 
-import { connectionBrowserGrant } from '../connectors/browser-resource';
+import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, connectionBrowserGrant } from '../connectors/browser-resource';
 import {
   authorizeCapabilities,
   entryToMessage,
@@ -2114,6 +2114,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const isChromeAction =
     row.run_type === 'action' &&
     (row.connector_key === 'chrome' || row.connector_key?.startsWith('chrome.'));
+  // Identity checks retain their parent's policy and browser binding, but use
+  // scratch tabs. Only dispatch may stamp this metadata, never action_input.
+  const isAccountProbe = row.run_metadata?.[BROWSER_ACCOUNT_PROBE_METADATA_KEY] === true;
   const actionInput = isChromeAction
     ? trustedChromeActionInput(
         selectedActionInput ?? {},
@@ -2127,10 +2130,10 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         // original list can allow several pages; that is not permission to
         // follow a later navigation to another one. The extension re-checks the
         // live URL against them. Set here, never from action_input.
-        row.parent_activation_tab_id == null
+        isAccountProbe || row.parent_activation_tab_id == null
           ? null
           : Number(row.parent_activation_tab_id),
-        row.parent_activation_url ? [row.parent_activation_url] : []
+        !isAccountProbe && row.parent_activation_url ? [row.parent_activation_url] : []
       )
     : selectedActionInput;
 

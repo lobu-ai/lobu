@@ -4,6 +4,8 @@ import { getDb, type DbClient } from '../db/client';
 import { compareSemverish } from '../worker-api/device-manifests';
 
 export const BROWSER_EXTENSION_UPDATE_REQUIRED = 'Update the Lobu Chrome extension to version 0.9.2 or newer, then reload it and retry setup.';
+/** Gateway-only child metadata; account probes use scratch tabs, not draft activation. */
+export const BROWSER_ACCOUNT_PROBE_METADATA_KEY = 'browser_account_probe';
 export function browserExtensionSupportsOrigins(version: string | null | undefined): boolean {
   return !!version && compareSemverish(version, '0.9.2') >= 0;
 }
