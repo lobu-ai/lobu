@@ -1330,6 +1330,9 @@ jobs:
           bash scripts/lib/__tests__/preview-teardown.test.sh
           bash scripts/lib/__tests__/staging-routing.test.sh
 
+      - name: Slack alarm cancellation guards
+        run: bash scripts/lib/__tests__/workflow-alarm-guards.test.sh
+
       - name: Kubeconfig workflow guards
         # Mutating deploy workflows must fail closed before their first cluster
         # write when the credential, cluster identity, or RBAC scope is stale.

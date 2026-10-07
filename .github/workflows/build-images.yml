@@ -493,16 +493,17 @@ jobs:
             https://api.github.com/user/packages/container/lobu-embeddings/visibility \
             -d '{"visibility":"public"}' || true
 
-  # A failed build, smoke, promotion, or package dispatch fails the workflow.
-  # Candidate build or smoke failures never publish the app timestamp tag Flux
-  # watches.
+  # Observe cancellations as well as failures, including prerequisites that
+  # stop before generate-tag can emit should_publish. Filter unrelated releases
+  # from the event itself so missing outputs cannot suppress the alarm.
   notify-failure:
     runs-on: ubuntu-24.04
-    needs: [generate-tag, connector-parity-smoke, build-worker, build-embeddings-service, build-app, app-image-smoke, promote-images, trigger-package-publish]
+    needs: [current-main-guard, generate-tag, connector-parity-smoke, build-worker, build-embeddings-service, build-app, app-image-smoke, promote-images, trigger-package-publish]
     if: >-
-      failure()
-      && needs.generate-tag.outputs.should_publish == 'true'
+      always()
       && (github.ref == 'refs/heads/main' || github.event_name == 'release')
+      && (github.event_name != 'release' || startsWith(github.event.release.tag_name, 'lobu-v'))
+      && (failure() || contains(needs.*.result, 'cancelled'))
     permissions:
       contents: read
     steps:
@@ -515,6 +516,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           ACTOR: ${{ github.actor }}
           SHA_SHORT: ${{ github.sha }}
+          RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || 'cancelled' }}
         run: |
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             echo "SLACK_DEPLOY_WEBHOOK_URL not set; skipping notification."
@@ -523,6 +525,6 @@ jobs:
           # First line of commit/release summary only, JSON-escaped via jq.
           first_line=$(printf '%s' "$RUN_SUMMARY" | head -n1)
           payload=$(jq -nc \
-            --arg text "<@U09513HH1N1> :rotating_light: build-images failed on \`${REF_NAME}\` — sibling image tags may be incomplete, or the pushed app image failed its smoke. <${RUN_URL}|run> · <${COMMIT_URL}|${SHA_SHORT:0:7}> by ${ACTOR}\n> ${first_line}" \
+            --arg text ":rotating_light: build-images ${RESULT} on \`${REF_NAME}\` — image publishing or verification did not complete successfully. <${RUN_URL}|run> · <${COMMIT_URL}|${SHA_SHORT:0:7}> by ${ACTOR}\n> ${first_line}" \
             '{text: $text}')
           curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
