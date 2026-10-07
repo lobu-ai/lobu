@@ -9,7 +9,7 @@ import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { notifyWorkerWork } from './worker-wakeup';
 import { enqueueSourceFeedListener, recordSourceFeedFailure } from './source-feed-listener';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
-import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY } from '../lib/device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, SOURCE_FEED_SCOPE_METADATA_KEY } from '../lib/device-feed-read-protocol';
 import { findMatchingAutomationActivations, queueAutomationActivations, dispatchAutomationRunsBestEffort } from '../automations/activation';
 import logger from '../utils/logger';
 
@@ -218,8 +218,9 @@ export async function sourceFeedContextForRun(
 ) {
   if (parentRunId == null || deviceWorkerId == null) return undefined;
   const [row] = await sql`
-    SELECT f.id AS feed_id, f.connection_id, f.feed_key, f.checkpoint, f.config, r.dry_run,
-           c.device_worker_id, r.run_type, r.automation_id, r.connector_version,
+    SELECT f.id AS feed_id, f.connection_id, f.feed_key, f.checkpoint, r.dry_run,
+           c.device_worker_id, r.run_type, r.automation_id,
+           r.run_metadata->>${SOURCE_FEED_SCOPE_METADATA_KEY} AS scope_key,
            d.feeds_schema->f.feed_key->'webhook'->'events' AS event_types
     FROM runs r
     JOIN feeds f ON f.id = r.feed_id AND f.organization_id = r.organization_id
@@ -240,8 +241,8 @@ export async function sourceFeedContextForRun(
         AND (${sql.unsafe(feedTriggerEligibilitySql('d', 'f', 'source-only'))})))
   `;
   if (!row) return undefined;
-  if (row.run_type === 'action'
-    && !(await sourceFeedSubscriptions(sql, organizationId, Number(row.feed_id), Number(row.automation_id))).length) return undefined;
+  if (row.run_type === 'action' && (typeof row.scope_key !== 'string' || !row.scope_key
+    || !(await sourceFeedSubscriptions(sql, organizationId, Number(row.feed_id), Number(row.automation_id))).length)) return undefined;
   return {
     dry_run: row.dry_run === true,
     connection_id: Number(row.connection_id),
@@ -250,7 +251,7 @@ export async function sourceFeedContextForRun(
     device_worker_id: String(row.device_worker_id),
     ack: row.dry_run ? null : savedSourceAck(row.checkpoint),
     ...(row.run_type === 'action' ? { subscription: {
-      scope_key: sourceFeedScopeKey(row.config, row.connector_version), event_types: row.event_types ?? [],
+      scope_key: row.scope_key, event_types: row.event_types ?? [],
     } } : {}),
   };
 }

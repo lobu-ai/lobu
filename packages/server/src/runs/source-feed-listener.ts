@@ -9,7 +9,7 @@ import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-c
 import { feedBackoff } from '../connectors/feed-backoff';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
-import { sourceFeedSubscriptions } from './source-feed-subscriptions';
+import { sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
 
 const LISTENER_SETUP_TIMEOUT_MS = 150_000;
 
@@ -145,7 +145,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         automationId: subscription.automationId,
         feedId: task.feedId,
         deadlineAt: Date.now() + LISTENER_SETUP_TIMEOUT_MS,
-        sourceSubscription: true,
+        sourceSubscriptionScopeKey: sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version),
       },
       controller.signal,
     );

@@ -8,7 +8,7 @@ import { sourceFeedScopeKey, sourceFeedSubscriptions } from '../../runs/source-f
 import * as subscriptions from '../../runs/source-feed-subscriptions';
 import * as activation from '../../automations/activation';
 import { SOURCE_FEED_LISTENER_TASK } from '../../scheduled/task-definitions';
-import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY } from '../../lib/device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, SOURCE_FEED_SCOPE_METADATA_KEY } from '../../lib/device-feed-read-protocol';
 import { resolveRunConnectorPolicy } from '../../authz/operation-run-policy';
 import * as entityPolicy from '../../authz/entity-policy';
 import { manageFeeds } from '../../tools/admin/manage_feeds';
@@ -399,9 +399,15 @@ describe('source feed notifications', () => {
       status, approval_status, policy_principal_kind, policy_principal_id, created_by_user_id, automation_id, run_metadata, expires_at, connector_version)
       VALUES (${org.id}, 'action', ${notice.feed_id}, ${connection.id}, 'synthetic.source', ${DEVICE_FEED_READ_ACTION_KEY},
         'running', 'auto', ${actor.kind}, ${actor.id}, ${user.id}, ${automationId},
-        ${sql.json({ [SOURCE_FEED_READ_METADATA_KEY]: true, [SOURCE_FEED_SUBSCRIPTION_METADATA_KEY]: true })}, now() + interval '1 minute', '1.0.0') RETURNING id`;
+        ${sql.json({ [SOURCE_FEED_READ_METADATA_KEY]: true, [SOURCE_FEED_SUBSCRIPTION_METADATA_KEY]: true,
+          [SOURCE_FEED_SCOPE_METADATA_KEY]: sourceFeedScopeKey({}, '1.0.0') })}, now() + interval '1 minute', '1.0.0') RETURNING id`;
     expect(await resolveRunConnectorPolicy({ organizationId: org.id, runId: Number(parent.id), sql })).toMatchObject({ effect: 'auto' });
     expect(await sourceFeedContextForRun(sql, Number(parent.id), device.id, org.id)).toMatchObject({ feed_id: notice.feed_id });
+    await sql`UPDATE runs SET run_metadata = run_metadata - ${SOURCE_FEED_SCOPE_METADATA_KEY} WHERE id = ${parent.id}`;
+    expect(await sourceFeedContextForRun(sql, Number(parent.id), device.id, org.id)).toBeUndefined();
+    await sql`UPDATE runs SET run_metadata = run_metadata || ${sql.json({
+      [SOURCE_FEED_SCOPE_METADATA_KEY]: sourceFeedScopeKey({}, '1.0.0'),
+    })}::jsonb WHERE id = ${parent.id}`;
     const other = await createTestUser();
     await sql`UPDATE connections SET created_by = ${other.id} WHERE id = ${connection.id}`;
     expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id)).toEqual([]);
