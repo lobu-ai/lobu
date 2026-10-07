@@ -6,8 +6,8 @@
  * surfaces only #eng's transcript when that user asks — connection-sourced data
  * never reaches a user beyond their access in the source system. Also proves the
  * two fail-closed edges (unresolved requester sees nothing of an enforced
- * connection) and that a connection WITHOUT a materialized ACL graph keeps the
- * legacy per-agent access semantics (no regression until a workspace is graphed).
+ * connection) and that a connection WITHOUT a materialized ACL graph requires
+ * its recorded owner, not merely workspace or agent access.
  */
 
 import { normalizeSlackUserId } from "@lobu/connectors/slack-identity";
@@ -284,15 +284,24 @@ describe("slack channel visibility gate (e2e via search_memory)", () => {
 		).not.toContain("C01ENG");
   });
 
-	it("no regression: WITHOUT a materialized graph the legacy per-agent fence applies", async () => {
+	it("without a graph, only the recorded connection owner can recall bound channels", async () => {
     const { org, alice, agent } = await setupWorkspace();
-    // No buildSlackChannelGraph → connection is not enforced → both channels recall.
+    const sql = getTestDb();
+    const colleague = await createTestUser({ name: "Colleague" });
+    await addUserToOrganization(colleague.id, org.id, "admin");
+    await sql`UPDATE connections SET created_by = ${alice.id}
+      WHERE organization_id = ${org.id} AND slug = ${`agentconn-${CONN}`}`;
+    expect((await searchAs(org.id, colleague.id, agent.agentId)).conversation_messages ?? []).toHaveLength(0);
+    expect((await searchAs(org.id, null, agent.agentId)).conversation_messages ?? []).toHaveLength(0);
     const result = await searchAs(org.id, alice.id, agent.agentId);
 		const channels = (result.conversation_messages ?? []).map(
 			(m) => m.channel_id,
 		);
 		expect(channels).toContain("C01ENG");
 		expect(channels).toContain("C01SEC");
+    await sql`UPDATE connections SET created_by = NULL
+      WHERE organization_id = ${org.id} AND slug = ${`agentconn-${CONN}`}`;
+    expect((await searchAs(org.id, alice.id, agent.agentId)).conversation_messages ?? []).toHaveLength(0);
   });
 
 	it("fails closed when the graph ages past the freshness window (no stale-membership re-exposure)", async () => {
@@ -315,7 +324,7 @@ describe("slack channel visibility gate (e2e via search_memory)", () => {
 
     // The sync stops: age this connection's graph past the 60-min window. An
     // onboarded-but-stale connection must FAIL CLOSED (drop its channels), NOT
-    // fall back to the legacy fence — serving stale membership is the hole the
+    // fall back to the ungraphed owner path — serving stale membership is the hole the
     // age-based gate closes. Alice loses recall even though she's still a member.
     const sql = getTestDb();
     await sql`
@@ -332,7 +341,7 @@ describe("slack channel visibility gate (e2e via search_memory)", () => {
 
     // Drive the real production caller with a stubbed Slack API + token resolver,
     // exactly as runSlackAclSyncTick wires it in prod. THIS is what activates the
-    // gate for a live connection — buildSlackChannelGraph is never called by hand.
+    // gate for a live connection — buildAccessGraph is never called by hand.
     const membersByChannel: Record<string, string[]> = {
 			C01ENG: ["U01ALICE"],
 			C01SEC: ["U01BOB"],
@@ -477,8 +486,8 @@ describe("slack channel visibility gate (e2e via search_memory)", () => {
 	it("org-wide Grid install (conn tenant = E…, bindings carry T…) STILL graphs and stays ENFORCED", async () => {
     // Regression guard for the codex finding: once bindings carry the real
     // workspace `T…` instead of the enterprise `E…`, an org-wide install's ACL
-    // sync must NOT drop every row (which would silently downgrade to the legacy
-    // per-agent fence). connTeamId is the enterprise id here — the relaxed scope
+    // sync must NOT drop every row (which would leave the connection ungraphed
+    // and owner-only). connTeamId is the enterprise id here — the relaxed scope
     // filter accepts every T… binding on the connection and graphs it.
     const org = await createTestOrganization({ name: "GridCo" });
     const alice = await createTestUser({ name: "GridAlice" });
@@ -560,7 +569,7 @@ describe("slack channel visibility gate (e2e via search_memory)", () => {
       { connectionId: GRID_CONN, organizationId: org.id },
     );
     // Pre-fix: connTeamId=E… ≠ binding T… dropped BOTH rows → 0 synced →
-    // connection never graphed → gate falls back to the legacy fence (NOT
+    // connection never graphed → gate falls back to the owner-only path (NOT
     // enforced). Post-fix: both channels graph and the gate enforces.
     expect(result.ok).toBe(true);
     expect(result.channelsSynced).toBe(2);
@@ -573,9 +582,9 @@ describe("slack channel visibility gate (e2e via search_memory)", () => {
     const channels = ((await asAlice).conversation_messages ?? []).map(
       (m) => m.channel_id,
     );
-    // ENFORCED (not legacy fence): Alice (member of #eng only) recalls #eng,
-    // never #secret. If the connection had fallen back to the legacy fence she'd
-    // see BOTH — that is exactly the downgrade this guards against.
+    // ENFORCED (not the owner-only path): Alice (member of #eng only) recalls
+    // #eng, never #secret. Had the connection stayed ungraphed she'd see neither,
+    // since she isn't its recorded owner — that is the downgrade this guards against.
     expect(channels).toContain("C01ENG");
     expect(channels).not.toContain("C01SEC");
   });

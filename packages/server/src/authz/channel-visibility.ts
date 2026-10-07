@@ -11,11 +11,9 @@
  * belong to). The two INTERSECT — an agent acting for a user never widens past
  * either bound.
  *
- * Enforcement is per-connection and OFF by default: a connection's rows are
- * gated only once it has a fresh `authz_source_acl_state` row (`acl_support
- * = 'full'` AND `freshness_state = 'fresh'`). A connection that was NEVER graphed
- * (no `authz_source_acl_state` row) keeps the existing per-agent access semantics, so an
- * absent graph never silently hides a channel. But once a row exists, anything
+ * A connection without source permission state is readable only by its recorded
+ * owner (`connections.created_by`), still intersected with the agent's bindings.
+ * Missing ownership denies access. Once an ACL state row exists, anything
  * short of full+fresh — partial/none support, stale/failed freshness, or a fresh
  * row aged past the window — fails CLOSED rather than passing through, so a
  * half-built or stalled graph can never mis-enforce.
@@ -27,6 +25,7 @@
 
 import { type DbClient, pgTextArray } from '../db/client.js';
 import { getConnectionEnforcement, rowToChannelKey } from './acl-state.js';
+import { ownedChatConnectionsSelectSql } from './connection-visibility.js';
 import { CHANNEL_READ_IDENTITIES, channelReadIdentityFor } from './sources.js';
 
 /** A bound channel the gate decides on. Mirrors the fields `resolveBoundChannelRows`
@@ -204,9 +203,8 @@ export async function getVisibleChannelKeysForMember(
 }
 
 /**
- * Filter bound channels down to what the requester may actually read. By
- * default, channels on never-graphed connections preserve legacy access;
- * callers granting access to non-owners can disable that fallback. Channels on
+ * Filter bound channels down to what the requester may actually read. Connections
+ * without source permissions require explicit connection ownership. Channels on
  * enforced connections survive only when the requester is provably `member_of`
  * them. An enforced channel with no team id, or an unresolvable requester, is
  * dropped.
@@ -220,10 +218,9 @@ export async function filterChannelsForRequester<T extends GatedChannelRow>(
     organizationId: string;
     userId: string | null;
     rows: T[];
-    allowNotGraphed?: boolean;
   },
 ): Promise<T[]> {
-  const { organizationId, userId, rows, allowNotGraphed = true } = params;
+  const { organizationId, userId, rows } = params;
   if (rows.length === 0) return rows;
 
   const states = await getConnectionEnforcement(
@@ -231,9 +228,13 @@ export async function filterChannelsForRequester<T extends GatedChannelRow>(
     organizationId,
     rows.map((r) => r.id),
   );
-  // No connection onboarded into authz → no per-user gating to apply; preserve
-  // legacy semantics without paying for member resolution.
-  if (states.size === 0) return allowNotGraphed ? rows : [];
+  const ownedRows = userId && rows.some((r) => !states.has(r.id))
+    ? await sql.unsafe<{ connection_id: string }>(
+      ownedChatConnectionsSelectSql('$1::text', '$2::text'),
+      [organizationId, userId],
+    )
+    : [];
+  const ownedConnections = new Set(ownedRows.map((r) => r.connection_id));
 
   // Only resolve the requester's membership when at least one connection is
   // actively enforcing (full+fresh). Onboarded-but-stale connections fail closed
@@ -258,7 +259,7 @@ export async function filterChannelsForRequester<T extends GatedChannelRow>(
 
   return rows.filter((r) => {
     const state = states.get(r.id);
-    if (!state) return allowNotGraphed; // never graphed → optional legacy fence
+    if (!state) return ownedConnections.has(r.id);
     if (state.status !== "enforced") return false; // stale/unsupported → fail closed
     const key = rowToChannelKey(r);
     if (key === null) return false; // no team id → can't form the key → fail closed

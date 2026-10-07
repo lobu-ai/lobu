@@ -42,8 +42,8 @@ export function aclConnectionIdSql(tableAlias?: "c"): string {
 
 /**
  * Downgrade an existing ACL row to `failed` and persist the reason. When the
- * connection was never graphed, the state update is a no-op so the gate remains
- * on the legacy fence, but the connection error is still recorded.
+ * connection was never graphed, the state update is a no-op so the connection
+ * stays ungraphed (owner-only for chat reads), but the error is still recorded.
  *
  * Both writes commit in one transaction so the persisted reason cannot be lost
  * between the state flip and the column write.
@@ -188,8 +188,8 @@ export async function deleteConnectionAclRow(
  * or by any tick before the exclusion existed — stays on a healthy row forever.
  *
  * Deliberately does NOT touch `authz_source_acl_state`. Dropping that row moves
- * a graphed connection to `not-graphed`, which is the legacy path of
- * `compileResourceVisibility` for its UNSTAMPED rows — while its
+ * a graphed connection to `not-graphed`, which reopens its UNSTAMPED rows to
+ * the ungraphed arm of `compileResourceVisibility` — while its
  * resource-stamped rows stay fail-closed with no enforced authority to
  * satisfy them. Retaining a `failed` row keeps exactly that fail-closed
  * posture; only the operator-facing message is stale, and only it is cleared.

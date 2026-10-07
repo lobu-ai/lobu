@@ -865,24 +865,22 @@ describe("agent history routes", () => {
 		expect(response.status).toBe(404);
 	});
 
-	test("keeps bound platform transcripts readable by the agent owner before ACL onboarding", async () => {
+	test("agent ownership does not grant access to a channel without source permissions", async () => {
 		const { conversationId } = await seedPlatformConversationAcl({
 			buildAcl: false,
 		});
 		const response = await readPlatformTranscript(USER_ID, conversationId);
 
-		expect(response.status).toBe(200);
+		expect(response.status).toBe(404);
 	});
 
-	test("keeps a metadata-only owner on the bound-channel path when agent_users is unreconciled", async () => {
-		// Ownership survives only in agent metadata (`agents.owner_*`), never
-		// mirrored into `agent_users`, so `ownsAgent` is false. Under the ambient
-		// org the owner must still reach the legacy bound-channel path via the
-		// metadata fallback rather than drop to the enforced ACL and 404.
+	test("connection ownership admits a channel without borrowing agent ownership", async () => {
 		const { conversationId } = await seedPlatformConversationAcl({
 			buildAcl: false,
 		});
 		await getDb()`DELETE FROM agent_users WHERE agent_id = 'agent-1'`;
+		await getDb()`UPDATE connections SET created_by = ${USER_ID}
+			WHERE organization_id = ${ORG_ID} AND slug = ${`agentconn-${SLACK_CONNECTION_ID}`}`;
 		expect(
 			await orgContext.run({ organizationId: ORG_ID }, () =>
 				userAgentsStore.ownsAgent("external", USER_ID, "agent-1", ORG_ID),
@@ -894,13 +892,7 @@ describe("agent history routes", () => {
 		expect(response.status).toBe(200);
 	});
 
-	test("a platform admin reads bound transcripts without an ownership row or ACL", async () => {
-		// Restores the admin bypass the ownership resolver granted before this
-		// route stopped calling it. The admin has no agent_users row and only a
-		// plain 'member' role, and no ACL is built — so every ownership/member
-		// path declines and only
-		// session.isAdmin authorizes. Without the bypass this falls to the
-		// enforced-ACL path and 404s (proven red->green).
+	test("platform administration does not grant access to channels with unknown permissions", async () => {
 		const { conversationId } = await seedPlatformConversationAcl({
 			buildAcl: false,
 		});
@@ -912,7 +904,7 @@ describe("agent history routes", () => {
 			isAdmin: true,
 		});
 
-		expect(response.status).toBe(200);
+		expect(response.status).toBe(404);
 	});
 
 	test("fails closed when an org member has no federated member projection", async () => {

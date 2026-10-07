@@ -113,6 +113,7 @@ export function connectionsRowToStored(
     createdAt: tsTime(row.created_at),
     updatedAt: tsTime(row.updated_at),
   };
+  if (row.created_by) out.createdBy = row.created_by;
   if (row.agent_id) out.agentId = row.agent_id;
   if (row.organization_id) out.organizationId = row.organization_id;
   if (row.error_message) out.errorMessage = row.error_message;
@@ -409,7 +410,7 @@ export async function upsertChatConnectionProjection(
     INSERT INTO connections (
       organization_id, connector_key, external_tenant_id, agent_id,
       display_name, status, config, credential_mode, slug, visibility,
-      error_message, created_at, updated_at
+      error_message, created_by, created_at, updated_at
     ) VALUES (
       ${orgId}, ${conn.platform}, ${externalTenantId},
       ${
@@ -418,8 +419,10 @@ export async function upsertChatConnectionProjection(
           : (conn.agentId ?? null)
       },
       ${displayName}, ${status}, ${jsonOf(foldedConfig)}, ${credentialMode},
-      ${slug}, 'org', ${conn.errorMessage ?? null}, now(), now()
+      ${slug}, 'org', ${conn.errorMessage ?? null}, ${conn.createdBy ?? null}, now(), now()
     )
+    -- Ownership is established only by this INSERT. Reinstalls and background
+    -- updates must neither replace an owner nor claim an ownerless legacy row.
     ON CONFLICT (organization_id, slug) WHERE deleted_at IS NULL DO UPDATE SET
       connector_key = EXCLUDED.connector_key,
       external_tenant_id = EXCLUDED.external_tenant_id,

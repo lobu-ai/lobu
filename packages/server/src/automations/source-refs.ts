@@ -304,8 +304,8 @@ function bareChannelId(feedKey: string): string {
 
 /** Compile a set of channel feeds to a read over
  *  `channel_messages`. The rows are membership-gated by the channel_messages CTE
- *  in execute-data-sources — a headless automation run reads only non-enforced
- *  channels, so enforced-channel content never reaches the shared recap. */
+ *  in execute-data-sources — the acting user must own an ungraphed connection
+ *  or have fresh channel membership. A headless run receives no channel rows. */
 function channelMessagesSelect(feeds: ResolvedFeed[]): string {
   const tuples = feeds
     .map(

@@ -41,9 +41,11 @@ describe('compileChannelMessagesVisibility', () => {
     expect(sql).toContain('$2::text');
   });
 
-  it('preserves the not-graphed passthrough and enforced-set fail-closed shape', () => {
+  it('requires ownership without a graph and membership with a fresh graph', () => {
     const { sql } = compileChannelMessagesVisibility(scope, 1, 'cm');
-    // not-graphed → no acl_state row → passthrough.
+    // No state requires ownership, not just workspace visibility.
+    expect(sql).toContain('c.created_by = $2::text');
+    expect(sql).toContain('c.deleted_at IS NULL');
     expect(sql).toContain('NOT EXISTS');
     expect(sql).toContain('public.authz_source_acl_state');
     // enforced branch is gated on the enforced-connection set (fail-closed on stale).
@@ -122,13 +124,13 @@ describe('compileChannelMessagesVisibility', () => {
       expect(sql).toContain(`cei.namespace = '${SLACK_IDENTITY.CHANNEL_ID}'`);
     });
 
-    it('empty registry ⇒ enforced branch is closed (FALSE), only passthrough can match', () => {
+    it('empty registry keeps enforced reads closed and requires ownership otherwise', () => {
       const { sql } = compileChannelMessagesVisibility(scope, 1, 'cm', []);
       // No registered platform → the member-visible disjunct is the literal FALSE,
       // so an enforced connection matches neither branch and its rows are dropped.
       expect(sql).toContain('FALSE');
       expect(sql).not.toContain("cm.platform = '");
-      // The not-graphed passthrough is still present (org-open legacy fence).
+      expect(sql).toContain('c.created_by = $2::text');
       expect(sql).toContain('NOT EXISTS');
     });
   });

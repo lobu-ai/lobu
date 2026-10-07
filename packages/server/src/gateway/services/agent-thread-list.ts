@@ -63,8 +63,8 @@ export interface ChannelVisibility {
  * Which channels may THIS requester read for THIS agent — the per-agent channel
  * fence (the agent's bound channels) INTERSECTED with the per-user channel ACL
  * gate ({@link filterChannelsForRequester}), team-scoped. A platform conversation
- * is visible iff {@link isConversationVisible}. Mirrors recall's gate so a user
- * never sees a channel transcript they're not a member of.
+ * is visible iff {@link isConversationVisible}. Mirrors recall's membership
+ * gate and its connection-owner fallback when source permissions are unknown.
  */
 export async function resolveChannelVisibility(
 	sql: DbClient,
@@ -72,7 +72,6 @@ export async function resolveChannelVisibility(
 		organizationId: string;
 		agentId: string;
 		userId: string | null;
-		allowNotGraphed?: boolean;
 	},
 ): Promise<ChannelVisibility> {
 	const bound = await resolveBoundChannelRows(sql, {
@@ -91,7 +90,6 @@ export async function resolveChannelVisibility(
 		organizationId: args.organizationId,
 		userId: args.userId,
 		rows: bound,
-		allowNotGraphed: args.allowNotGraphed,
 	});
 	const visibleKeys = new Set(
 		visible.map((c) =>
@@ -198,10 +196,9 @@ export async function listAgentThreads(args: {
 		userId,
 	});
 
-	// Platform ("all" scope) rows are ACL-gated: a platform conversation is only
-	// listed if its channel is in the agent's bound channels AND (for ACL-graphed
-	// connections) the requester is a member — so a user never sees a channel
-	// transcript they can't read.
+	// Group-channel conversations in "all" scope are ACL-gated: a conversation is only
+	// listed if its channel is in the agent's bound channels AND the requester
+	// has fresh channel membership or owns the ungraphed connection.
 	let channelVis: ChannelVisibility | null = null;
 	if (scope === "all") {
 		channelVis = await resolveChannelVisibility(getDb(), {

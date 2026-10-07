@@ -1009,8 +1009,8 @@ const RECALL_STOPWORDS = new Set([
  * read (`filterChannelsForRequester`): for a connection whose channel-ACL graph
  * is materialized + fresh, a channel survives only if the user is `member_of`
  * it, so an agent acting for a user never surfaces a channel the user isn't in.
- * Connections without a fresh ACL graph pass through on the per-agent fence
- * alone (no runtime change). See authz/channel-visibility.
+ * Connections with no ACL state are readable only by their recorded owner;
+ * stale ones fail closed. See authz/channel-visibility.
  *
  * Distinctive terms are AND-matched (ILIKE). A prompt with NO distinctive term
  * ("what did we talk about earlier") falls back to the most recent messages in
@@ -1032,8 +1032,8 @@ async function fetchConversationSnippets(
   });
   if (boundChannels.length === 0) return [];
   // Per-user ACL gate: drop channels the requester isn't a member of, for
-  // connections that have a fresh channel-ACL graph. Non-enforced connections
-  // are returned unchanged, so this is a no-op until a workspace is graphed.
+  // connections that have a fresh channel-ACL graph, and channels on ungraphed
+  // connections the requester doesn't own.
   const channels = await filterChannelsForRequester(sql, {
     organizationId: gate.organizationId,
     userId: gate.principal,

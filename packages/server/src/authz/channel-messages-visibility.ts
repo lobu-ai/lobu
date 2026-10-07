@@ -7,8 +7,7 @@
  * Rule (keyed on the channel identity rather than `events.entity_ids`, because
  * `channel_messages` carries no entity_ids), matching `getConnectionEnforcement`'s
  * three states:
- *   - `not-graphed` (NO acl state row for the connection) → unconstrained (legacy
- *     fence / org-open — the passthrough the whole authz program uses);
+ *   - `not-graphed` (NO acl state row) → recorded connection owner only;
  *   - `enforced` (acl row is full + fresh) → visible ONLY when the requester is
  *     `member_of` the `channel` entity keyed `slack_channel_id = UPPER(team:chan)`,
  *     where the team is resolved from the row's connection;
@@ -18,9 +17,8 @@
  *
  * Fail-closed: a headless/null principal, an enforced channel the requester
  * doesn't belong to, or a stale-ACL connection all see nothing. This is what
- * makes a (headless) automation run safe to read a streaming @feed — it reads only
- * not-graphed channels; enforced/stale ones return zero rows, so their content
- * never reaches the shared recap.
+ * makes a headless automation run fail closed on a streaming @feed. A run must
+ * carry its acting user's identity to establish ownership or channel membership.
  *
  * Requester resolution is the auth-signup `$member` claim only (same as
  * `compileResourceVisibility`) — the recap/query_sql reader is a web/app user, not
@@ -34,6 +32,7 @@
 
 import { CHANNEL_READ_IDENTITIES } from './sources.js';
 import { enforcedConnectionsSelectSql } from './acl-state.js';
+import { ownedChatConnectionsSelectSql } from './connection-visibility.js';
 import type { ChannelReadIdentity } from '@lobu/connector-sdk';
 import type { AuthzScope } from './scope.js';
 
@@ -130,23 +129,20 @@ export function compileChannelMessagesVisibility(
       keySql,
     )})`;
   });
-  // No registered chat platform → nothing is member-visible; only the
-  // not-graphed passthrough can match. FALSE keeps the enforced branch closed.
+  // No registered chat platform → only explicit connection ownership can admit
+  // an ungraphed connection. FALSE keeps the enforced branch closed.
   const memberVisible = platformBranches.length > 0 ? platformBranches.join('\n        OR ') : 'FALSE';
 
-  // Fail-closed on stale: a connection is visible ONLY when it has NO acl state
-  // row at all (never onboarded → legacy fence, org-visible) OR it is
-  // full+fresh-enforced AND the requester is a channel member. A connection whose
-  // acl row EXISTS but isn't currently fresh-enforcing (stale / partial / failed)
-  // matches neither branch → its transcripts are dropped. This mirrors
-  // getConnectionEnforcement's `not-graphed` (passthrough) vs `stale` (fail
-  // closed) split — NOT a bare `NOT IN (enforced)`, which would leak a channel
-  // whose ACL snapshot merely aged out.
+  // Unknown source permissions are owner-only; stale source permissions deny
+  // everyone. Workspace membership alone never grants channel access.
   const sql = `AND (
-      NOT EXISTS (
-        SELECT 1 FROM public.authz_source_acl_state a
-        WHERE a.organization_id = ${orgParam}
-          AND a.connection_id = ${tableAlias}.connection_id
+      (
+        ${tableAlias}.connection_id IN (${ownedChatConnectionsSelectSql(orgParam, userParam)})
+        AND NOT EXISTS (
+          SELECT 1 FROM public.authz_source_acl_state a
+          WHERE a.organization_id = ${orgParam}
+            AND a.connection_id = ${tableAlias}.connection_id
+        )
       )
       OR (
         ${tableAlias}.connection_id IN (${enforcedConnectionsSelectSql(orgParam)})

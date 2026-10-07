@@ -65,6 +65,8 @@ export interface ConnectionSettings {
 export interface StoredConnection {
   id: string;
   platform: string;
+  /** Verified Lobu creator, recorded on first insert and preserved on updates. */
+  createdBy?: string;
   agentId?: string;
   /**
    * Organization id this connection belongs to. Optional in the type for

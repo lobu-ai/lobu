@@ -447,10 +447,15 @@ than "member of any linked resource."
 Connection-owned ACL freshness remains part of the gate:
 
 ```text
-never graphed  → existing compatibility path
+never graphed  → chat: recorded connection owner only; other: connection visibility
 fresh/full     → enforce resource audience
 stale/failed   → fail closed
 ```
+
+Chat creation and verified Slack/Google Chat claims record the Lobu creator in
+`connections.created_by` on first insert. Reinstalls and background updates preserve
+that value. Existing ownerless connections remain ownerless; workspace or agent
+ownership never supplies an inferred grant.
 
 For shipped events, `event.connection_id` identifies the ACL authority. For a
 generic entity or a derived artifact, the protected `member_of` edge's authority

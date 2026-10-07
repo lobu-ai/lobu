@@ -1,14 +1,13 @@
 /**
  * Slack channel-membership SYNC — the production path that populates the authz
- * graph the visibility gate reads. Without this, `buildSlackChannelGraph` would
- * only ever run from tests and the gate would never enforce a real connection.
+ * graph the visibility gate reads.
  *
  * Per Slack connection: resolve the channels it actually captures
  * (`resolveBoundChannelRows` — the same source of truth the gate filters), fetch
  * each channel's current membership from Slack (`conversations.members`), and
- * hand the whole set to `buildSlackChannelGraph`, which materializes the
- * `member_of` edges, reconciles departures, and stamps the connection
- * `full`/`fresh`. A periodic tick (`runSlackAclSyncTick`, wired in
+ * hand the normalized resources to `buildAccessGraph`, which materializes the
+ * `member_of` edges and reconciles departures. The sync stamps the connection
+ * `full`/`fresh` after all workspaces complete. A periodic tick (`runSlackAclSyncTick`, wired in
  * `scheduled/jobs.ts`) re-runs this so membership changes (joins/leaves) converge
  * within the sync cadence, and the gate's freshness window fails the connection
  * closed if the tick ever stops.
@@ -17,9 +16,8 @@
  * membership fetch throws (Slack outage, bot removed, missing token), we do NOT
  * build a half-synced graph — we mark the connection's ACL state `failed` so the
  * gate drops all its channels until a later tick succeeds. We only DOWNGRADE an
- * existing row; a connection that has never been graphed stays on the legacy
- * fence (a brand-new connection whose first sync fails must not suddenly hide
- * every channel).
+ * existing row; a connection that has never been graphed remains readable only
+ * by its recorded connection owner.
  */
 
 import { createLogger } from '@lobu/core';
@@ -70,8 +68,8 @@ const logger = createLogger('slack-acl-sync');
  * overwriting or bypassing it.
  *
  * Writing the row DOES change enforcement, and that is the point: any existing
- * `authz_source_acl_state` row moves the connection from `not-graphed` (legacy
- * per-agent fence) to `stale`, which fails closed (`acl-state.ts` —
+ * `authz_source_acl_state` row moves the connection from `not-graphed`
+ * (recorded connection owner only) to `stale`, which fails closed (`acl-state.ts` —
  * "onboarded-but-stale ... must fail closed"). So a first-ever revocation on an
  * ungraphed connection denies its channel recall until the first sync completes,
  * rather than serving a membership Slack has already contradicted. The sentinel
@@ -195,7 +193,7 @@ async function syncSlackConnectionAclLocked(
   // connection (no teamId) — we accept EVERY real-team binding on the connection
   // and group by the binding's own team. Without this relaxation an org-wide
   // install (connTeamId = E…) drops all its `T…` bindings and silently
-  // downgrades to the legacy per-agent fence.
+  // downgrades to the not-graphed, owner-only path.
   const [conn] = await sql<{ team_id: string | null }>`
 		SELECT COALESCE(external_tenant_id, config->'chatMetadata'->>'teamId') AS team_id
 		FROM connections
@@ -300,7 +298,7 @@ async function syncSlackConnectionAclLocked(
           : rawMembers;
         // Channel name + privacy are BEST-EFFORT display metadata — a failure
         // here must NOT fail-close the whole sync (membership is the contract),
-        // so swallow and fall back to the id-as-name in buildSlackChannelGraph.
+        // so swallow and let slackChannelsToResources use the channel id as its name.
         let name: string | undefined;
         let isPrivate: boolean | undefined;
         try {

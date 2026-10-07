@@ -103,6 +103,7 @@ export function isSlackConfig(
 export interface PlatformConnection {
   id: string;
   platform: string;
+  createdBy?: string;
   agentId?: string;
   /**
    * Organization id this connection belongs to. Mirrors

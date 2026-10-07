@@ -85,6 +85,7 @@ describe("managed-install recall (Item 2) + author attribution surfacing (Item 3
 			credentialMode: "managed",
 			status: "active",
       metadata: { teamId: TEAM },
+      createdBy: user.id,
     });
     await seedManagedMessage(
       MANAGED_CONN,

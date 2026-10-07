@@ -9,7 +9,8 @@
  *      because an ACL sync stalled wedges the operation it gates);
  *   2. it links to NO access resource (`$resource` entity in `entity_ids`)
  *      AND its connection was never graphed (`connection_id IS NULL` or no
- *      `authz_source_acl_state` row): ordinary workspace content, unchanged.
+ *      `authz_source_acl_state` row). Chat connections additionally require the
+ *      recorded connection owner; data connections keep their explicit visibility.
  *      An unattributed row on a graphed connection stays fail-closed — a
  *      missing stamp is not proof of workspace visibility;
  *   3. it links to at least one access resource AND EVERY linked resource is
@@ -24,8 +25,8 @@
  * `connection_id IS NULL` (e.g. a channel-stamped `save_content` summary) is
  * gated by its stamps exactly like a connector-synced row, and a stamped event
  * whose authority went stale (or was never graphed) fails closed rather than
- * falling back to the legacy fence. An unstamped event on a never-graphed
- * connection keeps the legacy visibility the source messages have; once a
+ * falling back to workspace access. An unstamped chat event with no permission
+ * state requires the same connection ownership as its source messages; once a
  * connection is graphed, its unattributed rows never fall back.
  *
  * Fail-closed: an edge with no ownership claim, a claim owned by a stale /
@@ -42,6 +43,7 @@
  */
 
 import { ACL_RESOURCE_TYPE_SLUG } from '@lobu/connector-sdk';
+import { CHAT_PLATFORMS } from '@lobu/core';
 import { enforcedConnectionsSelectSql } from './acl-state.js';
 import { aclConnectionIdSql } from './acl-observability.js';
 import type { AuthzScope } from './scope.js';
@@ -52,6 +54,13 @@ import {
 
 /** Sole ACL resource type slug, inlined as a SQL string literal (constant). */
 const RESOURCE_TYPE_SQL = `'${ACL_RESOURCE_TYPE_SLUG}'`;
+
+/**
+ * Chat connector keys, inlined as SQL string literals (constants). Adapterless
+ * transports (`webhook`, `rest`) also carry `credential_mode`, so that column
+ * alone does not identify chat content.
+ */
+const CHAT_PLATFORMS_SQL = CHAT_PLATFORMS.map((key) => `'${key}'`).join(', ');
 
 /**
  * Predicate for a table holding events (alias has `connection_id` + `entity_ids`).
@@ -152,16 +161,22 @@ export function compileResourceVisibility(
   // (`connections.id::text` for data connectors, the `slackinst-…` /
   // `agentconn-…` slug for chat) — so the "was this connection ever graphed?"
   // check resolves through the `connections` row with the same
-  // `aclConnectionIdSql` expression the sync stamps. A NULL connection (a
-  // server-authored save) takes the legacy path.
-  const neverGraphed = `(${tableAlias}.connection_id IS NULL
-        OR NOT EXISTS (
+  // `aclConnectionIdSql` expression the sync stamps. An unstamped NULL-connection
+  // row (a server-authored save) is ordinary workspace content. An ungraphed chat
+  // connection additionally requires its recorded owner, matching transcript
+  // reads; a Slack data connector (no `credential_mode`) keeps connection
+  // visibility.
+  const unstampedSourceVisible = `(${tableAlias}.connection_id IS NULL
+        OR EXISTS (
           SELECT 1
           FROM public.connections c
           WHERE c.organization_id = ${orgParam}
             AND c.deleted_at IS NULL
             AND c.id = ${tableAlias}.connection_id
-            AND EXISTS (
+            AND (c.credential_mode IS NULL
+              OR c.connector_key NOT IN (${CHAT_PLATFORMS_SQL})
+              OR c.created_by = ${userParam})
+            AND NOT EXISTS (
               SELECT 1
               FROM public.authz_source_acl_state s
               WHERE s.organization_id = ${orgParam}
@@ -169,15 +184,12 @@ export function compileResourceVisibility(
             )
         ))`;
 
-  // Ordinary content (no linked resource) keeps the never-graphed legacy
-  // path; stamped content faces the all-required envelope. One `EXISTS` over
-  // the linked set decides which arm applies, so the unnest runs once per row.
+  // Unstamped content follows its source visibility; stamped content faces the
+  // all-required envelope. One `EXISTS` over the linked set decides which arm
+  // applies, so the unnest runs once per row.
   //
-  // Soft-deleted connections are NOT fenced here: `neverGraphed` filters
-  // `c.deleted_at IS NULL`, so an event on a deleted-but-graphed connection
-  // takes the legacy arm. The fence comes from `compileConnectionFkVisibility`
-  // (connection-visibility.ts), which is always composed in front of this
-  // gate at every seam — never use this compiler standalone.
+  // `compileConnectionFkVisibility` is also composed at every read seam to
+  // enforce connection visibility on stamped content and interaction events.
   const sql = `AND (
       (${tableAlias}.interaction_type <> 'none'
       AND EXISTS (
@@ -192,7 +204,7 @@ export function compileResourceVisibility(
           FROM (${linkedResources}) AS lr
           WHERE NOT (${resourceSatisfied})
         ))
-        ELSE ${neverGraphed}
+        ELSE ${unstampedSourceVisible}
       END)
     )`;
   return { sql, params: [scope.organizationId, scope.principal] };
