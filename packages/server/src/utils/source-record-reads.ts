@@ -193,6 +193,29 @@ function occurredAt(row: Record<string, unknown>): string {
   return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
+/** Pick the newest ready row. An exhausted page with a continuation blocks
+ * the merge: its next row could be newer than every currently loaded row. */
+function newestReadyStream<T extends {
+  page: { rows: Array<Record<string, unknown>>; next_cursor?: string | null };
+  taken: number;
+}>(streams: T[]): T | undefined {
+  let best: T | undefined;
+  for (const stream of streams) {
+    const row = stream.page.rows[stream.taken];
+    if (!row) {
+      if (stream.page.next_cursor) return undefined;
+      continue;
+    }
+    if (
+      !best ||
+      occurredAt(row) > occurredAt(best.page.rows[best.taken])
+    ) {
+      best = stream;
+    }
+  }
+  return best;
+}
+
 /** The read streams of a record: one per feed and matchable identity path. */
 function activityStreams(feeds: SourceFeed[], type: string) {
   return feeds.flatMap((feed) => {
@@ -302,13 +325,8 @@ export async function readSourceRecordActivity(
     return (owner ?? path) === path;
   };
 
-  // k-way merge over each stream's rows in source order. It stops once a
-  // stream with more pages runs out of read rows: its next row could be
-  // newer than anything left in the others.
   const events: Array<Record<string, unknown>> = [];
   while (events.length < options.limit) {
-    let best: (typeof pages)[number] | null = null;
-    let blocked = false;
     for (const stream of pages) {
       while (
         stream.taken < stream.page.rows.length &&
@@ -316,19 +334,9 @@ export async function readSourceRecordActivity(
       ) {
         stream.taken += 1;
       }
-      if (stream.taken >= stream.page.rows.length) {
-        if (stream.page.next_cursor) blocked = true;
-        continue;
-      }
-      if (
-        !best ||
-        occurredAt(stream.page.rows[stream.taken]) >
-          occurredAt(best.page.rows[best.taken])
-      ) {
-        best = stream;
-      }
     }
-    if (!best || blocked) break;
+    const best = newestReadyStream(pages);
+    if (!best) break;
     const row = best.page.rows[best.taken];
     best.taken += 1;
     const originId = String(row.origin_id ?? "");
@@ -413,7 +421,7 @@ function decodeLinkCursor(
   return parsed.streams;
 }
 
-/** Dedupe key of a relationship within one page. */
+/** Dedupe key of a relationship. */
 function linkKey(link: SourceRecordLink): string {
   return JSON.stringify([
     link.relationship_type,
@@ -421,6 +429,30 @@ function linkKey(link: SourceRecordLink): string {
     link.entity_type,
     link.key,
   ]);
+}
+
+/** The link a source row declares through `read`, or null without the other side's key. */
+function rowLink(
+  read: LinkRead,
+  row: Record<string, unknown>
+): SourceRecordLink | null {
+  const otherKey = (read.other.target.identities ?? [])
+    .map((identity) => getValueAtPath(row, identity.eventPath))
+    .find((value) => value != null && String(value).trim() !== "");
+  if (otherKey == null || !read.other.target.entityType) return null;
+  const key = String(otherKey).trim();
+  const name = read.other.target.titlePath
+    ? getValueAtPath(row, read.other.target.titlePath)
+    : null;
+  return {
+    relationship_type: read.type,
+    direction: read.direction,
+    entity_type: read.other.target.entityType,
+    key,
+    name: name == null || String(name).trim() === "" ? key : String(name),
+    occurred_at: occurredAt(row),
+    source_url: row.source_url == null ? null : String(row.source_url),
+  };
 }
 
 /** Bounded reads with source-owned checkpoints; never retain history in a cursor.
@@ -444,8 +476,14 @@ async function readLinkPage(
   }
   // The binding hash is not a signature. Validate the client-supplied stream
   // keys too, so a malformed cursor cannot silently look like exhaustion.
-  if (resume && Object.keys(resume).some(key => !grouped.has(key))) {
-    throw new ToolUserError("Invalid relationship cursor streams. Restart from the first page.", 400);
+  for (const [key, position] of Object.entries(resume ?? {})) {
+    const group = grouped.get(key);
+    if (!group) {
+      throw new ToolUserError("Invalid relationship cursor streams. Restart from the first page.", 400);
+    }
+    if (position.skip > group.length) {
+      throw new ToolUserError("Invalid relationship cursor row position. Restart from the first page.", 400);
+    }
   }
   const failures: SourceReadFailure[] = [];
   const next: Record<string, LinkPosition> = {};
@@ -460,9 +498,6 @@ async function readLinkPage(
         if (!position) return [];
         const { feed, path } = group[0];
         try {
-          if (position.skip > group.length) {
-            throw new Error("Invalid relationship cursor row position");
-          }
           const page = await readSourceFeedPage(
             {
               feed_id: feed.feedId,
@@ -528,33 +563,14 @@ async function readLinkPage(
       ) {
         continue;
       }
-      const otherKey = (read.other.target.identities ?? [])
-        .map((identity) => getValueAtPath(row, identity.eventPath))
-        .find((value) => value != null && String(value).trim() !== "");
-      if (otherKey == null || !read.other.target.entityType) continue;
-      const key = String(otherKey).trim();
-      const name = read.other.target.titlePath
-        ? getValueAtPath(row, read.other.target.titlePath)
-        : null;
-      const link: SourceRecordLink = {
-        relationship_type: read.type,
-        direction: read.direction,
-        entity_type: read.other.target.entityType,
-        key,
-        name: name == null || String(name).trim() === "" ? key : String(name),
-        occurred_at: occurredAt(row),
-        source_url: row.source_url == null ? null : String(row.source_url),
-      };
-      links.set(linkKey(link), link);
+      const link = rowLink(read, row);
+      if (link) links.set(linkKey(link), link);
     }
     return [...links.values()];
   };
 
   const links = new Map<string, SourceRecordLink>();
   while (links.size < options.limit) {
-    let best: (typeof pages)[number] | undefined;
-    let candidate: SourceRecordLink | undefined;
-    let blocked = false;
     for (const stream of pages) {
       let available = rowLinks(stream);
       while (stream.taken < stream.page.rows.length && stream.skip >= available.length) {
@@ -562,16 +578,10 @@ async function readLinkPage(
         stream.skip = 0;
         available = rowLinks(stream);
       }
-      if (stream.taken >= stream.page.rows.length) {
-        if (stream.page.next_cursor) blocked = true;
-        continue;
-      }
-      if (!candidate || available[stream.skip].occurred_at > candidate.occurred_at) {
-        best = stream;
-        candidate = available[stream.skip];
-      }
     }
-    if (!best || !candidate || blocked) break;
+    const best = newestReadyStream(pages);
+    if (!best) break;
+    const candidate = rowLinks(best)[best.skip];
     const key = linkKey(candidate);
     if (!links.has(key)) links.set(key, candidate);
     best.skip += 1;
@@ -707,25 +717,9 @@ export async function readSourceRecordLinks(
       const rows = await streams.get(stream)!;
       for (const row of rows ?? []) {
         if (row.origin_type !== read.kind) continue;
-        const otherKey = (read.other.target.identities ?? [])
-          .map((identity) => getValueAtPath(row, identity.eventPath))
-          .find((value) => value != null && String(value).trim() !== "");
-        if (otherKey == null || !read.other.target.entityType) continue;
-        const key = String(otherKey).trim();
-        const name = read.other.target.titlePath
-          ? getValueAtPath(row, read.other.target.titlePath)
-          : null;
-        const link: SourceRecordLink = {
-          relationship_type: read.type,
-          direction: read.direction,
-          entity_type: read.other.target.entityType,
-          key,
-          name:
-            name == null || String(name).trim() === "" ? key : String(name),
-          occurred_at: occurredAt(row),
-          source_url: row.source_url == null ? null : String(row.source_url),
-        };
-        const id = `${link.relationship_type}:${link.direction}:${link.entity_type}:${key}`;
+        const link = rowLink(read, row);
+        if (!link) continue;
+        const id = `${link.relationship_type}:${link.direction}:${link.entity_type}:${link.key}`;
         const existing = links.get(id);
         if (!existing || existing.occurred_at < link.occurred_at)
           links.set(id, link);

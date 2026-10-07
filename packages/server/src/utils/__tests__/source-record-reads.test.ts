@@ -306,6 +306,20 @@ it("rejects invented stream keys even when a cursor retains its original request
   expect(readPage).not.toHaveBeenCalled();
 });
 
+it("rejects an impossible relationship row position instead of retaining a failed stream", async () => {
+  readPage.mockResolvedValue({ rows: [], next_cursor: "more" });
+  const first = await reads.readSourceRecordLinks(scope, record, { cursor: null, limit: 10 });
+  const payload = JSON.parse(Buffer.from(first.next_cursor!, "base64url").toString());
+  const stream = Object.keys(payload.streams)[0];
+  payload.streams[stream] = { after: null, event: "e1", skip: 999 };
+  readPage.mockClear();
+  await expect(reads.readSourceRecordLinks(scope, record, {
+    limit: 10,
+    cursor: Buffer.from(JSON.stringify(payload)).toString("base64url"),
+  })).rejects.toMatchObject({ httpStatus: 400 });
+  expect(readPage).not.toHaveBeenCalled();
+});
+
 /** A source-native keyset remains valid after its last row is deleted. */
 function sourcePage(rows: Array<Record<string, unknown>>, limit: number, cursor?: string) {
   const key = (row: Record<string, unknown>) => [String(row.occurred_at ?? ""), String(row.origin_id)];
