@@ -143,6 +143,9 @@ describe('source feed notifications', () => {
     await reconcileSourceFeedListeners(sql, device.id, [org.id], []);
     expect.soft((await sql`SELECT next_run_at FROM feeds WHERE id = ${notice.feed_id}`)[0].next_run_at).toBeNull();
     expect(await sql`SELECT id FROM runs WHERE action_key = ${SOURCE_FEED_LISTENER_TASK}`).toHaveLength(0);
+    const subscription = { ...referenceDelivery(), scope_key: sourceFeedScopeKey({ scope: 'new' }, '1.0.0'), records: [], needs_rebind: true };
+    expect((await receiveFeedNotifications(sql, [{ ...notice, subscription }], device.id, [org.id]))[0].active).toBe(false);
+    expect(await sql`SELECT id FROM runs WHERE action_key = ${SOURCE_FEED_LISTENER_TASK}`).toHaveLength(0);
   });
 
   it('starts observation only for active subscriptions, dedupes wakes, and revokes the binding on pause', async () => {
