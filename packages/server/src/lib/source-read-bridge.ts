@@ -4,7 +4,7 @@ import type { AuthzScope } from '../authz/scope';
 import { getDb } from '../db/client';
 import { createConnectorOperationRun } from '../runs/queue-service';
 import { dispatchChromeActionToExtension } from '../worker-api/dispatch-chrome-action';
-import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY } from './device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, SOURCE_FEED_SCOPE_METADATA_KEY } from './device-feed-read-protocol';
 import { scrubSourceReadRun } from './source-read-run';
 
 export function sourceReadDeadlineError(feedId: number): Error & { exitReason: 'timeout' } {
@@ -23,7 +23,7 @@ export function createSourceReadBridge(
     definition_version: string | null;
     selected_artifact_hash: string | null;
   },
-  p: { scope: AuthzScope; automationId?: number | null; feedId: number; deadlineAt: number; sourceSubscription?: boolean },
+  p: { scope: AuthzScope; automationId?: number | null; feedId: number; deadlineAt: number; sourceSubscriptionScopeKey?: string },
   signal: AbortSignal,
 ) {
   const sql = getDb();
@@ -43,7 +43,8 @@ export function createSourceReadBridge(
         policyPrincipalKind: actor.kind, policyPrincipalId: actor.id,
         createdByUserId: p.scope.principal, automationId: p.automationId,
         runMetadata: { [SOURCE_FEED_READ_METADATA_KEY]: true,
-          ...(p.sourceSubscription ? { [SOURCE_FEED_SUBSCRIPTION_METADATA_KEY]: true } : {}) }, db: tx,
+          ...(p.sourceSubscriptionScopeKey ? { [SOURCE_FEED_SUBSCRIPTION_METADATA_KEY]: true,
+            [SOURCE_FEED_SCOPE_METADATA_KEY]: p.sourceSubscriptionScopeKey } : {}) }, db: tx,
       });
       await tx`UPDATE runs SET feed_id = ${feed.id}, expires_at = ${new Date(p.deadlineAt)},
         connector_version = ${feed.pinned_version ?? feed.definition_version},

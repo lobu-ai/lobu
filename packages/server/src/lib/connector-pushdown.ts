@@ -28,7 +28,7 @@ import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-c
 import { isMetadataOnlyDeviceConnector, readDeviceFeed } from './device-feed-read';
 import { readSourceFeedFromAdapter } from './source-feed-adapters';
 import { createSourceReadBridge, sourceReadDeadlineError } from './source-read-bridge';
-import { sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
+import { sourceFeedScopeKey, sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
 
 interface ConnectorQueryParams {
   /** The ACL gate — tenant + principal. Its `organizationId`/`principal` drive
@@ -539,7 +539,11 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   const onAbort = () => controller.abort();
   p.signal?.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(onAbort, timeoutMs);
-  const browser = createSourceReadBridge(feed, { ...p, sourceSubscription }, controller.signal);
+  const browser = createSourceReadBridge(feed, {
+    ...p,
+    sourceSubscriptionScopeKey: sourceSubscription
+      ? sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version) : undefined,
+  }, controller.signal);
   let status: 'completed' | 'failed' | 'timeout' = 'failed';
   try {
     const result = await executeCompiledConnector({

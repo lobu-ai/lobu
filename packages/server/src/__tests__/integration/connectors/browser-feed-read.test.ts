@@ -15,6 +15,7 @@ import { addUserToOrganization, createTestAgent, createTestOrganization, createT
 import { post } from '../../setup/test-helpers';
 import * as sourceListeners from '../../../runs/source-feed-listener';
 import * as sourceNotifications from '../../../runs/feed-notifications';
+import { sourceFeedScopeKey } from '../../../runs/source-feed-subscriptions';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 
 const SOURCE_KEY = 'browser-read-fixture';
@@ -178,10 +179,11 @@ describe('compiled browser source reads', () => {
   });
 
   it.each([
-    { failures: 0, rejectDuringSetup: false },
-    { failures: 2, rejectDuringSetup: false },
-    { failures: 2, rejectDuringSetup: true },
-  ])('runs compiled observation through browser claim/completion and recovery: %j', async ({ failures, rejectDuringSetup }) => {
+    { failures: 0, rejectDuringSetup: false, editDuringSetup: false },
+    { failures: 0, rejectDuringSetup: false, editDuringSetup: true },
+    { failures: 2, rejectDuringSetup: false, editDuringSetup: false },
+    { failures: 2, rejectDuringSetup: true, editDuringSetup: false },
+  ])('runs compiled observation through browser claim/completion and recovery: %j', async ({ failures, rejectDuringSetup, editDuringSetup }) => {
     const sql = getTestDb();
     const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId });
     const [automation] = await sql`WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
@@ -206,6 +208,12 @@ describe('compiled browser source reads', () => {
     const observed = sourceListeners.runSourceFeedListener({ organizationId: orgId, feedId });
     let finished = false;
     observed.finally(() => { finished = true; }).catch(() => {});
+    if (editDuringSetup) {
+      await expect.poll(async () => (await sql`SELECT id FROM runs
+        WHERE organization_id = ${orgId} AND action_key = 'feed_listen'`).length).toBe(1);
+      const updated = await manageFeeds({ action: 'update_feed', feed_id: feedId, config: { scope: 'new' } }, {} as Env, context());
+      expect(updated).not.toHaveProperty('error');
+    }
     let answered = false;
     let scopeKey = '';
     const ack = { binding_id: 'synthetic-observation-binding', epoch: 'synthetic-epoch', records: [{ id: 'source-item', revision: 1 }] };
@@ -219,6 +227,7 @@ describe('compiled browser source reads', () => {
       if (job?.run_id && job.operation_key === 'feed_listen') {
         expect(job.feed_context).toMatchObject({ feed_id: feedId, connection_id: connectionId, dry_run: false });
         scopeKey = job.feed_context.subscription.scope_key;
+        expect.soft(scopeKey).toBe(sourceFeedScopeKey({}, VERSION));
         expect((await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${feedId}`)[0].due).toBe(true);
         if (rejectDuringSetup) {
           await sourceNotifications.receiveFeedNotifications(sql, [{
@@ -254,14 +263,16 @@ describe('compiled browser source reads', () => {
       return;
     }
     expect(setupState.last_error).toBeNull();
-    // The setup completed, but the next poll may still omit its binding.
-    // Completing its queue task must not turn that omission into a tight loop.
-    await sql`UPDATE runs SET status = 'completed' WHERE action_key = 'source-feed-listener'`;
-    const setupTasks = await sql`SELECT id FROM runs WHERE action_key = 'source-feed-listener'`;
-    expect.soft((await sql`SELECT next_run_at > now() AS cooling_down FROM feeds WHERE id = ${feedId}`)[0].cooling_down).toBe(true);
-    await sourceListeners.reconcileSourceFeedListeners(sql, deviceId, [orgId], []);
-    await sourceListeners.reconcileSourceFeedListeners(sql, deviceId, [orgId], []);
-    expect.soft(await sql`SELECT id FROM runs WHERE action_key = 'source-feed-listener'`).toHaveLength(setupTasks.length);
+    if (!editDuringSetup) {
+      // The setup completed, but the next poll may still omit its binding.
+      // Completing its queue task must not turn that omission into a tight loop.
+      await sql`UPDATE runs SET status = 'completed' WHERE action_key = 'source-feed-listener'`;
+      const setupTasks = await sql`SELECT id FROM runs WHERE action_key = 'source-feed-listener'`;
+      expect.soft((await sql`SELECT next_run_at > now() AS cooling_down FROM feeds WHERE id = ${feedId}`)[0].cooling_down).toBe(true);
+      await sourceListeners.reconcileSourceFeedListeners(sql, deviceId, [orgId], []);
+      await sourceListeners.reconcileSourceFeedListeners(sql, deviceId, [orgId], []);
+      expect.soft(await sql`SELECT id FROM runs WHERE action_key = 'source-feed-listener'`).toHaveLength(setupTasks.length);
+    }
     const notification = await post('/api/workers/poll', { body: {
       worker_id: WORKER_ID, platform: 'chrome-extension', app_version: '9.9.0',
       capabilities: { 'browser.debugger': true, 'browser.tabs': true },
@@ -275,6 +286,14 @@ describe('compiled browser source reads', () => {
         } }],
     } });
     expect(notification.status).toBe(200);
+    if (editDuringSetup) {
+      expect((await notification.json()).feed_notification_receipts).toEqual([
+        expect.objectContaining({ active: false }),
+      ]);
+      expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(0);
+      expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${feedId}`)[0].checkpoint).toBeNull();
+      return;
+    }
     expect((await notification.json()).feed_notification_receipts).toEqual([
       expect.objectContaining({ active: true, ack }),
     ]);
