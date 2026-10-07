@@ -8,6 +8,7 @@ import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed'
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
 import { feedBackoff } from '../connectors/feed-backoff';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
+import { feedWebhookDrivenSql } from '../connectors/feed-health-semantics';
 import { sourceFeedSubscriptionSelection, sourceFeedSubscriptions } from './source-feed-subscriptions';
 
 export interface SourceFeedListenerTask { organizationId: string; feedId: number }
@@ -38,7 +39,7 @@ export async function reconcileSourceFeedListeners(sql: DbClient, deviceId: stri
       AND (f.next_run_at IS NULL OR f.next_run_at <= now())
       AND d.feeds_schema->f.feed_key->'operations' ? 'read'
       AND NOT (d.feeds_schema->f.feed_key->'operations' ? 'sync')
-      AND d.feeds_schema->f.feed_key->'webhook' IS NOT NULL
+      AND (${sql.unsafe(feedWebhookDrivenSql('d', 'f'))})
       AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
       AND (NOT (f.id = ANY(${pgBigintArray(boundFeedIds)}::bigint[])) OR f.next_run_at <= now())
       AND EXISTS (${sourceFeedSubscriptionSelection(sql)})

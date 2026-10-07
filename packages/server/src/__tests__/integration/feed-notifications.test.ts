@@ -133,6 +133,18 @@ describe('source feed notifications', () => {
       .toMatchObject({ schedule: null, due: true, consecutive_failures: 0, last_error: null });
   });
 
+  it.each([null, {}, { events: [] }, { events: [''] }])('does not set up a listener for an undispatchable webhook %j', async (webhook) => {
+    const { sql, org, user, device, notice } = await subscribedFixture();
+    await sql`UPDATE connector_definitions SET feeds_schema = ${sql.json({ items: { operations: ['read'], webhook } })}
+      WHERE organization_id = ${org.id}`;
+    const context = { organizationId: org.id, userId: user.id, memberRole: 'owner', scopes: ['mcp:read', 'mcp:write', 'mcp:admin'] } as ToolContext;
+    const updated = await manageFeeds({ action: 'update_feed', feed_id: notice.feed_id, config: { scope: 'new' } }, {} as Env, context);
+    expect(updated).not.toHaveProperty('error');
+    await reconcileSourceFeedListeners(sql, device.id, [org.id], []);
+    expect.soft((await sql`SELECT next_run_at FROM feeds WHERE id = ${notice.feed_id}`)[0].next_run_at).toBeNull();
+    expect(await sql`SELECT id FROM runs WHERE action_key = ${SOURCE_FEED_LISTENER_TASK}`).toHaveLength(0);
+  });
+
   it('starts observation only for active subscriptions, dedupes wakes, and revokes the binding on pause', async () => {
     const { sql, org, device, notice, automationId } = await subscribedFixture();
     await reconcileSourceFeedListeners(sql, device.id, [org.id], []);
