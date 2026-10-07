@@ -663,6 +663,19 @@ describe('compiled browser source reads', () => {
     expect((await sql`SELECT status FROM feeds WHERE id = ${feedId}`)[0].status).toBe('paused');
   });
 
+  it.each([false, true])('refuses to implicitly bind an admin browser account to another owner (existing profile: %s)', async (existingProfile) => {
+    await liveDefinition();
+    const sql = getTestDb();
+    const other = await createTestUser({ email:'other-owner@example.test' });
+    await addUserToOrganization(other.id, orgId, 'member');
+    await sql`UPDATE connections SET created_by = ${other.id} WHERE id = ${connectionId}`;
+    if (existingProfile) await ensureLiveBrowserProfile({ organizationId:orgId,connectorKey:SOURCE_KEY,deviceWorkerId:deviceId,userId });
+    const result = await manageConnections({ action:'update',connection_id:connectionId,device_worker_id:deviceId }, {} as Env, context());
+    expect(result).toMatchObject({ error:expect.stringContaining('on your own connections') });
+    expect((await sql`SELECT auth_profile_id FROM connections WHERE id = ${connectionId}`)[0].auth_profile_id).toBeNull();
+    expect(await sql`SELECT id FROM auth_profiles WHERE organization_id = ${orgId}`).toHaveLength(existingProfile ? 1 : 0);
+  });
+
   it.each(['create', 'connect'] as const)('%s lets members select browser auth on a connector with OAuth too', async (action) => {
     await liveDefinition();
     const sql = getTestDb();
@@ -704,6 +717,24 @@ describe('compiled browser source reads', () => {
     expect(await manageAuthProfiles({ action: 'delete_auth_profile', auth_profile_slug: profile.slug, force: true }, {} as Env, context()))
       .toMatchObject({ error: expect.stringContaining('Delete the connections') });
     expect((await sql`SELECT auth_profile_id FROM connections WHERE id = ${connectionId}`)[0].auth_profile_id).toBe(profile.id);
+  });
+
+  it.each(['active', 'revoked'] as const)('does not replace a retained %s live account through connection updates', async (status) => {
+    await liveDefinition();
+    const sql = getTestDb();
+    const original = await ensureLiveBrowserProfile({ organizationId: orgId, connectorKey: SOURCE_KEY, deviceWorkerId: deviceId, userId });
+    await sql`UPDATE auth_profiles SET status = ${status}, auth_data = ${sql.json({ mode: 'live', account_id: 'original-account', verified_at: new Date().toISOString() })} WHERE id = ${original.id}`;
+    await sql`UPDATE connections SET auth_profile_id = ${original.id}, visibility = 'private' WHERE id = ${connectionId}`;
+    const replacement = await createAuthProfile({ organizationId: orgId, connectorKey: SOURCE_KEY,
+      displayName: 'Replacement browser account', profileKind: 'browser_session', status: 'active', createdBy: userId,
+      deviceWorkerId: deviceId, authData: { mode: 'live', account_id: 'different-account', verified_at: new Date().toISOString() } });
+    const result = await manageConnections({ action: 'update', connection_id: connectionId,
+      auth_profile_slug: replacement.slug, display_name: 'Must not persist' }, {} as Env, context());
+    expect(result).toMatchObject({ error: expect.stringContaining('cannot be replaced') });
+    const [saved] = await sql`SELECT auth_profile_id, display_name FROM connections WHERE id = ${connectionId}`;
+    expect(saved.auth_profile_id).toBe(original.id);
+    expect(saved.display_name).not.toBe('Must not persist');
+    expect((await sql`SELECT status FROM feeds WHERE id = ${feedId}`)[0].status).toBe('active');
   });
 
   it('freezes the verified account with the queued browser run and refuses a changed identity', async () => {

@@ -1817,11 +1817,6 @@ export async function handleUpdate(
     };
   }
 
-  if (hasAuthProfileArg && authSelection.authProfile) {
-    const ownershipError = oauthAccountOwnershipError(authSelection.authProfile, ctx.userId, existing.created_by);
-    if (ownershipError) return { error: ownershipError };
-  }
-
   // Non-admins may only bind to a runtime profile they own. Mirrors the
   // handleCreate target-profile guard so a member who created a connection
   // can't pivot it onto another member's credentials. `env` profiles are
@@ -1846,6 +1841,13 @@ export async function handleUpdate(
 
   const provisionedLiveBrowser = !currentAuthProfile && hasDeviceWorkerArg &&
     (Boolean(authSelection.pendingLiveBrowser) || authSelection.authProfile?.auth_data?.mode === 'live');
+  const selectedProfileOwner = authSelection.authProfile ?? (authSelection.pendingLiveBrowser
+    ? { profile_kind: 'browser_session', auth_data: { mode: 'live' }, created_by: authSelection.pendingLiveBrowser.userId ?? null }
+    : null);
+  if ((hasAuthProfileArg || provisionedLiveBrowser) && selectedProfileOwner) {
+    const ownershipError = oauthAccountOwnershipError(selectedProfileOwner, ctx.userId, existing.created_by);
+    if (ownershipError) return { error: ownershipError };
+  }
   const nextAuthProfileId = hasAuthProfileArg || provisionedLiveBrowser
     ? (authSelection.authProfile?.id ?? null)
     : existing.auth_profile_id;
@@ -2087,7 +2089,7 @@ export async function handleUpdate(
     // Mirrors the shape manage_feeds already uses for handleUpdateFeed.
     const updateOutcome = await sql.begin(async (tx) => {
       const lockedRows = await tx`
-        SELECT config, app_auth_profile_id, status
+        SELECT config, auth_profile_id, app_auth_profile_id, status
         FROM connections
         WHERE id = ${args.connection_id}
           AND organization_id = ${organizationId}
@@ -2095,6 +2097,14 @@ export async function handleUpdate(
         FOR UPDATE
       `;
       if (lockedRows.length === 0) return { rows: [], previousStatus: null };
+      if (authSelection.pendingLiveBrowser || nextAuthProfileId !== lockedRows[0].auth_profile_id) {
+        const retained = await tx`SELECT id FROM auth_profiles
+          WHERE id = ${lockedRows[0].auth_profile_id} AND organization_id = ${organizationId}
+            AND profile_kind = 'browser_session' AND auth_data->>'mode' = 'live'`;
+        if (retained.length) {
+          return { denial: { error: 'A live browser account cannot be replaced on an existing connection. Create a separate connection to preserve the original source identity.' } };
+        }
+      }
       if (hasAppAuthProfileArg && !callerIsAdmin && args.app_auth_profile_slug === null && lockedRows[0].app_auth_profile_id !== null) {
         return { denial: { error: 'Only admins can clear the OAuth app profile.' } };
       }
