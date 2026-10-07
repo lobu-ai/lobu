@@ -33,8 +33,8 @@ describe("ViewAttachmentSchema", () => {
     expect(accepts({ event_kind: "deal.won", type: "deal" })).toBe(true);
   });
 
-  it("rejects an event attachment without its entity type", () => {
-    expect(accepts({ event_kind: "deal.won" })).toBe(false);
+  it("accepts a kind-only event attachment", () => {
+    expect(accepts({ event_kind: "deal.won" })).toBe(true);
   });
 
   it("rejects an event attachment with a placement or another subject", () => {

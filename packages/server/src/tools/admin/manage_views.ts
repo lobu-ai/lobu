@@ -115,9 +115,9 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
           400
         );
       }
-      if (typeof entry.type !== 'string' || entry.type.trim() === '') {
+      if (entry.type !== undefined && (typeof entry.type !== 'string' || entry.type.trim() === '')) {
         throw new ToolUserError(
-          'An event_kind attach entry needs the entity type its events link to',
+          'An event_kind type qualifier must be a non-empty entity type',
           400
         );
       }
@@ -130,7 +130,7 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
     ].filter(Boolean).length;
     if (keys !== 1) {
       throw new ToolUserError(
-        'Each attach entry needs exactly one of type, entity, workspace or event_kind (with its type)',
+        'Each attach entry needs exactly one of type, entity, workspace or event_kind (with an optional type qualifier)',
         400
       );
     }

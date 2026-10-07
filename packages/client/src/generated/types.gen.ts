@@ -6761,9 +6761,9 @@ export type ManageViewsData = {
                */
               event_kind: string;
               /**
-               * Entity-type slug the event must link at least one entity of.
+               * Optional linked entity-type qualifier. Omit to match the event kind alone.
                */
-              type: string;
+              type?: string;
             }
         >;
         /**
@@ -6944,9 +6944,9 @@ export type ManageViewsResponses = {
                  */
                 event_kind: string;
                 /**
-                 * Entity-type slug the event must link at least one entity of.
+                 * Optional linked entity-type qualifier. Omit to match the event kind alone.
                  */
-                type: string;
+                type?: string;
               }
           >;
           params: {
@@ -7071,9 +7071,9 @@ export type ManageViewsResponses = {
                  */
                 event_kind: string;
                 /**
-                 * Entity-type slug the event must link at least one entity of.
+                 * Optional linked entity-type qualifier. Omit to match the event kind alone.
                  */
-                type: string;
+                type?: string;
               }
           >;
           params: {
@@ -7205,9 +7205,9 @@ export type ManageViewsResponses = {
                  */
                 event_kind: string;
                 /**
-                 * Entity-type slug the event must link at least one entity of.
+                 * Optional linked entity-type qualifier. Omit to match the event kind alone.
                  */
-                type: string;
+                type?: string;
               }
           >;
           params: {

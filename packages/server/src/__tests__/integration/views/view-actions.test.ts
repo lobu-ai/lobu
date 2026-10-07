@@ -124,6 +124,54 @@ describe("view actions", () => {
 		primeMemberEventKinds(org.id, viewKinds);
 	});
 
+
+  it("binds a kind-only view action to its readable event and rejects a changed subject", async () => {
+    await executeTool("manage_views", {
+      action: "set", key: "event-poke", source_code: VIEW_SOURCE,
+      attach: [{ event_kind: "test.poked" }],
+      actions: { retry: { emits: "test.poked" } },
+    }, TEST_ENV, ownerCtx);
+    const source = await executeTool("save_memory", {
+      content: "Action source", semantic_type: "test.poked",
+    }, TEST_ENV, ownerCtx) as { id: number };
+    const other = await executeTool("save_memory", {
+      content: "Another source", semantic_type: "test.poked",
+    }, TEST_ENV, ownerCtx) as { id: number };
+    const args = {
+      view: "event-poke", action: "retry", value: { source_event_id: other.id },
+      scope: { event: source.id }, interaction_id: "event-bound-click",
+    };
+    await expect(executeTool("invoke_view_action", {
+      ...args, scope: undefined,
+    }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
+    const first = await executeTool("invoke_view_action", args, TEST_ENV, ownerCtx) as { event_id: number };
+    const [receipt] = await getTestDb()`
+      SELECT metadata FROM events WHERE id = ${first.event_id}
+    `;
+    expect(receipt.metadata.interaction.source_event_id).toBe(source.id);
+    expect(receipt.metadata.value.source_event_id).toBe(other.id);
+    await expect(executeTool("invoke_view_action", args, TEST_ENV, ownerCtx))
+      .resolves.toMatchObject({ created: false, event_id: first.event_id });
+    await expect(executeTool("invoke_view_action", {
+      ...args, scope: { event: other.id },
+    }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 409 });
+    const replacement = await executeTool("save_memory", {
+      content: "Updated source", semantic_type: "test.poked", supersedes_event_id: source.id,
+    }, TEST_ENV, ownerCtx) as { id: number };
+    const opened = await executeTool("open_view", {
+      key: "event-poke", scope: { event: source.id },
+    }, TEST_ENV, ownerCtx) as { scope: { event: number } };
+    expect(opened.scope.event).toBe(replacement.id);
+    await expect(executeTool("invoke_view_action", {
+      ...args, interaction_id: "stale-subject",
+    }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(executeTool("invoke_view_action", args, TEST_ENV, ownerCtx))
+      .resolves.toMatchObject({ created: false, event_id: first.event_id });
+    await expect(executeTool("invoke_view_action", {
+      ...args, interaction_id: "missing-event", scope: { event: 999999999 },
+    }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 404 });
+  });
+
 	it("appends one view_interaction event for a declared action", async () => {
 		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });
 		const result = await invokeViewAction({
