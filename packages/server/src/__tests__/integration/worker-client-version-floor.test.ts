@@ -6,6 +6,7 @@
 
 import { Hono } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { canaryVersion } from '../../../../../scripts/canary-publish.mjs';
 import type { Env } from '../../index';
 import { pollWorkerJob } from '../../worker-api/poll';
 import { cleanupTestDatabase } from '../setup/test-db';
@@ -13,7 +14,7 @@ import { seedOwnerContext } from '../setup/test-fixtures';
 
 describe('worker client version floor', () => {
   beforeAll(() => {
-    process.env.MIN_CLIENT_VERSION = 'macos=1.4.0';
+    process.env.MIN_CLIENT_VERSION = 'macos=1.4.0,headless=20.1.0';
   });
 
   afterAll(() => {
@@ -92,5 +93,17 @@ describe('worker client version floor', () => {
     const ok = await pollAs(org.id, user.id, { platform: 'chrome-extension', app_version: '0.1.0' });
     expect(ok.status).toBe(200);
     expect(ok.body.error).toBeUndefined();
+  });
+
+  it('admits published canaries at the release floor but rejects older bases', async () => {
+    const { org, user } = await seedOwnerContext({ orgName: 'Canary Version Floor Org' });
+    for (const [base, expected] of [['20.0.9', 409], ['20.1.0', 200], ['21.2.1', 200]] as const) {
+      const result = await pollAs(org.id, user.id, {
+        platform: 'headless',
+        app_version: canaryVersion(base, '1700000000', 'a'.repeat(40)),
+      });
+      expect(result.status).toBe(expected);
+      expect(result.body.error).toBe(expected === 409 ? 'upgrade_required' : undefined);
+    }
   });
 });

@@ -28,7 +28,9 @@
  * (see pollWorkerJob).
  *
  * Version shape is the convention every first-party client already reports:
- * dotted numerics `major.minor.patch[.build]`, compared numerically. The
+ * dotted numerics `major.minor.patch[.build]`, or the published
+ * `major.minor.patch-canary.<timestamp>.g<sha>` format, compared by release
+ * components. Canaries are built from commits after that base release. The
  * per-feature page-activation gate runs on this comparator too, against a
  * fixed floor of its own rather than MIN_CLIENT_VERSION.
  */
@@ -60,7 +62,7 @@ function envFloors(): Map<string, string> {
     const cut = trimmed.indexOf('=');
     const platform = cut > 0 ? trimmed.slice(0, cut).trim() : '';
     const version = cut > 0 ? trimmed.slice(cut + 1).trim() : '';
-    if (platform === '' || parseClientVersion(version) == null) {
+    if (platform === '' || parseFloorVersion(version) == null) {
       ignored.push(trimmed);
       continue;
     }
@@ -80,14 +82,20 @@ function envFloors(): Map<string, string> {
   return floors;
 }
 
-/** Parse `1.2.3[.4]` into numeric parts; null when the shape is unknown. */
+/** Parse a release or published canary into its release components. */
 export function parseClientVersion(
   value: unknown
 ): [number, number, number] | null {
   if (typeof value !== 'string') return null;
-  if (!/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(value)) return null;
-  const [major, minor, patch] = value.split('.').map(Number);
-  return [major, minor, patch];
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:\.\d+|-canary\.[1-9]\d*\.g[a-f0-9]{40})?$/.exec(value);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/** Operator floors remain numeric releases, not a particular canary commit. */
+function parseFloorVersion(value: unknown): [number, number, number] | null {
+  if (typeof value !== 'string' || value.includes('-')) return null;
+  return parseClientVersion(value);
 }
 
 /** True when the platform has no floor, or the version meets it. */
@@ -99,7 +107,7 @@ export function meetsClientVersionFloor(
   const floor = (platform != null ? floors.get(platform) : undefined) ?? null;
   if (floor == null) return true;
   const have = parseClientVersion(version);
-  const want = parseClientVersion(floor);
+  const want = parseFloorVersion(floor);
   // floors map values are validated on parse, so an unparseable floor here
   // cannot happen; stay permissive rather than bricking the fleet on it.
   if (want == null) return true;
