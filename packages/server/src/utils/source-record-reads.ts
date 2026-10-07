@@ -22,9 +22,6 @@ import { ToolUserError } from "./errors";
 import { getValueAtPath } from "./object-path";
 
 const READ_TIMEOUT_MS = 20_000;
-/** Source pages a relationship read follows per stream before reporting it incomplete. */
-const MAX_LINK_PAGES = 10;
-const LINK_PAGE_SIZE = 200;
 
 type EventKinds = Record<
   string,
@@ -605,8 +602,8 @@ async function readLinkPage(
 
 /**
  * A record's relationships, read live from events whose kinds declare
- * `relationships` over attributions to this type. Without a cursor each pair
- * is reported once, from its newest event; with one, see readLinkPage.
+ * `relationships` over attributions to this type. Omitted and null cursors both
+ * start the first bounded page; see readLinkPage for continuation semantics.
  */
 export async function readSourceRecordLinks(
   scope: AuthzScope,
@@ -660,71 +657,10 @@ export async function readSourceRecordLinks(
     }
   }
 
-  if (options.cursor !== undefined) {
-    const request = createHash("sha256").update(JSON.stringify([
-      scope.organizationId, scope.principal, scope.agentId ?? null,
-      record.type, record.key, options.relationshipType ?? null, options.direction ?? null,
-      feeds.map(feed => [feed.feedId, feed.connectionId, feed.matchPaths, feed.eventKinds]),
-    ])).digest("hex");
-    return readLinkPage(scope, record, reads, request, { ...options, cursor: options.cursor });
-  }
-
-  const failures: SourceReadFailure[] = [];
-  // Relationships sharing a feed and path read its source pages once, and a
-  // failing stream is reported once.
-  const streams = new Map<string, Promise<Array<Record<string, unknown>> | null>>();
-  const readStream = async (feed: SourceFeed, path: string) => {
-    try {
-      const rows: Array<Record<string, unknown>> = [];
-      let cursor: string | undefined;
-      for (let pageNumber = 0; ; pageNumber += 1) {
-        if (pageNumber === MAX_LINK_PAGES) {
-          throw new Error(
-            `more than ${MAX_LINK_PAGES} source pages; relationships beyond them were not read`
-          );
-        }
-        const page = await readSourceFeedPage(
-          {
-            feed_id: feed.feedId,
-            match: { path, values: [record.key] },
-            limit: LINK_PAGE_SIZE,
-            cursor,
-          },
-          READ_TIMEOUT_MS,
-          scope,
-          options.signal,
-          options.automationId
-        );
-        rows.push(...page.rows);
-        cursor = page.next_cursor;
-        if (!cursor) return rows;
-      }
-    } catch (error) {
-      failures.push({ feed_id: feed.feedId, error: getErrorMessage(error) });
-      return null;
-    }
-  };
-  const links = new Map<string, SourceRecordLink>();
-  await Promise.all(
-    reads.map(async (read) => {
-      const stream = `${read.feed.feedId}:${read.path}`;
-      if (!streams.has(stream)) streams.set(stream, readStream(read.feed, read.path));
-      const rows = await streams.get(stream)!;
-      for (const row of rows ?? []) {
-        if (row.origin_type !== read.kind) continue;
-        const link = rowLink(read, row);
-        if (!link) continue;
-        const id = linkKey(link);
-        const existing = links.get(id);
-        if (!existing || existing.occurred_at < link.occurred_at)
-          links.set(id, link);
-      }
-    })
-  );
-  return {
-    links: [...links.values()]
-      .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at))
-      .slice(0, options.limit),
-    failures,
-  };
+  const request = createHash("sha256").update(JSON.stringify([
+    scope.organizationId, scope.principal, scope.agentId ?? null,
+    record.type, record.key, options.relationshipType ?? null, options.direction ?? null,
+    feeds.map(feed => [feed.feedId, feed.connectionId, feed.matchPaths, feed.eventKinds]),
+  ])).digest("hex");
+  return readLinkPage(scope, record, reads, request, { ...options, cursor: options.cursor ?? null });
 }

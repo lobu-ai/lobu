@@ -213,7 +213,7 @@ describe('source-backed record reads', () => {
       record_links: [{ relationship_type: 'works_at', direction: 'incoming', entity_type: 'person', key: 'p1', name: 'Pat' }],
       record_failures: [],
     });
-    expect(companyLinks).not.toHaveProperty('next_cursor');
+    expect(companyLinks).toHaveProperty('next_cursor', null);
     const personLinks = await manageEntity(
       { action: 'list_links', record: { type: 'person', key: 'p1' } },
       {} as Env,
@@ -224,10 +224,10 @@ describe('source-backed record reads', () => {
     });
   }, 60_000);
 
-  it('opts into cursor pagination through the public tool without persisting source records', async () => {
+  it.each([undefined, null])('starts public relationship pagination with cursor %s without persisting source records', async (cursor) => {
     const before = await counts();
     const record = { type: 'company', key: 'c1' };
-    const first = await buildEntitiesNamespace(owner, {} as Env).listLinks({ record, limit: 1, cursor: null }) as Awaited<ReturnType<typeof manageEntity>>;
+    const first = await buildEntitiesNamespace(owner, {} as Env).listLinks({ record, limit: 1, ...(cursor === undefined ? {} : { cursor }) }) as Awaited<ReturnType<typeof manageEntity>>;
     expect(first).toMatchObject({ record_links: [{ key: 'p1' }], next_cursor: expect.any(String) });
     if (!('next_cursor' in first)) throw new Error('Missing cursor contract');
     const second = await manageEntity({ action: 'list_links', record, limit: 1, cursor: first.next_cursor }, {} as Env, owner);

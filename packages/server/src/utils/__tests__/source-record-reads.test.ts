@@ -101,6 +101,7 @@ it("does not attribute another event kind just because it shares an identity pat
 
 it("does not invent relationships for an event with no declaring kind", async () => {
   readPage.mockResolvedValue({
+    row_cursors: ["untyped"],
     rows: [
       {
         origin_id: "untyped",
@@ -112,6 +113,7 @@ it("does not invent relationships for an event with no declaring kind", async ()
     limit: 10,
   });
   expect(result.links).toEqual([]);
+  expect(result.failures).toEqual([]);
 });
 
 it.each([
@@ -172,12 +174,30 @@ const linked = (origin_id: string, occurred_at: string, contact_id = "c1") => ({
   metadata: { account_id: "a1", contact_id },
 });
 
-it("keeps legacy relationship response semantics when cursor is omitted", async () => {
-  readPage.mockResolvedValue({ rows: [linked("new", "2026-01-02", "c1"), linked("old", "2026-01-01", "c1")] });
+it("deduplicates the first relationship page when cursor is omitted", async () => {
+  readPage.mockResolvedValue({ rows: [linked("new", "2026-01-02", "c1"), linked("old", "2026-01-01", "c1")], row_cursors: ["new", "old"] });
   const result = await reads.readSourceRecordLinks(scope, record, { limit: 10 });
-  expect(Object.keys(result).sort()).toEqual(["failures", "links"]);
+  expect(result.next_cursor).toBeNull();
   expect(result.links).toHaveLength(1);
   expect(result.links[0].occurred_at).toBe("2026-01-02T00:00:00.000Z");
+});
+
+it.each([undefined, null])("starts a bounded first page with cursor %s and resumes without scanning ahead", async (cursor) => {
+  const rows = Array.from({ length: 2107 }, (_, n) => linked(`e${3000 - n}`, "2026-01-01", `c${n}`));
+  readPage.mockImplementation(async ({ limit, cursor }) => {
+    const start = cursor ? rows.findIndex(row => row.origin_id === cursor) + 1 : 0;
+    const page = rows.slice(start, start + limit);
+    return { rows: page, row_cursors: page.map(row => row.origin_id), next_cursor: page.at(-1)!.origin_id };
+  });
+  const first = await reads.readSourceRecordLinks(scope, record, { limit: 2, ...(cursor === undefined ? {} : { cursor }) });
+  expect(first.failures).toEqual([]);
+  expect(first.links.map(link => link.key)).toEqual(["c0", "c1"]);
+  expect(first.next_cursor).toEqual(expect.any(String));
+  expect(readPage).toHaveBeenCalledOnce();
+  expect(readPage).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 2, cursor: undefined }), expect.anything(), scope, undefined, undefined);
+  const second = await reads.readSourceRecordLinks(scope, record, { limit: 2, cursor: first.next_cursor });
+  expect(second.links.map(link => link.key)).toEqual(["c2", "c3"]);
+  expect(readPage).toHaveBeenCalledTimes(2);
 });
 
 it("pages past the old source scan cap with bounded cursors and no skipped destinations", async () => {
@@ -388,16 +408,20 @@ it("finds a relationship declared only on a later source page", async () => {
   });
   const result = await reads.readSourceRecordLinks(scope, record, { limit: 10 });
   expect(result.failures).toEqual([]);
-  expect(result.links.map((link) => link.key)).toEqual(["c7"]);
+  expect(result.links).toEqual([]);
+  expect(result.next_cursor).toEqual(expect.any(String));
+  const next = await reads.readSourceRecordLinks(scope, record, { limit: 10, cursor: result.next_cursor });
+  expect(next.links.map((link) => link.key)).toEqual(["c7"]);
+  expect(next.next_cursor).toBeNull();
 });
 
-it("reports a relationship read that hits its page cap instead of an empty list", async () => {
+it("returns continuation after an empty source page instead of scanning to a cap", async () => {
   readPage.mockResolvedValue({ rows: [], next_cursor: "more" });
   const result = await reads.readSourceRecordLinks(scope, record, { limit: 10 });
   expect(result.links).toEqual([]);
-  expect(result.failures).toEqual([
-    { feed_id: 1, error: expect.stringMatching(/were not read/) },
-  ]);
+  expect(result.failures).toEqual([]);
+  expect(result.next_cursor).toEqual(expect.any(String));
+  expect(readPage).toHaveBeenCalledOnce();
 });
 
 it("returns an event reachable through two of the record's paths once across pages", async () => {
