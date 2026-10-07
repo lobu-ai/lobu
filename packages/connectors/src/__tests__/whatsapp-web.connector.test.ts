@@ -18,6 +18,7 @@ import {
   setSystemTime,
 } from "bun:test";
 import WhatsAppWebConnector from "../whatsapp_web.js";
+import { constrainBrowserInput } from "../../../connector-sdk/src/browser-requirement.js";
 import { whatsAppWebAdapterProgram } from "../whatsapp-web-adapter.js";
 import {
   buildCollectionPlan,
@@ -73,6 +74,8 @@ function makeDispatcher(
   let installed = adapterInstalled;
   const dispatch = mock(
     async (action: string, input: Record<string, unknown>) => {
+      // Exercise the production host grant before simulating the paired extension.
+      input = constrainBrowserInput(connector.definition.browser, action, input);
       calls.push({ action, input });
       if (action === "navigate") return { tab_id: 42, current_url: input.url };
       if (action === "feed_listen") return typeof responses.feed_listen === "function" ? responses.feed_listen(input) : responses.feed_listen ?? { bridge_id: "synthetic-feed", binding_id: "synthetic-feed", epoch: "synthetic-epoch", token: "synthetic-token", records: [] };
@@ -1494,13 +1497,16 @@ describe("buffered source records use normal feed ingestion", () => {
 
   it("prioritizes buffered records without advancing past deferred history and acknowledges only emitted revisions", async () => {
     const checkpoint = initializeBrowserCheckpoint(null);
-    const { dispatcher } = makeDispatcher({
+    const { dispatcher, calls } = makeDispatcher({
       probe: READY,
       feed_listen: observation([{ revision: 1, payload: message("live-a") }, { revision: 2, payload: message("live-b") }]),
       collect: { ...collectResponse([]), history_pages: [{ messages: [message("history", { timestamp: 1000 })] }], backfill: { complete: true, chats: { synthetic: { oldest_timestamp: 1000 } } } },
     });
     const result = await runSync(messagesFeed(), syncCtx(checkpoint, dispatcher, { max_messages_per_sync: 1 }));
     expect(result.events.map((event) => event.origin_id)).toEqual(["live-a"]);
+    expect(calls.find(call => call.action === "feed_listen")?.input).toEqual({
+      tab_id: 42, allowed_origins: ["https://web.whatsapp.com"],
+    });
     const next = result.checkpoint as BrowserCheckpoint;
     expect(next.source_ack?.records).toEqual([{ id: "live-a", revision: 1 }]);
     expect(next.backfill).toEqual(checkpoint.backfill);
