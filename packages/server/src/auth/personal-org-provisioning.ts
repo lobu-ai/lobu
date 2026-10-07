@@ -267,11 +267,14 @@ export async function ensurePersonalOrganization(
         )
     `;
 	} catch (error) {
-		console.error("[Auth] Failed to set username for personal org:", {
-			userId: user.id,
-			slug: finalResult.slug,
-			error: String(error),
-		});
+		logger.error(
+			{
+				err: error,
+				userId: user.id,
+				slug: finalResult.slug,
+			},
+			"[Auth] Failed to set username for personal org"
+		);
 	}
 
 	// Provision the $member entity + core identifiers (auth_user_id, email)

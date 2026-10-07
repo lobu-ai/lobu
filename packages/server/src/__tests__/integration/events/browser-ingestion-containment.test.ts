@@ -444,7 +444,7 @@ describe('browser ingestion containment', () => {
       worker_id: WORKER_ID,
       items: [
         {
-          id: 'broken-browser-item',
+          id: `https://example.test/item?access_token=${raw}`,
           title: 'Broken item',
           payload_text: 'body',
           payload_type: `https://example.test/?code=${raw}`,
@@ -453,13 +453,16 @@ describe('browser ingestion containment', () => {
       ],
     });
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     try {
       await streamContent(failed.ctx);
       expect(failed.result().status).toBe(500);
       expect(JSON.stringify(failed.result().body)).not.toContain(raw);
       expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(raw);
+      expect(JSON.stringify(logSpy.mock.calls)).not.toContain(raw);
     } finally {
       errorSpy.mockRestore();
+      logSpy.mockRestore();
     }
   });
 });
