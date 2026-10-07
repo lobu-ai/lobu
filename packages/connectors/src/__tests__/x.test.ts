@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { connectorSdkMock } from "./connector-sdk.mock";
-import { runSync } from './sync-harness';
+import { runSync } from "./sync-harness";
 
 // Stub @lobu/connector-sdk (it pulls in playwright) so the connector imports
 // without the browser stack. Shared superset — see connector-sdk.mock.ts.
@@ -333,14 +333,19 @@ describe("parseBrowserTimelineResponse", () => {
 		];
 
 		const profile = parseBrowserTimelineResponse("https://x.com/alice", {
-			data: { user: { result: { timeline_v2: { timeline: { instructions } } } } },
+			data: {
+				user: { result: { timeline_v2: { timeline: { instructions } } } },
+			},
 		});
 		expect(profile).toHaveLength(1);
 		expect(profile[0]).toMatchObject({ id: "9", username: "alice" });
 
-		const bookmarks = parseBrowserTimelineResponse("https://x.com/i/bookmarks", {
-			data: { bookmark_timeline_v2: { timeline: { instructions } } },
-		});
+		const bookmarks = parseBrowserTimelineResponse(
+			"https://x.com/i/bookmarks",
+			{
+				data: { bookmark_timeline_v2: { timeline: { instructions } } },
+			},
+		);
 		expect(bookmarks).toHaveLength(1);
 		expect(bookmarks[0].text).toBe("profile tweet");
 	});
@@ -609,15 +614,25 @@ describe("finalizeSyncResult", () => {
 				publishedAt: new Date("2025-06-01T00:00:00Z"),
 			},
 		];
-		const liked = finalizeSyncResult(tweets as any, {}, {}, {
-			originType: "liked_tweet",
-		});
+		const liked = finalizeSyncResult(
+			tweets as any,
+			{},
+			{},
+			{
+				originType: "liked_tweet",
+			},
+		);
 		expect(liked.events[0].origin_type).toBe("liked_tweet");
 		expect(liked.events[0].attachments).toBeUndefined();
 
-		const bookmarked = finalizeSyncResult(tweets as any, {}, {}, {
-			originType: "bookmark",
-		});
+		const bookmarked = finalizeSyncResult(
+			tweets as any,
+			{},
+			{},
+			{
+				originType: "bookmark",
+			},
+		);
 		expect(bookmarked.events[0].origin_type).toBe("bookmark");
 	});
 
@@ -821,6 +836,7 @@ describe("XConnector definition", () => {
 		expect(Object.keys(def.feeds).sort()).toEqual([
 			"bookmarks",
 			"direct_messages",
+			"following_timeline",
 			"home_feed",
 			"liked_tweets",
 			"my_tweets",
@@ -1464,8 +1480,8 @@ describe("XConnector browser-first routing", () => {
 				],
 			],
 		},
-			{
-				name: "keeps a resumed cursor when replay transport fails",
+		{
+			name: "keeps a resumed cursor when replay transport fails",
 			replayResult: { ok: false, status: 0 },
 			replayThrows: true,
 			parserErrors: ["X likes cursor request failed (transport_error)"],
@@ -1476,21 +1492,21 @@ describe("XConnector browser-first routing", () => {
 			expectedCursor: "resume-cursor",
 			expectedEvents: ["500"],
 			expectedPages: { requested: 1, received: 0, unconfirmed: 1 },
-				drainResponses: [],
-			},
-			{
-				name: "keeps collected likes when the captured cursor URL cannot be rewritten",
-				initialUrl: "https://x.com/i/api/graphql/hash/Likes",
-				replayResult: { ok: true, status: 200 },
-				replayThrows: false,
-				parserErrors: ["X likes cursor rewrite failed"],
-				checkpoint: {},
-				expectedCursor: "retry-cursor",
-				expectedEvents: ["500"],
-				expectedPages: { requested: 1, received: 0, unconfirmed: 1 },
-				drainResponses: [],
-			},
-		]) {
+			drainResponses: [],
+		},
+		{
+			name: "keeps collected likes when the captured cursor URL cannot be rewritten",
+			initialUrl: "https://x.com/i/api/graphql/hash/Likes",
+			replayResult: { ok: true, status: 200 },
+			replayThrows: false,
+			parserErrors: ["X likes cursor rewrite failed"],
+			checkpoint: {},
+			expectedCursor: "retry-cursor",
+			expectedEvents: ["500"],
+			expectedPages: { requested: 1, received: 0, unconfirmed: 1 },
+			drainResponses: [],
+		},
+	]) {
 		test(scenario.name, async () => {
 			let drainCount = 0;
 			const dispatcher = {
@@ -1501,7 +1517,7 @@ describe("XConnector browser-first routing", () => {
 							result: {
 								responses: [
 									{
-									url: scenario.initialUrl ?? likesTimelineUrl(),
+										url: scenario.initialUrl ?? likesTimelineUrl(),
 										body: JSON.stringify(
 											likesTimelineResponse("500", "retry-cursor"),
 										),
@@ -1538,9 +1554,9 @@ describe("XConnector browser-first routing", () => {
 				sessionState: { chrome_dispatcher: dispatcher },
 			});
 
-			expect(
-				result.events.map((event: any) => event.origin_id).sort(),
-			).toEqual(scenario.expectedEvents);
+			expect(result.events.map((event: any) => event.origin_id).sort()).toEqual(
+				scenario.expectedEvents,
+			);
 			expect(result.metadata).toMatchObject({
 				collection_status: "in_progress",
 				pages_requested: scenario.expectedPages.requested,
@@ -2046,7 +2062,7 @@ describe("isReplySubmitLabel", () => {
 
 describe("prepare_reply action contract", () => {
 	test("pins the connector version for catalog upgrades", () => {
-		expect(new XConnector().definition.version).toBe("3.13.7");
+		expect(new XConnector().definition.version).toBe("3.14.0");
 	});
 
 	test("classifies staging a reply as a write for org policy", () => {
