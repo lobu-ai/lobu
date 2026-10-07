@@ -284,10 +284,9 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
   // POST /conversations/present-event { eventId }
   //
   // Unlike send_message, this route accepts no destination or authored card.
-  // It renders a tenant-owned durable event through its declared json_template
-  // and posts it back into the signed source conversation. That keeps event
-  // actions portable across web/Slack/Google Chat without teaching the model
-  // platform card JSON or internal action-id formats.
+  // It posts a tenant-owned event summary and canonical Open event link into
+  // the signed source conversation. Custom actions run in the event's React
+  // view; the worker never authors platform cards or action identities.
   router.post("/conversations/present-event", authenticateWorker, async (c) => {
     try {
       const worker = getVerifiedWorker(c);
@@ -340,7 +339,7 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
         if (presentation.reason === "not_renderable") {
           return errorResponse(
             c,
-            "Event has no renderable declared json_template",
+            "Event permalink is unavailable",
             422
           );
         }

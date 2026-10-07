@@ -156,6 +156,8 @@ const config: KnipConfig = {
         "examples/**/lobu.config.ts",
         "examples/**/*.connector.ts",
         "examples/**/*.reaction.ts",
+        // viewFromFile sources are compiled at apply time, not statically imported.
+        "examples/**/views/*.tsx",
         "examples/**/evals/**/*.ts",
         // Standalone example run scripts (`bun run seed`, `bun run compose`,
         // etc. in an example's package.json) are file-path entrypoints, not

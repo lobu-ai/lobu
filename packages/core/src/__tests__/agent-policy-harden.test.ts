@@ -179,7 +179,7 @@ describe("getCustomToolDescription", () => {
 
   test("registers the event presentation and scoped follow-up tools", () => {
     expect(getCustomToolDescription("present_event")).toContain(
-      "declared json_template"
+      "summary and Open event link"
     );
     expect(getCustomToolDescription("schedule_followup")).toContain(
       "current conversation"

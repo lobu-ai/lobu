@@ -5,7 +5,10 @@
   "description": "Lobu example: personal agent connectors (Revolut, LinkedIn, Spotify, WhatsApp Web).",
   "type": "module",
   "devDependencies": {
-    "@lobu/cli": "^13.3.0",
-    "@lobu/connector-sdk": "^13.3.0"
+    "@lobu/cli": "^21.2.1",
+    "@lobu/connector-sdk": "^21.2.1",
+    "@lobu/views": "^21.2.1",
+    "react": "^19.2.5",
+    "@types/react": "^19.0.0"
   }
 }

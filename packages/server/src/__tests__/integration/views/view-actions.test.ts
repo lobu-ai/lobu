@@ -25,6 +25,7 @@ import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	addUserToOrganization,
 	createTestOrganization,
+	createTestEntity,
 	createTestUser,
 } from "../../setup/test-fixtures";
 
@@ -170,6 +171,36 @@ describe("view actions", () => {
     await expect(executeTool("invoke_view_action", {
       ...args, interaction_id: "missing-event", scope: { event: 999999999 },
     }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 404 });
+  });
+
+  it("registers and executes an entity-qualified action without copying its kind into the workspace registry", async () => {
+    const entity = await createTestEntity({ name: "Action subject", entity_type: "ballot", organization_id: orgId });
+    const sql = getTestDb();
+    const kinds = { "ballot.opened": {}, "ballot.responded": {} };
+    await sql`
+      UPDATE entity_types SET event_kinds = ${sql.json(kinds)}
+      WHERE organization_id = ${orgId} AND slug = 'ballot'
+    `;
+    await executeTool("manage_views", {
+      action: "set", key: "ballot-form", source_code: VIEW_SOURCE,
+      attach: [{ event_kind: "ballot.opened", type: "ballot" }],
+      actions: { retry: { emits: "ballot.responded" } },
+    }, TEST_ENV, ownerCtx);
+    const source = await executeTool("save_memory", {
+      content: "Choose an option", semantic_type: "ballot.opened", entity_ids: [entity.id],
+    }, TEST_ENV, ownerCtx) as { id: number };
+    const response = await executeTool("invoke_view_action", {
+      view: "ballot-form", action: "retry", value: { choice: "yes" },
+      scope: { event: source.id }, interaction_id: "qualified-response",
+    }, TEST_ENV, ownerCtx) as { event_id: number };
+    const [event] = await sql`SELECT to_json(entity_ids) AS entity_ids, semantic_type FROM events WHERE id = ${response.event_id}`;
+    expect(event).toMatchObject({ entity_ids: [entity.id], semantic_type: "ballot.responded" });
+    for (const attach of [[], [{ event_kind: "ballot.opened" }], [{ event_kind: "ballot.opened", type: "another-type" }]]) {
+      await expect(executeTool("manage_views", {
+        action: "set", key: "unbound-ballot-form", source_code: VIEW_SOURCE, attach,
+        actions: { retry: { emits: "ballot.responded" } },
+      }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 422 });
+    }
   });
 
 	it("appends one view_interaction event for a declared action", async () => {

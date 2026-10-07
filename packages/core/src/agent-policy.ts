@@ -51,7 +51,7 @@ export const CUSTOM_TOOL_METADATA: Record<string, CustomToolMetadata> = {
   },
   present_event: {
     description:
-      "Render an existing Lobu event in the current conversation through its declared json_template. Use the event id returned by knowledge.save; do not hand-author platform card JSON or action ids.",
+      "Present an existing Lobu event as a summary and Open event link in the current conversation. Custom interactions open in its React view. Use the event id returned by knowledge.save; do not hand-author platform card JSON or action ids.",
   },
   schedule_followup: {
     description:

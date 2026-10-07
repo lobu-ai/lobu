@@ -4,7 +4,10 @@ import { activateWorkspaceEventTask } from "../../../packages/server/src/automat
 import { runAutomationScriptTask } from "../../../packages/server/src/automations/script-task";
 import { dispatchPendingAutomationRuns } from "../../../packages/server/src/automations/automation";
 import type { WorkspaceEventActivationTaskPayload } from "../../../packages/server/src/automations/workspace-event-contract";
-import { invokeTemplateEventAction } from "../../../packages/server/src/interactions/template-event-actions";
+import {
+  executeTool,
+  type AuthContext,
+} from "../../../packages/server/src/tools/execute";
 import type { Env } from "../../../packages/server/src/index";
 import {
   cleanupTestDatabase,
@@ -54,6 +57,15 @@ async function setup(
       event_kinds: type.eventKinds,
     });
   }
+  await api.views.set({
+    key: "poll-ballot",
+    source_code: readFileSync(
+      new URL("../views/poll-ballot.tsx", import.meta.url),
+      "utf8"
+    ),
+    attach: [{ event_kind: "poll_opened", type: "poll" }],
+    actions: { vote: { emits: "poll_vote_cast" } },
+  });
   const state = {
     question: "Choose a synthetic release lane",
     options: ["A", "B"],
@@ -122,7 +134,7 @@ async function setup(
     semantic_type: "poll_opened",
     content: "Choose A or B",
     title: state.question,
-    payload_type: "empty",
+    payload_type: "markdown",
     metadata: state,
   });
 
@@ -139,15 +151,35 @@ async function setup(
     sourceEventId?: number
   ) {
     const userId = workspace.users[actor].id;
-    return invokeTemplateEventAction({
+    const ctx: AuthContext = {
       organizationId: workspace.org.id,
-      sourceEventId: sourceEventId ?? Number((await head()).id),
-      action: "vote",
-      value: choice,
-      interactionId,
-      surface: "web",
-      actor: { platform: "lobu", platformUserId: userId, userId },
-    });
+      tokenOrganizationId: workspace.org.id,
+      userId,
+      memberRole: actor === "owner" ? "owner" : "member",
+      agentId: null,
+      requestedAgentId: null,
+      isAuthenticated: true,
+      clientId: null,
+      scopes: ["mcp:read", "mcp:write"],
+      tokenType: "oauth",
+      requestUrl: "http://localhost/api/test",
+      baseUrl: "",
+      scopedToOrg: true,
+      allowCrossOrg: false,
+    };
+    const result = (await executeTool(
+      "invoke_view_action",
+      {
+        view: "poll-ballot",
+        scope: { event: sourceEventId ?? Number((await head()).id) },
+        action: "vote",
+        value: { choice },
+        interaction_id: interactionId,
+      },
+      TEST_ENV,
+      ctx
+    )) as { event_id: number; created: boolean };
+    return { eventId: result.event_id, created: result.created };
   }
   async function activate(eventId: number) {
     const [task] =
@@ -214,6 +246,16 @@ async function setup(
 
 describe("personal poll lifecycle through persistent runtime", () => {
   beforeEach(cleanupTestDatabase);
+
+  it("ignores a forged option without recording a response", async () => {
+    const h = await setup();
+    const invalid = await h.vote("owner", "not-an-option", "invalid-choice");
+    await h.reduce(invalid.eventId);
+    expect((await h.head()).metadata.response_count).toBe(0);
+    const responses =
+      await h.sql`SELECT id FROM events WHERE organization_id = ${h.workspace.org.id} AND semantic_type = 'poll_response_recorded'`;
+    expect(responses).toHaveLength(0);
+  });
 
   it("counts two actors and replaces a changed vote without adding a participant", async () => {
     const h = await setup();
@@ -391,7 +433,7 @@ describe("personal poll lifecycle through persistent runtime", () => {
     await h.api.knowledge.save({
       entity_ids: [h.entityId],
       semantic_type: "poll_closed",
-      payload_type: "empty",
+      payload_type: "markdown",
       content: "Synthetic deadline follow-up",
       supersedes_event_id: Number(head.id),
       idempotency_key: `poll-close:${h.entityId}`,

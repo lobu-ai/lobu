@@ -235,12 +235,13 @@ function harness(closesAt = "2026-08-28T15:00:00.000Z", quorum = 2) {
       id: 200 + runId,
       entity_ids: params.entityIds ?? [77],
       semantic_type: "poll_vote_cast",
-      origin_type: "template_interaction",
+      origin_type: "view_interaction",
       occurred_at: params.occurredAt,
       metadata: {
         interaction: {
+          view: "poll-ballot",
           action: "vote",
-          value: params.choice,
+          value: { choice: params.choice },
           source_event_id: head.id,
           actor: {
             platform: "gchat",

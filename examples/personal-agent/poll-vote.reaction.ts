@@ -224,12 +224,19 @@ async function saveSuccessor(params: {
   const closed = params.state.status === "closed";
   await params.client.knowledge.save({
     entity_ids: [params.entityId],
-    content: closed
-      ? `Poll closed by ${params.state.close_reason}.`
-      : `Poll tally updated after vote event ${params.triggerId}.`,
+    content: [
+      params.state.question,
+      closed
+        ? `Closed: ${params.state.close_reason}.`
+        : `Open until ${params.state.closes_at}.`,
+      `${params.state.response_count} participants; quorum ${params.state.quorum}.`,
+      ...params.state.results.map(
+        (result) => `- ${result.option}: ${result.count}`
+      ),
+    ].join("\n\n"),
     title: closed ? `${params.state.question} — closed` : params.state.question,
     semantic_type: closed ? "poll_closed" : "poll_opened",
-    payload_type: "empty",
+    payload_type: "markdown",
     metadata: params.state as unknown as Record<string, unknown>,
     supersedes_event_id: params.headId,
     idempotency_key: params.alreadyClosed
@@ -375,14 +382,16 @@ export default async function reducePollVote(
   client: ReactionClient
 ): Promise<void> {
   const trigger = await readTrigger(ctx, client);
-  if (!trigger || trigger.origin_type !== "template_interaction") return;
+  if (!trigger || trigger.origin_type !== "view_interaction") return;
 
   const interaction = objectValue(trigger.metadata.interaction);
   const actor = objectValue(interaction.actor);
-  const choice = typeof interaction.value === "string" ? interaction.value : "";
+  const value = objectValue(interaction.value);
+  const choice = typeof value.choice === "string" ? value.choice : "";
   const platform = typeof actor.platform === "string" ? actor.platform : "";
   const actorId = typeof actor.id === "string" ? actor.id : "";
   if (
+    interaction.view !== "poll-ballot" ||
     interaction.action !== "vote" ||
     positiveInteger(interaction.source_event_id) == null ||
     !choice ||

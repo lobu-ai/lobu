@@ -9,6 +9,11 @@ import {
   storedDeliveryRecords,
 } from "./delivery";
 import {
+	Actions,
+	Card,
+	CardText,
+	LinkButton,
+	markdownToPlainText,
 	type AdapterPostableMessage,
 	type CardElement,
 } from "chat";
@@ -31,7 +36,12 @@ import { runtimeConnectionIdToSlug } from "../lobu/stores/connections-projection
 import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js";
 import { resolveEventKindDefinition } from "../utils/event-kind-validation";
 import { insertEvent } from "../utils/insert-event";
-import { toAbsolutePermalink } from "../utils/url-builder";
+import {
+	buildResourcePermalink,
+	getOrganizationSlug,
+	toAbsolutePermalink,
+} from "../utils/url-builder";
+import { clampEscaped, escapeSlackText } from "../utils/slack-text";
 import logger from "../utils/logger";
 import { isUniqueViolation } from "../utils/pg-errors";
 import { buildKindCard } from "./template-card";
@@ -568,17 +578,10 @@ interface StoredEventPresentationParams {
 }
 
 /**
- * Render one already-persisted event into the conversation that invoked the
- * current agent turn.
- *
- * The event is the authority: the worker supplies only its id, while the
- * server re-reads the tenant-scoped row, resolves the linked entity kind, and
- * derives the native card from that kind's json_template. The worker never
- * supplies a template, executable handler, action id, actor id, or platform
- * destination. The destination coordinates are signed worker-token claims.
- *
- * Persisting the platform message pointer on the SAME event gives the durable
- * interactive-card refresh task the routing data used for in-place updates.
+ * Present an event summary and its canonical Lobu link in the invoking
+ * conversation. Custom interactions live in the event's React view.
+ * The worker supplies only an event id; destination and workspace come from
+ * signed turn claims. The row-locked receipt deduplicates concurrent retries.
  */
 export async function presentStoredEventToConversation(
 	params: StoredEventPresentationParams,
@@ -594,16 +597,12 @@ async function presentStoredEventToConversationLocked(
 ): Promise<StoredEventPresentationResult> {
 	const [row] = await sql<{
 		title: string | null;
-		entity_ids: unknown;
 		semantic_type: string;
 		payload_text: string | null;
-		payload_data: unknown;
 		metadata: unknown;
-		source_url: string | null;
 		superseded_by: number | null;
 	}>`
-    SELECT title, entity_ids, semantic_type, payload_text, payload_data,
-           metadata, source_url, superseded_by
+    SELECT title, semantic_type, payload_text, metadata, superseded_by
     FROM events
     WHERE id = ${params.eventId}
       AND organization_id = ${params.organizationId}
@@ -615,12 +614,16 @@ async function presentStoredEventToConversationLocked(
 	}
 
 	const metadata = jsonRecord(row.metadata);
-	const fallbackText = row.payload_text
-		? `${row.title ?? row.semantic_type}\n\n${row.payload_text}`
-		: row.title ?? row.semantic_type;
-	// The row lock serializes concurrent retries across replicas. A completed
-	// presentation already has everything a retry needs, so replay it before
-	// resolving a template that may have changed since the original post.
+	const url = toAbsolutePermalink(buildResourcePermalink(
+		await getOrganizationSlug(params.organizationId),
+		{ kind: "event", eventId: params.eventId },
+	));
+	if (!url) return { ok: false, reason: "not_renderable" };
+	const text = markdownToPlainText(row.payload_text ?? "").trim();
+	const summary = text.length > 1800 ? text.slice(0, 1799) + "…" : text;
+	const fallbackText = [row.title ?? row.semantic_type, summary, `Open event: ${url}`]
+		.filter(Boolean).join("\n\n");
+	// The row lock serializes concurrent retries across replicas.
 	const existingDelivery = deliveryRecords(metadata).find(
 		(delivery) =>
 			delivery.connectionId === params.connectionId &&
@@ -636,36 +639,13 @@ async function presentStoredEventToConversationLocked(
 		};
 	}
 
-	const kind = await resolveEventKindDefinition(
-		row.semantic_type,
-		params.organizationId,
-		parsePgNumberArray(row.entity_ids),
-	);
-	// `present_event` is deliberately narrower than the ordinary Activity view:
-	// only an explicitly authored portable template may become an unsolicited
-	// native chat card. A schema-derived fallback is useful in the web UI, but it
-	// is not an authored chat presentation contract.
-	if (!kind?.jsonTemplate) return { ok: false, reason: "not_renderable" };
-
-	const data =
-		typeof metadata.notification_type === "string"
-			? jsonRecord(row.payload_data)
-			: metadata;
-	const card = buildKindCard({
-		metadataSchema: kind.metadataSchema,
-		jsonTemplate: kind.jsonTemplate,
-		data,
+	const card = Card({
 		title: row.title ?? row.semantic_type,
-		body: row.payload_text ?? undefined,
-		url: toAbsolutePermalink(
-			typeof metadata.resource_url === "string"
-				? metadata.resource_url
-				: row.source_url ?? undefined,
-		),
-		sourceEventId: params.eventId,
-		interactions: kind.interactions,
+		children: [
+			...(summary ? [CardText(clampEscaped(escapeSlackText(summary), 1800))] : []),
+			Actions([LinkButton({ url, label: "Open event" })]),
+		],
 	});
-	if (!card) return { ok: false, reason: "not_renderable" };
 
 	const manager = getChatInstanceManager();
 	if (!manager) return { ok: false, reason: "gateway_unavailable" };
