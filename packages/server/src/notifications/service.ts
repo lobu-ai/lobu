@@ -8,15 +8,7 @@ import {
   projectDelivery,
   storedDeliveryRecords,
 } from "./delivery";
-import {
-	Actions,
-	Card,
-	CardText,
-	LinkButton,
-	markdownToPlainText,
-	type AdapterPostableMessage,
-	type CardElement,
-} from "chat";
+import type { AdapterPostableMessage, CardElement } from "chat";
 import { loadConfiguredAutomationDeliveryTarget } from "../automations/delivery-target";
 import {
 	type DbClient,
@@ -34,17 +26,16 @@ import type { McpActivityAttribution } from "../lobu/stores/mcp-client-conversat
 import { resolveChatUserIdForUser } from "../lobu/stores/chat-identity.js";
 import { runtimeConnectionIdToSlug } from "../lobu/stores/connections-projection.js";
 import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js";
-import { resolveEventKindDefinition } from "../utils/event-kind-validation";
 import { insertEvent } from "../utils/insert-event";
 import {
 	buildResourcePermalink,
 	getOrganizationSlug,
 	toAbsolutePermalink,
 } from "../utils/url-builder";
-import { clampEscaped, escapeSlackText } from "../utils/slack-text";
 import logger from "../utils/logger";
 import { isUniqueViolation } from "../utils/pg-errors";
-import { buildKindCard } from "./template-card";
+import { buildEventChatMessage } from "./event-card";
+import { CONNECTOR_OPERATION_APPROVAL_KIND } from "../utils/platform-notification-kinds";
 import {
 	addActionOrigin,
 	actionResolutionText,
@@ -65,22 +56,9 @@ interface CreateNotificationParams {
 		| "agent_message";
 	title: string;
 	body?: string | null;
-	/**
-	 * Event semantic type (kind) for the notification's content. When set, the
-	 * event carries THIS semantic_type with an `empty` payload type, so the event-kind
-	 * render tail synthesizes the render template from the kind's `jsonTemplate`
-	 * (the same path every other `empty` event takes), and chat delivery builds
-	 * its card from the same kind's `metadataSchema`. Omit for the default
-	 * `notification` semantic type + plain text body.
-	 *
-	 * Setting this does not cost a notification its `notification` marker or its
-	 * interaction supersede chain. Notification identity is row presence in
-	 * `notification_targets`, not `semantic_type` (see content-search/params),
-	 * and the interaction chain lives on the separate pending-approval event —
-	 * this event carries no interaction fields at all.
-	 */
+	/** Event kind retained with the structured data; custom chat UI opens the event. */
 	semanticType?: string;
-	/** Structured payload bound to the event kind's render template. */
+	/** Structured event data, independent of the chat summary. */
 	payloadData?: Record<string, unknown>;
 	/**
 	 * Run this notification's card may decide, rendering Approve/Reject on the
@@ -619,10 +597,11 @@ async function presentStoredEventToConversationLocked(
 		{ kind: "event", eventId: params.eventId },
 	));
 	if (!url) return { ok: false, reason: "not_renderable" };
-	const text = markdownToPlainText(row.payload_text ?? "").trim();
-	const summary = text.length > 1800 ? text.slice(0, 1799) + "…" : text;
-	const fallbackText = [row.title ?? row.semantic_type, summary, `Open event: ${url}`]
-		.filter(Boolean).join("\n\n");
+	const { card, fallbackText } = buildEventChatMessage({
+		title: row.title ?? row.semantic_type,
+		body: row.payload_text,
+		url,
+	});
 	// The row lock serializes concurrent retries across replicas.
 	const existingDelivery = deliveryRecords(metadata).find(
 		(delivery) =>
@@ -638,14 +617,6 @@ async function presentStoredEventToConversationLocked(
 			fallbackText,
 		};
 	}
-
-	const card = Card({
-		title: row.title ?? row.semantic_type,
-		children: [
-			...(summary ? [CardText(clampEscaped(escapeSlackText(summary), 1800))] : []),
-			Actions([LinkButton({ url, label: "Open event" })]),
-		],
-	});
 
 	const manager = getChatInstanceManager();
 	if (!manager) return { ok: false, reason: "gateway_unavailable" };
@@ -902,40 +873,33 @@ export async function refreshInteractiveEventCardTask(
 		const chain = await sql<{
 			id: number;
 			title: string | null;
-			entity_ids: unknown;
 			semantic_type: string;
 			payload_text: string | null;
-			payload_data: unknown;
 			metadata: unknown;
 			supersedes_event_id: number | null;
 		}>`
       WITH RECURSIVE event_chain AS (
-        SELECT id, supersedes_event_id, title, entity_ids,
-               semantic_type, payload_text, payload_data, metadata, 0 AS depth
+        SELECT id, supersedes_event_id, title,
+               semantic_type, payload_text, metadata, 0 AS depth
         FROM events
         WHERE id = ${root.id}
           AND organization_id = ${payload.organizationId}
         UNION ALL
         SELECT successor.id, successor.supersedes_event_id, successor.title,
-               successor.entity_ids, successor.semantic_type,
-               successor.payload_text, successor.payload_data,
+               successor.semantic_type,
+               successor.payload_text,
                successor.metadata, event_chain.depth + 1
         FROM events successor
         JOIN event_chain ON successor.supersedes_event_id = event_chain.id
         WHERE successor.organization_id = ${payload.organizationId}
       )
-      SELECT id, supersedes_event_id, title, entity_ids,
-             semantic_type, payload_text, payload_data, metadata
+      SELECT id, supersedes_event_id, title,
+             semantic_type, payload_text, metadata
       FROM event_chain
       ORDER BY depth
   `;
 		const row = chain.at(-1);
 		if (!row) return;
-		const deliveredSource = chain.find(
-			(event) => deliveryRecords(jsonRecord(event.metadata)).length > 0,
-		);
-		if (!deliveredSource) return;
-		const sourceMetadata = jsonRecord(deliveredSource.metadata);
 		const deliveries = [
 			...new Map(
 				chain.flatMap((event) =>
@@ -947,55 +911,16 @@ export async function refreshInteractiveEventCardTask(
 			).values(),
 		];
 		if (deliveries.length === 0) return;
-		const sourceKind = await resolveEventKindDefinition(
-			deliveredSource.semantic_type,
-			payload.organizationId,
-			parsePgNumberArray(deliveredSource.entity_ids),
-		);
-		if (
-			!sourceKind?.interactions ||
-			Object.keys(sourceKind.interactions).length === 0
-		) {
-			return;
-		}
-
-		const entityIds = parsePgNumberArray(row.entity_ids);
-		const kind = await resolveEventKindDefinition(
-			row.semantic_type,
-			payload.organizationId,
-			entityIds,
-		);
-		if (!kind) {
-			throw new Error(`Event kind ${row.semantic_type} is unavailable`);
-		}
-		const metadata = jsonRecord(row.metadata);
-		const data =
-			typeof metadata.notification_type === "string"
-				? jsonRecord(row.payload_data)
-				: metadata;
-		const card = buildKindCard({
-			metadataSchema: kind.metadataSchema,
-			jsonTemplate: kind.jsonTemplate,
-			data,
+		const url = toAbsolutePermalink(buildResourcePermalink(
+			await getOrganizationSlug(payload.organizationId),
+			{ kind: "event", eventId: row.id },
+		));
+		if (!url) throw new Error("Event " + row.id + " has no review URL");
+		const content = buildEventChatMessage({
 			title: row.title ?? row.semantic_type,
-			body: row.payload_text ?? undefined,
-			url: toAbsolutePermalink(
-				typeof metadata.resource_url === "string"
-					? metadata.resource_url
-					: typeof sourceMetadata.resource_url === "string"
-						? sourceMetadata.resource_url
-						: undefined,
-			),
-			sourceEventId: row.id,
-			interactions: kind.interactions,
+			body: row.payload_text,
+			url,
 		});
-		if (!card) throw new Error(`Event ${row.id} is not renderable`);
-		const content: AdapterPostableMessage = {
-			card,
-			fallbackText: row.payload_text
-				? `${row.title ?? row.semantic_type}\n\n${row.payload_text}`
-				: row.title ?? row.semantic_type,
-		};
 		await Promise.all(
 			deliveries.map((delivery) =>
 				manager.editMessageContent(delivery.connectionId, {
@@ -1005,59 +930,44 @@ export async function refreshInteractiveEventCardTask(
 				}),
 			),
 		);
-		// Carry the delivery pointer to an interactive successor for observability
-		// and presentation retries. A terminal successor has no future refresh hop.
-		if (kind.interactions && Object.keys(kind.interactions).length > 0) {
-			await persistDeliveryMetadata(row.id, deliveries, card, {
-				db: sql,
-				required: true,
-			});
-		}
+		// Keep the receipt on the current event so later refreshes reuse the
+		// same provider messages rather than posting another copy.
+		await persistDeliveryMetadata(row.id, deliveries, content.card, {
+			db: sql,
+			required: true,
+		});
 	});
 }
 
-/**
- * Build the chat card for a notification from its event kind.
- *
- * Only kind-bearing notifications qualify: without a `semanticType` there is no
- * kind to resolve, which is exactly the plain-text case. Resolution failure is
- * never fatal — the caller falls back to the markdown body, so a missing kind
- * costs formatting, never delivery.
- */
-export async function resolveNotificationKindCard(
+async function buildNotificationMessage(
 	params: Omit<CreateNotificationParams, "userId">,
 	eventId: number,
-): Promise<CardElement | null> {
+) {
 	if (!params.semanticType) return null;
-	try {
-		const kind = await resolveEventKindDefinition(
-			params.semanticType,
-			params.organizationId,
-			params.entityIds,
-		);
-		if (!kind) return null;
-		return buildKindCard({
-			metadataSchema: kind.metadataSchema,
-			jsonTemplate: kind.jsonTemplate,
-			data: params.payloadData ?? {},
-			title: params.title,
-			body: params.body ?? undefined,
-			// Chat has no origin to resolve against, and Slack answers a relative
-			// button url with `invalid_blocks` — dropping the entire message, not
-			// just the button. The stored `resource_url` stays relative for the
-			// inbox; only the card gets the absolute form.
-			url: toAbsolutePermalink(params.resourceUrl),
-			decisionRunId: params.decisionRunId,
-			sourceEventId: eventId,
-			interactions: kind.interactions,
-		});
-	} catch (err) {
-		logger.warn(
-			{ err, semanticType: params.semanticType, orgId: params.organizationId },
-			"[Notifications] Could not build the event kind card for chat — falling back to text",
-		);
-		return null;
-	}
+	const nativeDestination = params.decisionRunId ||
+		(params.type !== "generic" && params.type !== "agent_message");
+	const url = nativeDestination
+		? toAbsolutePermalink(params.resourceUrl)
+		: toAbsolutePermalink(buildResourcePermalink(
+			await getOrganizationSlug(params.organizationId),
+			{ kind: "event", eventId },
+		));
+	const data = params.payloadData ?? {};
+	const details = params.decisionRunId && params.semanticType === CONNECTOR_OPERATION_APPROVAL_KIND
+		? [
+			"Operation: " + String(data.operation ?? ""),
+			data.connection ? "Connection: " + String(data.connection) : null,
+			"Input:\n" + JSON.stringify(data.input ?? {}, null, 2),
+		].filter(Boolean).join("\n")
+		: undefined;
+	return buildEventChatMessage({
+		title: params.title,
+		body: params.body,
+		url,
+		linkLabel: nativeDestination ? "Review in Lobu" : "Open event",
+		decisionRunId: params.decisionRunId,
+		details,
+	});
 }
 
 type NotificationDeliveryContext = Pick<
@@ -1408,21 +1318,20 @@ export async function deliverNotificationTask(
 								? row.metadata.resource_url
 								: null,
 					};
-					const baseCard = isCard(row.metadata.card)
-						? row.metadata.card
-						: await resolveNotificationKindCard(params, input.eventId);
+					const storedCard = !params.semanticType && isCard(row.metadata.card)
+						? row.metadata.card : null;
+					const message = storedCard ? null : await buildNotificationMessage(params, input.eventId);
+					const baseCard = storedCard ?? message?.card;
 					card = baseCard
-						? receipts.length
+						? storedCard && receipts.length
 							? baseCard
 							: addActionOrigin(baseCard, context.actionOrigin)
 						: undefined;
-					const body = row.payload_text
-						? `${row.title}\n\n${row.payload_text}`
-						: row.title;
+					const body = row.payload_text ? row.title + "\n\n" + row.payload_text : row.title;
 					const link = toAbsolutePermalink(params.resourceUrl);
 					const content = card
-						? { card }
-						: { markdown: link ? `${body}\n\n${link}` : body };
+						? { card, ...(message ? { fallbackText: message.fallbackText } : {}) }
+						: { markdown: link ? body + "\n\n" + link : body };
 					const sent = request.ownerDm
 						? await manager.postDirectMessage(
 								target.connectionId,

@@ -1,13 +1,10 @@
 /**
  * Shared vocabulary for the `json_template` render DSL.
  *
- * The DSL is authored once per event kind / entity type and rendered on three
- * surfaces: the web app and MCP apps (owletto's `json-renderer`) and chat
- * notification delivery (the server's `template-card`). The *formatting* of a
- * bound scalar must agree across all three — a date that reads "Aug 19, 2026"
- * in the Memory view cannot read "2026-08-19T00:00:00Z" in Slack — so the
- * format directives and their implementation live here rather than being
- * reimplemented per surface.
+ * Entity/list templates and historical event templates share this vocabulary
+ * across web and MCP rendering. Their bound values use the same formatting
+ * directives rather than reimplementing scalar formatting per renderer.
+ * Chat summaries and native decisions do not interpret this DSL.
  *
  * Structural node shapes stay with each renderer: the node vocabulary is
  * deliberately open (see the server's `validate-json-template`), and each
@@ -277,8 +274,7 @@ function resolveProps(
   const props: Record<string, unknown> = {};
   const actions: Record<string, string> = {};
   for (const [key, value] of Object.entries(raw)) {
-    // `"@name"` is the DSL's action binding. On the web it resolves to a
-    // function; a chat card has no such context, so keep the NAME.
+    // Keep action names separate from a renderer's JavaScript handlers.
     if (
       typeof value === "string" &&
       value.startsWith("@") &&
@@ -310,9 +306,8 @@ export interface TemplateVisitor<T> {
    *
    * `props` arrive RESOLVED: `{{path}}` yields the bound value with its type
    * intact, `"a/{{b}}"` interpolates to a string. Handler props (`onClick` and
-   * friends) are split into `actions` as bare action names, because a surface
-   * without a JS context — a chat card — still needs to know which action a
-   * button invokes.
+   * friends) are split into `actions` as bare action names so each renderer
+   * can bind its own handlers.
    */
   component(
     type: string,

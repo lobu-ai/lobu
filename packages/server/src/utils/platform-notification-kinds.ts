@@ -12,9 +12,9 @@
  * content an org models itself. But a notification the platform raises — an
  * approval, say — has a shape the platform owns and every org shares, and it
  * cannot require each org to have declared a kind before it renders. Declaring
- * it here gives it the same treatment as any other kind on every surface at
- * once: the Memory view, MCP apps, and chat all resolve through
- * `resolveEventKindDefinition`.
+ * it here gives Memory and MCP event readers the same kind-resolution path
+ * through `resolveEventKindDefinition`. Chat uses event summaries and
+ * server-owned approval evidence without interpreting kind templates.
  *
  * These are a FALLBACK, consulted only after entity-type and `$member` kinds,
  * so an org that declares the same slug still wins and can restyle it.
@@ -35,10 +35,8 @@ export const PLATFORM_NOTIFICATION_KINDS: Readonly<
 	Record<string, EventKindDefinition>
 > = {
 	/**
-	 * A connector operation queued behind approval. Before this existed the chat
-	 * post said only that *an* action needed approval — never which operation, on
-	 * which connection, with what input — so the decision could not be made from
-	 * the notification.
+	 * A connector operation queued behind approval, with structured evidence
+	 * identifying the operation, connection, and input under review.
 	 */
 	[CONNECTOR_OPERATION_APPROVAL_KIND]: {
 		description: "A connector operation waiting for a human decision.",
@@ -132,9 +130,7 @@ export const PLATFORM_NOTIFICATION_KINDS: Readonly<
 		/**
 		 * `text` nodes are literals — the DSL interpolates `{{path}}` in component
 		 * PROPS only, matching owletto's renderer — so every value here is bound
-		 * with a `data` node. Scalars go in a `fields` block (Slack lays them out
-		 * side by side) and the list goes in the table, which is the one thing a
-		 * field list cannot show well.
+		 * with a `data` node. Scalars go in a `fields` block and lists in a table.
 		 */
 		jsonTemplate: {
 			type: "card",
@@ -146,16 +142,12 @@ export const PLATFORM_NOTIFICATION_KINDS: Readonly<
 				 * carries its own leading separator inside the same `if`, so an
 				 * absent one takes its `·` with it.
 				 *
-				 * The trailing space in each separator is load-bearing. Chat joins
-				 * strip segments with one and normalises the run; the web renderer
-				 * lays the strip out with a flex `gap`, which applies BETWEEN direct
+				 * The trailing space in each separator is load-bearing. The web
+				 * renderer uses a flex `gap`, which applies BETWEEN direct
 				 * children and not inside the `span` grouping a separator with its
 				 * value — so without it the page reads "· requested byCRM sync".
 				 *
-				 * The name links to the entity when we have a URL for it, which is
-				 * the one thing a reader deciding from chat could not otherwise
-				 * reach: the record as it stands TODAY, next to the change proposed
-				 * to it.
+				 * The name links to the current record alongside the proposed change.
 				 */
 				{
 					type: "context",
@@ -227,8 +219,7 @@ export const PLATFORM_NOTIFICATION_KINDS: Readonly<
 				// Two shapes, so two tables. An update is three columns whose middle
 				// and right only mean anything once they are NAMED — "Eng" next to
 				// "Staff Eng" is undecidable without `Current`/`Proposed` above it.
-				// A create/delete/merge is a label/value pair, which needs no header
-				// and renders as native fields in chat.
+				// A create/delete/merge is a label/value pair, which needs no header.
 				{
 					type: "if",
 					condition: "diffs",

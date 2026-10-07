@@ -11,10 +11,8 @@ import {
  * shapes (field change, entity create, entity delete, entity merge) plus the
  * generic fallback.
  *
- * Chat rendering is deliberately absent here: entity approvals reach Slack
- * through the `entity_change_approval` event kind now, so their card is pinned
- * by `template-card.test.ts` against the same template the web and MCP
- * surfaces walk. `buildActionApprovalCard` survives only for asks.
+ * Chat summary budgets and native controls are covered by event-card.test.ts;
+ * durable delivery tests cover stored approval evidence and routing.
  */
 
 describe("approval notification rendering", () => {
@@ -143,7 +141,7 @@ describe("approval notification rendering", () => {
 	test("Markdown escaping neutralises link and emphasis delimiters", () => {
 		// One hostile name. The Markdown body must not let it forge a link or a
 		// bold run, and Slack's entity escaping must not leak into it — the chat
-		// side of this pair is pinned in `template-card.test.ts`.
+		// side of this pair is pinned in `event-card.test.ts`.
 		const details: ActionApprovalDetails = {
 			kind: "entity_change",
 			operation: "delete",

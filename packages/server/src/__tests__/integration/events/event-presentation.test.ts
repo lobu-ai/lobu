@@ -81,7 +81,7 @@ describe("stored event summary delivery", () => {
     expect(sent).toContain("Open event");
     expect(sent).toContain(`/events/${event.id}`);
     expect(sent).not.toContain("source.example");
-    expect(sent).not.toContain("template-event:");
+    expect(sent).not.toContain('"type":"button"');
     const [stored] = await getTestDb()`SELECT metadata, payload_text FROM events WHERE id = ${event.id}`;
     expect(stored.metadata.delivery).toHaveLength(1);
     expect(stored.payload_text).toContain("**A**");

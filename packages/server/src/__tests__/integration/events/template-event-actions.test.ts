@@ -1,3 +1,4 @@
+import { __setLocalFrontendForTests } from "../../../utils/public-origin";
 import {
 	afterEach,
 	beforeAll,
@@ -34,10 +35,12 @@ describe("template event actions", () => {
 	});
 
 	beforeEach(async () => {
+		__setLocalFrontendForTests(false);
 		await cleanupTestDatabase();
 	});
 
 	afterEach(() => {
+		__setLocalFrontendForTests(undefined);
 		__setChatInstanceManagerForTests(null);
 	});
 
@@ -415,8 +418,9 @@ describe("template event actions", () => {
 			editMessageContent.mock.calls[0]?.[1]?.content,
 		);
 		expect(refreshedCard).toContain("Closed after quorum was reached.");
-		expect(refreshedCard).toContain("Open in Lobu");
-		expect(refreshedCard).toContain("/template-action-poll");
+		expect(refreshedCard).toContain("Open event");
+		expect(refreshedCard).toContain("/events/" + closedReplacement.id);
+		expect(refreshedCard).not.toContain('"type":"button"');
 		const [closed] = await sql<{
 			id: number;
 			metadata: { delivery?: unknown };
@@ -545,8 +549,9 @@ describe("template event actions", () => {
 		await Promise.all([slowOldRefresh, newestRefresh]);
 		expect(racingEdit).toHaveBeenCalledTimes(2);
 		expect(JSON.stringify(racingEdit.mock.calls.at(-1))).toContain(
-			templateEventActionId(Number(newestSuccessor.id), "vote"),
+			"/events/" + newestSuccessor.id,
 		);
+		expect(JSON.stringify(racingEdit.mock.calls.at(-1))).not.toContain('"type":"button"');
 		await expect(
 			invokeTemplateEventAction({
 				organizationId: workspace.org.id,

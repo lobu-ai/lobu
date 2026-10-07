@@ -1,3 +1,9 @@
+import { templateEventActionId } from "../../../interactions/template-event-actions";
+import { initWorkspaceProvider } from "../../../workspace";
+import { __setLocalFrontendForTests } from "../../../utils/public-origin";
+import { cardToBlockKit } from "@chat-adapter/slack";
+import type { CardElement } from "chat";
+import { CONNECTOR_OPERATION_APPROVAL_KIND } from "../../../utils/platform-notification-kinds";
 import { Actions, Button, Card } from "chat";
 import { Value } from "@sinclair/typebox/value";
 import { ManageOperationsResultSchema } from "@lobu/core/contracts/tools/manage-operations";
@@ -6,6 +12,7 @@ import {
   afterAll,
   afterEach,
   beforeEach,
+  beforeAll,
   describe,
   expect,
   it,
@@ -34,10 +41,13 @@ import {
 } from "../../setup/test-fixtures";
 
 describe("durable notification delivery", () => {
+  beforeAll(initWorkspaceProvider);
   beforeEach(async () => {
+    __setLocalFrontendForTests(false);
     await cleanupTestDatabase();
   });
   afterEach(() => {
+    __setLocalFrontendForTests(undefined);
     __setChatInstanceManagerForTests(null);
   });
   afterAll(async () => {
@@ -86,6 +96,83 @@ describe("durable notification delivery", () => {
     };
     return { org, user, post, params };
   }
+
+  it("delivers custom events as a summary and canonical event link without requiring a kind renderer", async () => {
+    const h = await setup();
+    const event = await createNotificationForUsers([h.user.id], {
+      ...h.params,
+      semanticType: "synthetic.custom",
+      body: "Choose **one** option in the event.",
+      resourceUrl: "https://unrelated.example/record",
+      payloadData: { selected: false, count: 0, card: { type: "button" } },
+    });
+    const sql = getTestDb();
+    await sql`UPDATE events SET metadata = metadata || ${sql.json({
+      card: Card({ children: [Actions([Button({ id: templateEventActionId(Number(event.eventId), "vote"), label: "Old vote" })])] }),
+    })}::jsonb WHERE id = ${Number(event.eventId)}`;
+    await deliverNotificationTask({ organizationId: h.org.id, eventId: Number(event.eventId) });
+    expect(h.post).toHaveBeenCalledTimes(2);
+    const sent = JSON.stringify(h.post.mock.calls[0][2]);
+    expect(sent).toContain("Choose one option");
+    expect(sent).toContain("Open event");
+    expect(sent).toContain(`/events/${event.eventId}`);
+    expect(sent).not.toContain("unrelated.example");
+    expect(sent).not.toContain('"type":"button"');
+    expect(sent).not.toContain("run-approval:");
+    const [stored] = await getTestDb()`SELECT payload_data FROM events WHERE id = ${Number(event.eventId)}`;
+    expect(stored.payload_data).toEqual({ selected: false, count: 0, card: { type: "button" } });
+  });
+
+  it("preserves operation evidence and native approval controls without a template", async () => {
+    const h = await setup();
+    const sql = getTestDb();
+    const [run] = await sql`
+      INSERT INTO runs (organization_id, run_type, action_key, approval_status, status)
+      VALUES (${h.org.id}, 'action', 'synthetic.review', 'pending', 'pending') RETURNING id
+    `;
+    const event = await createNotificationForUsers([h.user.id], {
+      ...h.params, type: "action_approval_needed",
+      semanticType: CONNECTOR_OPERATION_APPROVAL_KIND,
+      decisionRunId: Number(run.id),
+      body: "A queued action is waiting for your review.",
+      resourceUrl: "/synthetic/runs/" + run.id,
+      payloadData: {
+        operation: "Publish draft", connection: "Synthetic <!channel>",
+        input: { enabled: false, count: 0, nested: { value: "kept" } },
+      },
+    });
+    await deliverNotificationTask({ organizationId: h.org.id, eventId: Number(event.eventId) });
+    const content = h.post.mock.calls[0][2] as { card: CardElement };
+    const text = cardToBlockKit(content.card).flatMap((block) =>
+      block.type === "section" && "text" in block && block.text &&
+      typeof block.text === "object" && "text" in block.text ? [String(block.text.text)] : [],
+    ).join("\n");
+    expect(text).toContain("Operation: Publish draft");
+    expect(text).toContain("Connection: Synthetic &lt;!channel&gt;");
+    expect(text).toContain('"enabled": false');
+    expect(text).toContain('"count": 0');
+    expect(text).toContain('"value": "kept"');
+    expect(JSON.stringify(content.card)).toContain("run-approval:" + run.id + ":approve");
+    expect(JSON.stringify(content.card)).toContain("run-approval:" + run.id + ":reject");
+    expect(JSON.stringify(content.card)).toContain("/synthetic/runs/" + run.id);
+  });
+
+  it.each(["connection_permission_request", "browser_auth_expired", "invitation_received"] as const)(
+    "preserves the native destination for %s",
+    async (type) => {
+      const h = await setup();
+      const event = await createNotificationForUsers([h.user.id], {
+        ...h.params, type, semanticType: "synthetic.native",
+        body: "Open setup to continue.",
+        resourceUrl: "https://app.example/synthetic/connections/setup",
+      });
+      await deliverNotificationTask({ organizationId: h.org.id, eventId: Number(event.eventId) });
+      const sent = JSON.stringify(h.post.mock.calls[0][2]);
+      expect(sent).toContain("https://app.example/synthetic/connections/setup");
+      expect(sent).not.toContain("/events/");
+      expect(sent).not.toContain("run-approval:");
+    },
+  );
 
   it("#3665 records provider acceptance and its timestamp in the durable receipt", async () => {
     const h = await setup();
