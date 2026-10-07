@@ -1,9 +1,10 @@
 /**
  * GitHub connector identity namespaces and normalization.
  *
- * Single source of truth for github_login / github_user_id / github_repo_* rules.
- * The connector, app-webhook actor resolution, repo ACL graph, and server
- * entity-link ingestion all import from here — not from connector-sdk.
+ * Single source of truth for github_login / github_user_id / github_repo_* rules
+ * and the connection's token precedence. The connector, app-webhook actor
+ * resolution, repo ACL graph and sync, and server entity-link ingestion all
+ * import from here — not from connector-sdk.
  */
 
 import type {
@@ -70,6 +71,30 @@ export function normalizeGithubIdentityValue(
     default:
       return undefined;
   }
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+/**
+ * The token a GitHub connection authorizes: the resolved OAuth / App access
+ * token first, then a configured `GITHUB_TOKEN` PAT. The connector runtime and
+ * the server's repo ACL sync both resolve through this, so they spend the same
+ * authority.
+ */
+export function resolveGithubToken(
+  accessToken: string | undefined,
+  config: { env_overrides?: Record<string, unknown> },
+): string | null {
+  const fields = config as Record<string, unknown>;
+  return (
+    nonEmptyString(accessToken) ??
+    nonEmptyString(config.env_overrides?.GITHUB_TOKEN) ??
+    nonEmptyString(fields.GITHUB_TOKEN) ??
+    nonEmptyString(fields.github_token) ??
+    null
+  );
 }
 
 /** Stable `github_user_id:ID` / `github_login:login` key used by poll + webhooks. */
