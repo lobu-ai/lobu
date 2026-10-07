@@ -939,7 +939,11 @@ describe("parseBrowserDmResponse", () => {
 });
 
 describe("XConnector browser-first routing", () => {
-	test("keeps an existing empty-config OAuth Likes feed on the API path", async () => {
+	test.each([
+		"like.read tweet.read users.read",
+		"tweet.read users.read",
+		undefined,
+	])("keeps an existing OAuth Likes feed on the API path with scopes %s", async (scope) => {
 		const originalFetch = globalThis.fetch;
 		const requested: string[] = [];
 		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
@@ -981,7 +985,7 @@ describe("XConnector browser-first routing", () => {
 				credentials: {
 					provider: "twitter",
 					accessToken: "oauth-token",
-					scope: "like.read tweet.read users.read",
+					scope,
 				},
 				entityIds: [],
 			});
@@ -1617,6 +1621,41 @@ describe("XConnector browser-first routing", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0].input.url).toBe("https://x.com/i/bookmarks");
 		expect(res.metadata.backend).toBe("extension-network");
+	});
+
+	test.each([
+		{ feedKey: "my_tweets", config: { use_extension: true } },
+		{ feedKey: "home_feed", config: {} },
+	])("explains browser authentication for $feedKey without a browser grant", async ({
+		feedKey,
+		config,
+	}) => {
+		const commit = mock(async () => {});
+		const originalFetch = globalThis.fetch;
+		const fetch = mock(async () => new Response("unexpected", { status: 500 }));
+		globalThis.fetch = fetch as typeof globalThis.fetch;
+		try {
+			await expect(
+				runSync(new XConnector(), {
+					feedKey,
+					config,
+					checkpoint: {},
+					entityIds: [],
+					commit,
+					credentials: {
+						provider: "twitter",
+						accessToken: "oauth-token",
+						scope: "users.read tweet.read",
+					},
+				}),
+			).rejects.toThrow(
+				"connection authenticated through your paired Chrome browser",
+			);
+			expect(commit).not.toHaveBeenCalled();
+			expect(fetch).not.toHaveBeenCalled();
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
 	});
 
 	test("honors use_extension even when OAuth scopes are sufficient", async () => {

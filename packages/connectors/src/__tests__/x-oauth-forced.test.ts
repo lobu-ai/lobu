@@ -23,6 +23,31 @@ mock.module("@lobu/connector-sdk", () => ({
 const { default: XConnector } = await import("../x");
 
 describe("XConnector forced OAuth", () => {
+	test.each([
+		"tweets",
+		"my_tweets",
+		"liked_tweets",
+		"bookmarks",
+		"direct_messages",
+	])("preserves %s OAuth errors when no browser fallback is available", async (feedKey) => {
+		const commit = mock(async () => {});
+		await expect(
+			runSync(new XConnector(), {
+				feedKey,
+				config: { account_handle: "testuser" },
+				checkpoint: {},
+				entityIds: [],
+				commit,
+				credentials: {
+					provider: "twitter",
+					accessToken: "oauth-token",
+					scope: "users.read tweet.read offline.access",
+				},
+			}),
+		).rejects.toMatchObject({ status: 403 });
+		expect(commit).not.toHaveBeenCalled();
+	});
+
 	test("use_oauth does not fall back to extension on 403", async () => {
 		const extensionCalls: Array<{ action: string; input: Record<string, unknown> }> =
 			[];

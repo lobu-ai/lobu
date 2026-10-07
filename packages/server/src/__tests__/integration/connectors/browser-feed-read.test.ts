@@ -512,6 +512,30 @@ describe('compiled browser source reads', () => {
     await upsertEntityApprovalPolicy(orgId, { resourceClass:'connector_action',connectorKey:SOURCE_KEY,effects:{execute:'auto'} });
   }
 
+  it('verifies a pending browser connection without a custom action handler', async () => {
+    await liveDefinition();
+    const sql = getTestDb();
+    await sql`UPDATE connector_definitions SET supports_execute = false
+      WHERE organization_id = ${orgId} AND key = ${SOURCE_KEY}`;
+    await sql`DELETE FROM feeds WHERE id = ${feedId}`;
+    await sql`DELETE FROM connections WHERE id = ${connectionId}`;
+    const creating = manageConnections({ action: 'create', connector_key: SOURCE_KEY, device_worker_id: deviceId }, {} as Env, context()) as Promise<Record<string, any>>;
+    await answerBrowser(creating, true, null);
+    const result = await creating;
+    expect(result).toMatchObject({ status: 'setup_required' });
+    const id = Number(result.connection_id);
+    const available = await handleListAvailable({ action: 'list_available', connection_id: id }, context());
+    expect(available).toMatchObject({ operations: expect.arrayContaining([
+      expect.objectContaining({ operation_key: 'verify_browser', executable: true }),
+    ]) });
+    const checking = manageConnections({ action: 'test', connection_id: id }, {} as Env, context()) as Promise<Record<string, any>>;
+    await answerBrowser(checking);
+    expect(await checking).toMatchObject({ status: 'ok' });
+    expect((await sql`SELECT status FROM connections WHERE id = ${id}`)[0].status).toBe('active');
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${orgId}
+      AND action_key = 'verify_browser' AND status = 'completed'`).toHaveLength(1);
+  });
+
   it.each(['create', 'connect'] as const)('%s requires browser selection before creating any connection or auth profile', async (action) => {
     await liveDefinition();
     const sql = getTestDb();

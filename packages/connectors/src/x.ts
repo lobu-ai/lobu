@@ -4,16 +4,15 @@
  * Supports two auth modes:
  * - OAuth 2.0 user context against the X API v2 (preferred when a token is
  *   available — the ToS-compliant path).
- * - The paired Owletto Chrome extension (fallback). Mirrors the LinkedIn
- *   connector: we attach the CDP Network domain in the user's signed-in
- *   x.com tab via the extension's `chrome.*` action dispatcher, drive scroll
- *   pagination, and parse the GraphQL responses the page emits. No Playwright,
- *   no cookie cache, no `--remote-debugging-port` plumbing.
+ * - A separate, verified browser connection through the paired Owletto Chrome
+ *   extension. Mirrors the LinkedIn connector: we attach the CDP Network domain
+ *   in the user's signed-in x.com tab via the extension's `chrome.*` action
+ *   dispatcher, drive scroll pagination, and parse the GraphQL responses the
+ *   page emits. No Playwright, cookie cache, or `--remote-debugging-port` plumbing.
  *
- * Auth is implicit on the extension path: the user is already signed into
- * x.com in the paired Chrome. There is no fallback path — if no online
- * Owletto extension is reachable in the connection's org, the sync fails fast
- * with a clear "no paired Owletto extension" error.
+ * Browser access requires a verified browser-authenticated connection.
+ * An OAuth connection does not gain browser access from a device pin; API
+ * failures stay on the OAuth path when no browser grant is available.
  *
  * Feeds:
  *   - tweets:        search by query or track a handle (API v2 or extension search)
@@ -1429,6 +1428,17 @@ class XLikesPageTracker {
 
 type XSyncBackend = "oauth_api" | "extension";
 
+function requireXBrowser(
+	ctx: Pick<SyncContext, "browser">,
+): ChromeActionDispatcher {
+	if (!ctx.browser) {
+		throw new Error(
+			"Use a separate X connection authenticated through your paired Chrome browser for browser-only feeds and actions.",
+		);
+	}
+	return requireBrowser(ctx);
+}
+
 function parseGrantedScopes(scope: string | null | undefined): Set<string> {
 	if (!scope) return new Set();
 	return new Set(
@@ -1460,8 +1470,7 @@ function readSyncBackendPreference(
 }
 
 /**
- * Browser-first: when OAuth exists but the token lacks feed scopes, use the
- * paired extension instead of failing against the API.
+ * Use browser fallback only when this connection has an authorized browser grant.
  */
 function resolveSyncBackend(
 	ctx: SyncContext,
@@ -1469,13 +1478,12 @@ function resolveSyncBackend(
 	requiredScopes: readonly string[] | undefined,
 ): XSyncBackend {
 	const preference = readSyncBackendPreference(config);
-	if (preference === "extension") return "extension";
-	if (preference === "oauth_api" && ctx.credentials?.accessToken) {
-		return "oauth_api";
-	}
-
 	const accessToken = ctx.credentials?.accessToken;
-	if (!accessToken) return "extension";
+	if (preference === "extension" || !accessToken) {
+		requireXBrowser(ctx);
+		return "extension";
+	}
+	if (preference === "oauth_api" || !ctx.browser) return "oauth_api";
 
 	const granted = parseGrantedScopes(ctx.credentials?.scope);
 	if (!hasGrantedScopes(granted, requiredScopes)) return "extension";
@@ -1516,13 +1524,14 @@ async function syncWithOAuthFallback<T extends XSyncPage>(
 	}
 }
 
-/** Browser-first feeds fall back to the extension unless `use_oauth` is set. */
+/** Fall back only when the connection has a browser grant and OAuth is not forced. */
 async function syncOAuthWithOptionalFallback<T extends XSyncPage>(
+	ctx: SyncContext,
 	config: Record<string, unknown>,
 	oauthFn: () => Promise<T>,
 	extensionFn: () => Promise<T>,
 ): Promise<T> {
-	if (isTruthyConfigFlag(config.use_oauth)) return oauthFn();
+	if (!ctx.browser || isTruthyConfigFlag(config.use_oauth)) return oauthFn();
 	return syncWithOAuthFallback(oauthFn, extensionFn);
 }
 
@@ -1972,7 +1981,7 @@ async function syncViaExtension(args: {
 	const { ctx, url, interceptPatterns, parseResponse, maxScrolls, checkpoint } =
 		args;
 	const result = await extensionNetworkSync<XTweet>({
-		dispatcher: requireBrowser(ctx),
+		dispatcher: requireXBrowser(ctx),
 		config: {
 			interceptPatterns,
 			allowedOrigins: X_ALLOWED_ORIGINS,
@@ -2092,7 +2101,7 @@ async function syncLikedTweetsViaExtension(
 ): Promise<XSyncPage> {
 	const accountHandle = await resolveAccountHandle(config);
 	const likesUrl = `https://x.com/${encodeURIComponent(accountHandle)}/likes`;
-	const dispatcher = requireBrowser(ctx);
+	const dispatcher = requireXBrowser(ctx);
 	const previouslyComplete = checkpoint.likes_backfill_status === "complete";
 	const pageBudget = previouslyComplete
 		? readLikesIncrementalPageBudget(config)
@@ -2433,7 +2442,7 @@ async function syncDirectMessagesViaExtension(
 			: "";
 
 	const result = await extensionNetworkSync<XDmMessage>({
-		dispatcher: requireBrowser(ctx),
+		dispatcher: requireXBrowser(ctx),
 		config: {
 			interceptPatterns: [
 				{ regex: "/i/api/graphql/\\w+/.*DM" },
@@ -2474,7 +2483,7 @@ async function syncHomeFeedViaDomScrape(
 ): Promise<XSyncPage> {
 	const maxScrolls = readScrollBudget(config, { defaultMax: 10, cap: 30 });
 	const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
-		dispatcher: requireBrowser(ctx),
+		dispatcher: requireXBrowser(ctx),
 		url: "https://x.com/home",
 		config: {
 			...HOME_FEED_SCRAPE_CONFIG,
@@ -2506,7 +2515,7 @@ const backendPreferenceProperties = {
 		type: "boolean",
 		default: false,
 		description:
-			"Force the paired Chrome extension even when OAuth is available.",
+			"Use the paired Chrome browser. Requires a separate X connection authenticated with the browser method.",
 	},
 	use_oauth: {
 		type: "boolean",
@@ -3302,7 +3311,7 @@ export default class XConnector extends ConnectorRuntime {
 				name: "My Posts",
 				sync: (ctx) => this.syncFeed(ctx),
 				description:
-					"Posts and replies authored by the connected account. Uses the X API when OAuth is available, otherwise the paired Chrome extension.",
+					"Posts and replies authored by the connected account. OAuth connections use the X API; browser-authenticated connections use the paired Chrome extension.",
 				configSchema: accountTimelineConfigSchema,
 				eventKinds: {
 					tweet: {
@@ -3322,7 +3331,7 @@ export default class XConnector extends ConnectorRuntime {
 				name: "Liked Posts",
 				sync: (ctx) => this.syncFeed(ctx),
 				description:
-					"Posts the connected account has liked. OAuth remains available for API-backed feeds; the paired signed-in Chrome extension performs resumable cursor backfill and incremental collection.",
+					"Posts the connected account has liked. OAuth connections use the X API; browser-authenticated connections use the paired Chrome extension for resumable cursor backfill and incremental collection.",
 				configSchema: likedTweetsConfigSchema,
 				eventKinds: {
 					liked_tweet: {
@@ -3337,7 +3346,7 @@ export default class XConnector extends ConnectorRuntime {
 				name: "Bookmarks",
 				sync: (ctx) => this.syncFeed(ctx),
 				description:
-					"Posts bookmarked by the connected account. Uses the X API when OAuth is available, otherwise the paired Chrome extension.",
+					"Posts bookmarked by the connected account. OAuth connections use the X API; browser-authenticated connections use the paired Chrome extension.",
 				configSchema: bookmarksConfigSchema,
 				eventKinds: {
 					bookmark: {
@@ -3352,7 +3361,7 @@ export default class XConnector extends ConnectorRuntime {
 				name: "Direct Messages",
 				sync: (ctx) => this.syncFeed(ctx),
 				description:
-					"Direct message events across all conversations. Uses the X API when dm.read is granted, otherwise the paired Chrome extension on /messages. Auto-creates person entities for 1:1 counterparts.",
+					"Direct message events across all conversations. OAuth connections use the X API and require dm.read; browser-authenticated connections use the paired Chrome extension on /messages. Auto-creates person entities for 1:1 counterparts.",
 				configSchema: bookmarksConfigSchema,
 				eventKinds: {
 					dm_message: {
@@ -3367,7 +3376,7 @@ export default class XConnector extends ConnectorRuntime {
 				name: "Home Timeline",
 				sync: (ctx) => this.syncFeed(ctx),
 				description:
-					"Your personalized x.com home timeline (For you + Following). Extension-only via content-script scrape. Use following_timeline for source-only chronological reads through the official API.",
+					"Your personalized x.com home timeline (For you + Following). Requires a separate X connection authenticated through your paired Chrome browser. Use following_timeline for source-only chronological reads through the official API.",
 				configSchema: homeFeedConfigSchema,
 				eventKinds: {
 					tweet: {
@@ -3384,7 +3393,7 @@ export default class XConnector extends ConnectorRuntime {
 				kind: "write",
 				name: "Prepare reply",
 				description:
-					"Stage a reply draft after the user opens the exact X post (fill the reply composer). NEVER opens a tab or submits — the human must click Reply. No auto-post path exists.",
+					"Requires an X connection authenticated through your paired Chrome browser. Stage a reply draft after the user opens the exact X post (fill the reply composer). NEVER opens a tab or submits — the human must click Reply. No auto-post path exists.",
 				annotations: {
 					destructiveHint: false,
 					idempotentHint: false,
@@ -3464,7 +3473,7 @@ export default class XConnector extends ConnectorRuntime {
 			if (!tweetRef) {
 				return { success: false, error: "tweet_url or tweet_id is required" };
 			}
-			const output = await prepareXReply(requireBrowser(ctx), {
+			const output = await prepareXReply(requireXBrowser(ctx), {
 				tweetUrl: tweetRef,
 				body,
 				banner: ctx.input.banner !== false,
@@ -3482,8 +3491,8 @@ export default class XConnector extends ConnectorRuntime {
 	}
 
 	private async syncFeed(ctx: SyncContext): Promise<SyncResult> {
-		// Collected whole, then committed once: an OAuth attempt that fails part
-		// way falls back to the extension, and nothing it gathered may land first.
+		// Collect before committing so an authorized browser fallback cannot
+		// duplicate events gathered by a partially failed OAuth attempt.
 		const page = await this.collectFeed(ctx);
 		await ctx.commit(page.events, page.checkpoint);
 		return {
@@ -3498,8 +3507,8 @@ export default class XConnector extends ConnectorRuntime {
 		const feedKey = ctx.feedKey ?? "tweets";
 		const oauthScopes = X_OAUTH_FEED_SCOPES[feedKey];
 
-		// The home timeline has no public API — it is always served by the
-		// extension, regardless of whether an OAuth token is present.
+		// This feed reads the home page through the browser, regardless of
+		// whether an OAuth token is present.
 		if (feedKey === "home_feed") {
 			return syncHomeFeedViaDomScrape(ctx, config, checkpoint);
 		}
@@ -3507,6 +3516,7 @@ export default class XConnector extends ConnectorRuntime {
 		if (feedKey === "my_tweets") {
 			if (resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api") {
 				return syncOAuthWithOptionalFallback(
+					ctx,
 					config,
 					() => syncMyTweetsViaOAuthApi(ctx, config, checkpoint),
 					() => syncMyTweetsViaExtension(ctx, config, checkpoint),
@@ -3518,6 +3528,7 @@ export default class XConnector extends ConnectorRuntime {
 		if (feedKey === "liked_tweets") {
 			if (resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api") {
 				return syncOAuthWithOptionalFallback(
+					ctx,
 					config,
 					() => syncLikedTweetsViaOAuthApi(ctx, config, checkpoint),
 					() => syncLikedTweetsViaExtension(ctx, config, checkpoint),
@@ -3529,6 +3540,7 @@ export default class XConnector extends ConnectorRuntime {
 		if (feedKey === "bookmarks") {
 			if (resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api") {
 				return syncOAuthWithOptionalFallback(
+					ctx,
 					config,
 					() => syncBookmarksViaOAuthApi(ctx, config, checkpoint),
 					() => syncBookmarksViaExtension(ctx, config, checkpoint),
@@ -3540,6 +3552,7 @@ export default class XConnector extends ConnectorRuntime {
 		if (feedKey === "direct_messages") {
 			if (resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api") {
 				return syncOAuthWithOptionalFallback(
+					ctx,
 					config,
 					() => syncDirectMessagesViaOAuthApi(ctx, config, checkpoint),
 					() => syncDirectMessagesViaExtension(ctx, config, checkpoint),
@@ -3548,10 +3561,11 @@ export default class XConnector extends ConnectorRuntime {
 			return syncDirectMessagesViaExtension(ctx, config, checkpoint);
 		}
 
-		// `tweets` feed: prefer the official API when scopes are sufficient,
-		// otherwise the extension's signed-in search.
+		// OAuth connections stay on the API even when scopes are missing; browser
+		// search requires this connection's browser grant.
 		if (resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api") {
 			return syncOAuthWithOptionalFallback(
+				ctx,
 				config,
 				() => syncViaOAuthApi(ctx, config, checkpoint),
 				() => syncSearchViaExtension(ctx, config, checkpoint),

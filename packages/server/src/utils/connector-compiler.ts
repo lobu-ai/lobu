@@ -172,7 +172,7 @@ async function main() {
       requiredCapability: def.requiredCapability || null,
       runtime: def.runtime || null,
       agentTooling: def.agentTooling || null,
-      supportsExecute: supportsExecute || !!def.browser,
+      supportsExecute,
     };
 
     process.send({ success: true, metadata });
