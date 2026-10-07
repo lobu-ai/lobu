@@ -25,8 +25,10 @@ export async function loadLiveEntityIdentities(
 		namespace: string;
 		identifier: string;
 		scope_key: string | null;
+		source_connector: string | null;
+		connection_id: number | null;
 	}>`
-		SELECT entity_id, namespace, identifier, scope_key
+		SELECT entity_id, namespace, identifier, scope_key, source_connector, connection_id
 		FROM entity_identities
 		WHERE organization_id = ${input.organizationId}
 		  AND entity_id = ANY(${pgBigintArray(input.entityIds)}::bigint[])
@@ -41,6 +43,8 @@ export async function loadLiveEntityIdentities(
 			namespace: row.namespace,
 			identifier: row.identifier,
 			scopeKey: row.scope_key,
+			sourceConnector: row.source_connector,
+			connectionId: row.connection_id == null ? null : Number(row.connection_id),
 		});
 		identities.set(entityId, bucket);
 	}

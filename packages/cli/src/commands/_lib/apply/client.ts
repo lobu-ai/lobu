@@ -113,6 +113,7 @@ export interface RemoteEntityType {
 }
 
 export interface RemoteRelationshipType {
+  purpose?: string | null;
   /** Persistent incarnation id (`entity_relationship_types.id`) — the `owned` identity for deletes. */
   id?: number;
   slug: string;

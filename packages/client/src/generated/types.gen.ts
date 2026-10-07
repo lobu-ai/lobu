@@ -1274,7 +1274,7 @@ export type ManageEntityData = {
          */
         force_delete_tree?: boolean;
         /**
-         * [delete, merge] Preflight only. For delete: report what it would remove/detach. For merge: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
+         * [delete, merge, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For merge or identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
          */
         dry_run?: boolean;
         /**
@@ -1292,6 +1292,10 @@ export type ManageEntityData = {
         };
       }
     | {
+        /**
+         * [delete, merge, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For merge or identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
+         */
+        dry_run?: boolean;
         /**
          * Create a relationship edge between two entities.
          */
@@ -1337,6 +1341,23 @@ export type ManageEntityData = {
         };
       }
     | {
+        /**
+         * [delete, merge, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For merge or identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
+         */
+        dry_run?: boolean;
+        /**
+         * Attribution source when mutation is triggered by an Automation reaction
+         */
+        automation_source?: {
+          /**
+           * Automation that triggered this mutation
+           */
+          automation_id: number;
+          /**
+           * Automation run that triggered this mutation
+           */
+          run_id: number;
+        };
         /**
          * Soft-delete a relationship.
          */
@@ -1482,7 +1503,7 @@ export type ManageEntityData = {
          */
         merge_rationale?: string;
         /**
-         * [delete, merge] Preflight only. For delete: report what it would remove/detach. For merge: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
+         * [delete, merge, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For merge or identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
          */
         dry_run?: boolean;
         /**
@@ -1738,7 +1759,7 @@ export type ManageEntityResponses = {
       }
     | {
         action: "link";
-        relationship: {
+        relationship?: {
           id: number;
           organization_id: string;
           from_entity_id: number;
@@ -1763,6 +1784,15 @@ export type ManageEntityResponses = {
           updated_at: string;
           deleted_at?: string | null;
         };
+        dry_run?: boolean;
+        preview?: {
+          outcome: "apply" | "review" | "suppressed" | "refused";
+          reason: string;
+        };
+        approval_queued?: boolean;
+        approval_suppressed?: boolean;
+        approval_run_id?: number;
+        approval_url?: string;
       }
     | {
         action: "update_link";
@@ -1794,6 +1824,15 @@ export type ManageEntityResponses = {
       }
     | {
         action: "unlink";
+        dry_run?: boolean;
+        preview?: {
+          outcome: "apply" | "review" | "suppressed" | "refused";
+          reason: string;
+        };
+        approval_queued?: boolean;
+        approval_suppressed?: boolean;
+        approval_run_id?: number;
+        approval_url?: string;
         success: boolean;
         message: string;
       }
@@ -2057,6 +2096,10 @@ export type ManageEntitySchemaData = {
      * [entity_type: create/update] TypeScript write rules for this type, as source. The default export receives one row per write — `{ committed, patch, next, op, changed(field), deny(reason), escalate(fields, reason) }` — and may only NARROW what is allowed: there is no `allow`. Compiled server-side on save and executed at the entity write seam, so an illegal state is rejected no matter which caller proposed it. Note `patch` is the fully MERGED value set, not a delta, so compare against `committed` rather than testing for a key's presence. `null` clears the rules; omit to leave unchanged.
      */
     rules_source?: null | string;
+    /**
+     * [relationship_type: create/update] Governed stored identity association. Activate only after all server replicas support identity associations.
+     */
+    purpose?: "identity";
     /**
      * [relationship_type: create] Whether the relationship is symmetric (A↔B = B↔A). Default false. Create-only: affects relationship canonicalization/dedup for existing rows, so an update carrying is_symmetric is rejected (not silently dropped). To change it, create a new type and migrate.
      */

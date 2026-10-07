@@ -732,6 +732,10 @@ function diffRelationshipType(
     desired,
     remote,
     fields: [
+      {
+        name: "purpose",
+        changed: (d, r) => d.purpose !== undefined && d.purpose !== r.purpose,
+      },
       { name: "name", changed: (d, r) => stringChanged(d.name, r.name) },
       {
         name: "description",
@@ -935,6 +939,12 @@ function compareRelationshipTypeThreeWay(
   // name/description are unmanaged when omitted (upsert never clears them).
   const triples = [
     {
+      field: "purpose",
+      desired: desired.purpose,
+      remote: remote.purpose ?? undefined,
+      attribution: attribution?.purpose ?? undefined,
+    },
+    {
       field: "name",
       desired: desired.name,
       remote: remote.name,
@@ -957,7 +967,9 @@ function compareRelationshipTypeThreeWay(
     triples.filter(
       (t) =>
         t.desired !== undefined ||
-        (t.field !== "name" && t.field !== "description")
+        (t.field !== "name" &&
+          t.field !== "description" &&
+          t.field !== "purpose")
     )
   );
 }
@@ -1253,6 +1265,7 @@ export const effectiveEntityTypeAfterApply = (
 };
 
 export interface RelationshipTypeFacets {
+  purpose: string | undefined;
   name: string | undefined;
   description: string | undefined;
   rules: unknown[];
@@ -1262,6 +1275,7 @@ export interface RelationshipTypeFacets {
 const remoteRelationshipTypeFacets = (
   r: RemoteRelationshipType
 ): RelationshipTypeFacets => ({
+  purpose: r.purpose ?? undefined,
   name: r.name,
   description: r.description,
   rules: r.rules ?? [],
@@ -1276,6 +1290,7 @@ export const effectiveRelationshipTypeAfterApply = (
   d: DesiredRelationshipType,
   r: RemoteRelationshipType | undefined
 ): RelationshipTypeFacets => ({
+  purpose: d.purpose ?? r?.purpose ?? undefined,
   name: d.name !== undefined ? d.name : r?.name,
   description: d.description !== undefined ? d.description : r?.description,
   rules: d.rules ?? [],

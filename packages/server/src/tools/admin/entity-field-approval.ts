@@ -1,3 +1,4 @@
+import { applyIdentityAssociationProposal, type IdentityAssociationProposal } from "../../utils/identity-association";
 /**
  * Durable approval gate for entity mutations that need human review. Field
  * updates preserve human ownership through `mergeEntityFields`; held creates,
@@ -211,6 +212,7 @@ export interface EntityMergeProposal {
 }
 
 export type EntityChangeProposal =
+	| IdentityAssociationProposal
 	| EntityFieldChangeProposal
 	| EntityDeleteProposal
 	| EntityCreateProposal
@@ -218,7 +220,7 @@ export type EntityChangeProposal =
 
 function operationOf(
 	proposal: EntityChangeProposal,
-): "create" | "update" | "delete" | "merge" {
+): "create" | "update" | "delete" | "merge" | "link" | "unlink" {
 	return proposal.operation ?? "update";
 }
 
@@ -308,6 +310,10 @@ function entityChangeIdempotencyKey(
 	const operation = operationOf(proposal);
 	let change: Record<string, unknown>;
 	switch (operation) {
+		case "link":
+		case "unlink":
+			change = { proposal };
+			break;
 		case "update":
 			change = {
 				entityId: asUpdateProposal(proposal).entity_id,
@@ -668,6 +674,7 @@ export async function proposeEntityChange(
 ): Promise<{ runId: number; eventId: number; approvalUrl?: string }> {
 	const sql = getDb();
 	const operation = operationOf(proposal);
+	const identityProposal = proposal.operation === "link" || proposal.operation === "unlink" ? proposal : null;
 	const updateProposal =
 		operation === "update" ? asUpdateProposal(proposal) : null;
 	const deleteProposal =
@@ -724,6 +731,7 @@ export async function proposeEntityChange(
         )
         OR (
           r.idempotency_key IS NULL
+          AND ${identityProposal === null}
           AND r.approval_status = 'pending'
           AND r.status = 'pending'
 		  -- Same proposal from a different parent run is a distinct ask. This
@@ -804,8 +812,9 @@ export async function proposeEntityChange(
 			: mergeWinnerLabel
 				? `Merge duplicate into ${mergeWinnerLabel}`
 				: `Merge duplicate ${formatLabel(entityType ?? "entity").toLowerCase()}`;
-	const actionLabel =
-		operation === "update"
+	const actionLabel = identityProposal
+		? `${operation === "link" ? "Associate" : "Separate"} identity records ${identityProposal.entity_id} and ${identityProposal.to_entity_id}`
+		: operation === "update"
 			? formatFieldChangeAction(entityType, fieldKeys)
 			: operation === "delete"
 				? `Delete ${entityType ? formatLabel(entityType).toLowerCase() : "entity"}`
@@ -816,7 +825,7 @@ export async function proposeEntityChange(
 	const insertApprovalEvent = (runId: number, db: DbClient) =>
 		insertEvent(
 			{
-				entityIds:
+				entityIds: identityProposal ? [identityProposal.entity_id, identityProposal.to_entity_id] :
 					operation === "create"
 						? []
 						: operation === "merge"
@@ -875,7 +884,7 @@ export async function proposeEntityChange(
 							: deleteProposal
 								? deleteProposal.current
 								: null,
-					proposal: createProposal
+					proposal: identityProposal ? { from_entity_id: identityProposal.entity_id, to_entity_id: identityProposal.to_entity_id, relationship_type: identityProposal.relationship_type_slug, records: identityProposal.current } : createProposal
 						? createProposal.proposal
 						: mergeEventMetadata
 							? mergeEventMetadata.proposal
@@ -1085,11 +1094,11 @@ export async function proposeEntityChange(
 						operation,
 						actorLabel,
 						entityId:
-							deleteProposal?.entity_id ?? mergeProposal?.entity_id ?? null,
+							identityProposal?.entity_id ?? deleteProposal?.entity_id ?? mergeProposal?.entity_id ?? null,
 						entityType: entityType ?? null,
 						entityName: entityName ?? null,
 						entityUrl,
-						proposal: mergeProposal
+						proposal: identityProposal ? { from_entity_id: identityProposal.entity_id, to_entity_id: identityProposal.to_entity_id, relationship_type: identityProposal.relationship_type_slug } : mergeProposal
 							? {
 									entity_id: mergeProposal.entity_id,
 									entity_ids: mergeEntityIds(mergeProposal),
@@ -1339,6 +1348,9 @@ export async function applyEntityChangeProposal(
 	sourceRunId: number | null = null,
 	postCommitEffects?: Array<() => Promise<void>>,
 ): Promise<unknown> {
+	if (proposal.operation === "link" || proposal.operation === "unlink") {
+		return applyIdentityAssociationProposal(db, proposal, ctx);
+	}
 	const operation = operationOf(proposal);
 	if (operation === "update") {
 		return applyEntityFieldChangeProposal(

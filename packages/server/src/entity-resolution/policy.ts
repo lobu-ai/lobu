@@ -29,6 +29,8 @@ export interface ResolutionEvidence {
 }
 
 export interface ResolutionIdentity {
+	sourceConnector?: string | null;
+	connectionId?: number | null;
 	namespace: string;
 	identifier: string;
 	scopeKey?: string | null;

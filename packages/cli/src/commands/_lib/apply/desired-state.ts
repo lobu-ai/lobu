@@ -91,6 +91,7 @@ export interface DesiredEntityType {
 }
 
 export interface DesiredRelationshipType {
+  purpose?: "identity";
   slug: string;
   name?: string;
   description?: string;

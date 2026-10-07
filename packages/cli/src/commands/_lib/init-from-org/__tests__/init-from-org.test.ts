@@ -846,6 +846,64 @@ describe("lobu init --from-org", () => {
     expect(rel?.rules).toEqual([{ source: "contact", target: "company" }]);
   });
 
+  test("identity relationship purpose survives exported config reload", async () => {
+    const dir = mkFixtureDir();
+    await initFromOrg({
+      targetDir: dir,
+      fetchImpl: buildFetch({
+        "/oauth/userinfo": () => ({
+          organizations: [{ id: "org-1", slug: "acme", name: "Acme Inc" }],
+        }),
+        "/agents/lone/config": () => ({ updatedAt: 0 }),
+        "/agents": () => ({ agents: [{ agentId: "lone", name: "Lone" }] }),
+        "automations?include_details": () => ({ automations: [] }),
+        // The REAL server `list` action omits rules (only `list_rules` returns
+        // them). Branch on the action so this mirrors production: list → no
+        // rules; list_rules → the rule rows in the server's snake_case shape.
+        manage_entity_schema: (body) => {
+          if (body.action === "list_rules") {
+            return {
+              rules: [
+                {
+                  id: 1,
+                  source_entity_type_slug: "contact",
+                  target_entity_type_slug: "contact",
+                },
+              ],
+            };
+          }
+          return {
+            entity_types: [
+              { slug: "contact", name: "Contact" },
+              { slug: "company", name: "Company" },
+            ],
+            relationship_types: [
+              { slug: "same_record", name: "Same record", purpose: "identity" },
+            ],
+          };
+        },
+        manage_auth_profiles: () => ({ auth_profiles: [] }),
+        manage_connections: () => ({ connections: [] }),
+      }),
+    });
+
+    const source = readFileSync(join(dir, "lobu.config.ts"), "utf-8");
+    // The rule was hydrated from list_rules and emitted, using the entity
+    // handles (not raw slugs) — proving the round-trip isn't lossy.
+    expect(source).toMatch(/rules:\s*\[/);
+    expect(source).toContain("source:");
+    expect(source).toContain("target:");
+
+    // Round-trips: the rule survives back into DesiredState.
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    const rel = state.memorySchema.relationshipTypes.find(
+      (r) => r.slug === "same_record"
+    );
+    expect(rel?.purpose).toBe("identity");
+    expect(source).toContain('purpose: "identity"');
+    expect(rel?.rules).toEqual([{ source: "contact", target: "contact" }]);
+  });
+
   test("public/cross-org + system types are NOT declared (only owned ones)", async () => {
     // The list endpoint returns the org's own types PLUS public types from
     // OTHER orgs (and the system `$member`). Only the org's own, non-system

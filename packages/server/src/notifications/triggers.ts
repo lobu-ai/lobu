@@ -34,7 +34,7 @@ type FieldChangeApprovalDetails = {
 
 type EntityChangeApprovalDetails = {
 	kind: "entity_change";
-	operation: "create" | "delete" | "merge";
+	operation: "create" | "delete" | "merge" | "link" | "unlink";
 	actorLabel?: string | null;
 	entityId?: number | null;
 	entityType?: string | null;
@@ -157,6 +157,7 @@ export function formatActionApprovalTitle(
 		const entityLabel = details.entityType
 			? formatLabel(details.entityType).toLowerCase()
 			: "entity";
+		if (details.operation === "link" || details.operation === "unlink") return `Review ${details.operation === "link" ? "associating" : "separating"} identity records`;
 		return details.operation === "delete"
 			? `Review deleting ${entityLabel}`
 			: details.operation === "merge"
@@ -227,7 +228,9 @@ function buildApprovalRenderModel(
 		...base,
 		diffs: null,
 		action:
-			details.operation === "delete"
+			details.operation === "link" ? "Associate these identity records"
+			: details.operation === "unlink" ? "Separate these identity records"
+			: details.operation === "delete"
 				? "Delete this entity"
 				: details.operation === "merge"
 					? "Merge these entities"

@@ -95,7 +95,7 @@ const AutomationSource = Type.Object(
 
 const DryRun = Type.Boolean({
   description:
-    "[delete, merge] Preflight only. For delete: report what it would remove/detach. For merge: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.",
+    "[delete, merge, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For merge or identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.",
 });
 
 const IncludeDeleted = Type.Boolean({
@@ -252,7 +252,27 @@ export const DeleteEntityAction = Type.Object({
   automation_source: Type.Optional(AutomationSource),
 });
 
+const IdentityDecisionFields = {
+  dry_run: Type.Optional(Type.Boolean()),
+  preview: Type.Optional(
+    Type.Object({
+      outcome: Type.Union([
+        Type.Literal("apply"),
+        Type.Literal("review"),
+        Type.Literal("suppressed"),
+        Type.Literal("refused"),
+      ]),
+      reason: Type.String(),
+    })
+  ),
+  approval_queued: Type.Optional(Type.Boolean()),
+  approval_suppressed: Type.Optional(Type.Boolean()),
+  approval_run_id: Type.Optional(Type.Number()),
+  approval_url: Type.Optional(Type.String()),
+};
+
 export const LinkEntitiesAction = Type.Object({
+  dry_run: Type.Optional(DryRun),
   action: Type.Literal("link", {
     description: "Create a relationship edge between two entities.",
   }),
@@ -266,6 +286,8 @@ export const LinkEntitiesAction = Type.Object({
 });
 
 export const UnlinkEntitiesAction = Type.Object({
+  dry_run: Type.Optional(DryRun),
+  automation_source: Type.Optional(AutomationSource),
   action: Type.Literal("unlink", {
     description: "Soft-delete a relationship.",
   }),
@@ -648,7 +670,8 @@ export const ManageEntityResultSchema = Type.Union([
   }),
   Type.Object({
     action: Type.Literal("link"),
-    relationship: RelationshipRowSchema,
+    relationship: Type.Optional(RelationshipRowSchema),
+    ...IdentityDecisionFields,
   }),
   Type.Object({
     action: Type.Literal("update_link"),
@@ -656,6 +679,7 @@ export const ManageEntityResultSchema = Type.Union([
   }),
   Type.Object({
     action: Type.Literal("unlink"),
+    ...IdentityDecisionFields,
     success: Type.Boolean(),
     message: Type.String(),
   }),

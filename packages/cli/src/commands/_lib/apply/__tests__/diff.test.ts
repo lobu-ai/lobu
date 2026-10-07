@@ -233,6 +233,24 @@ describe("apply diff — settings", () => {
 });
 
 describe("apply diff — memory schema", () => {
+  test("detects purpose activation and leaves omitted purpose unmanaged", () => {
+    const desired = buildState([], {
+      memorySchema: {
+        entityTypes: [],
+        relationshipTypes: [{ slug: "same_record", purpose: "identity" }],
+      },
+    });
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      relationshipTypes: [{ slug: "same_record" }],
+    };
+    expect(computeDiff(desired, remote).counts.update).toBe(1);
+    remote.relationshipTypes = [{ slug: "same_record", purpose: "identity" }];
+    expect(computeDiff(desired, remote).counts.noop).toBe(1);
+    desired.memorySchema.relationshipTypes = [{ slug: "same_record" }];
+    expect(computeDiff(desired, remote).counts.noop).toBe(1);
+  });
+
   test("creates entity + relationship types", () => {
     const desired: DesiredState = {
       agents: [],

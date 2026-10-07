@@ -1,3 +1,5 @@
+import { assertPhysicalMergeMembersAllowed } from "./identity-association";
+import { lockIdentityOrganization } from "./relationship-validation";
 /**
  * Entity merge — fold a duplicate `loser` entity into the `winner` it really is.
  *
@@ -117,6 +119,8 @@ export async function previewMerge(
 	db: DbClient = getDb(),
 ): Promise<EntityRowValidationVerdict | null> {
 	const loserIds = [...new Set(params.loserIds)].sort((a, b) => a - b);
+	const [winner] = await db`SELECT organization_id FROM entities WHERE id = ${params.winnerId}`;
+	if (winner) await assertPhysicalMergeMembersAllowed(db, String(winner.organization_id), [...loserIds, params.winnerId]);
 	if (loserIds.length === 0) return null;
 	try {
 		await validateEntityRowMergeGrantingApprovedFields({
@@ -158,6 +162,8 @@ export async function applyMergeGroupInTransaction(
   // generation after locking entity rows, while organization deletion locks the
   // org and then cascades into `entities`. Claim the parent first or the two
   // deadlock.
+  await lockIdentityOrganization(tx, params.orgId);
+  await assertPhysicalMergeMembersAllowed(tx, params.orgId, [...loserIds, params.winnerId]);
   await lockOrgForAclInvalidation(tx, params.orgId);
 
   // Lock the whole group in one global order before applying any member. Pairwise
@@ -224,6 +230,8 @@ export async function applyMerge(
 	// `applyMergeInTransaction`, so the group path can invalidate once for all its
 	// losers instead of once each.
 	return db.begin(async (tx) => {
+		await lockIdentityOrganization(tx, params.orgId);
+		await assertPhysicalMergeMembersAllowed(tx, params.orgId, [params.loserId, params.winnerId]);
 		await lockOrgForAclInvalidation(tx, params.orgId);
 		const result = await applyMergeInTransaction(params, tx);
 		await invalidateOrgAcl(tx, params.orgId);

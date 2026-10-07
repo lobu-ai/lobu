@@ -34,6 +34,21 @@ import {
  */
 const HEAL_MIGRATIONS = [
 	{
+		files: ["20261007010001_identity_association_indexes.sql"],
+		index: "idx_identity_withdrawal_pair",
+		seedSql: `CREATE INDEX IF NOT EXISTS idx_identity_withdrawal_pair ON entity_relationships (id)`,
+	},
+	{
+		files: ["20261007010001_identity_association_indexes.sql"],
+		index: "idx_identity_rejected_pair",
+		seedSql: `CREATE INDEX IF NOT EXISTS idx_identity_rejected_pair ON runs (id)`,
+	},
+	{
+		files: ["20261007010001_identity_association_indexes.sql"],
+		index: "idx_merge_rejected_members",
+		seedSql: `CREATE INDEX IF NOT EXISTS idx_merge_rejected_members ON runs (id)`,
+	},
+	{
 		files: ["20260907163000_runs_agent_turn_conversation_active.sql"],
 		index: "idx_runs_agent_turn_conversation_active",
 		seedSql: `

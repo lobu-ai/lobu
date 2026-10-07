@@ -120,7 +120,16 @@ export interface UpdateMutationRequest extends EntityMutationBase {
 	fields: Record<string, FieldOwner>;
 }
 
+export type RelationshipMutationRequest = EntityMutationBase & {
+	entityTypeSlug: string;
+	entityId: number;
+	entityOrgId: string;
+} & ({ action: "link" } | { action: "unlink" });
+
+export type RelationshipMutationDecision = { outcome: "allow" | "review" } | { outcome: "deny"; reason: string };
+
 export type EntityMutationRequest =
+	| RelationshipMutationRequest
 	| CreateMutationRequest
 	| DeleteMutationRequest
 	| UpdateMutationRequest;
@@ -164,7 +173,7 @@ export interface MutationInterceptor {
 	name: string;
 	evaluate: (
 		req: EntityMutationRequest,
-	) => Promise<CreateOrDeleteDecision | UpdateDecision | null>;
+	) => Promise<CreateOrDeleteDecision | UpdateDecision | RelationshipMutationDecision | null>;
 }
 
 /**
@@ -221,7 +230,7 @@ export function deferEntityCreate(args: {
 }
 
 function isUpdateDecision(
-	d: CreateOrDeleteDecision | UpdateDecision,
+	d: CreateOrDeleteDecision | UpdateDecision | RelationshipMutationDecision,
 ): d is UpdateDecision {
 	return d.outcome === "deny" || d.outcome === "fields";
 }
@@ -230,6 +239,7 @@ function isUpdateDecision(
  * Run every registered interceptor against `req` and fold the results per the
  * chaining semantics documented at the top of this file.
  */
+export async function runMutationGate(req: RelationshipMutationRequest): Promise<RelationshipMutationDecision>;
 export async function runMutationGate(
 	req: CreateMutationRequest | DeleteMutationRequest,
 ): Promise<CreateOrDeleteDecision>;
@@ -238,7 +248,16 @@ export async function runMutationGate(
 ): Promise<UpdateDecision>;
 export async function runMutationGate(
 	req: EntityMutationRequest,
-): Promise<CreateOrDeleteDecision | UpdateDecision> {
+): Promise<CreateOrDeleteDecision | UpdateDecision | RelationshipMutationDecision> {
+	if (req.action === "link" || req.action === "unlink") {
+		let review = false;
+		for (const interceptor of registry) {
+			const decision = await interceptor.evaluate(req);
+			if (decision?.outcome === "deny") return decision;
+			if (decision && decision.outcome !== "allow") review = true;
+		}
+		return { outcome: review ? "review" : "allow" };
+	}
 	if (req.action === "update") {
 		const requireApproval = new Set<string>();
 		for (const interceptor of registry) {
