@@ -620,6 +620,55 @@ describe('compiled browser source reads', () => {
       .toMatchObject({ config, status: 'active', auth_profile_id: null });
   });
 
+  it.each([
+    { changePin: false, addManaged: false },
+    { changePin: true, addManaged: false },
+    { changePin: false, addManaged: true },
+    { changePin: true, addManaged: true },
+  ])('keeps managed OAuth active when updating browser affinity: %j', async ({ changePin, addManaged }) => {
+    const sql = getTestDb();
+    const config = { managedBy: { org: 'synthetic-cloud' } };
+    await sql`UPDATE connections SET config = ${sql.json(addManaged ? {} : config)} WHERE id = ${connectionId}`;
+    await sql`UPDATE connector_definitions SET auth_schema = ${sql.json({ methods: [
+      { type: 'oauth', provider: 'synthetic' }, { type: 'browser', mode: 'live' },
+    ] })}, browser = ${sql.json({ origins: ['https://source.example'], authMethods: ['browser'],
+      accountProbe: { url: 'https://source.example/account', expression: 'self_probe' } })}
+      WHERE organization_id = ${orgId} AND key = ${SOURCE_KEY}`;
+    const nextDevice = changePin ? (await sql`INSERT INTO device_workers
+      (user_id, worker_id, platform, app_version, capabilities, organization_id, last_seen_at, connector_manifests)
+      SELECT user_id, 'synthetic-other-browser', platform, app_version, capabilities, organization_id, NOW(), connector_manifests
+      FROM device_workers WHERE id = ${deviceId} RETURNING id`)[0].id : deviceId;
+    const updated = await manageConnections({ action: 'update', connection_id: connectionId,
+      device_worker_id: nextDevice, ...(addManaged ? { config } : {}) }, {} as Env, context());
+    expect(updated).toMatchObject({ connection: { status: 'active', auth_profile_id: null, device_worker_id: nextDevice } });
+    expect((await sql`SELECT status, auth_profile_id, config FROM connections WHERE id = ${connectionId}`)[0])
+      .toMatchObject({ status: 'active', auth_profile_id: null, config });
+    expect(await sql`SELECT id FROM auth_profiles WHERE organization_id = ${orgId} AND profile_kind = 'browser_session'`).toHaveLength(0);
+    expect((await sql`SELECT status FROM feeds WHERE id = ${feedId}`)[0].status).toBe('active');
+    expect(await connectionBrowserResource(orgId, connectionId)).toBeNull();
+  });
+
+  it.each([false, true])('rejects a concurrent managed-auth mode change before browser provisioning (initially managed: %s)', async (managed) => {
+    const sql = getTestDb();
+    const managedConfig = { managedBy: { org: 'synthetic-cloud' } };
+    await sql`UPDATE connections SET config = ${sql.json(managed ? managedConfig : {})} WHERE id = ${connectionId}`;
+    await sql`UPDATE connector_definitions SET auth_schema = ${sql.json({ methods: [
+      { type: 'oauth', provider: 'synthetic' }, { type: 'browser', mode: 'live' },
+    ] })}, browser = ${sql.json({ origins: ['https://source.example'], authMethods: ['browser'],
+      accountProbe: { url: 'https://source.example/account', expression: 'self_probe' } })}
+      WHERE organization_id = ${orgId} AND key = ${SOURCE_KEY}`;
+    vi.spyOn(connectionWrites, 'connectionSlugTaken').mockImplementationOnce(async () => {
+      await sql`UPDATE connections SET config = ${sql.json(managed ? {} : managedConfig)} WHERE id = ${connectionId}`;
+      return false;
+    });
+    expect(await manageConnections({ action: 'update', connection_id: connectionId,
+      slug: 'synthetic-renamed-account', device_worker_id: deviceId }, {} as Env, context()))
+      .toMatchObject({ error: expect.stringContaining('configuration changed during the update') });
+    expect((await sql`SELECT status, auth_profile_id, slug FROM connections WHERE id = ${connectionId}`)[0])
+      .toMatchObject({ status: 'active', auth_profile_id: null, slug: SOURCE_KEY });
+    expect(await sql`SELECT id FROM auth_profiles WHERE organization_id = ${orgId} AND profile_kind = 'browser_session'`).toHaveLength(0);
+  });
+
   it('managed OAuth admission and updates enforce an OAuth-scoped browser requirement', async () => {
     vi.spyOn(cloudCredentials, 'resolveCloudCredential').mockResolvedValue(null);
     const sql = getTestDb();

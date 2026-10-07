@@ -1761,6 +1761,60 @@ export async function handleUpdate(
   if (explicitlyNoAuth && (retainedConfig.managedBy || retainedConfig.installation_ref || retainedConfig.consent_only)) {
     return { error: 'Delegated and app-installation connections cannot switch to no-auth. Create a separate connection.' };
   }
+  // Un-redact BEFORE anything reads the incoming config. Clients round-trip
+  // what the (now redacted) read path gave them — the Owletto action-modes
+  // editor spreads `connection.config` and PATCHes it straight back — so a
+  // `__LOBU_REDACTED__` here means "unchanged", not "set the literal
+  // placeholder". Without this the update would overwrite the live credential
+  // with the sentinel: silent data loss, worse than the leak it came from.
+  //
+  // Placed ahead of splitConfigByFeedScope so the feed-scope split, the
+  // consent_only computation, the merge and the replace all see real values.
+  const incomingConfigForWrite =
+    args.config === undefined
+      ? undefined
+      : (restoreRedactedConfig(
+          args.config,
+          parseJsonObject(existing.config),
+        ) as Record<string, unknown>);
+
+  const splitConfig = splitConfigByFeedScope(
+    incomingConfigForWrite ?? null,
+		(existing.feeds_schema as Record<string, FeedDefinition>) ?? null,
+  );
+
+  if (splitConfig.feedConfig) {
+    return {
+      error:
+        'Feed-scoped config belongs on feeds. Use client.feeds.update({ feed_id, config }) for sync target settings.',
+    };
+  }
+
+  // Config write mode: declarative `lobu apply` passes `replace_config: true`
+  // so a removed manifest key actually disappears remotely. Default (merge)
+  // is preserved for the web UI / partial updates.
+	const replaceConfig =
+		args.replace_config === true && args.config !== undefined;
+  const connectionConfigForReplace = splitConfig.connectionConfig ?? {};
+
+  // Consent-only is enforced BIDIRECTIONALLY: the feed-creation guard stops a
+  // consent-only connection from gaining feeds, and this stops a feed-having
+  // connection from becoming consent-only. Compute the consent_only flag the
+  // UPDATE below would land on — replace = exactly the new config; merge =
+  // existing config overlaid with the incoming keys — and reject the flip when
+  // the connection still has feeds, so the "data stays local" invariant holds.
+  const existingConfig = parseJsonObject(existing.config);
+  const resultingConfig = replaceConfig
+    ? connectionConfigForReplace
+    : splitConfig.connectionConfig
+      ? { ...existingConfig, ...splitConfig.connectionConfig }
+      : existingConfig;
+  // Browser affinity does not change a delegated OAuth grant into browser auth.
+  // Use the resulting config so adding/removing managedBy in this update agrees
+  // with the browser requirement check below.
+  const managedOAuth = !!getManagedByOrg(resultingConfig) &&
+    ((existing.auth_schema as { methods?: Array<{ type: string }> } | null)?.methods ?? [])
+      .some(method => method.type === 'oauth');
   const authSelection = await resolveConnectionAuthSelection({
     organizationId,
     connectorKey: existing.connector_key,
@@ -1768,7 +1822,7 @@ export async function handleUpdate(
     autoSelectAuthProfile: hasAuthProfileArg,
     authProfileSlug: hasAuthProfileArg ? args.auth_profile_slug : currentAuthProfile?.slug,
     appAuthProfileSlug: hasAppAuthProfileArg ? args.app_auth_profile_slug : currentAppAuthProfile?.slug,
-    deviceWorkerId: nextDeviceWorkerId,
+    deviceWorkerId: managedOAuth ? null : nextDeviceWorkerId,
     oauthAccountCreatedBy: ctx.userId,
   });
 
@@ -1901,54 +1955,6 @@ export async function handleUpdate(
         ? "active"
         : "pending_auth"
       : null);
-  // Un-redact BEFORE anything reads the incoming config. Clients round-trip
-  // what the (now redacted) read path gave them — the Owletto action-modes
-  // editor spreads `connection.config` and PATCHes it straight back — so a
-  // `__LOBU_REDACTED__` here means "unchanged", not "set the literal
-  // placeholder". Without this the update would overwrite the live credential
-  // with the sentinel: silent data loss, worse than the leak it came from.
-  //
-  // Placed ahead of splitConfigByFeedScope so the feed-scope split, the
-  // consent_only computation, the merge and the replace all see real values.
-  const incomingConfigForWrite =
-    args.config === undefined
-      ? undefined
-      : (restoreRedactedConfig(
-          args.config,
-          parseJsonObject(existing.config),
-        ) as Record<string, unknown>);
-
-  const splitConfig = splitConfigByFeedScope(
-    incomingConfigForWrite ?? null,
-		(existing.feeds_schema as Record<string, FeedDefinition>) ?? null,
-  );
-
-  if (splitConfig.feedConfig) {
-    return {
-      error:
-        'Feed-scoped config belongs on feeds. Use client.feeds.update({ feed_id, config }) for sync target settings.',
-    };
-  }
-
-  // Config write mode: declarative `lobu apply` passes `replace_config: true`
-  // so a removed manifest key actually disappears remotely. Default (merge)
-  // is preserved for the web UI / partial updates.
-	const replaceConfig =
-		args.replace_config === true && args.config !== undefined;
-  const connectionConfigForReplace = splitConfig.connectionConfig ?? {};
-
-  // Consent-only is enforced BIDIRECTIONALLY: the feed-creation guard stops a
-  // consent-only connection from gaining feeds, and this stops a feed-having
-  // connection from becoming consent-only. Compute the consent_only flag the
-  // UPDATE below would land on — replace = exactly the new config; merge =
-  // existing config overlaid with the incoming keys — and reject the flip when
-  // the connection still has feeds, so the "data stays local" invariant holds.
-  const existingConfig = parseJsonObject(existing.config);
-  const resultingConfig = replaceConfig
-    ? connectionConfigForReplace
-    : splitConfig.connectionConfig
-      ? { ...existingConfig, ...splitConfig.connectionConfig }
-      : existingConfig;
   const browserConnector = await getScopedConnectorDefinition({ organizationId, connectorKey: existing.connector_key });
   const browserDeviceId = hasDeviceWorkerArg ? nextDeviceWorkerId : (nextDeviceWorkerId ?? existing.device_worker_id);
   const browserRequirement = selectedBrowserRequirement(browserConnector?.browser, existing.auth_schema,
@@ -2133,6 +2139,10 @@ export async function handleUpdate(
           : lockedConfig;
       if (explicitlyNoAuth && (lockedResultingConfig.managedBy || lockedResultingConfig.installation_ref || lockedResultingConfig.consent_only)) {
         return { denial: { error: 'No-auth selection cannot retain delegated or app-installation credentials. Create a separate connection.' } };
+      }
+
+      if (!!getManagedByOrg(lockedResultingConfig) !== !!getManagedByOrg(resultingConfig)) {
+        return { denial: { error: 'Connection authentication configuration changed during the update. Refresh and try again.' } };
       }
 
       const liveBrowserProfile = authSelection.pendingLiveBrowser
