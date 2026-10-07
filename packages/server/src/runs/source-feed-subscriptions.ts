@@ -37,11 +37,11 @@ export async function sourceFeedSubscriptions(sql: DbClient, organizationId: str
       AND a.triggers @> jsonb_build_array(jsonb_build_object('kind', 'event', 'connector_key', c.connector_key))
       AND EXISTS (
         SELECT 1 FROM jsonb_array_elements(a.triggers) trigger,
-          jsonb_array_elements(COALESCE(d.automation_events, '[]'::jsonb)) event
+          jsonb_array_elements_text(COALESCE(d.feeds_schema->f.feed_key->'webhook'->'events', '[]'::jsonb)) event
         WHERE trigger->>'kind' = 'event' AND trigger->>'source' IS DISTINCT FROM 'workspace'
           AND trigger->>'connector_key' = c.connector_key
           AND (NOT trigger ? 'connection_id' OR trigger->'connection_id' = to_jsonb(c.id))
-          AND trigger->'event_types' ? (event->>'key')
+          AND trigger->'event_types' ? event
       )
     ORDER BY a.id
   `;

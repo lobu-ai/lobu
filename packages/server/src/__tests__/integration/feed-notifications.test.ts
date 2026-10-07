@@ -231,6 +231,21 @@ describe('source feed notifications', () => {
     }
   });
 
+  it('does not listen to a feed when the Automation subscribes only to another connector event', async () => {
+    const { sql, org, device, notice, automationId } = await subscribedFixture();
+    await sql`UPDATE connector_definitions SET automation_events = ${sql.json([
+      { key: 'message.created', label: 'New message', resourceType: 'message' },
+      { key: 'contact.changed', label: 'Changed contact', resourceType: 'contact' },
+    ])} WHERE organization_id = ${org.id}`;
+    await sql`UPDATE automations SET triggers = ${sql.json([{ kind: 'event', connector_key: 'synthetic.source',
+      connection_id: notice.connection_id, event_types: ['contact.changed'], execution: 'turn',
+      active_run: 'queue', output: 'silent' }])} WHERE id = ${automationId}`;
+    expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id)).toEqual([]);
+    await reconcileSourceFeedListeners(sql, device.id, [org.id], []);
+    expect(await sql`SELECT id FROM runs WHERE action_key = ${SOURCE_FEED_LISTENER_TASK}`).toHaveLength(0);
+    expect((await receiveFeedNotifications(sql, [{ ...notice, subscription: referenceDelivery() }], device.id, [org.id]))[0].active).toBe(false);
+  });
+
   it.each(['deny', 'approval'] as const)('revokes source subscriptions when organization policy requires %s', async (effect) => {
     const { sql, org, device, connection, notice, automationId } = await subscribedFixture();
     expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id, automationId)).toHaveLength(1);
