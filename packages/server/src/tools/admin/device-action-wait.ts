@@ -230,8 +230,10 @@ export async function waitForDeviceActionRunWithOptions(
   const sql = getDb();
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => sleepUnlessAborted(ms, options.abortSignal));
-  const queueDeadline = now() + options.queueMs;
+  const waitStartedAtMs = now();
+  const queueDeadline = waitStartedAtMs + options.queueMs;
   let claimedAtMs: number | null = null;
+  let callerAbortMessage: string | undefined;
   const postClaimMs = await resolvePostClaimBudgetMs(
     sql,
     runId,
@@ -283,7 +285,15 @@ export async function waitForDeviceActionRunWithOptions(
     }
     // Caller aborted (e.g. reaction timeout) — stop polling and let the
     // timeout finalization below mark the run, so we don't leak this loop.
-    if (options.abortSignal?.aborted) break;
+    if (options.abortSignal?.aborted) {
+      const phase =
+        claimedAtMs == null
+          ? 'before any device claimed the run'
+          : 'while the device was executing';
+      const waitedMs = Math.max(0, now() - waitStartedAtMs);
+      callerAbortMessage = `Run ${runId}: caller cancelled the wait or reached its deadline after ${waitedMs}ms, ${phase}.`;
+      break;
+    }
     const currentTimeMs = now();
     if (claimedAtMs != null) {
       if (currentTimeMs - claimedAtMs >= postClaimMs) break;
@@ -301,17 +311,20 @@ export async function waitForDeviceActionRunWithOptions(
   // on the device, where last_seen tells you nothing.
   // Looked up ONCE and used for both the stored `runs.error_message` and the
   // string returned to the caller below — those are two different readers of
-  // the same failure and both used to say "may be offline".
+  // the same failure and both used to say "may be offline". A caller abort
+  // does not prove a phase timeout: skip the device lookup and report only
+  // how long the caller waited.
   const deviceDiagnostic =
-    claimedAtMs != null
+    callerAbortMessage != null || claimedAtMs != null
       ? null
       : await describeRunDeviceLastSeen(runId, organizationId);
   const timeoutMessage =
-    deviceDiagnostic == null
+    callerAbortMessage ??
+    (deviceDiagnostic == null
       ? 'waitForDeviceActionRun: device claimed the run but did not complete in time'
       : `waitForDeviceActionRun: no device claimed the run within ${Math.round(
           options.queueMs / 1000
-        )}s (${deviceDiagnostic})`;
+        )}s (${deviceDiagnostic})`);
 
   // Atomic timeout finalization, with the operation card supersede in the SAME
   // transaction: a gateway-side timeout is the run's terminal state, and the
@@ -341,8 +354,8 @@ export async function waitForDeviceActionRunWithOptions(
       runId,
       organizationId,
       'failed',
-      `${actionKey} — timed out`,
-      `Operation timed out: ${actionKey} — ${timeoutMessage}`,
+      `${actionKey} — ${callerAbortMessage == null ? 'timed out' : 'caller wait ended'}`,
+      `Operation ${callerAbortMessage == null ? 'timed out' : 'wait ended'}: ${actionKey} — ${timeoutMessage}`,
       { error_message: timeoutMessage, run_status: 'timeout' },
       null,
       tx
@@ -385,8 +398,9 @@ export async function waitForDeviceActionRunWithOptions(
   return {
     status: 'timeout',
     error_message:
-      deviceDiagnostic == null
+      callerAbortMessage ??
+      (deviceDiagnostic == null
         ? `Run ${runId} claimed but the device worker didn't finish within ${postClaimMs}ms.`
-        : `Run ${runId} was never claimed within ${options.queueMs}ms — ${deviceDiagnostic}.`,
+        : `Run ${runId} was never claimed within ${options.queueMs}ms — ${deviceDiagnostic}.`),
   };
 }
