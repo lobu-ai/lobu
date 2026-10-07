@@ -900,6 +900,49 @@ describe("approval-run transition atomicity", () => {
 		expect(eventsAfter[0].n).toBe(eventsBefore[0].n);
 	});
 
+	it.each(["question", "connector"] as const)(
+		"reject preserves the proposer rationale and exposes the reviewer reason for %s approvals",
+		async (kind) => {
+			const runId = kind === "question"
+				? (await queueAgentAsk({
+					ctx: humanCtx,
+					question: "Approve this preview?",
+					body: "Review the source before deciding.",
+					inputSchema: { type: "object" },
+				})).runId
+				: ((await manageOperations(
+					{
+						action: "execute",
+						connection_id: connectionId,
+						operation_key: "create_item",
+						input: { body: { value: "rejection-preview" } },
+					},
+					{} as Env,
+					humanCtx,
+				)) as { run_id: number }).run_id;
+			const sql = getTestDb();
+			const [before] = await sql`
+				SELECT metadata FROM current_event_records
+				WHERE run_id = ${runId} AND organization_id = ${orgId}
+					AND interaction_type = 'approval'
+			`;
+			const rejected = await manageOperations(
+				{ action: "reject", run_id: runId, reason: "Missing source indicators." },
+				{} as Env,
+				humanCtx,
+			);
+			expect(rejected).toMatchObject({ rejected: true, run_id: runId });
+			const [after] = await sql`
+				SELECT metadata, interaction_status FROM current_event_records
+				WHERE run_id = ${runId} AND organization_id = ${orgId}
+					AND interaction_type = 'approval'
+			`;
+			expect(after.interaction_status).toBe("rejected");
+			expect(after.metadata.reject_reason).toBe("Missing source indicators.");
+			expect(after.metadata.reason).toBe(before.metadata.reason);
+		},
+	);
+
 	it("reject on a run with no approval card fails closed — the cancelled run write rolls back", async () => {
 		const sql = getTestDb();
 		// Corruption case: a pending connector-operation run whose approval card

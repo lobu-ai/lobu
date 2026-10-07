@@ -805,7 +805,7 @@ async function tryRejectBuilderRun(
 			"rejected",
 			`${handler.nounLabel}: ${desc} — rejected`,
 			`Builder action rejected: ${desc}${args.reason ? ` — ${args.reason}` : ""}`,
-			{ reason },
+			{ reject_reason: reason },
 			reviewer,
 			tx,
 		);
@@ -1839,7 +1839,7 @@ export async function handleReject(
 			"rejected",
 			`${operationKey} — rejected`,
 			`Operation rejected: ${operationKey}${args.reason ? ` — ${args.reason}` : ""}`,
-			{ reason },
+			{ reject_reason: reason },
 			reviewer,
 			tx,
 		);
