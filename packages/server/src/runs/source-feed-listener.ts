@@ -8,7 +8,7 @@ import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed'
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
 import { feedBackoff } from '../connectors/feed-backoff';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
-import { feedWebhookDrivenSql } from '../connectors/feed-health-semantics';
+import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { sourceFeedSubscriptions } from './source-feed-subscriptions';
 
 export interface SourceFeedListenerTask {
@@ -57,10 +57,7 @@ export async function reconcileSourceFeedListeners(
     WHERE c.device_worker_id = ${deviceId}::uuid AND c.organization_id = ANY(${pgTextArray(orgIds)}::text[])
       AND c.status = 'active' AND c.deleted_at IS NULL AND f.status = 'active' AND f.deleted_at IS NULL
       AND (f.next_run_at IS NULL OR f.next_run_at <= now())
-      AND d.feeds_schema->f.feed_key->'operations' ? 'read'
-      AND NOT (d.feeds_schema->f.feed_key->'operations' ? 'sync')
-      AND (${sql.unsafe(feedWebhookDrivenSql('d', 'f'))})
-      AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
+      AND (${sql.unsafe(feedTriggerEligibilitySql('d', 'f', 'source-only'))})
       AND (NOT (f.id = ANY(${pgBigintArray(boundFeedIds)}::bigint[])) OR f.next_run_at <= now())
       -- Cheap candidate filter; event matching, visibility and policy resolve once below.
       AND EXISTS (SELECT 1 FROM automations a

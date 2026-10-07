@@ -245,6 +245,20 @@ describe('source feed notifications', () => {
     }
   });
 
+  it.each([
+    { operations: ['read', 'sync'], mode: 'trigger' },
+    { operations: ['read'], mode: 'store' },
+    { operations: null, mode: 'trigger' },
+    { operations: 'read', mode: 'trigger' },
+    { operations: { read: true }, mode: 'trigger' },
+  ])('uses source-only trigger eligibility for delegated reads: %j', async ({ operations, mode }) => {
+    const { sql, org, notice } = await subscribedFixture();
+    await sql`UPDATE connector_definitions SET feeds_schema = ${sql.json({
+      items: { operations, webhook: { mode, events: ['message.created'] } },
+    })} WHERE organization_id = ${org.id}`;
+    expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id)).toEqual([]);
+  });
+
   it.each([null, 'message.created', { key: 'message.created' }])('rejects malformed feed event metadata without throwing: %j', async (events) => {
     const { sql, org, notice } = await subscribedFixture();
     await sql`UPDATE connector_definitions SET feeds_schema = ${sql.json({

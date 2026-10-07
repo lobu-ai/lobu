@@ -5,7 +5,7 @@ import type { DbClient, DbQuery } from '../db/client';
 import { pgTextArray } from '../db/client';
 import { feedBackoff } from '../connectors/feed-backoff';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
-import { feedWebhookDrivenSql } from '../connectors/feed-health-semantics';
+import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { notifyWorkerWork } from './worker-wakeup';
 import { enqueueSourceFeedListener } from './source-feed-listener';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
@@ -156,9 +156,7 @@ export async function receiveFeedNotifications(
           AND c.status = 'active' AND c.deleted_at IS NULL
           AND f.status = 'active' AND f.deleted_at IS NULL
           AND f.feed_key = ${notice.feed_key}
-          AND (${tx.unsafe(feedWebhookDrivenSql('d', 'f'))})
-          AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
-          AND d.feeds_schema->f.feed_key->'operations' ?| ARRAY['sync', 'read']
+          AND (${tx.unsafe(feedTriggerEligibilitySql('d', 'f'))})
       `;
       if (rows.length === 0) return { active: false };
       const feed = rows[0];
@@ -229,16 +227,13 @@ export async function sourceFeedContextForRun(
       AND c.device_worker_id = ${deviceWorkerId}::uuid
       AND c.status = 'active' AND c.deleted_at IS NULL
       AND (f.status = 'active' OR (r.dry_run AND f.status = 'paused')) AND f.deleted_at IS NULL
-      AND (${sql.unsafe(feedWebhookDrivenSql('d', 'f'))})
-      AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
-      AND ((r.run_type = 'sync' AND d.feeds_schema->f.feed_key->'operations' @> '["sync"]'::jsonb)
+      AND ((r.run_type = 'sync' AND (${sql.unsafe(feedTriggerEligibilitySql('d', 'f', 'sync'))}))
       OR (r.run_type = 'action' AND r.action_key = ${DEVICE_FEED_READ_ACTION_KEY}
         AND r.run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true'
         AND r.run_metadata->>${SOURCE_FEED_SUBSCRIPTION_METADATA_KEY} = 'true'
         AND r.parent_run_id IS NULL AND r.approval_status IN ('auto', 'approved')
         AND r.expires_at > now() AND NOT r.dry_run
-        AND d.feeds_schema->f.feed_key->'operations' ? 'read'
-        AND NOT (d.feeds_schema->f.feed_key->'operations' ? 'sync')))
+        AND (${sql.unsafe(feedTriggerEligibilitySql('d', 'f', 'source-only'))})))
   `;
   if (!row) return undefined;
   if (row.run_type === 'action'

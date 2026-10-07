@@ -4,6 +4,7 @@ import { listEntityApprovalPolicies, resolveActingPrincipal } from '../authz/ent
 import { evaluateConnectorPolicy } from '../authz/connector-policy';
 import type { DbClient } from '../db/client';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
+import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { DEVICE_FEED_READ_ACTION_KEY } from '../lib/device-feed-read-protocol';
 
 /** The same source configuration key fences listener setup and incoming deliveries. */
@@ -34,7 +35,7 @@ export async function sourceFeedSubscriptions(
     WHERE f.id = ${feedId} AND f.organization_id = ${organizationId}
       AND f.status = 'active' AND f.deleted_at IS NULL
       AND c.status = 'active' AND c.deleted_at IS NULL
-      AND d.feeds_schema->f.feed_key->'operations' ? 'read'
+      AND (${sql.unsafe(feedTriggerEligibilitySql('d', 'f', 'source-only'))})
       AND a.status = 'active'
       AND (a.managed_agent_id IS NOT NULL OR a.device_worker_id IS NOT NULL)
       ${automationId === undefined ? sql`` : sql`AND a.id = ${automationId}`}

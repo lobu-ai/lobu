@@ -94,8 +94,8 @@
  *
  * Exported as one fragment because its readers must agree — `list_feeds`
  * (`tools/admin/manage_feeds.ts`), the health scan
- * (`connectors/connector-health.ts`), and device feed notification routing
- * (`runs/feed-notifications.ts`, `runs/source-feed-listener.ts`). Hand-copied
+ * (`connectors/connector-health.ts`), and source/device trigger routing through
+ * `feedTriggerEligibilitySql` below. Hand-copied
  * jsonb predicates drift, and drift here means those surfaces silently
  * disagree about one feed.
  *
@@ -119,6 +119,26 @@ export function feedWebhookDrivenSql(
             WHERE jsonb_typeof(declared_event) = 'string'
               AND declared_event #>> '{}' <> ''
           ) ELSE false END`;
+}
+
+/** Listener setup, delivery, delegated reads and update_feed restarts must agree on trigger-feed eligibility. */
+export function feedTriggerEligibilitySql(
+  definitionAlias: string,
+  feedAlias: string,
+  mode: 'source-only' | 'sync' | 'either' = 'either',
+): string {
+  const feed = `${definitionAlias}.feeds_schema -> ${feedAlias}.feed_key`;
+  const operations = `${feed} -> 'operations'`;
+  let capability = `${operations} ?| ARRAY['sync', 'read']`;
+  if (mode === 'source-only') {
+    capability = `${operations} ? 'read' AND NOT (${operations} ? 'sync')`;
+  } else if (mode === 'sync') {
+    capability = `${operations} @> '["sync"]'::jsonb`;
+  }
+  return `(${feedWebhookDrivenSql(definitionAlias, feedAlias)})
+    AND COALESCE(${feed} -> 'webhook' ->> 'mode', 'trigger') = 'trigger'
+    AND jsonb_typeof(${operations}) = 'array'
+    AND (${capability})`;
 }
 
 type FeedExecutionMode = "source_only" | "streaming" | "scheduled" | "no_schedule";

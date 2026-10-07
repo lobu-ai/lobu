@@ -43,7 +43,7 @@ import { compileConnectionRowVisibility } from '../../authz/connection-visibilit
 import { readSourceFeedPage, SourceCursorError } from '../../lib/source-feed-page';
 import { authzScopeFromToolContext } from '../../authz/scope';
 import { reconcileAtlassianMcpJiraSite } from '../../connect/atlassian-mcp-site';
-import { deriveFeedHealthSemantics, feedWebhookDrivenSql } from '../../connectors/feed-health-semantics';
+import { deriveFeedHealthSemantics, feedTriggerEligibilitySql, feedWebhookDrivenSql } from '../../connectors/feed-health-semantics';
 import { feedDefinitionSelection } from '../../connectors/feed-definition-selection';
 import { getDb, pgBigintArray } from '../../db/client';
 import type { Env } from '../../index';
@@ -898,7 +898,7 @@ async function handleUpdateFeed(
     const existing = await tx`
       SELECT f.id, f.status, f.schedule, f.timezone, f.feed_key, f.config,
              f.pinned_version, c.auth_profile_id, cd.feeds_schema,
-             ${tx.unsafe(feedWebhookDrivenSql('cd', 'f'))} AS webhook_driven
+             (${tx.unsafe(feedTriggerEligibilitySql('cd', 'f', 'source-only'))}) AS source_listener
       FROM feeds f
       JOIN connections c ON c.id = f.connection_id
       LEFT JOIN LATERAL (${feedDefinitionSelection(tx)}) cd ON TRUE
@@ -976,10 +976,7 @@ async function handleUpdateFeed(
         : null;
     // Scope edits and resumes must wake an already-bound source listener too.
     // This is a one-shot retry clock; source feeds still have no sync cadence.
-    const definition = (feedRow.feeds_schema as Record<string, FeedDefinition> | null)?.[String(feedRow.feed_key)];
-    const restartListener = !canSync && operations.includes('read') && feedRow.webhook_driven === true
-      && (definition?.webhook?.mode ?? 'trigger') === 'trigger'
-      && (hasConfigArg || resuming);
+    const restartListener = feedRow.source_listener === true && (hasConfigArg || resuming);
 
     const updated = await tx`
       UPDATE feeds

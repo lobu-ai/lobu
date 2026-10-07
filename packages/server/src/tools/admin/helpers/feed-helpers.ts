@@ -11,7 +11,6 @@ export interface FeedDefinition {
     [keyword: string]: unknown;
   } | null;
   operations?: Array<'sync' | 'read'>;
-  webhook?: { mode?: 'trigger' | 'store'; events: string[] };
 }
 
 export function feedOperations(
