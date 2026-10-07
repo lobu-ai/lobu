@@ -2169,10 +2169,14 @@ async function rtHandleDelete(
     WHERE id = ${typeId}
   `;
 
+  // Identity rules remain part of the withdrawn associations' history and are
+  // immutable once used, even after their relationship type is retired.
   await sql`
     UPDATE entity_relationship_type_rules
     SET deleted_at = current_timestamp, updated_at = current_timestamp
     WHERE relationship_type_id = ${typeId} AND deleted_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM entity_relationship_types
+        WHERE id = ${typeId} AND purpose = 'identity')
   `;
 
   await insertToolConfigChange(

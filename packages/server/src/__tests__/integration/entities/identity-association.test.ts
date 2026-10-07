@@ -68,6 +68,50 @@ describe('governed stored identity associations', () => {
     expect(result).toMatchObject({ relationship_type: { purpose: 'identity', is_symmetric: false } });
   });
 
+  it.each([false, true])('deletes an unlinked scoped identity type and preserves history (archived: %s)', async (archiveFirst) => {
+    const { human, sql, workspace, ids: [a, b], link, typeId } = await graph(2);
+    await human.entity_schema.addRule({ slug: 'same_record', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
+    const relationshipId = linked(await link(a, b));
+    const typeBefore = await sql`SELECT * FROM entity_relationship_types WHERE id = ${typeId}`;
+    await expect(human.entity_schema.deleteRelType({ slug: 'same_record' })).rejects.toThrow(/relationships of this type exist/);
+    expect(await sql`SELECT * FROM entity_relationship_types WHERE id = ${typeId}`).toEqual(typeBefore);
+
+    await human.entities.unlink({ relationship_id: relationshipId });
+    if (archiveFirst) {
+      expect(await human.entity_schema.updateRelType({ slug: 'same_record', status: 'archived' })).toMatchObject({ status: 'applied' });
+    }
+    const rulesBefore = await sql`SELECT * FROM entity_relationship_type_rules WHERE relationship_type_id = ${typeId} ORDER BY id`;
+    const edgeBefore = await sql`SELECT * FROM entity_relationships WHERE id = ${relationshipId}`;
+    const eventsBefore = await sql`SELECT * FROM events WHERE organization_id = ${workspace.org.id}
+      AND metadata->>'relationshipId' = ${String(relationshipId)} ORDER BY id`;
+    expect(rulesBefore).toHaveLength(1);
+    expect(edgeBefore).toHaveLength(1);
+    expect(edgeBefore[0].deleted_at).not.toBeNull();
+    expect(eventsBefore.map(row => row.metadata.op).sort()).toEqual(['link', 'unlink']);
+
+    expect(await human.entity_schema.deleteRelType({ slug: 'same_record' })).toMatchObject({ status: 'applied', success: true });
+    expect(await human.entity_schema.getRelType('same_record')).toMatchObject({ relationship_type: null });
+    const [retiredType] = await sql`SELECT purpose, status, deleted_at FROM entity_relationship_types WHERE id = ${typeId}`;
+    expect(retiredType).toMatchObject({ purpose: 'identity', status: 'archived' });
+    expect(retiredType.deleted_at).not.toBeNull();
+    expect(await sql`SELECT * FROM entity_relationship_type_rules WHERE relationship_type_id = ${typeId} ORDER BY id`).toEqual(rulesBefore);
+    expect(await sql`SELECT * FROM entity_relationships WHERE id = ${relationshipId}`).toEqual(edgeBefore);
+    expect(await sql`SELECT * FROM events WHERE organization_id = ${workspace.org.id}
+      AND metadata->>'relationshipId' = ${String(relationshipId)} ORDER BY id`).toEqual(eventsBefore);
+  });
+
+  it('still retires ordinary relationship rules when deleting their type', async () => {
+    const { human, sql, workspace } = await graph(0);
+    await human.entity_schema.createRelType({ slug: 'related', name: 'Related' });
+    await human.entity_schema.addRule({ slug: 'related', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
+    expect(await human.entity_schema.deleteRelType({ slug: 'related' })).toMatchObject({ status: 'applied', success: true });
+    const rules = await sql`SELECT r.deleted_at FROM entity_relationship_type_rules r
+      JOIN entity_relationship_types t ON t.id = r.relationship_type_id
+      WHERE t.organization_id = ${workspace.org.id} AND t.slug = 'related'`;
+    expect(rules).toHaveLength(1);
+    expect(rules[0].deleted_at).not.toBeNull();
+  });
+
   it('refuses a cycle without moving or deleting either stored record', async () => {
     const { workspace, ids: [a, b], link } = await graph();
     await link(a, b);
