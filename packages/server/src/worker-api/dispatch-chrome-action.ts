@@ -5,9 +5,10 @@
  * call a chrome connector action against the paired Owletto extension in
  * the same org. We:
  *
- *   1. Look up the parent connector run's org (+ optional data connection) from runs.
- *   2. Pick an online chrome connection / extension (prefer an explicit target,
- *      then the parent connection's chrome-extension scrape pin).
+ *   1. Look up the parent connector run and its connection's declared browser
+ *      resource, scoping the action to that resource's origins.
+ *   2. Require the connection's bound Chrome extension to be online (an
+ *      explicit target must name that same browser); there is no fallback.
  *   3. Enqueue an action run via `createConnectorOperationRun` (the same
  *      helper `manage_operations.execute` uses for device-bound calls).
  *   4. Await completion via the shared `waitForDeviceActionRun` (also
@@ -29,6 +30,7 @@ import { resolveActingPrincipal, resolveStoredActingPrincipal } from '../authz/e
 import { applyRunConnectorPolicyAtClaim, CONNECTOR_PARENT_RUN_METADATA_KEY } from '../authz/operation-run-policy';
 import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
 import type { Env } from '../index';
+import { notifyBrowserAuthExpired } from '../notifications/triggers';
 import { waitForDeviceActionRun } from '../tools/admin/device-action-wait';
 import { DEVICE_ONLINE_WINDOW_SECONDS } from '../utils/device-liveness';
 import { DEVICE_PIN_TOMBSTONE_MESSAGES } from '../utils/device-pin-tombstones';
@@ -519,17 +521,11 @@ export async function resolveOnlineChromeConnection(
 
 /**
  * Reserved key in a chrome action's input: "dispatch this to the browser paired
- * with THIS chrome connection", overriding the parent connection's scrape pin.
- *
- * Why this exists. A connection's `device_worker_id` means "scrape with this
- * browser", and for a sync that is right — it belongs on the always-on machine.
- * But an interactive action exists to put a page in front of a person. Routing
- * it by the scrape pin stages the interaction on whichever box runs the cron,
- * so the human never sees it — exactly the bug this key fixes. Only the connector
- * knows an action is interactive, so the connector names the browser; syncs
- * never set it and are unaffected. Page-activated operations no longer use it:
- * the activated run's device pin below beats it, so this remains only for
- * explicitly targeted actions.
+ * with THIS chrome connection". It must resolve to the parent connection's
+ * bound browser; naming any other browser fails closed with
+ * `browser_binding_mismatch`, so it can never move an action onto a different
+ * signed-in account. Page-activated operations do not use it: the activated
+ * run's device pin below beats it.
  *
  * Consumed and stripped here — never forwarded to the extension.
  */
@@ -821,15 +817,22 @@ export async function dispatchChromeActionToExtension(params: {
     if (evaluated.status !== 'completed') return evaluated;
     const identity = evaluated.output?.value as { accountId?: unknown; displayName?: unknown } | null;
     const accountId = typeof identity?.accountId === 'string' ? identity.accountId.trim() : '';
-    const accountMismatch = !!browserResource.accountId && browserResource.accountId !== accountId;
+    const accountMismatch = !!accountId && !!browserResource.accountId && browserResource.accountId !== accountId;
     if (!accountId || accountId.length > 512 || accountMismatch) {
-      await sql.begin(async tx => {
+      const expiredConnections = await sql.begin(async tx => {
         await tx`UPDATE auth_profiles SET status = 'pending_auth', updated_at = now()
           WHERE id = ${browserResource.authProfileId} AND organization_id = ${organizationId} AND status <> 'revoked'`;
-        await tx`UPDATE connections SET status = 'pending_auth', updated_at = now()
+        return tx`UPDATE connections SET status = 'pending_auth', updated_at = now()
           WHERE id = ${parent.connection_id} AND organization_id = ${organizationId} AND status = 'active'
-            AND auth_profile_id = ${browserResource.authProfileId} AND device_worker_id = ${browserResource.deviceWorkerId}::uuid`;
+            AND auth_profile_id = ${browserResource.authProfileId} AND device_worker_id = ${browserResource.deviceWorkerId}::uuid
+          RETURNING id, connector_key`;
       });
+      // The persisted active -> pending transition claims this notice once,
+      // including account mismatch, without classifying rendered error prose.
+      for (const connection of expiredConnections) {
+        await notifyBrowserAuthExpired({ orgId: organizationId, connectionId: Number(connection.id),
+          connectorKey: connection.connector_key }).catch(error => logger.warn({ error }, 'Browser sign-in notification failed'));
+      }
       return { status: 'failed', error_message: accountMismatch
         ? dependencyUnavailableError('browser_account_mismatch', 'The selected browser is signed into a different account. Restore the original login, then verify this connection again.')
         : dependencyUnavailableError('browser_login_required', 'Sign in to the provider in the selected browser, then verify this connection again.') };

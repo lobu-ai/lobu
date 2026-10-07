@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { JSDOM } from "jsdom";
 import { connectorSdkMock } from "./connector-sdk.mock";
+import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 
 // Stub @lobu/connector-sdk (it pulls in playwright) so the connector imports
 // without the browser stack. Shared superset — see connector-sdk.mock.ts.
@@ -1667,6 +1668,28 @@ describe("LinkedInConnector home_feed", () => {
     const def = new LinkedInConnector().definition;
     expect(def.feeds.home_feed).toBeDefined();
     expect(def.feeds.home_feed.configSchema.required).toBeUndefined();
+  });
+
+  test.each([
+    "company_updates",
+    "jobs",
+  ])("normalizes a bare company host before the %s browser grant", async (feedKey) => {
+    const connector = new LinkedInConnector();
+    let destination: string | undefined;
+    connector[feedKey === "jobs" ? "syncJobs" : "syncUpdates"] = async (
+      url: string
+    ) => {
+      constrainBrowserInput(connector.definition.browser, "navigate", { url });
+      destination = url;
+      return { events: [], checkpoint: {} };
+    };
+    await runSync(connector, {
+      feedKey,
+      config: { company_url: "https://linkedin.com/company/synthetic/" },
+      checkpoint: {},
+      browser: { dispatch: async () => ({}) },
+    } as never);
+    expect(destination).toBe("https://www.linkedin.com/company/synthetic");
   });
 
   test("declares the slug/engagement fields on the post metadata schema", () => {

@@ -774,7 +774,7 @@ export class RevolutAuthWallError extends Error {
 
 async function notifyRevolutAuthWall(
   dispatcher: ChromeActionDispatcher,
-  landedUrl: string
+  startUrl: string
 ): Promise<void> {
   try {
     await dispatcher.dispatch("show_notification", {
@@ -783,8 +783,8 @@ async function notifyRevolutAuthWall(
       message:
         "Enter your Revolut passcode in the focused Chrome window, then rerun the sync.",
       body: "Enter your Revolut passcode in the focused Chrome window, then rerun the sync.",
-      landed_url: landedUrl,
-      click_url: landedUrl,
+      // Return through the declared app origin, not a redirected SSO callback.
+      click_url: startUrl,
     });
   } catch {
     // Best-effort only: lack of notification permission or an unavailable
@@ -1290,7 +1290,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
         .dispatch("focus_tab", { tab_id: tabId })
         .catch(() => undefined);
       const landedUrl = initialRoute.value?.href || REVOLUT_INVEST_URL;
-      await notifyRevolutAuthWall(dispatcher, landedUrl);
+      await notifyRevolutAuthWall(dispatcher, REVOLUT_INVEST_URL);
       throw new RevolutAuthWallError(landedUrl, "investment data");
     }
 
@@ -1364,7 +1364,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
         .dispatch("focus_tab", { tab_id: tabId })
         .catch(() => undefined);
       const landedUrl = route.href || REVOLUT_INVEST_URL;
-      await notifyRevolutAuthWall(dispatcher, landedUrl);
+      await notifyRevolutAuthWall(dispatcher, REVOLUT_INVEST_URL);
       throw new RevolutAuthWallError(landedUrl, "investment data");
     }
 

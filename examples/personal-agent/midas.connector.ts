@@ -480,18 +480,14 @@ export function safeDiagnosticUrl(url: string | null | undefined): string {
 }
 
 async function notifyMidasAuthWall(
-  dispatcher: ChromeActionDispatcher,
-  landedUrl: string
+  dispatcher: ChromeActionDispatcher
 ): Promise<void> {
-  // Never forward raw query params (may contain OAuth code/state/tokens).
-  const safeLanded = safeDiagnosticUrl(landedUrl);
   try {
     await dispatcher.dispatch("show_notification", {
       notification_id: "midas-auth-wall",
       title: "Midas needs sign-in",
       message:
         "Sign in to Midas in the focused Chrome window, then re-run the sync.",
-      landed_url: safeLanded,
       // Fixed, safe destination — never a callback URL with sensitive params.
       click_url: MIDAS_DASHBOARD_URL,
     });
@@ -577,7 +573,7 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
 
     const landedUrl = nav.current_url ?? MIDAS_DASHBOARD_URL;
     if (isMidasAuthWall(landedUrl)) {
-      await notifyMidasAuthWall(dispatcher, landedUrl);
+      await notifyMidasAuthWall(dispatcher);
       // Redact query/fragment: an auth-wall URL may carry code/state/tokens.
       throw new Error(
         `Midas session needs sign-in (landed on ${safeDiagnosticUrl(
@@ -611,7 +607,7 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
       // Empty portfolio is rare; more often the UI language/layout changed or
       // the session is soft-logged-out without a hard redirect.
       if (/giriş yap|sign in|log in|login/i.test(bodyText)) {
-        await notifyMidasAuthWall(dispatcher, landedUrl);
+        await notifyMidasAuthWall(dispatcher);
         throw new Error(
           "Failed to parse Midas dashboard — page looks unauthenticated. Sign in at atlas.getmidas.com and re-run."
         );

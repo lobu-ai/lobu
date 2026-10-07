@@ -1458,7 +1458,9 @@ export async function handleCreate(
     const pending = await completeBrowserConnectionSetup({ action: 'create', connectionId: Number(inserted[0].id),
       connectorKey: args.connector_key, slug: String(inserted[0].slug), ctx, setupUrl: await buildViewUrl(ctx, args.connector_key) });
     if (pending) return pending;
-    inserted[0].status = 'active';
+    // Report the stored status: a browser check does not complete another pending method.
+    const [verified] = await sql`SELECT status FROM connections WHERE id = ${inserted[0].id} AND organization_id = ${organizationId}`;
+    inserted[0].status = verified?.status ?? inserted[0].status;
     if (authSelection?.authProfile) authSelection.authProfile = await getAuthProfileById(organizationId, authSelection.authProfile.id);
   }
 

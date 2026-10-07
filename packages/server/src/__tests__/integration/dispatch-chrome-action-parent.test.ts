@@ -215,8 +215,8 @@ describe('dispatchChromeAction parent run authorization', () => {
 
 /**
  * `target_browser_connection_id` lets an interactive action name the browser
- * its draft must appear in, overriding the parent connection's scrape pin. It
- * is a routing directive with real blast radius: pointed at the wrong
+ * its draft must appear in; it must match the parent connection's bound
+ * browser. It is a routing directive with real blast radius: pointed at the wrong
  * connection it stages a draft in someone else's signed-in browser, so it
  * must resolve inside both the caller's org and connection-visibility scope,
  * then fail rather than fall back. (The built-in social connectors moved to

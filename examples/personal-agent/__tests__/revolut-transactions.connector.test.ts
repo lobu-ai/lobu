@@ -12,6 +12,7 @@ import { runSync } from "./sync-harness";
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { JSDOM } from "jsdom";
 import { connectorSdkMock } from "./connector-sdk.mock";
+import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 
@@ -746,6 +747,11 @@ describe("Revolut Finance snapshots", () => {
     let evaluateCount = 0;
     const dispatcher = {
       async dispatch(action: string, input: Record<string, unknown>) {
+        constrainBrowserInput(
+          new RevolutTransactionsConnector().definition.browser!,
+          action,
+          input
+        );
         calls.push({ action, input });
         if (action === "navigate") return { tab_id: 42 };
         if (action === "network_intercept_start") {

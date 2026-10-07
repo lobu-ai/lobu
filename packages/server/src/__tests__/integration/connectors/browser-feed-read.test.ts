@@ -6,6 +6,8 @@ import { sweepAbandonedDeviceFeedReadRuns } from '../../../scheduled/check-stall
 import { manageConnections } from '../../../tools/admin/manage_connections';
 import { manageAuthProfiles } from '../../../tools/admin/manage_auth_profiles';
 import { ensureLiveBrowserProfile } from '../../../utils/live-browser-profile';
+import { createAuthProfile } from '../../../utils/auth-profiles';
+import * as notifications from '../../../notifications/triggers';
 import { createConnectorOperationRun } from '../../../runs/queue-service';
 import { dispatchChromeActionToExtension } from '../../../worker-api/dispatch-chrome-action';
 import { upsertConnectorDefinitionRecords } from '../../../utils/connector-definition-install';
@@ -517,7 +519,13 @@ describe('compiled browser source reads', () => {
     expect(await sql`SELECT id FROM auth_profiles WHERE organization_id = ${orgId}`).toHaveLength(0);
   });
 
-  it.each(['create', 'connect'] as const)('%s binds and verifies a live browser account, then rejects an account switch', async (action) => {
+  it.each([
+    ['create', 'different-account', 'browser_account_mismatch'],
+    ['connect', 'different-account', 'browser_account_mismatch'],
+    ['create', null, 'browser_login_required'],
+    ['connect', null, 'browser_login_required'],
+  ] as const)('%s preserves its verified account and notifies once for %s (%s)', async (action, identity, reason) => {
+    const notify = vi.spyOn(notifications, 'notifyBrowserAuthExpired').mockResolvedValue();
     await liveDefinition();
     const sql = getTestDb();
     await sql`DELETE FROM feeds WHERE id = ${feedId}`;
@@ -533,8 +541,13 @@ describe('compiled browser source reads', () => {
       (${orgId}, ${connectionId}, 'items', 'active', '{}'::jsonb),
       (${orgId}, ${connectionId}, 'archive', 'paused', '{}'::jsonb)`;
     const checking = manageConnections({action:'test',connection_id:connectionId}, {} as Env, context()) as Promise<Record<string,any>>;
-    await answerBrowser(checking,true,'different-account');
-    expect(await checking).toMatchObject({status:'warning',message:expect.stringContaining('browser_account_mismatch')});
+    await answerBrowser(checking,true,identity);
+    expect(await checking).toMatchObject({status:'warning',message:expect.stringContaining(reason)});
+    expect(notify).toHaveBeenCalledExactlyOnceWith({ orgId, connectionId, connectorKey: SOURCE_KEY });
+    const checkingAgain = manageConnections({action:'test',connection_id:connectionId}, {} as Env, context()) as Promise<Record<string,any>>;
+    await answerBrowser(checkingAgain,true,identity);
+    expect(await checkingAgain).toMatchObject({status:'warning'});
+    expect(notify).toHaveBeenCalledTimes(1);
     const [profile] = await sql`SELECT ap.auth_data FROM connections c JOIN auth_profiles ap ON ap.id = c.auth_profile_id WHERE c.id = ${connectionId}`;
     expect(profile.auth_data.account_id).toBe('fixture-account');
     const recovering = manageConnections({action:'test',connection_id:connectionId}, {} as Env, context()) as Promise<Record<string,any>>;
@@ -543,6 +556,29 @@ describe('compiled browser source reads', () => {
     expect(await sql`SELECT feed_key, status FROM feeds WHERE connection_id = ${connectionId} ORDER BY feed_key`).toEqual([
       { feed_key: 'archive', status: 'paused' }, { feed_key: 'items', status: 'active' },
     ]);
+  });
+
+  it.each(['create', 'connect'] as const)('%s keeps OAuth pending after its independent browser check passes', async (action) => {
+    vi.spyOn(notifications, 'notifyConnectionPermissionRequest').mockResolvedValue();
+    const sql = getTestDb();
+    await sql`DELETE FROM feeds WHERE id = ${feedId}`;
+    await sql`DELETE FROM connections WHERE id = ${connectionId}`;
+    await sql`UPDATE connector_definitions SET supports_execute = true, auth_schema = ${sql.json({methods:[{
+      type:'oauth',provider:'synthetic',clientIdKey:'client_id',clientSecretKey:'client_secret',
+      authorizationUrl:'https://provider.example/authorize',tokenUrl:'https://provider.example/token',
+    }]})} WHERE organization_id = ${orgId} AND key = ${SOURCE_KEY}`;
+    await upsertEntityApprovalPolicy(orgId, { resourceClass:'connector_action',connectorKey:SOURCE_KEY,effects:{execute:'auto'} });
+    const app = await createAuthProfile({ organizationId:orgId,connectorKey:SOURCE_KEY,displayName:'Synthetic app',
+      profileKind:'oauth_app',provider:'synthetic',status:'active',createdBy:userId,
+      authData:{client_id:'synthetic-client',client_secret:'synthetic-secret'} });
+    const account = action === 'create' ? await createAuthProfile({ organizationId:orgId,connectorKey:SOURCE_KEY,
+      displayName:'Synthetic account',profileKind:'oauth_account',provider:'synthetic',status:'pending_auth',createdBy:userId }) : null;
+    const result = await manageConnections({ action,connector_key:SOURCE_KEY,device_worker_id:deviceId,
+      app_auth_profile_slug:app.slug,...(account ? {auth_profile_slug:account.slug} : {}) }, {} as Env, context()) as Record<string,any>;
+    expect(result).toMatchObject(action === 'create' ? {connection:{status:'pending_auth'}} : {status:'pending_auth',auth_type:'oauth',connect_url:expect.any(String)});
+    const id = action === 'create' ? result.connection.id : result.connection_id;
+    expect((await sql`SELECT status FROM connections WHERE id = ${id}`)[0].status).toBe('pending_auth');
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND action_key = 'verify_browser' AND status = 'completed'`).toHaveLength(1);
   });
 
   it.each(['create', 'connect'] as const)('%s keeps signed-out setup pending and exposes only verification as executable', async (action) => {
@@ -563,6 +599,13 @@ describe('compiled browser source reads', () => {
   it('refuses a forged live auth profile instead of treating a supplied timestamp as proof', async () => {
     const result = await manageAuthProfiles({action:'create_auth_profile',profile_kind:'browser_session',display_name:'Forged',auth_data:{mode:'live',account_id:'forged',verified_at:new Date().toISOString()}}, {} as Env, context());
     expect(result).toMatchObject({error:expect.stringContaining('created and verified through connections.create')});
+  });
+
+  it('does not create a live auth profile when an explicit account clear is rejected', async () => {
+    await liveDefinition();
+    const result = await manageConnections({ action:'update',connection_id:connectionId,auth_profile_slug:null }, {} as Env, context());
+    expect(result).toMatchObject({error:expect.stringContaining('requires an auth profile')});
+    expect(await getTestDb()`SELECT id FROM auth_profiles WHERE organization_id = ${orgId}`).toHaveLength(0);
   });
 
   it('lets a member revoke their live account while preserving its identity and pausing feeds', async () => {

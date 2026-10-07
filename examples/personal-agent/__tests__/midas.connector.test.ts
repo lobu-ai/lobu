@@ -13,6 +13,7 @@ import path from "node:path";
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import type { MidasCheckpoint } from "../midas.connector";
 import { connectorSdkMock } from "./connector-sdk.mock";
+import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 
 // Stub @lobu/connector-sdk (it pulls in playwright) so the connector imports
 // without the browser stack. Shared superset — see connector-sdk.mock.ts.
@@ -534,12 +535,17 @@ describe("MidasConnector.sync", () => {
   test("throws on auth-wall landing URL and notifies", async () => {
     const calls: string[] = [];
     const dispatcher = {
-      dispatch: async (action: string, _input: Record<string, unknown>) => {
+      dispatch: async (action: string, input: Record<string, unknown>) => {
+        constrainBrowserInput(
+          new MidasConnector().definition.browser!,
+          action,
+          input
+        );
         calls.push(action);
         if (action === "navigate") {
           return {
             tab_id: 1,
-            current_url: "https://atlas.getmidas.com/login",
+            current_url: "https://sso.getmidas.com/oauth?code=synthetic-secret",
           };
         }
         return {};

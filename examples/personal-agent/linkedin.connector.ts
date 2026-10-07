@@ -3711,13 +3711,16 @@ export default class LinkedInConnector extends ConnectorRuntime<
       return this.syncHomeFeed(homeScrolls, checkpoint, requireBrowser(ctx));
     }
 
-    const companyUrl = config.company_url;
-    if (!companyUrl) {
+    if (!config.company_url) {
       throw new Error("company_url is required");
     }
 
-    // Normalize URL - remove trailing slash
-    const baseUrl = companyUrl.replace(/\/$/, "");
+    // Canonicalize the public alias before applying the exact browser grant.
+    const companyUrl = new URL(config.company_url);
+    if (companyUrl.hostname === "linkedin.com") {
+      companyUrl.hostname = "www.linkedin.com";
+    }
+    const baseUrl = companyUrl.href.replace(/\/$/, "");
     const maxScrolls = config.max_scrolls ?? (feedKey === "jobs" ? 3 : 5);
 
     const dispatcher = requireBrowser(ctx);

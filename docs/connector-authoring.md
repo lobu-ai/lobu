@@ -372,7 +372,11 @@ verification establishes browser availability, not a signed-in account.
 `connections.create` / `connections.connect` require a selected paired Chrome
 (`device_worker_id`) and return the existing `setup_required` continuation until
 verification completes. Live account profiles are created by that setup flow,
-not by supplying account identity in `auth_data`. The connector-owned probe returns
+not by supplying account identity in `auth_data`. Selecting a device without an
+auth profile chooses live-browser auth when the connector offers it; select an
+OAuth account profile explicitly to retain OAuth with a device pin. A browser
+availability check cannot complete a separate pending OAuth grant.
+The connector-owned probe returns
 only the current account identity; it must not read messages, contacts or history.
 `verify_browser` is a reserved, policy-governed read operation used by setup and
 `connections.test`. A changed account fails closed and requires restoring the original

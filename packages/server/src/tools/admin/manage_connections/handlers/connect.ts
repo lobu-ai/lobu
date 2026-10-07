@@ -820,8 +820,12 @@ async function handleConnectImpl(
     const pending = await completeBrowserConnectionSetup({ action: 'connect', connectionId: Number(connection.id),
       connectorKey: args.connector_key, slug: connection.slug, ctx, setupUrl });
     if (pending) return pending;
-    return { action: 'connect', connection_id: connection.id, slug: connection.slug, status: 'active',
-      message: 'Browser connection verified.', view_url: setupUrl };
+    // A browser check does not complete another pending method such as OAuth.
+    const [verified] = await sql`SELECT status FROM connections WHERE id = ${connection.id} AND organization_id = ${organizationId}`;
+    if (verified?.status === 'active') {
+      return { action: 'connect', connection_id: connection.id, slug: connection.slug, status: 'active',
+        message: 'Browser connection verified.', view_url: setupUrl };
+    }
   }
 
   // If active immediately, return simple result

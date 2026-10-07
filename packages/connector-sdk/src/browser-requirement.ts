@@ -53,7 +53,7 @@ export function resolveBrowserRequirement(value: unknown, authMethod: string): C
 /** Replaces caller-supplied `allowed_origins` with the catalog grant; URLs must fall inside it. */
 export function constrainBrowserInput(browser: ConnectorBrowserRequirement, actionKey: string, input: Record<string, unknown>): Record<string, unknown> {
   validateBrowserRequirement(browser);
-  const allowedActions = ['verify_browser', 'navigate', 'evaluate', 'get_accessibility_tree', 'wait_for_selector', 'screenshot', 'click_ref', 'type_ref', 'press_key', 'scroll', 'focus_tab', 'close_tab', 'list_tabs', 'show_notification', 'network_intercept_start', 'network_intercept_drain', 'network_intercept_stop', 'network_intercept_replay', 'console_capture_start', 'console_capture_drain', 'console_capture_stop'];
+  const allowedActions = [BROWSER_VERIFY_OPERATION, 'navigate', 'evaluate', 'get_accessibility_tree', 'wait_for_selector', 'screenshot', 'click_ref', 'type_ref', 'press_key', 'scroll', 'focus_tab', 'close_tab', 'list_tabs', 'show_notification', 'network_intercept_start', 'network_intercept_drain', 'network_intercept_stop', 'network_intercept_replay', 'console_capture_start', 'console_capture_drain', 'console_capture_stop'];
   if (!allowedActions.includes(actionKey)) throw new Error('Operation is outside the declared browser resource');
   if (actionKey === 'navigate' && input.url === 'about:blank') return { ...input, allowed_origins: browser.origins };
   for (const key of ['url', 'click_url', 'landed_url']) {
