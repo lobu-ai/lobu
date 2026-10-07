@@ -15,6 +15,8 @@ export const NOTIFICATION_DELIVERY_TASK_QUEUE =
 export const AUTOMATION_REACTION_TASK = 'automation-reaction';
 export const AUTOMATION_DIGEST_TASK = 'automation-digest';
 export const AUTOMATION_SCRIPT_TASK = 'automation-script';
+export const SOURCE_FEED_LISTENER_TASK = 'source-feed-listener';
+const SOURCE_FEED_LISTENER_TASK_QUEUE = `task:${SOURCE_FEED_LISTENER_TASK}`;
 export const AUTOMATION_REACTION_TASK_QUEUE =
   `task:${AUTOMATION_REACTION_TASK}`;
 export const AUTOMATION_DIGEST_TASK_QUEUE =
@@ -29,6 +31,9 @@ export const AUTOMATION_SCRIPT_TASK_QUEUE =
  * during a rolling deploy. Existing task names stay on the shared lane.
  */
 export function taskQueueName(name: string): string {
+  if (name === SOURCE_FEED_LISTENER_TASK) {
+    return SOURCE_FEED_LISTENER_TASK_QUEUE;
+  }
   if (name === NOTIFICATION_DELIVERY_TASK) {
     return NOTIFICATION_DELIVERY_TASK_QUEUE;
   }
@@ -50,6 +55,7 @@ export function isTransactionalTaskName(name: string): boolean {
     name === AUTOMATION_REACTION_TASK ||
     name === AUTOMATION_DIGEST_TASK ||
     name === NOTIFICATION_DELIVERY_TASK ||
-    name === AUTOMATION_SCRIPT_TASK
+    name === AUTOMATION_SCRIPT_TASK ||
+    name === SOURCE_FEED_LISTENER_TASK
   );
 }

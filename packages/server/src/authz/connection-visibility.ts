@@ -27,6 +27,15 @@ function sqlLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function connectionVisibilityPredicate(tableAlias: string, principalSql: string | null): string {
+  return `(${tableAlias}.visibility = 'org'${principalSql === null ? '' : ` OR ${tableAlias}.created_by = ${principalSql}`})`;
+}
+
+/** Column names must be static server-owned identifiers, never request values. */
+export function compileConnectionColumnVisibility(tableAlias: string, principalColumn: string): string {
+  return `AND ${connectionVisibilityPredicate(tableAlias, principalColumn)}`;
+}
+
 /**
  * Predicate for a table that references a connection via `connection_id`.
  * Binds two params from `baseParamIndex`: the org id and the principal.
@@ -44,7 +53,7 @@ export function compileConnectionFkVisibility(
       SELECT vc.id FROM public.connections vc
       WHERE vc.organization_id = ${orgParam}
         AND vc.deleted_at IS NULL
-        AND (vc.visibility = 'org' OR (${userParam} IS NOT NULL AND vc.created_by = ${userParam}))
+        AND ${connectionVisibilityPredicate('vc', userParam)}
     ))`,
     params: [scope.organizationId, scope.principal],
   };
@@ -59,9 +68,5 @@ export function compileConnectionFkVisibility(
  * `sql.unsafe(fragment)` — no per-caller param-index bookkeeping to drift.
  */
 export function compileConnectionRowVisibility(scope: AuthzScope, tableAlias: string): string {
-  const arms = [`${tableAlias}.visibility = 'org'`];
-  if (scope.principal != null) {
-    arms.push(`${tableAlias}.created_by = ${sqlLiteral(scope.principal)}`);
-  }
-  return `AND (${arms.join(' OR ')})`;
+  return `AND ${connectionVisibilityPredicate(tableAlias, scope.principal == null ? null : sqlLiteral(scope.principal))}`;
 }

@@ -910,6 +910,8 @@ describe("WhatsApp source observation", () => {
     const adapter = globals.__owlettoWhatsAppAdapterV1;
     return {
       posts, handlers,
+      publish: (batch: unknown) => adapter.invoke({ op: "publish_changes", adapter_version: WHATSAPP_ADAPTER_VERSION,
+        bridge_id: "synthetic-feed", token: "synthetic-token", batch }),
       listen: (token = "synthetic-token", extra = {}) => adapter.invoke({ op: "listen", adapter_version: WHATSAPP_ADAPTER_VERSION, bridge_id: "synthetic-feed", token, recent_since: 1000, ...extra }),
       emit: (kind: string, body: string, t = 1100, remote = "15550000000@c.us") => {
         for (const fn of handlers.get(kind) ?? []) fn({ attributes: { id: { id: "synthetic-message", remote }, from: "15550000000@c.us", body, type: "chat", t } });
@@ -921,6 +923,83 @@ describe("WhatsApp source observation", () => {
     };
   }
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("waits for durable browser acceptance before finishing a replay page", async () => {
+    const source = install();
+    await source.listen("synthetic-token", { references_only: true });
+    const batch = { id: "replay-1", events: [], checkpoint: { previous: null, next: { after: 1 } } };
+    let completed = false;
+    const published = source.publish(batch).then((result: unknown) => { completed = true; return result; });
+    await settle();
+    expect(completed).toBe(false);
+    expect(source.posts[0].record).toEqual(batch);
+    source.reply({ type: "lobu-feed-record:ack", token: "wrong-token", sequence: source.posts[0].sequence, ok: true });
+    await settle();
+    expect(completed).toBe(false);
+    source.reply({ type: "lobu-feed-record:ack", token: "synthetic-token", sequence: source.posts[0].sequence, ok: true });
+    expect(await published).toEqual({ ok: true });
+    await source.listen();
+    expect(source.posts).toHaveLength(1);
+  });
+
+  it("surfaces a browser rejection so replay retries from the server cursor", async () => {
+    const source = install();
+    await source.listen("synthetic-token", { references_only: true });
+    const published = source.publish({ id: "rejected-page", events: [] });
+    await settle();
+    source.reply({ type: "lobu-feed-record:ack", token: "synthetic-token", sequence: source.posts[0].sequence, ok: false });
+    expect(await published).toMatchObject({ ok: false });
+  });
+
+  it.each([
+    { chat_filter: "individual", minimum_timestamp: 1000 },
+    { chat_filter: "group", minimum_timestamp: 1200 },
+  ])("discards unaccepted references when the listener scope changes: %j", async (scope) => {
+    const source = install();
+    await source.listen("old-token", { references_only: true, chat_filter: "group", minimum_timestamp: 1000 });
+    source.emit("add", "private group message", 1100, "synthetic-group@g.us");
+    await settle();
+    expect(source.posts).toHaveLength(1);
+
+    await source.listen("new-token", { references_only: true, ...scope });
+    expect(source.posts).toHaveLength(1);
+  });
+
+  it("retries unaccepted references when reconnecting within the same scope", async () => {
+    const source = install();
+    const scope = { references_only: true, chat_filter: "group", minimum_timestamp: 1000 };
+    await source.listen("old-token", scope);
+    source.emit("add", "private group message", 1100, "synthetic-group@g.us");
+    await settle();
+    await source.listen("new-token", scope);
+    expect(source.posts).toHaveLength(2);
+    expect(source.posts[1]).toEqual({ ...source.posts[0], token: "new-token" });
+  });
+
+  it("observes new-message references without reading or exporting the body", async () => {
+    const source = install();
+    await source.listen("reference-token", { references_only: true });
+    const attributes = { id: { id: "synthetic-message", remote: "15550000000@c.us" }, type: "chat", t: 1100,
+      get body(): string { throw new Error("The observer must not read content"); } };
+    source.emitModel("add", { attributes });
+    await settle();
+    expect(source.posts.map(post => post.record)).toEqual([{ id: "synthetic-message", events: [{ id: "synthetic-message", event_type: "message.created", resource_ref: "synthetic-message", resource_type: "message", occurred_at: new Date(1100 * 1000).toISOString() }] }]);
+    source.emitModel("change", { attributes });
+    await settle();
+    expect(source.posts).toHaveLength(1);
+  });
+
+  it("observes placeholder hydration while excluding changes to pre-subscription history", async () => {
+    const source = install();
+    await source.listen("reference-token", { references_only: true, minimum_timestamp: 1000 });
+    source.emit("add", "placeholder", 0);
+    source.emit("change", "old edit", 900);
+    await settle();
+    expect(source.posts).toHaveLength(0);
+    source.emit("change", "hydrated private body", 1100);
+    await settle();
+    expect(source.posts.map(post => post.record)).toEqual([{ id: "synthetic-message", events: [{ id: "synthetic-message", event_type: "message.created", resource_ref: "synthetic-message", resource_type: "message", occurred_at: new Date(1100 * 1000).toISOString() }] }]);
+  });
 
   it("ignores historical hydration while retaining changes to old messages", async () => {
     const source = install();

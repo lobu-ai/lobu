@@ -104,6 +104,7 @@ export type {
   Feed,
   FeedDefinition,
   FeedOperation,
+  FeedObserveContext,
   FeedReadContext,
   FeedReadHandler,
   FeedReadResult,

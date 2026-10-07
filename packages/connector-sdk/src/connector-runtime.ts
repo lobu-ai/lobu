@@ -10,6 +10,7 @@ import type {
   ActionResult,
   AuthContext,
   AuthResult,
+  FeedObserveContext,
   FeedReadContext,
   FeedReadResult,
   QueryContext,
@@ -96,6 +97,13 @@ export abstract class ConnectorRuntime<C = Record<string, unknown>, F = Record<s
     const result = await handler(ctx);
     assertFeedReadWindow(result, ctx.window, feed.readWindowAxis);
     return result;
+  }
+
+  /** Attach/reconnect the connector-owned listener; reference delivery bypasses this hook. */
+  async observe(ctx: FeedObserveContext<C, F>): Promise<void> {
+    const handler = this.definition.feeds?.[ctx.feedKey]?.observe;
+    if (!handler) throw new Error(`${this.definition.key} feed '${ctx.feedKey}' has no source listener`);
+    await handler(ctx);
   }
 
   /**

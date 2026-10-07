@@ -33,8 +33,11 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 15;
+  const ADAPTER_VERSION = 20;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
+  const MAX_RECORD_BYTES = 128 * 1024;
+  const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+  const MAX_BUFFER_ENTRIES = 10_000;
   const SYSTEM_TYPES = new Set([
     "gp2",
     "notification_template",
@@ -87,11 +90,14 @@ export function whatsAppWebAdapterProgram() {
         },
       });
     };
-    const previous = listeners.get(request.bridge_id);
+    const resident = listeners.get(request.bridge_id);
+    const previous = resident?.request.references_only === request.references_only
+      && resident?.request.chat_filter === request.chat_filter
+      && resident?.request.minimum_timestamp === request.minimum_timestamp ? resident : null;
     detach(request.bridge_id);
     // A new listener identity fences pending normalization from the detached
-    // handlers. Keep unaccepted records, but retry a transient source failure
-    // by attaching fresh handlers to the current collection.
+    // handlers. Keep unaccepted records only within the same source scope, and
+    // retry transient failures by attaching fresh handlers to the collection.
     const state = {
       ...(previous ?? {
       id: request.bridge_id, collection, sequence: 0,
@@ -102,10 +108,12 @@ export function whatsAppWebAdapterProgram() {
     };
     state.token = request.token;
     state.request = request;
+    state.post = (entry) => post(state, entry);
     const observe = (model, kind) => {
       if (state.error) return;
       const sequence = ++state.sequence;
-      void normalizeMessage(model, "reconcile").then((record) => {
+      const normalized = request.references_only ? Promise.resolve(messageReference(model)) : normalizeMessage(model, "reconcile");
+      void normalized.then((record) => {
         if (listeners.get(state.id) !== state || !record || record.timestamp <= 0) return;
         if (state.request.chat_filter === "group" && !record.is_group) return;
         if (state.request.chat_filter === "individual" && record.is_group) return;
@@ -113,14 +121,19 @@ export function whatsAppWebAdapterProgram() {
         // Loading historical models also emits add. Changes to old messages
         // still pass; they are exactly what the recent collection window misses.
         if (kind === "add" && record.timestamp < state.request.recent_since) return;
+        if (request.references_only) record = {
+          id: record.id,
+          events: [{ id: record.id, event_type: "message.created", resource_ref: record.id,
+            resource_type: "message", occurred_at: new Date(record.timestamp * 1000).toISOString() }],
+        };
         const previous = state.pending.get(record.id);
         const seen = state.fingerprints.get(record.id);
         if (seen && seen.sequence >= sequence) return;
         const fingerprint = JSON.stringify(record);
         if (seen?.fingerprint === fingerprint) { seen.sequence = sequence; return; }
         const bytes = new TextEncoder().encode(fingerprint).length;
-        if (bytes > 128 * 1024 || state.pendingBytes - (previous?.bytes ?? 0) + bytes > 16 * 1024 * 1024 ||
-          (state.pending.size >= 10_000 && !previous)) {
+        if (bytes > MAX_RECORD_BYTES || state.pendingBytes - (previous?.bytes ?? 0) + bytes > MAX_BUFFER_BYTES ||
+          (state.pending.size >= MAX_BUFFER_ENTRIES && !previous)) {
           reportError(state, "WhatsApp page observation buffer overflowed; recovery is required", sequence);
           return;
         }
@@ -130,7 +143,7 @@ export function whatsAppWebAdapterProgram() {
         state.fingerprintBytes += bytes - (seen?.bytes ?? 0);
         state.fingerprints.delete(record.id);
         state.fingerprints.set(record.id, { fingerprint, sequence, bytes });
-        while (state.fingerprints.size > 10_000 || state.fingerprintBytes > 16 * 1024 * 1024) {
+        while (state.fingerprints.size > MAX_BUFFER_ENTRIES || state.fingerprintBytes > MAX_BUFFER_BYTES) {
           const oldest = state.fingerprints.keys().next().value;
           state.fingerprintBytes -= state.fingerprints.get(oldest).bytes;
           state.fingerprints.delete(oldest);
@@ -146,9 +159,13 @@ export function whatsAppWebAdapterProgram() {
     state.onReply = (event) => {
       if (event.source !== window || event.origin !== location.origin || event.data?.token !== state.token) return;
       if (event.data.type === "lobu-feed-record:stop") { detach(state.id); return; }
-      if (event.data.type !== "lobu-feed-record:ack" || !event.data.ok) return;
+      if (event.data.type !== "lobu-feed-record:ack") return;
       for (const [id, entry] of state.pending) {
-        if (entry.sequence === event.data.sequence) { state.pendingBytes -= entry.bytes; state.pending.delete(id); break; }
+        if (entry.sequence !== event.data.sequence) continue;
+        if (event.data.ok) {
+          state.pendingBytes -= entry.bytes; state.pending.delete(id); entry.resolve?.();
+        } else entry.reject?.(new Error("Browser rejected the source reference batch"));
+        break;
       }
     };
     listeners.set(state.id, state);
@@ -168,6 +185,28 @@ export function whatsAppWebAdapterProgram() {
     });
     for (const entry of state.pending.values()) post(state, entry);
     return { ok: true, listening: true };
+  }
+
+  // Replay shares the live listener's durable browser buffer. Await its receipt,
+  // not server delivery: the server advances the cursor only with its own commit.
+  async function publishChanges(request) {
+    const state = listeners.get(request.bridge_id);
+    if (!state?.request.references_only || state.token !== request.token) throw new Error("Source listener is unavailable");
+    const record = request.batch;
+    const bytes = new TextEncoder().encode(JSON.stringify(record)).length;
+    const previous = state.pending.get(record.id);
+    if (bytes > MAX_RECORD_BYTES || state.pendingBytes - (previous?.bytes ?? 0) + bytes > MAX_BUFFER_BYTES ||
+      (state.pending.size >= MAX_BUFFER_ENTRIES && !previous)) throw new Error("Source replay buffer is full");
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Source replay was not accepted by the browser")), 10_000);
+      const entry = { record, bytes, sequence: ++state.sequence,
+        resolve: () => { clearTimeout(timer); resolve(); },
+        reject: (error) => { clearTimeout(timer); reject(error); } };
+      state.pendingBytes += bytes - (previous?.bytes ?? 0);
+      state.pending.set(record.id, entry);
+      state.post(entry);
+    });
+    return { ok: true };
   }
 
   function requireFirst(names) {
@@ -266,6 +305,70 @@ export function whatsAppWebAdapterProgram() {
 
   function modelData(model) {
     return model?.attributes ?? model?._data ?? model ?? {};
+  }
+
+  function messageReference(model) {
+    const row = modelData(model);
+    const key = row.id ?? model?.id;
+    const id = rawId(key);
+    const remote = widString(key?.remote ?? row.chatId ?? (key?.fromMe ? row.to : row.from));
+    if (!id || !remote || remote === "status@broadcast" || remote.endsWith("@newsletter") || SYSTEM_TYPES.has(row.type)) return null;
+    return { id, timestamp: unixSeconds(row), is_group: remote.endsWith("@g.us") };
+  }
+
+  /** Resume insertion order after reconnect without exporting any message body. */
+  async function observeMessages(input = {}) {
+    const after = input.after ?? null;
+    if (after !== null && (!Number.isSafeInteger(after) || after < 0)) throw new Error("Invalid WhatsApp observation cursor");
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open("model-storage");
+      request.onupgradeneeded = () => { request.transaction.abort(); reject(new Error("WhatsApp source history database is unavailable")); };
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error("WhatsApp source history database is blocked"));
+      request.onsuccess = () => resolve(request.result);
+    });
+    let rows;
+    try {
+      rows = await new Promise((resolve, reject) => {
+        const transaction = database.transaction("message", "readonly");
+        transaction.onabort = () => reject(transaction.error ?? new Error("WhatsApp source observation aborted"));
+        const index = transaction.objectStore("message").index("rowId");
+        const request = index.openCursor(after === null ? null : IDBKeyRange.lowerBound(after, true), after === null ? "prev" : "next");
+        const page = [];
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) { resolve(page); return; }
+          if (!Number.isSafeInteger(cursor.key) || cursor.key <= 0 || typeof cursor.value.id !== "string") {
+            reject(new Error("WhatsApp source history has an unsupported key layout")); return;
+          }
+          page.push({ position: cursor.key, id: cursor.value.id, timestamp: unixSeconds(cursor.value), type: cursor.value.type });
+          if (after === null || page.length > 500) resolve(page);
+          else cursor.continue();
+        };
+      });
+    } finally { database.close(); }
+    if (after === null) return { after: rows[0]?.position ?? 0, references: [], hasMore: false };
+    const page = rows.slice(0, 500);
+    const references = [];
+    if (page.length) {
+      const keys = requireFirst(["WAWebMsgKey"]);
+      if (typeof keys?.fromString !== "function") throw new Error("WhatsApp source message keys are unavailable");
+      for (const row of page) {
+        // IndexedDB already contains routing and time metadata. Loading message
+        // models would hydrate private content and fails for status entries.
+        const reference = messageReference({ id: keys.fromString(row.id), t: row.timestamp, type: row.type });
+        if (!reference) continue;
+        // Timestamp-zero rows are source placeholders, not messages. A later
+        // hydration change is also observed by the reference listener.
+        if (reference.timestamp <= 0) continue;
+        if (reference.timestamp < input.started_at) continue;
+        if (input.chat_filter === "group" && !reference.is_group) continue;
+        if (input.chat_filter === "individual" && reference.is_group) continue;
+        references.push(reference);
+      }
+    }
+    return { after: page[page.length - 1]?.position ?? after, references, hasMore: rows.length > 500 };
   }
 
   function models(collection) {
@@ -1828,6 +1931,8 @@ export function whatsAppWebAdapterProgram() {
           : { ok: false, error: status };
       }
       if (request.op === "listen") return listen(request);
+      if (request.op === "publish_changes") return await publishChanges(request);
+      if (request.op === "observe_messages") return { ok: true, ...(await observeMessages(request.input)) };
       const capabilities = operationCapabilities();
       if (capabilities[request.op] !== true) {
         return {

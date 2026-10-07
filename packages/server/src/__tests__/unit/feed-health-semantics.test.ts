@@ -41,6 +41,14 @@ describe("feed execution mode", () => {
 });
 
 describe("feed attention", () => {
+  test("source listeners surface failures without inheriting stale sync status", () => {
+    const source = { operations: ["read"] as Array<"read">, webhook_driven: true, status: "active", last_sync_status: "failed" };
+    expect(deriveFeedHealthSemantics(source).attention).toBe("healthy");
+    expect(deriveFeedHealthSemantics({ ...source, consecutive_failures: 1 })).toEqual({ executionMode: "source_only", attention: "last_attempt_failed" });
+    expect(deriveFeedHealthSemantics({ ...source, consecutive_failures: 1, status: "paused" }).attention).toBe("paused");
+    expect(deriveFeedHealthSemantics({ operations: ["read"], consecutive_failures: 1 })).toEqual({ executionMode: "source_only", attention: "healthy" });
+  });
+
   test("canonical setup overrides auto-pause but never overrides an execution pin", () => {
     expect(
       syncFeed({

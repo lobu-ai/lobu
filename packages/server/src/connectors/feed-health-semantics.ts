@@ -92,10 +92,12 @@
  * and a JSON-null webhook would all read as event-driven and hide exactly the
  * feed `no_trigger` exists to surface.
  *
- * Exported as one fragment because two readers must agree — `list_feeds`
- * (`tools/admin/manage_feeds.ts`) and the health scan
- * (`connectors/connector-health.ts`). Hand-copied jsonb predicates drift, and
- * drift here means the two surfaces silently disagree about one feed.
+ * Exported as one fragment because its readers must agree — `list_feeds`
+ * (`tools/admin/manage_feeds.ts`), the health scan
+ * (`connectors/connector-health.ts`), and source/device trigger routing through
+ * `feedTriggerEligibilitySql` below. Hand-copied
+ * jsonb predicates drift, and drift here means those surfaces silently
+ * disagree about one feed.
  *
  * The type guard is a CASE, not `AND`, deliberately. Postgres does not promise
  * that `AND` short-circuits left-to-right ("Expression Evaluation Rules" — use
@@ -117,6 +119,26 @@ export function feedWebhookDrivenSql(
             WHERE jsonb_typeof(declared_event) = 'string'
               AND declared_event #>> '{}' <> ''
           ) ELSE false END`;
+}
+
+/** Listener setup, delivery, delegated reads and update_feed restarts must agree on trigger-feed eligibility. */
+export function feedTriggerEligibilitySql(
+  definitionAlias: string,
+  feedAlias: string,
+  mode: 'source-only' | 'sync' | 'either' = 'either',
+): string {
+  const feed = `${definitionAlias}.feeds_schema -> ${feedAlias}.feed_key`;
+  const operations = `${feed} -> 'operations'`;
+  let capability = `${operations} ?| ARRAY['sync', 'read']`;
+  if (mode === 'source-only') {
+    capability = `${operations} ? 'read' AND NOT (${operations} ? 'sync')`;
+  } else if (mode === 'sync') {
+    capability = `${operations} @> '["sync"]'::jsonb`;
+  }
+  return `(${feedWebhookDrivenSql(definitionAlias, feedAlias)})
+    AND COALESCE(${feed} -> 'webhook' ->> 'mode', 'trigger') = 'trigger'
+    AND jsonb_typeof(${operations}) = 'array'
+    AND (${capability})`;
 }
 
 type FeedExecutionMode = "source_only" | "streaming" | "scheduled" | "no_schedule";
@@ -306,14 +328,16 @@ export function deriveFeedHealthSemantics(
     };
   }
 
-  // Read-only feeds are evaluated on demand; they have no sync lifecycle.
+  // Source feeds have no sync lifecycle, but observation can fail independently.
   if (
     input.operations?.includes('read') === true &&
     input.operations.includes('sync') === false
   ) {
+    const attention = nonCollectorAttention(input);
     return {
       executionMode: "source_only",
-      attention: nonCollectorAttention(input),
+      attention: attention === "healthy" && input.webhook_driven && (input.consecutive_failures ?? 0) > 0
+        ? "last_attempt_failed" : attention,
     };
   }
 

@@ -528,7 +528,9 @@ export interface FeedDefinition {
    * complete enough to store):
    *  - `mode: 'trigger'` (default) — the poll brings more than the webhook, so
    *    mark this feed due and let the poll fetch the complete record (deduped by
-   *    origin_id). Use for events whose poll endpoint returns richer data.
+   *    origin_id). Use for events whose poll endpoint returns richer data. On a
+   *    read-only feed, these are `automationEvents` keys whose source references
+   *    (from `observe`) activate subscribed Automations without importing content.
    *  - `mode: 'store'` — the payload is event-complete (e.g. a GitHub `star`
    *    carries the actor + starred_at) and re-polling the whole list is wasteful,
    *    so the router stores the structured event directly, consolidating with the
@@ -1008,6 +1010,10 @@ export interface WebhookRegistration {
 
 export type FeedOperation = 'sync' | 'read';
 
+/** Installs/reconnects a source listener. Delivery uses the existing browser feed transport. */
+export type FeedObserveContext<C = Record<string, unknown>, F = Record<string, unknown>> =
+  Omit<SyncContext<C, F>, 'commit' | 'entityIds'>;
+
 /** Fixed half-open source-time bounds, preserved across every page of a read. */
 export interface FeedReadWindow {
   start: string;
@@ -1086,6 +1092,8 @@ export interface RuntimeFeedDefinition<
 > extends Omit<FeedDefinition, 'operations'> {
   sync?: FeedSyncHandler<C, F>;
   read?: FeedReadHandler<F>;
+  /** Setup only: emits no result and does not add a feed operation. */
+  observe?: (ctx: FeedObserveContext<C, F>) => Promise<void>;
 }
 
 /** Runtime-only connector definition. Metadata extraction strips handlers. */

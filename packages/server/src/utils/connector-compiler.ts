@@ -132,7 +132,7 @@ async function main() {
       ? null
       : Object.fromEntries(Object.entries(def.feeds).map(([feedKey, rawFeed]) => {
           const feed = rawFeed && typeof rawFeed === 'object' ? rawFeed : {};
-          const { sync, read, ...serializable } = feed;
+          const { sync, read, observe, ...serializable } = feed;
           const operations = [];
           if (typeof sync === 'function') operations.push('sync');
           if (typeof read === 'function') operations.push('read');
@@ -140,6 +140,12 @@ async function main() {
             throw new Error(
               'Connector feed ' + JSON.stringify(feedKey) +
               ' must implement sync and/or read on its feed definition.'
+            );
+          }
+          if (typeof observe === 'function' && typeof sync === 'function') {
+            throw new Error(
+              'Connector feed ' + JSON.stringify(feedKey) +
+              ' cannot implement both sync and observe; they would share one feed checkpoint.'
             );
           }
           return [feedKey, { ...serializable, operations }];

@@ -23,6 +23,8 @@ export const DEVICE_FEED_READ_ACTION_KEY = '__lobu_feed_read';
 
 /** Server-owned provenance for a compiled source read and its browser steps. */
 export const SOURCE_FEED_READ_METADATA_KEY = 'source_feed_read';
+/** A headless read delegated by an active, owner-visible source subscription. */
+export const SOURCE_FEED_SUBSCRIPTION_METADATA_KEY = 'source_feed_subscription';
 
 export function isSourceFeedRead(metadata: Record<string, unknown> | null | undefined): boolean {
   return metadata?.[SOURCE_FEED_READ_METADATA_KEY] === true;

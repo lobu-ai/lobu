@@ -17,6 +17,7 @@ import {
   type EventEnvelope,
   type FeedReadContext,
   type FeedReadResult,
+  type FeedObserveContext,
   type RuntimeConnectorDefinition,
   type SyncContext,
   type SyncResult,
@@ -46,6 +47,8 @@ import {
 import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
 
 const SOURCE_OBSERVATION_ERROR_ID = "whatsapp-web:source-observation-error";
+// Each durable browser record is limited to 128 KiB, including its checkpoint.
+const SOURCE_RECORD_MAX_BYTES = 128 * 1024;
 
 /**
  * How long a run waits for WhatsApp Web to finish hydrating before giving up.
@@ -624,7 +627,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.5",
+    version: "1.0.6",
     faviconDomain: "whatsapp.com",
     // Implicit auth: the user is already signed into WhatsApp Web in the
     // paired Chrome. There is no artifact to relay — the QR is rendered by
@@ -632,13 +635,19 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     // so a handshake here could not read the page. A logged-out page fails
     // the readiness probe with the exact remedy instead.
     authSchema: { methods: [{ type: "none" }] },
+    automationEvents: [{
+      key: "message.created", label: "New message", resourceType: "message",
+      description: "A new message reference from WhatsApp Web. The Automation can read its content from the live messages feed.",
+    }],
     feeds: {
       live_messages: {
         key: "live_messages",
         name: "Live messages",
         description:
-          "Read messages directly from the paired WhatsApp Web session without importing message history. Reads page through locally available history in source storage order, using literal text search or id:<message ID>. Requires the paired browser to be online and signed in. No background sync or message-triggered Automations.",
+          "Read messages directly from WhatsApp Web without importing history, using literal text search or id:<message ID>. Active Automations can subscribe to new-message references. Requires the paired browser to be online and signed in; reconnects replay messages still available in WhatsApp's local history.",
         read: (ctx) => this.readMessages(ctx),
+        observe: (ctx) => this.observeMessages(ctx),
+        webhook: { mode: "trigger", events: ["message.created"] },
         configSchema: {
           type: "object",
           properties: {
@@ -948,6 +957,68 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       },
     },
   };
+
+  private async observeMessages(ctx: FeedObserveContext<BrowserCheckpoint, WhatsAppWebConfig>): Promise<void> {
+    const dispatcher = requireExtensionDispatcher(ctx);
+    const tabId = await readyWhatsAppTab(dispatcher);
+    const chatFilter = ctx.config.chat_filter ?? "all";
+    const previous = ctx.checkpoint?.observation?.chat_filter === chatFilter ? ctx.checkpoint.observation : undefined;
+    const startedAt = previous?.started_at ?? Math.floor(Date.now() / 1000);
+    // Snapshot before attaching so replay covers messages arriving during setup.
+    let after = previous?.after ?? (await invokeAdapter<{ after: number }>(
+      dispatcher, tabId, { op: "observe_messages", input: {} })).after;
+    const binding = await dispatcher.dispatch<{
+      bridge_id: string; token: string; listening?: boolean; subscription?: { scope_key: string };
+    }>("feed_listen", { tab_id: tabId });
+    if (!binding.bridge_id || !binding.token || !binding.subscription || binding.listening === false) {
+      throw new Error("A browser supporting source subscriptions is required for WhatsApp");
+    }
+    await invokeAdapter(dispatcher, tabId, {
+      op: "listen", bridge_id: binding.bridge_id, token: binding.token, references_only: true,
+      chat_filter: chatFilter, recent_since: startedAt, minimum_timestamp: startedAt,
+    });
+    let cursor = ctx.checkpoint ?? null;
+    for (let page = 0; page < 10; page++) {
+      const replay = await invokeAdapter<{
+        after: number; references: Array<{ id: string; timestamp: number }>; hasMore: boolean;
+      }>(dispatcher, tabId, { op: "observe_messages", input: { after, started_at: startedAt, chat_filter: chatFilter } });
+      const next: BrowserCheckpoint = {
+        schema: "owletto.whatsapp.browser.v1", adapter_version: WHATSAPP_ADAPTER_VERSION,
+        head: {}, backfill: { complete: true, cursor_chat_jid: null, inventory: [], chats: {} },
+        observation: { after: replay.after, started_at: startedAt, chat_filter: chatFilter },
+      };
+      const events = replay.references.map(reference => ({
+        id: reference.id, event_type: "message.created", resource_type: "message",
+        resource_ref: reference.id, occurred_at: new Date(reference.timestamp * 1000).toISOString(),
+      }));
+      for (let offset = 0; ;) {
+        const batchThrough = (end: number) => ({
+          id: `replay:${chatFilter}:${startedAt}:${after}:${replay.after}:${offset}`,
+          events: events.slice(offset, end),
+          // Earlier chunks may be replayed after interruption; existing signal
+          // dedupe handles them. Advance only after the entire page is accepted.
+          ...(end === events.length ? { checkpoint: { previous: cursor, next } } : {}),
+          more: end === events.length && replay.hasMore && page === 9,
+        });
+        let end = Math.min(offset + 500, events.length);
+        let batch = batchThrough(end);
+        const size = () => new TextEncoder().encode(JSON.stringify(batch)).length;
+        while (size() > SOURCE_RECORD_MAX_BYTES && end - offset > 1) {
+          end = offset + Math.floor((end - offset) / 2);
+          batch = batchThrough(end);
+        }
+        if (size() > SOURCE_RECORD_MAX_BYTES) throw new Error("Source reference or checkpoint exceeds the browser record limit");
+        await invokeAdapter(dispatcher, tabId, {
+          op: "publish_changes", bridge_id: binding.bridge_id, token: binding.token, batch,
+        });
+        if (end === events.length) break;
+        offset = end;
+      }
+      if (!replay.hasMore) return;
+      cursor = next;
+      after = replay.after;
+    }
+  }
 
   private async syncMessages(
     ctx: SyncContext<BrowserCheckpoint, WhatsAppWebConfig>

@@ -158,11 +158,11 @@ function messagesFeed() {
 }
 
 describe("WhatsApp live source reads", () => {
-  it("declares a source-only feed without sync, observations, or event ingestion", () => {
+  it("declares a source-only feed without sync or event ingestion", () => {
     const feed = connector.definition.feeds.live_messages;
     expect(typeof feed.read).toBe("function");
     expect("sync" in feed).toBe(false);
-    expect("webhook" in feed).toBe(false);
+    expect(feed.webhook).toEqual({ mode: "trigger", events: ["message.created"] });
     expect("eventKinds" in feed).toBe(false);
   });
 
@@ -210,6 +210,81 @@ describe("WhatsApp live source reads", () => {
     await expect(connector.read({ ...ctx, sort: { column: "occurred_at", order: "desc" } })).rejects.toThrow("sorting");
     await expect(connector.read({ ...ctx, window: { start: "2026-08-22T00:00:00Z", end: "2026-08-23T00:00:00Z" } })).rejects.toThrow("window");
     expect(page.calls).toHaveLength(0);
+  });
+});
+
+describe("WhatsApp source listener setup", () => {
+  const binding = { bridge_id: "synthetic-feed", token: "synthetic-token", subscription: { scope_key: "synthetic-scope" } };
+
+  it("publishes atomic replay batches and leaves delivery to the subscription transport", async () => {
+    const batches: Array<any> = [];
+    let pages = 0;
+    const page = makeDispatcher({ probe: READY, feed_listen: binding,
+      observe_messages: () => ({ ok: true, after: 101 + pages, references: [{ id: "message-" + (++pages), timestamp: 2001 }], hasMore: pages < 2 }),
+      publish_changes: (request: any) => { batches.push(request.batch); return { ok: true }; },
+    });
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.observation = { after: 100, started_at: 2000, chat_filter: "all" };
+    expect(await connector.observe({ feedKey: "live_messages", config: { chat_filter: "all" },
+      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } })).toBeUndefined();
+    expect(batches).toHaveLength(2);
+    expect(batches[0].checkpoint.previous).toEqual(checkpoint);
+    expect(batches[1].checkpoint.previous).toEqual(batches[0].checkpoint.next);
+    expect(batches[1].checkpoint.next.observation.after).toBe(102);
+    expect(batches[0].events).toEqual([{ id: "message-1", event_type: "message.created", resource_type: "message",
+      resource_ref: "message-1", occurred_at: new Date(2001 * 1000).toISOString() }]);
+    expect(batches.every(batch => batch.more === false)).toBe(true);
+  });
+
+  it("starts a fresh baseline when the chat filter changes", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const batches: Array<any> = [];
+    const page = makeDispatcher({ probe: READY, feed_listen: binding,
+      observe_messages: (request: any) => {
+        requests.push(request.input);
+        return { ok: true, after: 900, references: [], hasMore: false };
+      },
+      publish_changes: (request: any) => { batches.push(request.batch); return { ok: true }; },
+    });
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.observation = { after: 100, started_at: 1, chat_filter: "individual" };
+    await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
+      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toEqual({});
+    expect(requests[1]).toMatchObject({ after: 900, chat_filter: "group" });
+    expect(batches[0].checkpoint.previous).toEqual(checkpoint);
+    expect(batches[0].checkpoint.next.observation).toMatchObject({ after: 900, chat_filter: "group" });
+    expect(batches[0].events).toEqual([]);
+  });
+
+  it("splits large replay pages by encoded bytes and advances the cursor only after the final chunk", async () => {
+    const references = Array.from({ length: 500 }, (_, index) => ({
+      id: `synthetic-${index}-${"界".repeat(60)}`, timestamp: 2001,
+    }));
+    const batches: Array<any> = [];
+    const page = makeDispatcher({ probe: READY, feed_listen: binding,
+      observe_messages: { ok: true, after: 600, references, hasMore: false },
+      publish_changes: (request: any) => {
+        expect(new TextEncoder().encode(JSON.stringify(request.batch)).length).toBeLessThanOrEqual(128 * 1024);
+        batches.push(request.batch);
+        return { ok: true };
+      },
+    });
+    const checkpoint = initializeBrowserCheckpoint(null);
+    checkpoint.observation = { after: 100, started_at: 2000, chat_filter: "group" };
+    await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
+      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } });
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.flatMap(batch => batch.events.map((event: any) => event.resource_ref))).toEqual(references.map(ref => ref.id));
+    expect(batches.slice(0, -1).every(batch => !batch.checkpoint)).toBe(true);
+    expect(batches.at(-1).checkpoint).toMatchObject({ previous: checkpoint, next: { observation: { after: 600 } } });
+  });
+
+  it("rejects a browser without reference-delivery support", async () => {
+    const page = makeDispatcher({ probe: READY, observe_messages: { ok: true, after: 1 } });
+    await expect(connector.observe({ feedKey: "live_messages", config: {}, checkpoint: null,
+      credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } })).rejects.toThrow("source subscriptions");
   });
 });
 
@@ -850,8 +925,8 @@ describe("sync over the generic chrome bridge", () => {
     );
   });
 
-  it("bumps the WhatsApp connector version for live source reads", () => {
-    expect(connector.definition.version).toBe("1.0.5");
+  it("bumps the WhatsApp connector version for source subscriptions", () => {
+    expect(connector.definition.version).toBe("1.0.6");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {

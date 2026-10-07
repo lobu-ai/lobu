@@ -39,6 +39,7 @@ import type {
   AuthResult,
   ConnectorDefinition,
   FeedDefinition,
+  FeedObserveContext,
   FeedReadHandler,
   FeedSyncHandler,
   QueryContext,
@@ -62,10 +63,12 @@ export type ConnectorFeedSpec<
     | {
         sync: FeedSyncHandler<C, F>;
         read?: FeedReadHandler<F>;
+        observe?: never;
       }
     | {
-        sync?: FeedSyncHandler<C, F>;
+        sync?: never;
         read: FeedReadHandler<F>;
+        observe?: (ctx: FeedObserveContext<C, F>) => Promise<void>;
       }
   );
 
@@ -149,6 +152,7 @@ function buildDefinition(spec: ConnectorSpec): RuntimeConnectorDefinition {
           eventKinds: feed.eventKinds,
           sync: feed.sync,
           read: feed.read,
+          observe: feed.observe,
           readWindowAxis: feed.readWindowAxis,
           matchPaths: feed.matchPaths,
         },

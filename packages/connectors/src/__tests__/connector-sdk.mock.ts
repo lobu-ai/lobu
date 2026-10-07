@@ -90,6 +90,7 @@ export function connectorSdkMock() {
         {
           sync?: (ctx: unknown) => Promise<unknown>;
           read?: (ctx: unknown) => Promise<unknown>;
+          observe?: (ctx: unknown) => Promise<void>;
         }
       >;
     };
@@ -102,6 +103,12 @@ export function connectorSdkMock() {
         );
       }
       return handler(ctx);
+    }
+
+    async observe(ctx: { feedKey: string }): Promise<void> {
+      const handler = this.definition.feeds?.[ctx.feedKey]?.observe;
+      if (!handler) throw new Error("Feed has no listener setup");
+      await handler(ctx);
     }
 
     async read(ctx: { feedKey: string }): Promise<unknown> {

@@ -17,6 +17,9 @@
  * not consume this source-health budget. Manual feeds normally stay unscheduled
  * after failure; a retained source wake hint may re-arm one under this same
  * delay.
+ * Source listener setup failures and rejected source reference deliveries
+ * reuse only the base delay and cap. They keep retrying without hard-pausing,
+ * so a recovered browser/source can attach again.
  *
  *  1. Exponential backoff on `next_run_at` after a failure, so a failing feed
  *     retries progressively less often instead of every cadence.

@@ -14,6 +14,7 @@
  * - recollect_feed: Clear a feed's sync cursor so the next sync starts over
  */
 
+import type { FeedOperation } from '@lobu/connector-sdk';
 import {
   getErrorMessage,
   isRetryable,
@@ -42,7 +43,8 @@ import { compileConnectionRowVisibility } from '../../authz/connection-visibilit
 import { readSourceFeedPage, SourceCursorError } from '../../lib/source-feed-page';
 import { authzScopeFromToolContext } from '../../authz/scope';
 import { reconcileAtlassianMcpJiraSite } from '../../connect/atlassian-mcp-site';
-import { deriveFeedHealthSemantics, feedWebhookDrivenSql } from '../../connectors/feed-health-semantics';
+import { deriveFeedHealthSemantics, feedTriggerEligibilitySql, feedWebhookDrivenSql } from '../../connectors/feed-health-semantics';
+import { feedDefinitionSelection } from '../../connectors/feed-definition-selection';
 import { getDb, pgBigintArray } from '../../db/client';
 import type { Env } from '../../index';
 import {
@@ -213,6 +215,11 @@ async function handleListFeeds(
   const { organizationId } = ctx;
   const limit = args.limit ?? 50;
   const offset = args.offset ?? 0;
+  // Filtering, displayed capabilities and the overshoot count use the same
+  // selected definition as source reads and listener delivery.
+  const definitionJoin = sql`LEFT JOIN LATERAL (${feedDefinitionSelection(sql)}) selected_definition ON true`;
+  const selectedOperations = sql`COALESCE(selected_definition.feeds_schema->f.feed_key->'operations', '[]'::jsonb)`;
+  const webhookDriven = sql`${sql.unsafe(feedWebhookDrivenSql('selected_definition', 'f'))}`;
 
   // Build the filtered "page" of feeds first, then compute event_count in a
   // single GROUP BY restricted to the (connection_id, feed_key) tuples on
@@ -252,33 +259,13 @@ async function handleListFeeds(
   // intentionally separate from this sync-health filter.
   if (args.health) {
     where = sql`${where} AND f.status = 'active' AND c.status <> 'paused'`;
-    const selectedOperations = sql`
-      COALESCE((
-        SELECT health_cd.feeds_schema -> f.feed_key -> 'operations'
-        FROM connector_definitions health_cd
-        WHERE health_cd.key = c.connector_key
-          AND health_cd.organization_id = f.organization_id
-          -- Same definition selection as readSourceFeed: prefer the pinned
-          -- artifact, but fall back to the active definition for the key, since
-          -- a device-manifest upgrade archives the row a pin still names.
-          AND (
-            (f.pinned_version IS NULL AND health_cd.status = 'active')
-            OR (
-              f.pinned_version IS NOT NULL
-              AND (health_cd.version = f.pinned_version OR health_cd.status = 'active')
-            )
-          )
-        ORDER BY (health_cd.version = f.pinned_version) DESC,
-                 (health_cd.status = 'active') DESC,
-                 health_cd.updated_at DESC,
-                 health_cd.id DESC
-        LIMIT 1
-      ), '[]'::jsonb)
-    `;
-    const sourceOnly = sql`
+    const readOnly = sql`
       ${selectedOperations} @> '["read"]'::jsonb
       AND NOT (${selectedOperations} @> '["sync"]'::jsonb)
     `;
+    const sourceOnly = sql`(${readOnly}) AND NOT (${webhookDriven})`;
+    // Listener setup uses the failure counter, never the legacy sync attempt status.
+    const failedSync = sql`NOT (${readOnly}) AND f.last_sync_status = 'failed'`;
     const overdue = sql`
       ${selectedOperations} @> '["sync"]'::jsonb
       AND COALESCE(f.schedule, '') <> ''
@@ -294,7 +281,7 @@ async function handleListFeeds(
       where = sql`${where}
         AND NOT (${sourceOnly})
         AND (
-          f.last_sync_status = 'failed'
+          (${failedSync})
           OR COALESCE(f.consecutive_failures, 0) > 0
           OR (${overdue})
         )
@@ -304,7 +291,7 @@ async function handleListFeeds(
         AND (
           (${sourceOnly})
           OR (
-            f.last_sync_status IS DISTINCT FROM 'failed'
+            (${failedSync}) IS NOT TRUE
             AND COALESCE(f.consecutive_failures, 0) = 0
             AND NOT (${overdue})
           )
@@ -324,32 +311,12 @@ async function handleListFeeds(
   // true count there.
   const pageQuery = sql`
     SELECT ${sql.unsafe(publicFeedColumnList('f'))}, c.connector_key,
-           COALESCE(selected_definition.operations, '[]'::jsonb) AS operations,
-           COALESCE(selected_definition.webhook_driven, false) AS webhook_driven,
+           ${selectedOperations} AS operations,
+           ${webhookDriven} AS webhook_driven,
            COUNT(*) OVER()::int AS filtered_total
     FROM feeds f
     JOIN connections c ON c.id = f.connection_id
-    -- One definition per feed, projected twice. Same selection as
-    -- readSourceFeed, so the reported capabilities and the webhook
-    -- declaration both come from the version a read/sync would actually run.
-    LEFT JOIN LATERAL (
-      SELECT definition.feeds_schema -> f.feed_key -> 'operations' AS operations,
-             ${sql.unsafe(feedWebhookDrivenSql('definition', 'f'))} AS webhook_driven
-      FROM connector_definitions definition
-      WHERE definition.key = c.connector_key
-        AND definition.organization_id = f.organization_id
-        AND (
-          (f.pinned_version IS NULL AND definition.status = 'active')
-          OR (
-            f.pinned_version IS NOT NULL
-            AND (definition.version = f.pinned_version OR definition.status = 'active')
-          )
-        )
-      ORDER BY (definition.version = f.pinned_version) DESC,
-               (definition.status = 'active') DESC,
-               definition.updated_at DESC, definition.id DESC
-      LIMIT 1
-    ) selected_definition ON true
+    ${definitionJoin}
     WHERE ${where}
     ORDER BY f.created_at DESC LIMIT ${limit} OFFSET ${offset}
   `;
@@ -449,6 +416,7 @@ async function handleListFeeds(
       SELECT COUNT(*)::int AS total
       FROM feeds f
       JOIN connections c ON c.id = f.connection_id
+      ${definitionJoin}
       WHERE ${where}
     `) as Array<{ total: number }>;
     total = Number(countRow?.total ?? 0);
@@ -488,7 +456,7 @@ async function handleListFeeds(
       deviceWorkerId: feed.device_worker_id as string | null,
     });
     const semantics = deriveFeedHealthSemantics({
-      operations: feed.operations as Array<'sync' | 'read'> | null,
+      operations: feed.operations as FeedOperation[] | null,
       store:
         parseJsonObject(feed.config).store === 'channel_messages'
           ? 'channel_messages'
@@ -929,27 +897,11 @@ async function handleUpdateFeed(
   const txResult = await sql.begin(async (tx) => {
     const existing = await tx`
       SELECT f.id, f.status, f.schedule, f.timezone, f.feed_key, f.config,
-             f.pinned_version, c.auth_profile_id, cd.feeds_schema
+             f.pinned_version, c.auth_profile_id, cd.feeds_schema,
+             (${tx.unsafe(feedTriggerEligibilitySql('cd', 'f', 'source-only'))}) AS source_listener
       FROM feeds f
       JOIN connections c ON c.id = f.connection_id
-      LEFT JOIN LATERAL (
-        SELECT feeds_schema
-        FROM connector_definitions
-        WHERE key = c.connector_key
-          AND organization_id = ${organizationId}
-          AND (
-            (f.pinned_version IS NULL AND status = 'active')
-            OR (
-              f.pinned_version IS NOT NULL
-              AND (version = f.pinned_version OR status = 'active')
-            )
-          )
-        ORDER BY (version = f.pinned_version) DESC,
-                 (status = 'active') DESC,
-                 updated_at DESC,
-                 id DESC
-        LIMIT 1
-      ) cd ON TRUE
+      LEFT JOIN LATERAL (${feedDefinitionSelection(tx)}) cd ON TRUE
       WHERE f.id = ${args.feed_id} AND f.organization_id = ${organizationId}
       FOR UPDATE OF f
     `;
@@ -1022,6 +974,9 @@ async function handleUpdateFeed(
       recomputeNextRun && effectiveSchedule
         ? nextRunAt(effectiveSchedule, new Date(), effectiveTimezone)
         : null;
+    // Scope edits and resumes must wake an already-bound source listener too.
+    // This is a one-shot retry clock; source feeds still have no sync cadence.
+    const restartListener = feedRow.source_listener === true && (hasConfigArg || resuming);
 
     const updated = await tx`
       UPDATE feeds
@@ -1031,13 +986,14 @@ async function handleUpdateFeed(
           config = CASE WHEN ${hasConfigArg} THEN ${tx.json(effectiveConfig ?? {})}::jsonb ELSE config END,
           schedule = CASE WHEN ${hasScheduleArg} THEN ${nextSchedule ?? null} ELSE schedule END,
           timezone = CASE WHEN ${hasTimezoneArg} THEN ${args.timezone ?? null} ELSE timezone END,
-          next_run_at = CASE WHEN ${recomputeNextRun} THEN ${nextRunAtVal}::timestamptz ELSE next_run_at END,
+          next_run_at = CASE WHEN ${restartListener} THEN NOW() WHEN ${recomputeNextRun} THEN ${nextRunAtVal}::timestamptz ELSE next_run_at END,
           last_error = CASE
+            WHEN ${restartListener} THEN NULL
             WHEN ${hasStatusArg} AND last_error = ${OAUTH_SCOPE_PAUSE_LAST_ERROR} THEN NULL
             ELSE last_error
           END,
-          consecutive_failures = CASE WHEN ${resuming} THEN 0 ELSE consecutive_failures END,
-          first_failure_at = CASE WHEN ${resuming} THEN NULL ELSE first_failure_at END,
+          consecutive_failures = CASE WHEN ${resuming || restartListener} THEN 0 ELSE consecutive_failures END,
+          first_failure_at = CASE WHEN ${resuming || restartListener} THEN NULL ELSE first_failure_at END,
           updated_at = NOW()
       WHERE id = ${args.feed_id} AND organization_id = ${organizationId}
       RETURNING ${tx.unsafe(publicFeedColumnList())}

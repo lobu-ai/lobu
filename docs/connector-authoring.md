@@ -142,6 +142,66 @@ const result = await client.feeds.readMany({
 coverage result. Each `readMany` entry is independently bounded by the per-feed
 timeout, and one failure does not discard successful results from the others.
 
+### Source subscriptions without a content mirror
+
+A browser feed can combine `read` with `webhook: { mode: "trigger",
+events: ["message.created"] }` and an optional `observe(ctx): Promise<void>`
+setup hook. The hook attaches the connector-owned listener and replays missed
+references after reconnects. It returns no data and adds no public feed operation.
+
+The hook receives the last committed source cursor in `ctx.checkpoint` and
+the browser dispatcher. Call `feed_listen` to obtain a scoped bridge/token,
+then publish reference batches through the existing page transport:
+
+```ts
+{
+  id: stableBatchId,
+  events: [{
+    id: stableSourceChangeId,
+    event_type: "message.created", // also declared in automationEvents
+    resource_type: "message",
+    resource_ref: sourceMessageId,
+    occurred_at: sourceTimestamp,
+  }],
+  checkpoint: { previous: lastCursor, next: nextCursor }, // replay batches only
+  more: false,
+}
+```
+
+Each batch contains at most 500 references and 128 KiB, including its checkpoint.
+Split oversized source pages into ordered batches with stable IDs, and put the
+page checkpoint only on the final batch so interruption cannot skip references.
+The browser sends
+bounded batches through its normal worker poll; it accepts at most 64 listener
+bindings and reports every accepted binding on each poll. The server queues
+matching Automations using the existing delivery dedupe and batching, and
+advances the cursor in the same transaction. Only its committed acknowledgment removes
+the batch from the browser buffer. Stable change IDs must be identical across
+overlapping feeds. References contain no message bodies, media or attributes;
+opaque cursors contain only bounded source positions. `more: true` asks for
+another setup/replay pass when a bounded replay cannot finish.
+
+With no authorized subscriber, the listener is revoked. Healthy bindings
+deliver directly without running the connector again or scheduling imports.
+An authorized headless Automation may read its subscribed private feed; this
+does not grant it access to other private feeds. Browser reads retain the
+Automation principal for connector policy and scrub temporary operation payloads.
+Background observation requires Auto permission for reads on the source connector.
+Ask or Block policies revoke the subscription; a background listener cannot
+approve its own access.
+
+Automations explicitly decide whether to save original content, persist a
+derived result, or only act. Observation references and Automation run records
+remain durable. A model-based Automation can also retain content in its normal
+transcript; observation does not change that retention contract.
+
+Realtime delivery requires the browser and source session to be available.
+Connector authors must implement reconnect replay from source-owned cursors.
+WhatsApp replays newly inserted messages still present in its local source
+history; edits and deletions are not advertised as new-message events. Sources
+without a listener, webhook or replayable change API cannot promise lossless
+realtime subscriptions merely by implementing an on-demand `read` handler.
+
 ### What a feed sync must get right
 
 - **`origin_id` stability.** Keep `origin_id` identical for the same source item
