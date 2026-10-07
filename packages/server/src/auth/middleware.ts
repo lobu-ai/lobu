@@ -11,6 +11,7 @@ import type { ResolveAuthNext } from '../workspace/types';
 import { createAuth } from './index';
 import type { AuthInfo } from './oauth/types';
 import { resolveSession } from './resolve-session';
+import logger from '../utils/logger';
 
 // Extend Hono context with auth properties
 declare module 'hono' {
@@ -86,7 +87,7 @@ export async function requireAuth(c: Context<{ Bindings: Env }>, next: Next) {
     c.set('session', session.session);
     return next();
   } catch (error) {
-    console.error('[Auth] Session check failed:', error);
+    logger.error({ err: error }, '[Auth] Session check failed');
     return c.json({ error: 'Unauthorized', message: 'Session validation failed' }, 401);
   }
 }

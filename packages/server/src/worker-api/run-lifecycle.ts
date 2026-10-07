@@ -991,14 +991,16 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 						});
 					}
 				} catch (err) {
-					if (browserRun) {
-						console.error(
-							"[stream] Insert failed for browser item:",
-							sanitizeBrowserText(errorMessage(err))
-						);
-					} else {
-						console.error("[stream] Insert failed for item", item.id, ":", err);
-					}
+					logger.error(
+						{
+							run_id: batch.run_id,
+							origin_id: item.id,
+							sanitized: browserRun,
+							err: browserRun ? sanitizeBrowserText(errorMessage(err)) : err,
+							sentryReported: true,
+						},
+						"[stream] Insert failed for item"
+					);
 					throw err;
 				}
 			}

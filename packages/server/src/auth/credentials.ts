@@ -6,12 +6,15 @@
  */
 
 import type { DbClient } from '../db/client';
+import { scrubSentryValue } from '@lobu/core';
 import { fetchCredentialedPublicUrl } from '@lobu/connector-worker/egress';
+import { cancelResponseBody } from '../utils/bounded-response';
 import {
   readConnectorOAuthResponse,
   withConnectorOAuthDeadline,
 } from '../utils/connector-oauth-http';
 import { buildRefreshRequest, parseTokenRefreshResponse } from './oauth/token-refresh';
+import logger from '../utils/logger';
 
 /**
  * Credential tokens for sync execution
@@ -243,7 +246,9 @@ export class CredentialService {
       resource: params.resource,
     });
 
+    let tokenOrigin: string | undefined;
     try {
+      tokenOrigin = new URL(params.tokenUrl).origin;
       // This is the connector-account refresh path: tokenUrl is persisted from
       // connector OAuth metadata, not the operator-trusted gateway login
       // provider configuration. Pin its DNS and never redirect credentials.
@@ -255,19 +260,45 @@ export class CredentialService {
           redirect: 'error',
           signal,
         });
+        // Failure bodies are unused. Cancel them so a read error cannot hide
+        // the HTTP status or turn an expected rejection into error telemetry.
+        if (!response.ok) {
+          await cancelResponseBody(response);
+          return { response, text: '' };
+        }
         const text = await readConnectorOAuthResponse(response);
         return { response, text };
       });
 
       if (!result.response.ok) {
-        console.error('[Credentials] Generic token refresh failed:', result.text);
+        const details = { token_origin: tokenOrigin, status: result.response.status };
+        // Rejected/expired grants and rate limits are expected client outcomes.
+        if (result.response.status >= 400 && result.response.status < 500) {
+          logger.warn(details, '[Credentials] Generic token refresh failed');
+        } else {
+          logger.error(details, '[Credentials] Generic token refresh failed');
+        }
         return null;
       }
 
-      const data = JSON.parse(result.text) as Record<string, unknown>;
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(result.text) as Record<string, unknown>;
+      } catch {
+        // JSON parser messages can quote provider response bodies containing
+        // credentials. Record the failure without the body or parser error.
+        logger.error(
+          { token_origin: tokenOrigin, status: result.response.status },
+          '[Credentials] Generic token refresh returned invalid JSON'
+        );
+        return null;
+      }
       const parsed = parseTokenRefreshResponse(data);
       if (!parsed) {
-        console.error('[Credentials] Generic token refresh returned no access_token');
+        logger.error(
+          { token_origin: tokenOrigin },
+          '[Credentials] Generic token refresh returned no access_token'
+        );
         return null;
       }
 
@@ -277,7 +308,10 @@ export class CredentialService {
         refreshToken: parsed.refreshToken,
       };
     } catch (error) {
-      console.error('[Credentials] Generic token refresh error:', error);
+      logger.error(
+        { err: scrubSentryValue(error), token_origin: tokenOrigin },
+        '[Credentials] Generic token refresh error'
+      );
       return null;
     }
   }

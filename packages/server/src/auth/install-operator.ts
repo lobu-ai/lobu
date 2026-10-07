@@ -18,6 +18,7 @@ import { assertEncryptionKey } from '@lobu/core';
 import { getDb } from '../db/client';
 import { generateSecureToken } from './oauth/utils';
 import { ensurePersonalOrganization } from './personal-org-provisioning';
+import logger from '../utils/logger';
 
 export const INSTALL_OPERATOR_KIND = 'install_operator' as const;
 
@@ -133,9 +134,9 @@ export async function ensureInstallOperator(): Promise<{
       username: null,
     });
   } catch (err) {
-    console.error(
-      '[install-operator] Personal-org provisioning failed; will retry on next boot:',
-      err
+    logger.error(
+      { err },
+      '[install-operator] Personal-org provisioning failed; will retry on next boot'
     );
   }
 
