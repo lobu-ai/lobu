@@ -9,7 +9,7 @@ import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-c
 import { feedBackoff } from '../connectors/feed-backoff';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { feedWebhookDrivenSql } from '../connectors/feed-health-semantics';
-import { sourceFeedSubscriptionSelection, sourceFeedSubscriptions } from './source-feed-subscriptions';
+import { sourceFeedSubscriptions } from './source-feed-subscriptions';
 
 export interface SourceFeedListenerTask { organizationId: string; feedId: number }
 
@@ -28,7 +28,10 @@ export async function enqueueSourceFeedListener(sql: DbClient, organizationId: s
   }]);
 }
 
-/** Only missing bindings or due retries need setup; deliveries go directly through notifications. */
+/**
+ * Only missing bindings or due retries need setup; deliveries go directly through notifications.
+ * The browser caps listeners at 64 bindings and reports every binding on each poll.
+ */
 export async function reconcileSourceFeedListeners(sql: DbClient, deviceId: string, orgIds: string[], boundFeedIds: number[]): Promise<void> {
   const feeds = await sql`
     SELECT f.id, f.organization_id FROM feeds f
@@ -42,7 +45,10 @@ export async function reconcileSourceFeedListeners(sql: DbClient, deviceId: stri
       AND (${sql.unsafe(feedWebhookDrivenSql('d', 'f'))})
       AND COALESCE(d.feeds_schema->f.feed_key->'webhook'->>'mode', 'trigger') = 'trigger'
       AND (NOT (f.id = ANY(${pgBigintArray(boundFeedIds)}::bigint[])) OR f.next_run_at <= now())
-      AND EXISTS (${sourceFeedSubscriptionSelection(sql)})
+      -- Cheap candidate filter; event matching, visibility and policy resolve once below.
+      AND EXISTS (SELECT 1 FROM automations a
+        WHERE a.organization_id = f.organization_id AND a.status = 'active'
+          AND a.triggers @> jsonb_build_array(jsonb_build_object('kind', 'event', 'connector_key', c.connector_key)))
   `;
   for (const feed of feeds) {
     // An active task already owns this feed; skip the owner/visibility scans

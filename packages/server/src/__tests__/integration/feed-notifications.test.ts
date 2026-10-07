@@ -10,7 +10,7 @@ import * as activation from '../../automations/activation';
 import { SOURCE_FEED_LISTENER_TASK } from '../../scheduled/task-definitions';
 import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY } from '../../lib/device-feed-read-protocol';
 import { resolveRunConnectorPolicy } from '../../authz/operation-run-policy';
-import { resolveActingPrincipal, upsertEntityApprovalPolicy } from '../../authz/entity-policy';
+import * as entityPolicy from '../../authz/entity-policy';
 import { manageFeeds } from '../../tools/admin/manage_feeds';
 import type { Env } from '../../index';
 import type { ToolContext } from '../../tools/registry';
@@ -52,7 +52,7 @@ async function subscribedFixture() {
     automation_events = ${sql.json([{ key: 'message.created', label: 'New message', resourceType: 'message' }])}
     WHERE organization_id = ${org.id}`;
   await sql`UPDATE feeds SET schedule = NULL, next_run_at = NULL`;
-  await upsertEntityApprovalPolicy(org.id, { resourceClass: 'connector_action', connectorKey: 'synthetic.source',
+  await entityPolicy.upsertEntityApprovalPolicy(org.id, { resourceClass: 'connector_action', connectorKey: 'synthetic.source',
     operationCategory: 'read', effects: { execute: 'auto' } });
   const agent = await createTestAgent({ organizationId: org.id, ownerUserId: user.id });
   const [{ id }] = await sql`SELECT nextval('automations_id_seq') AS id`;
@@ -208,6 +208,19 @@ describe('source feed notifications', () => {
     await sql`UPDATE connections SET visibility = 'private', created_by = ${other.id} WHERE id = ${connection.id}`;
     await sql`UPDATE automations SET triggers = ${sql.json([{ kind: 'event', connector_key: 'synthetic.source',
       event_types: ['message.created'], execution: 'turn', active_run: 'queue', output: 'silent' }])} WHERE id = ${automationId}`;
+    const resolveOwner = vi.spyOn(entityPolicy, 'resolveActingPrincipal');
+    try {
+      await reconcileSourceFeedListeners(sql, device.id, [org.id], []);
+      expect(resolveOwner).not.toHaveBeenCalled();
+      expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id}`).toHaveLength(0);
+    } finally {
+      resolveOwner.mockRestore();
+    }
+  });
+
+  it('skips subscription resolution when the device has no active connector subscriber', async () => {
+    const { sql, org, device, automationId } = await subscribedFixture();
+    await sql`UPDATE automations SET status = 'archived' WHERE id = ${automationId}`;
     const resolveSubscriptions = vi.spyOn(subscriptions, 'sourceFeedSubscriptions');
     try {
       await reconcileSourceFeedListeners(sql, device.id, [org.id], []);
@@ -221,7 +234,7 @@ describe('source feed notifications', () => {
   it.each(['deny', 'approval'] as const)('revokes source subscriptions when organization policy requires %s', async (effect) => {
     const { sql, org, device, connection, notice, automationId } = await subscribedFixture();
     expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id, automationId)).toHaveLength(1);
-    await upsertEntityApprovalPolicy(org.id, { resourceClass: 'connector_action', connectionId: Number(connection.id),
+    await entityPolicy.upsertEntityApprovalPolicy(org.id, { resourceClass: 'connector_action', connectionId: Number(connection.id),
       operationCategory: 'read', effects: { execute: effect } });
     expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id, automationId)).toEqual([]);
     expect((await receiveFeedNotifications(sql, [notice], device.id, [org.id]))[0].active).toBe(false);
@@ -291,7 +304,7 @@ describe('source feed notifications', () => {
   it('binds observation authority to the subscribed principal and rejects foreign private connections', async () => {
     const { sql, org, user, device, connection, notice, automationId } = await subscribedFixture();
     await sql`UPDATE connections SET visibility = 'private', created_by = ${user.id} WHERE id = ${connection.id}`;
-    const actor = await resolveActingPrincipal(sql, { organizationId: org.id, sessionAutomationId: automationId });
+    const actor = await entityPolicy.resolveActingPrincipal(sql, { organizationId: org.id, sessionAutomationId: automationId });
     const [parent] = await sql`INSERT INTO runs (organization_id, run_type, feed_id, connection_id, connector_key, action_key,
       status, approval_status, policy_principal_kind, policy_principal_id, created_by_user_id, automation_id, run_metadata, expires_at, connector_version)
       VALUES (${org.id}, 'action', ${notice.feed_id}, ${connection.id}, 'synthetic.source', ${DEVICE_FEED_READ_ACTION_KEY},

@@ -17,13 +17,20 @@ export interface SourceFeedSubscription {
   agentId: string | null;
 }
 
-/** Correlated selection for the enclosing feed f, connection c and definition d. */
-export function sourceFeedSubscriptionSelection(sql: DbClient, automationId?: number) {
+/** Resolve subscriptions through the persisted owner and canonical connection visibility. */
+export async function sourceFeedSubscriptions(sql: DbClient, organizationId: string, feedId: number, automationId?: number): Promise<SourceFeedSubscription[]> {
   // Resource-ref match predicates are evaluated per change by the normal activation path.
-  return sql`
-    SELECT a.id, a.created_by, a.managed_agent_id
-    FROM automations a JOIN automation_versions v ON v.id = a.current_version_id
-    WHERE a.organization_id = f.organization_id AND a.status = 'active'
+  const rows = await sql`
+    SELECT a.id, a.created_by, a.managed_agent_id, c.id AS connection_id, c.connector_key
+    FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
+    JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
+    JOIN automations a ON a.organization_id = f.organization_id
+    JOIN automation_versions v ON v.id = a.current_version_id
+    WHERE f.id = ${feedId} AND f.organization_id = ${organizationId}
+      AND f.status = 'active' AND f.deleted_at IS NULL
+      AND c.status = 'active' AND c.deleted_at IS NULL
+      AND d.feeds_schema->f.feed_key->'operations' ? 'read'
+      AND a.status = 'active'
       AND (a.managed_agent_id IS NOT NULL OR a.device_worker_id IS NOT NULL)
       ${automationId === undefined ? sql`` : sql`AND a.id = ${automationId}`}
       ${sql.unsafe(compileConnectionColumnVisibility('c', 'a.created_by'))}
@@ -36,21 +43,7 @@ export function sourceFeedSubscriptionSelection(sql: DbClient, automationId?: nu
           AND (NOT trigger ? 'connection_id' OR trigger->'connection_id' = to_jsonb(c.id))
           AND trigger->'event_types' ? (event->>'key')
       )
-  `;
-}
-
-/** Resolve subscriptions through the persisted owner and canonical connection visibility. */
-export async function sourceFeedSubscriptions(sql: DbClient, organizationId: string, feedId: number, automationId?: number): Promise<SourceFeedSubscription[]> {
-  const rows = await sql`
-    SELECT subscription.*, c.id AS connection_id, c.connector_key
-    FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
-    JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
-    JOIN LATERAL (${sourceFeedSubscriptionSelection(sql, automationId)}) subscription ON true
-    WHERE f.id = ${feedId} AND f.organization_id = ${organizationId}
-      AND f.status = 'active' AND f.deleted_at IS NULL
-      AND c.status = 'active' AND c.deleted_at IS NULL
-      AND d.feeds_schema->f.feed_key->'operations' ? 'read'
-    ORDER BY subscription.id
+    ORDER BY a.id
   `;
   if (!rows.length) return [];
   const policies = await listEntityApprovalPolicies(organizationId, 'connector_action', sql);

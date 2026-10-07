@@ -169,9 +169,10 @@ then publish reference batches through the existing page transport:
 ```
 
 Each batch contains at most 500 references and 128 KiB. The browser sends
-bounded batches through its normal worker poll. The server queues matching
-Automations using the existing delivery dedupe and batching, and advances
-the cursor in the same transaction. Only its committed acknowledgment removes
+bounded batches through its normal worker poll; it accepts at most 64 listener
+bindings and reports every accepted binding on each poll. The server queues
+matching Automations using the existing delivery dedupe and batching, and
+advances the cursor in the same transaction. Only its committed acknowledgment removes
 the batch from the browser buffer. Stable change IDs must be identical across
 overlapping feeds. References contain no message bodies, media or attributes;
 opaque cursors contain only bounded source positions. `more: true` asks for
