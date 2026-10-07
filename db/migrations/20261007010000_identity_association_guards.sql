@@ -210,17 +210,11 @@ CREATE OR REPLACE TRIGGER lobu_guard_identity_entity_types BEFORE UPDATE OR DELE
 CREATE OR REPLACE TRIGGER lobu_guard_identity_organizations BEFORE DELETE ON organization
   FOR EACH ROW EXECUTE FUNCTION lobu_guard_identity_types();
 
--- Pair lookup reads current decision records by index, never aggregates events.
-CREATE INDEX IF NOT EXISTS idx_identity_withdrawal_pair ON entity_relationships
-  (organization_id, LEAST(from_entity_id, to_entity_id), GREATEST(from_entity_id, to_entity_id), updated_at DESC)
-  WHERE metadata ? '_lobu_identity_decision' AND deleted_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_identity_rejected_pair ON runs (organization_id, (action_input->>'identity_pair'), id DESC)
-  WHERE approval_status = 'rejected' AND action_key = 'entity_change';
+-- Pair lookup indexes are installed concurrently by the following migration.
+
 CREATE OR REPLACE FUNCTION lobu_resolution_members(proposal jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
   SELECT COALESCE(proposal->'entity_ids', jsonb_build_array(proposal->'entity_id')) || jsonb_build_array(proposal->'winner_entity_id')
 $$;
-CREATE INDEX IF NOT EXISTS idx_merge_rejected_members ON runs USING gin (lobu_resolution_members(action_input))
-  WHERE approval_status = 'rejected' AND action_key = 'entity_change' AND action_input->>'operation' = 'merge';
 
 -- migrate:down
 -- Refuse rollback while classified types exist; first withdraw and declassify
@@ -230,10 +224,7 @@ DO $$ BEGIN
     RAISE EXCEPTION 'Identity association types must be migrated before rollback';
   END IF;
 END $$;
-DROP INDEX IF EXISTS idx_merge_rejected_members;
 DROP FUNCTION IF EXISTS lobu_resolution_members(jsonb);
-DROP INDEX IF EXISTS idx_identity_rejected_pair;
-DROP INDEX IF EXISTS idx_identity_withdrawal_pair;
 DROP TRIGGER IF EXISTS lobu_guard_identity_organizations ON organization;
 DROP TRIGGER IF EXISTS lobu_guard_identity_entity_types ON entity_types;
 DROP TRIGGER IF EXISTS lobu_guard_identity_rules ON entity_relationship_type_rules;
@@ -247,4 +238,5 @@ DROP FUNCTION IF EXISTS lobu_require_identity_lock(text);
 DROP FUNCTION IF EXISTS lobu_identity_lock_key(text);
 ALTER TABLE entity_relationship_types DROP CONSTRAINT IF EXISTS entity_relationship_types_purpose_check;
 ALTER TABLE entity_relationship_types ADD CONSTRAINT entity_relationship_types_purpose_check
-  CHECK (purpose IS NULL OR purpose = 'authorization');
+  CHECK (purpose IS NULL OR purpose = 'authorization') NOT VALID;
+ALTER TABLE entity_relationship_types VALIDATE CONSTRAINT entity_relationship_types_purpose_check;
