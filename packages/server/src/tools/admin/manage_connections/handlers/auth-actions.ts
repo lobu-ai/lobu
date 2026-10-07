@@ -2,6 +2,9 @@
  * Auth-related action handlers: reauthenticate, test.
  */
 
+import { connectionBrowserResource } from '../../../../connectors/browser-resource';
+import { verifyBrowserConnection } from '../../helpers/verify-browser-connection';
+import { parseDependencyUnavailableError } from '../../../../connectors/dependency-unavailable';
 import { getErrorMessage, isRetryable, type ToolErrorCode } from '@lobu/core';
 import { probeSlackConnectionIdentity } from '../../../../gateway/connections/chat-connection-service';
 import { getDb } from '../../../../db/client';
@@ -199,6 +202,23 @@ export async function handleTest(
   const conn = rows[0] as any;
   const withDeviceHealth = (result: ConnectionTestResult): ConnectionTestResult =>
     applySelectedDeviceHealth(conn, result);
+
+  const browserResource = await connectionBrowserResource(organizationId, args.connection_id);
+  if (browserResource) {
+    const result = await verifyBrowserConnection(args.connection_id, ctx);
+    if ('status' in result && result.status === 'completed') {
+      return { action: 'test', status: 'ok', message: browserResource.requirement.accountProbe ? 'Selected browser and account verified.' : 'Selected browser is available. This connector does not declare an account identity check.' };
+    }
+    const message = 'error' in result ? String(result.error)
+      : 'error_message' in result && result.error_message ? String(result.error_message) : 'Browser verification requires completion.';
+    const reason = parseDependencyUnavailableError(message)?.reason;
+    const codes: Record<string, ToolErrorCode> = {
+      browser_offline: 'NETWORK', browser_login_required: 'AUTH_MISSING', browser_account_mismatch: 'AUTH_INVALID',
+      browser_setup_required: 'AUTH_MISSING', browser_upgrade_required: 'VALIDATION', browser_not_declared: 'VALIDATION', browser_binding_mismatch: 'VALIDATION',
+    };
+    const code = reason ? codes[reason] : 'status' in result && result.status === 'timeout' ? 'UPSTREAM_TIMEOUT' : undefined;
+    return { action: 'test', status: 'warning', message, ...(code ? testErrorFields(code) : {}) };
+  }
 
   if (conn.connector_key === 'slack' && conn.credential_mode) {
     try {

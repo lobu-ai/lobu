@@ -5,6 +5,7 @@
  * Generates embeddings and streams results.
  */
 
+import { validateBrowserRequirement } from '@lobu/connector-sdk';
 import type { Env, EventEnvelope } from '@lobu/connector-sdk';
 import { stableStringify } from '@lobu/core/contracts/tools/view-content-hash';
 import type { AgentKind } from '@lobu/core/contracts/worker/device-automation';
@@ -379,6 +380,7 @@ async function executeSyncRun(
       executor: laneExecutor,
       job: {
         mode: 'sync',
+        browser: validatedBrowserGrant(job.browser_grant),
         httpAuth: job.http_auth,
         config: mergeEnv(env, job.connection_credentials, feedConfig),
         checkpoint: checkpoint as Record<string, unknown> | null,
@@ -584,6 +586,7 @@ async function executeActionRun(
       executor: laneExecutor,
       job: {
         mode: 'action',
+        browser: validatedBrowserGrant(job.browser_grant),
         httpAuth: job.http_auth,
         // NOTE: unlike the gateway's inline action path (manage_operations
         // `executeLocalActionInline`, which merges the connection's own config
@@ -1115,4 +1118,10 @@ async function processEventChunk(
   }
 
   return contentItems;
+}
+
+function validatedBrowserGrant(value: unknown) {
+  if (value == null) return undefined;
+  validateBrowserRequirement(value);
+  return value;
 }

@@ -2,6 +2,9 @@
  * Connect action handler: create connection + OAuth flow in one call.
  */
 
+import { completeBrowserConnectionSetup } from '../../helpers/verify-browser-connection';
+import { selectedBrowserRequirement } from '../../../../connectors/browser-resource';
+import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-setup';
 import { getDb, pgBigintArray, type DbClient } from "../../../../db/client";
 import { normalizeScopeList } from "../../../../auth/oauth/scopes";
 import { oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
@@ -419,7 +422,8 @@ async function handleConnectImpl(
     if (ownershipError) return { error: ownershipError };
   }
 
-  if (!isAdmin) {
+  const isOwnLiveBrowser = authSelection.authProfile?.auth_data?.mode === 'live' && authSelection.authProfile.created_by === userId;
+  if (!isAdmin && !isOwnLiveBrowser) {
     if (!isOAuthConnect || (authSelection.authProfile && authSelection.authProfile.created_by !== userId)) {
       return { error: 'Members can only connect their own OAuth accounts. Ask an administrator to configure shared credentials.' };
     }
@@ -469,6 +473,10 @@ async function handleConnectImpl(
       };
     }
   }
+
+  const browserSetup = await checkBrowserConnectionSetup({ action: 'connect', connector,
+    profile: authSelection.authProfile, deviceWorkerId: deviceBinding.deviceWorkerId, ctx, setupUrl });
+  if (browserSetup) return browserSetup;
 
   const hasNoAuth =
 		!authSelection.oauthMethod &&
@@ -530,7 +538,7 @@ async function handleConnectImpl(
 				!!authSelection.appAuthProfile));
 
   const needsConnectFlow =
-		authSelection.preferredMethodType === "oauth" &&
+		isOAuthConnect &&
     !!authSelection.oauthMethod &&
     !hasReadySelection &&
     !args.auth_profile_slug;
@@ -807,6 +815,14 @@ async function handleConnectImpl(
 			authRunId: interactiveAuthRunId!,
 		});
 	}
+
+  if (selectedBrowserRequirement(connector.browser, connector.auth_schema, authSelection.authProfile?.profile_kind)) {
+    const pending = await completeBrowserConnectionSetup({ action: 'connect', connectionId: Number(connection.id),
+      connectorKey: args.connector_key, slug: connection.slug, ctx, setupUrl });
+    if (pending) return pending;
+    return { action: 'connect', connection_id: connection.id, slug: connection.slug, status: 'active',
+      message: 'Browser connection verified.', view_url: setupUrl };
+  }
 
   // If active immediately, return simple result
   if (!needsConnectFlow && !needsBrowserAuth) {

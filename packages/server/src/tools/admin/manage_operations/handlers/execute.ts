@@ -1,3 +1,5 @@
+import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
+import { connectionBrowserGrant } from '../../../../connectors/browser-resource';
 import { connectorRunEnv } from "@lobu/connector-worker/env";
 import { executeCompiledConnector } from "@lobu/connector-worker/executor/runtime";
 import { getErrorMessage } from "@lobu/core";
@@ -232,6 +234,7 @@ async function executeLocalActionInline(
 				),
 				env: envStrings,
 				sessionState,
+				browser: await connectionBrowserGrant(organizationId, connection.id, connectorVersion),
 				credentials,
 				httpAuth,
 			},
@@ -240,7 +243,7 @@ async function executeLocalActionInline(
 				// Let an inline connector action drive the paired Owletto Chrome
 				// extension (the Lobu Team Deliveroo connector scrapes restaurant
 				// search + menu pages this way). The connector calls
-				// `ctx.sessionState.chrome_dispatcher.dispatch(...)`; that surfaces here
+				// `ctx.browser.dispatch(...)`; that surfaces here
 				// and we resolve a chrome worker + run the device action in-process,
 				// the same bridge syncs use over HTTP.
 				onChromeDispatch: async (actionKey, actionInput) => {
@@ -249,9 +252,6 @@ async function executeLocalActionInline(
 						actionKey,
 						actionInput,
 						parentRunId: runId,
-						// Browser affinity: data connection pin to a chrome-extension
-						// selects which Owletto browser receives scrapes.
-						parentConnectionId: connection.id,
 						visibilityUserId: requesterUserId,
 						abortSignal,
 					});
@@ -630,7 +630,7 @@ export async function handleExecute(
 	}
 
 	const { connection, operation } = resolved;
-	if (connection.status !== "active") {
+	if (connection.status !== "active" && !(connection.status === "pending_auth" && operation.operation_key === BROWSER_VERIFY_OPERATION && await connectionBrowserGrant(ctx.organizationId, connection.id))) {
 		return { error: `Connection is ${connection.status}, must be active` };
 	}
 

@@ -16,6 +16,8 @@
 // dist/ for the packaged-connector test run, where that cross-package source
 // path does not resolve.
 
+import { requireBrowser } from "@lobu/connector-sdk/browser-requirement";
+
 interface DomScrapeOpts {
   dispatcher: {
     dispatch: (action: string, input: Record<string, unknown>) => Promise<any>;
@@ -114,6 +116,7 @@ export function connectorSdkMock() {
     throw new Error(`${name} is not used in connector unit tests`);
   };
   return {
+    requireBrowser,
     extensionNetworkSync: notUsed("extensionNetworkSync"),
     // Connectors create their HTTP client as a class field at construction, so a
     // throwing stub would break `new XConnector()`. Return an inert client whose

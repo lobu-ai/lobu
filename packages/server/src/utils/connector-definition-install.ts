@@ -20,6 +20,7 @@ import type { McpOAuthMetadata } from '../mcp-proxy/types';
 import { assertChromeNamespaceInstallIsDeviceManifest } from './connector-execution-placement';
 import { preflightConnectorRelationshipTypes } from './connector-relationship-declarations';
 import { reconcileConnectorIdentityScopeRegistry } from './connector-identity-scopes';
+import { reconcileBrowserConnections } from '../connectors/browser-resource';
 
 type SqlClient = ReturnType<typeof getDb>;
 
@@ -366,6 +367,7 @@ async function upsertConnectorDefinitionRecordsInTransaction(
     metadata,
   });
 
+  const browserJson = metadata.browser ? sql.json(metadata.browser) : null;
   const authSchemaJson = metadata.authSchema ? sql.json(metadata.authSchema) : null;
   const feedsSchemaJson = metadata.feeds ? sql.json(metadata.feeds) : null;
   const actionsSchemaJson = metadata.actions ? sql.json(metadata.actions) : null;
@@ -407,6 +409,7 @@ async function upsertConnectorDefinitionRecordsInTransaction(
       SET name = v.name,
           description = v.description,
           version = v.version,
+          browser = v.browser,
           auth_schema = v.auth_schema,
           feeds_schema = v.feeds_schema,
           actions_schema = v.actions_schema,
@@ -426,6 +429,7 @@ async function upsertConnectorDefinitionRecordsInTransaction(
           ${metadata.name}::text AS name,
           ${metadata.description ?? null}::text AS description,
           ${metadata.version}::text AS version,
+          ${browserJson}::jsonb AS browser,
           ${authSchemaJson}::jsonb AS auth_schema,
           ${feedsSchemaJson}::jsonb AS feeds_schema,
           ${actionsSchemaJson}::jsonb AS actions_schema,
@@ -441,12 +445,12 @@ async function upsertConnectorDefinitionRecordsInTransaction(
           ${preservedLoginEnabled}::boolean AS login_enabled
       ) v
       WHERE cd.id = ${existingRow.id}
-        AND (cd.name, cd.description, cd.version, cd.auth_schema, cd.feeds_schema,
+        AND (cd.name, cd.description, cd.version, cd.browser, cd.auth_schema, cd.feeds_schema,
           cd.actions_schema, cd.automation_events, cd.options_schema, cd.mcp_config,
           cd.openapi_config, cd.favicon_domain, cd.required_capability, cd.runtime,
           cd.agent_tooling, cd.supports_execute, cd.login_enabled)
         IS DISTINCT FROM
-          (v.name, v.description, v.version, v.auth_schema, v.feeds_schema,
+          (v.name, v.description, v.version, v.browser, v.auth_schema, v.feeds_schema,
           v.actions_schema, v.automation_events, v.options_schema, v.mcp_config,
           v.openapi_config, v.favicon_domain, v.required_capability, v.runtime,
           v.agent_tooling, v.supports_execute, v.login_enabled)
@@ -462,13 +466,13 @@ async function upsertConnectorDefinitionRecordsInTransaction(
     const inserted = await sql`
       INSERT INTO connector_definitions (
         organization_id, key, name, description, version,
-        auth_schema, feeds_schema, actions_schema, automation_events, options_schema,
+        browser, auth_schema, feeds_schema, actions_schema, automation_events, options_schema,
         mcp_config, openapi_config, favicon_domain, required_capability,
         runtime, agent_tooling, supports_execute, status, login_enabled
       ) VALUES (
         ${params.organizationId}, ${metadata.key}, ${metadata.name},
         ${metadata.description ?? null}, ${metadata.version},
-        ${authSchemaJson}, ${feedsSchemaJson}, ${actionsSchemaJson}, ${automationEventsJson},
+        ${browserJson}, ${authSchemaJson}, ${feedsSchemaJson}, ${actionsSchemaJson}, ${automationEventsJson},
         ${optionsSchemaJson},
         ${mcpConfigJson}, ${openapiConfigJson},
         ${metadata.faviconDomain ?? null}, ${metadata.requiredCapability ?? null},
@@ -490,6 +494,7 @@ async function upsertConnectorDefinitionRecordsInTransaction(
         SET name = ${metadata.name},
             description = ${metadata.description ?? null},
             version = ${metadata.version},
+            browser = ${browserJson},
             auth_schema = ${authSchemaJson},
             feeds_schema = ${feedsSchemaJson},
             actions_schema = ${actionsSchemaJson},
@@ -707,5 +712,6 @@ async function upsertConnectorDefinitionRecordsInTransaction(
     `;
   }
 
+  if (metadata.browser) await reconcileBrowserConnections(params.organizationId, metadata.key, sql);
   return { updated: wasActive };
 }

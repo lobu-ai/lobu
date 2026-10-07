@@ -254,6 +254,8 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
     // Large per-connector JSONB blobs — too big and structure-dependent to expose
     // via raw SQL. Callers should hit the typed connector handler instead.
     connector_definitions: new Set([
+      // Browser grants include executable account probes; use typed discovery.
+      'browser',
       'mcp_config',
       'api_config',
       'openapi_config',

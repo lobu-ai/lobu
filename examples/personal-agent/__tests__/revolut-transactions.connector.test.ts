@@ -565,7 +565,7 @@ describe("Revolut Finance snapshots", () => {
 
     const result = await runSync(connector, {
       feedKey: "balances",
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
       checkpoint: {
         investment_refs: [
           {
@@ -699,7 +699,7 @@ describe("Revolut Finance snapshots", () => {
     await expect(
       runSync(connector, {
         feedKey: "balances",
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       } as never)
     ).rejects.toThrow("debugger cleanup failed");
   });
@@ -736,7 +736,7 @@ describe("Revolut Finance snapshots", () => {
     await expect(
       runSync(connector, {
         feedKey: "balances",
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       } as never)
     ).rejects.toThrow("drain exploded");
   });
@@ -775,7 +775,7 @@ describe("Revolut Finance snapshots", () => {
     await expect(
       runSync(connector, {
         feedKey: "balances",
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       } as never)
     ).rejects.toThrow(/no investment data returned/);
     expect(calls.some((call) => call.action === "network_intercept_stop")).toBe(
@@ -825,7 +825,7 @@ describe("Revolut Finance snapshots", () => {
     await expect(
       runSync(connector, {
         feedKey: "balances",
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       } as never)
     ).rejects.toThrow(/no investment data returned/);
     expect(calls.some((call) => call.action === "network_intercept_stop")).toBe(
@@ -866,7 +866,7 @@ describe("Revolut Finance snapshots", () => {
     await expect(
       runSync(connector, {
         feedKey: "balances",
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       } as never)
     ).rejects.toThrow(/No balance was stored/);
     expect(calls.some((call) => call.action === "network_intercept_stop")).toBe(
@@ -896,7 +896,7 @@ describe("Revolut Finance snapshots", () => {
     await expect(
       runSync(connector, {
         feedKey: "balances",
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       } as never)
     ).rejects.toThrow(/needs sign-in \(no investment data returned/);
     expect(calls.some((call) => call.action === "focus_tab")).toBe(true);

@@ -1633,6 +1633,36 @@ describe("isHomeFeedNoise", () => {
 });
 
 describe("LinkedInConnector home_feed", () => {
+  test("verifies only the immutable self-profile id, without confusing provider failures with logout", async () => {
+    const probe = new Function(
+      "document",
+      "fetch",
+      `return ${new LinkedInConnector().definition.browser.accountProbe.expression}`
+    );
+    const document = { cookie: 'JSESSIONID="synthetic-session"' };
+    const fetchSelf = async (url: string) => {
+      expect(url).toBe("/voyager/api/me");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          miniProfile: {
+            entityUrn: "urn:li:fs_miniProfile:synthetic-account",
+            publicIdentifier: "renamed-profile",
+          },
+        }),
+      };
+    };
+    expect(await probe(document, fetchSelf)).toEqual({
+      accountId: "urn:li:fs_miniProfile:synthetic-account",
+    });
+    expect(
+      await probe(document, async () => ({ ok: false, status: 401 }))
+    ).toBeNull();
+    await expect(
+      probe(document, async () => ({ ok: false, status: 503 }))
+    ).rejects.toThrow("HTTP 503");
+  });
   test("declares a home_feed feed with no required company_url", () => {
     const def = new LinkedInConnector().definition;
     expect(def.feeds.home_feed).toBeDefined();
@@ -1779,7 +1809,7 @@ describe("LinkedInConnector home_feed", () => {
       feedKey: "home_feed",
       config: { max_scrolls: 4 },
       checkpoint: {},
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
     };
     const res = await (async () => {
       try {
@@ -2004,32 +2034,30 @@ describe("LinkedInConnector home_feed", () => {
         feedKey: "home_feed",
         config: { max_scrolls: 1 },
         checkpoint: {},
-        sessionState: {
-          chrome_dispatcher: {
-            dispatch: async (
-              _action: string,
-              input: Record<string, unknown>
-            ) => ({
-              tab_id: 1,
-              cs_scrape: true,
-              result: await genericScrape({
-                ...(input.scrape_config as Record<string, unknown>),
-                scroll: scrollOverride ?? { max: 0, stall: 0, waitMs: 0 },
-                ...(expandRowsOverride
-                  ? {
-                      expandRows: {
-                        ...((
-                          input.scrape_config as {
-                            expandRows?: Record<string, unknown>;
-                          }
-                        ).expandRows ?? {}),
-                        ...expandRowsOverride,
-                      },
-                    }
-                  : {}),
-              }),
+        browser: {
+          dispatch: async (
+            _action: string,
+            input: Record<string, unknown>
+          ) => ({
+            tab_id: 1,
+            cs_scrape: true,
+            result: await genericScrape({
+              ...(input.scrape_config as Record<string, unknown>),
+              scroll: scrollOverride ?? { max: 0, stall: 0, waitMs: 0 },
+              ...(expandRowsOverride
+                ? {
+                    expandRows: {
+                      ...((
+                        input.scrape_config as {
+                          expandRows?: Record<string, unknown>;
+                        }
+                      ).expandRows ?? {}),
+                      ...expandRowsOverride,
+                    },
+                  }
+                : {}),
             }),
-          },
+          }),
         },
       });
     } finally {
@@ -2513,7 +2541,7 @@ describe("LinkedInConnector home_feed", () => {
         feedKey: "home_feed",
         config: { min_scrolls: 6, max_scrolls: 10 },
         checkpoint: {},
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       });
       expect(scrollMaxes).toEqual([8]);
       expect(res.metadata.scrolls_this_run).toBe(8);
@@ -2532,7 +2560,7 @@ describe("LinkedInConnector home_feed", () => {
         feedKey: "home_feed",
         config: {},
         checkpoint: {},
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       })
     ).rejects.toThrow(/no post rows/i);
   });
@@ -2576,7 +2604,7 @@ describe("LinkedInConnector home_feed", () => {
       feedKey: "home_feed",
       config: {},
       checkpoint: {},
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
     });
     expect(res.events).toHaveLength(3);
     expect(res.events[1]).toMatchObject({
@@ -2621,7 +2649,7 @@ describe("LinkedInConnector home_feed", () => {
         feedKey: "home_feed",
         config: {},
         checkpoint: {},
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       })
     ).rejects.toThrow(
       "LinkedIn scraped 1 post row without a durable activity/share/ugcPost identity (first row id: opaque-component-key). No partial home-feed batch was persisted."
@@ -2664,7 +2692,7 @@ describe("LinkedInConnector home_feed", () => {
       feedKey: "home_feed",
       config: {},
       checkpoint: {},
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
     });
 
     expect(result.events).toHaveLength(1);
@@ -2702,7 +2730,7 @@ describe("LinkedInConnector home_feed", () => {
       feedKey: "home_feed",
       config: {},
       checkpoint: {},
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
     });
 
     expect(result.events).toHaveLength(1);
@@ -2738,7 +2766,7 @@ describe("LinkedInConnector home_feed", () => {
         feedKey: "home_feed",
         config: {},
         checkpoint: {},
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       })
     ).rejects.toThrow(/could not resolve.*No home-feed events were persisted/i);
   });
@@ -2764,7 +2792,7 @@ describe("LinkedInConnector home_feed", () => {
         feedKey: "home_feed",
         config: {},
         checkpoint: {},
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       })
     ).rejects.toThrow(/usable content with a durable identity/i);
   });
@@ -2778,7 +2806,7 @@ describe("LinkedInConnector home_feed", () => {
       feedKey: "home_feed",
       config: {},
       checkpoint: {},
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
     };
     await expect(runSync(connector, ctx)).rejects.toThrow(
       /Not logged into LinkedIn/
@@ -2983,11 +3011,12 @@ describe("LinkedInConnector takeout identity attributions", () => {
 });
 
 describe("LinkedInConnector auth schema", () => {
-  test("is none-only so a takeout/extension connection needs no OAuth handshake", () => {
+  test("requires a live browser account without an OAuth handshake", () => {
     const def = new LinkedInConnector().definition;
     const methods = def.authSchema.methods;
-    expect(methods).toHaveLength(1);
-    expect(methods[0].type).toBe("none");
+    expect(methods).toHaveLength(2);
+    expect(methods[0]).toMatchObject({ type: "browser", mode: "live" });
+    expect(methods[1]).toMatchObject({ type: "none" });
     // No oauth method — the server would otherwise pick it as authoritative and
     // force a LinkedIn OAuth flow before a connection could be created, blocking
     // the takeout + extension use cases (no feed consumes an OAuth token).
@@ -3356,7 +3385,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.13.1");
+    expect(c.definition.version).toBe("3.13.2");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
@@ -3719,24 +3748,22 @@ describe("prepare_comment helpers", () => {
       },
       credentials: null,
       config: {},
-      sessionState: {
-        chrome_dispatcher: {
-          dispatch: async (key: string) => {
-            if (key === "navigate") {
-              return {
-                tab_id: 5,
-                current_url:
-                  "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567",
-              };
-            }
-            if (key === "wait_for_selector") return {};
-            if (key === "evaluate") {
-              return {
-                value: { ok: true, reason: "typed", preview: "Nice post" },
-              };
-            }
-            return {};
-          },
+      browser: {
+        dispatch: async (key: string) => {
+          if (key === "navigate") {
+            return {
+              tab_id: 5,
+              current_url:
+                "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567",
+            };
+          }
+          if (key === "wait_for_selector") return {};
+          if (key === "evaluate") {
+            return {
+              value: { ok: true, reason: "typed", preview: "Nice post" },
+            };
+          }
+          return {};
         },
       },
     });
@@ -3759,68 +3786,66 @@ describe("prepare_comment helpers", () => {
       input: {},
       credentials: null,
       config: {},
-      sessionState: {
-        chrome_dispatcher: {
-          dispatch: async (key: string, input: Record<string, unknown>) => {
-            if (key !== "navigate") return {};
-            const url = String(input.url);
-            visited.push(url);
-            if (url === "https://www.linkedin.com/in/me/") {
-              return {
-                result: {
-                  loggedIn: true,
-                  landedUrl:
-                    "https://www.linkedin.com/in/fixture-member/?isSelfProfile=true",
-                  rows: [],
-                },
-              };
-            }
-            const member = {
-              href: "https://www.linkedin.com/in/fixture-member/",
-              name: "View Fixture Member’s profile",
+      browser: {
+        dispatch: async (key: string, input: Record<string, unknown>) => {
+          if (key !== "navigate") return {};
+          const url = String(input.url);
+          visited.push(url);
+          if (url === "https://www.linkedin.com/in/me/") {
+            return {
+              result: {
+                loggedIn: true,
+                landedUrl:
+                  "https://www.linkedin.com/in/fixture-member/?isSelfProfile=true",
+                rows: [],
+              },
             };
-            if (url.endsWith("/recent-activity/all/")) {
-              return {
-                result: {
-                  loggedIn: true,
-                  rows: [
-                    {
-                      id: "post_token",
-                      body: `Feed post ${prefix}Fixture Member • You Founder 1d • A post the member wrote with enough text`,
-                      post_identity: "urn:li:activity:1111111111111111111",
-                      links: [member],
-                    },
-                  ],
-                },
-              };
-            }
+          }
+          const member = {
+            href: "https://www.linkedin.com/in/fixture-member/",
+            name: "View Fixture Member’s profile",
+          };
+          if (url.endsWith("/recent-activity/all/")) {
             return {
               result: {
                 loggedIn: true,
                 rows: [
                   {
-                    id: "parent_token",
-                    body: "Feed post Fixture Post Author • 2nd Role at Co 3h • Somebody else's post with enough text",
-                    author_control_label:
-                      "Open control menu for post by Fixture Post Author",
-                    post_identity: "urn:li:activity:3333333333333333333",
-                    links: [
-                      {
-                        href: "https://www.linkedin.com/in/fixture-post-author/",
-                        name: "View Fixture Post Author’s profile",
-                      },
-                    ],
-                  },
-                  {
-                    id: "replaceableComment_urn:li:comment:(activity:3333333333333333333,4444444444444444444)",
-                    body: "Feed post recommendations are useful",
-                    author: "Fixture Member",
+                    id: "post_token",
+                    body: `Feed post ${prefix}Fixture Member • You Founder 1d • A post the member wrote with enough text`,
+                    post_identity: "urn:li:activity:1111111111111111111",
                     links: [member],
                   },
                 ],
               },
             };
-          },
+          }
+          return {
+            result: {
+              loggedIn: true,
+              rows: [
+                {
+                  id: "parent_token",
+                  body: "Feed post Fixture Post Author • 2nd Role at Co 3h • Somebody else's post with enough text",
+                  author_control_label:
+                    "Open control menu for post by Fixture Post Author",
+                  post_identity: "urn:li:activity:3333333333333333333",
+                  links: [
+                    {
+                      href: "https://www.linkedin.com/in/fixture-post-author/",
+                      name: "View Fixture Post Author’s profile",
+                    },
+                  ],
+                },
+                {
+                  id: "replaceableComment_urn:li:comment:(activity:3333333333333333333,4444444444444444444)",
+                  body: "Feed post recommendations are useful",
+                  author: "Fixture Member",
+                  links: [member],
+                },
+              ],
+            },
+          };
         },
       },
     } as never);
@@ -3895,50 +3920,48 @@ describe("prepare_comment helpers", () => {
       input: {},
       credentials: null,
       config: {},
-      sessionState: {
-        chrome_dispatcher: {
-          dispatch: async (key: string, input: Record<string, unknown>) => {
-            if (key !== "navigate") return {};
-            const url = String(input.url);
-            visited.push(url);
-            if (url === "https://www.linkedin.com/in/me/") {
-              return {
-                result: {
-                  loggedIn: true,
-                  landedUrl: "https://www.linkedin.com/in/jos%C3%A9-fixture/",
-                  rows: [],
-                },
-              };
-            }
-            if (url.endsWith("/recent-activity/all/")) {
-              return {
-                result: {
-                  loggedIn: true,
-                  rows: [
-                    {
-                      id: "post_token",
-                      body: "Feed post José Fixture • You Founder 1d • A post the member wrote with enough text",
-                      post_identity: "urn:li:activity:1111111111111111111",
-                      links: [member],
-                    },
-                  ],
-                },
-              };
-            }
+      browser: {
+        dispatch: async (key: string, input: Record<string, unknown>) => {
+          if (key !== "navigate") return {};
+          const url = String(input.url);
+          visited.push(url);
+          if (url === "https://www.linkedin.com/in/me/") {
+            return {
+              result: {
+                loggedIn: true,
+                landedUrl: "https://www.linkedin.com/in/jos%C3%A9-fixture/",
+                rows: [],
+              },
+            };
+          }
+          if (url.endsWith("/recent-activity/all/")) {
             return {
               result: {
                 loggedIn: true,
                 rows: [
                   {
-                    id: "replaceableComment_urn:li:comment:(activity:3333333333333333333,4444444444444444444)",
-                    body: "A comment the member wrote",
-                    author: "José Fixture",
+                    id: "post_token",
+                    body: "Feed post José Fixture • You Founder 1d • A post the member wrote with enough text",
+                    post_identity: "urn:li:activity:1111111111111111111",
                     links: [member],
                   },
                 ],
               },
             };
-          },
+          }
+          return {
+            result: {
+              loggedIn: true,
+              rows: [
+                {
+                  id: "replaceableComment_urn:li:comment:(activity:3333333333333333333,4444444444444444444)",
+                  body: "A comment the member wrote",
+                  author: "José Fixture",
+                  links: [member],
+                },
+              ],
+            },
+          };
         },
       },
     } as never);
@@ -3968,31 +3991,29 @@ describe("prepare_comment helpers", () => {
     const result = await new LinkedInConnector().execute({
       actionKey: "read_my_activity",
       input: {},
-      sessionState: {
-        chrome_dispatcher: {
-          dispatch: async (_key: string, input: Record<string, unknown>) => {
-            scrapes++;
-            const config = input.scrape_config as {
-              loggedOutWhen?: { pathRegex?: string };
-            };
-            const landedUrl =
-              scrapes === authWallAt
-                ? "https://www.linkedin.com/checkpoint/challenge/"
-                : scrapes === 1
-                  ? "https://www.linkedin.com/in/fixture-member/"
-                  : String(input.url);
-            return {
-              result: {
-                landedUrl,
-                loggedIn:
-                  !config.loggedOutWhen?.pathRegex ||
-                  !new RegExp(config.loggedOutWhen.pathRegex).test(
-                    new URL(landedUrl).pathname
-                  ),
-                rows: [],
-              },
-            };
-          },
+      browser: {
+        dispatch: async (_key: string, input: Record<string, unknown>) => {
+          scrapes++;
+          const config = input.scrape_config as {
+            loggedOutWhen?: { pathRegex?: string };
+          };
+          const landedUrl =
+            scrapes === authWallAt
+              ? "https://www.linkedin.com/checkpoint/challenge/"
+              : scrapes === 1
+                ? "https://www.linkedin.com/in/fixture-member/"
+                : String(input.url);
+          return {
+            result: {
+              landedUrl,
+              loggedIn:
+                !config.loggedOutWhen?.pathRegex ||
+                !new RegExp(config.loggedOutWhen.pathRegex).test(
+                  new URL(landedUrl).pathname
+                ),
+              rows: [],
+            },
+          };
         },
       },
     });
@@ -4014,28 +4035,26 @@ describe("prepare_comment helpers", () => {
       },
       credentials: null,
       config: {},
-      sessionState: {
-        chrome_dispatcher: {
-          dispatch: async (key: string, input: Record<string, unknown>) => {
-            if (key === "navigate") {
-              return {
-                tab_id: 6,
-                current_url:
-                  "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567",
-              };
-            }
-            if (key === "wait_for_selector") return {};
-            if (key === "evaluate") {
-              const expr = String(input.expression);
-              if (expr.includes("load|show|view")) return { value: false };
-              return {
-                value: {
-                  comments: [{ author: "Burak", text: "Nice post" }],
-                },
-              };
-            }
-            throw new Error(`unexpected ${key}`);
-          },
+      browser: {
+        dispatch: async (key: string, input: Record<string, unknown>) => {
+          if (key === "navigate") {
+            return {
+              tab_id: 6,
+              current_url:
+                "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567",
+            };
+          }
+          if (key === "wait_for_selector") return {};
+          if (key === "evaluate") {
+            const expr = String(input.expression);
+            if (expr.includes("load|show|view")) return { value: false };
+            return {
+              value: {
+                comments: [{ author: "Burak", text: "Nice post" }],
+              },
+            };
+          }
+          throw new Error(`unexpected ${key}`);
         },
       },
     });
@@ -4059,12 +4078,10 @@ describe("prepare_comment helpers", () => {
       },
       credentials: null,
       config: {},
-      sessionState: {
-        chrome_dispatcher: {
-          dispatch: async () => {
-            dispatches += 1;
-            throw new Error("must not dispatch for a generic feed URL");
-          },
+      browser: {
+        dispatch: async () => {
+          dispatches += 1;
+          throw new Error("must not dispatch for a generic feed URL");
         },
       },
     });
@@ -4085,21 +4102,19 @@ describe("prepare_comment helpers", () => {
       },
       credentials: null,
       config: {},
-      sessionState: {
-        chrome_dispatcher: {
-          dispatch: async (key: string) => {
-            if (key === "navigate") {
-              return {
-                tab_id: 9,
-                current_url:
-                  "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567",
-              };
-            }
-            if (key === "evaluate") {
-              return { value: { ok: true, preview: "Nice post" } };
-            }
-            return {};
-          },
+      browser: {
+        dispatch: async (key: string) => {
+          if (key === "navigate") {
+            return {
+              tab_id: 9,
+              current_url:
+                "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567",
+            };
+          }
+          if (key === "evaluate") {
+            return { value: { ok: true, preview: "Nice post" } };
+          }
+          return {};
         },
       },
     });
@@ -4123,21 +4138,19 @@ describe("prepare_comment helpers", () => {
       },
       credentials: null,
       config: {},
-      sessionState: {
-        chrome_dispatcher: {
-          dispatch: async (key: string) => {
-            if (key === "navigate") {
-              return {
-                tab_id: 10,
-                current_url:
-                  "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567",
-              };
-            }
-            if (key === "evaluate") {
-              return { value: { ok: true, preview: "Nice post" } };
-            }
-            return {};
-          },
+      browser: {
+        dispatch: async (key: string) => {
+          if (key === "navigate") {
+            return {
+              tab_id: 10,
+              current_url:
+                "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567",
+            };
+          }
+          if (key === "evaluate") {
+            return { value: { ok: true, preview: "Nice post" } };
+          }
+          return {};
         },
       },
     });
@@ -4160,12 +4173,10 @@ describe("prepare_comment helpers", () => {
       },
       credentials: null,
       config: {},
-      sessionState: {
-        chrome_dispatcher: {
-          dispatch: async () => {
-            dispatches += 1;
-            throw new Error("must not dispatch for a generic feed URL");
-          },
+      browser: {
+        dispatch: async () => {
+          dispatches += 1;
+          throw new Error("must not dispatch for a generic feed URL");
         },
       },
     });

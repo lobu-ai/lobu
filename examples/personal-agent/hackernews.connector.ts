@@ -20,6 +20,7 @@
 
 import TurndownService from "turndown";
 import {
+  requireBrowser,
   type ActionContext,
   type ActionResult,
   type ChromeActionDispatcher,
@@ -106,20 +107,6 @@ function fillReplyTextareaExpression(body: string): string {
 
 function chromeOriginsInput() {
   return { allowed_origins: HN_ORIGINS };
-}
-
-function requireExtensionDispatcher(ctx: {
-  sessionState?: Record<string, unknown> | null;
-}): ChromeActionDispatcher {
-  const handle = ctx.sessionState?.chrome_dispatcher as
-    | ChromeActionDispatcher
-    | undefined;
-  if (!handle || typeof handle.dispatch !== "function") {
-    throw new Error(
-      "HackerNews connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState."
-    );
-  }
-  return handle;
 }
 
 function isHnAuthWall(url: string | undefined): boolean {
@@ -244,10 +231,22 @@ export default class HackerNewsConnector extends ConnectorRuntime {
     name: "Hacker News",
     description:
       "Searches Hacker News stories and comments via Algolia API; prepare_comment stages a reply draft in the reply form for the human to submit.",
-    version: "1.1.0",
+    version: "1.1.1",
     faviconDomain: "news.ycombinator.com",
+    browser: {
+      origins: ["https://news.ycombinator.com"],
+      authMethods: ["browser"],
+      accountProbe: {
+        url: "https://news.ycombinator.com/",
+        expression:
+          "(() => { const accountId = document.querySelector('#me')?.textContent?.trim(); return accountId ? { accountId } : null; })()",
+      },
+    },
     authSchema: {
-      methods: [{ type: "none" }],
+      methods: [
+        { type: "none", label: "Public API" },
+        { type: "browser", mode: "live" },
+      ],
     },
     feeds: {
       stories: {
@@ -634,7 +633,7 @@ export default class HackerNewsConnector extends ConnectorRuntime {
           error: "item_url or item_id is required",
         };
       }
-      const dispatcher = requireExtensionDispatcher(ctx);
+      const dispatcher = requireBrowser(ctx);
       const output = await prepareHnComment(dispatcher, {
         itemUrl: itemRaw,
         body,

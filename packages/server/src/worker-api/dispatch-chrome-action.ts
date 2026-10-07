@@ -19,6 +19,8 @@
  * can land on any replica and finalize the run row.
  */
 
+import { BROWSER_VERIFY_OPERATION, constrainBrowserInput } from '@lobu/connector-sdk';
+import { BROWSER_EXTENSION_UPDATE_REQUIRED, browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
 import type { DispatchChromeActionRequest } from '@lobu/core/contracts/worker/protocol';
 import type { Context } from 'hono';
 import { resolveAutomationConnectionVisibilityUserId } from '../authz/automation-connection-visibility';
@@ -620,29 +622,25 @@ export async function dispatchChromeActionToExtension(params: {
   actionInput: Record<string, unknown>;
   /** Parent connector run id, also used to scope extension-owned tabs. */
   parentRunId: number;
-  /**
-   * Data connection that owns the parent connector run. When pinned to
-   * a chrome-extension, scrapes target that browser.
-   */
-  parentConnectionId?: number | null;
   /** User principal used only to resolve private browser visibility. */
   visibilityUserId?: string | null;
   /** Abort the wait early (e.g. the calling reaction hit its budget). */
   abortSignal?: AbortSignal;
+  /** Host-only recursion for the declared self-identity probe. Never accepted from worker input. */
+  skipAccountProbe?: boolean;
 }): Promise<ChromeActionDispatchResult> {
   const {
     organizationId,
     actionKey,
     actionInput,
     parentRunId,
-    parentConnectionId,
     visibilityUserId = null,
     abortSignal,
   } = params;
   const sql = getDb();
 
   const parentRows = (await sql`
-    SELECT created_by_user_id, automation_id,
+    SELECT connection_id, connector_version, target_device_worker_id, action_key, created_by_user_id, automation_id,
            activated_by_device_worker_id, activation_tab_id,
            activation_target_urls, run_metadata, activation_kind, status,
            run_type, approval_status, policy_principal_kind, policy_principal_id
@@ -651,6 +649,10 @@ export async function dispatchChromeActionToExtension(params: {
       AND organization_id = ${organizationId}
     LIMIT 1
   `) as Array<{
+    connection_id: number | null;
+    connector_version: string | null;
+    target_device_worker_id: string | null;
+    action_key: string | null;
     created_by_user_id: string | null;
     automation_id: number | null;
     activated_by_device_worker_id: string | null;
@@ -676,6 +678,27 @@ export async function dispatchChromeActionToExtension(params: {
     || !['sync', 'action'].includes(parent.run_type)) {
     return { status: 'failed', error_message: 'The parent connector run is no longer authorized to execute.' };
   }
+  const browserResource = await connectionBrowserResource(organizationId, parent.connection_id, parent.connector_version);
+  if (!browserResource) {
+    return { status: 'failed', error_message: dependencyUnavailableError('browser_not_declared', 'This connection has no declared browser resource for its selected authentication mode.') };
+  }
+  if (!browserResource.deviceWorkerId || (browserResource.profileDeviceId && browserResource.profileDeviceId !== browserResource.deviceWorkerId)) {
+    return { status: 'failed', error_message: dependencyUnavailableError('browser_setup_required', 'Choose a paired Chrome browser for this connection before running it.') };
+  }
+  if (browserResource.online && !browserResource.supportsScopedOrigins) {
+    return { status: 'failed', error_message: dependencyUnavailableError('browser_upgrade_required', BROWSER_EXTENSION_UPDATE_REQUIRED) };
+  }
+  if (parent.target_device_worker_id && parent.target_device_worker_id !== browserResource.deviceWorkerId) {
+    return { status: 'failed', error_message: dependencyUnavailableError('browser_binding_mismatch', 'The connection browser changed after this run was created. Start a new run.') };
+  }
+  const queuedBinding = parent.run_metadata?.browser_binding as Record<string, unknown> | undefined;
+  if (queuedBinding && Object.entries(browserBindingSnapshot(browserResource)).some(([key, value]) => queuedBinding[key] !== value)) {
+    return { status: 'failed', error_message: dependencyUnavailableError('browser_binding_mismatch', 'The browser account binding changed after this run was created. Start a new run.') };
+  }
+  if (browserResource.profileStatus === 'revoked') return { status: 'failed', error_message: dependencyUnavailableError('browser_setup_required', 'This browser account was revoked. Reconnect it before continuing.') };
+  let scopedInput: Record<string, unknown>;
+  try { scopedInput = constrainBrowserInput(browserResource.requirement, actionKey, actionInput); }
+  catch (error) { return { status: 'failed', error_message: errorMessage(error) }; }
   const actor = parent.run_type === 'sync'
     ? await resolveActingPrincipal(sql, { organizationId, userId: parent.created_by_user_id, sessionAutomationId: parent.automation_id })
     : await resolveStoredActingPrincipal(sql, organizationId, parent.policy_principal_kind, parent.policy_principal_id);
@@ -687,9 +710,9 @@ export async function dispatchChromeActionToExtension(params: {
   }
   const createdByUserId = parent.created_by_user_id;
   const automationId = parent.automation_id == null ? null : Number(parent.automation_id);
-  const activatedDeviceWorkerId = parent.activated_by_device_worker_id;
+  const activatedDeviceWorkerId = params.skipAccountProbe ? null : parent.activated_by_device_worker_id;
   const activationTabId =
-    parent.activation_tab_id == null ? null : Number(parent.activation_tab_id);
+    params.skipAccountProbe || parent.activation_tab_id == null ? null : Number(parent.activation_tab_id);
   const activationTargetUrls = parsePgTextArray(parent.activation_target_urls);
   const browserContext = browserContextWithFlow(
     browserActionContextFromMetadata(parent.run_metadata) ??
@@ -732,9 +755,7 @@ export async function dispatchChromeActionToExtension(params: {
     // Chrome must verify the live URL before returning the user-owned tab.
     // A stored activation is not evidence that this tab is still on that page.
   }
-  // An interactive action may name the browser it wants to be seen in. That
-  // beats the parent connection's scrape pin, which points at whichever machine
-  // owns the cron rather than wherever the human is sitting.
+  // An explicit or activated browser must agree with the saved account binding.
   const rawTarget = (actionInput ?? {})[TARGET_BROWSER_CONNECTION_INPUT_KEY];
   let targetedBrowser = false;
   let preferredDeviceWorkerId: string | null;
@@ -756,14 +777,17 @@ export async function dispatchChromeActionToExtension(params: {
     targetedBrowser = true;
   } else {
     preferredDeviceWorkerId = await preferredBrowserWorkerForConnection(
-      parentConnectionId,
+      parent.connection_id,
       sql
     );
   }
 
+  if (preferredDeviceWorkerId !== browserResource.deviceWorkerId) {
+    return { status: 'failed', error_message: dependencyUnavailableError('browser_binding_mismatch', 'This operation targets a different browser than the connection. Use a connection bound to that browser account.') };
+  }
   const chromeConnection = await resolveOnlineChromeConnection(organizationId, sql, {
     preferredDeviceWorkerId,
-    failIfPreferredOffline: preferredDeviceWorkerId != null,
+    failIfPreferredOffline: true,
   });
   if (!chromeConnection) {
     return {
@@ -772,14 +796,73 @@ export async function dispatchChromeActionToExtension(params: {
         'browser_offline',
         targetedBrowser
           ? 'The browser this action is set to open in is offline. Open Chrome with the Owletto extension on that machine and try again.'
-          : preferredDeviceWorkerId
-            ? 'The Chrome extension selected for this connection is offline. Open Owletto in that browser (and stay signed in) to continue.'
-            : 'No online paired Owletto Chrome extension in this organization. Pair a Chrome extension first (and make sure it is running).',
+          : 'The Chrome extension selected for this connection is offline. Open Owletto in that browser (and stay signed in) to continue.',
       ),
     };
   }
 
-  const operationInput: Record<string, unknown> = { ...(actionInput ?? {}) };
+  const probe = browserResource.requirement.accountProbe;
+  const verifiedBinding = parent.run_metadata?.browser_verified as Record<string, unknown> | undefined;
+  const alreadyVerified = verifiedBinding?.device_worker_id === browserResource.deviceWorkerId
+    && verifiedBinding?.auth_profile_id === browserResource.authProfileId
+    && verifiedBinding?.account_id === browserResource.accountId;
+  if (!params.skipAccountProbe && probe && !alreadyVerified) {
+    if (!browserResource.live || !browserResource.authProfileId) {
+      return { status: 'failed', error_message: dependencyUnavailableError('browser_setup_required', 'Connect this browser account before reading it.') };
+    }
+    const probeStep = (key: string, input: Record<string, unknown>) => dispatchChromeActionToExtension({
+      ...params, actionKey: key, actionInput: input, skipAccountProbe: true,
+    });
+    const nav = await probeStep('navigate', { url: probe.url, persistent: true, wait_for_load: true });
+    if (nav.status !== 'completed') return nav;
+    const tabId = nav.output?.tab_id;
+    if (typeof tabId !== 'number') return { status: 'failed', error_message: 'Browser account probe did not return a tab.' };
+    const evaluated = await probeStep('evaluate', { tab_id: tabId, expression: probe.expression, await_promise: true });
+    if (evaluated.status !== 'completed') return evaluated;
+    const identity = evaluated.output?.value as { accountId?: unknown; displayName?: unknown } | null;
+    const accountId = typeof identity?.accountId === 'string' ? identity.accountId.trim() : '';
+    const accountMismatch = !!browserResource.accountId && browserResource.accountId !== accountId;
+    if (!accountId || accountId.length > 512 || accountMismatch) {
+      await sql.begin(async tx => {
+        await tx`UPDATE auth_profiles SET status = 'pending_auth', updated_at = now()
+          WHERE id = ${browserResource.authProfileId} AND organization_id = ${organizationId} AND status <> 'revoked'`;
+        await tx`UPDATE connections SET status = 'pending_auth', updated_at = now()
+          WHERE id = ${parent.connection_id} AND organization_id = ${organizationId} AND status = 'active'
+            AND auth_profile_id = ${browserResource.authProfileId} AND device_worker_id = ${browserResource.deviceWorkerId}::uuid`;
+      });
+      return { status: 'failed', error_message: accountMismatch
+        ? dependencyUnavailableError('browser_account_mismatch', 'The selected browser is signed into a different account. Restore the original login, then verify this connection again.')
+        : dependencyUnavailableError('browser_login_required', 'Sign in to the provider in the selected browser, then verify this connection again.') };
+    }
+    if (!browserResource.accountId && parent.action_key !== BROWSER_VERIFY_OPERATION) {
+      return { status: 'failed', error_message: dependencyUnavailableError('browser_setup_required', 'Verify this browser account before reading it.') };
+    }
+    if (parent.action_key === BROWSER_VERIFY_OPERATION) {
+      await sql.begin(async tx => {
+        const verified = await tx`UPDATE auth_profiles SET status = 'active',
+          auth_data = jsonb_build_object('mode', 'live', 'account_id', ${accountId}::text, 'verified_at', now()), updated_at = now()
+          WHERE id = ${browserResource.authProfileId} AND organization_id = ${organizationId}
+            AND device_worker_id = ${browserResource.deviceWorkerId}::uuid
+            AND (auth_data->>'account_id' IS NULL OR auth_data->>'account_id' = ${accountId}) AND status <> 'revoked'
+          RETURNING id`;
+        if (!verified.length) throw new Error('Browser binding changed during verification; retry setup.');
+        const bound = await tx`UPDATE connections SET status = 'active', updated_at = now()
+          WHERE id = ${parent.connection_id} AND organization_id = ${organizationId}
+            AND auth_profile_id = ${browserResource.authProfileId} AND device_worker_id = ${browserResource.deviceWorkerId}::uuid
+            AND status IN ('pending_auth', 'active') AND deleted_at IS NULL RETURNING id`;
+        if (!bound.length) throw new Error('Connection changed during browser verification; retry setup.');
+      });
+    }
+    await sql`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${sql.json({ browser_verified: {
+      device_worker_id: browserResource.deviceWorkerId, auth_profile_id: browserResource.authProfileId, account_id: accountId,
+    } })} WHERE id = ${parentRunId} AND organization_id = ${organizationId} AND status = 'running'`;
+  }
+  if (actionKey === BROWSER_VERIFY_OPERATION) {
+    if (parent.action_key !== BROWSER_VERIFY_OPERATION) return { status: 'failed', error_message: 'Browser verification requires its own authorized operation.' };
+    return { status: 'completed', output: { browser_ready: true, account_verified: !!probe } };
+  }
+
+  const operationInput: Record<string, unknown> = { ...scopedInput };
   // Routing directive, not an extension argument — the extension must never see it.
   delete operationInput[TARGET_BROWSER_CONNECTION_INPUT_KEY];
   delete operationInput.require_page_activation;
@@ -843,12 +926,12 @@ export async function dispatchChromeActionToExtension(params: {
     {
       run_id: runId,
       parent_run_id: parentRunId,
-      parent_connection_id: parentConnectionId,
+      parent_connection_id: parent.connection_id,
       action_key: actionKey,
       chrome_connection_id: chromeConnection.connectionId,
       device_worker_id: chromeConnection.deviceWorkerId,
       preferred_device_worker_id: preferredDeviceWorkerId,
-      // true = the action named its browser; false = fell back to the scrape pin.
+      // true = the action named its browser; false = the connection's browser binding.
       targeted_browser: targetedBrowser,
     },
     '[dispatchChromeAction] dispatched'
@@ -890,11 +973,10 @@ export async function dispatchChromeAction(c: Context<{ Bindings: Env }>) {
   const sql = getDb();
 
   // Authorize: parent run must exist, be a running connector execution claimed
-  // by this worker. Both sync() and execute() receive chrome_dispatcher.
-  // connection_id supplies scrape affinity; an explicit action target
-  // overrides it.
+  // by this worker. Both sync() and execute() receive ctx.browser; the
+  // parent's connection binding selects the browser.
   const parentRows = (await sql`
-    SELECT r.organization_id, r.status, r.claimed_by, r.run_type, r.connection_id,
+    SELECT r.organization_id, r.status, r.claimed_by, r.run_type,
            r.created_by_user_id, r.automation_id
     FROM runs r
     WHERE r.id = ${body.parent_run_id}
@@ -904,7 +986,6 @@ export async function dispatchChromeAction(c: Context<{ Bindings: Env }>) {
     status: string;
     claimed_by: string | null;
     run_type: string;
-    connection_id: number | null;
     created_by_user_id: string | null;
     automation_id: number | null;
   }>;
@@ -941,7 +1022,6 @@ export async function dispatchChromeAction(c: Context<{ Bindings: Env }>) {
     actionKey: body.action_key,
     actionInput: body.action_input ?? {},
     parentRunId: body.parent_run_id,
-    parentConnectionId: parentRun.connection_id,
     visibilityUserId,
   });
   return c.json(result);

@@ -45,7 +45,7 @@ describe("XConnector forced OAuth", () => {
 					scope: "users.read tweet.read offline.access",
 				},
 				entityIds: [],
-				sessionState: { chrome_dispatcher: dispatcher },
+				browser: dispatcher,
 			}),
 		).rejects.toMatchObject({ status: 403 });
 

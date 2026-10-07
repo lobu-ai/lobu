@@ -9,6 +9,8 @@
 // contract — see that file for why connector-sdk, not core). Imported for local
 // use (ReflectResult) and re-exported below for connector authors.
 import type { EntityTypeContribution, ReflectedMeasure } from './metrics.js';
+import type { ConnectorBrowserRequirement } from './browser-requirement.js';
+import type { ChromeActionDispatcher } from './extension-network.js';
 import type { AttributeFilter } from '@lobu/core/contracts/tools/collection-selection';
 import type {
   ConnectorAutomationEvent,
@@ -41,6 +43,8 @@ export interface ConnectorDefinition {
   kind?: 'data' | 'integration';
   /** Auth configuration */
   authSchema?: ConnectorAuthSchema;
+  /** Delegated browser dependency. This does not change worker placement. */
+  browser?: ConnectorBrowserRequirement;
   /** Available feed definitions (keyed by feed_key) */
   feeds?: Record<string, FeedDefinition>;
   /** Available action definitions (keyed by action_key) */
@@ -368,6 +372,8 @@ export interface ConnectorAuthInteractive {
 
 export interface ConnectorAuthBrowser {
   type: 'browser';
+  /** Existing profiles capture cookies; live profiles keep the session in Chrome. */
+  mode?: 'cookies' | 'live';
   required?: boolean;
   description?: string;
   requiredDomains?: string[];
@@ -884,6 +890,8 @@ export interface EventEnvelope {
  * - `F` — feed config shape (defaults to `Record<string, unknown>`)
  */
 export interface SyncContext<C = Record<string, unknown>, F = Record<string, unknown>> {
+  /** Browser handle scoped by the host to this connection and declared origins. */
+  browser?: ChromeActionDispatcher;
   /** Feed key */
   feedKey: string;
   /**
@@ -1031,6 +1039,8 @@ export interface FeedReadWindowCoverage extends FeedReadWindow {
  * returned to the caller without being persisted by this contract.
  */
 export interface FeedReadContext<F = Record<string, unknown>> {
+  /** Browser handle scoped by the host to this connection and declared origins. */
+  browser?: ChromeActionDispatcher;
   feedId?: number;
   feedKey: string;
   query?: string;
@@ -1288,6 +1298,8 @@ export interface AuthResult {
  * Context passed to ConnectorRuntime.execute()
  */
 export interface ActionContext {
+  /** Browser handle scoped by the host to this connection and declared origins. */
+  browser?: ChromeActionDispatcher;
   /** Action key to execute */
   actionKey: string;
   /** Action input parameters */
@@ -1296,13 +1308,7 @@ export interface ActionContext {
   credentials: SyncCredentials | null;
   /** Connection config */
   config: Record<string, unknown>;
-  /**
-   * Per-run session state. The connector-worker splices a live
-   * `chrome_dispatcher` (a `ChromeActionDispatcher`) onto this for action runs
-   * the same way it does for syncs, so on-demand actions can drive the paired
-   * Owletto Chrome extension (e.g. scrape a page the agent chose at runtime).
-   * Null when no session/dispatcher applies.
-   */
+  /** Per-run authentication state. Use `browser` for declared browser access. */
   sessionState?: Record<string, unknown> | null;
   /** App-installation context when this connection is backed by an App install. */
   installation?: ConnectorInstallationContext;

@@ -3,6 +3,13 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { Env } from '../../../index';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { sweepAbandonedDeviceFeedReadRuns } from '../../../scheduled/check-stalled-executions';
+import { manageConnections } from '../../../tools/admin/manage_connections';
+import { manageAuthProfiles } from '../../../tools/admin/manage_auth_profiles';
+import { ensureLiveBrowserProfile } from '../../../utils/live-browser-profile';
+import { createConnectorOperationRun } from '../../../runs/queue-service';
+import { dispatchChromeActionToExtension } from '../../../worker-api/dispatch-chrome-action';
+import { upsertConnectorDefinitionRecords } from '../../../utils/connector-definition-install';
+import { handleListAvailable } from '../../../tools/admin/manage_operations/handlers/list-available';
 import { manageFeeds } from '../../../tools/admin/manage_feeds';
 import { getContent } from '../../../tools/get_content/handler';
 import * as sourceFeedPage from '../../../lib/source-feed-page';
@@ -27,16 +34,17 @@ const SOURCE = `
     key: '${SOURCE_KEY}', name: 'Browser read fixture', version: '${VERSION}',
     authSchema: { methods: [{ type: 'none' }] },
     automationEvents: [{ key: 'message.created', label: 'New message', resourceType: 'message' }],
+    browser: { origins: ['https://source.example'] },
     feeds: { items: {
       key: 'items', name: 'Items',
       webhook: { mode: 'trigger', events: ['message.created'] },
       observe: async (ctx) => {
-        await ctx.sessionState.chrome_dispatcher.dispatch('feed_listen', {});
+        await ctx.browser.dispatch('feed_listen', {});
       },
       read: async (ctx) => {
         if (ctx.query === 'plain') return { rows: [{ id: 'plain' }], hasMore: false };
-        const dispatcher = ctx.sessionState?.chrome_dispatcher;
-        if (!dispatcher) throw new Error('source read has no chrome_dispatcher');
+        const dispatcher = ctx.browser;
+        if (!dispatcher) throw new Error('source read has no browser grant');
         const page = await dispatcher.dispatch('evaluate', { expression: ctx.query });
         return { rows: page.rows, hasMore: false };
       },
@@ -48,7 +56,8 @@ const CHROME: DeviceConnectorManifest = {
   required_capability: 'browser.debugger', runtime: { platforms: ['chrome-extension'] },
   auth_schema: { methods: [{ type: 'none' }] }, feeds_schema: {},
   actions_schema: {
-    evaluate: { key: 'evaluate', name: 'Evaluate', kind: 'read', requiresApproval: false },
+    evaluate: { key: 'evaluate', name: 'Evaluate', kind: 'read' },
+    navigate: { key: 'navigate', name: 'Navigate', kind: 'write' },
     feed_listen: { key: 'feed_listen', name: 'Listen', kind: 'read' },
   },
 };
@@ -70,7 +79,7 @@ async function read(ctx = context(), query = 'private query'): Promise<Record<st
 }
 
 /** The real worker poll/complete routes carry observations across DB connections. */
-async function answerBrowser(reading: Promise<Record<string, any>>, answer = true): Promise<number | undefined> {
+async function answerBrowser(reading: Promise<Record<string, any>>, answer = true, identity: string | null = 'fixture-account'): Promise<number | undefined> {
   let finished = false;
   reading.finally(() => { finished = true; }).catch(() => {});
   for (let attempt = 0; attempt < 70 && !finished; attempt += 1) {
@@ -80,16 +89,17 @@ async function answerBrowser(reading: Promise<Record<string, any>>, answer = tru
     } });
     expect(response.status).toBe(200);
     const job = await response.json();
-    if (job?.run_id && job.operation_key === 'evaluate') {
-      expect(job.action_input).toMatchObject({ expression: 'private query' });
+    if (job?.run_id && ['evaluate', 'navigate'].includes(job.operation_key)) {
+      const probe = job.operation_key === 'navigate' || job.action_input.expression === 'self_probe';
+      if (!probe) expect(job.action_input).toMatchObject({ expression: 'private query' });
       if (!answer) return job.run_id;
       const completion = await post('/api/workers/complete-action', { body: {
-        run_id: job.run_id, worker_id: WORKER_ID, status: 'success', action_output: {
+        run_id: job.run_id, worker_id: WORKER_ID, status: 'success', action_output: job.operation_key === 'navigate' ? {tab_id: 77} : probe ? {value: identity ? {accountId: identity} : null} : {
           rows: ROWS, attachments: [{ filename: 'private.txt', data: Buffer.from('private bytes').toString('base64'), mime_type: 'text/plain' }],
         },
       } });
       expect(completion.status).toBe(200);
-      return job.run_id;
+      if (!probe) return job.run_id;
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -129,11 +139,11 @@ describe('compiled browser source reads', () => {
     for (const key of [SOURCE_KEY, 'chrome']) {
       const isChrome = key === 'chrome';
       await sql`INSERT INTO connector_definitions
-        (key, name, version, organization_id, status, runtime, required_capability, feeds_schema, actions_schema, auth_schema, automation_events)
+        (key, name, version, organization_id, status, runtime, required_capability, feeds_schema, actions_schema, auth_schema, automation_events, browser)
         VALUES (${key}, ${key}, ${VERSION}, ${orgId}, 'active', ${isChrome ? sql.json(CHROME.runtime!) : null},
           ${isChrome ? 'browser.debugger' : null}, ${sql.json(isChrome ? {} : { items: { key: 'items', operations: ['read'], webhook: { mode: 'trigger', events: ['message.created'] } } })},
-          ${sql.json(isChrome ? CHROME.actions_schema! : {})}, ${sql.json({ methods: [{ type: 'none' }] })},
-          ${sql.json(isChrome ? [] : [{ key: 'message.created', label: 'New message', resourceType: 'message' }])})`;
+          ${sql.json(isChrome ? CHROME.actions_schema! : (await extractConnectorMetadata(compiled.compiledCode)).actions!)}, ${sql.json({ methods: [{ type: 'none' }] })},
+          ${sql.json(isChrome ? [] : [{ key: 'message.created', label: 'New message', resourceType: 'message' }])}, ${isChrome ? null : sql.json((await extractConnectorMetadata(compiled.compiledCode)).browser!)})`;
       await sql`INSERT INTO connector_versions
         (organization_id, connector_key, version, compiled_code, compiled_code_hash, compile_config_hash, source_code, source_path)
         VALUES (${orgId}, ${key}, ${VERSION}, ${isChrome ? null : compiled.compiledCode},
@@ -467,4 +477,140 @@ describe('compiled browser source reads', () => {
     expect((await sql`SELECT status FROM runs WHERE id = ${childId}`)[0].status).toBe('timeout');
     expect(await sweepAbandonedDeviceFeedReadRuns(sql)).toBe(0);
   });
+  async function liveDefinition() {
+    const sql = getTestDb();
+    await sql`UPDATE connector_definitions SET auth_schema = ${sql.json({methods:[{type:'browser',mode:'live'}]})},
+      browser = ${sql.json({origins:['https://source.example'],accountProbe:{url:'https://source.example/account',expression:'self_probe'}})}, supports_execute = true
+      WHERE organization_id = ${orgId} AND key = ${SOURCE_KEY}`;
+    await upsertEntityApprovalPolicy(orgId, { resourceClass:'connector_action',connectorKey:SOURCE_KEY,effects:{execute:'auto'} });
+  }
+
+  it.each(['create', 'connect'] as const)('%s requires browser selection before creating any connection or auth profile', async (action) => {
+    await liveDefinition();
+    const sql = getTestDb();
+    const result = await manageConnections({action,connector_key:SOURCE_KEY}, {} as Env, context());
+    expect(result).toMatchObject({status:'setup_required',setup_family:'browser',next_action:'pair_browser'});
+    expect(await sql`SELECT id FROM auth_profiles WHERE organization_id = ${orgId}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM connections WHERE organization_id = ${orgId} AND connector_key = ${SOURCE_KEY}`).toHaveLength(1);
+  });
+
+  it('requires the scoped-origin extension before declaring a browser usable', async () => {
+    const sql = getTestDb();
+    await sql`UPDATE device_workers SET app_version = '0.9.1' WHERE id = ${deviceId}::uuid`;
+    const available = await handleListAvailable({action:'list_available',connection_id:connectionId},context());
+    expect(available).toMatchObject({operations:expect.arrayContaining([expect.objectContaining({operation_key:'verify_browser',executable:false})])});
+    expect(await manageConnections({action:'test',connection_id:connectionId}, {} as Env, context())).toMatchObject({ status:'warning',message:expect.stringContaining('0.9.2') });
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND connector_key = 'chrome'`).toHaveLength(0);
+  });
+
+  it('upgrades a legacy connection to pending setup without enabling or pausing its feeds', async () => {
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET status = 'paused' WHERE id = ${feedId}`;
+    const metadata = await extractConnectorMetadata(compiled.compiledCode);
+    await upsertConnectorDefinitionRecords({ sql, organizationId: orgId,
+      metadata: { ...metadata, authSchema: { methods: [{type:'browser',mode:'live'}] },
+        browser: {origins:['https://source.example'], accountProbe:{url:'https://source.example/account',expression:'self_probe'}} },
+      versionScope: 'organization', versionRecord: { compiledCode: compiled.compiledCode, compiledCodeHash: compiled.compiledCodeHash,
+        compileConfigHash: COMPILE_CONFIG_HASH, sourceCode: SOURCE, sourcePath: null } });
+    expect((await sql`SELECT status FROM connections WHERE id = ${connectionId}`)[0].status).toBe('pending_auth');
+    expect((await sql`SELECT status FROM feeds WHERE id = ${feedId}`)[0].status).toBe('paused');
+    expect(await sql`SELECT id FROM auth_profiles WHERE organization_id = ${orgId}`).toHaveLength(0);
+  });
+
+  it.each(['create', 'connect'] as const)('%s binds and verifies a live browser account, then rejects an account switch', async (action) => {
+    await liveDefinition();
+    const sql = getTestDb();
+    await sql`DELETE FROM feeds WHERE id = ${feedId}`;
+    await sql`DELETE FROM connections WHERE id = ${connectionId}`;
+    const creating = manageConnections({action,connector_key:SOURCE_KEY,device_worker_id:deviceId}, {} as Env, context()) as Promise<Record<string, any>>;
+    await answerBrowser(creating);
+    const result = await creating;
+    expect(result).toMatchObject(action === 'create' ? {action,connection:{status:'active',device_worker_id:deviceId,visibility:'private'}} : {action,status:'active'});
+    connectionId = Number(action === 'create' ? result.connection.id : result.connection_id);
+    const [saved] = await sql`SELECT c.status, ap.auth_data, ap.account_id FROM connections c JOIN auth_profiles ap ON ap.id = c.auth_profile_id WHERE c.id = ${connectionId}`;
+    expect(saved).toMatchObject({status:'active',account_id:null,auth_data:{mode:'live',account_id:'fixture-account'}});
+    await sql`INSERT INTO feeds (organization_id, connection_id, feed_key, status, config) VALUES
+      (${orgId}, ${connectionId}, 'items', 'active', '{}'::jsonb),
+      (${orgId}, ${connectionId}, 'archive', 'paused', '{}'::jsonb)`;
+    const checking = manageConnections({action:'test',connection_id:connectionId}, {} as Env, context()) as Promise<Record<string,any>>;
+    await answerBrowser(checking,true,'different-account');
+    expect(await checking).toMatchObject({status:'warning',message:expect.stringContaining('browser_account_mismatch')});
+    const [profile] = await sql`SELECT ap.auth_data FROM connections c JOIN auth_profiles ap ON ap.id = c.auth_profile_id WHERE c.id = ${connectionId}`;
+    expect(profile.auth_data.account_id).toBe('fixture-account');
+    const recovering = manageConnections({action:'test',connection_id:connectionId}, {} as Env, context()) as Promise<Record<string,any>>;
+    await answerBrowser(recovering);
+    expect(await recovering).toMatchObject({ status: 'ok' });
+    expect(await sql`SELECT feed_key, status FROM feeds WHERE connection_id = ${connectionId} ORDER BY feed_key`).toEqual([
+      { feed_key: 'archive', status: 'paused' }, { feed_key: 'items', status: 'active' },
+    ]);
+  });
+
+  it.each(['create', 'connect'] as const)('%s keeps signed-out setup pending and exposes only verification as executable', async (action) => {
+    await liveDefinition();
+    const sql = getTestDb();
+    await sql`DELETE FROM feeds WHERE id = ${feedId}`;
+    await sql`DELETE FROM connections WHERE id = ${connectionId}`;
+    const creating = manageConnections({action,connector_key:SOURCE_KEY,device_worker_id:deviceId}, {} as Env, context()) as Promise<Record<string,any>>;
+    await answerBrowser(creating,true,null);
+    const result = await creating;
+    expect(result).toMatchObject({status:'setup_required',instructions:expect.stringContaining('browser_login_required')});
+    const available = await handleListAvailable({action:'list_available',connection_id:result.connection_id},context());
+    expect(available).toMatchObject({operations:expect.arrayContaining([expect.objectContaining({operation_key:'verify_browser',executable:true})])});
+    const [saved] = await sql`SELECT status FROM connections WHERE id = ${result.connection_id}`;
+    expect(saved.status).toBe('pending_auth');
+  });
+
+  it('refuses a forged live auth profile instead of treating a supplied timestamp as proof', async () => {
+    const result = await manageAuthProfiles({action:'create_auth_profile',profile_kind:'browser_session',display_name:'Forged',auth_data:{mode:'live',account_id:'forged',verified_at:new Date().toISOString()}}, {} as Env, context());
+    expect(result).toMatchObject({error:expect.stringContaining('created and verified through connections.create')});
+  });
+
+  it('lets a member revoke their live account while preserving its identity and pausing feeds', async () => {
+    const profile = await ensureLiveBrowserProfile({ organizationId: orgId, connectorKey: SOURCE_KEY, deviceWorkerId: deviceId, userId });
+    const sql = getTestDb();
+    await sql`UPDATE auth_profiles SET status = 'active', auth_data = ${sql.json({ mode: 'live', account_id: 'fixture-account' })} WHERE id = ${profile.id}`;
+    await sql`UPDATE connections SET auth_profile_id = ${profile.id} WHERE id = ${connectionId}`;
+    const member = { ...context(), memberRole: 'member' as const };
+    await sql`UPDATE member SET role = 'member' WHERE "organizationId" = ${orgId} AND "userId" = ${userId}`;
+    const revoked = await manageAuthProfiles({ action: 'update_auth_profile', auth_profile_slug: profile.slug, status: 'revoked', display_name: 'Retired account' }, {} as Env, member);
+    expect(revoked).toMatchObject({ action: 'update_auth_profile', auth_profile: { status: 'revoked' } });
+    expect((await sql`SELECT status, auth_data FROM auth_profiles WHERE id = ${profile.id}`)[0]).toMatchObject({ status: 'revoked', auth_data: { account_id: 'fixture-account' } });
+    expect((await sql`SELECT status FROM connections WHERE id = ${connectionId}`)[0].status).toBe('pending_auth');
+    expect((await sql`SELECT status FROM feeds WHERE id = ${feedId}`)[0].status).toBe('paused');
+    expect(await manageAuthProfiles({ action: 'update_auth_profile', auth_profile_slug: profile.slug, status: 'active' }, {} as Env, member)).toMatchObject({ error: expect.stringContaining('gateway-owned') });
+  });
+
+  it('does not detach a live identity from retained connections even with force', async () => {
+    const profile = await ensureLiveBrowserProfile({ organizationId: orgId, connectorKey: SOURCE_KEY, deviceWorkerId: deviceId, userId });
+    const sql = getTestDb();
+    await sql`UPDATE connections SET auth_profile_id = ${profile.id}, status = 'revoked' WHERE id = ${connectionId}`;
+    expect(await manageAuthProfiles({ action: 'delete_auth_profile', auth_profile_slug: profile.slug, force: true }, {} as Env, context()))
+      .toMatchObject({ error: expect.stringContaining('Delete the connections') });
+    expect((await sql`SELECT auth_profile_id FROM connections WHERE id = ${connectionId}`)[0].auth_profile_id).toBe(profile.id);
+  });
+
+  it('freezes the verified account with the queued browser run and refuses a changed identity', async () => {
+    await liveDefinition();
+    const profile = await ensureLiveBrowserProfile({ organizationId: orgId, connectorKey: SOURCE_KEY, deviceWorkerId: deviceId, userId });
+    const sql = getTestDb();
+    await sql`UPDATE auth_profiles SET status = 'active', auth_data = ${sql.json({ mode: 'live', account_id: 'fixture-account', verified_at: new Date().toISOString() })} WHERE id = ${profile.id}`;
+    await sql`UPDATE connections SET auth_profile_id = ${profile.id} WHERE id = ${connectionId}`;
+    const run = await createConnectorOperationRun({ organizationId: orgId, connectionId, connectorKey: SOURCE_KEY,
+      operationKey: 'verify_browser', operationInput: {}, approvalMode: 'inline', policyPrincipalKind: 'user', policyPrincipalId: userId, createdByUserId: userId });
+    const [savedRun] = await sql`SELECT run_metadata, target_device_worker_id FROM runs WHERE id = ${run.runId}`;
+    expect(savedRun.target_device_worker_id).toBeNull();
+    expect(savedRun.run_metadata).toMatchObject({ browser_binding: {
+      device_worker_id: deviceId, auth_profile_id: profile.id, account_id: 'fixture-account',
+    } });
+    const activatedRun = await createConnectorOperationRun({ organizationId: orgId, connectionId, connectorKey: SOURCE_KEY,
+      operationKey: 'verify_browser', operationInput: {}, approvalMode: 'inline', policyPrincipalKind: 'user', policyPrincipalId: userId, createdByUserId: userId,
+      activation: { kind: 'page_visit', urls: ['https://source.example/account'], expiresInSeconds: 900 } });
+    expect((await sql`SELECT status, target_device_worker_id FROM runs WHERE id = ${activatedRun.runId}`)[0])
+      .toMatchObject({ status: 'pending', target_device_worker_id: deviceId });
+    await sql`UPDATE auth_profiles SET auth_data = auth_data || ${sql.json({ account_id: 'changed-account' })} WHERE id = ${profile.id}`;
+    expect(await dispatchChromeActionToExtension({ organizationId: orgId, parentRunId: run.runId, actionKey: 'evaluate', actionInput: { expression: 'self_probe' } }))
+      .toMatchObject({ status: 'failed', error_message: expect.stringContaining('browser_binding_mismatch') });
+    expect(await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId}`).toHaveLength(0);
+  });
+
 });

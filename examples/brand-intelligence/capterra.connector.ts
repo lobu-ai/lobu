@@ -10,8 +10,8 @@
  */
 
 import {
+  requireBrowser,
   type RuntimeConnectorDefinition,
-  type ChromeActionDispatcher,
   ConnectorRuntime,
   calculateEngagementScore,
   type EventEnvelope,
@@ -119,25 +119,6 @@ function normalizeReview(row: CapterraRow, index: number): CapterraReview {
   };
 }
 
-/**
- * Pull the chrome action dispatcher off the sync context. The connector-worker
- * splices a live `chrome_dispatcher` onto `sessionState`; with no online paired
- * Owletto extension in the connection's org there is nothing to splice.
- */
-function requireExtensionDispatcher(ctx: {
-  sessionState?: Record<string, unknown> | null;
-}): ChromeActionDispatcher {
-  const handle = ctx.sessionState?.chrome_dispatcher as
-    | ChromeActionDispatcher
-    | undefined;
-  if (!handle || typeof handle.dispatch !== "function") {
-    throw new Error(
-      "Capterra connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState — run on a connector-worker with the dispatcher bridge and an online extension."
-    );
-  }
-  return handle;
-}
-
 interface CapterraReview {
   id: string;
   rating: number;
@@ -152,10 +133,13 @@ export default class CapterraConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: "capterra",
     name: "Capterra",
-    version: "2.1.0",
+    version: "2.1.1",
     faviconDomain: "capterra.com",
     description:
       "Reads software reviews from Capterra through the paired Chrome extension.",
+    browser: {
+      origins: ["https://www.capterra.com", "https://www.capterra.co.uk"],
+    },
     authSchema: {
       methods: [{ type: "none" }],
     },
@@ -223,7 +207,7 @@ export default class CapterraConnector extends ConnectorRuntime {
       ? `https://www.capterra.com/p/${productId}/${productName}/reviews`
       : `https://www.capterra.com/p/${productId}/reviews`;
 
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
     const { items: rows } = await extensionDomScrape<CapterraRow>({
       dispatcher,
       url: baseUrl,

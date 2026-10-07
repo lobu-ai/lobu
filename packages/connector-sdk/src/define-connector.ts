@@ -131,6 +131,7 @@ function buildDefinition(spec: ConnectorSpec): RuntimeConnectorDefinition {
     mcpConfig: spec.mcpConfig,
     openapiConfig: spec.openapiConfig,
     requiredCapability: spec.requiredCapability,
+    browser: spec.browser,
     runtime: spec.runtime,
     webhook: spec.webhook,
     automationEvents: spec.automationEvents,

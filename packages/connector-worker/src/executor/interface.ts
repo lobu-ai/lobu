@@ -8,6 +8,7 @@ import type {
 } from '../agent-turn/types.js';
 import type {
   AuthResult,
+  ConnectorBrowserRequirement,
   ConnectorWebhookSchema,
   EventEnvelope,
   FeedReadMatch,
@@ -23,6 +24,8 @@ import type { ConnectorHttpRequest, ConnectorHttpResponse } from '@lobu/core/con
  * in, `SyncResult` / `ActionResult` / `AuthResult` out, no envelope.
  */
 export type ExecutorJob = {
+  /** Gateway-issued resource grant; not connector config. */
+  browser?: ConnectorBrowserRequirement;
   /** HTTP credentials stay in the gateway; every fetch uses the host hook. */
   httpAuth?: boolean;
 } & (
@@ -232,7 +235,7 @@ export interface ExecutionHooks {
   ) => Promise<Record<string, unknown>>;
   /**
    * Sync runs: connector code invoked
-   * `ctx.sessionState.chrome_dispatcher.dispatch(actionKey, actionInput)`.
+   * `ctx.browser.dispatch(actionKey, actionInput)`.
    * The host (connector-worker daemon) forwards the call to the gateway
    * (POST /api/workers/dispatch-chrome-action), which inserts a chrome
    * connector action run, waits for the paired Owletto extension to claim

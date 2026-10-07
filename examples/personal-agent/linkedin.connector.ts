@@ -31,6 +31,7 @@
  */
 
 import {
+  requireBrowser,
   type ActionContext,
   type ActionResult,
   type ChromeActionDispatcher,
@@ -808,7 +809,7 @@ async function readMyLinkedInActivity(
   const maxScrolls = Number.isFinite(rawScrolls)
     ? Math.min(10, Math.max(1, Math.trunc(rawScrolls)))
     : 3;
-  const dispatcher = requireExtensionDispatcher(ctx);
+  const dispatcher = requireBrowser(ctx);
 
   // Resolve the /in/me/ redirect before constructing canonical activity URLs.
   const profile = await extensionDomScrape<Record<string, unknown>>({
@@ -1621,30 +1622,6 @@ export function buildHomeFeedEvents(
     });
   }
   return events;
-}
-
-/**
- * Pull the chrome action dispatcher from sessionState. The connector-worker
- * host splices a live `chrome_dispatcher` object
- * onto every sync's sessionState; the dispatcher's `dispatch()` rides an
- * IPC channel up to the daemon and out to the gateway's
- * /api/workers/dispatch-chrome-action bridge. When no paired Owletto
- * extension is online in the connection's org, the bridge returns the
- * `failed` status and the dispatcher throws — we surface that as the sync
- * failure verbatim.
- */
-function requireExtensionDispatcher(ctx: {
-  sessionState?: Record<string, unknown> | null;
-}): ChromeActionDispatcher {
-  const handle = (
-    ctx.sessionState as Record<string, unknown> | null | undefined
-  )?.chrome_dispatcher as ChromeActionDispatcher | undefined;
-  if (!handle || typeof handle.dispatch !== "function") {
-    throw new Error(
-      "LinkedIn connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState — re-run on a connector-worker that has the dispatcher bridge."
-    );
-  }
-  return handle;
 }
 
 // ── prepare_comment handoff (browser stage, human submits) ───────────
@@ -3156,23 +3133,38 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.13.1",
+    version: "3.13.2",
     faviconDomain: "linkedin.com",
-    // Auth is `none`: every live feed authenticates implicitly through the
-    // paired Owletto Chrome extension (the user's own signed-in linkedin.com
-    // session — no OAuth token is ever read), and takeout feeds read local CSV
-    // files. A previously-declared OPTIONAL oauth method was removed: no feed
-    // consumed it, yet the server's connection-create picks the first non-`none`
-    // method as authoritative and forced an irrelevant LinkedIn OAuth handshake
-    // before a (takeout or extension-driven) connection could be created —
-    // blocking exactly the "one connector, both live and backfill" use case the
-    // merge exists for. If real OAuth sign-in is ever needed downstream, add it
-    // back behind a feed that actually uses the token.
+    // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
+    browser: {
+      authMethods: ["browser"],
+      origins: ["https://www.linkedin.com"],
+      accountProbe: {
+        url: "https://www.linkedin.com/feed/",
+        // Only the self-profile endpoint; vanity profile URLs can be renamed.
+        expression: `(async () => {
+          const raw = document.cookie.split('; ').find(cookie => cookie.startsWith('JSESSIONID='));
+          if (!raw) return null;
+          const csrf = decodeURIComponent(raw.slice(11)).replace(/^"|"$/g, '');
+          const response = await fetch('/voyager/api/me', {
+            credentials: 'include',
+            headers: { 'csrf-token': csrf, 'x-restli-protocol-version': '2.0.0' },
+          });
+          if (response.status === 401 || response.status === 403) return null;
+          if (!response.ok) throw new Error('LinkedIn account check failed (HTTP ' + response.status + ')');
+          const self = await response.json();
+          const accountId = self.miniProfile?.entityUrn;
+          return typeof accountId === 'string' && accountId ? { accountId } : null;
+        })()`,
+      },
+    },
     authSchema: {
       methods: [
         {
-          type: "none",
+          type: "browser",
+          mode: "live",
         },
+        { type: "none", label: "Local data export" },
       ],
     },
     feeds: {
@@ -3610,7 +3602,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         };
       }
 
-      const dispatcher = requireExtensionDispatcher(ctx);
+      const dispatcher = requireBrowser(ctx);
 
       if (ctx.actionKey === "verify_staged_comment") {
         const authorHint =
@@ -3716,11 +3708,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     // company_url — it always reads linkedin.com/feed/.
     if (feedKey === "home_feed") {
       const homeScrolls = readHomeScrollBudget(config);
-      return this.syncHomeFeed(
-        homeScrolls,
-        checkpoint,
-        requireExtensionDispatcher(ctx)
-      );
+      return this.syncHomeFeed(homeScrolls, checkpoint, requireBrowser(ctx));
     }
 
     const companyUrl = config.company_url;
@@ -3732,7 +3720,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     const baseUrl = companyUrl.replace(/\/$/, "");
     const maxScrolls = config.max_scrolls ?? (feedKey === "jobs" ? 3 : 5);
 
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
     if (feedKey === "jobs") {
       return this.syncJobs(baseUrl, maxScrolls, checkpoint, dispatcher);
     }

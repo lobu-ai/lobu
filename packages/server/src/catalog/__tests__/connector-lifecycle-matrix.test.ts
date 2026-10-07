@@ -60,7 +60,7 @@ describe("bundled connector lifecycle matrix", () => {
 			}
 		}
 		expect([...representedFamilies].sort()).toEqual(
-			["app_installation", "env_keys", "none", "oauth"],
+			["app_installation", "browser", "env_keys", "none", "oauth"],
 		);
 	});
 
@@ -86,8 +86,9 @@ describe("bundled connector lifecycle matrix", () => {
 			"market.quotes": 1,
 			// outlook's first actions: list_attachments + download_attachment.
 			"microsoft.outlook": 2,
-			"whatsapp.web": 6,
-			x: 1,
+			// Browser-backed connectors also expose the gateway's verification action.
+			"whatsapp.web": 7,
+			x: 2,
 			youtube: 5,
 		});
 

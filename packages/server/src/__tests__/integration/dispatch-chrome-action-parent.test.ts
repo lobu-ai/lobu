@@ -27,7 +27,7 @@ app.post('/dispatch', dispatchChromeAction);
 async function seedParentAuthority(organizationId: string, runId: number) {
   const connectorKey = 'browser-parent-fixture';
   await createTestConnectorDefinition({ key: connectorKey, name: 'Browser parent fixture', organization_id: organizationId });
-  await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({
+  await sql`UPDATE connector_definitions SET browser = ${sql.json({ origins: ['https://example.com', 'https://www.linkedin.com', 'https://x.com'] })}, actions_schema = ${sql.json({
     prepare_reply: { name: 'Prepare reply', kind: 'write' },
     prepare_comment: { name: 'Prepare comment', kind: 'write' },
   })} WHERE organization_id = ${organizationId} AND key = ${connectorKey}`;
@@ -35,6 +35,15 @@ async function seedParentAuthority(organizationId: string, runId: number) {
     WHERE organization_id = ${organizationId} AND key = 'chrome'`;
   const connection = await createTestConnection({ organization_id: organizationId, connector_key: connectorKey, createDefaultFeed: false });
   const [run] = await sql`SELECT created_by_user_id, automation_id FROM runs WHERE id = ${runId}`;
+  let [browser] = await sql`SELECT dw.id FROM device_workers dw JOIN connections c ON c.device_worker_id = dw.id
+    WHERE c.organization_id = ${organizationId} AND dw.organization_id = ${organizationId} AND c.connector_key = 'chrome' LIMIT 1`;
+  if (!browser) {
+    const owner = await createTestUser({ email: `browser-fixture-${runId}@example.test` });
+    [browser] = await sql`INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id, last_seen_at)
+      VALUES (${owner.id}, ${`fixture-browser-${runId}`}, 'chrome-extension', '["browser.debugger"]'::jsonb, ${organizationId}, now() - interval '1 day') RETURNING id`;
+  }
+  await sql`UPDATE connections SET device_worker_id = ${browser.id}::uuid WHERE id = ${connection.id}`;
+  await sql`UPDATE device_workers SET app_version = '9.9.0' WHERE id = ${browser.id}::uuid`;
   const actor = await resolveActingPrincipal(sql, { organizationId, userId: run.created_by_user_id, sessionAutomationId: run.automation_id });
   await sql`UPDATE runs SET connection_id = ${connection.id}, connector_key = ${connectorKey},
     policy_principal_kind = ${actor.kind}, policy_principal_id = ${actor.id} WHERE id = ${runId}`;
@@ -73,7 +82,7 @@ describe('dispatchChromeAction parent run authorization', () => {
     await expect(response.json()).resolves.toMatchObject({
       status: 'failed',
       error_message: expect.stringMatching(
-        /^\[lobu:dependency_unavailable:browser_offline\].*No online paired Owletto/,
+        /^\[lobu:dependency_unavailable:browser_offline\].*Chrome extension selected/,
       ),
     });
   });
@@ -180,6 +189,7 @@ describe('dispatchChromeAction parent run authorization', () => {
       expect(child.action_input).toEqual({
         url: 'https://example.com/',
         normal: 'kept',
+        allowed_origins: ['https://example.com', 'https://www.linkedin.com', 'https://x.com'],
       });
       expect(child.run_metadata).toEqual({
         [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,

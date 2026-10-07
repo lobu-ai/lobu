@@ -4,6 +4,7 @@
  * Used by manage_connections, manage_feeds, and manage_auth_profiles.
  */
 
+import { ensureLiveBrowserProfile } from '../../../utils/live-browser-profile';
 import { getScopedConnectorDefinition } from '../../../catalog/connector-definitions';
 import { oauthAccountOwnershipError } from '../../../authz/oauth-account-ownership';
 import { getDb } from '../../../db/client';
@@ -76,6 +77,7 @@ type EnvKeyAuthMethod = {
 
 type BrowserAuthMethod = {
   type: 'browser';
+  mode?: 'cookies' | 'live';
   required?: boolean;
   description?: string;
 };
@@ -660,14 +662,13 @@ export async function buildViewUrl(
  * A connection reads through ONE org-level credential (its auth profile's
  * token), not a per-reader credential — so an `org`-visible connection lets
  * EVERY org member read live through the connection owner's token. For a
- * personal login (`profile_kind === 'oauth_account'` — a user's own Gmail /
- * calendar / etc.) that means org-visible = the owner's private inbox exposed to
+ * personal login (`oauth_account` or `browser_session`, including captured
+ * cookies) that means org-visible = the owner's private account exposed to
  * the whole org. So a personal-credential connection defaults to `private`
  * regardless of the creator's role — the credential being personal is a stronger
- * fact than "an admin made it". Every other credential kind (env secrets,
- * oauth_app client creds, service accounts, browser sessions) backs a genuinely
- * shared source, so it keeps the role-based default (admins/owners → `org`,
- * members → `private`).
+ * fact than "an admin made it". Other credential kinds (env secrets,
+ * oauth_app client creds, service accounts) keep the role-based default
+ * (admins/owners → `org`, members → `private`).
  */
 export async function resolveConnectionVisibility(
   organizationId: string,
@@ -685,10 +686,9 @@ export async function resolveConnectionVisibility(
 
 /**
  * Is this auth-profile kind a PERSONAL credential — a single user's own login
- * whose token is not something the whole org should read through? Today only
- * `oauth_account` (a user's own Gmail/calendar/etc. grant). Every other kind
- * (env secrets, oauth_app client creds, service accounts, browser sessions)
- * backs a genuinely shared source.
+ * whose account is not something the whole org should read through?
+ * `oauth_account` and `browser_session` are personal, whether the latter uses
+ * a live browser or captured cookies. Other kinds retain role-based defaults.
  *
  * A connection reads through ONE org-level credential, so an `org`-visible
  * connection on a personal credential exposes that user's private data to every
@@ -698,7 +698,7 @@ export async function resolveConnectionVisibility(
  * update re-point).
  */
 export function isPersonalCredentialKind(profileKind?: string | null): boolean {
-  return profileKind === 'oauth_account';
+  return profileKind === 'oauth_account' || profileKind === 'browser_session';
 }
 
 /**
@@ -849,9 +849,14 @@ export async function resolveConnectionAuthSelection(params: {
     throw new Error('The selected OAuth app was not found for this connector.');
   }
 
+  const liveBrowserProfile = browserMethod?.mode === 'live' && params.deviceWorkerId
+    && !params.authProfileSlug && !params.appAuthProfileSlug
+    ? await ensureLiveBrowserProfile({ organizationId, connectorKey,
+        deviceWorkerId: params.deviceWorkerId, userId: params.oauthAccountCreatedBy }) : null;
+
   // 1. Resolve explicitly selected auth profile, or auto-select the primary
   //    auth profile for the connector's preferred auth method.
-  const authProfile =
+  const authProfile = liveBrowserProfile ??
     (await resolveAuthProfileSlugToId({
       organizationId,
       slug: params.authProfileSlug,
@@ -860,7 +865,7 @@ export async function resolveConnectionAuthSelection(params: {
     (autoSelect && preferredMethodType === 'env_keys' && envMethod
       ? await getPrimaryAuthProfileForKind({ organizationId, connectorKey, profileKind: 'env' })
       : null) ??
-    (autoSelect && preferredMethodType === 'browser' && browserMethod
+    (autoSelect && preferredMethodType === 'browser' && browserMethod && browserMethod.mode !== 'live'
       ? await getPrimaryAuthProfileForKind({
           organizationId,
           connectorKey,

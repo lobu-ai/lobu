@@ -74,6 +74,7 @@ export async function activatePageRun(
 		  AND status = 'pending'
 		  AND approval_status IN ('auto', 'approved')
 		  AND activation_kind = 'page_visit'
+		  AND (target_device_worker_id IS NULL OR target_device_worker_id = ${deviceId}::uuid)
 		  AND run_metadata->>'page_activation_identity' = 'exact'
 		  AND activated_at IS NULL
 		  AND expires_at > current_timestamp

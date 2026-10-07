@@ -830,6 +830,12 @@ describe("buildHomeFeedTweets", () => {
 });
 
 describe("XConnector definition", () => {
+	test("verifies the stable signed-in id and ignores a stale cookie on the login page", async () => {
+		const probe = new Function("document", "location", `return ${new XConnector().definition.browser.accountProbe.expression}`);
+		const document = { cookie: "twid=u%3D123456", querySelector: () => ({ getAttribute: () => "/renamed-handle" }) };
+		expect(await probe(document, { pathname: "/home" })).toEqual({ accountId: "123456" });
+		expect(await probe({ ...document, querySelector: () => null }, { pathname: "/login" })).toBeNull();
+	});
 	test("declares search, account, and extension-only home timeline feeds", () => {
 		const def = new XConnector().definition;
 		expect(def.key).toBe("x");
@@ -878,7 +884,7 @@ describe("XConnector definition", () => {
 		expect(def.feeds.home_feed.description).toMatch(/home timeline/i);
 		// Extension is the browser fallback method (no public API for the timeline).
 		const browserMethod = def.authSchema.methods.find(
-			(m: any) => m.type === "none" && m.label === "Paired Chrome extension",
+			(m: any) => m.type === "browser" && m.mode === "live",
 		);
 		expect(browserMethod).toBeDefined();
 	});
@@ -1070,7 +1076,7 @@ describe("XConnector browser-first routing", () => {
 				checkpoint: {},
 				credentials: {},
 				entityIds: [],
-				sessionState: { chrome_dispatcher: dispatcher },
+				browser: dispatcher,
 			}),
 		).rejects.toThrow(/captured no matching GraphQL responses/i);
 	});
@@ -1115,7 +1121,7 @@ describe("XConnector browser-first routing", () => {
 				checkpoint: {},
 				credentials: {},
 				entityIds: [],
-				sessionState: { chrome_dispatcher: dispatcher },
+				browser: dispatcher,
 			});
 		} catch (error) {
 			message = error instanceof Error ? error.message : String(error);
@@ -1180,7 +1186,7 @@ describe("XConnector browser-first routing", () => {
 			checkpoint: {},
 			credentials: {},
 			entityIds: [],
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		});
 		expect(result.events).toHaveLength(1);
 		expect(result.events[0]).toMatchObject({
@@ -1228,7 +1234,7 @@ describe("XConnector browser-first routing", () => {
 			checkpoint: {},
 			credentials: {},
 			entityIds: [],
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		});
 
 		expect(result.events).toHaveLength(0);
@@ -1271,7 +1277,7 @@ describe("XConnector browser-first routing", () => {
 			checkpoint: { likes_backfill_status: "complete" },
 			credentials: {},
 			entityIds: [],
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		});
 
 		expect(result.events.map((event: any) => event.origin_id)).toEqual(["500"]);
@@ -1355,7 +1361,7 @@ describe("XConnector browser-first routing", () => {
 			},
 			credentials: {},
 			entityIds: [],
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		});
 		const replays = calls.filter(
 			(call) => call.action === "network_intercept_replay",
@@ -1551,7 +1557,7 @@ describe("XConnector browser-first routing", () => {
 				checkpoint: scenario.checkpoint,
 				credentials: {},
 				entityIds: [],
-				sessionState: { chrome_dispatcher: dispatcher },
+				browser: dispatcher,
 			});
 
 			expect(result.events.map((event: any) => event.origin_id).sort()).toEqual(
@@ -1605,7 +1611,7 @@ describe("XConnector browser-first routing", () => {
 				scope: "users.read tweet.read offline.access",
 			},
 			entityIds: [],
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		});
 
 		expect(calls).toHaveLength(1);
@@ -1633,7 +1639,7 @@ describe("XConnector browser-first routing", () => {
 				scope: "users.read tweet.read offline.access",
 			},
 			entityIds: [],
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		});
 
 		expect(calls).toHaveLength(1);
@@ -1660,7 +1666,7 @@ describe("XConnector browser-first routing", () => {
 				scope: "users.read tweet.read offline.access",
 			},
 			entityIds: [],
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		});
 
 		expect(calls).toHaveLength(1);
@@ -1742,7 +1748,7 @@ describe("XConnector home_feed", () => {
 			feedKey: "home_feed",
 			config: { max_scrolls: 4 },
 			checkpoint: {},
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		};
 		const res = await runSync(connector, ctx);
 
@@ -1771,7 +1777,7 @@ describe("XConnector home_feed", () => {
 			feedKey: "home_feed",
 			config: {},
 			checkpoint: {},
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		};
 		await expect(runSync(connector, ctx)).rejects.toThrow(/Not logged into X/);
 	});
@@ -1817,7 +1823,7 @@ describe("XConnector home_feed", () => {
 			feedKey: "home_feed",
 			config: { max_scrolls: 4, use_existing_tab: true },
 			checkpoint: {},
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		});
 
 		expect(calls).toHaveLength(1);
@@ -1854,7 +1860,7 @@ describe("XConnector home_feed", () => {
 			feedKey: "home_feed",
 			config: { max_scrolls: 4 },
 			checkpoint: {},
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		});
 
 		expect(calls).toHaveLength(1);
@@ -1885,7 +1891,7 @@ describe("XConnector home_feed", () => {
 				feedKey: "home_feed",
 				config: { min_scrolls: 8, max_scrolls: 12 },
 				checkpoint: {},
-				sessionState: { chrome_dispatcher: dispatcher },
+				browser: dispatcher,
 			});
 		} finally {
 			Math.random = realRandom;
@@ -1912,7 +1918,7 @@ describe("XConnector home_feed", () => {
 			feedKey: "home_feed",
 			config: { max_scrolls: 7 },
 			checkpoint: {},
-			sessionState: { chrome_dispatcher: dispatcher },
+			browser: dispatcher,
 		});
 		expect(scrollMaxes).toEqual([7]);
 	});
@@ -2062,7 +2068,7 @@ describe("isReplySubmitLabel", () => {
 
 describe("prepare_reply action contract", () => {
 	test("pins the connector version for catalog upgrades", () => {
-		expect(new XConnector().definition.version).toBe("3.14.0");
+		expect(new XConnector().definition.version).toBe("3.14.1");
 	});
 
 	test("classifies staging a reply as a write for org policy", () => {

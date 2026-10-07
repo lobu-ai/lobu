@@ -341,8 +341,57 @@ before connector dispatch.
 
 `none`, `env_keys` (scope `connection` or `organization`), `oauth` (built-in or
 custom provider with `clientIdKey`/`clientSecretKey`), and `browser` for custom
-cookie-backed sessions. Paired-extension connectors use `none` when the browser
-owns authentication. Full schemas are in the SDK reference.
+cookie-backed sessions. A signed-in browser account uses `{ type: "browser", mode: "live" }`;
+its session stays in the selected Chrome profile. Full schemas are in the SDK reference.
+
+### Browser resources
+
+Declare `browser` independently of `runtime` and `requiredCapability`: the connector
+still runs on the server worker, with a scoped handle to its selected Chrome profile.
+
+```ts
+browser: {
+  origins: ["https://service.example"],
+  authMethods: ["browser"],
+  accountProbe: {
+    url: "https://service.example/account",
+    expression: "(() => { const id = document.querySelector('[data-self-id]')?.getAttribute('data-self-id'); return id ? { accountId: id } : null; })()",
+  },
+},
+authSchema: { methods: [{ type: "browser", mode: "live" }] },
+```
+
+Use `requireBrowser(ctx)` in actions, syncs and source reads. The host checks the
+saved browser binding and declared exact HTTPS origins; a caller cannot widen them.
+Browser-facing setup clients can import the same pure requirement resolver from
+`@lobu/connector-sdk/browser-requirement` without loading the SDK's server runtime.
+For OAuth/browser alternatives, `authMethods: ["browser"]` gives the OAuth account
+no browser access. Public scrapers can use `none` and omit `accountProbe`; their
+verification establishes browser availability, not a signed-in account.
+
+`connections.create` / `connections.connect` require a selected paired Chrome
+(`device_worker_id`) and return the existing `setup_required` continuation until
+verification completes. Live account profiles are created by that setup flow,
+not by supplying account identity in `auth_data`. The connector-owned probe returns
+only the current account identity; it must not read messages, contacts or history.
+`verify_browser` is a reserved, policy-governed read operation used by setup and
+`connections.test`. A changed account fails closed and requires restoring the original
+login. Checks do not grant approval for subsequent reads or writes. Verification
+does not resume paused feeds or enable stored imports; it only restores account
+readiness. Revoke the live profile to stop access, and use a separate connection
+for a different account so existing history keeps its original source identity.
+Both live-browser and captured-cookie connections default to private visibility;
+attaching either kind to an existing connection also makes it private.
+
+Existing browser connectors must add the declaration and publish a new version.
+Connections without a selected Chrome must complete setup; the server never chooses
+another online browser as a fallback. Installing the declaration moves unbound
+legacy connections to pending setup without changing their feed choices. Custom
+connector versions must be republished by their owner; the server does not infer
+origins or overwrite custom source. Browser grants come from the active connector
+version: runs or feeds pinned to an older version fail closed after an upgrade and
+must use the active version before retrying. Exact-origin grants require Chrome
+extension 0.9.2 or newer; older extensions receive an update-required setup error.
 
 A local install cannot finish an `oauth` connect flow itself — the connector
 callback `<base>/connect/oauth/callback` is not a registered redirect for any

@@ -1,3 +1,5 @@
+import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
+import { connectionBrowserGrant } from '../connectors/browser-resource';
 import { type DbClient, getDb } from '../db/client';
 import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, isSourceFeedRead } from '../lib/device-feed-read-protocol';
 import { sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
@@ -52,7 +54,9 @@ async function loadPolicyRun(sql: DbClient, organizationId: string, runId: numbe
 async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run: PolicyRun): Promise<ConnectorPolicyResult> {
   if (run.run_type !== 'action' || run.connection_id == null || !run.action_key) return unavailable();
   const resolved = await getOperationForConnection(organizationId, Number(run.connection_id), run.action_key, sql);
-  if (!resolved || resolved.connection.status !== 'active' || resolved.connection.connector_key !== run.connector_key) {
+  const mayVerify = resolved?.connection.status === 'pending_auth' && run.action_key === BROWSER_VERIFY_OPERATION
+    && await connectionBrowserGrant(organizationId, run.connection_id);
+  if (!resolved || (resolved.connection.status !== 'active' && !mayVerify) || resolved.connection.connector_key !== run.connector_key) {
     return unavailable();
   }
   const actor = await resolveStoredActingPrincipal(sql, organizationId, run.policy_principal_kind, run.policy_principal_id);

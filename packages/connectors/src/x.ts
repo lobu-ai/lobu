@@ -30,6 +30,7 @@
  */
 
 import {
+	requireBrowser,
 	type ActionContext,
 	type ActionResult,
 	type ChromeActionDispatcher,
@@ -1245,28 +1246,11 @@ export function finalizeLikedTweetsResult(
 
 // ── Extension dispatcher ───────────────────────────────────────
 //
-// Pulled from sessionState — the connector-worker host splices a live
-// `chrome_dispatcher` onto the sessionState of every sync AND every action run;
-// the dispatcher's `dispatch()` rides a host capability up to the gateway's
-// /api/workers/dispatch-chrome-action bridge and out to the paired Owletto
-// extension. When no extension is online in the connection's org, the bridge
+// Granted as ctx.browser only for the declared browser authentication mode.
+// The dispatcher's dispatch() rides a host capability up to the gateway's
+// /api/workers/dispatch-chrome-action bridge and out to the connection's
+// selected Owletto extension. When that browser is offline, the bridge
 // returns `failed` and the dispatcher throws — we surface that verbatim.
-//
-// Structurally typed rather than taking SyncContext, so `execute()` can pass an
-// ActionContext without either context type having to know about the other.
-function requireExtensionDispatcher(ctx: {
-	sessionState?: Record<string, unknown> | null;
-}): ChromeActionDispatcher {
-	const handle = ctx.sessionState?.chrome_dispatcher as
-		| ChromeActionDispatcher
-		| undefined;
-	if (!handle || typeof handle.dispatch !== "function") {
-		throw new Error(
-			"X connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState — re-run on a connector-worker that has the dispatcher bridge.",
-		);
-	}
-	return handle;
-}
 
 // ── Sync paths ─────────────────────────────────────────────────
 
@@ -1988,7 +1972,7 @@ async function syncViaExtension(args: {
 	const { ctx, url, interceptPatterns, parseResponse, maxScrolls, checkpoint } =
 		args;
 	const result = await extensionNetworkSync<XTweet>({
-		dispatcher: requireExtensionDispatcher(ctx),
+		dispatcher: requireBrowser(ctx),
 		config: {
 			interceptPatterns,
 			allowedOrigins: X_ALLOWED_ORIGINS,
@@ -2108,7 +2092,7 @@ async function syncLikedTweetsViaExtension(
 ): Promise<XSyncPage> {
 	const accountHandle = await resolveAccountHandle(config);
 	const likesUrl = `https://x.com/${encodeURIComponent(accountHandle)}/likes`;
-	const dispatcher = requireExtensionDispatcher(ctx);
+	const dispatcher = requireBrowser(ctx);
 	const previouslyComplete = checkpoint.likes_backfill_status === "complete";
 	const pageBudget = previouslyComplete
 		? readLikesIncrementalPageBudget(config)
@@ -2449,7 +2433,7 @@ async function syncDirectMessagesViaExtension(
 			: "";
 
 	const result = await extensionNetworkSync<XDmMessage>({
-		dispatcher: requireExtensionDispatcher(ctx),
+		dispatcher: requireBrowser(ctx),
 		config: {
 			interceptPatterns: [
 				{ regex: "/i/api/graphql/\\w+/.*DM" },
@@ -2490,7 +2474,7 @@ async function syncHomeFeedViaDomScrape(
 ): Promise<XSyncPage> {
 	const maxScrolls = readScrollBudget(config, { defaultMax: 10, cap: 30 });
 	const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
-		dispatcher: requireExtensionDispatcher(ctx),
+		dispatcher: requireBrowser(ctx),
 		url: "https://x.com/home",
 		config: {
 			...HOME_FEED_SCRAPE_CONFIG,
@@ -3195,8 +3179,27 @@ export default class XConnector extends ConnectorRuntime {
 		name: "X (Twitter)",
 		description:
 			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, and reads the chronological Following timeline live through the X API. Links social actors into the person graph.",
-		version: "3.14.0",
+		version: "3.14.1",
 		faviconDomain: "x.com",
+		browser: {
+			origins: ["https://x.com", "https://twitter.com"],
+			authMethods: ["browser"],
+			accountProbe: {
+				url: "https://x.com/home",
+				// twid is the signed-in user id, not a bearer credential or mutable handle.
+				expression: `(async () => {
+          for (let i = 0; i < 40; i++) {
+            const profile = document.querySelector('[data-testid=AppTabBar_Profile_Link]');
+            const raw = document.cookie.split('; ').find(cookie => cookie.startsWith('twid='));
+            const identity = raw ? decodeURIComponent(raw.slice(5)) : '';
+            if (profile && /^u=[0-9]+$/.test(identity)) return { accountId: identity.slice(2) };
+            if (/login|signup|account\\/access/.test(location.pathname)) return null;
+            await new Promise(resolve => setTimeout(resolve, 250));
+          }
+          return null;
+        })()`,
+			},
+		},
 		authSchema: {
 			methods: [
 				{
@@ -3235,8 +3238,8 @@ export default class XConnector extends ConnectorRuntime {
 					},
 				},
 				{
-					type: "none",
-					label: "Paired Chrome extension",
+					type: "browser",
+					mode: "live",
 				},
 			],
 		},
@@ -3461,7 +3464,7 @@ export default class XConnector extends ConnectorRuntime {
 			if (!tweetRef) {
 				return { success: false, error: "tweet_url or tweet_id is required" };
 			}
-			const output = await prepareXReply(requireExtensionDispatcher(ctx), {
+			const output = await prepareXReply(requireBrowser(ctx), {
 				tweetUrl: tweetRef,
 				body,
 				banner: ctx.input.banner !== false,

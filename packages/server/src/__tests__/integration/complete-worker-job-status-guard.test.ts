@@ -106,6 +106,28 @@ async function insertReapedRun(
   return rows[0].id;
 }
 
+describe('live browser identity ownership', () => {
+  beforeEach(cleanupTestDatabase);
+  it.each(['live', 'cookies'])('does not accept a worker-supplied live identity on a %s profile', async (mode) => {
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    const connectionId = await insertConnection(org.id);
+    const feedId = await insertFeed(org.id, connectionId);
+    const runId = await insertReapedRun(org.id, connectionId, feedId);
+    const original = mode === 'live' ? { mode, account_id: 'synthetic-original', verified_at: '2026-10-07T00:00:00.000Z' } : { cookies: [] };
+    const [profile] = await sql`INSERT INTO auth_profiles (organization_id, connector_key, slug, display_name, profile_kind, status, auth_data)
+      VALUES (${org.id}, 'chrome', 'synthetic-browser-account', 'Synthetic browser', 'browser_session', 'pending_auth', ${sql.json(original)}) RETURNING id`;
+    await sql`UPDATE connections SET auth_profile_id = ${profile.id} WHERE id = ${connectionId}`;
+    await sql`UPDATE runs SET status = 'running', completed_at = NULL WHERE id = ${runId}`;
+    const { ctx } = mockWorkerCtx({run_id: runId, worker_id: WORKER_ID, status: 'success', items_collected: 0,
+      auth_update: { mode: 'live', account_id: 'synthetic-forged', verified_at: '2026-10-07T00:00:00.000Z' }});
+    await completeWorkerJob(ctx);
+    const [saved] = await sql`SELECT auth_data, status FROM auth_profiles WHERE id = ${profile.id}`;
+    expect(saved.auth_data).toEqual(original);
+    expect(saved.status).toBe('pending_auth');
+  });
+});
+
 describe('completeWorkerJob status guard (late-completion-after-timeout)', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();

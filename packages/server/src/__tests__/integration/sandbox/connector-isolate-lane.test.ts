@@ -452,7 +452,7 @@ describe("personal-agent example: mixed live/takeout connector", () => {
 
 			expect(out.outcome).toBe("threw");
 			// The LIVE path's own precondition, reached and reported...
-			expect(out.message).toMatch(/paired Owletto Chrome extension/);
+			expect(out.message).toBe("Browser setup is required for this connection");
 			// ...and emphatically not the module-load rejection it used to be.
 			expect(out.message).not.toMatch(/Node builtin|node:fs|node:path/);
 		} finally {

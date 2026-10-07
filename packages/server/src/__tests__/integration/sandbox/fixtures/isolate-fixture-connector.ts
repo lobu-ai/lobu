@@ -33,7 +33,6 @@ interface FixtureConfig {
 	secret?: string;
 }
 
-type Dispatcher = { dispatch(actionKey: string, input: Record<string, unknown>): Promise<Record<string, unknown>> };
 
 function event(index: number): EventEnvelope {
 	return {
@@ -66,9 +65,9 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 
 	async execute(ctx: ActionContext): Promise<ActionResult> {
 		if (ctx.actionKey === "dispatch") {
-			const dispatcher = (ctx.sessionState as { chrome_dispatcher?: Dispatcher } | null)?.chrome_dispatcher;
-			if (!dispatcher) return { success: false, error: "no chrome_dispatcher on sessionState" };
-			const observation = await dispatcher.dispatch("tabs.list", ctx.input);
+			const dispatcher = ctx.browser;
+			if (!dispatcher) return { success: false, error: "no browser grant" };
+			const observation = await dispatcher.dispatch("list_tabs", ctx.input);
 			return { success: true, output: { observation } };
 		}
 		if (ctx.actionKey === "fail") return { success: false, error: "fixture action failed" };
@@ -253,9 +252,9 @@ export default class IsolateFixtureConnector extends ConnectorRuntime<Record<str
 				return { status: "complete" };
 			}
 			case "dispatch": {
-				const dispatcher = (ctx.sessionState as { chrome_dispatcher?: Dispatcher } | null)?.chrome_dispatcher;
-				if (!dispatcher) throw new Error("no chrome_dispatcher on sessionState");
-				const observation = await dispatcher.dispatch("tabs.list", { from: "sync" });
+				const dispatcher = ctx.browser;
+				if (!dispatcher) throw new Error("no browser grant");
+				const observation = await dispatcher.dispatch("list_tabs", { from: "sync" });
 				await ctx.commit([], { observation });
 				return { status: "complete" };
 			}

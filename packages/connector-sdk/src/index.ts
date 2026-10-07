@@ -234,6 +234,8 @@ export type {
   ExtensionScrapeResult,
 } from './extension-dom-scrape.js';
 export { extensionDomScrape } from './extension-dom-scrape.js';
+export type { ConnectorBrowserRequirement } from './browser-requirement.js';
+export { BROWSER_VERIFY_OPERATION, BROWSER_VERIFY_ACTION, browserAuthMethod, constrainBrowserInput, requireBrowser, resolveBrowserRequirement, validateBrowserRequirement } from './browser-requirement.js';
 export type {
   ChromeActionDispatcher,
   ChromeActionInput,

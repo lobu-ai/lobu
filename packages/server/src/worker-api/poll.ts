@@ -5,6 +5,7 @@
  * platform binding, capability authorization, and multi-lane run claiming.
  */
 
+import { connectionBrowserGrant } from '../connectors/browser-resource';
 import {
   authorizeCapabilities,
   entryToMessage,
@@ -815,6 +816,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
               AND status = 'pending'
               AND approval_status IN ('auto', 'approved')
               AND activation_kind = 'page_visit'
+              AND (target_device_worker_id IS NULL OR target_device_worker_id = ${deviceWorkerId}::uuid)
               AND run_metadata->>'page_activation_identity' = 'exact'
               AND activated_at IS NULL
               AND expires_at > current_timestamp
@@ -2181,6 +2183,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       Object.keys(connectionCredentials).length > 0 ? connectionCredentials : undefined,
     compiled_code: compiledCode,
     session_state: sessionState ?? undefined,
+    browser_grant: await connectionBrowserGrant(row.organization_id, row.connection_id, row.connector_version),
     action_key: row.action_key ?? undefined,
     // Mac/iOS bridge decodes `operation_key`; chrome uses `action_key` directly.
     operation_key: row.action_key ?? undefined,

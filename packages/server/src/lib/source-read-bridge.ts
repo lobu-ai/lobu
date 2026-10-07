@@ -61,7 +61,7 @@ export function createSourceReadBridge(
         if (signal.aborted) throw sourceReadDeadlineError(p.feedId);
         const result = await dispatchChromeActionToExtension({
           organizationId: p.scope.organizationId, actionKey, actionInput, parentRunId,
-          parentConnectionId: Number(feed.connection_id), visibilityUserId: p.scope.principal,
+          visibilityUserId: p.scope.principal,
           abortSignal: signal,
         });
         if (result.status !== 'completed') throw new Error(result.error_message ?? `Browser source step ${result.status}`);

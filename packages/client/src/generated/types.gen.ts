@@ -4407,7 +4407,7 @@ export type ManageAuthProfilesResponses = {
         cookie_count?: number;
         auth_cookie_name?: string | null;
         is_expired?: boolean;
-        auth_mode?: "cookies" | "empty";
+        auth_mode?: "cookies" | "live" | "empty";
       }
     | {
         action: "create_auth_profile";

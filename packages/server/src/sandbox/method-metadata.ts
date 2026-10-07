@@ -820,7 +820,7 @@ export default async (_ctx, client) => {
 	},
 	"connections.test": {
 		summary:
-			"Inspect a connection's authentication or device availability: OAuth token validity/expiry, env/app-auth presence, browser-session cookies, or (for an auth-free connection pinned to a device) whether the paired device is online. These are metadata checks; browser sessions run through the paired extension.",
+			"Check a connection's authentication and readiness: OAuth token validity/expiry, env/app-auth presence, captured browser-session cookies, or device availability. Browser-backed connectors verify the selected Chrome profile and any declared account identity through the paired extension without reading source content. Successful verification restores readiness but does not resume paused feeds.",
 		access: "external",
 		enforcedTier: "admin",
 		signature:

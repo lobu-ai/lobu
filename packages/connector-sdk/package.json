@@ -16,6 +16,10 @@
         "default": "./dist/index.js"
       }
     },
+    "./browser-requirement": {
+      "types": "./dist/browser-requirement.d.ts",
+      "import": "./dist/browser-requirement.js"
+    },
     "./define-connector": {
       "import": {
         "types": "./dist/define-connector.d.ts",

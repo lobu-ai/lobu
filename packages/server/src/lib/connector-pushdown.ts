@@ -8,6 +8,7 @@
  * operations.execute.
  */
 
+import { connectionBrowserGrant } from '../connectors/browser-resource';
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
 import { assertFeedReadWindow, validateFeedReadWindow, type FeedReadMatch, type FeedReadWindow, type FeedReadWindowCoverage, type QueryContext } from '@lobu/connector-sdk';
 import { createHash } from 'node:crypto';
@@ -558,6 +559,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
         config,
         env: dbEgressConfig(),
         sessionState,
+        browser: await connectionBrowserGrant(p.scope.organizationId, feed.connection_id, feed.pinned_version ?? feed.definition_version),
         credentials,
         httpAuth,
         limit: p.limit,

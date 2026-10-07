@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 20;
+  const ADAPTER_VERSION = 21;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const MAX_RECORD_BYTES = 128 * 1024;
   const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -1923,6 +1923,10 @@ export function whatsAppWebAdapterProgram() {
             reason: `expected ${ADAPTER_VERSION}`,
           },
         };
+      }
+      if (request.op === "account_identity") {
+        const accountId = widString(meUser());
+        return accountId ? { accountId } : null;
       }
       if (request.op === "probe") {
         const status = readiness();

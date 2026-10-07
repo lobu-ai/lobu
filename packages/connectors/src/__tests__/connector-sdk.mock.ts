@@ -20,6 +20,7 @@
 // drag in none of the browser stack.
 import * as fileInput from '../../../connector-sdk/src/file-input.js';
 import * as fileOutput from '../../../connector-sdk/src/file-output.js';
+import { requireBrowser } from '../../../connector-sdk/src/browser-requirement.js';
 
 interface DomScrapeOpts {
   dispatcher: {
@@ -154,6 +155,7 @@ export function connectorSdkMock() {
   });
 
   return {
+    requireBrowser,
     ...fileInput,
     ...fileOutput,
     // Sole platform entity-type slug for ACL-gated resources. Must stay in step

@@ -2,6 +2,9 @@
  * CRUD action handlers: list, get, create, update, delete.
  */
 
+import { completeBrowserConnectionSetup } from '../../helpers/verify-browser-connection';
+import { selectedBrowserRequirement } from '../../../../connectors/browser-resource';
+import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-setup';
 import { randomUUID } from "node:crypto";
 import { getErrorMessage, parseJsonObject } from "@lobu/core";
 import { getScopedConnectorDefinition } from "../../../../catalog/connector-definitions";
@@ -1032,6 +1035,11 @@ export async function handleCreate(
           oauthAccountCreatedBy: effectiveCreatedBy,
         });
 
+  const browserSetup = await checkBrowserConnectionSetup({ action: 'create', connector,
+    profile: authSelection?.authProfile, deviceWorkerId: deviceBinding.deviceWorkerId, ctx,
+    setupUrl: await buildViewUrl(ctx, args.connector_key) });
+  if (browserSetup) return browserSetup;
+
   if (authSelection) {
     const requiresAuth =
 			!!authSelection.oauthMethod ||
@@ -1446,6 +1454,14 @@ export async function handleCreate(
 		});
 	}
 
+  if (selectedBrowserRequirement(connector.browser, connector.auth_schema, authSelection?.authProfile?.profile_kind)) {
+    const pending = await completeBrowserConnectionSetup({ action: 'create', connectionId: Number(inserted[0].id),
+      connectorKey: args.connector_key, slug: String(inserted[0].slug), ctx, setupUrl: await buildViewUrl(ctx, args.connector_key) });
+    if (pending) return pending;
+    inserted[0].status = 'active';
+    if (authSelection?.authProfile) authSelection.authProfile = await getAuthProfileById(organizationId, authSelection.authProfile.id);
+  }
+
   return {
 		action: "create",
     connection: enrichWithAuthProfiles(
@@ -1751,6 +1767,7 @@ export async function handleUpdate(
     authProfileSlug: hasAuthProfileArg ? args.auth_profile_slug : currentAuthProfile?.slug,
     appAuthProfileSlug: hasAppAuthProfileArg ? args.app_auth_profile_slug : currentAppAuthProfile?.slug,
     deviceWorkerId: nextDeviceWorkerId,
+    oauthAccountCreatedBy: ctx.userId,
   });
 
   if (args.auth_profile_slug === null && !explicitlyNoAuth &&
@@ -1820,25 +1837,26 @@ export async function handleUpdate(
     }
   }
 
-  const nextAuthProfileId = hasAuthProfileArg
+  const provisionedLiveBrowser = !currentAuthProfile && hasDeviceWorkerArg && authSelection.authProfile?.auth_data?.mode === 'live';
+  const nextAuthProfileId = hasAuthProfileArg || provisionedLiveBrowser
     ? (authSelection.authProfile?.id ?? null)
     : existing.auth_profile_id;
-  // Re-pointing a connection onto a PERSONAL credential (oauth_account) must
+  // Re-pointing onto a personal credential (OAuth or browser session) must
   // floor its visibility to 'private' — otherwise an existing 'org' connection
   // rebound onto a user's own Gmail would expose that inbox org-wide through the
   // owner's token. Downgrade-only: we never widen here (the CASE keeps the
   // current visibility when the new profile is not personal).
   const rebindToPersonalCred =
-		hasAuthProfileArg &&
+		(hasAuthProfileArg || provisionedLiveBrowser) &&
 		isPersonalCredentialKind(authSelection.authProfile?.profile_kind);
   const nextAppAuthProfileId = hasAppAuthProfileArg
     ? (authSelection.appAuthProfile?.id ?? null)
     : existing.app_auth_profile_id;
-  const effectiveSelectedAuthProfile = hasAuthProfileArg
+  const effectiveSelectedAuthProfile = hasAuthProfileArg || provisionedLiveBrowser
     ? authSelection.authProfile
     : currentAuthProfile;
   const browserAuthBindingChanged =
-    hasAuthProfileArg && nextAuthProfileId !== existing.auth_profile_id;
+    (hasAuthProfileArg || provisionedLiveBrowser) && nextAuthProfileId !== existing.auth_profile_id;
 
   // Device-bound browser profile auto-pins the connection's device.
 	const updateProfileDeviceWorkerId =
@@ -1856,6 +1874,19 @@ export async function handleUpdate(
       };
     } else if (!nextDeviceWorkerId) {
       nextDeviceWorkerId = updateProfileDeviceWorkerId;
+    }
+  }
+  const browserConnector = await getScopedConnectorDefinition({ organizationId, connectorKey: existing.connector_key });
+  const browserRequirement = selectedBrowserRequirement(browserConnector?.browser, existing.auth_schema, effectiveSelectedAuthProfile?.profile_kind);
+  if (browserRequirement && (hasDeviceWorkerArg || hasAuthProfileArg || args.status === 'active')) {
+    if (!nextDeviceWorkerId) return { error: 'This connector requires a paired Chrome browser. The browser binding cannot be removed.' };
+    const binding = await resolveDeviceBinding({ organizationId, userId: ctx.userId, connector: browserConnector!, deviceWorkerId: nextDeviceWorkerId, browser: true });
+    if ('error' in binding) return binding;
+    if (browserRequirement.accountProbe && (effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' || effectiveSelectedAuthProfile.device_worker_id !== nextDeviceWorkerId)) {
+      return { error: 'Choose a live browser account bound to this Chrome profile.' };
+    }
+    if (args.status === 'active' && browserRequirement.accountProbe && (effectiveSelectedAuthProfile?.status !== 'active' || !effectiveSelectedAuthProfile.auth_data?.account_id)) {
+      return { error: 'Verify this browser account with connections.test before activating the connection.' };
     }
   }
   const newlyBoundBrowserProfile =
@@ -2231,7 +2262,7 @@ export async function handleUpdate(
   // with no cron stays manual (#2021).
   const shouldCascadeStatus =
     args.status !== undefined ||
-    (!explicitlyNoAuth &&
+    (effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' && !explicitlyNoAuth &&
       effectiveStatus !== null &&
       updatedConnection.status !== previousConnectionStatus);
   if (shouldCascadeStatus) {
@@ -2242,7 +2273,7 @@ export async function handleUpdate(
     }
   }
 
-	const effectiveAuth = hasAuthProfileArg
+	const effectiveAuth = hasAuthProfileArg || provisionedLiveBrowser
 		? authSelection.authProfile
 		: currentAuthProfile;
   const effectiveAppAuth = hasAppAuthProfileArg

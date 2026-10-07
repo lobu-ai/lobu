@@ -508,20 +508,21 @@ describe("isolate lane: fixture connector", () => {
 			actionKey: "dispatch",
 			actionInput: { tab: 3 },
 			config: {},
+			browser: { origins: ["https://example.com"] },
 			credentials: null,
 			sessionState: { cookies: "x" },
 			env: {},
 		});
-		expect(action.dispatches).toEqual([{ actionKey: "tabs.list", input: { tab: 3 } }]);
+		expect(action.dispatches).toEqual([{ actionKey: "list_tabs", input: { tab: 3, allowed_origins: ["https://example.com"] } }]);
 		expect(action.result).toEqual({
 			mode: "action",
-			output: { observation: { actionKey: "tabs.list", echoed: { tab: 3 }, tabs: [{ id: 1 }, { id: 2 }] } },
+			output: { observation: { actionKey: "list_tabs", echoed: { tab: 3, allowed_origins: ["https://example.com"] }, tabs: [{ id: 1 }, { id: 2 }] } },
 		});
 
-		const sync = await runIsolate(fixtureIsolateCode, syncJob({ scenario: "dispatch" }));
-		expect(sync.dispatches).toEqual([{ actionKey: "tabs.list", input: { from: "sync" } }]);
+		const sync = await runIsolate(fixtureIsolateCode, { ...syncJob({ scenario: "dispatch" }), browser: { origins: ["https://example.com"] } });
+		expect(sync.dispatches).toEqual([{ actionKey: "list_tabs", input: { from: "sync", allowed_origins: ["https://example.com"] } }]);
 		expect(checkpointOf(sync)).toEqual({
-			observation: { actionKey: "tabs.list", echoed: { from: "sync" }, tabs: [{ id: 1 }, { id: 2 }] },
+			observation: { actionKey: "list_tabs", echoed: { from: "sync", allowed_origins: ["https://example.com"] }, tabs: [{ id: 1 }, { id: 2 }] },
 		});
 	});
 

@@ -24,6 +24,7 @@
  * `IsolateLaneIneligibleError`.
  */
 
+import { BROWSER_VERIFY_OPERATION, constrainBrowserInput } from '@lobu/connector-sdk';
 import net from 'node:net';
 import tls from 'node:tls';
 import type { EventEnvelope } from '@lobu/connector-sdk';
@@ -222,12 +223,6 @@ const GUEST_RUNNER = String.raw`
     };
   }
 
-  function withDispatcher(sessionState) {
-    var out = Object.assign({}, sessionState || {});
-    out.chrome_dispatcher = chromeDispatcher();
-    return out;
-  }
-
   // One commit may carry more events than one bridge message should. Every
   // chunk but the last travels without a checkpoint, so the cursor moves only
   // with the chunk that completes the page: an earlier chunk that lands alone
@@ -274,10 +269,15 @@ const GUEST_RUNNER = String.raw`
     }
 
     if (job.mode === 'action') {
+      if (job.actionKey === ${JSON.stringify(BROWSER_VERIFY_OPERATION)} && job.browser) {
+        var verified = await chromeDispatcher().dispatch(${JSON.stringify(BROWSER_VERIFY_OPERATION)}, {});
+        return { mode: 'action', output: verified };
+      }
       var actionResult = await instance.execute({
         actionKey: job.actionKey,
         input: job.actionInput,
-        sessionState: withDispatcher(job.sessionState),
+        browser: job.browser ? chromeDispatcher() : undefined,
+        sessionState: Object.assign({}, job.sessionState || {}),
         credentials: job.credentials,
         config: mergedConfig
       });
@@ -322,7 +322,8 @@ const GUEST_RUNNER = String.raw`
     if (job.mode === 'observe') {
       await instance.observe({
         feedId: job.feedId, feedKey: job.feedKey, checkpoint: job.checkpoint,
-        config: mergedConfig, credentials: job.credentials, sessionState: withDispatcher(job.sessionState),
+        config: mergedConfig, credentials: job.credentials, browser: job.browser ? chromeDispatcher() : undefined,
+        sessionState: Object.assign({}, job.sessionState || {}),
         env: job.env
       });
       return { mode: 'observe' };
@@ -332,7 +333,8 @@ const GUEST_RUNNER = String.raw`
       var readResult = await instance.read({
         feedId: job.feedId === null ? undefined : job.feedId, feedKey: job.feedKey, query: job.query, cursor: job.cursor,
         window: job.window,
-        config: mergedConfig, credentials: job.credentials, sessionState: withDispatcher(job.sessionState),
+        config: mergedConfig, credentials: job.credentials, browser: job.browser ? chromeDispatcher() : undefined,
+        sessionState: Object.assign({}, job.sessionState || {}),
         limit: job.limit, offset: job.offset, sort: job.sort, match: job.match
       });
       return {
@@ -350,7 +352,8 @@ const GUEST_RUNNER = String.raw`
       checkpoint: job.checkpoint,
       credentials: job.credentials,
       entityIds: job.entityIds,
-      sessionState: withDispatcher(job.sessionState),
+      browser: job.browser ? chromeDispatcher() : undefined,
+      sessionState: Object.assign({}, job.sessionState || {}),
       commit: commit
     });
     // A commit the connector fired without awaiting still belongs to this pass.
@@ -903,8 +906,9 @@ export class IsolateExecutor implements SyncExecutor {
           return JSON.stringify(signal ?? {});
         },
         dispatchChromeAction: async (actionKey: unknown, inputJson: unknown) => {
+          if (!job.browser) throw new Error('Browser access was not granted for this connection');
           if (!hooks?.onChromeDispatch) {
-            throw new Error('chrome_dispatcher is not available in this execution context (no onChromeDispatch hook)');
+            throw new Error('ctx.browser is not available in this execution context (no onChromeDispatch hook)');
           }
           const parsed = parseGuestJson(inputJson, 'dispatchChromeAction');
           const input = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
@@ -914,14 +918,14 @@ export class IsolateExecutor implements SyncExecutor {
             timer = setTimeout(() => {
               reject(
                 new Error(
-                  `chrome_dispatcher.dispatch('${keyStr}') exceeded 120000ms; IPC may be wedged`
+                  `ctx.browser.dispatch('${keyStr}') exceeded 120000ms; IPC may be wedged`
                 )
               );
             }, 120_000);
           });
           try {
             const output = await Promise.race([
-              hooks.onChromeDispatch(keyStr, input),
+              hooks.onChromeDispatch(keyStr, constrainBrowserInput(job.browser, keyStr, input)),
               timeoutPromise,
             ]);
             return JSON.stringify(output ?? {});

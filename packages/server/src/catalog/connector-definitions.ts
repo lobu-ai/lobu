@@ -1,3 +1,4 @@
+import type { ConnectorBrowserRequirement } from '@lobu/connector-sdk';
 import type { SourceFiles, SourceDependencies } from "@lobu/core/contracts/tools/source-files";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
@@ -57,6 +58,7 @@ export type ScopedConnectorDefinitionRow = {
 	name: string;
 	description: string | null;
 	version: string;
+	browser?: ConnectorBrowserRequirement | null;
 	auth_schema: AuthSchema;
 	feeds_schema: Record<string, unknown> | null;
 	actions_schema: Record<string, unknown> | null;
@@ -121,6 +123,7 @@ export async function listScopedConnectorDefinitions(params: {
       d.name,
       d.description,
       d.version,
+      d.browser,
       d.auth_schema,
       d.feeds_schema,
       d.actions_schema,
