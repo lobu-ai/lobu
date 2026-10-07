@@ -21,8 +21,10 @@
  *   - liked_tweets:  posts the user has liked (API v2 or signed-in extension backfill)
  *   - bookmarks:        posts the user has bookmarked (API v2 or extension)
  *   - direct_messages:  1:1 and group DMs (OAuth API; extension fallback on /messages)
- *   - home_feed:        personalized x.com home timeline (extension only — there
- *                    is no public API for the "For you" / "Following" timeline;
+ *   - following_timeline: live chronological Following timeline (OAuth API,
+ *                    source reads only; does not import tweet events)
+ *   - home_feed:        personalized x.com home timeline (extension only — the
+ *                    API does not expose the algorithmic "For you" timeline;
  *                    read via content-script scrape because CDP network capture
  *                    blocks the feed from rendering, same as LinkedIn home_feed)
  */
@@ -31,19 +33,21 @@ import {
 	type ActionContext,
 	type ActionResult,
 	type ChromeActionDispatcher,
-	type RuntimeConnectorDefinition,
-	type EventAttributionRule,
-	type EventAttributionTargetSpec,
-	type EntityTraitSpec,
 	ConnectorRuntime,
 	calculateEngagementScore,
 	createHttpClient,
+	type EntityTraitSpec,
+	type EventAttributionRule,
+	type EventAttributionTargetSpec,
 	type EventEnvelope,
 	extensionDomScrape,
 	extensionNetworkSync,
-	HttpStatusError,
+	type FeedReadContext,
+	type FeedReadResult,
 	type HttpClient,
+	HttpStatusError,
 	paginateByCursor,
+	type RuntimeConnectorDefinition,
 	type SyncContext,
 	type SyncResult,
 } from "@lobu/connector-sdk";
@@ -54,7 +58,8 @@ type XSyncPage = {
 	checkpoint: Record<string, unknown>;
 	metadata?: SyncResult["metadata"];
 };
-import { X_IDENTITY, normalizeXHandle } from "./x-identity.js";
+
+import { normalizeXHandle, X_IDENTITY } from "./x-identity.js";
 
 /** OAuth scopes needed per feed for the API path (not used to pause browser-capable feeds). */
 const X_OAUTH_FEED_SCOPES: Record<string, readonly string[]> = {
@@ -353,12 +358,23 @@ const X_DM_COUNTERPARTY_ATTRIBUTIONS: EventAttributionRule[] = [
 			entityType: "person",
 			titlePath: "metadata.sender_name",
 			identities: [
-				{ namespace: X_IDENTITY.USER_ID, eventPath: "metadata.sender_id", primary: true },
-				{ namespace: X_IDENTITY.HANDLE, eventPath: "metadata.sender_handle", matchOnly: true },
+				{
+					namespace: X_IDENTITY.USER_ID,
+					eventPath: "metadata.sender_id",
+					primary: true,
+				},
+				{
+					namespace: X_IDENTITY.HANDLE,
+					eventPath: "metadata.sender_handle",
+					matchOnly: true,
+				},
 			],
 		},
 		traits: {
-			x_handle: { eventPath: "metadata.sender_handle", mergeStrategy: "prefer_non_empty" },
+			x_handle: {
+				eventPath: "metadata.sender_handle",
+				mergeStrategy: "prefer_non_empty",
+			},
 			// Same trait key as X_PERSON_AUTHOR_TRAITS / DM counterparty — keep
 			// person metadata vocabulary consistent across X attribution paths.
 			x_display_name: {
@@ -526,8 +542,7 @@ function buildApiTweet(
 	)?.id;
 
 	const authorId = tweet.author_id;
-	const username =
-		usernameById.get(authorId ?? "") ?? defaultUsername ?? "";
+	const username = usernameById.get(authorId ?? "") ?? defaultUsername ?? "";
 
 	return {
 		id: tweet.id,
@@ -1535,8 +1550,9 @@ function extractViewerUserId(json: unknown): string | undefined {
 		(data?.data as Record<string, unknown> | undefined)?.user_result,
 	];
 	for (const node of candidates) {
-		const result = (node as { user_results?: { result?: { rest_id?: string } } })
-			?.user_results?.result;
+		const result = (
+			node as { user_results?: { result?: { rest_id?: string } } }
+		)?.user_results?.result;
 		if (result?.rest_id) return String(result.rest_id);
 	}
 	return undefined;
@@ -1562,9 +1578,7 @@ function buildBrowserDmMessage(
 	const createdAt = String(
 		messageData.time ?? messageData.created_at ?? messageData.timestamp ?? "",
 	);
-	const senderId = String(
-		messageData.sender_id ?? messageNode.sender_id ?? "",
-	);
+	const senderId = String(messageData.sender_id ?? messageNode.sender_id ?? "");
 	const conversationId = String(
 		messageNode.conversation_id ??
 			messageNode.conversationId ??
@@ -1641,17 +1655,13 @@ function extractDmMessagesFromNode(
 
 	const content = record.content;
 	if (content && typeof content === "object") {
-		messages.push(
-			...extractDmMessagesFromNode(content, authUserId, seen),
-		);
+		messages.push(...extractDmMessagesFromNode(content, authUserId, seen));
 	}
 
 	const entries = record.entries;
 	if (Array.isArray(entries)) {
 		for (const entry of entries) {
-			messages.push(
-				...extractDmMessagesFromNode(entry, authUserId, seen),
-			);
+			messages.push(...extractDmMessagesFromNode(entry, authUserId, seen));
 		}
 	}
 
@@ -1681,9 +1691,7 @@ function extractDmMessagesFromNode(
 		record.user_events,
 	];
 	for (const candidate of nestedCandidates) {
-		messages.push(
-			...extractDmMessagesFromNode(candidate, authUserId, seen),
-		);
+		messages.push(...extractDmMessagesFromNode(candidate, authUserId, seen));
 	}
 
 	return messages;
@@ -1727,6 +1735,99 @@ async function resolveAuthenticatedUser(
 		throw new Error("Could not resolve authenticated X user via /2/users/me");
 	}
 	return { id, username };
+}
+
+/** Read one source-owned page. No sync/commit path or browser fallback exists. */
+async function readFollowingTimeline(
+	ctx: FeedReadContext,
+): Promise<FeedReadResult> {
+	if (!ctx.credentials?.accessToken) {
+		throw new Error("X Following source reads require OAuth credentials.");
+	}
+	if (ctx.query?.trim() || ctx.offset || ctx.match || ctx.window) {
+		throw new Error(
+			"X Following source reads support cursor pagination, not queries, offsets, matches, or window coverage.",
+		);
+	}
+	if (
+		ctx.sort &&
+		!(ctx.sort.column === "occurred_at" && ctx.sort.order === "desc")
+	) {
+		throw new Error(
+			"X Following source reads only support occurred_at descending.",
+		);
+	}
+	const limit = ctx.limit ?? 50;
+	if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+		throw new Error(
+			"X Following source read limit must be an integer from 1 to 100.",
+		);
+	}
+	const http = createOAuthHttpClient(ctx.credentials.accessToken);
+	const user = await resolveAuthenticatedUser(http);
+	const expected = ctx.config.expected_account_handle;
+	if (
+		typeof expected === "string" &&
+		normalizeXHandle(expected) !== normalizeXHandle(user.username)
+	) {
+		throw new Error(
+			`Authenticated X account @${user.username} does not match expected account ${expected}.`,
+		);
+	}
+	const url = new URL(
+		`https://api.x.com/2/users/${encodeURIComponent(user.id)}/timelines/reverse_chronological`,
+	);
+	url.searchParams.set("max_results", String(limit));
+	url.searchParams.set("tweet.fields", `${TWEET_FIELDS},entities`);
+	url.searchParams.set("expansions", "author_id");
+	url.searchParams.set("user.fields", "username,name,protected");
+	if (ctx.cursor) url.searchParams.set("pagination_token", ctx.cursor);
+	const page = await http.get<
+		Omit<XApiListResponse, "data" | "includes"> & {
+			data?: Array<XApiTweetRecord & { entities?: { urls?: XExpandedUrl[] } }>;
+			includes?: { users?: Array<XApiUserRecord & { protected?: boolean }> };
+		}
+	>(url.toString());
+	if (
+		page.errors?.length ||
+		(!Array.isArray(page.data) && page.meta?.result_count !== 0)
+	) {
+		throw new Error("X Following API returned an incomplete or invalid page.");
+	}
+	const authors = new Map(
+		(page.includes?.users ?? []).map((author) => [author.id, author]),
+	);
+	const handles = new Map(
+		[...authors].map(([id, author]) => [id, author.username ?? ""]),
+	);
+	const rows: Record<string, unknown>[] = [];
+	for (const record of page.data ?? []) {
+		const tweet = buildApiTweet(record, handles);
+		if (!tweet || !Number.isFinite(tweet.publishedAt.getTime())) {
+			throw new Error(
+				"X Following API returned a post without valid identity, content, or timestamp.",
+			);
+		}
+		const author = authors.get(record.author_id ?? "");
+		// A missing author/protection flag cannot establish public visibility.
+		if (ctx.config.public_only === true && author?.protected !== false)
+			continue;
+		tweet.authorDisplayName = author?.name;
+		tweet.urls = record.entities?.urls;
+		const event = tweetToEvent(tweet);
+		rows.push({
+			...event,
+			metadata: {
+				...event.metadata,
+				author_protected: author?.protected ?? null,
+			},
+		});
+	}
+	return {
+		rows,
+		nextCursor: page.meta?.next_token,
+		hasMore: Boolean(page.meta?.next_token),
+	};
 }
 
 async function resolveAccountHandle(
@@ -2061,15 +2162,15 @@ async function syncLikedTweetsViaExtension(
 		url: likesUrl,
 		parseResponse,
 		checkAuth: (currentUrl) => !isXAuthWall(currentUrl),
-			triggerNextPage: async (_tabId, browserDispatcher, sessionId) => {
-				let requestUrl: string | undefined;
-				try {
-					requestUrl = pages.prepareReplay();
-				} catch {
-					parserErrors.push("X likes cursor rewrite failed");
-					return;
-				}
-				if (!requestUrl) return;
+		triggerNextPage: async (_tabId, browserDispatcher, sessionId) => {
+			let requestUrl: string | undefined;
+			try {
+				requestUrl = pages.prepareReplay();
+			} catch {
+				parserErrors.push("X likes cursor rewrite failed");
+				return;
+			}
+			if (!requestUrl) return;
 			let observation: { ok?: boolean; status?: number };
 			try {
 				observation = await browserDispatcher.dispatch<{
@@ -2236,11 +2337,16 @@ async function syncBookmarksViaOAuthApi(
 		maxPages,
 	);
 
-	return finalizeSyncResult(tweets, checkpoint, {
-		backend: "oauth_api",
-		api_calls: pageCount,
-		feed: "bookmarks",
-	}, { originType: "bookmark" });
+	return finalizeSyncResult(
+		tweets,
+		checkpoint,
+		{
+			backend: "oauth_api",
+			api_calls: pageCount,
+			feed: "bookmarks",
+		},
+		{ originType: "bookmark" },
+	);
 }
 
 async function syncBookmarksViaExtension(
@@ -2270,14 +2376,10 @@ function parseApiDmListResponse(
 	const usernameById = new Map(
 		users.map((user) => [user.id, user.username ?? ""]),
 	);
-	const nameById = new Map(
-		users.map((user) => [user.id, user.name ?? ""]),
-	);
+	const nameById = new Map(users.map((user) => [user.id, user.name ?? ""]));
 
 	return (json.data ?? [])
-		.map((event) =>
-			buildDmMessage(event, authUserId, usernameById, nameById),
-		)
+		.map((event) => buildDmMessage(event, authUserId, usernameById, nameById))
 		.filter((message): message is XDmMessage => message !== null);
 }
 
@@ -3092,8 +3194,8 @@ export default class XConnector extends ConnectorRuntime {
 		key: "x",
 		name: "X (Twitter)",
 		description:
-			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension. Links social actors into the person graph.",
-		version: "3.13.7",
+			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, and reads the chronological Following timeline live through the X API. Links social actors into the person graph.",
+		version: "3.14.0",
 		faviconDomain: "x.com",
 		authSchema: {
 			methods: [
@@ -3139,6 +3241,39 @@ export default class XConnector extends ConnectorRuntime {
 			],
 		},
 		feeds: {
+			following_timeline: {
+				key: "following_timeline",
+				name: "Following Timeline (live)",
+				description:
+					"Read the authenticated account's chronological Following timeline through the X API without importing tweet events. Bounded by X's available recent history; does not provide window coverage or the algorithmic For You feed.",
+				read: readFollowingTimeline,
+				configSchema: {
+					type: "object",
+					additionalProperties: false,
+					properties: {
+						expected_account_handle: {
+							type: "string",
+							pattern: "^@?[A-Za-z0-9_]{1,15}$",
+							description:
+								"Optional account identity check. Reject reads when the authorized account has a different handle.",
+						},
+						public_only: {
+							type: "boolean",
+							default: false,
+							description:
+								"Return only posts whose expanded author is explicitly public. Protected or unknown authors are excluded; pagination is preserved.",
+						},
+					},
+				},
+				eventKinds: {
+					tweet: {
+						description: "A source-owned post from the Following timeline",
+					},
+					reply: {
+						description: "A source-owned reply from the Following timeline",
+					},
+				},
+			},
 			tweets: {
 				key: "tweets",
 				name: "Tweets",
@@ -3229,7 +3364,7 @@ export default class XConnector extends ConnectorRuntime {
 				name: "Home Timeline",
 				sync: (ctx) => this.syncFeed(ctx),
 				description:
-					"Your personalized x.com home timeline (For you + Following). Extension-only via content-script scrape — there is no public API for the home timeline.",
+					"Your personalized x.com home timeline (For you + Following). Extension-only via content-script scrape. Use following_timeline for source-only chronological reads through the official API.",
 				configSchema: homeFeedConfigSchema,
 				eventKinds: {
 					tweet: {
@@ -3348,7 +3483,10 @@ export default class XConnector extends ConnectorRuntime {
 		// way falls back to the extension, and nothing it gathered may land first.
 		const page = await this.collectFeed(ctx);
 		await ctx.commit(page.events, page.checkpoint);
-		return { status: "complete", ...(page.metadata ? { metadata: page.metadata } : {}) };
+		return {
+			status: "complete",
+			...(page.metadata ? { metadata: page.metadata } : {}),
+		};
 	}
 
 	private async collectFeed(ctx: SyncContext): Promise<XSyncPage> {
@@ -3364,9 +3502,7 @@ export default class XConnector extends ConnectorRuntime {
 		}
 
 		if (feedKey === "my_tweets") {
-			if (
-				resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api"
-			) {
+			if (resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api") {
 				return syncOAuthWithOptionalFallback(
 					config,
 					() => syncMyTweetsViaOAuthApi(ctx, config, checkpoint),
@@ -3377,9 +3513,7 @@ export default class XConnector extends ConnectorRuntime {
 		}
 
 		if (feedKey === "liked_tweets") {
-			if (
-				resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api"
-			) {
+			if (resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api") {
 				return syncOAuthWithOptionalFallback(
 					config,
 					() => syncLikedTweetsViaOAuthApi(ctx, config, checkpoint),
@@ -3390,9 +3524,7 @@ export default class XConnector extends ConnectorRuntime {
 		}
 
 		if (feedKey === "bookmarks") {
-			if (
-				resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api"
-			) {
+			if (resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api") {
 				return syncOAuthWithOptionalFallback(
 					config,
 					() => syncBookmarksViaOAuthApi(ctx, config, checkpoint),
@@ -3403,9 +3535,7 @@ export default class XConnector extends ConnectorRuntime {
 		}
 
 		if (feedKey === "direct_messages") {
-			if (
-				resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api"
-			) {
+			if (resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api") {
 				return syncOAuthWithOptionalFallback(
 					config,
 					() => syncDirectMessagesViaOAuthApi(ctx, config, checkpoint),
@@ -3417,9 +3547,7 @@ export default class XConnector extends ConnectorRuntime {
 
 		// `tweets` feed: prefer the official API when scopes are sufficient,
 		// otherwise the extension's signed-in search.
-		if (
-			resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api"
-		) {
+		if (resolveSyncBackend(ctx, config, oauthScopes) === "oauth_api") {
 			return syncOAuthWithOptionalFallback(
 				config,
 				() => syncViaOAuthApi(ctx, config, checkpoint),
