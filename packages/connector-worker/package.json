@@ -81,7 +81,7 @@
     "esbuild": "^0.28.1",
     "just-bash": "^2.14.2",
     "pathe": "^2.0.3",
-    "undici": "7.29.0"
+    "undici": "7.29.1"
   },
   "devDependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.70.0",
