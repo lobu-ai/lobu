@@ -125,22 +125,30 @@ jobs:
           chmod +x scripts/prod-smoke.sh
           scripts/prod-smoke.sh
 
+  # A separate job can report a smoke cancellation even if no smoke step ran.
+  # Skip filtered build runs; build-images owns their alarms. Delivery still
+  # requires GitHub to schedule this job and a runner to execute it.
+  notify-failure:
+    needs: smoke
+    if: always() && needs.smoke.result != 'success' && needs.smoke.result != 'skipped'
+    runs-on: ubuntu-24.04
+    steps:
       # Same devops channel the Flux notification-controller and build-images'
       # notify-failure post to, so cluster-side and CI-side breakage land in one
-      # place. Skipped when the webhook is unset; never fails the job itself.
+      # place. Skipped when the webhook is unset; never changes the smoke verdict.
       - name: Post failure to Slack devops
-        if: failure()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DEPLOY_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TARGET: ${{ inputs.url || 'https://app.lobu.ai' }}
+          RESULT: ${{ needs.smoke.result }}
         run: |
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             echo "SLACK_DEPLOY_WEBHOOK_URL not set; skipping notification."
             exit 0
           fi
           payload=$(jq -nc --arg text \
-            ":rotating_light: prod smoke FAILED against ${TARGET} — <${RUN_URL}|run>" \
+            ":rotating_light: prod smoke ${RESULT} against ${TARGET} — <${RUN_URL}|run>" \
             '{text: $text}')
           curl -sS -X POST -H 'Content-type: application/json' \
             --data "$payload" "$SLACK_WEBHOOK_URL"

@@ -51,26 +51,32 @@ jobs:
           QA_SLACK_CHANNEL: ${{ secrets.QA_SLACK_CHANNEL }}
         run: scripts/slack-qa-token-liveness.sh
 
+  # Report scheduled probe failures and cancellations from a separate job, even
+  # if no probe step ran. Manual dispatches already have an operator watching.
+  notify-failure:
+    needs: liveness
+    if: >-
+      always()
+      && github.event_name == 'schedule'
+      && needs.liveness.result != 'success'
+      && needs.liveness.result != 'skipped'
+    runs-on: ubuntu-24.04
+    steps:
       # Same devops channel build-images' notify-failure and the Flux
-      # notification-controller post to, so credential rot lands where the
-      # rest of the operational noise already goes. Skipped when the webhook
-      # is unset, and it runs only after the probe already failed, so it
-      # cannot change the job's verdict either way.
-      #
-      # Scheduled runs only: a manual dispatch already has someone watching it,
-      # and they do not need to be paged about the run they just started.
+      # notification-controller post to, so credential rot lands where the rest
+      # of the operational noise already goes.
       - name: Post failure to Slack devops
-        if: failure() && github.event_name == 'schedule'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DEPLOY_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULT: ${{ needs.liveness.result }}
         run: |
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             echo "SLACK_DEPLOY_WEBHOOK_URL not set; skipping notification."
             exit 0
           fi
           payload=$(jq -nc --arg text \
-            ":key: Slack QA credential check failed — the exact-response smoke cannot run. The run names which credential is dead, or reports Slack unreachable. <${RUN_URL}|run>" \
+            ":key: Slack QA credential check ${RESULT} — QA credentials could not be verified. Check <${RUN_URL}|run> for probe errors or cancellation details." \
             '{text: $text}')
           curl -sS -X POST -H 'Content-type: application/json' \
             --data "$payload" "$SLACK_WEBHOOK_URL"
