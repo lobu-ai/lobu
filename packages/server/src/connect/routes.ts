@@ -44,7 +44,7 @@ import {
   resolveOAuthAppClientCredentials,
 } from '../tools/admin/helpers/connection-helpers';
 import { registerConnectorWebhook } from './webhook-registration';
-import { mergeOAuthScopeAuthData, normalizeScopeList } from '../auth/oauth/scopes';
+import { hasAllScopes, mergeOAuthScopeAuthData, normalizeScopeList } from '../auth/oauth/scopes';
 import { createSyncRun, describeSyncRunSkip } from '../runs/queue-service';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { buildConnectionAuthUrl, buildConnectionsUrl, getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
@@ -813,7 +813,12 @@ async function handleOAuthCallback(
     accessToken: tokens.accessToken,
     userinfoUrl: authConfig.userinfoUrl,
   });
-  const grantedScopes = normalizeScopeList(tokens.scope);
+  // Incremental grants can include sibling scopes. Store only this flow's
+  // scopes on both the profile and its isolated account, which sync reads back.
+  const requestedScopes = normalizeScopeList(authConfig.requestedScopes ?? authConfig.scopes);
+  const grantedScopes = normalizeScopeList(tokens.scope).filter((scope) =>
+    hasAllScopes(requestedScopes, [scope])
+  );
 
   const actorUserId = (await resolveConnectActorUserId(c, tokenRow.created_by)) ?? 'connect-flow';
 
@@ -902,7 +907,7 @@ async function handleOAuthCallback(
         ${tokens.accessToken},
         ${tokens.refreshToken},
         ${expiresAt},
-        ${tokens.scope},
+        ${tokens.scope === null ? null : grantedScopes.join(' ')},
         NOW(), NOW()
       )
       ON CONFLICT ("providerId", "accountId") DO UPDATE SET

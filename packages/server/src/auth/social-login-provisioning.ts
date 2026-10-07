@@ -10,7 +10,7 @@ import {
 import { getOAuthAuthMethods, normalizeConnectorAuthSchema } from '../utils/connector-auth';
 import logger from '../utils/logger';
 import { syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
-import { mergeOAuthScopeAuthData, normalizeScopeList } from './oauth/scopes';
+import { hasAllScopes, mergeOAuthScopeAuthData, normalizeScopeList } from './oauth/scopes';
 import { createProvisionedConnection } from '../utils/provisioned-connection';
 import { resolveRequestOrganizationId } from './config';
 
@@ -65,10 +65,30 @@ export async function provisionConnectorFromSocialLogin(params: {
       : { raw: null, normalized: null };
 
     const displayLabel = userInfo?.name ?? userInfo?.email ?? params.account.id;
-    const requestedScopes = normalizeScopeList(
-      params.account.scope ?? oauthMethod.loginScopes ?? oauthMethod.requiredScopes
+    // Social-login grants are shared by provider. Attribute only this
+    // connector's scopes so reconnect cannot request a sibling's permissions.
+    const declaredFeedScopes =
+      row.feeds_schema && typeof row.feeds_schema === 'object' && !Array.isArray(row.feeds_schema)
+        ? Object.values(row.feeds_schema as Record<string, unknown>).flatMap((feed) =>
+            normalizeScopeList(
+              (feed as Record<string, unknown> | null | undefined)?.requiredScopes
+            )
+          )
+        : [];
+    const declaredScopes = normalizeScopeList([
+      ...(oauthMethod.loginScopes ?? []),
+      ...(oauthMethod.requiredScopes ?? []),
+      ...(oauthMethod.optionalScopes ?? []),
+      ...declaredFeedScopes,
+    ]);
+    const filterToDeclared = (scopes: string[]) =>
+      scopes.filter((scope) => hasAllScopes(declaredScopes, [scope]));
+    const requestedScopes = filterToDeclared(
+      normalizeScopeList(
+        params.account.scope ?? oauthMethod.loginScopes ?? oauthMethod.requiredScopes
+      )
     );
-    const grantedScopes = normalizeScopeList(params.account.scope);
+    const grantedScopes = filterToDeclared(normalizeScopeList(params.account.scope));
 
     const existingProfileRows = await sql`
       SELECT id, slug, auth_data, status, account_id, provider

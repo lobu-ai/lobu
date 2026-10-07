@@ -98,12 +98,12 @@ export async function syncOAuthConnectionsForAuthProfile(
   }
 
   const [accountRow] = await sql`
-    SELECT scope
+    SELECT scope, "accountId"
     FROM "account"
     WHERE id = ${authProfile.account_id}
     LIMIT 1
   `;
-  const grantedScopes = normalizeScopeList(
+  const accountGrantedScopes = normalizeScopeList(
     (accountRow as { scope?: string | null } | undefined)?.scope
   );
 
@@ -123,6 +123,31 @@ export async function syncOAuthConnectionsForAuthProfile(
   const oauthMethod = getOAuthAuthMethods(authSchema).find(
     (method) => method.provider.toLowerCase() === (authProfile.provider ?? '').toLowerCase()
   );
+  const feedsSchema =
+    (connectorRow as { feeds_schema?: Record<string, unknown> } | undefined)?.feeds_schema ??
+    null;
+  // Shared social-login accounts need per-connector attribution. Isolated
+  // connector accounts keep their own grants, including scopes removed from
+  // the manifest, so reconnect cannot downgrade an existing grant.
+  const declaredFeedScopes =
+    feedsSchema && typeof feedsSchema === 'object' && !Array.isArray(feedsSchema)
+      ? Object.values(feedsSchema as Record<string, unknown>).flatMap((feed) =>
+          normalizeScopeList(
+            (feed as Record<string, unknown> | null | undefined)?.requiredScopes
+          )
+        )
+      : [];
+  const declaredScopes = normalizeScopeList([
+    ...(oauthMethod?.loginScopes ?? []),
+    ...(oauthMethod?.requiredScopes ?? []),
+    ...(oauthMethod?.optionalScopes ?? []),
+    ...declaredFeedScopes,
+  ]);
+  const isolatedAccount = (accountRow as { accountId?: string } | undefined)?.accountId
+    ?.startsWith('lobu-connector:');
+  const grantedScopes = isolatedAccount
+    ? accountGrantedScopes
+    : accountGrantedScopes.filter((scope) => hasAllScopes(declaredScopes, [scope]));
   // Optional permissions affect the capabilities that declare them, not the
   // health of every operation/feed backed by this account.
   const connectorScopesOk = hasAllScopes(
@@ -158,9 +183,6 @@ export async function syncOAuthConnectionsForAuthProfile(
       AND c.deleted_at IS NULL
       AND f.deleted_at IS NULL
   `;
-
-  const feedsSchema =
-    (connectorRow as { feeds_schema?: Record<string, unknown> } | undefined)?.feeds_schema ?? null;
 
   for (const row of feedRows as Array<{
     id: number;
