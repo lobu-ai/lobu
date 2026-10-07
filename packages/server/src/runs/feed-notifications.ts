@@ -52,6 +52,11 @@ async function receiveSourceReferenceDelivery(
     logger.warn({ feedId: notice.feed_id }, 'Revoking invalid source reference delivery');
     return { active: false };
   }
+  // A valid binding confirms setup. Preserve due recovery and failure backoff;
+  // only a successful setup's future confirmation window can be cleared.
+  await tx`UPDATE feeds SET next_run_at = NULL
+    WHERE id = ${notice.feed_id} AND organization_id = ${feed.organization_id}
+      AND consecutive_failures = 0 AND next_run_at > now()`;
   const queued: Array<{ runId: number; status: string }> = [];
   for (const { payload } of delivery.records) {
     for (const event of payload.events) {

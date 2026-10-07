@@ -227,6 +227,14 @@ describe('compiled browser source reads', () => {
     }
     await observed;
     expect(answered).toBe(true);
+    // The setup completed, but the next poll may still omit its binding.
+    // Completing its queue task must not turn that omission into a tight loop.
+    await sql`UPDATE runs SET status = 'completed' WHERE action_key = 'source-feed-listener'`;
+    const setupTasks = await sql`SELECT id FROM runs WHERE action_key = 'source-feed-listener'`;
+    expect.soft((await sql`SELECT next_run_at > now() AS cooling_down FROM feeds WHERE id = ${feedId}`)[0].cooling_down).toBe(true);
+    await sourceListeners.reconcileSourceFeedListeners(sql, deviceId, [orgId], []);
+    await sourceListeners.reconcileSourceFeedListeners(sql, deviceId, [orgId], []);
+    expect.soft(await sql`SELECT id FROM runs WHERE action_key = 'source-feed-listener'`).toHaveLength(setupTasks.length);
     const notification = await post('/api/workers/poll', { body: {
       worker_id: WORKER_ID, platform: 'chrome-extension', app_version: '9.9.0',
       capabilities: { 'browser.debugger': true, 'browser.tabs': true },

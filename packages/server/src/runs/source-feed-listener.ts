@@ -113,7 +113,11 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         credentials: auth.credentials, sessionState: auth.sessionState, httpAuth: auth.httpAuth, env: dbEgressConfig(),
       }, hooks: { onHttpFetch: auth.onHttpFetch, onChromeDispatch: browser.onChromeDispatch, signal: controller.signal }, timeoutMs,
     });
-    await sql`UPDATE feeds SET consecutive_failures = 0, last_error = NULL, next_run_at = NULL
+    // Allow a poll to confirm the binding before retrying a successful setup.
+    // Its next valid notification clears this clock; a missing binding cannot
+    // repeatedly enqueue setup at the browser's poll rate.
+    await sql`UPDATE feeds SET consecutive_failures = 0, last_error = NULL,
+      next_run_at = now() + (${feedBackoff.baseMs}::bigint || ' milliseconds')::interval
       WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
         AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb`;
     status = 'completed';

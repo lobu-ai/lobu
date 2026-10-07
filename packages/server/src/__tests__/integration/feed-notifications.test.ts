@@ -202,6 +202,20 @@ describe('source feed notifications', () => {
     expect(await sql`SELECT id FROM runs WHERE action_key = ${SOURCE_FEED_LISTENER_TASK}`).toHaveLength(2);
   });
 
+  it('confirms idle bindings without defeating failed or interrupted setup recovery', async () => {
+    const { sql, org, device, notice } = await subscribedFixture();
+    const subscription = { ...referenceDelivery(), records: [] };
+    for (const failures of [0, 1]) {
+      await sql`UPDATE feeds SET consecutive_failures = ${failures}, next_run_at = now() + interval '1 minute'
+        WHERE id = ${notice.feed_id}`;
+      await receiveFeedNotifications(sql, [{ ...notice, subscription }], device.id, [org.id]);
+      expect((await sql`SELECT next_run_at IS NULL AS confirmed FROM feeds WHERE id = ${notice.feed_id}`)[0].confirmed).toBe(failures === 0);
+    }
+    await sql`UPDATE feeds SET consecutive_failures = 0, next_run_at = now() WHERE id = ${notice.feed_id}`;
+    await receiveFeedNotifications(sql, [{ ...notice, subscription }], device.id, [org.id]);
+    expect((await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${notice.feed_id}`)[0].due).toBe(true);
+  });
+
   it('excludes foreign private feeds before resolving owners during reconciliation', async () => {
     const { sql, org, device, connection, automationId } = await subscribedFixture();
     const other = await createTestUser();
