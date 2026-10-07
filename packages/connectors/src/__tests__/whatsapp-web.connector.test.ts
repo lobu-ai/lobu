@@ -229,7 +229,7 @@ describe("WhatsApp source listener setup", () => {
     const checkpoint = initializeBrowserCheckpoint(null);
     checkpoint.observation = { after: 100, started_at: 2000, chat_filter: "all" };
     expect(await connector.observe({ feedKey: "live_messages", config: { chat_filter: "all" },
-      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } })).toBeUndefined();
+      checkpoint, credentials: null, browser: page.dispatcher })).toBeUndefined();
     expect(batches).toHaveLength(2);
     expect(batches[0].checkpoint.previous).toEqual(checkpoint);
     expect(batches[1].checkpoint.previous).toEqual(batches[0].checkpoint.next);
@@ -252,7 +252,7 @@ describe("WhatsApp source listener setup", () => {
     const checkpoint = initializeBrowserCheckpoint(null);
     checkpoint.observation = { after: 100, started_at: 1, chat_filter: "individual" };
     await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
-      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } });
+      checkpoint, credentials: null, browser: page.dispatcher });
     expect(requests).toHaveLength(2);
     expect(requests[0]).toEqual({});
     expect(requests[1]).toMatchObject({ after: 900, chat_filter: "group" });
@@ -277,7 +277,7 @@ describe("WhatsApp source listener setup", () => {
     const checkpoint = initializeBrowserCheckpoint(null);
     checkpoint.observation = { after: 100, started_at: 2000, chat_filter: "group" };
     await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
-      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } });
+      checkpoint, credentials: null, browser: page.dispatcher });
     expect(batches.length).toBeGreaterThan(1);
     expect(batches.flatMap(batch => batch.events.map((event: any) => event.resource_ref))).toEqual(references.map(ref => ref.id));
     expect(batches.slice(0, -1).every(batch => !batch.checkpoint)).toBe(true);
@@ -287,7 +287,7 @@ describe("WhatsApp source listener setup", () => {
   it("rejects a browser without reference-delivery support", async () => {
     const page = makeDispatcher({ probe: READY, observe_messages: { ok: true, after: 1 } });
     await expect(connector.observe({ feedKey: "live_messages", config: {}, checkpoint: null,
-      credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } })).rejects.toThrow("source subscriptions");
+      credentials: null, browser: page.dispatcher })).rejects.toThrow("source subscriptions");
   });
 });
 

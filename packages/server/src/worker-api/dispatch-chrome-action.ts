@@ -862,6 +862,22 @@ export async function dispatchChromeActionToExtension(params: {
   }
   if (actionKey === BROWSER_VERIFY_OPERATION) {
     if (parent.action_key !== BROWSER_VERIFY_OPERATION) return { status: 'failed', error_message: 'Browser verification requires its own authorized operation.' };
+    if (!probe) {
+      // Public scrapers can recover their missing browser dependency without
+      // completing an independent credential flow or resuming paused feeds.
+      await sql`UPDATE connections c SET status = 'active', updated_at = now()
+        FROM connector_definitions cd
+        WHERE c.id = ${parent.connection_id} AND c.organization_id = ${organizationId}
+          AND c.status = 'pending_auth' AND c.deleted_at IS NULL
+          AND c.device_worker_id = ${browserResource.deviceWorkerId}::uuid
+          AND c.auth_profile_id IS NULL AND c.app_auth_profile_id IS NULL
+          AND cd.organization_id = c.organization_id AND cd.key = c.connector_key
+          AND cd.status = 'active' AND cd.version = ${parent.connector_version}
+          AND NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(cd.auth_schema->'methods', '[]'::jsonb)) method
+            WHERE method->>'type' <> 'none'
+          )`;
+    }
     return { status: 'completed', output: { browser_ready: true, account_verified: !!probe } };
   }
 

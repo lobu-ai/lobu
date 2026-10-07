@@ -192,6 +192,23 @@ describe('compiled browser source reads', () => {
     expect(body.feed_notification_receipts).toBeUndefined();
   });
 
+  it('recovers a public browser binding without resuming paused feeds', async () => {
+    const sql = getTestDb();
+    await sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${connectionId}`;
+    await sql`UPDATE feeds SET status = 'paused' WHERE id = ${feedId}`;
+    const metadata = await extractConnectorMetadata(compiled.compiledCode);
+    await upsertConnectorDefinitionRecords({ sql, organizationId: orgId, metadata,
+      versionScope: 'organization', versionRecord: { compiledCode: compiled.compiledCode, compiledCodeHash: compiled.compiledCodeHash,
+        compileConfigHash: COMPILE_CONFIG_HASH, sourceCode: SOURCE, sourcePath: null } });
+    expect((await sql`SELECT status FROM connections WHERE id = ${connectionId}`)[0].status).toBe('pending_auth');
+    expect(await manageConnections({ action: 'update', connection_id: connectionId, device_worker_id: deviceId }, {} as Env, context()))
+      .toMatchObject({ action: 'update', connection: { status: 'pending_auth', device_worker_id: deviceId } });
+    expect(await manageConnections({ action: 'test', connection_id: connectionId }, {} as Env, context()))
+      .toMatchObject({ status: 'ok' });
+    expect((await sql`SELECT status FROM connections WHERE id = ${connectionId}`)[0].status).toBe('active');
+    expect((await sql`SELECT status FROM feeds WHERE id = ${feedId}`)[0].status).toBe('paused');
+  });
+
   it.each([
     { failures: 0, rejectDuringSetup: false, editDuringSetup: false },
     { failures: 0, rejectDuringSetup: false, editDuringSetup: true },
