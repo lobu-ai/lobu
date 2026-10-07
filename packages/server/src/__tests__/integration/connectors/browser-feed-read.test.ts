@@ -177,7 +177,11 @@ describe('compiled browser source reads', () => {
     expect(body.feed_notification_receipts).toBeUndefined();
   });
 
-  it('runs a compiled observer through browser claim/completion into a durable Automation with no content events', async () => {
+  it.each([
+    { failures: 0, rejectDuringSetup: false },
+    { failures: 2, rejectDuringSetup: false },
+    { failures: 2, rejectDuringSetup: true },
+  ])('runs compiled observation through browser claim/completion and recovery: %j', async ({ failures, rejectDuringSetup }) => {
     const sql = getTestDb();
     const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId });
     const [automation] = await sql`WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
@@ -197,6 +201,8 @@ describe('compiled browser source reads', () => {
     };`;
     await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: 'script', source: script } })}
       WHERE id = ${automation.id}`;
+    await sql`UPDATE feeds SET consecutive_failures = ${failures},
+      last_error = ${failures ? 'Synthetic prior source failure' : null} WHERE id = ${feedId}`;
     const observed = sourceListeners.runSourceFeedListener({ organizationId: orgId, feedId });
     let finished = false;
     observed.finally(() => { finished = true; }).catch(() => {});
@@ -214,6 +220,17 @@ describe('compiled browser source reads', () => {
         expect(job.feed_context).toMatchObject({ feed_id: feedId, connection_id: connectionId, dry_run: false });
         scopeKey = job.feed_context.subscription.scope_key;
         expect((await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${feedId}`)[0].due).toBe(true);
+        if (rejectDuringSetup) {
+          await sourceNotifications.receiveFeedNotifications(sql, [{
+            feed_id: feedId, connection_id: connectionId, feed_key: 'items', changed: true,
+            notification_id: 'synthetic-invalid-during-setup', subscription: {
+              scope_key: scopeKey, binding_id: ack.binding_id, epoch: ack.epoch, needs_rebind: false,
+              records: [{ revision: 1, payload: { id: 'bad-page', events: [
+                { id: 'bad-event', event_type: 'undeclared', resource_ref: 'bad-source' },
+              ] } }],
+            },
+          }], deviceId, [orgId]);
+        }
         const completed = await post('/api/workers/complete-action', { body: {
           run_id: job.run_id, worker_id: WORKER_ID, status: 'success', action_output: {
             listening: true,
@@ -227,6 +244,16 @@ describe('compiled browser source reads', () => {
     }
     await observed;
     expect(answered).toBe(true);
+    const [setupState] = await sql`SELECT consecutive_failures, last_error, next_run_at > now() AS deferred
+      FROM feeds WHERE id = ${feedId}`;
+    expect.soft(setupState.consecutive_failures).toBe(failures + Number(rejectDuringSetup));
+    if (rejectDuringSetup) {
+      expect(setupState.last_error).toBeTruthy();
+      expect(setupState.deferred).toBe(true);
+      expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(0);
+      return;
+    }
+    expect(setupState.last_error).toBeNull();
     // The setup completed, but the next poll may still omit its binding.
     // Completing its queue task must not turn that omission into a tight loop.
     await sql`UPDATE runs SET status = 'completed' WHERE action_key = 'source-feed-listener'`;
@@ -251,11 +278,12 @@ describe('compiled browser source reads', () => {
     expect((await notification.json()).feed_notification_receipts).toEqual([
       expect.objectContaining({ active: true, ack }),
     ]);
-    const [feed] = await sql`SELECT checkpoint, items_collected, schedule, next_run_at FROM feeds WHERE id = ${feedId}`;
+    const [feed] = await sql`SELECT checkpoint, items_collected, schedule, next_run_at, consecutive_failures FROM feeds WHERE id = ${feedId}`;
     expect(feed.checkpoint).toEqual({ cursor: { after: 1 } });
     expect(Number(feed.items_collected)).toBe(0);
     expect(feed.schedule).toBeNull();
     expect(feed.next_run_at).toBeNull();
+    expect(feed.consecutive_failures).toBe(0);
     expect(await sql`SELECT id FROM events WHERE organization_id = ${orgId}`).toHaveLength(0);
     const activations = await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND run_type = 'automation'`;
     expect(activations).toHaveLength(1);

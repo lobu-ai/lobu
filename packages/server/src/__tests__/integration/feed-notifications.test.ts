@@ -14,6 +14,7 @@ import * as entityPolicy from '../../authz/entity-policy';
 import { manageFeeds } from '../../tools/admin/manage_feeds';
 import type { Env } from '../../index';
 import type { ToolContext } from '../../tools/registry';
+import { feedBackoff } from '../../connectors/feed-backoff';
 
 async function fixture() {
   const sql = getTestDb();
@@ -206,14 +207,24 @@ describe('source feed notifications', () => {
     const { sql, org, device, notice } = await subscribedFixture();
     const subscription = { ...referenceDelivery(), records: [] };
     for (const failures of [0, 1]) {
-      await sql`UPDATE feeds SET consecutive_failures = ${failures}, next_run_at = now() + interval '1 minute'
+      await sql`UPDATE feeds SET consecutive_failures = ${failures},
+        last_error = ${failures ? 'Synthetic setup failure' : null}, next_run_at = now() + interval '1 minute'
         WHERE id = ${notice.feed_id}`;
       await receiveFeedNotifications(sql, [{ ...notice, subscription }], device.id, [org.id]);
       expect((await sql`SELECT next_run_at IS NULL AS confirmed FROM feeds WHERE id = ${notice.feed_id}`)[0].confirmed).toBe(failures === 0);
     }
-    await sql`UPDATE feeds SET consecutive_failures = 0, next_run_at = now() WHERE id = ${notice.feed_id}`;
-    await receiveFeedNotifications(sql, [{ ...notice, subscription }], device.id, [org.id]);
-    expect((await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${notice.feed_id}`)[0].due).toBe(true);
+    for (const failures of [0, 2]) {
+      // A late confirmation cannot cancel an already-due recovery attempt.
+      await sql`UPDATE feeds SET consecutive_failures = ${failures}, last_error = NULL,
+        next_run_at = now() - interval '1 minute' WHERE id = ${notice.feed_id}`;
+      await receiveFeedNotifications(sql, [{ ...notice, subscription }], device.id, [org.id]);
+      const [late] = await sql`SELECT next_run_at <= now() AS due, consecutive_failures
+        FROM feeds WHERE id = ${notice.feed_id}`;
+      expect(late).toEqual({ due: true, consecutive_failures: failures });
+    }
+    await reconcileSourceFeedListeners(sql, device.id, [org.id], [notice.feed_id]);
+    expect(await sql`SELECT id FROM runs WHERE action_key = ${SOURCE_FEED_LISTENER_TASK}
+      AND action_input->'payload'->>'feedId' = ${String(notice.feed_id)}`).toHaveLength(1);
   });
 
   it('excludes foreign private feeds before resolving owners during reconciliation', async () => {
@@ -308,6 +319,17 @@ describe('source feed notifications', () => {
     expect(receipts[0]).not.toHaveProperty('ack');
     expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${notice.feed_id}`)[0].checkpoint).toEqual(checkpoint);
     expect(await sql`SELECT id FROM runs WHERE organization_id = ${org.id}`).toHaveLength(0);
+    const [failed] = await sql`SELECT consecutive_failures, last_error,
+      EXTRACT(EPOCH FROM next_run_at - now()) * 1000 AS retry_ms FROM feeds WHERE id = ${notice.feed_id}`;
+    expect.soft(failed.consecutive_failures).toBe(1);
+    expect.soft(failed.last_error).toBeTruthy();
+    expect.soft(Number(failed.retry_ms)).toBeGreaterThan(feedBackoff.baseMs - 5000);
+    await sql`UPDATE feeds SET consecutive_failures = 3, next_run_at = now() WHERE id = ${notice.feed_id}`;
+    await receiveFeedNotifications(sql, [{ ...notice, subscription }], device.id, [org.id]);
+    const [repeated] = await sql`SELECT consecutive_failures,
+      EXTRACT(EPOCH FROM next_run_at - now()) * 1000 AS retry_ms FROM feeds WHERE id = ${notice.feed_id}`;
+    expect(repeated.consecutive_failures).toBe(4);
+    expect(Number(repeated.retry_ms)).toBeGreaterThan(Math.min(feedBackoff.baseMs * 8, feedBackoff.maxMs) - 5000);
   });
 
   it('continues other bindings when one delivery is rejected', async () => {

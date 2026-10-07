@@ -18,6 +18,21 @@ export interface SourceFeedListenerTask {
   feedId: number;
 }
 
+/** Setup errors and rejected source pages share the existing feed retry clock. */
+export async function recordSourceFeedFailure(
+  sql: DbClient,
+  task: SourceFeedListenerTask,
+  config: unknown,
+  message: string,
+): Promise<void> {
+  await sql`UPDATE feeds SET consecutive_failures = consecutive_failures + 1,
+    last_error = ${message},
+    next_run_at = now() + (LEAST(${feedBackoff.maxMs}::bigint,
+      ${feedBackoff.baseMs}::bigint * (2 ^ LEAST(consecutive_failures, 30))::bigint) || ' milliseconds')::interval
+    WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
+      AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb`;
+}
+
 /** Both notification delivery and reconnect reconciliation use the same queue identity. */
 function listenerTaskKey(organizationId: string, feedId: number): string {
   return `source-feed-listener:${organizationId}:${feedId}`;
@@ -129,9 +144,11 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
   try {
     // Keep setup due until it completes. A gateway crash after binding the page
     // must still be recoverable when the abandoned task is reaped.
-    await sql`UPDATE feeds SET next_run_at = now()
+    const [started] = await sql`UPDATE feeds SET next_run_at = now()
       WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
-        AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb`;
+        AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb
+      RETURNING consecutive_failures`;
+    if (!started) return;
     const compiledCode = await resolveConnectorCodeForKey(
       feed.connector_key,
       task.organizationId,
@@ -170,22 +187,16 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
       timeoutMs: LISTENER_SETUP_TIMEOUT_MS,
     });
 
-    // Allow a poll to confirm the binding before retrying a successful setup.
-    // Its next valid notification clears this clock; a missing binding cannot
-    // repeatedly enqueue setup at the browser's poll rate.
-    await sql`UPDATE feeds SET consecutive_failures = 0, last_error = NULL,
+    // Only a valid browser delivery confirms recovery. Keep the failure count
+    // through setup, and do not erase a rejected page received during setup.
+    await sql`UPDATE feeds SET last_error = NULL,
       next_run_at = now() + (${feedBackoff.baseMs}::bigint || ' milliseconds')::interval
       WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
-        AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb`;
+        AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb
+        AND consecutive_failures = ${started.consecutive_failures}`;
     status = 'completed';
   } catch (error) {
-    // Reuse the feed retry clock. This is failure recovery, never a collection cadence.
-    await sql`UPDATE feeds SET consecutive_failures = consecutive_failures + 1,
-      last_error = 'Source listener setup failed; check the paired browser.',
-      next_run_at = now() + (LEAST(${feedBackoff.maxMs}::bigint,
-        ${feedBackoff.baseMs}::bigint * (2 ^ LEAST(consecutive_failures, 30))::bigint) || ' milliseconds')::interval
-      WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
-        AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb`;
+    await recordSourceFeedFailure(sql, task, config, 'Source listener setup failed; check the paired browser.');
     throw error;
   } finally {
     if (controller.signal.aborted) status = 'timeout';

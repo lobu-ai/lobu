@@ -7,7 +7,7 @@ import { feedBackoff } from '../connectors/feed-backoff';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { notifyWorkerWork } from './worker-wakeup';
-import { enqueueSourceFeedListener } from './source-feed-listener';
+import { enqueueSourceFeedListener, recordSourceFeedFailure } from './source-feed-listener';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
 import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY } from '../lib/device-feed-read-protocol';
 import { findMatchingAutomationActivations, queueAutomationActivations, dispatchAutomationRunsBestEffort } from '../automations/activation';
@@ -51,16 +51,20 @@ async function receiveSourceReferenceDelivery(
     || delivery.records.some(record => record.payload.events.some(event =>
       !declared.has(event.event_type) || !eventTypes.has(event.event_type)
       || (event.occurred_at && !Number.isFinite(Date.parse(event.occurred_at)))))) {
-    // Revoke the bad binding before any writes. The next setup replays from the
-    // unchanged source cursor instead of retrying this malformed buffer forever.
+    // Revoke without committing references or a cursor. Repeated malformed
+    // replay pages back off just like failed listener setup.
     logger.warn({ feedId: notice.feed_id }, 'Revoking invalid source reference delivery');
+    await recordSourceFeedFailure(tx, {
+      organizationId: feed.organization_id,
+      feedId: notice.feed_id,
+    }, config ?? {}, 'Source reference delivery was invalid; check the connector.');
     return { active: false };
   }
-  // A valid binding confirms setup. Preserve due recovery and failure backoff;
-  // only a successful setup's future confirmation window can be cleared.
-  await tx`UPDATE feeds SET next_run_at = NULL
+  // A successful setup clears last_error and arms a confirmation window.
+  // Confirm only that window; preserve unfinished setup and failure retries.
+  await tx`UPDATE feeds SET next_run_at = NULL, consecutive_failures = 0
     WHERE id = ${notice.feed_id} AND organization_id = ${feed.organization_id}
-      AND consecutive_failures = 0 AND next_run_at > now()`;
+      AND last_error IS NULL AND next_run_at > now()`;
   const queued: Array<{ runId: number; status: string }> = [];
   for (const { payload } of delivery.records) {
     for (const event of payload.events) {
