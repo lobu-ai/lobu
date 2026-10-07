@@ -19,6 +19,7 @@ import {
 
 export const RELATIONSHIP_CLAIMS_METADATA_KEY = '_lobu_claims';
 export const MANUAL_RELATIONSHIP_CLAIM_KEY = 'manual';
+export const IDENTITY_DECISION_METADATA_KEY = '_lobu_identity_decision';
 
 export interface ConnectorRelationshipDeclaration {
   type: string;
@@ -107,9 +108,10 @@ export function assertManualRelationshipMutationAllowed(
 }
 
 export function assertNoReservedRelationshipMetadata(metadata: unknown): void {
-  if (record(metadata) && Object.hasOwn(metadata as object, RELATIONSHIP_CLAIMS_METADATA_KEY)) {
+  const reserved = record(metadata) && [RELATIONSHIP_CLAIMS_METADATA_KEY, IDENTITY_DECISION_METADATA_KEY].find(key => Object.hasOwn(metadata as object, key));
+  if (reserved) {
     throw new ToolUserError(
-      `Metadata key '${RELATIONSHIP_CLAIMS_METADATA_KEY}' is reserved for relationship ownership.`,
+      `Metadata key '${reserved}' is reserved for relationship ownership.`,
       400
     );
   }
@@ -509,6 +511,9 @@ export async function reconcileConnectorRelationshipClaims(
       throw new ToolUserError(`Connector relationship type '${slug}' is not active`, 409);
     }
     assertNotAclManagedEdge(type, 'connector relationship materialization');
+    if (type.purpose === 'identity') {
+      throw new ToolUserError('Connector evidence cannot materialize identity-purpose relationships', 409);
+    }
   }
 
   const aggregated = new Map<

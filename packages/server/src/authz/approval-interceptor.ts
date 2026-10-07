@@ -138,7 +138,7 @@ export function buildFieldChangeDeferral(args: {
 async function evaluate(
 	req: EntityMutationRequest,
 ): Promise<
-	| { outcome: "allow" }
+	| { outcome: "allow" | "review" }
 	| { outcome: "deny"; reason: string }
 	| { outcome: "defer"; deferred: DeferredMutation }
 	| UpdateDecision
@@ -150,6 +150,14 @@ async function evaluate(
 	const ownerAgentId = req.ownerAgentId ?? null;
 	// An automation whose owning agent couldn't be resolved fails closed downstream.
 	const ownerResolved = req.ownerResolved ?? true;
+
+	if (req.action === "link" || req.action === "unlink") {
+		// Association changes are whole-record updates under the existing envelope.
+		// They have no field patch and cannot inherit a synthetic field's approval.
+		const decision = await evaluateEntityMutation({ ...req, action: "update" });
+		return decision === "deny" ? { outcome: "deny", reason: "Policy denied identity association" }
+			: { outcome: decision === "require_approval" ? "review" : "allow" };
+	}
 
 	if (req.action === "update") {
 		const decisions = await evaluateEntityFieldUpdates({

@@ -419,6 +419,7 @@ function stripSymbols(value: Record<string, unknown>): Record<string, unknown> {
 }
 
 export interface RelationshipType {
+  purpose?: "identity";
   readonly kind: "relationshipType";
   key: string;
   name?: string;

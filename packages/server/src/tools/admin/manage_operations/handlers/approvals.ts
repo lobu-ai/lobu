@@ -1,3 +1,5 @@
+import { IdentityAssociationStaleError, rememberIdentityRejection } from "../../../../utils/identity-association";
+import { lockIdentityOrganization } from "../../../../utils/relationship-validation";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -558,6 +560,9 @@ async function tryApproveBuilderRun(
 		// DB-only mutations finish inside it; external/slow handlers return a
 		// continuation that runs after this short transaction commits.
 		phaseOne = await getDb().begin(async (tx) => {
+      const [schemaRun] = await tx`SELECT 1 FROM runs WHERE id = ${args.run_id}
+        AND organization_id = ${ctx.organizationId} AND action_key = ${MANAGE_ENTITY_SCHEMA_ACTION_KEY}`;
+      if (schemaRun) await lockIdentityOrganization(tx, ctx.organizationId);
 			await lockOrganizationForApproval(tx, ctx.organizationId);
 			const claim = await claimBuilderRun(
 				args.run_id,
@@ -860,7 +865,7 @@ async function claimEntityChangeRun(
 
 function entityChangeOperation(
 	proposal: EntityChangeProposal,
-): "create" | "update" | "delete" | "merge" {
+): "create" | "update" | "delete" | "merge" | "link" | "unlink" {
 	return proposal.operation ?? "update";
 }
 
@@ -876,6 +881,7 @@ function resolutionFingerprintOf(
 }
 
 function describeEntityChange(proposal: EntityChangeProposal): string {
+	if (proposal.operation === "link" || proposal.operation === "unlink") return `${proposal.entity_id} → ${proposal.to_entity_id} (${proposal.relationship_type_slug})`;
 	const operation = entityChangeOperation(proposal);
 	if (operation === "update") {
 		return Object.keys(
@@ -1164,6 +1170,7 @@ async function tryApproveEntityChangeRun(
 		error: unknown,
 	): Promise<ManageOperationsResult> => {
 		const errorMessage = error instanceof Error ? error.message : String(error);
+		const nextStep = error instanceof IdentityAssociationStaleError ? "Request fresh identity review." : "The approval is back to pending — approve again after fixing the blocker, or reject it.";
 		const denial =
 			error instanceof EntityRowValidationError &&
 			error.verdict.outcome === "deny"
@@ -1216,7 +1223,7 @@ async function tryApproveEntityChangeRun(
 					pendingOperation === "update"
 						? "entity_field_change — apply failed, still pending"
 						: `entity_${pendingOperation} — apply failed, still pending`,
-					`Applying the approved change failed: ${errorMessage}. The approval is pending again — fix the blocker and approve once more, or reject it.`,
+					`Applying the approved change failed: ${errorMessage}. ${nextStep}`,
 					{ error_message: errorMessage },
 					reviewer,
 					tx,
@@ -1231,7 +1238,7 @@ async function tryApproveEntityChangeRun(
 			};
 		}
 		return {
-			error: `Failed to apply entity ${pendingOperation}: ${errorMessage}. The approval is back to pending — approve again after fixing the blocker, or reject it.`,
+			error: `Failed to apply entity ${pendingOperation}: ${errorMessage}. ${nextStep}`,
 		};
 	};
 
@@ -1276,6 +1283,7 @@ async function tryApproveEntityChangeRun(
 				// row before the approval-run and candidate entity rows —
 				// organization deletion locks the parent and cascades downward, and
 				// the reverse order deadlocks against it.
+				await lockIdentityOrganization(tx, ctx.organizationId);
 				await lockOrgForAclInvalidation(tx, ctx.organizationId);
 				const claimed = await claimEntityChangeRun(
 					args.run_id,
@@ -1345,6 +1353,7 @@ async function tryApproveEntityChangeRun(
 		// and a rollback leaves the run exactly as it was.
 		const postCommitEffects: Array<() => Promise<void>> = [];
 		const result = await sql.begin(async (tx) => {
+			if (pendingOperation === "link" || pendingOperation === "unlink") await lockIdentityOrganization(tx, ctx.organizationId);
 			await lockOrganizationForApproval(tx, ctx.organizationId);
 			const claimedInTx = await claimEntityChangeRun(
 				args.run_id,
@@ -1405,6 +1414,7 @@ async function tryRejectEntityChangeRun(
 	const reject = async (
 		db: DbClient,
 	): Promise<ManageOperationsResult | null> => {
+		if (pendingIsMerge || pending.action_input?.operation === "link" || pending.action_input?.operation === "unlink") await lockIdentityOrganization(db, ctx.organizationId);
 		const claimed = await claimEntityChangeRun(
 			args.run_id,
 			ctx.organizationId,
@@ -1413,6 +1423,9 @@ async function tryRejectEntityChangeRun(
 			db,
 		);
 		if (!claimed) return null;
+		if (claimed.proposal.operation === "link") {
+			await rememberIdentityRejection(db, ctx.organizationId, args.run_id, claimed.proposal);
+		}
 		if (pendingIsMerge) {
 			const mergeProposal = asMergeProposal(claimed.proposal);
 			await lockResolutionCandidate(db, {

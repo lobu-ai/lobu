@@ -18,13 +18,14 @@ export const EDGE_SOURCE_CONFIG = 'config';
 export const EDGE_SOURCE_MANUAL = 'manual';
 
 /**
- * System-controlled classification of what a relationship type is FOR.
+ * Explicit classification of what a relationship type is for.
  *
  * `authorization` marks a type for the purpose-based ACL-read cutover. It is
  * deliberately not caller-settable: the whole point is that the platform, not
  * a caller or connector manifest, decides which vocabulary grants access.
+ * Owners may declare `identity`, which governs associations and grants no access.
  */
-export type RelationshipTypePurpose = 'authorization';
+export type RelationshipTypePurpose = 'authorization' | 'identity';
 export const PURPOSE_AUTHORIZATION: RelationshipTypePurpose = 'authorization';
 
 /**
@@ -107,6 +108,17 @@ export async function withAclPrivilege<T>(tx: DbClient, fn: () => Promise<T>): P
   } finally {
     await tx`SELECT set_config('lobu.acl_write', 'off', true)`.catch(() => {});
   }
+}
+
+/** Shared SQL generator also used by the DB guard; acquire before any row lock. */
+export async function lockIdentityOrganization(tx: DbClient, organizationId: string): Promise<void> {
+  await tx`SELECT pg_advisory_xact_lock(lobu_identity_lock_key(${organizationId}))`;
+}
+
+export async function withIdentityPrivilege<T>(tx: DbClient, fn: () => Promise<T>): Promise<T> {
+  await tx`SELECT set_config('lobu.identity_write', 'on', true)`;
+  try { return await fn(); }
+  finally { await tx`SELECT set_config('lobu.identity_write', 'off', true)`.catch(() => {}); }
 }
 
 /**

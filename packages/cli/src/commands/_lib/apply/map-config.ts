@@ -510,6 +510,7 @@ function mapEntityType(entity: EntityType): DesiredEntityType {
 function mapRelationshipType(rel: RelationshipType): DesiredRelationshipType {
   return {
     slug: rel.key,
+    ...(rel.purpose ? { purpose: rel.purpose } : {}),
     ...(rel.name ? { name: rel.name } : {}),
     ...(rel.description ? { description: rel.description } : {}),
     ...(rel.rules

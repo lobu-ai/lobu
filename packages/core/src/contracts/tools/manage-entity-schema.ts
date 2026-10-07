@@ -152,6 +152,12 @@ export const ManageEntitySchemaSchema = Type.Object({
   ),
 
   // Relationship type fields
+  purpose: Type.Optional(
+    Type.Literal("identity", {
+      description:
+        "[relationship_type: create/update] Governed stored identity association. Activate only after all server replicas support identity associations.",
+    })
+  ),
   is_symmetric: Type.Optional(
     Type.Boolean({
       description:

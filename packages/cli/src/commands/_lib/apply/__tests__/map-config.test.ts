@@ -24,6 +24,22 @@ const env: NodeJS.ProcessEnv = {
 };
 
 describe("mapProjectToDesiredState", () => {
+  test("maps identity purpose as a typed relationship field", () => {
+    const record = defineEntityType({ key: "record" });
+    const same = defineRelationshipType({
+      key: "same_record",
+      purpose: "identity",
+      rules: [{ source: record, target: record }],
+    });
+    const state = mapProjectToDesiredState(
+      defineConfig({ entities: [record], relationships: [same], agents: [] })
+    );
+    expect(state.memorySchema.relationshipTypes[0]).toMatchObject({
+      purpose: "identity",
+      rules: [{ source: "record", target: "record" }],
+    });
+  });
+
   test("maps agents: providers, network (deduped), resolved provider keys", () => {
     const crm = defineAgent({
       id: "crm",

@@ -1903,9 +1903,15 @@ export async function deleteEntity(
       // with the ACL-write privilege still granted.
       await withAclPrivilege(tx, async () => {
         await tx`
-          DELETE FROM entity_relationships
-          WHERE from_entity_id = ANY(${entityTreeIdsLiteral}::bigint[])
-             OR to_entity_id = ANY(${entityTreeIdsLiteral}::bigint[])
+          DELETE FROM entity_relationships r
+          WHERE (from_entity_id = ANY(${entityTreeIdsLiteral}::bigint[])
+             OR to_entity_id = ANY(${entityTreeIdsLiteral}::bigint[]))
+            -- Retired identity decisions survive until their endpoint is
+            -- actually deleted; the existing FK cascade then removes them.
+            AND NOT (r.deleted_at IS NOT NULL AND EXISTS (
+              SELECT 1 FROM entity_relationship_types rt
+              WHERE rt.id = r.relationship_type_id AND rt.purpose = 'identity'
+            ))
         `;
       });
       // Fail closed until a sync based on the post-delete graph completes. The

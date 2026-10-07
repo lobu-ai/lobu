@@ -459,6 +459,7 @@ function emitRelationshipType(
 ): Handle {
   imports.use("defineRelationshipType");
   const fields: string[] = [`key: ${str(r.slug)}`];
+  if (r.purpose === "identity") fields.push(`purpose: "identity"`);
   if (r.name) fields.push(`name: ${str(r.name)}`);
   if (r.description) fields.push(`description: ${str(r.description)}`);
   if (r.rules?.length) {

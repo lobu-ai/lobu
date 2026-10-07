@@ -1,3 +1,4 @@
+import { assertPhysicalMergeMembersAllowed, decideIdentityAssociation, type IdentityAssociationInput } from "../../utils/identity-association";
 /**
  * Tool: manage_entity
  *
@@ -142,7 +143,7 @@ import {
 	toEntityInfo,
 } from "../view-urls";
 import { action, defineActionTool } from "./action-tool";
-import { proposeEntityDelete, proposeEntityMerge } from "./entity-field-approval";
+import { proposeEntityChange, proposeEntityDelete, proposeEntityMerge } from "./entity-field-approval";
 
 export { ManageEntityResultSchema, ManageEntitySchema };
 
@@ -267,6 +268,7 @@ type EdgeAddress = Pick<
  * `link` have no `entity_type`, and `link` has no `name`.
  */
 interface TrackedMutationArgs extends Attributed {
+	dry_run?: boolean;
 	action: "create" | "update" | "link";
 	entity_id?: number;
 	entity_type?: string;
@@ -355,6 +357,8 @@ async function trackEntityReaction(
 	) {
 		return;
 	}
+	if (args.action === "link" && args.dry_run) return;
+	if (result.action === "link" && (!("relationship" in result) || !result.relationship)) return;
 	const reactionType =
 		result.action === "create"
 			? "entity_created"
@@ -905,6 +909,7 @@ async function handleMerge(
 		throw new ToolUserError("A merge can include at most 25 duplicates", 400);
 
 	const sql = getDb();
+	await assertPhysicalMergeMembersAllowed(sql, ctx.organizationId, [...loserIds, winnerId]);
 	// Every duplicate and the winner must be live and in the caller's org — never
 	// merge across a tenant boundary or into a deleted/foreign entity.
 	const rows = (await sql`
@@ -1208,6 +1213,7 @@ async function handleResolveDuplicates(
 ): Promise<ManageEntityResult> {
 	// The schema already requires >= 2 unique ids; sorted for a stable order.
 	const candidateIds = [...args.candidate_entity_ids].sort((a, b) => a - b);
+	await assertPhysicalMergeMembersAllowed(getDb(), ctx.organizationId, candidateIds);
 	let discovery: Awaited<ReturnType<typeof discoverWorkspaceResolutionGroups>>;
 	try {
 		discovery = await discoverWorkspaceResolutionGroups(getDb(), {
@@ -1977,15 +1983,27 @@ async function resolveRelationshipType(
 	return rows[0];
 }
 
+async function handleIdentityAssociation(input: IdentityAssociationInput, ctx: ToolContext, parentRunId: number | null = null): Promise<ManageEntityResult> {
+  const sql = getDb();
+  const decision = await sql.begin(tx => decideIdentityAssociation(tx, input, ctx));
+  if (decision.outcome === 'refused' && !input.dry_run) throw new ToolUserError(decision.reason, 409);
+  const queued = decision.outcome === 'review' && !input.dry_run && decision.proposal
+    ? await proposeEntityChange(ctx, decision.proposal, parentRunId) : null;
+  const base = { dry_run: input.dry_run, preview: { outcome: decision.outcome, reason: decision.reason },
+    approval_queued: queued ? true : undefined, approval_run_id: queued?.runId,
+    approval_url: queued?.approvalUrl, approval_suppressed: decision.outcome === 'suppressed' || undefined };
+  if (input.operation === 'unlink') return { action: 'unlink', success: true, message: decision.reason, ...base };
+  const rows = decision.relationshipId ? await sql.unsafe<RelationshipRow>(
+    `SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1`, [decision.relationshipId]) : [];
+  return { action: 'link', relationship: rows[0], ...base };
+}
+
 async function handleLink(
 	args: Static<typeof LinkEntitiesAction>,
 	env: Env,
 	ctx: ToolContext,
 ): Promise<ManageEntityResult> {
 	const sql = getDb();
-
-	validateNoSelfReference(args.from_entity_id, args.to_entity_id);
-	await validateScopeRule(args.from_entity_id, args.to_entity_id, env, ctx);
 
 	const relType = await resolveRelationshipType(
 		args.relationship_type_slug,
@@ -1996,6 +2014,18 @@ async function handleLink(
   // classification is only a trust boundary if the classified rows stop being
   // generically writable.
   assertNotAclManagedEdge(relType, 'link');
+  if (relType.purpose === 'identity') {
+    const attribution = await resolveAutomationAttribution(ctx, args.automation_source);
+    validateConfidence(args.confidence);
+    validateSource(args.source);
+    return handleIdentityAssociation({ operation: 'link', entity_id: args.from_entity_id,
+      to_entity_id: args.to_entity_id, relationship_type_id: Number(relType.id),
+      relationship_type_slug: args.relationship_type_slug, metadata: args.metadata,
+      dry_run: args.dry_run, automation_id: attribution.automationId, source: args.source, confidence: args.confidence }, ctx, attribution.runId);
+  }
+  if (args.dry_run) throw new ToolUserError('Relationship dry_run requires purpose identity', 400);
+  validateNoSelfReference(args.from_entity_id, args.to_entity_id);
+  await validateScopeRule(args.from_entity_id, args.to_entity_id, env, ctx);
   const typeId = Number(relType.id);
   const isSymmetric = Boolean(relType.is_symmetric);
 
@@ -2167,6 +2197,20 @@ async function handleUnlink(
 	const relationshipId = await resolveRelationshipId(args, ctx, "unlink");
 
   const sql = getDb();
+  const [identity] = await sql`
+    SELECT r.from_entity_id, r.to_entity_id, r.relationship_type_id, t.slug FROM entity_relationships r
+    JOIN entity_relationship_types t ON t.id = r.relationship_type_id
+    WHERE r.id = ${relationshipId} AND r.organization_id = ${ctx.organizationId} AND t.purpose = 'identity'
+  `;
+  if (identity) {
+    const attribution = await resolveAutomationAttribution(ctx, args.automation_source);
+    return handleIdentityAssociation({ operation: 'unlink', relationship_id: relationshipId,
+    entity_id: Number(identity.from_entity_id), to_entity_id: Number(identity.to_entity_id),
+    relationship_type_id: Number(identity.relationship_type_id), relationship_type_slug: String(identity.slug),
+    dry_run: args.dry_run, automation_id: attribution.automationId }, ctx, attribution.runId);
+  }
+  if (args.dry_run) throw new ToolUserError('Relationship dry_run requires purpose identity', 400);
+
 
 	const result = await sql.begin(async (tx) => {
 		const retracted = await retractManualRelationshipClaim(tx, {
@@ -2225,6 +2269,7 @@ async function handleUpdateLink(
 			ctx.organizationId,
 			"update_link",
 		);
+		if (edge.purpose === "identity") throw new ToolUserError("updateLink does not support identity associations; use unlink", 409);
 		assertManualRelationshipMutationAllowed(edge, "updated");
 		validateConfidence(args.confidence);
 		validateSource(args.source);

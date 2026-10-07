@@ -3,6 +3,46 @@ import { ApiError } from "../../../memory/_lib/errors.js";
 import { ApplyClient, isDuplicateError } from "../client.js";
 
 describe("ApplyClient", () => {
+  test("sends relationship purpose on the schema API", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const client = new ApplyClient(
+      {
+        apiBaseUrl: "https://example.test",
+        orgSlug: "fixture",
+        token: "test-token",
+      },
+      (async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        calls.push(body);
+        return new Response(
+          JSON.stringify(
+            body.action === "list_rules"
+              ? { rules: [] }
+              : {
+                  relationship_type: {
+                    id: 1,
+                    slug: "same_record",
+                    purpose: "identity",
+                  },
+                }
+          ),
+          { status: 200 }
+        );
+      }) as typeof fetch
+    );
+    await client.upsertRelationshipType({
+      slug: "same_record",
+      purpose: "identity",
+    });
+    expect(calls).toContainEqual(
+      expect.objectContaining({
+        schema_type: "relationship_type",
+        action: "create",
+        purpose: "identity",
+      })
+    );
+  });
+
   test("maps non-secret managed MCP catalog metadata", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const client = new ApplyClient(

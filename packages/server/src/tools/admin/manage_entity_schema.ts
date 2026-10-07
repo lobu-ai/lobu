@@ -1,3 +1,4 @@
+import { lockIdentityOrganization } from "../../utils/relationship-validation";
 /**
  * Tool: manage_entity_schema
  *
@@ -140,6 +141,7 @@ async function manageEntitySchemaImpl(
 		);
 	}
   if (args.schema_type === 'entity_type') {
+    if (args.purpose !== undefined) throw new ToolUserError('purpose is a relationship type field', 400);
     if (isEntitySchemaMutation(args)) return governEntitySchemaMutation(args, ctx);
     return runEntityTypeActions(args, env, ctx);
   }
@@ -331,6 +333,7 @@ function entitySchemaApprovalLabel(proposal: ManageEntitySchemaProposal): string
 }
 
 const STRUCTURAL_ENTITY_SCHEMA_FIELDS = new Set([
+  'purpose',
   'metadata_schema',
   'event_kinds',
   'backing',
@@ -696,6 +699,7 @@ async function governEntitySchemaMutation(
   const initiator = resolveRunInitiator(ctx);
   const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
   const outcome = await sql.begin(async (tx) => {
+    await lockIdentityOrganization(tx, ctx.organizationId);
     // Config audit rows and pending runs both reference the organization. Claim
     // the parent before any schema row so organization deletion cannot take the
     // inverse parent-then-child lock order.
@@ -1954,7 +1958,7 @@ async function rtHandleCreate(
     inserted = await sql`
     INSERT INTO entity_relationship_types (
       slug, name, description, organization_id, created_by,
-      metadata_schema, metadata, is_symmetric, inverse_type_id, status,
+      metadata_schema, metadata, is_symmetric, inverse_type_id, status, purpose,
       created_at, updated_at
     ) VALUES (
       ${args.slug},
@@ -1967,6 +1971,7 @@ async function rtHandleCreate(
       ${args.is_symmetric ?? false},
       ${inverseTypeId},
       ${args.status ?? 'active'},
+      ${args.purpose ?? null},
       current_timestamp,
       current_timestamp
     )
@@ -2075,6 +2080,7 @@ async function rtHandleUpdate(
 
   await sql`
     UPDATE entity_relationship_types SET
+      purpose = COALESCE(${args.purpose ?? null}, purpose),
       name = COALESCE(${args.name ?? null}, name),
       description = CASE
         WHEN ${args.description !== undefined} THEN ${args.description ?? null}
