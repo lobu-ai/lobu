@@ -33,8 +33,11 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 18;
+  const ADAPTER_VERSION = 19;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
+  const MAX_RECORD_BYTES = 128 * 1024;
+  const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+  const MAX_BUFFER_ENTRIES = 10_000;
   const SYSTEM_TYPES = new Set([
     "gp2",
     "notification_template",
@@ -127,8 +130,8 @@ export function whatsAppWebAdapterProgram() {
         const fingerprint = JSON.stringify(record);
         if (seen?.fingerprint === fingerprint) { seen.sequence = sequence; return; }
         const bytes = new TextEncoder().encode(fingerprint).length;
-        if (bytes > 128 * 1024 || state.pendingBytes - (previous?.bytes ?? 0) + bytes > 16 * 1024 * 1024 ||
-          (state.pending.size >= 10_000 && !previous)) {
+        if (bytes > MAX_RECORD_BYTES || state.pendingBytes - (previous?.bytes ?? 0) + bytes > MAX_BUFFER_BYTES ||
+          (state.pending.size >= MAX_BUFFER_ENTRIES && !previous)) {
           reportError(state, "WhatsApp page observation buffer overflowed; recovery is required", sequence);
           return;
         }
@@ -138,7 +141,7 @@ export function whatsAppWebAdapterProgram() {
         state.fingerprintBytes += bytes - (seen?.bytes ?? 0);
         state.fingerprints.delete(record.id);
         state.fingerprints.set(record.id, { fingerprint, sequence, bytes });
-        while (state.fingerprints.size > 10_000 || state.fingerprintBytes > 16 * 1024 * 1024) {
+        while (state.fingerprints.size > MAX_BUFFER_ENTRIES || state.fingerprintBytes > MAX_BUFFER_BYTES) {
           const oldest = state.fingerprints.keys().next().value;
           state.fingerprintBytes -= state.fingerprints.get(oldest).bytes;
           state.fingerprints.delete(oldest);
@@ -190,8 +193,8 @@ export function whatsAppWebAdapterProgram() {
     const record = request.batch;
     const bytes = new TextEncoder().encode(JSON.stringify(record)).length;
     const previous = state.pending.get(record.id);
-    if (bytes > 128 * 1024 || state.pendingBytes - (previous?.bytes ?? 0) + bytes > 16 * 1024 * 1024 ||
-      (state.pending.size >= 10_000 && !previous)) throw new Error("Source replay buffer is full");
+    if (bytes > MAX_RECORD_BYTES || state.pendingBytes - (previous?.bytes ?? 0) + bytes > MAX_BUFFER_BYTES ||
+      (state.pending.size >= MAX_BUFFER_ENTRIES && !previous)) throw new Error("Source replay buffer is full");
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("Source replay was not accepted by the browser")), 10_000);
       const entry = { record, bytes, sequence: ++state.sequence,

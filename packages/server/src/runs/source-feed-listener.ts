@@ -11,6 +11,8 @@ import { feedDefinitionSelection } from '../connectors/feed-definition-selection
 import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { sourceFeedSubscriptions } from './source-feed-subscriptions';
 
+const LISTENER_SETUP_TIMEOUT_MS = 150_000;
+
 export interface SourceFeedListenerTask {
   organizationId: string;
   feedId: number;
@@ -95,9 +97,8 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
   `;
   if (!feed) return;
 
-  const timeoutMs = 150_000;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), LISTENER_SETUP_TIMEOUT_MS);
   const browser = createSourceReadBridge(
     {
       id: Number(feed.id),
@@ -116,7 +117,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
       },
       automationId: subscription.automationId,
       feedId: task.feedId,
-      deadlineAt: Date.now() + timeoutMs,
+      deadlineAt: Date.now() + LISTENER_SETUP_TIMEOUT_MS,
       sourceSubscription: true,
     },
     controller.signal,
@@ -166,7 +167,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         onChromeDispatch: browser.onChromeDispatch,
         signal: controller.signal,
       },
-      timeoutMs,
+      timeoutMs: LISTENER_SETUP_TIMEOUT_MS,
     });
 
     // Allow a poll to confirm the binding before retrying a successful setup.
