@@ -422,7 +422,8 @@ async function handleConnectImpl(
     if (ownershipError) return { error: ownershipError };
   }
 
-  const isOwnLiveBrowser = authSelection.authProfile?.auth_data?.mode === 'live' && authSelection.authProfile.created_by === userId;
+  const isOwnLiveBrowser = (authSelection.pendingLiveBrowser && authSelection.pendingLiveBrowser.userId === userId) ||
+    (authSelection.authProfile?.auth_data?.mode === 'live' && authSelection.authProfile.created_by === userId);
   if (!isAdmin && !isOwnLiveBrowser) {
     if (!isOAuthConnect || (authSelection.authProfile && authSelection.authProfile.created_by !== userId)) {
       return { error: 'Members can only connect their own OAuth accounts. Ask an administrator to configure shared credentials.' };
@@ -475,6 +476,7 @@ async function handleConnectImpl(
   }
 
   const browserSetup = await checkBrowserConnectionSetup({ action: 'connect', connector,
+    pendingLiveBrowser: Boolean(authSelection.pendingLiveBrowser),
     profile: authSelection.authProfile, deviceWorkerId: deviceBinding.deviceWorkerId, ctx, setupUrl });
   if (browserSetup) return browserSetup;
 
@@ -543,6 +545,7 @@ async function handleConnectImpl(
     !hasReadySelection &&
     !args.auth_profile_slug;
   const needsBrowserAuth =
+    !!authSelection.pendingLiveBrowser ||
     !!authSelection.browserMethod &&
     !!authSelection.authProfile &&
 		authSelection.authProfile.profile_kind === "browser_session" &&
@@ -622,7 +625,7 @@ async function handleConnectImpl(
   // for the OAuth callback to downgrade it.
   const connectionProfileKind =
     authSelection.authProfile?.profile_kind ??
-    (needsConnectFlow ? "oauth_account" : undefined);
+    (authSelection.pendingLiveBrowser ? 'browser_session' : needsConnectFlow ? "oauth_account" : undefined);
   const connectVisibility = await resolveConnectionVisibility(
     organizationId,
     userId,
@@ -746,6 +749,7 @@ async function handleConnectImpl(
 		const bundle = await createConnectionSetupBundle({
 			db: sql,
 			interactive: isInteractiveConnect,
+      pendingLiveBrowser: authSelection.pendingLiveBrowser,
 			organizationId,
 			connectorKey: args.connector_key,
 			displayName: connectDisplayName,
@@ -816,7 +820,8 @@ async function handleConnectImpl(
 		});
 	}
 
-  if (selectedBrowserRequirement(connector.browser, connector.auth_schema, authSelection.authProfile?.profile_kind)) {
+  if (selectedBrowserRequirement(connector.browser, connector.auth_schema,
+    authSelection.pendingLiveBrowser ? 'browser_session' : authSelection.authProfile?.profile_kind)) {
     const pending = await completeBrowserConnectionSetup({ action: 'connect', connectionId: Number(connection.id),
       connectorKey: args.connector_key, slug: connection.slug, ctx, setupUrl });
     if (pending) return pending;

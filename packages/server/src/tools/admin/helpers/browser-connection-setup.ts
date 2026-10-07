@@ -9,8 +9,10 @@ import { buildConnectionSetupContinuation } from './connect-setup-continuation';
 export async function checkBrowserConnectionSetup(params: {
   action: 'create' | 'connect'; connector: ScopedConnectorDefinitionRow;
   profile?: AuthProfileRow | null; deviceWorkerId?: string | null; ctx: ToolContext; setupUrl?: string;
+  pendingLiveBrowser?: boolean;
 }) {
-  const browser = selectedBrowserRequirement(params.connector.browser, params.connector.auth_schema, params.profile?.profile_kind);
+  const browser = selectedBrowserRequirement(params.connector.browser, params.connector.auth_schema,
+    params.pendingLiveBrowser ? 'browser_session' : params.profile?.profile_kind);
   if (!browser) return null;
   const deviceId = params.profile?.device_worker_id ?? params.deviceWorkerId;
   if (!deviceId) return buildConnectionSetupContinuation({ action: params.action,

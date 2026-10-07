@@ -4,7 +4,7 @@
  * Used by manage_connections, manage_feeds, and manage_auth_profiles.
  */
 
-import { ensureLiveBrowserProfile } from '../../../utils/live-browser-profile';
+import { findLiveBrowserProfile, type LiveBrowserProfileParams } from '../../../utils/live-browser-profile';
 import { getScopedConnectorDefinition } from '../../../catalog/connector-definitions';
 import { oauthAccountOwnershipError } from '../../../authz/oauth-account-ownership';
 import { getDb } from '../../../db/client';
@@ -765,6 +765,7 @@ export async function resolveConnectionDisplayName(params: {
 
 interface AuthSelectionResult {
   selectedKind: 'none' | AuthProfileKind;
+  pendingLiveBrowser?: LiveBrowserProfileParams;
   authProfile: AuthProfileRow | null;
   appAuthProfile: AuthProfileRow | null;
   oauthMethod: OAuthAuthMethod | null;
@@ -849,10 +850,16 @@ export async function resolveConnectionAuthSelection(params: {
     throw new Error('The selected OAuth app was not found for this connector.');
   }
 
-  const liveBrowserProfile = browserMethod?.mode === 'live' && params.deviceWorkerId
-    && !params.authProfileSlug && !params.appAuthProfileSlug
-    ? await ensureLiveBrowserProfile({ organizationId, connectorKey,
-        deviceWorkerId: params.deviceWorkerId, userId: params.oauthAccountCreatedBy }) : null;
+  const liveBrowserSetup = browserMethod?.mode === 'live' && params.deviceWorkerId
+    && params.authProfileSlug === undefined && !params.appAuthProfileSlug
+    ? { organizationId, connectorKey, deviceWorkerId: params.deviceWorkerId, userId: params.oauthAccountCreatedBy }
+    : null;
+  const liveBrowserProfile = liveBrowserSetup ? await findLiveBrowserProfile(liveBrowserSetup) : null;
+  if (liveBrowserSetup && !liveBrowserProfile) {
+    // Selection is read-only. Provision only with the accepted connection write.
+    return { ...EMPTY_SELECTION({ oauthMethod, envMethod, browserMethod, preferredMethodType }),
+      selectedKind: 'browser_session', pendingLiveBrowser: liveBrowserSetup };
+  }
 
   // 1. Resolve explicitly selected auth profile, or auto-select the primary
   //    auth profile for the connector's preferred auth method.

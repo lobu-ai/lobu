@@ -5,6 +5,7 @@
 import { completeBrowserConnectionSetup } from '../../helpers/verify-browser-connection';
 import { selectedBrowserRequirement } from '../../../../connectors/browser-resource';
 import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-setup';
+import { ensureLiveBrowserProfile } from '../../../../utils/live-browser-profile';
 import { randomUUID } from "node:crypto";
 import { getErrorMessage, parseJsonObject } from "@lobu/core";
 import { getScopedConnectorDefinition } from "../../../../catalog/connector-definitions";
@@ -1036,6 +1037,7 @@ export async function handleCreate(
         });
 
   const browserSetup = await checkBrowserConnectionSetup({ action: 'create', connector,
+    pendingLiveBrowser: Boolean(authSelection?.pendingLiveBrowser),
     profile: authSelection?.authProfile, deviceWorkerId: deviceBinding.deviceWorkerId, ctx,
     setupUrl: await buildViewUrl(ctx, args.connector_key) });
   if (browserSetup) return browserSetup;
@@ -1045,7 +1047,7 @@ export async function handleCreate(
 			!!authSelection.oauthMethod ||
 			!!authSelection.envMethod ||
 			!!authSelection.browserMethod;
-    if (requiresAuth && !explicitlyNoAuth && !authSelection.authProfile) {
+    if (requiresAuth && !explicitlyNoAuth && !authSelection.authProfile && !authSelection.pendingLiveBrowser) {
 			const setupFamily = authSelection.browserMethod
 				? "browser"
 				: authSelection.envMethod
@@ -1209,7 +1211,7 @@ export async function handleCreate(
   const visibility = await resolveConnectionVisibility(
     organizationId,
     effectiveCreatedBy,
-		authSelection?.authProfile?.profile_kind,
+		authSelection?.authProfile?.profile_kind ?? (authSelection?.pendingLiveBrowser ? 'browser_session' : undefined),
   );
   const connectorFeedsSchema = (connector.feeds_schema ?? null) as Record<
     string,
@@ -1303,6 +1305,7 @@ export async function handleCreate(
     }
   }
   const connectionStatus =
+    authSelection?.pendingLiveBrowser ||
     interactiveMethod ||
 		(authSelection?.authProfile?.profile_kind === "browser_session" &&
       !browserProfileUsable) ||
@@ -1373,6 +1376,7 @@ export async function handleCreate(
 		const bundle = await createConnectionSetupBundle({
 			db: sql,
 			interactive: Boolean(interactiveMethod),
+      pendingLiveBrowser: authSelection?.pendingLiveBrowser,
 			organizationId,
 			connectorKey: args.connector_key,
 			displayName,
@@ -1454,7 +1458,8 @@ export async function handleCreate(
 		});
 	}
 
-  if (selectedBrowserRequirement(connector.browser, connector.auth_schema, authSelection?.authProfile?.profile_kind)) {
+  if (selectedBrowserRequirement(connector.browser, connector.auth_schema,
+    authSelection?.pendingLiveBrowser ? 'browser_session' : authSelection?.authProfile?.profile_kind)) {
     const pending = await completeBrowserConnectionSetup({ action: 'create', connectionId: Number(inserted[0].id),
       connectorKey: args.connector_key, slug: String(inserted[0].slug), ctx, setupUrl: await buildViewUrl(ctx, args.connector_key) });
     if (pending) return pending;
@@ -1839,7 +1844,8 @@ export async function handleUpdate(
     }
   }
 
-  const provisionedLiveBrowser = !currentAuthProfile && hasDeviceWorkerArg && authSelection.authProfile?.auth_data?.mode === 'live';
+  const provisionedLiveBrowser = !currentAuthProfile && hasDeviceWorkerArg &&
+    (Boolean(authSelection.pendingLiveBrowser) || authSelection.authProfile?.auth_data?.mode === 'live');
   const nextAuthProfileId = hasAuthProfileArg || provisionedLiveBrowser
     ? (authSelection.authProfile?.id ?? null)
     : existing.auth_profile_id;
@@ -1850,7 +1856,7 @@ export async function handleUpdate(
   // current visibility when the new profile is not personal).
   const rebindToPersonalCred =
 		(hasAuthProfileArg || provisionedLiveBrowser) &&
-		isPersonalCredentialKind(authSelection.authProfile?.profile_kind);
+		isPersonalCredentialKind(authSelection.pendingLiveBrowser ? 'browser_session' : authSelection.authProfile?.profile_kind);
   const nextAppAuthProfileId = hasAppAuthProfileArg
     ? (authSelection.appAuthProfile?.id ?? null)
     : existing.app_auth_profile_id;
@@ -1862,7 +1868,7 @@ export async function handleUpdate(
 
   // Device-bound browser profile auto-pins the connection's device.
 	const updateProfileDeviceWorkerId =
-		effectiveSelectedAuthProfile?.device_worker_id ?? null;
+		effectiveSelectedAuthProfile?.device_worker_id ?? authSelection.pendingLiveBrowser?.deviceWorkerId ?? null;
   if (updateProfileDeviceWorkerId) {
     if (!hasDeviceWorkerArg) {
       // Caller didn't touch device pin — adopt the profile's device.
@@ -1879,12 +1885,16 @@ export async function handleUpdate(
     }
   }
   const browserConnector = await getScopedConnectorDefinition({ organizationId, connectorKey: existing.connector_key });
-  const browserRequirement = selectedBrowserRequirement(browserConnector?.browser, existing.auth_schema, effectiveSelectedAuthProfile?.profile_kind);
+  const browserRequirement = selectedBrowserRequirement(browserConnector?.browser, existing.auth_schema,
+    authSelection.pendingLiveBrowser ? 'browser_session' : effectiveSelectedAuthProfile?.profile_kind);
   if (browserRequirement && (hasDeviceWorkerArg || hasAuthProfileArg || args.status === 'active')) {
-    if (!nextDeviceWorkerId) return { error: 'This connector requires a paired Chrome browser. The browser binding cannot be removed.' };
-    const binding = await resolveDeviceBinding({ organizationId, userId: ctx.userId, connector: browserConnector!, deviceWorkerId: nextDeviceWorkerId, browser: true });
+    const browserDeviceId = hasDeviceWorkerArg ? nextDeviceWorkerId : (nextDeviceWorkerId ?? existing.device_worker_id);
+    if (!browserDeviceId) return { error: 'This connector requires a paired Chrome browser. The browser binding cannot be removed.' };
+    const binding = await resolveDeviceBinding({ organizationId, userId: ctx.userId, connector: browserConnector!,
+      deviceWorkerId: browserDeviceId, currentDeviceWorkerId: existing.device_worker_id, browser: true });
     if ('error' in binding) return binding;
-    if (browserRequirement.accountProbe && (effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' || effectiveSelectedAuthProfile.device_worker_id !== nextDeviceWorkerId)) {
+    if (browserRequirement.accountProbe && !authSelection.pendingLiveBrowser &&
+      (effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' || effectiveSelectedAuthProfile.device_worker_id !== browserDeviceId)) {
       return { error: 'Choose a live browser account bound to this Chrome profile.' };
     }
     if (args.status === 'active' && browserRequirement.accountProbe && (effectiveSelectedAuthProfile?.status !== 'active' || !effectiveSelectedAuthProfile.auth_data?.account_id)) {
@@ -1906,7 +1916,7 @@ export async function handleUpdate(
     : false;
   const effectiveStatus =
     args.status ??
-    (newlyBoundBrowserProfile
+    (authSelection.pendingLiveBrowser ? 'pending_auth' : newlyBoundBrowserProfile
       ? browserProfileUsable
         ? "active"
         : "pending_auth"
@@ -2120,6 +2130,8 @@ export async function handleUpdate(
         return { denial: { error: 'No-auth selection cannot retain delegated or app-installation credentials. Create a separate connection.' } };
       }
 
+      const liveBrowserProfile = authSelection.pendingLiveBrowser
+        ? await ensureLiveBrowserProfile(authSelection.pendingLiveBrowser, tx) : null;
       const rows = await tx`
         UPDATE connections
         SET display_name = COALESCE(${args.display_name ?? null}, display_name),
@@ -2127,7 +2139,7 @@ export async function handleUpdate(
             status = CASE WHEN ${explicitlyNoAuth} AND ${args.status === undefined}
               AND (status = 'pending_auth' OR (status = 'revoked' AND error_message = ${CONNECT_TOKEN_EXPIRED_ERROR}))
               THEN 'active' ELSE COALESCE(${effectiveStatus}, status) END,
-            auth_profile_id = ${nextAuthProfileId},
+            auth_profile_id = ${liveBrowserProfile?.id ?? nextAuthProfileId},
             app_auth_profile_id = ${nextAppAuthProfileId},
             account_id = CASE WHEN ${explicitlyNoAuth} THEN NULL ELSE account_id END,
             error_message = CASE WHEN ${explicitlyNoAuth}
@@ -2264,7 +2276,7 @@ export async function handleUpdate(
   // with no cron stays manual (#2021).
   const shouldCascadeStatus =
     args.status !== undefined ||
-    (effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' && !explicitlyNoAuth &&
+    (!authSelection.pendingLiveBrowser && effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' && !explicitlyNoAuth &&
       effectiveStatus !== null &&
       updatedConnection.status !== previousConnectionStatus);
   if (shouldCascadeStatus) {
