@@ -1792,7 +1792,9 @@ jobs:
     env:
       # Peekaboo requires Swift 6.2; macos-15 defaults to Xcode 16.4 (Swift 6.1).
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
-    timeout-minutes: 15
+    # Leave headroom for the Release Xcode build after dependency installation,
+    # helper smoke checks, and standalone Swift tests consume part of the budget.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
