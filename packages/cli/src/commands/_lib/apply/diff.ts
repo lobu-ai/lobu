@@ -709,6 +709,13 @@ function diffEntityType(
         },
       },
       {
+        name: "collection",
+        changed: (d, r) =>
+          d.collection !== undefined
+            ? !deepEqual(d.collection, r.schemaExtras?.["x-lobu-collection"])
+            : prune && r.schemaExtras?.["x-lobu-collection"] !== undefined,
+      },
+      {
         // Write rules — prune-aware, like eventKinds. Compares SOURCE, never the
         // compiled artifact: the server owns compilation, so a compiler change
         // must not read as a rule change.
@@ -881,6 +888,12 @@ function compareEntityTypeThreeWay(
       attribution: attribution?.schemaExtras?.["x-lobu-resolution"],
     },
     {
+      field: "collection",
+      desired: desired.collection,
+      remote: remote.schemaExtras?.["x-lobu-collection"],
+      attribution: attribution?.schemaExtras?.["x-lobu-collection"],
+    },
+    {
       field: "rules",
       desired: desired.rulesSource?.sourceCode,
       remote: remote.rulesSource ?? undefined,
@@ -912,6 +925,7 @@ function compareEntityTypeThreeWay(
     "metrics",
     "eventKinds",
     "resolutionPolicy",
+    "collection",
     "rules",
   ]);
   return classifyThreeWay(
@@ -1225,6 +1239,8 @@ export const effectiveEntityTypeAfterApply = (
   // policy always overlays (config wins).
   const schemaExtras: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(r?.schemaExtras ?? {})) {
+    if (prune && key === "x-lobu-collection" && d.collection === undefined)
+      continue;
     if (
       prune &&
       key === "x-lobu-resolution" &&
@@ -1234,6 +1250,8 @@ export const effectiveEntityTypeAfterApply = (
     schemaExtras[key] = value;
   }
   if (d.resolutionPolicy) Object.assign(schemaExtras, d.resolutionPolicy);
+  if (d.collection !== undefined)
+    schemaExtras["x-lobu-collection"] = d.collection;
   const inherit = <T>(declared: T | undefined, live: T | undefined) =>
     declared !== undefined ? declared : prune ? undefined : live;
   // Declared keys win; outside prune the remote-only keys survive the rebuild.

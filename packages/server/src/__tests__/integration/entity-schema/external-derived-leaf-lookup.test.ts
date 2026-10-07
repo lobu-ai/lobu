@@ -61,6 +61,20 @@ describe('external derived record lookup', () => {
     expect(result.rows).toEqual([{ id: 20001, slug: 'source-20001', name: 'Row 20001' }]);
   });
 
+  it('accepts the entity table default sort without a source created_at column', async () => {
+    const api = await TestApiClient.for({ organizationId: orgId, userId, memberRole: 'owner' });
+    const page = await api.entities.list({ entity_type: 'source-record', sort_by: 'created_at', sort_order: 'desc', limit: 1 }) as { entities: Array<{ slug: string }> };
+    expect(page.entities.map(row => row.slug)).toEqual(['source-1']);
+  });
+
+  it('passes numeric sorting and pagination from the entity API into the source', async () => {
+    const api = await TestApiClient.for({ organizationId: orgId, userId, memberRole: 'owner' });
+    for (const [order, expected] of [['asc', 2], ['desc', 20000]] as const) {
+      const page = await api.entities.list({ entity_type: 'source-record', sort_by: 'id', sort_order: order, offset: 1, limit: 1 }) as { entities: Array<{ metadata: { id: number } }> };
+      expect(page.entities.map(row => row.metadata.id)).toEqual([expected]);
+    }
+  });
+
   it('resolves the native record URL without materializing an entity', async () => {
     const result = await resolvePath({ path: `/${orgSlug}/source-record/source-20001` }, {}, ownerToolContext(orgId, userId));
     expect(result.entity).toMatchObject({ slug: 'source-20001', name: 'Row 20001', is_derived: true });

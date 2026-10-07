@@ -183,6 +183,12 @@
       "import": "./dist/contracts/tools/manage-entity-schema.js",
       "require": "./dist/contracts/tools/manage-entity-schema.js"
     },
+    "./contracts/tools/collection-presentation": {
+      "types": "./dist/contracts/tools/collection-presentation.d.ts",
+      "bun": "./src/contracts/tools/collection-presentation.ts",
+      "import": "./dist/contracts/tools/collection-presentation.js",
+      "require": "./dist/contracts/tools/collection-presentation.js"
+    },
     "./contracts/tools/collection-selection": {
       "types": "./dist/contracts/tools/collection-selection.d.ts",
       "bun": "./src/contracts/tools/collection-selection.ts",

@@ -15,6 +15,7 @@ import type {
   AutomationScheduleTrigger,
   AutomationWorkspaceEventTrigger,
 } from "@lobu/core/contracts/tools/manage-automations";
+import type { CollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import type { RetainedSource } from "@lobu/core/contracts/tools/source-files";
 import type Ajv from "ajv";
 import type {
@@ -53,6 +54,12 @@ export interface DesiredEntityType {
   description?: string;
   required?: string[];
   properties?: Record<string, unknown>;
+  /**
+   * The `x-lobu-collection` metadata_schema key. Present only when declared;
+   * folded into the upserted metadata_schema and diffed against the remote
+   * `schemaExtras`, like {@link resolutionPolicy}.
+   */
+  collection?: CollectionPresentation;
   /**
    * Event kinds (semantic types) for events linked to this type, keyed by
    * semantic_type — `{ description?, metadataSchema?, jsonTemplate? }`. Present

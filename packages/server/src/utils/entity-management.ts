@@ -125,7 +125,7 @@ function identityRootSql(entityAlias: string): string {
 export async function queryDerivedEntityView(
 	backingSql: string,
 	backingSource: string | undefined,
-	page: { limit: number; offset: number; search?: string; filters?: AttributeFilter[] },
+	page: { limit: number; offset: number; search?: string; filters?: AttributeFilter[]; sort_by?: string; sort_order?: "asc" | "desc" },
 	ctx: ToolContext,
 	options?: { preservePageRows?: boolean; exactSlug?: string },
 ): Promise<Awaited<ReturnType<typeof querySqlImpl>>> {
@@ -136,6 +136,10 @@ export async function queryDerivedEntityView(
 			connection: backingSource,
 			limit: page.limit,
 			offset: page.offset,
+			// The entity table defaults to created_at, which derived rows synthesize
+			// on read. Preserve backing order instead of requiring that source column.
+			sort_by: page.sort_by === "created_at" ? undefined : page.sort_by,
+			sort_order: page.sort_order ?? "desc",
 		},
 		undefined,
 		ctx,
@@ -145,6 +149,7 @@ export async function queryDerivedEntityView(
 			// Record lookups remain bounded and carry no collection selection.
 			...(options?.exactSlug === undefined || page.search || page.filters?.length ? {
 				selection: { filters: page.filters, search: page.search },
+				stableIdentityColumns: [...DERIVED_SLUG_COLUMNS],
 			} : {}),
 			...(options?.preservePageRows
 				? { maxSerializedResultBytes: Number.POSITIVE_INFINITY }
@@ -2287,7 +2292,7 @@ export async function listEntities(
 				filters.entity_type,
 				backingSql,
 				(etRows[0]?.backing_source as string | null | undefined) ?? undefined,
-				{ limit, offset, search: filters.search, filters: filters.filters },
+				{ limit, offset, search: filters.search, filters: filters.filters, sort_by: filters.sort_by, sort_order: filters.sort_order },
 				ctx,
 			);
 		}
@@ -2576,7 +2581,7 @@ async function listDerivedEntities(
 	entityType: string,
 	backingSql: string,
 	backingSource: string | undefined,
-	page: { limit: number; offset: number; search?: string; filters?: AttributeFilter[] },
+	page: { limit: number; offset: number; search?: string; filters?: AttributeFilter[]; sort_by?: string; sort_order?: "asc" | "desc" },
 	ctx: ToolContext,
 ): Promise<{
   entities: CreatedEntity[];
@@ -2631,8 +2636,8 @@ async function listDerivedEntities(
 		totalCount: result.total_count,
 		limit: page.limit,
 		offset: page.offset,
-		sortBy: "created_at",
-		sortOrder: "desc",
+		sortBy: page.sort_by ?? "created_at",
+		sortOrder: page.sort_order === "asc" ? "asc" : "desc",
 	};
 }
 

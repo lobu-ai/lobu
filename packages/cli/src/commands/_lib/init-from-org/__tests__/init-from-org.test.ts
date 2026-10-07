@@ -179,6 +179,18 @@ function fullOrgRoutes(): Record<
             description: "A sales lead",
             metadata_schema: {
               type: "object",
+              "x-lobu-collection": {
+                table: { columns: ["stage"] },
+                presets: [
+                  {
+                    key: "active",
+                    label: "Active",
+                    selection: {
+                      filters: [{ field: "stage", op: "eq", value: "active" }],
+                    },
+                  },
+                ],
+              },
               required: ["stage"],
               properties: {
                 stage: { type: "string", "x-table-label": "Stage" },
@@ -382,6 +394,18 @@ describe("lobu init --from-org", () => {
       description: "A sales lead",
       required: ["stage"],
       properties: { stage: { type: "string", "x-table-label": "Stage" } },
+      collection: {
+        table: { columns: ["stage"] },
+        presets: [
+          {
+            key: "active",
+            label: "Active",
+            selection: {
+              filters: [{ field: "stage", op: "eq", value: "active" }],
+            },
+          },
+        ],
+      },
     });
     expect(state.memorySchema.relationshipTypes[0]).toEqual({
       slug: "converted-to",

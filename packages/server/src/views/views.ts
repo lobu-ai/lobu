@@ -16,6 +16,10 @@ import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import type { ViewAttachment } from '@lobu/core/contracts/tools/manage-views';
 import { COLLECTION_QUERY_KEY } from '@lobu/core/contracts/tools/collection-selection';
+import {
+  COLLECTION_PRESET_QUERY_KEY,
+  COLLECTION_TABLE_QUERY_KEY,
+} from '@lobu/core/contracts/tools/collection-presentation';
 import type { SourceFiles, SourceDependencies } from '@lobu/core/contracts/tools/source-files';
 import { sourceDependencies } from '@lobu/connector-worker/compile';
 import { build, type Plugin } from 'esbuild';
@@ -39,11 +43,18 @@ export const VIEW_COMPILED_MAX_BYTES = 2 * 1024 * 1024;
 export const VIEW_SOURCE_MAX_CHARS = 1_000_000;
 /**
  * A view owns its page's whole query string (it is selected by path, see
- * `view-path`), except shared `$collection` selection and the web shell's
- * `peek` / `peek_*` pane state. A view cannot declare those.
+ * `view-path`), except shared `$collection` selection, the `$preset` /
+ * `$table` collection presentation state, and the web shell's `peek` /
+ * `peek_*` pane state. A view cannot declare those.
  */
 export function isShellOwnedParam(name: string): boolean {
-  return name === COLLECTION_QUERY_KEY || name === 'peek' || name.startsWith('peek_');
+  return (
+    name === COLLECTION_QUERY_KEY ||
+    name === COLLECTION_PRESET_QUERY_KEY ||
+    name === COLLECTION_TABLE_QUERY_KEY ||
+    name === 'peek' ||
+    name.startsWith('peek_')
+  );
 }
 
 export function isValidViewKey(key: string): boolean {

@@ -344,6 +344,8 @@ export async function querySqlImpl(
      */
     exactMatch?: QueryContext['exactMatch'];
     selection?: QueryContext['selection'];
+    /** Internal derived-row routing columns, used only to break equal sort values. */
+    stableIdentityColumns?: string[];
   }
 ): Promise<QuerySqlResult> {
   const startTime = Date.now();
@@ -529,7 +531,18 @@ export async function querySqlImpl(
   if ('error' in bounds) return fail(bounds.error);
   const { limit, offset } = bounds;
 
-  const orderBy = args.sort_by ? `ORDER BY "${args.sort_by}" ${sortOrder}` : '';
+  const identityColumns = args.sort_by ? options?.stableIdentityColumns ?? [] : [];
+  if (identityColumns.some((column) => !COLUMN_NAME_RE.test(column))) {
+    return fail('Invalid identity sort column');
+  }
+  const identityOrder = identityColumns.length
+    ? `COALESCE(${identityColumns.map((column) => `to_jsonb(_t)->>'${column}'`).join(', ')}) ASC`
+    : '';
+  const ordering = [
+    args.sort_by ? `"${args.sort_by}" ${sortOrder}` : '',
+    identityOrder,
+  ].filter(Boolean);
+  const orderBy = ordering.length ? `ORDER BY ${ordering.join(', ')}` : '';
   // Single execution: the scoped subquery can be expensive (derived entity views
   // aggregate large event ranges), so run it ONCE and take the total from a
   // window count instead of a second full `SELECT count(*) FROM (subquery)`

@@ -33,6 +33,7 @@ import {
   type TSchema,
   type TString,
 } from "@sinclair/typebox";
+import type { CollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import type { SecretRef } from "./secret.js";
 
 /** A connector referenced by its key, or by the class produced by `defineConnector`. */
@@ -199,6 +200,8 @@ export interface EntityType {
    * placement, and per-field optionality; raw JSON Schema objects stay valid.
    */
   properties?: Record<string, unknown>;
+  /** Collection presets, table defaults and a read-only facet query. */
+  collection?: CollectionPresentation;
   /**
    * Event kinds (semantic types) valid for events linked to this entity type,
    * keyed by semantic_type. Declares each kind's metadata contract + optional

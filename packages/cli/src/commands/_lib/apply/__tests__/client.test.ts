@@ -43,6 +43,53 @@ describe("ApplyClient", () => {
     );
   });
 
+  test("collection presentation persists with schema fields and clears only when explicitly pruned", async () => {
+    const bodies: Record<string, any>[] = [];
+    const client = new ApplyClient(
+      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
+      (async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }) as typeof fetch
+    );
+    const collection = {
+      presets: [
+        {
+          key: "large",
+          label: "Large",
+          selection: {
+            filters: [{ field: "size", op: "gte" as const, value: 200 }],
+          },
+        },
+      ],
+    };
+    const core = {
+      properties: { size: { type: "number" } },
+      required: ["size"],
+    };
+    await client.upsertEntityType(
+      { slug: "account", collection },
+      { "x-other": true },
+      core
+    );
+    expect(bodies[0]?.metadata_schema).toMatchObject({
+      ...core,
+      "x-other": true,
+      "x-lobu-collection": collection,
+    });
+    await client.upsertEntityType(
+      { slug: "account", properties: core.properties },
+      { "x-lobu-collection": collection }
+    );
+    expect(bodies[1]?.metadata_schema["x-lobu-collection"]).toEqual(collection);
+    await client.upsertEntityType(
+      { slug: "account" },
+      { "x-lobu-collection": collection },
+      core,
+      new Set(["collection"])
+    );
+    expect(bodies[2]?.metadata_schema).toEqual({ type: "object", ...core });
+  });
   test("maps non-secret managed MCP catalog metadata", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const client = new ApplyClient(

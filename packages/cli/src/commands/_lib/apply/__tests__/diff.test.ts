@@ -60,6 +60,41 @@ function emptyRemote(): RemoteSnapshot {
 }
 
 describe("apply diff — agents", () => {
+  test("collection config converges, preserves omitted configuration, and supports explicit pruning", () => {
+    const collection = {
+      presets: [{ key: "large", label: "Large", selection: {} }],
+    };
+    const remote = {
+      ...emptyRemote(),
+      entityTypes: [
+        { slug: "account", schemaExtras: { "x-lobu-collection": collection } },
+      ],
+    };
+    const state = buildState([], {
+      memorySchema: {
+        entityTypes: [{ slug: "account", collection }],
+        relationshipTypes: [],
+      },
+    });
+    expect(
+      computeDiff(state, remote).rows.find((row) => row.id === "account")?.verb
+    ).toBe("noop");
+    const omitted = buildState([], {
+      memorySchema: {
+        entityTypes: [{ slug: "account" }],
+        relationshipTypes: [],
+      },
+    });
+    expect(
+      computeDiff(omitted, remote).rows.find((row) => row.id === "account")
+        ?.verb
+    ).toBe("noop");
+    expect(
+      computeDiff(omitted, remote, { prune: true }).rows.find(
+        (row) => row.id === "account"
+      )?.changedFields
+    ).toContain("collection");
+  });
   test("create from empty remote", () => {
     const desired = buildState([
       buildDesiredAgent("triage", {
