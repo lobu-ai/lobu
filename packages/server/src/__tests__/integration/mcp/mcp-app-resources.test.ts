@@ -615,14 +615,6 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
 
   it('returns the exact saved event payload for the save_memory App card', async () => {
     const sessionId = await initSession(`/mcp/${org.slug}`);
-    const payloadTemplate = {
-      root: {
-        type: 'bar-chart',
-        data: '{{points}}',
-        labelField: 'label',
-        valueField: 'value',
-      },
-    };
     const payloadData = {
       points: [
         { label: 'Saved', value: 12 },
@@ -639,8 +631,8 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
           arguments: {
             title: 'Saved chart',
             semantic_type: 'content',
-            payload_type: 'json_template',
-            payload_template: payloadTemplate,
+            payload_type: 'markdown',
+            content: 'Saved: **12**. Rendered: **7**.',
             payload_data: payloadData,
             metadata: {},
             idempotency_key: 'mcp-app-save-memory-render-result',
@@ -657,10 +649,9 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     expect(body.result?.structuredContent).toEqual(
       expect.objectContaining({
         title: 'Saved chart',
-        payload_type: 'json_template',
+        payload_type: 'markdown',
         payload_data: payloadData,
-        payload_template: payloadTemplate,
-        payload_text: null,
+        payload_text: 'Saved: **12**. Rendered: **7**.',
         attachments: [],
         source_url: null,
         view_url: expect.stringMatching(/\/events\/\d+$/),
@@ -686,8 +677,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
           arguments: {
             title: 'Large durable note',
             semantic_type: 'content',
-            payload_type: 'json_template',
-            payload_template: { root: { type: 'data', path: 'body' } },
+            payload_type: 'empty',
             payload_data: { body: 'x'.repeat(600 * 1024) },
             metadata: {},
             idempotency_key: 'mcp-app-save-memory-oversized-result',

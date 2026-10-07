@@ -69,6 +69,8 @@ export type ReactionKnowledgeSaveContract = [
   Assert<"payload_data" extends keyof KnowledgeSaveInput ? true : false>,
   Assert<"supersedes_event_id" extends keyof KnowledgeSaveInput ? true : false>,
   Assert<"slug" extends keyof KnowledgeSaveInput ? false : true>,
+  Assert<"payload_template" extends keyof KnowledgeSaveInput ? false : true>,
+  Assert<{ semantic_type: "note"; payload_type: "json_template" } extends KnowledgeSaveInput ? false : true>,
   // `content` is required only for text/markdown; the old copy demanded it for every payload type.
   Assert<{ semantic_type: "note"; payload_type: "empty" } extends KnowledgeSaveInput ? true : false>,
   Assert<{ semantic_type: "note" } extends KnowledgeSaveInput ? false : true>,

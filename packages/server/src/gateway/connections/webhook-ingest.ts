@@ -742,7 +742,7 @@ export async function handleWebhookIngest(
 						? { connectionId: automationConnectionId }
 						: {}),
 					semanticType,
-					payloadType: "json_template",
+					payloadType: eventContent ? "text" : "empty",
 					payloadData,
 					content: eventContent,
 					title: eventTitle,

@@ -923,8 +923,7 @@ describe('org-wide guidance context', () => {
         {
           content: 'x',
           semantic_type: GUIDANCE_SEMANTIC_TYPE,
-          payload_type: 'json_template',
-          payload_template: { kind: 'text', text: 'x' },
+          payload_type: 'media',
           metadata: {},
         } as never,
         env,

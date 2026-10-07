@@ -388,13 +388,15 @@ export async function buildContentItems(opts: {
   // from the kind's metadataSchema (same generator as entity auto-default). An
   // event with real body content (text/markdown/media) or an explicit template
   // is left untouched. Resolution rides the cached event_kinds registry, so the
-  // per-event lookups are cheap and bounded to the metadata-only minority. Kind
-  // notifications keep routing metadata separate and bind their payload_data.
+  // per-event lookups are cheap and bounded to the metadata-only minority. Structured
+  // payloads bind their own data rather than unrelated routing metadata.
   await Promise.all(
     contentItems.map(async (item) => {
       if (organizationId === null || item.payload_template || item.payload_type !== 'empty') return;
       const isNotification = typeof item.metadata?.notification_type === 'string';
-      const renderData = isNotification ? (item.payload_data ?? {}) : item.metadata;
+      const renderData = isNotification || Object.keys(item.payload_data ?? {}).length > 0
+        ? (item.payload_data ?? {})
+        : item.metadata;
       if (!isNotification && (!renderData || Object.keys(renderData).length === 0)) return;
       const kind = await resolveEventKindDefinition(
         item.semantic_type,

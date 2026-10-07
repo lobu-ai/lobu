@@ -221,7 +221,8 @@ describe("handleWebhookIngest auth", () => {
 		const rows = await eventRows();
 		expect(rows.length).toBe(1);
 		expect(rows[0].payload_data).toEqual({ hello: "world" });
-		expect(rows[0].payload_type).toBe("json_template");
+		expect(rows[0].payload_type).toBe("empty");
+		expect(rows[0].payload_template).toBeNull();
 		expect(rows[0].semantic_type).toBe("content");
 		expect(rows[0].entity_ids).toBeNull();
 		expect(rows[0].metadata.webhook_connection_id).toBe("whk1");
@@ -574,6 +575,8 @@ describe("handleWebhookIngest body handling", () => {
 		const rows = await eventRows();
 		// Non-empty payload_text is the gate the embed-backfill keys on; the
 		// flattened "path: value" projection carries searchable tokens.
+		expect(rows[0].payload_type).toBe("text");
+		expect(rows[0].payload_template).toBeNull();
 		expect(rows[0].payload_text).toContain("event.title: ZeroDivisionError");
 		expect(rows[0].payload_text).toContain("event.level: error");
 	});
@@ -669,7 +672,7 @@ describe("handleWebhookIngest idempotency", () => {
 			originId: "same-origin",
 			connectorKey: "webhook:whk1",
 			semanticType: "content",
-			payloadType: "json_template" as const,
+			payloadType: "empty" as const,
 			payloadData: { n: 1 },
 		};
 		await insertEvent(params);

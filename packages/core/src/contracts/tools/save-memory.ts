@@ -41,26 +41,19 @@ export const SaveContentSchema = Type.Object({
       [
         Type.Literal("text"),
         Type.Literal("markdown"),
-        Type.Literal("json_template"),
         Type.Literal("media"),
         Type.Literal("empty"),
       ],
       {
         description:
-          "Content format. 'text' (default): plain text. 'markdown': rendered as rich text. 'json_template': rendered via payload_template + payload_data. 'media': media-focused display. 'empty': metadata only.",
+          "Content format. 'text' (default): plain text. 'markdown': rendered as rich text. 'media': media-focused display. 'empty': metadata only.",
       }
     )
   ),
   payload_data: Type.Optional(
     Type.Record(Type.String(), Type.Any(), {
       description:
-        "Structured data object. Used as template data for json_template, or structured metadata for media.",
-    })
-  ),
-  payload_template: Type.Optional(
-    Type.Record(Type.String(), Type.Any(), {
-      description:
-        "JSON template for rendering. Required when payload_type is json_template. Must have a { root: ... } structure.",
+        "Structured event data, preserved alongside content and media.",
     })
   ),
   attachments: Type.Optional(
@@ -127,8 +120,8 @@ export type SaveContentArgs = Static<typeof SaveContentSchema>;
 /**
  * `client.knowledge.save` input. The schema leaves every field optional
  * because `saveContent` resolves the requirement per `payload_type`:
- * `semantic_type` always, `content` for text/markdown, `payload_template`
- * for json_template. Stated here once, over the contract's own fields.
+ * `semantic_type` always, `content` for text/markdown.
+ * Stated here once, over the contract's own fields.
  */
 type Save<R extends keyof SaveContentArgs = never> = FlatActionInput<
   SaveContentArgs,
@@ -138,5 +131,4 @@ type Save<R extends keyof SaveContentArgs = never> = FlatActionInput<
 
 export type SaveContentInput =
   | (Save<"content"> & { payload_type?: "text" | "markdown" })
-  | (Save<"payload_template"> & { payload_type: "json_template" })
   | (Save & { payload_type: "media" | "empty" });

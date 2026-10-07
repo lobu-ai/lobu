@@ -61,11 +61,10 @@ export type CardElement = Record<string, unknown>;
 export type KnowledgeSearchInput = PublicSearchArgs;
 
 /**
- * The `save_memory` contract's own input, from core. The hand-written copy
- * lacked `payload_data`, `payload_template` and `attachments`, required
- * `content` for every payload type, and advertised a `slug` field the server
- * rejects as an unknown argument. Pinned by `ReactionKnowledgeSaveContract`
- * in `./reaction-client-types.typecheck`.
+ * The `save_memory` contract's own input, from core. Structured data and
+ * attachments are retained; only text/Markdown require content.
+ * Pinned by `ReactionKnowledgeSaveContract` in
+ * `./reaction-client-types.typecheck`.
  */
 export type KnowledgeSaveInput = SaveContentInput;
 

@@ -77,7 +77,7 @@ describe('saveContent > honest indexing status', () => {
     expect(result.exact_read.content_ids).toEqual([result.id]);
 
     // A direct tool call echoes the persisted row, so the ordinary text save —
-    // not just the json_template one — carries its own body back with no second
+    // including ordinary Markdown — carries its own body back with no second
     // read. The headless shape is pinned by the next test.
     expect(result.payload_type).toBe('text');
     expect(result.payload_text).toBe(

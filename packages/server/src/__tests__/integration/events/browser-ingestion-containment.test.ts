@@ -435,7 +435,7 @@ describe('browser ingestion containment', () => {
     expect(JSON.stringify(rows)).toContain('REDACTED');
   });
 
-  it('does not echo or log raw browser values when stream ingestion fails', async () => {
+  it.each(['payload_type', 'occurred_at'])('does not echo raw browser values when %s fails validation or storage', async (field) => {
     const { runId } = await createBrowserRun(false);
     const raw = 'stream-failure-callback-value';
     const failed = mockWorkerCtx({
@@ -447,8 +447,9 @@ describe('browser ingestion containment', () => {
           id: `https://example.test/item?access_token=${raw}`,
           title: 'Broken item',
           payload_text: 'body',
-          payload_type: `https://example.test/?code=${raw}`,
+          payload_type: 'text',
           occurred_at: new Date().toISOString(),
+          [field]: `https://example.test/?code=${raw}`,
         },
       ],
     });
@@ -456,7 +457,7 @@ describe('browser ingestion containment', () => {
     const logSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     try {
       await streamContent(failed.ctx);
-      expect(failed.result().status).toBe(500);
+      expect(failed.result().status).toBe(field === 'payload_type' ? 422 : 500);
       expect(JSON.stringify(failed.result().body)).not.toContain(raw);
       expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(raw);
       expect(JSON.stringify(logSpy.mock.calls)).not.toContain(raw);

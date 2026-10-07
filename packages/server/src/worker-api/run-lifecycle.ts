@@ -21,7 +21,7 @@ import type {
 	PollAuthSignalRequest,
 	StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
-import { FeedSourceAckSchema, HeartbeatRequestSchema } from "@lobu/core/contracts/worker/protocol";
+import { ContentItemSchema, FeedSourceAckSchema, HeartbeatRequestSchema } from "@lobu/core/contracts/worker/protocol";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "hono";
 import {
@@ -466,6 +466,19 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 		);
 		if (denied) return denied;
 
+		// The worker is an external writer; TypeScript cannot constrain a wire
+		// payload. Validate the declared fields and format before committing any
+		// item or advancing the feed checkpoint.
+		for (const item of batch.items) {
+			if (
+				Object.keys(item).some((key) => !Object.hasOwn(ContentItemSchema.properties, key)) ||
+				(item.payload_type !== undefined &&
+					!Value.Check(ContentItemSchema.properties.payload_type, item.payload_type))
+			) {
+				return c.json({ error: "Content item fields or payload format are outside the worker contract" }, 422);
+			}
+		}
+
 		const sql = getDb();
 
 		// Look up run details for event columns
@@ -505,7 +518,6 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 						content: item.payload_text,
 						sourceUrl: item.source_url,
 						payloadData: item.payload_data,
-						payloadTemplate: item.payload_template,
 						attachments: item.attachments,
 						metadata: item.metadata,
 					});
@@ -517,7 +529,6 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 						payload_text: sanitized.content ?? item.payload_text,
 						source_url: sanitized.sourceUrl,
 						payload_data: sanitized.payloadData,
-						payload_template: sanitized.payloadTemplate,
 						attachments: sanitized.attachments,
 						metadata: sanitized.metadata,
 						automation_signals: sanitizeBrowserPayload(item.automation_signals),
@@ -784,7 +795,6 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 							payloadType: item.payload_type,
 							content: item.payload_text,
 							payloadData: item.payload_data,
-							payloadTemplate: item.payload_template,
 							attachments: item.attachments,
 							authorName: item.author_name,
 							sourceUrl: item.source_url,

@@ -199,36 +199,3 @@ function portableActionName(node: Record<string, unknown>): string | null {
 		? handler.slice(1)
 		: null;
 }
-
-/** Validate handler bindings without imposing a storage shape on the template. */
-export function validateTemplateHandlers(template: unknown): void {
-	if (!isPlainObject(template)) return;
-	if ("type" in template) {
-		walkHandlers(template, "");
-	} else if (isPlainObject(template.root)) {
-		walkHandlers(template.root, ".root");
-	}
-}
-
-function walkHandlers(node: unknown, path: string): void {
-	if (!isPlainObject(node)) return;
-	if (node.type === "if") {
-		walkHandlers(node.then, `${path}.then`);
-		if (node.else !== undefined) walkHandlers(node.else, `${path}.else`);
-		return;
-	}
-	if (node.type === "each") {
-		if (typeof node.render !== "string") {
-			walkHandlers(node.render, `${path}.render`);
-		}
-		return;
-	}
-	if (node.type === "text" || node.type === "data") return;
-
-	validateComponentHandlers(node, path);
-	if (Array.isArray(node.children)) {
-		node.children.forEach((child, i) => {
-			walkHandlers(child, `${path}.children[${i}]`);
-		});
-	}
-}

@@ -846,14 +846,12 @@ export interface EventEnvelope {
   origin_id: string;
   /** Source-native item type (e.g. post, message, issue) */
   origin_type?: string;
-  /** Content format: 'text' (default), 'markdown', 'json_template', 'media', 'empty' */
-  payload_type?: 'text' | 'markdown' | 'json_template' | 'media' | 'empty';
+  /** Content format: 'text' (default), 'markdown', 'media', 'empty' */
+  payload_type?: 'text' | 'markdown' | 'media' | 'empty';
   /** Main text content */
   payload_text: string;
-  /** Structured data (template data for json_template, or structured metadata for media) */
+  /** Structured event data, preserved alongside content and media. */
   payload_data?: Record<string, unknown>;
-  /** JSON template for rendering (required when payload_type is 'json_template') */
-  payload_template?: Record<string, unknown> | null;
   /** File or media attachments */
   attachments?: unknown[];
   /** Title / subject line */
