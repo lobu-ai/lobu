@@ -94,6 +94,28 @@ export async function countStoredEntitiesOfType(
 	return Number(rows[0]?.count || 0);
 }
 
+/** Live stored identity edges only; retained source rows are not list roots.
+ * Same-org/type live endpoints keep search from widening the root's read scope.
+ * Physical row counts deliberately do not use this display predicate.
+ */
+function identityEdgesSql(entityAlias: string): string {
+  return `SELECT ir.from_entity_id, ir.to_entity_id
+    FROM entity_relationships ir
+    JOIN entity_relationship_types it ON it.id = ir.relationship_type_id
+    JOIN entities source ON source.id = ir.from_entity_id
+    JOIN entities target ON target.id = ir.to_entity_id
+    WHERE ir.organization_id = ${entityAlias}.organization_id AND ir.deleted_at IS NULL
+      AND it.organization_id = ${entityAlias}.organization_id AND it.purpose = 'identity'
+      AND it.deleted_at IS NULL AND it.status = 'active'
+      AND source.organization_id = ${entityAlias}.organization_id AND target.organization_id = ${entityAlias}.organization_id
+      AND source.entity_type_id = ${entityAlias}.entity_type_id AND target.entity_type_id = ${entityAlias}.entity_type_id
+      AND source.deleted_at IS NULL AND target.deleted_at IS NULL`;
+}
+
+function identityRootSql(entityAlias: string): string {
+  return `NOT EXISTS (${identityEdgesSql(entityAlias)} AND ir.from_entity_id = ${entityAlias}.id)`;
+}
+
 /**
  * Run a derived entity type's `backing_sql` through the shared `querySqlImpl`
  * executor (org-scoped internal tables or connection pushdown). List, detail
@@ -135,7 +157,7 @@ export async function queryDerivedEntityView(
 }
 
 /**
- * Display count for one entity type: stored `entities` rows, or the derived
+ * Display count for one entity type: canonical stored roots, or the derived
  * view's `total_count` from {@link queryDerivedEntityView} (same path as list).
  * A failed derived query returns 0 so a broken view cannot poison type lists.
  */
@@ -164,12 +186,17 @@ export async function countEntitiesOfType(
 		}
 		return 0;
 	}
-	return countStoredEntitiesOfType(type.id, ctx.organizationId);
+	const rows = await getDb().unsafe<{ count: number }>(`
+    SELECT COUNT(*)::int AS count FROM entities e
+    WHERE e.organization_id = $1 AND e.entity_type_id = $2 AND e.deleted_at IS NULL
+      AND ${identityRootSql('e')}
+  `, [ctx.organizationId, type.id]);
+  return Number(rows[0]?.count || 0);
 }
 
 /**
  * Batch display counts for entity-type list / bootstrap. One GROUP BY for all
- * stored types, plus parallel derived view counts via
+ * stored roots, plus parallel derived view counts via
  * {@link countEntitiesOfType}.
  */
 export async function getEntityCountsByTypes(
@@ -184,13 +211,14 @@ export async function getEntityCountsByTypes(
 
 	if (stored.length > 0) {
 		const sql = getDb();
-		const rows = await sql`
+		const rows = await sql.unsafe<{ entity_type_id: number; entity_count: number }>(`
       SELECT e.entity_type_id AS entity_type_id, COUNT(*)::int as entity_count
       FROM entities e
-      WHERE e.organization_id = ${ctx.organizationId}
+      WHERE e.organization_id = $1
         AND e.deleted_at IS NULL
+        AND ${identityRootSql('e')}
       GROUP BY e.entity_type_id
-    `;
+    `, [ctx.organizationId]);
 		for (const row of rows) {
 			counts.set(Number(row.entity_type_id), Number(row.entity_count));
 		}
@@ -2265,7 +2293,7 @@ export async function listEntities(
 		}
 	}
 
-	const conditions: string[] = ["{e}.deleted_at IS NULL"];
+	const conditions: string[] = ["{e}.deleted_at IS NULL", identityRootSql("{e}")];
 	// The scoped segment statement numbers its own placeholders from $1, so its
 	// params lead the list and every other filter binds after them.
 	const params: unknown[] = segmentFilter ? [...segmentFilter.params] : [];
@@ -2291,7 +2319,17 @@ export async function listEntities(
 
 	if (filters.search) {
 		conditions.push(
-			`({e}.name ILIKE $${paramIdx} ESCAPE '!' OR {e}.metadata->>'domain' ILIKE $${paramIdx} ESCAPE '!')`,
+			`EXISTS (
+        WITH RECURSIVE members(id) AS (
+          SELECT {e}.id
+          UNION
+          SELECT edge.from_entity_id FROM members m
+          JOIN LATERAL (${identityEdgesSql('{e}')}) edge ON edge.to_entity_id = m.id
+        )
+        SELECT 1 FROM members m JOIN entities member ON member.id = m.id
+        WHERE member.name ILIKE $${paramIdx} ESCAPE '!'
+          OR member.metadata->>'domain' ILIKE $${paramIdx} ESCAPE '!'
+      )`,
 		);
 		params.push(`%${filters.search.replace(/[!%_]/g, '!$&')}%`);
 		paramIdx++;
