@@ -1,3 +1,4 @@
+import { collectTemplateActionInvocations } from "@lobu/core/json-template";
 import { __setLocalFrontendForTests } from "../../../utils/public-origin";
 import {
 	afterEach,
@@ -42,6 +43,59 @@ describe("template event actions", () => {
 	afterEach(() => {
 		__setLocalFrontendForTests(undefined);
 		__setChatInstanceManagerForTests(null);
+	});
+
+	it.each([
+		{ name: "ordinary structured payload", payload: { choice: "shown", count: 0, enabled: false }, metadata: { choice: "hidden" }, shown: "shown" },
+		{ name: "metadata-only event", payload: {}, metadata: { choice: "shown" }, shown: "shown" },
+		{ name: "notification payload", payload: { choice: "shown" }, metadata: { notification_type: "generic", choice: "hidden" }, shown: "shown" },
+		{ name: "empty notification payload", payload: {}, metadata: { notification_type: "generic", choice: "hidden" }, shown: null },
+	])("validates the choice rendered from $name", async ({ payload, metadata, shown }) => {
+		const workspace = await TestWorkspace.create({ name: "Event data agreement" });
+		const entity = await createTestEntity({
+			name: "Synthetic decision", entity_type: "synthetic-decision",
+			organization_id: workspace.org.id, created_by: workspace.users.owner.id,
+		});
+		const sql = getTestDb();
+		await sql`
+      UPDATE entity_types SET event_kinds = ${sql.json({
+			decision: {
+				jsonTemplate: {
+					type: "if", condition: "choice",
+					then: { type: "button", props: { label: "{{choice}}", value: "{{choice}}", onClick: "@choose" } },
+					else: { type: "text", content: "No choice available" },
+				},
+				interactions: { choose: { emits: "decision_cast" } },
+			},
+			decision_cast: { description: "A verified decision" },
+		})} WHERE organization_id = ${workspace.org.id} AND slug = 'synthetic-decision'
+    `;
+		const source = await insertEvent({
+			entityIds: [entity.id], organizationId: workspace.org.id,
+			originId: "synthetic-decision", payloadType: "empty",
+			semanticType: "decision", payloadData: payload, metadata,
+		});
+		const api = await TestApiClient.for({
+			organizationId: workspace.org.id, userId: workspace.users.owner.id, memberRole: "owner",
+		});
+		const read = await api.knowledge.read({ content_ids: [source.id] });
+		const item = read.content.find((event) => Number(event.id) === source.id)!;
+		const rendered = collectTemplateActionInvocations(
+			item.payload_template!.root, item.payload_data ?? {},
+		);
+		expect(rendered).toEqual(shown === null ? [] : [{ action: "choose", value: shown }]);
+		const invoke = (value: string) => invokeTemplateEventAction({
+			organizationId: workspace.org.id, sourceEventId: source.id,
+			action: "choose", value, interactionId: "choice-" + value, surface: "web",
+			actor: { platform: "web", platformUserId: workspace.users.owner.id, userId: workspace.users.owner.id },
+		});
+		await expect(invoke("hidden")).rejects.toThrow(/not present in the rendered event/i);
+		if (shown !== null) {
+			const accepted = await invoke(rendered[0].value!);
+			expect(accepted).toMatchObject({ created: true, eventType: "decision_cast" });
+			const [stored] = await sql`SELECT metadata FROM events WHERE id = ${accepted.eventId}`;
+			expect(stored.metadata).toMatchObject({ ...item.payload_data, interaction: { value: shown } });
+		}
 	});
 
 	it("binds actor + delivery, dedupes retries, and wakes subscribed Automations", async () => {

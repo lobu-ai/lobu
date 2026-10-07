@@ -41,6 +41,17 @@ export interface EventKindDefinition {
   interactions?: TemplateInteractionRegistry;
 }
 
+/** Keep rendered values and offered-action validation on the same event data. */
+export function resolveEventKindData(
+  payloadData: Record<string, unknown> | null | undefined,
+  metadata: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const data = payloadData ?? {};
+  return typeof metadata?.notification_type === 'string' || !isEmptyObject(data)
+    ? data
+    : (metadata ?? {});
+}
+
 // ============================================
 // Fuzzy Match
 // ============================================

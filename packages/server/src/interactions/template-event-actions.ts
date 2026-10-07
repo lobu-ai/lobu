@@ -11,6 +11,7 @@ import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js
 import { resolveEntityRender } from "../utils/default-entity-template";
 import { ToolUserError } from "../utils/errors";
 import {
+	resolveEventKindData,
 	resolveEventKindDefinition,
 	validateSaveContentSemanticType,
 } from "../utils/event-kind-validation";
@@ -483,13 +484,10 @@ async function appendTemplateEventAction(
 		kind.jsonTemplate ?? null,
 		kind.metadataSchema,
 	);
-	const sourceMetadata = record(sourceEvent.metadata);
-	// Match get_content's rendering contract exactly: notification events render
-	// their payload, while ordinary typed events render their metadata.
-	const sourceData =
-		typeof sourceMetadata.notification_type === "string"
-			? record(sourceEvent.payload_data)
-			: sourceMetadata;
+	const sourceData = resolveEventKindData(
+		record(sourceEvent.payload_data),
+		record(sourceEvent.metadata),
+	);
 	const rendered = template
 		? collectTemplateActionInvocations(template, sourceData)
 		: [];

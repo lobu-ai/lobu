@@ -12,7 +12,7 @@ import {
   eventArtifactBinding,
 } from '../../gateway/files/artifact-store';
 import { resolveEntityRender } from '../../utils/default-entity-template';
-import { resolveEventKindDefinition } from '../../utils/event-kind-validation';
+import { resolveEventKindData, resolveEventKindDefinition } from '../../utils/event-kind-validation';
 import { buildResourcePermalink } from '../../utils/url-builder';
 import { AUDIT_SEMANTIC_TYPE } from '../constants';
 import type { ContentRow } from './types';
@@ -394,10 +394,8 @@ export async function buildContentItems(opts: {
     contentItems.map(async (item) => {
       if (organizationId === null || item.payload_template || item.payload_type !== 'empty') return;
       const isNotification = typeof item.metadata?.notification_type === 'string';
-      const renderData = isNotification || Object.keys(item.payload_data ?? {}).length > 0
-        ? (item.payload_data ?? {})
-        : item.metadata;
-      if (!isNotification && (!renderData || Object.keys(renderData).length === 0)) return;
+      const renderData = resolveEventKindData(item.payload_data, item.metadata);
+      if (!isNotification && Object.keys(renderData).length === 0) return;
       const kind = await resolveEventKindDefinition(
         item.semantic_type,
         organizationId,
