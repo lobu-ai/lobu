@@ -223,7 +223,7 @@ export interface ReactionClient {
     }>;
     /** Read one durable run and its completed answer/rejection state. */
     getRun(run_id: number): Promise<{ run: Record<string, unknown> }>;
-    /** Execute one operation and wait for its result. */
+    /** Execute one operation and wait for its result; device operations with `background: true` return the queued `run_id` instead. */
     execute(input: OperationExecuteInput): Promise<{
       status?:
         | "completed"

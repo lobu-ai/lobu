@@ -905,7 +905,7 @@ export default async (_ctx, client) => {
 	},
 	"operations.execute": {
 		summary:
-			"Execute a connector action. OBJECT signature: execute({ connection_id: number, operation_key: string, input?: object, idempotency_key?: string, automation_source?: { automation_id: number, run_id: number } }). connector_key is not accepted. operation_key is an opaque manifest identifier: copy it exactly from operations.listAvailable and never derive it from the display name. A durable idempotency_key replays the original run instead of repeating the external request.",
+			"Execute a connector action. OBJECT signature: execute({ connection_id: number, operation_key: string, input?: object, idempotency_key?: string, background?: boolean, automation_source?: { automation_id: number, run_id: number } }). connector_key is not accepted. operation_key is an opaque manifest identifier: copy it exactly from operations.listAvailable and never derive it from the display name. A durable idempotency_key replays the original run instead of repeating the external request. For device work, background: true returns run_id promptly and survives SDK deadlines; read operations.getRun(run_id) later or explicitly operations.cancel(run_id). Approval and queue expiry still apply.",
 		access: "external",
 		enforcedTier: "write",
 		cost: "expensive",
@@ -925,6 +925,11 @@ export default async (_ctx, client) => {
 		signature:
 			"operations.getRun(run_id: number): Promise<unknown> // or operations.getRun({ run_id })",
 		example: "const run = await client.operations.getRun(123);",
+	},
+	"operations.cancel": {
+		summary: "Cancel your connector operation, or any operation as a workspace administrator. Stops future claims/results and signals a running worker on its next heartbeat. Existing external effects are not undone.",
+		access: "write",
+		signature: "operations.cancel(run_id: number): Promise<unknown>",
 	},
 	"operations.approve": {
 		summary: "Approve a pending run that required human approval.",

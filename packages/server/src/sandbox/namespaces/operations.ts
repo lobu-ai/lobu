@@ -23,6 +23,7 @@ export interface OperationsNamespace {
 	execute(input: OperationExecuteInput): Promise<unknown>;
 	listRuns(input?: OperationListRunsInput): Promise<unknown>;
 	getRun(run_id: number): Promise<unknown>;
+	cancel(run_id: number): Promise<unknown>;
 	approve(input: OperationApproveInput): Promise<unknown>;
 	reject(input: OperationRejectInput): Promise<unknown>;
 }
@@ -48,6 +49,9 @@ export function buildOperationsNamespace(
 			mapArgs: (run_id) => ({
 				run_id: idArg("operations.getRun", "run_id", run_id, "number"),
 			}),
+		}),
+		cancel: method("cancel", {
+			mapArgs: (run_id) => ({ run_id: idArg("operations.cancel", "run_id", run_id, "number") }),
 		}),
 		approve: method("approve"),
 		reject: method("reject"),

@@ -4518,6 +4518,10 @@ export type ManageOperationsData = {
          * Durable caller key. Replays return the original operation run; reusing the key for a different operation or input is rejected.
          */
         idempotency_key?: string;
+        /**
+         * Device operations only: return the durable run_id immediately. The run survives the caller disconnecting; use get_run for results and cancel to stop it. Approval and queue expiry still apply.
+         */
+        background?: boolean;
         activation?: {
           kind: "page_visit";
           /**
@@ -4594,6 +4598,13 @@ export type ManageOperationsData = {
          * Fetch one connector action or internal approval run.
          */
         action: "get_run";
+        run_id: number;
+      }
+    | {
+        /**
+         * Cancel a connector operation owned by the requester, or as a workspace administrator. Prevents further claims/results and asks the worker to stop on its next heartbeat; already performed effects are not undone.
+         */
+        action: "cancel";
         run_id: number;
       }
     | {
@@ -4884,6 +4895,12 @@ export type ManageOperationsResponses = {
         run_id: number;
         event_id?: number;
         message: string;
+      }
+    | {
+        action: "cancel";
+        run_id: number;
+        status: string;
+        cancelled: boolean;
       }
     | {
         action: "reject";

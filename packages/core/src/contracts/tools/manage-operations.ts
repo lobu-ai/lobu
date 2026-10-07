@@ -96,6 +96,13 @@ export const ExecuteAction = Type.Object({
         "Durable caller key. Replays return the original operation run; reusing the key for a different operation or input is rejected.",
     })
   ),
+  background: Type.Optional(
+    Type.Boolean({
+      default: false,
+      description:
+        "Device operations only: return the durable run_id immediately. The run survives the caller disconnecting; use get_run for results and cancel to stop it. Approval and queue expiry still apply.",
+    })
+  ),
   activation: Type.Optional(
     Type.Object({
       kind: Type.Literal("page_visit"),
@@ -202,6 +209,14 @@ export const GetRunAction = Type.Object({
     description: "Fetch one connector action or internal approval run.",
   }),
   run_id: Type.Number(),
+});
+
+export const CancelAction = Type.Object({
+  action: Type.Literal("cancel", {
+    description:
+      "Cancel a connector operation owned by the requester, or as a workspace administrator. Prevents further claims/results and asks the worker to stop on its next heartbeat; already performed effects are not undone.",
+  }),
+  run_id: Type.Integer({ minimum: 1 }),
 });
 
 /**
@@ -529,6 +544,12 @@ export const ManageOperationsResultSchema = Type.Union([
     message: Type.String(),
   }),
   Type.Object({
+    action: Type.Literal("cancel"),
+    run_id: Type.Integer(),
+    status: Type.String(),
+    cancelled: Type.Boolean(),
+  }),
+  Type.Object({
     action: Type.Literal("reject"),
     rejected: Type.Literal(true),
     run_id: Type.Integer(),
@@ -561,6 +582,7 @@ export const ManageOperationsSchema = Type.Union([
   ExecuteAction,
   ListRunsAction,
   GetRunAction,
+  CancelAction,
   ListActivityAction,
   ApproveAction,
   RejectAction,

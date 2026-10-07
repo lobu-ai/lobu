@@ -555,7 +555,7 @@ async function replayExistingOperationRun(
 			action: "execute",
 			run_id: claim.runId,
 			status: "in_progress",
-			message: `Idempotent operation run ${claim.runId} is already in progress.`,
+			message: `Operation run ${claim.runId} is in progress. Read operations.getRun(${claim.runId}) for its result.`,
 		};
 	}
 	return {
@@ -754,6 +754,10 @@ export async function handleExecute(
 			"Page activation requires a server-executed local connector operation.",
 			422,
 		);
+	}
+
+	if (args.background && !executesOnDevice) {
+		throw new ToolUserError("Background execution requires a device operation.", 422);
 	}
 
 	const approvalMode: "inline" | "queued" | "device" = shouldQueue
@@ -1029,6 +1033,10 @@ export async function handleExecute(
 	// here until it flips to completed/failed/timeout, or we hit the
 	// device-action timeout. Returns action_output on success.
 	if (approvalMode === "device") {
+		if (args.background) {
+			await trackOperationReaction(runId);
+			return replayExistingOperationRun(claim, operation.name, ctx);
+		}
 		const result = await waitForDeviceActionRun(
 			runId,
 			ctx.organizationId,
