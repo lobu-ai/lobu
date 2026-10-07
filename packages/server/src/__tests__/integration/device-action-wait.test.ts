@@ -39,6 +39,7 @@ import {
   waitForDeviceActionRun,
   waitForDeviceActionRunWithOptions,
 } from '../../tools/admin/device-action-wait';
+import { insertEvent } from '../../utils/insert-event';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestOrganization, seedOwnerContext } from '../setup/test-fixtures';
 
@@ -511,12 +512,93 @@ describe('waitForDeviceActionRun', () => {
 
     expect(out.status).toBe('timeout');
     expect(elapsed).toBeLessThan(5_000); // did NOT sit through the 60s budget
+    expect(out.error_message).toContain('caller cancelled the wait or reached its deadline');
+    expect(out.error_message).toContain('before any device claimed the run');
+    expect(out.error_message).not.toContain('60000ms');
 
     const sql = getTestDb();
     const rows = (await sql`
-      SELECT status FROM runs WHERE id = ${runId}
-    `) as Array<{ status: string }>;
+      SELECT status, error_message FROM runs WHERE id = ${runId}
+    `) as Array<{ status: string; error_message: string }>;
     expect(rows[0].status).toBe('timeout');
+    expect(rows[0].error_message).toBe(out.error_message);
+  });
+
+  it.each([false, true])('reports an early caller abort honestly (claimed=%s)', async (claimed) => {
+    const org = await createTestOrganization();
+    await insertChromeConnector(org.id);
+    const connId = await insertChromeConnection(org.id);
+    const runId = await insertPendingActionRun(org.id, connId, {});
+    await insertEvent({
+      entityIds: [],
+      organizationId: org.id,
+      originId: `synthetic_dispatched_${runId}`,
+      title: 'Navigate — dispatched',
+      content: 'Operation dispatched: Navigate',
+      semanticType: 'operation',
+      runId,
+      interactionType: 'approval',
+      interactionStatus: 'approved',
+      authorName: 'synthetic-agent',
+    });
+    let syntheticNow = Date.now();
+    if (claimed) await claim(runId, WORKER_ID, syntheticNow);
+    const controller = new AbortController();
+
+    const out = await waitForDeviceActionRunWithOptions(runId, org.id, {
+      queueMs: 60_000,
+      postClaimMs: 95_000,
+      pollMs: 500,
+      now: () => syntheticNow,
+      sleep: workerTurn(async () => {
+        syntheticNow += 8_000;
+        controller.abort();
+      }),
+      abortSignal: controller.signal,
+    });
+
+    expect(out.status).toBe('timeout');
+    expect(out.error_message).toContain('caller cancelled the wait or reached its deadline after 8000ms');
+    expect(out.error_message).toContain(
+      claimed ? 'while the device was executing' : 'before any device claimed the run'
+    );
+    expect(out.error_message).not.toMatch(/60000ms|95000ms|offline|last seen|no paired device/);
+    const sql = getTestDb();
+    const rows = (await sql`
+      SELECT status, error_message FROM runs WHERE id = ${runId}
+    `) as Array<{ status: string; error_message: string }>;
+    expect(rows[0].status).toBe('timeout');
+    expect(rows[0].error_message).toBe(out.error_message);
+    const cards = await sql`
+      SELECT title, interaction_status, interaction_error FROM current_event_records
+      WHERE organization_id = ${org.id} AND run_id = ${runId}
+    `;
+    expect(cards).toHaveLength(1);
+    expect(cards[0].title).toBe('navigate — caller wait ended');
+    expect(cards[0].interaction_status).toBe('failed');
+    expect(cards[0].interaction_error).toBe(out.error_message);
+    // An aborted pending operation must not become claimable later.
+    if (!claimed) await claim(runId, WORKER_ID);
+    expect(await workerCompleteAction(runId, WORKER_ID, 'success', { late: true })).toBe(false);
+  });
+
+  it('preserves a worker result that arrives before caller cancellation is observed', async () => {
+    const org = await createTestOrganization();
+    await insertChromeConnector(org.id);
+    const connId = await insertChromeConnection(org.id);
+    const runId = await insertPendingActionRun(org.id, connId, {});
+    await claim(runId, WORKER_ID);
+    const controller = new AbortController();
+
+    const out = await waitForDeviceActionRunWithOptions(runId, org.id, {
+      ...FAST_BUDGETS,
+      sleep: workerTurn(async () => {
+        await workerCompleteAction(runId, WORKER_ID, 'success', { finished: true });
+        controller.abort();
+      }),
+      abortSignal: controller.signal,
+    });
+    expect(out).toEqual({ status: 'completed', output: { finished: true } });
   });
 });
 
