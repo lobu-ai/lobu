@@ -528,7 +528,9 @@ export interface FeedDefinition {
    * complete enough to store):
    *  - `mode: 'trigger'` (default) — the poll brings more than the webhook, so
    *    mark this feed due and let the poll fetch the complete record (deduped by
-   *    origin_id). Use for events whose poll endpoint returns richer data.
+   *    origin_id). Use for events whose poll endpoint returns richer data. On a
+   *    read-only feed, these are `automationEvents` keys whose source references
+   *    (from `observe`) activate subscribed Automations without importing content.
    *  - `mode: 'store'` — the payload is event-complete (e.g. a GitHub `star`
    *    carries the actor + starred_at) and re-polling the whole list is wasteful,
    *    so the router stores the structured event directly, consolidating with the
