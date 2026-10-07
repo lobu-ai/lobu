@@ -159,7 +159,7 @@ describe('formatMetadataExtractionError', () => {
 
 describe('resolveBundledAgentToolingMetadata', () => {
   test('returns tooling and auth only for an exact bundled key and version', async () => {
-    const metadata = await resolveBundledAgentToolingMetadata('github', '1.3.0');
+    const metadata = await resolveBundledAgentToolingMetadata('github', '1.4.0');
     expect(metadata?.agentTooling).toMatchObject({
       nix: { packages: ['gh'] },
       env: [{ name: 'GH_TOKEN', credential: 'lease' }],

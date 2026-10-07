@@ -13,11 +13,14 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import GitHubConnector from '@lobu/connectors/github';
 import type { Env } from '../../../index';
 import type { ToolContext } from '../../../tools/registry';
 import { manageAuthProfiles } from '../../../tools/admin/manage_auth_profiles';
 import { manageConnections } from '../../../tools/admin/manage_connections';
 import {
+  buildOAuthConnectConfig,
+  getOAuthMethods,
   resolveOAuthAppClientCredentials,
   resolveRequestedOAuthScopes,
 } from '../../../tools/admin/helpers/connection-helpers';
@@ -71,6 +74,21 @@ async function makeOAuthConnector(orgId: string) {
 }
 
 describe('connector OAuth scope resolution (pure)', () => {
+  it('requests GitHub collaborator permissions only when explicitly selected', () => {
+    const method = getOAuthMethods(new GitHubConnector().definition.authSchema).find(
+      (candidate) => candidate.provider === 'github'
+    );
+    if (!method) throw new Error('GitHub OAuth method is missing');
+
+    expect(buildOAuthConnectConfig(method).scopes).toEqual(['read:user', 'user:email']);
+    expect(buildOAuthConnectConfig(method, ['repo', 'read:org', 'admin:org']).scopes).toEqual([
+      'read:user',
+      'user:email',
+      'repo',
+      'read:org',
+    ]);
+  });
+
   it('includes login identity scopes alongside required connector scopes', () => {
     expect(
       resolveRequestedOAuthScopes(

@@ -383,7 +383,7 @@ export default class GitHubConnector extends ConnectorRuntime {
     key: 'github',
     name: 'GitHub',
     description: 'Collects GitHub issues/discussions and executes repo actions.',
-    version: '1.3.0',
+    version: '1.4.0',
     automationEvents: GITHUB_AUTOMATION_EVENTS,
     faviconDomain: 'github.com',
     // A GitHub connection gives the agent's sandbox an authenticated `gh`.
@@ -469,10 +469,11 @@ export default class GitHubConnector extends ConnectorRuntime {
           type: 'oauth',
           provider: 'github',
           requiredScopes: ['read:user'],
-          // Webhook scopes are OPTIONAL and requested incrementally — only when
-          // the user enables a live feed (repo) or org-wide ingestion (org), not
-          // at first connect. `repo` covers reads of private repos.
-          optionalScopes: ['repo', 'admin:repo_hook', 'admin:org_hook'],
+          // OPTIONAL scopes are requested only when selected, never at first
+          // connect. `repo` covers private-repo reads and write actions; listing
+          // repository collaborators for access sync needs `read:org` alongside
+          // `repo`; the hook scopes back live feeds and org-wide ingestion.
+          optionalScopes: ['repo', 'read:org', 'admin:repo_hook', 'admin:org_hook'],
           loginScopes: ['read:user', 'user:email'],
           clientIdKey: 'GITHUB_CLIENT_ID',
           clientSecretKey: 'GITHUB_CLIENT_SECRET',
@@ -480,7 +481,7 @@ export default class GitHubConnector extends ConnectorRuntime {
           tokenEndpointAuthMethod: 'client_secret_post',
           required: false,
           description:
-            'GitHub OAuth enables repo access for this connection. Upgrade to the optional repo scope for private repositories and write actions.',
+            'GitHub OAuth enables repo access for this connection. Upgrade to repo for private repositories and write actions; add read:org to synchronize repository access permissions.',
           loginProvisioning: {
             autoCreateConnection: true,
           },
