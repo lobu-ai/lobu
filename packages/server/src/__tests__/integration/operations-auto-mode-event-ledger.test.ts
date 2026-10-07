@@ -26,6 +26,8 @@ import { createAuthProfile } from "../../utils/auth-profiles";
 import { initWorkspaceProvider } from "../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
+	addUserToOrganization,
+	createTestUser,
 	createTestConnection,
 	createTestConnectorDefinition,
 	seedOwnerContext,
@@ -240,6 +242,100 @@ describe("operation ledger under Auto policy", () => {
 			  )
 		`) as unknown as Array<{ id: string }>;
 		expect(runs).toEqual([]);
+	});
+
+	async function backgroundDevice() {
+		delete process.env.WORKER_API_TOKEN;
+		const sql = getTestDb();
+		const workerId = `background-device-${Date.now()}`;
+		const [device] = (await sql`
+			INSERT INTO device_workers (
+				user_id, worker_id, platform, app_version, capabilities, label,
+				organization_id, last_seen_at
+			) VALUES (
+				${userId}, ${workerId}, 'macos', '0.1.0', ${sql.json([])}, 'Auto Ledger Device',
+				${orgId}, NOW()
+			)
+			RETURNING id
+		`) as unknown as Array<{ id: string }>;
+		const deviceConn = await createTestConnection({
+			organization_id: orgId,
+			connector_key: CONNECTOR,
+			created_by: userId,
+			visibility: "private",
+		});
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action",
+			connectionId: deviceConn.id,
+			effects: { execute: "auto" },
+		});
+		await sql`
+			UPDATE connections SET device_worker_id = ${String(device.id)}::uuid
+			WHERE id = ${deviceConn.id}
+		`;
+
+		return { deviceConn, workerId };
+	}
+
+	it("background device work survives caller abort and completes through the worker API", async () => {
+		const { deviceConn, workerId } = await backgroundDevice();
+		const abort = new AbortController();
+		const request = { action: "execute" as const, connection_id: deviceConn.id,
+			operation_key: "echo", input: { value: "background" },
+			idempotency_key: "synthetic-background-completion", background: true };
+		const queued = await manageOperations(request, {} as Env, { ...ctx, abortSignal: abort.signal }) as { status: string; run_id: number };
+		expect(queued.status).toBe("in_progress");
+		abort.abort();
+		expect(await manageOperations(request, {} as Env, ctx)).toMatchObject({ run_id: queued.run_id, status: "in_progress" });
+		const claimed = await post("/api/workers/poll", { body: { worker_id: workerId, platform: "macos", app_version: "0.1.0", label: workerId, capabilities: {} } });
+		expect(await claimed.json()).toMatchObject({ run_id: queued.run_id });
+		const complete = await post("/api/workers/complete-action", { body: { run_id: queued.run_id, worker_id: workerId, status: "success", action_output: { value: "background-done" } } });
+		expect(complete.status).toBe(200);
+		expect(await manageOperations({ action: "get_run", run_id: queued.run_id }, {} as Env, ctx)).toMatchObject({ run: { status: "completed", output: { value: "background-done" } } });
+		expect((await operationLedger(orgId, queued.run_id)).at(-1)).toMatchObject({ interaction_status: "completed" });
+		expect(await manageOperations({ action: "cancel", run_id: queued.run_id }, {} as Env, ctx)).toMatchObject({ status: "completed", cancelled: false });
+	});
+
+	it("cancellation is durable, idempotent, and rejects late worker completion", async () => {
+		const { deviceConn, workerId } = await backgroundDevice();
+		const queued = await manageOperations({ action: "execute", connection_id: deviceConn.id, operation_key: "echo", input: { value: "cancel" }, background: true }, {} as Env, ctx) as { run_id: number };
+		const claimed = await post("/api/workers/poll", { body: { worker_id: workerId, platform: "macos", app_version: "0.1.0", label: workerId, capabilities: {} } });
+		expect(await claimed.json()).toMatchObject({ run_id: queued.run_id });
+		const cancel = { action: "cancel" as const, run_id: queued.run_id };
+		expect(await manageOperations(cancel, {} as Env, { ...ctx, organizationId: "synthetic-other-org" })).toHaveProperty("error");
+		expect(await manageOperations(cancel, {} as Env, { ...ctx, userId: null, agentId: null })).toHaveProperty("error");
+		expect(await manageOperations(cancel, {} as Env, ctx)).toMatchObject({ status: "cancelled", cancelled: true });
+		expect(await manageOperations(cancel, {} as Env, ctx)).toMatchObject({ status: "cancelled", cancelled: false });
+		expect((await post("/api/workers/complete-action", { body: { run_id: queued.run_id, worker_id: workerId, status: "success", action_output: { wrong: true } } })).status).toBe(200);
+		expect(await manageOperations({ action: "get_run", run_id: queued.run_id }, {} as Env, ctx)).toMatchObject({ run: { status: "cancelled", output: null } });
+		expect((await post("/api/workers/heartbeat", { body: { run_id: queued.run_id, worker_id: workerId } })).status).toBe(409);
+		expect((await operationLedger(orgId, queued.run_id)).at(-1)?.metadata).toMatchObject({ run_status: "cancelled" });
+	});
+
+	it("background approval stays pending and only its requester can cancel it", async () => {
+		const { deviceConn, workerId } = await backgroundDevice();
+		await upsertEntityApprovalPolicy(orgId, { resourceClass: "connector_action", connectionId: deviceConn.id, effects: { execute: "approval" } });
+		const queued = await manageOperations({ action: "execute", connection_id: deviceConn.id, operation_key: "echo", input: { value: "approval" }, background: true }, {} as Env, ctx) as { status: string; run_id: number };
+		expect(queued.status).toBe("pending_approval");
+		const member = await createTestUser({ name: "Other operation member" });
+		await addUserToOrganization(member.id, orgId);
+		const memberCtx = { ...ctx, userId: member.id };
+		expect(await manageOperations({ action: "cancel", run_id: queued.run_id }, {} as Env, memberCtx)).toHaveProperty("error");
+		expect(await manageOperations({ action: "cancel", run_id: queued.run_id }, {} as Env, { ...ctx, agentId: "synthetic-foreign-agent" })).toHaveProperty("error");
+		// Exercise the non-admin requester branch, independent of admin privilege.
+		await getTestDb()`UPDATE runs SET created_by_user_id = ${member.id} WHERE id = ${queued.run_id}`;
+		expect(await manageOperations({ action: "cancel", run_id: queued.run_id }, {} as Env, memberCtx)).toMatchObject({ status: "cancelled", cancelled: true });
+		// A withdrawn approval must leave every reviewer surface, not stay pending.
+		const [settled] = await getTestDb()`SELECT approval_status FROM runs WHERE id = ${queued.run_id}`;
+		expect(settled.approval_status).toBe("expired");
+		expect((await operationLedger(orgId, queued.run_id)).at(-1)).toMatchObject({ interaction_status: "rejected", metadata: { approval_status: "expired" } });
+		expect(await manageOperations({ action: "reject", run_id: queued.run_id }, {} as Env, ctx)).toHaveProperty("error");
+		const polled = await post("/api/workers/poll", { body: { worker_id: workerId, platform: "macos", app_version: "0.1.0", label: workerId, capabilities: {} } });
+		expect(await polled.json()).not.toHaveProperty("run_id", queued.run_id);
+	});
+
+	it("refuses background mode for inline operations before creating a run", async () => {
+		await expect(manageOperations({ action: "execute", connection_id: connectionId, operation_key: "echo", input: { value: "inline" }, background: true }, {} as Env, ctx)).rejects.toThrow(/background.*device/i);
 	});
 
 	it("records a device-executed auto run when the worker reports completion", async () => {

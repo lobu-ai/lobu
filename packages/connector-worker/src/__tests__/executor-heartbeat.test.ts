@@ -48,6 +48,7 @@ mock.module('../compile-connector.js', () => ({
 }));
 
 
+import { WorkerHttpError } from '../daemon/client.js';
 import { executeRun } from '../daemon/executor.js';
 
 function makeStubClient() {
@@ -177,6 +178,45 @@ describe('executor heartbeats (lobu#860)', () => {
     expect(result.error).toContain('must not contain compiled_code');
     expect(executeCompiledConnectorMock).not.toHaveBeenCalled();
   });
+
+  test('revoked action lease aborts a running isolate', async () => {
+    const client = makeStubClient();
+    client.heartbeat = async () => { throw new WorkerHttpError(409, '/heartbeat', 'Run is not in progress'); };
+    let signal: AbortSignal | undefined;
+    executeCompiledConnectorMock.mockImplementationOnce(async ({ hooks }) => {
+      signal = hooks?.signal;
+      await fireIntervalTicks(1);
+      return { mode: 'action', output: {} };
+    });
+    await executeRun(client as any, { run_id: 102, run_type: 'action', connector_key: 'fake', action_key: 'run', compiled_code: 'compiled-code' } as any, {} as any, { executor: { execute: executeCompiledConnectorMock } });
+    expect(signal?.aborted).toBe(true);
+  });
+
+  test('a transient heartbeat failure does not cancel healthy action work', async () => {
+    const client = makeStubClient();
+    client.heartbeat = async () => { throw new WorkerHttpError(503, '/heartbeat', 'temporarily unavailable'); };
+    let signal: AbortSignal | undefined;
+    executeCompiledConnectorMock.mockImplementationOnce(async ({ hooks }) => {
+      signal = hooks?.signal;
+      await fireIntervalTicks(1);
+      return { mode: 'action', output: {} };
+    });
+    await executeRun(client as any, { run_id: 103, run_type: 'action', connector_key: 'fake', action_key: 'run', compiled_code: 'compiled-code' } as any, {} as any, { executor: { execute: executeCompiledConnectorMock } });
+    expect(signal?.aborted).toBe(false);
+  });
+
+  test('revoked shell lease terminates the running process before its deadline', async () => {
+    const client = makeStubClient();
+    client.heartbeat = async () => { throw new WorkerHttpError(409, '/heartbeat', 'Run is not in progress'); };
+    const complete = spyOn(client, 'completeAction');
+    const started = Date.now();
+    const execution = executeRun(client as any, { run_id: 104, run_type: 'action', connector_key: 'os.shell', action_key: 'run', action_input: { command: 'sleep 10', timeout_ms: 15000 } } as any, {} as any);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await fireIntervalTicks(1);
+    await execution;
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(complete).not.toHaveBeenCalled();
+  }, 20000);
 
   test('executeEmbedBackfillRun heartbeats at least twice over a 70s simulated run', async () => {
     const client = makeStubClient();

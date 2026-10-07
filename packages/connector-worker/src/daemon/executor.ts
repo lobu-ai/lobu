@@ -16,7 +16,7 @@ import {
 } from './builtins/index.js';
 import { executeAgentTurnRun } from './agent-turn.js';
 import { executeDeviceChatRun } from './device-chat.js';
-import type { ContentItem, ExecutorClient, PollResponse } from './client.js';
+import { WorkerHttpError, type ContentItem, type ExecutorClient, type PollResponse } from './client.js';
 import { attachedInteractiveSession, attachInteractiveSession } from './interactive-session.js';
 import { log } from './log.js';
 import { reportTerminalFailure } from './terminal-failure.js';
@@ -513,6 +513,25 @@ function extractExecutionDiagnostics(error: unknown):
   };
 }
 
+/** Action work stops when its durable lease is revoked. Network failures alone
+ * do not prove revocation; the gateway's structured 409 does. */
+function monitorActionRun(client: ExecutorClient, runId: number, cfg: ExecutorConfig) {
+  const controller = new AbortController();
+  const signal = cfg.shutdownSignal
+    ? AbortSignal.any([controller.signal, cfg.shutdownSignal])
+    : controller.signal;
+  const interval = setInterval(async () => {
+    try {
+      const response = await client.heartbeat(runId);
+      if (response?.continue === false) controller.abort();
+    } catch (error) {
+      if (error instanceof WorkerHttpError && error.status === 409) controller.abort();
+      else log.debug('[executor] Action heartbeat failed:', error);
+    }
+  }, cfg.heartbeatIntervalMs);
+  return { signal, revoked: () => controller.signal.aborted, stop: () => clearInterval(interval) };
+}
+
 /**
  * Execute an action run (async action with approval)
  */
@@ -556,20 +575,7 @@ async function executeActionRun(
 
   log.info(`[executor] Starting action run ${run_id} (${connector_key}/${action_key})`);
 
-  // Heartbeat so the gateway's stale-run reaper doesn't write us off
-  // mid-action. Action runs can legitimately take minutes (LLM calls,
-  // long Playwright sessions, third-party API rate-limit waits); the
-  // reaper's default threshold is 120s, so a 30s heartbeat gives ~3
-  // ticks of grace. Without this the row sits "running" until the worker
-  // process dies, and the lane was previously excluded from the reaper
-  // (lobu#859) because the heartbeat was missing.
-  const heartbeatInterval = setInterval(async () => {
-    try {
-      await client.heartbeat(run_id);
-    } catch (err) {
-      log.debug('[executor] Action heartbeat failed:', err);
-    }
-  }, cfg.heartbeatIntervalMs);
+  const monitor = monitorActionRun(client, run_id, cfg);
   let terminalPayloadStarted = false;
 
   try {
@@ -598,6 +604,7 @@ async function executeActionRun(
         credentials: credentials ?? null,
       },
       hooks: {
+        signal: monitor.signal,
         ...(job.http_auth ? { onHttpFetch: (request, signal) => client.httpFetch(run_id, request, signal) } : {}),
         onChromeDispatch: async (actionKey, actionInput) => {
           return client.dispatchChromeAction({
@@ -615,6 +622,7 @@ async function executeActionRun(
     }
     const actionOutput = result.output;
 
+    if (monitor.revoked()) return { itemsCollected: 0 };
     terminalPayloadStarted = true;
     await completeActionOnce(client, {
       run_id,
@@ -629,7 +637,7 @@ async function executeActionRun(
     const errorMessage = error instanceof Error ? error.message : String(error);
     log.info(`[executor] Action run ${run_id} failed:`, errorMessage);
 
-    if (terminalPayloadStarted) {
+    if (terminalPayloadStarted || monitor.revoked()) {
       return { itemsCollected: 0, error: errorMessage };
     }
     await completeActionOnce(client, {
@@ -641,7 +649,7 @@ async function executeActionRun(
 
     return { itemsCollected: 0, error: errorMessage };
   } finally {
-    clearInterval(heartbeatInterval);
+    monitor.stop();
   }
 }
 
@@ -666,21 +674,16 @@ async function executeDaemonBuiltinActionRun(
     return { itemsCollected: 0, error: message };
   }
 
-  const heartbeatInterval = setInterval(async () => {
-    try {
-      await client.heartbeat(run_id);
-    } catch (error) {
-      log.debug('[executor] Daemon built-in heartbeat failed:', error);
-    }
-  }, cfg.heartbeatIntervalMs);
+  const monitor = monitorActionRun(client, run_id, cfg);
 
   try {
     const result = await executeDaemonBuiltin({
       connectorKey: connector_key,
       actionKey: action_key,
       input: (action_input ?? {}) as Record<string, unknown>,
-      shutdownSignal: cfg.shutdownSignal,
+      shutdownSignal: monitor.signal,
     });
+    if (monitor.revoked()) return { itemsCollected: 0 };
     if (!result.ok) {
       const message = `${result.code}: ${result.error}`;
       await completeActionOnce(client, {
@@ -707,7 +710,7 @@ async function executeDaemonBuiltinActionRun(
     log.info(`[executor] Daemon built-in terminal delivery uncertain for ${run_id}:`, message);
     return { itemsCollected: 0, error: message };
   } finally {
-    clearInterval(heartbeatInterval);
+    monitor.stop();
   }
 }
 

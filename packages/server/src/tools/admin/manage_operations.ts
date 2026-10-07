@@ -13,6 +13,7 @@ import {
 	handleReject,
 	handleRejectBatch,
 } from "./manage_operations/handlers/approvals";
+import { handleCancel } from "./manage_operations/handlers/cancel";
 import { handleExecute } from "./manage_operations/handlers/execute";
 import { handleListAvailable } from "./manage_operations/handlers/list-available";
 import {
@@ -23,6 +24,7 @@ import {
 import {
 	ApproveAction,
 	ApproveBatchAction,
+	CancelAction,
 	ExecuteAction,
 	GetRunAction,
 	ListActivityAction,
@@ -50,6 +52,9 @@ const manageOperationsTool = defineActionTool("manage_operations", {
 	execute: action(ExecuteAction, handleExecute),
 	list_runs: action(ListRunsAction, handleListRuns),
 	get_run: action(GetRunAction, handleGetRun),
+	cancel: action(CancelAction, async (args, ctx) =>
+		settleApprovalResult(ctx, await handleCancel(args, ctx)),
+	),
 	list_activity: action(ListActivityAction, handleListActivity),
 	approve: action(ApproveAction, async (args, ctx, env) =>
 		settleApprovalResult(ctx, await handleApprove(args, ctx, env)),
