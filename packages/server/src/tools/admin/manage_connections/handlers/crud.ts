@@ -4,6 +4,7 @@
 
 import { completeBrowserConnectionSetup } from '../../helpers/verify-browser-connection';
 import { selectedBrowserRequirement } from '../../../../connectors/browser-resource';
+import { getManagedByOrg } from '../../../../utils/connector-auth';
 import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-setup';
 import { ensureLiveBrowserProfile } from '../../../../utils/live-browser-profile';
 import { randomUUID } from "node:crypto";
@@ -999,14 +1000,7 @@ export async function handleCreate(
   // so it falls through to the normal auth path rather than being created
   // active+unauthenticated.
   const incomingConfig = parseJsonObject(args.config);
-  const managedByOrg =
-		incomingConfig.managedBy &&
-		typeof incomingConfig.managedBy === "object" &&
-    !Array.isArray(incomingConfig.managedBy)
-      ? (incomingConfig.managedBy as Record<string, unknown>).org
-      : undefined;
-  const managedByRequested =
-		typeof managedByOrg === "string" && managedByOrg.trim().length > 0;
+  const managedByRequested = !!getManagedByOrg(incomingConfig);
   // managedBy delegates to a cloud OAuth grant, so it only applies to OAuth
   // connectors. On a non-OAuth connector (env/browser/none) treating it as
   // managed would bypass a real local auth requirement, so reject it instead of
@@ -1037,6 +1031,7 @@ export async function handleCreate(
         });
 
   const browserSetup = await checkBrowserConnectionSetup({ action: 'create', connector,
+    config: incomingConfig,
     pendingLiveBrowser: Boolean(authSelection?.pendingLiveBrowser),
     profile: authSelection?.authProfile, deviceWorkerId: deviceBinding.deviceWorkerId, ctx,
     setupUrl: await buildViewUrl(ctx, args.connector_key) });
@@ -1459,7 +1454,7 @@ export async function handleCreate(
 	}
 
   if (selectedBrowserRequirement(connector.browser, connector.auth_schema,
-    authSelection?.pendingLiveBrowser ? 'browser_session' : authSelection?.authProfile?.profile_kind)) {
+    authSelection?.pendingLiveBrowser ? 'browser_session' : authSelection?.authProfile?.profile_kind, false, incomingConfig)) {
     const pending = await completeBrowserConnectionSetup({ action: 'create', connectionId: Number(inserted[0].id),
       connectorKey: args.connector_key, slug: String(inserted[0].slug), ctx, setupUrl: await buildViewUrl(ctx, args.connector_key) });
     if (pending) return pending;
@@ -1886,23 +1881,6 @@ export async function handleUpdate(
       nextDeviceWorkerId = updateProfileDeviceWorkerId;
     }
   }
-  const browserConnector = await getScopedConnectorDefinition({ organizationId, connectorKey: existing.connector_key });
-  const browserRequirement = selectedBrowserRequirement(browserConnector?.browser, existing.auth_schema,
-    authSelection.pendingLiveBrowser ? 'browser_session' : effectiveSelectedAuthProfile?.profile_kind);
-  if (browserRequirement && (hasDeviceWorkerArg || hasAuthProfileArg || args.status === 'active')) {
-    const browserDeviceId = hasDeviceWorkerArg ? nextDeviceWorkerId : (nextDeviceWorkerId ?? existing.device_worker_id);
-    if (!browserDeviceId) return { error: 'This connector requires a paired Chrome browser. The browser binding cannot be removed.' };
-    const binding = await resolveDeviceBinding({ organizationId, userId: ctx.userId, connector: browserConnector!,
-      deviceWorkerId: browserDeviceId, currentDeviceWorkerId: existing.device_worker_id, browser: true });
-    if ('error' in binding) return binding;
-    if (browserRequirement.accountProbe && !authSelection.pendingLiveBrowser &&
-      (effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' || effectiveSelectedAuthProfile.device_worker_id !== browserDeviceId)) {
-      return { error: 'Choose a live browser account bound to this Chrome profile.' };
-    }
-    if (args.status === 'active' && browserRequirement.accountProbe && (effectiveSelectedAuthProfile?.status !== 'active' || !effectiveSelectedAuthProfile.auth_data?.account_id)) {
-      return { error: 'Verify this browser account with connections.test before activating the connection.' };
-    }
-  }
   const newlyBoundBrowserProfile =
     browserAuthBindingChanged &&
     effectiveSelectedAuthProfile?.profile_kind === "browser_session"
@@ -1971,6 +1949,23 @@ export async function handleUpdate(
     : splitConfig.connectionConfig
       ? { ...existingConfig, ...splitConfig.connectionConfig }
       : existingConfig;
+  const browserConnector = await getScopedConnectorDefinition({ organizationId, connectorKey: existing.connector_key });
+  const browserDeviceId = hasDeviceWorkerArg ? nextDeviceWorkerId : (nextDeviceWorkerId ?? existing.device_worker_id);
+  const browserRequirement = selectedBrowserRequirement(browserConnector?.browser, existing.auth_schema,
+    authSelection.pendingLiveBrowser ? 'browser_session' : effectiveSelectedAuthProfile?.profile_kind, !!browserDeviceId, resultingConfig);
+  if (browserRequirement && (hasDeviceWorkerArg || hasAuthProfileArg || args.config !== undefined || args.status === 'active')) {
+    if (!browserDeviceId) return { error: 'This connector requires a paired Chrome browser. The browser binding cannot be removed.' };
+    const binding = await resolveDeviceBinding({ organizationId, userId: ctx.userId, connector: browserConnector!,
+      deviceWorkerId: browserDeviceId, currentDeviceWorkerId: existing.device_worker_id, browser: true });
+    if ('error' in binding) return binding;
+    if (browserRequirement.accountProbe && !authSelection.pendingLiveBrowser &&
+      (effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' || effectiveSelectedAuthProfile.device_worker_id !== browserDeviceId)) {
+      return { error: 'Choose a live browser account bound to this Chrome profile.' };
+    }
+    if (args.status === 'active' && browserRequirement.accountProbe && (effectiveSelectedAuthProfile?.status !== 'active' || !effectiveSelectedAuthProfile.auth_data?.account_id)) {
+      return { error: 'Verify this browser account with connections.test before activating the connection.' };
+    }
+  }
 	if (
 		!callerIsAdmin &&
 		isAtlassianMcpConfig(existing.mcp_config) &&

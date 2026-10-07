@@ -60,6 +60,7 @@ type InternalExecutionTarget = ExecutionTarget & {
 };
 
 type OperationTargetRow = {
+  config: Record<string, unknown> | null;
 	browser: unknown;
 	auth_schema: unknown;
 	device_platform: string | null;
@@ -90,7 +91,7 @@ function executionTargetFromRow(
 	const capabilityOnly = row.connector_manifest_hash == null &&
 		hashlessManifestArtifactMayBeClaimed(row.connector_key, row.connector_runtime);
 	if (capabilityOnly) deviceReadiness = undefined;
-	const browser = selectedBrowserRequirement(row.browser, row.auth_schema, row.auth_profile_kind, !!row.device_worker_id);
+	const browser = selectedBrowserRequirement(row.browser, row.auth_schema, row.auth_profile_kind, !!row.device_worker_id, row.config);
 	const browserBound = !!browser && !!row.device_worker_id && row.device_platform === "chrome-extension" &&
 		(!browser.accountProbe || (row.auth_data?.mode === "live" && row.profile_device_id === row.device_worker_id && row.profile_status !== "revoked"));
 	const browserVersionReady = browserExtensionSupportsOrigins(row.device_app_version);

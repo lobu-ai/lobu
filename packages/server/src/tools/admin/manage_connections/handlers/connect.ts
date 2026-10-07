@@ -476,6 +476,7 @@ async function handleConnectImpl(
   }
 
   const browserSetup = await checkBrowserConnectionSetup({ action: 'connect', connector,
+    config: args.config,
     pendingLiveBrowser: Boolean(authSelection.pendingLiveBrowser),
     profile: authSelection.authProfile, deviceWorkerId: deviceBinding.deviceWorkerId, ctx, setupUrl });
   if (browserSetup) return browserSetup;
@@ -821,7 +822,7 @@ async function handleConnectImpl(
 	}
 
   if (selectedBrowserRequirement(connector.browser, connector.auth_schema,
-    authSelection.pendingLiveBrowser ? 'browser_session' : authSelection.authProfile?.profile_kind)) {
+    authSelection.pendingLiveBrowser ? 'browser_session' : authSelection.authProfile?.profile_kind, false, args.config)) {
     const pending = await completeBrowserConnectionSetup({ action: 'connect', connectionId: Number(connection.id),
       connectorKey: args.connector_key, slug: connection.slug, ctx, setupUrl });
     if (pending) return pending;

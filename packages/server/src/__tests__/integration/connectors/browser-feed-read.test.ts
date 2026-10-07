@@ -13,6 +13,7 @@ import * as notifications from '../../../notifications/triggers';
 import { createConnectorOperationRun } from '../../../runs/queue-service';
 import { dispatchChromeActionToExtension } from '../../../worker-api/dispatch-chrome-action';
 import { upsertConnectorDefinitionRecords } from '../../../utils/connector-definition-install';
+import { connectionBrowserResource } from '../../../connectors/browser-resource';
 import { handleListAvailable } from '../../../tools/admin/manage_operations/handlers/list-available';
 import { qualifiedOperationKey } from '../../../tools/admin/manage_operations/handlers/shared';
 import { manageFeeds } from '../../../tools/admin/manage_feeds';
@@ -27,6 +28,7 @@ import { addUserToOrganization, createTestAgent, createTestOrganization, createT
 import { post } from '../../setup/test-helpers';
 import * as sourceListeners from '../../../runs/source-feed-listener';
 import * as sourceNotifications from '../../../runs/feed-notifications';
+import * as cloudCredentials from '../../../connect/cloud-credential';
 import { sourceFeedScopeKey } from '../../../runs/source-feed-subscriptions';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 
@@ -40,6 +42,7 @@ const SOURCE = `
     authSchema: { methods: [{ type: 'none' }] },
     automationEvents: [{ key: 'message.created', label: 'New message', resourceType: 'message' }],
     browser: { origins: ['https://source.example'] },
+    actions: { inspect: { name: 'Inspect', kind: 'read', execute: async () => ({ success: true, output: {} }) } },
     feeds: { items: {
       key: 'items', name: 'Items',
       webhook: { mode: 'trigger', events: ['message.created'] },
@@ -539,6 +542,78 @@ describe('compiled browser source reads', () => {
     expect((await sql`SELECT status FROM connections WHERE id = ${connectionId}`)[0].status).toBe('pending_auth');
     expect((await sql`SELECT status FROM feeds WHERE id = ${feedId}`)[0].status).toBe('paused');
     expect(await sql`SELECT id FROM auth_profiles WHERE organization_id = ${orgId}`).toHaveLength(0);
+  });
+
+  it.each([
+    { name: 'managed OAuth without a browser', managedBy: { org: 'synthetic-cloud' }, pinned: false, oauth: true, allModes: false, status: 'active' },
+    { name: 'managed OAuth with scrape affinity', managedBy: { org: 'synthetic-cloud' }, pinned: true, oauth: true, allModes: false, status: 'active' },
+    { name: 'empty managed organization', managedBy: { org: '   ' }, pinned: false, oauth: true, allModes: false, status: 'pending_auth' },
+    { name: 'invalid managed organization', managedBy: { org: 123 }, pinned: false, oauth: true, allModes: false, status: 'pending_auth' },
+    { name: 'unbound legacy connection', managedBy: null, pinned: false, oauth: true, allModes: false, status: 'pending_auth' },
+    { name: 'browser-only connector with managed config', managedBy: { org: 'synthetic-cloud' }, pinned: false, oauth: false, allModes: false, status: 'pending_auth' },
+    { name: 'managed OAuth missing an unconditional browser', managedBy: { org: 'synthetic-cloud' }, pinned: false, oauth: true, allModes: true, status: 'pending_auth' },
+    { name: 'managed OAuth with an unconditional browser', managedBy: { org: 'synthetic-cloud' }, pinned: true, oauth: true, allModes: true, status: 'active' },
+  ])('definition refresh preserves the selected auth mode: $name', async ({ managedBy, pinned, oauth, allModes, status }) => {
+    const sql = getTestDb();
+    await sql`UPDATE connections SET config = ${sql.json({ managedBy })}, device_worker_id = ${pinned ? deviceId : null}::uuid
+      WHERE id = ${connectionId}`;
+    const metadata = await extractConnectorMetadata(compiled.compiledCode);
+    await upsertConnectorDefinitionRecords({ sql, organizationId: orgId,
+      metadata: { ...metadata, authSchema: { methods: [
+        ...(oauth ? [{ type: 'oauth', provider: 'synthetic' }] : []), { type: 'browser', mode: 'live' },
+      ] }, browser: allModes ? { origins: ['https://source.example'] } : {
+        origins: ['https://source.example'], authMethods: ['browser'],
+        accountProbe: { url: 'https://source.example/account', expression: 'self_probe' },
+      } },
+      versionScope: 'organization', versionRecord: { compiledCode: compiled.compiledCode, compiledCodeHash: compiled.compiledCodeHash,
+        compileConfigHash: COMPILE_CONFIG_HASH, sourceCode: SOURCE, sourcePath: null } });
+    expect((await sql`SELECT status, auth_profile_id FROM connections WHERE id = ${connectionId}`)[0]).toMatchObject({ status, auth_profile_id: null });
+    expect((await sql`SELECT status FROM feeds WHERE id = ${feedId}`)[0].status).toBe('active');
+    if (status === 'active' && !allModes) {
+      expect(await connectionBrowserResource(orgId, connectionId)).toBeNull();
+      expect(await handleListAvailable({ action: 'list_available', connection_id: connectionId }, context())).toMatchObject({
+        operations: expect.arrayContaining([expect.objectContaining({ operation_key: 'inspect', executable: true })]),
+      });
+    }
+  });
+
+  it.each([
+    { config: { managedBy: null }, replace_config: false },
+    { config: { managedBy: { org: '   ' } }, replace_config: false },
+    { config: {}, replace_config: true },
+  ])('requires a live account when an update removes managed OAuth: %j', async (update) => {
+    const sql = getTestDb();
+    const config = { managedBy: { org: 'synthetic-cloud' } };
+    await sql`UPDATE connections SET config = ${sql.json(config)} WHERE id = ${connectionId}`;
+    await sql`UPDATE connector_definitions SET auth_schema = ${sql.json({ methods: [
+      { type: 'oauth', provider: 'synthetic' }, { type: 'browser', mode: 'live' },
+    ] })}, browser = ${sql.json({ origins: ['https://source.example'], authMethods: ['browser'],
+      accountProbe: { url: 'https://source.example/account', expression: 'self_probe' } })}
+      WHERE organization_id = ${orgId} AND key = ${SOURCE_KEY}`;
+    expect(await manageConnections({ action: 'update', connection_id: connectionId, ...update }, {} as Env, context()))
+      .toMatchObject({ error: 'Choose a live browser account bound to this Chrome profile.' });
+    expect((await sql`SELECT config, status, auth_profile_id FROM connections WHERE id = ${connectionId}`)[0])
+      .toMatchObject({ config, status: 'active', auth_profile_id: null });
+  });
+
+  it('managed OAuth admission and updates enforce an OAuth-scoped browser requirement', async () => {
+    vi.spyOn(cloudCredentials, 'resolveCloudCredential').mockResolvedValue(null);
+    const sql = getTestDb();
+    await sql`UPDATE connector_definitions SET auth_schema = ${sql.json({ methods: [
+      { type: 'oauth', provider: 'synthetic' }, { type: 'browser', mode: 'live' },
+    ] })}, browser = ${sql.json({ origins: ['https://source.example'], authMethods: ['oauth'] })}
+      WHERE organization_id = ${orgId} AND key = ${SOURCE_KEY}`;
+    await sql`DELETE FROM feeds WHERE id = ${feedId}`;
+    await sql`DELETE FROM connections WHERE id = ${connectionId}`;
+    const config = { managedBy: { org: 'synthetic-cloud' } };
+    expect(await manageConnections({ action: 'create', connector_key: SOURCE_KEY, config }, {} as Env, context()))
+      .toMatchObject({ status: 'setup_required', setup_family: 'browser', next_action: 'pair_browser' });
+    expect(await sql`SELECT id FROM connections WHERE organization_id = ${orgId} AND connector_key = ${SOURCE_KEY}`).toHaveLength(0);
+    const created = await manageConnections({ action: 'create', connector_key: SOURCE_KEY, config, device_worker_id: deviceId }, {} as Env, context()) as Record<string, any>;
+    expect(created).toMatchObject({ connection: { status: 'active', auth_profile_id: null, device_worker_id: deviceId } });
+    expect(await manageConnections({ action: 'update', connection_id: Number(created.connection.id), device_worker_id: null }, {} as Env, context()))
+      .toMatchObject({ error: expect.stringContaining('browser binding cannot be removed') });
+    expect((await sql`SELECT device_worker_id FROM connections WHERE id = ${created.connection.id}`)[0].device_worker_id).toBe(deviceId);
   });
 
   it.each([

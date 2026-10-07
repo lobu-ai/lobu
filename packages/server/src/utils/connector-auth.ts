@@ -24,6 +24,14 @@ const DEFAULT_AUTH_SCHEMA: ConnectorAuthSchema = {
   methods: [{ type: 'none' }],
 };
 
+/** Managed OAuth keeps the account grant in the named cloud organization. */
+export function getManagedByOrg(config: Record<string, unknown> | null | undefined): string | null {
+  const managedBy = config?.managedBy;
+  if (!managedBy || typeof managedBy !== 'object' || Array.isArray(managedBy)) return null;
+  const org = (managedBy as Record<string, unknown>).org;
+  return typeof org === 'string' && org.trim() ? org.trim() : null;
+}
+
 function isLikelySecretKey(key: string): boolean {
   return /(secret|token|password|api_key|apikey|private_key|client_secret)/i.test(key);
 }
