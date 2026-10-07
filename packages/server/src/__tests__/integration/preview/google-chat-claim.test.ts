@@ -56,6 +56,15 @@ async function fixture() {
 }
 
 describe("Google Chat shared claim flow", () => {
+  it("records the verified claimant as the new connection creator", async () => {
+    const f = await fixture();
+    const result = await claimPendingConnection(f.provider, f.engine, f.input);
+    if (result.status !== "ok") throw new Error(JSON.stringify(result));
+    const [row] = await f.sql`SELECT created_by FROM connections
+      WHERE organization_id = ${f.target.id} AND slug = ${runtimeConnectionIdToSlug(result.bindingId)}`;
+    expect(row.created_by).toBe(f.user.id);
+  });
+
   it.each(["active", "error"])("the real manager accepts verified setup after %s startup and durable updates", async (status) => {
     const f = await fixture();
     await orgContext.run({ organizationId: f.owner.id }, () => f.connections.saveConnection({

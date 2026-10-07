@@ -1634,7 +1634,7 @@ function buildSlackClaimProvider(): ClaimProvider {
 		resolveClaimerSlackIdentities: resolveClaimingUserSlackIdentities,
 		stampSlackIdentityForUser,
 		usersInfo: (botToken, uid) => createSlackWebApi().usersInfo(botToken, uid),
-		claim: async (pending, organizationId, confirmMove) => {
+		claim: async (pending, organizationId, confirmMove, userId) => {
 			const core = getLobuCoreServices();
 			if (!core) throw new Error("Lobu core services unavailable");
 			const result = await claimSlackPendingInstall(
@@ -1643,6 +1643,7 @@ function buildSlackClaimProvider(): ClaimProvider {
 				pending,
 				organizationId,
 				confirmMove,
+				userId,
 			);
 			return result;
 		},

@@ -228,6 +228,8 @@ export async function insertChatConnectionRow(opts: {
   settings?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   credentialMode?: 'byo' | 'managed';
+  /** Recorded owner (insert only); ungraphed chat channels are readable only by this user. */
+  createdBy?: string;
 }): Promise<void> {
   const sql = getTestDb();
   const slug = opts.id.startsWith('slackinst-')
@@ -261,11 +263,11 @@ export async function insertChatConnectionRow(opts: {
   await sql`
     INSERT INTO connections (
       organization_id, connector_key, external_tenant_id, agent_id, display_name,
-      status, config, credential_mode, slug, visibility, created_at, updated_at
+      status, config, credential_mode, slug, visibility, created_by, created_at, updated_at
     ) VALUES (
       ${opts.organizationId}, ${opts.platform}, ${teamId}, ${opts.agentId ?? null},
       ${teamName ?? opts.platform}, ${status}, ${sql.json(foldedConfig)},
-      ${credentialMode}, ${slug}, 'org', NOW(), NOW()
+      ${credentialMode}, ${slug}, 'org', ${opts.createdBy ?? null}, NOW(), NOW()
     )
     ON CONFLICT (organization_id, slug) WHERE deleted_at IS NULL DO UPDATE SET
       connector_key = EXCLUDED.connector_key,
@@ -1091,4 +1093,3 @@ export async function linkChatIdentityInGraph(opts: {
     DO NOTHING
   `;
 }
-

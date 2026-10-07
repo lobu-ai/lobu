@@ -34,6 +34,7 @@ export interface ChatConnectionRow {
 
 export interface UpsertChatConnectionInput {
 	organizationId: string;
+	createdBy?: string;
 	platform: string;
 	stableId: string;
 	displayName?: string;
@@ -373,6 +374,7 @@ export async function upsertByoChatConnection(
 						...(input.displayName ? { teamName: input.displayName } : {}),
 					},
 					input.stableId,
+					input.createdBy,
 				),
 			);
 			const rows = (await sql`

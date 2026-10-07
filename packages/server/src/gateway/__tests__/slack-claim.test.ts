@@ -488,3 +488,12 @@ describe("slackClaimProvider.bind — identity linking", () => {
     expect(result).toEqual({ bindingId: "slackinst-bound" });
   });
 });
+
+describe("slackClaimProvider creator identity", () => {
+  test("passes the verified Lobu claimant, not the provider installer id, to persistence", async () => {
+    const { deps, claim } = makeDeps();
+    const pending = pendingInstall();
+    await slackClaimProvider(deps).bind(pending, "test-org", "test-lobu-claimant", false);
+    expect(claim).toHaveBeenCalledWith(pending, "test-org", false, "test-lobu-claimant");
+  });
+});

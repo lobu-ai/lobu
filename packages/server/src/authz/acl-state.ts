@@ -43,7 +43,8 @@ export function enforcedConnectionsSelectSql(orgParam: string): string {
  *  - `stale`       — onboarded (a row exists) but not currently enforcing
  *                    (partial/stale/aged-out) → fails closed.
  *  - `not-graphed` — no row at all (a connection ABSENT from
- *                    {@link getConnectionEnforcement}'s map); legacy per-agent fence.
+ *                    {@link getConnectionEnforcement}'s map); channel readers
+ *                    require recorded connection ownership.
  */
 export type EnforcementStatus = "enforced" | "stale" | "not-graphed";
 
@@ -65,7 +66,7 @@ export const NOT_GRAPHED: ChannelEnforcement = {
 /**
  * Resolve each connection's enforcement state. A connection ABSENT from the
  * returned map has no `authz_source_acl_state` row — it was never graphed, so it
- * keeps the legacy per-agent fence ({@link NOT_GRAPHED}). A connection PRESENT is
+ * requires recorded connection ownership for channel reads. A connection PRESENT is
  * either `enforced` (full+fresh+in-window) or `stale` (anything else, which fails
  * closed). This is the ONE place the enforce predicate is evaluated for the
  * parameterized read paths, so the gate and the audience can never disagree.

@@ -136,6 +136,7 @@ describe("listAgentThreads scope=all", () => {
 			agentId: AGENT,
 			platform: "slack",
 			status: "active",
+			createdBy: userId,
 		});
 		await createTestAutomationSubscription({
 			organizationId: org,
@@ -156,6 +157,7 @@ describe("listAgentThreads scope=all", () => {
 			status: "active",
 			credentialMode: "managed",
 			metadata: { teamId: "T1" },
+			createdBy: userId,
 		});
 
 		// A bound Slack conversation (newest) + an UNBOUND one. Both get a
@@ -852,6 +854,7 @@ describe("listAgentThreads scope=all — an explicitly bound DM", () => {
 			agentId: BOUND_DM_AGENT,
 			platform: "slack",
 			status: "active",
+			createdBy: userId,
 		});
 		await createTestAutomationSubscription({
 			organizationId: org,
@@ -874,7 +877,7 @@ describe("listAgentThreads scope=all — an explicitly bound DM", () => {
 		await cleanupTestDatabase();
 	});
 
-	it("stays visible to a plain member via the channel fence, without admin", async () => {
+	it("stays visible to the non-admin connection owner via the channel fence", async () => {
 		const threads = await listAgentThreads({
 			agentId: BOUND_DM_AGENT,
 			organizationId: org,

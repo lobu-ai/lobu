@@ -26,6 +26,7 @@ async function bindChannelWithMessages(opts: {
   connectionId: string;
   channelId: string;
   messages: string[];
+  createdBy: string;
 }): Promise<void> {
   const sql = getTestDb();
   await insertChatConnectionRow({
@@ -34,6 +35,7 @@ async function bindChannelWithMessages(opts: {
 		platform: "slack",
     organizationId: opts.organizationId,
 		status: "active",
+    createdBy: opts.createdBy,
   });
   await createTestAutomationSubscription({
     organizationId: opts.organizationId,
@@ -71,6 +73,7 @@ describe("search_memory channel recall", () => {
 
     await bindChannelWithMessages({
       organizationId: org.id,
+      createdBy: user.id,
       agentId: agent.agentId,
 			connectionId: "conn-recall",
 			channelId: "C-RECALL",
@@ -112,6 +115,7 @@ describe("search_memory channel recall", () => {
 
     await bindChannelWithMessages({
       organizationId: org.id,
+      createdBy: user.id,
       agentId: mine.agentId,
 			connectionId: "conn-mine",
 			channelId: "C-MINE",
@@ -119,6 +123,7 @@ describe("search_memory channel recall", () => {
     });
     await bindChannelWithMessages({
       organizationId: org.id,
+      createdBy: user.id,
       agentId: other.agentId,
 			connectionId: "conn-other",
 			channelId: "C-OTHER",
@@ -150,6 +155,7 @@ describe("search_memory channel recall", () => {
 
     await bindChannelWithMessages({
       organizationId: org.id,
+      createdBy: user.id,
       agentId: agent.agentId,
 			connectionId: "conn-recap",
 			channelId: "C-RECAP",
@@ -185,6 +191,7 @@ describe("search_memory channel recall", () => {
 
     await bindChannelWithMessages({
       organizationId: org.id,
+      createdBy: user.id,
       agentId: agent.agentId,
 			connectionId: "conn-punct",
 			channelId: "C-PUNCT",

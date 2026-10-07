@@ -858,6 +858,7 @@ export async function handleCreate(
 					.slice(0, 6)}`;
 			const created = await upsertByoChatConnection({
 				organizationId,
+				createdBy: effectiveCreatedBy ?? undefined,
 				platform: args.connector_key,
 				stableId,
 				displayName: args.display_name,
@@ -1485,6 +1486,7 @@ export async function handleApplyChatConnection(
 	try {
 		const result = await upsertByoChatConnection({
 			organizationId,
+			createdBy: ctx.userId ?? undefined,
 			platform: args.connector_key,
 			stableId: args.stable_id,
 			displayName: args.display_name,

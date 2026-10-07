@@ -27,6 +27,7 @@ import {
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildAccessGraph } from '../../../authz/access-graph';
 import { pgBigintArray } from '../../../db/client';
+import { slugToRuntimeConnectionId } from '../../../lobu/stores/connections-projection';
 import { getContent } from '../../../tools/get_content';
 import type { ToolContext } from '../../../tools/registry';
 import { saveContent } from '../../../tools/save_content';
@@ -34,6 +35,7 @@ import { search } from '../../../tools/search';
 import { ensureRelationshipType, upsertEdges } from '../../../utils/edge-writes';
 import { getConfiguredEmbeddingModel } from '../../../utils/embeddings';
 import { clearEntityLinkRulesCache } from '../../../utils/entity-link-upsert';
+import { executeDataSources } from '../../../utils/execute-data-sources';
 import { MANUAL_RELATIONSHIP_CLAIM_KEY } from '../../../utils/relationship-claims';
 import { withAclEdgeWrite } from '../../../utils/relationship-validation';
 import { initWorkspaceProvider } from '../../../workspace';
@@ -120,6 +122,71 @@ describe('derived-event permission envelope', () => {
     await cleanupTestDatabase();
     await seedSystemEntityTypes();
     clearEntityLinkRulesCache();
+  });
+
+  it.each(['agentconn-ungraphed-owner', 'slackinst-ungraphed-owner'])(
+    'unstamped chat events require the connection owner across reads (%s)',
+    async (slug) => {
+      const org = await createTestOrganization({ name: 'Unknown chat permissions' });
+      const owner = await createTestUser();
+      const colleague = await createTestUser();
+      await addUserToOrganization(owner.id, org.id, 'member');
+      await addUserToOrganization(colleague.id, org.id, 'admin');
+      const conn = await createTestConnection({
+        organization_id: org.id,
+        connector_key: 'slack',
+        visibility: 'org',
+        created_by: owner.id,
+        createDefaultFeed: false,
+      });
+      const sql = getTestDb();
+      await sql`UPDATE connections SET credential_mode = 'managed', slug = ${slug} WHERE id = ${conn.id}`;
+      const event = await createTestEvent({
+        organization_id: org.id,
+        connection_id: conn.id,
+        content: 'Owner-only channel message',
+        embedding: axisVec(0),
+      });
+      const readSql = async (userId: string | null) => executeDataSources(
+        [{ name: 'messages', query: `SELECT id FROM events WHERE id = ${event.id}` }],
+        { organizationId: org.id, userId },
+        sql,
+      );
+      for (const [userId, visible] of [[owner.id, true], [colleague.id, false], [null, false]] as const) {
+        const ctx = ctxFor(org.id, userId);
+        expect((await recallContentIds(ctx)).has(event.id)).toBe(visible);
+        expect((await exactContentIds(ctx, [event.id])).has(event.id)).toBe(visible);
+        expect((await readSql(userId)).messages).toHaveLength(visible ? 1 : 0);
+      }
+      const runtimeId = slugToRuntimeConnectionId(slug);
+      await sql`INSERT INTO authz_source_acl_state (organization_id, connection_id, acl_support, freshness_state)
+        VALUES (${org.id}, ${runtimeId}, 'none', 'failed')`;
+      expect((await exactContentIds(ctxFor(org.id, owner.id), [event.id])).has(event.id)).toBe(false);
+      expect((await readSql(owner.id)).messages).toHaveLength(0);
+    },
+  );
+
+  it('unstamped webhook deliveries keep connection visibility despite credential_mode', async () => {
+    const org = await createTestOrganization({ name: 'Webhook deliveries' });
+    const owner = await createTestUser();
+    const colleague = await createTestUser();
+    await addUserToOrganization(owner.id, org.id, 'member');
+    await addUserToOrganization(colleague.id, org.id, 'member');
+    const conn = await createTestConnection({
+      organization_id: org.id,
+      connector_key: 'webhook',
+      visibility: 'org',
+      created_by: owner.id,
+      createDefaultFeed: false,
+    });
+    await getTestDb()`UPDATE connections SET credential_mode = 'byo' WHERE id = ${conn.id}`;
+    const event = await createTestEvent({
+      organization_id: org.id,
+      connection_id: conn.id,
+      content: 'Webhook delivery',
+      embedding: axisVec(0),
+    });
+    expect((await exactContentIds(ctxFor(org.id, colleague.id), [event.id])).has(event.id)).toBe(true);
   });
 
   async function setupGithubRepos() {

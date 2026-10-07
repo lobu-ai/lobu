@@ -5,8 +5,8 @@
  * A channel @feed compiles to a read over `channel_messages` (not `events`),
  * and that read is gated per-channel by `compileChannelMessagesVisibility`:
  *
- *   1. On a NON-enforced connection, a headless automation run (null principal)
- *      reads the transcript — org-open channels are usable as sources.
+ *   1. Without source permissions, only the recorded connection owner reads;
+ *      headless runs and other workspace members cannot use the transcript.
  *   2. On an ACL-enforced connection, a headless run reads NOTHING — enforced
  *      channel content never reaches the shared recap. THE security property.
  *   3. On an ACL-enforced connection, a member (auth $member with a `member_of`
@@ -87,6 +87,7 @@ describe("channel feed as an automation @feed source", () => {
       organization_id: orgId,
       connector_key: "slack",
       display_name: `Org Slack ${orgId} ${TEAM_ID} ${chatConnectionSeq}`,
+      created_by: workspace.users.owner.id,
       createDefaultFeed: false,
     });
     const sql = getTestDb();
@@ -165,7 +166,7 @@ describe("channel feed as an automation @feed source", () => {
     expect(normalized[0].query).toContain("channel_messages");
   });
 
-  it("a headless automation reads a NON-enforced channel's transcript", async () => {
+  it("a headless automation cannot read a channel with unknown permissions", async () => {
     const conn = await makeChatConnection();
     await ensureChannelFeed({
       connectionId: conn.id,
@@ -174,13 +175,13 @@ describe("channel feed as an automation @feed source", () => {
     });
     await seedTranscript(conn.runtimeId);
 
-    // No ACL graph → connection not enforced → headless (null principal) reads it.
+    // No ACL graph and no principal proves no audience, even for an org connection.
     const rows = (await readAsAutomationSource(null)) as Array<{ text: string }>;
-    expect(rows.length).toBe(2);
-    expect(rows.map((r) => r.text).sort()).toEqual([
-      "channel secret one",
-      "channel secret two",
-    ]);
+    expect(rows).toEqual([]);
+    expect(await readAsAutomationSource(workspace.users.member.id)).toEqual([]);
+    expect(await readAsAutomationSource(workspace.users.owner.id)).toHaveLength(2);
+    await getTestDb()`UPDATE connections SET created_by = NULL WHERE id = ${conn.id}`;
+    expect(await readAsAutomationSource(workspace.users.owner.id)).toEqual([]);
   });
 
   it("a headless automation reads NOTHING from an ACL-enforced channel (no leak)", async () => {
@@ -308,9 +309,8 @@ describe("channel feed as an automation @feed source", () => {
 
   it("does not expose a PRIVATE connection's channel to a headless automation (connection visibility)", async () => {
     // A private chat connection: visible only to its creator, even though its
-    // channel isn't ACL-enforced. The membership gate alone (not-graphed →
-    // passthrough) would leak it to a headless automation; connection visibility
-    // must also apply.
+    // channel isn't ACL-enforced. Both channel and connection visibility must
+    // require the creator instead of treating missing permissions as public.
     chatConnectionSeq += 1;
     const priv = await createTestConnection({
       organization_id: orgId,
@@ -366,7 +366,7 @@ describe("channel feed as an automation @feed source", () => {
     const windowStart = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     const windowEnd = new Date(Date.now() + 60 * 1000).toISOString();
     const rows = (await readAsAutomationSource({
-      userId: null,
+      userId: workspace.users.owner.id,
       windowStart,
       windowEnd,
     })) as Array<{ text: string }>;

@@ -91,7 +91,7 @@ export function googleChatClaimProvider(deps: {
       if (!source) throw new Error("Google Chat source is unavailable");
       let bindingId: string;
       try {
-        bindingId = await activateGoogleChatSpace(deps.store, source, organizationId, pending.external_tenant_id, confirmMove);
+        bindingId = await activateGoogleChatSpace(deps.store, source, organizationId, pending.external_tenant_id, confirmMove, userId);
       } catch (error) {
         if (error instanceof CrossOrgTransferBlockedError) {
           const existing = await elsewhere(pending, organizationId);

@@ -21,6 +21,22 @@
  * seams' two-step flow.
  */
 import type { AuthzScope } from './scope';
+import { aclConnectionIdSql } from './acl-observability';
+
+/**
+ * Recorded ownership for chat connections whose source permissions are unknown.
+ * Agent ownership and workspace roles are not evidence of source access. The
+ * runtime key is derived exactly as ACL sync derives it (including BYO slugs).
+ * Parameters are bound SQL expressions supplied by the visibility compilers.
+ */
+export function ownedChatConnectionsSelectSql(orgParam: string, userParam: string): string {
+  return `SELECT ${aclConnectionIdSql('c')} AS connection_id
+    FROM public.connections c
+    WHERE c.organization_id = ${orgParam}
+      AND c.deleted_at IS NULL
+      AND c.credential_mode IS NOT NULL
+      AND c.created_by = ${userParam}`;
+}
 
 /** Quote a value as a SQL string literal (single-quote doubling). */
 function sqlLiteral(value: string): string {

@@ -37,7 +37,6 @@ import { readAutomationRunThreads } from "../../services/automation-run-thread.j
 import {
 	createOwnershipResolver,
 	resolveSettingsLookupUserId,
-	sessionMatchesMetadataOwner,
 } from "../shared/agent-ownership.js";
 import {
 	authorizeOrgAgentMemberInProvenOrg,
@@ -505,8 +504,8 @@ export function createAgentHistoryRoutes(deps: {
 	 * user who owns the agent. The outer Lobu middleware establishes this
 	 * ambient org only after verifying Better Auth membership (and pins PATs),
 	 * then the route intersects the agent's channel bindings with the source ACL.
-	 * Agent owners retain the legacy bound-channel access semantics; everyone else needs
-	 * a fresh enforced ACL that proves channel membership.
+	 * Unknown channel permissions require ownership of the source connection;
+	 * owning the agent does not prove access to its source channels.
 	 * Keep the owner resolver above for every other history surface.
 	 */
 	async function getAuthorizedPlatformConversationScope(
@@ -515,11 +514,9 @@ export function createAgentHistoryRoutes(deps: {
 		agentId: string;
 		organizationId: string;
 		userId: string;
-		allowNotGraphed: boolean;
 		/**
-		 * Platform admin. Distinct from `allowNotGraphed`, which an agent OWNER
-		 * also gets: owning an agent must not confer read access to every user's
-		 * private conversation with it.
+		 * Platform admin, used for owned conversations and the explicit DM rule.
+		 * Group channels always pass through the source access gate.
 		 */
 		isAdmin: boolean;
 	} | null> {
@@ -530,7 +527,7 @@ export function createAgentHistoryRoutes(deps: {
 		const userId = resolveSettingsLookupUserId(session);
 
 		// A shared agent-id string can resolve to an ownership row in another org.
-		// Keep both the transcript lookup and owner check in the ambient org.
+		// Keep the transcript lookup in the ambient org.
 		const ambientOrgId = resolveOrgId();
 		if (!ambientOrgId) return null;
 
@@ -542,66 +539,15 @@ export function createAgentHistoryRoutes(deps: {
 				agentId,
 				organizationId: ambientOrgId,
 				userId,
-				allowNotGraphed: true,
 				isAdmin: true,
 			};
 		}
 		if (session.agentId && session.agentId !== agentId) return null;
 
-		const ownsHere =
-			(await deps.userAgentsStore?.ownsAgent(
-				session.platform,
-				userId,
-				agentId,
-				ambientOrgId,
-			)) ?? false;
-		if (ownsHere) {
-			return {
-				agentId,
-				organizationId: ambientOrgId,
-				userId,
-				allowNotGraphed: true,
-				isAdmin: false,
-			};
-		}
-
-		// `ownsAgent` reads `agent_users`, but legacy ownership can survive only
-		// in agent metadata (`agents.owner_*`) that was never reconciled into the
-		// mapping. Mirror the ownership resolver's metadata fallback so those
-		// owners keep the legacy bound-channel path. `getMetadata` is ALS-scoped to
-		// the ambient org, so a match proves ambient-org ownership: a shared-agent
-		// id with no per-user owner in this org (owner column is NULL) falls
-		// through to the enforced ACL below, unchanged. Reconcile into
-		// `agent_users` so the next read hits the fast path.
-		const metadata = await deps.agentConfigStore?.getMetadata(agentId);
-		if (
-			metadata?.owner &&
-			metadata.organizationId === ambientOrgId &&
-			sessionMatchesMetadataOwner(
-				session,
-				metadata.owner.platform,
-				metadata.owner.userId,
-			)
-		) {
-			deps.userAgentsStore
-				?.addAgent(session.platform, userId, agentId, ambientOrgId)
-				.catch(() => {
-					/* best-effort reconciliation */
-				});
-			return {
-				agentId,
-				organizationId: ambientOrgId,
-				userId,
-				allowNotGraphed: true,
-				isAdmin: false,
-			};
-		}
-
 		return {
 			agentId,
 			organizationId: ambientOrgId,
 			userId,
-			allowNotGraphed: false,
 			isAdmin: false,
 		};
 	}
@@ -869,7 +815,6 @@ export function createAgentHistoryRoutes(deps: {
 					organizationId: scope.organizationId,
 					agentId: scope.agentId,
 					userId: scope.userId,
-					allowNotGraphed: scope.allowNotGraphed,
 				});
 				if (!isConversationVisible(conversationId, channelVis)) {
 					return errorResponse(c, "Conversation not found", 404);

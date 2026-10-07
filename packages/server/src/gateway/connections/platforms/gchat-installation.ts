@@ -65,6 +65,7 @@ export async function activateGoogleChatSpace(
   organizationId: string,
   spaceName: string,
   confirmMove = false,
+  createdBy?: string,
 ): Promise<string> {
   const project = (source.config as any).googleChatProjectNumber;
   if (source.platform !== PROVIDER || source.status !== "active" || !source.organizationId ||
@@ -79,7 +80,7 @@ export async function activateGoogleChatSpace(
     metadata: { external_id: id, source_connection_id: source.id, source_organization_id: source.organizationId },
   });
   const projection: StoredConnection = {
-    id, organizationId, platform: PROVIDER, status: "active",
+    id, organizationId, createdBy, platform: PROVIDER, status: "active",
     config: { platform: PROVIDER, installation_ref: String(installation.id) }, settings: { allowGroups: true },
     metadata: { teamId: spaceName, teamName: spaceName },
     createdAt: installation.createdAt, updatedAt: installation.updatedAt,

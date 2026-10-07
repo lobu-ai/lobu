@@ -444,6 +444,7 @@ export class ChatInstanceManager {
     settings?: ConnectionSettings,
     metadata: Record<string, any> = {},
 		stableId?: string,
+    createdBy?: string,
   ): Promise<PlatformConnection> {
     const descriptor = getPlatformDescriptor(platform);
     if (!descriptor && !isAdapterlessPlatform(platform)) {
@@ -482,6 +483,7 @@ export class ChatInstanceManager {
     const connection: PlatformConnection = {
       id,
       platform,
+      ...(createdBy ? { createdBy } : {}),
       ...(agentId ? { agentId } : {}),
       ...(organizationId ? { organizationId } : {}),
       config,

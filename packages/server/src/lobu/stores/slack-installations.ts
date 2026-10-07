@@ -124,6 +124,8 @@ export async function upsertSlackInstallByTeam(
   organizationId: string,
   teamId: string,
   data: {
+    /** Verified Lobu claimant, distinct from Slack installerUserId. */
+    createdBy?: string;
     teamName?: string;
     botUserId?: string;
     botToken: string;
@@ -343,6 +345,7 @@ export async function upsertSlackInstallByTeam(
       id: slackRow.id,
       platform: SLACK_PROVIDER,
       organizationId,
+      createdBy: data.createdBy,
       config: slackRow.config,
       settings: { allowGroups: true },
       metadata: {
@@ -904,7 +907,8 @@ export async function claimSlackPendingInstall(
   secretStore: WritableSecretStore,
   pending: SlackPendingInstall,
   organizationId: string,
-  confirmMove = false
+  confirmMove = false,
+  createdBy?: string,
 ): Promise<{ installationId: string }> {
   const sql = getDb();
   const claimed = await sql`
@@ -931,6 +935,7 @@ export async function claimSlackPendingInstall(
       organizationId,
       pending.teamId,
       {
+        createdBy,
         teamName: pending.teamName ?? undefined,
         botUserId: pending.botUserId ?? undefined,
         botToken: pending.botToken,

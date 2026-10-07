@@ -78,6 +78,7 @@ export interface SlackClaimProviderDeps {
     pending: SlackPendingInstall,
     organizationId: string,
     confirmMove: boolean,
+    userId: string,
   ): Promise<{ installationId: string }>;
 }
 
@@ -167,6 +168,7 @@ export function slackClaimProvider(
           pending,
           organizationId,
           confirmMove,
+          userId,
         );
         // Link ONLY Slack identities proven to belong to the claimer (OIDC /
         // resolveClaimerSlackIdentities). Never map pending.installerUserId to

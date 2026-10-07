@@ -473,7 +473,7 @@ describe("acl observability", () => {
 			// A connection graphed BEFORE it became consent-only: delete its feeds
 			// and flip the flag and this is the live shape. Its already-synced
 			// events are fenced by this row, and `compileResourceVisibility` treats
-			// a MISSING row as never-graphed passthrough — so dropping it here
+			// a MISSING row as never-graphed (connection visibility) — so dropping it here
 			// would turn fail-closed into readable.
 			await sql`
         INSERT INTO authz_source_acl_state (organization_id, connection_id, acl_support, freshness_state, last_synced_at)
