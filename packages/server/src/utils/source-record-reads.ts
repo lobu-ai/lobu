@@ -10,6 +10,7 @@
  * Nothing is written.
  */
 
+import { createHash } from "node:crypto";
 import type { EventAttributionRule } from "@lobu/connector-sdk";
 import { getErrorMessage } from "@lobu/core";
 import type { GetContentArgs } from "@lobu/core/contracts/tools/read-knowledge";
@@ -346,16 +347,174 @@ interface SourceRecordLink {
   source_url: string | null;
 }
 
+interface LinkRead {
+  feed: SourceFeed;
+  kind: string;
+  path: string;
+  type: string;
+  direction: "outgoing" | "incoming";
+  other: EventAttributionRule;
+}
+
+interface LinkPosition {
+  after: string | null;
+  /** A partially consumed source row may declare several relationships. */
+  event: string | null;
+  skip: number;
+}
+
+function decodeLinkCursor(cursor: string, request: string): Record<string, LinkPosition> {
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+  } catch {}
+  const position = (value: unknown): value is LinkPosition => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const p = value as LinkPosition;
+    return (p.after === null || (typeof p.after === "string" && p.after.length > 0)) &&
+      (p.event === null || (typeof p.event === "string" && p.event.length > 0)) &&
+      Number.isSafeInteger(p.skip) && p.skip >= 0 && (p.skip === 0 || p.event !== null);
+  };
+  if (parsed?.version !== 1 || parsed.request !== request ||
+    !parsed.streams || typeof parsed.streams !== "object" || Array.isArray(parsed.streams) ||
+    Object.keys(parsed.streams).length === 0 || !Object.values(parsed.streams).every(position)) {
+    throw new ToolUserError("Invalid relationship cursor, or its caller, record, filters or sources changed. Restart from the first page.", 400);
+  }
+  return parsed.streams;
+}
+
+/** Bounded reads with source-owned checkpoints; never retain history in a cursor.
+ * Links are unique within a page. The same pair can have evidence on later pages,
+ * so consumers merge pages by (relationship_type, direction, entity_type, key),
+ * keeping the newest occurred_at. This also handles a recovering source safely. */
+async function readLinkPage(
+  scope: AuthzScope,
+  record: SourceRecordRef,
+  reads: LinkRead[],
+  request: string,
+  options: { limit: number; cursor: string | null; signal?: AbortSignal; automationId?: number | null }
+) {
+  const resume = options.cursor === null ? null : decodeLinkCursor(options.cursor, request);
+  const grouped = new Map<string, LinkRead[]>();
+  for (const read of reads) {
+    const key = `${read.feed.feedId}:${read.path}`;
+    const group = grouped.get(key) ?? [];
+    group.push(read);
+    grouped.set(key, group);
+  }
+  // The binding hash is not a signature. Validate the client-supplied stream
+  // keys too, so a malformed cursor cannot silently look like exhaustion.
+  if (resume && Object.keys(resume).some(key => !grouped.has(key))) {
+    throw new ToolUserError("Invalid relationship cursor streams. Restart from the first page.", 400);
+  }
+  const failures: SourceReadFailure[] = [];
+  const next: Record<string, LinkPosition> = {};
+  const pages = (await Promise.all([...grouped].map(async ([key, group]) => {
+    const position = resume ? resume[key] : { after: null, event: null, skip: 0 };
+    if (!position) return [];
+    const { feed, path } = group[0];
+    try {
+      if (position.skip > group.length) throw new Error("Invalid relationship cursor row position");
+      const page = await readSourceFeedPage({
+        feed_id: feed.feedId, match: { path, values: [record.key] },
+        limit: options.limit, cursor: position.after ?? undefined,
+      }, READ_TIMEOUT_MS, scope, options.signal, options.automationId);
+      if (page.rows.some(row => typeof row.origin_id !== "string" || !row.origin_id)) {
+        throw new Error("Relationship pagination requires stable source row identities.");
+      }
+      if (page.rows.length && (!page.row_cursors || page.row_cursors.length !== page.rows.length ||
+        page.row_cursors.some(cursor => typeof cursor !== "string" || !cursor || cursor === position.after))) {
+        throw new Error("Relationship pagination requires advancing per-row source cursors.");
+      }
+      if (page.next_cursor && page.next_cursor === position.after) throw new Error("The source cursor did not advance.");
+      // If the partially consumed row was deleted, its successor starts at zero.
+      const skip = String(page.rows[0]?.origin_id ?? "") === position.event ? position.skip : 0;
+      return [{ key, group, position, page, taken: 0, skip }];
+    } catch (error) {
+      failures.push({ feed_id: feed.feedId, error: getErrorMessage(error) });
+      next[key] = position;
+      return [];
+    }
+  }))).flat();
+  const rowLinks = (stream: (typeof pages)[number]): SourceRecordLink[] => {
+    const row = stream.page.rows[stream.taken];
+    if (!row) return [];
+    const links = new Map<string, SourceRecordLink>();
+    for (const read of stream.group) {
+      if (row.origin_type !== read.kind || String(getValueAtPath(row, read.path) ?? "").trim() !== record.key) continue;
+      const otherKey = (read.other.target.identities ?? []).map(identity => getValueAtPath(row, identity.eventPath))
+        .find(value => value != null && String(value).trim() !== "");
+      if (otherKey == null || !read.other.target.entityType) continue;
+      const name = read.other.target.titlePath ? getValueAtPath(row, read.other.target.titlePath) : null;
+      const link: SourceRecordLink = {
+        relationship_type: read.type, direction: read.direction,
+        entity_type: read.other.target.entityType, key: String(otherKey).trim(),
+        name: name == null || !String(name).trim() ? String(otherKey).trim() : String(name),
+        occurred_at: occurredAt(row), source_url: row.source_url == null ? null : String(row.source_url),
+      };
+      links.set(JSON.stringify([link.relationship_type, link.direction, link.entity_type, link.key]), link);
+    }
+    return [...links.values()];
+  };
+  const links = new Map<string, SourceRecordLink>();
+  while (links.size < options.limit) {
+    let best: (typeof pages)[number] | undefined;
+    let candidate: SourceRecordLink | undefined;
+    let blocked = false;
+    for (const stream of pages) {
+      let available = rowLinks(stream);
+      while (stream.taken < stream.page.rows.length && stream.skip >= available.length) {
+        stream.taken += 1;
+        stream.skip = 0;
+        available = rowLinks(stream);
+      }
+      if (stream.taken >= stream.page.rows.length) {
+        if (stream.page.next_cursor) blocked = true;
+        continue;
+      }
+      if (!candidate || available[stream.skip].occurred_at > candidate.occurred_at) {
+        best = stream;
+        candidate = available[stream.skip];
+      }
+    }
+    if (!best || !candidate || blocked) break;
+    const key = JSON.stringify([candidate.relationship_type, candidate.direction, candidate.entity_type, candidate.key]);
+    if (!links.has(key)) links.set(key, candidate);
+    best.skip += 1;
+  }
+  for (const stream of pages) {
+    // Complete a fully consumed row even if it filled the page exactly.
+    if (stream.taken < stream.page.rows.length && stream.skip >= rowLinks(stream).length) {
+      stream.taken += 1;
+      stream.skip = 0;
+    }
+    const { key, position, page, taken, skip } = stream;
+    const after = taken > 0 ? page.row_cursors![taken - 1] : position.after;
+    if (taken < page.rows.length) {
+      next[key] = { after, event: skip ? String(page.rows[taken].origin_id) : null, skip };
+    } else if (page.next_cursor) {
+      next[key] = { after: taken ? after : page.next_cursor, event: null, skip: 0 };
+    }
+  }
+  return {
+    links: [...links.values()], failures,
+    next_cursor: Object.keys(next).length
+      ? Buffer.from(JSON.stringify({ version: 1, request, streams: next }), "utf8").toString("base64url")
+      : null,
+  };
+}
+
 /**
  * A record's relationships, read live from events whose kinds declare
- * `relationships` over attributions to this type. Each pair is reported once,
- * from its newest event.
+ * `relationships` over attributions to this type. Without a cursor each pair
+ * is reported once, from its newest event; with one, see readLinkPage.
  */
 export async function readSourceRecordLinks(
   scope: AuthzScope,
   record: SourceRecordRef,
   options: {
     limit: number;
+    cursor?: string | null;
     relationshipType?: string;
     direction?: "outgoing" | "incoming";
     signal?: AbortSignal;
@@ -363,14 +522,7 @@ export async function readSourceRecordLinks(
   }
 ) {
   const feeds = await loadSourceFeeds(scope, record.type);
-  const reads: Array<{
-    feed: SourceFeed;
-    kind: string;
-    path: string;
-    type: string;
-    direction: "outgoing" | "incoming";
-    other: EventAttributionRule;
-  }> = [];
+  const reads: LinkRead[] = [];
   for (const feed of feeds) {
     for (const [kind, spec] of Object.entries(feed.eventKinds)) {
       const byName = new Map(
@@ -407,6 +559,15 @@ export async function readSourceRecordLinks(
         }
       }
     }
+  }
+
+  if (options.cursor !== undefined) {
+    const request = createHash("sha256").update(JSON.stringify([
+      scope.organizationId, scope.principal, scope.agentId ?? null,
+      record.type, record.key, options.relationshipType ?? null, options.direction ?? null,
+      feeds.map(feed => [feed.feedId, feed.connectionId, feed.matchPaths, feed.eventKinds]),
+    ])).digest("hex");
+    return readLinkPage(scope, record, reads, request, { ...options, cursor: options.cursor });
   }
 
   const failures: SourceReadFailure[] = [];

@@ -213,10 +213,10 @@ export default async (_ctx, client) => {
 		access: "write",
 	},
 	"entities.listLinks": {
-		summary: "List relationships for an entity.",
+		summary: "List relationships for a stored entity or source-backed record. For source pagination pass cursor: null first, then next_cursor; merge repeated links by relationship type, direction, entity type and key, keeping the newest occurred_at. Stop automatic pagination on record_failures and retry explicitly. Omit cursor for the legacy list. Stored entities retain limit/offset pagination.",
 		access: "read",
 		signature:
-			"entities.listLinks(input: { entity_id: number; direction?: 'outbound' | 'inbound' | 'both'; relationship_type_slug?: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence_min?: number; include_deleted?: boolean; limit?: number; offset?: number }): Promise<unknown>",
+			"entities.listLinks(input: { entity_id?: number; record?: { type: string; key: string }; cursor?: string | null; direction?: 'outbound' | 'inbound' | 'both'; relationship_type_slug?: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence_min?: number; include_deleted?: boolean; limit?: number; offset?: number }): Promise<unknown>",
 	},
 	"entities.search": {
 		summary:

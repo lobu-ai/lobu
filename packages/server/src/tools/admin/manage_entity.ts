@@ -2371,6 +2371,7 @@ async function handleListLinks(
 			args.record,
 			{
 				limit: Math.min(Math.max(args.limit ?? 100, 1), 500),
+				cursor: args.cursor,
 				relationshipType: args.relationship_type_slug,
 				direction:
 					args.direction === "outbound"
@@ -2386,7 +2387,14 @@ async function handleListLinks(
 			action: "list_links",
 			record_links: result.links,
 			record_failures: result.failures,
+			...("next_cursor" in result ? { next_cursor: result.next_cursor } : {}),
 		};
+	}
+	if (args.cursor !== undefined) {
+		throw new ToolUserError(
+			"cursor requires a source-backed record; entity_id uses limit/offset pagination.",
+			400,
+		);
 	}
 	if (args.entity_id === undefined) {
 		throw new ToolUserError("list_links needs entity_id or record.", 400);

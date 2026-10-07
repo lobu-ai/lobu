@@ -172,6 +172,140 @@ const linked = (origin_id: string, occurred_at: string, contact_id = "c1") => ({
   metadata: { account_id: "a1", contact_id },
 });
 
+it("keeps legacy relationship response semantics when cursor is omitted", async () => {
+  readPage.mockResolvedValue({ rows: [linked("new", "2026-01-02", "c1"), linked("old", "2026-01-01", "c1")] });
+  const result = await reads.readSourceRecordLinks(scope, record, { limit: 10 });
+  expect(Object.keys(result).sort()).toEqual(["failures", "links"]);
+  expect(result.links).toHaveLength(1);
+  expect(result.links[0].occurred_at).toBe("2026-01-02T00:00:00.000Z");
+});
+
+it("pages past the old source scan cap with bounded cursors and no skipped destinations", async () => {
+  const rows = Array.from({ length: 2107 }, (_, n) => linked(`e${String(3000 - n).padStart(4, "0")}`, "2026-01-01", `c${n}`));
+  readPage.mockImplementation(async ({ limit, cursor }) => {
+    const start = cursor ? rows.findIndex(row => row.origin_id === cursor) + 1 : 0;
+    const page = rows.slice(start, start + limit);
+    return { rows: page, row_cursors: page.map(row => row.origin_id), ...(start + page.length < rows.length ? { next_cursor: page.at(-1)!.origin_id } : {}) };
+  });
+  let cursor: string | null = null;
+  const seen: string[] = [];
+  do {
+    const page = await reads.readSourceRecordLinks(scope, record, { limit: 100, cursor });
+    expect(page.failures).toEqual([]);
+    expect(page.links.length).toBeLessThanOrEqual(100);
+    seen.push(...page.links.map(link => link.key));
+    cursor = page.next_cursor ?? null;
+    if (cursor) expect(cursor.length).toBeLessThan(2000);
+  } while (cursor);
+  expect(seen).toEqual(rows.map(row => row.metadata.contact_id));
+  expect(readPage).toHaveBeenCalledTimes(22);
+});
+
+it("resumes all relationships from one event when they cross a page boundary", async () => {
+  feeds = [{ ...feed, feed_schema: { ...feed.feed_schema, eventKinds: { linked: {
+    ...feed.feed_schema.eventKinds.linked,
+    relationships: [{ type: "knows", from: "account", to: "contact" }, { type: "owns", from: "account", to: "contact" }],
+  } } } }];
+  readPage.mockResolvedValue({ rows: [linked("e1", "2026-01-01")], row_cursors: ["e1"] });
+  const first = await reads.readSourceRecordLinks(scope, record, { limit: 1, cursor: null });
+  expect(first.links.map(link => link.relationship_type)).toEqual(["knows"]);
+  expect(first.next_cursor).toEqual(expect.any(String));
+  const second = await reads.readSourceRecordLinks(scope, record, { limit: 1, cursor: first.next_cursor });
+  expect(second.links.map(link => link.relationship_type)).toEqual(["owns"]);
+  expect(second.next_cursor).toBeNull();
+});
+
+it("preserves a failed stream for retry while returning authorized partial links", async () => {
+  feeds = [feed, { ...feed, feed_id: 2 }];
+  readPage.mockImplementation(async ({ feed_id }) => {
+    if (feed_id === 2) throw new Error("source unavailable");
+    return { rows: [linked("e1", "2026-01-01")], row_cursors: ["e1"] };
+  });
+  const first = await reads.readSourceRecordLinks(scope, record, { limit: 10, cursor: null });
+  expect(first.links).toHaveLength(1);
+  expect(first.failures).toEqual([{ feed_id: 2, error: "source unavailable" }]);
+  readPage.mockReset().mockResolvedValue({ rows: [linked("e2", "2026-01-02", "c2")], row_cursors: ["e2"] });
+  const second = await reads.readSourceRecordLinks(scope, record, { limit: 10, cursor: first.next_cursor });
+  expect(second.links.map(link => link.key)).toEqual(["c2"]);
+  expect(readPage).toHaveBeenCalledTimes(1);
+  expect(readPage.mock.calls[0][0].feed_id).toBe(2);
+});
+
+it("binds relationship cursors to the caller, record and filters", async () => {
+  readPage.mockResolvedValue({ rows: [linked("e1", "2026-01-01")], row_cursors: ["e1"], next_cursor: "e1" });
+  const first = await reads.readSourceRecordLinks(scope, record, { limit: 1, cursor: null });
+  readPage.mockClear();
+  for (const [auth, ref, filters] of [
+    [{ ...scope, principal: "other" }, record, {}],
+    [scope, { ...record, key: "a2" }, {}],
+    [scope, record, { direction: "incoming" as const }],
+    [scope, record, { relationshipType: "other" }],
+  ] as const) {
+    await expect(reads.readSourceRecordLinks(auth, ref, { limit: 1, cursor: first.next_cursor, ...filters })).rejects.toThrow(/cursor/i);
+  }
+  expect(readPage).not.toHaveBeenCalled();
+});
+
+it("does not claim exhaustion for an empty source page with a continuation", async () => {
+  readPage.mockResolvedValueOnce({ rows: [], next_cursor: "empty-page" });
+  const first = await reads.readSourceRecordLinks(scope, record, { limit: 10, cursor: null });
+  expect(first.links).toEqual([]);
+  expect(first.next_cursor).toEqual(expect.any(String));
+  readPage.mockResolvedValueOnce({ rows: [linked("e1", "2026-01-01")], row_cursors: ["e1"] });
+  const second = await reads.readSourceRecordLinks(scope, record, { limit: 10, cursor: first.next_cursor });
+  expect(second.links).toHaveLength(1);
+  expect(second.next_cursor).toBeNull();
+});
+
+it("merges relationship streams newest first even when one source uses short pages", async () => {
+  feeds = [feed, { ...feed, feed_id: 2 }];
+  pagedSource({
+    1: [linked("e5", "2026-01-05", "c5"), linked("e3", "2026-01-03", "c3"), linked("e1", "2026-01-01", "c1")],
+    2: [linked("e4", "2026-01-04", "c4"), linked("e2", "2026-01-02", "c2")],
+  });
+  const seen: string[] = [];
+  let cursor: string | null = null;
+  for (let i = 0; i < 5; i++) {
+    const page = await reads.readSourceRecordLinks(scope, record, { cursor, limit: 3 });
+    seen.push(...page.links.map(link => link.key));
+    cursor = page.next_cursor ?? null;
+    if (!cursor) break;
+  }
+  expect(cursor).toBeNull();
+  expect(seen).toEqual(["c5", "c4", "c3", "c2", "c1"]);
+});
+
+it("does not apply a deleted row's partial relationship position to its successor", async () => {
+  feeds = [{ ...feed, feed_schema: { ...feed.feed_schema, eventKinds: { linked: {
+    ...feed.feed_schema.eventKinds.linked,
+    relationships: [{ type: "knows", from: "account", to: "contact" }, { type: "owns", from: "account", to: "contact" }],
+  } } } }];
+  readPage.mockResolvedValueOnce({ rows: [linked("new", "2026-01-02")], row_cursors: ["new"], next_cursor: "new" });
+  const first = await reads.readSourceRecordLinks(scope, record, { cursor: null, limit: 1 });
+  readPage.mockResolvedValueOnce({ rows: [linked("old", "2026-01-01", "c2")], row_cursors: ["old"] });
+  const second = await reads.readSourceRecordLinks(scope, record, { cursor: first.next_cursor, limit: 2 });
+  expect(second.links.map(link => [link.relationship_type, link.key])).toEqual([["knows", "c2"], ["owns", "c2"]]);
+  expect(second.next_cursor).toBeNull();
+});
+
+it("fails explicitly when a source cannot supply per-row checkpoints", async () => {
+  readPage.mockResolvedValue({ rows: [linked("e1", "2026-01-01")] });
+  const page = await reads.readSourceRecordLinks(scope, record, { cursor: null, limit: 10 });
+  expect(page.links).toEqual([]);
+  expect(page.failures).toEqual([{ feed_id: 1, error: expect.stringMatching(/per-row/) }]);
+  expect(page.next_cursor).toEqual(expect.any(String));
+});
+
+it("rejects invented stream keys even when a cursor retains its original request binding", async () => {
+  readPage.mockResolvedValue({ rows: [], next_cursor: "more" });
+  const first = await reads.readSourceRecordLinks(scope, record, { cursor: null, limit: 10 });
+  const payload = JSON.parse(Buffer.from(first.next_cursor!, "base64url").toString());
+  payload.streams = { unknown: { after: null, event: null, skip: 0 } };
+  readPage.mockClear();
+  await expect(reads.readSourceRecordLinks(scope, record, { limit: 10, cursor: Buffer.from(JSON.stringify(payload)).toString("base64url") })).rejects.toThrow(/cursor streams/);
+  expect(readPage).not.toHaveBeenCalled();
+});
+
 /** A source-native keyset remains valid after its last row is deleted. */
 function sourcePage(rows: Array<Record<string, unknown>>, limit: number, cursor?: string) {
   const key = (row: Record<string, unknown>) => [String(row.occurred_at ?? ""), String(row.origin_id)];
