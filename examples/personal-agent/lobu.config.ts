@@ -803,10 +803,21 @@ const hackerNewsConnection = defineConnection({
   feeds: [{ feed: "front_page", config: {} }],
 });
 
+const spotifyAppAuth = defineAuthProfile({
+  slug: "spotify-app",
+  connector: "spotify",
+  authKind: "oauth_app",
+  name: "Spotify App",
+});
+
 const spotifyConnection = defineConnection({
   slug: "spotify-buremba",
   connector: "spotify",
   name: "Spotify",
+  // App credentials resolve org-first: this profile's auth_data, then host
+  // env (SPOTIFY_CLIENT_ID/SECRET). Fill the profile after apply; OAuth
+  // itself completes in the UI against the hosted callback.
+  appAuthProfile: spotifyAppAuth,
   // OAuth lives in the Spotify app grant (SPOTIFY_CLIENT_ID/SECRET +
   // dashboard redirect URI); nothing device-pinned here. Complete the
   // grant in the UI, then each feed syncs on its own cadence.
@@ -1076,7 +1087,7 @@ export default defineConfig({
     linkedInInterestProfile,
     linkedInFeedFlagger,
   ],
-  authProfiles: [gmailAccountAuth, gmailAppAuth],
+  authProfiles: [gmailAccountAuth, gmailAppAuth, spotifyAppAuth],
   connections: [
     midasConnection,
     marketQuotesConnection,
