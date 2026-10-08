@@ -1,4 +1,5 @@
 import {
+  requireBrowser,
   type ChromeActionDispatcher,
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
@@ -93,30 +94,6 @@ export interface MidasCheckpoint {
    * incomplete in a scrape carry prior identities forward until fully rendered.
    */
   active_holdings?: MidasHoldingIdentity[];
-}
-
-/**
- * Pull the chrome action dispatcher from sessionState.
- *
- * The connector-worker host splices a live
- * `chrome_dispatcher` object onto every sync's sessionState; `dispatch()`
- * rides IPC up to the daemon and out through the gateway chrome-action
- * bridge to a paired Owletto extension. Looking at `ctx.channel` is wrong —
- * that field is the chat/channel facet, not the extension bridge (prod failure:
- * "MidasConnector requires a ChromeActionDispatcher" with Owletto online).
- */
-export function requireExtensionDispatcher(ctx: {
-  sessionState?: Record<string, unknown> | null;
-}): ChromeActionDispatcher {
-  const handle = (
-    ctx.sessionState as Record<string, unknown> | null | undefined
-  )?.chrome_dispatcher as ChromeActionDispatcher | undefined;
-  if (!handle || typeof handle.dispatch !== "function") {
-    throw new Error(
-      "Midas connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState — re-run on a connector-worker that has the dispatcher bridge."
-    );
-  }
-  return handle;
 }
 
 /**
@@ -503,18 +480,14 @@ export function safeDiagnosticUrl(url: string | null | undefined): string {
 }
 
 async function notifyMidasAuthWall(
-  dispatcher: ChromeActionDispatcher,
-  landedUrl: string
+  dispatcher: ChromeActionDispatcher
 ): Promise<void> {
-  // Never forward raw query params (may contain OAuth code/state/tokens).
-  const safeLanded = safeDiagnosticUrl(landedUrl);
   try {
     await dispatcher.dispatch("show_notification", {
       notification_id: "midas-auth-wall",
       title: "Midas needs sign-in",
       message:
         "Sign in to Midas in the focused Chrome window, then re-run the sync.",
-      landed_url: safeLanded,
       // Fixed, safe destination — never a callback URL with sensitive params.
       click_url: MIDAS_DASHBOARD_URL,
     });
@@ -529,8 +502,9 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
     name: "Midas",
     description:
       "Syncs Midas portfolio holdings via the Owletto Chrome extension.",
-    version: "1.1.0",
+    version: "1.1.1",
     faviconDomain: "atlas.getmidas.com",
+    browser: { origins: ["https://atlas.getmidas.com"] },
     authSchema: {
       methods: [{ type: "none" }],
     },
@@ -583,7 +557,7 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
       throw new Error(`Unknown feed: ${ctx.feedKey}`);
     }
 
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
 
     const nav = await dispatcher.dispatch<{
       tab_id: number;
@@ -599,7 +573,7 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
 
     const landedUrl = nav.current_url ?? MIDAS_DASHBOARD_URL;
     if (isMidasAuthWall(landedUrl)) {
-      await notifyMidasAuthWall(dispatcher, landedUrl);
+      await notifyMidasAuthWall(dispatcher);
       // Redact query/fragment: an auth-wall URL may carry code/state/tokens.
       throw new Error(
         `Midas session needs sign-in (landed on ${safeDiagnosticUrl(
@@ -633,7 +607,7 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
       // Empty portfolio is rare; more often the UI language/layout changed or
       // the session is soft-logged-out without a hard redirect.
       if (/giriş yap|sign in|log in|login/i.test(bodyText)) {
-        await notifyMidasAuthWall(dispatcher, landedUrl);
+        await notifyMidasAuthWall(dispatcher);
         throw new Error(
           "Failed to parse Midas dashboard — page looks unauthenticated. Sign in at atlas.getmidas.com and re-run."
         );

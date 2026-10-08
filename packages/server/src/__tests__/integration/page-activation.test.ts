@@ -39,7 +39,7 @@ async function seed() {
 	});
 	await sql`
 		UPDATE connector_definitions
-		SET actions_schema = ${sql.json({
+		SET browser = ${sql.json({ origins: ["https://x.com"] })}, actions_schema = ${sql.json({
 			prepare_reply: { name: "Prepare reply", kind: "write" },
 		})}
 		WHERE organization_id = ${org.id}
@@ -169,6 +169,15 @@ describe("page-activated operation runs", () => {
 		expect(await response.json()).not.toEqual({ status: "activated" });
 		const [row] = await sql`SELECT activated_at FROM runs WHERE id = ${seeded.run.id}`;
 		expect(row.activated_at).toBeNull();
+	});
+
+	it("only activates a queued operation in its selected browser", async () => {
+		const seeded = await seed();
+		const mini = seeded.workers.find(worker => worker.worker_id === "chrome-mini")!;
+		await sql`UPDATE runs SET target_device_worker_id = ${mini.id}::uuid WHERE id = ${seeded.run.id}`;
+		const app = appFor(seeded.user.id, seeded.org.id);
+		expect(await (await request(app, "chrome-book", seeded.run.id, "https://x.com/ada/status/123")).json()).toEqual({ status: "unavailable" });
+		expect(await (await request(app, "chrome-mini", seeded.run.id, "https://x.com/ada/status/123")).json()).toMatchObject({ status: "activated" });
 	});
 
 	it("retires lossy pending state repeat-safely and refuses recreation from its stripped target", async () => {
@@ -397,6 +406,7 @@ describe("page-activated operation runs", () => {
 
 	it("requires live Chrome verification and refuses navigation to a different target", async () => {
 		const seeded = await seed();
+		await sql`UPDATE device_workers SET app_version = '9.9.0' WHERE organization_id = ${seeded.org.id}`;
 		const mini = seeded.workers.find(
 			(worker) => worker.worker_id === "chrome-mini",
 		);

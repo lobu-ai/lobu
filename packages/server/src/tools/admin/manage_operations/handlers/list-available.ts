@@ -1,3 +1,5 @@
+import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
+import { BROWSER_EXTENSION_UPDATE_REQUIRED, browserExtensionSupportsOrigins, selectedBrowserRequirement } from '../../../../connectors/browser-resource';
 import {
 	ListAvailableAction,
 	type ManageOperationsResult,
@@ -51,12 +53,20 @@ type ExecutionTarget = {
 
 type InternalExecutionTarget = ExecutionTarget & {
 	auth_profile_kind: string | null;
+	browserVerificationReady: boolean;
 	granted_scopes: string[];
 	granted_scopes_known: boolean;
 	requested_scopes: string[];
 };
 
 type OperationTargetRow = {
+  config: Record<string, unknown> | null;
+	browser: unknown;
+	auth_schema: unknown;
+	device_platform: string | null;
+	device_app_version: string | null;
+	profile_device_id: string | null;
+	profile_status: string | null;
 	id: number;
 	connector_key: string;
 	slug: string;
@@ -81,7 +91,12 @@ function executionTargetFromRow(
 	const capabilityOnly = row.connector_manifest_hash == null &&
 		hashlessManifestArtifactMayBeClaimed(row.connector_key, row.connector_runtime);
 	if (capabilityOnly) deviceReadiness = undefined;
+	const browser = selectedBrowserRequirement(row.browser, row.auth_schema, row.auth_profile_kind, !!row.device_worker_id, row.config);
+	const browserBound = !!browser && !!row.device_worker_id && row.device_platform === "chrome-extension" &&
+		(!browser.accountProbe || (row.auth_data?.mode === "live" && row.profile_device_id === row.device_worker_id && row.profile_status !== "revoked"));
+	const browserVersionReady = browserExtensionSupportsOrigins(row.device_app_version);
 	const base = {
+		browserVerificationReady: browserBound && browserVersionReady && row.device_online && ["active", "pending_auth"].includes(row.status),
 		connection_id: Number(row.id),
 		slug: row.slug,
 		display_name: row.display_name ?? row.slug,
@@ -97,6 +112,11 @@ function executionTargetFromRow(
 			executable: false,
 			reason: `Connection status is ${row.status}.`,
 		};
+	}
+	if (browser && !browserBound) return { ...base, status: "setup_required", executable: false, reason: "Select and verify the connection’s paired Chrome browser account." };
+	if (browser && row.device_online && !browserVersionReady) return { ...base, status: "setup_required", executable: false, reason: BROWSER_EXTENSION_UPDATE_REQUIRED };
+	if (browser?.accountProbe && (!row.auth_data?.account_id || !row.auth_data?.verified_at || row.profile_status !== "active")) {
+		return { ...base, status: "pending_auth", executable: false, reason: "Verify the signed-in account in the selected browser." };
 	}
 	const pinError = describeMissingBrowserExecutionPin(row.connector_key, row.device_worker_id);
 	if (pinError) {
@@ -442,11 +462,18 @@ function buildAvailableOperation(args: {
 	const targets = internalTargets.filter((target) => !args.hideBlocked || args.policyFor(operation, target.connection_id).effect !== "deny").map((target): ExecutionTarget => {
 		const {
 			auth_profile_kind: _authProfileKind,
+			browserVerificationReady,
 			granted_scopes,
 			granted_scopes_known,
 			requested_scopes: _requestedScopes,
 			...publicTarget
 		} = target;
+		if (operation.operation_key === BROWSER_VERIFY_OPERATION && !browserVerificationReady && target.status === "ready") {
+			return { ...publicTarget, status: "unsupported", executable: false, reason: "This connection does not use a browser." };
+		}
+		if (operation.operation_key === BROWSER_VERIFY_OPERATION && browserVerificationReady) {
+			publicTarget.status = "ready"; publicTarget.executable = true; publicTarget.reason = "The paired browser can verify this account.";
+		}
 		publicTarget.policy = args.policyFor(operation, target.connection_id);
 		if (publicTarget.policy.effect === "deny") {
 			return { ...publicTarget, status: "blocked", executable: false, reason: "Organization policy blocks this operation." };
@@ -580,6 +607,8 @@ async function loadVisibleOperationTargets(
 		        COALESCE(latest.manifest_backed, false) AS connector_manifest_backed,
 		        latest.artifact_hash AS connector_manifest_hash,
 		        latest.runtime AS connector_runtime,
+		        latest.browser, latest.auth_schema, dw.platform AS device_platform, dw.app_version AS device_app_version,
+		        ap.device_worker_id AS profile_device_id, ap.status AS profile_status,
 		        ap.profile_kind AS auth_profile_kind,
 		        ap.auth_data AS auth_data,
 		        COALESCE(dw.last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS}), false) AS device_online,
@@ -590,7 +619,7 @@ async function loadVisibleOperationTargets(
 		 LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
 		 LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
 		 LEFT JOIN LATERAL (
-		   SELECT cd.version, cd.runtime,
+		   SELECT cd.version, cd.runtime, cd.browser, cd.auth_schema,
 		          artifact.manifest_backed, artifact.artifact_hash
 		   FROM connector_definitions cd
 		   LEFT JOIN LATERAL (

@@ -7,6 +7,7 @@ import { dbEgressConfig } from '../utils/cloud-mode';
 import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
 import { feedBackoff } from '../connectors/feed-backoff';
+import { connectionBrowserGrant } from '../connectors/browser-resource';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
@@ -176,6 +177,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
       compiledCode,
       job: {
         mode: 'observe',
+        browser: await connectionBrowserGrant(task.organizationId, Number(feed.connection_id), feed.pinned_version ?? feed.definition_version),
         feedId: task.feedId,
         feedKey: feed.feed_key,
         checkpoint,

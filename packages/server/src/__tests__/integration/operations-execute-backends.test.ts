@@ -152,7 +152,7 @@ describe("operations.execute backend lifecycle", () => {
 							throw new Error('local\\u0000boom');
 						}
 						if (ctx.actionKey === 'stage_browser') {
-							await ctx.sessionState.chrome_dispatcher.dispatch('navigate', {
+							await ctx.browser.dispatch('navigate', {
 								url: 'https://example.test/',
 								target_browser_connection_id: ctx.input.browser_connection_id,
 							});
@@ -706,6 +706,9 @@ describe("operations.execute backend lifecycle", () => {
 			)
 			RETURNING id
 		`;
+
+		await sql`UPDATE connector_definitions SET browser = ${sql.json({ origins: ["https://example.test"] })} WHERE organization_id = ${orgId} AND key = ${LOCAL}`;
+		await sql`UPDATE connections SET device_worker_id = ${worker.id}::uuid WHERE id = ${localConnectionId}`;
 
 		const result = await manageOperations(
 			{

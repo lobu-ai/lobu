@@ -34,6 +34,7 @@ import { getOrgUrlContext } from '../../view-urls';
 import {
   getAppInstallationAuthMethods,
   getEnvAuthFieldKeys,
+  getManagedByOrg,
   isPrimaryAuthMethodAppInstallation,
   normalizeConnectorAuthSchema,
 } from '../../../utils/connector-auth';
@@ -60,15 +61,6 @@ function hasInstallationRef(config: Record<string, unknown>): boolean {
     (typeof ref === 'number' && Number.isFinite(ref)) ||
     (typeof ref === 'string' && ref.trim().length > 0)
   );
-}
-
-function hasManagedByOrg(config: Record<string, unknown>): boolean {
-  const managedBy = config.managedBy;
-  if (!managedBy || typeof managedBy !== 'object' || Array.isArray(managedBy)) {
-    return false;
-  }
-  const org = (managedBy as Record<string, unknown>).org;
-  return typeof org === 'string' && org.trim().length > 0;
 }
 
 /**
@@ -139,7 +131,7 @@ export async function rejectUnboundAppInstallationCreate(params: {
     });
     if (resolvedApp) return null;
   }
-  if (hasManagedByOrg(config)) return null;
+  if (getManagedByOrg(config)) return null;
   // Env/PAT creds supplied directly in config (e.g. GITHUB_TOKEN) → env auth.
   const envKeys = getEnvAuthFieldKeys(schema);
   if (envKeys.some((key) => config[key] !== undefined && config[key] !== null)) {

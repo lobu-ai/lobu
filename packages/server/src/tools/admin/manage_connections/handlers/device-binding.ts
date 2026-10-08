@@ -72,6 +72,8 @@ export async function resolveDeviceBinding(params: {
   userId: string | null | undefined;
   connector: ScopedConnectorDefinitionRow;
   deviceWorkerId: string | null | undefined;
+  /** Delegated browser requirement, independent of the worker placement declaration. */
+  browser?: boolean;
   /**
    * The connection's CURRENT pin, when re-validating an existing connection
    * (`update`). Re-sending the pin the connection already has is not a
@@ -81,7 +83,7 @@ export async function resolveDeviceBinding(params: {
   currentDeviceWorkerId?: string | null;
 }): Promise<{ error: string } | { deviceWorkerId: string | null }> {
   const sql = getDb();
-  const requiredCapability = params.connector.required_capability ?? null;
+  const requiredCapability = params.browser ? 'browser.debugger' : params.connector.required_capability ?? null;
   const deviceWorkerId = params.deviceWorkerId?.trim() || null;
 
   if (!deviceWorkerId) {
@@ -94,7 +96,7 @@ export async function resolveDeviceBinding(params: {
   }
 
   const rows = (await sql`
-    SELECT dw.id, dw.user_id, dw.capabilities, dw.label, dw.organization_id,
+    SELECT dw.id, dw.user_id, dw.platform, dw.capabilities, dw.label, dw.organization_id,
            dw.last_seen_at, now() AS db_now,
            dw.last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval AS fresh
     FROM device_workers dw
@@ -103,6 +105,7 @@ export async function resolveDeviceBinding(params: {
   `) as unknown as Array<{
     id: string;
     user_id: string;
+    platform: string;
     capabilities: unknown;
     label: string | null;
     organization_id: string | null;
@@ -118,6 +121,9 @@ export async function resolveDeviceBinding(params: {
   }
   if (!params.userId || device.user_id !== params.userId) {
     return { error: `You can only pin a device you own.` };
+  }
+  if (params.browser && device.platform !== 'chrome-extension') {
+    return { error: 'This connection requires a paired Chrome browser.' };
   }
   if (device.organization_id !== params.organizationId) {
     return {

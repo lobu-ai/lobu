@@ -3,7 +3,7 @@ import { runSync } from "./sync-harness";
  * Midas connector — extension dispatcher wiring + dashboard DOM text parsing.
  *
  * Guards:
- *  - prod chrome_dispatcher injection (not ctx.channel)
+ *  - the declared browser resource
  *  - Atlas TR "Pozisyonlar" table layout (live capture fixture)
  *  - European number format for both USD and TRY on the TR UI
  */
@@ -11,16 +11,15 @@ import { runSync } from "./sync-harness";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { beforeAll, describe, expect, mock, test } from "bun:test";
-import type { ChromeActionDispatcher } from "@lobu/connector-sdk";
 import type { MidasCheckpoint } from "../midas.connector";
 import { connectorSdkMock } from "./connector-sdk.mock";
+import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 
 // Stub @lobu/connector-sdk (it pulls in playwright) so the connector imports
 // without the browser stack. Shared superset — see connector-sdk.mock.ts.
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 
 let MidasConnector: typeof import("../midas.connector").default;
-let requireExtensionDispatcher: typeof import("../midas.connector").requireExtensionDispatcher;
 let isMidasAuthWall: typeof import("../midas.connector").isMidasAuthWall;
 let parseAtlasAmount: typeof import("../midas.connector").parseAtlasAmount;
 let parseShares: typeof import("../midas.connector").parseShares;
@@ -34,7 +33,6 @@ let MIDAS_DASHBOARD_TEXT_EXPRESSION: typeof import("../midas.connector").MIDAS_D
 beforeAll(async () => {
   const mod = await import("../midas.connector");
   MidasConnector = mod.default;
-  requireExtensionDispatcher = mod.requireExtensionDispatcher;
   isMidasAuthWall = mod.isMidasAuthWall;
   parseAtlasAmount = mod.parseAtlasAmount;
   parseShares = mod.parseShares;
@@ -60,7 +58,7 @@ function syncWith(bodyText: string, checkpoint: MidasCheckpoint | null = {}) {
     feedKey: "assets",
     config: {},
     checkpoint,
-    sessionState: { chrome_dispatcher: dispatcherFor(bodyText) },
+    browser: dispatcherFor(bodyText),
   } as never);
 }
 
@@ -186,38 +184,6 @@ describe("Midas dashboard settle", () => {
     // mean ready() never matched the fixture and the 12s deadline bailed us
     // out — which must fail, not pass slowly.
     expect(reads).toBeLessThan(10);
-  });
-});
-
-describe("requireExtensionDispatcher", () => {
-  test("throws when chrome_dispatcher is missing (the prod failure mode)", () => {
-    expect(() => requireExtensionDispatcher({ sessionState: {} })).toThrow(
-      /chrome_dispatcher/
-    );
-    expect(() => requireExtensionDispatcher({ sessionState: null })).toThrow(
-      /chrome_dispatcher/
-    );
-    expect(() => requireExtensionDispatcher({})).toThrow(/chrome_dispatcher/);
-  });
-
-  test("does not accept ctx.channel — only sessionState.chrome_dispatcher", () => {
-    const channelish = { dispatch: async () => ({}) };
-    expect(() =>
-      requireExtensionDispatcher({
-        sessionState: { channel: channelish } as Record<string, unknown>,
-      })
-    ).toThrow(/chrome_dispatcher/);
-  });
-
-  test("returns the injected chrome_dispatcher handle", () => {
-    const handle: ChromeActionDispatcher = {
-      dispatch: async () => ({}) as never,
-    };
-    expect(
-      requireExtensionDispatcher({
-        sessionState: { chrome_dispatcher: handle },
-      })
-    ).toBe(handle);
   });
 });
 
@@ -409,7 +375,7 @@ describe("event mapping", () => {
 });
 
 describe("MidasConnector.sync", () => {
-  test("uses sessionState.chrome_dispatcher and emits holdings + balance", async () => {
+  test("uses ctx.browser and emits holdings + balance", async () => {
     const calls: Array<{ action: string; input: Record<string, unknown> }> = [];
     const dispatcher = {
       dispatch: async (action: string, input: Record<string, unknown>) => {
@@ -432,7 +398,7 @@ describe("MidasConnector.sync", () => {
       feedKey: "assets",
       config: {},
       checkpoint: {},
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
     } as never);
 
     expect(calls[0].action).toBe("navigate");
@@ -554,7 +520,7 @@ describe("MidasConnector.sync", () => {
     );
   });
 
-  test("throws a clear error when chrome_dispatcher is missing", async () => {
+  test("throws a clear error when the browser grant is missing", async () => {
     const connector = new MidasConnector();
     await expect(
       runSync(connector, {
@@ -563,18 +529,23 @@ describe("MidasConnector.sync", () => {
         checkpoint: {},
         sessionState: {},
       } as never)
-    ).rejects.toThrow(/chrome_dispatcher/);
+    ).rejects.toThrow(/Browser setup is required/);
   });
 
   test("throws on auth-wall landing URL and notifies", async () => {
     const calls: string[] = [];
     const dispatcher = {
-      dispatch: async (action: string, _input: Record<string, unknown>) => {
+      dispatch: async (action: string, input: Record<string, unknown>) => {
+        constrainBrowserInput(
+          new MidasConnector().definition.browser!,
+          action,
+          input
+        );
         calls.push(action);
         if (action === "navigate") {
           return {
             tab_id: 1,
-            current_url: "https://atlas.getmidas.com/login",
+            current_url: "https://sso.getmidas.com/oauth?code=synthetic-secret",
           };
         }
         return {};
@@ -586,7 +557,7 @@ describe("MidasConnector.sync", () => {
         feedKey: "assets",
         config: {},
         checkpoint: {},
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       } as never)
     ).rejects.toThrow(/sign-in/i);
     expect(calls).toContain("show_notification");
@@ -600,7 +571,7 @@ describe("MidasConnector.sync", () => {
         feedKey: "nope",
         config: {},
         checkpoint: {},
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       } as never)
     ).rejects.toThrow(/does not support sync/);
   });
@@ -620,7 +591,7 @@ describe("MidasConnector.sync", () => {
         feedKey: "assets",
         config: {},
         checkpoint: {},
-        sessionState: { chrome_dispatcher: dispatcher },
+        browser: dispatcher,
       } as never)
     ).rejects.toThrow(/Failed to parse Midas dashboard/);
   });

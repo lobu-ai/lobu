@@ -167,6 +167,10 @@ async function handleTestAuthProfile(
       authProfile.auth_data,
       authProfile.connector_key
     );
+    if (summary.auth_mode === 'live') {
+      return { action: 'test_auth_profile', status: 'warning', auth_mode: 'live',
+        message: 'Use connections.test to check this live account in its paired browser. Stored verification is not a live login check.' };
+    }
     if (summary.cookie_count === 0) {
       return {
         action: 'test_auth_profile',
@@ -549,6 +553,7 @@ async function handleCreateBrowserSessionProfile(
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
   const authData = (args.auth_data as Record<string, unknown> | undefined) ?? {};
+  if (authData.mode === 'live') return { error: 'Live browser accounts are created and verified through connections.create with a paired browser.' };
   const browserSessionReady = (await getBrowserSessionReadiness(authData)).usable;
   const authProfile = await createAuthProfile({
     organizationId: ctx.organizationId,
@@ -575,16 +580,17 @@ async function handleUpdateAuthProfile(
   args: Static<typeof UpdateAuthProfileAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
-  // Mirror create gating: only oauth_account profiles are member-editable.
-  // env / oauth_app / browser_session are org-shared credentials — admin only.
-  // Personal OAuth grants remain owner-only even for workspace administrators.
+  // OAuth accounts and live browser profiles are owner-editable. Other profile
+  // kinds require an admin, including captured-cookie browser sessions.
+  // Admin access does not override personal OAuth/live-browser ownership.
   const existingForRoleCheck = await getAuthProfileBySlug(
     ctx.organizationId,
     args.auth_profile_slug
   );
   if (existingForRoleCheck) {
     const isAdmin = await callerIsAdmin(getDb(), ctx);
-    if (existingForRoleCheck.profile_kind !== 'oauth_account' && !isAdmin) {
+    const liveBrowser = existingForRoleCheck.profile_kind === 'browser_session' && existingForRoleCheck.auth_data?.mode === 'live';
+    if (existingForRoleCheck.profile_kind !== 'oauth_account' && !liveBrowser && !isAdmin) {
       return {
         error: `Only admins can modify ${existingForRoleCheck.profile_kind} auth profiles.`,
       };
@@ -613,6 +619,11 @@ async function handleUpdateAuthProfile(
       : args.credentials
         ? normalizeAuthValues(args.credentials)
         : undefined;
+
+  if (updateAuthDataPayload?.mode === 'live' || (existingForRoleCheck?.auth_data?.mode === 'live' &&
+    (updateAuthDataPayload !== undefined || (args.status !== undefined && args.status !== 'revoked') || args.reconnect))) {
+    return { error: 'Live browser identity and readiness are gateway-owned. Use connections.test to verify the selected browser account.' };
+  }
 
   // The grant's identity and app binding are callback-owned, including raw profile patches.
   if (updateAuthDataPayload && existingForRoleCheck?.profile_kind === 'oauth_account') {
@@ -710,7 +721,7 @@ async function handleUpdateAuthProfile(
     };
   }
 
-  if (authProfile.profile_kind === 'browser_session') {
+  if (authProfile.profile_kind === 'browser_session' && authProfile.auth_data?.mode !== 'live') {
     const browserSessionReady = await getBrowserSessionReadiness(
       authProfile.auth_data,
       authProfile.connector_key
@@ -729,6 +740,10 @@ async function handleUpdateAuthProfile(
       authProfile.id,
       browserSessionReady.usable
     );
+  }
+
+  if (authProfile.profile_kind === 'browser_session' && authProfile.auth_data?.mode === 'live' && args.status === 'revoked') {
+    await syncConnectionsForBrowserAuthProfile(ctx.organizationId, authProfile.id, false);
   }
 
   // Cascade for oauth_app: admins flipping an app profile to revoked/error
@@ -803,6 +818,14 @@ async function handleDeleteAuthProfile(
     `;
     if (lockRows.length === 0) return null;
 
+    // A live profile is the durable source identity. Detaching it would allow
+    // a new login to populate an existing connection's history under that id.
+    if (existing.profile_kind === 'browser_session' && existing.auth_data?.mode === 'live') {
+      const retained = await tx`SELECT id FROM connections WHERE organization_id = ${ctx.organizationId}
+        AND auth_profile_id = ${existing.id} AND deleted_at IS NULL LIMIT 1`;
+      if (retained.length) return { error: 'Delete the connections using this live browser account before deleting its identity. You can revoke the account to stop access without losing its binding.' };
+    }
+
     await tx`
       UPDATE connect_tokens
       SET auth_profile_id = NULL
@@ -869,6 +892,7 @@ async function handleDeleteAuthProfile(
   if (!deleted) {
     return { error: `Failed to delete auth profile '${args.auth_profile_slug}'` };
   }
+  if ('error' in deleted) return { error: String(deleted.error) };
 
   recordAuthProfileConfigChange(ctx, {
     resourceId: args.auth_profile_slug,

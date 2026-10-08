@@ -150,6 +150,7 @@ export async function listOrgInstalled(
 					mcp_config: publicMcpConfig(row.mcp_config),
 					favicon_domain: row.favicon_domain,
 					required_capability: row.required_capability,
+					browser: row.browser,
 					runtime: row.runtime,
 					default_connection_config: row.default_connection_config,
 					source_uri: connectorSourcePathToUri(row.source_path),

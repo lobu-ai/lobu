@@ -4,8 +4,8 @@
  *
  * A connection reads through ONE org-level credential (its auth profile's token),
  * so an `org`-visible connection lets every org member read live through the
- * owner's token. For a personal login (`profile_kind='oauth_account'` — a user's
- * own Gmail etc.) that means org-visible = the owner's private inbox exposed to
+ * owner's account. For a personal login (`oauth_account` or `browser_session`)
+ * that means org-visible = the owner's private account exposed to
  * the whole org. So a personal-credential connection must default to `private`
  * EVEN when an admin/owner creates it — the credential being personal outranks
  * the role. Every other credential kind (env/oauth_app/service account) backs a
@@ -157,6 +157,56 @@ describe('connection visibility default depends on credential kind', () => {
     `) as Array<{ visibility: string }>;
     // No personal credential → role default preserved (owner → org).
     expect(row.visibility).toBe('org');
+  });
+
+  it.each(['create', 'update'] as const)('%s keeps a captured-cookie browser account private', async (action) => {
+    const org = await createTestOrganization({ name: 'Browser Privacy Fixture' });
+    const user = await createTestUser({ name: 'Browser Owner Fixture' });
+    await addUserToOrganization(user.id, org.id, 'owner');
+    const ctx = ownerCtx(org.id, user.id);
+    const sql = getTestDb();
+    await createTestConnectorDefinition({
+      key: 'vis.browser',
+      name: 'Vis Browser',
+      organization_id: org.id,
+      auth_schema: { methods: [{ type: 'browser', cookieDomain: 'example.test' }] },
+    });
+    const profile = await manageAuthProfiles({
+      action: 'create_auth_profile',
+      profile_kind: 'browser_session',
+      display_name: 'Browser Privacy Fixture',
+      slug: 'browser-account',
+      auth_data: { mode: 'cookies' },
+    }, TEST_ENV, ctx);
+    expect(profile).not.toHaveProperty('error');
+
+    let connectionId: number;
+    if (action === 'create') {
+      const created = await manageConnections({
+        action, connector_key: 'vis.browser', auth_profile_slug: 'browser-account',
+      }, TEST_ENV, ctx);
+      expect(created).not.toHaveProperty('error');
+      connectionId = 'connection' in created ? (created.connection as { id: number }).id : 0;
+    } else {
+      // Start with a legacy shared connection to prove that re-pointing it
+      // onto personal browser credentials also downgrades visibility.
+      const [seed] = await sql`
+        INSERT INTO connections (organization_id, connector_key, slug, status, visibility, created_by)
+        VALUES (${org.id}, 'vis.browser', 'browser-rebind', 'active', 'org', ${user.id})
+        RETURNING id
+      `;
+      connectionId = seed.id;
+      const updated = await manageConnections({
+        action, connection_id: connectionId, auth_profile_slug: 'browser-account',
+      }, TEST_ENV, ctx);
+      expect(updated).not.toHaveProperty('error');
+    }
+    expect(connectionId).toBeGreaterThan(0);
+    const [saved] = await sql`
+      SELECT c.visibility, ap.profile_kind FROM connections c
+      JOIN auth_profiles ap ON ap.id = c.auth_profile_id WHERE c.id = ${connectionId}
+    `;
+    expect(saved).toEqual({ visibility: 'private', profile_kind: 'browser_session' });
   });
 
   it('re-pointing an ORG connection onto an oauth_account profile DOWNGRADES it to private', async () => {

@@ -12,8 +12,8 @@
 
 import { createHash } from "node:crypto";
 import {
+  requireBrowser,
   type RuntimeConnectorDefinition,
-  type ChromeActionDispatcher,
   ConnectorRuntime,
   calculateEngagementScore,
   type EventEnvelope,
@@ -121,8 +121,11 @@ export default class GlassdoorConnector extends ConnectorRuntime {
     name: "Glassdoor",
     description:
       "Reads employee reviews from Glassdoor through the paired Chrome extension.",
-    version: "2.1.0",
+    version: "2.1.1",
     faviconDomain: "glassdoor.com",
+    browser: {
+      origins: ["https://www.glassdoor.com", "https://www.glassdoor.co.uk"],
+    },
     authSchema: {
       methods: [{ type: "none" }],
     },
@@ -188,7 +191,7 @@ export default class GlassdoorConnector extends ConnectorRuntime {
       ? `https://www.glassdoor.com/Reviews/company-reviews-${company_id}.htm`
       : `https://www.glassdoor.com/Reviews/${company_name}-reviews-SRCH_KE0.htm`;
 
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
     const { items: rows, loggedIn } = await extensionDomScrape<GlassdoorRow>({
       dispatcher,
       url: baseUrl,
@@ -265,23 +268,4 @@ function normalizeReview(row: GlassdoorRow): GlassdoorReview {
     date: (row.date || row.dateText || "").trim(),
     author: row.author?.trim() ?? "",
   };
-}
-
-/**
- * Pull the chrome action dispatcher off the sync context. The connector-worker
- * splices a live `chrome_dispatcher` onto `sessionState`; with no online paired
- * Owletto extension in the connection's org there is nothing to splice.
- */
-function requireExtensionDispatcher(ctx: {
-  sessionState?: Record<string, unknown> | null;
-}): ChromeActionDispatcher {
-  const handle = ctx.sessionState?.chrome_dispatcher as
-    | ChromeActionDispatcher
-    | undefined;
-  if (!handle || typeof handle.dispatch !== "function") {
-    throw new Error(
-      "Glassdoor connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState — run on a connector-worker with the dispatcher bridge and an online extension."
-    );
-  }
-  return handle;
 }

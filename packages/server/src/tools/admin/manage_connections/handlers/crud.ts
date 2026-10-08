@@ -2,6 +2,11 @@
  * CRUD action handlers: list, get, create, update, delete.
  */
 
+import { completeBrowserConnectionSetup } from '../../helpers/verify-browser-connection';
+import { selectedBrowserRequirement } from '../../../../connectors/browser-resource';
+import { getManagedByOrg } from '../../../../utils/connector-auth';
+import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-setup';
+import { ensureLiveBrowserProfile } from '../../../../utils/live-browser-profile';
 import { randomUUID } from "node:crypto";
 import { getErrorMessage, parseJsonObject } from "@lobu/core";
 import { getScopedConnectorDefinition } from "../../../../catalog/connector-definitions";
@@ -995,14 +1000,7 @@ export async function handleCreate(
   // so it falls through to the normal auth path rather than being created
   // active+unauthenticated.
   const incomingConfig = parseJsonObject(args.config);
-  const managedByOrg =
-		incomingConfig.managedBy &&
-		typeof incomingConfig.managedBy === "object" &&
-    !Array.isArray(incomingConfig.managedBy)
-      ? (incomingConfig.managedBy as Record<string, unknown>).org
-      : undefined;
-  const managedByRequested =
-		typeof managedByOrg === "string" && managedByOrg.trim().length > 0;
+  const managedByRequested = !!getManagedByOrg(incomingConfig);
   // managedBy delegates to a cloud OAuth grant, so it only applies to OAuth
   // connectors. On a non-OAuth connector (env/browser/none) treating it as
   // managed would bypass a real local auth requirement, so reject it instead of
@@ -1032,12 +1030,19 @@ export async function handleCreate(
           oauthAccountCreatedBy: effectiveCreatedBy,
         });
 
+  const browserSetup = await checkBrowserConnectionSetup({ action: 'create', connector,
+    config: incomingConfig,
+    pendingLiveBrowser: Boolean(authSelection?.pendingLiveBrowser),
+    profile: authSelection?.authProfile, deviceWorkerId: deviceBinding.deviceWorkerId, ctx,
+    setupUrl: await buildViewUrl(ctx, args.connector_key) });
+  if (browserSetup) return browserSetup;
+
   if (authSelection) {
     const requiresAuth =
 			!!authSelection.oauthMethod ||
 			!!authSelection.envMethod ||
 			!!authSelection.browserMethod;
-    if (requiresAuth && !explicitlyNoAuth && !authSelection.authProfile) {
+    if (requiresAuth && !explicitlyNoAuth && !authSelection.authProfile && !authSelection.pendingLiveBrowser) {
 			const setupFamily = authSelection.browserMethod
 				? "browser"
 				: authSelection.envMethod
@@ -1201,7 +1206,7 @@ export async function handleCreate(
   const visibility = await resolveConnectionVisibility(
     organizationId,
     effectiveCreatedBy,
-		authSelection?.authProfile?.profile_kind,
+		authSelection?.authProfile?.profile_kind ?? (authSelection?.pendingLiveBrowser ? 'browser_session' : undefined),
   );
   const connectorFeedsSchema = (connector.feeds_schema ?? null) as Record<
     string,
@@ -1295,6 +1300,7 @@ export async function handleCreate(
     }
   }
   const connectionStatus =
+    authSelection?.pendingLiveBrowser ||
     interactiveMethod ||
 		(authSelection?.authProfile?.profile_kind === "browser_session" &&
       !browserProfileUsable) ||
@@ -1365,6 +1371,7 @@ export async function handleCreate(
 		const bundle = await createConnectionSetupBundle({
 			db: sql,
 			interactive: Boolean(interactiveMethod),
+      pendingLiveBrowser: authSelection?.pendingLiveBrowser,
 			organizationId,
 			connectorKey: args.connector_key,
 			displayName,
@@ -1445,6 +1452,17 @@ export async function handleCreate(
 			completionCheck: activeConnectionPoll(connectionId),
 		});
 	}
+
+  if (selectedBrowserRequirement(connector.browser, connector.auth_schema,
+    authSelection?.pendingLiveBrowser ? 'browser_session' : authSelection?.authProfile?.profile_kind, false, incomingConfig)) {
+    const pending = await completeBrowserConnectionSetup({ action: 'create', connectionId: Number(inserted[0].id),
+      connectorKey: args.connector_key, slug: String(inserted[0].slug), ctx, setupUrl: await buildViewUrl(ctx, args.connector_key) });
+    if (pending) return pending;
+    // Report the stored status: a browser check does not complete another pending method.
+    const [verified] = await sql`SELECT status FROM connections WHERE id = ${inserted[0].id} AND organization_id = ${organizationId}`;
+    inserted[0].status = verified?.status ?? inserted[0].status;
+    if (authSelection?.authProfile) authSelection.authProfile = await getAuthProfileById(organizationId, authSelection.authProfile.id);
+  }
 
   return {
 		action: "create",
@@ -1743,141 +1761,6 @@ export async function handleUpdate(
   if (explicitlyNoAuth && (retainedConfig.managedBy || retainedConfig.installation_ref || retainedConfig.consent_only)) {
     return { error: 'Delegated and app-installation connections cannot switch to no-auth. Create a separate connection.' };
   }
-  const authSelection = await resolveConnectionAuthSelection({
-    organizationId,
-    connectorKey: existing.connector_key,
-    authSchema: existing.auth_schema,
-    autoSelectAuthProfile: hasAuthProfileArg,
-    authProfileSlug: hasAuthProfileArg ? args.auth_profile_slug : currentAuthProfile?.slug,
-    appAuthProfileSlug: hasAppAuthProfileArg ? args.app_auth_profile_slug : currentAppAuthProfile?.slug,
-    deviceWorkerId: nextDeviceWorkerId,
-  });
-
-  if (args.auth_profile_slug === null && !explicitlyNoAuth &&
-    (authSelection.oauthMethod || authSelection.envMethod || authSelection.browserMethod)) {
-    return { error: 'This connector requires an auth profile. Select a replacement profile, or explicitly select a declared no-auth method by clearing both profile fields.' };
-  }
-
-  if (args.auth_profile_slug && !authSelection.authProfile) {
-		return {
-			error: `Auth profile '${args.auth_profile_slug}' not found for this connector`,
-		};
-  }
-  if (args.app_auth_profile_slug && !authSelection.appAuthProfile) {
-    return {
-      error: `App auth profile '${args.app_auth_profile_slug}' not found for this connector`,
-    };
-  }
-  // Unhealthy retained credentials must not block name or policy edits.
-  // Only a new binding needs to satisfy the selection status requirements.
-  if (
-    hasAuthProfileArg &&
-    authSelection.authProfile &&
-    authSelection.authProfile.id !== existing.auth_profile_id &&
-		authSelection.authProfile.profile_kind !== "browser_session" &&
-		authSelection.authProfile.status !== "active" &&
-		authSelection.authProfile.status !== "pending_auth"
-  ) {
-    return {
-      error: `Auth profile '${args.auth_profile_slug}' has status '${authSelection.authProfile.status}' — must be active or pending_auth`,
-    };
-  }
-	if (
-    hasAppAuthProfileArg &&
-		authSelection.appAuthProfile &&
-    authSelection.appAuthProfile.id !== existing.app_auth_profile_id &&
-		authSelection.appAuthProfile.status !== "active"
-	) {
-    return {
-      error: `App auth profile '${args.app_auth_profile_slug}' has status '${authSelection.appAuthProfile.status}' — must be active`,
-    };
-  }
-
-  if (hasAuthProfileArg && authSelection.authProfile) {
-    const ownershipError = oauthAccountOwnershipError(authSelection.authProfile, ctx.userId, existing.created_by);
-    if (ownershipError) return { error: ownershipError };
-  }
-
-  // Non-admins may only bind to a runtime profile they own. Mirrors the
-  // handleCreate target-profile guard so a member who created a connection
-  // can't pivot it onto another member's credentials. `env` profiles are
-  // admin-managed org-shared credentials — same rule as create.
-  if (hasAuthProfileArg && !callerIsAdmin && authSelection.authProfile) {
-    const profile = authSelection.authProfile;
-		if (profile.profile_kind === "env") {
-      return {
-        error:
-					"Only admins can use env-credential auth profiles. Ask an admin to rebind this connection.",
-      };
-    }
-    if (
-			profile.profile_kind === "browser_session" &&
-      profile.created_by !== ctx.userId
-    ) {
-      return {
-        error: `Auth profile '${profile.slug}' belongs to another user. Create your own profile (action: 'create_auth_profile') and use its slug instead.`,
-      };
-    }
-  }
-
-  const nextAuthProfileId = hasAuthProfileArg
-    ? (authSelection.authProfile?.id ?? null)
-    : existing.auth_profile_id;
-  // Re-pointing a connection onto a PERSONAL credential (oauth_account) must
-  // floor its visibility to 'private' — otherwise an existing 'org' connection
-  // rebound onto a user's own Gmail would expose that inbox org-wide through the
-  // owner's token. Downgrade-only: we never widen here (the CASE keeps the
-  // current visibility when the new profile is not personal).
-  const rebindToPersonalCred =
-		hasAuthProfileArg &&
-		isPersonalCredentialKind(authSelection.authProfile?.profile_kind);
-  const nextAppAuthProfileId = hasAppAuthProfileArg
-    ? (authSelection.appAuthProfile?.id ?? null)
-    : existing.app_auth_profile_id;
-  const effectiveSelectedAuthProfile = hasAuthProfileArg
-    ? authSelection.authProfile
-    : currentAuthProfile;
-  const browserAuthBindingChanged =
-    hasAuthProfileArg && nextAuthProfileId !== existing.auth_profile_id;
-
-  // Device-bound browser profile auto-pins the connection's device.
-	const updateProfileDeviceWorkerId =
-		effectiveSelectedAuthProfile?.device_worker_id ?? null;
-  if (updateProfileDeviceWorkerId) {
-    if (!hasDeviceWorkerArg) {
-      // Caller didn't touch device pin — adopt the profile's device.
-      nextDeviceWorkerId = updateProfileDeviceWorkerId;
-		} else if (
-			nextDeviceWorkerId &&
-			nextDeviceWorkerId !== updateProfileDeviceWorkerId
-		) {
-      return {
-        error: `Auth profile '${effectiveSelectedAuthProfile!.slug}' lives on a different device than the one selected; pick that device or a different profile.`,
-      };
-    } else if (!nextDeviceWorkerId) {
-      nextDeviceWorkerId = updateProfileDeviceWorkerId;
-    }
-  }
-  const newlyBoundBrowserProfile =
-    browserAuthBindingChanged &&
-    effectiveSelectedAuthProfile?.profile_kind === "browser_session"
-      ? effectiveSelectedAuthProfile
-      : null;
-  const browserProfileUsable = newlyBoundBrowserProfile
-    ? (
-        await getBrowserSessionReadiness(
-          newlyBoundBrowserProfile.auth_data,
-          existing.connector_key,
-        )
-      ).usable
-    : false;
-  const effectiveStatus =
-    args.status ??
-    (newlyBoundBrowserProfile
-      ? browserProfileUsable
-        ? "active"
-        : "pending_auth"
-      : null);
   // Un-redact BEFORE anything reads the incoming config. Clients round-trip
   // what the (now redacted) read path gave them — the Owletto action-modes
   // editor spreads `connection.config` and PATCHes it straight back — so a
@@ -1926,6 +1809,169 @@ export async function handleUpdate(
     : splitConfig.connectionConfig
       ? { ...existingConfig, ...splitConfig.connectionConfig }
       : existingConfig;
+  // Browser affinity does not change a delegated OAuth grant into browser auth.
+  // Use the resulting config so adding/removing managedBy in this update agrees
+  // with the browser requirement check below.
+  const managedOAuth = !!getManagedByOrg(resultingConfig) &&
+    ((existing.auth_schema as { methods?: Array<{ type: string }> } | null)?.methods ?? [])
+      .some(method => method.type === 'oauth');
+  const authSelection = await resolveConnectionAuthSelection({
+    organizationId,
+    connectorKey: existing.connector_key,
+    authSchema: existing.auth_schema,
+    autoSelectAuthProfile: hasAuthProfileArg,
+    authProfileSlug: hasAuthProfileArg ? args.auth_profile_slug : currentAuthProfile?.slug,
+    appAuthProfileSlug: hasAppAuthProfileArg ? args.app_auth_profile_slug : currentAppAuthProfile?.slug,
+    deviceWorkerId: managedOAuth ? null : nextDeviceWorkerId,
+    oauthAccountCreatedBy: ctx.userId,
+  });
+
+  if (args.auth_profile_slug === null && !explicitlyNoAuth &&
+    (authSelection.oauthMethod || authSelection.envMethod || authSelection.browserMethod)) {
+    return { error: 'This connector requires an auth profile. Select a replacement profile, or explicitly select a declared no-auth method by clearing both profile fields.' };
+  }
+
+  if (args.auth_profile_slug && !authSelection.authProfile) {
+		return {
+			error: `Auth profile '${args.auth_profile_slug}' not found for this connector`,
+		};
+  }
+  if (args.app_auth_profile_slug && !authSelection.appAuthProfile) {
+    return {
+      error: `App auth profile '${args.app_auth_profile_slug}' not found for this connector`,
+    };
+  }
+  // Unhealthy retained credentials must not block name or policy edits.
+  // Only a new binding needs to satisfy the selection status requirements.
+  if (
+    hasAuthProfileArg &&
+    authSelection.authProfile &&
+    authSelection.authProfile.id !== existing.auth_profile_id &&
+		authSelection.authProfile.profile_kind !== "browser_session" &&
+		authSelection.authProfile.status !== "active" &&
+		authSelection.authProfile.status !== "pending_auth"
+  ) {
+    return {
+      error: `Auth profile '${args.auth_profile_slug}' has status '${authSelection.authProfile.status}' — must be active or pending_auth`,
+    };
+  }
+	if (
+    hasAppAuthProfileArg &&
+		authSelection.appAuthProfile &&
+    authSelection.appAuthProfile.id !== existing.app_auth_profile_id &&
+		authSelection.appAuthProfile.status !== "active"
+	) {
+    return {
+      error: `App auth profile '${args.app_auth_profile_slug}' has status '${authSelection.appAuthProfile.status}' — must be active`,
+    };
+  }
+
+  // Non-admins may only bind to a runtime profile they own. Mirrors the
+  // handleCreate target-profile guard so a member who created a connection
+  // can't pivot it onto another member's credentials. `env` profiles are
+  // admin-managed org-shared credentials — same rule as create.
+  if (hasAuthProfileArg && !callerIsAdmin && authSelection.authProfile) {
+    const profile = authSelection.authProfile;
+		if (profile.profile_kind === "env") {
+      return {
+        error:
+					"Only admins can use env-credential auth profiles. Ask an admin to rebind this connection.",
+      };
+    }
+    if (
+			profile.profile_kind === "browser_session" &&
+      profile.created_by !== ctx.userId
+    ) {
+      return {
+        error: `Auth profile '${profile.slug}' belongs to another user. Create your own profile (action: 'create_auth_profile') and use its slug instead.`,
+      };
+    }
+  }
+
+  const provisionedLiveBrowser = !currentAuthProfile && hasDeviceWorkerArg &&
+    (Boolean(authSelection.pendingLiveBrowser) || authSelection.authProfile?.auth_data?.mode === 'live');
+  const selectedProfileOwner = authSelection.authProfile ?? (authSelection.pendingLiveBrowser
+    ? { profile_kind: 'browser_session', auth_data: { mode: 'live' }, created_by: authSelection.pendingLiveBrowser.userId ?? null }
+    : null);
+  if ((hasAuthProfileArg || provisionedLiveBrowser) && selectedProfileOwner) {
+    const ownershipError = oauthAccountOwnershipError(selectedProfileOwner, ctx.userId, existing.created_by);
+    if (ownershipError) return { error: ownershipError };
+  }
+  const nextAuthProfileId = hasAuthProfileArg || provisionedLiveBrowser
+    ? (authSelection.authProfile?.id ?? null)
+    : existing.auth_profile_id;
+  // Re-pointing onto a personal credential (OAuth or browser session) must
+  // floor its visibility to 'private' — otherwise an existing 'org' connection
+  // rebound onto a user's own Gmail would expose that inbox org-wide through the
+  // owner's token. Downgrade-only: we never widen here (the CASE keeps the
+  // current visibility when the new profile is not personal).
+  const rebindToPersonalCred =
+		(hasAuthProfileArg || provisionedLiveBrowser) &&
+		isPersonalCredentialKind(authSelection.pendingLiveBrowser ? 'browser_session' : authSelection.authProfile?.profile_kind);
+  const nextAppAuthProfileId = hasAppAuthProfileArg
+    ? (authSelection.appAuthProfile?.id ?? null)
+    : existing.app_auth_profile_id;
+  const effectiveSelectedAuthProfile = hasAuthProfileArg || provisionedLiveBrowser
+    ? authSelection.authProfile
+    : currentAuthProfile;
+  const browserAuthBindingChanged =
+    (hasAuthProfileArg || provisionedLiveBrowser) && nextAuthProfileId !== existing.auth_profile_id;
+
+  // Device-bound browser profile auto-pins the connection's device.
+	const updateProfileDeviceWorkerId =
+		effectiveSelectedAuthProfile?.device_worker_id ?? authSelection.pendingLiveBrowser?.deviceWorkerId ?? null;
+  if (updateProfileDeviceWorkerId) {
+    if (!hasDeviceWorkerArg) {
+      // Caller didn't touch device pin — adopt the profile's device.
+      nextDeviceWorkerId = updateProfileDeviceWorkerId;
+		} else if (
+			nextDeviceWorkerId &&
+			nextDeviceWorkerId !== updateProfileDeviceWorkerId
+		) {
+      return {
+        error: `Auth profile '${effectiveSelectedAuthProfile!.slug}' lives on a different device than the one selected; pick that device or a different profile.`,
+      };
+    } else if (!nextDeviceWorkerId) {
+      nextDeviceWorkerId = updateProfileDeviceWorkerId;
+    }
+  }
+  const newlyBoundBrowserProfile =
+    browserAuthBindingChanged &&
+    effectiveSelectedAuthProfile?.profile_kind === "browser_session"
+      ? effectiveSelectedAuthProfile
+      : null;
+  const browserProfileUsable = newlyBoundBrowserProfile
+    ? (
+        await getBrowserSessionReadiness(
+          newlyBoundBrowserProfile.auth_data,
+          existing.connector_key,
+        )
+      ).usable
+    : false;
+  const effectiveStatus =
+    args.status ??
+    (authSelection.pendingLiveBrowser ? 'pending_auth' : newlyBoundBrowserProfile
+      ? browserProfileUsable
+        ? "active"
+        : "pending_auth"
+      : null);
+  const browserConnector = await getScopedConnectorDefinition({ organizationId, connectorKey: existing.connector_key });
+  const browserDeviceId = hasDeviceWorkerArg ? nextDeviceWorkerId : (nextDeviceWorkerId ?? existing.device_worker_id);
+  const browserRequirement = selectedBrowserRequirement(browserConnector?.browser, existing.auth_schema,
+    authSelection.pendingLiveBrowser ? 'browser_session' : effectiveSelectedAuthProfile?.profile_kind, !!browserDeviceId, resultingConfig);
+  if (browserRequirement && (hasDeviceWorkerArg || hasAuthProfileArg || args.config !== undefined || args.status === 'active')) {
+    if (!browserDeviceId) return { error: 'This connector requires a paired Chrome browser. The browser binding cannot be removed.' };
+    const binding = await resolveDeviceBinding({ organizationId, userId: ctx.userId, connector: browserConnector!,
+      deviceWorkerId: browserDeviceId, currentDeviceWorkerId: existing.device_worker_id, browser: true });
+    if ('error' in binding) return binding;
+    if (browserRequirement.accountProbe && !authSelection.pendingLiveBrowser &&
+      (effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' || effectiveSelectedAuthProfile.device_worker_id !== browserDeviceId)) {
+      return { error: 'Choose a live browser account bound to this Chrome profile.' };
+    }
+    if (args.status === 'active' && browserRequirement.accountProbe && (effectiveSelectedAuthProfile?.status !== 'active' || !effectiveSelectedAuthProfile.auth_data?.account_id)) {
+      return { error: 'Verify this browser account with connections.test before activating the connection.' };
+    }
+  }
 	if (
 		!callerIsAdmin &&
 		isAtlassianMcpConfig(existing.mcp_config) &&
@@ -2044,7 +2090,7 @@ export async function handleUpdate(
     // Mirrors the shape manage_feeds already uses for handleUpdateFeed.
     const updateOutcome = await sql.begin(async (tx) => {
       const lockedRows = await tx`
-        SELECT config, app_auth_profile_id, status
+        SELECT config, auth_profile_id, app_auth_profile_id, status
         FROM connections
         WHERE id = ${args.connection_id}
           AND organization_id = ${organizationId}
@@ -2052,6 +2098,14 @@ export async function handleUpdate(
         FOR UPDATE
       `;
       if (lockedRows.length === 0) return { rows: [], previousStatus: null };
+      if (authSelection.pendingLiveBrowser || nextAuthProfileId !== lockedRows[0].auth_profile_id) {
+        const retained = await tx`SELECT id FROM auth_profiles
+          WHERE id = ${lockedRows[0].auth_profile_id} AND organization_id = ${organizationId}
+            AND profile_kind = 'browser_session' AND auth_data->>'mode' = 'live'`;
+        if (retained.length) {
+          return { denial: { error: 'A live browser account cannot be replaced on an existing connection. Create a separate connection to preserve the original source identity.' } };
+        }
+      }
       if (hasAppAuthProfileArg && !callerIsAdmin && args.app_auth_profile_slug === null && lockedRows[0].app_auth_profile_id !== null) {
         return { denial: { error: 'Only admins can clear the OAuth app profile.' } };
       }
@@ -2087,6 +2141,12 @@ export async function handleUpdate(
         return { denial: { error: 'No-auth selection cannot retain delegated or app-installation credentials. Create a separate connection.' } };
       }
 
+      if (!!getManagedByOrg(lockedResultingConfig) !== !!getManagedByOrg(resultingConfig)) {
+        return { denial: { error: 'Connection authentication configuration changed during the update. Refresh and try again.' } };
+      }
+
+      const liveBrowserProfile = authSelection.pendingLiveBrowser
+        ? await ensureLiveBrowserProfile(authSelection.pendingLiveBrowser, tx) : null;
       const rows = await tx`
         UPDATE connections
         SET display_name = COALESCE(${args.display_name ?? null}, display_name),
@@ -2094,7 +2154,7 @@ export async function handleUpdate(
             status = CASE WHEN ${explicitlyNoAuth} AND ${args.status === undefined}
               AND (status = 'pending_auth' OR (status = 'revoked' AND error_message = ${CONNECT_TOKEN_EXPIRED_ERROR}))
               THEN 'active' ELSE COALESCE(${effectiveStatus}, status) END,
-            auth_profile_id = ${nextAuthProfileId},
+            auth_profile_id = ${liveBrowserProfile?.id ?? nextAuthProfileId},
             app_auth_profile_id = ${nextAppAuthProfileId},
             account_id = CASE WHEN ${explicitlyNoAuth} THEN NULL ELSE account_id END,
             error_message = CASE WHEN ${explicitlyNoAuth}
@@ -2231,7 +2291,7 @@ export async function handleUpdate(
   // with no cron stays manual (#2021).
   const shouldCascadeStatus =
     args.status !== undefined ||
-    (!explicitlyNoAuth &&
+    (!authSelection.pendingLiveBrowser && effectiveSelectedAuthProfile?.auth_data?.mode !== 'live' && !explicitlyNoAuth &&
       effectiveStatus !== null &&
       updatedConnection.status !== previousConnectionStatus);
   if (shouldCascadeStatus) {
@@ -2242,7 +2302,7 @@ export async function handleUpdate(
     }
   }
 
-	const effectiveAuth = hasAuthProfileArg
+	const effectiveAuth = hasAuthProfileArg || provisionedLiveBrowser
 		? authSelection.authProfile
 		: currentAuthProfile;
   const effectiveAppAuth = hasAppAuthProfileArg

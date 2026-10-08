@@ -7,6 +7,7 @@
  * - JSON utilities for duplicate detection
  */
 
+import { browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
 import { randomUUID } from 'node:crypto';
 import type { BrowserActionContext } from '../worker-api/browser-action-context';
 
@@ -344,6 +345,11 @@ export async function deviceManifestAdmissionError(
 ): Promise<string | null> {
   const pinError = describeMissingBrowserExecutionPin(connectorKey, deviceWorkerId);
   if (pinError) return pinError;
+  const browser = await connectionBrowserResource(organizationId, connectionId, connectorVersion, sql);
+  if (browser && (!browser.deviceWorkerId || (browser.requirement.accountProbe &&
+    (!browser.live || !browser.authProfileId || browser.profileDeviceId !== browser.deviceWorkerId)))) {
+    return 'Browser setup is required: select a paired Chrome profile and connect its account.';
+  }
   if (!artifact.manifestBacked) return null;
   const [row] = await sql<{
     owner_user_id: string | null;
@@ -574,6 +580,8 @@ async function createSyncRunWithClient(
     connectorVersion, feed.device_worker_id, resolved
   );
   if (admissionError) throw new ToolUserError(admissionError, 409);
+  const browser = await connectionBrowserResource(feed.organization_id, feed.connection_id, connectorVersion, sql);
+  const browserMetadata = browser ? { browser_binding: browserBindingSnapshot(browser) } : {};
 
   // Manual feeds (schedule null) keep next_run_at null after enqueue so they
   // are not re-picked by the due-feed scheduler.
@@ -592,11 +600,11 @@ async function createSyncRunWithClient(
     INSERT INTO runs (
       organization_id, run_type, feed_id, connection_id,
       connector_key, connector_version, connector_artifact_hash, status, approval_status, created_at,
-      dry_run, target_device_worker_id
+      dry_run, target_device_worker_id, run_metadata
     ) VALUES (
       ${feed.organization_id}, 'sync', ${feedId}, ${feed.connection_id},
       ${feed.connector_key}, ${connectorVersion}, ${resolved.manifestHash}, 'pending', 'auto', current_timestamp,
-      true, ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`}
+      true, ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`}, ${sql.json(browserMetadata)}
     )
     RETURNING id
   `
@@ -605,11 +613,11 @@ async function createSyncRunWithClient(
       INSERT INTO runs (
         organization_id, run_type, feed_id, connection_id,
         connector_key, connector_version, connector_artifact_hash, status, approval_status, created_at,
-        target_device_worker_id
+        target_device_worker_id, run_metadata
       ) VALUES (
         ${feed.organization_id}, 'sync', ${feedId}, ${feed.connection_id},
         ${feed.connector_key}, ${connectorVersion}, ${resolved.manifestHash}, 'pending', 'auto', current_timestamp,
-        ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`}
+        ${feed.device_worker_id == null ? null : sql`${feed.device_worker_id}::uuid`}, ${sql.json(browserMetadata)}
       )
       RETURNING id, feed_id
     )
@@ -1396,10 +1404,12 @@ export async function createConnectorOperationRun(params: {
 
   // Freeze the run's execution target BEFORE choosing its artifact: an exact
   // device pin, not the fleet, decides which contract this run is created
-  // against (see resolvePinnedDeviceConnectorVersion).
+  // against (see resolvePinnedDeviceConnectorVersion). A plain inline run
+  // executes on the gateway and has no device target; its browser binding is
+  // carried in run_metadata instead.
   let targetDeviceWorkerId: string | null = null;
   let targetDeviceOwnerUserId: string | null = null;
-  if (params.connectionId && params.approvalMode !== 'inline') {
+  if (params.connectionId && (params.approvalMode !== 'inline' || params.activation)) {
     const connRows = await sql<{
       device_worker_id: string | null;
       device_owner_user_id: string | null;
@@ -1457,9 +1467,11 @@ export async function createConnectorOperationRun(params: {
     : null;
 
   const activationUrls = params.activation ? normalizePageActivationUrls(params.activation.urls) : [];
+  const browser = await connectionBrowserResource(params.organizationId, params.connectionId, connectorVersion, sql);
+  const browserMetadata = browser ? { ...params.runMetadata, browser_binding: browserBindingSnapshot(browser) } : params.runMetadata;
   const runMetadata = params.activation
-    ? { ...params.runMetadata, page_activation_identity: 'exact' }
-    : params.runMetadata;
+    ? { ...browserMetadata, page_activation_identity: 'exact' }
+    : browserMetadata;
   const insertMetadata = params.sdkBrowserContext
     ? {
         ...runMetadata,

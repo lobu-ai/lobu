@@ -7,7 +7,7 @@
 
 import type { RetainedSource } from '@lobu/core/contracts/tools/source-files';
 import { createIsolateConnectorCompiler } from '@lobu/connector-worker/compile';
-import type { ConnectorAgentTooling } from '@lobu/connector-sdk';
+import { BROWSER_VERIFY_OPERATION, BROWSER_VERIFY_ACTION, validateBrowserRequirement, type ConnectorBrowserRequirement, type ConnectorAgentTooling } from '@lobu/connector-sdk';
 import { type CompileResult, computeCodeHash, extractMetadata } from './compiler-core';
 import { isReservedConnectorKey } from './reserved';
 import { validateConnectorRelationshipDeclarations } from './connector-relationship-declarations';
@@ -20,6 +20,7 @@ export interface ConnectorMetadata {
   version: string;
   /** `'data'` (default/absent) vs `'integration'` (pure app/auth, no feeds/sync). */
   kind?: 'data' | 'integration' | null;
+  browser?: ConnectorBrowserRequirement | null;
   authSchema: Record<string, unknown> | null;
   /** Declarative inbound-webhook schema (signing scheme + routing), if any. */
   webhook: Record<string, unknown> | null;
@@ -125,6 +126,7 @@ async function main() {
     // \`typeof prototype.execute === 'function'\` is always true and can't tell an
     // override from the inherited default. An OWN \`execute\` on the class's own
     // prototype means the connector actually implements execution.
+    if (def.browser && def.actions?.[${JSON.stringify(BROWSER_VERIFY_OPERATION)}]) throw new Error('verify_browser is reserved for the declared browser resource');
     const supportsExecute =
       Object.getOwnPropertyNames(RuntimeClass.prototype).includes('execute');
 
@@ -158,9 +160,10 @@ async function main() {
       version: def.version || null,
       kind: def.kind || null,
       authSchema: def.authSchema || null,
+      browser: def.browser || null,
       webhook: def.webhook || null,
       feeds,
-      actions: def.actions || null,
+      actions: def.browser ? { ...(def.actions || {}), [${JSON.stringify(BROWSER_VERIFY_OPERATION)}]: ${JSON.stringify(BROWSER_VERIFY_ACTION)} } : def.actions || null,
       automationEvents: def.automationEvents || null,
       optionsSchema: def.optionsSchema || null,
       faviconDomain: def.faviconDomain || null,
@@ -205,6 +208,15 @@ export async function extractConnectorMetadata(compiledCode: string): Promise<Co
  * fields. Throws with the canonical message used across the install paths.
  */
 export function validateConnectorMetadata(metadata: ConnectorMetadata): void {
+  if (metadata.browser != null) validateBrowserRequirement(metadata.browser);
+  const authMethods = (metadata.authSchema?.methods as Array<{type: string; mode?: string}> | undefined) ?? [];
+  if (metadata.browser?.authMethods?.some(method => !authMethods.some(auth => auth.type === method))) {
+    throw new Error('Browser resource names an authentication method the connector does not declare.');
+  }
+  if (authMethods.some(method => method.type === 'browser' && method.mode === 'live') &&
+    (!metadata.browser?.accountProbe || (metadata.browser.authMethods && !metadata.browser.authMethods.includes('browser')))) {
+    throw new Error('Live browser authentication requires a declared browser resource with an account probe.');
+  }
   if (!metadata.key || !metadata.name || !metadata.version) {
     throw new Error('Connector must have key, name, and version.');
   }

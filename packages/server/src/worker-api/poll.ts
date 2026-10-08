@@ -5,6 +5,7 @@
  * platform binding, capability authorization, and multi-lane run claiming.
  */
 
+import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, connectionBrowserGrant } from '../connectors/browser-resource';
 import {
   authorizeCapabilities,
   entryToMessage,
@@ -815,6 +816,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
               AND status = 'pending'
               AND approval_status IN ('auto', 'approved')
               AND activation_kind = 'page_visit'
+              AND (target_device_worker_id IS NULL OR target_device_worker_id = ${deviceWorkerId}::uuid)
               AND run_metadata->>'page_activation_identity' = 'exact'
               AND activated_at IS NULL
               AND expires_at > current_timestamp
@@ -2112,6 +2114,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const isChromeAction =
     row.run_type === 'action' &&
     (row.connector_key === 'chrome' || row.connector_key?.startsWith('chrome.'));
+  // Identity checks retain their parent's policy and browser binding, but use
+  // scratch tabs. Only dispatch may stamp this metadata, never action_input.
+  const isAccountProbe = row.run_metadata?.[BROWSER_ACCOUNT_PROBE_METADATA_KEY] === true;
   const actionInput = isChromeAction
     ? trustedChromeActionInput(
         selectedActionInput ?? {},
@@ -2125,10 +2130,10 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         // original list can allow several pages; that is not permission to
         // follow a later navigation to another one. The extension re-checks the
         // live URL against them. Set here, never from action_input.
-        row.parent_activation_tab_id == null
+        isAccountProbe || row.parent_activation_tab_id == null
           ? null
           : Number(row.parent_activation_tab_id),
-        row.parent_activation_url ? [row.parent_activation_url] : []
+        !isAccountProbe && row.parent_activation_url ? [row.parent_activation_url] : []
       )
     : selectedActionInput;
 
@@ -2181,6 +2186,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       Object.keys(connectionCredentials).length > 0 ? connectionCredentials : undefined,
     compiled_code: compiledCode,
     session_state: sessionState ?? undefined,
+    browser_grant: await connectionBrowserGrant(row.organization_id, row.connection_id, row.connector_version),
     action_key: row.action_key ?? undefined,
     // Mac/iOS bridge decodes `operation_key`; chrome uses `action_key` directly.
     operation_key: row.action_key ?? undefined,

@@ -45,6 +45,7 @@
  */
 
 import {
+  requireBrowser,
   type ChromeActionDispatcher,
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
@@ -761,27 +762,6 @@ export function transactionToEvent(t: RevolutTransaction): EventEnvelope {
 // Extension dispatch + auth-wall handling
 // ---------------------------------------------------------------------------
 
-/**
- * Pull the chrome action dispatcher from sessionState. The connector-worker
- * host splices a live `chrome_dispatcher` object onto
- * every sync's sessionState; the dispatcher's `dispatch()` rides an IPC channel
- * up to the daemon and out to the gateway's chrome-action bridge and the paired
- * Owletto extension. When no paired Owletto extension is online in the
- * connection's org, the bridge returns the `failed` status and the dispatcher
- * throws — we surface that as the sync failure verbatim.
- */
-function requireExtensionDispatcher(ctx: SyncContext): ChromeActionDispatcher {
-  const handle = (
-    ctx.sessionState as Record<string, unknown> | null | undefined
-  )?.chrome_dispatcher as ChromeActionDispatcher | undefined;
-  if (!handle || typeof handle.dispatch !== "function") {
-    throw new Error(
-      "Revolut connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState — re-run on a connector-worker that has the dispatcher bridge."
-    );
-  }
-  return handle;
-}
-
 /** Raised when the retail API is unauthenticated (passcode / SSO sign-in wall). */
 export class RevolutAuthWallError extends Error {
   constructor(landedUrl: string, dataKind = "transactions") {
@@ -794,7 +774,7 @@ export class RevolutAuthWallError extends Error {
 
 async function notifyRevolutAuthWall(
   dispatcher: ChromeActionDispatcher,
-  landedUrl: string
+  startUrl: string
 ): Promise<void> {
   try {
     await dispatcher.dispatch("show_notification", {
@@ -803,8 +783,8 @@ async function notifyRevolutAuthWall(
       message:
         "Enter your Revolut passcode in the focused Chrome window, then rerun the sync.",
       body: "Enter your Revolut passcode in the focused Chrome window, then rerun the sync.",
-      landed_url: landedUrl,
-      click_url: landedUrl,
+      // Return through the declared app origin, not a redirected SSO callback.
+      click_url: startUrl,
     });
   } catch {
     // Best-effort only: lack of notification permission or an unavailable
@@ -1198,8 +1178,11 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
     name: "Revolut",
     description:
       "Syncs exact Revolut transactions and current Invest balances through your paired Owletto Chrome session, with no separate connector login.",
-    version: "4.8.0",
+    version: "4.8.1",
     faviconDomain: "app.revolut.com",
+    browser: {
+      origins: ["https://app.revolut.com", "https://invest.revolut.com"],
+    },
     authSchema: {
       // Auth is implicit via the paired Owletto extension's signed-in Chrome —
       // no CDP attach from our side beyond the Network domain, no cookie
@@ -1281,7 +1264,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
   };
 
   async syncBalances(ctx: SyncContext): Promise<SyncResult> {
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
 
     const nav = await dispatcher.dispatch<{ tab_id: number }>("navigate", {
       url: REVOLUT_INVEST_URL,
@@ -1307,7 +1290,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
         .dispatch("focus_tab", { tab_id: tabId })
         .catch(() => undefined);
       const landedUrl = initialRoute.value?.href || REVOLUT_INVEST_URL;
-      await notifyRevolutAuthWall(dispatcher, landedUrl);
+      await notifyRevolutAuthWall(dispatcher, REVOLUT_INVEST_URL);
       throw new RevolutAuthWallError(landedUrl, "investment data");
     }
 
@@ -1381,7 +1364,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
         .dispatch("focus_tab", { tab_id: tabId })
         .catch(() => undefined);
       const landedUrl = route.href || REVOLUT_INVEST_URL;
-      await notifyRevolutAuthWall(dispatcher, landedUrl);
+      await notifyRevolutAuthWall(dispatcher, REVOLUT_INVEST_URL);
       throw new RevolutAuthWallError(landedUrl, "investment data");
     }
 
@@ -1438,7 +1421,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
 
     const config = (ctx.config ?? {}) as Record<string, unknown>;
     const checkpoint = (ctx.checkpoint ?? {}) as RevolutCheckpoint;
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
 
     const startUrl =
       typeof config.start_url === "string" && config.start_url.trim()

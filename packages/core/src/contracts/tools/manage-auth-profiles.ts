@@ -202,7 +202,11 @@ export const ManageAuthProfilesResultSchema = Type.Union([
     auth_cookie_name: Type.Optional(Type.Union([Type.String(), Type.Null()])),
     is_expired: Type.Optional(Type.Boolean()),
     auth_mode: Type.Optional(
-      Type.Union([Type.Literal("cookies"), Type.Literal("empty")])
+      Type.Union([
+        Type.Literal("cookies"),
+        Type.Literal("live"),
+        Type.Literal("empty"),
+      ])
     ),
   }),
   Type.Object({

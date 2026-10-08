@@ -8,6 +8,7 @@ import { fetchConnectionHttp } from './http-auth';
 import { resolveAuthCredentials } from './auth-credential-secrets';
 import {
   getAppInstallationAuthMethods,
+  getManagedByOrg,
   getOAuthAuthMethods,
   normalizeConnectorAuthSchema,
 } from './connector-auth';
@@ -257,13 +258,9 @@ async function resolveManagedByForConnection(
   if (rows.length === 0) return null;
 
   const config = parseJsonObject(rows[0].config);
-  const managedByRaw = config.managedBy;
-  if (!managedByRaw || typeof managedByRaw !== 'object' || Array.isArray(managedByRaw)) {
-    return null;
-  }
-  const managedBy = managedByRaw as Record<string, unknown>;
-  const org = typeof managedBy.org === 'string' ? managedBy.org.trim() : '';
+  const org = getManagedByOrg(config);
   if (!org) return null;
+  const managedBy = config.managedBy as Record<string, unknown>;
   const connectionSlug =
     typeof managedBy.connectionSlug === 'string' && managedBy.connectionSlug.trim()
       ? managedBy.connectionSlug.trim()

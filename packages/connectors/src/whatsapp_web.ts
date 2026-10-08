@@ -10,6 +10,7 @@
  */
 
 import {
+  requireBrowser,
   type ActionContext,
   type ActionResult,
   type ChromeActionDispatcher,
@@ -123,26 +124,6 @@ class WhatsAppAdapterError extends Error {
     this.name = "WhatsAppAdapterError";
     this.state = state;
   }
-}
-
-/**
- * Pull the chrome action dispatcher off sessionState. The connector-worker
- * host splices a live `chrome_dispatcher` onto every sync AND action context;
- * its `dispatch()` rides a host capability up to the daemon and out to the
- * gateway's chrome-action bridge.
- */
-function requireExtensionDispatcher(ctx: {
-  sessionState?: Record<string, unknown> | null;
-}): ChromeActionDispatcher {
-  const handle = ctx.sessionState?.chrome_dispatcher as
-    | ChromeActionDispatcher
-    | undefined;
-  if (!handle || typeof handle.dispatch !== "function") {
-    throw new Error(
-      "WhatsApp Web connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState — pin this connection to a chrome-extension device."
-    );
-  }
-  return handle;
 }
 
 /**
@@ -627,14 +608,24 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.6",
+    version: "1.0.7",
     faviconDomain: "whatsapp.com",
-    // Implicit auth: the user is already signed into WhatsApp Web in the
-    // paired Chrome. There is no artifact to relay — the QR is rendered by
-    // web.whatsapp.com itself — and an auth run carries no chrome dispatcher,
-    // so a handshake here could not read the page. A logged-out page fails
-    // the readiness probe with the exact remedy instead.
-    authSchema: { methods: [{ type: "none" }] },
+    authSchema: { methods: [{ type: "browser", mode: "live" }] },
+    browser: {
+      origins: [WHATSAPP_ORIGIN],
+      accountProbe: {
+        url: `${WHATSAPP_ORIGIN}/`,
+        expression: `(async () => {
+          (${whatsAppWebAdapterProgram.toString()})();
+          for (let i = 0; i < 40; i++) {
+            const identity = await globalThis.__owlettoWhatsAppAdapterV1.invoke({ op: "account_identity", adapter_version: ${WHATSAPP_ADAPTER_VERSION} });
+            if (identity?.accountId) return identity;
+            await new Promise(resolve => setTimeout(resolve, 250));
+          }
+          return null;
+        })()`,
+      },
+    },
     automationEvents: [{
       key: "message.created", label: "New message", resourceType: "message",
       description: "A new message reference from WhatsApp Web. The Automation can read its content from the live messages feed.",
@@ -959,7 +950,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
   };
 
   private async observeMessages(ctx: FeedObserveContext<BrowserCheckpoint, WhatsAppWebConfig>): Promise<void> {
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     const chatFilter = ctx.config.chat_filter ?? "all";
     const previous = ctx.checkpoint?.observation?.chat_filter === chatFilter ? ctx.checkpoint.observation : undefined;
@@ -1023,7 +1014,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
   private async syncMessages(
     ctx: SyncContext<BrowserCheckpoint, WhatsAppWebConfig>
   ): Promise<SyncResult> {
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     return await this.collectMessages(ctx, dispatcher, tabId);
   }
@@ -1239,7 +1230,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     // Source message time cannot represent edits, revokes, or delayed arrivals.
     // Keep Automation change consumption on the existing durable event path.
     if (ctx.window) throw new Error("WhatsApp live reads do not support change-time windows; use message events for Automation changes.");
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     const response = await invokeAdapter<{
       results: unknown[];
@@ -1278,7 +1269,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       return { success: false, error: `Unknown action: ${action}` };
     }
     try {
-      const dispatcher = requireExtensionDispatcher(ctx);
+      const dispatcher = requireBrowser(ctx);
       const tabId = await readyWhatsAppTab(dispatcher);
       const response = await invokeAdapter<Record<string, unknown>>(
         dispatcher,

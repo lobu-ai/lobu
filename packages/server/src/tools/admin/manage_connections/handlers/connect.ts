@@ -2,6 +2,9 @@
  * Connect action handler: create connection + OAuth flow in one call.
  */
 
+import { completeBrowserConnectionSetup } from '../../helpers/verify-browser-connection';
+import { selectedBrowserRequirement } from '../../../../connectors/browser-resource';
+import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-setup';
 import { getDb, pgBigintArray, type DbClient } from "../../../../db/client";
 import { normalizeScopeList } from "../../../../auth/oauth/scopes";
 import { oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
@@ -419,7 +422,9 @@ async function handleConnectImpl(
     if (ownershipError) return { error: ownershipError };
   }
 
-  if (!isAdmin) {
+  const isOwnLiveBrowser = (authSelection.pendingLiveBrowser && authSelection.pendingLiveBrowser.userId === userId) ||
+    (authSelection.authProfile?.auth_data?.mode === 'live' && authSelection.authProfile.created_by === userId);
+  if (!isAdmin && !isOwnLiveBrowser) {
     if (!isOAuthConnect || (authSelection.authProfile && authSelection.authProfile.created_by !== userId)) {
       return { error: 'Members can only connect their own OAuth accounts. Ask an administrator to configure shared credentials.' };
     }
@@ -469,6 +474,12 @@ async function handleConnectImpl(
       };
     }
   }
+
+  const browserSetup = await checkBrowserConnectionSetup({ action: 'connect', connector,
+    config: args.config,
+    pendingLiveBrowser: Boolean(authSelection.pendingLiveBrowser),
+    profile: authSelection.authProfile, deviceWorkerId: deviceBinding.deviceWorkerId, ctx, setupUrl });
+  if (browserSetup) return browserSetup;
 
   const hasNoAuth =
 		!authSelection.oauthMethod &&
@@ -530,11 +541,12 @@ async function handleConnectImpl(
 				!!authSelection.appAuthProfile));
 
   const needsConnectFlow =
-		authSelection.preferredMethodType === "oauth" &&
+		isOAuthConnect &&
     !!authSelection.oauthMethod &&
     !hasReadySelection &&
     !args.auth_profile_slug;
   const needsBrowserAuth =
+    !!authSelection.pendingLiveBrowser ||
     !!authSelection.browserMethod &&
     !!authSelection.authProfile &&
 		authSelection.authProfile.profile_kind === "browser_session" &&
@@ -614,7 +626,7 @@ async function handleConnectImpl(
   // for the OAuth callback to downgrade it.
   const connectionProfileKind =
     authSelection.authProfile?.profile_kind ??
-    (needsConnectFlow ? "oauth_account" : undefined);
+    (authSelection.pendingLiveBrowser ? 'browser_session' : needsConnectFlow ? "oauth_account" : undefined);
   const connectVisibility = await resolveConnectionVisibility(
     organizationId,
     userId,
@@ -738,6 +750,7 @@ async function handleConnectImpl(
 		const bundle = await createConnectionSetupBundle({
 			db: sql,
 			interactive: isInteractiveConnect,
+      pendingLiveBrowser: authSelection.pendingLiveBrowser,
 			organizationId,
 			connectorKey: args.connector_key,
 			displayName: connectDisplayName,
@@ -807,6 +820,19 @@ async function handleConnectImpl(
 			authRunId: interactiveAuthRunId!,
 		});
 	}
+
+  if (selectedBrowserRequirement(connector.browser, connector.auth_schema,
+    authSelection.pendingLiveBrowser ? 'browser_session' : authSelection.authProfile?.profile_kind, false, args.config)) {
+    const pending = await completeBrowserConnectionSetup({ action: 'connect', connectionId: Number(connection.id),
+      connectorKey: args.connector_key, slug: connection.slug, ctx, setupUrl });
+    if (pending) return pending;
+    // A browser check does not complete another pending method such as OAuth.
+    const [verified] = await sql`SELECT status FROM connections WHERE id = ${connection.id} AND organization_id = ${organizationId}`;
+    if (verified?.status === 'active') {
+      return { action: 'connect', connection_id: connection.id, slug: connection.slug, status: 'active',
+        message: 'Browser connection verified.', view_url: setupUrl };
+    }
+  }
 
   // If active immediately, return simple result
   if (!needsConnectFlow && !needsBrowserAuth) {

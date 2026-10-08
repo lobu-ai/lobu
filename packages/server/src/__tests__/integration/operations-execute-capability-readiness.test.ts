@@ -9,12 +9,14 @@
  * true → "ready".
  */
 
+import { getOperationForConnection, listOperations } from "../../operations/connector-operations";
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../index";
 import {
 	compileConnectorSource,
 	extractConnectorMetadata,
+	validateConnectorMetadata,
 } from "../../utils/connector-compiler";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import type { ToolContext } from "../../tools/registry";
@@ -29,6 +31,15 @@ import {
 
 const WITH_EXECUTE = "demo.cap.with_execute";
 const WITHOUT_EXECUTE = "demo.cap.no_execute";
+const BROWSER_WITHOUT_EXECUTE = "demo.cap.browser_no_execute";
+const browser = {
+	origins: ["https://source.example"],
+	authMethods: ["browser"],
+	accountProbe: { url: "https://source.example/account", expression: "null" },
+};
+const browserAuthSchema = {
+	methods: [{ type: "oauth", provider: "test" }, { type: "browser", mode: "live" }],
+};
 
 // A runtime that OVERRIDES execute().
 const SOURCE_WITH_EXECUTE = `
@@ -51,6 +62,14 @@ export class MyConnector extends Base {
 }
 `;
 
+const SOURCE_BROWSER_WITHOUT_EXECUTE = SOURCE_WITHOUT_EXECUTE.replace(
+	WITHOUT_EXECUTE,
+	BROWSER_WITHOUT_EXECUTE,
+).replace(
+	"name: 'No Execute'",
+	`browser: ${JSON.stringify(browser)}, authSchema: ${JSON.stringify(browserAuthSchema)}, name: 'Browser No Execute'`,
+);
+
 describe("execute capability readiness (item 2)", () => {
 	describe("compile-time capability probe", () => {
 		it("detects an overridden execute() as supportsExecute=true", async () => {
@@ -64,12 +83,20 @@ describe("execute capability readiness (item 2)", () => {
 			const metadata = await extractConnectorMetadata(compiled.compiledCode);
 			expect(metadata.supportsExecute).toBe(false);
 		});
+		it("keeps inherited execute unsupported when only browser verification is gateway-owned", async () => {
+			const compiled = await compileConnectorSource(SOURCE_BROWSER_WITHOUT_EXECUTE);
+			const metadata = await extractConnectorMetadata(compiled.compiledCode);
+			validateConnectorMetadata(metadata);
+			expect(metadata.actions).toHaveProperty("verify_browser");
+			expect(metadata.supportsExecute).toBe(false);
+		});
 	});
 
 	describe("readiness reflects the capability flag", () => {
 		let orgId: string;
 		let userId: string;
 		let ctx: ToolContext;
+		const connectionIds = new Map<string, number>();
 
 		beforeAll(async () => {
 			await cleanupTestDatabase();
@@ -86,17 +113,21 @@ describe("execute capability readiness (item 2)", () => {
 			for (const [key, name, supports] of [
 				[WITH_EXECUTE, "With Execute", true],
 				[WITHOUT_EXECUTE, "No Execute", false],
+				[BROWSER_WITHOUT_EXECUTE, "Browser No Execute", false],
 			] as const) {
 				await createTestConnectorDefinition({
 					key,
 					name,
 					organization_id: orgId,
-					auth_schema: { methods: [{ type: "oauth", provider: "test" }] },
+					auth_schema: key === BROWSER_WITHOUT_EXECUTE
+						? browserAuthSchema
+						: { methods: [{ type: "oauth", provider: "test" }] },
 				});
 				await sql`
 					UPDATE connector_definitions
-					SET actions_schema = ${sql.json({ doit: { name: "Do it", kind: "write" } })},
-					    supports_execute = ${supports}
+					SET actions_schema = ${sql.json({ doit: { name: "Do it", kind: "write" }, verify_browser: { name: "Verify browser", kind: "read" } })},
+					    supports_execute = ${supports},
+					    browser = ${key === BROWSER_WITHOUT_EXECUTE ? sql.json(browser) : null}
 					WHERE organization_id = ${orgId} AND key = ${key}
 				`;
 				await sql`
@@ -113,6 +144,7 @@ describe("execute capability readiness (item 2)", () => {
 					created_by: userId,
 					visibility: "private",
 				});
+				connectionIds.set(key, conn.id);
 				await upsertEntityApprovalPolicy(orgId, {
 					resourceClass: "connector_action",
 					connectionId: conn.id,
@@ -157,6 +189,28 @@ describe("execute capability readiness (item 2)", () => {
 			const r = await readiness(WITH_EXECUTE);
 			expect(r.readiness).toBe("ready");
 			expect(r.executable).toBe(true);
+		});
+
+		it("keeps ordinary browser actions unsupported without an execute override", async () => {
+			expect(await readiness(BROWSER_WITHOUT_EXECUTE)).toEqual({ readiness: "unsupported", executable: false });
+		});
+
+		it("enables only gateway verification for a declared browser connector", async () => {
+			for (const key of [BROWSER_WITHOUT_EXECUTE, WITHOUT_EXECUTE]) {
+				const connectionId = connectionIds.get(key);
+				if (connectionId === undefined) throw new Error(`Missing connection for ${key}`);
+				for (const filter of [{ connectorKey: key }, { connectionId }]) {
+					const { operations } = await listOperations({ organizationId: orgId, ...filter });
+					expect(operations.find(op => op.operation_key === "doit")?.supports_execute).toBe(false);
+					expect(operations.find(op => op.operation_key === "verify_browser")?.supports_execute).toBe(key === BROWSER_WITHOUT_EXECUTE);
+				}
+				for (const operationKey of ["doit", "verify_browser"]) {
+					const resolved = await getOperationForConnection(orgId, connectionId, operationKey);
+					expect(resolved?.operation.supports_execute).toBe(
+						key === BROWSER_WITHOUT_EXECUTE && operationKey === "verify_browser",
+					);
+				}
+			}
 		});
 
 		it("reports 'unsupported' when the runtime lacks execute()", async () => {

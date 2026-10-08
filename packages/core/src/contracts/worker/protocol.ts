@@ -858,6 +858,7 @@ export const PollResponseSchema = Type.Object({
   feed_id: Type.Optional(Type.Integer()),
   compiled_code: Type.Optional(Type.String()),
   session_state: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  browser_grant: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   connector_version: Type.Optional(Type.String()),
   action_key: Type.Optional(Type.String()),
   /** Native device operation key; public connector operations use action_key. */

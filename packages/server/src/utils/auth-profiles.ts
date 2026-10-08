@@ -95,7 +95,7 @@ export interface AuthProfileRow {
 }
 
 interface BrowserSessionSummary {
-  auth_mode: 'cookies' | 'empty';
+  auth_mode: 'cookies' | 'live' | 'empty';
   cookie_count: number;
   captured_at: string | null;
   auth_cookie_name: string | null;
@@ -195,7 +195,7 @@ export function summarizeBrowserSessionAuthData(
       : null;
 
   return {
-    auth_mode: cookies.length > 0 ? 'cookies' : 'empty',
+    auth_mode: authData?.mode === 'live' ? 'live' : cookies.length > 0 ? 'cookies' : 'empty',
     cookie_count: cookies.length,
     captured_at: typeof authData?.captured_at === 'string' ? authData.captured_at : null,
     auth_cookie_name: typeof authCookie?.name === 'string' ? authCookie.name : null,
@@ -211,7 +211,7 @@ export async function getBrowserSessionReadiness(
   const summary = summarizeBrowserSessionAuthData(authData, connectorKey);
   return {
     ...summary,
-    usable: summary.cookie_count > 0 && !!summary.auth_cookie_name && !summary.is_expired,
+    usable: browserSessionIsUsable(authData, connectorKey),
   };
 }
 
@@ -220,7 +220,9 @@ export function browserSessionIsUsable(
   connectorKey?: string | null
 ): boolean {
   const summary = summarizeBrowserSessionAuthData(authData, connectorKey);
-  return summary.cookie_count > 0 && !!summary.auth_cookie_name && !summary.is_expired;
+  return summary.auth_mode === 'live'
+    ? typeof authData?.account_id === 'string' && !!authData.account_id && typeof authData?.verified_at === 'string' && Number.isFinite(Date.parse(authData.verified_at))
+    : summary.cookie_count > 0 && !!summary.auth_cookie_name && !summary.is_expired;
 }
 
 function sanitizeProfileSlug(value: string): string {
@@ -660,6 +662,7 @@ export async function getPrimaryAuthProfileForKind(params: {
       FROM auth_profiles
       WHERE organization_id = ${params.organizationId}
         AND profile_kind = 'browser_session'
+        AND auth_data->>'mode' IS DISTINCT FROM 'live'
         AND status = 'active'
         AND (
           ${deviceWorkerId}::uuid IS NULL
@@ -794,7 +797,7 @@ export async function resolveAuthProfileSlugToId(params: {
   if (
     params.connectorKey &&
     profile.profile_kind !== 'oauth_app' &&
-    profile.profile_kind !== 'browser_session' &&
+    (profile.profile_kind !== 'browser_session' || profile.auth_data?.mode === 'live') &&
     profile.connector_key !== params.connectorKey
   )
     return null;

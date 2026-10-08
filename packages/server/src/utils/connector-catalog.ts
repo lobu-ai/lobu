@@ -11,7 +11,7 @@ import {
 	extractConnectorMetadata,
 	NO_CONNECTOR_RUNTIME_ERROR,
 } from "./connector-compiler";
-import type { ConnectorAgentTooling } from "@lobu/connector-sdk";
+import type { ConnectorBrowserRequirement, ConnectorAgentTooling } from "@lobu/connector-sdk";
 import logger from "./logger";
 
 const DEFAULT_CONNECTOR_DIR_CANDIDATES = [
@@ -42,6 +42,7 @@ type ExtractedConnectorCatalogMetadata = {
 	name: string;
 	description: string | null;
 	version: string;
+	browser?: ConnectorBrowserRequirement | null;
 	auth_schema: Record<string, unknown> | null;
 	webhook: Record<string, unknown> | null;
 	feeds_schema: Record<string, unknown> | null;
@@ -62,6 +63,7 @@ interface CatalogConnectorDefinition {
 	name: string;
 	description: string | null;
 	version: string;
+	browser?: ConnectorBrowserRequirement | null;
 	auth_schema: Record<string, unknown> | null;
 	webhook: Record<string, unknown> | null;
 	feeds_schema: Record<string, unknown> | null;
@@ -276,6 +278,7 @@ async function extractConnectorCatalogMetadata(
 			name: metadata.name,
 			description: metadata.description ?? null,
 			version: metadata.version,
+			browser: metadata.browser ?? null,
 			auth_schema: metadata.authSchema ?? null,
 			webhook: metadata.webhook ?? null,
 			feeds_schema: metadata.feeds ?? null,
@@ -399,6 +402,7 @@ export async function listCatalogConnectorDefinitions(): Promise<
 			name: entry.name,
 			description: entry.description ?? null,
 			version: entry.version ?? "0.0.0",
+			browser: (detail.browser as ConnectorBrowserRequirement | null) ?? null,
 			auth_schema:
 				(detail.auth_schema as Record<string, unknown> | null) ?? null,
 			webhook: (detail.webhook as Record<string, unknown> | null) ?? null,

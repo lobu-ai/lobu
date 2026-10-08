@@ -70,6 +70,7 @@ export async function generateConnectorsManifest(): Promise<CatalogManifest> {
 				// absolute URI here would capture the build machine's checkout.
 				source_path: sourcePath,
 				auth_schema: metadata.auth_schema,
+				browser: metadata.browser,
 				webhook: metadata.webhook,
 				feeds_schema: metadata.feeds_schema,
 				actions_schema: metadata.actions_schema,

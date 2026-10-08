@@ -18,6 +18,7 @@ import {
   setSystemTime,
 } from "bun:test";
 import WhatsAppWebConnector from "../whatsapp_web.js";
+import { constrainBrowserInput } from "../../../connector-sdk/src/browser-requirement.js";
 import { whatsAppWebAdapterProgram } from "../whatsapp-web-adapter.js";
 import {
   buildCollectionPlan,
@@ -73,6 +74,8 @@ function makeDispatcher(
   let installed = adapterInstalled;
   const dispatch = mock(
     async (action: string, input: Record<string, unknown>) => {
+      // Exercise the production host grant before simulating the paired extension.
+      input = constrainBrowserInput(connector.definition.browser, action, input);
       calls.push({ action, input });
       if (action === "navigate") return { tab_id: 42, current_url: input.url };
       if (action === "feed_listen") return typeof responses.feed_listen === "function" ? responses.feed_listen(input) : responses.feed_listen ?? { bridge_id: "synthetic-feed", binding_id: "synthetic-feed", epoch: "synthetic-epoch", token: "synthetic-token", records: [] };
@@ -142,7 +145,7 @@ function syncCtx(
     checkpoint,
     credentials: null,
     entityIds: [],
-    sessionState: { chrome_dispatcher: dispatcher },
+    browser: dispatcher,
   } as never;
 }
 
@@ -173,7 +176,7 @@ describe("WhatsApp live source reads", () => {
     });
     const result = await connector.read({
       feedKey: "live_messages", config: { chat_filter: "individual" }, credentials: null,
-      query: "hello", limit: 10, sessionState: { chrome_dispatcher: page.dispatcher },
+      query: "hello", limit: 10, browser: page.dispatcher,
     });
     expect(result.rows).toMatchObject([{ id: "live-message", text: "hello" }]);
     expect(result.nextCursor).toBe("next-page");
@@ -187,7 +190,7 @@ describe("WhatsApp live source reads", () => {
       read_messages: { ok: true, results: [], nextCursor: "next-page", hasMore: true },
     });
     const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null,
-      cursor: "previous-page", sessionState: { chrome_dispatcher: page.dispatcher },
+      cursor: "previous-page", browser: page.dispatcher,
     });
     expect(result).toMatchObject({ rows: [], nextCursor: "next-page", hasMore: true });
   });
@@ -197,14 +200,14 @@ describe("WhatsApp live source reads", () => {
       read_messages: { ok: false, error: { state: "operation_failed", reason: "Source message could not be loaded" } },
     });
     await expect(connector.read({ feedKey: "live_messages", config: {}, credentials: null,
-      sessionState: { chrome_dispatcher: page.dispatcher },
+      browser: page.dispatcher,
     })).rejects.toThrow("Source message could not be loaded");
   });
 
   it("rejects unsupported sorting and offset pagination before dispatch", async () => {
     const page = makeDispatcher();
     const ctx = { feedKey: "live_messages", config: {}, credentials: null,
-      sessionState: { chrome_dispatcher: page.dispatcher },
+      browser: page.dispatcher,
     };
     await expect(connector.read({ ...ctx, offset: 10 })).rejects.toThrow("cursor");
     await expect(connector.read({ ...ctx, sort: { column: "occurred_at", order: "desc" } })).rejects.toThrow("sorting");
@@ -226,7 +229,7 @@ describe("WhatsApp source listener setup", () => {
     const checkpoint = initializeBrowserCheckpoint(null);
     checkpoint.observation = { after: 100, started_at: 2000, chat_filter: "all" };
     expect(await connector.observe({ feedKey: "live_messages", config: { chat_filter: "all" },
-      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } })).toBeUndefined();
+      checkpoint, credentials: null, browser: page.dispatcher })).toBeUndefined();
     expect(batches).toHaveLength(2);
     expect(batches[0].checkpoint.previous).toEqual(checkpoint);
     expect(batches[1].checkpoint.previous).toEqual(batches[0].checkpoint.next);
@@ -249,7 +252,7 @@ describe("WhatsApp source listener setup", () => {
     const checkpoint = initializeBrowserCheckpoint(null);
     checkpoint.observation = { after: 100, started_at: 1, chat_filter: "individual" };
     await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
-      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } });
+      checkpoint, credentials: null, browser: page.dispatcher });
     expect(requests).toHaveLength(2);
     expect(requests[0]).toEqual({});
     expect(requests[1]).toMatchObject({ after: 900, chat_filter: "group" });
@@ -274,7 +277,7 @@ describe("WhatsApp source listener setup", () => {
     const checkpoint = initializeBrowserCheckpoint(null);
     checkpoint.observation = { after: 100, started_at: 2000, chat_filter: "group" };
     await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
-      checkpoint, credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } });
+      checkpoint, credentials: null, browser: page.dispatcher });
     expect(batches.length).toBeGreaterThan(1);
     expect(batches.flatMap(batch => batch.events.map((event: any) => event.resource_ref))).toEqual(references.map(ref => ref.id));
     expect(batches.slice(0, -1).every(batch => !batch.checkpoint)).toBe(true);
@@ -284,7 +287,7 @@ describe("WhatsApp source listener setup", () => {
   it("rejects a browser without reference-delivery support", async () => {
     const page = makeDispatcher({ probe: READY, observe_messages: { ok: true, after: 1 } });
     await expect(connector.observe({ feedKey: "live_messages", config: {}, checkpoint: null,
-      credentials: null, sessionState: { chrome_dispatcher: page.dispatcher } })).rejects.toThrow("source subscriptions");
+      credentials: null, browser: page.dispatcher })).rejects.toThrow("source subscriptions");
   });
 });
 
@@ -926,7 +929,7 @@ describe("sync over the generic chrome bridge", () => {
   });
 
   it("bumps the WhatsApp connector version for source subscriptions", () => {
-    expect(connector.definition.version).toBe("1.0.6");
+    expect(connector.definition.version).toBe("1.0.7");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
@@ -943,7 +946,7 @@ describe("sync over the generic chrome bridge", () => {
 
   it("refuses to run without a paired extension", async () => {
     await expect(runSync(messagesFeed(), syncCtx(null, undefined))).rejects.toThrow(
-      /paired Owletto Chrome extension/i
+      /Browser setup is required/i
     );
   });
 });
@@ -1288,7 +1291,7 @@ describe("actions", () => {
       input: { query: "hello" },
       credentials: null,
       config: {},
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
     } as never);
     expect(result.success).toBe(true);
     expect(result.output?.source).toBe("whatsapp_fts");
@@ -1308,7 +1311,7 @@ describe("actions", () => {
       input: { chat_jid: "1@s.whatsapp.net", text: "hi" },
       credentials: null,
       config: {},
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
     } as never);
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/no raw WhatsApp message ID/);
@@ -1329,7 +1332,7 @@ describe("actions", () => {
       input: { chat_jid: "1@s.whatsapp.net", text: "hi" },
       credentials: null,
       config: {},
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
     } as never);
     expect(result.success).toBe(true);
     expect(result.output).toEqual({
@@ -1355,7 +1358,7 @@ describe("actions", () => {
       input: { message_id: "3EB0" },
       credentials: null,
       config: {},
-      sessionState: { chrome_dispatcher: dispatcher },
+      browser: dispatcher,
     } as never);
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/capability_unavailable/);
@@ -1385,11 +1388,11 @@ describe("placement", () => {
     expect(connector.definition.key.startsWith("chrome")).toBe(false);
   });
 
-  it("declares no interactive auth handshake", () => {
+  it("declares a live browser account without a separate interactive handshake", () => {
     // The QR is rendered by web.whatsapp.com in the user's own browser, and an
     // auth run carries no chrome dispatcher, so there is nothing to relay.
     expect(connector.definition.authSchema?.methods).toEqual([
-      { type: "none" },
+      { type: "browser", mode: "live" },
     ]);
   });
 });
@@ -1494,13 +1497,16 @@ describe("buffered source records use normal feed ingestion", () => {
 
   it("prioritizes buffered records without advancing past deferred history and acknowledges only emitted revisions", async () => {
     const checkpoint = initializeBrowserCheckpoint(null);
-    const { dispatcher } = makeDispatcher({
+    const { dispatcher, calls } = makeDispatcher({
       probe: READY,
       feed_listen: observation([{ revision: 1, payload: message("live-a") }, { revision: 2, payload: message("live-b") }]),
       collect: { ...collectResponse([]), history_pages: [{ messages: [message("history", { timestamp: 1000 })] }], backfill: { complete: true, chats: { synthetic: { oldest_timestamp: 1000 } } } },
     });
     const result = await runSync(messagesFeed(), syncCtx(checkpoint, dispatcher, { max_messages_per_sync: 1 }));
     expect(result.events.map((event) => event.origin_id)).toEqual(["live-a"]);
+    expect(calls.find(call => call.action === "feed_listen")?.input).toEqual({
+      tab_id: 42, allowed_origins: ["https://web.whatsapp.com"],
+    });
     const next = result.checkpoint as BrowserCheckpoint;
     expect(next.source_ack?.records).toEqual([{ id: "live-a", revision: 1 }]);
     expect(next.backfill).toEqual(checkpoint.backfill);

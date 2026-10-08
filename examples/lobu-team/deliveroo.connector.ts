@@ -17,14 +17,13 @@
  * Deliveroo pages are server-rendered (the list + menu are in the DOM, not a
  * separate XHR), so both actions use `extensionDomScrape` (a content script, no
  * CDP debugger) rather than `extensionNetworkSync`. Actions reach the extension
- * via the `chrome_dispatcher` spliced onto `ctx.sessionState` by the
- * connector-worker — the same bridge syncs use.
+ * via the declared `ctx.browser` grant — the same bridge syncs use.
  */
 
 import {
+  requireBrowser,
   type ActionContext,
   type ActionResult,
-  type ChromeActionDispatcher,
   type ConnectorDefinition,
   ConnectorRuntime,
   extensionDomScrape,
@@ -171,26 +170,6 @@ export function parseMenuRows(rows: MenuRow[]): MenuItem[] {
   return items;
 }
 
-/**
- * Pull the chrome action dispatcher off a sync OR action context. The
- * connector-worker splices a live `chrome_dispatcher` onto `sessionState` for
- * both run modes; with no online paired Owletto extension in the connection's
- * org the dispatcher throws.
- */
-function requireExtensionDispatcher(ctx: {
-  sessionState?: Record<string, unknown> | null;
-}): ChromeActionDispatcher {
-  const handle = ctx.sessionState?.chrome_dispatcher as
-    | ChromeActionDispatcher
-    | undefined;
-  if (!handle || typeof handle.dispatch !== "function") {
-    throw new Error(
-      "Deliveroo connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState — run on a connector-worker with the dispatcher bridge and an online extension."
-    );
-  }
-  return handle;
-}
-
 const searchInputSchema = {
   type: "object",
   required: ["query"],
@@ -245,8 +224,9 @@ export default class DeliverooConnector extends ConnectorRuntime {
     name: "Deliveroo",
     description:
       "Search Deliveroo restaurants near the office and read a restaurant's menu, on demand, via the paired Owletto Chrome extension. Auth is implicit (the office account is signed into deliveroo.co.uk in that Chrome). Reading only — no checkout.",
-    version: "2.0.1",
+    version: "2.0.2",
     faviconDomain: "deliveroo.co.uk",
+    browser: { origins: ["https://deliveroo.co.uk"] },
     authSchema: { methods: [{ type: "none" }] },
     actions: {
       search_restaurants: {
@@ -299,7 +279,7 @@ export default class DeliverooConnector extends ConnectorRuntime {
         "No restaurants list URL — set `restaurants_url` on the Deliveroo connection (the office delivery location) or pass `location_url`."
       );
     }
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
 
     const { items: rows, loggedIn } = await extensionDomScrape<RestaurantRow>({
       dispatcher,
@@ -340,7 +320,7 @@ export default class DeliverooConnector extends ConnectorRuntime {
       throw new Error(`Not a deliveroo.co.uk restaurant URL: ${url}`);
     }
     const maxScrolls = input.max_scrolls ?? 12;
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
 
     const { items: rows, loggedIn } = await extensionDomScrape<MenuRow>({
       dispatcher,

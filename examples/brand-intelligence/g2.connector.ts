@@ -11,8 +11,8 @@
  */
 
 import {
+  requireBrowser,
   type RuntimeConnectorDefinition,
-  type ChromeActionDispatcher,
   ConnectorRuntime,
   calculateEngagementScore,
   type EventEnvelope,
@@ -124,25 +124,6 @@ function normalizeReview(row: G2Row): G2Review {
   };
 }
 
-/**
- * Pull the chrome action dispatcher off the sync context. The connector-worker
- * splices a live `chrome_dispatcher` onto `sessionState`; with no online paired
- * Owletto extension in the connection's org there is nothing to splice.
- */
-function requireExtensionDispatcher(ctx: {
-  sessionState?: Record<string, unknown> | null;
-}): ChromeActionDispatcher {
-  const handle = ctx.sessionState?.chrome_dispatcher as
-    | ChromeActionDispatcher
-    | undefined;
-  if (!handle || typeof handle.dispatch !== "function") {
-    throw new Error(
-      "G2 connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState — run on a connector-worker with the dispatcher bridge and an online extension."
-    );
-  }
-  return handle;
-}
-
 interface G2Review {
   rating: number;
   title: string;
@@ -182,8 +163,9 @@ export default class G2Connector extends ConnectorRuntime {
     name: "G2",
     description:
       "Reads B2B software reviews from G2.com through the paired Chrome extension.",
-    version: "2.1.0",
+    version: "2.1.1",
     faviconDomain: "g2.com",
+    browser: { origins: ["https://www.g2.com"] },
     authSchema: {
       methods: [{ type: "none" }],
     },
@@ -243,7 +225,7 @@ export default class G2Connector extends ConnectorRuntime {
     const baseUrl = productUrl;
     const reviewCardSelector = '[itemprop="review"]';
 
-    const dispatcher = requireExtensionDispatcher(ctx);
+    const dispatcher = requireBrowser(ctx);
     const allEvents: EventEnvelope[] = [];
     const maxPages = 5;
     let pagesCrawled = 0;

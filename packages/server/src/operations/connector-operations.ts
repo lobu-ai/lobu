@@ -1,3 +1,4 @@
+import { BROWSER_VERIFY_OPERATION, type ConnectorBrowserRequirement } from "@lobu/connector-sdk";
 import { isDeepStrictEqual } from "node:util";
 import { type DbClient, getDb, pgTextArray } from "../db/client";
 import { compileConnectionRowVisibility } from "../authz/connection-visibility";
@@ -28,6 +29,7 @@ type ConnectorRow = {
 	// #2033 item 2: NULL (legacy) is treated as supported; only an explicit
 	// `false` marks local_action ops unsupported.
 	supports_execute?: boolean | null;
+	browser?: ConnectorBrowserRequirement | null;
 };
 
 const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head"] as const;
@@ -472,6 +474,7 @@ function getLocalActionOperations(
 	connectorName: string,
 	actionsSchema: Record<string, any> | null,
 	supportsExecute: boolean | null | undefined,
+	hasBrowser: boolean,
 ): OperationDescriptor[] {
 	if (!actionsSchema) return [];
 	// NULL/undefined (legacy definition installed before the flag) is treated as
@@ -490,7 +493,8 @@ function getLocalActionOperations(
 		annotations: normalizeAnnotations(def.annotations),
 		input_schema: def.input_schema ?? def.inputSchema,
 		output_schema: def.output_schema ?? def.outputSchema,
-		supports_execute: executeSupported,
+		// Verification runs in the gateway; ordinary actions still need execute().
+		supports_execute: executeSupported || (hasBrowser && key === BROWSER_VERIFY_OPERATION),
 		backend_config: {
 			backend: "local_action",
 			actionKey: key,
@@ -557,6 +561,7 @@ async function buildConnectorOperations(
 				connector.name,
 				connector.actions_schema,
 				connector.supports_execute,
+				!!connector.browser,
 			),
 		),
 		mcpOperations,
@@ -579,7 +584,7 @@ async function getConnectorsForListing(params: {
 
 	if (params.connectionId) {
 		const rows = await sql`
-      SELECT cd.key, cd.name, cd.actions_schema, cd.auth_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute
+      SELECT cd.key, cd.name, cd.actions_schema, cd.auth_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute, cd.browser
       FROM connections c
       JOIN connector_definitions cd
         ON cd.key = c.connector_key
@@ -597,7 +602,7 @@ async function getConnectorsForListing(params: {
 	if (params.entityId) {
 		const rows = await sql`
       SELECT DISTINCT ON (cd.key)
-        cd.key, cd.name, cd.actions_schema, cd.auth_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute
+        cd.key, cd.name, cd.actions_schema, cd.auth_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute, cd.browser
       FROM connections c
       JOIN feeds f ON f.connection_id = c.id
       JOIN connector_definitions cd
@@ -616,7 +621,7 @@ async function getConnectorsForListing(params: {
 
 	let query = sql`
     SELECT DISTINCT ON (cd.key)
-      cd.key, cd.name, cd.actions_schema, cd.auth_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute
+      cd.key, cd.name, cd.actions_schema, cd.auth_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute, cd.browser
     FROM connector_definitions cd
     WHERE cd.status = 'active'
       AND cd.organization_id = ${params.organizationId}
@@ -767,6 +772,8 @@ export async function getOperationForConnection(
       cd.actions_schema,
       cd.mcp_config,
       cd.openapi_config,
+      cd.supports_execute,
+      cd.browser,
       cd.runtime AS connector_runtime,
       COALESCE(cv.manifest_backed, false) AS connector_manifest_backed,
       CASE WHEN cv.manifest_backed THEN cv.artifact_hash ELSE NULL END AS connector_manifest_hash,
@@ -815,6 +822,8 @@ export async function getOperationForConnection(
 			actions_schema: row.actions_schema,
 			mcp_config: row.mcp_config,
 			openapi_config: row.openapi_config,
+			supports_execute: row.supports_execute,
+			browser: row.browser,
 		},
 		organizationId,
 		{ connectionIds: [connectionId] },

@@ -1435,7 +1435,12 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 						)
 					: null;
 
-			if (authProfile?.profile_kind === "browser_session") {
+			if (authProfile?.profile_kind === "browser_session" &&
+        (authProfile.auth_data?.mode === 'live' || req.auth_update.mode === 'live')) {
+        // Live identity is established only by the gateway's browser probe.
+        // A worker completion can neither replace it nor turn a cookie profile into one.
+        logger.warn({ run_id: req.run_id }, '[completeWorkerJob] ignored worker update to gateway-owned browser identity');
+      } else if (authProfile?.profile_kind === "browser_session") {
 				const nextAuthData = {
 					...(authProfile.auth_data ?? {}),
 					...req.auth_update,
