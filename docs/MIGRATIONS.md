@@ -227,17 +227,22 @@ If the migration partially applied (column created, index missing, view missing)
 
 ### Retiring physical entity merges
 
-The physical-merge cutover requires operator cleanup before deployment. Preview
-one workspace with `bun scripts/retire-physical-merges.ts --org <workspace-id>
---manifest <private-new-file>`. Review its blockers and exact snapshots, retire
-stored callers and pending decisions, then execute with the reviewed manifest,
-`--execute --writers-retired --backup <private-new-file>`. The tool requires
-an explicit workspace and durable backup; it aborts on drift or unknown
-references. Keep the archive outside the checkout. Events are retained and
-only their entity-reference arrays are redirected; survivors and provenance
-must remain byte-for-byte unchanged. Never treat the absence of usage as
-permission to remove data.
+Existing installations must first deploy the release containing
+`20261009020000_retire_physical_entity_merge.sql`. Use that release's audited
+maintenance tool to retire redirects, active ledgers, pending decisions, and
+saved callers before its deployment. Keep its verified backup outside the
+checkout. The maintenance tool remains available in that release; it is omitted
+after the redirect column is removed.
 
-The first release fences new physical merges and removes all runtime readers.
-Its historical ledger table remains audit-only, without entity foreign keys.
-Only after that release is deployed may a later migration drop redirect columns.
+The following release removes the null `entities.merged_into` column and its
+index, foreign key, and temporary fence. Its preflight requires the validated
+first-release fence whenever the column exists. Complete the first rollout
+before deploying this contract release; a database fence alone does not prove
+that every old reader has stopped. Fresh installs replay the history in order.
+
+The contract release also drops the obsolete rejected-merge index, proposal
+helper, and winner-history index. Identity decision indexes remain, as do
+`entity_identities.merged_from_entity_id` and its provenance index. Historical
+`entity_merge_operations` rows and their audit constraints remain intact;
+execution and undo stay retired. The retained source-run index supports its
+foreign key. These migrations do not delete audit rows or rewrite events.

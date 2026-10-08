@@ -28,23 +28,12 @@ interface ResolutionEntity {
 	identities?: ResolutionIdentity[];
 }
 
-/**
- * One entity's normalized rule keys, grouped under the same labels used by
- * `evidence.kind`. This is a readable view of the rule evaluation included in
- * the resolution fingerprint. Rules that normalize no values are omitted.
- */
-interface ResolutionKeySet {
-	id: number;
-	keys: Record<string, string[]>;
-}
-
 interface IdentityGroupAssessment {
 	decision: ResolutionDecision;
 	evidence: ResolutionEvidence[];
 	policyHash: string;
 	fingerprint: string;
 	reason: string;
-	resolutionKeys: ResolutionKeySet[];
 }
 
 interface ResolutionRule {
@@ -266,17 +255,6 @@ export function assessIdentityGroups(input: {
 		a.kind.localeCompare(b.kind) || a.identifier.localeCompare(b.identifier));
 	const policyHash = digest(rules);
 	const automatic = automaticMatch && !conflict;
-	const resolutionKeys = normalized.map(({ id, values }) => {
-		const keysByLabel = new Map<string, Set<string>>();
-		values.forEach((keys, index) => {
-			if (keys.length === 0) return;
-			const label = rules[index].fields.join(" + ");
-			const rendered = keysByLabel.get(label) ?? new Set<string>();
-			for (const key of keys) rendered.add(renderRuleKey(key));
-			keysByLabel.set(label, rendered);
-		});
-		return { id, keys: Object.fromEntries([...keysByLabel].map(([label, keys]) => [label, [...keys].sort()])) };
-	});
 	const fieldLabels = [...new Set(rules.flatMap(rule => rule.fields))].join(" or ");
 	const matchedLabels = [...new Set(matchedEvidence.map(item => item.kind))].join(" and ");
 	return {
@@ -285,7 +263,6 @@ export function assessIdentityGroups(input: {
 		policyHash,
 		fingerprint: digest({ policyHash, normalized,
 			left: left.map(record => record.id), right: right.map(record => record.id) }),
-		resolutionKeys,
 		reason: conflict
 			? "Members carry conflicting values declared unique; human review is required."
 			: automatic

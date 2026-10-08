@@ -90,10 +90,11 @@ records. Preview, queued, suppressed, and applied receipts are distinct.
 Record-level read policies withhold an entire group when any member is denied;
 source permissions still govern history.
 
-Deployment removes physical-merge runtime readers before dropping their columns
-in a later release. The upgrade requires owner-verified cleanup of redirects,
-active ledgers, old approvals, and saved callers. Remaining historical ledger
-snapshots are audit-only and do not support undo.
+The physical-merge redirect column and its execution helpers are removed.
+Existing installations upgrade through the first retirement release, which
+requires owner-verified cleanup and removes runtime readers before the column
+drop. Historical ledger snapshots remain audit-only and do not support undo;
+authentication identity provenance is retained.
 
 ## The event lifecycle (end to end)
 
