@@ -902,6 +902,9 @@ const linkedinConnection = defineConnection({
   name: "LinkedIn",
   // Scrape affinity: the live paired Chrome that prod actually scrapes on.
   deviceWorkerId: "706aa825-5f82-4ce2-80d1-c09cd7908001",
+  // No synced timeline: the flagger reads linkedin.com/feed/ live each run
+  // through the read_home_feed action, so no stored post rows are needed.
+  // The paired Chrome below is still the scrape affinity for live reads.
   feeds: [
     // Local Data Export (CSV) feeds.
     ...(linkedinTakeoutDir
@@ -918,13 +921,6 @@ const linkedinConnection = defineConnection({
           "media",
         ].map((feed) => ({ feed, config: { takeout_dir: linkedinTakeoutDir } }))
       : []),
-    // Live Chrome-extension feed (no company_url needed). Every 3 hours; a run
-    // while the paired browser is offline re-arms without a source-health failure.
-    {
-      feed: "home_feed",
-      schedule: "0 */3 * * *",
-      config: { min_scrolls: 6, max_scrolls: 10 },
-    },
   ],
 });
 
@@ -1161,12 +1157,11 @@ const linkedInFeedFlagger = defineAutomation({
   slug: "linkedin-feed-flagger",
   name: "LinkedIn feed flagger",
   ...linkedInAssistantDevice,
-  // Half an hour after each 3-hourly home_feed sync.
+  // Runs on its own clock: the timeline is read live each run through the
+  // read_home_feed action, not from synced rows, so there is no sync to
+  // follow. A run while the paired browser is offline completes empty.
   triggers: [every("30 */3 * * *", { timezone: "Europe/London" })],
-  sources: {
-    posts:
-      "SELECT * FROM events WHERE connector_key = 'linkedin' AND feed_key = 'home_feed' ORDER BY occurred_at DESC",
-  },
+  sources: { none: "SELECT id FROM events WHERE false" },
   prompt: linkedInFeedFlaggerPrompt,
   reaction: reactionFromFile<typeof LinkedInFlagReaction>(
     "./linkedin-flag.reaction.ts"
