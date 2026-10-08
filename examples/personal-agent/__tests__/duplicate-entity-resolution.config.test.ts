@@ -6,7 +6,7 @@ describe("duplicate entity resolution configuration", () => {
   // to `[]` and CLEARS the stored cron, unlike an omitted feed `schedule`.
   // Dropping this declaration would silently strand the Automation with no
   // cadence, so assert the whole trigger list rather than just its presence.
-  test("declares the daily cadence apply would otherwise strip", () => {
+  test("declares the weekly cadence apply would otherwise strip", () => {
     const automation = config.automations?.find(
       (candidate) =>
         candidate.slug === "duplicate-entity-resolution-real-v3-final"
@@ -15,7 +15,7 @@ describe("duplicate entity resolution configuration", () => {
     expect(automation?.triggers).toEqual([
       {
         kind: "schedule",
-        cron: "0 6 * * *",
+        cron: "0 6 * * 1",
         timezone: "Europe/London",
         skip_if_unchanged: false,
       },

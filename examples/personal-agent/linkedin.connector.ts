@@ -898,6 +898,64 @@ async function readMyLinkedInActivity(
 }
 
 /**
+ * Live home-feed read for virtual timelines: scrapes the same cards the
+ * home_feed sync persists, but returns them without storing any events.
+ * Unlike the sync path this skips short-URL resolution (no fetch in an
+ * action context) and drops rows without a durable post URL instead of
+ * failing the run — the flagger can only stage drafts for addressable
+ * posts, so unaddressable rows are reported as skipped, not errors.
+ */
+async function readHomeFeed(ctx: ActionContext): Promise<ActionResult> {
+  const rawScrolls = Number(ctx.input.max_scrolls ?? 6);
+  const maxScrolls = Number.isFinite(rawScrolls)
+    ? Math.min(10, Math.max(1, Math.trunc(rawScrolls)))
+    : 6;
+  const dispatcher = requireBrowser(ctx);
+  const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
+    dispatcher,
+    url: "https://www.linkedin.com/feed/",
+    config: {
+      ...HOME_FEED_SCRAPE_CONFIG,
+      scroll: { ...HOME_FEED_SCRAPE_CONFIG.scroll, max: maxScrolls },
+    },
+    parseRows: (raw) =>
+      (raw as HomeFeedRow[]).map((row) => ({
+        ...row,
+        post_identity: decodeHomeFeedPostIdentity(row.post_identity),
+      })),
+    allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
+    persistent: true,
+  });
+  if (!loggedIn) {
+    return {
+      success: false,
+      error:
+        "Not logged into LinkedIn. Sign in to linkedin.com in the paired Chrome profile, then retry.",
+    };
+  }
+  const items: Array<Record<string, unknown>> = [];
+  let skipped = 0;
+  for (const event of buildHomeFeedEvents(rows, new Date())) {
+    if (!event.source_url) {
+      skipped += 1;
+      continue;
+    }
+    items.push({
+      type: event.origin_type,
+      id: event.origin_id,
+      ...(event.origin_parent_id ? { parent_id: event.origin_parent_id } : {}),
+      author: event.author_name ?? null,
+      text: event.payload_text ?? "",
+      url: event.source_url,
+    });
+  }
+  return {
+    success: true,
+    output: { count: items.length, skipped, items },
+  };
+}
+
+/**
  * Best-effort author extraction from a home-feed row's body text. Social
  * context appears before the post author in two shapes: actor banners name an
  * engaging member ("X likes this", "X commented", "X reposted this") and
@@ -3133,7 +3191,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.13.2",
+    version: "3.14.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
     browser: {
@@ -3556,6 +3614,29 @@ export default class LinkedInConnector extends ConnectorRuntime<
           },
         },
       },
+      read_home_feed: {
+        key: "read_home_feed",
+        name: "Read home feed",
+        description:
+          "Read the signed-in member's current LinkedIn home feed in the paired Chrome browser, and return the visible posts and comments without storing any events. Read-only.",
+        kind: "read",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            max_scrolls: {
+              type: "integer",
+              minimum: 1,
+              maximum: 10,
+              description: "Scroll passes over the feed (default 6).",
+            },
+          },
+        },
+      },
     },
   };
 
@@ -3563,6 +3644,9 @@ export default class LinkedInConnector extends ConnectorRuntime<
     try {
       if (ctx.actionKey === "read_my_activity") {
         return await readMyLinkedInActivity(ctx);
+      }
+      if (ctx.actionKey === "read_home_feed") {
+        return await readHomeFeed(ctx);
       }
       if (
         ctx.actionKey !== "prepare_comment" &&

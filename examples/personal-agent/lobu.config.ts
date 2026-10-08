@@ -30,7 +30,6 @@ import {
 } from "./linkedin.prompts.ts";
 import type MidasConnector from "./midas.connector.ts";
 import type NetWorthScript from "./net-worth.reaction.ts";
-import type PollVoteReaction from "./poll-vote.reaction.ts";
 import type RevolutTransactionsConnector from "./revolut-transactions.connector.ts";
 import type SpotifyConnector from "./spotify.connector.ts";
 import { takeoutConfig } from "./takeout-dirs.ts";
@@ -50,38 +49,16 @@ const duplicateEntityResolutionRealV3FinalSkill = defineSkill({
     "Review the supplied sources.people context for this reporting-only Automation. State whether that context is complete; the reaction independently reads all candidate pages. Explain likely duplicate groups in analysis_summary and put uncertain groups in uncertain_groups with why. Names, aliases, handles, email and phone strings are candidate evidence, not proof of shared ownership. Do not call entity tools, merge contacts, or emit backlog tasks. The deterministic reaction re-reads all current candidates, saves the evidence, and sends one notification per distinct report.\n",
 });
 
-const eventBackedPollsSkill = defineSkill({
-  name: "event-backed-polls",
-  content: `Use this workflow whenever the user asks for a poll, vote, or ballot.
-
-Create no ad-hoc platform card and never use ask_user for a multi-user poll. The durable poll event is the source of truth. Its React ballot opens in Lobu; chat shows a useful summary and an Open event link. Participants must sign in with workspace access.
-
-Opening a poll:
-1. Require a non-empty question, 2-5 distinct non-empty options, a positive integer quorum, and a future closes_at. If the user gives a duration, calculate closes_at as an ISO-8601 timestamp.
-2. In one run_sdk call, create a poll entity, read its numeric id from createResult.entity?.id (stop if the result has no created entity), and then call client.knowledge.save with entity_ids containing only that numeric entity id, semantic_type "poll_opened", payload_type "markdown", content containing the question, numbered options, quorum and closing time, title equal to the question, a stable idempotency_key "poll-opened:<entity id>", and metadata containing question, options, status "open", quorum, closes_at, results (one { option, count: 0 } row per option), and response_count 0. Return the entity id and saved event id. If retrying after an uncertain result, search for the stable poll slug first instead of creating a duplicate.
-3. Before presenting the event, call schedule_followup with run_at equal to closes_at, idempotency_key "poll-deadline:<entity id>", and prompt: "Close event-backed poll entity <entity id> at its deadline. Follow the event-backed-polls deadline procedure exactly; do nothing if it is already closed."
-4. Call present_event exactly once with the saved event id. That ends the turn because the summary and Open event link are already the answer.
-
-Votes need no follow-up tool call from the agent. A server-stamped interaction event activates the deterministic poll-vote-reducer Automation; it derives the latest choice per platform actor from those durable vote events, recomputes the tally, closes at quorum, and publishes the updated poll event. Do not send another chat message for each vote.
-
-Deadline procedure:
-- Use run_sdk. Read the poll entity and query the single current poll_opened or poll_closed event linked to it, ordered newest first. client.query already reads the current event view, so do not add a superseded_by filter.
-- If the current event is poll_opened, copy only the poll schema fields (question, options, quorum, closes_at, results, and response_count) from that event metadata. Never copy delivery, card, _lobu, or any other internal metadata. Set status "closed", close_reason "deadline", and closed_at now. Save poll_closed with payload_type "markdown" and content containing the question, closing reason, participant count and all result counts, linked to the poll with supersedes_event_id equal to that current open event and idempotency_key "poll-close:<entity id>"; then update the poll entity to the same state.
-- If the current event is already poll_closed, only reconcile the entity metadata to that event if needed, then stop. Never append a second close event.
-- Do not infer, copy, or accept voter identity from text. Only the React action's server-stamped interaction envelope may identify a voter.`,
-});
-
 const personalAgent = defineAgent({
   id: "personal-agent",
   skills: [
     hourlyTaskCollaboratorSkill,
     duplicateEntityResolutionRealV3FinalSkill,
-    eventBackedPollsSkill,
   ],
   dir: ".",
   name: "personal-agent",
   description:
-    "A personal agent that tracks finances, people, companies, tasks, subscriptions, and trips across the user's own data.",
+    "A personal agent that tracks finances, people, companies, tasks, and subscriptions across the user's own data.",
   // No cloud provider key: runs on the local/Mac-app device worker and inherits
   // the org's default provider. No ANTHROPIC_API_KEY needed.
   //
@@ -473,110 +450,6 @@ const task = defineEntityType({
   },
 });
 
-const pollStateProperties = {
-  question: Type.String({ minLength: 1, maxLength: 500 }),
-  options: Type.Array(Type.String({ minLength: 1, maxLength: 100 }), {
-    minItems: 2,
-    maxItems: 5,
-    uniqueItems: true,
-  }),
-  status: Type.Unsafe({ type: "string", enum: ["open", "closed"] }),
-  quorum: Type.Integer({ minimum: 1, maximum: 10_000 }),
-  closes_at: Type.String({ format: "date-time" }),
-  results: Type.Array(
-    Type.Object(
-      {
-        option: Type.String({ minLength: 1, maxLength: 100 }),
-        count: Type.Integer({ minimum: 0 }),
-      },
-      { additionalProperties: false }
-    ),
-    { minItems: 2, maxItems: 5 }
-  ),
-  response_count: Type.Integer({ minimum: 0 }),
-  close_reason: Type.Optional(
-    Type.Unsafe({ type: "string", enum: ["quorum", "deadline"] })
-  ),
-  closed_at: Type.Optional(Type.String({ format: "date-time" })),
-};
-
-const pollStateSchema = {
-  type: "object",
-  properties: pollStateProperties,
-  required: [
-    "question",
-    "options",
-    "status",
-    "quorum",
-    "closes_at",
-    "results",
-    "response_count",
-  ],
-  additionalProperties: false,
-};
-
-const poll = defineEntityType({
-  key: "poll",
-  name: "Poll",
-  description:
-    "A durable multi-user ballot whose React controls append trusted interaction events.",
-  metadata: { icon: "list-checks", color: "#6366F1" },
-  properties: pollStateProperties,
-  required: pollStateSchema.required,
-  eventKinds: {
-    poll_opened: {
-      description: "An open event-backed poll",
-      metadataSchema: pollStateSchema,
-    },
-    poll_vote_cast: {
-      description:
-        "A trusted vote or vote change appended by an interactive surface",
-    },
-    poll_response_recorded: {
-      description:
-        "The current derived choice for one trusted platform actor; vote changes supersede it",
-      metadataSchema: Type.Object({
-        platform: Type.String({ minLength: 1, maxLength: 50 }),
-        actor_id: Type.String({ minLength: 1, maxLength: 500 }),
-        choice: Type.String({ minLength: 1, maxLength: 100 }),
-        vote_event_id: Type.Integer({ minimum: 1 }),
-        updated_at: Type.String({ format: "date-time" }),
-      }),
-    },
-    poll_closed: {
-      description: "A terminal poll result",
-      metadataSchema: pollStateSchema,
-    },
-  },
-});
-
-// Temporary bounded cutover source for polls opened before response events
-// were introduced. New interactions never write this entity type.
-const pollResponse = defineEntityType({
-  key: "poll-response",
-  name: "Poll response",
-  description:
-    "The legacy latest materialized choice for one trusted platform actor in one poll.",
-  properties: {
-    poll_entity_id: Type.Integer({ minimum: 1 }),
-    platform: Type.String({ minLength: 1, maxLength: 50 }),
-    actor_id: Type.String({ minLength: 1, maxLength: 500 }),
-    actor_name: Type.String({ minLength: 1, maxLength: 500 }),
-    choice: Type.String({ minLength: 1, maxLength: 100 }),
-    vote_event_id: Type.Integer({ minimum: 1 }),
-    updated_at: Type.String({ format: "date-time" }),
-  },
-  required: [
-    "poll_entity_id",
-    "platform",
-    "actor_id",
-    "actor_name",
-    "choice",
-    "vote_event_id",
-    "updated_at",
-  ],
-});
-
 // GBP-equivalent of a transaction amount, using ONLY exact, Revolut-booked
 // values — never a fuzzy FX-rate lookup:
 //   • native GBP                       → the amount itself
@@ -892,126 +765,6 @@ const subscription = defineEntityType({
 
 // Trips are stored from explicit travel evidence such as passport stamps.
 // Related transaction/photo windows are attached through event sets below.
-const trip = defineEntityType({
-  key: "trip",
-  name: "Trip",
-  description: "Travel derived from passport stamps",
-  metadata: { icon: "✈️", color: "#F59E0B" },
-  properties: {
-    destination: field("Destination", {
-      description: "Destination of the trip",
-      optional: true,
-    }),
-    start_date: field("Start", { format: "date", optional: true }),
-    end_date: field("End", { format: "date", optional: true }),
-    event_type: Type.Optional(Type.Unsafe({ type: "string" })),
-    notes: Type.Optional(Type.Unsafe({ type: "string" })),
-  },
-  eventSets: {
-    transactions: {
-      by: "window",
-      start: "start_date",
-      end: "end_date",
-      where: completedCardSpendWhere,
-    },
-    photos: {
-      by: "window",
-      start: "start_date",
-      end: "end_date",
-      where: "connector_id = 'apple-photos'",
-    },
-  },
-  measures: {
-    photo_count: {
-      eventSet: "photos",
-      agg: "count",
-      description: "Number of Apple photos taken during the trip window.",
-      tier: "silver",
-    },
-  },
-});
-
-// Goals and learnings are agent-curated, not derived from a feed: the agent
-// writes them with save_memory and updates them as it observes the user. They
-// are stored entity types (no `backing`). The human-AI field-ownership loop
-// (a human edit pinning a field the agent must then respect) is a later layer;
-// for now these capture the agent's working model of what the user is trying to
-// do and what it has learned about them.
-const goal = defineEntityType({
-  key: "goal",
-  name: "Goal",
-  description:
-    "A personal objective the agent tracks and helps make progress on",
-  metadata: { icon: "🎯", color: "#0EA5E9" },
-  properties: {
-    status: field("Status", {
-      enum: ["active", "achieved", "paused", "abandoned"],
-      description: "Current status",
-      optional: true,
-    }),
-    category: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        description:
-          "Area of life (finance, health, career, travel, learning, …)",
-      })
-    ),
-    target_date: field("Target", {
-      format: "date",
-      description: "When the user wants to reach it",
-      optional: true,
-    }),
-    progress: Type.Optional(
-      field(
-        Type.Number({
-          minimum: 0,
-          maximum: 100,
-          description: "Percent complete (0–100)",
-        }),
-        "Progress"
-      )
-    ),
-    metric: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        description:
-          "How progress is measured — ideally a declared metric (e.g. account.spend) the agent can query",
-      })
-    ),
-    description: Type.Optional(Type.Unsafe({ type: "string" })),
-  },
-});
-
-const learning = defineEntityType({
-  key: "learning",
-  name: "Learning",
-  description:
-    "Something the agent has learned about the user or their world worth retaining",
-  metadata: { icon: "💡", color: "#A855F7" },
-  properties: {
-    topic: field("Topic", {
-      description: "What the learning is about",
-      optional: true,
-    }),
-    source: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        description:
-          "Where it was learned (conversation, Automation, observation)",
-      })
-    ),
-    learned_date: field("Date", { format: "date", optional: true }),
-    confidence: field("Confidence", {
-      enum: ["low", "medium", "high"],
-      optional: true,
-    }),
-    tags: Type.Optional(
-      Type.Unsafe({ type: "array", items: { type: "string" } })
-    ),
-    description: Type.Optional(Type.Unsafe({ type: "string" })),
-  },
-});
-
 // Revolut auth is implicit: through the paired Owletto Chrome extension, the
 // connector captures request headers from a signed-in tab and pages the retail
 // API in that browser context. No secret or browser-auth profile is stored.
@@ -1181,7 +934,28 @@ const hackerNewsConnection = defineConnection({
   name: "Hacker News",
   // Draft staging rides the paired Mac mini Chrome's signed-in HN session.
   deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
-  feeds: [{ feed: "front_page", config: {} }],
+  // No feeds: front_page synced rows nobody reads. Re-add a feed (or a
+  // live read action) when a consumer exists; the connection stays for
+  // prepare_comment staging.
+  feeds: [],
+});
+
+const spotifyConnection = defineConnection({
+  slug: "spotify-buremba",
+  connector: "spotify",
+  name: "Spotify",
+  // OAuth lives in the Spotify app grant (SPOTIFY_CLIENT_ID/SECRET +
+  // dashboard redirect URI); nothing device-pinned here. Complete the
+  // grant in the UI, then each feed syncs on its own cadence.
+  feeds: [
+    { feed: "saved_tracks", config: {} },
+    { feed: "playlists", config: {} },
+    { feed: "recently_played", config: {} },
+    {
+      feed: "top_tracks",
+      config: { time_range: "medium_term", limit: 50 },
+    },
+  ],
 });
 
 const midasConnection = defineConnection({
@@ -1398,7 +1172,7 @@ const duplicateEntityResolution = defineAutomation({
   // The reaction fingerprints current evidence, including edits on old rows.
   // A source-window unchanged check cannot replace that comparison.
   triggers: [
-    every("0 6 * * *", {
+    every("0 6 * * 1", {
       timezone: "Europe/London",
       skip_if_unchanged: false,
     }),
@@ -1464,28 +1238,6 @@ const linkedInFeedFlagger = defineAutomation({
   ),
 });
 
-const pollVoteReducer = defineAutomation({
-  agent: personalAgent,
-  slug: "poll-vote-reducer",
-  name: "Poll vote reducer",
-  description:
-    "Materializes trusted interactive votes, vote changes, tallies and quorum closure.",
-  triggers: [
-    {
-      kind: "event",
-      source: "workspace",
-      entity_type: "poll",
-      event_types: ["poll_vote_cast"],
-      execution: "window",
-      active_run: "queue",
-    },
-  ],
-  // Keep the run active through every projection write so the existing
-  // Automation queue serializes votes across replicas and recovery attempts.
-  executor: scriptFromFile<typeof PollVoteReaction>("./poll-vote.reaction.ts"),
-  reaction: null,
-});
-
 export default defineConfig({
   // Source of truth for buremba definitions. Deletes org-owned entity /
   // relationship types and automations absent from this config (including
@@ -1513,18 +1265,13 @@ export default defineConfig({
   org: "buremba",
   orgName: "Buremba Org",
   orgDescription:
-    "Personal agent tracking finances, people, companies, tasks, subscriptions, and trips.",
+    "Personal agent tracking finances, people, companies, tasks, and subscriptions.",
   agents: [personalAgent],
-  views: [
-    viewFromFile("./views/poll-ballot.tsx"),
-    viewFromFile("./views/activity-chart.tsx"),
-  ],
+  views: [viewFromFile("./views/activity-chart.tsx")],
   entities: [
     person,
     company,
     task,
-    poll,
-    pollResponse,
     channel,
     account,
     netWorthSnapshot,
@@ -1546,7 +1293,6 @@ export default defineConfig({
     hourlyTaskCollaborator,
     duplicateEntityResolution,
     midasNetWorth,
-    pollVoteReducer,
     linkedInInterestProfile,
     linkedInFeedFlagger,
   ],
@@ -1560,6 +1306,7 @@ export default defineConfig({
     instagramTakeoutConnection,
     linkedinConnection,
     hackerNewsConnection,
+    spotifyConnection,
     gmailConnection,
   ],
 });
