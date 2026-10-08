@@ -493,6 +493,12 @@ const account = defineEntityType({
 // in a subscription-like category. The category exclusion + low-variance test
 // keep frequent restaurants/groceries (which the old blocklist chased by hand)
 // from masquerading as subscriptions.
+//
+// Deliberately derived, not stored: obligations are inferred from the spend
+// stream, so a stored entity would need reconciling every run (detected vs
+// changed vs cancelled). The backing view recomputes status from recency
+// instead. If this ever gets slow, materialize on write like net-worth
+// snapshots — until then the view is the long-term shape.
 const subscriptionBackingSql = `
 WITH card AS (
   SELECT
@@ -790,8 +796,10 @@ const hackerNewsConnection = defineConnection({
   name: "Hacker News",
   // Draft staging rides the paired Mac mini Chrome's signed-in HN session.
   deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
-  // front_page rows feed arrival_frame today and a dedicated HN signal
-  // Automation next; nothing else reads them yet.
+  // front_page rows feed the hourly collaborator's arrival_frame, where the
+  // external agent can act on them (including prepare_comment via the
+  // operations bridge when it wants). No dedicated Automation: nothing
+  // else reads these rows yet.
   feeds: [{ feed: "front_page", config: {} }],
 });
 
