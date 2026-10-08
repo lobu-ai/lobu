@@ -2,25 +2,27 @@
  * GitHub repo-membership ACL SYNC — the production path that populates the repo
  * graph the resource gate reads, mirroring `./slack-acl-sync` for the second
  * source. Per GitHub connection: enumerate the repos it captures (from its
- * feeds), fetch each repo's collaborators, and hand them to `buildGithubRepoGraph`
+ * feeds), verify public visibility or fetch collaborators, and use `buildAccessGraph`
  * (which materializes the `member_of` edges, reconciles departures, and stamps
  * the connection `full`/`fresh`).
  *
- * Fail-closed on error, ATOMIC per connection: if ANY repo's collaborator fetch
- * throws (GitHub outage, token expiry, repo gone), we mark the connection's ACL
+ * Fail-closed on error, ATOMIC per connection: if ANY repo's metadata or
+ * collaborator fetch throws (GitHub outage, token expiry, repo gone), we mark the connection's ACL
  * state `failed` rather than build a half-synced graph — but only DOWNGRADE an
  * existing row (a connection that has never been graphed stays on the legacy
- * fence). The external calls (repo list, collaborator fetch) are injected so the
+ * fence). The external calls (repo list, visibility, collaborators) are injected so the
  * sync logic is tested with stubs and the live tick wires the real GitHub API.
  */
 
 import { createLogger } from '@lobu/core';
+import { IDENTITY, type AccessMember } from '@lobu/connector-sdk';
 import { getDb } from '../db/client.js';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context.js';
 import {
   type GithubRepoCollaborator,
   githubAclSource,
   githubReposToResources,
+  normalizeGithubRepoFullName,
   resolveGithubToken,
 } from '@lobu/connectors/github-identity';
 import {
@@ -39,6 +41,8 @@ const logger = createLogger('github-acl-sync');
 export interface GithubRepoRef {
   owner: string;
   repo: string;
+  /** All feeds for this repo were removed: retract its audience without fetching it. */
+  retired?: boolean;
 }
 
 /** Injectable seams: tests drive the real graph build + gate with stubbed GitHub
@@ -46,6 +50,12 @@ export interface GithubRepoRef {
 export interface GithubAclSyncDeps {
   /** The repos this connection captures (from its feeds' config). */
   listRepos: (params: { organizationId: string; connectionId: string }) => Promise<GithubRepoRef[]>;
+  /** Verified public repo audience, or null to require collaborators. Never inferred from a 403. */
+  fetchPublicMembers?: (params: {
+    organizationId: string;
+    connectionId: string;
+    repo: GithubRepoRef;
+  }) => Promise<AccessMember[] | null>;
   /** A repo's current collaborators. Throws on a GitHub-level error (fail-closed). */
   fetchCollaborators: (params: {
     organizationId: string;
@@ -67,7 +77,8 @@ export interface GithubAclSyncResult {
 
 /**
  * Sync ONE GitHub connection's repo-membership graph. Resolves its captured
- * repos, fetches collaborators per repo, and builds the graph. See the file
+ * repos, verifies public visibility or fetches collaborators per repo, and
+ * builds the graph. See the file
  * header for the fail-closed contract.
  */
 export async function syncGithubConnectionAcl(
@@ -101,7 +112,8 @@ async function syncGithubConnectionAclLocked(
   const syncFence = await captureAclSyncFence(organizationId);
 
   const repos = await deps.listRepos({ organizationId, connectionId });
-  if (repos.length === 0) {
+  // Retired repos only retract; a connection with no live repo still fails closed.
+  if (!repos.some((repo) => !repo.retired)) {
     const reason = 'GitHub ACL sync unavailable: no repository feeds configured';
     logger.error(
       `${reason} — downgrading any existing ACL graph`,
@@ -112,22 +124,37 @@ async function syncGithubConnectionAclLocked(
   }
 
   try {
-    const repoInputs = [];
+    const resources = [];
     for (const repo of repos) {
-      const collaborators = await deps.fetchCollaborators({ organizationId, connectionId, repo });
-      repoInputs.push({ fullName: `${repo.owner}/${repo.repo}`, collaborators });
+      const params = { organizationId, connectionId, repo };
+      const publicMembers = repo.retired ? [] : await deps.fetchPublicMembers?.(params);
+      const fullName = `${repo.owner}/${repo.repo}`;
+      const [resource] = githubReposToResources([{
+        fullName,
+        collaborators: publicMembers == null ? await deps.fetchCollaborators(params) : [],
+      }]);
+      if (!resource) {
+        // An unparseable name was never graphed, so a retired one has nothing to retract.
+        if (repo.retired) continue;
+        throw new Error(`Invalid GitHub repository identity: ${fullName}`);
+      }
+      if (publicMembers != null) resource.members = publicMembers;
+      resources.push(resource);
     }
     await buildAccessGraph({
       organizationId,
       connectionId,
       connectorKey: githubAclSource.key,
       resourceNamespace: githubAclSource.resourceNamespace,
-      memberIdentities: githubAclSource.memberIdentities,
-      resources: githubReposToResources(repoInputs),
+      memberIdentities: [
+        ...githubAclSource.memberIdentities,
+        { namespace: IDENTITY.AUTH_USER_ID, primary: true },
+      ],
+      resources,
       syncFence,
     });
     await clearConnectionAclError(organizationId, connectionId);
-    return { ok: true, reposSynced: repoInputs.length };
+    return { ok: true, reposSynced: resources.length };
   } catch (error) {
     logger.error(
       'GitHub ACL sync failed — marking connection fail-closed',
@@ -143,20 +170,69 @@ async function syncGithubConnectionAclLocked(
 }
 
 /** Parse `owner/repo` from a feed config (the GitHub connector stores
- * `repo_owner`/`repo_name`). Skips feeds without a fully-specified repo. */
-function repoRefsFromFeedConfigs(configs: Array<Record<string, unknown> | null>): GithubRepoRef[] {
-  const seen = new Set<string>();
-  const refs: GithubRepoRef[] = [];
-  for (const config of configs) {
+ * `repo_owner`/`repo_name`). Skips feeds without a fully-specified repo; a repo
+ * whose every feed is deleted is returned `retired`. */
+function repoRefsFromFeedConfigs(feeds: Array<{
+  config: Record<string, unknown> | null;
+  deleted_at: unknown;
+}>): GithubRepoRef[] {
+  const refs = new Map<string, GithubRepoRef>();
+  for (const { config, deleted_at } of feeds) {
     const owner = typeof config?.repo_owner === 'string' ? config.repo_owner.trim() : '';
     const repo = typeof config?.repo_name === 'string' ? config.repo_name.trim() : '';
     if (!owner || !repo) continue;
     const key = `${owner}/${repo}`.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    refs.push({ owner, repo });
+    const existing = refs.get(key);
+    if (existing && !existing.retired) continue;
+    refs.set(key, { owner, repo, ...(deleted_at != null ? { retired: true } : {}) });
   }
-  return refs;
+  return [...refs.values()];
+}
+
+/** Repository metadata is the authority for public read access. An internal
+ * repository, missing metadata, redirect, or provider error never means public. */
+async function isPublicRepository(token: string, repo: GithubRepoRef): Promise<boolean> {
+  const res = await fetch(
+    `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}`,
+    {
+      redirect: 'error',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'lobu',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    },
+  );
+  if (!res.ok) throw new Error(`GitHub repository ${repo.owner}/${repo.repo} returned ${res.status}`);
+  const body = await res.json() as { full_name?: string; private?: boolean; visibility?: string } | null;
+  const expected = normalizeGithubRepoFullName(`${repo.owner}/${repo.repo}`);
+  if (!expected || !body || typeof body.private !== 'boolean'
+    || normalizeGithubRepoFullName(body.full_name) !== expected) {
+    throw new Error(`Invalid GitHub repository metadata for ${repo.owner}/${repo.repo}`);
+  }
+  return body.private === false && body.visibility === 'public';
+}
+
+/** Compose the existing resource/member graph with verified workspace members.
+ * These identities come from sign-in, never from provider text or feed config.
+ * Connection visibility is still enforced separately on every read. */
+async function publicRepositoryMembers(organizationId: string): Promise<AccessMember[]> {
+  const rows = await getDb()<{ user_id: string }>`
+    SELECT ei.identifier AS user_id
+    FROM entity_identities ei
+    JOIN entities e ON e.id = ei.entity_id AND e.organization_id = ei.organization_id
+    JOIN entity_types et ON et.id = e.entity_type_id AND et.organization_id = e.organization_id
+    JOIN "member" m ON m."organizationId" = ei.organization_id AND m."userId" = ei.identifier
+    WHERE ei.organization_id = ${organizationId}
+      AND ei.namespace = ${IDENTITY.AUTH_USER_ID} AND ei.source_connector = 'auth:signup'
+      AND ei.scope_key IS NULL AND ei.deleted_at IS NULL
+      AND e.deleted_at IS NULL AND et.deleted_at IS NULL AND et.slug = '$member'
+  `;
+  return rows.map(({ user_id }) => ({
+    key: `${IDENTITY.AUTH_USER_ID}:${user_id}`,
+    identities: [{ namespace: IDENTITY.AUTH_USER_ID, value: user_id }],
+  }));
 }
 
 /** GitHub `/repos/{owner}/{repo}/collaborators`, paginated, bare `{login,id}`.
@@ -247,22 +323,33 @@ export async function runGithubAclSyncTick(): Promise<void> {
   // One credential resolution per connection, not per repo: a managed grant or
   // App mint is a network round trip.
   const tokens = new Map<string, Promise<string | null>>();
+  const connectionToken = async (organizationId: string, connectionId: string): Promise<string> => {
+    let token = tokens.get(connectionId);
+    if (!token) {
+      token = resolveGithubConnectionToken(organizationId, connectionId);
+      tokens.set(connectionId, token);
+    }
+    const resolved = await token;
+    if (!resolved) throw new Error(`No GitHub credential for connection ${connectionId}`);
+    return resolved;
+  };
   const deps: GithubAclSyncDeps = {
-    listRepos: async ({ connectionId }) => {
-      const rows = await sql<{ config: Record<string, unknown> | null }>`
-				SELECT config FROM feeds WHERE connection_id = ${Number(connectionId)} AND deleted_at IS NULL
+    listRepos: async ({ organizationId, connectionId }) => {
+      // Deleted feeds stay listed (as retired repos) so their old graph claims
+      // are retracted. Merely omitting a resource leaves its previous grants
+      // live whenever another repository refreshes the same connection.
+      const rows = await sql<{ config: Record<string, unknown> | null; deleted_at: unknown }>`
+				SELECT config, deleted_at FROM feeds
+        WHERE organization_id = ${organizationId} AND connection_id = ${Number(connectionId)}
 			`;
-      return repoRefsFromFeedConfigs(rows.map((r) => r.config));
+      return repoRefsFromFeedConfigs(rows);
+    },
+    fetchPublicMembers: async ({ organizationId, connectionId, repo }) => {
+      const token = await connectionToken(organizationId, connectionId);
+      return await isPublicRepository(token, repo) ? publicRepositoryMembers(organizationId) : null;
     },
     fetchCollaborators: async ({ organizationId, connectionId, repo }) => {
-      let token = tokens.get(connectionId);
-      if (!token) {
-        token = resolveGithubConnectionToken(organizationId, connectionId);
-        tokens.set(connectionId, token);
-      }
-      const resolved = await token;
-      if (!resolved) throw new Error(`No GitHub credential for connection ${connectionId}`);
-      return fetchRepoCollaborators(resolved, repo);
+      return fetchRepoCollaborators(await connectionToken(organizationId, connectionId), repo);
     },
   };
 
