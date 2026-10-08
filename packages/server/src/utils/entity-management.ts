@@ -7,6 +7,8 @@
  */
 
 import { deriveToolActorSource } from './apply-context';
+import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
+import { attachEntityIdentities, identityMemberIdsSql, identityRootSql } from './entity-identity';
 import type { EntityMetrics } from "@lobu/connector-sdk";
 import { classifyToolError, getErrorMessage, slugify } from "@lobu/core";
 import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
@@ -41,6 +43,7 @@ import { isAdminOrOwnerRole, isInProcessSystemCall } from "../tools/access-contr
 import { querySqlImpl } from "../tools/admin/query_sql";
 import type { ToolContext } from "../tools/registry";
 import { entityLinkMatchSql } from "./content-search";
+import { buildConnectionVisibilityClause } from "./content-search/visibility";
 import {
 	computeFieldMerge,
 	type FieldControl,
@@ -92,28 +95,6 @@ export async function countStoredEntitiesOfType(
       AND e.deleted_at IS NULL
   `;
 	return Number(rows[0]?.count || 0);
-}
-
-/** Live stored identity edges only; retained source rows are not list roots.
- * Same-org/type live endpoints keep search from widening the root's read scope.
- * Physical row counts deliberately do not use this display predicate.
- */
-function identityEdgesSql(entityAlias: string): string {
-  return `SELECT ir.from_entity_id, ir.to_entity_id
-    FROM entity_relationships ir
-    JOIN entity_relationship_types it ON it.id = ir.relationship_type_id
-    JOIN entities source ON source.id = ir.from_entity_id
-    JOIN entities target ON target.id = ir.to_entity_id
-    WHERE ir.organization_id = ${entityAlias}.organization_id AND ir.deleted_at IS NULL
-      AND it.organization_id = ${entityAlias}.organization_id AND it.purpose = 'identity'
-      AND it.deleted_at IS NULL AND it.status = 'active'
-      AND source.organization_id = ${entityAlias}.organization_id AND target.organization_id = ${entityAlias}.organization_id
-      AND source.entity_type_id = ${entityAlias}.entity_type_id AND target.entity_type_id = ${entityAlias}.entity_type_id
-      AND source.deleted_at IS NULL AND target.deleted_at IS NULL`;
-}
-
-function identityRootSql(entityAlias: string): string {
-  return `NOT EXISTS (${identityEdgesSql(entityAlias)} AND ir.from_entity_id = ${entityAlias}.id)`;
 }
 
 /**
@@ -402,6 +383,7 @@ export interface EntityData {
 
 export interface CreatedEntity {
   id: number;
+  identity?: EntityIdentity;
   /** Internal ownership projection used to avoid cross-org audit anchors. */
   organization_id?: string;
   entity_type: string;
@@ -1668,33 +1650,36 @@ export async function getEntity(
   // Visibility branches checked here:
   //   1. caller's own org (always readable)
   //   2. public-catalog entity (anyone reads, except `$member`)
-  const result = await sql<CreatedEntity>`
+  const visibility = buildConnectionVisibilityClause({
+    organizationId: ctx.organizationId, userId: ctx.userId, baseParamIndex: 3,
+  }, 'ev');
+  const result = await sql.unsafe<CreatedEntity>(`
     SELECT
       e.id, e.organization_id, et.slug AS entity_type, e.name, e.slug, e.parent_id, e.metadata, e.created_at,
       pe.name as parent_name, pe.slug as parent_slug, pet.slug as parent_entity_type,
       (
         SELECT COUNT(*) FROM current_event_records ev
-        WHERE ${sql.unsafe(entityLinkMatchSql('e.id::bigint', 'ev'))}
-          AND ev.organization_id = ${ctx.organizationId}
+        WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}
+          AND ev.organization_id = $1 ${visibility.sql}
       ) as total_content,
       (
         SELECT COUNT(DISTINCT c.connector_key)
         FROM feeds f
         JOIN connections c ON c.id = f.connection_id
-        WHERE f.organization_id = ${ctx.organizationId}
+        WHERE f.organization_id = $1
           AND f.deleted_at IS NULL
           AND c.deleted_at IS NULL
-          AND ${sql.unsafe(feedLinkedToBusinessEntitySql('e.id', 'f', 'c', 'e.organization_id'))}
+          AND ${feedLinkedToBusinessEntitySql('e.id', 'f', 'c', 'e.organization_id')}
       ) as active_connections,
       (
         SELECT COUNT(*) FROM automations i
         WHERE e.id = ANY(i.entity_ids)
-          AND i.organization_id = ${ctx.organizationId}
+          AND i.organization_id = $1
       ) as automations_count,
       (
         SELECT COUNT(*) FROM entities c
         WHERE c.parent_id = e.id
-          AND c.organization_id = ${ctx.organizationId}
+          AND c.organization_id = $1
           AND c.deleted_at IS NULL
       ) as children_count
     FROM entities e
@@ -1702,15 +1687,15 @@ export async function getEntity(
     LEFT JOIN entities pe ON e.parent_id = pe.id
     LEFT JOIN entity_types pet ON pet.id = pe.entity_type_id
     LEFT JOIN organization eo ON eo.id = e.organization_id
-    WHERE e.id = ${entityId}
+    WHERE e.id = $2
       AND (
-        e.organization_id = ${ctx.organizationId}
+        e.organization_id = $1
         OR (eo.visibility = 'public' AND et.slug <> '$member')
       )
-      ${includeDeleted ? sql`` : sql`AND e.deleted_at IS NULL`}
-  `;
+      ${includeDeleted ? '' : 'AND e.deleted_at IS NULL'}
+  `, [ctx.organizationId, entityId, ...visibility.params]);
 
-  return result.length > 0 ? result[0] : null;
+  return (await attachEntityIdentities(sql, result))[0] ?? null;
 }
 
 /**
@@ -2313,49 +2298,39 @@ export async function listEntities(
 		params.push(filters.entity_type);
 	}
 
+	const memberConditions: string[] = [];
 	if (filters.parent_id !== undefined) {
 		if (filters.parent_id === null) {
-			conditions.push("{e}.parent_id IS NULL");
+			memberConditions.push("member.parent_id IS NULL");
 		} else {
-			conditions.push(`{e}.parent_id = $${paramIdx++}`);
+			memberConditions.push(`member.parent_id = $${paramIdx++}`);
 			params.push(filters.parent_id);
 		}
 	}
 
 	if (filters.search) {
-		conditions.push(
-			`EXISTS (
-        WITH RECURSIVE members(id) AS (
-          SELECT {e}.id
-          UNION
-          SELECT edge.from_entity_id FROM members m
-          JOIN LATERAL (${identityEdgesSql('{e}')}) edge ON edge.to_entity_id = m.id
-        )
-        SELECT 1 FROM members m JOIN entities member ON member.id = m.id
-        WHERE member.name ILIKE $${paramIdx} ESCAPE '!'
-          OR member.metadata->>'domain' ILIKE $${paramIdx} ESCAPE '!'
-      )`,
-		);
+		memberConditions.push(`(member.name ILIKE $${paramIdx} ESCAPE '!'
+      OR member.metadata->>'domain' ILIKE $${paramIdx} ESCAPE '!')`);
 		params.push(`%${filters.search.replace(/[!%_]/g, '!$&')}%`);
 		paramIdx++;
 	}
 
 	if (filters.category) {
-		conditions.push(`{e}.metadata->>'category' = $${paramIdx++}`);
+		memberConditions.push(`member.metadata->>'category' = $${paramIdx++}`);
 		params.push(filters.category);
 	}
 
 	if (filters.main_market) {
-		conditions.push(`{e}.metadata->>'main_market' = $${paramIdx++}`);
+		memberConditions.push(`member.metadata->>'main_market' = $${paramIdx++}`);
 		params.push(filters.main_market);
 	}
 
 	if (filters.market) {
-		conditions.push(`{e}.metadata->>'market' = $${paramIdx++}`);
+		memberConditions.push(`member.metadata->>'market' = $${paramIdx++}`);
 		params.push(filters.market);
 	}
 
-	conditions.push(...attributeFilterSql(filters.filters ?? [], "{e}.metadata", params));
+	memberConditions.push(...attributeFilterSql(filters.filters ?? [], "member.metadata", params));
 
 	// Render the shared conditions for a given pair of table aliases. The
 	// outer query uses e/et; the page-id prefetch subquery below re-binds the
@@ -2365,14 +2340,19 @@ export async function listEntities(
 			.map((c) =>
 				c.replace(/\{e\}\./g, `${eAlias}.`).replace(/\{et\}\./g, `${etAlias}.`),
 			)
-			// Authored SQL may contain literal "{e}." or "{et}." text.
-			.concat(segmentFilter ? [`${eAlias}.id IN (${segmentFilter.sql})`] : [])
+			// Every predicate must hold on one member, including the authored segment.
+			// Append authored SQL after alias substitution so literal text is untouched.
+			.concat(memberConditions.length || segmentFilter ? [`EXISTS (
+        SELECT 1 FROM entities member WHERE member.id IN (${identityMemberIdsSql(`${eAlias}.id`)})
+          AND ${[...memberConditions, ...(segmentFilter ? [`member.id IN (${segmentFilter.sql})`] : [])].join(' AND ')}
+      )`] : [])
 			.join(" AND ");
 
 	const whereClause = renderWhere("e", "et");
 
 	const sortColumnMap: Record<string, string> = {
 		name: "e.name",
+		domain: "e.metadata->>'domain'",
 		created_at: "e.created_at",
 		total_content: "total_content",
 		active_connections: "active_connections",
@@ -2388,12 +2368,17 @@ export async function listEntities(
 	const sortOrderSql = normalizedSortOrder === "asc" ? "ASC" : "DESC";
 	const orderBy = `${sortColumnMap[sortBy]} ${sortOrderSql}, e.id ASC`;
 
+  const visibility = buildConnectionVisibilityClause({
+    organizationId: ctx.organizationId, userId: ctx.userId, baseParamIndex: params.length + 1,
+  }, 'ev');
+  params.push(...visibility.params);
+
 	const baseQuery = `
     FROM entities e
     JOIN entity_types et ON et.id = e.entity_type_id
     LEFT JOIN entities pe ON e.parent_id = pe.id
     LEFT JOIN entity_types pet ON pet.id = pe.entity_type_id
-    LEFT JOIN LATERAL (SELECT COUNT(*) as cnt FROM current_event_records ev WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}) tc ON true
+    LEFT JOIN LATERAL (SELECT COUNT(*) as cnt FROM current_event_records ev WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')} AND ev.organization_id = e.organization_id ${visibility.sql}) tc ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(DISTINCT c.connector_key) as cnt
       FROM feeds f
@@ -2415,7 +2400,7 @@ export async function listEntities(
   // BY only, no LATERALs — and enrich just those rows. Sorts by computed
   // columns (total_content, …) need the counts for ordering, so they keep the
   // single-query shape.
-  const plainSort = sortBy === 'name' || sortBy === 'created_at';
+  const plainSort = sortBy === 'name' || sortBy === 'created_at' || sortBy === 'domain';
   const pageIdClause = plainSort
     ? `AND e.id = ANY(ARRAY(
          SELECT e2.id FROM entities e2
@@ -2475,7 +2460,7 @@ export async function listEntities(
 
   const totalCount = Number(totalCountResult[0]?.total_count || 0);
 
-  return { entities, hasMore, totalCount, limit, offset, sortBy, sortOrder: normalizedSortOrder };
+  return { entities: await attachEntityIdentities(sql, entities), hasMore, totalCount, limit, offset, sortBy, sortOrder: normalizedSortOrder };
 }
 
 /**

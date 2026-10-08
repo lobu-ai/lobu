@@ -535,6 +535,18 @@ export type RelationshipCountByType = Static<
   typeof RelationshipCountByTypeSchema
 >;
 
+/** Server-derived grouping. Persist record IDs; the representative can change. */
+export const EntityIdentitySchema = Type.Object({
+  root_id: Type.Integer({ minimum: 1 }),
+  member_ids: Type.Array(Type.Integer({ minimum: 1 }), {
+    minItems: 1,
+    maxItems: 26,
+    uniqueItems: true,
+  }),
+});
+
+export type EntityIdentity = Static<typeof EntityIdentitySchema>;
+
 /**
  * Shared entity shape across the create/update/get/list variants (the superset
  * of fields; each variant marks its extras optional). `metadata` and the
@@ -543,6 +555,7 @@ export type RelationshipCountByType = Static<
  */
 export const ManageEntityItemSchema = Type.Object({
   id: Type.Integer(),
+  identity: Type.Optional(EntityIdentitySchema),
   entity_type: Type.String(),
   name: Type.String(),
   slug: Type.String(),

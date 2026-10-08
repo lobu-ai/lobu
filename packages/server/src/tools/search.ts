@@ -7,6 +7,9 @@
  * `client.entities.create(...)` then `client.connections.create(...)`.
  */
 
+import { EntityIdentitySchema, type EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
+import { attachEntityIdentities, identityRootIdSql } from '../utils/entity-identity';
+import { buildConnectionVisibilityClause } from '../utils/content-search/visibility';
 import { type Static, Type } from '@sinclair/typebox';
 import {
   hasRequiredMcpScope,
@@ -93,6 +96,7 @@ export function resolveEntityLimit(args: SearchArgs): number {
 
 // Unified entity with all fields (nulls where not applicable)
 export const EntitySchema = Type.Object({
+  identity: Type.Optional(EntityIdentitySchema),
   id: Type.Integer(),
   type: Type.String(),
   name: Type.String(),
@@ -132,6 +136,7 @@ const ConnectionInfoSchema = Type.Object({
 type ConnectionInfo = Static<typeof ConnectionInfoSchema>;
 
 interface EntityQueryRow {
+  identity?: EntityIdentity;
   id: number;
   organization_id: string;
   name: string;
@@ -1740,7 +1745,7 @@ async function searchWorkspaceImpl(
 // tenants' activity volumes through aggregate counts. Each count is
 // gated on `e.organization_id = $callerOrg` so we return zeros for
 // cross-org rows. Connection counts additionally apply per-user visibility.
-function entitySelectColumns(callerOrgParamIdx: number, scope: AuthzScope): string {
+function entitySelectColumns(callerOrgParamIdx: number, scope: AuthzScope, visibilitySql: string): string {
   const ownOrg = `e.organization_id = $${callerOrgParamIdx}`;
   const connectionVisibility = compileConnectionRowVisibility(scope, 'cn');
   return `
@@ -1750,7 +1755,7 @@ function entitySelectColumns(callerOrgParamIdx: number, scope: AuthzScope): stri
     COALESCE((
       SELECT COUNT(*) FROM current_event_records ev
       WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}
-        AND ev.organization_id = e.organization_id
+        AND ev.organization_id = e.organization_id ${visibilitySql}
     ), 0)
   ELSE 0 END as content_count,
   CASE WHEN ${ownOrg} THEN
@@ -1959,15 +1964,28 @@ async function queryEntities(
     matchReason = 'exact_name';
   }
 
+  const visibility = buildConnectionVisibilityClause({
+    organizationId: scope.organizationId, userId: scope.principal, baseParamIndex: params.length + 1,
+  }, 'ev');
+  params.push(...visibility.params);
+  // Rank actual matching records within their group before paging. The selected
+  // record keeps its own name and metadata; the descriptor identifies its root.
   const rows = await sql.unsafe<EntityQueryRow>(
-    `SELECT ${entitySelectColumns(orgParamIdx, scope)},
-      ${scoreExpr} as match_score,
-      '${matchReason}' as match_reason,
-      ${vectorSimExpr} as vector_similarity
-    ${ENTITY_JOINS}
-    WHERE ${whereClause}
-    ORDER BY (e.organization_id = $${orgParamIdx}) DESC, match_score DESC
-    LIMIT ${limit}`,
+    `WITH candidates AS MATERIALIZED (
+      SELECT e.id, e.organization_id, ${identityRootIdSql('e.id')} AS identity_root_id,
+        ${scoreExpr} AS match_score, ${vectorSimExpr} AS vector_similarity
+      ${ENTITY_JOINS} WHERE ${whereClause}
+    ), ranked AS (
+      SELECT *, row_number() OVER (PARTITION BY identity_root_id ORDER BY match_score DESC, id ASC) AS group_rank
+      FROM candidates
+    ), page AS (
+      SELECT * FROM ranked WHERE group_rank = 1
+      ORDER BY (organization_id = $${orgParamIdx}) DESC, match_score DESC, id ASC LIMIT ${limit}
+    )
+    SELECT ${entitySelectColumns(orgParamIdx, scope, visibility.sql)}, page.match_score,
+      '${matchReason}' AS match_reason, page.vector_similarity
+    ${ENTITY_JOINS} JOIN page ON page.id = e.id
+    ORDER BY (e.organization_id = $${orgParamIdx}) DESC, page.match_score DESC, e.id ASC`,
     params
   );
 
@@ -1988,14 +2006,17 @@ async function fetchEntityById(
   // canonical entities (HMRC, banks) the agent has discovered via search.
   // Operational counts are gated on caller org; connection counts also use
   // the caller's row-visibility predicate.
+  const visibility = buildConnectionVisibilityClause({
+    organizationId: scope.organizationId, userId: scope.principal, baseParamIndex: 4,
+  }, 'ev');
   const result = await sql.unsafe<EntityQueryRow>(
-    `SELECT ${entitySelectColumns(2, scope)}
+    `SELECT ${entitySelectColumns(2, scope, visibility.sql)}
     ${ENTITY_JOINS}
     LEFT JOIN organization eo ON eo.id = e.organization_id
     WHERE e.id = $1
       AND (e.organization_id = $2 OR ($3::boolean AND eo.visibility = 'public'))
       AND e.deleted_at IS NULL`,
-    [entityId, scope.organizationId, includePublic]
+    [entityId, scope.organizationId, includePublic, ...visibility.params]
   );
 
   if (result.length === 0) return null;
@@ -2008,14 +2029,17 @@ async function fetchPublicEntityById(
   entityId: number,
   scope: AuthzScope
 ): Promise<EntityQueryRow | null> {
+  const visibility = buildConnectionVisibilityClause({
+    organizationId: scope.organizationId, userId: scope.principal, baseParamIndex: 3,
+  }, 'ev');
   const result = await getDb().unsafe<EntityQueryRow>(
-    `SELECT ${entitySelectColumns(1, scope)}
+    `SELECT ${entitySelectColumns(1, scope, visibility.sql)}
     ${ENTITY_JOINS}
     JOIN organization eo ON eo.id = e.organization_id
     WHERE e.id = $2
       AND eo.visibility = 'public'
       AND e.deleted_at IS NULL`,
-    [scope.organizationId, entityId]
+    [scope.organizationId, entityId, ...visibility.params]
   );
   if (result.length === 0) return null;
   await attachOrganizationSlugs(result);
@@ -2075,7 +2099,8 @@ async function formatEntityResult(
     return emptyResult({ ...(title ? { title } : {}), entity_type: args.entity_type || null });
   }
   // Map rows to unified Entity format (all fields, nulls where not applicable)
-  const matches: Entity[] = visibleRows.map((row) => ({
+  const matches: Entity[] = (await attachEntityIdentities(getDb(), visibleRows)).map((row) => ({
+    ...(row.identity ? { identity: row.identity } : {}),
     id: Number(row.id),
     type: row.entity_type,
     name: row.name,
@@ -2127,27 +2152,30 @@ async function formatEntityResult(
   // primaries to match the same invariant the parent's stats follow.
   let children: UnifiedSearchResult['children'];
   if (isRootEntity) {
-    const childRows = await getDb()<ChildEntityRow>`
+    const childVisibility = buildConnectionVisibilityClause({
+      organizationId: connectionScope.organizationId, userId: connectionScope.principal, baseParamIndex: 4,
+    }, 'ev');
+    const childRows = await getDb().unsafe<ChildEntityRow>(`
       SELECT
         e.id,
         e.name,
         et.slug AS entity_type,
         e.metadata::jsonb->>'market' as market,
-        CASE WHEN ${primaryIsCallerOrg} THEN
+        CASE WHEN $1::boolean THEN
           COALESCE(
             (SELECT COUNT(*) FROM current_event_records ev
-              WHERE e.id = ANY(ev.entity_ids)
-                AND ev.organization_id = e.organization_id),
+              WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}
+                AND ev.organization_id = e.organization_id ${childVisibility.sql}),
             0
           )
         ELSE 0 END as content_count
       FROM entities e
       JOIN entity_types et ON et.id = e.entity_type_id
-      WHERE e.parent_id = ${primaryEntity.id}
-        AND e.organization_id = ${primaryRow.organization_id}
+      WHERE e.parent_id = $2
+        AND e.organization_id = $3
       ORDER BY e.created_at DESC
       LIMIT ${MAX_CHILDREN}
-    `;
+    `, [primaryIsCallerOrg, primaryEntity.id, primaryRow.organization_id, ...childVisibility.params]);
     children = childRows.map((row) => ({
       id: Number(row.id),
       name: row.name,

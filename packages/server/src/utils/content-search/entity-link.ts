@@ -6,6 +6,7 @@
 
 import { EVENT_RECALL_IDENTITY_NAMESPACES } from '@lobu/connector-sdk/identity-namespaces';
 import { type DbClient, pgTextArray } from '../../db/client';
+import { identityMemberIdsSql } from '../entity-identity';
 import { CONNECTOR_RECALL_NAMESPACES } from '../../identity/connector-identity-modules';
 import {
   IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY,
@@ -55,26 +56,12 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * namespace becomes a join filter instead of a restrictable predicate.
  */
 export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
-  // Direct (feed-pinned / save_content / webhook) attribution: the entity id is
-  // stamped in `events.entity_ids`. Merge redirect: also match events stamped
-  // with any entity MERGED INTO this one — a merged loser's raw-stamped events
-  // (which can't be rewritten, events being append-only) recall against the
-  // winner. `applyMerge` FLATTENS chains (L→W→V is stored as L→V, W→V), so a
-  // single `merged_into = X` hop reaches every descendant loser — no recursion.
-  // `&&` (overlap) against the {self ∪ direct losers} set; the losers subquery
-  // is one indexed lookup (idx_entities_merged_into), a one-time InitPlan even
-  // when `paramRef` is an outer column, NOT per-event (see
-  // entity-merge-redirect-plan.test.ts).
-  const directBranch = `SELECT e2.id FROM events e2
-      WHERE e2.entity_ids && ARRAY(
-        SELECT en.id FROM entities en
-        WHERE en.id = ${paramRef} OR en.merged_into = ${paramRef}
-      )`;
+  const directBranch = directEntityLinkBranch(paramRef);
 
   const standardBranches = STANDARD_IDENTITY_NAMESPACES.map(
     (ns) => `SELECT e2.id FROM events e2
       JOIN entity_identities ei
-        ON ei.entity_id = ${paramRef}
+        ON ei.entity_id IN (${identityMemberIdsSql(paramRef)})
        AND ei.namespace = '${ns}'
        AND ei.deleted_at IS NULL
       WHERE e2.metadata ? '${ns}'
@@ -84,6 +71,17 @@ export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
 
   const branches = [directBranch, ...standardBranches].join('\n    UNION\n    ');
   return `${alias}.id IN (\n    ${branches}\n  )`;
+}
+
+/** Keep physical redirects until the approved legacy migration has completed. */
+function directEntityLinkBranch(entityRef: string): string {
+  return `SELECT e2.id FROM events e2
+    WHERE e2.entity_ids && ARRAY(
+      WITH members AS (${identityMemberIdsSql(entityRef)})
+      SELECT id FROM members
+      UNION
+      SELECT en.id FROM entities en WHERE en.merged_into IN (SELECT id FROM members)
+    )`;
 }
 
 /**
@@ -101,7 +99,7 @@ export interface EntityIdentityScope {
 }
 
 /**
- * Pre-fetch the live `entity_identities` rows for one entity, restricted to
+ * Pre-fetch live identity claims for the current group, restricted to
  * the namespaces we have backing indexes for (`STANDARD_IDENTITY_NAMESPACES`).
  *
  * Cheap: indexed scan via `idx_entity_identities_by_entity`. Typical entity
@@ -111,15 +109,15 @@ export async function fetchEntityIdentityScopes(
   sql: DbClient,
   entityId: number
 ): Promise<EntityIdentityScope[]> {
-  const rows = (await sql`
+  const rows = (await sql.unsafe(`
     SELECT identity.namespace,
            identity.identifier,
            identity.scope_key
     FROM entity_identities identity
-    WHERE identity.entity_id = ${entityId}
+    WHERE identity.entity_id IN (${identityMemberIdsSql('$1::bigint')})
       AND identity.deleted_at IS NULL
-      AND identity.namespace = ANY(${pgTextArray([...STANDARD_IDENTITY_NAMESPACES])}::text[])
-  `) as Array<{ namespace: unknown; identifier: unknown; scope_key: unknown }>;
+      AND identity.namespace = ANY($2::text[])
+  `, [entityId, pgTextArray([...STANDARD_IDENTITY_NAMESPACES])])) as Array<{ namespace: unknown; identifier: unknown; scope_key: unknown }>;
   return rows.map((r) => ({
     namespace: String(r.namespace),
     identifier: String(r.identifier),
@@ -153,15 +151,7 @@ export function buildEntityLinkUnion(opts: {
   baseParamIndex: number;
 }): { sql: string; params: string[] } {
   const alias = opts.alias ?? 'f';
-  // Merge redirect (see entityLinkMatchSql): match events stamped with this
-  // entity OR any entity merged into it, so a merged loser's raw-stamped events
-  // recall against the winner. Chains are flattened at merge time (merged_into is
-  // the flattened root), so one indexed hop reaches every descendant loser.
-  const direct = `SELECT e2.id FROM events e2
-      WHERE e2.entity_ids && ARRAY(
-        SELECT en.id FROM entities en
-        WHERE en.id = ${opts.entityIdLiteral}::bigint OR en.merged_into = ${opts.entityIdLiteral}::bigint
-      )`;
+  const direct = directEntityLinkBranch(`${opts.entityIdLiteral}::bigint`);
   const params: string[] = [];
   let paramIndex = opts.baseParamIndex;
 

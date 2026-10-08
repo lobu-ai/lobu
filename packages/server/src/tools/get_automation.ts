@@ -1,3 +1,4 @@
+import { identityMemberIdsSql } from '../utils/entity-identity';
 /**
  * Tool: get_automation (Incremental Time Windows)
  *
@@ -537,7 +538,7 @@ async function getAutomationImpl(
            'scopeKey', ei.scope_key
          ))
          FROM entity_identities ei
-         WHERE ei.entity_id = (i.entity_ids)[1]
+         WHERE ei.entity_id IN (${identityMemberIdsSql('(i.entity_ids)[1]')})
            AND ei.deleted_at IS NULL
            AND ei.namespace IN (${namespacesLiteral})
         ) as entity_scopes,

@@ -139,6 +139,10 @@ export type SearchMemoryResponses = {
     title?: string;
     entity_type: string | null;
     entity: {
+      identity?: {
+        root_id: number;
+        member_ids: Array<number>;
+      };
       id: number;
       type: string;
       name: string;
@@ -163,6 +167,10 @@ export type SearchMemoryResponses = {
       match_reason: string;
     } | null;
     matches: Array<{
+      identity?: {
+        root_id: number;
+        member_ids: Array<number>;
+      };
       id: number;
       type: string;
       name: string;
@@ -1592,6 +1600,10 @@ export type ManageEntityResponses = {
         action: "create";
         entity?: {
           id: number;
+          identity?: {
+            root_id: number;
+            member_ids: Array<number>;
+          };
           entity_type: string;
           name: string;
           slug: string;
@@ -1628,6 +1640,10 @@ export type ManageEntityResponses = {
         action: "update";
         entity: {
           id: number;
+          identity?: {
+            root_id: number;
+            member_ids: Array<number>;
+          };
           entity_type: string;
           name: string;
           slug: string;
@@ -1663,6 +1679,10 @@ export type ManageEntityResponses = {
         action: "list";
         entities: Array<{
           id: number;
+          identity?: {
+            root_id: number;
+            member_ids: Array<number>;
+          };
           entity_type: string;
           name: string;
           slug: string;
@@ -1709,6 +1729,10 @@ export type ManageEntityResponses = {
         action: "get";
         entity: {
           id: number;
+          identity?: {
+            root_id: number;
+            member_ids: Array<number>;
+          };
           entity_type: string;
           name: string;
           slug: string;
