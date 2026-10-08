@@ -170,14 +170,16 @@ function fingerprintAndCapture(parsed: Record<string, unknown>): void {
  */
 const sentryAwareStream: pino.DestinationStream = {
   write(line: string): void {
-    process.stdout.write(line);
     let parsed: unknown;
     try {
-      parsed = JSON.parse(line);
+      parsed = scrubSentryValue(JSON.parse(line));
     } catch {
+      // Never fall back to emitting an unredacted record on a logging failure.
+      process.stdout.write('{"level":"error","msg":"Log record could not be serialized safely"}\n');
       return;
     }
     if (parsed && typeof parsed === 'object') {
+      process.stdout.write(`${JSON.stringify(parsed)}\n`);
       fingerprintAndCapture(parsed as Record<string, unknown>);
     }
   },
@@ -186,6 +188,8 @@ const sentryAwareStream: pino.DestinationStream = {
 const logger = pino(
   {
     level: getLogLevel(),
+    base: { service: 'lobu-server', release: process.env.APP_GIT_SHA,
+      environment: process.env.ENVIRONMENT || process.env.NODE_ENV || 'development' },
     browser: {
       asObject: false,
     },

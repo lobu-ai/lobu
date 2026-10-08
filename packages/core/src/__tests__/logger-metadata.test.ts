@@ -34,6 +34,26 @@ function captureWarn(
 }
 
 describe("console logger pino-style metadata", () => {
+  test("preserves diagnostic stack frames while scrubbing credentials in all fields", () => {
+    const err = new Error(
+      "fetch https://example.test/path?token=synthetic-query-secret"
+    );
+    err.stack = `${err.message}\n    at syntheticOperation (worker.js:12:3)`;
+    const line = captureWarn((log) => {
+      log.warn(
+        "failed https://example.test/path?token=synthetic-message-secret",
+        {
+          err,
+          nested: { cookie: "synthetic-cookie-secret" },
+        }
+      );
+    });
+    expect(line).toContain("syntheticOperation");
+    expect(line).not.toContain("synthetic-query-secret");
+    expect(line).not.toContain("synthetic-message-secret");
+    expect(line).not.toContain("synthetic-cookie-secret");
+  });
+
   test("renders BOTH the message and the leading metadata object", () => {
     const line = captureWarn((log) => {
       log.warn(

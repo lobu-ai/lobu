@@ -120,7 +120,16 @@ async function resolveJobExecution(
     return { ok: true, code: codeResult.code, executor: customExecutor };
   }
   try {
-    const executor = await select.selectExecutor({ timeoutMs });
+    const executor = await select.selectExecutor({
+      timeoutMs,
+      logSink: (level, line) => {
+        const context = { run_id: job.run_id, connector_key: job.connector_key, source: 'connector' };
+        if (level === 'error') log.error(context, line);
+        else if (level === 'warn') log.warn(context, line);
+        else if (level === 'debug') log.debug(context, line);
+        else log.info(context, line);
+      },
+    });
     return { ok: true, code: codeResult.code, executor };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -247,7 +256,7 @@ export async function executeRun(
     try {
       await reportTerminalFailure(client, job, message, 'error_message');
     } catch (error) {
-      log.info('[executor] Failed to reject invalid daemon built-in run:', error);
+      log.error('[executor] Failed to reject invalid daemon built-in run:', error);
     }
     return { itemsCollected: 0, error: message };
   }
@@ -291,7 +300,7 @@ export async function executeRun(
     try {
       await reportTerminalFailure(client, job, message);
     } catch (completeErr) {
-      log.info('[executor] Terminal completion after unhandled failure errored:', completeErr);
+      log.error('[executor] Terminal completion after unhandled failure errored:', completeErr);
     }
     return { itemsCollected: 0, error: message };
   }
@@ -329,7 +338,7 @@ async function executeSyncRun(
   );
   if (!execution.ok) {
     const errorMessage = `Run ${run_id} (${connector_key}): ${execution.error}`;
-    log.info('[executor]', errorMessage);
+    log.error('[executor]', errorMessage);
     await client.complete({
       run_id,
       worker_id: client.id,
@@ -449,7 +458,7 @@ async function executeSyncRun(
     stopHeartbeat();
 
     const errorMessage = error instanceof Error ? error.message : String(error);
-    log.info(`[executor] Sync run ${run_id} failed:`, errorMessage);
+    log.error(`[executor] Sync run ${run_id} failed:`, errorMessage);
 
     const diag = extractExecutionDiagnostics(error);
 
@@ -563,7 +572,7 @@ async function executeActionRun(
   );
   if (!execution.ok) {
     const errorMessage = `Action run ${run_id} (${connector_key}): ${execution.error}`;
-    log.info('[executor]', errorMessage);
+    log.error('[executor]', errorMessage);
     await completeActionOnce(client, {
       run_id,
       worker_id: client.id,
@@ -642,7 +651,7 @@ async function executeActionRun(
     return { itemsCollected: 0 };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    log.info(`[executor] Action run ${run_id} failed:`, errorMessage);
+    log.error(`[executor] Action run ${run_id} failed:`, errorMessage);
 
     if (terminalPayloadStarted || monitor.revoked()) {
       return { itemsCollected: 0, error: errorMessage };
@@ -748,7 +757,7 @@ async function executeAuthRun(
   );
   if (!execution.ok) {
     const errorMessage = `Auth run ${run_id} (${connector_key}): ${execution.error}`;
-    log.info('[executor]', errorMessage);
+    log.error('[executor]', errorMessage);
     await client.completeAuth({
       run_id,
       worker_id: client.id,
@@ -836,7 +845,7 @@ async function executeAuthRun(
   } catch (error) {
     clearInterval(heartbeatInterval);
     const errorMessage = error instanceof Error ? error.message : String(error);
-    log.info(`[executor] Auth run ${run_id} failed:`, errorMessage);
+    log.error(`[executor] Auth run ${run_id} failed:`, errorMessage);
 
     const diag = extractExecutionDiagnostics(error);
 
@@ -1006,7 +1015,7 @@ async function executeEmbedBackfillRun(
     return { itemsCollected: results.length };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    log.info(`[executor] Embed backfill run ${run_id} failed:`, errorMessage);
+    log.error(`[executor] Embed backfill run ${run_id} failed:`, errorMessage);
 
     await client.complete({
       run_id,

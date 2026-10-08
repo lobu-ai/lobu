@@ -342,6 +342,7 @@ export async function restToolProxy(
 		return c.json(toJsonSafe(toRestPublicToolResult(toolName, result)));
 	} catch (error) {
 		if (error instanceof ToolNotRegisteredError) {
+			logger.warn({ error, tool_name: error.toolName, source: "rest_proxy" }, "Requested tool is not registered");
 			// Registry/frontend drift — surface to Sentry so the next "Tool not
 			// found" outage doesn't sit silent behind a 400 the page swallows.
 			// `tool_name` goes in `extra` (not `tags`) because the URL segment is

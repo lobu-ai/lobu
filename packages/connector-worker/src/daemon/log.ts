@@ -7,7 +7,20 @@
  * failures. Pass `--debug` to enable the poll/heartbeat/retry chatter.
  */
 
+import { scrubSentryValue } from '@lobu/core';
+
 let debugEnabled = false;
+
+function write(level: string, parts: unknown[]): void {
+  const record = scrubSentryValue({
+    timestamp: new Date().toISOString(), level, service: 'lobu-worker',
+    release: process.env.APP_GIT_SHA,
+    message: parts.filter((part) => typeof part === 'string').join(' '),
+    data: parts.filter((part) => typeof part !== 'string'),
+  });
+  // stderr is intentional: stdout belongs to the CLI's machine protocol.
+  console.error(JSON.stringify(record));
+}
 
 export function setDebug(enabled: boolean): void {
   debugEnabled = enabled;
@@ -16,10 +29,12 @@ export function setDebug(enabled: boolean): void {
 export const log = {
   /** Always-on: one line per run, startup/shutdown, and hard failures. */
   info: (...parts: unknown[]): void => {
-    console.error(...parts);
+    write('info', parts);
   },
+  warn: (...parts: unknown[]): void => write('warn', parts),
+  error: (...parts: unknown[]): void => write('error', parts),
   /** Debug-only: poll chatter, heartbeats, retry and backoff detail. */
   debug: (...parts: unknown[]): void => {
-    if (debugEnabled) console.error(...parts);
+    if (debugEnabled) write('debug', parts);
   },
 };

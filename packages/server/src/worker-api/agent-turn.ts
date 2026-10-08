@@ -1,3 +1,4 @@
+import { logRunFailure } from "../runs/log-run-failure";
 /**
  * Completion for an agent turn run.
  *
@@ -1013,7 +1014,10 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     return { status, notify: true };
   });
   if ('error' in result) return c.json({ error: result.error }, result.code);
-  if (result.notify) await notifyThreadResponse();
+  if (result.notify) {
+    logRunFailure({ id: body.run_id, status: result.status, run_type: "agent_turn" });
+    await notifyThreadResponse();
+  }
   return c.json({ ok: true, status: result.status, ...(result.idempotent ? { idempotent: true } : {}) });
 }
 

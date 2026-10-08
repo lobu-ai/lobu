@@ -1,3 +1,4 @@
+import { logRunFailure } from "../runs/log-run-failure";
 import { type MessagePayload, parseSessionEntries } from "@lobu/core";
 import {
 	type CompleteDeviceChatRequest,
@@ -275,7 +276,11 @@ export async function completeDeviceChatRun(c: Context<{ Bindings: Env }>) {
 		);
 		return true;
 	});
-	if (transitioned) await notifyThreadResponse();
+	if (transitioned) {
+		logRunFailure({ id: runId, status: error ? "failed" : "completed", run_type: "chat_message",
+			exit_reason: body.exit_reason, exit_code: body.exit_code, exit_signal: body.exit_signal });
+		await notifyThreadResponse();
+	}
 	return c.json({
 		ok: true,
 		status: error ? "failed" : "completed",
