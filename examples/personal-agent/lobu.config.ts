@@ -790,10 +790,9 @@ const hackerNewsConnection = defineConnection({
   name: "Hacker News",
   // Draft staging rides the paired Mac mini Chrome's signed-in HN session.
   deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
-  // No feeds: front_page synced rows nobody reads. Re-add a feed (or a
-  // live read action) when a consumer exists; the connection stays for
-  // prepare_comment staging.
-  feeds: [],
+  // front_page rows feed arrival_frame today and a dedicated HN signal
+  // Automation next; nothing else reads them yet.
+  feeds: [{ feed: "front_page", config: {} }],
 });
 
 const spotifyConnection = defineConnection({
