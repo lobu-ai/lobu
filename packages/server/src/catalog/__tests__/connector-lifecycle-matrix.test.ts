@@ -21,6 +21,7 @@ const EXPECTED_BUNDLED_CONNECTORS = [
 	"slack",
 	"teams",
 	"telegram",
+	"tiktok.web",
 	"webhook",
 	"whatsapp",
 	"whatsapp.web",
@@ -89,6 +90,7 @@ describe("bundled connector lifecycle matrix", () => {
 			// outlook's first actions: list_attachments + download_attachment.
 			"microsoft.outlook": 2,
 			// Browser-backed connectors also expose the gateway's verification action.
+			"tiktok.web": 4,
 			"whatsapp.web": 7,
 			x: 2,
 			youtube: 5,
