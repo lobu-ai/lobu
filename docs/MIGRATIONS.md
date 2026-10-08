@@ -224,3 +224,20 @@ If the migration partially applied (column created, index missing, view missing)
 
 - [PR #767](https://github.com/lobu-ai/lobu/pull/767) — the boot-time schema-version assertion that catches behind-DB images at startup.
 - The post-incident commentary on the original migration ([#765](https://github.com/lobu-ai/lobu/pull/765)) for what "operational note" looks like when a migration's risks are flagged but not addressed.
+
+### Retiring physical entity merges
+
+The physical-merge cutover requires operator cleanup before deployment. Preview
+one workspace with `bun scripts/retire-physical-merges.ts --org <workspace-id>
+--manifest <private-new-file>`. Review its blockers and exact snapshots, retire
+stored callers and pending decisions, then execute with the reviewed manifest,
+`--execute --writers-retired --backup <private-new-file>`. The tool requires
+an explicit workspace and durable backup; it aborts on drift or unknown
+references. Keep the archive outside the checkout. Events are retained and
+only their entity-reference arrays are redirected; survivors and provenance
+must remain byte-for-byte unchanged. Never treat the absence of usage as
+permission to remove data.
+
+The first release fences new physical merges and removes all runtime readers.
+Its historical ledger table remains audit-only, without entity foreign keys.
+Only after that release is deployed may a later migration drop redirect columns.

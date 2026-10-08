@@ -19,13 +19,13 @@ describe('shared collection attribute selection', () => {
       await addUserToOrganization(user.id, target.id, 'owner');
       const owner = await TestApiClient.for({ organizationId: target.id, userId: user.id, memberRole: 'owner' });
       await owner.entity_schema.createType({ slug: 'account', name: 'Accounts', metadata_schema: schema });
-      await owner.entities.create({ type: 'account', name: 'Alpha 100%', metadata: { tier: 'large', seats: 100, active: true } });
+      await owner.entities.create({ entity_type: 'account', name: 'Alpha 100%', metadata: { tier: 'large', seats: 100, active: true } });
       if (target.id === org.id) {
         api = owner;
-        await owner.entities.create({ type: 'account', name: 'Beta', metadata: { tier: 'large', seats: 200, active: false } });
-        await owner.entities.create({ type: 'account', name: 'Gamma', metadata: { tier: 'small', seats: 10, active: true } });
-        await owner.entities.create({ type: 'account', name: 'Absent', metadata: { seats: 0 } });
-        await owner.entities.create({ type: 'account', name: 'Null', metadata: { tier: null, seats: 0 } });
+        await owner.entities.create({ entity_type: 'account', name: 'Beta', metadata: { tier: 'large', seats: 200, active: false } });
+        await owner.entities.create({ entity_type: 'account', name: 'Gamma', metadata: { tier: 'small', seats: 10, active: true } });
+        await owner.entities.create({ entity_type: 'account', name: 'Absent', metadata: { seats: 0 } });
+        await owner.entities.create({ entity_type: 'account', name: 'Null', metadata: { tier: null, seats: 0 } });
         await owner.entity_schema.createType({
           slug: 'source-account', name: 'Source accounts', metadata_schema: schema,
           backing: { sql: `SELECT name, slug, metadata->>'tier' AS tier, (metadata->>'seats')::numeric AS seats, (metadata->>'active')::boolean AS active FROM entities` },

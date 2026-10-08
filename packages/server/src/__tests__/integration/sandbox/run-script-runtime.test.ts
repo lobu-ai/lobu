@@ -1231,14 +1231,14 @@ describe("sandbox output budgets", () => {
   it("reports the total skipped calls even when the preview truncates", async () => {
     const sdk = stubSDK({
       entities: {
-        manage: async () => ({}),
+        update: async () => ({}),
       } as never,
     });
     const result = await runScript({
       source: [
         "export default async (_ctx, client) => {",
         "  for (let i = 0; i < 30; i++) {",
-        "    await client.entities.manage({ big: 'x'.repeat(4000) });",
+        "    await client.entities.update({ entity_id: 1, metadata: { big: 'x'.repeat(4000) } });",
         "  }",
         "  return 'done';",
         "};",

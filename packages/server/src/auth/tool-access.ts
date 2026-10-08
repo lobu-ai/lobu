@@ -96,7 +96,7 @@ export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
 	// list_catalog/list_installed as admin, so a default `mcp:read`+`mcp:write`
 	// token (what `lobu token create` mints) couldn't discover connectors at all.
 	manage_catalog: new Set([]),
-	manage_entity: new Set(["delete", "merge", "resolve_duplicates", "unmerge"]),
+	manage_entity: new Set(["delete"]),
 	manage_entity_schema: new Set([
 		"create",
 		"update",

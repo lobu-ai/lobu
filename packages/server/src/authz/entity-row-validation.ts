@@ -42,7 +42,7 @@ export type ValidatedEntityRowPatch = EntityRowPatch & {
 };
 
 /** The entity write a verdict judged, in the vocabulary the audit records. */
-export type EntityWriteOperation = "create" | "update" | "delete" | "merge";
+export type EntityWriteOperation = "create" | "update" | "delete";
 
 /** What a rule decided, carried on the error so a caller can route it. */
 export interface EntityRowValidationVerdict {
@@ -64,18 +64,14 @@ export interface EntityRowValidationVerdict {
  * closed the DEFAULT for every caller. Only a caller with approval machinery to
  * route an escalation into opts in by catching this and reading {@link verdict}
  * — `updateEntity`, automation promotion (`promote-keyed-entities`), and
- * `manage_entity` deletion and merge. Link auto-create and eval scaffolding have
+ * `manage_entity` deletion. Link auto-create and eval scaffolding have
  * nowhere to queue a card, so for them a rule that asked for review must stop the
  * write — which is exactly what an uncaught throw does.
  *
- * Soft-delete (`deleteEntity`) and merge (`applyMergeInTransaction`) are the
- * in-between cases. The policy gate can queue either card, and `manage_entity`
- * also turns a delete rule's `$deleted` escalation into a delete card and a
- * merge rule's `$merged_into` escalation into a merge card. Applying those cards
- * grants `$deleted` or `$merged_into` — the one field each card can be said to
- * have approved. Callers without approval machinery still fail closed. A `deny`
- * stops the write either way, and force delete reaches this seam under the same
- * `$deleted` name, so freezing a row freezes both delete paths.
+ * A delete rule's `$deleted` escalation becomes a delete card. Applying it
+ * grants `$deleted`, the field the reviewer approved. Callers without approval
+ * machinery still fail closed. A deny always stops the write, and force delete
+ * reaches this seam under the same `$deleted` name.
  */
 export class EntityRowValidationError extends Error {
 	readonly verdict: EntityRowValidationVerdict;
@@ -106,23 +102,13 @@ const UNGOVERNED_COLUMNS: ReadonlySet<string> = new Set([
 	"contentHash",
 ]);
 
-/**
- * Reserved `$`-names a rule sees for non-metadata columns.
- *
- * This is the rule VOCABULARY, not the shape of `EntityRowPatch`. `mergedInto`
- * has no key on that patch — the merge ledger is written by
- * `transitionEntityMergeRows`, never `patchEntityRows` — so `flatten` never
- * finds it and only the merge seam proposes it. Keeping it here is what makes
- * `$merged_into` one namespace with the rest, so a rule reads
- * `row.next.$merged_into` exactly as it reads `row.next.$deleted`.
- */
+/** Reserved `$`-names a rule sees for non-metadata columns. */
 export const RESERVED_COLUMN_NAMES: Readonly<Record<string, string>> = {
 	name: "$name",
 	slug: "$slug",
 	parentId: "$parent_id",
 	content: "$content",
 	softDelete: "$deleted",
-	mergedInto: "$merged_into",
 };
 
 function touchesGovernedColumn(patch: EntityRowPatch): boolean {
@@ -176,7 +162,6 @@ interface CommittedRow {
 	parent_id: string | number | null;
 	content: string | null;
 	deleted_at: Date | null;
-	merged_into: string | number | null;
 }
 
 function committedState(row: CommittedRow): Record<string, unknown> {
@@ -192,7 +177,6 @@ function committedState(row: CommittedRow): Record<string, unknown> {
 		$parent_id: row.parent_id == null ? null : Number(row.parent_id),
 		$content: row.content ?? null,
 		$deleted: row.deleted_at != null,
-		$merged_into: row.merged_into == null ? null : Number(row.merged_into),
 	};
 }
 
@@ -303,15 +287,7 @@ export async function validateEntityRowPatchGrantingApprovedFields(params: {
 	return branded;
 }
 
-/**
- * Read every target row, group by compiled rule, evaluate, and enforce the
- * verdicts. Shared by the patch seam and the merge seam so the two cannot drift
- * on how a deny is logged or how a grant waives an escalate.
- *
- * Takes an ALREADY-FLAT patch, because the two seams flatten differently: an
- * ordinary patch maps its columns through `RESERVED_COLUMN_NAMES`, while a
- * merge proposes exactly one reserved name and has no metadata of its own.
- */
+/** Read target rows, evaluate their compiled rules, and enforce approval grants. */
 async function enforceCompiledRules(params: {
 	tx: DbClient;
 	ids: number[];
@@ -330,7 +306,7 @@ async function enforceCompiledRules(params: {
 	const rows = await tx<CommittedRow>`
     SELECT e.id, e.organization_id, et.slug AS entity_type,
            e.metadata, e.name, e.slug, e.parent_id, e.content,
-           e.deleted_at, e.merged_into, et.rules_compiled
+           e.deleted_at, et.rules_compiled
     FROM entities e
     JOIN entity_types et ON et.id = e.entity_type_id
     WHERE e.id = ANY(${pgBigintArray(ids)}::bigint[])
@@ -420,57 +396,10 @@ async function enforceCompiledRules(params: {
 }
 
 /**
- * Validate the MERGE of a losing row into a winner.
- *
- * Merge does NOT borrow `$deleted`. A merge tombstones the loser as an
- * implementation detail of the redirect, but the act is a consolidation, not a
- * destruction: the row's data survives, reachable through `merged_into`, and
- * `applyUnmerge` can put it back. A tenant must be able to freeze deletion of a
- * posted invoice without also freezing the dedupe of a double-entered one, so
- * the merge gets its own reserved name and a rule says which it means.
- *
- * Scope is the LOSER's transition only. The winner's metadata patch is NOT
- * validated here: `mergeEntityState` appends the loser's name to
- * `metadata.aliases` on every merge, so validating the winner would present a
- * metadata change to the rule engine every single time — a rule freezing a
- * canonical row would make it unable to absorb any duplicate at all. That needs
- * a decision about what approving a merge grants, not a call added here. The
- * redirect repoint (`expectedMergedInto` non-null) is likewise out of scope: it
- * only ever touches rows that are already tombstoned.
- *
- * Same handle contract as the patch seam — the caller's transaction, never
- * `getDb()`, because `applyMergeInTransaction` already holds the row locks this
- * verdict is judged under.
- *
- * @throws EntityRowValidationError when a rule denies or escalates the merge.
- */
-export async function validateEntityRowMergeGrantingApprovedFields(params: {
-	tx: DbClient;
-	/** The rows being merged AWAY. The winner is not judged here. */
-	loserIds: number[];
-	/** The canonical row they are being pointed at. */
-	mergedInto: number;
-	/** REQUIRED, as on the patch seam. `["$merged_into"]` when this call is the
-	 * application of a merge a human approved. */
-	approvedFields: readonly string[];
-}): Promise<void> {
-	const { tx, loserIds, mergedInto, approvedFields } = params;
-	if (loserIds.length === 0) return;
-	await enforceCompiledRules({
-		tx,
-		ids: loserIds,
-		flatPatch: { [RESERVED_COLUMN_NAMES.mergedInto]: mergedInto },
-		approvedFields,
-		operation: "merge",
-	});
-}
-
-/**
  * Mint a validated patch WITHOUT running validation.
  *
  * For platform bookkeeping that legitimately sits outside tenant state rules —
- * eval scaffolding, ACL graph upkeep, merge-ledger transitions. Deliberately
- * named and greppable: an exemption should be visible in review, unlike the
+ * eval scaffolding and ACL graph upkeep. Deliberately named and greppable: an exemption should be visible in review, unlike the
  * implicit bypass that every direct `patchEntityRows` caller enjoyed before
  * this seam existed.
  *

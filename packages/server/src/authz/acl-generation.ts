@@ -58,7 +58,7 @@ export async function bumpAclGeneration(tx: DbClient, orgId: string): Promise<vo
  * `connections`, and the rest. A transaction that locks entity or connection
  * rows first and only afterwards updates `organization` inverts that order and
  * deadlocks against a concurrent delete. Every invalidating transaction —
- * merge, unmerge, force-delete, approval-driven merge — therefore claims the
+ * relationship retraction and force-delete — therefore claims the
  * parent up front.
  */
 export async function lockOrgForAclInvalidation(

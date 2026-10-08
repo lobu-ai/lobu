@@ -56,6 +56,14 @@ docker run -d --name lobu-pg -p 5432:5432 \
 # DATABASE_URL=postgresql://postgres:lobu@localhost:5432/postgres
 ```
 
+## Entity resolution
+
+Entity types may declare `resolutionPolicy.rules` in `lobu.config.ts`. Each rule
+specifies `fields`, a `normalizer` (`email`, `phone`, or `exact`), and `onMatch`
+(`auto_link` or `review`). Types without an explicit policy have no matching
+rules. Declare a relationship with `purpose: "identity"` for associations;
+linked records keep their own IDs and metadata.
+
 ## Commands
 
 `lobu --help` shows the grouped command list, and `lobu <cmd> --help` lists the per-command flags. The full surface, grouped the way `--help` groups it:

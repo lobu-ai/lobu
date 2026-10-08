@@ -74,14 +74,11 @@ export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
   return `${alias}.id IN (\n    ${branches}\n  )`;
 }
 
-/** Events are append-only, so retained merge losers still carry their original IDs. */
+/** Match the IDs of the current identity component. */
 function directEntityLinkBranch(entityRef: string): string {
   return `SELECT e2.id FROM events e2
     WHERE e2.entity_ids && ARRAY(
-      WITH members AS (${identityMemberIdsSql(entityRef)})
-      SELECT id FROM members
-      UNION
-      SELECT en.id FROM entities en WHERE en.merged_into IN (SELECT id FROM members)
+      ${identityMemberIdsSql(entityRef)}
     )`;
 }
 

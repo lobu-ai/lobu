@@ -454,10 +454,10 @@ function mapEntityType(entity: EntityType): DesiredEntityType {
         rule.normalizer === "phone" ||
         rule.normalizer === "exact";
       const onMatchOk =
-        rule.onMatch === "auto_merge" || rule.onMatch === "review";
+        rule.onMatch === "auto_link" || rule.onMatch === "review";
       if (fields && fields.length > 0 && normalizerOk && onMatchOk) return [];
       return [
-        `rule ${index}: expected { fields: string[], normalizer: "email"|"phone"|"exact", onMatch: "auto_merge"|"review" }`,
+        `rule ${index}: expected { fields: string[], normalizer: "email"|"phone"|"exact", onMatch: "auto_link"|"review" }`,
       ];
     });
     if (ruleErrors.length > 0) {

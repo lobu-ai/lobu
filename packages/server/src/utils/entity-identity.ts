@@ -1,5 +1,6 @@
 import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
 import { type DbClient, pgBigintArray } from '../db/client';
+import { ToolUserError } from './errors';
 
 /** One edge predicate for every identity read; ordinary and ACL edges never group records. */
 function identityEdgesSql(entityAlias: string): string {
@@ -66,4 +67,17 @@ export async function attachEntityIdentities<T extends { id: number }>(db: DbCli
     const identity = byId.get(Number(row.id));
     return identity ? { ...row, identity } : row;
   });
+}
+
+/** Identity semantics come from workspace declarations, never an entity key. */
+export async function configuredIdentityRelationship(db: DbClient, organizationId: string, entityType: string): Promise<{ id: number; slug: string }> {
+  const rows = await db<{ id: number; slug: string }>`SELECT t.id, t.slug FROM entity_relationship_types t
+    WHERE t.organization_id = ${organizationId} AND t.purpose = 'identity' AND t.status = 'active' AND t.deleted_at IS NULL
+      AND (NOT EXISTS (SELECT 1 FROM entity_relationship_type_rules r WHERE r.relationship_type_id = t.id AND r.deleted_at IS NULL)
+        OR EXISTS (SELECT 1 FROM entity_relationship_type_rules r WHERE r.relationship_type_id = t.id AND r.deleted_at IS NULL
+          AND r.source_entity_type_slug = ${entityType} AND r.target_entity_type_slug = ${entityType})) ORDER BY t.id LIMIT 2`;
+  if (rows.length !== 1) throw new ToolUserError(rows.length === 0
+    ? 'Configure an active relationship with purpose identity for this entity type before discovering duplicates'
+    : 'Duplicate discovery requires exactly one applicable active identity relationship type', 409);
+  return { id: Number(rows[0].id), slug: rows[0].slug };
 }

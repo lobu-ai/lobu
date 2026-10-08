@@ -19,7 +19,6 @@ export async function readAutomationRunThreads(args: {
 		status: string;
 		task: string | null;
 		pendingActionCount: number;
-		autoAppliedCount: number;
 		messages: ReturnType<typeof paginateSessionMessages>["messages"];
 		actions: Array<{
 			type: "tool-approval";
@@ -34,30 +33,6 @@ export async function readAutomationRunThreads(args: {
 			reason: string | null;
 			status: string;
 			reviewedByName: string | null;
-		}>;
-		automaticActions: Array<{
-			type: "entity-merge-result";
-			operationId: number;
-			status: "active" | "undone";
-			canUndo: boolean;
-			loser: {
-				id: number;
-				name: string;
-				entityType: string;
-				slug: string;
-				parentEntityType: string | null;
-				parentSlug: string | null;
-			};
-			winner: {
-				id: number;
-				name: string;
-				entityType: string;
-				slug: string;
-				parentEntityType: string | null;
-				parentSlug: string | null;
-			};
-			evidence: Array<{ kind: string; identifier: string }>;
-			appliedAt: string;
 		}>;
 	}>;
 }> {
@@ -136,7 +111,6 @@ export async function readAutomationRunThreads(args: {
 			status: row.status,
 			task: row.prompt,
 			pendingActionCount: 0,
-			autoAppliedCount: 0,
 			messages,
 			actions: [] as Array<{
 				type: "tool-approval";
@@ -151,30 +125,6 @@ export async function readAutomationRunThreads(args: {
 				reason: string | null;
 				status: string;
 				reviewedByName: string | null;
-			}>,
-			automaticActions: [] as Array<{
-				type: "entity-merge-result";
-				operationId: number;
-				status: "active" | "undone";
-				canUndo: boolean;
-				loser: {
-					id: number;
-					name: string;
-					entityType: string;
-					slug: string;
-					parentEntityType: string | null;
-					parentSlug: string | null;
-				};
-				winner: {
-					id: number;
-					name: string;
-					entityType: string;
-					slug: string;
-					parentEntityType: string | null;
-					parentSlug: string | null;
-				};
-				evidence: Array<{ kind: string; identifier: string }>;
-				appliedAt: string;
 			}>,
 		};
 	});
@@ -264,101 +214,6 @@ export async function readAutomationRunThreads(args: {
 		if (!run) continue;
 		run.actions.push(action);
 		if (action.status === "pending") run.pendingActionCount += 1;
-	}
-
-	if (runIds.length > 0) {
-		const autoRows = await sql<{
-			source_run_id: number;
-			operation_id: number;
-			status: "active" | "undone";
-			can_undo: boolean;
-			evidence: Array<{ kind: string; identifier: string }>;
-			created_at: Date;
-			loser_id: number;
-			loser_name: string;
-			loser_type: string;
-			loser_slug: string;
-			loser_parent_type: string | null;
-			loser_parent_slug: string | null;
-			winner_id: number;
-			winner_name: string;
-			winner_type: string;
-			winner_slug: string;
-			winner_parent_type: string | null;
-			winner_parent_slug: string | null;
-		}>`
-			SELECT operation.source_run_id, operation.id AS operation_id,
-			       operation.status, operation.evidence, operation.created_at,
-			       operation.status = 'active'
-			         AND loser.merged_into = operation.winner_entity_id
-			         AND winner.deleted_at IS NULL
-			         AND NOT EXISTS (
-			           SELECT 1
-			           FROM entity_merge_operations later
-			           WHERE later.organization_id = operation.organization_id
-			             AND later.winner_entity_id = operation.winner_entity_id
-			             AND later.status = 'active'
-			             AND later.id > operation.id
-			         ) AS can_undo,
-			       loser.id AS loser_id, loser.name AS loser_name,
-			       loser_type.slug AS loser_type, loser.slug AS loser_slug,
-			       loser_parent_type.slug AS loser_parent_type,
-			       loser_parent.slug AS loser_parent_slug,
-			       winner.id AS winner_id, winner.name AS winner_name,
-			       winner_type.slug AS winner_type, winner.slug AS winner_slug,
-			       winner_parent_type.slug AS winner_parent_type,
-			       winner_parent.slug AS winner_parent_slug
-			FROM entity_merge_operations operation
-			JOIN entities loser
-			  ON loser.id = operation.loser_entity_id
-			 AND loser.organization_id = operation.organization_id
-			JOIN entity_types loser_type ON loser_type.id = loser.entity_type_id
-			LEFT JOIN entities loser_parent
-			  ON loser_parent.id = loser.parent_id
-			 AND loser_parent.organization_id = operation.organization_id
-			LEFT JOIN entity_types loser_parent_type ON loser_parent_type.id = loser_parent.entity_type_id
-			JOIN entities winner
-			  ON winner.id = operation.winner_entity_id
-			 AND winner.organization_id = operation.organization_id
-			JOIN entity_types winner_type ON winner_type.id = winner.entity_type_id
-			LEFT JOIN entities winner_parent
-			  ON winner_parent.id = winner.parent_id
-			 AND winner_parent.organization_id = operation.organization_id
-			LEFT JOIN entity_types winner_parent_type ON winner_parent_type.id = winner_parent.entity_type_id
-			WHERE operation.organization_id = ${organizationId}
-			  AND operation.source_run_id = ANY(${pgBigintArray(runIds)}::bigint[])
-			  AND operation.decision = 'auto_merge'
-			ORDER BY operation.created_at, operation.id
-		`;
-		for (const row of autoRows) {
-			const run = runById.get(Number(row.source_run_id));
-			if (!run) continue;
-			run.autoAppliedCount += 1;
-			run.automaticActions.push({
-				type: "entity-merge-result",
-				operationId: Number(row.operation_id),
-				status: row.status,
-				canUndo: row.can_undo,
-				loser: {
-					id: Number(row.loser_id),
-					name: row.loser_name,
-					entityType: row.loser_type,
-					slug: row.loser_slug,
-					parentEntityType: row.loser_parent_type,
-					parentSlug: row.loser_parent_slug,
-				},
-				winner: {
-					id: Number(row.winner_id),
-					name: row.winner_name,
-					entityType: row.winner_type,
-					slug: row.winner_slug,
-					parentEntityType: row.winner_parent_type,
-					parentSlug: row.winner_parent_slug,
-				},
-				evidence: row.evidence ?? [],
-				appliedAt: row.created_at.toISOString(),
-			});
-		}
 	}
 
 	return { runs };

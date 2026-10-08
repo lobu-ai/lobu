@@ -202,7 +202,7 @@ describe("manage_automations — instruction-presence rule", () => {
 };
 
 export default async function reaction(ctx, client) {
-	await client.entities.manage({ action: "resolve_duplicates", candidate_entity_ids: [1] });
+	await client.entities.discoverDuplicates({ entity_type: "contact-record" });
 }`;
 
 	it("creates a schedule Automation from a reaction script without a prompt", async () => {
@@ -229,7 +229,7 @@ export default async function reaction(ctx, client) {
 			WHERE automation.id = ${Number(created.automation_id)}
 		`;
 		expect(row.prompt).toBe("");
-		expect(row.reaction_script).toContain("resolve_duplicates");
+		expect(row.reaction_script).toContain("discoverDuplicates");
 		expect(row.reaction_input_schema).toEqual({
 			type: "object",
 			properties: { summary: { type: "string" } },
@@ -340,7 +340,7 @@ export default async function reaction(ctx, client) {
 		const [sibling] = await sql`
 			SELECT reaction_script FROM automations WHERE id = ${siblingId}
 		`;
-		expect(sibling.reaction_script).toContain("resolve_duplicates");
+		expect(sibling.reaction_script).toContain("discoverDuplicates");
 	});
 
 	it("rejects clearing the reaction script that was the sole instruction source", async () => {
@@ -376,7 +376,7 @@ export default async function reaction(ctx, client) {
 			FROM automations
 			WHERE id = ${Number(created.automation_id)}
 		`;
-		expect(row.reaction_script).toContain("resolve_duplicates");
+		expect(row.reaction_script).toContain("discoverDuplicates");
 	});
 
 	it("allows clearing a reaction when the prompt alone satisfies the rule", async () => {

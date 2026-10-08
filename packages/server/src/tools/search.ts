@@ -1,3 +1,4 @@
+import { type EntityReadRestrictions, entityReadPolicySql, entityReadRestrictions, filterEntityReadRows } from "../authz/entity-read-policy";
 /**
  * Tool: search_memory
  *
@@ -26,7 +27,6 @@ import {
 import { isInProcessSystemCall } from './access-control';
 import { AUDIT_SEMANTIC_TYPE, MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail } from '../utils/member-entity-type';
-import { evaluateEntityMutation, resolveActingPrincipal } from '../authz/entity-policy';
 import { type AuthzScope, authzScopeFromToolContext } from '../authz/scope';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
 import { getDb } from '../db/client';
@@ -1421,43 +1421,19 @@ async function searchImpl(
  * Default entity read is auto (unrestricted); a type-scoped deny removes those
  * results so search can't leak around manage_entity get/list.
  */
-async function filterEntitiesByReadPolicy<T extends { entity_type: string }>(
+async function filterEntitiesByReadPolicy<T extends { id?: number | string; entity_type: string }>(
   ctx: ToolContext,
-  entities: T[]
+  entities: T[],
+  readRestrictions?: EntityReadRestrictions,
 ): Promise<T[]> {
   if (entities.length === 0 || !ctx.organizationId) return entities;
-  // Human-driven tools (no agent/automation) keep full org entity search.
-  if (!ctx.agentId && !ctx.actingAutomationId) return entities;
-  const actor = await resolveActingPrincipal(getDb(), {
-    organizationId: ctx.organizationId,
-    userId: ctx.userId,
-    agentId: ctx.agentId,
-    explicitAutomationId: null,
-    sessionAutomationId: ctx.actingAutomationId ?? null,
-  });
-  if (actor.kind === 'user') return entities;
-  const typeCache = new Map<string, boolean>();
-  const out: T[] = [];
-  for (const entity of entities) {
-    const slug = entity.entity_type;
-    let ok = typeCache.get(slug);
-    if (ok === undefined) {
-      const decision = await evaluateEntityMutation({
-        organizationId: ctx.organizationId,
-        principalKind: actor.kind,
-        principalId: actor.id,
-        ownerAgentId: actor.ownerAgentId,
-        ownerResolved: actor.ownerResolved,
-        action: 'read',
-        entityTypeSlug: slug,
-        sql: getDb(),
-      });
-      ok = decision === 'allow';
-      typeCache.set(slug, ok);
-    }
-    if (ok) out.push(entity);
-  }
-  return out;
+  const db = getDb();
+  const restrictions = readRestrictions ?? await entityReadRestrictions(db, ctx);
+  const scoped = entities.filter(entity => !restrictions.some(rule => rule.entity_id === null &&
+    (rule.entity_type_slug === null || rule.entity_type_slug === entity.entity_type)));
+  const records = scoped.filter((entity): entity is T & { id: number | string } => entity.id !== undefined);
+  const allowed = new Set((await filterEntityReadRows(db, records, restrictions)).map(row => Number(row.id)));
+  return scoped.filter(entity => entity.id === undefined || allowed.has(Number(entity.id)));
 }
 
 async function searchWorkspaceImpl(
@@ -1495,9 +1471,11 @@ async function searchWorkspaceImpl(
     throw new ToolUserError('Must provide either query, entity_id, or query_embedding', 400);
   }
 
+  const readRestrictions = await entityReadRestrictions(getDb(), ctx);
+
   // Type-scoped search: fail closed before querying when the agent can't read that type.
   if (args.entity_type) {
-    const probe = await filterEntitiesByReadPolicy(ctx, [{ entity_type: args.entity_type }]);
+    const probe = await filterEntitiesByReadPolicy(ctx, [{ entity_type: args.entity_type }], readRestrictions);
     if (probe.length === 0) {
       throw new ToolUserError(
         `Policy denies reading entities of type '${args.entity_type}' for this principal.`,
@@ -1606,7 +1584,8 @@ async function searchWorkspaceImpl(
         args.entity_id,
         env,
         connectionScope,
-        args.include_public_catalogs ?? true
+        args.include_public_catalogs ?? true,
+        readRestrictions
       )) ?? execution.preResolvedEntity ?? null;
     if (entity) {
       // $member entities follow the manage_entity read policy, not the agent
@@ -1622,7 +1601,7 @@ async function searchWorkspaceImpl(
           suggestion: entityIdNotFoundSuggestion(args.entity_id),
         });
       }
-      const readable = await filterEntitiesByReadPolicy(ctx, [entity]);
+      const readable = await filterEntitiesByReadPolicy(ctx, [entity], readRestrictions);
       if (readable.length === 0) {
         return emptyResult({
           ...(title ? { title } : {}),
@@ -1632,7 +1611,7 @@ async function searchWorkspaceImpl(
       }
       const recall = await recallFor(args.entity_id);
       return applyCoverageScope(
-        withRecall(await formatEntityResult(readable, args, ctx, connectionScope), recall),
+        withRecall(await formatEntityResult(readable, args, ctx, connectionScope, readRestrictions), recall),
         execution
       );
     }
@@ -1673,7 +1652,7 @@ async function searchWorkspaceImpl(
   );
 
   let [results, recall] = await Promise.all([
-    queryEntities(query, args, env, connectionScope),
+    queryEntities(query, args, env, connectionScope, readRestrictions),
     recallFor(),
   ]);
 
@@ -1686,7 +1665,8 @@ async function searchWorkspaceImpl(
         fallbackQuery.slice(0, 200).trim() || null,
         args,
         env,
-        connectionScope
+        connectionScope,
+        readRestrictions
       );
       if (results.length > 0) {
         logger.info(
@@ -1698,10 +1678,10 @@ async function searchWorkspaceImpl(
   }
 
   if (results.length > 0) {
-    const readable = await filterEntitiesByReadPolicy(ctx, [...results]);
+    const readable = await filterEntitiesByReadPolicy(ctx, [...results], readRestrictions);
     if (readable.length > 0) {
       return applyCoverageScope(
-        withRecall(await formatEntityResult(readable, args, ctx, connectionScope), recall),
+        withRecall(await formatEntityResult(readable, args, ctx, connectionScope, readRestrictions), recall),
         execution
       );
     }
@@ -1745,11 +1725,11 @@ async function searchWorkspaceImpl(
 // tenants' activity volumes through aggregate counts. Each count is
 // gated on `e.organization_id = $callerOrg` so we return zeros for
 // cross-org rows. Connection counts additionally apply per-user visibility.
-function entitySelectColumns(callerOrgParamIdx: number, scope: AuthzScope, visibilitySql: string): string {
+function entitySelectColumns(callerOrgParamIdx: number, scope: AuthzScope, visibilitySql: string, childReadPredicate = 'TRUE'): string {
   const ownOrg = `e.organization_id = $${callerOrgParamIdx}`;
   const connectionVisibility = compileConnectionRowVisibility(scope, 'cn');
   return `
-  e.id, e.organization_id, e.name, et.slug AS entity_type, e.slug, e.metadata, e.parent_id,
+  e.id, e.organization_id, e.name, et.slug AS entity_type, e.slug, e.metadata, pe.id AS parent_id,
   pe.name as parent_name, pe.slug as parent_slug, pet.slug as parent_entity_type,
   CASE WHEN ${ownOrg} THEN
     COALESCE((
@@ -1786,17 +1766,17 @@ function entitySelectColumns(callerOrgParamIdx: number, scope: AuthzScope, visib
     ), 0)
   ELSE 0 END as active_connection_count,
   CASE WHEN ${ownOrg} THEN
-    COALESCE((SELECT COUNT(*) FROM entities c WHERE c.parent_id = e.id AND c.organization_id = e.organization_id), 0)
+    COALESCE((SELECT COUNT(*) FROM entities c WHERE c.parent_id = e.id AND c.organization_id = e.organization_id AND ${childReadPredicate}), 0)
   ELSE 0 END as children_count,
   CASE WHEN ${ownOrg} THEN
     COALESCE((SELECT COUNT(*) FROM automations i WHERE e.id = ANY(i.entity_ids) AND i.organization_id = e.organization_id), 0)
   ELSE 0 END as automation_count`;
 }
 
-const ENTITY_JOINS = `
+const entityJoinsSql = (parentReadPredicate = 'TRUE') => `
   FROM entities e
   JOIN entity_types et ON et.id = e.entity_type_id
-  LEFT JOIN entities pe ON e.parent_id = pe.id
+  LEFT JOIN entities pe ON e.parent_id = pe.id AND ${parentReadPredicate}
   LEFT JOIN entity_types pet ON pet.id = pe.entity_type_id`;
 
 /**
@@ -1812,7 +1792,8 @@ async function queryEntities(
   query: string | null,
   args: SearchArgs,
   _env: Env,
-  scope: AuthzScope
+  scope: AuthzScope,
+  readRestrictions: EntityReadRestrictions,
 ) {
   const sql = getDb();
   const fuzzyEnabled = args.fuzzy ?? true;
@@ -1936,6 +1917,7 @@ async function queryEntities(
   // Do NOT honor `metadata_filter.agent_id` here either: `metadata_filter` is on
   // the public schema, so honoring it would re-expose the cross-agent footgun.
 
+  conditions.push(entityReadPolicySql(readRestrictions, 'e', params));
   const whereClause = conditions.join(' AND ');
 
   // Build scoring expression
@@ -1968,13 +1950,15 @@ async function queryEntities(
     organizationId: scope.organizationId, userId: scope.principal, baseParamIndex: params.length + 1,
   }, 'ev');
   params.push(...visibility.params);
+  const parentReadPredicate = entityReadPolicySql(readRestrictions, 'pe', params);
+  const childReadPredicate = entityReadPolicySql(readRestrictions, 'c', params);
   // Rank actual matching records within their group before paging. The selected
   // record keeps its own name and metadata; the descriptor identifies its root.
   const rows = await sql.unsafe<EntityQueryRow>(
     `WITH candidates AS MATERIALIZED (
       SELECT e.id, e.organization_id, ${identityRootIdSql('e.id')} AS identity_root_id,
         ${scoreExpr} AS match_score, ${vectorSimExpr} AS vector_similarity
-      ${ENTITY_JOINS} WHERE ${whereClause}
+      ${entityJoinsSql(parentReadPredicate)} WHERE ${whereClause}
     ), ranked AS (
       SELECT *, row_number() OVER (PARTITION BY identity_root_id ORDER BY match_score DESC, id ASC) AS group_rank
       FROM candidates
@@ -1982,9 +1966,9 @@ async function queryEntities(
       SELECT * FROM ranked WHERE group_rank = 1
       ORDER BY (organization_id = $${orgParamIdx}) DESC, match_score DESC, id ASC LIMIT ${limit}
     )
-    SELECT ${entitySelectColumns(orgParamIdx, scope, visibility.sql)}, page.match_score,
+    SELECT ${entitySelectColumns(orgParamIdx, scope, visibility.sql, childReadPredicate)}, page.match_score,
       '${matchReason}' AS match_reason, page.vector_similarity
-    ${ENTITY_JOINS} JOIN page ON page.id = e.id
+    ${entityJoinsSql(parentReadPredicate)} JOIN page ON page.id = e.id
     ORDER BY (e.organization_id = $${orgParamIdx}) DESC, page.match_score DESC, e.id ASC`,
     params
   );
@@ -1998,7 +1982,8 @@ async function fetchEntityById(
   entityId: number,
   _env: Env,
   scope: AuthzScope,
-  includePublic: boolean
+  includePublic: boolean,
+  readRestrictions: EntityReadRestrictions,
 ) {
   const sql = getDb();
 
@@ -2009,14 +1994,18 @@ async function fetchEntityById(
   const visibility = buildConnectionVisibilityClause({
     organizationId: scope.organizationId, userId: scope.principal, baseParamIndex: 4,
   }, 'ev');
+  const params: unknown[] = [entityId, scope.organizationId, includePublic, ...visibility.params];
+  const readPredicate = entityReadPolicySql(readRestrictions, 'e', params);
+  const parentReadPredicate = entityReadPolicySql(readRestrictions, 'pe', params);
+  const childReadPredicate = entityReadPolicySql(readRestrictions, 'c', params);
   const result = await sql.unsafe<EntityQueryRow>(
-    `SELECT ${entitySelectColumns(2, scope, visibility.sql)}
-    ${ENTITY_JOINS}
+    `SELECT ${entitySelectColumns(2, scope, visibility.sql, childReadPredicate)}
+    ${entityJoinsSql(parentReadPredicate)}
     LEFT JOIN organization eo ON eo.id = e.organization_id
     WHERE e.id = $1
       AND (e.organization_id = $2 OR ($3::boolean AND eo.visibility = 'public'))
-      AND e.deleted_at IS NULL`,
-    [entityId, scope.organizationId, includePublic, ...visibility.params]
+      AND e.deleted_at IS NULL AND ${readPredicate}`,
+    params
   );
 
   if (result.length === 0) return null;
@@ -2034,7 +2023,7 @@ async function fetchPublicEntityById(
   }, 'ev');
   const result = await getDb().unsafe<EntityQueryRow>(
     `SELECT ${entitySelectColumns(1, scope, visibility.sql)}
-    ${ENTITY_JOINS}
+    ${entityJoinsSql()}
     JOIN organization eo ON eo.id = e.organization_id
     WHERE e.id = $2
       AND eo.visibility = 'public'
@@ -2067,7 +2056,8 @@ async function formatEntityResult(
   entityRows: EntityQueryRow[],
   args: SearchArgs,
   ctx: ToolContext,
-  connectionScope: AuthzScope
+  connectionScope: AuthzScope,
+  readRestrictions: EntityReadRestrictions,
 ): Promise<UnifiedSearchResult> {
   const title = args.title?.trim() || undefined;
   // $member read policy mirrors manage_entity list/get: callers who are not
@@ -2095,11 +2085,12 @@ async function formatEntityResult(
       );
     }
   }
-  if (visibleRows.length === 0) {
+  const identifiedRows = await filterEntityReadRows(getDb(), await attachEntityIdentities(getDb(), visibleRows), readRestrictions);
+  if (identifiedRows.length === 0) {
     return emptyResult({ ...(title ? { title } : {}), entity_type: args.entity_type || null });
   }
   // Map rows to unified Entity format (all fields, nulls where not applicable)
-  const matches: Entity[] = (await attachEntityIdentities(getDb(), visibleRows)).map((row) => ({
+  const matches: Entity[] = identifiedRows.map((row) => ({
     ...(row.identity ? { identity: row.identity } : {}),
     id: Number(row.id),
     type: row.entity_type,
@@ -2125,7 +2116,7 @@ async function formatEntityResult(
 
   const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
   const primaryEntity = matches[0];
-  const primaryRow = visibleRows[0];
+  const primaryRow = identifiedRows[0];
   const entityType = primaryEntity.type;
   const isRootEntity = !primaryEntity.parent_id;
 
@@ -2155,6 +2146,8 @@ async function formatEntityResult(
     const childVisibility = buildConnectionVisibilityClause({
       organizationId: connectionScope.organizationId, userId: connectionScope.principal, baseParamIndex: 4,
     }, 'ev');
+    const childParams: unknown[] = [primaryIsCallerOrg, primaryEntity.id, primaryRow.organization_id, ...childVisibility.params];
+    const childReadPredicate = entityReadPolicySql(readRestrictions, 'e', childParams);
     const childRows = await getDb().unsafe<ChildEntityRow>(`
       SELECT
         e.id,
@@ -2172,10 +2165,10 @@ async function formatEntityResult(
       FROM entities e
       JOIN entity_types et ON et.id = e.entity_type_id
       WHERE e.parent_id = $2
-        AND e.organization_id = $3
+        AND e.organization_id = $3 AND ${childReadPredicate}
       ORDER BY e.created_at DESC
       LIMIT ${MAX_CHILDREN}
-    `, [primaryIsCallerOrg, primaryEntity.id, primaryRow.organization_id, ...childVisibility.params]);
+    `, childParams);
     children = childRows.map((row) => ({
       id: Number(row.id),
       name: row.name,

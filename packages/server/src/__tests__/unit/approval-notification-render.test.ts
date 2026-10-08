@@ -7,8 +7,8 @@ import {
 } from "../../notifications/triggers";
 
 /**
- * Golden-pins the approval TITLE and Markdown BODY for all four structured
- * shapes (field change, entity create, entity delete, entity merge) plus the
+ * Golden-pins approval titles and Markdown bodies for field changes, entity
+ * create/delete, and identity association/separation, plus the
  * generic fallback.
  *
  * Chat summary budgets and native controls are covered by event-card.test.ts;
@@ -113,30 +113,26 @@ describe("approval notification rendering", () => {
 		);
 	});
 
-	test("entity merge: names both entities and renders a merge action", () => {
-		const details: ActionApprovalDetails = {
-			kind: "entity_change",
-			operation: "merge",
-			actorLabel: "An automation",
-			entityId: 12,
-			entityType: "person",
-			entityName: "Duplicate Person",
-			proposal: {
-				entity_id: 12,
-				winner_entity_id: 10,
-				name: "Duplicate Person",
-				winner_name: "Canonical Person",
-			},
-			reason: "Duplicate entities need approval before merging.",
-		};
-
-		expect(formatActionApprovalTitle("entity_change", details)).toBe(
-			"Review merging person",
-		);
-		expect(formatActionApprovalBody({ details })).toContain(
-			"**An automation** wants to merge Duplicate Person (#12).",
-		);
-	});
+	for (const operation of ["link", "unlink"] as const) {
+		test(`identity ${operation}: describes the actual association decision`, () => {
+			const details: ActionApprovalDetails = {
+				kind: "entity_change",
+				operation,
+				actorLabel: "An automation",
+				entityId: 12,
+				entityType: "contact",
+				entityName: "Imported Contact",
+				proposal: { from_entity_id: 12, to_entity_id: 10, relationship_type: "same_entity" },
+			};
+			expect(formatActionApprovalTitle("entity_change", details)).toBe(
+				`Review ${operation === "link" ? "associating" : "separating"} identity records`,
+			);
+			expect(formatActionApprovalBody({ details })).toBe(
+				`**An automation** wants to ${operation === "link" ? "associate" : "separate"} Imported Contact (#12).\n` +
+				"- From entity id: 12\n- To entity id: 10\n- Relationship type: same\\_entity",
+			);
+		});
+	}
 
 	test("Markdown escaping neutralises link and emphasis delimiters", () => {
 		// One hostile name. The Markdown body must not let it forge a link or a

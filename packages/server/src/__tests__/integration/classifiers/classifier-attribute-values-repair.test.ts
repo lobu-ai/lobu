@@ -39,7 +39,7 @@ describe('classifier attribute_values corruption (item 4)', () => {
 
     await owner.entity_schema.createType({ slug: 'company', name: 'Company' });
     const entity = (await owner.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'Attr Target',
     })) as { entity: { id: number } };
     entityId = entity.entity.id;

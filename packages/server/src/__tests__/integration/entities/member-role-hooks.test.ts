@@ -102,7 +102,7 @@ describe('member roles through generic entity edits', () => {
   it('applies the same existing write permission to ordinary entities', async () => {
     const client = await TestApiClient.for({ organizationId: org.id, userId: owner.userId, memberRole: 'owner' });
     await client.entity_schema.createType({ slug: 'contact', name: 'Contact' });
-    const created = await client.entities.create({ type: 'contact', name: 'Example contact' }) as { entity: { id: number } };
+    const created = await client.entities.create({ entity_type: 'contact', name: 'Example contact' }) as { entity: { id: number } };
     const body = { action: 'update', entity_id: created.entity.id, name: 'Updated contact' };
     const denied = await post(`/api/${org.slug}/manage_entity`, { cookie: member.cookie, body });
     expect(denied.status).toBe(403);

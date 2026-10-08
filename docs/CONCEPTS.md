@@ -71,8 +71,29 @@ only an applied unlink returns `success: true`.
 
 Ordinary relationships and system authorization edges do not form these groups.
 Reserved, derived, source-backed, deleted, and nonparticipating records have no
-identity descriptor. Legacy physical-merge redirects remain readable until the
-separate migration retires them; this grouping does not move records or history.
+identity descriptor. Identity associations retain the original records and history;
+physical merge, redirect, and undo operations are retired.
+
+The entity SDK has ten named methods: `discoverDuplicates`, `list`, `get`,
+`create`, `update`, `delete`, `link`, `unlink`, `updateLink`, and `listLinks`.
+Use `entity_id` and `entity_type` in their inputs. Schema-defined fields belong
+in `metadata`; filter them with `filters`. There are no `manage` or `search`
+aliases or implicit field shortcuts.
+
+Duplicate discovery requires one applicable active relationship with
+`purpose: "identity"` and explicit `x-lobu-resolution.rules` on the entity type.
+Each rule names `fields`, a normalizer (`email`, `phone`, or `exact`), and
+`onMatch: "auto_link"` or `"review"`. No entity type receives implicit rules.
+Discovery proposes at most one current root pair per whole matching component;
+apply it with `link` and rediscover after each join. Groups retain up to 26
+records. Preview, queued, suppressed, and applied receipts are distinct.
+Record-level read policies withhold an entire group when any member is denied;
+source permissions still govern history.
+
+Deployment removes physical-merge runtime readers before dropping their columns
+in a later release. The upgrade requires owner-verified cleanup of redirects,
+active ledgers, old approvals, and saved callers. Remaining historical ledger
+snapshots are audit-only and do not support undo.
 
 ## The event lifecycle (end to end)
 

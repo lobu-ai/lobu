@@ -1053,30 +1053,6 @@ export type ManageEntityData = {
          */
         parent_id?: number;
         /**
-         * [create/update] Primary domain (e.g., spotify.com)
-         */
-        domain?: string;
-        /**
-         * [create/update/list] Industry category
-         */
-        category?: string;
-        /**
-         * [create/update] Platform type (b2b, b2c, b2b2c)
-         */
-        platform_type?: string;
-        /**
-         * [create/update/list] Primary market (ISO 3166-1 alpha-2)
-         */
-        main_market?: string;
-        /**
-         * [create/update/list] Market/region (ISO 3166-1 alpha-2)
-         */
-        market?: string;
-        /**
-         * [create/update] Entity URL
-         */
-        link?: string;
-        /**
          * [create/update/link/update_link] Custom metadata object. For entities: validated against the entity type's JSON schema. For links: relationship metadata. On update, fields a human owns are NOT overwritten — they are queued for the human's approval and reported in the result's `blocked_fields`/`approval_queued`; tell the user you PROPOSED those changes rather than claiming you set them. Unowned fields in the same call apply directly (`applied_fields`).
          */
         metadata?: {
@@ -1102,7 +1078,7 @@ export type ManageEntityData = {
          */
         action: "update";
         /**
-         * [get/update/delete/list_links/merge/unmerge] Entity ID to operate on
+         * [get/update/delete/list_links] Entity ID to operate on
          */
         entity_id: number;
         /**
@@ -1121,30 +1097,6 @@ export type ManageEntityData = {
          * [create/update] Parent entity ID (for hierarchical entities).
          */
         parent_id?: number;
-        /**
-         * [create/update] Primary domain (e.g., spotify.com)
-         */
-        domain?: string;
-        /**
-         * [create/update/list] Industry category
-         */
-        category?: string;
-        /**
-         * [create/update] Platform type (b2b, b2c, b2b2c)
-         */
-        platform_type?: string;
-        /**
-         * [create/update/list] Primary market (ISO 3166-1 alpha-2)
-         */
-        main_market?: string;
-        /**
-         * [create/update/list] Market/region (ISO 3166-1 alpha-2)
-         */
-        market?: string;
-        /**
-         * [create/update] Entity URL
-         */
-        link?: string;
         /**
          * [create/update/link/update_link] Custom metadata object. For entities: validated against the entity type's JSON schema. For links: relationship metadata. On update, fields a human owns are NOT overwritten — they are queued for the human's approval and reported in the result's `blocked_fields`/`approval_queued`; tell the user you PROPOSED those changes rather than claiming you set them. Unowned fields in the same call apply directly (`applied_fields`).
          */
@@ -1203,18 +1155,6 @@ export type ManageEntityData = {
          */
         search?: string;
         /**
-         * [create/update/list] Industry category
-         */
-        category?: string;
-        /**
-         * [create/update/list] Primary market (ISO 3166-1 alpha-2)
-         */
-        main_market?: string;
-        /**
-         * [create/update/list] Market/region (ISO 3166-1 alpha-2)
-         */
-        market?: string;
-        /**
          * [list] Name of an on:'entity' segment declared on entity_type (metrics_config.segments). Narrows the list to entities matching its predicate. Requires entity_type.
          */
         segment?: string;
@@ -1254,7 +1194,7 @@ export type ManageEntityData = {
          */
         action: "get";
         /**
-         * [get/update/delete/list_links/merge/unmerge] Entity ID to operate on
+         * [get/update/delete/list_links] Entity ID to operate on
          */
         entity_id: number;
         /**
@@ -1268,7 +1208,7 @@ export type ManageEntityData = {
          */
         action: "delete";
         /**
-         * [get/update/delete/list_links/merge/unmerge] Entity ID to operate on
+         * [get/update/delete/list_links] Entity ID to operate on
          */
         entity_id: number;
         /**
@@ -1276,7 +1216,7 @@ export type ManageEntityData = {
          */
         force_delete_tree?: boolean;
         /**
-         * [delete, merge, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For merge or identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
+         * [delete, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
          */
         dry_run?: boolean;
         /**
@@ -1295,7 +1235,7 @@ export type ManageEntityData = {
       }
     | {
         /**
-         * [delete, merge, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For merge or identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
+         * [delete, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
          */
         dry_run?: boolean;
         /**
@@ -1344,7 +1284,7 @@ export type ManageEntityData = {
       }
     | {
         /**
-         * [delete, merge, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For merge or identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
+         * [delete, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
          */
         dry_run?: boolean;
         /**
@@ -1423,7 +1363,7 @@ export type ManageEntityData = {
          */
         action: "list_links";
         /**
-         * [get/update/delete/list_links/merge/unmerge] Entity ID to operate on
+         * [get/update/delete/list_links] Entity ID to operate on
          */
         entity_id?: number;
         /**
@@ -1481,53 +1421,6 @@ export type ManageEntityData = {
       }
     | {
         /**
-         * Fold a duplicate entity (entity_id) into the one it really is (winner_entity_id). The loser is tombstoned + forwarded; its identities, aliases, edges, and events recall against the winner. Events are never rewritten. Use when two entities are confirmed the same real-world thing.
-         */
-        action: "merge";
-        /**
-         * [merge] The surviving entity that absorbs `entity_id` (the duplicate).
-         */
-        winner_entity_id: number;
-        /**
-         * [get/update/delete/list_links/merge/unmerge] Entity ID to operate on
-         */
-        entity_id?: number;
-        /**
-         * [merge] All duplicate entities to fold into winner_entity_id. Use this for a duplicate group; entity_id remains supported for a single duplicate.
-         */
-        duplicate_entity_ids?: Array<number>;
-        /**
-         * [merge] Optional structured evidence for human-initiated merge provenance. Agent and Automation evidence is always recomputed from the entity type's resolution policy.
-         */
-        merge_evidence?: Array<{
-          kind: string;
-          identifier: string;
-          identity_ids?: Array<number>;
-        }>;
-        /**
-         * [merge] Why you believe these are the same thing, in one sentence, for the human reviewing the approval card (e.g. 'Same phone digits; the shell is a WhatsApp handle for this contact.'). Shown as your claim, clearly separated from the workspace's own policy verdict — it never counts as proof and never affects whether the merge auto-applies.
-         */
-        merge_rationale?: string;
-        /**
-         * [delete, merge, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For merge or identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.
-         */
-        dry_run?: boolean;
-        /**
-         * Attribution source when mutation is triggered by an Automation reaction
-         */
-        automation_source?: {
-          /**
-           * Automation that triggered this mutation
-           */
-          automation_id: number;
-          /**
-           * Automation run that triggered this mutation
-           */
-          run_id: number;
-        };
-      }
-    | {
-        /**
          * Read whole duplicate components across all live entities of one type. Current-state sweep: changes behind the cursor are reconsidered next sweep. Writes nothing.
          */
         action: "discover_duplicates";
@@ -1543,26 +1436,6 @@ export type ManageEntityData = {
          * [discover_duplicates] Opaque continuation from the preceding page, scoped to this workspace and entity type.
          */
         cursor?: string;
-      }
-    | {
-        /**
-         * Discover duplicate components among candidate_entity_ids using the entity type's x-lobu-resolution policy, then auto-merge deterministic matches or queue review.
-         */
-        action: "resolve_duplicates";
-        /**
-         * [resolve_duplicates] Candidate entity IDs. The server re-reads their values and applies the entity type's resolution policy.
-         */
-        candidate_entity_ids: Array<number>;
-      }
-    | {
-        /**
-         * Reverse a merge from its durable ledger: restore the loser's identities, canonical attributes, and relationships, then un-tombstone it. Fails closed if later edits made exact reversal unsafe.
-         */
-        action: "unmerge";
-        /**
-         * [get/update/delete/list_links/merge/unmerge] Entity ID to operate on
-         */
-        entity_id: number;
       };
   path: {
     /**
@@ -1935,67 +1808,6 @@ export type ManageEntityResponses = {
         };
       }
     | {
-        action: "merge";
-        success: boolean;
-        message: string;
-        winner_entity_id: number;
-        loser_entity_id: number;
-        loser_entity_ids?: Array<number>;
-        moved_identities: number;
-        repointed_edges: number;
-        dry_run?: boolean;
-        /**
-         * Dry-run prediction from current evidence, rejection memory, and write rules. Execution rechecks under lock.
-         */
-        preview?: {
-          outcome: "apply" | "review" | "suppressed" | "refused";
-          reason: string;
-        };
-        resolution?: {
-          decision: "auto_merge" | "human";
-          reason: string;
-          evidence: Array<{
-            kind: string;
-            identifier: string;
-          }>;
-        };
-      }
-    | {
-        action: "merge";
-        approval_queued: true;
-        approval_url?: string;
-        approval_run_id: number;
-        approval_action: "merge";
-        approval_proposal: {
-          entity_id: number;
-          entity_ids?: Array<number>;
-          winner_entity_id: number;
-        };
-        approval_attribution: "agent" | "automation";
-        next_steps: Array<string>;
-        resolution?: {
-          decision: "review";
-          reason: string;
-          evidence: Array<{
-            kind: string;
-            identifier: string;
-          }>;
-        };
-      }
-    | {
-        action: "merge";
-        approval_suppressed: true;
-        message: string;
-        resolution: {
-          decision: "review";
-          reason: string;
-          evidence: Array<{
-            kind: string;
-            identifier: string;
-          }>;
-        };
-      }
-    | {
         action: "discover_duplicates";
         candidates_scanned: number;
         components: Array<{
@@ -2008,36 +1820,12 @@ export type ManageEntityResponses = {
           oversized: boolean;
           deferred_candidates: number;
           decisions: Array<{
-            winner_entity_id: number;
-            loser_entity_id: number;
-            /**
-             * Existing resolution assessment fingerprint for this pair and current evidence/policy; execution rechecks.
-             */
-            fingerprint: string;
+            from_entity_id: number;
+            to_entity_id: number;
+            relationship_type_slug: string;
           }>;
         }>;
         next_cursor: string | null;
-      }
-    | {
-        action: "resolve_duplicates";
-        candidates_scanned: number;
-        groups_found: number;
-        auto_merged: number;
-        approvals_queued: number;
-        approvals_suppressed: number;
-        oversized_groups: number;
-        /**
-         * Candidates connected only through another record; reconsidered after direct merges apply.
-         */
-        deferred_candidates: number;
-      }
-    | {
-        action: "unmerge";
-        success: boolean;
-        message: string;
-        winner_entity_id: number;
-        loser_entity_id: number;
-        restored_identities: number;
       };
 };
 
@@ -7621,16 +7409,6 @@ export type ResolvePathResponses = {
           automations_count: number;
           is_derived?: boolean;
           measure_columns?: Array<string>;
-          merged_records?: Array<{
-            id: number;
-            name: string;
-            slug: string;
-            metadata: {
-              [key: string]: unknown;
-            };
-            merged_at: string;
-            can_unmerge: boolean;
-          }>;
         })
       | null;
     children: Array<{
@@ -7699,9 +7477,6 @@ export type ResolvePathResponses = {
       devices: number;
       clients: number;
     };
-    redirect: {
-      to: string;
-    } | null;
   };
 };
 

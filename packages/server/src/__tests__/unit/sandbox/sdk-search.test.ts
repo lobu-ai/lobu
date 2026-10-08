@@ -494,15 +494,14 @@ describe("sdkSearch", () => {
 		expect(result.results[0]).toContain(example);
 	});
 
-	it("renders accepted aliases from the runtime alias registry (one source)", async () => {
+	it("omits retired entity aliases and renders aliases still in the runtime registry", async () => {
 		const entitiesGet = await sdkSearch(
 			{ query: "entities.get" },
 			stubEnv,
 			readCtx,
 		);
-		expect(entitiesGet.results[0]).toContain(
-			"accepted aliases: id → entity_id",
-		);
+		expect(entitiesGet.results[0]).not.toContain("accepted aliases:");
+		expect(entitiesGet.results[0]).toContain("entity_id: number");
 		const send = await sdkSearch(
 			{ query: "notifications.send" },
 			stubEnv,

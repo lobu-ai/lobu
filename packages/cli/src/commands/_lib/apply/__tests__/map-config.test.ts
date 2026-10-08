@@ -522,7 +522,7 @@ describe("mapProjectToDesiredState", () => {
       name: "Person",
       resolutionPolicy: {
         rules: [
-          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+          { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
           { fields: ["phone"], normalizer: "phone", onMatch: "review" },
         ],
       },
@@ -537,7 +537,7 @@ describe("mapProjectToDesiredState", () => {
     expect(byKey.person?.resolutionPolicy).toEqual({
       "x-lobu-resolution": {
         rules: [
-          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+          { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
           { fields: ["phone"], normalizer: "phone", onMatch: "review" },
         ],
       },
@@ -555,7 +555,7 @@ describe("mapProjectToDesiredState", () => {
           {
             fields: [],
             normalizer: "email",
-            onMatch: "auto_merge",
+            onMatch: "auto_link",
           },
         ],
       },
@@ -563,6 +563,20 @@ describe("mapProjectToDesiredState", () => {
     expect(() =>
       mapProjectToDesiredState(defineConfig({ agents: [], entities: [bad] }))
     ).toThrow(/invalid resolutionPolicy/i);
+  });
+
+  test("rejects the retired physical merge policy instead of silently accepting it", () => {
+    const bad = defineEntityType({
+      key: "contact_record",
+      resolutionPolicy: {
+        rules: [
+          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+        ],
+      } as never,
+    });
+    expect(() =>
+      mapProjectToDesiredState(defineConfig({ agents: [], entities: [bad] }))
+    ).toThrow(/onMatch: "auto_link"\|"review"/);
   });
 
   test("rejects a resolutionPolicy without a rules array", () => {

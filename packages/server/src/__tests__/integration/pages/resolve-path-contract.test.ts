@@ -16,7 +16,6 @@ import {
 } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
 import { TestApiClient } from '../../setup/test-mcp-client';
-import { applyMerge } from '../../../utils/entity-merge';
 
 interface Fixture {
   orgId: string;
@@ -25,7 +24,7 @@ interface Fixture {
   token: string;
   memberToken: string;
   canonicalDealId: number;
-  mergedDealId: number;
+  associatedDealId: number;
 }
 
 async function seedFixture(): Promise<Fixture> {
@@ -66,29 +65,30 @@ async function seedFixture(): Promise<Fixture> {
     )
   `;
 
-  const brand = (await api.entities.create({ type: 'brand', name: 'Acme Brand' })) as {
+  const brand = (await api.entities.create({ entity_type: 'brand', name: 'Acme Brand' })) as {
     entity: { id: number };
   };
   await api.entities.create({
-    type: 'product',
+    entity_type: 'product',
     name: 'Acme Product',
     parent_id: brand.entity.id,
   });
   const canonicalDeal = (await api.entities.create({
-    type: 'deal',
+    entity_type: 'deal',
     name: 'Acme Deal',
     metadata: { stage: 'negotiation', amount: 50000 },
   })) as { entity: { id: number } };
-  const mergedDeal = (await api.entities.create({
-    type: 'deal',
+  const associatedDeal = (await api.entities.create({
+    entity_type: 'deal',
     name: 'Acme Deal Import',
-    metadata: { source: 'Google Contacts', owner: 'Burak' },
+    metadata: { source: 'Import', owner: 'Reviewer' },
   })) as { entity: { id: number } };
-  await applyMerge({
-    orgId: org.id,
-    loserId: mergedDeal.entity.id,
-    winnerId: canonicalDeal.entity.id,
-    mergedBy: user.id,
+  const human = api.withAuth({ tokenType: 'session' });
+  await human.entity_schema.createRelType({ slug: 'same_record', name: 'Same record', purpose: 'identity' });
+  await human.entities.link({
+    from_entity_id: associatedDeal.entity.id,
+    to_entity_id: canonicalDeal.entity.id,
+    relationship_type_slug: 'same_record',
   });
 
   const oauthClient = await createTestOAuthClient();
@@ -103,7 +103,7 @@ async function seedFixture(): Promise<Fixture> {
     token,
     memberToken,
     canonicalDealId: canonicalDeal.entity.id,
-    mergedDealId: mergedDeal.entity.id,
+    associatedDealId: associatedDeal.entity.id,
   };
 }
 
@@ -165,42 +165,29 @@ describe('resolve_path contract', () => {
     expect(resolved.entity?.json_template ?? null).toBeNull();
   });
 
-  it('redirects merged URLs and exposes the absorbed record on the canonical entity', async () => {
-    const oldPath = (await resolvePath(fixture, {
+  it('keeps identity member URLs exact and omits retired merge undo details', async () => {
+    const member = (await resolvePath(fixture, {
       path: `/${fixture.orgSlug}/deal/acme-deal-import`,
-    })) as { redirect?: { to: string } | null };
-    expect(oldPath.redirect).toEqual({
-      to: `/${fixture.orgSlug}/deal/acme-deal?merged_from=Acme%20Deal%20Import`,
-    });
+    })) as { entity?: { id: number; metadata: unknown }; redirect?: unknown };
+    expect(member.entity?.id).toBe(fixture.associatedDealId);
+    expect(member.entity?.metadata).toEqual({ source: 'Import', owner: 'Reviewer' });
+    expect(member).not.toHaveProperty("redirect");
+    expect(member.entity).not.toHaveProperty('merged_records');
 
-    const canonical = (await resolvePath(fixture, {
+    const root = (await resolvePath(fixture, {
       path: `/${fixture.orgSlug}/deal/acme-deal`,
-    })) as {
-      entity?: {
-        id: number;
-        merged_records?: Array<{
-          id: number;
-          name: string;
-          metadata: Record<string, unknown>;
-        }>;
-      };
-    };
-    expect(canonical.entity?.id).toBe(fixture.canonicalDealId);
-    expect(canonical.entity?.merged_records).toEqual([
-      expect.objectContaining({
-        id: fixture.mergedDealId,
-        name: 'Acme Deal Import',
-        metadata: { source: 'Google Contacts', owner: 'Burak' },
-        can_unmerge: true,
-      }),
-    ]);
+    })) as { entity?: { id: number }; redirect?: unknown };
+    expect(root.entity?.id).toBe(fixture.canonicalDealId);
+    expect(root).not.toHaveProperty("redirect");
+    expect(root.entity).not.toHaveProperty('merged_records');
 
     const memberView = (await resolvePath(
       fixture,
-      { path: `/${fixture.orgSlug}/deal/acme-deal` },
+      { path: `/${fixture.orgSlug}/deal/acme-deal-import` },
       fixture.memberToken
-    )) as { entity?: { merged_records?: unknown[] } };
-    expect(memberView.entity?.merged_records).toBeUndefined();
+    )) as { entity?: { id: number } };
+    expect(memberView.entity?.id).toBe(fixture.associatedDealId);
+    expect(memberView.entity).not.toHaveProperty('merged_records');
   });
 
   it('rejects malformed or missing paths instead of silently falling back', async () => {

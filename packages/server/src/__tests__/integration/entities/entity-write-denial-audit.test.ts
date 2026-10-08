@@ -1,6 +1,6 @@
 /**
  * Durable audit coverage for every manage_entity refusal — policy and write
- * rule, across create/update/delete/merge. A clean refusal is only truthful
+ * rule, across create/update/delete. A clean refusal is only truthful
  * when the append-only denial row survives; a pre-transaction policy deny
  * commits its row first, and a rule deny raised inside the write transaction
  * is recorded after that transaction rolls back. Either way the attempted
@@ -80,9 +80,6 @@ export default (row) => {
   if (row.op === "update" && row.changed("$deleted") && row.next.$deleted) {
     row.deny("this invoice cannot be deleted");
   }
-  if (row.op === "update" && row.changed("$merged_into") && row.next.$merged_into) {
-    row.deny("this invoice cannot be merged");
-  }
 };
 `;
 
@@ -107,13 +104,6 @@ async function ruledWorkspace() {
 		)
 	`;
 	return { org, user, agent };
-}
-
-function humanContext(organizationId: string, userId: string): ToolContext {
-	return {
-		...agentContext(organizationId, userId, ""),
-		agentId: null,
-	} as ToolContext;
 }
 
 async function denialEvents(organizationId: string) {
@@ -563,19 +553,12 @@ describe("manage_entity write-denial audit", () => {
 		expect(serialized).not.toContain(updateSecret);
 	});
 
-	it("audits real delete and merge rule denials but not their dry-run previews", async () => {
+	it("audits real delete rule denials but not dry-run previews", async () => {
 		const { org, user, agent } = await ruledWorkspace();
 		await policyEffect(org.id, agent.agentId, "delete", "auto");
-		const first = await createEntity({
+		const invoice = await createEntity({
 			entity_type: "invoice",
-			name: "First invoice",
-			organization_id: org.id,
-			created_by: user.id,
-			metadata: { status: "draft" },
-		});
-		const second = await createEntity({
-			entity_type: "invoice",
-			name: "Second invoice",
+			name: "Protected invoice",
 			organization_id: org.id,
 			created_by: user.id,
 			metadata: { status: "draft" },
@@ -583,50 +566,31 @@ describe("manage_entity write-denial audit", () => {
 		const agentCtx = agentContext(org.id, user.id, agent.agentId);
 
 		await manageEntity(
-			{ action: "delete", entity_id: first.id, dry_run: true },
+			{ action: "delete", entity_id: invoice.id, dry_run: true },
 			env,
 			agentCtx,
-		);
-		await manageEntity(
-			{
-				action: "merge",
-				entity_id: first.id,
-				winner_entity_id: second.id,
-				dry_run: true,
-			},
-			env,
-			humanContext(org.id, user.id),
 		);
 		expect(await denialEvents(org.id)).toHaveLength(0);
 
 		await expect(
 			manageEntity(
-				{ action: "delete", entity_id: first.id },
+				{ action: "delete", entity_id: invoice.id },
 				env,
 				agentCtx,
 			),
 		).rejects.toThrow("this invoice cannot be deleted");
-		await expect(
-			manageEntity(
-				{
-					action: "merge",
-					entity_id: first.id,
-					winner_entity_id: second.id,
-				},
-				env,
-				humanContext(org.id, user.id),
-			),
-		).rejects.toThrow("this invoice cannot be merged");
 
 		const events = await denialEvents(org.id);
-		expect(events).toHaveLength(2);
-		expect(events.map((event) => event.metadata.operation)).toEqual([
-			"delete",
-			"merge",
-		]);
-		expect(events.map((event) => event.metadata.denied_fields)).toEqual([
-			["$deleted"],
-			["$merged_into"],
-		]);
+		expect(events).toHaveLength(1);
+		expect(events[0].metadata).toMatchObject({
+			operation: "delete",
+			denial_source: "rule",
+			denied_fields: ["$deleted"],
+			entity_id: invoice.id,
+		});
+		const [stored] = await getTestDb()`
+			SELECT deleted_at FROM entities WHERE id = ${invoice.id}
+		`;
+		expect(stored.deleted_at).toBeNull();
 	});
 });

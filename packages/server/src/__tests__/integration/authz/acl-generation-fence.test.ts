@@ -13,9 +13,8 @@ import { bumpAclGeneration } from "../../../authz/acl-generation";
 import { markAclFresh } from "../../../authz/access-graph";
 import { markConnectionAclFailed } from "../../../authz/acl-observability";
 import { getDb } from "../../../db/client";
-import { applyMerge, applyUnmerge } from "../../../utils/entity-merge";
 import { cleanupTestDatabase } from "../../setup/test-db";
-import { createTestEntity, createTestOrganization } from "../../setup/test-fixtures";
+import { createTestOrganization } from "../../setup/test-fixtures";
 
 describe("ACL generation fence", () => {
 	let orgId: string;
@@ -44,15 +43,6 @@ describe("ACL generation fence", () => {
       WHERE organization_id = ${orgId} AND connection_id = ${connectionId}
     `;
 		return rows.length > 0 ? rows[0].freshness_state : null;
-	}
-
-	/** Two `person` entities, the second of which can be merged into the first. */
-	async function seedMergePair(): Promise<{ loserId: number; winnerId: number }> {
-		const mk = (name: string) =>
-			createTestEntity({ organization_id: orgId, entity_type: "person", name });
-		const loser = await mk("Loser");
-		const winner = await mk("Winner");
-		return { loserId: loser.id, winnerId: winner.id };
 	}
 
 	/** Stamp with a fence captured right now — the ordinary uncontended case. */
@@ -201,38 +191,6 @@ describe("ACL generation fence", () => {
 		await markConnectionAclFailed(orgId, connectionId, "generation fence test");
 		expect(Number(await observeGeneration())).toBeGreaterThan(Number(generation));
 		expect(await freshnessState()).toBe("failed");
-	});
-
-	/** Merge and unmerge both mutate authorization state outside an ACL sync. */
-	describe("entity merge invalidation", () => {
-		async function generation(): Promise<number> {
-			return Number(await observeGeneration());
-		}
-
-		it("invalidates on merge", async () => {
-			const { loserId, winnerId } = await seedMergePair();
-			await stampFresh();
-			const before = await generation();
-			await applyMerge(
-				{ orgId, loserId, winnerId, mergedBy: "generation-test" },
-				getDb(),
-			);
-			expect(await generation()).toBeGreaterThan(before);
-			expect(await freshnessState()).toBe("stale");
-		});
-
-		it("invalidates on unmerge", async () => {
-			const { loserId, winnerId } = await seedMergePair();
-			await applyMerge(
-				{ orgId, loserId, winnerId, mergedBy: "generation-test" },
-				getDb(),
-			);
-			await stampFresh();
-			const before = await generation();
-			await applyUnmerge({ orgId, loserId, unmergedBy: "generation-test" }, getDb());
-			expect(await generation()).toBeGreaterThan(before);
-			expect(await freshnessState()).toBe("stale");
-		});
 	});
 
 	it("refuses to stamp when the organization row is missing", async () => {

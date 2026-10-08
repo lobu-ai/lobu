@@ -1,60 +1,239 @@
 import { describe, expect, it } from "vitest";
-import { discoverEntityResolutionGroups } from "./discovery";
 import {
-	assessEntityResolution,
 	assessIdentityGroups,
 	normalizedResolutionRuleKeys,
+	readEntityResolutionRules,
 } from "./policy";
 
+type RecordInput = Parameters<typeof assessIdentityGroups>[0]["left"][number];
 const schema = {
-	type: "object",
 	"x-lobu-resolution": {
 		rules: [
-			{ fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+			{ fields: ["email"], normalizer: "email", onMatch: "auto_link" },
 			{ fields: ["phone"], normalizer: "phone", onMatch: "review" },
 		],
 	},
 };
 
-describe("identity group resolution", () => {
+function pair(left: RecordInput, right: RecordInput, metadataSchema: unknown = schema) {
+	return assessIdentityGroups({ metadataSchema, left: [left], right: [right] });
+}
+
+function singleRule(fields: string[], normalizer = "exact", onMatch = "review") {
+	return { "x-lobu-resolution": { rules: [{ fields, normalizer, onMatch }] } };
+}
+
+describe("explicit identity resolution policy", () => {
+	it("does not infer policy from an entity type or familiar field names", () => {
+		const legacyCaller = readEntityResolutionRules as (...args: unknown[]) => unknown;
+		for (const metadataSchema of [undefined, null, {}, { type: "object" }]) {
+			expect(legacyCaller(metadataSchema, { entityTypeSlug: "person" })).toEqual([]);
+			const result = assessIdentityGroups({ metadataSchema,
+				left: [{ id: 1, metadata: { email: "shared@example.test", phone: "1234567" } }],
+				right: [{ id: 2, metadata: { email: "shared@example.test", phone: "1234567" } }],
+			});
+			expect(result.decision).toBe("review");
+			expect(result.evidence).toEqual([]);
+		}
+	});
+
+	it("accepts auto_link and rejects the retired automatic merge setting", () => {
+		expect(readEntityResolutionRules(singleRule(["account"], "exact", "auto_link")))
+			.toEqual([{ fields: ["account"], normalizer: "exact", onMatch: "auto_link" }]);
+		expect(readEntityResolutionRules(singleRule(["account"], "exact", "auto_merge"))).toEqual([]);
+	});
+
+	it("ignores malformed rules and trims only explicitly configured field paths", () => {
+		expect(readEntityResolutionRules({ "x-lobu-resolution": { rules: [
+			null, [], { fields: [] }, { fields: ["value"], normalizer: "unknown", onMatch: "review" },
+			{ fields: [" account ", "account", "", null], normalizer: "exact", onMatch: "review" },
+		] } })).toEqual([{ fields: ["account"], normalizer: "exact", onMatch: "review" }]);
+	});
+
+	it("keeps configured singular and plural field paths distinct", () => {
+		const result = pair(
+			{ id: 1, metadata: { emails: ["shared@example.test"] } },
+			{ id: 2, metadata: { email: "shared@example.test" }, identities: [{ namespace: "email", identifier: "shared@example.test" }] },
+			singleRule(["emails"], "email"),
+		);
+		expect(result.evidence).toEqual([]);
+		expect(result.reason).toContain("emails");
+	});
+
+	it("names custom fields verbatim when explaining missing evidence", () => {
+		const result = pair({ id: 1, metadata: {} }, { id: 2, metadata: {} }, singleRule(["status"]));
+		expect(result.reason).toBe("No matching status could be verified; human review is required.");
+	});
+});
+
+describe("identity group assessment", () => {
 	it("uses non-root evidence without combining composite fields from different records", () => {
-		const metadataSchema = {
-			"x-lobu-resolution": {
-				rules: [{ fields: ["account", "region"], normalizer: "exact", onMatch: "auto_merge" }],
-			},
-		};
+		const metadataSchema = singleRule(["account", "region"], "exact", "auto_link");
 		const right = [{ id: 3, metadata: { account: "synthetic-account", region: "west" } }];
-		const incomplete = assessIdentityGroups({
-			metadataSchema,
-			left: [{ id: 1, metadata: { account: "synthetic-account" } }, { id: 2, metadata: { region: "west" } }],
-			right,
-		});
+		const incomplete = assessIdentityGroups({ metadataSchema,
+			left: [{ id: 1, metadata: { account: "synthetic-account" } }, { id: 2, metadata: { region: "west" } }], right });
 		expect(incomplete.decision).toBe("review");
 		expect(incomplete.evidence).toEqual([]);
-		expect(assessIdentityGroups({
-			metadataSchema,
-			left: [{ id: 1, metadata: { account: "synthetic-account", region: "west" } }, { id: 2, metadata: {} }],
-			right,
-		}).decision).toBe("auto_merge");
+		expect(assessIdentityGroups({ metadataSchema,
+			left: [{ id: 1, metadata: { account: "synthetic-account", region: "west" } }, { id: 2, metadata: {} }], right,
+		}).decision).toBe("auto_link");
 	});
 
-	it("requires review when members of one side conflict despite a direct cross-group match", () => {
-		expect(assessIdentityGroups({
-			metadataSchema: schema,
-			left: [{ id: 1, metadata: { email: "shared@example.test" } }, { id: 2, metadata: { email: "conflict@example.test" } }],
-			right: [{ id: 3, metadata: { email: "shared@example.test" } }],
-		}).decision).toBe("review");
+	it("automatically links a declared unique match even when review-only fields differ", () => {
+		const result = pair(
+			{ id: 1, metadata: { email: "shared@example.test", phone: "1111111" } },
+			{ id: 2, metadata: { email: " SHARED@example.test ", phone: "2222222" } },
+		);
+		expect(result.decision).toBe("auto_link");
+		expect(result.evidence).toEqual([{ kind: "email", identifier: "shared@example.test" }]);
 	});
 
-	it("keeps equal source identifiers in different tenant scopes separate", () => {
-		expect(assessIdentityGroups({
-			metadataSchema: schema,
-			left: [{ id: 1, metadata: {}, identities: [{ namespace: "email", identifier: "shared@example.test", scopeKey: "scope-a" }] }],
-			right: [{ id: 2, metadata: {}, identities: [{ namespace: "email", identifier: "shared@example.test", scopeKey: "scope-b" }] }],
-		}).decision).toBe("review");
+	it("requires review when another unique field conflicts despite a matching field", () => {
+		const metadataSchema = { "x-lobu-resolution": { rules: [
+			{ fields: ["email"], normalizer: "email", onMatch: "auto_link" },
+			{ fields: ["account"], normalizer: "exact", onMatch: "auto_link" },
+		] } };
+		const result = pair(
+			{ id: 1, metadata: { email: "shared@example.test", account: "first" } },
+			{ id: 2, metadata: { email: "shared@example.test", account: "second" } }, metadataSchema,
+		);
+		expect(result.decision).toBe("review");
+		expect(result.reason).toContain("conflicting");
 	});
 
-	it("fingerprints unmatched values while ignoring member and value ordering", () => {
+	it("checks unique conflicts within either existing group", () => {
+		const left = [{ id: 1, metadata: { email: "shared@example.test" } }, { id: 2, metadata: { email: "conflict@example.test" } }];
+		const right = [{ id: 3, metadata: { email: "shared@example.test" } }];
+		for (const sides of [{ left, right }, { left: right, right: left }]) {
+			expect(assessIdentityGroups({ metadataSchema: schema, ...sides }).decision).toBe("review");
+		}
+	});
+
+	it("matches shared members of multi-valued fields and deduplicates evidence", () => {
+		const result = assessIdentityGroups({ metadataSchema: schema,
+			left: [{ id: 1, metadata: { email: ["other@example.test", "shared@example.test"] } }],
+			right: [{ id: 2, metadata: { email: "SHARED@example.test" } }, { id: 3, metadata: { email: "shared@example.test" } }],
+		});
+		expect(result.decision).toBe("auto_link");
+		expect(result.evidence).toEqual([{ kind: "email", identifier: "shared@example.test" }]);
+	});
+
+	it("keeps review-only matches for human judgement", () => {
+		const result = pair({ id: 1, metadata: { phone: "+44 7700 900 123" } }, { id: 2, metadata: { phone: "447700900123" } });
+		expect(result.decision).toBe("review");
+		expect(result.evidence).toEqual([{ kind: "phone", identifier: "447700900123" }]);
+		expect(result.reason).toContain("phone");
+	});
+
+	it("never automatically associates an empty group", () => {
+		const record = { id: 1, metadata: { email: "shared@example.test" } };
+		for (const sides of [{ left: [record], right: [] }, { left: [], right: [record] }]) {
+			const result = assessIdentityGroups({ metadataSchema: schema, ...sides });
+			expect(result.decision).toBe("review");
+			expect(result.evidence).toEqual([]);
+		}
+	});
+});
+
+describe("normalized identity claims", () => {
+	it.each(["not-an-email", "person@.example.test", "a..b@example.test", "a@example", "", null, true])(
+		"does not match malformed email %s", value => {
+			const result = pair({ id: 1, metadata: { email: value } }, { id: 2, metadata: { email: value } });
+			expect(result.evidence).toEqual([]);
+			expect(result.decision).toBe("review");
+		},
+	);
+
+	it.each(["call 1234567", "123456", "1234567890123456", "447700900123@example.test"])(
+		"does not match malformed phone %s", phone => {
+			expect(pair({ id: 1, metadata: { phone } }, { id: 2, metadata: { phone } }).evidence).toEqual([]);
+		},
+	);
+
+	it("reads exact configured namespaces from claims independently of metadata", () => {
+		const result = pair(
+			{ id: 1, metadata: {}, identities: [{ namespace: "phone", identifier: "+44 7700 900 123" }] },
+			{ id: 2, metadata: {}, identities: [{ namespace: "phone", identifier: "447700900123" }] },
+		);
+		expect(result.evidence).toEqual([{ kind: "phone", identifier: "447700900123" }]);
+		expect(result.resolutionKeys).toEqual([
+			{ id: 1, keys: { phone: ["447700900123"] } }, { id: 2, keys: { phone: ["447700900123"] } },
+		]);
+	});
+
+	it("requires tenant scope equality and keeps scoped metadata mirrors scoped", () => {
+		const record = (id: number, scopeKey: string | null): RecordInput => ({
+			id, metadata: { email: "shared@example.test" },
+			identities: [{ namespace: "email", identifier: "SHARED@example.test", scopeKey }],
+		});
+		expect(pair(record(1, "tenant-a"), record(2, "tenant-b")).evidence).toEqual([]);
+		expect(pair(record(1, "tenant-a"), record(2, null)).evidence).toEqual([]);
+		expect(pair(record(1, "tenant-a"), record(2, "tenant-a")).evidence).toEqual([
+			{ kind: "email", identifier: "shared@example.test [tenant: tenant-a]" },
+		]);
+		expect(pair(record(1, null), record(2, null)).decision).toBe("auto_link");
+	});
+
+	it("keeps composite tenant tuples distinct when values contain separators", () => {
+		const result = pair(
+			{ id: 1, metadata: { region: "x" }, identities: [{ namespace: "account", identifier: "same", scopeKey: "tenant-a\u001fsegment" }] },
+			{ id: 2, metadata: { region: "segment\u001fx" }, identities: [{ namespace: "account", identifier: "same", scopeKey: "tenant-a" }] },
+			singleRule(["account", "region"], "exact", "auto_link"),
+		);
+		expect(result.evidence).toEqual([]);
+		expect(result.decision).toBe("review");
+	});
+
+	it("does not infer a phone or repair a corrupted number from another namespace", () => {
+		const shell = { id: 1, metadata: {}, identities: [
+			{ namespace: "provider_id", identifier: "447700900123@example.test" },
+			{ namespace: "phone", identifier: "447700900123" },
+		] };
+		const rule = readEntityResolutionRules(singleRule(["phone"], "phone"))[0]!;
+		expect(normalizedResolutionRuleKeys(shell, rule)).toEqual(['[["447700900123",null]]']);
+		expect(normalizedResolutionRuleKeys({ ...shell, identities: shell.identities.slice(0, 1) }, rule)).toEqual([]);
+		expect(pair(shell, { id: 2, metadata: { phone: "070-090-0123" } }).evidence).toEqual([]);
+	});
+
+	it("combines metadata and claims only within each record", () => {
+		const result = pair(
+			{ id: 1, metadata: { account: "same" }, identities: [{ namespace: "region", identifier: "west" }] },
+			{ id: 2, metadata: { region: "west" }, identities: [{ namespace: "account", identifier: "same" }] },
+			singleRule(["account", "region"]),
+		);
+		expect(result.evidence).toEqual([{ kind: "account + region", identifier: "same · west" }]);
+	});
+
+	it("uses nested declared paths and preserves custom labels safely", () => {
+		const result = pair(
+			{ id: 1, metadata: { profile: { value: "shared" }, constructor: "key" } },
+			{ id: 2, metadata: { profile: { value: "shared" }, constructor: "key" } },
+			singleRule(["profile.value", "constructor"]),
+		);
+		expect(result.resolutionKeys).toEqual([
+			{ id: 1, keys: { "profile.value + constructor": ["shared · key"] } },
+			{ id: 2, keys: { "profile.value + constructor": ["shared · key"] } },
+		]);
+	});
+
+	it("bounds a rule's Cartesian value expansion without partial matches", () => {
+		const rule = readEntityResolutionRules(singleRule(["left", "right"]))[0]!;
+		const values = Array.from({ length: 17 }, (_, index) => String(index));
+		expect(normalizedResolutionRuleKeys({ id: 1, metadata: { left: values, right: values } }, rule)).toEqual([]);
+	});
+});
+
+describe("identity decision fingerprints", () => {
+	it("preserves the reviewed fingerprint of an unchanged explicit review policy", () => {
+		// Persisted by the previous group assessor; no normalization or topology changed.
+		const result = assessIdentityGroups({ metadataSchema: singleRule(["account"]),
+			left: [{ id: 7, metadata: { account: "same" } }, { id: 8, metadata: { account: "unmatched" } }],
+			right: [{ id: 9, metadata: { account: "same" } }],
+		});
+		expect(result.fingerprint).toBe("a16ba4258004af35f3a3ba1810842972da630f1049378664c52b0a903732f6fe");
+	});
+
+	it("includes unmatched values while ignoring member and value ordering", () => {
 		const left = [{ id: 1, metadata: { email: ["shared@example.test", "unmatched@example.test"] } }, { id: 2, metadata: {} }];
 		const right = [{ id: 3, metadata: { email: "shared@example.test" } }];
 		const original = assessIdentityGroups({ metadataSchema: schema, left, right });
@@ -66,602 +245,24 @@ describe("identity group resolution", () => {
 		expect(changed.evidence).toEqual(original.evidence);
 		expect(changed.fingerprint).not.toBe(original.fingerprint);
 	});
-});
 
-describe("entity resolution module", () => {
-	it("discovers connected components and chooses the most complete canonical record", () => {
-		const result = discoverEntityResolutionGroups({
-			metadataSchema: schema,
-			candidates: [
-				{ id: 3, metadata: { email: "person@example.com" } },
-				{
-					id: 4,
-					metadata: {
-						email: " Person@Example.com ",
-						phone: "+44 123 456 789",
-						title: "Engineer",
-					},
-				},
-				{ id: 5, metadata: { phone: "44-123-456-789" } },
-			],
-		});
-		expect(result).toEqual({
-			groups: [{ winnerId: 4, loserIds: [3, 5] }],
-			oversizedGroupCount: 0,
-			deferredCandidateCount: 0,
-		});
+	it("includes policy and group membership even when evidence remains identical", () => {
+		const left = { id: 1, metadata: { email: "shared@example.test" } };
+		const right = { id: 2, metadata: { email: "shared@example.test" } };
+		const original = pair(left, right);
+		const review = pair(left, right, singleRule(["email"], "email", "review"));
+		expect(review.evidence).toEqual(original.evidence);
+		expect(review.policyHash).not.toBe(original.policyHash);
+		expect(review.fingerprint).not.toBe(original.fingerprint);
+		expect(pair(right, left).fingerprint).not.toBe(original.fingerprint);
 	});
 
-	it("defers candidates without direct evidence to the chosen canonical record", () => {
-		const chainSchema = {
-			"x-lobu-resolution": {
-				rules: [
-					{ fields: ["email"], normalizer: "email", onMatch: "review" },
-					{ fields: ["phone"], normalizer: "phone", onMatch: "review" },
-					{ fields: ["external_id"], normalizer: "exact", onMatch: "review" },
-				],
-			},
-		};
-		const result = discoverEntityResolutionGroups({
-			metadataSchema: chainSchema,
-			candidates: [
-				{ id: 1, metadata: { email: "same@example.com" } },
-				{
-					id: 2,
-					metadata: { email: "same@example.com", phone: "+44 123 456 789" },
-				},
-				{
-					id: 3,
-					metadata: { phone: "+44 123 456 789", external_id: "remote-1" },
-				},
-				{ id: 4, metadata: { external_id: "remote-1" } },
-			],
-		});
-		expect(result.groups).toEqual([{ winnerId: 2, loserIds: [1, 3] }]);
-		expect(result.deferredCandidateCount).toBe(1);
-	});
-
-	it("does not invent matching semantics when the entity type has no policy", () => {
-		const result = discoverEntityResolutionGroups({
-			metadataSchema: { type: "object" },
-			candidates: [
-				{ id: 1, metadata: { email: "same@example.com" } },
-				{ id: 2, metadata: { email: "same@example.com" } },
-			],
-		});
-		expect(result.groups).toEqual([]);
-	});
-
-	it("keeps the built-in person automation useful with review-only defaults", () => {
-		const result = discoverEntityResolutionGroups({
-			metadataSchema: { type: "object" },
-			entityTypeSlug: "person",
-			candidates: [
-				{ id: 1, metadata: { email: "same@example.com" } },
-				{ id: 2, metadata: { email: " SAME@example.com " } },
-				{ id: 3, metadata: { phone: "+44 123 456 789" } },
-				{ id: 4, metadata: { phone: "44-123-456-789" } },
-			],
-		});
-		expect(result.groups).toEqual([
-			{ winnerId: 1, loserIds: [2] },
-			{ winnerId: 3, loserIds: [4] },
-		]);
-		const assessment = assessEntityResolution({
-			metadataSchema: { type: "object" },
-			entityTypeSlug: "person",
-			winner: { id: 1, metadata: { email: "same@example.com" } },
-			losers: [{ id: 2, metadata: { email: " SAME@example.com " } }],
-		});
-		expect(assessment.decision).toBe("review");
-		expect(assessment.reason).toBe(
-			"Matching email points to the same thing, but that is not enough to merge automatically under this entity type's policy, so it needs your judgement.",
-		);
-	});
-
-	it("names the entity type's own resolution fields verbatim in the reason", () => {
-		// A custom field must survive intact — naive singularization turned
-		// "status" into "statu".
-		const customSchema = {
-			type: "object",
-			"x-lobu-resolution": {
-				rules: [
-					{ fields: ["status"], normalizer: "exact", onMatch: "review" },
-				],
-			},
-		};
-		const assessment = assessEntityResolution({
-			metadataSchema: customSchema,
-			winner: { id: 1, metadata: {} },
-			losers: [{ id: 2, metadata: {} }],
-		});
-		expect(assessment.reason).toBe(
-			"No matching status could be verified automatically, so this merge needs your judgement.",
-		);
-	});
-
-	it("coalesces only the known singular/plural field aliases", () => {
-		// person defaults are email/emails/phone/phones — a reader wants two names.
-		const assessment = assessEntityResolution({
-			metadataSchema: { type: "object" },
-			entityTypeSlug: "person",
-			winner: { id: 1, metadata: {} },
-			losers: [{ id: 2, metadata: {} }],
-		});
-		expect(assessment.reason).toBe(
-			"No matching email or phone could be verified automatically, so this merge needs your judgement.",
-		);
-	});
-
-	it("auto-merges a configured unique identity but reviews conflicting strict identities", () => {
-		const base = {
-			metadataSchema: schema,
-			winner: {
-				id: 1,
-				metadata: { email: "same@example.com", phone: "1111111" },
-			},
-		};
-		expect(
-			assessEntityResolution({
-				...base,
-				losers: [
-					{
-						id: 2,
-						metadata: { email: "SAME@example.com", phone: "2222222" },
-					},
-				],
-			}).decision,
-		).toBe("auto_merge");
-
-		const strictSchema = {
-			...schema,
-			"x-lobu-resolution": {
-				rules: [
-					{ fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
-					{
-						fields: ["external_id"],
-						normalizer: "exact",
-						onMatch: "auto_merge",
-					},
-				],
-			},
-		};
-		const conflict = assessEntityResolution({
-			metadataSchema: strictSchema,
-			winner: {
-				id: 1,
-				metadata: { email: "same@example.com", external_id: "one" },
-			},
-			losers: [
-				{
-					id: 2,
-					metadata: { email: "same@example.com", external_id: "two" },
-				},
-			],
-		});
-		expect(conflict.decision).toBe("review");
-
-		const changedConflict = assessEntityResolution({
-			metadataSchema: strictSchema,
-			winner: {
-				id: 1,
-				metadata: { email: "same@example.com", external_id: "three" },
-			},
-			losers: [
-				{
-					id: 2,
-					metadata: { email: "same@example.com", external_id: "four" },
-				},
-			],
-		});
-		expect(changedConflict.fingerprint).not.toBe(conflict.fingerprint);
-	});
-
-	it("explains mixed-policy groups without denying configured automatic rules", () => {
-		const mixedMatch = assessEntityResolution({
-			metadataSchema: schema,
-			winner: {
-				id: 1,
-				metadata: { email: "same@example.com", phone: "1111111" },
-			},
-			losers: [
-				{ id: 2, metadata: { email: "same@example.com" } },
-				{ id: 3, metadata: { phone: "1111111" } },
-			],
-		});
-		expect(mixedMatch.decision).toBe("review");
-		expect(mixedMatch.reason).toBe(
-			"Matching email and phone points to the same thing, but that is not enough to merge automatically under this entity type's policy, so it needs your judgement.",
-		);
-	});
-
-	it("rejects malformed email and phone values as deterministic identities", () => {
-		expect(
-			discoverEntityResolutionGroups({
-				metadataSchema: schema,
-				candidates: [
-					{
-						id: 1,
-						metadata: { email: "not-an-email", phone: "call 1234567" },
-					},
-					{
-						id: 2,
-						metadata: { email: "not-an-email", phone: "call 1234567" },
-					},
-				],
-			}).groups,
-		).toEqual([]);
-		expect(
-			assessEntityResolution({
-				metadataSchema: schema,
-				winner: { id: 1, metadata: { email: "person@.example.com" } },
-				losers: [{ id: 2, metadata: { email: "person@.example.com" } }],
-			}).decision,
-		).toBe("review");
-	});
-
-	it("matches an identity shared by multi-valued fields", () => {
-		const assessment = assessEntityResolution({
-			metadataSchema: schema,
-			winner: {
-				id: 1,
-				metadata: {
-					email: ["primary@example.com", "shared@example.com"],
-				},
-			},
-			losers: [
-				{
-					id: 2,
-					metadata: { email: ["SHARED@example.com"] },
-				},
-			],
-		});
-		expect(assessment.decision).toBe("auto_merge");
-		expect(assessment.evidence).toContainEqual({
-			kind: "email",
-			identifier: "shared@example.com",
-		});
-	});
-
-	it("changes the rejection fingerprint when a conflicting strict value changes", () => {
-		const strictSchema = {
-			"x-lobu-resolution": {
-				rules: [
-					{ fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
-					{
-						fields: ["external_id"],
-						normalizer: "exact",
-						onMatch: "auto_merge",
-					},
-				],
-			},
-		};
-		const assess = (externalId: string) =>
-			assessEntityResolution({
-				metadataSchema: strictSchema,
-				winner: {
-					id: 1,
-					metadata: { email: "same@example.com", external_id: "one" },
-				},
-				losers: [
-					{
-						id: 2,
-						metadata: {
-							email: "same@example.com",
-							external_id: externalId,
-						},
-					},
-				],
-			});
-
-		expect(assess("two").fingerprint).not.toBe(assess("three").fingerprint);
-	});
-
-	it("reads rule-field values from entity_identities rows, not just metadata", () => {
-		const assessment = assessEntityResolution({
-			metadataSchema: { type: "object" },
-			entityTypeSlug: "person",
-			winner: {
-				id: 1,
-				metadata: {},
-				identities: [{ namespace: "phone", identifier: "+44 7700 900 123" }],
-			},
-			losers: [
-				{
-					id: 2,
-					metadata: {},
-					identities: [{ namespace: "phone", identifier: "447700900123" }],
-				},
-			],
-		});
-		expect(assessment.decision).toBe("review");
-		expect(assessment.evidence).toContainEqual({
-			kind: "phone",
-			identifier: "447700900123",
-		});
-		expect(assessment.resolutionKeys).toEqual([
-			{ id: 1, keys: { phone: ["447700900123"] } },
-			{ id: 2, keys: { phone: ["447700900123"] } },
-		]);
-	});
-
-	it("requires identity scope keys to agree before producing merge evidence", () => {
-		const assess = (leftScopeKey: string | null, rightScopeKey: string | null) =>
-			assessEntityResolution({
-				metadataSchema: { type: "object" },
-				entityTypeSlug: "person",
-				winner: {
-					id: 1,
-					metadata: {},
-					identities: [
-						{ namespace: "phone", identifier: "+44 7700 900 123", scopeKey: leftScopeKey },
-					],
-				},
-				losers: [
-					{
-						id: 2,
-						metadata: {},
-						identities: [
-							{ namespace: "phone", identifier: "447700900123", scopeKey: rightScopeKey },
-						],
-					},
-				],
-			});
-
-		expect(assess("tenant-a", "tenant-b").evidence).toEqual([]);
-		expect(assess("tenant-a", "tenant-a").evidence).toContainEqual({
-			kind: "phone",
-			identifier: "447700900123 [tenant: tenant-a]",
-		});
-		expect(assess(null, null).evidence).toContainEqual({
-			kind: "phone",
-			identifier: "447700900123",
-		});
-	});
-
-	it("keeps multi-field tenant tuples distinct when values contain separators", () => {
-		const assessment = assessEntityResolution({
-			metadataSchema: {
-				"x-lobu-resolution": {
-					rules: [
-						{
-							fields: ["account", "region"],
-							normalizer: "exact",
-							onMatch: "auto_merge",
-						},
-					],
-				},
-			},
-			winner: {
-				id: 1,
-				metadata: { region: "x" },
-				identities: [
-					{
-						namespace: "account",
-						identifier: "same",
-						scopeKey: "tenant-a\u001fsegment",
-					},
-				],
-			},
-			losers: [
-				{
-					id: 2,
-					metadata: { region: "segment\u001fx" },
-					identities: [
-						{
-							namespace: "account",
-							identifier: "same",
-							scopeKey: "tenant-a",
-						},
-					],
-				},
-			],
-		});
-
-		expect(assessment.decision).toBe("review");
-		expect(assessment.evidence).toEqual([]);
-	});
-
-	it("reads a JID-shell's phone identity but does not match a corrupted metadata phone", () => {
-		// The run-702088 prod shape (numbers sanitized): the WhatsApp shell has
-		// its phone only in entity_identities; the named contact's metadata phone
-		// was double-split on import, losing the country code. The shell's
-		// identity must be read; the corrupted number still must NOT match —
-		// repairing import-mangled phones is a separate bug, and inventing a
-		// match here would paper over it.
-		const phoneRule: Parameters<typeof normalizedResolutionRuleKeys>[1] = {
-			fields: ["phone"],
-			normalizer: "phone",
-			onMatch: "review",
-		};
-		const jidShell = {
-			id: 519,
-			metadata: {},
-			identities: [
-				{ namespace: "wa_jid", identifier: "447700900123@s.whatsapp.net" },
-				{ namespace: "phone", identifier: "447700900123" },
-			],
-		};
-		expect(normalizedResolutionRuleKeys(jidShell, phoneRule)).toEqual([
-			'[["447700900123",null]]',
-		]);
-
-		const assessment = assessEntityResolution({
-			metadataSchema: { type: "object" },
-			entityTypeSlug: "person",
-			winner: {
-				id: 24002,
-				metadata: { phone: "070-090-0123", email: "" },
-			},
-			losers: [jidShell],
-		});
-		expect(assessment.decision).toBe("review");
-		expect(assessment.evidence).toEqual([]);
-	});
-
-	it("never treats an identity from another namespace as a rule-field value", () => {
-		const jidOnly = {
-			id: 1,
-			metadata: {},
-			identities: [
-				{ namespace: "wa_jid", identifier: "447700900123@s.whatsapp.net" },
-			],
-		};
-		expect(
-			normalizedResolutionRuleKeys(jidOnly, {
-				fields: ["phone"],
-				normalizer: "phone",
-				onMatch: "review",
-			}),
-		).toEqual([]);
-		expect(
-			normalizedResolutionRuleKeys(jidOnly, {
-				fields: ["wa_jid"],
-				normalizer: "phone",
-				onMatch: "review",
-			}),
-		).toEqual([]);
-	});
-
-	it("folds identities into the fingerprint deterministically", () => {
-		const assess = (
-			identities: Array<{ namespace: string; identifier: string }>,
-		) =>
-			assessEntityResolution({
-				metadataSchema: { type: "object" },
-				entityTypeSlug: "person",
-				winner: { id: 1, metadata: { email: "same@example.com" } },
-				losers: [{ id: 2, metadata: {}, identities }],
-			});
-
-		const without = assess([]);
-		const withPhone = assess([
-			{ namespace: "phone", identifier: "447700900123" },
-			{ namespace: "email", identifier: "same@example.com" },
-		]);
-		expect(withPhone.fingerprint).not.toBe(without.fingerprint);
-		const reordered = assess([
-			{ namespace: "email", identifier: "same@example.com" },
-			{ namespace: "phone", identifier: "447700900123" },
-		]);
-		expect(reordered.fingerprint).toBe(withPhone.fingerprint);
-	});
-
-	it("keeps discovery grouping and assessment in agreement on identity-only matches", () => {
-		const namedContact = {
-			id: 1,
-			metadata: { title: "Engineer" },
-			identities: [{ namespace: "phone", identifier: "+44 7700 900 123" }],
-		};
-		const shell = {
-			id: 2,
-			metadata: {},
-			identities: [{ namespace: "phone", identifier: "447700900123" }],
-		};
-		const discovered = discoverEntityResolutionGroups({
-			metadataSchema: { type: "object" },
-			entityTypeSlug: "person",
-			candidates: [namedContact, shell],
-		});
-		expect(discovered.groups).toEqual([{ winnerId: 1, loserIds: [2] }]);
-
-		const assessment = assessEntityResolution({
-			metadataSchema: { type: "object" },
-			entityTypeSlug: "person",
-			winner: namedContact,
-			losers: [shell],
-		});
-		expect(assessment.evidence).toContainEqual({
-			kind: "phone",
-			identifier: "447700900123",
-		});
-	});
-
-	it("draws each field of a combination rule from metadata and identities alike", () => {
-		const comboSchema = {
-			"x-lobu-resolution": {
-				rules: [
-					{
-						fields: ["email", "phone"],
-						normalizer: "exact",
-						onMatch: "review",
-					},
-				],
-			},
-		};
-		const assessment = assessEntityResolution({
-			metadataSchema: comboSchema,
-			winner: {
-				id: 1,
-				metadata: { email: "same@example.com" },
-				identities: [{ namespace: "phone", identifier: "447700900123" }],
-			},
-			losers: [
-				{
-					id: 2,
-					metadata: { phone: "447700900123" },
-					identities: [{ namespace: "email", identifier: "same@example.com" }],
-				},
-			],
-		});
-		expect(assessment.evidence).toContainEqual({
-			kind: "email + phone",
-			identifier: "same@example.com · 447700900123",
-		});
-	});
-
-	it("records custom rule labels without colliding with object prototype keys", () => {
-		const assessment = assessEntityResolution({
-			metadataSchema: {
-				"x-lobu-resolution": {
-					rules: [
-						{
-							fields: ["constructor"],
-							normalizer: "exact",
-							onMatch: "review",
-						},
-					],
-				},
-			},
-			winner: { id: 1, metadata: { constructor: "shared" } },
-			losers: [{ id: 2, metadata: { constructor: "shared" } }],
-		});
-
-		expect(assessment.resolutionKeys).toEqual([
-			{ id: 1, keys: { constructor: ["shared"] } },
-			{ id: 2, keys: { constructor: ["shared"] } },
-		]);
-	});
-
-	it("rejects oversized decision batches before returning partial work", () => {
-		const candidates = Array.from({ length: 400 }, (_, index) => ({
-			id: index + 1,
-			metadata: { email: `pair-${Math.floor(index / 2)}@example.com` },
-		}));
-		expect(() =>
-			discoverEntityResolutionGroups({
-				metadataSchema: schema,
-				candidates,
-				maxGroups: 500,
-				maxOperations: 199,
-			}),
-		).toThrow(/199 duplicate decisions/);
-	});
-
-	it("bounds direct-neighbor work for one oversized identity component", () => {
-		const candidates = Array.from({ length: 5_000 }, (_, index) => ({
-			id: index + 1,
-			metadata: { email: "shared@example.com" },
-		}));
-		expect(
-			discoverEntityResolutionGroups({
-				metadataSchema: schema,
-				candidates,
-			}),
-		).toEqual({
-			groups: [],
-			oversizedGroupCount: 1,
-			deferredCandidateCount: 0,
-		});
+	it("includes claims deterministically and changes with tenant scope", () => {
+		const left = { id: 1, metadata: { email: "shared@example.test" } };
+		const identities = [{ namespace: "phone", identifier: "447700900123" }, { namespace: "email", identifier: "shared@example.test" }];
+		const original = pair(left, { id: 2, metadata: {}, identities });
+		expect(pair(left, { id: 2, metadata: {}, identities: [...identities].reverse() }).fingerprint).toBe(original.fingerprint);
+		expect(pair(left, { id: 2, metadata: {} }).fingerprint).not.toBe(original.fingerprint);
+		expect(pair(left, { id: 2, metadata: {}, identities: identities.map(identity => ({ ...identity, scopeKey: "tenant-a" })) }).fingerprint).not.toBe(original.fingerprint);
 	});
 });

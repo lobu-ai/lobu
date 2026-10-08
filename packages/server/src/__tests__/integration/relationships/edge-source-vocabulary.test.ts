@@ -26,11 +26,11 @@ describe('relationship source vocabulary', () => {
     source?: typeof EDGE_SOURCE_CONFIG | typeof EDGE_SOURCE_MANUAL
   ) {
     const a = (await workspace.owner.entities.create({
-      type: 'doc',
+      entity_type: 'doc',
       name: `${prefix} A`,
     })) as { entity: { id: number } };
     const b = (await workspace.owner.entities.create({
-      type: 'doc',
+      entity_type: 'doc',
       name: `${prefix} B`,
     })) as { entity: { id: number } };
     const linked = (await workspace.owner.entities.link({
@@ -74,8 +74,7 @@ describe('relationship source vocabulary', () => {
       // A caller mistake, not an operational failure: it must carry a 4xx so
       // the tool layer reports it instead of logging it as a fault.
       await expect(
-        workspace.owner.entities.manage({
-          action: 'update_link',
+        workspace.owner.entities.updateLink({
           relationship_id: id,
           source: next,
         })
@@ -91,11 +90,11 @@ describe('relationship source vocabulary', () => {
     'refuses to mint a new edge directly into the %s reconcile scope',
     async (source) => {
       const a = (await workspace.owner.entities.create({
-        type: 'doc',
+        entity_type: 'doc',
         name: `Mint ${source} A`,
       })) as { entity: { id: number } };
       const b = (await workspace.owner.entities.create({
-        type: 'doc',
+        entity_type: 'doc',
         name: `Mint ${source} B`,
       })) as { entity: { id: number } };
 
@@ -116,8 +115,7 @@ describe('relationship source vocabulary', () => {
 
   it('still allows an ordinary source change between authored values', async () => {
     const id = await seedEdge('Plain');
-    await workspace.owner.entities.manage({
-      action: 'update_link',
+    await workspace.owner.entities.updateLink({
       relationship_id: id,
       source: 'llm',
     });
@@ -127,8 +125,7 @@ describe('relationship source vocabulary', () => {
   it('refuses to replace metadata that scopes a reconciled edge', async () => {
     const id = await seedEdge('Metadata', EDGE_SOURCE_CONFIG);
     await expect(
-      workspace.owner.entities.manage({
-        action: 'update_link',
+      workspace.owner.entities.updateLink({
         relationship_id: id,
         metadata: { connection_id: 'other-connection' },
       })
@@ -143,8 +140,7 @@ describe('relationship source vocabulary', () => {
 
   it('allows confidence updates with unchanged reconciler metadata', async () => {
     const id = await seedEdge('Confidence', EDGE_SOURCE_CONFIG);
-    const result = (await workspace.owner.entities.manage({
-      action: 'update_link',
+    const result = (await workspace.owner.entities.updateLink({
       relationship_id: id,
       confidence: 0.75,
       metadata: { channel_key: 'Confidence', connection_id: 'test-connection' },
