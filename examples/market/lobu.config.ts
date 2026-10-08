@@ -523,6 +523,25 @@ const brandOf = defineRelationshipType({
   rules: [{ source: "company", target: "company" }],
 });
 
+const customerOf = defineRelationshipType({
+  key: "customer_of",
+  name: "Customer Of",
+  description: "An organization or person is a customer of an organization",
+  rules: [
+    { source: "company", target: "company" },
+    { source: "person", target: "company" },
+  ],
+});
+
+// Symmetric in the live org. Config cannot express symmetry, so it is managed
+// through the API; never delete and recreate this type or the flag is lost.
+const partnerOf = defineRelationshipType({
+  key: "partner_of",
+  name: "Partner Of",
+  description: "Two organizations have a mutual partnership",
+  rules: [{ source: "company", target: "company" }],
+});
+
 const integratesWith = defineRelationshipType({
   key: "integrates_with",
   name: "Integrates With",
@@ -609,6 +628,8 @@ export default defineConfig({
     acquiredBy,
     subsidiaryOf,
     brandOf,
+    customerOf,
+    partnerOf,
     integratesWith,
     competitorOf,
   ],
