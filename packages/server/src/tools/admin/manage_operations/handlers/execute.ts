@@ -8,7 +8,7 @@ import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
-import { resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
+import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
 import { applyRunConnectorPolicyAtClaim } from "../../../../authz/operation-run-policy";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { type DbClient, getDb } from "../../../../db/client";
@@ -56,6 +56,7 @@ import { insertEvent } from "../../../../utils/insert-event";
 import { stripNul, stripNulDeep } from "../../../../utils/strip-nul";
 import { buildResourcePermalink } from "../../../../utils/url-builder";
 import { trackAutomationReaction } from "../../../../utils/automation-reactions";
+import { executeConnectorOperation } from "../../../../operations/connector-delegation";
 import { dispatchChromeActionToExtension } from "../../../../worker-api/dispatch-chrome-action";
 import {
 	deriveBrowserActionContext,
@@ -240,6 +241,11 @@ async function executeLocalActionInline(
 			},
 			hooks: {
 				onHttpFetch,
+				onOperationExecute: (request) =>
+					executeConnectorOperation(
+						{ parentRunId: runId, claimedBy, organizationId, request, abortSignal },
+						handleExecute,
+					),
 				// Let an inline connector action drive the paired Owletto Chrome
 				// extension (the Lobu Team Deliveroo connector scrapes restaurant
 				// search + menu pages this way). The connector calls
@@ -574,6 +580,10 @@ export async function handleExecute(
 	args: Static<typeof ExecuteAction>,
 	ctx: ToolContext,
 	_env: Env,
+	delegation?: {
+		actor: ActingPrincipal;
+		assertActive: (sql: DbClient) => Promise<void>;
+	},
 ): Promise<ManageOperationsResult> {
 	const sql = getDb();
 	const browserContext = deriveBrowserActionContext(ctx);
@@ -630,6 +640,16 @@ export async function handleExecute(
 	}
 
 	const { connection, operation } = resolved;
+	// A delegated call cannot recurse into another compiled connector or bypass
+	// the browser adapter's origin/account/page-activation restrictions.
+	if (
+		delegation &&
+		(!connection.connector_manifest_backed ||
+			!connection.device_worker_id ||
+			connection.device_platform === "chrome-extension")
+	) {
+		return { error: "Connector operations require a pinned native device connection. Use ctx.browser for browser operations." };
+	}
 	if (connection.status !== "active" && !(connection.status === "pending_auth" && operation.operation_key === BROWSER_VERIFY_OPERATION && await connectionBrowserGrant(ctx.organizationId, connection.id))) {
 		return { error: `Connection is ${connection.status}, must be active` };
 	}
@@ -680,7 +700,7 @@ export async function handleExecute(
 		};
 	}
 
-	const actor = await resolveActingPrincipal(sql, {
+	const actor = delegation?.actor ?? await resolveActingPrincipal(sql, {
 		organizationId: ctx.organizationId,
 		userId: ctx.userId,
 		agentId: ctx.agentId,
@@ -783,6 +803,7 @@ export async function handleExecute(
 		// createConnectorOperationRun via its db param (which also carries its
 		// connector-version read into the same tx — safe, it is a read).
 		const { claim, eventId, approvalUrl } = await sql.begin(async (tx) => {
+			await delegation?.assertActive(tx);
 			// Serialize approval queueing against connection deletion: take a SHARE
 			// lock on the connection row and re-verify it is still live. A delete's
 			// tombstone+expiry tx holds FOR UPDATE on the same row, so an in-flight
@@ -927,6 +948,7 @@ export async function handleExecute(
 	// branch does: a run that exists without a card is a connector action with
 	// nothing recording that it ran.
 	const claim = await sql.begin(async (tx) => {
+		await delegation?.assertActive(tx);
 		const createdRun = await createConnectorOperationRun({
 			organizationId: ctx.organizationId,
 			connectionId: connection.id,

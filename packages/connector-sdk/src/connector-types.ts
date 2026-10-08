@@ -12,6 +12,7 @@ import type { EntityTypeContribution, ReflectedMeasure } from './metrics.js';
 import type { ConnectorBrowserRequirement } from './browser-requirement.js';
 import type { ChromeActionDispatcher } from './extension-network.js';
 import type { AttributeFilter } from '@lobu/core/contracts/tools/collection-selection';
+import type { ConnectorOperationRequest, ConnectorOperationResult } from '@lobu/core/contracts/tools/manage-operations';
 import type {
   ConnectorAutomationEvent,
   ConnectorAutomationSignalDraft,
@@ -1294,10 +1295,20 @@ export interface AuthResult {
 // Action Context & Result
 // =============================================================================
 
+/** Host-mediated calls to a visible native device connection. The target's
+ * Auto/Ask/Block policy applies independently. Pending approval is a receipt,
+ * not a completed effect. Reuse the same key on ambiguous outcomes; do not
+ * blindly retry an interactive prompt. Keys are scoped to the parent run. */
+export interface ConnectorOperations {
+  execute(request: ConnectorOperationRequest): Promise<ConnectorOperationResult>;
+}
+
 /**
  * Context passed to ConnectorRuntime.execute()
  */
 export interface ActionContext {
+  /** Native device operations, delegated through the host's operation lifecycle. */
+  operations?: ConnectorOperations;
   /** Browser handle scoped by the host to this connection and declared origins. */
   browser?: ChromeActionDispatcher;
   /** Action key to execute */

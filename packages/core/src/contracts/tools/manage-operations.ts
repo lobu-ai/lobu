@@ -1,4 +1,5 @@
 import { type Static, Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import type { ActionInput } from "./action-input";
 import { MAX_TOOL_PAGE_OFFSET, MAX_TOOL_PAGE_SIZE } from "./pagination";
 
@@ -124,6 +125,30 @@ export const ExecuteAction = Type.Object({
     })
   ),
 });
+
+/** Connector implementation calls use the public operation lifecycle, with a
+ * parent-scoped idempotency key and no caller-supplied authority or device id. */
+export const ConnectorOperationRequestSchema = Type.Object(
+  {
+    ...Type.Pick(ExecuteAction, ["operation_key", "input", "background"])
+      .properties,
+    connection_id: Type.Integer({ minimum: 1 }),
+    idempotency_key: Type.String({ minLength: 1, maxLength: 128 }),
+  },
+  { additionalProperties: false }
+);
+export type ConnectorOperationRequest = Static<
+  typeof ConnectorOperationRequestSchema
+>;
+export function isConnectorOperationRequest(
+  value: unknown
+): value is ConnectorOperationRequest {
+  return Value.Check(ConnectorOperationRequestSchema, value);
+}
+export type ConnectorOperationResult = Extract<
+  ManageOperationsResult,
+  { action: "execute" } | { error: string }
+>;
 
 /**
  * Run types excluded from `list_runs` when the caller does not name run types

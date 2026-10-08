@@ -26,6 +26,7 @@
  */
 
 import { type Static, Type } from "@sinclair/typebox";
+import { ConnectorOperationRequestSchema } from "../tools/manage-operations";
 
 export const CONNECTOR_HTTP_AUTH_CAPABILITY = "http_auth";
 export const CONNECTOR_HTTP_MAX_BYTES = 4 * 1024 * 1024;
@@ -1379,6 +1380,22 @@ export const HeartbeatRequestSchema = Type.Object({
     Type.Array(TurnToolEventSchema, { maxItems: TURN_TOOL_EVENT_QUEUE_MAX })
   ),
 });
+
+/**
+ * Request the gateway delegate a native device operation on behalf of a
+ * running connector action. Scoped to the parent run's live claim.
+ */
+export const ExecuteConnectorOperationRequestSchema = Type.Object(
+  {
+    parent_run_id: Type.Integer({ minimum: 1 }),
+    worker_id: Type.String({ minLength: 1 }),
+    request: ConnectorOperationRequestSchema,
+  },
+  { additionalProperties: false }
+);
+export type ExecuteConnectorOperationRequest = Static<
+  typeof ExecuteConnectorOperationRequestSchema
+>;
 
 /**
  * Request the gateway dispatch a chrome connector action on behalf of a

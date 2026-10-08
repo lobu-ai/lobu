@@ -609,6 +609,10 @@ async function executeActionRun(
       hooks: {
         signal: monitor.signal,
         ...(job.http_auth ? { onHttpFetch: (request, signal) => client.httpFetch(run_id, request, signal) } : {}),
+        onOperationExecute: async (request) => {
+          if (!client.executeConnectorOperation) throw new Error('Connector operations are not available on this host');
+          return client.executeConnectorOperation({ parent_run_id: run_id, worker_id: client.id, request }, monitor.signal);
+        },
         onChromeDispatch: async (actionKey, actionInput) => {
           return client.dispatchChromeAction({
             parent_run_id: run_id,
