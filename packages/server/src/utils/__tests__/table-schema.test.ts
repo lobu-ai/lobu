@@ -237,8 +237,9 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
   const INTENTIONALLY_OMITTED: Record<string, Set<string>> = {
     // enabled_classifiers (entities) and classifiers (automation_versions) were
     // retired with Automation classifier extraction. Schema exposure is removed
-    // ahead of the two-phase column drop.
-    entities: new Set(['embedding', 'content_tsv', 'content_hash', 'field_controls', 'enabled_classifiers']),
+    // ahead of the two-phase column drop. merged_into is likewise retired from
+    // query_sql before its second-release physical column drop.
+    entities: new Set(['embedding', 'content_tsv', 'content_hash', 'field_controls', 'enabled_classifiers', 'merged_into']),
     automation_versions: new Set(['classifiers']),
     // superseded_by: the query_sql events CTE reads from current_event_records,
     // which doesn't expose the column — and never usefully can: the Stage-2

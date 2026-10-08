@@ -13,6 +13,7 @@ import type { ToolContext } from "../registry";
 const readActivity = vi.fn();
 const readLinks = vi.fn();
 const evaluatePolicy = vi.fn();
+const loadReadRestrictions = vi.fn();
 const sql = vi.fn(async () => [{ role: "owner" }]);
 const ctx = {
   organizationId: "record-test-org",
@@ -40,6 +41,7 @@ beforeAll(async () => {
       id: "record-test-agent",
     })),
     evaluateEntityMutation: evaluatePolicy,
+    loadEntityReadRestrictions: loadReadRestrictions,
   }));
   vi.doMock("../../utils/source-record-reads", () => ({
     readSourceRecordActivity: readActivity,
@@ -52,6 +54,7 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.clearAllMocks();
   evaluatePolicy.mockResolvedValue("auto");
+  loadReadRestrictions.mockResolvedValue([]);
   readActivity.mockResolvedValue({ events: [], failures: [] });
   readLinks.mockResolvedValue({ links: [], failures: [], next_cursor: null });
 });
@@ -64,18 +67,25 @@ afterAll(() => {
 });
 
 describe("record read admission", () => {
-  it("applies the entity read policy before contacting a source", async () => {
-    evaluatePolicy.mockResolvedValue("deny");
+  it.each([record.type, null])("applies the entity read policy (%s) before contacting a source", async entityType => {
+    loadReadRestrictions.mockResolvedValue([{ entity_type_slug: entityType, entity_id: null }]);
     await expect(
       getContent({ record }, {} as Env, {
         ...ctx,
         agentId: "record-test-agent",
       })
     ).rejects.toThrow(/Policy denies reading/);
-    expect(evaluatePolicy).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "read", entityTypeSlug: record.type })
+    expect(loadReadRestrictions).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: ctx.organizationId, principalKind: "agent", principalId: "record-test-agent" })
     );
     expect(readActivity).not.toHaveBeenCalled();
+  });
+
+  it("allows a source read when the principal's restrictions concern another entity type", async () => {
+    loadReadRestrictions.mockResolvedValue([{ entity_type_slug: "other-record", entity_id: null }]);
+    await getContent({ record }, {} as Env, { ...ctx, agentId: "record-test-agent" });
+    expect(loadReadRestrictions).toHaveBeenCalledOnce();
+    expect(readActivity).toHaveBeenCalledOnce();
   });
 
   it.each([

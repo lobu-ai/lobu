@@ -85,7 +85,7 @@ function stubSql(seeds: PolicyRowSeed[]): DbClient {
 		}
 		// Param order mirrors loadCandidatePolicies' WHERE: org, resourceClass,
 		// principalKind, principalId, ownerAgentId×2, targetAgentId,
-		// entityTypeSlug, entityId.
+		// allEntityScopes, entityTypeSlug, allEntityScopes, entityId.
 		const [
 			org,
 			resourceClass,
@@ -94,7 +94,9 @@ function stubSql(seeds: PolicyRowSeed[]): DbClient {
 			ownerAgentId,
 			,
 			targetAgentId,
+			allEntityTypes,
 			entityTypeSlug,
+			allEntityIds,
 			entityId,
 		] = params as [
 			string,
@@ -104,7 +106,9 @@ function stubSql(seeds: PolicyRowSeed[]): DbClient {
 			string | null,
 			string | null,
 			string | null,
+			boolean,
 			string | null,
+			boolean,
 			number | null,
 		];
 		return Promise.resolve(
@@ -122,9 +126,9 @@ function stubSql(seeds: PolicyRowSeed[]): DbClient {
 								row.principal_id === ownerAgentId))) &&
 					(row.target_agent_id === null ||
 						row.target_agent_id === targetAgentId) &&
-					(row.entity_type_slug === null ||
+					(allEntityTypes || row.entity_type_slug === null ||
 						row.entity_type_slug === entityTypeSlug) &&
-					(row.entity_id === null || row.entity_id === entityId),
+					(allEntityIds || row.entity_id === null || row.entity_id === entityId),
 			),
 		);
 	};
