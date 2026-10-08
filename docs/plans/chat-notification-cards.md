@@ -22,6 +22,7 @@ rebuild the shared presentation rather than reusing stored custom cards.
 
 The chat template interpreter has been deleted. General entity/list templates
 and historical event rendering remain active on the web and MCP surfaces.
-Historical event conversion, reconciliation of previously delivered controls,
-and removal of the old event-action and refresh paths are separate remaining
-retirement steps.
+`packages/server/scripts/convert-event-presentation.ts` provides bounded preview
+and apply commands for historical events without delivery receipts or interactions.
+Reconciliation of previously delivered controls and removal of the old
+event-action and refresh paths remain separate retirement steps.

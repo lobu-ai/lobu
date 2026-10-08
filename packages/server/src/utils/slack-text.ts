@@ -83,4 +83,3 @@ export function clampEscaped(value: string, max: number): string {
 	}
 	return `${cut}…`;
 }
-
