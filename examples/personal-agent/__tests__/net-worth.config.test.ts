@@ -32,18 +32,10 @@ describe("consolidated net-worth configuration", () => {
     ]);
   });
 
-  test("exposes the latest precomputed scalar and bounded drilldown as a derived entity", () => {
-    const entity = config.entities?.find(
-      (candidate) => candidate.key === "net-worth-snapshot"
-    );
-    expect(entity?.backing?.sql).toContain(
-      "metadata->>'schema' = 'net-worth-snapshot/v4'"
-    );
-    expect(entity?.backing?.sql).toContain("SUM(latest.net_worth_gbp) OVER ()");
-    expect(entity?.backing?.sql).toContain("ORDER BY created_at DESC, id DESC");
-    expect(entity?.backing?.sql).toContain("LIMIT 1");
-    expect(entity?.backing?.sql).toContain("metadata->'previous' AS previous");
-    expect(entity?.backing?.sql).not.toContain("GROUP BY");
+  test("keeps the weekly snapshot in events, not a derived entity", () => {
+    expect(
+      config.entities?.some((entity) => entity.key === "net-worth-snapshot")
+    ).toBe(false);
   });
 
   test("replaces the legacy asset type with an account metric grain", () => {

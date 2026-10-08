@@ -6,9 +6,6 @@
   "type": "module",
   "devDependencies": {
     "@lobu/cli": "^21.2.1",
-    "@lobu/connector-sdk": "^21.2.1",
-    "@lobu/views": "^21.2.1",
-    "react": "^19.2.5",
-    "@types/react": "^19.0.0"
+    "@lobu/connector-sdk": "^21.2.1"
   }
 }

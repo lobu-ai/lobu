@@ -13,7 +13,6 @@ import {
   every,
   reactionFromFile,
   scriptFromFile,
-  viewFromFile,
   field,
   Type,
 } from "@lobu/cli/config";
@@ -30,7 +29,6 @@ import {
 } from "./linkedin.prompts.ts";
 import type MidasConnector from "./midas.connector.ts";
 import type NetWorthScript from "./net-worth.reaction.ts";
-import type PollVoteReaction from "./poll-vote.reaction.ts";
 import type RevolutTransactionsConnector from "./revolut-transactions.connector.ts";
 import type SpotifyConnector from "./spotify.connector.ts";
 import { takeoutConfig } from "./takeout-dirs.ts";
@@ -50,33 +48,11 @@ const duplicateEntityResolutionRealV3FinalSkill = defineSkill({
     "Review the supplied sources.people context for this reporting-only Automation. State whether that context is complete; the reaction independently reads all candidate pages. Explain likely duplicate groups in analysis_summary and put uncertain groups in uncertain_groups with why. Names, aliases, handles, email and phone strings are candidate evidence, not proof of shared ownership. Do not call entity tools, merge contacts, or emit backlog tasks. The deterministic reaction re-reads all current candidates, saves the evidence, and sends one notification per distinct report.\n",
 });
 
-const eventBackedPollsSkill = defineSkill({
-  name: "event-backed-polls",
-  content: `Use this workflow whenever the user asks for a poll, vote, or ballot.
-
-Create no ad-hoc platform card and never use ask_user for a multi-user poll. The durable poll event is the source of truth. Its React ballot opens in Lobu; chat shows a useful summary and an Open event link. Participants must sign in with workspace access.
-
-Opening a poll:
-1. Require a non-empty question, 2-5 distinct non-empty options, a positive integer quorum, and a future closes_at. If the user gives a duration, calculate closes_at as an ISO-8601 timestamp.
-2. In one run_sdk call, create a poll entity, read its numeric id from createResult.entity?.id (stop if the result has no created entity), and then call client.knowledge.save with entity_ids containing only that numeric entity id, semantic_type "poll_opened", payload_type "markdown", content containing the question, numbered options, quorum and closing time, title equal to the question, a stable idempotency_key "poll-opened:<entity id>", and metadata containing question, options, status "open", quorum, closes_at, results (one { option, count: 0 } row per option), and response_count 0. Return the entity id and saved event id. If retrying after an uncertain result, search for the stable poll slug first instead of creating a duplicate.
-3. Before presenting the event, call schedule_followup with run_at equal to closes_at, idempotency_key "poll-deadline:<entity id>", and prompt: "Close event-backed poll entity <entity id> at its deadline. Follow the event-backed-polls deadline procedure exactly; do nothing if it is already closed."
-4. Call present_event exactly once with the saved event id. That ends the turn because the summary and Open event link are already the answer.
-
-Votes need no follow-up tool call from the agent. A server-stamped interaction event activates the deterministic poll-vote-reducer Automation; it derives the latest choice per platform actor from those durable vote events, recomputes the tally, closes at quorum, and publishes the updated poll event. Do not send another chat message for each vote.
-
-Deadline procedure:
-- Use run_sdk. Read the poll entity and query the single current poll_opened or poll_closed event linked to it, ordered newest first. client.query already reads the current event view, so do not add a superseded_by filter.
-- If the current event is poll_opened, copy only the poll schema fields (question, options, quorum, closes_at, results, and response_count) from that event metadata. Never copy delivery, card, _lobu, or any other internal metadata. Set status "closed", close_reason "deadline", and closed_at now. Save poll_closed with payload_type "markdown" and content containing the question, closing reason, participant count and all result counts, linked to the poll with supersedes_event_id equal to that current open event and idempotency_key "poll-close:<entity id>"; then update the poll entity to the same state.
-- If the current event is already poll_closed, only reconcile the entity metadata to that event if needed, then stop. Never append a second close event.
-- Do not infer, copy, or accept voter identity from text. Only the React action's server-stamped interaction envelope may identify a voter.`,
-});
-
 const personalAgent = defineAgent({
   id: "personal-agent",
   skills: [
     hourlyTaskCollaboratorSkill,
     duplicateEntityResolutionRealV3FinalSkill,
-    eventBackedPollsSkill,
   ],
   dir: ".",
   name: "personal-agent",
@@ -160,7 +136,8 @@ const person = defineEntityType({
       })
     ),
     company: field("Company", {
-      description: "Company / employer (LinkedIn connection + manual).",
+      description:
+        "Employer name as seen (LinkedIn connection + manual). Canonical identity lives in the market org's public company entity; prefer its domain or slug when known.",
       optional: true,
     }),
     last_linkedin_message_at: Type.Optional(
@@ -278,103 +255,6 @@ const person = defineEntityType({
   },
 });
 
-const company = defineEntityType({
-  key: "company",
-  name: "Company",
-  description:
-    "An organization the user cares about — own company, employer, customer, partner, or portfolio company. Link people via works_at.",
-  metadata: { icon: "building", color: "#2563eb" },
-  properties: {
-    domain: Type.Optional(
-      Type.Unsafe({ type: "string", description: "Primary web domain" })
-    ),
-    one_liner: Type.Optional(
-      Type.Unsafe({ type: "string", description: "One-line description" })
-    ),
-    location: Type.Optional(Type.Unsafe({ type: "string" })),
-    market: Type.Optional(
-      Type.Unsafe({ type: "string", description: "Primary market vertical" })
-    ),
-    main_market: Type.Optional(Type.Unsafe({ type: "string" })),
-    platform_type: Type.Optional(Type.Unsafe({ type: "string" })),
-    linkedin_url: Type.Optional(Type.Unsafe({ type: "string", format: "uri" })),
-    founding_year: Type.Optional(
-      Type.Unsafe({ type: "integer", maximum: 2030, minimum: 1900 })
-    ),
-    team_size: Type.Optional(Type.Unsafe({ type: "integer", minimum: 0 })),
-    stage: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        enum: [
-          "preseed",
-          "seed",
-          "series_a",
-          "series_b",
-          "series_c",
-          "growth",
-          "public",
-        ],
-        description: "Current funding stage when relevant",
-      })
-    ),
-    mrr: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        description: "Monthly recurring revenue in USD",
-      })
-    ),
-    revenue: Type.Optional(
-      Type.Unsafe({ type: "number", description: "Annual revenue in USD" })
-    ),
-    valuation: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        description: "Last known valuation in USD",
-      })
-    ),
-    growth_rate: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        description: "YoY growth rate as decimal",
-      })
-    ),
-    funding_raised: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        description: "Total funding raised in USD",
-      })
-    ),
-    thesis: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        description: "Investment or relationship notes",
-      })
-    ),
-    traction_score: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        maximum: 100,
-        minimum: 0,
-        description: "Computed traction score",
-      })
-    ),
-    traction_signals: Type.Optional(
-      Type.Unsafe({
-        type: "object",
-        properties: {
-          hiring: { type: "number" },
-          last_updated: { type: "string", format: "date-time" },
-          news_coverage: { type: "number" },
-          github_velocity: { type: "number" },
-          social_mentions: { type: "number" },
-          app_store_growth: { type: "number" },
-          review_sentiment: { type: "number" },
-        },
-      })
-    ),
-  },
-});
-
 // System chat-surface unit (Slack etc.). Declared so prune does not attempt to
 // delete the org's channel type while conversation ACL still depends on it.
 const channel = defineEntityType({
@@ -473,110 +353,6 @@ const task = defineEntityType({
   },
 });
 
-const pollStateProperties = {
-  question: Type.String({ minLength: 1, maxLength: 500 }),
-  options: Type.Array(Type.String({ minLength: 1, maxLength: 100 }), {
-    minItems: 2,
-    maxItems: 5,
-    uniqueItems: true,
-  }),
-  status: Type.Unsafe({ type: "string", enum: ["open", "closed"] }),
-  quorum: Type.Integer({ minimum: 1, maximum: 10_000 }),
-  closes_at: Type.String({ format: "date-time" }),
-  results: Type.Array(
-    Type.Object(
-      {
-        option: Type.String({ minLength: 1, maxLength: 100 }),
-        count: Type.Integer({ minimum: 0 }),
-      },
-      { additionalProperties: false }
-    ),
-    { minItems: 2, maxItems: 5 }
-  ),
-  response_count: Type.Integer({ minimum: 0 }),
-  close_reason: Type.Optional(
-    Type.Unsafe({ type: "string", enum: ["quorum", "deadline"] })
-  ),
-  closed_at: Type.Optional(Type.String({ format: "date-time" })),
-};
-
-const pollStateSchema = {
-  type: "object",
-  properties: pollStateProperties,
-  required: [
-    "question",
-    "options",
-    "status",
-    "quorum",
-    "closes_at",
-    "results",
-    "response_count",
-  ],
-  additionalProperties: false,
-};
-
-const poll = defineEntityType({
-  key: "poll",
-  name: "Poll",
-  description:
-    "A durable multi-user ballot whose React controls append trusted interaction events.",
-  metadata: { icon: "list-checks", color: "#6366F1" },
-  properties: pollStateProperties,
-  required: pollStateSchema.required,
-  eventKinds: {
-    poll_opened: {
-      description: "An open event-backed poll",
-      metadataSchema: pollStateSchema,
-    },
-    poll_vote_cast: {
-      description:
-        "A trusted vote or vote change appended by an interactive surface",
-    },
-    poll_response_recorded: {
-      description:
-        "The current derived choice for one trusted platform actor; vote changes supersede it",
-      metadataSchema: Type.Object({
-        platform: Type.String({ minLength: 1, maxLength: 50 }),
-        actor_id: Type.String({ minLength: 1, maxLength: 500 }),
-        choice: Type.String({ minLength: 1, maxLength: 100 }),
-        vote_event_id: Type.Integer({ minimum: 1 }),
-        updated_at: Type.String({ format: "date-time" }),
-      }),
-    },
-    poll_closed: {
-      description: "A terminal poll result",
-      metadataSchema: pollStateSchema,
-    },
-  },
-});
-
-// Temporary bounded cutover source for polls opened before response events
-// were introduced. New interactions never write this entity type.
-const pollResponse = defineEntityType({
-  key: "poll-response",
-  name: "Poll response",
-  description:
-    "The legacy latest materialized choice for one trusted platform actor in one poll.",
-  properties: {
-    poll_entity_id: Type.Integer({ minimum: 1 }),
-    platform: Type.String({ minLength: 1, maxLength: 50 }),
-    actor_id: Type.String({ minLength: 1, maxLength: 500 }),
-    actor_name: Type.String({ minLength: 1, maxLength: 500 }),
-    choice: Type.String({ minLength: 1, maxLength: 100 }),
-    vote_event_id: Type.Integer({ minimum: 1 }),
-    updated_at: Type.String({ format: "date-time" }),
-  },
-  required: [
-    "poll_entity_id",
-    "platform",
-    "actor_id",
-    "actor_name",
-    "choice",
-    "vote_event_id",
-    "updated_at",
-  ],
-});
-
 // GBP-equivalent of a transaction amount, using ONLY exact, Revolut-booked
 // values — never a fuzzy FX-rate lookup:
 //   • native GBP                       → the amount itself
@@ -626,53 +402,6 @@ const completedCardSpendWhere = `semantic_type = 'transaction'
     AND metadata->>'state' = 'COMPLETED'
     AND metadata->>'transaction_type' = 'CARD_PAYMENT'
     AND metadata->>'direction' = 'out'`;
-
-// One bounded, immutable weekly row is the financial read model. The inner
-// top-1 uses the live-event index; the outer SUM window runs over that one row
-// only and lets the existing derived-column classifier expose net_worth_gbp as
-// the first-class measure without a separate metrics DSL.
-const netWorthSnapshot = defineEntityType({
-  key: "net-worth-snapshot",
-  name: "Net Worth Snapshot",
-  description:
-    "Latest household balance-sheet valuation from connector positions and current observations, with weekly FX, valuation range, and deterministic attribution.",
-  metadata: { icon: "wallet-cards", color: "#10B981" },
-  backing: {
-    sql: `SELECT
-      latest.id,
-      latest.week,
-      latest.snapshot_at,
-      SUM(latest.net_worth_gbp) OVER () AS net_worth_gbp,
-      SUM(latest.net_worth_low_gbp) OVER () AS net_worth_low_gbp,
-      SUM(latest.net_worth_high_gbp) OVER () AS net_worth_high_gbp,
-      latest.scope,
-      latest.sources,
-      latest.positions,
-      latest.breakdowns,
-      latest.previous,
-      latest.attribution
-    FROM (
-      SELECT
-        id,
-        metadata->>'week' AS week,
-        occurred_at AS snapshot_at,
-        (metadata->>'net_worth_gbp')::numeric AS net_worth_gbp,
-        (metadata->'net_worth_range_gbp'->>'low')::numeric AS net_worth_low_gbp,
-        (metadata->'net_worth_range_gbp'->>'high')::numeric AS net_worth_high_gbp,
-        metadata->>'scope' AS scope,
-        metadata->'sources' AS sources,
-        metadata->'positions' AS positions,
-        metadata->'breakdowns' AS breakdowns,
-        metadata->'previous' AS previous,
-        metadata->'attribution' AS attribution
-      FROM events
-      WHERE semantic_type = 'summary'
-        AND metadata->>'schema' = 'net-worth-snapshot/v4'
-      ORDER BY created_at DESC, id DESC
-      LIMIT 1
-    ) latest`,
-  },
-});
 
 const account = defineEntityType({
   key: "account",
@@ -764,6 +493,12 @@ const account = defineEntityType({
 // in a subscription-like category. The category exclusion + low-variance test
 // keep frequent restaurants/groceries (which the old blocklist chased by hand)
 // from masquerading as subscriptions.
+//
+// Deliberately derived, not stored: obligations are inferred from the spend
+// stream, so a stored entity would need reconciling every run (detected vs
+// changed vs cancelled). The backing view recomputes status from recency
+// instead. If this ever gets slow, materialize on write like net-worth
+// snapshots — until then the view is the long-term shape.
 const subscriptionBackingSql = `
 WITH card AS (
   SELECT
@@ -1133,23 +868,49 @@ const instagramTakeoutConnection = defineConnection({
   ],
 });
 
-// One consolidated LinkedIn connection spanning BOTH sources: the local Data
-// Export CSV feeds AND the live Chrome-extension feeds. Because it's a single
-// connection on connector "linkedin", people met live and people in the CSV
-// export dedup on the shared linkedin_slug/email identity. The stable slug is
-// the config identity; runtime database ids are deliberately not hard-coded.
-//
-// The live home_feed reads linkedin.com/feed/ through the paired Owletto Chrome
-// extension and needs no company_url. The company_updates/jobs live feeds each
-// require a company_url, so add them per-company when tracking a specific page
-// (e.g. { feed: "company_updates", config: { company_url: "https://www.linkedin.com/company/openai" } }).
+const xAccountAuth = defineAuthProfile({
+  slug: "x-twitter-account",
+  connector: "x",
+  authKind: "oauth_account",
+  name: "X Account",
+});
+
+const xAppAuth = defineAuthProfile({
+  slug: "x-twitter-oauth-app",
+  connector: "x",
+  authKind: "oauth_app",
+  name: "X OAuth App",
+});
+
+const xConnection = defineConnection({
+  slug: "x-twitter-bu7emba",
+  connector: "x",
+  name: "X",
+  // Keep the adopted connection's identity, remote feed settings and cadence.
+  // Declaring config: {} would replace existing per-feed browser settings.
+  // Both auth bindings are prod truth: omitting one reads as an explicit
+  // clear on reapply and the server rejects clearing required auth.
+  deviceWorkerId: "706aa825-5f82-4ce2-80d1-c09cd7908001",
+  authProfile: xAccountAuth,
+  appAuthProfile: xAppAuth,
+  feeds: [
+    { feed: "bookmarks" },
+    { feed: "my_tweets" },
+    { feed: "home_feed" },
+    { feed: "liked_tweets" },
+  ],
+});
+
 const linkedinConnection = defineConnection({
   slug: "linkedin-buremba",
   connector: "linkedin",
   name: "LinkedIn",
-  // Scrape affinity: the paired Mac mini Chrome owns the signed-in session.
-  deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
+  // Scrape affinity for live reads through the paired Chrome extension.
+  deviceWorkerId: "706aa825-5f82-4ce2-80d1-c09cd7908001",
   feeds: [
+    // Apply never prunes feeds. Clear the old schedule explicitly so live
+    // reads do not leave the previous periodic ingestion running.
+    { feed: "home_feed", schedule: null },
     // Local Data Export (CSV) feeds.
     ...(linkedinTakeoutDir
       ? [
@@ -1165,13 +926,6 @@ const linkedinConnection = defineConnection({
           "media",
         ].map((feed) => ({ feed, config: { takeout_dir: linkedinTakeoutDir } }))
       : []),
-    // Live Chrome-extension feed (no company_url needed). Every 3 hours; a run
-    // while the paired browser is offline re-arms without a source-health failure.
-    {
-      feed: "home_feed",
-      schedule: "0 */3 * * *",
-      config: { min_scrolls: 6, max_scrolls: 10 },
-    },
   ],
 });
 
@@ -1179,9 +933,44 @@ const hackerNewsConnection = defineConnection({
   slug: "hackernews-buremba",
   connector: "hackernews",
   name: "Hacker News",
-  // Draft staging rides the paired Mac mini Chrome's signed-in HN session.
-  deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
-  feeds: [{ feed: "front_page", config: {} }],
+  // No device pin: the Algolia sync needs no browser.
+  // prepare_comment staging would resolve a Chrome at call time.
+  feeds: [{ feed: "front_page", schedule: "0 */3 * * *", config: {} }],
+});
+
+const spotifyAccountAuth = defineAuthProfile({
+  slug: "spotify-spotify-account",
+  connector: "spotify",
+  authKind: "oauth_account",
+  name: "Spotify Account",
+});
+
+const spotifyAppAuth = defineAuthProfile({
+  slug: "spotify-oauth-app",
+  connector: "spotify",
+  authKind: "oauth_app",
+  name: "Spotify OAuth App",
+});
+
+const spotifyConnection = defineConnection({
+  slug: "spotify-buremba",
+  connector: "spotify",
+  name: "Spotify",
+  // Both bindings are prod truth: omitting one reads as an explicit clear
+  // on reapply. App credentials resolve org-first from the app profile's
+  // auth_data, then host env. Fill the app profile after apply, then
+  // complete OAuth in the UI against the hosted callback.
+  authProfile: spotifyAccountAuth,
+  appAuthProfile: spotifyAppAuth,
+  feeds: [
+    { feed: "saved_tracks", config: {} },
+    { feed: "playlists", config: {} },
+    { feed: "recently_played", config: {} },
+    {
+      feed: "top_tracks",
+      config: { time_range: "medium_term", limit: 50 },
+    },
+  ],
 });
 
 const midasConnection = defineConnection({
@@ -1243,19 +1032,6 @@ const gmailConnection = defineConnection({
 // examples/personal-finance — not here. With prune:true they are removed from
 // buremba if present.
 
-const worksAt = defineRelationshipType({
-  key: "works_at",
-  name: "Works At",
-  description: "Person employed by / associated with a company",
-  rules: [{ source: person, target: company }],
-});
-
-const memberOf = defineRelationshipType({
-  key: "member_of",
-  name: "Member of",
-  description: "A person is a member of an organization or channel",
-});
-
 const mentions = defineRelationshipType({
   key: "mentions",
   name: "Mentions",
@@ -1272,66 +1048,6 @@ const connectedWith = defineRelationshipType({
   description:
     "Social connection observed on a platform (LinkedIn connection, mutual follow). Symmetric.",
 });
-
-const founderOf = defineRelationshipType({
-  key: "founder_of",
-  name: "Founder Of",
-  description: "A person founded or co-founded a company.",
-});
-
-const sameAs = defineRelationshipType({
-  key: "same_as",
-  name: "Same As",
-  description:
-    "Maps a private person profile to its canonical public identity. The mapping and private profile remain visible only to this workspace.",
-});
-
-// Historical social-signal entity rows still exist. Prune must retain their
-// type until an explicit data migration removes them.
-const socialSignal = defineEntityType({
-  key: "social-signal",
-  name: "Social Signal",
-  description:
-    "Deprecated historical entity rows from the former Social Interest Radar output path.",
-  metadata: { icon: "radar" },
-  properties: {
-    platform: {
-      type: "string",
-      enum: ["x", "linkedin"],
-      description: "Source platform",
-    },
-    author: {
-      type: "string",
-      minLength: 1,
-      description: 'Post author (never "unknown")',
-    },
-    snippet: Type.Optional(
-      Type.Unsafe({ type: "string", description: "Excerpt of the post" })
-    ),
-    why: {
-      type: "string",
-      minLength: 1,
-      description: "Why this matches taste — specific to this item",
-    },
-    priority: { type: "string", enum: ["high", "normal", "low"] },
-    source_origin_id: {
-      type: "string",
-      description: "Stable events.origin_id of the source post",
-    },
-    source_event_id: Type.Optional(
-      Type.Unsafe({
-        type: "integer",
-        description: "Originating event id (unstable across re-sync)",
-      })
-    ),
-    suggested_action: Type.Optional(
-      Type.Unsafe({ type: "string", description: "Concrete next step" })
-    ),
-  },
-  required: ["platform", "author", "why", "priority", "source_origin_id"],
-});
-
-// ── Automations (must be declared under prune or apply deletes them) ─
 
 const midasNetWorth = defineAutomation({
   agent: personalAgent,
@@ -1398,7 +1114,7 @@ const duplicateEntityResolution = defineAutomation({
   // The reaction fingerprints current evidence, including edits on old rows.
   // A source-window unchanged check cannot replace that comparison.
   triggers: [
-    every("0 6 * * *", {
+    every("0 6 * * 1", {
       timezone: "Europe/London",
       skip_if_unchanged: false,
     }),
@@ -1452,38 +1168,18 @@ const linkedInFeedFlagger = defineAutomation({
   slug: "linkedin-feed-flagger",
   name: "LinkedIn feed flagger",
   ...linkedInAssistantDevice,
-  // Half an hour after each 3-hourly home_feed sync.
-  triggers: [every("30 */3 * * *", { timezone: "Europe/London" })],
-  sources: {
-    posts:
-      "SELECT * FROM events WHERE connector_key = 'linkedin' AND feed_key = 'home_feed' ORDER BY occurred_at DESC",
-  },
+  // Live reads must run even though their declared source is always empty.
+  triggers: [
+    every("30 */3 * * *", {
+      timezone: "Europe/London",
+      skip_if_unchanged: false,
+    }),
+  ],
+  sources: { none: "SELECT id FROM events WHERE false" },
   prompt: linkedInFeedFlaggerPrompt,
   reaction: reactionFromFile<typeof LinkedInFlagReaction>(
     "./linkedin-flag.reaction.ts"
   ),
-});
-
-const pollVoteReducer = defineAutomation({
-  agent: personalAgent,
-  slug: "poll-vote-reducer",
-  name: "Poll vote reducer",
-  description:
-    "Materializes trusted interactive votes, vote changes, tallies and quorum closure.",
-  triggers: [
-    {
-      kind: "event",
-      source: "workspace",
-      entity_type: "poll",
-      event_types: ["poll_vote_cast"],
-      execution: "window",
-      active_run: "queue",
-    },
-  ],
-  // Keep the run active through every projection write so the existing
-  // Automation queue serializes votes across replicas and recovery attempts.
-  executor: scriptFromFile<typeof PollVoteReaction>("./poll-vote.reaction.ts"),
-  reaction: null,
 });
 
 export default defineConfig({
@@ -1515,42 +1211,32 @@ export default defineConfig({
   orgDescription:
     "Personal agent tracking finances, people, companies, tasks, subscriptions, and trips.",
   agents: [personalAgent],
-  views: [
-    viewFromFile("./views/poll-ballot.tsx"),
-    viewFromFile("./views/activity-chart.tsx"),
-  ],
   entities: [
     person,
-    company,
     task,
-    poll,
-    pollResponse,
     channel,
     account,
-    netWorthSnapshot,
     subscription,
     trip,
     goal,
     learning,
-    socialSignal,
   ],
-  relationships: [
-    worksAt,
-    memberOf,
-    mentions,
-    connectedWith,
-    founderOf,
-    sameAs,
-  ],
+  relationships: [mentions, connectedWith],
   automations: [
     hourlyTaskCollaborator,
     duplicateEntityResolution,
     midasNetWorth,
-    pollVoteReducer,
     linkedInInterestProfile,
     linkedInFeedFlagger,
   ],
-  authProfiles: [gmailAccountAuth, gmailAppAuth],
+  authProfiles: [
+    gmailAccountAuth,
+    gmailAppAuth,
+    spotifyAccountAuth,
+    spotifyAppAuth,
+    xAccountAuth,
+    xAppAuth,
+  ],
   connections: [
     midasConnection,
     marketQuotesConnection,
@@ -1560,6 +1246,8 @@ export default defineConfig({
     instagramTakeoutConnection,
     linkedinConnection,
     hackerNewsConnection,
+    xConnection,
+    spotifyConnection,
     gmailConnection,
   ],
 });
