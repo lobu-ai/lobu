@@ -39,7 +39,7 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * SQL predicate: "event `<alias>` is linked to entity `<paramRef>`".
  *
  * Matches two ways:
- *   1. Direct attribution: a group member or its legacy merge loser appears in
+ *   1. Direct attribution: a group member appears in
  *      `events.entity_ids`.
  *   2. Identity-graph attribution: a group member's live `entity_identities` row claims an
  *      identifier that the event carries in `metadata->>namespace` (stamped
@@ -127,8 +127,8 @@ export async function fetchEntityIdentityScopes(
  * Build the same `<alias>.id IN (UNION …)` predicate as `entityLinkMatchSql`,
  * but emit only the branches an entity actually needs.
  *
- * Differences from the legacy helper:
- *  - The direct `entity_ids && ARRAY[group members and merge losers]` branch is always included.
+ * Differences from `entityLinkMatchSql`:
+ *  - The direct `entity_ids && ARRAY[group members]` branch is always included.
  *  - One `metadata->>'<ns>' = $N` branch per pre-fetched scope (no JOIN to
  *    `entity_identities`; the identifier is bound as a parameter). For an
  *    entity with no identities, that's zero extra branches — Postgres only

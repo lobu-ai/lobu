@@ -136,9 +136,8 @@ async function adoptChatIdentityOntoMember(
     UPDATE entity_identities ei
     SET entity_id = ${memberEntityId},
         source_connector = 'auth:signup',
-        -- Keep a trail back to the person we took this from, matching the
-        -- convention in entity-merge.ts (COALESCE so a re-run never overwrites
-        -- the ORIGINAL owner with an intermediate one).
+        -- Preserve the first recorded owner when adopting this identity;
+        -- repeated adoption must not replace it with an intermediate owner.
         merged_from_entity_id = COALESCE(ei.merged_from_entity_id, ei.entity_id),
         updated_at = current_timestamp
     FROM entities e

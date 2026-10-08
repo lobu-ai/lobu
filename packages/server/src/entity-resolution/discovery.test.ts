@@ -156,9 +156,6 @@ describe("normalized identity claims", () => {
 			{ id: 2, metadata: {}, identities: [{ namespace: "phone", identifier: "447700900123" }] },
 		);
 		expect(result.evidence).toEqual([{ kind: "phone", identifier: "447700900123" }]);
-		expect(result.resolutionKeys).toEqual([
-			{ id: 1, keys: { phone: ["447700900123"] } }, { id: 2, keys: { phone: ["447700900123"] } },
-		]);
 	});
 
 	it("requires tenant scope equality and keeps scoped metadata mirrors scoped", () => {
@@ -210,10 +207,7 @@ describe("normalized identity claims", () => {
 			{ id: 2, metadata: { profile: { value: "shared" }, constructor: "key" } },
 			singleRule(["profile.value", "constructor"]),
 		);
-		expect(result.resolutionKeys).toEqual([
-			{ id: 1, keys: { "profile.value + constructor": ["shared · key"] } },
-			{ id: 2, keys: { "profile.value + constructor": ["shared · key"] } },
-		]);
+		expect(result.evidence).toEqual([{ kind: "profile.value + constructor", identifier: "shared · key" }]);
 	});
 
 	it("bounds a rule's Cartesian value expansion without partial matches", () => {

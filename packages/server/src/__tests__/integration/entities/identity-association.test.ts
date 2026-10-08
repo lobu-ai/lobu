@@ -51,19 +51,14 @@ function runId(result: unknown): number {
 describe('governed stored identity associations', () => {
   beforeEach(cleanupTestDatabase);
 
-  it('can reapply the identity guard migration without losing decisions', async () => {
+  it('can reapply redirect retirement without losing withdrawn identity decisions', async () => {
     const { sql, human, ids: [a, b], link } = await graph();
     const id = linked(await link(a, b));
     await human.entities.unlink({ relationship_id: id });
     const before = await sql`SELECT * FROM entity_relationships WHERE id = ${id}`;
-    const migration = readFileSync(resolve(process.cwd(), '../../db/migrations/20261007010000_identity_association_guards.sql'), 'utf8');
-    const [guard] = await sql`SELECT pg_get_functiondef('lobu_guard_identity_members()'::regprocedure) AS definition`;
-    try {
-      await sql.begin(tx => tx.unsafe(migration.split('-- migrate:down')[0]));
-      expect(await sql`SELECT * FROM entity_relationships WHERE id = ${id}`).toEqual(before);
-    } finally {
-      await sql.unsafe(String(guard.definition));
-    }
+    const migration = readFileSync(resolve(process.cwd(), '../../db/migrations/20261009030001_drop_physical_entity_redirect.sql'), 'utf8');
+    await sql.begin(tx => tx.unsafe(migration.split('-- migrate:down')[0]));
+    expect(await sql`SELECT * FROM entity_relationships WHERE id = ${id}`).toEqual(before);
   });
 
   it('retains the identity purpose through public create/get', async () => {
@@ -151,7 +146,7 @@ describe('governed stored identity associations', () => {
     await sql`INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier, source_connector)
       VALUES (${workspace.org.id}, ${a}, 'reference', 'source:alpha', 'fixture')`;
     const event = await createTestEvent({ entity_id: a, content: 'Retained source event', origin_id: 'source:alpha' });
-    const recordsBefore = await sql`SELECT id, name, metadata, merged_into, deleted_at FROM entities WHERE id = ANY(${pgBigintArray([a, b, c, d])}::bigint[]) ORDER BY id`;
+    const recordsBefore = await sql`SELECT id, name, metadata, deleted_at FROM entities WHERE id = ANY(${pgBigintArray([a, b, c, d])}::bigint[]) ORDER BY id`;
     const identityBefore = await sql`SELECT * FROM entity_identities WHERE entity_id = ${a}`;
     const eventBefore = await sql`SELECT * FROM events WHERE id = ${event.id}`;
     const ab = linked(await link(a, b));
@@ -161,7 +156,7 @@ describe('governed stored identity associations', () => {
     await human.entities.unlink({ relationship_id: bd });
     const edges = await sql`SELECT id FROM entity_relationships WHERE organization_id = ${workspace.org.id} AND deleted_at IS NULL ORDER BY id`;
     expect(edges.map(row => Number(row.id)).sort((x, y) => x - y)).toEqual([ordinary, ab, cd].sort((x, y) => x - y));
-    expect(await sql`SELECT id, name, metadata, merged_into, deleted_at FROM entities WHERE id = ANY(${pgBigintArray([a, b, c, d])}::bigint[]) ORDER BY id`).toEqual(recordsBefore);
+    expect(await sql`SELECT id, name, metadata, deleted_at FROM entities WHERE id = ANY(${pgBigintArray([a, b, c, d])}::bigint[]) ORDER BY id`).toEqual(recordsBefore);
     expect(await sql`SELECT * FROM entity_identities WHERE entity_id = ${a}`).toEqual(identityBefore);
     expect(await sql`SELECT * FROM events WHERE id = ${event.id}`).toEqual(eventBefore);
     await human.entities.update({ entity_id: a, metadata: { retained: 'exact record edit' } });
@@ -350,9 +345,9 @@ describe('governed stored identity associations', () => {
     await expect(human.entities.link(input)).rejects.toThrow(/stored.*non-reserved/);
   });
 
-  it('does not let direct SQL physically merge an opted type with no edges', async () => {
+  it('rejects the retired redirect column even when a type has no identity edges', async () => {
     const { sql, ids: [a, b] } = await graph();
-    await expect(sql`UPDATE entities SET merged_into = ${b} WHERE id = ${a}`).rejects.toThrow(/identity/i);
+    await expect(sql`UPDATE entities SET merged_into = ${b} WHERE id = ${a}`).rejects.toMatchObject({ code: '42703' });
   });
 
   it('keeps classification inert for ordinary relationships and refuses adopting populated edges', async () => {

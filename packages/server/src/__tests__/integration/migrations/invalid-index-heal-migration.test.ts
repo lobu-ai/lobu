@@ -1,7 +1,9 @@
-import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { getDb } from "../../../db/client";
+import postgres from "postgres";
+import { type DbClient, getDb, PROD_PG_VALUE_OPTIONS } from "../../../db/client";
 import {
 	executeMigrationSection,
 	loadMigrationDown,
@@ -165,9 +167,9 @@ function resolveMigrationsDir(): string {
 }
 
 async function indexValidity(
+	sql: DbClient,
 	indexName: string,
 ): Promise<{ exists: boolean; valid: boolean | null }> {
-	const sql = getDb();
 	const [row] = await sql<{ exists: boolean; valid: boolean | null }>`
     SELECT
       EXISTS (
@@ -189,6 +191,33 @@ async function indexValidity(
 	return row ?? { exists: false, valid: null };
 }
 
+// This historical index migration also creates a now-retired merge index and
+// requires its retired SQL helper. Concurrent DDL cannot be rolled back, so
+// exercise that exact migration in a disposable database, never the current one.
+async function withHistoricalIdentityIndexes(check: (sql: DbClient) => Promise<void>) {
+	const database = `identity_index_test_${randomUUID().replaceAll("-", "")}`;
+	const admin = getDb();
+	await admin.unsafe(`CREATE DATABASE ${database}`);
+	const url = new URL(process.env.DATABASE_URL!);
+	url.pathname = `/${database}`;
+	const sql = postgres(url.toString(), { max: 1, ...PROD_PG_VALUE_OPTIONS });
+	try {
+		await sql.unsafe(`
+			CREATE TABLE entity_relationships (id bigint, organization_id text,
+				from_entity_id bigint, to_entity_id bigint, updated_at timestamptz,
+				metadata jsonb, deleted_at timestamptz);
+			CREATE TABLE runs (id bigint, organization_id text, action_input jsonb,
+				approval_status text, action_key text);
+		`);
+		const source = readFileSync(join(resolveMigrationsDir(), "20261007010000_identity_association_guards.sql"), "utf8");
+		await sql.unsafe(source.slice(source.indexOf("CREATE OR REPLACE FUNCTION lobu_resolution_members"), source.indexOf("-- migrate:down")));
+		await check(sql as unknown as DbClient);
+	} finally {
+		await sql.end();
+		await admin.unsafe(`DROP DATABASE ${database}`);
+	}
+}
+
 describe("INVALID concurrent-index heal in transaction:false migrations", () => {
 	beforeAll(async () => {
 		await initWorkspaceProvider();
@@ -206,38 +235,44 @@ describe("INVALID concurrent-index heal in transaction:false migrations", () => 
 		index,
 		seedSql,
 	}) => {
-		const migrationsDir = resolveMigrationsDir();
-		const sql = getDb();
+		const verify = async (sql: DbClient) => {
+			const migrationsDir = resolveMigrationsDir();
 
-		// Drop any live index from prior suite setup, then seed a same-named
-		// INVALID carcass the way a crashed CREATE INDEX CONCURRENTLY would.
-		await sql.unsafe(`DROP INDEX IF EXISTS public.${index}`);
-		await sql.unsafe(seedSql);
-		await sql.unsafe(`
-        UPDATE pg_index
-        SET indisvalid = false
-        WHERE indexrelid = (
-          SELECT c.oid
-          FROM pg_class c
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = 'public'
-            AND c.relname = '${index}'
-        )
-      `);
+			// Drop any live index from prior suite setup, then seed a same-named
+			// INVALID carcass the way a crashed CREATE INDEX CONCURRENTLY would.
+			await sql.unsafe(`DROP INDEX IF EXISTS public.${index}`);
+			await sql.unsafe(seedSql);
+			await sql.unsafe(`
+	        UPDATE pg_index
+	        SET indisvalid = false
+	        WHERE indexrelid = (
+	          SELECT c.oid
+	          FROM pg_class c
+	          JOIN pg_namespace n ON n.oid = c.relnamespace
+	          WHERE n.nspname = 'public'
+	            AND c.relname = '${index}'
+	        )
+	      `);
 
-		const before = await indexValidity(index);
-		expect(before).toEqual({ exists: true, valid: false });
+			const before = await indexValidity(sql, index);
+			expect(before).toEqual({ exists: true, valid: false });
 
-		// Apply the pair in order: the companion heal migration drops the
-		// INVALID carcass, then the transaction:false migration rebuilds it
-		// CONCURRENTLY. Statement-at-a-time mirrors the runtime runner.
-		for (const file of files) {
-			const up = loadMigrationUp(migrationsDir, file);
-			await executeMigrationSection((statement) => sql.unsafe(statement), up);
+			// Apply the pair in order: the companion heal migration drops the
+			// INVALID carcass, then the transaction:false migration rebuilds it
+			// CONCURRENTLY. Statement-at-a-time mirrors the runtime runner.
+			for (const file of files) {
+				const up = loadMigrationUp(migrationsDir, file);
+				await executeMigrationSection((statement) => sql.unsafe(statement), up);
+			}
+
+			const after = await indexValidity(sql, index);
+			expect(after).toEqual({ exists: true, valid: true });
+		};
+		if (files[0] === "20261007010001_identity_association_indexes.sql") {
+			await withHistoricalIdentityIndexes(verify);
+		} else {
+			await verify(getDb());
 		}
-
-		const after = await indexValidity(index);
-		expect(after).toEqual({ exists: true, valid: true });
 	});
 
 	it("round-trips the notification browser-run column, index, and foreign key", async () => {
