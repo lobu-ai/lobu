@@ -57,7 +57,7 @@ const personalAgent = defineAgent({
   dir: ".",
   name: "personal-agent",
   description:
-    "A personal agent that tracks finances, people, companies, tasks, and subscriptions across the user's own data.",
+    "A personal agent that tracks finances, people, companies, tasks, subscriptions, and trips across the user's own data.",
   // No cloud provider key: runs on the local/Mac-app device worker and inherits
   // the org's default provider. No ANTHROPIC_API_KEY needed.
   //
@@ -627,6 +627,126 @@ const subscription = defineEntityType({
 
 // Trips are stored from explicit travel evidence such as passport stamps.
 // Related transaction/photo windows are attached through event sets below.
+const trip = defineEntityType({
+  key: "trip",
+  name: "Trip",
+  description: "Travel derived from passport stamps",
+  metadata: { icon: "✈️", color: "#F59E0B" },
+  properties: {
+    destination: field("Destination", {
+      description: "Destination of the trip",
+      optional: true,
+    }),
+    start_date: field("Start", { format: "date", optional: true }),
+    end_date: field("End", { format: "date", optional: true }),
+    event_type: Type.Optional(Type.Unsafe({ type: "string" })),
+    notes: Type.Optional(Type.Unsafe({ type: "string" })),
+  },
+  eventSets: {
+    transactions: {
+      by: "window",
+      start: "start_date",
+      end: "end_date",
+      where: completedCardSpendWhere,
+    },
+    photos: {
+      by: "window",
+      start: "start_date",
+      end: "end_date",
+      where: "connector_id = 'apple-photos'",
+    },
+  },
+  measures: {
+    photo_count: {
+      eventSet: "photos",
+      agg: "count",
+      description: "Number of Apple photos taken during the trip window.",
+      tier: "silver",
+    },
+  },
+});
+
+// Goals and learnings are agent-curated, not derived from a feed: the agent
+// writes them with save_memory and updates them as it observes the user. They
+// are stored entity types (no `backing`). The human-AI field-ownership loop
+// (a human edit pinning a field the agent must then respect) is a later layer;
+// for now these capture the agent's working model of what the user is trying to
+// do and what it has learned about them.
+const goal = defineEntityType({
+  key: "goal",
+  name: "Goal",
+  description:
+    "A personal objective the agent tracks and helps make progress on",
+  metadata: { icon: "🎯", color: "#0EA5E9" },
+  properties: {
+    status: field("Status", {
+      enum: ["active", "achieved", "paused", "abandoned"],
+      description: "Current status",
+      optional: true,
+    }),
+    category: Type.Optional(
+      Type.Unsafe({
+        type: "string",
+        description:
+          "Area of life (finance, health, career, travel, learning, …)",
+      })
+    ),
+    target_date: field("Target", {
+      format: "date",
+      description: "When the user wants to reach it",
+      optional: true,
+    }),
+    progress: Type.Optional(
+      field(
+        Type.Number({
+          minimum: 0,
+          maximum: 100,
+          description: "Percent complete (0–100)",
+        }),
+        "Progress"
+      )
+    ),
+    metric: Type.Optional(
+      Type.Unsafe({
+        type: "string",
+        description:
+          "How progress is measured — ideally a declared metric (e.g. account.spend) the agent can query",
+      })
+    ),
+    description: Type.Optional(Type.Unsafe({ type: "string" })),
+  },
+});
+
+const learning = defineEntityType({
+  key: "learning",
+  name: "Learning",
+  description:
+    "Something the agent has learned about the user or their world worth retaining",
+  metadata: { icon: "💡", color: "#A855F7" },
+  properties: {
+    topic: field("Topic", {
+      description: "What the learning is about",
+      optional: true,
+    }),
+    source: Type.Optional(
+      Type.Unsafe({
+        type: "string",
+        description:
+          "Where it was learned (conversation, Automation, observation)",
+      })
+    ),
+    learned_date: field("Date", { format: "date", optional: true }),
+    confidence: field("Confidence", {
+      enum: ["low", "medium", "high"],
+      optional: true,
+    }),
+    tags: Type.Optional(
+      Type.Unsafe({ type: "array", items: { type: "string" } })
+    ),
+    description: Type.Optional(Type.Unsafe({ type: "string" })),
+  },
+});
+
 // Revolut auth is implicit: through the paired Owletto Chrome extension, the
 // connector captures request headers from a signed-in tab and pages the retail
 // API in that browser context. No secret or browser-auth profile is stored.
@@ -758,12 +878,30 @@ const instagramTakeoutConnection = defineConnection({
 // extension and needs no company_url. The company_updates/jobs live feeds each
 // require a company_url, so add them per-company when tracking a specific page
 // (e.g. { feed: "company_updates", config: { company_url: "https://www.linkedin.com/company/openai" } }).
+const xConnection = defineConnection({
+  slug: "x-twitter-bu7emba",
+  connector: "x",
+  name: "X",
+  // Adopted live from prod (person X traits and the old voice rows feed off
+  // connector_key 'x'). Slug, cadence and device pin are prod truth;
+  // renaming would reset sync state. Feed schedules are intentionally
+  // undeclared so apply leaves the remote cadence (Europe/London) alone —
+  // only an explicit null would clear one.
+  deviceWorkerId: "706aa825-5f82-4ce2-80d1-c09cd7908001",
+  feeds: [
+    { feed: "bookmarks", config: {} },
+    { feed: "my_tweets", config: {} },
+    { feed: "home_feed", config: {} },
+    { feed: "liked_tweets", config: {} },
+  ],
+});
+
 const linkedinConnection = defineConnection({
   slug: "linkedin-buremba",
   connector: "linkedin",
   name: "LinkedIn",
-  // Scrape affinity: the paired Mac mini Chrome owns the signed-in session.
-  deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
+  // Scrape affinity: the live paired Chrome that prod actually scrapes on.
+  deviceWorkerId: "706aa825-5f82-4ce2-80d1-c09cd7908001",
   feeds: [
     // Local Data Export (CSV) feeds.
     ...(linkedinTakeoutDir
@@ -794,13 +932,9 @@ const hackerNewsConnection = defineConnection({
   slug: "hackernews-buremba",
   connector: "hackernews",
   name: "Hacker News",
-  // Draft staging rides the paired Mac mini Chrome's signed-in HN session.
-  deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
-  // front_page rows feed the hourly collaborator's arrival_frame, where the
-  // external agent can act on them (including prepare_comment via the
-  // operations bridge when it wants). No dedicated Automation: nothing
-  // else reads these rows yet.
-  feeds: [{ feed: "front_page", config: {} }],
+  // No device pin: the Algolia sync needs no browser (prod runs unpinned).
+  // prepare_comment staging would resolve a Chrome at call time.
+  feeds: [{ feed: "front_page", schedule: "0 */3 * * *", config: {} }],
 });
 
 const spotifyAppAuth = defineAuthProfile({
@@ -907,7 +1041,6 @@ const connectedWith = defineRelationshipType({
   description:
     "Social connection observed on a platform (LinkedIn connection, mutual follow). Symmetric.",
 });
-
 
 const midasNetWorth = defineAutomation({
   agent: personalAgent,
@@ -1067,7 +1200,7 @@ export default defineConfig({
   org: "buremba",
   orgName: "Buremba Org",
   orgDescription:
-    "Personal agent tracking finances, people, companies, tasks, and subscriptions.",
+    "Personal agent tracking finances, people, companies, tasks, subscriptions, and trips.",
   agents: [personalAgent],
   entities: [
     person,
@@ -1097,6 +1230,7 @@ export default defineConfig({
     instagramTakeoutConnection,
     linkedinConnection,
     hackerNewsConnection,
+    xConnection,
     spotifyConnection,
     gmailConnection,
   ],

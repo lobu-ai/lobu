@@ -4,7 +4,7 @@ How to gather **historical, export-only** personal data for a Lobu org running t
 
 Set `org` in `lobu.config.ts` to your workspace slug (the example defaults to `personal-agent`). Connection slugs below use short generic names — change them in config if you run multiple accounts of the same type.
 
-For durable facts, ingest into `save_memory` — not as file-path references.
+For durable facts, ingest into `learning` entities or `save_memory` — not as file-path references.
 
 ## Live connectors
 
@@ -12,7 +12,7 @@ For durable facts, ingest into `save_memory` — not as file-path references.
 
 | Connector | Slug | Feeds |
 |-----------|------|-------|
-| Revolut | `revolut` | `transactions` → `account`, `subscription` |
+| Revolut | `revolut` | `transactions` → `account`, `subscription`, `trip` |
 
 **Commonly added alongside this example** (via dashboard or extended config):
 
@@ -27,6 +27,8 @@ For durable facts, ingest into `save_memory` — not as file-path references.
 | Chrome | `chrome`, `chrome-history`, `chrome-downloads`, `chrome-bookmarks` | Browsing + downloads |
 | Apple Photos / Calendar / Reminders / Screen Time | `apple-photos`, `calendar`, `reminders`, `apple-screen-time` | Device data |
 | Local folder | `local-folder` | Watched directories |
+
+**Trips** are Revolut-derived only (foreign card-spend clusters). Passport, visa, or ILR history belongs in travel **learnings**, not `trip` entities.
 
 ---
 
@@ -93,7 +95,7 @@ Takeout/
 Some exports also ship JSON under `history/` instead of HTML. Lobu has no Takeout parser yet — treat the export as a **one-off backfill**:
 
 - Drop `watch-history.html` (or the whole `Takeout/` folder) into a **local folder** feed (`local.directory` on Lobu for Mac) so the file is ingested as a document, **or**
-- Summarise key facts into `save_memory` after you skim the export.
+- Summarise key facts into **learning** entities / `save_memory` after you skim the export.
 
 **Partial live alternative:** `chrome.history` (Owletto Chrome + `history` permission) captures `youtube.com/watch?v=...` visits from the browser (~90-day backfill + live). Good for forward-looking web viewing; not a full account history.
 
@@ -156,8 +158,8 @@ LinkedIn_Export_<date>.zip
 
 | File | Suggested Lobu target |
 |------|------------------------|
-| `Positions.csv` + `Education.csv` | **Career history** memory |
-| `Profile.csv` + `Skills.csv` | Professional identity facts in memory |
+| `Positions.csv` + `Education.csv` | **Career history** learning |
+| `Profile.csv` + `Skills.csv` | Professional identity facts in learnings |
 | `Connections.csv` | Seed `person` entities for close network (not the whole CSV — curate) |
 | `Messages/` | Episodic `save_memory` only for threads not captured elsewhere |
 
@@ -188,7 +190,7 @@ Live `home_feed` keeps your timeline current; the zip **backfills** graph and ca
 |---|---|
 | **Download** | https://x.com/settings/download_your_data |
 | **Format** | `twitter-YYYY-MM-DD-<hash>.zip` → `data/tweets.js`, DMs, media |
-| **Ingest** | Backfill only — summarise into memory or episodic memory |
+| **Ingest** | Backfill only — summarise into learnings or episodic memory |
 | **Status** | _Not started_ |
 
 ---
@@ -199,7 +201,7 @@ Live `home_feed` keeps your timeline current; the zip **backfills** graph and ca
 |---|---|
 | **Download** | ChatGPT → Settings → Data controls → Export data |
 | **Format** | `conversations.json`, `memories.json`, `projects.json`, `users.json` |
-| **Ingest** | Diff `memories.json` + project descriptions into memory; skip ephemeral devtool threads |
+| **Ingest** | Diff `memories.json` + project descriptions into learnings; skip ephemeral devtool threads |
 | **Status** | _Not started_ |
 
 ---
@@ -233,7 +235,7 @@ Full step-by-step: [LinkedIn → Download your archive](#download-your-linkedin-
 | | |
 |---|---|
 | **Source** | Passport scans, visa spreadsheets, flight logs |
-| **Ingest** | Travel notes (e.g. **UK travel and absence history**, **International travel profile**) |
+| **Ingest** | Travel learnings (e.g. **UK travel and absence history**, **International travel profile**) |
 | **Status** | _Not started_ |
 
 ---
@@ -277,14 +279,14 @@ lobu memory org set personal-agent
 # Search before writing
 lobu memory run search_memory '{"query":"career linkedin"}' --org personal-agent
 
-# Update a saved fact
+# Update a learning
 lobu memory run run_sdk --org personal-agent '{"script":"export default async (_ctx, c) => c.entities.update({ entity_id: <id>, metadata: { ... } })"}'
 
 # Append an episodic note
 lobu memory run save_memory --org personal-agent '{"content":"...","semantic_type":"observation"}'
 ```
 
-**Rules:** search first · supersede stale memories · no file paths in memory · credentials never ingested.
+**Rules:** search first · supersede stale learnings · no file paths in memory · credentials never ingested.
 
 ---
 
