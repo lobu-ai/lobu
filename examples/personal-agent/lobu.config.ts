@@ -13,7 +13,6 @@ import {
   every,
   reactionFromFile,
   scriptFromFile,
-  viewFromFile,
   field,
   Type,
 } from "@lobu/cli/config";
@@ -1267,7 +1266,6 @@ export default defineConfig({
   orgDescription:
     "Personal agent tracking finances, people, companies, tasks, and subscriptions.",
   agents: [personalAgent],
-  views: [viewFromFile("./views/activity-chart.tsx")],
   entities: [
     person,
     company,
