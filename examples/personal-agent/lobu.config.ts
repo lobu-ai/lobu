@@ -1492,12 +1492,14 @@ const linkedInInterestProfile = defineAutomation({
       skip_if_unchanged: false,
     }),
   ],
-  // Declared keyed state: each run supersedes the current voice_profile event
+  // Declared keyed state: each run supersedes the current preference event
   // carrying the same channel+mode. Replaces the former manual
-  // client.knowledge.save of a 'preference' note (no lineage, title-based
-  // identity) and the removed voice-profile entity type.
+  // client.knowledge.save of a title-addressed note (no lineage) and the
+  // removed voice-profile entity type. `preference` is a default $member
+  // kind, so unlike a bespoke semantic type this needs no registry
+  // provisioning before apply.
   outputs: {
-    profiles: { event: "voice_profile", key: ["channel", "mode"] },
+    profiles: { event: "preference", key: ["channel", "mode"] },
   },
   sources: { none: "SELECT id FROM events WHERE false" },
   prompt: linkedInInterestProfilePrompt,

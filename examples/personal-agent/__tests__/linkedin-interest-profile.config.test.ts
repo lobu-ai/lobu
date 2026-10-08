@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import config from "../lobu.config";
+import {
+  linkedInFeedFlaggerPrompt,
+  linkedInInterestProfilePrompt,
+} from "../linkedin.prompts";
 import { deriveAutomationExtractionSchema } from "../../../packages/server/src/utils/automation-extraction-schema";
 import type { DbClient } from "../../../packages/server/src/db/client";
 
@@ -17,7 +21,12 @@ const throwingSql = (() => {
   throw new Error("must not reach the database");
 }) as unknown as DbClient;
 
+// `preference` is a default $member kind (member-entity-type.ts
+// DEFAULT_MEMBER_EVENT_KINDS), so this declared output needs no registry
+// provisioning before apply — unlike a bespoke semantic type, which the
+// create/version validator rejects with HTTP 422.
 const representativeDraft = {
+  title: "LinkedIn voice profile",
   content:
     "Burak posts about agents and infra. Voice: short, direct, no hashtags.",
   metadata: {
@@ -40,9 +49,9 @@ const legacyDraft = {
 };
 
 describe("LinkedIn interest-profile declared output", () => {
-  test("declares the keyed voice_profile event the prompt promises", () => {
+  test("declares the keyed preference event the prompt promises", () => {
     expect(profileAutomation()?.outputs).toEqual({
-      profiles: { event: "voice_profile", key: ["channel", "mode"] },
+      profiles: { event: "preference", key: ["channel", "mode"] },
     });
   });
 
@@ -63,5 +72,20 @@ describe("LinkedIn interest-profile declared output", () => {
       properties: { profiles: { type: "array" } },
       required: expect.arrayContaining(["profiles"]),
     });
+  });
+
+  test("the interest prompt pins the channel/mode identity", () => {
+    expect(linkedInInterestProfilePrompt).toContain('"linkedin-buremba"');
+    expect(linkedInInterestProfilePrompt).toContain('"channel": "linkedin"');
+    expect(linkedInInterestProfilePrompt).toContain('"mode": "voice"');
+  });
+
+  test("the flagger filters by mode with legacy fallback", () => {
+    // Without the mode predicate a newer taste row would displace the voice
+    // profile used for drafting.
+    expect(linkedInFeedFlaggerPrompt).toContain("metadata->>'mode' = 'voice'");
+    expect(linkedInFeedFlaggerPrompt).toContain(
+      "title = 'LinkedIn interest profile'"
+    );
   });
 });
