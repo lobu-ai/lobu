@@ -6,9 +6,8 @@
  * to
  *   events.entity_ids && ARRAY(SELECT id FROM entities WHERE id=X OR merged_into=X)
  *
- * The efficiency claim: the redirect costs ONE extra indexed lookup on
- * idx_entities_merged_into (bounded by how many losers were merged into X), NOT
- * a per-event scan, and the outer `&&` still rides the GIN index
+ * The current helper resolves the identity group and its legacy merge losers
+ * once per recall, not once per event, and `&&` still rides the GIN index
  * idx_events_entity_ids. This test proves that from the actual query PLAN on a
  * non-trivial events table, so a future change that regresses it to a Seq Scan
  * (e.g. an unindexed OR, or a subquery the planner can't inline) fails CI rather

@@ -39,8 +39,9 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * SQL predicate: "event `<alias>` is linked to entity `<paramRef>`".
  *
  * Matches two ways:
- *   1. Legacy / feed-pinned attribution: entity id appears in `events.entity_ids`.
- *   2. Identity-graph attribution: a live `entity_identities` row claims an
+ *   1. Direct attribution: a group member or its legacy merge loser appears in
+ *      `events.entity_ids`.
+ *   2. Identity-graph attribution: a group member's live `entity_identities` row claims an
  *      identifier that the event carries in `metadata->>namespace` (stamped
  *      there by `applyEventAttributions` at ingestion; see src/utils/entity-link-upsert.ts).
  *
@@ -73,7 +74,7 @@ export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
   return `${alias}.id IN (\n    ${branches}\n  )`;
 }
 
-/** Keep physical redirects until the approved legacy migration has completed. */
+/** Events are append-only, so retained merge losers still carry their original IDs. */
 function directEntityLinkBranch(entityRef: string): string {
   return `SELECT e2.id FROM events e2
     WHERE e2.entity_ids && ARRAY(
@@ -130,7 +131,7 @@ export async function fetchEntityIdentityScopes(
  * but emit only the branches an entity actually needs.
  *
  * Differences from the legacy helper:
- *  - The direct `entity_ids @> ARRAY[N]` branch is always included.
+ *  - The direct `entity_ids && ARRAY[group members and merge losers]` branch is always included.
  *  - One `metadata->>'<ns>' = $N` branch per pre-fetched scope (no JOIN to
  *    `entity_identities`; the identifier is bound as a parameter). For an
  *    entity with no identities, that's zero extra branches — Postgres only

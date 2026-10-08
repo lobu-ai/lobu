@@ -2,7 +2,7 @@ import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
 import { type DbClient, pgBigintArray } from '../db/client';
 
 /** One edge predicate for every identity read; ordinary and ACL edges never group records. */
-export function identityEdgesSql(entityAlias: string): string {
+function identityEdgesSql(entityAlias: string): string {
   return `SELECT ir.from_entity_id, ir.to_entity_id
     FROM entity_relationships ir
     JOIN entity_relationship_types it ON it.id = ir.relationship_type_id
