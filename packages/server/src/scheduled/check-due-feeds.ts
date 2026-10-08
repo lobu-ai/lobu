@@ -40,7 +40,7 @@ interface DueFeedRow {
   feed_key: string;
   connector_key: string;
   eligibility_lane: DueFeedEligibilityLane;
-  schedule: string;
+  schedule: string | null;
   timezone: string | null;
   next_run_at: string;
 }
@@ -248,9 +248,10 @@ export async function materializeDueFeeds(
     onError: async (feed, error) => {
       // Admission did not execute the source. Retry at its normal cadence,
       // without consuming a checkpoint or the connector's failure budget.
+      // One-shot feeds wait for another trigger instead of inventing a cron.
       let retryAt: string | null = null;
       try {
-        retryAt = nextRunAt(feed.schedule, new Date(), feed.timezone);
+        retryAt = feed.schedule ? nextRunAt(feed.schedule, new Date(), feed.timezone) : null;
       } catch (scheduleError) {
         // Invalid schedules cannot become runnable on a later poll. A schedule
         // edit recomputes next_run_at; park this cursor until that correction.
@@ -261,7 +262,8 @@ export async function materializeDueFeeds(
         const advanced = await sql`
           UPDATE feeds f SET next_run_at = ${retryAt}, updated_at = current_timestamp
           WHERE f.id = ${feed.id} AND f.organization_id = ${feed.organization_id}
-            AND f.next_run_at = ${feed.next_run_at}::text::timestamptz AND f.schedule = ${feed.schedule}
+            AND f.next_run_at = ${feed.next_run_at}::text::timestamptz
+            AND f.schedule IS NOT DISTINCT FROM ${feed.schedule}
             AND f.timezone IS NOT DISTINCT FROM ${feed.timezone}
             AND f.status = 'active' AND f.deleted_at IS NULL
             AND NOT EXISTS (

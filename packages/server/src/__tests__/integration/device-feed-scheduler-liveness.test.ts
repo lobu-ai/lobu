@@ -36,7 +36,10 @@ describe('scheduled feed device liveness', () => {
     await cleanupTestDatabase();
   });
 
-  it('backs off failed admission without consuming source health or starving a healthy feed', async () => {
+  it.each([
+    { schedule: '0 9 * * *', deferred: true, localTime: '09:00' },
+    { schedule: null, deferred: null, localTime: null },
+  ])('backs off failed admission without consuming source health or starving a healthy feed (schedule: $schedule)', async ({ schedule, deferred, localTime }) => {
     const sql = getTestDb();
     const { org, user } = await seedOwnerContext({ orgName: 'Admission Scheduler Org' });
     const key = 'test.scheduler-browser-setup';
@@ -57,7 +60,7 @@ describe('scheduled feed device liveness', () => {
       WHERE id = ${connection.id}`;
     const [feed] = await sql`INSERT INTO feeds (organization_id, connection_id, feed_key,
       status, schedule, timezone, next_run_at, consecutive_failures, last_sync_status, checkpoint)
-      VALUES (${org.id}, ${connection.id}, 'items', 'active', '0 9 * * *', 'Pacific/Auckland',
+      VALUES (${org.id}, ${connection.id}, 'items', 'active', ${schedule}, 'Pacific/Auckland',
         now() - interval '10 minutes', 2, 'failed', ${sql.json({ cursor: 'preserved' })})
       RETURNING id, next_run_at`;
     const feedId = Number(feed.id);
@@ -68,7 +71,7 @@ describe('scheduled feed device liveness', () => {
       const [after] = await sql`SELECT next_run_at > now() AS deferred,
         to_char(next_run_at AT TIME ZONE 'Pacific/Auckland', 'HH24:MI') AS local_time,
         checkpoint, consecutive_failures, last_sync_status FROM feeds WHERE id = ${feedId}`;
-      expect(after).toMatchObject({ deferred: true, local_time: '09:00', checkpoint: { cursor: 'preserved' },
+      expect(after).toMatchObject({ deferred, local_time: localTime, checkpoint: { cursor: 'preserved' },
         consecutive_failures: 2, last_sync_status: 'failed' });
       expect(warning).toHaveBeenCalledTimes(1);
       expect(error).not.toHaveBeenCalled();
