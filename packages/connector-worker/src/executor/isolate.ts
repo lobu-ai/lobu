@@ -33,6 +33,7 @@ import { type EgressAddressPolicy, isReservedIp, stripIpv6Brackets } from '@lobu
 import { normalizeDomainPattern } from '@lobu/core';
 import { CredentialVault } from '../egress/credentials.js';
 import { CONNECTOR_HTTP_MAX_BYTES } from '@lobu/core/contracts/worker/protocol';
+import { isConnectorOperationRequest } from '@lobu/core/contracts/tools/manage-operations';
 import {
   EgressDispatcher,
   fetchPublicUrl,
@@ -213,6 +214,12 @@ const GUEST_RUNNER = String.raw`
     return null;
   }
 
+  function operations() {
+    return { execute: function (request) {
+      return H.async('executeOperation', JSON.stringify(request)).then(function (json) { return JSON.parse(json); });
+    }};
+  }
+
   function chromeDispatcher() {
     return {
       dispatch: function (actionKey, actionInput) {
@@ -274,6 +281,7 @@ const GUEST_RUNNER = String.raw`
         return { mode: 'action', output: verified };
       }
       var actionResult = await instance.execute({
+        operations: operations(),
         actionKey: job.actionKey,
         input: job.actionInput,
         browser: job.browser ? chromeDispatcher() : undefined,
@@ -904,6 +912,15 @@ export class IsolateExecutor implements SyncExecutor {
             timeoutMs: typeof timeoutMs === 'number' ? timeoutMs : undefined,
           });
           return JSON.stringify(signal ?? {});
+        },
+        executeOperation: async (requestJson: unknown) => {
+          if (job.mode !== 'action' || !hooks?.onOperationExecute) {
+            throw new Error('Connector operations are not available in this execution context');
+          }
+          if (hooks.signal?.aborted) throw new Error('Connector operation cancelled');
+          const request = parseGuestJson(requestJson, 'executeOperation');
+          if (!isConnectorOperationRequest(request)) throw new Error('Invalid connector operation request');
+          return JSON.stringify(await hooks.onOperationExecute(request));
         },
         dispatchChromeAction: async (actionKey: unknown, inputJson: unknown) => {
           if (!job.browser) throw new Error('Browser access was not granted for this connection');

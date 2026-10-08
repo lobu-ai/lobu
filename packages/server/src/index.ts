@@ -936,11 +936,13 @@ app.post("/api/workers/complete-agent-turn", completeAgentTurnRun);
 
 // Bridge that lets connector-worker fleets dispatch chrome connector actions
 // against a paired Owletto extension. See dispatch-chrome-action.ts.
+import { executeWorkerOperation } from "./worker-api/execute-operation";
 import { dispatchChromeAction } from "./worker-api/dispatch-chrome-action";
 import { stampSlackIdentityForUser } from "./auth/subject-identities";
 import { collapseSessionCookies, resolveSession } from './auth/resolve-session';
 
 app.post("/api/workers/dispatch-chrome-action", dispatchChromeAction);
+app.post("/api/workers/execute-operation", executeWorkerOperation);
 app.post("/api/workers/complete-embeddings", completeEmbeddings);
 app.post("/api/workers/me/runs/:runId/complete-automation", completeAutomationRun);
 app.post("/api/workers/me/runs/:runId/complete-chat", completeDeviceChatRun);

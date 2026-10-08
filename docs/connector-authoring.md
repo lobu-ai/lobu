@@ -282,6 +282,30 @@ Declare `actions` with an `inputSchema`, a `kind` (`read` or `write`), and
 annotations (`destructiveHint`, `openWorldHint`, `idempotentHint`); handle them in
 `execute(ctx)`. Omit it entirely if the connector has no actions.
 
+Action implementations can delegate to a native device connection with
+`ctx.operations.execute({ connection_id, operation_key, input, idempotency_key })`.
+Store the selected connection in the connector's config; discover its operation
+key through `operations.listAvailable` during setup. The connector itself stays
+in the server isolate: do not pin it to the device or import `child_process`.
+The existing device connection owns process execution and routing.
+
+The host reconstructs the original requester and applies the target connection's
+visibility and Auto/Ask/Block policy. This does not inherit the parent action's
+approval. The result is the normal operation receipt: check `status` and surface
+`pending_approval` with its `approval_url`, rather than reporting the effect as
+completed. `background: true` returns a durable `run_id`; use the public
+`operations.getRun` and `operations.cancel` methods to inspect or stop it.
+
+The required idempotency key is scoped to the parent run. Reusing it with the
+same input returns the same child run; changed input is rejected. A new parent
+run is a new execution, so inspect an uncertain earlier result before resubmitting
+an interactive prompt. Foreground calls follow parent cancellation; background
+runs and approval receipts have their own durable lifecycle.
+
+This bridge supports action implementations and pinned native device manifests.
+Browser operations continue through `ctx.browser`, which additionally enforces
+declared origins, account binding and interactive page activation.
+
 The organization chooses Auto, Ask, or Block through its connector policies.
 Unmatched actions require approval. Declaring an action as non-destructive does
 not make it Auto: add an explicit policy for that connector or operation when

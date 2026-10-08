@@ -1,3 +1,4 @@
+import type { ConnectorOperationRequest, ConnectorOperationResult } from '@lobu/connector-sdk';
 import type {
   AgentTurnEvent,
   AgentTurnInput,
@@ -246,6 +247,8 @@ export interface ExecutionHooks {
     actionKey: string,
     actionInput: Record<string, unknown>
   ) => Promise<Record<string, unknown>>;
+  /** Action runs: delegate through the existing operation admission and device execution path. */
+  onOperationExecute?: (request: ConnectorOperationRequest) => Promise<ConnectorOperationResult>;
 }
 
 /**

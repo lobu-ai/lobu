@@ -53,6 +53,8 @@ export interface ExecutorClient {
    * — multi-replica safe because the wait is Postgres-mediated.
    */
   dispatchChromeAction(req: DispatchChromeActionRequest): Promise<Record<string, unknown>>;
+  /** Delegate a native device operation on behalf of the running parent action. */
+  executeConnectorOperation?(req: ExecuteConnectorOperationRequest, signal?: AbortSignal): Promise<ConnectorOperationResult>;
   /** Spend only the current run's gateway-held HTTP credentials. */
   httpFetch(runId: number, request: ConnectorHttpRequest, signal?: AbortSignal): Promise<ConnectorHttpResponse>;
   /**
@@ -135,6 +137,7 @@ import type {
   DispatchChromeActionResponse,
   EmbedEvent,
   EmitAuthArtifactRequest,
+  ExecuteConnectorOperationRequest,
   HeartbeatRequest,
   HeartbeatResponse,
   PollAuthSignalRequest,
@@ -142,6 +145,7 @@ import type {
   PollResponse,
   StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
+import type { ConnectorOperationResult } from "@lobu/core/contracts/tools/manage-operations";
 import type { AgentKind } from "@lobu/core/contracts/worker/device-automation";
 import { resolveRunnableAgentKinds } from "./agent-binaries.js";
 
@@ -540,6 +544,10 @@ export class WorkerClient implements ExecutorClient {
       result.error_message ??
         `Chrome action '${req.action_key}' ${result.status === 'timeout' ? 'timed out' : 'failed'}`
     );
+  }
+
+  async executeConnectorOperation(req: ExecuteConnectorOperationRequest, signal?: AbortSignal): Promise<ConnectorOperationResult> {
+    return this.requestJson<ConnectorOperationResult>('/api/workers/execute-operation', req, signal);
   }
 
   async httpFetch(runId: number, request: ConnectorHttpRequest, signal?: AbortSignal): Promise<ConnectorHttpResponse> {

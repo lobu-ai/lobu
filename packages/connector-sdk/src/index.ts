@@ -91,6 +91,7 @@ export type {
   ConnectorAuthSchema,
   ConnectorDefinition,
   ConnectorInstallationContext,
+  ConnectorOperations,
   ConnectorRuntimeInfo,
   ConnectorWebhookSchema,
   ContentItem,
@@ -280,6 +281,8 @@ export type {
   EntityUpdateLinkInput,
 } from '@lobu/core/contracts/tools/manage-entity';
 export type {
+  ConnectorOperationRequest,
+  ConnectorOperationResult,
   OperationExecuteInput,
   OperationListAvailableInput,
   OperationListRunsInput,
