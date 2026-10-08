@@ -2387,7 +2387,7 @@ async function handleListLinks(
 			action: "list_links",
 			record_links: result.links,
 			record_failures: result.failures,
-			...("next_cursor" in result ? { next_cursor: result.next_cursor } : {}),
+			next_cursor: result.next_cursor,
 		};
 	}
 	if (args.cursor !== undefined) {

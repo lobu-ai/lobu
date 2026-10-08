@@ -53,7 +53,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   evaluatePolicy.mockResolvedValue("auto");
   readActivity.mockResolvedValue({ events: [], failures: [] });
-  readLinks.mockResolvedValue({ links: [], failures: [] });
+  readLinks.mockResolvedValue({ links: [], failures: [], next_cursor: null });
 });
 
 afterAll(() => {
