@@ -136,7 +136,8 @@ const person = defineEntityType({
       })
     ),
     company: field("Company", {
-      description: "Company / employer (LinkedIn connection + manual).",
+      description:
+        "Employer name as seen (LinkedIn connection + manual). Canonical identity lives in the market org's public company entity; prefer its domain or slug when known.",
       optional: true,
     }),
     last_linkedin_message_at: Type.Optional(
@@ -251,103 +252,6 @@ const person = defineEntityType({
       { fields: ["phone"], normalizer: "phone", onMatch: "review" },
       { fields: ["phones"], normalizer: "phone", onMatch: "review" },
     ],
-  },
-});
-
-const company = defineEntityType({
-  key: "company",
-  name: "Company",
-  description:
-    "An organization the user cares about — own company, employer, customer, partner, or portfolio company. Link people via works_at.",
-  metadata: { icon: "building", color: "#2563eb" },
-  properties: {
-    domain: Type.Optional(
-      Type.Unsafe({ type: "string", description: "Primary web domain" })
-    ),
-    one_liner: Type.Optional(
-      Type.Unsafe({ type: "string", description: "One-line description" })
-    ),
-    location: Type.Optional(Type.Unsafe({ type: "string" })),
-    market: Type.Optional(
-      Type.Unsafe({ type: "string", description: "Primary market vertical" })
-    ),
-    main_market: Type.Optional(Type.Unsafe({ type: "string" })),
-    platform_type: Type.Optional(Type.Unsafe({ type: "string" })),
-    linkedin_url: Type.Optional(Type.Unsafe({ type: "string", format: "uri" })),
-    founding_year: Type.Optional(
-      Type.Unsafe({ type: "integer", maximum: 2030, minimum: 1900 })
-    ),
-    team_size: Type.Optional(Type.Unsafe({ type: "integer", minimum: 0 })),
-    stage: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        enum: [
-          "preseed",
-          "seed",
-          "series_a",
-          "series_b",
-          "series_c",
-          "growth",
-          "public",
-        ],
-        description: "Current funding stage when relevant",
-      })
-    ),
-    mrr: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        description: "Monthly recurring revenue in USD",
-      })
-    ),
-    revenue: Type.Optional(
-      Type.Unsafe({ type: "number", description: "Annual revenue in USD" })
-    ),
-    valuation: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        description: "Last known valuation in USD",
-      })
-    ),
-    growth_rate: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        description: "YoY growth rate as decimal",
-      })
-    ),
-    funding_raised: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        description: "Total funding raised in USD",
-      })
-    ),
-    thesis: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        description: "Investment or relationship notes",
-      })
-    ),
-    traction_score: Type.Optional(
-      Type.Unsafe({
-        type: "number",
-        maximum: 100,
-        minimum: 0,
-        description: "Computed traction score",
-      })
-    ),
-    traction_signals: Type.Optional(
-      Type.Unsafe({
-        type: "object",
-        properties: {
-          hiring: { type: "number" },
-          last_updated: { type: "string", format: "date-time" },
-          news_coverage: { type: "number" },
-          github_velocity: { type: "number" },
-          social_mentions: { type: "number" },
-          app_store_growth: { type: "number" },
-          review_sentiment: { type: "number" },
-        },
-      })
-    ),
   },
 });
 
@@ -1016,19 +920,6 @@ const gmailConnection = defineConnection({
 // examples/personal-finance — not here. With prune:true they are removed from
 // buremba if present.
 
-const worksAt = defineRelationshipType({
-  key: "works_at",
-  name: "Works At",
-  description: "Person employed by / associated with a company",
-  rules: [{ source: person, target: company }],
-});
-
-const memberOf = defineRelationshipType({
-  key: "member_of",
-  name: "Member of",
-  description: "A person is a member of an organization or channel",
-});
-
 const mentions = defineRelationshipType({
   key: "mentions",
   name: "Mentions",
@@ -1044,19 +935,6 @@ const connectedWith = defineRelationshipType({
   name: "Connected With",
   description:
     "Social connection observed on a platform (LinkedIn connection, mutual follow). Symmetric.",
-});
-
-const founderOf = defineRelationshipType({
-  key: "founder_of",
-  name: "Founder Of",
-  description: "A person founded or co-founded a company.",
-});
-
-const sameAs = defineRelationshipType({
-  key: "same_as",
-  name: "Same As",
-  description:
-    "Maps a private person profile to its canonical public identity. The mapping and private profile remain visible only to this workspace.",
 });
 
 // Historical social-signal entity rows still exist. Prune must retain their
@@ -1268,7 +1146,6 @@ export default defineConfig({
   agents: [personalAgent],
   entities: [
     person,
-    company,
     task,
     channel,
     account,
@@ -1279,14 +1156,7 @@ export default defineConfig({
     learning,
     socialSignal,
   ],
-  relationships: [
-    worksAt,
-    memberOf,
-    mentions,
-    connectedWith,
-    founderOf,
-    sameAs,
-  ],
+  relationships: [mentions, connectedWith],
   automations: [
     hourlyTaskCollaborator,
     duplicateEntityResolution,
