@@ -1,24 +1,16 @@
 /**
- * Repro: anonymous public-knowledge reads (the `market.lobu.ai` feed) surface
- * internal operational rows — tool-invocation audit (`query_sql completed`,
- * `manage_automations completed`, …) plus Automation config/lifecycle
- * dual-writes. They carry `connection_id IS NULL`, so the connection-visibility
- * gate lets them through, and `get_content` never sets `exclude_internal_ops`
- * (only the recall path does). Consequence on prod: ~95/100 head rows are
- * `tool_invocation` exhaust, `total` is inflated, and `sql_preview_redacted`
- * leaks full SQL + `mcp_session_id`/`mcp_conversation_id` to anon readers.
- *
- * Fix contract (mirrors `search-recall-internal-ops`): `get_content` list/search
- * excludes internal ops unless the caller explicitly filters `semantic_type`;
- * `resolve_path` bootstrap counts/recent exclude them as well.
+ * Default non-owner/admin knowledge feeds and bootstrap exclude internal ops.
+ * Explicit semantic_type reads retain the operational trail, so this tests
+ * discovery filtering rather than an authorization boundary.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
-import { getContent } from '../../../tools/get_content';
+import { type ContentItem, getContent } from '../../../tools/get_content';
 import { resolvePath } from '../../../tools/resolve_path';
 import type { ToolContext } from '../../../tools/registry';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import {
+  createTestEntity,
   createTestEvent,
   createTestOrganization,
   seedSystemEntityTypes,
@@ -27,6 +19,7 @@ import {
 describe('public knowledge feed > internal-ops exclusion', () => {
   let org: Awaited<ReturnType<typeof createTestOrganization>>;
   let slug: string;
+  let entity: Awaited<ReturnType<typeof createTestEntity>>;
   let normalId: number;
   let auditId: number;
   let lifecycleId: number;
@@ -43,7 +36,7 @@ describe('public knowledge feed > internal-ops exclusion', () => {
       scopedToOrg: true,
       allowCrossOrg: false,
       scopes: ['*'],
-    } as unknown as ToolContext;
+    } as ToolContext;
   }
 
   function ownerCtx(): ToolContext {
@@ -56,7 +49,7 @@ describe('public knowledge feed > internal-ops exclusion', () => {
       scopedToOrg: false,
       allowCrossOrg: true,
       scopes: ['mcp:read'],
-    } as unknown as ToolContext;
+    } as ToolContext;
   }
 
   beforeAll(async () => {
@@ -67,12 +60,17 @@ describe('public knowledge feed > internal-ops exclusion', () => {
       name: 'Public Internal Ops Org',
       visibility: 'public',
     });
-    slug = (org as unknown as { slug: string }).slug;
+    slug = org.slug;
+    entity = await createTestEntity({
+      name: 'Catalog item',
+      organization_id: org.id,
+    });
 
     normalId = (
       await createTestEvent({
         organization_id: org.id,
-        title: 'Public catalog review',
+        entity_id: entity.id,
+        title: 'Nightly sync review',
         content: 'A real connector-synced review body.',
         semantic_type: 'content',
       })
@@ -81,6 +79,7 @@ describe('public knowledge feed > internal-ops exclusion', () => {
     auditId = (
       await createTestEvent({
         organization_id: org.id,
+        entity_id: entity.id,
         title: 'query_sql completed',
         content: '',
         semantic_type: 'audit',
@@ -92,6 +91,7 @@ describe('public knowledge feed > internal-ops exclusion', () => {
     lifecycleId = (
       await createTestEvent({
         organization_id: org.id,
+        entity_id: entity.id,
         title: 'Nightly sync Automation "created"',
         content: '',
         semantic_type: 'change',
@@ -103,6 +103,7 @@ describe('public knowledge feed > internal-ops exclusion', () => {
     configId = (
       await createTestEvent({
         organization_id: org.id,
+        entity_id: entity.id,
         title: "Nightly sync Automation 'created'",
         content: '',
         semantic_type: 'change',
@@ -114,7 +115,8 @@ describe('public knowledge feed > internal-ops exclusion', () => {
     memberNoteId = (
       await createTestEvent({
         organization_id: org.id,
-        title: 'Member config notes',
+        entity_id: entity.id,
+        title: 'Nightly sync config notes',
         content: 'A member note that reuses the config label.',
         semantic_type: 'note',
         metadata: { category: 'config' },
@@ -122,18 +124,19 @@ describe('public knowledge feed > internal-ops exclusion', () => {
     ).id;
   });
 
-  it('anonymous date-feed excludes audit/lifecycle/config rows but keeps content', async () => {
+  it.each([undefined, 'Nightly sync'])('anonymous list/search excludes internal ops (query: %s)', async (query) => {
     const result = await getContent(
-      { limit: 50, sort_by: 'date', sort_order: 'desc' } as never,
+      { limit: 50, sort_by: 'date', sort_order: 'desc', ...(query ? { query } : {}) },
       {} as never,
       anonCtx(),
     );
-    const ids = new Set(result.content.map((c) => c.id));
+    const ids = new Set((result.content as ContentItem[]).map((c) => c.id));
     expect(ids.has(normalId)).toBe(true);
     expect(ids.has(memberNoteId)).toBe(true);
     expect(ids.has(auditId)).toBe(false);
     expect(ids.has(lifecycleId)).toBe(false);
     expect(ids.has(configId)).toBe(false);
+    expect(result.total).toBe(2);
   });
 
   it('explicit semantic_type filter still returns the ops rows on purpose', async () => {
@@ -147,35 +150,50 @@ describe('public knowledge feed > internal-ops exclusion', () => {
       {} as never,
       anonCtx(),
     );
-    const ids = new Set(result.content.map((c) => c.id));
+    const ids = new Set((result.content as ContentItem[]).map((c) => c.id));
     expect(ids.has(auditId)).toBe(true);
   });
 
-  it('owners keep the full ops trail in the default feed', async () => {
+  it.each(['owner', 'admin'] as const)('%s keeps the full ops trail in the default feed', async (memberRole) => {
     const result = await getContent(
       { limit: 50, sort_by: 'date', sort_order: 'desc' } as never,
       {} as never,
-      ownerCtx(),
+      { ...ownerCtx(), memberRole },
     );
-    const ids = new Set(result.content.map((c) => c.id));
+    const ids = new Set((result.content as ContentItem[]).map((c) => c.id));
     expect(ids.has(auditId)).toBe(true);
     expect(ids.has(lifecycleId)).toBe(true);
     expect(ids.has(configId)).toBe(true);
   });
 
-  it('bootstrap recent_content/total_content exclude internal ops', async () => {
+  it.each(['', '/brand/catalog-item'])('bootstrap counts match recent content at %s', async (entityPath) => {
     const resolved = await resolvePath(
-      { path: `/${slug}`, include_bootstrap: true } as never,
+      { path: `/${slug}${entityPath}`, include_bootstrap: true },
       {} as never,
       anonCtx(),
     );
-    const recent = (resolved.bootstrap as { recent_content?: Array<{ id: number }> })
-      ?.recent_content ?? [];
+    const recent = resolved.bootstrap?.recent_content ?? [];
     const recentIds = new Set(recent.map((c) => c.id));
     expect(recentIds.has(normalId)).toBe(true);
+    expect(recentIds.has(memberNoteId)).toBe(true);
     expect(recentIds.has(auditId)).toBe(false);
     expect(recentIds.has(lifecycleId)).toBe(false);
     expect(recentIds.has(configId)).toBe(false);
     expect(resolved.bootstrap?.total_content).toBe(2);
+    if (entityPath) expect(resolved.entity?.total_content).toBe(2);
+  });
+
+  it.each(['', '/brand/catalog-item'])('owner bootstrap keeps the full operational trail at %s', async (entityPath) => {
+    const resolved = await resolvePath(
+      { path: `/${slug}${entityPath}`, include_bootstrap: true },
+      {} as never,
+      ownerCtx(),
+    );
+    const ids = new Set(resolved.bootstrap?.recent_content.map((c) => c.id));
+    expect(ids.has(auditId)).toBe(true);
+    expect(ids.has(lifecycleId)).toBe(true);
+    expect(ids.has(configId)).toBe(true);
+    expect(resolved.bootstrap?.total_content).toBe(5);
+    if (entityPath) expect(resolved.entity?.total_content).toBe(5);
   });
 });

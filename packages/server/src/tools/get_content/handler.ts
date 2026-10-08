@@ -691,13 +691,9 @@ async function getContentImpl(
         semantic_type: args.semantic_type,
         entity_types: args.entity_types,
         interaction_status: args.interaction_status,
-        // Internal operational rows (tool-invocation audit + Automation
-        // config/lifecycle dual-writes) carry no body and only title-match into
-        // noise — on public orgs they dominate the head of the date feed and
-        // leak SQL previews + MCP session ids to anonymous readers.
-        // Same default as the recall path, scoped like the workspace-audit
-        // exclusion (non-owner/admin callers); an explicit `semantic_type`
-        // filter still wins inside the builders.
+        // Keep the default non-owner/admin feed focused on content. This is
+        // a discovery filter, not an access boundary: explicit semantic_type
+        // reads still include the operational trail.
         ...(!args.semantic_type && excludeWorkspaceAudit && {
           exclude_internal_ops: true,
         }),

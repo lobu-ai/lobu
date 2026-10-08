@@ -605,17 +605,12 @@ async function _resolvePath(
     // view templates: the detail page falls back to the schema-derived
     // auto-default below, and views resolve client-side from `manage_views`.
     const [
-      [eventsCount],
+      eventsCount,
       [connectionsCount],
       [automationsCount],
     ] = await Sentry.startSpan({ name: 'entity:counts', op: 'db' }, () =>
       Promise.all([
-        sql.unsafe<{ cnt: number }>(
-          `SELECT COUNT(*) as cnt FROM current_event_records ev
-             WHERE ${entityLinkMatchSql(`${Number(entityRow.id)}::bigint`, 'ev')}
-               AND ev.organization_id = $1`,
-          [workspace.id]
-        ),
+        fetchContentCount(sql, workspace.id, Number(entityRow.id), excludeWorkspaceAudit),
         sql.unsafe<{ cnt: number }>(
           `SELECT COUNT(DISTINCT cn.connector_key) as cnt
            FROM feeds f
@@ -684,7 +679,7 @@ async function _resolvePath(
       template_data: redactedTemplateData,
       tabs: processedEntityTabs,
       created_at: createdAt,
-      total_content: Number(eventsCount?.cnt) || 0,
+      total_content: eventsCount,
       active_connections: Number(connectionsCount?.cnt) || 0,
       automations_count: Number(automationsCount?.cnt) || 0,
     };
@@ -991,7 +986,9 @@ async function fetchBootstrap(
 
   const [entityTypes, totalContent, recentContent, recentFeeds] = await Promise.all([
     listEntityTypes(sql, ctx),
-    fetchContentCount(sql, workspace.id, entity, excludeWorkspaceAudit),
+    entity
+      ? Promise.resolve(entity.total_content)
+      : fetchContentCount(sql, workspace.id, null, excludeWorkspaceAudit),
     fetchRecentContent(sql, workspace.id, entity?.id ?? null, excludeWorkspaceAudit),
     fetchRecentFeeds(sql, workspace.id, entity?.id ?? null),
   ]);
@@ -1157,40 +1154,35 @@ async function fetchWorkspaceCounts(
 
 /**
  * Live event rows in scope. This one aggregates an append-only table, so it
- * is deliberately NOT part of `fetchWorkspaceCounts` — it is reached only
- * through `include_bootstrap`, so only callers that render bootstrap content
- * (the public page renderer, the workspace landing route) pay for it. An
- * entity scope reuses the count already computed while resolving that entity
- * rather than running a second pass over the same rows.
+ * is deliberately NOT part of `fetchWorkspaceCounts`. Workspace-wide counts
+ * require `include_bootstrap`; entity details always compute their scoped
+ * count, which bootstrap reuses rather than scanning the same rows again.
  */
 async function fetchContentCount(
   sql: DbClient,
   organizationId: string,
-  entity: ResolvedEntityDetails | null,
+  entityId: number | null,
   excludeWorkspaceAudit: boolean
 ): Promise<number> {
-  if (entity) return entity.total_content;
-
-  const [row] = await sql`
+  const [row] = await sql.unsafe<{ total_content: number }>(`
     SELECT COUNT(*)::int AS total_content
     FROM current_event_records ev
-    WHERE ev.organization_id = ${organizationId}
+    WHERE ev.organization_id = $1
       -- Exclude null-shaped internal events (P1 corrections) from the org content count.
       AND ev.semantic_type <> 'correction'
-      -- Internal operational rows (tool-invocation audit + Automation
-      -- config/lifecycle dual-writes) are not workspace content for
-      -- non-owner callers: they would otherwise dominate bootstrap
-      -- counts/recent on active orgs and leak SQL previews + MCP session ids
-      -- through the public page. Owners keep the full trail.
+      -- Match the default non-owner/admin feed's internal-ops exclusion.
       ${excludeWorkspaceAudit
-        ? sql`AND NOT (ev.semantic_type = 'audit' AND COALESCE(ev.origin_type, '') = 'tool_invocation')
+        ? `AND NOT (ev.semantic_type = 'audit' AND COALESCE(ev.origin_type, '') = 'tool_invocation')
               AND NOT (ev.semantic_type = 'change' AND COALESCE(ev.metadata->>'category', '') IN ('config', 'lifecycle'))`
-        : sql``}
+        : ''}
       -- Workspace-identity audit rows record member/invitation lifecycle; only
       -- owner/admin and trusted system callers may see them.
-      ${excludeWorkspaceAudit ? sql`AND NOT (ev.metadata ? '_lobu_workspace_audit')` : sql``}
-  `;
-  return Number((row as { total_content?: number } | undefined)?.total_content) || 0;
+      ${excludeWorkspaceAudit ? `AND NOT (ev.metadata ? '_lobu_workspace_audit')` : ''}
+      ${entityId !== null
+        ? `AND ${entityLinkMatchSql(`${Number(entityId)}::bigint`, 'ev')}`
+        : ''}
+  `, [organizationId]);
+  return Number(row?.total_content) || 0;
 }
 
 async function fetchRecentContent(
@@ -1238,8 +1230,7 @@ async function fetchRecentContent(
     WHERE ev.organization_id = $1
       -- Exclude null-shaped internal events (P1 corrections) from the recent-content list.
       AND ev.semantic_type <> 'correction'
-      -- Internal operational rows are not workspace content for non-owner
-      -- callers; see fetchContentCount above. Owners keep the full trail.
+      -- Match fetchContentCount so bootstrap totals and recent items agree.
       ${excludeWorkspaceAudit ? `AND NOT (ev.semantic_type = 'audit' AND COALESCE(ev.origin_type, '') = 'tool_invocation')
       AND NOT (ev.semantic_type = 'change' AND COALESCE(ev.metadata->>'category', '') IN ('config', 'lifecycle'))` : ''}
       -- Workspace-identity audit rows record member/invitation lifecycle; only
