@@ -36,7 +36,7 @@ export interface ResolutionIdentity {
 	scopeKey?: string | null;
 }
 
-interface ResolutionEntity {
+export interface ResolutionEntity {
 	id: number;
 	metadata: Record<string, unknown>;
 	/** Live identity claims that may not also exist in entity metadata. */
@@ -403,4 +403,36 @@ export function assessEntityResolution(input: {
 							? `No matching ${ruleFieldLabel} could be verified automatically, so this merge needs your judgement.`
 							: "This entity type has no automatic matching rules, so every merge needs your judgement.",
 	};
+}
+
+/** Identity groups keep each record's normalized keys separate, including composite rules. */
+export function assessIdentityGroups(input: {
+  metadataSchema: unknown;
+  left: ResolutionEntity[];
+  right: ResolutionEntity[];
+}): EntityResolutionAssessment {
+  const rules = readEntityResolutionRules(input.metadataSchema);
+  const records = [...input.left, ...input.right].sort((a, b) => a.id - b.id);
+  const pairs = input.left.flatMap(left => input.right.map(right =>
+    assessEntityResolution({ metadataSchema: input.metadataSchema, winner: right, losers: [left] })));
+  const normalized = records.map(record => ({ id: record.id,
+    values: rules.map(rule => normalizedResolutionRuleKeys(record, rule)) }));
+  // A unique rule may be populated on just some members. Any disjoint populated
+  // values anywhere in the combined group prevent automatic association.
+  const conflicts = rules.some((rule, index) => rule.onMatch === 'auto_merge' && normalized.some((left, i) =>
+    normalized.slice(i + 1).some(right => left.values[index].length > 0 && right.values[index].length > 0 &&
+      !left.values[index].some(value => right.values[index].includes(value)))));
+  const evidence = [...new Map(pairs.flatMap(pair => pair.evidence).map(item =>
+    [canonicalJson([item.kind, item.identifier]), item])).values()];
+  const policyHash = digest(rules);
+  const automatic = pairs.some(pair => pair.decision === 'auto_merge') && !conflicts;
+  return {
+    decision: automatic ? 'auto_merge' : 'review', evidence, policyHash,
+    fingerprint: digest({ policyHash, normalized, left: input.left.map(row => row.id).sort((a,b) => a-b),
+      right: input.right.map(row => row.id).sort((a,b) => a-b) }),
+    resolutionKeys: [...new Map(pairs.flatMap(pair => pair.resolutionKeys).map(row => [row.id, row])).values()],
+    reason: conflicts ? 'Members carry conflicting values declared unique; human review is required.'
+      : automatic ? 'Direct member evidence satisfies the declared automatic matching policy.'
+        : 'The declared evidence requires human review.',
+  };
 }
