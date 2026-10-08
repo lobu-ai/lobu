@@ -403,53 +403,6 @@ const completedCardSpendWhere = `semantic_type = 'transaction'
     AND metadata->>'transaction_type' = 'CARD_PAYMENT'
     AND metadata->>'direction' = 'out'`;
 
-// One bounded, immutable weekly row is the financial read model. The inner
-// top-1 uses the live-event index; the outer SUM window runs over that one row
-// only and lets the existing derived-column classifier expose net_worth_gbp as
-// the first-class measure without a separate metrics DSL.
-const netWorthSnapshot = defineEntityType({
-  key: "net-worth-snapshot",
-  name: "Net Worth Snapshot",
-  description:
-    "Latest household balance-sheet valuation from connector positions and current observations, with weekly FX, valuation range, and deterministic attribution.",
-  metadata: { icon: "wallet-cards", color: "#10B981" },
-  backing: {
-    sql: `SELECT
-      latest.id,
-      latest.week,
-      latest.snapshot_at,
-      SUM(latest.net_worth_gbp) OVER () AS net_worth_gbp,
-      SUM(latest.net_worth_low_gbp) OVER () AS net_worth_low_gbp,
-      SUM(latest.net_worth_high_gbp) OVER () AS net_worth_high_gbp,
-      latest.scope,
-      latest.sources,
-      latest.positions,
-      latest.breakdowns,
-      latest.previous,
-      latest.attribution
-    FROM (
-      SELECT
-        id,
-        metadata->>'week' AS week,
-        occurred_at AS snapshot_at,
-        (metadata->>'net_worth_gbp')::numeric AS net_worth_gbp,
-        (metadata->'net_worth_range_gbp'->>'low')::numeric AS net_worth_low_gbp,
-        (metadata->'net_worth_range_gbp'->>'high')::numeric AS net_worth_high_gbp,
-        metadata->>'scope' AS scope,
-        metadata->'sources' AS sources,
-        metadata->'positions' AS positions,
-        metadata->'breakdowns' AS breakdowns,
-        metadata->'previous' AS previous,
-        metadata->'attribution' AS attribution
-      FROM events
-      WHERE semantic_type = 'summary'
-        AND metadata->>'schema' = 'net-worth-snapshot/v4'
-      ORDER BY created_at DESC, id DESC
-      LIMIT 1
-    ) latest`,
-  },
-});
-
 const account = defineEntityType({
   key: "account",
   name: "Financial Account",
@@ -1149,7 +1102,6 @@ export default defineConfig({
     task,
     channel,
     account,
-    netWorthSnapshot,
     subscription,
     trip,
     goal,
