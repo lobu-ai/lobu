@@ -8,7 +8,7 @@ const originalStdoutWrite = process.stdout.write.bind(process.stdout);
 const originalStderrWrite = process.stderr.write.bind(process.stderr);
 const originalConsoleError = console.error;
 const originalToken = process.env.LOBU_API_TOKEN;
-const exampleDir = join(import.meta.dir, "../../../../examples/market");
+const exampleDir = join(import.meta.dir, "../../../../examples/personal-agent");
 
 let sentMessageId = "synthetic-platform-message";
 
@@ -168,7 +168,7 @@ describe("chatCommand example integration", () => {
 
     expect(createBodies).toEqual([
       {
-        agentId: "vc-tracking",
+        agentId: "personal-agent",
         forceNew: true,
       },
     ]);
@@ -199,19 +199,19 @@ describe("chatCommand example integration", () => {
 
         if (
           url ===
-            "http://gateway.test/lobu/api/v1/agents/vc-tracking/messages" &&
+            "http://gateway.test/lobu/api/v1/agents/personal-agent/messages" &&
           init?.method === "POST"
         ) {
           return Response.json({
             success: true,
             messageId: "synthetic-platform-message",
-            eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
+            eventsUrl: "/api/v1/agents/personal-agent/events?platform=telegram",
           });
         }
 
         if (
           url ===
-            "http://gateway.test/lobu/api/v1/agents/vc-tracking/events?platform=telegram" &&
+            "http://gateway.test/lobu/api/v1/agents/personal-agent/events?platform=telegram" &&
           !init?.method
         ) {
           return createSseResponse([
@@ -265,19 +265,19 @@ describe("chatCommand example integration", () => {
 
         if (
           url ===
-            "http://gateway.test/lobu/api/v1/agents/vc-tracking/messages" &&
+            "http://gateway.test/lobu/api/v1/agents/personal-agent/messages" &&
           init?.method === "POST"
         ) {
           return Response.json({
             success: true,
             messageId: "synthetic-platform-message",
-            eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
+            eventsUrl: "/api/v1/agents/personal-agent/events?platform=telegram",
           });
         }
 
         if (
           url ===
-            "http://gateway.test/lobu/api/v1/agents/vc-tracking/events?platform=telegram" &&
+            "http://gateway.test/lobu/api/v1/agents/personal-agent/events?platform=telegram" &&
           !init?.method
         ) {
           return createSseResponse([
@@ -319,19 +319,19 @@ describe("chatCommand example integration", () => {
 
         if (
           url ===
-            "http://gateway.test/lobu/api/v1/agents/vc-tracking/messages" &&
+            "http://gateway.test/lobu/api/v1/agents/personal-agent/messages" &&
           init?.method === "POST"
         ) {
           return Response.json({
             success: true,
             messageId: "synthetic-platform-message",
-            eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
+            eventsUrl: "/api/v1/agents/personal-agent/events?platform=telegram",
           });
         }
 
         if (
           url ===
-            "http://gateway.test/lobu/api/v1/agents/vc-tracking/events?platform=telegram" &&
+            "http://gateway.test/lobu/api/v1/agents/personal-agent/events?platform=telegram" &&
           !init?.method
         ) {
           return createSseResponse([
@@ -369,7 +369,7 @@ describe("chatCommand example integration", () => {
 
         if (
           url ===
-            "http://gateway.test/lobu/api/v1/agents/vc-tracking/messages" &&
+            "http://gateway.test/lobu/api/v1/agents/personal-agent/messages" &&
           init?.method === "POST"
         ) {
           const body = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -377,13 +377,13 @@ describe("chatCommand example integration", () => {
           return Response.json({
             success: true,
             messageId: "synthetic-platform-message",
-            eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
+            eventsUrl: "/api/v1/agents/personal-agent/events?platform=telegram",
           });
         }
 
         if (
           url ===
-            "http://gateway.test/lobu/api/v1/agents/vc-tracking/events?platform=telegram" &&
+            "http://gateway.test/lobu/api/v1/agents/personal-agent/events?platform=telegram" &&
           !init?.method
         ) {
           return createSseResponse([
