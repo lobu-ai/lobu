@@ -35,7 +35,11 @@ const representativeDraft = {
     themes: ["agents"],
     prefers: ["technical substance"],
     avoids: ["engagement bait"],
-    confidence: "medium",
+    // Numeric 0..1: the $member preference kind constrains confidence to a
+    // number (member-entity-type.ts BASE_MEMBER_EVENT_METADATA_SCHEMA), so a
+    // low/medium/high string 422s at persist time. No other constrained keys
+    // (importance, namespace, status) are emitted.
+    confidence: 0.8,
     evidence_count: 12,
   },
 };
@@ -78,6 +82,12 @@ describe("LinkedIn interest-profile declared output", () => {
     expect(linkedInInterestProfilePrompt).toContain('"linkedin-buremba"');
     expect(linkedInInterestProfilePrompt).toContain('"channel": "linkedin"');
     expect(linkedInInterestProfilePrompt).toContain('"mode": "voice"');
+    // The $member preference kind constrains confidence to numeric 0..1;
+    // a low/medium/high string 422s at persist time.
+    expect(linkedInInterestProfilePrompt).toContain("number 0 to 1");
+    expect(linkedInInterestProfilePrompt).not.toContain(
+      '"low"|"medium"|"high"'
+    );
   });
 
   test("the flagger filters by mode with legacy fallback", () => {
