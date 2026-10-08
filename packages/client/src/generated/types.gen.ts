@@ -1781,7 +1781,26 @@ export type ManageEntityResponses = {
       }
     | {
         action: "link";
-        relationship?: {
+        dry_run: true;
+        preview: {
+          outcome: "apply" | "review" | "suppressed" | "refused";
+          reason: string;
+        };
+      }
+    | {
+        action: "link";
+        approval_queued: true;
+        approval_run_id: number;
+        approval_url?: string;
+      }
+    | {
+        action: "link";
+        approval_suppressed: true;
+        message: string;
+      }
+    | {
+        action: "link";
+        relationship: {
           id: number;
           organization_id: string;
           from_entity_id: number;
@@ -1806,15 +1825,6 @@ export type ManageEntityResponses = {
           updated_at: string;
           deleted_at?: string | null;
         };
-        dry_run?: boolean;
-        preview?: {
-          outcome: "apply" | "review" | "suppressed" | "refused";
-          reason: string;
-        };
-        approval_queued?: boolean;
-        approval_suppressed?: boolean;
-        approval_run_id?: number;
-        approval_url?: string;
       }
     | {
         action: "update_link";
@@ -1846,16 +1856,26 @@ export type ManageEntityResponses = {
       }
     | {
         action: "unlink";
-        dry_run?: boolean;
-        preview?: {
+        dry_run: true;
+        preview: {
           outcome: "apply" | "review" | "suppressed" | "refused";
           reason: string;
         };
-        approval_queued?: boolean;
-        approval_suppressed?: boolean;
-        approval_run_id?: number;
+      }
+    | {
+        action: "unlink";
+        approval_queued: true;
+        approval_run_id: number;
         approval_url?: string;
-        success: boolean;
+      }
+    | {
+        action: "unlink";
+        approval_suppressed: true;
+        message: string;
+      }
+    | {
+        action: "unlink";
+        success: true;
         message: string;
       }
     | {

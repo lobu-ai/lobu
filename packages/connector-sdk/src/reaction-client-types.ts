@@ -19,16 +19,25 @@ import type { DeleteContentArgs } from "@lobu/core/contracts/tools/delete-knowle
 import type { ConnectionListInput } from "@lobu/core/contracts/tools/manage-connections";
 import type {
   EntityCreateInput,
+  EntityCreateResult,
   EntityDeleteInput,
+  EntityDeleteResult,
   EntityDiscoverDuplicatesInput,
   EntityDiscoverDuplicatesResult,
   EntityGetInput,
+  EntityGetResult,
   EntityLinkInput,
+  EntityLinkResult,
   EntityListInput,
+  EntityListResult,
   EntityListLinksInput,
+  EntityListLinksResult,
   EntityUnlinkInput,
+  EntityUnlinkResult,
   EntityUpdateInput,
+  EntityUpdateResult,
   EntityUpdateLinkInput,
+  EntityUpdateLinkResult,
 } from "@lobu/core/contracts/tools/manage-entity";
 import type {
   OperationExecuteInput,
@@ -175,15 +184,15 @@ export interface ReactionClient {
 
   entities: {
     discoverDuplicates(input: EntityDiscoverDuplicatesInput): Promise<EntityDiscoverDuplicatesResult>;
-    list(filter?: EntityListInput): Promise<unknown>;
-    get(input: EntityGetInput): Promise<unknown>;
-    create(input: EntityCreateInput): Promise<{ id: number }>;
-    update(input: EntityUpdateInput): Promise<unknown>;
-    delete(input: EntityDeleteInput): Promise<unknown>;
-    link(input: EntityLinkInput): Promise<unknown>;
-    unlink(input: EntityUnlinkInput): Promise<unknown>;
-    updateLink(input: EntityUpdateLinkInput): Promise<unknown>;
-    listLinks(input: EntityListLinksInput): Promise<unknown>;
+    list(filter?: EntityListInput): Promise<EntityListResult>;
+    get(input: EntityGetInput): Promise<EntityGetResult>;
+    create(input: EntityCreateInput): Promise<EntityCreateResult>;
+    update(input: EntityUpdateInput): Promise<EntityUpdateResult>;
+    delete(input: EntityDeleteInput): Promise<EntityDeleteResult>;
+    link(input: EntityLinkInput): Promise<EntityLinkResult>;
+    unlink(input: EntityUnlinkInput): Promise<EntityUnlinkResult>;
+    updateLink(input: EntityUpdateLinkInput): Promise<EntityUpdateLinkResult>;
+    listLinks(input: EntityListLinksInput): Promise<EntityListLinksResult>;
     search(query: string, options?: { limit?: number }): Promise<unknown>;
   };
 

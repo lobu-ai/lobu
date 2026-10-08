@@ -1991,13 +1991,18 @@ async function handleIdentityAssociation(input: IdentityAssociationInput, ctx: T
   if (decision.outcome === 'refused' && !input.dry_run) throw new ToolUserError(decision.reason, 409);
   const queued = decision.outcome === 'review' && !input.dry_run && decision.proposal
     ? await proposeEntityChange(ctx, decision.proposal, parentRunId) : null;
-  const base = { dry_run: input.dry_run, preview: { outcome: decision.outcome, reason: decision.reason },
-    approval_queued: queued ? true : undefined, approval_run_id: queued?.runId,
-    approval_url: queued?.approvalUrl, approval_suppressed: decision.outcome === 'suppressed' || undefined };
-  if (input.operation === 'unlink') return { action: 'unlink', success: true, message: decision.reason, ...base };
+  if (input.dry_run) return { action: input.operation, dry_run: true,
+    preview: { outcome: decision.outcome, reason: decision.reason } };
+  if (queued) return { action: input.operation, approval_queued: true,
+    approval_run_id: queued.runId, approval_url: queued.approvalUrl };
+  if (decision.outcome === 'suppressed') return input.operation === 'link'
+    ? { action: 'link', approval_suppressed: true, message: decision.reason }
+    : { action: 'unlink', approval_suppressed: true, message: decision.reason };
+  if (input.operation === 'unlink') return { action: 'unlink', success: true, message: decision.reason };
   const rows = decision.relationshipId ? await sql.unsafe<RelationshipRow>(
     `SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1`, [decision.relationshipId]) : [];
-  return { action: 'link', relationship: rows[0], ...base };
+  if (!rows[0]) throw new ToolUserError('Identity association did not produce a relationship', 409);
+  return { action: 'link', relationship: rows[0] };
 }
 
 async function handleLink(

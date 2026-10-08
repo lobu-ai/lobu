@@ -11,13 +11,34 @@
  * now keeps owner-admin writes out of a read-scope client's listing.
  */
 import { describe, expect, it } from "bun:test";
-import { ManageEntitySchema } from "@lobu/core/contracts/tools/manage-entity";
+import { ManageEntityResultSchema, ManageEntitySchema } from "@lobu/core/contracts/tools/manage-entity";
+import { Value } from "@sinclair/typebox/value";
 import { getAllTools } from "../../tools/registry";
 import { validateToolArgs } from "../../tools/validate-args";
 import { ToolUserError } from "../../utils/errors";
 
 const validate = (args: unknown) =>
 	validateToolArgs("manage_entity", ManageEntitySchema, args);
+
+describe("identity decision result contract", () => {
+	it.each(["link", "unlink"])("keeps %s previews and pending decisions distinct from applied results", (action) => {
+		const receipts = [
+			{ action, dry_run: true, preview: { outcome: "review", reason: "Requires review" } },
+			{ action, approval_queued: true, approval_run_id: 1 },
+			{ action, approval_suppressed: true, message: "Previously rejected" },
+		];
+		for (const receipt of receipts) {
+			expect(Value.Check(ManageEntityResultSchema, receipt)).toBe(true);
+			expect(Value.Check(ManageEntityResultSchema, { ...receipt, success: true })).toBe(false);
+		}
+		expect(Value.Check(ManageEntityResultSchema, { action })).toBe(false);
+		expect(Value.Check(ManageEntityResultSchema, { action, approval_queued: true })).toBe(false);
+	});
+
+	it("accepts an applied unlink receipt", () => {
+		expect(Value.Check(ManageEntityResultSchema, { action: "unlink", success: true, message: "Withdrawn" })).toBe(true);
+	});
+});
 
 function messageOf(fn: () => unknown): string {
 	try {

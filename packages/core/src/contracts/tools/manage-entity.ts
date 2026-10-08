@@ -252,24 +252,45 @@ export const DeleteEntityAction = Type.Object({
   automation_source: Type.Optional(AutomationSource),
 });
 
-const IdentityDecisionFields = {
-  dry_run: Type.Optional(Type.Boolean()),
-  preview: Type.Optional(
-    Type.Object({
-      outcome: Type.Union([
-        Type.Literal("apply"),
-        Type.Literal("review"),
-        Type.Literal("suppressed"),
-        Type.Literal("refused"),
-      ]),
-      reason: Type.String(),
-    })
-  ),
-  approval_queued: Type.Optional(Type.Boolean()),
-  approval_suppressed: Type.Optional(Type.Boolean()),
-  approval_run_id: Type.Optional(Type.Number()),
-  approval_url: Type.Optional(Type.String()),
-};
+const IdentityPreview = Type.Object({
+  outcome: Type.Union([
+    Type.Literal("apply"),
+    Type.Literal("review"),
+    Type.Literal("suppressed"),
+    Type.Literal("refused"),
+  ]),
+  reason: Type.String(),
+});
+
+function IdentityDecisionResults<A extends "link" | "unlink">(action: A) {
+  return [
+    Type.Object(
+      {
+        action: Type.Literal(action),
+        dry_run: Type.Literal(true),
+        preview: IdentityPreview,
+      },
+      { additionalProperties: false }
+    ),
+    Type.Object(
+      {
+        action: Type.Literal(action),
+        approval_queued: Type.Literal(true),
+        approval_run_id: Type.Integer({ minimum: 1 }),
+        approval_url: Type.Optional(Type.String()),
+      },
+      { additionalProperties: false }
+    ),
+    Type.Object(
+      {
+        action: Type.Literal(action),
+        approval_suppressed: Type.Literal(true),
+        message: Type.String(),
+      },
+      { additionalProperties: false }
+    ),
+  ];
+}
 
 export const LinkEntitiesAction = Type.Object({
   dry_run: Type.Optional(DryRun),
@@ -687,21 +708,24 @@ export const ManageEntityResultSchema = Type.Union([
     approval_current: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     approval_attribution: Type.Optional(ApprovalAttributionSchema),
   }),
-  Type.Object({
-    action: Type.Literal("link"),
-    relationship: Type.Optional(RelationshipRowSchema),
-    ...IdentityDecisionFields,
-  }),
+  ...IdentityDecisionResults("link"),
+  Type.Object(
+    { action: Type.Literal("link"), relationship: RelationshipRowSchema },
+    { additionalProperties: false }
+  ),
   Type.Object({
     action: Type.Literal("update_link"),
     relationship: RelationshipRowSchema,
   }),
-  Type.Object({
-    action: Type.Literal("unlink"),
-    ...IdentityDecisionFields,
-    success: Type.Boolean(),
-    message: Type.String(),
-  }),
+  ...IdentityDecisionResults("unlink"),
+  Type.Object(
+    {
+      action: Type.Literal("unlink"),
+      success: Type.Literal(true),
+      message: Type.String(),
+    },
+    { additionalProperties: false }
+  ),
   Type.Object({
     action: Type.Literal("list_links"),
     record_links: Type.Array(
@@ -868,4 +892,40 @@ export type ManageEntityResult = Static<typeof ManageEntityResultSchema>;
 export type EntityDiscoverDuplicatesResult = Extract<
   ManageEntityResult,
   { action: "discover_duplicates" }
+>;
+
+export type EntityCreateResult = Extract<
+  ManageEntityResult,
+  { action: "create" }
+>;
+
+export type EntityUpdateResult = Extract<
+  ManageEntityResult,
+  { action: "update" }
+>;
+
+export type EntityGetResult = Extract<ManageEntityResult, { action: "get" }>;
+
+export type EntityListResult = Extract<ManageEntityResult, { action: "list" }>;
+
+export type EntityDeleteResult = Extract<
+  ManageEntityResult,
+  { action: "delete" }
+>;
+
+export type EntityLinkResult = Extract<ManageEntityResult, { action: "link" }>;
+
+export type EntityUnlinkResult = Extract<
+  ManageEntityResult,
+  { action: "unlink" }
+>;
+
+export type EntityUpdateLinkResult = Extract<
+  ManageEntityResult,
+  { action: "update_link" }
+>;
+
+export type EntityListLinksResult = Extract<
+  ManageEntityResult,
+  { action: "list_links" }
 >;
