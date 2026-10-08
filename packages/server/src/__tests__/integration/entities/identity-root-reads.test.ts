@@ -16,7 +16,7 @@ async function graph() {
   await human.entity_schema.createRelType({ slug: 'same_record', name: 'Same record', purpose: 'identity' });
   const ids: number[] = [];
   for (const name of ['Alpha 100%', 'Bravo', 'Charlie']) {
-    const result = await human.entities.create({ type: 'contact-record', name, metadata: { domain: `${name.toLowerCase().replace(/ /g, '-')}.example.test` } });
+    const result = await human.entities.create({ entity_type: 'contact-record', name, metadata: { domain: `${name.toLowerCase().replace(/ /g, '-')}.example.test` } });
     ids.push(Number(result.entity.id));
   }
   const link = (from: number, to: number) => human.entities.link({ from_entity_id: from, to_entity_id: to, relationship_type_slug: 'same_record' });
@@ -44,11 +44,11 @@ describe('canonical identity root list/search/count', () => {
     }
   });
 
-  it('searches transitive member names/domains and returns the root once without changing its metadata', async () => {
+  it('searches transitive member names and returns the root once without changing its metadata', async () => {
     const { ids: [a, b, c], link, list } = await graph();
     await link(a, b);
     await link(b, c);
-    for (const search of ['Alpha', '%', 'alpha-100%.example.test', 'Bravo', 'Charlie']) {
+    for (const search of ['Alpha', '%', 'Bravo', 'Charlie']) {
       const result = await list({ search });
       expect(result.entities.map(row => Number(row.id))).toEqual([c]);
       expect(result.entities[0].name).toBe('Charlie');
@@ -56,6 +56,7 @@ describe('canonical identity root list/search/count', () => {
       expect(result.metadata.total_count).toBe(1);
     }
     expect((await list({ search: 'missing' })).entities).toEqual([]);
+    expect((await list({ filters: [{ field: 'domain', op: 'eq', value: 'alpha-100%.example.test' }] })).entities.map(row => Number(row.id))).toEqual([c]);
   });
 
   it('display counts agree with roots while physical counts keep all source records', async () => {
@@ -86,7 +87,7 @@ describe('canonical identity root list/search/count', () => {
     await link(a, b);
     const other = await TestWorkspace.create({ name: 'Other root workspace' });
     await other.owner.entity_schema.createType({ slug: 'contact-record', name: 'Contact record' });
-    await other.owner.entities.create({ type: 'contact-record', name: 'Private foreign name' });
+    await other.owner.entities.create({ entity_type: 'contact-record', name: 'Private foreign name' });
     expect((await list({ search: 'Private foreign name' })).entities).toEqual([]);
     expect((await human.entities.list({ search: 'Alpha' })).entities.map(row => Number(row.id))).toEqual([b]);
     expect((await list({ search: 'Alpha', parent_id: c })).metadata.total_count).toBe(0);
@@ -94,8 +95,8 @@ describe('canonical identity root list/search/count', () => {
     expect((await list({ search: 'Alpha', segment: 'member_only' })).metadata.total_count).toBe(1);
     expect((await list({ search: 'Bravo', segment: 'member_only' })).metadata.total_count).toBe(0);
     for (const filter of ['category', 'main_market', 'market']) {
-      expect((await list({ search: 'Alpha', [filter]: 'root-only' })).metadata.total_count).toBe(0);
-      expect((await list({ search: 'Alpha', [filter]: 'member-only' })).entities.map(row => Number(row.id))).toEqual([b]);
+      expect((await list({ search: 'Alpha', filters: [{ field: filter, op: 'eq', value: 'root-only' }] })).metadata.total_count).toBe(0);
+      expect((await list({ search: 'Alpha', filters: [{ field: filter, op: 'eq', value: 'member-only' }] })).entities.map(row => Number(row.id))).toEqual([b]);
       expect((await list({ search: 'Alpha', filters: [{ field: filter, op: 'eq', value: 'member-only' }] })).metadata.total_count).toBe(1);
     }
   });

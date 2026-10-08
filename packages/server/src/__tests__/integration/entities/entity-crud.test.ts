@@ -43,7 +43,7 @@ describe('entity CRUD', () => {
 
   it('creates an entity, reads it back, and lists it', async () => {
     const created = (await owner.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'Acme Corp',
     })) as { entity?: { id: number; name: string } };
     expect(created.entity?.id).toBeGreaterThan(0);
@@ -62,7 +62,7 @@ describe('entity CRUD', () => {
 
   it('updates an entity', async () => {
     const created = (await owner.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'Old Name',
     })) as { entity: { id: number } };
     await owner.entities.update({ entity_id: created.entity.id, name: 'New Name' });
@@ -74,7 +74,7 @@ describe('entity CRUD', () => {
 
   it('hard-deletes a fresh entity with no event history', async () => {
     const created = (await owner.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'To Delete',
     })) as { entity: { id: number } };
     await owner.entities.delete({ entity_id: created.entity.id });
@@ -85,7 +85,7 @@ describe('entity CRUD', () => {
   it('get honors include_deleted: soft-deleted entity is hidden by default, returned with the flag', async () => {
     const sql = getTestDb();
     const created = (await owner.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'Soft Deleted Co',
     })) as { entity: { id: number } };
     const id = created.entity.id;
@@ -109,7 +109,7 @@ describe('entity CRUD', () => {
   describe('access control', () => {
     it('lets a member create + list (write scope is enough)', async () => {
       const created = (await member.entities.create({
-        type: 'company',
+        entity_type: 'company',
         name: 'Member-Created',
       })) as { entity?: { id: number } };
       expect(created.entity?.id).toBeGreaterThan(0);
@@ -122,7 +122,7 @@ describe('entity CRUD', () => {
 
     it('blocks a member from deleting entities (delete requires owner/admin)', async () => {
       const created = (await owner.entities.create({
-        type: 'company',
+        entity_type: 'company',
         name: 'Owner-Only-Delete',
       })) as { entity: { id: number } };
       await expect(member.entities.delete({ entity_id: created.entity.id })).rejects.toThrow(
@@ -133,7 +133,7 @@ describe('entity CRUD', () => {
     it('blocks a read-only-scoped member from creating', async () => {
       const reader = member.withAuth({ scopes: ['mcp:read'] });
       await expect(
-        reader.entities.create({ type: 'company', name: 'Read-Only' })
+        reader.entities.create({ entity_type: 'company', name: 'Read-Only' })
       ).rejects.toThrow(/scope|access/i);
     });
   });

@@ -69,13 +69,10 @@ const NAMESPACE_TOOL = Object.fromEntries(
  * tiered namespace that is not here and does not resolve is a FAILURE, not a
  * silent skip. Adding an entry is a deliberate, reviewable act — the previous
  * `continue` swallowed 25 methods (all of feeds.*, all of authProfiles.*, all
- * 12 entitySchema.*, entities.search) without anyone noticing 11 real
+ * 12 entitySchema.*) without anyone noticing 11 real
  * authorization drifts hiding among them.
  */
 const NO_TOOL_ACTION = new Set([
-	// Bypasses the action caller entirely: delegates to the `search` tool, which
-	// carries its own access gate rather than a manage_entity action.
-	"entities.search",
 	// Same shape: delegates to the standalone `get_automation` tool.
 	"automations.get",
 	// Uses the owner-scoped current MCP conversation helper, not manage_conversations.

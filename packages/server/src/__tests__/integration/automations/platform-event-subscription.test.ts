@@ -117,7 +117,7 @@ describe('platform event subscriptions', () => {
       managed_agent_id: agent.agentId,
     });
     const created = (await api.entities.create({
-      type: 'invoice',
+      entity_type: 'invoice',
       name: 'Atomic Invoice',
       metadata: { status: 'draft' },
     })) as { entity: { id: number } };

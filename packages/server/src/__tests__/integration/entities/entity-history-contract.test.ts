@@ -98,7 +98,7 @@ describe('entity history contracts', () => {
 
   it('records a single change event for real metadata updates, not no-op repeats', async () => {
     const created = (await workspace.owner.entities.create({
-      type: 'brand',
+      entity_type: 'brand',
       name: 'Audit Brand',
       metadata: { domain: 'old.example' },
     })) as { entity: { id: number } };
@@ -146,11 +146,11 @@ describe('entity history contracts', () => {
       name: 'Atomic Related Brand',
     });
     const from = (await workspace.owner.entities.create({
-      type: 'brand',
+      entity_type: 'brand',
       name: 'Atomic From',
     })) as { entity: { id: number } };
     const to = (await workspace.owner.entities.create({
-      type: 'brand',
+      entity_type: 'brand',
       name: 'Atomic To',
     })) as { entity: { id: number } };
     await sql.unsafe(`
@@ -191,16 +191,16 @@ describe('entity history contracts', () => {
   });
 
   it('force-deletes a tree with event history by detaching event references, not deleting events', async () => {
-    const root = (await workspace.owner.entities.create({ type: 'brand', name: 'Purged Root' })) as {
+    const root = (await workspace.owner.entities.create({ entity_type: 'brand', name: 'Purged Root' })) as {
       entity: { id: number };
     };
     const child = (await workspace.owner.entities.create({
-      type: 'brand',
+      entity_type: 'brand',
       name: 'Purged Child',
       parent_id: root.entity.id,
     })) as { entity: { id: number } };
     const grandchild = (await workspace.owner.entities.create({
-      type: 'brand',
+      entity_type: 'brand',
       name: 'Purged Grandchild',
       parent_id: child.entity.id,
     })) as { entity: { id: number } };
@@ -259,10 +259,10 @@ describe('entity history contracts', () => {
       name: 'Related Brand',
     });
 
-    const a = (await workspace.owner.entities.create({ type: 'brand', name: 'Disposable A' })) as {
+    const a = (await workspace.owner.entities.create({ entity_type: 'brand', name: 'Disposable A' })) as {
       entity: { id: number };
     };
-    const b = (await workspace.owner.entities.create({ type: 'brand', name: 'Disposable B' })) as {
+    const b = (await workspace.owner.entities.create({ entity_type: 'brand', name: 'Disposable B' })) as {
       entity: { id: number };
     };
 
@@ -279,8 +279,7 @@ describe('entity history contracts', () => {
       relationship_type_slug: 'related-brand',
     })) as { relationship: { id: number } };
     await waitForEdgeChangeEvent(linked.relationship.id, 'link');
-    await workspace.owner.entities.manage({
-      action: 'unlink',
+    await workspace.owner.entities.unlink({
       relationship_id: linked.relationship.id,
     });
     await waitForEdgeChangeEvent(linked.relationship.id, 'unlink');
@@ -337,11 +336,11 @@ describe('entity history contracts', () => {
    */
   it('reports the event rows its transaction actually detached, not the preflight (#2812)', async () => {
     const deleted = (await workspace.owner.entities.create({
-      type: 'brand',
+      entity_type: 'brand',
       name: 'Deleted During Audit',
     })) as { entity: { id: number } };
     const survivor = (await workspace.owner.entities.create({
-      type: 'brand',
+      entity_type: 'brand',
       name: 'Concurrent Audit Survivor',
     })) as { entity: { id: number } };
     const sql = getTestDb();
@@ -425,16 +424,16 @@ describe('entity history contracts', () => {
   });
 
   it('hard-deletes a descendant tree with no event history', async () => {
-    const root = (await workspace.owner.entities.create({ type: 'brand', name: 'Disposable Root' })) as {
+    const root = (await workspace.owner.entities.create({ entity_type: 'brand', name: 'Disposable Root' })) as {
       entity: { id: number };
     };
     const child = (await workspace.owner.entities.create({
-      type: 'brand',
+      entity_type: 'brand',
       name: 'Disposable Child',
       parent_id: root.entity.id,
     })) as { entity: { id: number } };
     const grandchild = (await workspace.owner.entities.create({
-      type: 'brand',
+      entity_type: 'brand',
       name: 'Disposable Grandchild',
       parent_id: child.entity.id,
     })) as { entity: { id: number } };

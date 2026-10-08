@@ -67,7 +67,7 @@ describe('sandbox run (wire)', () => {
       slug: 'company',
       name: 'Company',
     });
-    await seedClient.entities.create({ type: 'company', name: 'Sandbox Co' });
+    await seedClient.entities.create({ entity_type: 'company', name: 'Sandbox Co' });
     await seedClient.entity_schema.createType({
       slug: 'net-worth-snapshot',
       name: 'Net Worth Snapshot',

@@ -442,6 +442,15 @@ describe("method-metadata", () => {
 		expect(METHOD_METADATA["authProfiles.test"].access).toBe("external");
 	});
 
+	it("publishes only canonical entity methods and inputs", () => {
+		expect(Object.keys(METHOD_METADATA).filter((path) => path.startsWith("entities.")).sort()).toEqual([
+			"entities.create", "entities.delete", "entities.discoverDuplicates", "entities.get",
+			"entities.link", "entities.list", "entities.listLinks", "entities.unlink",
+			"entities.update", "entities.updateLink",
+		]);
+		expect(Object.keys(SDK_FIELD_ALIASES).filter((path) => path.startsWith("entities."))).toEqual([]);
+	});
+
 	it("keeps the alias registry aligned with runtime methods and their docs", () => {
 		const { namespaceMethods } = enumerateSdkMethods();
 		for (const [path, aliases] of Object.entries(SDK_FIELD_ALIASES)) {

@@ -114,7 +114,7 @@ describe('entity list segment filter', () => {
       ['vendor-d', 'bronze'],
     ]) {
       await owner.entities.create({
-        type: 'synthetic-vendor', name,
+        entity_type: 'synthetic-vendor', name,
         metadata: { tier, label: name === 'vendor-a' ? '{e}.name {et}.slug' : '' },
       });
     }
@@ -139,7 +139,7 @@ describe('entity list segment filter', () => {
       metrics_config: METRICS,
     });
     await otherOwner.entities.create({
-      type: 'synthetic-vendor',
+      entity_type: 'synthetic-vendor',
       name: 'foreign-gold',
       metadata: { tier: 'gold' },
     });

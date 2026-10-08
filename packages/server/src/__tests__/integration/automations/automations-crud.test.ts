@@ -62,7 +62,7 @@ describe('automation CRUD', () => {
 
     await owner.entity_schema.createType({ slug: 'company', name: 'Company' });
     const entity = (await owner.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'Automation Target',
     })) as { entity: { id: number } };
     entityId = entity.entity.id;
@@ -266,11 +266,11 @@ describe('automation CRUD', () => {
 
   it('creates an automation and its reaction contract atomically', async () => {
     const sql = getTestDb();
-    const reaction = `export const input = { type: "object", properties: { merge_proposals: { type: "array" } }, required: ["merge_proposals"] }; export default async function () {}`;
+    const reaction = `export const input = { type: "object", properties: { identity_proposals: { type: "array" } }, required: ["identity_proposals"] }; export default async function () {}`;
     const created = (await owner.automations.create({
       slug: 'atomic-reaction-automation',
       name: 'Atomic Reaction Automation',
-      prompt: 'Return merge proposals.',
+      prompt: 'Return identity proposals.',
       managed_agent_id: agentId,
       reaction_script: reaction,
     })) as { automation_id: string };
@@ -286,32 +286,34 @@ describe('automation CRUD', () => {
       FROM automations WHERE id = ${created.automation_id}
     `;
     expect(row?.reaction_script).toBe(reaction);
-    expect(row?.reaction_script_compiled).toContain('merge_proposals');
+    expect(row?.reaction_script_compiled).toContain('identity_proposals');
     expect(row?.reaction_input_schema).toMatchObject({
-      required: ['merge_proposals'],
+      required: ['identity_proposals'],
     });
   });
 
-  it('executes an installed merge reaction and queues exactly one pending, unapplied approval with automation/window attribution', async () => {
+  it('executes an installed identity reaction and queues exactly one pending, unapplied approval with automation/window attribution', async () => {
     const sql = getTestDb();
 
-    // Three people form one exact-identity component (winner ↔ bridge by email,
-    // bridge ↔ loser by phone), proving grouping does not depend on model output.
+    // Three records form one evidence component; only one root pair is proposed.
+    await owner.entity_schema.createType({ slug: 'contact-record', name: 'Contact record' });
+    await owner.entity_schema.createRelType({ slug: 'same_record', name: 'Same record', purpose: 'identity' });
+    await owner.entity_schema.addRule({ slug: 'same_record', source_entity_type_slug: 'contact-record', target_entity_type_slug: 'contact-record' });
     const winner = await createTestEntity({
-      name: 'Reaction Merge Winner',
-      entity_type: 'person',
+      name: 'Reaction Identity Winner',
+      entity_type: 'contact-record',
       organization_id: ownerOrgId,
       created_by: ownerUserId,
     });
     const bridge = await createTestEntity({
-      name: 'Reaction Merge Bridge',
-      entity_type: 'person',
+      name: 'Reaction Identity Bridge',
+      entity_type: 'contact-record',
       organization_id: ownerOrgId,
       created_by: ownerUserId,
     });
     const loser = await createTestEntity({
-      name: 'Reaction Merge Loser',
-      entity_type: 'person',
+      name: 'Reaction Identity Loser',
+      entity_type: 'contact-record',
       organization_id: ownerOrgId,
       created_by: ownerUserId,
     });
@@ -338,16 +340,16 @@ describe('automation CRUD', () => {
       WHERE id = (SELECT entity_type_id FROM entities WHERE id = ${winner.id})
     `;
 
-    const template = AUTOMATION_CATALOG_TEMPLATES.find((t) => t.id === 'duplicate-merge');
-    if (!template) throw new Error('duplicate-merge automation template is missing');
+    const template = AUTOMATION_CATALOG_TEMPLATES.find((t) => t.id === 'duplicate-identity');
+    if (!template) throw new Error('duplicate-identity automation template is missing');
     const reactionScript = String(template.detail.reaction_script);
 
     const created = (await owner.automations.create({
-      slug: 'reaction-merge-exec-automation',
-      name: 'Reaction Merge Exec Automation',
-      prompt: 'Find and merge duplicate people.',
+      slug: 'reaction-identity-exec-automation',
+      name: 'Reaction Identity Exec Automation',
+      prompt: 'Find duplicate records for the configured identity policy.',
       managed_agent_id: agentId,
-      sources: template.detail.sources,
+      entity_id: winner.id,
       reaction_script: reactionScript,
     })) as { automation_id: string };
     const automationId = Number(created.automation_id);
@@ -370,9 +372,8 @@ describe('automation CRUD', () => {
       context: {
         extracted_data: {
           analysis_summary: 'The source contains one exact-identity component.',
-          uncertain_groups: [],
         },
-        entities: [],
+        entities: [{ id: winner.id, entity_type: 'contact-record', name: winner.name, metadata: {} }],
         window: {
           run_id: sourceRun.runId,
           automation_id: automationId,
@@ -382,8 +383,8 @@ describe('automation CRUD', () => {
         },
         automation: {
           id: automationId,
-          slug: 'reaction-merge-exec-automation',
-          name: 'Reaction Merge Exec Automation',
+          slug: 'reaction-identity-exec-automation',
+          name: 'Reaction Identity Exec Automation',
           version: 1,
         },
         organization_id: ownerOrgId,
@@ -408,8 +409,8 @@ describe('automation CRUD', () => {
       FROM runs
       WHERE organization_id = ${ownerOrgId}
         AND run_type = 'internal'
-        AND action_input->>'operation' = 'merge'
-        AND action_input->>'winner_entity_id' = ${String(winner.id)}
+        AND action_input->>'operation' = 'link'
+        AND action_input->>'relationship_type_slug' = 'same_record'
     `;
     expect(pending).toHaveLength(1);
     expect(Number(pending[0].automation_id)).toBe(automationId);
@@ -417,29 +418,25 @@ describe('automation CRUD', () => {
     expect(pending[0].approval_status).toBe('pending');
     expect(pending[0].status).toBe('pending');
 
-    const [pendingInput] = await sql<{ entity_ids: number[] }[]>`
-      SELECT action_input->'entity_ids' AS entity_ids
+    const [pendingInput] = await sql<{ entity_id: number; to_entity_id: number }[]>`
+      SELECT (action_input->>'entity_id')::bigint AS entity_id,
+        (action_input->>'to_entity_id')::bigint AS to_entity_id
       FROM runs
       WHERE organization_id = ${ownerOrgId}
         AND run_type = 'internal'
-        AND action_input->>'operation' = 'merge'
-        AND action_input->>'winner_entity_id' = ${String(winner.id)}
+        AND action_input->>'operation' = 'link'
+        AND action_input->>'relationship_type_slug' = 'same_record'
     `;
-    expect(pendingInput.entity_ids.map(Number)).toEqual([bridge.id]);
-
-    const duplicateRows = await sql<
-      { id: number; merged_into: number | null; deleted_at: string | null }[]
-    >`
-      SELECT id, merged_into, deleted_at
-      FROM entities
-      WHERE id IN (${bridge.id}, ${loser.id})
-      ORDER BY id
-    `;
-    expect(duplicateRows.map((row) => Number(row.id))).toEqual(
-      [bridge.id, loser.id].sort((a, b) => a - b)
+    expect([Number(pendingInput.entity_id), Number(pendingInput.to_entity_id)].sort((a, b) => a - b)).toEqual(
+      [winner.id, bridge.id].sort((a, b) => a - b)
     );
-    expect(duplicateRows.every((row) => row.merged_into === null)).toBe(true);
+    const duplicateRows = await sql<{ id: number; deleted_at: string | null }[]>`
+      SELECT id, deleted_at FROM entities
+      WHERE id IN (${winner.id}, ${bridge.id}, ${loser.id}) ORDER BY id
+    `;
+    expect(duplicateRows).toHaveLength(3);
     expect(duplicateRows.every((row) => row.deleted_at === null)).toBe(true);
+    expect(await sql`SELECT id FROM entity_relationships WHERE organization_id = ${ownerOrgId} AND deleted_at IS NULL`).toEqual([]);
 
     await owner.automations.delete({ automation_ids: [created.automation_id] });
   });
@@ -449,7 +446,7 @@ describe('automation CRUD', () => {
       owner.automations.create({
         slug: 'invalid-reaction-automation',
         name: 'Invalid Reaction Automation',
-        prompt: 'Return merge proposals.',
+        prompt: 'Return identity proposals.',
         managed_agent_id: agentId,
         reaction_script: 'export default async function reaction() {',
       })
@@ -544,7 +541,7 @@ describe('automation CRUD', () => {
     const targets: number[] = [];
     for (let i = 0; i < N; i++) {
       const e = (await owner.entities.create({
-        type: 'company',
+        entity_type: 'company',
         name: `CFV Group Race Target ${i}`,
       })) as { entity: { id: number } };
       targets.push(e.entity.id);
@@ -593,7 +590,7 @@ describe('automation CRUD', () => {
     const targets: number[] = [];
     for (let i = 0; i < N; i++) {
       const e = (await owner.entities.create({
-        type: 'company',
+        entity_type: 'company',
         name: `CFV Target ${i}`,
       })) as { entity: { id: number } };
       targets.push(e.entity.id);
@@ -639,7 +636,7 @@ describe('automation CRUD', () => {
     const versionId = Number(row?.current_version_id);
 
     const target = (await owner.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'CFV Slug Race Target',
     })) as { entity: { id: number } };
 
@@ -691,11 +688,11 @@ describe('automation CRUD', () => {
     const versionId = Number(row?.current_version_id);
 
     const freshTarget = (await owner.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'CFV Rollback Fresh',
     })) as { entity: { id: number } };
     const collidingTarget = (await owner.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'CFV Rollback Colliding',
     })) as { entity: { id: number } };
 
@@ -1264,7 +1261,7 @@ describe('automation CRUD', () => {
       const sql = getTestDb();
       const deviceId = await seedDevice('cfv-device-pin');
       const target = (await owner.entities.create({
-        type: 'company',
+        entity_type: 'company',
         name: 'CFV Device Clone Target',
       })) as { entity: { id: number } };
 
@@ -1316,7 +1313,7 @@ describe('automation CRUD', () => {
     it('creates and clones an agentless manual-only automation (executor optional)', async () => {
       const sql = getTestDb();
       const target = (await owner.entities.create({
-        type: 'company',
+        entity_type: 'company',
         name: 'CFV Manual Clone Target',
       })) as { entity: { id: number } };
 

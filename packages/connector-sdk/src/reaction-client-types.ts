@@ -193,7 +193,6 @@ export interface ReactionClient {
     unlink(input: EntityUnlinkInput): Promise<EntityUnlinkResult>;
     updateLink(input: EntityUpdateLinkInput): Promise<EntityUpdateLinkResult>;
     listLinks(input: EntityListLinksInput): Promise<EntityListLinksResult>;
-    search(query: string, options?: { limit?: number }): Promise<unknown>;
   };
 
   connections: {

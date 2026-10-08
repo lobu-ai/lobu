@@ -330,7 +330,7 @@ describe("apply diff — memory schema", () => {
     const declared = {
       "x-lobu-resolution": {
         rules: [
-          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+          { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
         ],
       },
     };
@@ -388,7 +388,7 @@ describe("apply diff — memory schema", () => {
                 {
                   fields: ["email"],
                   normalizer: "email",
-                  onMatch: "auto_merge",
+                  onMatch: "auto_link",
                 },
               ],
             },
@@ -405,7 +405,7 @@ describe("apply diff — memory schema", () => {
     const live = {
       "x-lobu-resolution": {
         rules: [
-          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+          { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
         ],
       },
     };
@@ -449,7 +449,7 @@ describe("apply diff — memory schema", () => {
     const declared = {
       "x-lobu-resolution": {
         rules: [
-          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+          { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
         ],
       },
     };
@@ -495,7 +495,7 @@ describe("apply diff — memory schema", () => {
                   {
                     fields: ["email"],
                     normalizer: "email",
-                    onMatch: "auto_merge",
+                    onMatch: "auto_link",
                   },
                 ],
               },
@@ -525,7 +525,7 @@ describe("apply diff — memory schema", () => {
                   {
                     fields: ["email"],
                     normalizer: "email",
-                    onMatch: "auto_merge",
+                    onMatch: "auto_link",
                   },
                 ],
               },
@@ -555,7 +555,7 @@ describe("apply diff — memory schema", () => {
                   {
                     fields: ["email"],
                     normalizer: "email",
-                    onMatch: "auto_merge",
+                    onMatch: "auto_link",
                   },
                 ],
               },
@@ -584,7 +584,7 @@ describe("apply diff — memory schema", () => {
                   {
                     fields: ["email"],
                     normalizer: "email",
-                    onMatch: "auto_merge",
+                    onMatch: "auto_link",
                   },
                 ],
               },

@@ -68,7 +68,7 @@ describe("manage_entity union contract", () => {
 		expect(messageOf(() => validate({ action: "create", entity_type: "company" }))).toMatch(
 			/name/,
 		);
-		for (const action of ["update", "get", "delete", "unmerge"]) {
+		for (const action of ["update", "get", "delete"]) {
 			expect(messageOf(() => validate({ action }))).toMatch(/entity_id/);
 		}
 		// list_links takes entity_id or a source-backed record; the handler
@@ -76,12 +76,9 @@ describe("manage_entity union contract", () => {
 		expect(
 			messageOf(() => validate({ action: "link", from_entity_id: 1, to_entity_id: 2 })),
 		).toMatch(/relationship_type_slug/);
-		expect(messageOf(() => validate({ action: "merge", entity_id: 7 }))).toMatch(
-			/winner_entity_id/,
-		);
-		expect(messageOf(() => validate({ action: "resolve_duplicates" }))).toMatch(
-			/candidate_entity_ids/,
-		);
+		for (const action of ["merge", "unmerge", "resolve_duplicates"]) {
+			expect(messageOf(() => validate({ action }))).toMatch(/action/);
+		}
 	});
 
 	it("rejects a field another action takes instead of ignoring it", () => {
@@ -119,17 +116,6 @@ describe("manage_entity union contract", () => {
 		}
 	});
 
-	it("bounds resolve_duplicates to at least two distinct candidates", () => {
-		expect(messageOf(() => validate({ action: "resolve_duplicates", candidate_entity_ids: [7] })))
-			.toMatch(/candidate_entity_ids/);
-		expect(
-			messageOf(() => validate({ action: "resolve_duplicates", candidate_entity_ids: [7, 7] })),
-		).toMatch(/candidate_entity_ids/);
-		expect(validate({ action: "resolve_duplicates", candidate_entity_ids: [7, 8] })).toEqual({
-			action: "resolve_duplicates",
-			candidate_entity_ids: [7, 8],
-		});
-	});
 
 	it("accepts each action's full field set", () => {
 		const source = { automation_id: 3, run_id: 44 };
@@ -141,13 +127,7 @@ describe("manage_entity union contract", () => {
 				content: "body",
 				slug: "acme",
 				parent_id: 1,
-				domain: "acme.com",
-				category: "saas",
-				platform_type: "b2b",
-				main_market: "US",
-				market: "US",
-				link: "https://acme.com",
-				metadata: { team_size: 5 },
+				metadata: { domain: "acme.com", category: "saas", platform_type: "b2b", main_market: "US", market: "US", link: "https://acme.com", team_size: 5 },
 				automation_source: source,
 			}),
 		).toMatchObject({ entity_type: "company", automation_source: source });
@@ -167,9 +147,7 @@ describe("manage_entity union contract", () => {
 				entity_type: "company",
 				parent_id: 1,
 				search: "acme",
-				category: "saas",
-				main_market: "US",
-				market: "US",
+				filters: [{ field: "category", op: "eq", value: "saas" }],
 				limit: 20,
 				offset: 40,
 				sort_by: "created_at",
@@ -218,26 +196,7 @@ describe("manage_entity union contract", () => {
 				offset: 0,
 			}),
 		).toMatchObject({ direction: "inbound", source: "feed", limit: 200 });
-		expect(
-			validate({
-				action: "merge",
-				winner_entity_id: 1,
-				duplicate_entity_ids: [2, 3],
-				merge_evidence: [{ kind: "email", identifier: "a@acme.com" }],
-				merge_rationale: "Same email.",
-				dry_run: true,
-				automation_source: source,
-			}),
-		).toMatchObject({ winner_entity_id: 1, duplicate_entity_ids: [2, 3] });
-		expect(validate({ action: "merge", winner_entity_id: 1, entity_id: 2 })).toEqual({
-			action: "merge",
-			winner_entity_id: 1,
-			entity_id: 2,
-		});
-		expect(validate({ action: "unmerge", entity_id: 2 })).toEqual({
-			action: "unmerge",
-			entity_id: 2,
-		});
+
 	});
 });
 
@@ -280,10 +239,7 @@ describe("manage_entity wire schema", () => {
 			"unlink",
 			"update_link",
 			"list_links",
-			"merge",
 			"discover_duplicates",
-			"resolve_duplicates",
-			"unmerge",
 		]);
 	});
 
@@ -299,8 +255,5 @@ describe("manage_entity wire schema", () => {
 			"Required: from_entity_id, to_entity_id, relationship_type_slug.",
 		);
 		expect(lineFor("unlink")).not.toContain("Required:");
-		expect(lineFor("merge")).toContain("Required: winner_entity_id.");
-		expect(lineFor("resolve_duplicates")).toContain("Required: candidate_entity_ids.");
-		expect(lineFor("unmerge")).toContain("Required: entity_id.");
 	});
 });

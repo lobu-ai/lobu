@@ -8,7 +8,7 @@
  *
  *   1. sync A captures generation 0, holding a snapshot that still contains a
  *      since-revoked member U
- *   2. an unmerge commits generation 1, drops U's edges, marks the state stale
+ *   2. a relationship retraction commits generation 1, drops U's edges, marks the state stale
  *   3. sync B captures generation 1, reconciles U away, stamps fresh — its
  *      generation still matches, so the stamp is correct
  *   4. A writes U's `member_of` edge back; nothing fences an edge WRITE

@@ -1,9 +1,12 @@
+import { entityReadPolicySql, entityReadRestrictions } from "../authz/entity-read-policy";
 import type { EntityDiscoverDuplicatesResult } from "@lobu/core/contracts/tools/manage-entity";
-import { type DbClient, pgBigintArray } from "../db/client";
+import { type DbClient } from "../db/client";
 import { ToolUserError } from "../utils/errors";
+import type { ToolContext } from "../tools/registry";
+import { discoverIdentityJoin } from "../utils/identity-association";
+import { configuredIdentityRelationship } from "../utils/entity-identity";
 import { loadLiveEntityIdentities } from "./identities";
 import {
-	assessEntityResolution,
 	normalizedResolutionRuleKeys,
 	readEntityResolutionRules,
 	type ResolutionIdentity,
@@ -15,11 +18,6 @@ interface ResolutionCandidate {
 	identities?: ResolutionIdentity[];
 }
 
-interface ResolutionGroup {
-	winnerId: number;
-	loserIds: number[];
-}
-
 function populatedFieldCount(candidate: ResolutionCandidate): number {
 	return Object.values(candidate.metadata).filter((value) => {
 		if (value === null || value === undefined || value === "") return false;
@@ -29,8 +27,8 @@ function populatedFieldCount(candidate: ResolutionCandidate): number {
 
 function buildResolutionComponents(input: {
 	metadataSchema: unknown;
-	entityTypeSlug?: string | null;
 	candidates: ResolutionCandidate[];
+	identityGroups?: number[][];
 }) {
 	const candidates = new Map(
 		input.candidates.map((candidate) => [candidate.id, candidate]),
@@ -52,16 +50,18 @@ function buildResolutionComponents(input: {
 		parent.set(Math.max(leftRoot, rightRoot), Math.min(leftRoot, rightRoot));
 	};
 
+	for (const group of input.identityGroups ?? []) {
+		for (const id of group.slice(1)) union(group[0], id);
+	}
+
 	const ownersByIdentity = new Map<string, number[]>();
 	const identitiesByCandidate = new Map<number, Set<string>>(
 		[...candidates.keys()].map((id) => [id, new Set()]),
 	);
-	for (const rule of readEntityResolutionRules(input.metadataSchema, {
-		entityTypeSlug: input.entityTypeSlug,
-	})) {
+	for (const rule of readEntityResolutionRules(input.metadataSchema)) {
 		for (const candidate of candidates.values()) {
 			for (const value of normalizedResolutionRuleKeys(candidate, rule)) {
-				const key = `${rule.normalizer}:${rule.fields.join("\u001f")}:${value}`;
+				const key = JSON.stringify([rule.normalizer, rule.fields, value]);
 				identitiesByCandidate.get(candidate.id)?.add(key);
 				const owners = ownersByIdentity.get(key) ?? [];
 				owners.push(candidate.id);
@@ -86,258 +86,97 @@ function buildResolutionComponents(input: {
 	return { components, identitiesByCandidate };
 }
 
-/**
- * Build connected duplicate components from schema-declared identity rules.
- * This is intentionally server-side: reaction scripts submit IDs only and can
- * neither forge normalized evidence nor carry a second policy implementation.
- */
-export function discoverEntityResolutionGroups(input: {
-	metadataSchema: unknown;
-	entityTypeSlug?: string | null;
-	candidates: ResolutionCandidate[];
-	maxGroupSize?: number;
-	maxGroups?: number;
-	maxOperations?: number;
-}): {
-	groups: ResolutionGroup[];
-	oversizedGroupCount: number;
-	deferredCandidateCount: number;
-} {
-	const maxGroupSize = input.maxGroupSize ?? 26;
-	const maxGroups = input.maxGroups ?? 199;
-	const maxOperations = input.maxOperations ?? 199;
-	const { components, identitiesByCandidate } = buildResolutionComponents(input);
-
-	let oversizedGroupCount = 0;
-	let deferredCandidateCount = 0;
-	const groups = [...components.values()]
-		.filter((component) => component.length > 1)
-		.flatMap((component) => {
-			if (component.length > maxGroupSize) {
-				oversizedGroupCount += 1;
-				return [];
-			}
-			const sharesIdentity = (leftId: number, rightId: number): boolean => {
-				const left = identitiesByCandidate.get(leftId);
-				const right = identitiesByCandidate.get(rightId);
-				if (!left || !right) return false;
-				const [smaller, larger] =
-					left.size <= right.size ? [left, right] : [right, left];
-				return [...smaller].some((identity) => larger.has(identity));
-			};
-			const directNeighborCount = (candidateId: number): number =>
-				component.reduce(
-					(total, other) =>
-						total +
-						(other.id !== candidateId && sharesIdentity(candidateId, other.id)
-							? 1
-							: 0),
-					0,
-				);
-			const ranked = component.sort((left, right) => {
-				const completeness =
-					populatedFieldCount(right) - populatedFieldCount(left);
-				if (completeness !== 0) return completeness;
-				const connectivity =
-					directNeighborCount(right.id) - directNeighborCount(left.id);
-				if (connectivity !== 0) return connectivity;
-				return left.id - right.id;
-			});
-			const winner = ranked[0];
-			if (!winner) return [];
-			const directLoserIds = ranked
-				.slice(1)
-				.filter((candidate) => sharesIdentity(winner.id, candidate.id))
-				.map((candidate) => candidate.id)
-				.sort((left, right) => left - right);
-			deferredCandidateCount += component.length - directLoserIds.length - 1;
-			return [
-				{
-					winnerId: winner.id,
-					loserIds: directLoserIds,
-				},
-			];
-		})
-		.sort((left, right) => left.winnerId - right.winnerId);
-	if (groups.length > maxGroups) {
-		throw new Error(
-			`More than ${maxGroups} identity components need resolution; no changes were queued`,
-		);
-	}
-	const operationCount = groups.reduce(
-		(total, group) => total + group.loserIds.length,
-		0,
-	);
-	if (operationCount > maxOperations) {
-		throw new Error(
-			`More than ${maxOperations} duplicate decisions need resolution; no changes were queued`,
-		);
-	}
-	return { groups, oversizedGroupCount, deferredCandidateCount };
-}
-
-export async function discoverWorkspaceResolutionGroups(
-	db: DbClient,
-	input: {
-		organizationId: string;
-		candidateIds: number[];
-		maxGroups?: number;
-		maxOperations?: number;
-	},
-): Promise<{
-	candidatesScanned: number;
-	groups: ResolutionGroup[];
-	oversizedGroupCount: number;
-	deferredCandidateCount: number;
-}> {
-	const rows = await db<{
-		id: number;
-		entity_type_id: number;
-		metadata: Record<string, unknown>;
-		metadata_schema: Record<string, unknown> | null;
-		entity_type_slug: string;
-	}>`
-		SELECT entity.id, entity.entity_type_id, entity.metadata,
-		       type.metadata_schema, type.slug AS entity_type_slug
-		FROM entities entity
-		JOIN entity_types type ON type.id = entity.entity_type_id
-		WHERE entity.organization_id = ${input.organizationId}
-		  AND entity.id = ANY(${pgBigintArray(input.candidateIds)}::bigint[])
-		  AND entity.deleted_at IS NULL
-	`;
-	const identities = await loadLiveEntityIdentities(db, {
-		organizationId: input.organizationId,
-		entityIds: rows.map((row) => Number(row.id)),
-	});
-	type ResolutionRow = (typeof rows)[number];
-	const byType = new Map<number, ResolutionRow[]>();
-	for (const row of rows) {
-		const typeId = Number(row.entity_type_id);
-		const bucket = byType.get(typeId) ?? [];
-		bucket.push(row);
-		byType.set(typeId, bucket);
-	}
-
-	let oversizedGroupCount = 0;
-	let deferredCandidateCount = 0;
-	const groups: ResolutionGroup[] = [];
-	for (const typeRows of byType.values()) {
-		const discovered = discoverEntityResolutionGroups({
-			metadataSchema: typeRows[0]?.metadata_schema,
-			entityTypeSlug: typeRows[0]?.entity_type_slug,
-			candidates: typeRows.map((row) => ({
-				id: Number(row.id),
-				metadata: row.metadata ?? {},
-				identities: identities.get(Number(row.id)) ?? [],
-			})),
-			maxGroups: input.maxGroups ?? 199,
-			maxOperations: input.maxOperations ?? 199,
-		});
-		groups.push(...discovered.groups);
-		oversizedGroupCount += discovered.oversizedGroupCount;
-		deferredCandidateCount += discovered.deferredCandidateCount;
-	}
-	const maxGroups = input.maxGroups ?? 199;
-	if (groups.length > maxGroups) {
-		throw new Error(
-			`More than ${maxGroups} identity components need resolution; no changes were queued`,
-		);
-	}
-	const maxOperations = input.maxOperations ?? 199;
-	if (
-		groups.reduce((total, group) => total + group.loserIds.length, 0) >
-		maxOperations
-	) {
-		throw new Error(
-			`More than ${maxOperations} duplicate decisions need resolution; no changes were queued`,
-		);
-	}
-	return {
-		candidatesScanned: rows.length,
-		groups,
-		oversizedGroupCount,
-		deferredCandidateCount,
-	};
-}
-
-/** Full current-state matching; only the output is paged, never the match input. */
+/** Current-state sweep: propose one root pair per component, then rediscover after a join. */
 export async function discoverWorkspaceResolutionPage(
-	db: DbClient,
-	input: { organizationId: string; entityType: string; limit?: number; cursor?: string },
+  db: DbClient,
+  input: { organizationId: string; entityType: string; limit?: number; cursor?: string },
+  ctx: ToolContext,
 ): Promise<EntityDiscoverDuplicatesResult> {
-	let after = 0;
-	if (input.cursor) {
-		try {
-			const cursor = JSON.parse(Buffer.from(input.cursor, "base64url").toString("utf8"));
-			if (cursor.v !== 1 || cursor.org !== input.organizationId ||
-				cursor.type !== input.entityType || !Number.isSafeInteger(cursor.after) || cursor.after < 1) {
-				throw new Error();
-			}
-			after = cursor.after;
-		} catch {
-			throw new ToolUserError("Invalid duplicate discovery cursor for this workspace and entity type", 400);
-		}
-	}
-	const [type] = await db<{ id: number; metadata_schema: unknown }>`
-		SELECT id, metadata_schema FROM entity_types
-		WHERE organization_id = ${input.organizationId} AND slug = ${input.entityType}
-		  AND deleted_at IS NULL
-	`;
-	if (!type) throw new ToolUserError(`Entity type '${input.entityType}' not found`, 404);
-	const rows = await db<{ id: number; metadata: Record<string, unknown> }>`
-		SELECT id, metadata FROM entities
-		WHERE organization_id = ${input.organizationId} AND entity_type_id = ${type.id}
-		  AND deleted_at IS NULL AND merged_into IS NULL
-		ORDER BY id
-	`;
-	const identities = await loadLiveEntityIdentities(db, {
-		organizationId: input.organizationId,
-		entityIds: rows.map((row) => Number(row.id)),
-	});
-	const candidates = rows.map((row) => ({
-		id: Number(row.id), metadata: row.metadata ?? {},
-		identities: identities.get(Number(row.id)) ?? [],
-	}));
-	const policy = { metadataSchema: type.metadata_schema, entityTypeSlug: input.entityType };
-	const { components } = buildResolutionComponents({ ...policy, candidates });
-	const remaining = [...components.entries()]
-		.filter(([id, members]) => id > after && members.length > 1)
-		.sort(([left], [right]) => left - right);
-	const page: EntityDiscoverDuplicatesResult["components"] = [];
-	let decisions = 0;
-	for (const [componentId, members] of remaining) {
-		if (page.length >= (input.limit ?? 50)) break;
-		const discovered = discoverEntityResolutionGroups({ ...policy, candidates: members });
-		const oversized = discovered.oversizedGroupCount > 0;
-		const group = discovered.groups[0];
-		const decisionCount = group?.loserIds.length ?? 0;
-		if (decisions + decisionCount > 199) break;
-		const byId = new Map(members.map((candidate) => [candidate.id, candidate]));
-		page.push({
-			component_id: componentId,
-			candidate_count: members.length,
-			candidate_entity_ids: oversized ? [] : members.map((candidate) => candidate.id).sort((a, b) => a - b),
-			oversized,
-			deferred_candidates: oversized ? members.length : discovered.deferredCandidateCount,
-			decisions: group ? group.loserIds.map((loserId) => ({
-				winner_entity_id: group.winnerId,
-				loser_entity_id: loserId,
-				fingerprint: assessEntityResolution({
-					...policy, winner: byId.get(group.winnerId)!, losers: [byId.get(loserId)!],
-				}).fingerprint,
-			})) : [],
-		});
-		decisions += decisionCount;
-	}
-	const last = page.at(-1);
-	return {
-		action: "discover_duplicates",
-		candidates_scanned: candidates.length,
-		components: page,
-		next_cursor: last && remaining.length > page.length
-			? Buffer.from(JSON.stringify({
-				v: 1, org: input.organizationId, type: input.entityType, after: last.component_id,
-			})).toString("base64url")
-			: null,
-	};
+  let after = 0;
+  if (input.cursor) {
+    try {
+      const cursor = JSON.parse(Buffer.from(input.cursor, "base64url").toString("utf8"));
+      if (cursor.v !== 2 || cursor.org !== input.organizationId || cursor.type !== input.entityType ||
+        !Number.isSafeInteger(cursor.after) || cursor.after < 1) throw new Error();
+      after = cursor.after;
+    } catch { throw new ToolUserError("Invalid duplicate discovery cursor for this workspace and entity type", 400); }
+  }
+  const [type] = await db<{ id: number; metadata_schema: unknown; backing_sql: string | null; backing_source: string | null }>`
+    SELECT id, metadata_schema, backing_sql, backing_source FROM entity_types
+    WHERE organization_id = ${input.organizationId} AND slug = ${input.entityType} AND deleted_at IS NULL`;
+  if (!type) throw new ToolUserError(`Entity type '${input.entityType}' not found`, 404);
+  if (input.entityType.startsWith('$') || type.backing_sql || type.backing_source) {
+    throw new ToolUserError('Identity discovery requires a stored, non-reserved entity type', 400);
+  }
+  const relationship = await configuredIdentityRelationship(db, input.organizationId, input.entityType);
+  const readParams: unknown[] = [input.organizationId, type.id];
+  const readPredicate = entityReadPolicySql(await entityReadRestrictions(db, ctx), 'e', readParams);
+  const rows = await db.unsafe<{ id: number; name: string; entity_type_id: number; organization_id: string; metadata: Record<string, unknown> }>(`
+    SELECT e.id, e.name, e.entity_type_id, e.organization_id, e.metadata FROM entities e WHERE e.organization_id = $1
+      AND e.entity_type_id = $2 AND e.deleted_at IS NULL AND ${readPredicate} ORDER BY e.id`, readParams);
+  const identities = await loadLiveEntityIdentities(db, {
+    organizationId: input.organizationId, entityIds: rows.map(row => Number(row.id)),
+  });
+  const recordsById = new Map(rows.map(row => [Number(row.id), row]));
+  const candidates = rows.map(row => ({ id: Number(row.id), metadata: row.metadata ?? {},
+    identities: identities.get(Number(row.id)) ?? [] }));
+  const edges = await db<{ from_entity_id: number; to_entity_id: number }>`
+    SELECT r.from_entity_id, r.to_entity_id FROM entity_relationships r
+    JOIN entity_relationship_types t ON t.id = r.relationship_type_id
+    JOIN entities a ON a.id = r.from_entity_id JOIN entities b ON b.id = r.to_entity_id
+    WHERE r.organization_id = ${input.organizationId} AND r.deleted_at IS NULL
+      AND t.organization_id = ${input.organizationId} AND t.purpose = 'identity'
+      AND t.status = 'active' AND t.deleted_at IS NULL
+      AND a.organization_id = ${input.organizationId} AND b.organization_id = ${input.organizationId}
+      AND a.entity_type_id = ${type.id} AND b.entity_type_id = ${type.id}
+      AND a.deleted_at IS NULL AND b.deleted_at IS NULL`;
+  const parents = new Map(edges.map(edge => [Number(edge.from_entity_id), Number(edge.to_entity_id)]));
+  const rootOf = (id: number) => {
+    const visited = new Set<number>();
+    while (parents.has(id)) {
+      if (visited.has(id) || visited.size >= 26) throw new ToolUserError('Invalid identity component; repair its topology before discovery', 409);
+      visited.add(id); id = parents.get(id)!;
+    }
+    return id;
+  };
+  const identityGroups = new Map<number, ResolutionCandidate[]>();
+  for (const row of candidates) {
+    const root = rootOf(row.id);
+    const group = identityGroups.get(root) ?? [];
+    group.push(row); identityGroups.set(root, group);
+  }
+  const { components, identitiesByCandidate } = buildResolutionComponents({ metadataSchema: type.metadata_schema,
+    candidates, identityGroups: [...identityGroups.values()].map(group => group.map(row => row.id)) });
+  const remaining = [...components.entries()].filter(([id, members]) => id > after &&
+    new Set(members.map(row => rootOf(row.id))).size > 1).sort(([a], [b]) => a - b);
+  const page: EntityDiscoverDuplicatesResult['components'] = [];
+  for (const [componentId, members] of remaining) {
+    if (page.length >= Math.min(input.limit ?? 50, 199)) break;
+    const oversized = members.length > 26;
+    const decisions: EntityDiscoverDuplicatesResult['components'][number]['decisions'] = [];
+    let proposedMembers = 0;
+    if (!oversized) {
+      const roots = [...new Set(members.map(row => rootOf(row.id)))].sort((a, b) =>
+        identityGroups.get(b)!.reduce((n, row) => n + populatedFieldCount(row), 0) -
+        identityGroups.get(a)!.reduce((n, row) => n + populatedFieldCount(row), 0) || a - b);
+      const decision = await discoverIdentityJoin(db, ctx, roots.map(root =>
+        identityGroups.get(root)!.map(member => ({ ...recordsById.get(member.id)!,
+          id: member.id, slug: input.entityType, metadata_schema: type.metadata_schema,
+          backing_sql: null, backing_source: null,
+        })).sort((a, b) => Number(b.id === root) - Number(a.id === root))), identities,
+        (a, b) => [...identitiesByCandidate.get(a)!].some(key => identitiesByCandidate.get(b)!.has(key)));
+      if (decision) {
+        decisions.push({ from_entity_id: decision.from, to_entity_id: decision.to, relationship_type_slug: relationship.slug });
+        proposedMembers = decision.memberCount;
+      }
+    }
+    page.push({ component_id: componentId, candidate_count: members.length,
+      candidate_entity_ids: oversized ? [] : members.map(row => row.id).sort((a, b) => a - b),
+      oversized, deferred_candidates: members.length - proposedMembers, decisions });
+  }
+  const last = page.at(-1);
+  return { action: 'discover_duplicates', candidates_scanned: candidates.length, components: page,
+    next_cursor: last && remaining.length > page.length ? Buffer.from(JSON.stringify({
+      v: 2, org: input.organizationId, type: input.entityType, after: last.component_id,
+    })).toString('base64url') : null };
 }

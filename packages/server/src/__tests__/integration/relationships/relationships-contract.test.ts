@@ -32,11 +32,11 @@ async function seedGraph(workspace: TestWorkspace, prefix: string): Promise<Seed
   });
 
   const company = (await workspace.owner.entities.create({
-    type: 'company',
+    entity_type: 'company',
     name: `${prefix} Company`,
   })) as { entity: { id: number } };
   const product = (await workspace.owner.entities.create({
-    type: 'product',
+    entity_type: 'product',
     name: `${prefix} Product`,
   })) as { entity: { id: number } };
 

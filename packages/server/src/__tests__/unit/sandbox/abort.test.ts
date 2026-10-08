@@ -124,7 +124,7 @@ describe("automation reaction default", () => {
       source: [
         "export default async (_ctx, client) => {",
         "  if (typeof client.entities.create !== 'function') throw new Error('lost write access');",
-        "  return client.entities.create({ type: 'company', name: 'Reactor' });",
+        "  return client.entities.create({ entity_type: 'company', name: 'Reactor' });",
         "};",
       ].join("\n"),
       sdk,

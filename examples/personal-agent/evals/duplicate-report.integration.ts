@@ -150,7 +150,7 @@ describe("duplicate report reaction", () => {
     expect(reports[0].metadata.groups).toHaveLength(601);
   });
 
-  it("retains overlapping name/email/phone groups and excludes deleted, merged and test contacts before matching", async () => {
+  it("retains overlapping evidence from associated records and excludes deleted and test contacts", async () => {
     const h = await setup();
     const a = await h.person("Shared Name", {
       email: "owner@sample.invalid",
@@ -166,18 +166,38 @@ describe("duplicate report reaction", () => {
     await h.person("Test Only");
     await h.person("Test Only", { email: "synthetic@example.test" });
     const deleted = await h.person("Shared Name");
-    const merged = await h.person("Shared Name");
+    const associated = await h.person("Shared Name");
     await h.sql`UPDATE entities SET deleted_at = NOW() WHERE id = ${deleted}`;
-    await h.sql`UPDATE entities SET merged_into = ${a} WHERE id = ${merged}`;
+    const human = h.workspace.withAuth({ tokenType: "session" });
+    await human.entity_schema.createRelType({
+      slug: "same_record",
+      name: "Same record",
+      purpose: "identity",
+    });
+    await human.entities.link({
+      from_entity_id: associated,
+      to_entity_id: a,
+      relationship_type_slug: "same_record",
+    });
+    const relationshipsBefore = await h.sql`
+      SELECT id, from_entity_id, to_entity_id, metadata, deleted_at
+      FROM entity_relationships WHERE organization_id = ${h.workspace.org.id} ORDER BY id
+    `;
     expect(await h.react()).toMatchObject({
       success: true,
-      returnValue: { candidate_count: 3, group_count: 3 },
+      returnValue: { candidate_count: 4, group_count: 3 },
     });
     expect((await h.reports())[0].metadata.groups).toEqual([
       { reason: "email:owner@sample.invalid", ids: [a, c] },
-      { reason: "name:sharedname", ids: [a, b] },
+      { reason: "name:sharedname", ids: [a, b, associated] },
       { reason: "phone:44123456789", ids: [a, c] },
     ]);
+    expect(
+      await h.sql`
+      SELECT id, from_entity_id, to_entity_id, metadata, deleted_at
+      FROM entity_relationships WHERE organization_id = ${h.workspace.org.id} ORDER BY id
+    `
+    ).toEqual(relationshipsBefore);
   });
 
   it("deduplicates concurrent retries, ignores incidental edits, and reopens same-day material evidence", async () => {
@@ -188,7 +208,7 @@ describe("duplicate report reaction", () => {
     });
     await h.person("Shared Name", { company: "Original" });
     const before =
-      await h.sql`SELECT id, name, metadata, deleted_at, merged_into FROM entities WHERE organization_id = ${h.workspace.org.id} ORDER BY id`;
+      await h.sql`SELECT id, name, metadata, deleted_at FROM entities WHERE organization_id = ${h.workspace.org.id} ORDER BY id`;
     const concurrent = await Promise.all([h.react(), h.react()]);
     expect(concurrent).toEqual(
       expect.arrayContaining([
@@ -199,7 +219,7 @@ describe("duplicate report reaction", () => {
     expect(await h.reports()).toHaveLength(1);
     expect(await h.notifications()).toHaveLength(1);
     expect(
-      await h.sql`SELECT id, name, metadata, deleted_at, merged_into FROM entities WHERE organization_id = ${h.workspace.org.id} ORDER BY id`
+      await h.sql`SELECT id, name, metadata, deleted_at FROM entities WHERE organization_id = ${h.workspace.org.id} ORDER BY id`
     ).toEqual(before);
     await h.sql`UPDATE entities SET updated_at = NOW(), metadata = metadata || '{"last_interaction_at":"2026-10-03","x_handle":"sample"}'::jsonb WHERE id = ${a}`;
     expect(await h.react()).toMatchObject({ success: true });

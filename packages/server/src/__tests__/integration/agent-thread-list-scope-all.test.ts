@@ -613,6 +613,8 @@ describe("listAgentThreads scope=all", () => {
 			}),
 		]);
 		expect(data).not.toHaveProperty("interactions");
+		expect(data.runs[0]).not.toHaveProperty("automaticActions");
+		expect(data.runs[0]).not.toHaveProperty("autoAppliedCount");
 	});
 
 	it("does not read a different agent's automation in the same organization", async () => {
@@ -716,7 +718,7 @@ describe("listAgentThreads scope=all", () => {
 			VALUES
 			  ('internal', 'cancelled', ${org}, ${AUTOMATION_ID}, ${automationRun.id},
 			   'rejected', 'entity_change',
-			   ${sql.json({ source_run_id: automationRun.id, operation: "merge" })},
+			   ${sql.json({ source_run_id: automationRun.id, operation: "link" })},
 			   '2026-06-28T04:01:00Z', '2026-06-28T04:02:00Z')
 			RETURNING id
 		`;
@@ -724,14 +726,14 @@ describe("listAgentThreads scope=all", () => {
 			entityIds: [],
 			organizationId: org,
 			originId: `automation-rejected-${approvalRun.id}`,
-			title: "Merge kept separate",
+			title: "Identity records kept separate",
 			content: "The reviewer kept these entities separate.",
 			semanticType: "operation",
 			runId: approvalRun.id,
 			interactionType: "approval",
 			interactionStatus: "rejected",
 			metadata: {
-				action: "merge",
+				action: "link",
 				tool: "entity_change",
 				resourceKind: "entity",
 				reason:
@@ -780,7 +782,7 @@ describe("listAgentThreads scope=all", () => {
 			VALUES
 			  ('internal', 'pending', ${org}, ${AUTOMATION_ID}, ${automationRun.id},
 			   'pending', 'entity_change',
-			   ${sql.json({ source_run_id: automationRun.id, operation: "merge" })},
+			   ${sql.json({ source_run_id: automationRun.id, operation: "link" })},
 			   '2026-06-28T05:01:00Z')
 			RETURNING id
 		`;
@@ -788,14 +790,14 @@ describe("listAgentThreads scope=all", () => {
 			entityIds: [],
 			organizationId: org,
 			originId: `automation-no-transcript-${approvalRun.id}`,
-			title: "Review merge without transcript",
+			title: "Review identity association without transcript",
 			content: "A durable approval must remain visible.",
 			semanticType: "operation",
 			runId: approvalRun.id,
 			interactionType: "approval",
 			interactionStatus: "pending",
 			metadata: {
-				action: "merge",
+				action: "link",
 				tool: "entity_change",
 				resourceKind: "entity",
 			},

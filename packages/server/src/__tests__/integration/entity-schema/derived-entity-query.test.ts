@@ -95,13 +95,13 @@ describe('derived entity read path (reuse query_sql)', () => {
     });
     // The view has no stored rows; inserting one would be silently ignored.
     await expect(
-      owner.entities.create({ type: 'orders-view', name: 'nope' })
+      owner.entities.create({ entity_type: 'orders-view', name: 'nope' })
     ).rejects.toThrow(/derived|view|no stored rows/i);
   });
 
   it('rejects converting a populated stored type into a derived view', async () => {
     await owner.entity_schema.createType({ slug: 'people', name: 'People' });
-    await owner.entities.create({ type: 'people', name: 'Ada' });
+    await owner.entities.create({ entity_type: 'people', name: 'Ada' });
     // Would orphan Ada (the view ignores stored rows) — must be rejected.
     await expect(
       owner.entity_schema.updateType({
@@ -165,7 +165,7 @@ describe('derived entity read path (reuse query_sql)', () => {
       name: 'Animal counts',
       backing: { sql: 'SELECT 1 AS x FROM events' },
     });
-    await owner.entities.create({ type: 'animals', name: 'Cat' });
+    await owner.entities.create({ entity_type: 'animals', name: 'Cat' });
     const db = getTestDb();
     const [cat] = await db`
       SELECT id FROM entities WHERE name = 'Cat' AND organization_id = ${orgAId} LIMIT 1
@@ -181,7 +181,7 @@ describe('derived entity read path (reuse query_sql)', () => {
 
   it('DB trigger rejects setting backing_sql on a populated stored type (UPDATE)', async () => {
     await owner.entity_schema.createType({ slug: 'plants', name: 'Plants' });
-    await owner.entities.create({ type: 'plants', name: 'Fern' });
+    await owner.entities.create({ entity_type: 'plants', name: 'Fern' });
     const db = getTestDb();
     // Direct DB convert-to-derived while rows exist must be rejected.
     await expect(
@@ -192,7 +192,7 @@ describe('derived entity read path (reuse query_sql)', () => {
 
   it('allows converting to derived when all rows are soft-deleted (matches app live-row count)', async () => {
     await owner.entity_schema.createType({ slug: 'fish', name: 'Fish' });
-    await owner.entities.create({ type: 'fish', name: 'Nemo' });
+    await owner.entities.create({ entity_type: 'fish', name: 'Nemo' });
     const db = getTestDb();
     // Soft-delete the only row — the app's convert-guard counts WHERE deleted_at
     // IS NULL, so conversion is allowed; the DB trigger must agree (not block on

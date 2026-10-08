@@ -12,9 +12,8 @@
  * own, and that surface raises a 409 on a duplicate triple where a materializer
  * wants an idempotent no-op.
  *
- * Not a general edge kernel either: `entity-merge`'s repoint/tombstone and
- * `force_delete_tree`'s hard delete stay where they are, because their SQL is
- * ordering-dependent and set-based.
+ * `force_delete_tree` keeps its hard-delete SQL separate because it depends on
+ * the deletion order of the complete tree.
  */
 
 import { type DbClient, getDb, pgBigintArray } from '../db/client';
@@ -101,7 +100,7 @@ export async function upsertEdges(params: UpsertEdgesParams): Promise<number[]> 
   if (pairs.length === 0) return [];
   // `unnest` feeds the INSERT in array order. Keep new-triple conflicts in one
   // deterministic order; existing rows are prelocked by id in the statement
-  // below, matching the relationship reconcilers and entity merge/unmerge.
+  // below, matching the relationship reconcilers.
   pairs.sort(
     (left, right) =>
       left.fromEntityId - right.fromEntityId || left.toEntityId - right.toEntityId

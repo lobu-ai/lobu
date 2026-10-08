@@ -239,16 +239,14 @@ const person = defineEntityType({
       description: "WhatsApp chat the message belongs to.",
     },
   },
-  // Entity-resolution policy: a normalized email match auto-merges two persons
-  // (a normalized address is a strong unique key — the same human on LinkedIn,
-  // Gmail, X, etc.). Phone stays review-only: shared/work numbers collide too
-  // easily to merge without a human look. Declared here so `apply` folds it into
-  // the person type's metadata_schema and the duplicate-entity-resolution
-  // reaction's candidate submissions auto-merge on email.
+  // This workspace permits automatic identity association on normalized email
+  // matches. Each source record keeps its ID and metadata. Phone matches require
+  // review because numbers can be shared. The reporting Automation only reports
+  // candidates; this policy governs explicit association requests.
   resolutionPolicy: {
     rules: [
-      { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
-      { fields: ["emails"], normalizer: "email", onMatch: "auto_merge" },
+      { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
+      { fields: ["emails"], normalizer: "email", onMatch: "auto_link" },
       { fields: ["phone"], normalizer: "phone", onMatch: "review" },
       { fields: ["phones"], normalizer: "phone", onMatch: "review" },
     ],

@@ -528,7 +528,7 @@ describe("executePlan — entity-type schema fidelity", () => {
     const schemaExtras = {
       "x-lobu-resolution": {
         rules: [
-          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+          { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
         ],
       },
     };

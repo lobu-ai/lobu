@@ -39,11 +39,11 @@ describe('unlink/update_link addressed by relationship triple', () => {
 
   async function seedEdge(prefix: string, typeSlug = slug) {
     const invoice = (await workspace.owner.entities.create({
-      type: 'invoice',
+      entity_type: 'invoice',
       name: `${prefix} Invoice`,
     })) as { entity: { id: number } };
     const customer = (await workspace.owner.entities.create({
-      type: 'customer',
+      entity_type: 'customer',
       name: `${prefix} Customer`,
     })) as { entity: { id: number } };
     const linked = (await workspace.owner.entities.link({
@@ -83,8 +83,7 @@ describe('unlink/update_link addressed by relationship triple', () => {
   it('still unlinks by relationship_id', async () => {
     const { fromId, relationshipId } = await seedEdge('UnlinkById');
 
-    await workspace.owner.entities.manage({
-      action: 'unlink',
+    await workspace.owner.entities.unlink({
       relationship_id: relationshipId,
     });
 
@@ -155,8 +154,7 @@ describe('unlink/update_link addressed by relationship triple', () => {
   it('accepts the id and the triple together when they name the same edge', async () => {
     const { fromId, toId, relationshipId } = await seedEdge('Agreeing');
 
-    await workspace.owner.entities.manage({
-      action: 'unlink',
+    await workspace.owner.entities.unlink({
       relationship_id: relationshipId,
       from_entity_id: fromId,
       to_entity_id: toId,
@@ -172,8 +170,7 @@ describe('unlink/update_link addressed by relationship triple', () => {
     const b = await seedEdge('ConflictB');
 
     await expect(
-      workspace.owner.entities.manage({
-        action: 'unlink',
+      workspace.owner.entities.unlink({
         relationship_id: a.relationshipId,
         from_entity_id: b.fromId,
         to_entity_id: b.toId,
@@ -188,7 +185,7 @@ describe('unlink/update_link addressed by relationship triple', () => {
 
   it('still requires an identifier when neither the id nor the triple is given', async () => {
     await expect(
-      workspace.owner.entities.manage({ action: 'unlink' })
+      workspace.owner.entities.unlink({  })
     ).rejects.toThrow(/relationship_id/);
   });
 });

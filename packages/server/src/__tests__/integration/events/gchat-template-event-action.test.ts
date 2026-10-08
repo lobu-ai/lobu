@@ -786,7 +786,7 @@ describe("Google Chat declared event action adapter", () => {
 			closes_at: closesAt,
 		};
 		const createdDeadlinePoll = (await workspace.owner.entities.create({
-			type: "poll",
+			entity_type: "poll",
 			name: deadlinePoll.question,
 			metadata: deadlinePoll,
 		})) as { entity: { id: number } };

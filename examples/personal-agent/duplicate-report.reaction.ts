@@ -2,7 +2,8 @@ import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 
 // Match against the complete live population before the caller adds keyset
 // pagination. A person may belong to several groups; no CASE priority drops
-// their other evidence. This reports candidates and never authorizes a merge.
+// their other evidence. Associated records retain their own evidence here; this
+// reporting Automation never changes identity relationships.
 export const duplicateCandidateQuery = `
 WITH people AS (
   SELECT id, name,
@@ -16,7 +17,7 @@ WITH people AS (
       'ig_username', metadata->'ig_username', 'instagram_profile_url', metadata->'instagram_profile_url'
     )) AS context
   FROM entities
-  WHERE entity_type = 'person' AND deleted_at IS NULL AND merged_into IS NULL
+  WHERE entity_type = 'person' AND deleted_at IS NULL
     AND lower(coalesce(metadata->>'email', '')) NOT LIKE '%@example.test'
 ), signals AS (
   SELECT p.id, 'name:' || p.name_key AS reason FROM people p WHERE p.name_key <> ''
@@ -119,7 +120,7 @@ export default async function reportDuplicates(
   const fingerprint = hash.digest;
   const summary = [
     `Duplicate candidate groups: ${groups.size} (candidates: ${candidates.length}).`,
-    "Candidates need review; this report does not merge contacts.",
+    "Candidates need review; this report does not associate contacts.",
     ...orderedGroups
       .slice(0, 12)
       .map(

@@ -130,6 +130,13 @@ describe("ClientSDK object signature contract", () => {
 		automationGets.length = 0;
 	});
 
+	it("exposes exactly the ten named entity methods", () => {
+		expect(Object.keys(builders.entities(ctx, env)).sort()).toEqual([
+			"create", "delete", "discoverDuplicates", "get", "link", "list",
+			"listLinks", "unlink", "update", "updateLink",
+		]);
+	});
+
 	it("forwards named id objects instead of treating them as positional ids", async () => {
 		const entities = builders.entities(ctx, env);
 		const feeds = builders.feeds(ctx, env);
@@ -241,15 +248,12 @@ describe("ClientSDK object signature contract", () => {
 	});
 
 	it("rewrites documented field aliases to the canonical runtime fields", async () => {
-		const entities = builders.entities(ctx, env);
 		const feeds = builders.feeds(ctx, env);
 		const schedules = builders.schedules(ctx, env);
 		const automations = builders.automations(ctx, env);
 		const connections = builders.connections(ctx, env);
 		const notifications = builders.notifications(ctx, env);
 
-		await entities.get({ id: 11 } as never);
-		await entities.delete({ id: 12 } as never);
 		await feeds.get({ id: 21 } as never);
 		await schedules.update({ schedule_id: "s-1", description: "d" } as never);
 		await schedules.pause({ schedule_id: "s-2" } as never);
@@ -262,8 +266,6 @@ describe("ClientSDK object signature contract", () => {
 		await notifications.send({ title: "T", message: "hello" } as never);
 
 		expect(calls).toEqual([
-			{ action: "get", input: { entity_id: 11 } },
-			{ action: "delete", input: { entity_id: 12 } },
 			{ action: "read_feed", input: { feed_id: 21 } },
 			{ action: "update", input: { id: "s-1", description: "d" } },
 			{ action: "pause", input: { id: "s-2" } },
@@ -281,9 +283,9 @@ describe("ClientSDK object signature contract", () => {
 	});
 
 	it("lets the canonical field win when both alias and canonical are supplied", async () => {
-		const entities = builders.entities(ctx, env);
-		await entities.get({ id: 99, entity_id: 11 } as never);
-		expect(calls).toEqual([{ action: "get", input: { entity_id: 11 } }]);
+		const feeds = builders.feeds(ctx, env);
+		await feeds.get({ id: 99, feed_id: 11 } as never);
+		expect(calls).toEqual([{ action: "read_feed", input: { feed_id: 11 } }]);
 	});
 
 	it("accepts the canonical single-field object form on positional methods", async () => {

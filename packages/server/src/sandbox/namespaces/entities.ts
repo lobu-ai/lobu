@@ -30,11 +30,9 @@ import type {
 import type { Env } from "../../index";
 import { manageEntity } from "../../tools/admin/manage_entity";
 import type { ToolContext } from "../../tools/registry";
-import { search } from "../../tools/search";
 import { createActionCaller } from "./action-call";
 
 export interface EntitiesNamespace {
-	manage(input: Record<string, unknown>): Promise<unknown>;
 	discoverDuplicates(input: EntityDiscoverDuplicatesInput): Promise<EntityDiscoverDuplicatesResult>;
 	list(filter?: EntityListInput): Promise<EntityListResult>;
 	get(input: EntityGetInput): Promise<EntityGetResult>;
@@ -45,17 +43,15 @@ export interface EntitiesNamespace {
 	unlink(input: EntityUnlinkInput): Promise<EntityUnlinkResult>;
 	updateLink(input: EntityUpdateLinkInput): Promise<EntityUpdateLinkResult>;
 	listLinks(input: EntityListLinksInput): Promise<EntityListLinksResult>;
-	search(query: string, options?: { limit?: number }): Promise<unknown>;
 }
 
 export function buildEntitiesNamespace(
 	ctx: ToolContext,
 	env: Env,
 ): EntitiesNamespace {
-	const { manage, method } = createActionCaller(manageEntity, env, ctx, "entities");
+	const { method } = createActionCaller(manageEntity, env, ctx, "entities");
 
 	return {
-		manage,
 		discoverDuplicates: method("discover_duplicates"),
 		list: method("list"),
 		get: method("get"),
@@ -66,12 +62,5 @@ export function buildEntitiesNamespace(
 		unlink: method("unlink"),
 		updateLink: method("update_link"),
 		listLinks: method("list_links"),
-		search(query, options) {
-			return search(
-				{ query, limit: options?.limit } as never,
-				env,
-				ctx,
-			) as Promise<unknown>;
-		},
 	};
 }

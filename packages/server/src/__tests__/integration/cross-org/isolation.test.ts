@@ -47,7 +47,7 @@ describe('cross-org isolation', () => {
     await clientB.entity_schema.createType({ slug: 'company', name: 'Company' });
 
     const entityA = (await clientA.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'Org A Only',
     })) as { entity: { id: number } };
     entityIdA = entityA.entity.id;
@@ -74,7 +74,7 @@ describe('cross-org isolation', () => {
   it('an org A user with their own org context cannot fetch an org B entity', async () => {
     // Create an entity in B, then try to read it with A's context.
     const entityB = (await clientB.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'Org B Only',
     })) as { entity: { id: number } };
     await expect(clientA.entities.get({ entity_id: entityB.entity.id })).rejects.toThrow(/not found/i);
