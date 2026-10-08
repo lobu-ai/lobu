@@ -18,6 +18,8 @@ import {
   type DueFeedClaimContext,
   materializeDueFeeds,
 } from '../../scheduled/check-due-feeds';
+import { createSyncRun } from '../../runs/queue-service';
+import { ensureLiveBrowserProfile } from '../../utils/live-browser-profile';
 import { getSchedulerHealth } from '../../scheduled/scheduler-health';
 import { DEVICE_ONLINE_WINDOW_SECONDS } from '../../utils/device-liveness';
 import logger from '../../utils/logger';
@@ -32,6 +34,70 @@ import {
 describe('scheduled feed device liveness', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
+  });
+
+  it('backs off failed admission without consuming source health or starving a healthy feed', async () => {
+    const sql = getTestDb();
+    const { org, user } = await seedOwnerContext({ orgName: 'Admission Scheduler Org' });
+    const key = 'test.scheduler-browser-setup';
+    await createTestConnectorDefinition({ key, name: key, organization_id: org.id,
+      feeds_schema: { items: { description: 'Items', operations: ['sync'] } } });
+    await sql`UPDATE connector_definitions SET
+      browser = ${sql.json({ origins: ['https://source.example'], authMethods: ['browser'],
+        accountProbe: { url: 'https://source.example/account', expression: 'null' } })},
+      auth_schema = ${sql.json({ methods: [{ type: 'browser', mode: 'live' }] })}
+      WHERE organization_id = ${org.id} AND key = ${key}`;
+    const [device] = await sql`INSERT INTO device_workers
+      (user_id, worker_id, platform, capabilities, organization_id, last_seen_at)
+      VALUES (${user.id}, 'scheduler-browser-fixture', 'chrome-extension',
+        ${sql.json(['browser.debugger'])}, ${org.id}, now()) RETURNING id`;
+    const connection = await createTestConnection({ organization_id: org.id,
+      connector_key: key, created_by: user.id, createDefaultFeed: false });
+    await sql`UPDATE connections SET device_worker_id = ${device.id}::uuid
+      WHERE id = ${connection.id}`;
+    const [feed] = await sql`INSERT INTO feeds (organization_id, connection_id, feed_key,
+      status, schedule, timezone, next_run_at, consecutive_failures, last_sync_status, checkpoint)
+      VALUES (${org.id}, ${connection.id}, 'items', 'active', '0 9 * * *', 'Pacific/Auckland',
+        now() - interval '10 minutes', 2, 'failed', ${sql.json({ cursor: 'preserved' })})
+      RETURNING id, next_run_at`;
+    const feedId = Number(feed.id);
+    const warning = vi.spyOn(logger, 'warn');
+    const error = vi.spyOn(logger, 'error');
+    try {
+      expect(await materializeDueFeeds({} as Env, sql)).toEqual({ dueFeeds: 1, runsCreated: 0, skipped: 0 });
+      const [after] = await sql`SELECT next_run_at > now() AS deferred,
+        to_char(next_run_at AT TIME ZONE 'Pacific/Auckland', 'HH24:MI') AS local_time,
+        checkpoint, consecutive_failures, last_sync_status FROM feeds WHERE id = ${feedId}`;
+      expect(after).toMatchObject({ deferred: true, local_time: '09:00', checkpoint: { cursor: 'preserved' },
+        consecutive_failures: 2, last_sync_status: 'failed' });
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(error).not.toHaveBeenCalled();
+      expect(await materializeDueFeeds({} as Env, sql)).toEqual({ dueFeeds: 0, runsCreated: 0, skipped: 0 });
+      expect(warning).toHaveBeenCalledTimes(1);
+      await expect(createSyncRun(feedId, {} as Env, sql)).rejects.toMatchObject({ httpStatus: 409 });
+
+      const healthyKey = 'test.scheduler-healthy-behind-setup';
+      await createTestConnectorDefinition({ key: healthyKey, name: healthyKey, organization_id: org.id,
+        feeds_schema: { items: { description: 'Items', operations: ['sync'] } } });
+      const healthy = await createTestConnection({ organization_id: org.id, connector_key: healthyKey,
+        created_by: user.id, createDefaultFeed: false });
+      await sql`INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
+        VALUES (${org.id}, ${healthy.id}, 'items', 'active', '* * * * *', now() - interval '5 minutes')`;
+      await sql`UPDATE feeds SET next_run_at = ${feed.next_run_at} WHERE id = ${feedId}`;
+      expect(await materializeDueFeeds({} as Env, sql, { maxRunsCreated: 1 }))
+        .toEqual({ dueFeeds: 2, runsCreated: 1, skipped: 0 });
+
+      const profile = await ensureLiveBrowserProfile({ organizationId: org.id, connectorKey: key,
+        deviceWorkerId: device.id, userId: user.id }, sql);
+      await sql`UPDATE auth_profiles SET status = 'active', auth_data = ${sql.json({ mode: 'live', account_id: 'synthetic-account' })}
+        WHERE id = ${profile.id}`;
+      await sql`UPDATE connections SET auth_profile_id = ${profile.id} WHERE id = ${connection.id}`;
+      await sql`UPDATE feeds SET next_run_at = now() - interval '1 minute' WHERE id = ${feedId}`;
+      expect(await materializeDueFeeds({} as Env, sql)).toEqual({ dueFeeds: 1, runsCreated: 1, skipped: 0 });
+    } finally {
+      warning.mockRestore();
+      error.mockRestore();
+    }
   });
 
   it('defers only an offline execution pin, and only until that device polls again', async () => {
@@ -403,7 +469,7 @@ describe('scheduled feed device liveness', () => {
         claimContext: fleetContext,
         maxRunsCreated: 1,
       })
-    ).toEqual({ dueFeeds: 2, runsCreated: 1, skipped: 0 });
+    ).toEqual({ dueFeeds: 1, runsCreated: 1, skipped: 0 });
 
     // The device registry upsert is best-effort. If it transiently fails but
     // the fallback resolves the existing device row, this current poll is

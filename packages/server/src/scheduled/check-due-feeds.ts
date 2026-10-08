@@ -17,6 +17,8 @@ import {
   selectedConnectorVersionArtifactSql,
 } from '../utils/connector-execution-placement';
 import logger from '../utils/logger';
+import { nextRunAt } from '../utils/cron';
+import { ToolUserError } from '../utils/errors';
 import { createSyncRun } from '../runs/queue-service';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import {
@@ -38,6 +40,9 @@ interface DueFeedRow {
   feed_key: string;
   connector_key: string;
   eligibility_lane: DueFeedEligibilityLane;
+  schedule: string;
+  timezone: string | null;
+  next_run_at: string;
 }
 
 export type DueFeedEligibilityLane =
@@ -96,6 +101,7 @@ export async function materializeDueFeeds(
     label: 'CheckDueFeeds',
     fetchDue: () => sql<DueFeedRow>`
       SELECT f.id, f.organization_id, f.connection_id, f.feed_key, c.connector_key,
+        f.schedule, f.timezone, f.next_run_at::text AS next_run_at,
         CASE
           WHEN ${claimContext == null} THEN 'unscoped'
           WHEN ${!isUserScopedWorker} AND c.device_worker_id IS NOT NULL
@@ -239,8 +245,43 @@ export async function materializeDueFeeds(
       );
       return 'created';
     },
-    onError: (feed, error) => {
-      logger.error({ error, feedId: feed.id }, '[CheckDueFeeds] Failed to create run');
+    onError: async (feed, error) => {
+      // Admission did not execute the source. Retry at its normal cadence,
+      // without consuming a checkpoint or the connector's failure budget.
+      let retryAt: string | null = null;
+      try {
+        retryAt = nextRunAt(feed.schedule, new Date(), feed.timezone);
+      } catch (scheduleError) {
+        // Invalid schedules cannot become runnable on a later poll. A schedule
+        // edit recomputes next_run_at; park this cursor until that correction.
+        logger.error({ error: scheduleError, feedId: feed.id }, '[CheckDueFeeds] Invalid feed schedule');
+      }
+      try {
+        // Text binding preserves Postgres microseconds for this compare-and-set.
+        const advanced = await sql`
+          UPDATE feeds f SET next_run_at = ${retryAt}, updated_at = current_timestamp
+          WHERE f.id = ${feed.id} AND f.organization_id = ${feed.organization_id}
+            AND f.next_run_at = ${feed.next_run_at}::text::timestamptz AND f.schedule = ${feed.schedule}
+            AND f.timezone IS NOT DISTINCT FROM ${feed.timezone}
+            AND f.status = 'active' AND f.deleted_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM runs r WHERE r.feed_id = f.id AND r.run_type = 'sync'
+                AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+            )
+          RETURNING f.id
+        `;
+        // Another poller already advanced or admitted this exact due cursor.
+        if (advanced.length === 0) return;
+      } catch (advanceError) {
+        logger.error({ error: advanceError, feedId: feed.id }, '[CheckDueFeeds] Failed to defer feed after admission error');
+        return;
+      }
+      const details = { error, feedId: feed.id, nextRunAt: retryAt };
+      if (error instanceof ToolUserError && error.httpStatus < 500) {
+        logger.warn(details, '[CheckDueFeeds] Feed admission requires setup');
+      } else {
+        logger.error(details, '[CheckDueFeeds] Failed to create run');
+      }
     },
     onDone: ({ runsCreated, skipped }) => {
       if (runsCreated > 0) {
