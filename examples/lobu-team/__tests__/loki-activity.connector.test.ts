@@ -7,6 +7,48 @@ import LokiActivityConnector, {
 } from "../loki-activity.connector.ts";
 
 describe("Lobu Team Loki activity connector", () => {
+  it("scrubs credentials in plain logs, nested messages, and labels", async () => {
+    const result = await queryLokiLogs(
+      { LOKI_URL: "https://loki.example.test", namespace: "synthetic" },
+      {
+        query: '{namespace="synthetic"}',
+        start: "2026-10-01T00:00:00Z",
+        end: "2026-10-01T01:00:00Z",
+      },
+      async () =>
+        Response.json({
+          status: "success",
+          data: {
+            resultType: "streams",
+            result: [
+              {
+                stream: { detail: "Bearer synthetic-label-secret" },
+                values: [
+                  ["1", "Authorization: Basic synthetic-header-secret"],
+                  [
+                    "2",
+                    JSON.stringify({
+                      message:
+                        "request failed with Bearer synthetic-message-secret",
+                      error: {
+                        stack:
+                          "Error: failed\npassword=synthetic-password-secret\n at test.ts:1:1",
+                      },
+                    }),
+                  ],
+                ],
+              },
+            ],
+          },
+        })
+    );
+    const serialized = JSON.stringify(result);
+    for (const secret of ["label", "header", "message", "password"]) {
+      expect(serialized).not.toContain(`synthetic-${secret}-secret`);
+    }
+    expect(serialized).toContain("test.ts:1:1");
+  });
+
   it("bounds investigation, preserves stack evidence, and scrubs credentials", async () => {
     const fake = mock(async () =>
       Response.json({

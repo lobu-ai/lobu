@@ -1,4 +1,5 @@
 import { scrubSentryValue } from "../../packages/core/src/utils/sentry-scrubber";
+import { redactOutput } from "../../packages/connector-worker/src/executor/redact";
 import {
   type ActionContext,
   type ActionResult,
@@ -231,12 +232,28 @@ export async function queryLokiLogs(
         labels: scrubSentryValue(stream.stream ?? {}),
         log: scrubSentryValue(log),
       };
-      const size = new TextEncoder().encode(JSON.stringify(record)).byteLength;
-      if (records.length >= limit || outputBytes + size > 100_000) {
+      // Structured keys and credentials embedded in log text need both scrubbers.
+      // Bound text redaction work: the shared URI pattern scales poorly on
+      // long unbroken lines, so omit oversized records rather than risk a timeout.
+      let oversizedField = false;
+      const serialized = JSON.stringify(record, (_key, value) => {
+        if (typeof value !== "string") return value;
+        if (value.length > 8192) {
+          oversizedField = true;
+          return null;
+        }
+        return redactOutput(value);
+      });
+      const size = new TextEncoder().encode(serialized).byteLength;
+      if (
+        oversizedField ||
+        records.length >= limit ||
+        outputBytes + size > 100_000
+      ) {
         truncated = true;
         continue;
       }
-      records.push(record);
+      records.push(JSON.parse(serialized));
       outputBytes += size;
     }
   }
@@ -254,7 +271,7 @@ export async function queryLokiLogs(
     limit,
     truncated: truncated || records.length === limit,
     coverage:
-      "A bounded sample; narrow the query or time range when truncated. No feed checkpoint is advanced.",
+      "A bounded sample; records with string fields over 8192 characters are omitted. Narrow the query or time range when truncated. No feed checkpoint is advanced.",
   };
 }
 

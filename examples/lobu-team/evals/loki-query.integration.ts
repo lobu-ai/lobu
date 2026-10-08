@@ -45,7 +45,10 @@ it("runs query_logs inside the native isolate through the existing HTTP auth cap
                 resultType: "streams",
                 result: [
                   {
-                    stream: { app: "server" },
+                    stream: {
+                      app: "server",
+                      detail: "Bearer synthetic-label-secret",
+                    },
                     values: [
                       [
                         "1791000000000000000",
@@ -53,6 +56,8 @@ it("runs query_logs inside the native isolate through the existing HTTP auth cap
                           level: "error",
                           stack: "Error: fixture\n at test.ts:2:1",
                           cookie: "secret-fixture",
+                          message:
+                            "failed with Bearer synthetic-message-secret",
                         }),
                       ],
                     ],
@@ -77,4 +82,6 @@ it("runs query_logs inside the native isolate through the existing HTTP auth cap
     ],
   });
   expect(JSON.stringify(result)).not.toContain("secret-fixture");
+  expect(JSON.stringify(result)).not.toContain("synthetic-label-secret");
+  expect(JSON.stringify(result)).not.toContain("synthetic-message-secret");
 });
