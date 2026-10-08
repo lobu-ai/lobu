@@ -1177,6 +1177,15 @@ async function fetchContentCount(
     WHERE ev.organization_id = ${organizationId}
       -- Exclude null-shaped internal events (P1 corrections) from the org content count.
       AND ev.semantic_type <> 'correction'
+      -- Internal operational rows (tool-invocation audit + Automation
+      -- config/lifecycle dual-writes) are not workspace content for
+      -- non-owner callers: they would otherwise dominate bootstrap
+      -- counts/recent on active orgs and leak SQL previews + MCP session ids
+      -- through the public page. Owners keep the full trail.
+      ${excludeWorkspaceAudit
+        ? sql`AND NOT (ev.semantic_type = 'audit' AND COALESCE(ev.origin_type, '') = 'tool_invocation')
+              AND NOT (ev.semantic_type = 'change' AND COALESCE(ev.metadata->>'category', '') IN ('config', 'lifecycle'))`
+        : sql``}
       -- Workspace-identity audit rows record member/invitation lifecycle; only
       -- owner/admin and trusted system callers may see them.
       ${excludeWorkspaceAudit ? sql`AND NOT (ev.metadata ? '_lobu_workspace_audit')` : sql``}
@@ -1229,6 +1238,10 @@ async function fetchRecentContent(
     WHERE ev.organization_id = $1
       -- Exclude null-shaped internal events (P1 corrections) from the recent-content list.
       AND ev.semantic_type <> 'correction'
+      -- Internal operational rows are not workspace content for non-owner
+      -- callers; see fetchContentCount above. Owners keep the full trail.
+      ${excludeWorkspaceAudit ? `AND NOT (ev.semantic_type = 'audit' AND COALESCE(ev.origin_type, '') = 'tool_invocation')
+      AND NOT (ev.semantic_type = 'change' AND COALESCE(ev.metadata->>'category', '') IN ('config', 'lifecycle'))` : ''}
       -- Workspace-identity audit rows record member/invitation lifecycle; only
       -- owner/admin and trusted system callers may see them in bootstrap.
       ${excludeWorkspaceAudit ? `AND NOT (ev.metadata ? '_lobu_workspace_audit')` : ''}
