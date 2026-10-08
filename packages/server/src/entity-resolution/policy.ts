@@ -36,7 +36,7 @@ export interface ResolutionIdentity {
 	scopeKey?: string | null;
 }
 
-export interface ResolutionEntity {
+interface ResolutionEntity {
 	id: number;
 	metadata: Record<string, unknown>;
 	/** Live identity claims that may not also exist in entity metadata. */

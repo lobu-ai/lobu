@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { discoverEntityResolutionGroups } from "./discovery";
 import {
 	assessEntityResolution,
+	assessIdentityGroups,
 	normalizedResolutionRuleKeys,
 } from "./policy";
 
@@ -14,6 +15,58 @@ const schema = {
 		],
 	},
 };
+
+describe("identity group resolution", () => {
+	it("uses non-root evidence without combining composite fields from different records", () => {
+		const metadataSchema = {
+			"x-lobu-resolution": {
+				rules: [{ fields: ["account", "region"], normalizer: "exact", onMatch: "auto_merge" }],
+			},
+		};
+		const right = [{ id: 3, metadata: { account: "synthetic-account", region: "west" } }];
+		const incomplete = assessIdentityGroups({
+			metadataSchema,
+			left: [{ id: 1, metadata: { account: "synthetic-account" } }, { id: 2, metadata: { region: "west" } }],
+			right,
+		});
+		expect(incomplete.decision).toBe("review");
+		expect(incomplete.evidence).toEqual([]);
+		expect(assessIdentityGroups({
+			metadataSchema,
+			left: [{ id: 1, metadata: { account: "synthetic-account", region: "west" } }, { id: 2, metadata: {} }],
+			right,
+		}).decision).toBe("auto_merge");
+	});
+
+	it("requires review when members of one side conflict despite a direct cross-group match", () => {
+		expect(assessIdentityGroups({
+			metadataSchema: schema,
+			left: [{ id: 1, metadata: { email: "shared@example.test" } }, { id: 2, metadata: { email: "conflict@example.test" } }],
+			right: [{ id: 3, metadata: { email: "shared@example.test" } }],
+		}).decision).toBe("review");
+	});
+
+	it("keeps equal source identifiers in different tenant scopes separate", () => {
+		expect(assessIdentityGroups({
+			metadataSchema: schema,
+			left: [{ id: 1, metadata: {}, identities: [{ namespace: "email", identifier: "shared@example.test", scopeKey: "scope-a" }] }],
+			right: [{ id: 2, metadata: {}, identities: [{ namespace: "email", identifier: "shared@example.test", scopeKey: "scope-b" }] }],
+		}).decision).toBe("review");
+	});
+
+	it("fingerprints unmatched values while ignoring member and value ordering", () => {
+		const left = [{ id: 1, metadata: { email: ["shared@example.test", "unmatched@example.test"] } }, { id: 2, metadata: {} }];
+		const right = [{ id: 3, metadata: { email: "shared@example.test" } }];
+		const original = assessIdentityGroups({ metadataSchema: schema, left, right });
+		const reordered = assessIdentityGroups({ metadataSchema: schema,
+			left: [left[1], { id: 1, metadata: { email: ["unmatched@example.test", "shared@example.test"] } }], right });
+		const changed = assessIdentityGroups({ metadataSchema: schema,
+			left: [left[1], { id: 1, metadata: { email: ["new@example.test", "shared@example.test"] } }], right });
+		expect(reordered.fingerprint).toBe(original.fingerprint);
+		expect(changed.evidence).toEqual(original.evidence);
+		expect(changed.fingerprint).not.toBe(original.fingerprint);
+	});
+});
 
 describe("entity resolution module", () => {
 	it("discovers connected components and chooses the most complete canonical record", () => {

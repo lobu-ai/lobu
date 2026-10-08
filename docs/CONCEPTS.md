@@ -54,6 +54,21 @@ representative and can change. Persist record IDs when referring to a record.
   retaining source permissions and identifier scope. Connection, child, and
   assigned Automation counts continue to describe the exact record.
 
+Identity decisions evaluate every member on both sides. Composite identifiers
+must come from one record; a match cannot combine fields from different members.
+A conflicting unique identifier anywhere in either group requires review, and
+write policies apply to every affected member. Approvals recheck the current
+members, normalized evidence, policy, and original requester's access.
+
+Rejections and withdrawals retain their original member pairs when roots change.
+Unchanged or reduced support stays suppressed. New normalized evidence can queue
+fresh human review; an explicit human reconsideration also requires a new
+approval that identifies the prior decisions.
+
+`link` and `unlink` results distinguish applied changes, queued approvals,
+suppression, and dry-run previews. Only an applied link returns `relationship`;
+only an applied unlink returns `success: true`.
+
 Ordinary relationships and system authorization edges do not form these groups.
 Reserved, derived, source-backed, deleted, and nonparticipating records have no
 identity descriptor. Legacy physical-merge redirects remain readable until the

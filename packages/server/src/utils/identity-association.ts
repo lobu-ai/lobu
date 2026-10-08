@@ -149,10 +149,10 @@ export async function rememberIdentityRejection(db: DbClient, org: string, runId
   const members = proposal.member_support ?? { [proposal.identity_pair]: proposal.suppression_support };
   for (const [key, support] of Object.entries(members)) {
     const previous = await rejectedPairDecisions(db, org, support.pair, runId);
-    const keys = previous.filter(row => row.support?.version === SUPPORT_VERSION && row.support.policy === support.policy)
-      .flatMap(row => row.support.keys);
+    const matching = previous.filter(row => row.support?.version === SUPPORT_VERSION && row.support.policy === support.policy);
+    const keys = matching.flatMap(row => row.support.keys);
     const remembered = supportSnapshot(support.policy, support.pair, [...support.keys, ...keys]);
-    const targetId = Math.max(runId, ...previous.filter(row => row.support?.version === SUPPORT_VERSION && row.support.policy === support.policy).map(row => Number(row.id)));
+    const targetId = Math.max(runId, ...matching.map(row => Number(row.id)));
     // Keep the accumulated support on the newest indexed decision even when an
     // older proposal is rejected last. Other member pairs remain untouched.
     await db`UPDATE runs SET action_input = jsonb_set(action_input, '{member_support}',
@@ -285,7 +285,11 @@ export async function decideIdentityAssociation(db: DbClient, input: IdentityAss
     adjacency.get(Number(edge.to_entity_id))?.push(Number(edge.from_entity_id));
   }
   const leftIds = new Set<number>();
-  const visit = (id: number) => { if (leftIds.has(id)) return; leftIds.add(id); for (const next of adjacency.get(id) ?? []) visit(next); };
+  const visit = (id: number) => {
+    if (leftIds.has(id)) return;
+    leftIds.add(id);
+    for (const next of adjacency.get(id) ?? []) visit(next);
+  };
   visit(pair[0]);
   const left = records.filter(row => leftIds.has(Number(row.id)));
   const right = records.filter(row => !leftIds.has(Number(row.id)));
