@@ -235,7 +235,9 @@ export class IsolateHost {
       return await script.run(this.context, {
         promise: true,
         copy: true,
-        ...(options.timeoutMs > 0 ? { timeout: options.timeoutMs } : {}),
+        // The host's single deadline covers compilation, synchronous work,
+        // and continuations after await. A second V8 deadline at the same
+        // instant races the typed termination and leaks a guest-error result.
       });
     } catch (error) {
       throw this.classifyRunFailure(error);
