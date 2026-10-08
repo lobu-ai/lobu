@@ -543,7 +543,10 @@ function mapAutomationOutputs(
             key: output.key,
             ...(output.name ? { name: output.name } : {}),
           }
-        : { event: output.event },
+        : {
+            event: output.event,
+            ...(output.key ? { key: output.key } : {}),
+          },
     ])
   );
 }

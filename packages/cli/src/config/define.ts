@@ -734,6 +734,15 @@ export interface AutomationEntityOutput {
 export interface AutomationEventOutput {
   /** Semantic type assigned to every standard event draft in this output. */
   event: string;
+  /**
+   * Optional one to four metadata fields forming one exact composite identity
+   * tuple, scoped to the semantic type (not the Automation, so a migration can
+   * seed rows the Automation later adopts). Every draft must contain every
+   * field in `metadata` as a non-blank string, safe integer, or boolean.
+   * Field order is significant. When set, each run supersedes the current
+   * event carrying the same key values. Omit for append-only per-item logs.
+   */
+  key?: string[];
 }
 
 export type AutomationOutput = AutomationEntityOutput | AutomationEventOutput;
