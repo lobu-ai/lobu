@@ -755,6 +755,9 @@ const revolutConnection = defineConnection({
   slug: "revolut-buremba",
   connector: "revolut",
   name: "Revolut",
+  // Scrape affinity: prod truth (paired browser with the signed-in session).
+  // Omitting the pin would read as an explicit unpin on reapply.
+  deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
   feeds: [
     // Apply replaces feed config wholesale. Preserve checkpointed syncs and the
     // 60s passcode grace period within the device worker's ~95s run budget.
@@ -975,6 +978,9 @@ const midasConnection = defineConnection({
   slug: "midas",
   connector: "midas",
   name: "Midas",
+  // Scrape affinity: prod truth. Omitting the pin would read as an explicit
+  // unpin on reapply and reroute live syncs.
+  deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
   feeds: [{ feed: "assets", config: {} }],
 });
 
@@ -1030,6 +1036,27 @@ const gmailConnection = defineConnection({
 // examples/personal-finance — not here. With prune:true they are removed from
 // buremba if present.
 
+const worksAt = defineRelationshipType({
+  key: "works_at",
+  name: "Works At",
+  description: "Person employed by / associated with a company",
+});
+
+const founderOf = defineRelationshipType({
+  key: "founder_of",
+  name: "Founder Of",
+  description: "A person founded or co-founded a company.",
+});
+
+const sameAs = defineRelationshipType({
+  key: "same_as",
+  name: "Same As",
+  description:
+    "Maps a private person profile to its canonical public identity. The mapping and private profile remain visible only to this workspace.",
+});
+
+// Historical social-signal entity rows still exist. Prune must retain their
+// type until an explicit data migration removes them.
 const mentions = defineRelationshipType({
   key: "mentions",
   name: "Mentions",
@@ -1077,7 +1104,7 @@ const hourlyTaskCollaborator = defineAutomation({
   agent: personalAgent,
   slug: "hourly-task-collaborator",
   name: "Hourly Task Collaborator",
-  model: "chatgpt/gpt-6-astra",
+  // No model pin: runs on the external agent runtime, which owns model choice.
   triggers: [every("0 * * * *", { timezone: "Europe/London" })],
   minCooldownSeconds: 300,
   outputs: {
@@ -1219,7 +1246,7 @@ export default defineConfig({
     goal,
     learning,
   ],
-  relationships: [mentions, connectedWith],
+  relationships: [worksAt, mentions, connectedWith, founderOf, sameAs],
   automations: [
     hourlyTaskCollaborator,
     duplicateEntityResolution,
