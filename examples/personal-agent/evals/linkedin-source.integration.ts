@@ -14,13 +14,15 @@ import config from "../lobu.config";
 
 beforeEach(cleanupTestDatabase);
 
-test("LinkedIn windows exclude other sources and complete with home-feed posts and comments", async () => {
+test("LinkedIn flagger windows read live and complete without stored sources", async () => {
   const definition = config.automations?.find(
     (automation) => automation.slug === "linkedin-feed-flagger"
   );
   if (!definition) throw new Error("Missing LinkedIn automation");
-  const query = definition.sources?.posts;
-  if (typeof query !== "string") throw new Error("Missing LinkedIn source");
+  // Virtual timeline: the only source is intentionally empty. The agent
+  // reads linkedin.com/feed/ live through read_home_feed each run.
+  const query = definition.sources?.none;
+  if (typeof query !== "string") throw new Error("Missing empty source");
   const workspace = await TestWorkspace.create({
     name: "Synthetic LinkedIn sources",
   });
@@ -61,8 +63,8 @@ test("LinkedIn windows exclude other sources and complete with home-feed posts a
     });
   }
 
-  const post = await seed("linkedin", "home_feed", "post");
-  const comment = await seed("linkedin", "home_feed", "comment");
+  // Distractors only: nothing syncs home_feed rows anymore, so no stored
+  // row may leak into the flagger window.
   await seed("x", "home_feed", "post");
   await seed("linkedin", "profile", "profile");
   const created = await workspace.owner.automations.create({
@@ -70,7 +72,7 @@ test("LinkedIn windows exclude other sources and complete with home-feed posts a
     name: "Synthetic LinkedIn source",
     managed_agent_id: agent.agentId,
     prompt: definition.prompt,
-    sources: [{ name: "posts", query }],
+    sources: [{ name: "none", query }],
   });
   const automationId = Number(created.automation_id);
   const queued = await createAutomationRun({
@@ -90,16 +92,9 @@ test("LinkedIn windows exclude other sources and complete with home-feed posts a
     run_id: queued.runId,
   })) as {
     window_token: string;
-    sources: { posts: Array<{ id: number; payload_text: string }> };
+    sources: { none: Array<{ id: number }> };
   };
-  expect(read.sources.posts.map((row) => Number(row.id)).sort()).toEqual(
-    [post.id, comment.id].sort()
-  );
-  expect(
-    read.sources.posts.every((row) =>
-      row.payload_text.includes("Synthetic linkedin home_feed")
-    )
-  ).toBe(true);
+  expect(read.sources.none).toEqual([]);
   await workspace.owner.automations.completeWindow({
     automation_id: String(automationId),
     run_id: queued.runId,
