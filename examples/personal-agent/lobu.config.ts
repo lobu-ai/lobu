@@ -868,13 +868,31 @@ const instagramTakeoutConnection = defineConnection({
   ],
 });
 
+const xAccountAuth = defineAuthProfile({
+  slug: "x-twitter-account",
+  connector: "x",
+  authKind: "oauth_account",
+  name: "X Account",
+});
+
+const xAppAuth = defineAuthProfile({
+  slug: "x-twitter-oauth-app",
+  connector: "x",
+  authKind: "oauth_app",
+  name: "X OAuth App",
+});
+
 const xConnection = defineConnection({
   slug: "x-twitter-bu7emba",
   connector: "x",
   name: "X",
   // Keep the adopted connection's identity, remote feed settings and cadence.
   // Declaring config: {} would replace existing per-feed browser settings.
+  // Both auth bindings are prod truth: omitting one reads as an explicit
+  // clear on reapply and the server rejects clearing required auth.
   deviceWorkerId: "706aa825-5f82-4ce2-80d1-c09cd7908001",
+  authProfile: xAccountAuth,
+  appAuthProfile: xAppAuth,
   feeds: [
     { feed: "bookmarks" },
     { feed: "my_tweets" },
@@ -920,19 +938,29 @@ const hackerNewsConnection = defineConnection({
   feeds: [{ feed: "front_page", schedule: "0 */3 * * *", config: {} }],
 });
 
+const spotifyAccountAuth = defineAuthProfile({
+  slug: "spotify-spotify-account",
+  connector: "spotify",
+  authKind: "oauth_account",
+  name: "Spotify Account",
+});
+
 const spotifyAppAuth = defineAuthProfile({
-  slug: "spotify-app",
+  slug: "spotify-oauth-app",
   connector: "spotify",
   authKind: "oauth_app",
-  name: "Spotify App",
+  name: "Spotify OAuth App",
 });
 
 const spotifyConnection = defineConnection({
   slug: "spotify-buremba",
   connector: "spotify",
   name: "Spotify",
-  // Fill the app profile after apply, then complete OAuth in the UI against
-  // the hosted callback. Feed schedules remain managed in the UI.
+  // Both bindings are prod truth: omitting one reads as an explicit clear
+  // on reapply. App credentials resolve org-first from the app profile's
+  // auth_data, then host env. Fill the app profile after apply, then
+  // complete OAuth in the UI against the hosted callback.
+  authProfile: spotifyAccountAuth,
   appAuthProfile: spotifyAppAuth,
   feeds: [
     { feed: "saved_tracks", config: {} },
@@ -1201,7 +1229,14 @@ export default defineConfig({
     linkedInInterestProfile,
     linkedInFeedFlagger,
   ],
-  authProfiles: [gmailAccountAuth, gmailAppAuth, spotifyAppAuth],
+  authProfiles: [
+    gmailAccountAuth,
+    gmailAppAuth,
+    spotifyAccountAuth,
+    spotifyAppAuth,
+    xAccountAuth,
+    xAppAuth,
+  ],
   connections: [
     midasConnection,
     marketQuotesConnection,
