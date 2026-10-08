@@ -32,6 +32,33 @@ then the feature map. `AUTOMATIONS.md` holds the Automation primitive contract;
   agent does, sources bound what it may read, outputs declare what a completed
   run persists. See `AUTOMATIONS.md`.
 
+## Entity identity groups
+
+A workspace can declare a relationship type with `purpose: "identity"` for its
+stored entity types. Linking two current roots associates their records and
+makes the target the representative. Each record keeps its ID and metadata;
+unlinking an edge splits off its source subtree. There is no new permanent
+person ID.
+
+Participating live records expose `identity: { root_id, member_ids }` on reads.
+`member_ids` is sorted and bounded to 26 records; `root_id` is the current
+representative and can change. Persist record IDs when referring to a record.
+
+- `entities.get`, updates, deletes, and `listLinks` address the exact record.
+- `entities.list` returns one representative per group. One member must satisfy
+  the complete set of search, parent, attribute, and segment filters; display
+  fields and sort order come from the representative.
+- `knowledge.search` returns the strongest matching member once per group,
+  before applying the result limit. Its metadata remains that member's own.
+- Entity-scoped history and content counts include the group's visible events,
+  retaining source permissions and identifier scope. Connection, child, and
+  assigned Automation counts continue to describe the exact record.
+
+Ordinary relationships and system authorization edges do not form these groups.
+Reserved, derived, source-backed, deleted, and nonparticipating records have no
+identity descriptor. Legacy physical-merge redirects remain readable until the
+separate migration retires them; this grouping does not move records or history.
+
 ## The event lifecycle (end to end)
 
 ```mermaid

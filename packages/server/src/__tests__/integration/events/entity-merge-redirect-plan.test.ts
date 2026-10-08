@@ -6,9 +6,8 @@
  * to
  *   events.entity_ids && ARRAY(SELECT id FROM entities WHERE id=X OR merged_into=X)
  *
- * The efficiency claim: the redirect costs ONE extra indexed lookup on
- * idx_entities_merged_into (bounded by how many losers were merged into X), NOT
- * a per-event scan, and the outer `&&` still rides the GIN index
+ * The current helper resolves the identity group and its legacy merge losers
+ * once per recall, not once per event, and `&&` still rides the GIN index
  * idx_events_entity_ids. This test proves that from the actual query PLAN on a
  * non-trivial events table, so a future change that regresses it to a Seq Scan
  * (e.g. an unindexed OR, or a subquery the planner can't inline) fails CI rather
@@ -20,6 +19,7 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
+import { buildEntityLinkUnion } from '../../../utils/content-search/entity-link';
 import { pgBigintArray } from '../../../db/client';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -103,7 +103,7 @@ describe('entity merge redirect — query plan stays index-driven', () => {
 
   it('redirect form STILL uses the GIN index — no full-table scan on events', async () => {
     const plan = await planFor(
-      `e.entity_ids && ARRAY(SELECT en.id FROM entities en WHERE en.id = ${winner} OR en.merged_into = ${winner})`
+      buildEntityLinkUnion({ entityIdLiteral: winner, scopes: [], alias: 'e', baseParamIndex: 1 }).sql
     );
     // The hot path must not regress to a Seq Scan on the (large) events table.
     expect(plan).not.toMatch(/Seq Scan on events/);
@@ -112,7 +112,7 @@ describe('entity merge redirect — query plan stays index-driven', () => {
 
   it('resolves {winner ∪ losers} as a ONE-TIME InitPlan (loops=1), not correlated per-event', async () => {
     const plan = await planFor(
-      `e.entity_ids && ARRAY(SELECT en.id FROM entities en WHERE en.id = ${winner} OR en.merged_into = ${winner})`
+      buildEntityLinkUnion({ entityIdLiteral: winner, scopes: [], alias: 'e', baseParamIndex: 1 }).sql
     );
     // The crux of the efficiency claim: the {winner ∪ losers} subquery is a
     // non-correlated InitPlan — computed ONCE and materialized into the `&&`
@@ -123,7 +123,7 @@ describe('entity merge redirect — query plan stays index-driven', () => {
     // regress is that the subquery runs `loops=1`, not once per events row.
     expect(plan).toMatch(/InitPlan/);
     // The entities scan inside the InitPlan executes exactly once.
-    const initPlanEntitiesScan = /InitPlan[\s\S]*?on entities en[^\n]*loops=(\d+)/.exec(plan);
+    const initPlanEntitiesScan = /InitPlan[\s\S]*?on entities seed[^\n]*loops=(\d+)/.exec(plan);
     expect(initPlanEntitiesScan).not.toBeNull();
     expect(Number(initPlanEntitiesScan?.[1])).toBe(1);
     // And it is never re-driven by the events scan (no correlated SubPlan on entities).

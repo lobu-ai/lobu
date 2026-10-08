@@ -1445,6 +1445,7 @@ async function handleList(
 					: rawMetadata;
 			return {
 				id: e.id,
+				...(e.identity ? { identity: e.identity } : {}),
 				entity_type: e.entity_type,
 				name: e.name,
 				slug: e.slug,
@@ -1650,6 +1651,7 @@ async function handleGet(
 		action: "get",
     entity: {
       id: entity.id,
+      ...(entity.identity ? { identity: entity.identity } : {}),
       entity_type: entity.entity_type,
       name: entity.name,
       slug: entity.slug,
