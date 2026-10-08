@@ -54,3 +54,32 @@ export function joinSectionLines(
 	const more = omitted > 0 ? `\n_…and ${omitted} more_` : "";
 	return { text: `${header}${kept.join("\n")}${more}`, omitted };
 }
+
+/**
+ * Clamp text that has ALREADY been through `escapeSlackText`.
+ *
+ * Escaping expands (`&` becomes `&amp;`), so the cap has to be applied to the
+ * escaped form — that is the budget Slack actually counts, and clamping the raw
+ * text first can still hand Slack a string well over the limit. But a plain
+ * slice of escaped text lands inside an entity often enough to matter: the cut
+ * leaves `&am`, and Slack renders the fragment literally in a card the reader is
+ * about to approve. An approval body is built one line per proposed field with
+ * no bound of its own (`renderApprovalBody`), so this is the ordinary case for a
+ * wide entity, not a pathological one. Cut, then walk back off a trailing
+ * partial entity.
+ */
+export function clampEscaped(value: string, max: number): string {
+	if (value.length <= max) return value;
+	let cut = value.slice(0, max - 1);
+	const lastAmp = cut.lastIndexOf("&");
+	// The longest entity we emit is `&amp;` (5). A `&` within that distance of
+	// the end with no `;` after it is a partial one.
+	if (
+		lastAmp !== -1 &&
+		cut.length - lastAmp <= 5 &&
+		!cut.slice(lastAmp).includes(";")
+	) {
+		cut = cut.slice(0, lastAmp);
+	}
+	return `${cut}…`;
+}

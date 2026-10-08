@@ -6,6 +6,8 @@
  */
 
 import { toJsonSafe } from "@lobu/core";
+import { Value } from "@sinclair/typebox/value";
+import { ViewActionScopeSchema } from "./tools/invoke_view_action";
 import * as Sentry from "@sentry/node";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -489,6 +491,7 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 		const body = await c.req.json<{
 			value?: unknown;
 			interaction_id?: unknown;
+			scope?: unknown;
 		}>();
 		if (
 			body.value !== undefined &&
@@ -500,8 +503,12 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 		if (typeof body.interaction_id !== "string" || !body.interaction_id) {
 			throw new ToolUserError("interaction_id is required", 400);
 		}
+		if (body.scope !== undefined && !Value.Check(ViewActionScopeSchema, body.scope)) {
+			throw new ToolUserError("scope must name one stored event version", 400);
+		}
 		const result = await invokeViewAction({
 			organizationId: ctx.organizationId,
+			...(body.scope ? { event: { id: body.scope.event, env: c.env, ctx } } : {}),
 			viewKey: key,
 			action,
 			value: (body.value ?? null) as Record<string, unknown> | null,

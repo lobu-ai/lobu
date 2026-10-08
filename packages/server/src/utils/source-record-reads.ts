@@ -343,7 +343,13 @@ export async function readSourceRecordActivity(
       origin_id: originId,
       origin_type: row.origin_type ?? null,
       title: row.title ?? null,
+      // The same defaults stored connector ingestion applies (run-lifecycle, insertEvent).
+      semantic_type: row.semantic_type ?? row.origin_type ?? "content",
+      payload_type: row.payload_type ?? "text",
       payload_text: row.payload_text ?? null,
+      payload_data: row.payload_data ?? {},
+      payload_template: row.payload_template ?? null,
+      attachments: row.attachments ?? [],
       author_name: row.author_name ?? null,
       source_url: row.source_url ?? null,
       occurred_at: occurredAt(row),

@@ -37,7 +37,6 @@ import {
 import { ensureMemberEntityType } from '../utils/member-entity-type';
 import { requireWriteAccess } from '../utils/organization-access';
 import { isUniqueViolation } from '../utils/pg-errors';
-import { validateTemplateHandlers } from '../utils/validate-json-template';
 import { trackAutomationReaction } from '../utils/automation-reactions';
 import { isSystemContext } from './access-control';
 import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
@@ -236,7 +235,7 @@ async function saveContentImpl(
   const payloadType = args.payload_type ?? 'text';
 
   // Guidance renders from `payload_text` only (loadOrgGuidanceBlock), so a
-  // media/json_template/empty guidance event would save yet render as nothing.
+  // media/empty guidance event would save yet render as nothing.
   // Constrain authorship to non-whitespace text/markdown rather than silently
   // storing an un-renderable row.
   if (isOrgGuidance) {
@@ -257,18 +256,6 @@ async function saveContentImpl(
   // Validate content requirement based on payload_type
   if ((payloadType === 'text' || payloadType === 'markdown') && !args.content) {
     throw new ToolUserError(`content is required for payload_type '${payloadType}'`);
-  }
-  if (payloadType === 'json_template' && !args.payload_template) {
-    throw new ToolUserError("payload_template is required when payload_type is 'json_template'");
-  }
-  // Events retain their existing permissive template shape, but handler values
-  // must use the renderer's action-binding syntax.
-  if (payloadType === 'json_template') {
-    try {
-      validateTemplateHandlers(args.payload_template);
-    } catch (err) {
-      throw new ToolUserError((err as Error).message, 422);
-    }
   }
 
   // 1. Require write access for each entity
@@ -600,7 +587,6 @@ async function saveContentImpl(
         payloadType,
         content: args.content ?? null,
         payloadData: args.payload_data,
-        payloadTemplate: args.payload_template ?? null,
         attachments,
         authorName: args.author,
         sourceUrl: args.source_url ?? parentSourceUrl,

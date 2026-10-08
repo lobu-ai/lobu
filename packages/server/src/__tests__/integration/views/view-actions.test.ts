@@ -25,6 +25,7 @@ import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	addUserToOrganization,
 	createTestOrganization,
+	createTestEntity,
 	createTestUser,
 } from "../../setup/test-fixtures";
 
@@ -123,6 +124,84 @@ describe("view actions", () => {
     `;
 		primeMemberEventKinds(org.id, viewKinds);
 	});
+
+
+  it("binds a kind-only view action to its readable event and rejects a changed subject", async () => {
+    await executeTool("manage_views", {
+      action: "set", key: "event-poke", source_code: VIEW_SOURCE,
+      attach: [{ event_kind: "test.poked" }],
+      actions: { retry: { emits: "test.poked" } },
+    }, TEST_ENV, ownerCtx);
+    const source = await executeTool("save_memory", {
+      content: "Action source", semantic_type: "test.poked",
+    }, TEST_ENV, ownerCtx) as { id: number };
+    const other = await executeTool("save_memory", {
+      content: "Another source", semantic_type: "test.poked",
+    }, TEST_ENV, ownerCtx) as { id: number };
+    const args = {
+      view: "event-poke", action: "retry", value: { source_event_id: other.id },
+      scope: { event: source.id }, interaction_id: "event-bound-click",
+    };
+    await expect(executeTool("invoke_view_action", {
+      ...args, scope: undefined,
+    }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
+    const first = await executeTool("invoke_view_action", args, TEST_ENV, ownerCtx) as { event_id: number };
+    const [receipt] = await getTestDb()`
+      SELECT metadata FROM events WHERE id = ${first.event_id}
+    `;
+    expect(receipt.metadata.interaction.source_event_id).toBe(source.id);
+    expect(receipt.metadata.value.source_event_id).toBe(other.id);
+    await expect(executeTool("invoke_view_action", args, TEST_ENV, ownerCtx))
+      .resolves.toMatchObject({ created: false, event_id: first.event_id });
+    await expect(executeTool("invoke_view_action", {
+      ...args, scope: { event: other.id },
+    }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 409 });
+    const replacement = await executeTool("save_memory", {
+      content: "Updated source", semantic_type: "test.poked", supersedes_event_id: source.id,
+    }, TEST_ENV, ownerCtx) as { id: number };
+    const opened = await executeTool("open_view", {
+      key: "event-poke", scope: { event: source.id },
+    }, TEST_ENV, ownerCtx) as { scope: { event: number } };
+    expect(opened.scope.event).toBe(replacement.id);
+    await expect(executeTool("invoke_view_action", {
+      ...args, interaction_id: "stale-subject",
+    }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(executeTool("invoke_view_action", args, TEST_ENV, ownerCtx))
+      .resolves.toMatchObject({ created: false, event_id: first.event_id });
+    await expect(executeTool("invoke_view_action", {
+      ...args, interaction_id: "missing-event", scope: { event: 999999999 },
+    }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 404 });
+  });
+
+  it("registers and executes an entity-qualified action without copying its kind into the workspace registry", async () => {
+    const entity = await createTestEntity({ name: "Action subject", entity_type: "ballot", organization_id: orgId });
+    const sql = getTestDb();
+    const kinds = { "ballot.opened": {}, "ballot.responded": {} };
+    await sql`
+      UPDATE entity_types SET event_kinds = ${sql.json(kinds)}
+      WHERE organization_id = ${orgId} AND slug = 'ballot'
+    `;
+    await executeTool("manage_views", {
+      action: "set", key: "ballot-form", source_code: VIEW_SOURCE,
+      attach: [{ event_kind: "ballot.opened", type: "ballot" }],
+      actions: { retry: { emits: "ballot.responded" } },
+    }, TEST_ENV, ownerCtx);
+    const source = await executeTool("save_memory", {
+      content: "Choose an option", semantic_type: "ballot.opened", entity_ids: [entity.id],
+    }, TEST_ENV, ownerCtx) as { id: number };
+    const response = await executeTool("invoke_view_action", {
+      view: "ballot-form", action: "retry", value: { choice: "yes" },
+      scope: { event: source.id }, interaction_id: "qualified-response",
+    }, TEST_ENV, ownerCtx) as { event_id: number };
+    const [event] = await sql`SELECT to_json(entity_ids) AS entity_ids, semantic_type FROM events WHERE id = ${response.event_id}`;
+    expect(event).toMatchObject({ entity_ids: [entity.id], semantic_type: "ballot.responded" });
+    for (const attach of [[], [{ event_kind: "ballot.opened" }], [{ event_kind: "ballot.opened", type: "another-type" }]]) {
+      await expect(executeTool("manage_views", {
+        action: "set", key: "unbound-ballot-form", source_code: VIEW_SOURCE, attach,
+        actions: { retry: { emits: "ballot.responded" } },
+      }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 422 });
+    }
+  });
 
 	it("appends one view_interaction event for a declared action", async () => {
 		await setView("poke-view", VIEW_SOURCE, { retry: { emits: "test.poked" } });

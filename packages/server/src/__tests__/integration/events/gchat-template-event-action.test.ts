@@ -1,3 +1,4 @@
+import { __setLocalFrontendForTests } from "../../../utils/public-origin";
 import { Chat } from "chat";
 import {
 	afterEach,
@@ -223,10 +224,12 @@ describe("Google Chat declared event action adapter", () => {
 
 	beforeEach(async () => {
 		await cleanupTestDatabase();
+		__setLocalFrontendForTests(false);
 	});
 
 	afterEach(() => {
 		__setChatInstanceManagerForTests(null);
+		__setLocalFrontendForTests(undefined);
 	});
 
 	test("materializes multi-user voting, quorum, deadline, and card settlement", async () => {
@@ -478,7 +481,8 @@ describe("Google Chat declared event action adapter", () => {
 			expect.objectContaining({ ok: true, messageId: MESSAGE_NAME }),
 			expect.objectContaining({ ok: true, messageId: MESSAGE_NAME }),
 		]);
-		expect(JSON.stringify(postToConversation.mock.calls)).toContain(actionId);
+		expect(JSON.stringify(postToConversation.mock.calls)).not.toContain(actionId);
+		expect(JSON.stringify(postToConversation.mock.calls)).toContain("Open event");
 		expect(postToConversation).toHaveBeenCalledTimes(1);
 		expect(
 			await presentStoredEventToConversation({

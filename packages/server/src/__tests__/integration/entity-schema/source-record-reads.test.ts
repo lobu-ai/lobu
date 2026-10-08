@@ -30,6 +30,9 @@ const SOURCE = `
   import { defineConnector } from '@lobu/connector-sdk';
   const ROWS = [
     { origin_id: 'e4', origin_type: 'role', title: 'Pat joined Acme', occurred_at: '2026-01-04T00:00:00.000Z',
+      semantic_type: 'summary', payload_type: 'json_template', payload_data: { summary: 'Role summary' },
+      payload_template: { type: 'div', children: '{{summary}}' },
+      attachments: [{ url: 'https://example.test/role.pdf', mime_type: 'application/pdf' }],
       metadata: { person_id: 'p1', person_name: 'Pat', company_id: 'c1', company_name: 'Acme' } },
     { origin_id: 'e3', origin_type: 'call', title: 'Globex call', occurred_at: '2026-01-03T00:00:00.000Z',
       metadata: { company_id: 'c2' } },
@@ -148,6 +151,20 @@ describe('source-backed record reads', () => {
     );
     expect(second.content.map((item) => (item as { origin_id: string }).origin_id)).toEqual(['e1']);
     expect(second.page.has_more).toBe(false);
+    expect(await counts()).toEqual(before);
+  }, 60_000);
+
+  it('preserves the rich source envelope through the compiled connector without storing an event', async () => {
+    const before = await counts();
+    const page = await getContent({ record: { type: 'company', key: 'c1' }, feed_ids: [feedId], limit: 1 }, {} as Env, owner);
+    expect(page.record_failures).toBeUndefined();
+    expect(page.content).toHaveLength(1);
+    expect(page.content[0]).toMatchObject({
+      feed_id: feedId, origin_id: 'e4', semantic_type: 'summary', payload_type: 'json_template',
+      payload_data: { summary: 'Role summary' }, payload_template: { type: 'div', children: '{{summary}}' },
+      attachments: [{ url: 'https://example.test/role.pdf', mime_type: 'application/pdf' }],
+    });
+    expect(page.content[0]).not.toHaveProperty('id');
     expect(await counts()).toEqual(before);
   }, 60_000);
 

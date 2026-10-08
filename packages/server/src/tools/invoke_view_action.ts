@@ -10,9 +10,14 @@ import {
 	InvokeEventActionResultSchema,
 } from "./invoke_event_action";
 
+export const ViewActionScopeSchema = Type.Object({
+	event: Type.Integer({ minimum: 1, description: "Exact stored event version shown by the view." }),
+}, { additionalProperties: false });
+
 export const InvokeViewActionSchema = Type.Object(
 	{
 		view: ViewKeySchema,
+		scope: Type.Optional(ViewActionScopeSchema),
 		action: Type.String({ minLength: 1, maxLength: 64 }),
 		value: Type.Optional(
 			Type.Record(Type.String(), Type.Unknown(), {
@@ -28,7 +33,7 @@ type InvokeViewActionArgs = Static<typeof InvokeViewActionSchema>;
 
 async function invokeViewActionImpl(
 	args: InvokeViewActionArgs,
-	_env: Env,
+	env: Env,
 	ctx: AccountToolContext
 ): Promise<Static<typeof InvokeEventActionResultSchema>> {
 	if (!ctx.isAuthenticated || !ctx.userId) {
@@ -37,13 +42,12 @@ async function invokeViewActionImpl(
 			401
 		);
 	}
-	// No offered-action capability token: unlike template actions, a view click
-	// carries no rendered-event binding to prove. The authenticated caller IS
-	// the actor, and the CURRENT view's declaration is the boundary — a
-	// removed button stops working because the row no longer declares it.
+	// The current view declaration and normal event read policy authorize the
+	// action. The event subject is outside user-controlled action values.
 	const target = requireWorkspaceContext(ctx);
 	const result = await invokeViewAction({
 		organizationId: target.organizationId,
+		...(args.scope ? { event: { id: args.scope.event, env, ctx: target } } : {}),
 		viewKey: args.view,
 		action: args.action,
 		value: args.value ?? null,

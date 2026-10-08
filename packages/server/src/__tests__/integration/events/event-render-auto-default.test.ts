@@ -108,6 +108,21 @@ describe('get_content render — event auto-default template', () => {
     expect(item.payload_data).toMatchObject({ amount: 50000, stage: 'negotiation' });
   });
 
+  it('keeps structured event data separate from routing metadata', async () => {
+    const data = { amount: 42, stage: 'review', approved: false };
+    const [item] = await buildContentItems({
+      sql: getTestDb(), organizationId: orgId, ownerSlug: null,
+      baseUrl: undefined, includePrivateAttribution: false,
+      rawContent: [row({
+        id: 6, semantic_type: 'valuation', payload_type: 'empty',
+        entity_ids: [dealEntityId], payload_data: data,
+        metadata: { webhook_connection_id: 'synthetic-webhook' },
+      })],
+    });
+    expect(item.payload_data).toEqual(data);
+    expect(item.metadata).toEqual({ webhook_connection_id: 'synthetic-webhook' });
+  });
+
   it('carries the resolved interaction registry with an authored event template', async () => {
     const [item] = await buildContentItems({
       sql: getTestDb(),

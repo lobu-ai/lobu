@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { isEventAttachment } from "@lobu/core/contracts/tools/view-attach";
 import {
 	collectTemplateActionInvocations,
 	type TemplateActionInvocation,
@@ -10,12 +11,16 @@ import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js
 import { resolveEntityRender } from "../utils/default-entity-template";
 import { ToolUserError } from "../utils/errors";
 import {
+	resolveEventKindData,
 	resolveEventKindDefinition,
 	validateSaveContentSemanticType,
 } from "../utils/event-kind-validation";
 import { insertConnectionlessWorkspaceEvent } from "../utils/insert-event";
 import { emit } from "../events/emitter";
 import { getView, isValidViewKey, VIEW_ACTION_NAME_RE } from "../views/views";
+import { resolveEventViewSubject } from "../views/event-subject";
+import type { Env } from "../index";
+import type { ToolContext } from "../tools/registry";
 
 const TEMPLATE_EVENT_ACTION_PREFIX = "event-action";
 const ACTION_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -55,20 +60,12 @@ export interface InvokedTemplateEventAction {
 	eventType: string;
 }
 
-/**
- * Second source for the chokepoint: a click on a DECLARED view action.
- *
- * Unlike the template path there is no rendered event to match the value
- * against (no server render) and no delivery binding (views render only in
- * frame hosts). The declaration on the CURRENT view row is the whole check: a
- * removed button stops accepting new clicks because the row no longer declares
- * it. An exact retry returns its earlier receipt without executing again. Write
- * rules, workspace scoping and Automation activation are identical to the
- * template path, and the appended event carries `origin_type =
- * 'view_interaction'`. There is deliberately no signed offered-action token:
- * the declaration check is the boundary, not a UX-consistency re-render.
- */
+/** A declared view action shares the existing receipt and activation path.
+ * Event-bound actions additionally validate their readable source version.
+ * An accepted retry returns its receipt even after the declaration changes. */
 export interface InvokeViewActionParams {
+	/** Trusted caller context is required to resolve an event-bound action. */
+	event?: { id: number; env: Env; ctx: ToolContext };
 	organizationId: string;
 	viewKey: string;
 	action: string;
@@ -111,7 +108,8 @@ async function acceptedAction(params: ActionParams): Promise<InvokedTemplateEven
 		: false;
 	const sameSubject = "sourceEventId" in params
 		? row.origin_type === "template_interaction" && interaction.source_event_id === params.sourceEventId
-		: row.origin_type === "view_interaction" && interaction.view === params.viewKey;
+		: row.origin_type === "view_interaction" && interaction.view === params.viewKey
+			&& (interaction.source_event_id ?? null) === (params.event?.id ?? null);
 	// JSONB stores the JSON value, so compare the same representation for view payloads.
 	const value = params.value === null ? null : JSON.parse(JSON.stringify(params.value));
 	if (!sameSubject || row.origin_id !== key ||
@@ -202,6 +200,17 @@ async function appendViewAction(
 		);
 	}
 
+	if (!params.event && view.attach.length > 0 && view.attach.every(isEventAttachment)) {
+		throw new ToolUserError("This view action requires its event subject.", 400);
+	}
+	const subject = params.event
+		? await resolveEventViewSubject(view, params.event.id, params.event.env, params.event.ctx)
+		: null;
+	if (subject && Number(subject.id) !== params.event?.id) {
+		throw new ToolUserError("This event has been replaced. Reopen it before submitting.", 409);
+	}
+	const entityIds = subject?.entity_ids ?? [];
+
 	const interactionEnvelope = {
 		action: params.action,
 		value: params.value,
@@ -213,6 +222,7 @@ async function appendViewAction(
 			...(params.actor.name ? { name: params.actor.name } : {}),
 		},
 		view: view.key,
+		...(subject ? { source_event_id: subject.id, source_origin_id: subject.origin_id } : {}),
 		...(params.source?.connectionId
 			? { connection_id: params.source.connectionId }
 			: {}),
@@ -225,13 +235,13 @@ async function appendViewAction(
 		value: params.value,
 		interaction: interactionEnvelope,
 	};
-	// View actions are not entity-bound, so the kind resolves with no entity
-	// context — exactly as an org-level kind does on the template path.
+	// Event actions inherit the authorized source entities; payload fields
+	// cannot invent this context.
 	const kindValidation = await validateSaveContentSemanticType(
 		declared.emits,
 		eventData,
 		params.organizationId,
-		[],
+		entityIds,
 	);
 	if (!kindValidation.valid) {
 		throw new ToolUserError(kindValidation.errors.join("\n"), 422);
@@ -239,7 +249,7 @@ async function appendViewAction(
 
 	const inserted = await insertConnectionlessWorkspaceEvent(
 		{
-			entityIds: [],
+			entityIds,
 			organizationId: params.organizationId,
 			originId: idempotencyKey,
 			title: `${view.name}: ${params.action}`,
@@ -474,13 +484,10 @@ async function appendTemplateEventAction(
 		kind.jsonTemplate ?? null,
 		kind.metadataSchema,
 	);
-	const sourceMetadata = record(sourceEvent.metadata);
-	// Match get_content's rendering contract exactly: notification events render
-	// their payload, while ordinary typed events render their metadata.
-	const sourceData =
-		typeof sourceMetadata.notification_type === "string"
-			? record(sourceEvent.payload_data)
-			: sourceMetadata;
+	const sourceData = resolveEventKindData(
+		record(sourceEvent.payload_data),
+		record(sourceEvent.metadata),
+	);
 	const rendered = template
 		? collectTemplateActionInvocations(template, sourceData)
 		: [];

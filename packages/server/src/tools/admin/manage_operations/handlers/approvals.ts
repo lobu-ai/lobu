@@ -805,7 +805,7 @@ async function tryRejectBuilderRun(
 			"rejected",
 			`${handler.nounLabel}: ${desc} — rejected`,
 			`Builder action rejected: ${desc}${args.reason ? ` — ${args.reason}` : ""}`,
-			{ reason },
+			{ reject_reason: reason },
 			reviewer,
 			tx,
 		);
@@ -1598,7 +1598,7 @@ export async function handleApprove(
 				"rejected",
 				`${pendingRun.action_key} — blocked by policy`,
 				why,
-				{ reason: why },
+				{ reject_reason: why },
 				reviewer,
 				tx,
 			);
@@ -1839,7 +1839,7 @@ export async function handleReject(
 			"rejected",
 			`${operationKey} — rejected`,
 			`Operation rejected: ${operationKey}${args.reason ? ` — ${args.reason}` : ""}`,
-			{ reason },
+			{ reject_reason: reason },
 			reviewer,
 			tx,
 		);

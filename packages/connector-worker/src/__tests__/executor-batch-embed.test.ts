@@ -104,7 +104,6 @@ describe('sync embedding path batches per chunk (Finding #12)', () => {
           payload_type: 'media',
           payload_text: 'aa',
           payload_data: { layout: 'gallery' },
-          payload_template: { type: 'image-grid' },
           attachments: [{ kind: 'image', url: 'https://example.test/photo.jpg' }],
           occurred_at: new Date(),
           origin_type: 'post',
@@ -146,7 +145,6 @@ describe('sync embedding path batches per chunk (Finding #12)', () => {
     expect(byId.get('a')).toMatchObject({
       payload_type: 'media',
       payload_data: { layout: 'gallery' },
-      payload_template: { type: 'image-grid' },
       attachments: [{ kind: 'image', url: 'https://example.test/photo.jpg' }],
     });
     expect(byId.get('b')!.embedding).toEqual([4, 0, 0]);

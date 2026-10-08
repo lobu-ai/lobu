@@ -305,19 +305,13 @@ export type SaveMemoryData = {
      */
     semantic_type?: string;
     /**
-     * Content format. 'text' (default): plain text. 'markdown': rendered as rich text. 'json_template': rendered via payload_template + payload_data. 'media': media-focused display. 'empty': metadata only.
+     * Content format. 'text' (default): plain text. 'markdown': rendered as rich text. 'media': media-focused display. 'empty': metadata only.
      */
-    payload_type?: "text" | "markdown" | "json_template" | "media" | "empty";
+    payload_type?: "text" | "markdown" | "media" | "empty";
     /**
-     * Structured data object. Used as template data for json_template, or structured metadata for media.
+     * Structured event data, preserved alongside content and media.
      */
     payload_data?: {
-      [key: string]: unknown;
-    };
-    /**
-     * JSON template for rendering. Required when payload_type is json_template. Must have a { root: ... } structure.
-     */
-    payload_template?: {
       [key: string]: unknown;
     };
     /**
@@ -6761,9 +6755,9 @@ export type ManageViewsData = {
                */
               event_kind: string;
               /**
-               * Entity-type slug the event must link at least one entity of.
+               * Optional linked entity-type qualifier. Omit to match the event kind alone.
                */
-              type: string;
+              type?: string;
             }
         >;
         /**
@@ -6944,9 +6938,9 @@ export type ManageViewsResponses = {
                  */
                 event_kind: string;
                 /**
-                 * Entity-type slug the event must link at least one entity of.
+                 * Optional linked entity-type qualifier. Omit to match the event kind alone.
                  */
-                type: string;
+                type?: string;
               }
           >;
           params: {
@@ -7071,9 +7065,9 @@ export type ManageViewsResponses = {
                  */
                 event_kind: string;
                 /**
-                 * Entity-type slug the event must link at least one entity of.
+                 * Optional linked entity-type qualifier. Omit to match the event kind alone.
                  */
-                type: string;
+                type?: string;
               }
           >;
           params: {
@@ -7205,9 +7199,9 @@ export type ManageViewsResponses = {
                  */
                 event_kind: string;
                 /**
-                 * Entity-type slug the event must link at least one entity of.
+                 * Optional linked entity-type qualifier. Omit to match the event kind alone.
                  */
-                type: string;
+                type?: string;
               }
           >;
           params: {

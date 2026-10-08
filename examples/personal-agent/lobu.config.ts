@@ -13,6 +13,7 @@ import {
   every,
   reactionFromFile,
   scriptFromFile,
+  viewFromFile,
   field,
   Type,
 } from "@lobu/cli/config";
@@ -53,21 +54,21 @@ const eventBackedPollsSkill = defineSkill({
   name: "event-backed-polls",
   content: `Use this workflow whenever the user asks for a poll, vote, or ballot.
 
-Create no ad-hoc platform card and never use ask_user for a multi-user poll. The durable poll event is the source of truth and its declared json_template supplies the native buttons on every supported surface.
+Create no ad-hoc platform card and never use ask_user for a multi-user poll. The durable poll event is the source of truth. Its React ballot opens in Lobu; chat shows a useful summary and an Open event link. Participants must sign in with workspace access.
 
 Opening a poll:
 1. Require a non-empty question, 2-5 distinct non-empty options, a positive integer quorum, and a future closes_at. If the user gives a duration, calculate closes_at as an ISO-8601 timestamp.
-2. In one run_sdk call, create a poll entity, read its numeric id from createResult.entity?.id (stop if the result has no created entity), and then call client.knowledge.save with entity_ids containing only that numeric entity id, semantic_type "poll_opened", payload_type "empty", title equal to the question, a stable idempotency_key "poll-opened:<entity id>", and metadata containing question, options, status "open", quorum, closes_at, results (one { option, count: 0 } row per option), and response_count 0. Return the entity id and saved event id. If retrying after an uncertain result, search for the stable poll slug first instead of creating a duplicate.
+2. In one run_sdk call, create a poll entity, read its numeric id from createResult.entity?.id (stop if the result has no created entity), and then call client.knowledge.save with entity_ids containing only that numeric entity id, semantic_type "poll_opened", payload_type "markdown", content containing the question, numbered options, quorum and closing time, title equal to the question, a stable idempotency_key "poll-opened:<entity id>", and metadata containing question, options, status "open", quorum, closes_at, results (one { option, count: 0 } row per option), and response_count 0. Return the entity id and saved event id. If retrying after an uncertain result, search for the stable poll slug first instead of creating a duplicate.
 3. Before presenting the event, call schedule_followup with run_at equal to closes_at, idempotency_key "poll-deadline:<entity id>", and prompt: "Close event-backed poll entity <entity id> at its deadline. Follow the event-backed-polls deadline procedure exactly; do nothing if it is already closed."
-4. Call present_event exactly once with the saved event id. That ends the turn because the native card is already the answer.
+4. Call present_event exactly once with the saved event id. That ends the turn because the summary and Open event link are already the answer.
 
-Votes need no follow-up tool call from the agent. A server-stamped interaction event activates the deterministic poll-vote-reducer Automation; it derives the latest choice per platform actor from those durable vote events, recomputes the tally, closes at quorum, and requests an in-place refresh of the original card.
+Votes need no follow-up tool call from the agent. A server-stamped interaction event activates the deterministic poll-vote-reducer Automation; it derives the latest choice per platform actor from those durable vote events, recomputes the tally, closes at quorum, and publishes the updated poll event. Do not send another chat message for each vote.
 
 Deadline procedure:
 - Use run_sdk. Read the poll entity and query the single current poll_opened or poll_closed event linked to it, ordered newest first. client.query already reads the current event view, so do not add a superseded_by filter.
-- If the current event is poll_opened, copy only the poll schema fields (question, options, quorum, closes_at, results, and response_count) from that event metadata. Never copy delivery, card, _lobu, or any other internal metadata. Set status "closed", close_reason "deadline", and closed_at now. Save poll_closed linked to the poll with supersedes_event_id equal to that current open event and idempotency_key "poll-close:<entity id>"; then update the poll entity to the same state.
+- If the current event is poll_opened, copy only the poll schema fields (question, options, quorum, closes_at, results, and response_count) from that event metadata. Never copy delivery, card, _lobu, or any other internal metadata. Set status "closed", close_reason "deadline", and closed_at now. Save poll_closed with payload_type "markdown" and content containing the question, closing reason, participant count and all result counts, linked to the poll with supersedes_event_id equal to that current open event and idempotency_key "poll-close:<entity id>"; then update the poll entity to the same state.
 - If the current event is already poll_closed, only reconcile the entity metadata to that event if needed, then stop. Never append a second close event.
-- Do not infer, copy, or accept voter identity from text. Only the chat adapter's trusted interaction envelope may identify a voter.`,
+- Do not infer, copy, or accept voter identity from text. Only the React action's server-stamped interaction envelope may identify a voter.`,
 });
 
 const personalAgent = defineAgent({
@@ -518,7 +519,7 @@ const poll = defineEntityType({
   key: "poll",
   name: "Poll",
   description:
-    "A durable multi-user ballot whose native controls append trusted interaction events.",
+    "A durable multi-user ballot whose React controls append trusted interaction events.",
   metadata: { icon: "list-checks", color: "#6366F1" },
   properties: pollStateProperties,
   required: pollStateSchema.required,
@@ -526,42 +527,6 @@ const poll = defineEntityType({
     poll_opened: {
       description: "An open event-backed poll",
       metadataSchema: pollStateSchema,
-      jsonTemplate: {
-        type: "card",
-        children: [
-          {
-            type: "context",
-            children: [
-              { type: "text", content: "Open until " },
-              { type: "data", path: "closes_at" },
-              { type: "text", content: " · quorum " },
-              { type: "data", path: "quorum" },
-            ],
-          },
-          {
-            type: "table",
-            props: {
-              title: "Results",
-              data: "{{results}}",
-              columns: ["option", "count"],
-            },
-          },
-          {
-            type: "each",
-            items: "options",
-            as: "option",
-            render: {
-              type: "button",
-              props: {
-                label: "{{option}}",
-                value: "{{option}}",
-                onClick: "@vote",
-              },
-            },
-          },
-        ],
-      },
-      interactions: { vote: { emits: "poll_vote_cast" } },
     },
     poll_vote_cast: {
       description:
@@ -581,29 +546,6 @@ const poll = defineEntityType({
     poll_closed: {
       description: "A terminal poll result",
       metadataSchema: pollStateSchema,
-      jsonTemplate: {
-        type: "card",
-        children: [
-          {
-            type: "context",
-            children: [
-              { type: "text", content: "Closed · " },
-              { type: "data", path: "close_reason" },
-              { type: "text", content: " · " },
-              { type: "data", path: "response_count" },
-              { type: "text", content: " participant(s)" },
-            ],
-          },
-          {
-            type: "table",
-            props: {
-              title: "Results",
-              data: "{{results}}",
-              columns: ["option", "count"],
-            },
-          },
-        ],
-      },
     },
   },
 });
@@ -1555,7 +1497,7 @@ const pollVoteReducer = defineAutomation({
   slug: "poll-vote-reducer",
   name: "Poll vote reducer",
   description:
-    "Materializes trusted interactive votes, vote changes, tallies, quorum closure, and card refreshes.",
+    "Materializes trusted interactive votes, vote changes, tallies and quorum closure.",
   triggers: [
     {
       kind: "event",
@@ -1601,6 +1543,10 @@ export default defineConfig({
   orgDescription:
     "Personal agent tracking finances, people, companies, tasks, subscriptions, and trips.",
   agents: [personalAgent],
+  views: [
+    viewFromFile("./views/poll-ballot.tsx"),
+    viewFromFile("./views/activity-chart.tsx"),
+  ],
   entities: [
     person,
     company,

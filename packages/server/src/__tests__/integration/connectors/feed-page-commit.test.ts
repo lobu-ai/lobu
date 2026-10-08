@@ -137,6 +137,21 @@ describe('feed page commit', () => {
     await Promise.all(extraClients.splice(0).map((client) => client.end({ timeout: 5 })));
   });
 
+  it.each([
+    { payload_type: 'json_template' },
+    { payload_template: { root: { type: 'text', content: 'old' } } },
+  ])('rejects retired presentation without committing a page: %j', async (retired) => {
+    const { connectionId, feedId, runId } = await seed();
+    const { ctx, result } = mockWorkerCtx({
+      run_id: runId, worker_id: WORKER_ID, checkpoint: { cursor: 'page-1' },
+      items: [item('valid'), item('retired', retired)],
+    });
+    await streamContent(ctx);
+    expect(result().status).toBe(422);
+    expect(await currentOriginIds(connectionId)).toEqual([]);
+    expect(await feedCheckpoint(feedId)).toEqual(OLD_CHECKPOINT);
+  });
+
   it('stores an item that has neither text nor a title instead of dropping it under an advanced cursor', async () => {
     const { connectionId, feedId, runId } = await seed();
     const batch = {

@@ -906,8 +906,8 @@ export const ActivatePageResponseSchema = Type.Object({
  * One collected item in a `/stream` batch. This is the SERVER-accepted superset:
  * the connector-worker's `ContentItem` sends the plain-content subset (id,
  * payload_text, author/source/score/embedding…), while richer producers (the
- * chrome extension, json_template feeds) also send `payload_type` + the
- * `payload_data`/`payload_template`/`attachments` it selects. All are optional
+ * chrome extension and media feeds) also send `payload_type` with
+ * structured `payload_data` and `attachments`. All are optional
  * so a bare content item still validates.
  */
 export const ContentItemSchema = Type.Object({
@@ -917,16 +917,12 @@ export const ContentItemSchema = Type.Object({
     Type.Union([
       Type.Literal("text"),
       Type.Literal("markdown"),
-      Type.Literal("json_template"),
       Type.Literal("media"),
       Type.Literal("empty"),
     ])
   ),
   payload_text: Type.String(),
   payload_data: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-  payload_template: Type.Optional(
-    Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()])
-  ),
   attachments: Type.Optional(Type.Array(Type.Unknown())),
   author_name: Type.Optional(Type.String()),
   occurred_at: Type.String(),

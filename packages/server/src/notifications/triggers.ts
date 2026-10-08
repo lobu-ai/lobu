@@ -1,4 +1,4 @@
-import { Actions, Button, Card, CardText, LinkButton } from "chat";
+import { buildEventChatMessage } from "./event-card";
 import { type DbClient, getDb } from "../db/client";
 import { emit } from "../events/emitter";
 import type { McpActivityAttribution } from "../lobu/stores/mcp-client-conversations";
@@ -354,38 +354,12 @@ export function buildActionApprovalCard(params: {
 		return undefined;
 	}
 
-	const actions = [];
-	if (params.runId) {
-		actions.push(
-			Button({
-				id: `run-approval:${params.runId}:approve`,
-				label: "Approve",
-				style: "primary",
-				value: "approve",
-			}),
-		);
-		actions.push(
-			Button({
-				id: `run-approval:${params.runId}:reject`,
-				label: "Reject",
-				style: "danger",
-				value: "reject",
-			}),
-		);
-	}
-	if (params.approvalUrl) {
-		actions.push(
-			LinkButton({ url: params.approvalUrl, label: "Review in Lobu" }),
-		);
-	}
-
-	const cardText = params.summary?.trim() ?? "";
-	return Card({
-		children: [
-			...(cardText ? [CardText(cardText)] : []),
-			...(actions.length > 0 ? [Actions(actions)] : []),
-		],
-	});
+	return buildEventChatMessage({
+		body: params.summary,
+		url: params.approvalUrl,
+		linkLabel: "Review in Lobu",
+		decisionRunId: params.runId,
+	}).card;
 }
 
 async function getOrgAdminUserIds(organizationId: string, sql: DbClient = getDb()): Promise<string[]> {
@@ -499,9 +473,7 @@ export async function notifyActionApprovalNeeded(params: {
 	} | null;
 }, transaction?: DbClient): Promise<void> {
 	const operation = params.operation ?? null;
-	// The render model is already the shape a template wants — a couple of
-	// scalars plus `diffs` / `proposal` lists — so the kind's `each` walks it
-	// directly rather than a formatter flattening it into one paragraph.
+	// Keep structured evidence on the event as well as the readable body.
 	const entityChange = params.details
 		? (buildApprovalRenderModel(params.details) as unknown as Record<string, unknown>)
 		: null;
@@ -518,9 +490,7 @@ export async function notifyActionApprovalNeeded(params: {
 			type: "action_approval_needed",
 			title: formatActionApprovalTitle(params.actionKey, params.details),
 			body: formatActionApprovalBody(params),
-			// Both approval families render through a platform notification kind, so the
-			// chat post, the Memory view and MCP apps all show the SAME table from
-			// one declaration instead of each surface formatting the payload again.
+			// Native decisions retain their structured evidence and server-owned run id.
 			...(operation
 				? {
 						semanticType: CONNECTOR_OPERATION_APPROVAL_KIND,

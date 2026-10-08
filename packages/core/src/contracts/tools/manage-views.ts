@@ -81,7 +81,7 @@ export const ViewAttachmentSchema = Type.Union([
   }),
   // An event subject: the view renders one event (scope.event) on the event's
   // own page, /events/<id>/-/views/<key>. It matches an event whose kind is
-  // `event_kind` AND that links at least one entity of `type`. Closed, and no
+  // `event_kind`, optionally qualified by a linked entity of `type`. Closed, and no
   // placement: the event page has one layout.
   Type.Object(
     {
@@ -91,12 +91,14 @@ export const ViewAttachmentSchema = Type.Union([
         description:
           "Event kind (semantic_type) this view renders, e.g. 'deal.won'.",
       }),
-      type: Type.String({
-        minLength: 1,
-        maxLength: 120,
-        description:
-          "Entity-type slug the event must link at least one entity of.",
-      }),
+      type: Type.Optional(
+        Type.String({
+          minLength: 1,
+          maxLength: 120,
+          description:
+            "Optional linked entity-type qualifier. Omit to match the event kind alone.",
+        })
+      ),
     },
     { additionalProperties: false }
   ),

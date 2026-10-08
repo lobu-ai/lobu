@@ -521,8 +521,8 @@ describe('views resources + open_view + invoke_view_action', () => {
 			expect(won.attach).toEqual(eventAttach);
 		});
 
-		it('rejects an event attachment without a type or with a placement', async () => {
-			await expect(setAttachedView('bad-won', [{ event_kind: 'deal.won' }])).rejects.toThrow();
+		it('accepts a kind-only attachment and rejects one with a placement', async () => {
+			await expect(setAttachedView('kind-only-won', [{ event_kind: 'deal.won' }])).resolves.toBeUndefined();
 			await expect(
 				setAttachedView('bad-won', [
 					{ event_kind: 'deal.won', type: 'company', placement: 'tab' },

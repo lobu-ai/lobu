@@ -99,6 +99,42 @@ it("does not attribute another event kind just because it shares an identity pat
   expect(result.events.map((event) => event.origin_id)).toEqual(["valid"]);
 });
 
+it("preserves rich event content without accepting stored identity or action state", async () => {
+  const content = {
+    semantic_type: "summary",
+    payload_type: "json_template",
+    payload_data: { summary: "Account summary", items: ["one", "two"] },
+    payload_template: { type: "div", children: "{{summary}}" },
+    attachments: [{ url: "https://example.test/report.pdf", mime_type: "application/pdf" }],
+  };
+  readPage.mockResolvedValue({
+    row_cursors: ["rich"],
+    rows: [{
+      ...linked("rich", "2026-01-01T00:00:00Z"), ...content,
+      id: 99, feed_id: 999, run_id: 17, automation_id: 18,
+      interaction_type: "approval", interaction_status: "pending",
+    }],
+  });
+  const result = await reads.readSourceRecordActivity(scope, record, { limit: 10 });
+  expect(result.events).toHaveLength(1);
+  expect(result.events[0]).toMatchObject({ ...content, feed_id: 1, platform: "test_source", origin_id: "rich" });
+  for (const field of ["id", "run_id", "automation_id", "interaction_type", "interaction_status"]) {
+    expect(result.events[0]).not.toHaveProperty(field);
+  }
+});
+
+it("keeps ordinary source events readable when rich envelope fields are omitted", async () => {
+  readPage.mockResolvedValue({
+    row_cursors: ["plain"],
+    rows: [{ ...linked("plain", "2026-01-01T00:00:00Z"), payload_text: "Plain event" }],
+  });
+  const result = await reads.readSourceRecordActivity(scope, record, { limit: 10 });
+  expect(result.events[0]).toMatchObject({
+    payload_text: "Plain event", semantic_type: "linked", payload_type: "text",
+    payload_data: {}, payload_template: null, attachments: [],
+  });
+});
+
 it("does not invent relationships for an event with no declaring kind", async () => {
   readPage.mockResolvedValue({
     row_cursors: ["untyped"],

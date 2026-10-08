@@ -1,7 +1,6 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { ViewKeySchema } from "@lobu/core/contracts/tools/manage-views";
 import {
-	eventAttachmentsFor,
 	hasWorkspaceAttachment,
 	isEventAttachment,
 	matchesRecord,
@@ -12,11 +11,11 @@ import { ToolUserError } from "../utils/errors";
 import { resolvePublicOrigin } from "../utils/public-origin";
 import { viewPathSuffix } from "@lobu/core/contracts/tools/view-path";
 import { getOrganizationSlug } from "../utils/url-builder";
-import { getView, viewResourceUri } from "../views/views";
-import { getDb, pgBigintArray } from "../db/client";
+import { getView, viewResourceUri, type StoredView } from "../views/views";
+import { getDb } from "../db/client";
 import { requireWorkspaceContext } from "./access-control";
-import { getContent } from "./get_content/handler";
-import type { AccountToolContext, ToolContext } from "./registry";
+import { resolveEventViewSubject } from "../views/event-subject";
+import type { AccountToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
 import { COLLECTION_QUERY_KEY, CollectionSelectionSchema, type CollectionSelection } from "@lobu/core/contracts/tools/collection-selection";
 
@@ -110,68 +109,6 @@ function resolveViewParams(
 		}
 	}
 	return resolved;
-}
-
-type StoredView = NonNullable<Awaited<ReturnType<typeof getView>>>;
-
-/**
- * The event page for `eventId`, when `view` attaches to it. The event is read
- * through `read_knowledge` itself — the exact-id read the web event page
- * renders — so the caller's workspace, connection-visibility and agent read
- * policy decide whether it exists, and a view can never open over an event its
- * caller cannot read. The id names a supersede lineage; the match is made on
- * its current version (the row nothing supersedes).
- */
-async function resolveEventViewPath(
-	view: StoredView,
-	eventId: number,
-	orgSlug: string,
-	env: Env,
-	ctx: ToolContext
-): Promise<string> {
-	type Row = { semantic_type: string; entity_ids: number[]; superseded_by?: number | null };
-	let current: Row | null = null;
-	for (let offset = 0; !current; offset += 100) {
-		const read = await getContent({ content_ids: [eventId], limit: 100, offset }, env, ctx);
-		current = (read.content as Row[]).find((row) => row.superseded_by == null) ?? null;
-		if (!read.page?.has_more) break;
-	}
-	if (!current) {
-		throw new ToolUserError(`Event ${eventId} not found`, 404);
-	}
-	const kinds = eventAttachmentsFor(view.attach, current.semantic_type);
-	if (kinds.length === 0) {
-		throw new ToolUserError(
-			`View '${view.key}' is not attached to '${current.semantic_type}' events`,
-			400
-		);
-	}
-	const entityIds = current.entity_ids.filter((id) => Number.isInteger(id));
-	const sql = getDb();
-	const linkedTypes =
-		entityIds.length === 0
-			? []
-			: await sql<{ slug: string }>`
-          SELECT DISTINCT et.slug
-          FROM entities e
-          JOIN entity_types et ON et.id = e.entity_type_id
-          WHERE e.id = ANY(${pgBigintArray(entityIds)}::bigint[])
-            AND e.organization_id = ${ctx.organizationId}
-            AND e.deleted_at IS NULL
-            AND et.deleted_at IS NULL
-        `;
-	const types = new Set(linkedTypes.map((row) => row.slug));
-	if (!kinds.some((a) => types.has(a.type))) {
-		throw new ToolUserError(
-			`View '${view.key}' renders '${current.semantic_type}' events linked to ${kinds
-				.map((a) => `a ${a.type}`)
-				.join(" or ")}; event ${eventId} links none`,
-			400
-		);
-	}
-	// The permalink id, not the current version's: the page resolves the
-	// lineage the same way this did.
-	return `/${orgSlug}/events/${eventId}${viewPathSuffix(view.key)}`;
 }
 
 /**
@@ -292,16 +229,11 @@ async function openViewImpl(
 			400
 		);
 	}
+	const event = scope.event === undefined ? null : await resolveEventViewSubject(view, scope.event, env, target);
 	const { pathname, card } =
 		scope.event !== undefined
 			? {
-					pathname: await resolveEventViewPath(
-						view,
-						scope.event,
-						orgSlug,
-						env,
-						target
-					),
+					pathname: `/${orgSlug}/events/${scope.event}${viewPathSuffix(view.key)}`,
 					card: false,
 				}
 			: await resolveViewPath(view, scope, orgSlug, target.organizationId);
@@ -334,7 +266,7 @@ async function openViewImpl(
 			...(scope.collection !== undefined ? { collection: scope.collection } : {}),
 			...(scope.type !== undefined ? { type: scope.type } : {}),
 			...(scope.entity !== undefined ? { entity: scope.entity } : {}),
-			...(scope.event !== undefined ? { event: scope.event } : {}),
+			...(event ? { event: event.id } : {}),
 		},
 		params,
 		url: `${origin}${pathname}${query ? `?${query}` : ""}`,

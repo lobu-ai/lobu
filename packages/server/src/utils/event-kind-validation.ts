@@ -9,7 +9,7 @@
  * Returns human-readable errors with valid kinds, expected schema, and fuzzy suggestions.
  */
 
-import { getDb } from '../db/client';
+import { type DbClient, getDb } from '../db/client';
 import { formatAjvError, getAjv } from './ajv-singleton';
 import { exceedsValidationLimits, isEmptyObject } from './metadata-limits';
 import { resolvePlatformNotificationKind } from './platform-notification-kinds';
@@ -39,6 +39,17 @@ export interface EventKindDefinition {
   jsonTemplate?: Record<string, unknown>;
   /** Template action name -> append-only event kind. */
   interactions?: TemplateInteractionRegistry;
+}
+
+/** Keep rendered values and offered-action validation on the same event data. */
+export function resolveEventKindData(
+  payloadData: Record<string, unknown> | null | undefined,
+  metadata: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const data = payloadData ?? {};
+  return typeof metadata?.notification_type === 'string' || !isEmptyObject(data)
+    ? data
+    : (metadata ?? {});
 }
 
 // ============================================
@@ -113,9 +124,9 @@ export function primeMemberEventKinds(
 }
 
 async function loadMemberEventKinds(
-  orgId: string
+  orgId: string,
+  sql: DbClient = getDb()
 ): Promise<Record<string, EventKindDefinition> | null> {
-  const sql = getDb();
   const rows = await sql`
     SELECT event_kinds
     FROM entity_types
@@ -138,8 +149,10 @@ async function loadMemberEventKinds(
  * Returns null if no $member type or no event_kinds defined (accept any kind).
  */
 async function getMemberEventKinds(
-  orgId: string
+  orgId: string,
+  sql?: DbClient
 ): Promise<Record<string, EventKindDefinition> | null> {
+  if (sql) return loadMemberEventKinds(orgId, sql);
   return eventKindsCache.getOrSet(`${orgId}:$member`, () => loadMemberEventKinds(orgId));
 }
 
@@ -159,10 +172,11 @@ export async function refreshMemberEventKinds(orgId: string): Promise<void> {
  */
 async function getEntityTypeEventKinds(
   orgId: string,
-  entityId: number
+  entityId: number,
+  db?: DbClient
 ): Promise<Record<string, EventKindDefinition> | null> {
-  return eventKindsCache.getOrSet(`${orgId}:entity:${entityId}`, async () => {
-    const sql = getDb();
+  const load = async () => {
+    const sql = db ?? getDb();
     const rows = await sql`
       SELECT et.event_kinds
       FROM entities e
@@ -180,7 +194,8 @@ async function getEntityTypeEventKinds(
       }
     }
     return null;
-  });
+  };
+  return db ? load() : eventKindsCache.getOrSet(`${orgId}:entity:${entityId}`, load);
 }
 
 /**
@@ -325,21 +340,23 @@ export async function validateSaveContentSemanticType(
  * rendering. Resolution order mirrors validateSaveContentSemanticType:
  * linked entity-type event_kinds (most specific) first, then the org-wide $member
  * event_kinds. Returns null when no definition declares this kind (the caller
- * then has no schema to render from). Reuses the same per-pod TTL cache.
+ * then has no schema to render from). An explicit SQL handle bypasses the
+ * per-pod TTL cache for transaction-scoped reads.
  */
 export async function resolveEventKindDefinition(
   semanticType: string,
   orgId: string,
-  entityIds?: number[]
+  entityIds?: number[],
+  sql?: DbClient
 ): Promise<EventKindDefinition | null> {
   if (entityIds && entityIds.length > 0) {
     for (const entityId of entityIds) {
-      const entityTypeKinds = await getEntityTypeEventKinds(orgId, entityId);
+      const entityTypeKinds = await getEntityTypeEventKinds(orgId, entityId, sql);
       const entityDef = entityTypeKinds?.[semanticType];
       if (entityDef) return entityDef;
     }
   }
-  const memberKinds = await getMemberEventKinds(orgId);
+  const memberKinds = await getMemberEventKinds(orgId, sql);
   // Platform kinds are the LAST resort, so an org that declares the same slug
   // keeps ownership of how it renders.
   return memberKinds?.[semanticType] ?? resolvePlatformNotificationKind(semanticType);

@@ -63,7 +63,7 @@ import {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
-import { ViewBridge, type HostContext, type ToolResult } from "./bridge.js";
+import { type HostContext, type ToolResult, ViewBridge } from "./bridge.js";
 
 export type ParamValue = string | number | boolean;
 export type Params = Record<string, ParamValue>;
@@ -72,10 +72,11 @@ export type Params = Record<string, ParamValue>;
  * What the view is rendering. `type` on a type page, `entity` (plus its
  * `type`) on a record page, `event` on an event's page, nothing on the Data hub.
  *
- * `event` is an `events.id` and, like the event's permalink, names its whole
- * supersede lineage. There is no event hook: read it with the same exact-id
- * read the event page renders, and render the current version, the row that
- * nothing superseded (the result is the lineage, oldest first):
+ * `event` is the resolved stored version supplied by the host. New actions
+ * reject a superseded version; reopening resolves the permalink again.
+ * There is no event hook: read it with the same exact-id read the event page
+ * renders. Select the supplied version from the returned lineage so the
+ * displayed content and action subject stay aligned:
  *
  * ```tsx
  * export const view = defineView({
@@ -85,12 +86,12 @@ export type Params = Record<string, ParamValue>;
  *
  * export default function DealWon() {
  *   const { event } = useScope();
- *   const read = useQuery<{ content: Array<{ superseded_by?: number | null;
+ *   const read = useQuery<{ content: Array<{ id: number;
  *     title: string | null; metadata: Record<string, unknown> }> }>(
  *     event === undefined ? null : tool("read_knowledge", { content_ids: [event] })
  *   );
- *   const current = read.data?.content.find((row) => row.superseded_by == null);
- *   return <h1>{current?.title}</h1>;
+ *   const subject = read.data?.content.find((row) => row.id === event);
+ *   return <h1>{subject?.title}</h1>;
  * }
  * ```
  */
@@ -116,8 +117,8 @@ export interface ParamDef {
  * Collection `when` equalities must all be present in scope.collection.filters;
  * they control discoverability, never authorization. Omitted surface preserves
  * legacy collection and record matching. An event
- * attachment `{ event_kind, type }` matches events of that kind linked to at
- * least one entity of `type`, renders on the event's page, and takes none.
+ * attachment `{ event_kind, type? }` matches that kind, optionally qualified by
+ * a linked entity type. It renders on the event page without a placement.
  */
 export type Attachment = ViewAttachment;
 
@@ -452,10 +453,12 @@ export interface ActionResult {
   ok: boolean;
   error: string | null;
   result: unknown;
+  /** Retry the same submission after a failed acknowledgement. A new call to
+   * useAction's function is a new intent, even when its value is identical. */
+  retry: (() => Promise<ActionResult>) | null;
 }
 
-/** Mint the per-click interaction id the action tool requires (browser retry
- *  id on web): a UUID where available, else a time + random fallback. */
+/** Mint one id for a deliberate submission, retained by its retry closure. */
 export function mintInteractionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -463,9 +466,8 @@ export function mintInteractionId(): string {
   return `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
 }
 
-/** A declared action → `invoke_view_action { view, action, value }`. The name
- *  must exist on the CURRENT view definition; a removed button throws here
- *  instead of emitting a stale event. */
+/** Submit a declared action. Failed acknowledgements expose an explicit retry
+ * that keeps the original value, event subject and interaction id. */
 export function useAction(
   name: string
 ): (value?: Record<string, unknown>) => Promise<ActionResult> {
@@ -475,28 +477,57 @@ export function useAction(
   }
   return useCallback(
     async (value: Record<string, unknown> = {}) => {
-      try {
-        // The tool requires an interaction id (browser retry id on web):
-        // mint one per click so retries stay idempotent.
-        const result = await rt.callTool("invoke_view_action", {
-          view: rt.def.key,
-          action: name,
-          value,
-          interaction_id: mintInteractionId(),
-        });
-        const err = resultError(result);
-        return {
-          ok: !err,
-          error: err,
-          result: result.structuredContent ?? null,
-        };
-      } catch (e) {
+      if (!rt.ready) {
         return {
           ok: false,
-          error: e instanceof Error ? e.message : String(e),
+          error: "The host has not supplied the view subject.",
           result: null,
+          retry: null,
         };
       }
+      let args: Record<string, unknown>;
+      try {
+        // Snapshot JSON before the first send; edits to a form after a failure
+        // must not change the meaning of an already accepted submission.
+        args = JSON.parse(
+          JSON.stringify({
+            view: rt.def.key,
+            action: name,
+            value,
+            ...(rt.scope.event === undefined
+              ? {}
+              : { scope: { event: rt.scope.event } }),
+            interaction_id: mintInteractionId(),
+          })
+        );
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+          result: null,
+          retry: null,
+        };
+      }
+      const submit = async (): Promise<ActionResult> => {
+        try {
+          const result = await rt.callTool("invoke_view_action", args);
+          const error = resultError(result);
+          return {
+            ok: !error,
+            error,
+            result: result.structuredContent ?? null,
+            retry: error ? submit : null,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+            result: null,
+            retry: submit,
+          };
+        }
+      };
+      return submit();
     },
     [rt, name]
   );
@@ -603,6 +634,16 @@ export function Provider({
       setParamsState(coerceParams(def, input.params));
       setReady(true);
     });
+    // MCP hosts initially send the permalink arguments. The opening result
+    // supplies the exact readable version, including after a supersession.
+    const offResult = b.onToolResult((result) => {
+      const resolved = result.structuredContent as
+        | { view?: unknown; scope?: unknown }
+        | undefined;
+      if (resolved?.view === def.key && resolved.scope) {
+        setScope(coerceScope(resolved.scope));
+      }
+    });
     const offCtx = b.onHostContext((ctx) => {
       const next = themeFromContext(ctx);
       setTheme(next);
@@ -621,6 +662,7 @@ export function Provider({
       .catch((e) => console.error("[lobu-views] connect failed", e));
     return () => {
       offInput();
+      offResult();
       offCtx();
       offData();
     };
@@ -678,7 +720,13 @@ export function Provider({
       callTool,
     ]
   );
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  // A host-resolved replacement is a new form, including in MCP hosts that
+  // keep the iframe mounted while delivering the opening result.
+  return (
+    <Ctx.Provider key={scope.event ?? "unbound"} value={value}>
+      {children}
+    </Ctx.Provider>
+  );
 }
 
 export interface MountOptions {

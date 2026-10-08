@@ -24,6 +24,8 @@ import {
 } from '@lobu/core/contracts/tools/manage-views';
 import type { Static } from '@sinclair/typebox';
 import { emit } from '../../events/emitter';
+import { getDb, pgTextArray } from '../../db/client';
+import { isEventAttachment } from '@lobu/core/contracts/tools/view-attach';
 import { ToolUserError } from '../../utils/errors';
 import {
   refreshMemberEventKinds,
@@ -115,9 +117,9 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
           400
         );
       }
-      if (typeof entry.type !== 'string' || entry.type.trim() === '') {
+      if (entry.type !== undefined && (typeof entry.type !== 'string' || entry.type.trim() === '')) {
         throw new ToolUserError(
-          'An event_kind attach entry needs the entity type its events link to',
+          'An event_kind type qualifier must be a non-empty entity type',
           400
         );
       }
@@ -130,7 +132,7 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
     ].filter(Boolean).length;
     if (keys !== 1) {
       throw new ToolUserError(
-        'Each attach entry needs exactly one of type, entity, workspace or event_kind (with its type)',
+        'Each attach entry needs exactly one of type, entity, workspace or event_kind (with an optional type qualifier)',
         400
       );
     }
@@ -186,29 +188,39 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
 }
 
 /**
- * Every declared action must emit a kind the org registry accepts, checked
- * with the resolver the click runs (`invokeViewAction`: org-wide, no entity
- * context). Otherwise a view saves cleanly and every button returns 422 for
- * whoever clicks it. The click keeps its own check, which still catches a
- * kind the registry dropped after the save.
+ * A view's actions must be valid in every scope it can mount. Entity-qualified
+ * event views inherit that entity's registry; unbound or kind-only attachments
+ * still need a workspace kind. Invocation validates the actual source again.
  */
 async function assertActionKindsRegistered(
   organizationId: string,
-  actions: Record<string, { emits: string }>
+  actions: Record<string, { emits: string }>,
+  attach: SetViewInput['attach'],
 ): Promise<void> {
-  const entries = Object.entries(actions);
-  if (entries.length === 0) return;
-  // The kind may have been registered moments ago or on another replica, so
-  // validate against the committed registry, not this pod's cached copy.
+  if (Object.keys(actions).length === 0) return;
   await refreshMemberEventKinds(organizationId);
-  for (const [name, decl] of entries) {
-    const result = await validateSaveContentSemanticType(decl.emits, null, organizationId, []);
-    if (!result.valid) {
-      throw new ToolUserError(
-        `Action '${name}' emits '${decl.emits}', which this organization does not register. Declare it in the $member event_kinds first.\n${result.errors.join('\n')}`,
-        422
-      );
-    }
+  const qualifiedTypes = attach.length > 0 &&
+    attach.every((entry) => isEventAttachment(entry) && entry.type)
+      ? [...new Set(attach.flatMap((entry) =>
+          isEventAttachment(entry) && entry.type ? [entry.type] : []))]
+      : [];
+  const registries = qualifiedTypes.length === 0 ? [] : await getDb()<{
+    slug: string; event_kinds: Record<string, unknown> | null;
+  }>`
+    SELECT slug, event_kinds FROM entity_types
+    WHERE organization_id = ${organizationId}
+      AND slug = ANY(${pgTextArray(qualifiedTypes)}::text[])
+      AND deleted_at IS NULL
+  `;
+  for (const [name, decl] of Object.entries(actions)) {
+    const global = await validateSaveContentSemanticType(decl.emits, null, organizationId, []);
+    if (global.valid) continue;
+    if (qualifiedTypes.length > 0 && registries.length === qualifiedTypes.length &&
+      registries.every((row) => row.event_kinds && Object.hasOwn(row.event_kinds, decl.emits))) continue;
+    throw new ToolUserError(
+      `Action '${name}' emits '${decl.emits}', which is not registered for every attached scope. Declare it on the qualified entity types or in $member event_kinds.\n${global.errors.join('\n')}`,
+      422,
+    );
   }
 }
 
@@ -230,7 +242,7 @@ async function handleSet(
   const attach = (args.attach ?? []) as SetViewInput['attach'];
   const params = (args.params ?? {}) as SetViewInput['params'];
   const actions = (args.actions ?? {}) as SetViewInput['actions'];
-  await assertActionKindsRegistered(ctx.organizationId, actions);
+  await assertActionKindsRegistered(ctx.organizationId, actions, attach);
   // Resolve the executable artifact BEFORE the identity: a supplied bundle is
   // validated (non-empty, under the cap) and source-only input is compiled,
   // so the no-op comparison below sees the same bytes `setView` would store.
