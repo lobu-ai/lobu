@@ -691,6 +691,12 @@ async function getContentImpl(
         semantic_type: args.semantic_type,
         entity_types: args.entity_types,
         interaction_status: args.interaction_status,
+        // Keep the default non-owner/admin feed focused on content. This is
+        // a discovery filter, not an access boundary: explicit semantic_type
+        // reads still include the operational trail.
+        ...(!args.semantic_type && excludeWorkspaceAudit && {
+          exclude_internal_ops: true,
+        }),
         // Workspace-identity audit events carry member emails / invitation
         // details; anonymous public-workspace readers must never retrieve them.
         ...(excludeWorkspaceAudit && {

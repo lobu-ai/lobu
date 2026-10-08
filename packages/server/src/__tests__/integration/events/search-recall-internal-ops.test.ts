@@ -17,8 +17,8 @@
  * matched by the shape their writers persist, never by `metadata.category`
  * alone — `category` is caller-written through save_memory, so a member's note
  * tagged `category: 'config'` stays recallable. Explicit semantic_type filters
- * override the exclusion; get_content / query_sql / dashboards are unaffected
- * because they never set the flag.
+ * override the exclusion. get_content also sets the flag for non-owner/admin
+ * default list/search reads; query_sql / dashboards never consult it.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';

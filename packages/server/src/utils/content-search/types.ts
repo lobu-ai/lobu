@@ -41,20 +41,11 @@ export interface ContentSearchOptions {
    */
   exclude_workspace_audit?: boolean;
   /**
-   * Recall-only (`search_memory`): hide internal operational rows -
-   * tool-invocation audit events and config/lifecycle state-change rows, each
-   * matched by the exact shape its writer persists (see
-   * `INTERNAL_OPS_EXCLUSION_SQL`). These carry no body text and no embedding,
-   * so recall can only title-match them into noise: an unrelated query
-   * surfaces "query_sql completed", and one Automation create shows up twice
-   * (the lifecycle and config audit streams write single- vs double-quoted
-   * titles). Honoured on BOTH retrieval paths - the ranked search path and the
-   * list path recall falls back to for a query under three characters with no
-   * embedding. Explicit reads are unaffected: get_content and any caller
-   * passing an explicit semantic_type filter keep seeing these rows, and
-   * query_sql / dashboard / feed paths never consult this flag.
-   * Workspace-identity audit rows stay governed by the role-scoped
-   * exclude_workspace_audit instead.
+   * Hide tool-invocation audit and config/lifecycle change rows (see
+   * INTERNAL_OPS_EXCLUSION_SQL). Used by recall and default non-owner/admin
+   * get_content list/search reads. Explicit semantic_type filters override
+   * this discovery filter; it is not an access boundary. Workspace-identity
+   * audit rows remain governed by exclude_workspace_audit.
    */
   exclude_internal_ops?: boolean;
   run_id?: number; // Filter by Automation run ID
