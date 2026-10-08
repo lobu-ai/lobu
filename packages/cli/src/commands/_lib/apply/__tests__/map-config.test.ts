@@ -852,6 +852,26 @@ describe("mapProjectToDesiredState", () => {
     });
   });
 
+  test("preserves key on event outputs so keyed state supersedes", () => {
+    const crm = defineAgent({ id: "crm" });
+    const automation = defineAutomation({
+      agent: crm,
+      slug: "voice",
+      skills: ["s"],
+      outputs: {
+        profiles: { event: "voice_profile", key: ["channel", "mode"] },
+        notes: { event: "observation" },
+      },
+    });
+    const dw = mapProjectToDesiredState(
+      defineConfig({ agents: [crm], automations: [automation] })
+    ).automations[0];
+    expect(dw?.outputs).toEqual({
+      profiles: { event: "voice_profile", key: ["channel", "mode"] },
+      notes: { event: "observation" },
+    });
+  });
+
   test("rejects declared outputs on conversational turn triggers", () => {
     const crm = defineAgent({ id: "crm" });
     const automation = defineAutomation({

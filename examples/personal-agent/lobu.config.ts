@@ -1286,43 +1286,6 @@ const sameAs = defineRelationshipType({
     "Maps a private person profile to its canonical public identity. The mapping and private profile remain visible only to this workspace.",
 });
 
-const voiceProfile = defineEntityType({
-  key: "voice-profile",
-  name: "Voice profile",
-  description:
-    "How the member sounds (mode=voice) or what they engage with (mode=taste) on one channel. Human analogue of agent identity/soul.",
-  metadata: { icon: "🎙️", color: "#F59E0B" },
-  properties: {
-    mode: field("Mode", { enum: ["voice", "taste"], optional: true }),
-    channel: field("Channel", {
-      enum: ["core", "x", "linkedin", "reddit", "instagram"],
-      optional: true,
-    }),
-    summary: Type.Optional(Type.Unsafe({ type: "string" })),
-    themes: Type.Optional(
-      Type.Unsafe({ type: "array", items: { type: "string" } })
-    ),
-    prefers: Type.Optional(
-      Type.Unsafe({ type: "array", items: { type: "string" } })
-    ),
-    avoids: Type.Optional(
-      Type.Unsafe({ type: "array", items: { type: "string" } })
-    ),
-    confidence: field("Confidence", {
-      enum: ["low", "medium", "high"],
-      optional: true,
-    }),
-    evidence_count: Type.Optional(field(Type.Number(), "Evidence")),
-    evidence_from: Type.Optional(
-      Type.Unsafe({ type: "string", format: "date" })
-    ),
-    evidence_to: Type.Optional(Type.Unsafe({ type: "string", format: "date" })),
-    sample_event_ids: Type.Optional(
-      Type.Unsafe({ type: "array", items: { type: "number" } })
-    ),
-  },
-});
-
 // Historical social-signal entity rows still exist. Prune must retain their
 // type until an explicit data migration removes them.
 const socialSignal = defineEntityType({
@@ -1471,6 +1434,15 @@ const linkedInInterestProfile = defineAutomation({
       skip_if_unchanged: false,
     }),
   ],
+  // Declared keyed state: each run supersedes the current preference event
+  // carrying the same channel+mode. Replaces the former manual
+  // client.knowledge.save of a title-addressed note (no lineage) and the
+  // removed voice-profile entity type. `preference` is a default $member
+  // kind, so unlike a bespoke semantic type this needs no registry
+  // provisioning before apply.
+  outputs: {
+    profiles: { event: "preference", key: ["channel", "mode"] },
+  },
   sources: { none: "SELECT id FROM events WHERE false" },
   prompt: linkedInInterestProfilePrompt,
 });
@@ -1560,7 +1532,6 @@ export default defineConfig({
     trip,
     goal,
     learning,
-    voiceProfile,
     socialSignal,
   ],
   relationships: [
