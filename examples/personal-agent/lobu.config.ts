@@ -897,52 +897,6 @@ const connectedWith = defineRelationshipType({
     "Social connection observed on a platform (LinkedIn connection, mutual follow). Symmetric.",
 });
 
-// Historical social-signal entity rows still exist. Prune must retain their
-// type until an explicit data migration removes them.
-const socialSignal = defineEntityType({
-  key: "social-signal",
-  name: "Social Signal",
-  description:
-    "Deprecated historical entity rows from the former Social Interest Radar output path.",
-  metadata: { icon: "radar" },
-  properties: {
-    platform: {
-      type: "string",
-      enum: ["x", "linkedin"],
-      description: "Source platform",
-    },
-    author: {
-      type: "string",
-      minLength: 1,
-      description: 'Post author (never "unknown")',
-    },
-    snippet: Type.Optional(
-      Type.Unsafe({ type: "string", description: "Excerpt of the post" })
-    ),
-    why: {
-      type: "string",
-      minLength: 1,
-      description: "Why this matches taste — specific to this item",
-    },
-    priority: { type: "string", enum: ["high", "normal", "low"] },
-    source_origin_id: {
-      type: "string",
-      description: "Stable events.origin_id of the source post",
-    },
-    source_event_id: Type.Optional(
-      Type.Unsafe({
-        type: "integer",
-        description: "Originating event id (unstable across re-sync)",
-      })
-    ),
-    suggested_action: Type.Optional(
-      Type.Unsafe({ type: "string", description: "Concrete next step" })
-    ),
-  },
-  required: ["platform", "author", "why", "priority", "source_origin_id"],
-});
-
-// ── Automations (must be declared under prune or apply deletes them) ─
 
 const midasNetWorth = defineAutomation({
   agent: personalAgent,
@@ -1113,7 +1067,6 @@ export default defineConfig({
     trip,
     goal,
     learning,
-    socialSignal,
   ],
   relationships: [mentions, connectedWith],
   automations: [
