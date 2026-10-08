@@ -900,10 +900,8 @@ async function readMyLinkedInActivity(
 /**
  * Live home-feed read for virtual timelines: scrapes the same cards the
  * home_feed sync persists, but returns them without storing any events.
- * Unlike the sync path this skips short-URL resolution (no fetch in an
- * action context) and drops rows without a durable post URL instead of
- * failing the run — the flagger can only stage drafts for addressable
- * posts, so unaddressable rows are reported as skipped, not errors.
+ * Skips short-URL resolution and reports unaddressable posts as skipped:
+ * the flagger can only stage drafts for posts with a durable URL.
  */
 async function readHomeFeed(ctx: ActionContext): Promise<ActionResult> {
   const rawScrolls = Number(ctx.input.max_scrolls ?? 6);
@@ -934,6 +932,9 @@ async function readHomeFeed(ctx: ActionContext): Promise<ActionResult> {
     };
   }
   const items: Array<Record<string, unknown>> = [];
+  // Count only emitted events without a URL: unresolved scrape rows may
+  // never become events (dropped as noise), so counting rows would inflate
+  // the number. The flagger can only stage drafts for addressable posts.
   let skipped = 0;
   for (const event of buildHomeFeedEvents(rows, new Date())) {
     if (!event.source_url) {

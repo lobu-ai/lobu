@@ -288,18 +288,26 @@ describe("LinkedIn flag reaction", () => {
     expect(profile?.agentKind).toBe("claude-code");
     expect(flagger?.deviceWorkerId).toBe(profile?.deviceWorkerId);
     expect(profile?.prompt).toContain('"linkedin-buremba"');
-    // The flagger is virtual too: it reads the timeline live through
-    // read_home_feed, so its only source is intentionally empty and the
-    // prompt must drive the live read instead of a stored-posts source.
     expect(flagger?.sources).toEqual({
       none: "SELECT id FROM events WHERE false",
     });
     expect(flagger?.prompt).toContain('"read_home_feed"');
     expect(flagger?.prompt).toContain('"linkedin-buremba"');
-    // Its only source is intentionally empty, so a scheduled run must not be
-    // skipped as unchanged.
+    // Both read live, so an unchanged-source skip would prevent every run.
     expect(profile?.triggers).toEqual([
       expect.objectContaining({ kind: "schedule", skip_if_unchanged: false }),
     ]);
+    expect(flagger?.triggers).toEqual([
+      expect.objectContaining({ kind: "schedule", skip_if_unchanged: false }),
+    ]);
+  });
+
+  test("clears the legacy home-feed sync cadence when switching to live reads", () => {
+    const connection = config.connections?.find(
+      (candidate) => candidate.slug === "linkedin-buremba"
+    );
+    expect(
+      connection?.feeds?.find((feed) => feed.feed === "home_feed")
+    ).toMatchObject({ schedule: null });
   });
 });

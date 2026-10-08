@@ -33,9 +33,6 @@ describe("consolidated net-worth configuration", () => {
   });
 
   test("keeps the weekly snapshot in events, not a derived entity", () => {
-    // The Monday reaction persists one immutable summary event per week
-    // (schema net-worth-snapshot/v4); nothing reads a net-worth-snapshot
-    // entity — the reaction, evals and UI query the events directly.
     expect(
       config.entities?.some((entity) => entity.key === "net-worth-snapshot")
     ).toBe(false);

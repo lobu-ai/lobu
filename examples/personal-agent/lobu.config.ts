@@ -868,31 +868,18 @@ const instagramTakeoutConnection = defineConnection({
   ],
 });
 
-// One consolidated LinkedIn connection spanning BOTH sources: the local Data
-// Export CSV feeds AND the live Chrome-extension feeds. Because it's a single
-// connection on connector "linkedin", people met live and people in the CSV
-// export dedup on the shared linkedin_slug/email identity. The stable slug is
-// the config identity; runtime database ids are deliberately not hard-coded.
-//
-// The live home_feed reads linkedin.com/feed/ through the paired Owletto Chrome
-// extension and needs no company_url. The company_updates/jobs live feeds each
-// require a company_url, so add them per-company when tracking a specific page
-// (e.g. { feed: "company_updates", config: { company_url: "https://www.linkedin.com/company/openai" } }).
 const xConnection = defineConnection({
   slug: "x-twitter-bu7emba",
   connector: "x",
   name: "X",
-  // Adopted live from prod (person X traits and the old voice rows feed off
-  // connector_key 'x'). Slug, cadence and device pin are prod truth;
-  // renaming would reset sync state. Feed schedules are intentionally
-  // undeclared so apply leaves the remote cadence (Europe/London) alone —
-  // only an explicit null would clear one.
+  // Keep the adopted connection's identity, remote feed settings and cadence.
+  // Declaring config: {} would replace existing per-feed browser settings.
   deviceWorkerId: "706aa825-5f82-4ce2-80d1-c09cd7908001",
   feeds: [
-    { feed: "bookmarks", config: {} },
-    { feed: "my_tweets", config: {} },
-    { feed: "home_feed", config: {} },
-    { feed: "liked_tweets", config: {} },
+    { feed: "bookmarks" },
+    { feed: "my_tweets" },
+    { feed: "home_feed" },
+    { feed: "liked_tweets" },
   ],
 });
 
@@ -900,12 +887,12 @@ const linkedinConnection = defineConnection({
   slug: "linkedin-buremba",
   connector: "linkedin",
   name: "LinkedIn",
-  // Scrape affinity: the live paired Chrome that prod actually scrapes on.
+  // Scrape affinity for live reads through the paired Chrome extension.
   deviceWorkerId: "706aa825-5f82-4ce2-80d1-c09cd7908001",
-  // No synced timeline: the flagger reads linkedin.com/feed/ live each run
-  // through the read_home_feed action, so no stored post rows are needed.
-  // The paired Chrome below is still the scrape affinity for live reads.
   feeds: [
+    // Apply never prunes feeds. Clear the old schedule explicitly so live
+    // reads do not leave the previous periodic ingestion running.
+    { feed: "home_feed", schedule: null },
     // Local Data Export (CSV) feeds.
     ...(linkedinTakeoutDir
       ? [
@@ -928,7 +915,7 @@ const hackerNewsConnection = defineConnection({
   slug: "hackernews-buremba",
   connector: "hackernews",
   name: "Hacker News",
-  // No device pin: the Algolia sync needs no browser (prod runs unpinned).
+  // No device pin: the Algolia sync needs no browser.
   // prepare_comment staging would resolve a Chrome at call time.
   feeds: [{ feed: "front_page", schedule: "0 */3 * * *", config: {} }],
 });
@@ -944,13 +931,9 @@ const spotifyConnection = defineConnection({
   slug: "spotify-buremba",
   connector: "spotify",
   name: "Spotify",
-  // App credentials resolve org-first: this profile's auth_data, then host
-  // env (SPOTIFY_CLIENT_ID/SECRET). Fill the profile after apply; OAuth
-  // itself completes in the UI against the hosted callback.
+  // Fill the app profile after apply, then complete OAuth in the UI against
+  // the hosted callback. Feed schedules remain managed in the UI.
   appAuthProfile: spotifyAppAuth,
-  // OAuth lives in the Spotify app grant (SPOTIFY_CLIENT_ID/SECRET +
-  // dashboard redirect URI); nothing device-pinned here. Complete the
-  // grant in the UI, then each feed syncs on its own cadence.
   feeds: [
     { feed: "saved_tracks", config: {} },
     { feed: "playlists", config: {} },
@@ -1157,10 +1140,13 @@ const linkedInFeedFlagger = defineAutomation({
   slug: "linkedin-feed-flagger",
   name: "LinkedIn feed flagger",
   ...linkedInAssistantDevice,
-  // Runs on its own clock: the timeline is read live each run through the
-  // read_home_feed action, not from synced rows, so there is no sync to
-  // follow. A run while the paired browser is offline completes empty.
-  triggers: [every("30 */3 * * *", { timezone: "Europe/London" })],
+  // Live reads must run even though their declared source is always empty.
+  triggers: [
+    every("30 */3 * * *", {
+      timezone: "Europe/London",
+      skip_if_unchanged: false,
+    }),
+  ],
   sources: { none: "SELECT id FROM events WHERE false" },
   prompt: linkedInFeedFlaggerPrompt,
   reaction: reactionFromFile<typeof LinkedInFlagReaction>(
