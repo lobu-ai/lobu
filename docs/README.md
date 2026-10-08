@@ -13,6 +13,10 @@ docs below for shipped semantics.
 
 ## Active design
 
+- **`design/chatgpt-mcp-events.md`** — proposed ChatGPT Events adapter over
+  existing event, Automation, and delivery infrastructure; verified boundaries,
+  implementation slices, and acceptance criteria (not a shipped contract).
+
 - **`design/access-resources.md`** — consolidation of Lobu's shipped
   connector-resource ACL foundation into one visibility-envelope model for
   generic entities, ERP data, actions, agents, and derived outputs.
