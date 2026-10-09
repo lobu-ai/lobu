@@ -5,7 +5,10 @@ import { notify } from "../../../packages/server/src/tools/admin/notify";
 import { getArgsValidator } from "../../../packages/server/src/tools/validate-args";
 import reaction, { input } from "../product-activity-digest.reaction";
 
-function harness(digests: Array<{ content: string }>, previous: string[] = []) {
+function harness(
+  digests: Array<{ content: string; title?: string }>,
+  previous: string[] = []
+) {
   const validateSend = getArgsValidator(notify)!;
   const send = mock(async (args: unknown) => {
     validateSend({ action: "send", ...(args as object) });
@@ -75,6 +78,12 @@ describe("production digest delivery", () => {
         await harness([{ content }]).run();
       }
     }
+  });
+
+  test("accepted Unicode titles pass the real notification validator", async () => {
+    const digest = { title: "😀".repeat(160), content: "A meaningful update." };
+    expect(new Ajv().compile(input)({ digests: [digest] })).toBe(true);
+    await harness([digest]).run();
   });
 
   test("bounds legacy bodies and deduplicates the actual delivered text", async () => {

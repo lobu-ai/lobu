@@ -49,7 +49,9 @@ export default async (
   `)) as Array<{ payload_text?: string | null }>;
   if (previous.some((row) => row.payload_text?.trim() === body.trim())) return;
   await client.notifications.send({
-    title: digest.title || "Lobu production",
+    title: (digest.title || "Lobu production")
+      .slice(0, 160)
+      .replace(/[\uD800-\uDBFF]$/, ""),
     body,
     recipients: "admins",
     idempotency_key: `product-activity-digest:run:${ctx.window.run_id}`,
