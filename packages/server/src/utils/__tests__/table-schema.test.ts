@@ -306,6 +306,11 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
       'scheduler_client_id',
       'next_window_start',
       'last_completed_window_start',
+      // Product evals are retired. Keep physical columns through release N
+      // while old replicas still project them; drop them in release N+1.
+      'latest_eval_score',
+      'latest_eval_at',
+      'latest_eval_run_id',
     ]),
     user: new Set(['email', 'phoneNumber', 'phoneNumberVerified']),
   };
