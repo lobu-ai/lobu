@@ -18,9 +18,7 @@ import {
 } from "@lobu/cli/config";
 import { duplicateCandidateQuery } from "./duplicate-report.reaction.ts";
 import type DuplicateReportReaction from "./duplicate-report.reaction.ts";
-import type GoogleTakeoutConnector from "./google-takeout.connector.ts";
 import type HackerNewsConnector from "./hackernews.connector.ts";
-import type InstagramTakeoutConnector from "./instagram-takeout.connector.ts";
 import type LinkedInConnector from "./linkedin.connector.ts";
 import type LinkedInFlagReaction from "./linkedin-flag.reaction.ts";
 import {
@@ -35,7 +33,6 @@ import { takeoutConfig } from "./takeout-dirs.ts";
 import { taskBuilderPrompt } from "./task-builder.prompt.ts";
 import type TaskBuilderReaction from "./task-builder.reaction.ts";
 import type TaskRules from "./task.rules.ts";
-import type TwitterTakeoutConnector from "./twitter-takeout.connector.ts";
 
 const hourlyTaskCollaboratorSkill = defineSkill({
   name: "hourly-task-collaborator",
@@ -1255,15 +1252,11 @@ export default defineConfig({
     connectorFromFile<typeof LinkedInConnector>("./linkedin.connector.ts"),
     connectorFromFile<typeof HackerNewsConnector>("./hackernews.connector.ts"),
     connectorFromFile<typeof SpotifyConnector>("./spotify.connector.ts"),
-    connectorFromFile<typeof GoogleTakeoutConnector>(
-      "./google-takeout.connector.ts"
-    ),
-    connectorFromFile<typeof TwitterTakeoutConnector>(
-      "./twitter-takeout.connector.ts"
-    ),
-    connectorFromFile<typeof InstagramTakeoutConnector>(
-      "./instagram-takeout.connector.ts"
-    ),
+    // Takeout connectors intentionally NOT installed: they read machine-local
+    // archive directories, which a V8 isolate can never do (no filesystem),
+    // so their bundles fail isolate eligibility. The .connector.ts files and
+    // the paused prod connections stay; live connections exempt their
+    // installed definitions from prune, so nothing is uninstalled.
   ],
   org: "buremba",
   orgName: "Buremba Org",
