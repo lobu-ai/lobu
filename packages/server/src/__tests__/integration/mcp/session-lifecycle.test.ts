@@ -1,3 +1,6 @@
+import { setImmediate as nextTurn } from 'node:timers/promises';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -427,9 +430,13 @@ describe('MCP active transport lifetime', () => {
 
   it('real SDK client cancellations preserve the GET heartbeat and a concurrent active request', async () => {
     const sent: Request[] = [];
+    // A real HTTP adapter owns inbound Requests until its sockets close.
+    // Undici's abort propagation holds their controllers weakly.
+    const inFlightRequests: Request[] = [];
     const transport = new StreamableHTTPClientTransport(new URL(url), {
       fetch: async (input, options) => {
         const req = new Request(input, options);
+        inFlightRequests.push(req);
         if (req.method === 'POST' && (await req.clone().json()).method === 'ping') sent.push(req);
         return app.fetch(req, env);
       },
@@ -489,8 +496,16 @@ describe('MCP active transport lifetime', () => {
     } finally {
       release.resolve();
       siblingRelease.resolve();
+      setFlagsFromString('--expose-gc');
+      const collect = runInNewContext('gc') as () => void;
+      setFlagsFromString('--no-expose-gc');
+      for (let n = 0; n < 8; n++) {
+        await nextTurn();
+        collect();
+      }
       await client.close();
       await vi.waitFor(() => { expect(vi.getTimerCount()).toBe(0); });
+      expect(inFlightRequests.some(req => req.method === 'GET')).toBe(true);
     }
   });
 
