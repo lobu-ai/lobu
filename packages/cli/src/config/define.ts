@@ -10,7 +10,6 @@
  * config and references.
  */
 
-import type { EntityResolutionRule } from "@lobu/core/contracts/tools/manage-entity-schema";
 import type {
   AutomationEventTrigger,
   AutomationScheduleTrigger,
@@ -227,7 +226,11 @@ export interface EntityType {
    * has no matching rules. Association preserves each record and its ID.
    */
   resolutionPolicy?: {
-    rules: EntityResolutionRule[];
+    rules: Array<{
+      fields: string[];
+      normalizer: "email" | "phone" | "exact";
+      onMatch: "auto_link" | "review";
+    }>;
   };
   metadata?: Record<string, unknown>;
   /**

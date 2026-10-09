@@ -29,6 +29,7 @@ DO $$ BEGIN
     RAISE EXCEPTION 'Expected enabled identity edge guard before normalizing history';
   END IF;
 END $$;
+-- squawk-ignore prefer-robust-stmts -- dbmate wraps this migration in one transaction; rollback restores the trigger
 ALTER TABLE public.entity_relationships DISABLE TRIGGER lobu_guard_identity_edges;
 UPDATE public.entity_relationships
 SET metadata = jsonb_set(metadata, '{_lobu_identity_decision}', pg_temp.normalize_identity_decision(
@@ -36,6 +37,7 @@ SET metadata = jsonb_set(metadata, '{_lobu_identity_decision}', pg_temp.normaliz
 WHERE metadata ? '_lobu_identity_decision'
   AND metadata->'_lobu_identity_decision' IS DISTINCT FROM pg_temp.normalize_identity_decision(
     metadata->'_lobu_identity_decision', format('[%s,%s]', LEAST(from_entity_id, to_entity_id), GREATEST(from_entity_id, to_entity_id)));
+-- squawk-ignore prefer-robust-stmts -- restore the guard within the same dbmate transaction before commit
 ALTER TABLE public.entity_relationships ENABLE TRIGGER lobu_guard_identity_edges;
 
 -- Old pending proposals remain stale: do not invent evidence fingerprints or
