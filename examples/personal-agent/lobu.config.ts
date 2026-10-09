@@ -791,10 +791,9 @@ const takeoutConnection = defineConnection({
       feed: "keep",
       config: takeoutConfig("GOOGLE_KEEP_TAKEOUT_DIR", "google-keep"),
     },
-    {
-      feed: "maps",
-      config: takeoutConfig("GOOGLE_MAPS_TAKEOUT_DIR", "google-maps"),
-    },
+    // No maps feed: the installed google.takeout definition only knows
+    // keep + youtube, and takeout connectors can't be reinstalled (isolate
+    // lane rejects node:fs). Maps history stays in the archive.
   ],
 });
 
