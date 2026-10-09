@@ -14,8 +14,12 @@
  * the model here is: a sandbox per worktree, but only the ones you are
  * actively using are started. `up` enforces the cap before it starts one.
  *
- *   bun scripts/sandbox.ts up     create-or-start, sync, install, boot, print URL
- *   bun scripts/sandbox.ts sync   re-upload the tree without restarting the app
+ *   bun scripts/sandbox.ts up     create-or-start, sync, install, boot, print URL.
+ *                                 Incremental by default (see below);
+ *                                 FRESH=1 forces a full sync, install, and boot.
+ *   bun scripts/sandbox.ts sync   re-upload the tree without restarting the app.
+ *                                 Health-checks the preview and reboots only if
+ *                                 it is down.
  *   bun scripts/sandbox.ts url    print the preview URL
  *   bun scripts/sandbox.ts stop   stop it (frees quota; disk and DB survive)
  *   bun scripts/sandbox.ts rm     delete it permanently; `rm <name>` targets
@@ -23,12 +27,22 @@
  *                                 to reclaim one whose worktree is already gone
  *   bun scripts/sandbox.ts ls     every lobu sandbox + quota headroom, with the
  *                                 ones that outlived their worktree flagged
+ *
+ * Incremental sync: `up`/`sync` upload only files changed since the last
+ * successful sync (recorded per sandbox in the OS temp dir), skip
+ * `bun install` when lockfiles are unchanged, and skip the reboot when only
+ * `packages/owletto/` changed — Vite HMR absorbs frontend changes, and a
+ * preview health check confirms availability. `up` reboots for other changes;
+ * `sync` leaves a healthy app running and records any pending reboot/install
+ * for the next `up`. FRESH=1 forces a full sync, install, and boot.
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
+  readlinkSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -186,60 +200,547 @@ function gitFiles(root: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Incremental sync state, recorded per sandbox in the OS temp dir (never in
+ * the repo: it is machine-local bookkeeping). Missing state — a first sync,
+ * a cleared /tmp, or FRESH=1 — means the full path.
+ */
+interface SyncState {
+  lobuHead: string | null;
+  owlettoHead: string | null;
+  lockHash: string | null;
+  envHash?: string;
+  pendingBoot?: boolean;
+  /** Content hashes of files uploaded by the last sync, remote-tree paths. */
+  files?: Record<string, string>;
+}
+
+export function syncStatePath(name: string, dir = tmpdir()): string {
+  return join(dir, `lobu-sandbox-sync-${name}.json`);
+}
+
+export function readSyncState(path: string): SyncState | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<SyncState>;
+    if (typeof raw !== "object" || raw === null) return null;
+    const files = raw.files;
+    return {
+      lobuHead: typeof raw.lobuHead === "string" ? raw.lobuHead : null,
+      owlettoHead: typeof raw.owlettoHead === "string" ? raw.owlettoHead : null,
+      lockHash: typeof raw.lockHash === "string" ? raw.lockHash : null,
+      ...(typeof raw.envHash === "string" ? { envHash: raw.envHash } : {}),
+      ...(raw.pendingBoot === true ? { pendingBoot: true } : {}),
+      files:
+        files && typeof files === "object"
+          ? Object.fromEntries(
+              Object.entries(files).filter(
+                (entry): entry is [string, string] =>
+                  typeof entry[0] === "string" && typeof entry[1] === "string"
+              )
+            )
+          : {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function writeSyncState(path: string, state: SyncState): void {
+  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+function gitHead(cwd: string): string | null {
+  try {
+    return sh("git", ["rev-parse", "HEAD"], cwd).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Git's -z format puts the destination first, then the rename/copy source. */
+export function parsePorcelainZ(output: string): string[] {
+  const chunks = output.split("\0");
+  const paths: string[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const match = chunks[i].match(/^(.{2}) (.*)$/s);
+    if (!match) continue;
+    paths.push(match[2]);
+    if (/[RC]/.test(match[1])) i++;
+  }
+  return paths;
+}
+
+function statusNames(cwd: string): string[] {
+  try {
+    return parsePorcelainZ(
+      sh("git", ["status", "--porcelain", "-z", "-uall"], cwd)
+    );
+  } catch {
+    return [];
+  }
+}
+
+function diffNames(cwd: string, oldHead: string | null): string[] | null {
+  if (!oldHead) return null;
+  try {
+    return sh(
+      "git",
+      [
+        "diff-tree",
+        "-r",
+        "--name-only",
+        "--no-commit-id",
+        "-z",
+        oldHead,
+        "HEAD",
+        "--",
+        ".",
+      ],
+      cwd
+    )
+      .split("\0")
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+interface TreeChanges {
+  /** Syncable paths, prefixed for the remote tree (submodule filtered out). */
+  files: string[];
+  /** `.env` changed: never uploaded via the tree, but needs a reboot. */
+  envChanged: boolean;
+}
+
+/** Staged gitlink SHA for the submodule path, or null when absent. */
+export function parseLsFilesS(output: string): string | null {
+  const match = output.match(/^160000 ([0-9a-f]{40}) 0\t/m);
+  return match ? match[1] : null;
+}
+
+function subPointer(root: string): string | null {
+  try {
+    return parseLsFilesS(
+      sh("git", ["ls-files", "-s", "packages/owletto"], root)
+    );
+  } catch {
+    return null;
+  }
+}
+
+function isAncestor(cwd: string, maybeAncestor: string, head: string): boolean {
+  try {
+    return (
+      spawnSync("git", ["merge-base", "--is-ancestor", maybeAncestor, head], {
+        cwd,
+        encoding: "utf8",
+      }).status === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function currentHeads(
+  root: string,
+  sub: string
+): { lobuHead: string | null; owlettoHead: string | null } {
+  return { lobuHead: gitHead(root), owlettoHead: gitHead(sub) };
+}
+
+/**
+ * Changed paths since the recorded heads, prefixed for the remote tree
+ * (`packages/owletto/...` for the submodule). Null when the range cannot be
+ * computed — the caller takes the full path instead of guessing. Null too
+ * when the parent index names submodule content the checkout does not
+ * contain: the recorded range would otherwise miss it. A pointer merely
+ * behind the checkout (unpushed work, an unbumped pointer) is fully covered
+ * by old..HEAD and stays incremental.
+ */
+export function changedSince(
+  root: string,
+  sub: string,
+  prev: { lobuHead: string | null; owlettoHead: string | null }
+): TreeChanges | null {
+  const pointer = subPointer(root);
+  const subHead = gitHead(sub);
+  // A pointer the checkout does not contain names content the recorded range
+  // would miss — but a pointer behind the checkout (unpushed submodule work,
+  // an unbumped pointer) is fully covered by old..HEAD. Only the former
+  // forces the full path.
+  if (
+    pointer &&
+    subHead &&
+    pointer !== subHead &&
+    !isAncestor(sub, pointer, subHead)
+  ) {
+    return null;
+  }
+  const parentDiff = diffNames(root, prev.lobuHead);
+  if (parentDiff === null) return null;
+  // A checkout without the submodule (minimal fixtures) has no range to
+  // compare and no status to read — both come back empty, never null.
+  const hasSubmodule = existsSync(join(sub, ".git"));
+  const subDiff = hasSubmodule ? diffNames(sub, prev.owlettoHead) : [];
+  if (subDiff === null) return null;
+  const parentStatus = statusNames(root);
+  const subStatus = statusNames(sub);
+  const envChanged =
+    parentDiff.includes(".env") ||
+    parentStatus.includes(".env") ||
+    subStatus.includes(".env");
+  const seen = new Set<string>();
+  const files: string[] = [];
+  const push = (path: string) => {
+    if (!seen.has(path)) {
+      seen.add(path);
+      files.push(path);
+    }
+  };
+  for (const path of [...parentDiff, ...parentStatus]) {
+    if (
+      path === "packages/owletto" ||
+      path.startsWith("packages/owletto/") ||
+      path === ".gitmodules" ||
+      path === ".env" ||
+      path === ".env.local" ||
+      isAppleDouble(path)
+    ) {
+      continue;
+    }
+    push(path);
+  }
+  for (const path of [...subDiff, ...subStatus]) {
+    if (path === ".env" || path === ".env.local" || isAppleDouble(path)) {
+      continue;
+    }
+    push(`packages/owletto/${path}`);
+  }
+  return { files, envChanged };
+}
+
+type SyncScope = "none" | "frontend" | "full";
+
+/**
+ * Pure scope decision over already-filtered change lists. `.env` travels
+ * separately (sanitized upload) but still needs a reboot to apply, so it
+ * forces the full path without ever entering an upload list.
+ */
+export function syncScope(
+  parentChanged: string[],
+  owlettoChanged: string[],
+  envChanged: boolean
+): SyncScope {
+  if (
+    parentChanged.length === 0 &&
+    owlettoChanged.length === 0 &&
+    !envChanged
+  ) {
+    return "none";
+  }
+  if (!envChanged && parentChanged.length === 0) return "frontend";
+  return "full";
+}
+
+/**
+ * Everything the MCP iframe bundle compiles: the apps themselves plus the
+ * shared components, hooks, libs, styles, and build configuration they pull
+ * in (see module comment on why this list is explicit). Any touch forces the
+ * reboot path — dev-native.sh rebuilds the bundle at boot because Vite HMR
+ * cannot reach it, and the gateway serves built assets from in-memory caches
+ * that only a restart clears.
+ *
+ * Deliberately explicit rather than prefix-broad (ui/button.tsx rather than
+ * the whole components/ui dir): an under-broad list silently serves stale
+ * iframe content, while precision keeps ordinary UI iteration on the fast
+ * HMR path. The closure test fails loudly if mcp-apps imports drift outside
+ * this set.
+ */
+const MCP_REBUILD_PREFIXES = [
+  "packages/owletto/src/mcp-apps/",
+  "packages/owletto/src/lib/json-renderer/",
+];
+
+const MCP_REBUILD_FILES = new Set([
+  "packages/owletto/src/components/agents/interaction-card.tsx",
+  "packages/owletto/src/components/entities/entity-view-templates.ts",
+  "packages/owletto/src/components/entity-tabs/connections-tab/dynamic-connector-form.tsx",
+  "packages/owletto/src/components/entity-tabs/events-tab/navigation.ts",
+  "packages/owletto/src/components/schema-value-editors.tsx",
+  "packages/owletto/src/components/ui/button.tsx",
+  "packages/owletto/src/components/ui/checkbox.tsx",
+  "packages/owletto/src/components/ui/form-draft-conflict.tsx",
+  "packages/owletto/src/components/ui/input.tsx",
+  "packages/owletto/src/components/ui/select.tsx",
+  "packages/owletto/src/components/ui/spinner.tsx",
+  "packages/owletto/src/components/ui/table.tsx",
+  "packages/owletto/src/components/ui/textarea.tsx",
+  "packages/owletto/src/hooks/use-form-draft.ts",
+  "packages/owletto/src/lib/api-diagnostics.ts",
+  "packages/owletto/src/lib/api.ts",
+  "packages/owletto/src/lib/api/agent-permissions.ts",
+  "packages/owletto/src/lib/api/agents.ts",
+  "packages/owletto/src/lib/api/attention-cache.ts",
+  "packages/owletto/src/lib/api/automations.ts",
+  "packages/owletto/src/lib/api/clients.ts",
+  "packages/owletto/src/lib/api/connections.ts",
+  "packages/owletto/src/lib/api/content-query-keys.ts",
+  "packages/owletto/src/lib/api/content.ts",
+  "packages/owletto/src/lib/api/core.ts",
+  "packages/owletto/src/lib/api/entities.ts",
+  "packages/owletto/src/lib/api/hook-factory.ts",
+  "packages/owletto/src/lib/api/notifications.ts",
+  "packages/owletto/src/lib/api/runs.ts",
+  "packages/owletto/src/lib/api/sandboxes.ts",
+  "packages/owletto/src/lib/api/search-memory.ts",
+  "packages/owletto/src/lib/auth-state.tsx",
+  "packages/owletto/src/lib/auth.ts",
+  "packages/owletto/src/lib/embedded-auth.ts",
+  "packages/owletto/src/lib/event-filters.ts",
+  "packages/owletto/src/lib/filter-utils.ts",
+  "packages/owletto/src/lib/form-input-draft.ts",
+  "packages/owletto/src/lib/public-bootstrap.ts",
+  "packages/owletto/src/lib/reserved.ts",
+  "packages/owletto/src/lib/source-attribution.ts",
+  "packages/owletto/src/lib/subdomain.ts",
+  "packages/owletto/src/lib/telemetry.ts",
+  "packages/owletto/src/lib/url.ts",
+  "packages/owletto/src/lib/utils.ts",
+  "packages/owletto/src/index.css",
+  "packages/owletto/src/fonts.css",
+  "packages/owletto/postcss.config.js",
+  "packages/owletto/vite.config.mcp.ts",
+  "packages/owletto/vite.config.mcp-review.ts",
+  "packages/owletto/mcp-app-harness.html",
+  // Invoked by the build itself, not imported: build:mcp-apps post-processes
+  // the emitted HTML through this script, so it shapes output bytes exactly
+  // like a source edit does. (check-mcp-app-bundle.mjs only verifies and is
+  // deliberately excluded.)
+  "packages/owletto/scripts/version-mcp-app-assets.mjs",
+]);
+
+export function needsMcpRebuild(path: string): boolean {
+  if (MCP_REBUILD_FILES.has(path)) return true;
+  return MCP_REBUILD_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+/**
+ * Scope with the MCP rule folded in: iframe inputs always mean the reboot
+ * path, everything else defers to the frontend/full split.
+ */
+export function resolveScope(
+  changedPaths: string[],
+  envChanged: boolean
+): SyncScope {
+  if (changedPaths.some((path) => needsMcpRebuild(path))) return "full";
+  return syncScope(
+    changedPaths.filter((path) => !path.startsWith("packages/owletto/")),
+    changedPaths.filter((path) => path.startsWith("packages/owletto/")),
+    envChanged
+  );
+}
+
+interface SyncPlan {
+  /** Full remote truth after this sync (for the next manifest). */
+  fullList: string[];
+  /** Files to upload (subset of fullList). */
+  upload: string[];
+  /** Stale remote paths to delete. */
+  remove: string[];
+}
+
+/**
+ * Delta plan from the previous remote manifest, the current full list, and
+ * the changed set (null = unknown, upload everything). Uploads are
+ * intersected with the full list so a changed-but-deleted path can only
+ * ever land in `remove`, never in a tarball that would fail on it.
+ */
+export function planSync(
+  prevManifest: string[],
+  fullList: string[],
+  changed: string[] | null
+): SyncPlan {
+  const full = new Set(fullList);
+  const upload =
+    changed === null ? [...fullList] : changed.filter((path) => full.has(path));
+  const remove = prevManifest.filter((path) => !full.has(path));
+  return { fullList: [...fullList], upload, remove };
+}
+
+/** sha256 over sorted path+content pairs; order-independent by construction. */
+export function hashEntries(entries: Array<[string, string]>): string {
+  const hash = createHash("sha256");
+  for (const [path, content] of [...entries].sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0
+  )) {
+    hash.update(path, "utf8");
+    hash.update("\0", "utf8");
+    hash.update(content, "utf8");
+    hash.update("\0", "utf8");
+  }
+  return hash.digest("hex");
+}
+
+/** Fingerprint content, executable mode, and symlink target without dereferencing. */
+function hashFile(path: string): string {
+  const stat = lstatSync(path);
+  return createHash("sha256")
+    .update(`${stat.mode & 0o777}:`)
+    .update(
+      stat.isSymbolicLink()
+        ? `symlink:${readlinkSync(path)}`
+        : readFileSync(path)
+    )
+    .digest("hex");
+}
+
+/** Lockfiles, workspace manifests, and patches consumed by the root install. */
+export function lockfileEntries(root: string): Array<[string, string]> {
+  const { files, subFiles } = listTreeFiles(root);
+  return [...files, ...subFiles.map((file) => `packages/owletto/${file}`)]
+    .filter(
+      (file) =>
+        /(^|\/)(package\.json|bun\.lockb?|bunfig\.toml|\.npmrc)$/.test(file) ||
+        file.startsWith("patches/")
+    )
+    .map((file) => [file, readFileSync(join(root, file)).toString("base64")]);
+}
+
+/**
+ * Non-fatal dirty-tree notice. Syncing uncommitted work is supported — that
+ * is the point of the inner loop — but what gets verified should say so.
+ */
+export function dirtyNotice(parent: string[], sub: string[]): string | null {
+  if (parent.length === 0 && sub.length === 0) return null;
+  const parts = [`${parent.length} file(s)`];
+  if (sub.length > 0) parts.push(`${sub.length} in owletto`);
+  return (
+    `>> warning: syncing uncommitted changes (${parts.join(", ")}) — ` +
+    "what you verify may not match any commit"
+  );
+}
+
+/** Preview health from this machine: 2xx on the SPA root within the budget. */
+async function previewHealthy(
+  url: string,
+  timeoutMs = 120_000
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url, {
+        headers: { Accept: "text/html" },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (response.status >= 200 && response.status < 300) return true;
+    } catch {
+      // Not up yet — keep polling until the budget runs out.
+    }
+    await new Promise((r) => setTimeout(r, 5_000));
+  }
+  return false;
+}
+
+/** Archive-exclusion shared by full and delta uploads (see buildTarball). */
+function isSyncExcluded(relative: string): boolean {
+  return (
+    relative === ".env" ||
+    relative === ".env.local" ||
+    isAppleDouble(relative) ||
+    relative === "packages/owletto" ||
+    relative.startsWith("packages/owletto/")
+  );
+}
+
+function fileExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+/**
+ * The full file set the sandbox should hold, split by repo: the parent
+ * checkout minus the submodule (which git does not descend into), plus the
+ * submodule's own files prefixed for the remote tree.
+ */
+export function listTreeFiles(root: string): {
+  files: string[];
+  subFiles: string[];
+} {
+  const sub = join(root, "packages/owletto");
+  return {
+    files: [...new Set(gitFiles(root))].filter(
+      (f) => !isSyncExcluded(f) && fileExists(join(root, f))
+    ),
+    subFiles: existsSync(join(sub, ".git"))
+      ? [...new Set(gitFiles(sub))].filter(
+          (f) =>
+            f !== ".env" &&
+            f !== ".env.local" &&
+            !isAppleDouble(f) &&
+            fileExists(join(sub, f))
+        )
+      : [],
+  };
+}
+
 function writeNullList(path: string, files: string[]) {
   writeFileSync(path, files.length > 0 ? `${files.join("\0")}\0` : "");
 }
 
-export function buildTarball(root: string): string {
+/**
+ * `only` restricts the ARCHIVES to a subset (delta uploads); the manifest
+ * always records the full truth so a later sync can compute deletions.
+ * `.env` handling is unchanged: never archived, uploaded separately (see
+ * syncTree), and `.env.local` never leaves the Mac at all.
+ */
+export function buildTarball(root: string, only?: Set<string>): string {
   const stage = mkdtempSync(join(tmpdir(), "lobu-sandbox-"));
-  const tar = join(stage, "tree.tar.gz");
-  const files = gitFiles(root)
-    // .env is excluded explicitly rather than left to .gitignore: it is
-    // uploaded separately with host-specific keys stripped (see
-    // HOST_ONLY_ENV_KEYS), and a checkout that happens to track it would
-    // otherwise send the Mac's DATABASE_URL straight into the sandbox.
-    // .env.local is never sent at all — it is only this worktree's ports.
-    .filter(
-      (f) =>
-        f !== "packages/owletto" &&
-        !f.startsWith("packages/owletto/") &&
-        f !== ".env" &&
-        f !== ".env.local" &&
-        !isAppleDouble(f)
-    );
+  try {
+    const tar = join(stage, "tree.tar.gz");
+    const { files, subFiles } = listTreeFiles(root);
+    const wanted = (path: string) => !only || only.has(path);
+    const uploadFiles = files.filter(wanted);
+    const uploadSub = subFiles.filter((f) => wanted(`packages/owletto/${f}`));
 
-  const listFile = join(stage, "files.txt");
-  writeNullList(listFile, files);
-  sh(
-    "tar",
-    ["-czf", tar, "-C", root, "--null", "-T", listFile],
-    undefined,
-    NO_APPLEDOUBLE
-  );
-
-  // Submodule content at its current checkout. The sandbox has no .git and
-  // owletto is private, so it cannot fetch this itself.
-  const sub = join(root, "packages/owletto");
-  let subFiles: string[] = [];
-  if (existsSync(join(sub, ".git"))) {
-    const subTar = join(stage, "owletto.tar.gz");
-    subFiles = gitFiles(sub).filter(
-      (f) => f !== ".env" && f !== ".env.local" && !isAppleDouble(f)
-    );
-    const subList = join(stage, "sub.txt");
-    writeNullList(subList, subFiles);
+    const listFile = join(stage, "files.txt");
+    writeNullList(listFile, uploadFiles);
     sh(
       "tar",
-      ["-czf", subTar, "-C", sub, "--null", "-T", subList],
+      ["-czf", tar, "-C", root, "--null", "-T", listFile],
       undefined,
       NO_APPLEDOUBLE
     );
+
+    // Submodule content at its current checkout. The sandbox has no .git and
+    // owletto is private, so it cannot fetch this itself. Without a checkout
+    // there is nothing to archive; the manifest (full truth, below) already
+    // reflects the empty set.
+    const sub = join(root, "packages/owletto");
+    if (existsSync(join(sub, ".git"))) {
+      const subTar = join(stage, "owletto.tar.gz");
+      const subList = join(stage, "sub.txt");
+      writeNullList(subList, uploadSub);
+      sh(
+        "tar",
+        ["-czf", subTar, "-C", sub, "--null", "-T", subList],
+        undefined,
+        NO_APPLEDOUBLE
+      );
+    }
+    writeNullList(join(stage, "manifest.bin"), [
+      ...files,
+      ...subFiles.map((file) => `packages/owletto/${file}`),
+    ]);
+    return stage;
+  } catch (error) {
+    rmSync(stage, { recursive: true, force: true });
+    throw error;
   }
-  writeNullList(join(stage, "manifest.bin"), [
-    ...files,
-    ...subFiles.map((file) => `packages/owletto/${file}`),
-  ]);
-  return stage;
 }
 
 /**
@@ -472,53 +973,258 @@ async function exec(sandbox: Sandbox, cmd: string, timeoutSec = 1800) {
 async function syncTree(sandbox: Sandbox, root: string) {
   const stage = buildTarball(root);
   try {
-    const fs = sandbox.fs;
     console.log(">> uploading tree");
-    await fs.uploadFile(join(stage, "tree.tar.gz"), "/tmp/tree.tar.gz");
-    await fs.uploadFile(
-      join(stage, "manifest.bin"),
-      "/tmp/lobu-sandbox-manifest"
-    );
-    await exec(
-      sandbox,
-      "rm -rf /tmp/lobu-source && mkdir -p /tmp/lobu-source && tar -xzf /tmp/tree.tar.gz -C /tmp/lobu-source"
-    );
-    if (existsSync(join(stage, "owletto.tar.gz"))) {
-      await fs.uploadFile(join(stage, "owletto.tar.gz"), "/tmp/owletto.tar.gz");
-      await exec(
-        sandbox,
-        "mkdir -p /tmp/lobu-source/packages/owletto && tar -xzf /tmp/owletto.tar.gz -C /tmp/lobu-source/packages/owletto"
-      );
-    }
-    // Delete only files sent by the previous sync. Ignored runtime state
-    // (node_modules, dist, workspaces) is never in this manifest, so source
-    // deletions propagate without erasing the warm install. The database is
-    // not even in the tree: it lives at DATA_ROOT, beside the checkout.
-    await exec(
-      sandbox,
-      `mkdir -p ${WORKSPACE} && ` +
-        `if [ -f /workspace/.lobu-sandbox-manifest ]; then ` +
-        `(cd ${WORKSPACE} && while IFS= read -r -d '' path; do ` +
-        `case "$path" in ''|.|..|/*|../*|*/../*|*/..) echo "invalid sync path: $path" >&2; exit 1;; esac; ` +
-        `rm -rf -- "$path"; done < /workspace/.lobu-sandbox-manifest); fi && ` +
-        `cp -a /tmp/lobu-source/. ${WORKSPACE}/ && ` +
-        "cp /tmp/lobu-sandbox-manifest /workspace/.lobu-sandbox-manifest"
-    );
-    // Clean legacy sidecars from sandboxes created before the manifest existed.
-    await exec(sandbox, `find ${WORKSPACE} -name '._*' -type f -delete`, 300);
-
-    const env = sanitizedEnv(root);
-    if (env !== null) {
-      const envFile = join(stage, "env.sanitized");
-      writeFileSync(envFile, env);
-      await fs.uploadFile(envFile, `${WORKSPACE}/.env`);
-    } else {
-      await exec(sandbox, `rm -f ${WORKSPACE}/.env`, 60);
-    }
-    await exec(sandbox, `rm -f ${WORKSPACE}/.env.local`, 60);
+    await pushStage(sandbox, root, stage, null);
   } finally {
     rmSync(stage, { recursive: true, force: true });
   }
+}
+
+function warnDirty(root: string, sub: string): void {
+  const clean = (paths: string[]) =>
+    paths.filter(
+      (path) => path !== ".env" && path !== ".env.local" && !isAppleDouble(path)
+    );
+  const notice = dirtyNotice(clean(statusNames(root)), clean(statusNames(sub)));
+  if (notice) console.log(notice);
+}
+
+/**
+ * Why the full path, or null when a delta suffices. A state file from before
+ * file maps existed cannot seed drift detection, so it syncs full exactly
+ * once and every later run stays incremental.
+ */
+export function fullSyncReason(
+  state: SyncState | null,
+  prevManifest: string[] | null,
+  fresh: boolean,
+  changes: TreeChanges | null
+): string | null {
+  if (fresh) return "FRESH=1 requested";
+  if (state === null) return "no prior sync state";
+  if (prevManifest === null) return "no remote manifest";
+  if (changes === null) return "change range uncomputable";
+  if (!state.files || Object.keys(state.files).length === 0) {
+    return "no file map yet";
+  }
+  return null;
+}
+
+/**
+ * File application shared by `sync` and `up`: full upload when state is
+ * unknown (or FRESH=1), else delta upload plus manifest-diff removals,
+ * plus re-upload of previously-synced paths whose local content drifted
+ * (e.g. an experiment reverted to HEAD reads as "unchanged" to git but the
+ * sandbox still holds the experiment). Returns the scope applied and the
+ * state to persist. Install/reboot/health decisions stay with the caller.
+ */
+export async function applyTreeSync(
+  sandbox: Sandbox,
+  root: string,
+  sub: string,
+  state: SyncState | null,
+  prevManifest: string[] | null
+): Promise<{
+  scope: SyncScope;
+  next: SyncState;
+}> {
+  const heads = currentHeads(root, sub);
+  const lockHash = hashEntries(lockfileEntries(root));
+  const env = sanitizedEnv(root);
+  const envHash = hashEntries(env === null ? [] : [[".env", env]]);
+  const nextFiles = hashTreeFiles(root);
+  const fresh = process.env.FRESH === "1";
+  const changes = !fresh && state ? changedSince(root, sub, state) : null;
+  const fullReason = fullSyncReason(state, prevManifest, fresh, changes);
+  if (fullReason !== null || changes === null || prevManifest === null) {
+    if (fullReason !== null) console.log(`>> ${fullReason} — full sync`);
+    await syncTree(sandbox, root);
+    return {
+      scope: "full" as const,
+      next: { ...heads, lockHash, envHash, files: nextFiles },
+    };
+  }
+  const full = Object.keys(nextFiles);
+  const prevFiles = state?.files ?? {};
+  const remoteFiles = new Set(prevManifest);
+  const effective = full.filter(
+    (path) => !remoteFiles.has(path) || nextFiles[path] !== prevFiles[path]
+  );
+  const plan = planSync(prevManifest, full, effective);
+  const changedPaths = [...plan.upload, ...plan.remove];
+  const envChanged = state?.envHash !== envHash;
+  // MCP iframe sources (and their shared inputs) compile into a separately
+  // built bundle that Vite HMR cannot reach, and the gateway caches the built
+  // assets in memory — so any touch forces the reboot path, which rebuilds
+  // via dev-native.sh and restarts the server with cold caches.
+  const scope = resolveScope(changedPaths, envChanged);
+  if (scope === "full" && changedPaths.some((path) => needsMcpRebuild(path))) {
+    console.log(">> MCP app sources changed — rebooting to rebuild the bundle");
+  }
+  const upload = plan.upload;
+  if (upload.length === 0 && plan.remove.length === 0 && !envChanged) {
+    console.log(">> tree unchanged since last sync — nothing to upload");
+  } else {
+    const stage = buildTarball(root, new Set(upload));
+    try {
+      console.log(
+        `>> uploading ${upload.length} changed file(s), removing ${plan.remove.length}`
+      );
+      await pushStage(sandbox, root, stage, plan.remove);
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  }
+  return { scope, next: { ...heads, lockHash, envHash, files: nextFiles } };
+}
+
+/** Content hashes for every syncable path (full-truth file map). */
+function hashTreeFiles(root: string): Record<string, string> {
+  const { files, subFiles } = listTreeFiles(root);
+  const full = [
+    ...files,
+    ...subFiles.map((file) => `packages/owletto/${file}`),
+  ];
+  const next: Record<string, string> = {};
+  for (const path of full) {
+    next[path] = hashFile(join(root, path));
+  }
+  return next;
+}
+
+export async function syncIncremental(
+  sandbox: Sandbox,
+  root: string,
+  name: string
+): Promise<void> {
+  const sub = join(root, "packages/owletto");
+  warnDirty(root, sub);
+  const fresh = process.env.FRESH === "1";
+  const state = fresh ? null : readSyncState(syncStatePath(name));
+  const prevManifest = await readRemoteManifest(sandbox);
+  rmSync(syncStatePath(name), { force: true });
+  const applied = await applyTreeSync(sandbox, root, sub, state, prevManifest);
+  const link = await sandbox.getPreviewLink(APP_PORT);
+  const url = String(link?.url ?? link);
+  if (!fresh && sandbox.public && (await previewHealthy(url))) {
+    writeSyncState(syncStatePath(name), {
+      ...applied.next,
+      lockHash: state?.lockHash ?? null,
+      pendingBoot: state?.pendingBoot || applied.scope === "full",
+    });
+    return console.log(`synced ${name} (preview healthy, app left running)`);
+  }
+  // Recovery must use the same install and private boot/seat checks as `up`.
+  await upIncremental(sandbox, root, name);
+}
+
+/** Previous remote manifest, or null when the sandbox never synced. */
+async function readRemoteManifest(sandbox: Sandbox): Promise<string[] | null> {
+  const out = await exec(
+    sandbox,
+    "cat /workspace/.lobu-sandbox-manifest 2>/dev/null || true",
+    60
+  ).catch(() => "");
+  const entries = out.split("\0").filter(Boolean);
+  return entries.length > 0 ? entries : null;
+}
+
+async function remoteNodeModulesPresent(sandbox: Sandbox): Promise<boolean> {
+  const out = await exec(
+    sandbox,
+    "test -d /workspace/lobu/node_modules && echo yes || echo no",
+    60
+  ).catch(() => "no");
+  return out.trim() === "yes";
+}
+
+async function printAppUrls(sandbox: Sandbox): Promise<void> {
+  const link = await sandbox.getPreviewLink(APP_PORT);
+  const previewUrl = String(link?.url ?? link);
+  await sandbox.refreshData();
+  console.log(previewUrlFor(sandbox.public, previewUrl, link?.token));
+  // A stopped sandbox can still report its URL, but nothing inside it can
+  // sign in, so the link is only minted when the app is actually up.
+  if (/start|running/i.test(stateOf(sandbox))) {
+    const seat = await readSeat(sandbox);
+    const login = seat && (await mintLoginLink(sandbox, previewUrl, seat));
+    if (login) console.log(login);
+  }
+}
+
+/**
+ * The validated removal loop, shared by full replaces (previous manifest)
+ * and delta removals (uploaded list). The case guard is load-bearing: a
+ * malicious or corrupted list must not escape the checkout.
+ */
+function removeLoopStatement(sourceFile: string): string {
+  return (
+    `(cd ${WORKSPACE} && while IFS= read -r -d '' path; do ` +
+    `case "$path" in ''|.|..|/*|../*|*/../*|*/..) echo "invalid sync path: $path" >&2; exit 1;; esac; ` +
+    `rm -rf -- "$path"; done < ${sourceFile})`
+  );
+}
+
+async function pushStage(
+  sandbox: Sandbox,
+  root: string,
+  stage: string,
+  remove: string[] | null
+) {
+  const fs = sandbox.fs;
+  await fs.uploadFile(join(stage, "tree.tar.gz"), "/tmp/tree.tar.gz");
+  await fs.uploadFile(
+    join(stage, "manifest.bin"),
+    "/tmp/lobu-sandbox-manifest"
+  );
+  await exec(
+    sandbox,
+    "rm -rf /tmp/lobu-source && mkdir -p /tmp/lobu-source && tar -xzf /tmp/tree.tar.gz -C /tmp/lobu-source"
+  );
+  if (existsSync(join(stage, "owletto.tar.gz"))) {
+    await fs.uploadFile(join(stage, "owletto.tar.gz"), "/tmp/owletto.tar.gz");
+    await exec(
+      sandbox,
+      "mkdir -p /tmp/lobu-source/packages/owletto && tar -xzf /tmp/owletto.tar.gz -C /tmp/lobu-source/packages/owletto"
+    );
+  }
+  // Delete only files sent by a previous sync (full replace) or the computed
+  // removals (delta). Ignored runtime state (node_modules, dist, workspaces)
+  // is never in any manifest, so source deletions propagate without erasing
+  // the warm install. The database is not even in the tree: it lives at
+  // DATA_ROOT, beside the checkout.
+  await exec(sandbox, `mkdir -p ${WORKSPACE}`);
+  if (remove === null) {
+    await exec(
+      sandbox,
+      `if [ -f /workspace/.lobu-sandbox-manifest ]; then ` +
+        removeLoopStatement("/workspace/.lobu-sandbox-manifest") +
+        `; fi`
+    );
+  } else if (remove.length > 0) {
+    const removeFile = join(stage, "remove.bin");
+    writeNullList(removeFile, remove);
+    await fs.uploadFile(removeFile, "/tmp/lobu-sync-remove");
+    await exec(sandbox, removeLoopStatement("/tmp/lobu-sync-remove"));
+    await exec(sandbox, "rm -f /tmp/lobu-sync-remove");
+  }
+  await exec(
+    sandbox,
+    `cp -a /tmp/lobu-source/. ${WORKSPACE}/ && ` +
+      "cp /tmp/lobu-sandbox-manifest /workspace/.lobu-sandbox-manifest"
+  );
+  // Clean legacy sidecars from sandboxes created before the manifest existed.
+  await exec(sandbox, `find ${WORKSPACE} -name '._*' -type f -delete`, 300);
+
+  const env = sanitizedEnv(root);
+  if (env !== null) {
+    const envFile = join(stage, "env.sanitized");
+    writeFileSync(envFile, env);
+    await fs.uploadFile(envFile, `${WORKSPACE}/.env`);
+  } else {
+    await exec(sandbox, `rm -f ${WORKSPACE}/.env`, 60);
+  }
+  await exec(sandbox, `rm -f ${WORKSPACE}/.env.local`, 60);
 }
 
 /** Both bearers below only have to be unguessable; each is compared verbatim. */
@@ -1037,17 +1743,7 @@ async function main() {
       console.error(`no sandbox ${name}; run: make sandbox`);
       process.exit(1);
     }
-    const link = await sandbox.getPreviewLink(APP_PORT);
-    const previewUrl = String(link?.url ?? link);
-    await sandbox.refreshData();
-    console.log(previewUrlFor(sandbox.public, previewUrl, link?.token));
-    // A stopped sandbox can still report its URL, but nothing inside it can
-    // sign in, so the link is only minted when the app is actually up.
-    if (/start|running/i.test(stateOf(sandbox))) {
-      const seat = await readSeat(sandbox);
-      const login = seat && (await mintLoginLink(sandbox, previewUrl, seat));
-      if (login) console.log(login);
-    }
+    await printAppUrls(sandbox);
     return;
   }
 
@@ -1056,11 +1752,8 @@ async function main() {
       console.error(`no sandbox ${name}; run: make sandbox`);
       process.exit(1);
     }
-    // Tree only: Vite HMR and tsx watch pick the changes up in place, so
-    // restarting would throw away a warm process for nothing. `up` is the
-    // command that reboots.
-    await syncTree(sandbox, root);
-    return console.log(`synced ${name} (app left running)`);
+    await syncIncremental(sandbox, root, name);
+    return;
   }
 
   if (!sandbox) {
@@ -1107,49 +1800,101 @@ async function main() {
     await sandbox.start();
   }
 
-  await syncTree(sandbox, root);
-  console.log(">> bun install");
-  await exec(sandbox, `cd ${WORKSPACE} && bun install --frozen-lockfile`, 1800);
+  await upIncremental(sandbox, root, name);
+}
 
-  const link = await sandbox.getPreviewLink(APP_PORT);
-  const url: string = link?.url ?? String(link);
-  // Shut the door before the app comes up. On a re-run the sandbox is already
-  // public from the last `up`, so without this the whole build-and-wait window
-  // serves on a public URL before claimSeat and assertSignUpClosed have run.
-  await setPublic(sandbox, false);
-  console.log(">> booting app (first boot builds every workspace package)");
-  await bootApp(sandbox, url, {
-    workerApiToken: generateBearerToken(),
-    embeddingsServiceToken: generateBearerToken(),
-  });
-  const ready = await waitReady(sandbox);
+export async function upIncremental(
+  sandbox: Sandbox,
+  root: string,
+  name: string
+): Promise<void> {
+  const sub = join(root, "packages/owletto");
+  warnDirty(root, sub);
+  const fresh = process.env.FRESH === "1";
+  const state = fresh ? null : readSyncState(syncStatePath(name));
 
-  if (!ready) {
-    console.error(
-      `\n  ${name} did not become ready. Last log lines:\n` +
-        (await exec(sandbox, "tail -n 25 /workspace/dev.log || true", 60).catch(
-          () => ""
-        ))
+  // Every reboot closes the public preview until the seat checks pass.
+  const fullBoot = async (why: string) => {
+    console.log(why);
+    const link = await sandbox.getPreviewLink(APP_PORT);
+    const url: string = link?.url ?? String(link);
+    // Shut the door before the app comes up. On a re-run the sandbox is already
+    // public from the last `up`, so without this the whole build-and-wait window
+    // serves on a public URL before claimSeat and assertSignUpClosed have run.
+    await setPublic(sandbox, false);
+    console.log(">> booting app (first boot builds every workspace package)");
+    await bootApp(sandbox, url, {
+      workerApiToken: generateBearerToken(),
+      embeddingsServiceToken: generateBearerToken(),
+    });
+    const ready = await waitReady(sandbox);
+
+    if (!ready) {
+      console.error(
+        `\n  ${name} did not become ready. Last log lines:\n` +
+          (await exec(
+            sandbox,
+            "tail -n 25 /workspace/dev.log || true",
+            60
+          ).catch(() => ""))
+      );
+      process.exit(1);
+    }
+    // The order is the whole point: the preview is private above, so we take the
+    // one seat single-user mode allows, PROVE that sign-up is shut, and only then
+    // drop the preview key.
+    const { seat, sessionToken } = await claimSeat(sandbox, root);
+    await assertSignUpClosed(sandbox);
+    await setPublic(sandbox, true);
+    const login = sessionToken ? loginLink(url, sessionToken) : undefined;
+
+    console.log(`\n  ${name} ready`);
+    console.log(`  app:   ${previewUrlFor(sandbox.public, url, link?.token)}`);
+    console.log(
+      login
+        ? `  login: ${login}`
+        : `  login: sign in as ${seat.email} (could not mint a link; see ${SEAT_FILE})`
     );
-    process.exit(1);
-  }
-  // The order is the whole point: the preview is private above, so we take the
-  // one seat single-user mode allows, PROVE that sign-up is shut, and only then
-  // drop the preview key.
-  const { seat, sessionToken } = await claimSeat(sandbox, root);
-  await assertSignUpClosed(sandbox);
-  await setPublic(sandbox, true);
-  const login = sessionToken ? loginLink(url, sessionToken) : undefined;
+    console.log("  logs:  make sandbox-logs");
+    console.log("  stop:  make sandbox-stop   (frees quota; DB survives)\n");
+  };
 
-  console.log(`\n  ${name} ready`);
-  console.log(`  app:   ${previewUrlFor(sandbox.public, url, link?.token)}`);
-  console.log(
-    login
-      ? `  login: ${login}`
-      : `  login: sign in as ${seat.email} (could not mint a link; see ${SEAT_FILE})`
-  );
-  console.log("  logs:  make sandbox-logs");
-  console.log("  stop:  make sandbox-stop   (frees quota; DB survives)\n");
+  const prevManifest = await readRemoteManifest(sandbox);
+  rmSync(syncStatePath(name), { force: true });
+  const applied = await applyTreeSync(sandbox, root, sub, state, prevManifest);
+  const scope = applied.scope;
+  const lockChanged = (state?.lockHash ?? null) !== applied.next.lockHash;
+
+  const nodeModules = await remoteNodeModulesPresent(sandbox);
+  if (lockChanged || !nodeModules) {
+    console.log(
+      lockChanged
+        ? ">> bun install (lockfiles changed)"
+        : ">> bun install (no remote node_modules)"
+    );
+    await exec(
+      sandbox,
+      `cd ${WORKSPACE} && bun install --frozen-lockfile`,
+      1800
+    );
+  } else {
+    console.log(">> bun install skipped (lockfiles unchanged)");
+  }
+
+  if (scope === "full" || state?.pendingBoot || lockChanged || !nodeModules) {
+    await fullBoot(">> rebooting for server-side changes");
+    writeSyncState(syncStatePath(name), applied.next);
+    return;
+  }
+  // A root response proves preview availability, not that a browser applied HMR.
+  const link = await sandbox.getPreviewLink(APP_PORT);
+  if (sandbox.public && (await previewHealthy(String(link?.url ?? link)))) {
+    writeSyncState(syncStatePath(name), applied.next);
+    await printAppUrls(sandbox);
+    return console.log(`\n  ${name} ready (preview healthy, no reboot)\n`);
+  }
+  await fullBoot(">> preview unhealthy or private — rebooting");
+  writeSyncState(syncStatePath(name), applied.next);
 }
 
 // Importing this module (the tests do) must not launch a sandbox.
