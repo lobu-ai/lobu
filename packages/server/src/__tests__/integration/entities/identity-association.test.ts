@@ -8,9 +8,8 @@ import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { reconcileConnectorRelationshipClaims } from '../../../utils/relationship-claims';
 import { lockIdentityOrganization, withIdentityPrivilege } from '../../../utils/relationship-validation';
 import { pgBigintArray } from '../../../db/client';
-import { assessEntityResolution } from '../../../entity-resolution/policy';
 
-async function graph(count = 3, policy?: 'auto_merge' | 'review') {
+async function graph(count = 3, policy?: 'auto_link' | 'review') {
   const workspace = await TestWorkspace.create({ name: 'Stored identity associations' });
   const human = await workspace.withAuth({ tokenType: 'session' });
   const metadataSchema = policy ? {
@@ -24,7 +23,7 @@ async function graph(count = 3, policy?: 'auto_merge' | 'review') {
   const ids: number[] = [];
   for (let i = 0; i < count; i++) {
     const name = ['Alpha', 'Bravo', 'Charlie'][i] ?? `Record ${i}`;
-    const result = await human.entities.create({ type: 'contact-record', name,
+    const result = await human.entities.create({ entity_type: 'contact-record', name,
       metadata: policy ? { emails: ['shared@example.test'] } : { retained: name } });
     ids.push(Number((result as { entity: { id: number } }).entity.id));
   }
@@ -52,14 +51,99 @@ function runId(result: unknown): number {
 describe('governed stored identity associations', () => {
   beforeEach(cleanupTestDatabase);
 
-  it('can reapply the identity guard migration without losing decisions', async () => {
+  it('can reapply redirect retirement without losing withdrawn identity decisions', async () => {
     const { sql, human, ids: [a, b], link } = await graph();
     const id = linked(await link(a, b));
     await human.entities.unlink({ relationship_id: id });
     const before = await sql`SELECT * FROM entity_relationships WHERE id = ${id}`;
-    const migration = readFileSync(resolve(process.cwd(), '../../db/migrations/20261007010000_identity_association_guards.sql'), 'utf8');
+    const migration = readFileSync(resolve(process.cwd(), '../../db/migrations/20261009030001_drop_physical_entity_redirect.sql'), 'utf8');
     await sql.begin(tx => tx.unsafe(migration.split('-- migrate:down')[0]));
     expect(await sql`SELECT * FROM entity_relationships WHERE id = ${id}`).toEqual(before);
+  });
+
+  const normalization = () => readFileSync(resolve(process.cwd(), '../../db/migrations/20261009040000_normalize_identity_decisions.sql'), 'utf8').split('-- migrate:down')[0];
+
+  it.each(['known', 'null', 'unknown'])('normalizes withdrawn history with %s evidence without reviving it', async (evidence) => {
+    const { sql, human, ids: [a, b], link } = await graph();
+    const id = linked(await link(b, a));
+    await human.entities.unlink({ relationship_id: id });
+    await human.entity_schema.deleteRelType({ slug: 'same_record' });
+    await sql.begin(async tx => {
+      await tx`ALTER TABLE entity_relationships DISABLE TRIGGER lobu_guard_identity_edges`;
+      await tx`UPDATE entity_relationships SET metadata = metadata #- '{_lobu_identity_decision,member_support}' WHERE id = ${id}`;
+      if (evidence !== 'known') await tx`UPDATE entity_relationships SET metadata = jsonb_set(metadata,
+        '{_lobu_identity_decision,suppression_support}', ${sql.json({ evidence: evidence === 'null' ? null : { version: 99, opaque: 'retained' } })}::jsonb->'evidence') WHERE id = ${id}`;
+      await tx`ALTER TABLE entity_relationships ENABLE TRIGGER lobu_guard_identity_edges`;
+    });
+    const [before] = await sql`SELECT * FROM entity_relationships WHERE id = ${id}`;
+    await sql.begin(tx => tx.unsafe(normalization()));
+    const [after] = await sql`SELECT * FROM entity_relationships WHERE id = ${id}`;
+    expect(after).toEqual({ ...before, metadata: { ...before.metadata, _lobu_identity_decision: {
+      ...before.metadata._lobu_identity_decision,
+      member_support: { [JSON.stringify([a, b])]: before.metadata._lobu_identity_decision.suppression_support },
+    } } });
+    await sql.begin(tx => tx.unsafe(normalization()));
+    expect(await sql`SELECT * FROM entity_relationships WHERE id = ${id}`).toEqual([after]);
+    const [guard] = await sql`SELECT tgenabled FROM pg_trigger WHERE tgname = 'lobu_guard_identity_edges'`;
+    expect(guard.tgenabled).toBe('O');
+    await expect(sql`UPDATE entity_relationships SET confidence = 0.5 WHERE id = ${id}`).rejects.toThrow();
+  });
+
+  it('adds only the missing original pair to a partial map, preserving opaque member entries', async () => {
+    const { sql, agent, input, ids: [a, b, c] } = await graph(3, 'review');
+    const pending = runId(await agent.entities.link(input));
+    const partial = { [JSON.stringify([a, c])]: null };
+    await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{member_support}', ${sql.json(partial)}::jsonb) WHERE id = ${pending}`;
+    const [before] = await sql`SELECT * FROM runs WHERE id = ${pending}`;
+    await sql.begin(tx => tx.unsafe(normalization()));
+    expect(await sql`SELECT * FROM runs WHERE id = ${pending}`).toEqual([{ ...before, action_input: {
+      ...before.action_input, member_support: { ...partial, [JSON.stringify([a, b])]: before.action_input.suppression_support },
+    } }]);
+  });
+
+  it('rolls back history normalization and restores the guard when a later decision is invalid', async () => {
+    const { sql, agent, input, human, ids: [a, b], link } = await graph(2, 'review');
+    const pending = runId(await agent.entities.link(input));
+    await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{member_support}', 'null'::jsonb) WHERE id = ${pending}`;
+    const id = linked(await link(a, b));
+    await human.entities.unlink({ relationship_id: id });
+    await sql.begin(async tx => {
+      await tx`ALTER TABLE entity_relationships DISABLE TRIGGER lobu_guard_identity_edges`;
+      await tx`UPDATE entity_relationships SET metadata = metadata #- '{_lobu_identity_decision,member_support}' WHERE id = ${id}`;
+      await tx`ALTER TABLE entity_relationships ENABLE TRIGGER lobu_guard_identity_edges`;
+    });
+    const before = await sql`SELECT * FROM entity_relationships WHERE id = ${id}`;
+    await expect(sql.begin(tx => tx.unsafe(normalization()))).rejects.toThrow(/Invalid identity member support map/);
+    expect(await sql`SELECT * FROM entity_relationships WHERE id = ${id}`).toEqual(before);
+    const [guard] = await sql`SELECT tgenabled FROM pg_trigger WHERE tgname = 'lobu_guard_identity_edges'`;
+    expect(guard.tgenabled).toBe('O');
+  });
+
+  it.each(['known', 'null', 'unknown'])('keeps old pending proposals stale and their %s rejection evidence intact', async (evidence) => {
+    const { sql, agent, human, input, ids: [a, b] } = await graph(2, 'review');
+    const pending = runId(await agent.entities.link(input));
+    await sql`UPDATE runs SET action_input = action_input - 'member_support' - 'evidence_fingerprint' - 'prior_decisions' WHERE id = ${pending}`;
+    if (evidence !== 'known') await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{suppression_support}',
+      ${sql.json({ evidence: evidence === 'null' ? null : { version: 99, opaque: 'retained' } })}::jsonb->'evidence') WHERE id = ${pending}`;
+    const [before] = await sql`SELECT * FROM runs WHERE id = ${pending}`;
+    await sql.begin(tx => tx.unsafe(normalization()));
+    const [after] = await sql`SELECT * FROM runs WHERE id = ${pending}`;
+    expect(after).toEqual({ ...before, action_input: { ...before.action_input,
+      member_support: { [JSON.stringify([a, b])]: before.action_input.suppression_support } } });
+    await expect(human.operations.approve({ run_id: pending })).rejects.toThrow(/stale/);
+    // A stale approval is still rejectable; opaque evidence must not become an empty map.
+    await human.operations.reject({ run_id: pending });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
+  });
+
+  it.each(['not-json', '42', '[]'])('fails closed on malformed historical evidence key %s', async (key) => {
+    const { sql, agent, human, input, ids: [a, b] } = await graph(2, 'review');
+    const pending = runId(await agent.entities.link(input));
+    await human.operations.reject({ run_id: pending });
+    const [row] = await sql`SELECT action_input FROM runs WHERE id = ${pending}`;
+    row.action_input.member_support[JSON.stringify([a, b])].keys = [key];
+    await sql`UPDATE runs SET action_input = ${sql.json(row.action_input)}::jsonb WHERE id = ${pending}`;
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
   });
 
   it('retains the identity purpose through public create/get', async () => {
@@ -147,7 +231,7 @@ describe('governed stored identity associations', () => {
     await sql`INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier, source_connector)
       VALUES (${workspace.org.id}, ${a}, 'reference', 'source:alpha', 'fixture')`;
     const event = await createTestEvent({ entity_id: a, content: 'Retained source event', origin_id: 'source:alpha' });
-    const recordsBefore = await sql`SELECT id, name, metadata, merged_into, deleted_at FROM entities WHERE id = ANY(${pgBigintArray([a, b, c, d])}::bigint[]) ORDER BY id`;
+    const recordsBefore = await sql`SELECT id, name, metadata, deleted_at FROM entities WHERE id = ANY(${pgBigintArray([a, b, c, d])}::bigint[]) ORDER BY id`;
     const identityBefore = await sql`SELECT * FROM entity_identities WHERE entity_id = ${a}`;
     const eventBefore = await sql`SELECT * FROM events WHERE id = ${event.id}`;
     const ab = linked(await link(a, b));
@@ -157,7 +241,7 @@ describe('governed stored identity associations', () => {
     await human.entities.unlink({ relationship_id: bd });
     const edges = await sql`SELECT id FROM entity_relationships WHERE organization_id = ${workspace.org.id} AND deleted_at IS NULL ORDER BY id`;
     expect(edges.map(row => Number(row.id)).sort((x, y) => x - y)).toEqual([ordinary, ab, cd].sort((x, y) => x - y));
-    expect(await sql`SELECT id, name, metadata, merged_into, deleted_at FROM entities WHERE id = ANY(${pgBigintArray([a, b, c, d])}::bigint[]) ORDER BY id`).toEqual(recordsBefore);
+    expect(await sql`SELECT id, name, metadata, deleted_at FROM entities WHERE id = ANY(${pgBigintArray([a, b, c, d])}::bigint[]) ORDER BY id`).toEqual(recordsBefore);
     expect(await sql`SELECT * FROM entity_identities WHERE entity_id = ${a}`).toEqual(identityBefore);
     expect(await sql`SELECT * FROM events WHERE id = ${event.id}`).toEqual(eventBefore);
     await human.entities.update({ entity_id: a, metadata: { retained: 'exact record edit' } });
@@ -181,13 +265,13 @@ describe('governed stored identity associations', () => {
     const { workspace, human, input, ids, sql } = await graph();
     await expect(workspace.member.entities.link(input)).rejects.toThrow(/permission|owner|admin/i);
     await human.entity_schema.createType({ slug: 'other-record', name: 'Other record' });
-    const other = await human.entities.create({ type: 'other-record', name: 'Other' }) as { entity: { id: number } };
+    const other = await human.entities.create({ entity_type: 'other-record', name: 'Other' }) as { entity: { id: number } };
     await expect(human.entities.link({ ...input, to_entity_id: other.entity.id })).rejects.toThrow(/same.*type/i);
     const foreign = await TestWorkspace.create({ name: 'Foreign records' });
     await expect(foreign.owner.entities.link(input)).rejects.toThrow();
     await sql`UPDATE entities SET deleted_at = current_timestamp WHERE id = ${ids[1]}`;
     await expect(human.entities.link(input)).rejects.toThrow(/live/);
-    await expect(human.entities.manage({ action: 'link', from: { type: 'contact-record', key: 'a' }, to: { type: 'contact-record', key: 'b' }, relationship_type_slug: 'same_record' })).rejects.toThrow();
+    await expect(human.entities.link({ from: { type: 'contact-record', key: 'a' }, to: { type: 'contact-record', key: 'b' }, relationship_type_slug: 'same_record' })).rejects.toThrow();
     await expect(human.entity_schema.manage({ schema_type: 'relationship_type', action: 'create', slug: 'access', name: 'Access', purpose: 'authorization' })).rejects.toThrow();
   });
 
@@ -231,7 +315,7 @@ describe('governed stored identity associations', () => {
   });
 
   it.each(['apply', 'review', 'refused'] as const)('uses the same %s decision in preview and execution', async outcome => {
-    const { human, agent, input, sql, workspace } = await graph(3, outcome === 'review' ? 'review' : 'auto_merge');
+    const { human, agent, input, sql, workspace } = await graph(3, outcome === 'review' ? 'review' : 'auto_link');
     if (outcome === 'refused') await upsertEntityApprovalPolicy(workspace.org.id, { updateMode: 'deny' });
     const before = await sql`SELECT count(*)::int AS n FROM runs WHERE organization_id = ${workspace.org.id}`;
     expect(await agent.entities.link({ ...input, dry_run: true })).toMatchObject({ preview: { outcome } });
@@ -239,13 +323,15 @@ describe('governed stored identity associations', () => {
     if (outcome === 'refused') await expect(agent.entities.link(input)).rejects.toThrow(/Policy denied/);
     else {
       const result = await agent.entities.link(input);
-      expect(result).toMatchObject({ preview: { outcome } });
+      if (outcome === 'apply') expect(result).toHaveProperty('relationship');
+      else expect(result).toMatchObject({ approval_queued: true });
+      expect(result).not.toHaveProperty('preview');
       if (outcome === 'review') expect(await human.operations.approve({ run_id: runId(result) })).toMatchObject({ approved: true });
     }
   });
 
   it('write-policy approval overrides certain resolution and rechecks denial at approval', async () => {
-    const { workspace, human, agent, input } = await graph(3, 'auto_merge');
+    const { workspace, human, agent, input } = await graph(3, 'auto_link');
     await upsertEntityApprovalPolicy(workspace.org.id, { updateMode: 'approval' });
     expect(await agent.entities.link({ ...input, dry_run: true })).toMatchObject({ preview: { outcome: 'review' } });
     const queued = await agent.entities.link(input);
@@ -291,7 +377,7 @@ describe('governed stored identity associations', () => {
     expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
     for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: ['new@example.test'] } });
     const fresh = await agent.entities.link(input);
-    expect(fresh).toMatchObject({ preview: { outcome: 'review' } });
+    expect(fresh).toMatchObject({ approval_queued: true });
     const [run] = await sql`SELECT action_input FROM runs WHERE id = ${runId(fresh)} AND organization_id = ${workspace.org.id}`;
     expect(run.action_input.support.fingerprint).not.toBe(run.action_input.topology);
     expect(JSON.stringify(run.action_input.support)).not.toMatch(/identity_ids|events.id/);
@@ -299,7 +385,7 @@ describe('governed stored identity associations', () => {
   });
 
   it('withdraws atomically with its audit, suppresses automation replay, and permits human reconsideration', async () => {
-    const { human, agent, input, sql, ids: [a, b], link } = await graph(3, 'auto_merge');
+    const { human, agent, input, sql, ids: [a, b], link } = await graph(3, 'auto_link');
     const relationshipId = linked(await link(a, b));
     await sql.unsafe(`CREATE FUNCTION test_identity_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
       IF NEW.metadata->>'_lobu_relationship_change' = 'true' AND NEW.metadata->>'op' = 'unlink' THEN RAISE EXCEPTION 'audit failure'; END IF;
@@ -314,33 +400,18 @@ describe('governed stored identity associations', () => {
       await sql.unsafe('DROP TRIGGER test_identity_audit_failure ON events; DROP FUNCTION test_identity_audit_failure()');
     }
     await human.entities.unlink({ relationship_id: relationshipId });
-    expect(await agent.entities.link(input)).toMatchObject({ preview: { outcome: 'suppressed' } });
-    expect(linked(await human.entities.link(input))).not.toBe(relationshipId);
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
+    const reconsidered = await human.entities.link(input);
+    expect(reconsidered).toMatchObject({ approval_queued: true });
+    const [proposal] = await sql`SELECT action_input FROM runs WHERE id = ${runId(reconsidered)}`;
+    expect(proposal.action_input.reason).toContain(`withdrawal #${relationshipId}`);
+    expect(await human.operations.approve({ run_id: runId(reconsidered) })).toMatchObject({ approved: true });
+    const [replacement] = await sql`SELECT id FROM entity_relationships WHERE from_entity_id = ${a} AND to_entity_id = ${b} AND deleted_at IS NULL`;
+    expect(Number(replacement.id)).not.toBe(relationshipId);
   });
 
-  it.each([false, true])('preserves legacy physical-merge rejection orientation (reverse=%s)', async reverse => {
-    const { human, agent, input, sql, workspace, ids: [a, b], metadataSchema } = await graph(3, 'review');
-    const policy = assessEntityResolution({ metadataSchema, winner: { id: b, metadata: { emails: ['shared@example.test'] } }, losers: [{ id: a, metadata: { emails: ['shared@example.test'] } }] });
-    await sql`INSERT INTO runs (organization_id, run_type, action_key, status, approval_status, action_input)
-      VALUES (${workspace.org.id}, 'internal', 'entity_change', 'cancelled', 'rejected', ${sql.json({ operation: 'merge', entity_id: reverse ? b : a,
-        winner_entity_id: reverse ? a : b, policy_hash: policy.policyHash, evidence: policy.evidence })})`;
-    expect(await agent.entities.link(input)).toMatchObject({ preview: { outcome: 'suppressed' } });
-    expect(linked(await human.entities.link(input))).toBeGreaterThan(0);
-  });
-
-  it('conservatively preserves a multi-loser rejection', async () => {
-    const { agent, input, sql, workspace, ids: [a, b, c] } = await graph(3, 'review');
-    await sql`INSERT INTO runs (organization_id, run_type, action_key, status, approval_status, action_input)
-      VALUES (${workspace.org.id}, 'internal', 'entity_change', 'cancelled', 'rejected', ${sql.json({ operation: 'merge', entity_id: a, entity_ids: [a, c], winner_entity_id: b })})`;
-    expect(await agent.entities.link(input)).toMatchObject({ preview: { outcome: 'suppressed' } });
-  });
-
-  it('refuses deletion and physical merge for opted types, including merge previews', async () => {
+  it('refuses deletion of linked identity members', async () => {
     const { human, sql, workspace, ids: [a, b], link } = await graph();
-    for (const dry_run of [false, true]) {
-      await expect(human.entities.manage({ action: 'merge', entity_id: a, winner_entity_id: b, dry_run })).rejects.toThrow(/identity associations/);
-    }
-    await expect(human.entities.manage({ action: 'resolve_duplicates', candidate_entity_ids: [a, b] })).rejects.toThrow(/identity associations/);
     await link(a, b);
     await expect(human.entities.delete({ entity_id: a })).rejects.toThrow(/identity/i);
     await expect(sql`UPDATE entities SET deleted_at = NOW() WHERE id = ${a}`).rejects.toThrow(/Unlink identity/);
@@ -353,15 +424,15 @@ describe('governed stored identity associations', () => {
     if (kind === 'reserved') await sql`UPDATE entity_types SET slug = '$identity-fixture' WHERE organization_id = ${workspace.org.id} AND slug = 'contact-record'`;
     else {
       await expect(sql`UPDATE entity_types SET backing_sql = 'SELECT 1 AS id' WHERE organization_id = ${workspace.org.id} AND slug = 'contact-record'`).rejects.toThrow(/stored rows exist/);
-      await expect(human.entities.manage({ action: 'link', from: { type: 'derived', key: 'a' }, to: { type: 'derived', key: 'b' }, relationship_type_slug: 'same_record' })).rejects.toThrow();
+      await expect(human.entities.link({ from: { type: 'derived', key: 'a' }, to: { type: 'derived', key: 'b' }, relationship_type_slug: 'same_record' })).rejects.toThrow();
       return;
     }
     await expect(human.entities.link(input)).rejects.toThrow(/stored.*non-reserved/);
   });
 
-  it('does not let direct SQL physically merge an opted type with no edges', async () => {
+  it('rejects the retired redirect column even when a type has no identity edges', async () => {
     const { sql, ids: [a, b] } = await graph();
-    await expect(sql`UPDATE entities SET merged_into = ${b} WHERE id = ${a}`).rejects.toThrow(/identity/i);
+    await expect(sql`UPDATE entities SET merged_into = ${b} WHERE id = ${a}`).rejects.toMatchObject({ code: '42703' });
   });
 
   it('keeps classification inert for ordinary relationships and refuses adopting populated edges', async () => {
@@ -391,12 +462,12 @@ describe('governed stored identity associations', () => {
     const second = await agent.entities.link(input);
     await human.operations.reject({ run_id: runId(second) });
     for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: ['shared@example.test'] } });
-    expect(await agent.entities.link(input)).toMatchObject({ preview: { outcome: 'suppressed' } });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
     await human.entity_schema.updateType({ slug: 'contact-record', metadata_schema: {
-      'x-lobu-resolution': { rules: [{ fields: ['emails'], normalizer: 'email', onMatch: 'auto_merge' }] },
+      'x-lobu-resolution': { rules: [{ fields: ['emails'], normalizer: 'email', onMatch: 'auto_link' }] },
     } });
     // A new policy permits reconsideration, but never silently undoes rejection.
-    expect(await agent.entities.link(input)).toMatchObject({ preview: { outcome: 'review' } });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_queued: true });
   });
 
   it.each([false, true])('retains both rejections when proposals overlap (reverse=%s)', async reverse => {
@@ -411,6 +482,26 @@ describe('governed stored identity associations', () => {
       for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: [email] } });
       expect(await agent.entities.link({ ...input, dry_run: true })).toMatchObject({ preview: { outcome: 'suppressed' } });
     }
+  });
+
+  it.each([
+    [false, null], [true, null],
+    [false, { version: 99, opaque: 'retained' }], [true, { version: 99, opaque: 'retained' }],
+  ])('retains opaque historical rejections when proposals overlap (reverse=%s, support=%j)', async (reverse, evidence) => {
+    const { sql, human, agent, input, ids: [a, b] } = await graph(2, 'review');
+    const first = runId(await agent.entities.link(input));
+    await sql`UPDATE runs SET action_input = jsonb_set(action_input - 'member_support', '{suppression_support}',
+      ${sql.json({ evidence })}::jsonb->'evidence') WHERE id = ${first}`;
+    const [legacy] = await sql`SELECT action_input FROM runs WHERE id = ${first}`;
+    expect(legacy.action_input.suppression_support).toEqual(evidence);
+    await sql.begin(tx => tx.unsafe(normalization()));
+    for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: ['second@example.test'] } });
+    const second = runId(await agent.entities.link(input));
+    for (const id of reverse ? [second, first] : [first, second]) await human.operations.reject({ run_id: id });
+    const [latest] = await sql`SELECT action_input->'member_support' AS members FROM runs WHERE id = ${second}`;
+    expect(latest.members[JSON.stringify([a, b])]).toEqual(evidence);
+    for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: ['fresh@example.test'] } });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
   });
 
   it('fingerprints scoped normalized source support without identity-row ids', async () => {
@@ -429,11 +520,11 @@ describe('governed stored identity associations', () => {
     await sql`UPDATE entity_identities SET deleted_at = NOW() WHERE entity_id = ${a}`;
     await sql`INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier, scope_key, source_connector, connection_id)
       VALUES (${workspace.org.id}, ${a}, 'emails', 'Shared@Example.test', 'fixture-scope', 'fixture', ${connection.id})`;
-    expect(await agent.entities.link(input)).toMatchObject({ preview: { outcome: 'suppressed' } });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
     const otherConnection = await createTestConnection({ organization_id: workspace.org.id, connector_key: 'fixture', created_by: workspace.users.owner.id, createDefaultFeed: false });
     await sql`UPDATE entity_identities SET connection_id = ${otherConnection.id} WHERE entity_id = ${a} AND deleted_at IS NULL`;
     const next = await agent.entities.link(input);
-    expect(next).toMatchObject({ preview: { outcome: 'review' } });
+    expect(next).toMatchObject({ approval_queued: true });
     const [after] = await sql`SELECT action_input->'support' AS support FROM runs WHERE id = ${runId(next)}`;
     expect(after.support.fingerprint).not.toBe(before.support.fingerprint);
   });
@@ -460,7 +551,7 @@ describe('governed stored identity associations', () => {
   });
 
   it('keeps an Automation preview of an existing edge free of reaction writes', async () => {
-    const { sql, workspace, human, agentRow, input } = await graph(3, 'auto_merge');
+    const { sql, workspace, human, agentRow, input } = await graph(3, 'auto_link');
     await human.entities.link(input);
     const [automation] = await sql`INSERT INTO automations
       (organization_id, managed_agent_id, created_by, automation_group_id, name, status, min_cooldown_seconds)
@@ -482,4 +573,115 @@ describe('governed stored identity associations', () => {
     expect(await sql`SELECT id FROM entities WHERE id = ${a}`).toHaveLength(0);
     expect(await sql`SELECT id FROM events WHERE organization_id = ${workspace.org.id} AND metadata->>'relationshipId' = ${String(relationshipId)} ORDER BY id`).toEqual(auditBefore);
   });
+  it('uses direct member evidence even when both roots lack that evidence', async () => {
+    const { human, agent, ids: [a, b, c, d], link } = await graph(4, 'auto_link');
+    for (const id of [b, d]) await human.entities.update({ entity_id: id, metadata: { emails: [] } });
+    await link(a, b);
+    await link(c, d);
+    const result = await agent.entities.link({ from_entity_id: b, to_entity_id: d, relationship_type_slug: 'same_record' });
+    expect(result).toMatchObject({ relationship: { from_entity_id: b, to_entity_id: d } });
+    expect(result).not.toHaveProperty('approval_queued', true);
+  });
+
+  it('requires review for conflicting unique values anywhere in the joined groups', async () => {
+    const { human, agent, ids: [a, b, c], link } = await graph(3, 'auto_link');
+    await human.entities.update({ entity_id: a, metadata: { emails: ['conflicting@example.test'] } });
+    await link(a, b);
+    expect(await agent.entities.link({ from_entity_id: b, to_entity_id: c, relationship_type_slug: 'same_record' }))
+      .toMatchObject({ approval_queued: true });
+  });
+
+  it.each(['link', 'unlink'] as const)('gates %s on a denied non-root member', async operation => {
+    const { workspace, agent, ids: [a, b, c], link } = await graph(3, 'auto_link');
+    await link(a, b);
+    const relationshipId = operation === 'unlink' ? linked(await link(b, c)) : undefined;
+    await upsertEntityApprovalPolicy(workspace.org.id, { entityId: a, updateMode: 'deny' });
+    const result = operation === 'link'
+      ? await agent.entities.link({ from_entity_id: b, to_entity_id: c, relationship_type_slug: 'same_record', dry_run: true })
+      : await agent.entities.unlink({ relationship_id: relationshipId, dry_run: true });
+    expect(result).toMatchObject({ dry_run: true, preview: { outcome: 'refused' } });
+  });
+
+  it('invalidates approval when unmatched normalized values change', async () => {
+    const { human, agent, input, ids: [a] } = await graph(3, 'review');
+    const queued = await agent.entities.link(input);
+    await human.entities.update({ entity_id: a, metadata: { emails: ['shared@example.test', 'new-unmatched@example.test'] } });
+    await expect(human.operations.approve({ run_id: runId(queued) })).rejects.toThrow(/stale/);
+  });
+
+  it('keeps a rejected member pair suppressed after its representative changes', async () => {
+    const { human, agent, ids: [a, b, c], link } = await graph(3, 'review');
+    const rejected = await agent.entities.link({ from_entity_id: a, to_entity_id: c, relationship_type_slug: 'same_record' });
+    await human.operations.reject({ run_id: runId(rejected) });
+    await link(a, b);
+    expect(await agent.entities.link({ from_entity_id: b, to_entity_id: c, relationship_type_slug: 'same_record' }))
+      .toMatchObject({ approval_suppressed: true });
+  });
+
+  it('retains the original pair rejection when regrouping and later restoring its policy', async () => {
+    const { human, agent, ids: [a, b, c, d], link, metadataSchema } = await graph(4, 'review');
+    const original = await agent.entities.link({ from_entity_id: a, to_entity_id: c, relationship_type_slug: 'same_record' });
+    await human.operations.reject({ run_id: runId(original) });
+    await link(a, b);
+    await link(c, d);
+    await human.entity_schema.updateType({ slug: 'contact-record', metadata_schema: {
+      'x-lobu-resolution': { rules: [
+        { fields: ['emails'], normalizer: 'email', onMatch: 'review' },
+        { fields: ['phone'], normalizer: 'phone', onMatch: 'review' },
+      ] },
+    } });
+    const input = { from_entity_id: b, to_entity_id: d, relationship_type_slug: 'same_record' };
+    await human.operations.reject({ run_id: runId(await agent.entities.link(input)) });
+    await human.entity_schema.updateType({ slug: 'contact-record', metadata_schema: metadataSchema });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
+  });
+
+  it('retains accepted member support when withdrawal follows an evidence edit', async () => {
+    const { human, agent, input, ids: [a, b], link } = await graph(2, 'auto_link');
+    const relationshipId = linked(await link(a, b));
+    for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: ['replacement@example.test'] } });
+    await human.entities.unlink({ relationship_id: relationshipId });
+    for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: ['shared@example.test'] } });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
+  });
+
+  it('does not overwrite a newer policy rejection when an older proposal is rejected last', async () => {
+    const { human, agent, input } = await graph(2, 'review');
+    const first = await agent.entities.link(input);
+    await human.entity_schema.updateType({ slug: 'contact-record', metadata_schema: {
+      'x-lobu-resolution': { rules: [
+        { fields: ['emails'], normalizer: 'email', onMatch: 'review' },
+        { fields: ['phone'], normalizer: 'phone', onMatch: 'review' },
+      ] },
+    } });
+    const second = await agent.entities.link(input);
+    await human.operations.reject({ run_id: runId(second) });
+    await human.operations.reject({ run_id: runId(first) });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
+  });
+
+  it('allows fresh group review when non-root evidence grows despite unchanged empty root pairs', async () => {
+    const { human, agent, ids: [a, b, c, d], link } = await graph(4, 'review');
+    for (const id of [b, d]) await human.entities.update({ entity_id: id, metadata: { emails: [] } });
+    await link(a, b);
+    await link(c, d);
+    const input = { from_entity_id: b, to_entity_id: d, relationship_type_slug: 'same_record' };
+    await human.operations.reject({ run_id: runId(await agent.entities.link(input)) });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
+    for (const id of [a, c]) await human.entities.update({ entity_id: id, metadata: { emails: ['shared@example.test', 'new@example.test'] } });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_queued: true });
+  });
+
+  it('does not report an unlink as applied while approval is pending', async () => {
+    const { workspace, human, agent, ids: [a, b], link, sql } = await graph();
+    const relationshipId = linked(await link(a, b));
+    await upsertEntityApprovalPolicy(workspace.org.id, { updateMode: 'approval' });
+    const queued = await agent.entities.unlink({ relationship_id: relationshipId });
+    expect(queued).toMatchObject({ approval_queued: true });
+    expect(queued).not.toHaveProperty('success');
+    expect(queued).not.toHaveProperty('preview');
+    expect((await sql`SELECT deleted_at FROM entity_relationships WHERE id = ${relationshipId}`)[0].deleted_at).toBeNull();
+    await human.operations.approve({ run_id: runId(queued) });
+  });
+
 });

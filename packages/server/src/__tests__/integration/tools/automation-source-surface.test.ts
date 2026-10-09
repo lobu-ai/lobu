@@ -128,20 +128,19 @@ describe('write surfaces refuse an unowned automation_source', () => {
     await attacker.api.entity_schema.createType({ slug: 'company', name: 'Company' });
     await attacker.api.entity_schema.createRelType({ slug: 'related', name: 'Related' });
     const from = (await attacker.api.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'From',
     })) as { entity: { id: number } };
     const to = (await attacker.api.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'To',
     })) as { entity: { id: number } };
     const borrowedTo = (await attacker.api.entities.create({
-      type: 'company',
+      entity_type: 'company',
       name: 'Borrowed To',
     })) as { entity: { id: number } };
 
-    await attacker.api.entities.manage({
-      action: 'link',
+    await attacker.api.entities.link({
       from_entity_id: from.entity.id,
       to_entity_id: to.entity.id,
       relationship_type_slug: 'related',
@@ -151,8 +150,7 @@ describe('write surfaces refuse an unowned automation_source', () => {
       },
     });
 
-    await attacker.api.entities.manage({
-      action: 'link',
+    await attacker.api.entities.link({
       from_entity_id: from.entity.id,
       to_entity_id: borrowedTo.entity.id,
       relationship_type_slug: 'related',
@@ -192,7 +190,7 @@ describe('write surfaces credit a stamped acting Automation with no declaration'
     const org = await orgWithAutomationAndRun('Acting Entity', 'a-entity');
     await org.api.entity_schema.createType({ slug: 'employee', name: 'Employee' });
     const created = (await org.api.entities.create({
-      type: 'employee',
+      entity_type: 'employee',
       name: 'Ada',
     })) as { entity: { id: number } };
 
@@ -203,8 +201,7 @@ describe('write surfaces credit a stamped acting Automation with no declaration'
       actingAutomationId: org.automationId,
       actingRunId: org.runId,
     });
-    await reaction.entities.manage({
-      action: 'update',
+    await reaction.entities.update({
       entity_id: created.entity.id,
       metadata: { provisioning_status: 'provisioned' },
     });

@@ -34,7 +34,7 @@ type FieldChangeApprovalDetails = {
 
 type EntityChangeApprovalDetails = {
 	kind: "entity_change";
-	operation: "create" | "delete" | "merge" | "link" | "unlink";
+	operation: "create" | "delete" | "link" | "unlink";
 	actorLabel?: string | null;
 	entityId?: number | null;
 	entityType?: string | null;
@@ -160,9 +160,7 @@ export function formatActionApprovalTitle(
 		if (details.operation === "link" || details.operation === "unlink") return `Review ${details.operation === "link" ? "associating" : "separating"} identity records`;
 		return details.operation === "delete"
 			? `Review deleting ${entityLabel}`
-			: details.operation === "merge"
-				? `Review merging ${entityLabel}`
-				: `Review creating ${entityLabel}`;
+			: `Review creating ${entityLabel}`;
 	}
 	return `Action "${actionKey}" needs approval`;
 }
@@ -232,9 +230,7 @@ function buildApprovalRenderModel(
 			: details.operation === "unlink" ? "Separate these identity records"
 			: details.operation === "delete"
 				? "Delete this entity"
-				: details.operation === "merge"
-					? "Merge these entities"
-					: "Create this entity",
+				: "Create this entity",
 		proposal: Object.entries(details.proposal ?? {}).map(([field, value]) => ({
 			label: formatLabel(field),
 			value: truncateNotificationLine(displayNotificationValue(value)),
@@ -253,6 +249,7 @@ function buildApprovalRenderModel(
 function renderApprovalBody(
 	model: ApprovalRenderModel,
 	approvalUrl?: string,
+	operation?: EntityChangeApprovalDetails["operation"],
 ): string {
 	const lines: string[] = [];
 	const label = escapeMarkdownText(
@@ -275,12 +272,9 @@ function renderApprovalBody(
 				`- ${d.label}: ~${escapeMarkdownText(d.current)}~\n→ ${escapeMarkdownText(d.proposed)}`,
 			);
 	} else {
-		const verb =
-			model.action === "Delete this entity"
-				? "delete"
-				: model.action === "Merge these entities"
-					? "merge"
-					: "create";
+		const verb = operation === "link" ? "associate"
+			: operation === "unlink" ? "separate"
+			: operation === "delete" ? "delete" : "create";
 		lines.push(`**${who}** wants to ${verb} ${entityLink}.`);
 		if (model.proposal.length > 0) {
 			for (const p of model.proposal)
@@ -305,6 +299,7 @@ export function formatActionApprovalBody(params: {
 		return renderApprovalBody(
 			buildApprovalRenderModel(params.details),
 			params.approvalUrl,
+			params.details.kind === "entity_change" ? params.details.operation : undefined,
 		);
 	}
 

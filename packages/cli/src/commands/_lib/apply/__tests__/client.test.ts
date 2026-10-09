@@ -562,7 +562,7 @@ describe("ApplyClient — prune", () => {
         {
           fields: ["email"],
           normalizer: "email",
-          onMatch: "auto_merge",
+          onMatch: "auto_link",
         },
       ],
     };
@@ -643,7 +643,7 @@ describe("ApplyClient — prune", () => {
         resolutionPolicy: {
           "x-lobu-resolution": {
             rules: [
-              { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+              { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
             ],
           },
         },
@@ -654,9 +654,7 @@ describe("ApplyClient — prune", () => {
 
     const body = JSON.parse(String(calls[0]?.init?.body));
     expect(body.metadata_schema["x-lobu-resolution"]).toEqual({
-      rules: [
-        { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
-      ],
+      rules: [{ fields: ["email"], normalizer: "email", onMatch: "auto_link" }],
     });
     expect(body.metadata_schema.properties).toEqual({
       email: { type: "string" },
@@ -678,16 +676,14 @@ describe("ApplyClient — prune", () => {
       {
         "x-lobu-resolution": {
           rules: [
-            { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+            { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
           ],
         },
       }
     );
     const body = JSON.parse(String(calls[0]?.init?.body));
     expect(body.metadata_schema["x-lobu-resolution"]).toEqual({
-      rules: [
-        { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
-      ],
+      rules: [{ fields: ["email"], normalizer: "email", onMatch: "auto_link" }],
     });
   });
 
@@ -709,7 +705,7 @@ describe("ApplyClient — prune", () => {
         resolutionPolicy: {
           "x-lobu-resolution": {
             rules: [
-              { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+              { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
             ],
           },
         },
@@ -728,7 +724,7 @@ describe("ApplyClient — prune", () => {
       required: ["email"],
       "x-lobu-resolution": {
         rules: [
-          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+          { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
         ],
       },
     });
@@ -749,7 +745,7 @@ describe("ApplyClient — prune", () => {
       resolutionPolicy: {
         "x-lobu-resolution": {
           rules: [
-            { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+            { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
           ],
         },
       },
@@ -782,7 +778,7 @@ describe("ApplyClient — prune", () => {
         resolutionPolicy: {
           "x-lobu-resolution": {
             rules: [
-              { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+              { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
             ],
           },
         },
@@ -815,7 +811,7 @@ describe("ApplyClient — prune", () => {
       {
         "x-lobu-resolution": {
           rules: [
-            { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+            { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
           ],
         },
       },

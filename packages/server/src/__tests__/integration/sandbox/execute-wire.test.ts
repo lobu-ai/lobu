@@ -67,7 +67,7 @@ describe('sandbox run (wire)', () => {
       slug: 'company',
       name: 'Company',
     });
-    await seedClient.entities.create({ type: 'company', name: 'Sandbox Co' });
+    await seedClient.entities.create({ entity_type: 'company', name: 'Sandbox Co' });
     await seedClient.entity_schema.createType({
       slug: 'net-worth-snapshot',
       name: 'Net Worth Snapshot',
@@ -252,4 +252,59 @@ describe('sandbox run (wire)', () => {
     expect(json).toContain('"action":"list"');
     expect(json).toMatch(/"n":\d+/);
   });
+
+  it('reports a caught timeout as a terminal failure through MCP', async (testCtx) => {
+    if (!isolatedAvailable) return testCtx.skip();
+    const client = new TestMcpClient({ token, orgSlug });
+    const response = await client.raw<{ structuredContent: Record<string, unknown> }>('tools/call', {
+      name: 'run_sdk',
+      arguments: {
+        script: `export default async (ctx) => {
+          try { await ctx.sleep(30000); } catch {}
+          return { incorrectlySucceeded: true };
+        };`,
+        timeout_ms: 500,
+      },
+    });
+    expect(response.error).toBeUndefined();
+    expect(response.result.structuredContent).toMatchObject({
+      success: false,
+      error: { name: 'TimeoutError' },
+    });
+    expect(response.result.structuredContent).not.toHaveProperty('return_value');
+  });
+
+  it('preserves a committed write and reports it when the script later times out', async (testCtx) => {
+    if (!isolatedAvailable) return testCtx.skip();
+    const client = new TestMcpClient({ token, orgSlug });
+    const response = await client.raw<{ structuredContent: Record<string, unknown> }>('tools/call', {
+      name: 'run_sdk',
+      arguments: {
+        script: `export default async (ctx, client) => {
+          await client.entities.create({
+            entity_type: 'company',
+            name: 'Committed Before Timeout Co',
+          });
+          try { await ctx.sleep(30000); } catch {}
+          return { incorrectlySucceeded: true };
+        };`,
+        timeout_ms: 2000,
+      },
+    });
+    expect(response.error).toBeUndefined();
+    expect(response.result.structuredContent).toMatchObject({
+      success: false,
+      error: { name: 'TimeoutError' },
+      started_side_effects: [{ path: 'entities.create', access: 'write', count: 1 }],
+    });
+    expect(response.result.structuredContent).not.toHaveProperty('return_value');
+    const read = await client.querySdk<{ success: boolean; return_value: boolean }>(
+      `export default async (_ctx, client) => {
+        const result = await client.entities.list({ entity_type: 'company' });
+        return result.entities.some((entity) => entity.name === 'Committed Before Timeout Co');
+      };`
+    );
+    expect(read).toMatchObject({ success: true, return_value: true });
+  });
+
 });

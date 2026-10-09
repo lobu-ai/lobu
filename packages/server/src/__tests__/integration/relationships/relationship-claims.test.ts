@@ -27,11 +27,11 @@ async function seedClaimGraph() {
     name: 'Invoice Customer',
   });
   const invoice = (await workspace.owner.entities.create({
-    type: 'invoice',
+    entity_type: 'invoice',
     name: 'INV-RACE',
   })) as { entity: { id: number } };
   const customer = (await workspace.owner.entities.create({
-    type: 'customer',
+    entity_type: 'customer',
     name: 'Race Customer',
   })) as { entity: { id: number } };
   const connection = await createTestConnection({
@@ -159,7 +159,7 @@ describe('relationship source claims', () => {
   it('locks concurrent multi-edge assertions in triple order', async () => {
     const { sql, workspace, connection, desired } = await seedClaimGraph();
     const secondCustomer = (await workspace.owner.entities.create({
-      type: 'customer',
+      entity_type: 'customer',
       name: 'Second Race Customer',
     })) as { entity: { id: number } };
     const secondEdge = {
@@ -203,7 +203,7 @@ describe('relationship source claims', () => {
   it('locks desired and departing claims in one order during concurrent moves', async () => {
     const { sql, workspace, connection, desired } = await seedClaimGraph();
     const secondCustomer = (await workspace.owner.entities.create({
-      type: 'customer',
+      entity_type: 'customer',
       name: 'Move Race Customer',
     })) as { entity: { id: number } };
     const secondEdge = {
@@ -268,7 +268,7 @@ describe('relationship source claims', () => {
   it('uses the same existing-row lock order in batch and claim writers', async () => {
     const { sql, workspace, connection, desired } = await seedClaimGraph();
     const secondCustomer = (await workspace.owner.entities.create({
-      type: 'customer',
+      entity_type: 'customer',
       name: 'Cross Writer Customer',
     })) as { entity: { id: number } };
     const secondEdge = {
@@ -513,8 +513,7 @@ describe('relationship source claims', () => {
     expect(row.confidence).toBe(0.4);
     expect(row.source).toBe('feed');
 
-    await workspace.owner.entities.manage({
-      action: 'unlink',
+    await workspace.owner.entities.unlink({
       relationship_id: Number(row.id),
     });
 
@@ -545,15 +544,13 @@ describe('relationship source claims', () => {
     `;
 
     await expect(
-      workspace.owner.entities.manage({
-        action: 'update_link',
+      workspace.owner.entities.updateLink({
         relationship_id: Number(unclaimed.id),
         confidence: 0.5,
       })
     ).rejects.toThrow(/_lobu_claims/);
     await expect(
-      workspace.owner.entities.manage({
-        action: 'unlink',
+      workspace.owner.entities.unlink({
         relationship_id: Number(unclaimed.id),
       })
     ).rejects.toThrow(/_lobu_claims/);

@@ -1,22 +1,10 @@
 /**
  * Bundle entry wrapper — Node-version gate FIRST, then the real server.
  *
- * The server graph statically imports `@sentry/node`, which pulls `undici`.
- * On Node 18 undici references the absent `File` global and throws
- * `ReferenceError: File is not defined` at load — a cryptic crash that
- * fires before `./server`'s own `assert-node-version` guard can run, because
- * ES `import` statements are hoisted and evaluated before any sibling module
- * body (verified: a top-level import's side effects run before an IIFE placed
- * textually above it).
- *
- * So the gate lives HERE, in an entry with zero static imports of the server
- * graph. The synchronous check runs first; only if it passes do we DYNAMICALLY
- * import the server graph — which the build emits as a SEPARATE bundle
- * (server-main.bundle.mjs). Its URL is constructed at runtime so esbuild cannot
- * inline and re-hoist it.
- * That is where Sentry/undici finally load. Result: an old Node gets an
- * explicit, actionable message and a clean exit(1) instead of the undici
- * ReferenceError.
+ * Server dependencies require the supported Node globals and native ABI.
+ * This entry has no static server imports: the version check must run before
+ * dependency evaluation, so unsupported Node versions get an actionable error.
+ * The build emits server-main.bundle.mjs separately to prevent import hoisting.
  *
  * Keep the threshold in sync with ./utils/assert-node-version.ts and the CLI's
  * internal/node-version.ts + bin/lobu.js.
@@ -41,9 +29,9 @@ assertNodeOrExit();
 
 // Dynamic import of the SEPARATE server-main bundle is REQUIRED: a static
 // import — or a dynamic import esbuild can resolve and inline — would hoist the
-// server graph's @sentry/node → undici above assertNodeOrExit(), defeating the
+// server dependency graph above assertNodeOrExit(), defeating the
 // gate. Constructing the URL at runtime leaves the import for Node and defers
-// undici until after the check passes. server-main self-executes its main() on
+// dependencies until after the check passes. server-main self-executes its main() on
 // load, so importing it boots the server.
 //
 // The specifier is resolved relative to this file's URL so it works from the

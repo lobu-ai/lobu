@@ -76,11 +76,11 @@ describe('edge change history', () => {
 
   async function seedEdge(prefix: string) {
     const invoice = (await workspace.owner.entities.create({
-      type: 'invoice',
+      entity_type: 'invoice',
       name: `${prefix} Invoice`,
     })) as { entity: { id: number } };
     const customer = (await workspace.owner.entities.create({
-      type: 'customer',
+      entity_type: 'customer',
       name: `${prefix} Customer`,
     })) as { entity: { id: number } };
 
@@ -124,8 +124,7 @@ describe('edge change history', () => {
     const { relationshipId } = await seedEdge('Update');
     await waitForEdgeChanges(relationshipId, 1);
 
-    await workspace.owner.entities.manage({
-      action: 'update_link',
+    await workspace.owner.entities.updateLink({
       relationship_id: relationshipId,
       confidence: 0.9,
     });
@@ -143,14 +142,12 @@ describe('edge change history', () => {
     const { relationshipId } = await seedEdge('Successive');
     await waitForEdgeChanges(relationshipId, 1);
 
-    await workspace.owner.entities.manage({
-      action: 'update_link',
+    await workspace.owner.entities.updateLink({
       relationship_id: relationshipId,
       confidence: 0.6,
     });
     await waitForEdgeChanges(relationshipId, 2);
-    await workspace.owner.entities.manage({
-      action: 'update_link',
+    await workspace.owner.entities.updateLink({
       relationship_id: relationshipId,
       confidence: 0.7,
     });
@@ -169,13 +166,11 @@ describe('edge change history', () => {
     await waitForEdgeChanges(relationshipId, 1);
 
     await Promise.all([
-      workspace.owner.entities.manage({
-        action: 'update_link',
+      workspace.owner.entities.updateLink({
         relationship_id: relationshipId,
         confidence: 0.6,
       }),
-      workspace.owner.entities.manage({
-        action: 'update_link',
+      workspace.owner.entities.updateLink({
         relationship_id: relationshipId,
         confidence: 0.7,
       }),
@@ -196,8 +191,7 @@ describe('edge change history', () => {
     const { relationshipId } = await seedEdge('Noop');
     await waitForEdgeChanges(relationshipId, 1);
 
-    await workspace.owner.entities.manage({
-      action: 'update_link',
+    await workspace.owner.entities.updateLink({
       relationship_id: relationshipId,
       confidence: 0.5, // the value it already has
     });
@@ -213,8 +207,7 @@ describe('edge change history', () => {
     const { relationshipId } = await seedEdge('Unlink');
     await waitForEdgeChanges(relationshipId, 1);
 
-    await workspace.owner.entities.manage({
-      action: 'unlink',
+    await workspace.owner.entities.unlink({
       relationship_id: relationshipId,
     });
 
@@ -231,14 +224,12 @@ describe('edge change history', () => {
     const { relationshipId } = await seedEdge('Lifetime');
     await waitForEdgeChanges(relationshipId, 1);
 
-    await workspace.owner.entities.manage({
-      action: 'update_link',
+    await workspace.owner.entities.updateLink({
       relationship_id: relationshipId,
       source: 'llm',
     });
     await waitForEdgeChanges(relationshipId, 2);
-    await workspace.owner.entities.manage({
-      action: 'unlink',
+    await workspace.owner.entities.unlink({
       relationship_id: relationshipId,
     });
 

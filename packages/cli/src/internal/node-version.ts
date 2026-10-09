@@ -5,7 +5,7 @@
  * is tied to each Node line's V8 ABI: isolated-vm@6 covers Node 22–24, the
  * aliased isolated-vm@7 covers Node 26+. Node 25 is an EOL non-LTS line upstream
  * skipped, so it boots but has no sandbox build. Below 22 nothing works — the
- * bundled server's deps (undici via @sentry/node) reference globals absent on
+ * bundled server's deps (undici) reference globals absent on
  * old Node and crash on load.
  *
  * The `bin/lobu.js` entrypoint carries an inline copy of the MIN threshold

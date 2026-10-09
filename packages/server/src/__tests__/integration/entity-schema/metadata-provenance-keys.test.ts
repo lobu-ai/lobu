@@ -52,7 +52,7 @@ describe('entity metadata validation > automation provenance keys', () => {
 
   it('accepts promotion provenance on update under additionalProperties: false', async () => {
     const created = (await owner.entities.create({
-      type: 'strict-task',
+      entity_type: 'strict-task',
       name: 'Promoted task round-trip',
       metadata: { action: 'Ship the fix', status: 'backlog' },
     })) as { entity: { id: number } };
@@ -82,7 +82,7 @@ describe('entity metadata validation > automation provenance keys', () => {
 
   it('still rejects genuinely unknown metadata keys', async () => {
     const created = (await owner.entities.create({
-      type: 'strict-task',
+      entity_type: 'strict-task',
       name: 'Strictness control',
       metadata: { action: 'Stay strict', status: 'backlog' },
     })) as { entity: { id: number } };
@@ -100,7 +100,7 @@ describe('entity metadata validation > automation provenance keys', () => {
 
   it('validates a partial patch against the merged entity metadata', async () => {
     const created = (await owner.entities.create({
-      type: 'strict-task',
+      entity_type: 'strict-task',
       name: 'Partial edit',
       metadata: { action: 'Preserve the required action', status: 'backlog' },
     })) as { entity: { id: number } };
@@ -126,7 +126,7 @@ describe('entity metadata validation > automation provenance keys', () => {
 
   it('initializes metadata when a stored row has null metadata', async () => {
     const created = (await owner.entities.create({
-      type: 'strict-task',
+      entity_type: 'strict-task',
       name: 'Initialize null metadata',
       metadata: { action: 'Initial content' },
     })) as { entity: { id: number } };
@@ -153,7 +153,7 @@ describe('entity metadata validation > automation provenance keys', () => {
       },
     } as never);
     const created = (await owner.entities.create({
-      type: 'strict-no-source',
+      entity_type: 'strict-no-source',
       name: 'Legacy promotion',
       metadata: { action: 'Keep required content', status: 'backlog' },
     })) as { entity: { id: number } };
@@ -195,7 +195,7 @@ describe('entity metadata validation > automation provenance keys', () => {
       metadata: { source: 'https://example.invalid/domain-value' },
     })).rejects.toThrow("unknown property 'source'");
     await expect(owner.entities.create({
-      type: 'strict-no-source',
+      entity_type: 'strict-no-source',
       name: 'Spoofed provenance metadata',
       metadata: {
         action: 'Stay strict',
@@ -251,7 +251,7 @@ describe('entity metadata validation > automation provenance keys', () => {
       metadata_schema: metadataSchema,
     } as never);
     const created = (await owner.entities.create({
-      type: `strict-domain-source-${kind}`,
+      entity_type: `strict-domain-source-${kind}`,
       name: `Declared source validation ${kind}`,
       metadata: { action: 'Stay strict', source: 'verified' },
     })) as { entity: { id: number } };
@@ -286,7 +286,7 @@ describe('entity metadata validation > automation provenance keys', () => {
    */
   it('preserves an optional null clear and non-null schema coercions', async () => {
     const created = (await owner.entities.create({
-      type: 'strict-task',
+      entity_type: 'strict-task',
       name: 'Clear optional status',
       metadata: { action: 'Keep this', status: 'backlog' },
     })) as { entity: { id: number } };
@@ -313,7 +313,7 @@ describe('entity metadata validation > automation provenance keys', () => {
    */
   it('rejects an oversized null-only metadata patch', async () => {
     const created = (await owner.entities.create({
-      type: 'strict-task',
+      entity_type: 'strict-task',
       name: 'Bounded null patch',
       metadata: { action: 'Stay bounded' },
     })) as { entity: { id: number } };
@@ -344,7 +344,7 @@ describe('entity metadata validation > automation provenance keys', () => {
    */
   it('rejects an explicit null clear for a required schema field', async () => {
     const created = (await owner.entities.create({
-      type: 'strict-task',
+      entity_type: 'strict-task',
       name: 'Keep required action',
       metadata: { action: 'Cannot clear this', status: 'backlog' },
     })) as { entity: { id: number } };

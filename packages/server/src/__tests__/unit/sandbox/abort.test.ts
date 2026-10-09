@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { raceAbort } from "../../../utils/race-abort";
 import { sleepAgainstAbort } from "../../../sandbox/run-script";
 import { runOrSkip, stubSDK } from "./_helpers";
@@ -31,6 +31,16 @@ describe("sandbox sleep", () => {
 });
 
 describe("AbortSignal cancellation", () => {
+  beforeAll(async () => {
+    // Runtime loading shares the deadline now; resolve availability before
+    // measuring short dispatch budgets (Bun cannot load isolated-vm).
+    const result = await runOrSkip({
+      source: "export default async () => null;",
+      sdk: stubSDK(),
+    });
+    if (result) expect(result.success).toBe(true);
+  });
+
   it("script timeout returns the script before its upstream call resolves", async () => {
     let callCount = 0;
     const sdk = stubSDK({
@@ -124,7 +134,7 @@ describe("automation reaction default", () => {
       source: [
         "export default async (_ctx, client) => {",
         "  if (typeof client.entities.create !== 'function') throw new Error('lost write access');",
-        "  return client.entities.create({ type: 'company', name: 'Reactor' });",
+        "  return client.entities.create({ entity_type: 'company', name: 'Reactor' });",
         "};",
       ].join("\n"),
       sdk,

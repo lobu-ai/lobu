@@ -65,7 +65,7 @@ describe('stored entity list pagination + sort (two-stage page fetch)', () => {
     await owner.entity_schema.createType({ slug: 'company', name: 'Company' });
 
     for (const name of names) {
-      const created = (await owner.entities.create({ type: 'company', name })) as {
+      const created = (await owner.entities.create({ entity_type: 'company', name })) as {
         entity: { id: number };
       };
       ids[name] = created.entity.id;

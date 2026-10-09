@@ -1,11 +1,3 @@
-/**
- * Tests for loadAllowedDomains' Sentry-ingest-host handling. This is the
- * load-bearing egress decision for worker Sentry reporting: the worker reaches
- * Sentry THROUGH the gateway proxy (not directly — the Linux systemd scope's
- * IPAddressDeny would drop a direct connection), so the proxy allowlist MUST
- * admit the Sentry ingest host or every capture POST is silently 403'd.
- */
-
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { loadAllowedDomains } from "../network-allowlist.js";
 
@@ -29,16 +21,16 @@ describe("loadAllowedDomains + SENTRY_DSN", () => {
     expect(loadAllowedDomains()).toEqual([]);
   });
 
-  test("DSN set, WORKER_ALLOWED_DOMAINS unset → only the Sentry host is allowed", () => {
+  test("DSN set, WORKER_ALLOWED_DOMAINS unset → complete isolation is preserved", () => {
     process.env.SENTRY_DSN = "https://abc123@o42.ingest.de.sentry.io/9876";
-    expect(loadAllowedDomains()).toEqual(["o42.ingest.de.sentry.io"]);
+    expect(loadAllowedDomains()).toEqual([]);
   });
 
-  test("DSN set + allowlist → Sentry host appended", () => {
+  test("DSN set + allowlist → obsolete telemetry config does not widen egress", () => {
     process.env.SENTRY_DSN = "https://k@o1.ingest.us.sentry.io/2";
     process.env.WORKER_ALLOWED_DOMAINS = "github.com,api.example.com";
     const allowed = loadAllowedDomains();
-    expect(allowed).toContain("o1.ingest.us.sentry.io");
+    expect(allowed).not.toContain("o1.ingest.us.sentry.io");
     expect(allowed).toContain("github.com");
     expect(allowed).toContain("api.example.com");
   });

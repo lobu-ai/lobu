@@ -8,7 +8,7 @@
  * error_message unset.
  */
 
-import { expect, mock, test } from 'bun:test';
+import { expect, mock, spyOn, test } from 'bun:test';
 
 // biome-ignore lint/suspicious/noExplicitAny: test seam — module mocks need loose types
 type AnyFn = (...args: any[]) => any;
@@ -61,6 +61,43 @@ const baseJob = {
   credentials: null,
   compiled_code: 'compiled',
 };
+
+test.each(['sync', 'action', 'auth', 'embed_backfill'])('%s failure retains its scrubbed stack in daemon logs', async (run_type) => {
+  const error = new Error('fetch https://example.test/path?token=synthetic-secret');
+  error.stack = `${error.message}\n    at syntheticOperation (worker.js:12:3)`;
+  executeCompiledConnectorMock.mockImplementation(async () => { throw error; });
+  const stderr = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const result = await executeRun(
+      { ...makeStubClient(), async fetchEventsForEmbedding() { throw error; } } as any,
+      { ...baseJob, run_type, action_key: 'synthetic_action', action_input: { event_ids: [1] } } as any,
+      {} as any,
+      { executor: { execute: executeCompiledConnectorMock } },
+    );
+    expect(result.error).toBe(error.message);
+    const failures = stderr.mock.calls.map(([line]) => JSON.parse(String(line)))
+      .filter((record) => record.level === 'error');
+    expect(failures).toHaveLength(1);
+    expect(JSON.stringify(failures[0])).toContain('syntheticOperation');
+    expect(JSON.stringify(failures[0])).not.toContain('synthetic-secret');
+  } finally {
+    stderr.mockRestore();
+  }
+});
+
+test('unhandled run failures are logged as errors with their original stack', async () => {
+  const stderr = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const result = await executeRun(makeStubClient() as any, { ...baseJob, run_type: 'action' } as any, {} as any);
+    expect(result.error).toContain('Invalid action run');
+    const failures = stderr.mock.calls.map(([line]) => JSON.parse(String(line)));
+    expect(failures).toHaveLength(1);
+    expect(failures[0].level).toBe('error');
+    expect(failures[0].data[0].stack).toContain('executeActionRun');
+  } finally {
+    stderr.mockRestore();
+  }
+});
 
 test('sync metadata.fetch_errors → forwarded as error_message on the successful completion', async () => {
   executeCompiledConnectorMock.mockImplementation(async () => ({

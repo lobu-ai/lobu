@@ -6,7 +6,7 @@
  * #948 + the #943 7-hygiene catch-up):
  *
  *   1. Middleware ordering on the Hono wrapper:
- *      peer-address stash → env-inject → request logger → sentry-5xx-capture → onError
+ *      peer-address stash → env-inject → request logger → structured-5xx-capture → onError
  *   2. Route mounts: `/lobu` mounted only when lobuApp is non-null; `/` always.
  *   3. httpServer timeouts: keepAliveTimeout=75000, headersTimeout=76000.
  *   4. Shutdown ordering documented in createServerLifecycle().
@@ -23,11 +23,6 @@ import net from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-
-vi.mock("@sentry/node", () => ({
-	captureException: vi.fn(),
-	captureMessage: vi.fn(),
-}));
 
 // --- heavy collaborators of createServerLifecycle, replaced so the spine
 // --- boots in-process against a real ephemeral HTTP server.
@@ -83,26 +78,6 @@ vi.mock("../utils/logger", () => {
 	};
 	const logger = make();
 	return { default: logger };
-});
-
-vi.mock("../sentry", () => {
-	const reported = new WeakSet<object>();
-	return {
-		captureServerError: vi.fn(),
-		isSentryReported: vi.fn((c: { req: unknown }) =>
-			reported.has(c.req as object),
-		),
-		markSentryReported: vi.fn((c: { req: unknown }) => {
-			reported.add(c.req as object);
-		}),
-		trackMCPToolCall: vi.fn(
-			async <T,>(
-				_toolName: string,
-				_args: unknown,
-				handler: () => Promise<T>,
-			) => handler(),
-		),
-	};
 });
 
 // The wrapper imports `mainApp` from `./index` to mount at `/`. The real
@@ -320,9 +295,9 @@ describe("buildWrapperApp", () => {
 		expect(await res.text()).toBe("10.0.0.1");
 	});
 
-	it("captures 5xx responses to Sentry via the post-response middleware", async () => {
+	it("logs 5xx responses via the post-response middleware", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
-		const sentry = await import("@sentry/node");
+		const { default: logger } = await import("../utils/logger");
 		const { Hono } = await import("hono");
 		const lobuApp = new Hono();
 		// Routes that try/catch internally and return c.json(..., 500) — the
@@ -333,21 +308,17 @@ describe("buildWrapperApp", () => {
 
 		const res = await wrapper.request("/lobu/silent-500");
 		expect(res.status).toBe(500);
-		expect(sentry.captureMessage).toHaveBeenCalled();
-		const calls = (sentry.captureMessage as ReturnType<typeof vi.fn>).mock
-			.calls;
-		const lastCall = calls[calls.length - 1] ?? [];
-		const [message, opts] = lastCall;
-		expect(message).toBe("inner caught");
-		expect(opts.level).toBe("error");
-		expect(opts.tags.source).toBe("http_response");
+		expect(logger.error).toHaveBeenCalledWith(
+			expect.objectContaining({ source: "http_response", res_status: 500 }),
+			"inner caught",
+		);
 	});
 
 	it("suppresses ONLY the draining readiness 503; other health 5xx still report", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
-		const sentry = await import("@sentry/node");
+		const { default: logger } = await import("../utils/logger");
 		const { Hono } = await import("hono");
-		const captureMessage = sentry.captureMessage as ReturnType<typeof vi.fn>;
+		const captureMessage = logger.error as ReturnType<typeof vi.fn>;
 
 		// Expected deploy-drain shape → suppressed (was LOBU-BACKEND-X noise).
 		const draining = buildWrapperApp({} as never, new Hono());
@@ -370,9 +341,9 @@ describe("buildWrapperApp", () => {
 		expect(captureMessage).toHaveBeenCalled();
 	});
 
-	it("routes thrown exceptions through onError + Sentry.captureException", async () => {
+	it("logs the original thrown exception through onError", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
-		const sentry = await import("@sentry/node");
+		const { default: logger } = await import("../utils/logger");
 		const { Hono } = await import("hono");
 		const lobuApp = new Hono();
 		lobuApp.get("/boom", () => {
@@ -382,24 +353,20 @@ describe("buildWrapperApp", () => {
 
 		const res = await wrapper.request("/lobu/boom");
 		expect(res.status).toBe(500);
-		expect(sentry.captureException).toHaveBeenCalled();
-		const calls = (sentry.captureException as ReturnType<typeof vi.fn>).mock
-			.calls;
+		expect(logger.error).toHaveBeenCalled();
+		const calls = (logger.error as ReturnType<typeof vi.fn>).mock.calls
+			.filter(([record]) => record?.source === "app_onError");
 		const lastCall = calls[calls.length - 1] ?? [];
-		const [errArg] = lastCall;
+		const [{ err: errArg }] = lastCall;
 		expect((errArg as Error).message).toBe("thrown from route");
 	});
 
 	it("does NOT double-report when onError fires after post-response middleware", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
-		const sentry = await import("@sentry/node");
+		const { default: logger } = await import("../utils/logger");
 		const { Hono } = await import("hono");
-		const captureMessage = sentry.captureMessage as ReturnType<typeof vi.fn>;
-		const captureException = sentry.captureException as ReturnType<
-			typeof vi.fn
-		>;
+		const captureMessage = logger.error as ReturnType<typeof vi.fn>;
 		captureMessage.mockClear();
-		captureException.mockClear();
 
 		const lobuApp = new Hono();
 		lobuApp.get("/boom", () => {
@@ -408,10 +375,12 @@ describe("buildWrapperApp", () => {
 		const wrapper = buildWrapperApp({} as never, lobuApp);
 
 		await wrapper.request("/lobu/boom");
-		// onError marks the request as reported via markSentryReported BEFORE
+		// onError marks the request as reported via markErrorReported BEFORE
 		// the post-response middleware runs; the latter must skip the 5xx path.
-		expect(captureException).toHaveBeenCalledTimes(1);
-		expect(captureMessage).toHaveBeenCalledTimes(0);
+		const diagnostics = captureMessage.mock.calls.filter(([record]) =>
+			record?.source === "app_onError" || record?.source === "http_response");
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0][0].source).toBe("app_onError");
 	});
 });
 

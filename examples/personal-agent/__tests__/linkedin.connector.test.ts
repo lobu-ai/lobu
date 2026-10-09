@@ -3408,7 +3408,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.13.2");
+    expect(c.definition.version).toBe("3.14.0");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
@@ -4044,6 +4044,69 @@ describe("prepare_comment helpers", () => {
     expect(result.error).toMatch(/Not logged into LinkedIn/);
     expect(result.output).toBeUndefined();
     expect(scrapes).toBe(authWallAt);
+  });
+
+  test("definition declares read_home_feed as a read-only live read", () => {
+    const action = new LinkedInConnector().definition.actions?.read_home_feed;
+    expect(action?.key).toBe("read_home_feed");
+    expect(action?.kind).toBe("read");
+    expect(action?.annotations?.destructiveHint).toBe(false);
+    expect(action?.annotations?.idempotentHint).toBe(true);
+  });
+
+  test("read_home_feed fails on an auth wall", async () => {
+    const result = await new LinkedInConnector().execute({
+      actionKey: "read_home_feed",
+      input: {},
+      browser: {
+        dispatch: async () => ({
+          result: {
+            loggedIn: false,
+            landedUrl: "https://www.linkedin.com/checkpoint/challenge/",
+            rows: [],
+          },
+        }),
+      },
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Not logged into LinkedIn/);
+  });
+
+  test("read_home_feed returns addressable posts without storing events", async () => {
+    const result = await new LinkedInConnector().execute({
+      actionKey: "read_home_feed",
+      input: { max_scrolls: 6 },
+      browser: {
+        dispatch: async () => ({
+          result: {
+            loggedIn: true,
+            landedUrl: "https://www.linkedin.com/feed/",
+            rows: [
+              {
+                id: "row-one",
+                body: "Feed post Ada Lovelace • 1st A durable agents post with enough body text",
+                author: "Ada Lovelace",
+                post_url:
+                  "https://www.linkedin.com/feed/update/urn:li:activity:7345678901234567890",
+              },
+            ],
+          },
+        }),
+      },
+    });
+    expect(result.success).toBe(true);
+    const output = result.output as {
+      count: number;
+      skipped: number;
+      items: Array<Record<string, unknown>>;
+    };
+    expect(output.count).toBe(1);
+    expect(output.skipped).toBe(0);
+    expect(output.items[0]).toMatchObject({
+      author: "Ada Lovelace",
+      url: "https://www.linkedin.com/feed/update/urn:li:activity:7345678901234567890",
+    });
+    expect(String(output.items[0].text)).toContain("durable agents post");
   });
 
   test("execute verify_staged_comment routes through the read path", async () => {

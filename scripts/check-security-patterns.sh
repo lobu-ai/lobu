@@ -16,9 +16,9 @@
 #     packages/server/src/gateway/orchestration/. WS3 hardening replaced this
 #     with a strict attribute-ref validator; the loose form must stay out.
 #   - Imports of the GRANTING entity-row validators
-#     (`validateEntityRow{Patch,Insert,Merge}GrantingApprovedFields`) outside
-#     the approval apply path (entity-field-approval.ts) and the write kernels
-#     (entity-management.ts, entity-merge.ts) — the only importers allowed to
+#     (`validateEntityRow{Patch,Insert}GrantingApprovedFields`) outside
+#     the approval apply path (entity-field-approval.ts) and the write kernel
+#     (entity-management.ts) — the only importers allowed to
 #     waive a rule escalation.
 #
 # Out of scope: the postgres.js `.unsafe(query, params)` form is the SAFE
@@ -122,13 +122,12 @@ fi
 # staged/committed (the CI case) but not while untracked in a dirty worktree.
 echo "  -> granting validator imports outside the approval apply path"
 HITS=$(
-  git grep -nE 'validateEntityRow(Patch|Insert|Merge)GrantingApprovedFields' -- \
+  git grep -nE 'validateEntityRow(Patch|Insert)GrantingApprovedFields' -- \
     'packages/' \
     2>/dev/null \
     | grep -E '\.tsx?:' \
     | grep -v '^packages/server/src/tools/admin/entity-field-approval.ts:' \
     | grep -v '^packages/server/src/utils/entity-management.ts:' \
-    | grep -v '^packages/server/src/utils/entity-merge.ts:' \
     | grep -v '^packages/server/src/authz/entity-row-validation.ts:' \
     | grep -v '/__tests__/' \
     | filter_allowlist

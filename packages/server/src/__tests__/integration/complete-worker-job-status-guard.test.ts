@@ -31,13 +31,22 @@
  */
 
 import type { Context } from 'hono';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import logger from '../../utils/logger';
 import type { Env } from '../../index';
 import { completeWorkerJob } from '../../worker-api';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestOrganization } from '../setup/test-fixtures';
 
 const WORKER_ID = 'worker-late';
+
+beforeEach(() => { vi.spyOn(logger, 'warn'); vi.spyOn(logger, 'error'); });
+afterEach(() => vi.restoreAllMocks());
+function terminalFailureLogs() {
+  return [...vi.mocked(logger.warn).mock.calls, ...vi.mocked(logger.error).mock.calls]
+    .filter(([record]) => record && typeof record === 'object' && 'source' in record && record.source === 'run_completion');
+}
+
 
 function mockWorkerCtx(body: unknown): {
   ctx: Context<{ Bindings: Env }>;
@@ -298,6 +307,7 @@ describe('completeWorkerJob status guard (late-completion-after-timeout)', () =>
     await completeWorkerJob(ctx);
 
     expect(result().status).toBe(500);
+    expect(terminalFailureLogs()).toHaveLength(0);
     const [after] = await sql<{
       status: string;
       completed_at: Date | null;
@@ -342,8 +352,11 @@ describe('completeWorkerJob status guard (late-completion-after-timeout)', () =>
       error_message: 'stream delivery failed',
     });
     await completeWorkerJob(ctx);
-
+    expect(terminalFailureLogs()).toHaveLength(1);
     expect(result().body).toEqual({ success: true });
+    await completeWorkerJob(ctx);
+    expect(terminalFailureLogs()).toHaveLength(1);
+    expect(result().body).toEqual({ success: false, reason: 'already_finalized' });
     const after = (await sql`
       SELECT r.status, r.checkpoint AS run_checkpoint, f.checkpoint AS feed_checkpoint
       FROM runs r JOIN feeds f ON f.id = r.feed_id

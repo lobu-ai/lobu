@@ -341,7 +341,6 @@ export const QUERYABLE_SCHEMA = {
         'created_by',
         'content',
         'deleted_at',
-        'merged_into'
       ),
     },
     // events (excludes: embedding)

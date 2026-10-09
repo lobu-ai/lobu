@@ -160,7 +160,7 @@ describe("manage_automations owner-escalation guard", () => {
 			name: "Company",
 		});
 		const target = (await workspace.owner.entities.create({
-			type: "company",
+			entity_type: "company",
 			name: "Clone Target",
 		})) as { entity: { id: number } };
 		const bAutomation = (await workspace.owner.automations.create({
@@ -221,7 +221,7 @@ describe("manage_automations owner-escalation guard", () => {
 			name: "Company",
 		});
 		const target = (await workspace.owner.entities.create({
-			type: "company",
+			entity_type: "company",
 			name: "Clone Target 2",
 		})) as { entity: { id: number } };
 		const bAutomation = (await workspace.owner.automations.create({

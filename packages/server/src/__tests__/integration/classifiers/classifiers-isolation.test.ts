@@ -30,7 +30,7 @@ async function seedEntityType(workspace: TestWorkspace, slug: string, name: stri
 async function seedClassifier(workspace: TestWorkspace, slug: string): Promise<SeededClassifier> {
   await seedEntityType(workspace, 'company', 'Company');
   const entity = (await workspace.owner.entities.create({
-    type: 'company',
+    entity_type: 'company',
     name: `${slug} Target`,
   })) as { entity: { id: number } };
 

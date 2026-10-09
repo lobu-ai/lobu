@@ -49,18 +49,9 @@ export type MethodMetadata = MethodAccessMetadata & {
 export const RUNTIME_HELPER_METADATA: Record<string, MethodMetadata> = {
 	"ctx.sleep": {
 		summary:
-			"Pause a sandbox script for 0–30000ms. The wait aborts at the script's overall timeout; use it between SDK reads when polling.",
+			"Pause a sandbox script for 0–30000ms for a short, bounded retry delay. The wait ends at cancellation or the script deadline, which is terminal even if caught. For long device work, return a background operation run_id and read operations.getRun in a later invocation instead of polling here.",
 		access: "read",
 		example: "await ctx.sleep(1000);",
-		usageExample: `// Poll a run without exposing unrestricted timer globals.
-export default async (ctx, client) => {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const run = await client.operations.getRun(123);
-    if (run.status !== 'pending') return run;
-    await ctx.sleep(1000);
-  }
-  throw new Error('Run did not finish in time');
-};`,
 	},
 };
 
@@ -87,16 +78,12 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
 	},
 
 	// entities
-	"entities.manage": {
-		summary: "Raw manage_entity action wrapper. Prefer named methods.",
-		access: "admin",
-	},
 	"entities.discoverDuplicates": {
 		summary:
-			"Read complete duplicate components across all live entities and identity claims of one entity type. Page whole components with next_cursor; components over 26 candidates are explicitly withheld. Pages contain at most 199 proposed decisions. Current-state sweep: concurrent changes behind the cursor are reconsidered next sweep. Writes nothing; resolve_duplicates rechecks current evidence and policy.",
+			"Read complete duplicate components across all live entities and identity claims of one entity type. Page whole components with next_cursor; components over 26 candidates are explicitly withheld. Pages contain at most 199 proposed decisions. Current-state sweep: concurrent changes behind the cursor are reconsidered next sweep. Writes nothing. Each decision links two current group roots using the configured identity relationship; entities.link rechecks evidence and policy.",
 		access: "read",
 		signature:
-			"entities.discoverDuplicates(input: { entity_type: string; limit?: number; cursor?: string }): Promise<{ action: 'discover_duplicates'; candidates_scanned: number; components: Array<{ component_id: number; candidate_count: number; candidate_entity_ids: number[]; oversized: boolean; deferred_candidates: number; decisions: Array<{ winner_entity_id: number; loser_entity_id: number; fingerprint: string }> }>; next_cursor: string | null }>",
+			"entities.discoverDuplicates(input: { entity_type: string; limit?: number; cursor?: string }): Promise<{ action: 'discover_duplicates'; candidates_scanned: number; components: Array<{ component_id: number; candidate_count: number; candidate_entity_ids: number[]; oversized: boolean; deferred_candidates: number; decisions: Array<{ from_entity_id: number; to_entity_id: number; relationship_type_slug: string }> }>; next_cursor: string | null }>",
 		example:
 			"const page = await client.entities.discoverDuplicates({ entity_type: '<entity-type>', limit: 50 });",
 	},
@@ -105,7 +92,7 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
 			"List entities in the current organization with optional filters. Returns `{ action, entities, metadata }` where `entities` is the page and `metadata` carries `total_count`, `has_more`, `limit`, `offset`.",
 		access: "read",
 		signature:
-			"entities.list(input?: { entity_type?: string; parent_id?: number | null; search?: string; filters?: Array<{ field: string; op: 'eq' | 'neq'; value: string | number | boolean | null } | { field: string; op: 'lt' | 'lte' | 'gt' | 'gte'; value: string | number }>; segment?: string; category?: string; main_market?: string; market?: string; limit?: number; offset?: number; sort_by?: string; sort_order?: 'asc' | 'desc' }): Promise<unknown>",
+			"entities.list(input?: { entity_type?: string; parent_id?: number | null; search?: string; filters?: Array<{ field: string; op: 'eq' | 'neq'; value: string | number | boolean | null } | { field: string; op: 'lt' | 'lte' | 'gt' | 'gte'; value: string | number }>; segment?: string; limit?: number; offset?: number; sort_by?: string; sort_order?: 'asc' | 'desc' }): Promise<unknown>",
 		example:
 			"const { entities } = await client.entities.list({ entity_type: 'company' });",
 		usageExample: `// All companies in the workspace, newest first.
@@ -126,8 +113,8 @@ export default async (_ctx, client) => {
 		throws: ["EntityNotFound"],
 		example: "const entity = await client.entities.get({ entity_id: 42 });",
 		usageExample: `export default async (_ctx, client) => {
-  const entity = await client.entities.get({ entity_id: 42 });
-  return { id: entity.id, name: entity.name, type: entity.entity_type };
+  const { entity } = await client.entities.get({ entity_id: 42 });
+  return { id: entity.id, name: entity.name, entity_type: entity.entity_type };
 };`,
 	},
 	"entities.create": {
@@ -175,10 +162,10 @@ export default async (_ctx, client) => {
 	},
 	"entities.link": {
 		summary:
-			"Create a relationship between two entities. Needs the two entity IDs AND a relationship TYPE that already exists — if the relationship type is new, call `entitySchema.createRelType` first; list existing ones with `entitySchema.listRelTypes()`. (`entitySchema.addRule` does NOT create a type; it restricts the allowed source/target entity-type pairs on a type that already exists.)",
+			"Create a relationship between two entities. Identity-purpose relationships associate retained records; applied, queued approval, suppressed, and preview results are distinct. Needs the two entity IDs AND a relationship TYPE that already exists — if the relationship type is new, call `entitySchema.createRelType` first; list existing ones with `entitySchema.listRelTypes()`. (`entitySchema.addRule` does NOT create a type; it restricts the allowed source/target entity-type pairs on a type that already exists.)",
 		access: "write",
 		signature:
-			"entities.link(input: { from_entity_id: number; to_entity_id: number; relationship_type_slug: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence?: number; metadata?: object }): Promise<unknown>",
+			"entities.link(input: { from_entity_id: number; to_entity_id: number; relationship_type_slug: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence?: number; metadata?: object; dry_run?: boolean }): Promise<unknown>",
 		example:
 			"await client.entities.link({ from_entity_id: 42, to_entity_id: 43, relationship_type_slug: 'customer_of' });",
 		usageExample: `// Two-hop: the relationship TYPE must exist before linking. Ensure it
@@ -217,17 +204,6 @@ export default async (_ctx, client) => {
 		access: "read",
 		signature:
 			"entities.listLinks(input: { entity_id?: number; record?: { type: string; key: string }; cursor?: string | null; direction?: 'outbound' | 'inbound' | 'both'; relationship_type_slug?: string; source?: 'ui' | 'llm' | 'feed' | 'api'; confidence_min?: number; include_deleted?: boolean; limit?: number; offset?: number }): Promise<unknown>",
-	},
-	"entities.search": {
-		summary:
-			"Fuzzy search entities by name. POSITIONAL signature: search(query: string, options?: { limit?: number }). The query is the first positional argument — passing an object like { query: '...' } throws (the handler calls query.slice).",
-		access: "read",
-		example: "const hits = await client.entities.search('acme', { limit: 5 });",
-		usageExample: `// Resolve a free-text mention into entity ids before linking knowledge to it.
-// First arg is the query string; second is options. Do NOT pass { query }.
-export default async (_ctx, client) => {
-  return client.entities.search('Acme', { limit: 5 });
-};`,
 	},
 
 	// entitySchema
@@ -543,10 +519,10 @@ export default async (_ctx, client) => {
 	},
 	"notifications.send": {
 		summary:
-			"Send a notification to org users. With a flat object `input_schema`, it becomes a human question on the existing approval/rejection rail: in-app surfaces render answer controls, chat delivery links to Lobu when input is needed, and the returned `run_id` can be read with `operations.getRun` until its output contains `{ answer: ... }`. Supported answer schemas contain primitive fields, scalar enum choices, string or scalar-enum arrays, and optional nullable wrappers; nested objects, references, combinators other than those nullable wrappers, constants, and string/number/array constraints are rejected. An unsupported `input_schema` fails the call with HTTP 422. Without `input_schema`, it sends an FYI. With `semantic_type`, the notification renders as a content event through the event-kind pipeline: `data` feeds the kind's `jsonTemplate` in the Memory/Events view, the inbox keeps the markdown `body`, and the kind is validated against `$member.event_kinds` (422 on an unregistered kind or invalid non-empty data). Both fan out to active bot connections. Pass `automation_source` from a reaction for feedback attribution.",
+			"Send a notification to org users. With a flat object `input_schema`, it becomes a human question on the existing approval/rejection rail: in-app surfaces render answer controls, chat delivery links to Lobu when input is needed, and the returned `run_id` can be read with `operations.getRun` until its output contains `{ answer: ... }`. Supported answer schemas contain primitive fields, scalar enum choices, string or scalar-enum arrays, and optional nullable wrappers; nested objects, references, combinators other than those nullable wrappers, constants, and string/number/array constraints are rejected. An unsupported `input_schema` fails the call with HTTP 422. Without `input_schema`, it sends an FYI. With `semantic_type`, the notification renders as a content event through the event-kind pipeline: `data` feeds the kind's `jsonTemplate` in the Memory/Events view, the inbox keeps the markdown `body`, and the kind is validated against `$member.event_kinds` (422 on an unregistered kind or invalid non-empty data). Explicit user recipients and browser handoffs stay in the inbox unless a connection or Automation delivery destination is configured. Other notifications fan out to active bot connections. Use `browser_url` with `browser_handoff_run_id` to link a page-activated operation. Pass `automation_source` from a reaction for feedback attribution.",
 		access: "write",
 		signature:
-			"notifications.send(input: { title: string; body?: string; card?: CardElement; recipients?: 'admins' | 'all' | string[]; resource_url?: string; idempotency_key?: string; connection_id?: string; data?: object; semantic_type?: string; input_schema?: object; automation_source?: { automation_id: number; run_id: number } }): Promise<{ notified_count: number; event_id: number | null; url: string | null; run_id?: number }>",
+			"notifications.send(input: { title: string; body?: string; card?: CardElement; recipients?: 'admins' | 'all' | string[]; resource_url?: string; browser_url?: string; browser_handoff_run_id?: number; idempotency_key?: string; connection_id?: string; data?: object; semantic_type?: string; input_schema?: object; automation_source?: { automation_id: number; run_id: number } }): Promise<{ notified_count: number; event_id: number | null; url: string | null; run_id?: number }>",
 		example:
 			"await client.notifications.send({ title: 'Choose a launch window', input_schema: { type: 'object', properties: { window: { enum: ['Monday', 'Friday'] } }, required: ['window'] } });",
 		usageExample: `// Ask a human and return the durable handle the caller can poll.

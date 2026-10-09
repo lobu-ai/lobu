@@ -56,13 +56,21 @@ docker run -d --name lobu-pg -p 5432:5432 \
 # DATABASE_URL=postgresql://postgres:lobu@localhost:5432/postgres
 ```
 
+## Entity resolution
+
+Entity types may declare `resolutionPolicy.rules` in `lobu.config.ts`. Each rule
+specifies `fields`, a `normalizer` (`email`, `phone`, or `exact`), and `onMatch`
+(`auto_link` or `review`). Types without an explicit policy have no matching
+rules. Declare a relationship with `purpose: "identity"` for associations;
+linked records keep their own IDs and metadata.
+
 ## Commands
 
 `lobu --help` shows the grouped command list, and `lobu <cmd> --help` lists the per-command flags. The full surface, grouped the way `--help` groups it:
 
 ### Local dev
 
-- `lobu init [name]` — scaffold a project (`lobu.config.ts` + agent files + `.env`), or bootstrap a re-appliable project from an existing org with `--from-org [slug]`. Interactive by default; pass `-y` / `--yes` (with any other flag) for non-interactive / CI scaffolding. `lobu init .` or `--here` scaffolds into the current directory. Flags: `--port`, `--public-url`, `--network restricted|open|isolated`, `--provider <id>` (`--list-providers` prints the ids and exits), `--provider-key`, `--memory none|lobu-cloud|lobu-custom`, `--memory-url`, `--otel-endpoint`, `--sentry` / `--no-sentry`, `--hosted-slack` / `--no-hosted-slack`, `--url` (with `--from-org`).
+- `lobu init [name]` — scaffold a project (`lobu.config.ts` + agent files + `.env`), or bootstrap a re-appliable project from an existing org with `--from-org [slug]`. Interactive by default; pass `-y` / `--yes` (with any other flag) for non-interactive / CI scaffolding. `lobu init .` or `--here` scaffolds into the current directory. Flags: `--port`, `--public-url`, `--network restricted|open|isolated`, `--provider <id>` (`--list-providers` prints the ids and exits), `--provider-key`, `--memory none|lobu-cloud|lobu-custom`, `--memory-url`, `--otel-endpoint`, `--hosted-slack` / `--no-hosted-slack`, `--url` (with `--from-org`).
   After writing the files, init installs the project's dependencies (prefers `bun`, falls back to `npm`, always with install scripts disabled). Pass `--skip-install` to scaffold files only. The install is warn-don't-fail: if it cannot run, init prints a warning and you run `npm install` (or `bun install`) yourself before `lobu apply`.
 - `lobu connect [agent]` — wire an external client (Claude Code, Codex, OpenCode, Cursor, …) to your Lobu MCP endpoint: installs the supported MCP + skill bundle, or prints the exact native handoff when the host requires UI setup. `--url` overrides the MCP server URL; `--dry-run` prints the setup without changing agent configuration.
 - `lobu run` (aliases: `lobu dev`, `lobu start`) — boot the embedded stack. Pre-flights the gateway port and accepts `--port` / `--quiet` / `--verbose` / `--log-level`. `--unsafe-shared-db` allows running against a non-loopback `DATABASE_URL` inherited from the shell.
@@ -70,7 +78,6 @@ docker run -d --name lobu-pg -p 5432:5432 \
 - `lobu validate` — validate `lobu.config.ts` schema, skill IDs, and provider config.
 - `lobu doctor` — Postgres connectivity, pgvector extension, port availability, provider API keys, workspace dir. `--memory-only` checks just memory MCP connectivity + auth.
 - `lobu runtime install [components...]` — preinstall `server`, `device`, `postgres`, and `embeddings` components for offline use; `--offline` verifies the existing cache without downloading.
-- `lobu telemetry {status,on,off}` — Sentry is off by default; `on --dsn <dsn>` uses a custom DSN.
 - `lobu opencode-plugin <install|status|uninstall>` — manage Lobu's interactive-session plugin for OpenCode.
 
 ### Cloud

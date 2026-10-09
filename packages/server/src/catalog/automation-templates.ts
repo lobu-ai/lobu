@@ -125,50 +125,58 @@ export const AUTOMATION_CATALOG_TEMPLATES: CatalogEntry[] = [
 		},
 	},
 	{
-		id: "duplicate-merge",
-		name: "Duplicate entity merge",
-		version: "3.0.0",
+		id: "duplicate-identity",
+		name: "Duplicate identity resolution",
+		version: "4.0.0",
 		description:
-			"Find entities that are the same real-world thing and fold duplicates into one canonical record.",
+			"Associate duplicate records with reversible identity links while preserving every record. Attach one entity to select the entity type to inspect.",
 		detail: {
-			slug: "duplicate-merge",
-			triggers: [scheduleTrigger("0 3 * * *")],
-			// A cross-entity Automation: its source surfaces people rather than events.
-			// The model explains findings; the entity-resolution module owns grouping,
-			// normalization, auto/review policy, suppression, and merge limits.
-			sources: [{ name: "people", query: "@entity:person" }],
+			slug: "duplicate-identity",
+			triggers: [{ ...scheduleTrigger("0 3 * * *"), skip_if_unchanged: false }],
 			prompt:
-				"Review every row in sources.people. Explain likely duplicate groups in analysis_summary and put name-only, alias-only, handle-only, oversized, or otherwise uncertain groups in uncertain_groups with why. Do not call entity tools or emit backlog tasks. After analysis, the deterministic reaction submits only candidate IDs to the server. The person entity type's x-lobu-resolution policy decides which normalized identities auto-merge and which require human review. Without that extension, normalized email and phone matches remain review-only and never auto-merge.\n",
+				"Summarize the bound entity type in analysis_summary. Do not call entity tools or emit backlog tasks. The deterministic reaction discovers duplicate groups across this entity type and submits reversible identity links. Configure an identity-purpose relationship and the entity type's x-lobu-resolution rules first; there are no implicit identity rules. The server rechecks evidence, access, and approval policy for every link. Queued approvals are proposals, not completed links. Oversized groups and an incomplete sweep are reported in the reaction log.\n",
 			reaction_script: `export const input = {
 	type: "object",
-	properties: {
-		analysis_summary: { type: "string" },
-		uncertain_groups: { type: "array", items: { type: "object" } },
-	},
-	required: ["analysis_summary", "uncertain_groups"],
+	properties: { analysis_summary: { type: "string" } },
+	required: ["analysis_summary"],
 	additionalProperties: false,
 };
 
 export default async function reaction(ctx, client) {
-	const MAX_CANDIDATES = 5000;
-	const since = String(ctx.window.window_start).slice(0, 10);
-	const until = new Date(new Date(ctx.window.window_end).getTime() - 1).toISOString().slice(0, 10);
-	const knowledge = await client.knowledge.read({ automation_id: ctx.window.automation_id, since, until });
-	const candidates = Array.isArray(knowledge?.sources?.people) ? knowledge.sources.people : [];
-	const candidateIds = [...new Set(candidates
-		.map((candidate) => candidate?.id)
-		.filter((id) => Number.isSafeInteger(id) && id > 0))];
-	if (candidateIds.length < 2) return;
-	if (candidateIds.length > MAX_CANDIDATES) {
-		throw new Error("More than 5000 entities need duplicate discovery; no changes were queued");
+	const types = [...new Set((ctx.entities ?? []).map((entity) => entity.entity_type))];
+	if (types.length !== 1 || !types[0] || types[0].startsWith("$")) {
+		throw new Error("Attach entities of exactly one stored entity type to select the identity sweep");
 	}
-	await client.entities.manage({
-		action: "resolve_duplicates",
-		candidate_entity_ids: candidateIds,
-	});
+	const progress = { entity_type: types[0], applied: 0, queued: 0, suppressed: 0, oversized: 0, deferred_candidates: 0, complete: false, next_cursor: null };
+	let calls = 0;
+	let cursor;
+	do {
+		// Reserve one call for the final progress log; a page emits at most one link per component.
+		const limit = Math.min(100, 198 - calls);
+		if (limit < 1) break;
+		const page = await client.entities.discoverDuplicates({ entity_type: types[0], limit, ...(cursor ? { cursor } : {}) });
+		calls++;
+		for (const component of page.components) {
+			progress.oversized += Number(component.oversized);
+			progress.deferred_candidates += component.deferred_candidates;
+			for (const decision of component.decisions) {
+				const result = await client.entities.link(decision);
+				calls++;
+				if (result.approval_queued) progress.queued++;
+				else if (result.approval_suppressed) progress.suppressed++;
+				else if (result.relationship) progress.applied++;
+				else throw new Error("Identity link returned no applied, queued, or suppressed receipt");
+			}
+		}
+		cursor = page.next_cursor;
+		progress.next_cursor = cursor;
+		progress.complete = cursor === null;
+	} while (cursor);
+	await client.log("Duplicate identity sweep", progress);
+	return progress;
 }`,
 			reactions_guidance:
-				"Explain uncertainty; never decide identity from names, aliases, or handles. The server-side entity type policy is the only merge authority.",
+				"Attach an entity of the type to inspect. Keep uncertain matches for human review. Each run uses at most 200 SDK calls; incomplete sweeps expose next_cursor in the log and restart from current state next run.",
 			tags: ["identity", "deduplication", "world-model"],
 		},
 	},

@@ -96,8 +96,8 @@ function isReady(source: HandoffSource): boolean {
 	);
 }
 
-function isFailed(source: HandoffSource): boolean {
-	return source.status === "failed" || source.status === "timeout";
+function isFailedOrCancelled(source: HandoffSource): boolean {
+	return source.status === "failed" || source.status === "timeout" || source.status === "cancelled";
 }
 
 /**
@@ -140,7 +140,7 @@ export async function recreateBrowserHandoff(
 		};
 	}
 	if (
-		!isFailed(source) &&
+		!isFailedOrCancelled(source) &&
 		(source.status === "completed" || source.activated_at != null)
 	) {
 		throw new ToolUserError(

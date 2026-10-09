@@ -161,13 +161,12 @@ RUN if [ "$KEEP_EMBEDDED_PG" != "1" ]; then \
 # Build frontend static assets (production only)
 ARG VITE_API_URL=
 ENV VITE_API_URL=$VITE_API_URL
-# Vite inlines these at build time (import.meta.env). Without VITE_SENTRY_DSN
-# baked in here the prod SPA's initSentry() short-circuits and frontend errors
-# never reach Sentry. Safe no-op when the build-arg is empty.
-ARG VITE_SENTRY_DSN=
-ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN
+
 ARG VITE_ENVIRONMENT=production
 ENV VITE_ENVIRONMENT=$VITE_ENVIRONMENT
+ARG VITE_FARO_URL=
+ENV VITE_FARO_URL=$VITE_FARO_URL
+ENV VITE_APP_GIT_SHA=$APP_GIT_SHA
 ARG SKIP_WEB_BUILD=false
 RUN if [ "$SKIP_WEB_BUILD" = "false" ] && [ -f packages/owletto/package.json ]; then \
       cd packages/owletto && bun run build && bun run build:mcp-apps; \

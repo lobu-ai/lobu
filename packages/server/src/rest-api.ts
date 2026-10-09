@@ -8,7 +8,6 @@
 import { toJsonSafe } from "@lobu/core";
 import { Value } from "@sinclair/typebox/value";
 import { ViewActionScopeSchema } from "./tools/invoke_view_action";
-import * as Sentry from "@sentry/node";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
@@ -342,14 +341,7 @@ export async function restToolProxy(
 		return c.json(toJsonSafe(toRestPublicToolResult(toolName, result)));
 	} catch (error) {
 		if (error instanceof ToolNotRegisteredError) {
-			// Registry/frontend drift — surface to Sentry so the next "Tool not
-			// found" outage doesn't sit silent behind a 400 the page swallows.
-			// `tool_name` goes in `extra` (not `tags`) because the URL segment is
-			// attacker-controlled and would otherwise blow up tag cardinality.
-			Sentry.captureException(error, {
-				tags: { source: "rest_proxy" },
-				extra: { tool_name: error.toolName },
-			});
+			logger.warn({ error, tool_name: error.toolName, source: "rest_proxy" }, "Requested tool is not registered");
 		}
 		return restErrorResponse(c, error);
 	}

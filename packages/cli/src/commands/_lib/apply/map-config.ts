@@ -20,6 +20,10 @@ import {
   normalizeWorkspaceEventTrigger,
   resolvedEventExecution,
 } from "@lobu/core/contracts/tools/manage-automations";
+import {
+  InvalidEntityResolutionPolicyError,
+  parseEntityResolutionPolicy,
+} from "@lobu/core/contracts/tools/manage-entity-schema";
 
 /**
  * Exhaustiveness projection over the stored AgentSettings shape. Every key is
@@ -84,13 +88,13 @@ import type {
   DesiredAgent,
   DesiredAgentMetadata,
   DesiredAuthProfile,
+  DesiredAutomation,
   DesiredConnection,
   DesiredEntityType,
   DesiredFeed,
   DesiredOrgProvider,
   DesiredRelationshipType,
   DesiredState,
-  DesiredAutomation,
 } from "./desired-state.js";
 
 /** Source label recorded on connector docs (mirrors the YAML manifest path). */
@@ -435,34 +439,14 @@ function mapEntityType(entity: EntityType): DesiredEntityType {
       );
     }
   }
-  // Fail loud on malformed resolution rules: the server drops invalid rules,
-  // which can silently disable the intended matching policy.
-  if (entity.resolutionPolicy) {
-    if (!Array.isArray(entity.resolutionPolicy.rules)) {
+  // Share the server's complete-policy validation; never weaken composite keys.
+  if (entity.resolutionPolicy !== undefined) {
+    try {
+      parseEntityResolutionPolicy(entity.resolutionPolicy);
+    } catch (error) {
+      if (!(error instanceof InvalidEntityResolutionPolicyError)) throw error;
       throw new ValidationError(
-        `entity type "${entity.key}" has invalid resolutionPolicy: expected rules to be an array`
-      );
-    }
-    const ruleErrors = entity.resolutionPolicy.rules.flatMap((rule, index) => {
-      const fields =
-        Array.isArray(rule.fields) &&
-        rule.fields.every((f) => typeof f === "string" && f.trim())
-          ? rule.fields
-          : null;
-      const normalizerOk =
-        rule.normalizer === "email" ||
-        rule.normalizer === "phone" ||
-        rule.normalizer === "exact";
-      const onMatchOk =
-        rule.onMatch === "auto_merge" || rule.onMatch === "review";
-      if (fields && fields.length > 0 && normalizerOk && onMatchOk) return [];
-      return [
-        `rule ${index}: expected { fields: string[], normalizer: "email"|"phone"|"exact", onMatch: "auto_merge"|"review" }`,
-      ];
-    });
-    if (ruleErrors.length > 0) {
-      throw new ValidationError(
-        `entity type "${entity.key}" has invalid resolutionPolicy: ${ruleErrors.join("; ")}`
+        `entity type "${entity.key}" has invalid resolutionPolicy: ${error.message}`
       );
     }
   }
@@ -543,7 +527,10 @@ function mapAutomationOutputs(
             key: output.key,
             ...(output.name ? { name: output.name } : {}),
           }
-        : { event: output.event },
+        : {
+            event: output.event,
+            ...(output.key ? { key: output.key } : {}),
+          },
     ])
   );
 }

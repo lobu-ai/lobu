@@ -7,6 +7,9 @@
  */
 
 import { deriveToolActorSource } from './apply-context';
+import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
+import { attachEntityIdentities, identityMemberIdsSql, identityRootSql } from './entity-identity';
+import { type EntityReadRestrictions, entityReadPolicySql, entityReadRestrictions, filterEntityReadRows } from '../authz/entity-read-policy';
 import type { EntityMetrics } from "@lobu/connector-sdk";
 import { classifyToolError, getErrorMessage, slugify } from "@lobu/core";
 import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
@@ -41,6 +44,7 @@ import { isAdminOrOwnerRole, isInProcessSystemCall } from "../tools/access-contr
 import { querySqlImpl } from "../tools/admin/query_sql";
 import type { ToolContext } from "../tools/registry";
 import { entityLinkMatchSql } from "./content-search";
+import { buildConnectionVisibilityClause } from "./content-search/visibility";
 import {
 	computeFieldMerge,
 	type FieldControl,
@@ -92,28 +96,6 @@ export async function countStoredEntitiesOfType(
       AND e.deleted_at IS NULL
   `;
 	return Number(rows[0]?.count || 0);
-}
-
-/** Live stored identity edges only; retained source rows are not list roots.
- * Same-org/type live endpoints keep search from widening the root's read scope.
- * Physical row counts deliberately do not use this display predicate.
- */
-function identityEdgesSql(entityAlias: string): string {
-  return `SELECT ir.from_entity_id, ir.to_entity_id
-    FROM entity_relationships ir
-    JOIN entity_relationship_types it ON it.id = ir.relationship_type_id
-    JOIN entities source ON source.id = ir.from_entity_id
-    JOIN entities target ON target.id = ir.to_entity_id
-    WHERE ir.organization_id = ${entityAlias}.organization_id AND ir.deleted_at IS NULL
-      AND it.organization_id = ${entityAlias}.organization_id AND it.purpose = 'identity'
-      AND it.deleted_at IS NULL AND it.status = 'active'
-      AND source.organization_id = ${entityAlias}.organization_id AND target.organization_id = ${entityAlias}.organization_id
-      AND source.entity_type_id = ${entityAlias}.entity_type_id AND target.entity_type_id = ${entityAlias}.entity_type_id
-      AND source.deleted_at IS NULL AND target.deleted_at IS NULL`;
-}
-
-function identityRootSql(entityAlias: string): string {
-  return `NOT EXISTS (${identityEdgesSql(entityAlias)} AND ir.from_entity_id = ${entityAlias}.id)`;
 }
 
 /**
@@ -169,7 +151,10 @@ export async function queryDerivedEntityView(
 export async function countEntitiesOfType(
 	type: EntityTypeCountInput,
 	ctx: ToolContext,
+  readRestrictions?: EntityReadRestrictions,
 ): Promise<number> {
+  const restrictions = readRestrictions ?? await entityReadRestrictions(getDb(), ctx);
+  if (restrictions.some(rule => rule.entity_id === null && (rule.entity_type_slug === null || rule.entity_type_slug === type.slug))) return 0;
 	if (type.backing_sql) {
 		try {
 			const result = await queryDerivedEntityView(
@@ -191,11 +176,13 @@ export async function countEntitiesOfType(
 		}
 		return 0;
 	}
+	const params: unknown[] = [ctx.organizationId, type.id];
+	const readPredicate = entityReadPolicySql(restrictions, 'e', params);
 	const rows = await getDb().unsafe<{ count: number }>(`
     SELECT COUNT(*)::int AS count FROM entities e
     WHERE e.organization_id = $1 AND e.entity_type_id = $2 AND e.deleted_at IS NULL
-      AND ${identityRootSql('e')}
-  `, [ctx.organizationId, type.id]);
+      AND ${identityRootSql('e')} AND ${readPredicate}
+  `, params);
   return Number(rows[0]?.count || 0);
 }
 
@@ -211,19 +198,22 @@ export async function getEntityCountsByTypes(
 	const counts = new Map<number, number>();
 	if (types.length === 0) return counts;
 
+	const restrictions = await entityReadRestrictions(getDb(), ctx);
 	const stored = types.filter((t) => !t.backing_sql);
 	const derived = types.filter((t) => !!t.backing_sql);
 
 	if (stored.length > 0) {
 		const sql = getDb();
+		const params: unknown[] = [ctx.organizationId];
+		const readPredicate = entityReadPolicySql(restrictions, 'e', params);
 		const rows = await sql.unsafe<{ entity_type_id: number; entity_count: number }>(`
       SELECT e.entity_type_id AS entity_type_id, COUNT(*)::int as entity_count
       FROM entities e
       WHERE e.organization_id = $1
         AND e.deleted_at IS NULL
-        AND ${identityRootSql('e')}
+        AND ${identityRootSql('e')} AND ${readPredicate}
       GROUP BY e.entity_type_id
-    `, [ctx.organizationId]);
+    `, params);
 		for (const row of rows) {
 			counts.set(Number(row.entity_type_id), Number(row.entity_count));
 		}
@@ -232,7 +222,7 @@ export async function getEntityCountsByTypes(
 	if (derived.length > 0) {
 		await Promise.all(
 			derived.map(async (t) => {
-				counts.set(t.id, await countEntitiesOfType(t, ctx));
+				counts.set(t.id, await countEntitiesOfType(t, ctx, restrictions));
 			}),
 		);
 	}
@@ -307,41 +297,6 @@ interface EntityUpdateOptions {
 // Shared Helpers
 // ============================================
 
-const CONVENIENCE_FIELDS = [
-  'domain',
-  'category',
-  'platform_type',
-  'main_market',
-  'market',
-  'link',
-  'external_ids',
-] as const;
-
-/**
- * Merge convenience fields (domain, category, etc.) into a metadata object.
- * For creates, uses truthiness; for updates, uses `!== undefined` to allow clearing fields.
- */
-function mergeConvenienceFields(
-	data: Partial<EntityData>,
-	base: Record<string, any>,
-	mode: "create" | "update",
-): Record<string, any> {
-  const out = { ...base };
-  for (const key of CONVENIENCE_FIELDS) {
-    const value = data[key];
-    if (mode === 'update') {
-      if (value !== undefined) out[key] = value;
-    } else if (key === 'external_ids') {
-      if (value && typeof value === 'object' && Object.keys(value).length > 0) {
-        out[key] = value;
-      }
-    } else if (value) {
-      out[key] = value;
-    }
-  }
-  return out;
-}
-
 /**
  * Convert a numeric embedding array to a PostgreSQL vector literal.
  */
@@ -389,19 +344,11 @@ export interface EntityData {
   // them without an approval. This is the "approve" half of the recap feedback
   // loop; "correct" is a normal metadata update. Ignored for agent/system writes.
   affirm_fields?: string[] | null;
-
-  // Convenience fields - will be merged into metadata
-  domain?: string | null;
-  category?: string | null;
-  platform_type?: string | null;
-  main_market?: string | null;
-  external_ids?: Record<string, any>;
-  market?: string | null;
-  link?: string | null;
 }
 
 export interface CreatedEntity {
   id: number;
+  identity?: EntityIdentity;
   /** Internal ownership projection used to avoid cross-org audit anchors. */
   organization_id?: string;
   entity_type: string;
@@ -482,18 +429,6 @@ export interface EntityRowPatch {
 	softDelete?: boolean;
 }
 
-/**
- * Fields owned by the merge ledger rather than ordinary entity editing.
- * `liveness` is explicit because this path may revive a tombstoned loser;
- * normal `patchEntityRows` deliberately cannot do that.
- */
-export interface EntityMergeRowTransition {
-	mergedInto?: number | null;
-	metadata?: Record<string, unknown>;
-	fieldControls?: Record<string, unknown>;
-	liveness?: "deleted" | "live";
-}
-
 export interface InsertedEntityRow {
 	id: number;
 	name: string;
@@ -566,8 +501,7 @@ export function tryInsertEntityRow(params: {
  * Patch an explicit, bounded set of entity ids using the caller's DB handle.
  * Omitted fields remain unchanged; nullable fields distinguish null from
  * omission. Only live rows are patched — a tombstoned row is skipped, so this
- * path can never resurrect one; reviving a merge loser belongs to
- * `transitionEntityMergeRows` alone. Every call touches updated_at, including a
+ * path can never resurrect one. Every call touches updated_at, including a
  * fully blocked update whose patch ends up empty.
  *
  * Returns the ids actually written, ascending.
@@ -609,79 +543,6 @@ export async function patchEntityRows(params: {
       updated_at = current_timestamp
     WHERE id = ANY(${idsLiteral}::bigint[])
       AND deleted_at IS NULL
-    RETURNING id
-  `;
-	return rows.map((row) => Number(row.id)).sort((a, b) => a - b);
-}
-
-/**
- * Apply one merge-ledger transition to an explicit, bounded set of rows.
- *
- * This is the only physical kernel path that may change `merged_into`, patch a
- * tombstoned canonical row, or clear `deleted_at`. It does not authorize or
- * validate a merge: the caller must hold the relevant row locks in a real
- * transaction and supply the topology value it already proved under lock.
- * Merge and unmerge are one compound transaction — never run `runMutationGate`
- * from here.
- *
- * Write rules are enforced by the CALLER, not here. `applyMergeInTransaction`
- * runs `validateEntityRowMergeGrantingApprovedFields` over the losing row —
- * under the locks it already holds and before any write — proposing the
- * reserved name `$merged_into`. Merge deliberately does NOT reuse `$deleted`:
- * the tombstone is an implementation detail of the redirect, and a tenant must
- * be able to freeze deletion without freezing dedupe.
- *
- * The merge's other three writes are DECLARED EXEMPTIONS, not oversights:
- *
- *  - The WINNER's metadata patch. `mergeEntityState` is winner-preserving: it
- *    fills only fields the winner left undefined/null/empty, unions arrays, and
- *    appends the loser's name to `metadata.aliases`. It cannot overwrite a value
- *    the winner already holds, so freezing a field already means a merge cannot
- *    change it. Governing the patch anyway would present a metadata change on
- *    EVERY merge — the alias append guarantees one — so a rule freezing the
- *    canonical record would make it unable to absorb any duplicate, which is
- *    exactly backwards: the canonical row is the one you merge INTO. The
- *    residual hole is narrow and named: filling a BLANK field on a frozen winner
- *    is a write no rule sees. Closing it means judging the patch minus the alias
- *    ledger, which makes `aliases` platform vocabulary a tenant can no longer
- *    govern — a rule-contract change, not a call added here.
- *  - The redirect repoint. Step 4 of `applyMergeInTransaction` flattens rows
- *    that ALREADY point at the loser so they point at the winner instead. Those
- *    rows are tombstones of merges that were judged when they happened; asking
- *    again would re-litigate a settled decision on a row nobody is editing.
- *  - Unmerge (`liveness: "live"`). Left free on purpose, so a freeze added after
- *    a merge cannot strand a row tombstoned with no way back.
- */
-export async function transitionEntityMergeRows(params: {
-	tx: DbClient;
-	organizationId: string;
-	ids: number[];
-	expectedMergedInto: number | null;
-	transition: EntityMergeRowTransition;
-}): Promise<number[]> {
-	if (params.ids.length === 0) return [];
-	const { tx, transition } = params;
-	const hasMergedInto = transition.mergedInto !== undefined;
-	const hasMetadata = transition.metadata !== undefined;
-	const hasFieldControls = transition.fieldControls !== undefined;
-	const markDeleted = transition.liveness === "deleted";
-	const markLive = transition.liveness === "live";
-	const idsLiteral = pgBigintArray(params.ids);
-
-	const rows = await tx<{ id: number }>`
-    UPDATE entities SET
-      merged_into = CASE WHEN ${hasMergedInto} THEN ${transition.mergedInto ?? null}::bigint ELSE merged_into END,
-      metadata = CASE WHEN ${hasMetadata} THEN ${tx.json(transition.metadata ?? {})} ELSE metadata END,
-      field_controls = CASE WHEN ${hasFieldControls} THEN ${tx.json(transition.fieldControls ?? {})} ELSE field_controls END,
-      deleted_at = CASE
-        WHEN ${markDeleted} THEN current_timestamp
-        WHEN ${markLive} THEN NULL
-        ELSE deleted_at
-      END,
-      updated_at = current_timestamp
-    WHERE organization_id = ${params.organizationId}
-      AND id = ANY(${idsLiteral}::bigint[])
-      AND merged_into IS NOT DISTINCT FROM ${params.expectedMergedInto}::bigint
     RETURNING id
   `;
 	return rows.map((row) => Number(row.id)).sort((a, b) => a - b);
@@ -893,30 +754,7 @@ async function preventEntityCycles(
   }
 }
 
-/**
- * Every row a force delete must remove with `entityId`: its `parent_id`
- * descendants AND the merge tombstones that redirect into any of them.
- *
- * Following `merged_into` is not an extra: a row merged away has no identity of
- * its own left — it is a redirect to its winner — and `entities_merged_into_fkey`
- * refuses to let the winner go while the redirect points at it. Walking only the
- * parent tree therefore made a merged-into record permanently undeletable, and
- * the caller saw a raw Postgres constraint message rather than an answer.
- *
- * Both edges are followed in one CTE so a chain (C merged into B, B a child of
- * A) is collected in a single pass. `merged_into` is already flattened at merge
- * time, but the recursion costs nothing and does not depend on that.
- *
- * `UNION`, not `UNION ALL`: the two edges can reach a row twice — a child that
- * was also merged into a sibling — and a merge can fold a parent into its own
- * descendant, closing a cycle that only the deduplicating form terminates on.
- *
- * This covers every FK into `entities` that would otherwise block the delete.
- * Of the 9, four are ON DELETE CASCADE and one SET NULL; the four RESTRICT/NO
- * ACTION ones are `entities_parent_id_fkey` (children — the parent tree),
- * `entities_merged_into_fkey` (redirects — this function), and
- * `entity_merge_operations`' two (the ledger, deleted explicitly below).
- */
+/** Collect the entity and its parent hierarchy descendants for a force delete. */
 async function loadEntityTreeIds(sql: DbClient, entityId: number): Promise<number[]> {
   const rows = await sql<{ id: number }>`
     WITH RECURSIVE entity_tree AS (
@@ -926,7 +764,7 @@ async function loadEntityTreeIds(sql: DbClient, entityId: number): Promise<numbe
       UNION
       SELECT e.id
       FROM entities e
-      JOIN entity_tree et ON e.parent_id = et.id OR e.merged_into = et.id
+      JOIN entity_tree et ON e.parent_id = et.id
     )
     SELECT id
     FROM entity_tree
@@ -1044,11 +882,7 @@ export async function createEntity(
 						name: createData.name.trim(),
 						slug: createData.slug || slugify(createData.name),
 						parentId: createData.parent_id || null,
-						metadata: mergeConvenienceFields(
-							createData,
-							createData.metadata || {},
-							"create",
-						),
+						metadata: { ...createData.metadata },
 						createdBy: createData.created_by || "system",
 						content: createData.content?.trim() || null,
 						embedding: createData.embedding,
@@ -1074,7 +908,7 @@ export async function createEntity(
 
 		// Handle database constraint violations
 		if (msg.includes("duplicate key") || msg.includes("unique constraint")) {
-			throw new Error("Entity already exists with this name/domain");
+			throw new Error("Entity already exists with this name or unique field");
 		}
 		if (msg.includes("foreign key")) {
 			if (data.parent_id) {
@@ -1124,11 +958,7 @@ export async function updateEntity(
 	// Generate new slug if provided or name is being updated
 	const newSlug = data.slug ?? (data.name ? slugify(data.name) : null);
 
-	const metadataUpdates = mergeConvenienceFields(
-		data,
-		data.metadata ?? {},
-		"update",
-	);
+	const metadataUpdates = { ...data.metadata };
 	const hasMetadataUpdates = Object.keys(metadataUpdates).length > 0;
 	const affirmFields = Array.isArray(data.affirm_fields)
 		? data.affirm_fields
@@ -1654,7 +1484,7 @@ export async function getEntity(
 	entityId: number,
 	_env: Env,
 	ctx: ToolContext,
-	opts?: { includeDeleted?: boolean },
+	opts?: { includeDeleted?: boolean; readRestrictions?: EntityReadRestrictions },
 ): Promise<CreatedEntity | null> {
   const sql = getDb();
   if (!ctx.organizationId) return null;
@@ -1668,49 +1498,58 @@ export async function getEntity(
   // Visibility branches checked here:
   //   1. caller's own org (always readable)
   //   2. public-catalog entity (anyone reads, except `$member`)
-  const result = await sql<CreatedEntity>`
+  const visibility = buildConnectionVisibilityClause({
+    organizationId: ctx.organizationId, userId: ctx.userId, baseParamIndex: 3,
+  }, 'ev');
+  const params: unknown[] = [ctx.organizationId, entityId, ...visibility.params];
+  const restrictions = opts?.readRestrictions ?? [];
+  const readPredicate = entityReadPolicySql(restrictions, 'e', params);
+  const parentReadPredicate = entityReadPolicySql(restrictions, 'pe', params);
+  const childReadPredicate = entityReadPolicySql(restrictions, 'c', params);
+  const result = await sql.unsafe<CreatedEntity>(`
     SELECT
-      e.id, e.organization_id, et.slug AS entity_type, e.name, e.slug, e.parent_id, e.metadata, e.created_at,
+      e.id, e.organization_id, et.slug AS entity_type, e.name, e.slug, pe.id AS parent_id, e.metadata, e.created_at,
       pe.name as parent_name, pe.slug as parent_slug, pet.slug as parent_entity_type,
       (
         SELECT COUNT(*) FROM current_event_records ev
-        WHERE ${sql.unsafe(entityLinkMatchSql('e.id::bigint', 'ev'))}
-          AND ev.organization_id = ${ctx.organizationId}
+        WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}
+          AND ev.organization_id = $1 ${visibility.sql}
       ) as total_content,
       (
         SELECT COUNT(DISTINCT c.connector_key)
         FROM feeds f
         JOIN connections c ON c.id = f.connection_id
-        WHERE f.organization_id = ${ctx.organizationId}
+        WHERE f.organization_id = $1
           AND f.deleted_at IS NULL
           AND c.deleted_at IS NULL
-          AND ${sql.unsafe(feedLinkedToBusinessEntitySql('e.id', 'f', 'c', 'e.organization_id'))}
+          AND ${feedLinkedToBusinessEntitySql('e.id', 'f', 'c', 'e.organization_id')}
       ) as active_connections,
       (
         SELECT COUNT(*) FROM automations i
         WHERE e.id = ANY(i.entity_ids)
-          AND i.organization_id = ${ctx.organizationId}
+          AND i.organization_id = $1
       ) as automations_count,
       (
         SELECT COUNT(*) FROM entities c
         WHERE c.parent_id = e.id
-          AND c.organization_id = ${ctx.organizationId}
-          AND c.deleted_at IS NULL
+          AND c.organization_id = $1
+          AND c.deleted_at IS NULL AND ${childReadPredicate}
       ) as children_count
     FROM entities e
     JOIN entity_types et ON et.id = e.entity_type_id
-    LEFT JOIN entities pe ON e.parent_id = pe.id
+    LEFT JOIN entities pe ON e.parent_id = pe.id AND ${parentReadPredicate}
     LEFT JOIN entity_types pet ON pet.id = pe.entity_type_id
     LEFT JOIN organization eo ON eo.id = e.organization_id
-    WHERE e.id = ${entityId}
+    WHERE e.id = $2
       AND (
-        e.organization_id = ${ctx.organizationId}
+        e.organization_id = $1
         OR (eo.visibility = 'public' AND et.slug <> '$member')
       )
-      ${includeDeleted ? sql`` : sql`AND e.deleted_at IS NULL`}
-  `;
+      ${includeDeleted ? '' : 'AND e.deleted_at IS NULL'}
+      AND ${readPredicate}
+  `, params);
 
-  return result.length > 0 ? result[0] : null;
+  return (await filterEntityReadRows(sql, await attachEntityIdentities(sql, result), restrictions))[0] ?? null;
 }
 
 /**
@@ -1901,10 +1740,7 @@ export async function deleteEntity(
       // Hard deletion is not a lesser destruction than a tombstone, so giving
       // `force` its own reserved name would turn every "this row cannot be
       // deleted" rule into "cannot be deleted without passing
-      // force_delete_tree=true" — a control with a documented bypass. This is
-      // the opposite call from merge, which got its own `$merged_into` precisely
-      // because merging a duplicate into its canonical record is a correction
-      // and not a destruction at all.
+      // force_delete_tree=true" — a control with a documented bypass.
       //
       // Every id in the tree is judged, not just the root: a descendant carries
       // its own type's rules, and deleting a parent must not be a way to destroy
@@ -2045,18 +1881,6 @@ export async function deleteEntity(
           AND entity_ids <@ ${entityTreeIdsLiteral}::bigint[]
       `;
 
-      // The merge ledger is undo state for rows that are about to stop existing,
-      // so it goes with them. Its FKs are ON DELETE RESTRICT, which is the right
-      // default — nothing should delete an entity out from under a live ledger —
-      // but this path is the one place that legitimately may, because it removes
-      // the winner and every redirect into it together (see `loadEntityTreeIds`).
-      // Without this the RESTRICT surfaced as a raw constraint error and the
-      // record could never be deleted at all.
-      await tx`
-        DELETE FROM entity_merge_operations
-        WHERE winner_entity_id = ANY(${entityTreeIdsLiteral}::bigint[])
-           OR loser_entity_id = ANY(${entityTreeIdsLiteral}::bigint[])
-      `;
       await tx`
         UPDATE feeds
         SET entity_ids = ARRAY(
@@ -2208,9 +2032,6 @@ export async function listEntities(
 		entity_type?: string;
 		parent_id?: number | null;
 		search?: string;
-		category?: string;
-		main_market?: string;
-		market?: string;
 		segment?: string;
 		filters?: AttributeFilter[];
 		limit?: number;
@@ -2220,6 +2041,7 @@ export async function listEntities(
 	},
 	_env: Env,
 	ctx: ToolContext,
+	readRestrictions: EntityReadRestrictions = [],
 ): Promise<{
   entities: CreatedEntity[];
   hasMore: boolean;
@@ -2313,49 +2135,23 @@ export async function listEntities(
 		params.push(filters.entity_type);
 	}
 
+	const memberConditions: string[] = [];
 	if (filters.parent_id !== undefined) {
 		if (filters.parent_id === null) {
-			conditions.push("{e}.parent_id IS NULL");
+			memberConditions.push("member.parent_id IS NULL");
 		} else {
-			conditions.push(`{e}.parent_id = $${paramIdx++}`);
+			memberConditions.push(`member.parent_id = $${paramIdx++}`);
 			params.push(filters.parent_id);
 		}
 	}
 
 	if (filters.search) {
-		conditions.push(
-			`EXISTS (
-        WITH RECURSIVE members(id) AS (
-          SELECT {e}.id
-          UNION
-          SELECT edge.from_entity_id FROM members m
-          JOIN LATERAL (${identityEdgesSql('{e}')}) edge ON edge.to_entity_id = m.id
-        )
-        SELECT 1 FROM members m JOIN entities member ON member.id = m.id
-        WHERE member.name ILIKE $${paramIdx} ESCAPE '!'
-          OR member.metadata->>'domain' ILIKE $${paramIdx} ESCAPE '!'
-      )`,
-		);
+		memberConditions.push(`member.name ILIKE $${paramIdx} ESCAPE '!'`);
 		params.push(`%${filters.search.replace(/[!%_]/g, '!$&')}%`);
 		paramIdx++;
 	}
-
-	if (filters.category) {
-		conditions.push(`{e}.metadata->>'category' = $${paramIdx++}`);
-		params.push(filters.category);
-	}
-
-	if (filters.main_market) {
-		conditions.push(`{e}.metadata->>'main_market' = $${paramIdx++}`);
-		params.push(filters.main_market);
-	}
-
-	if (filters.market) {
-		conditions.push(`{e}.metadata->>'market' = $${paramIdx++}`);
-		params.push(filters.market);
-	}
-
-	conditions.push(...attributeFilterSql(filters.filters ?? [], "{e}.metadata", params));
+	memberConditions.push(...attributeFilterSql(filters.filters ?? [], "member.metadata", params));
+	conditions.push(entityReadPolicySql(readRestrictions, '{e}', params));
 
 	// Render the shared conditions for a given pair of table aliases. The
 	// outer query uses e/et; the page-id prefetch subquery below re-binds the
@@ -2365,14 +2161,19 @@ export async function listEntities(
 			.map((c) =>
 				c.replace(/\{e\}\./g, `${eAlias}.`).replace(/\{et\}\./g, `${etAlias}.`),
 			)
-			// Authored SQL may contain literal "{e}." or "{et}." text.
-			.concat(segmentFilter ? [`${eAlias}.id IN (${segmentFilter.sql})`] : [])
+			// Every predicate must hold on one member, including the authored segment.
+			// Append authored SQL after alias substitution so literal text is untouched.
+			.concat(memberConditions.length || segmentFilter ? [`EXISTS (
+        SELECT 1 FROM entities member WHERE member.id IN (${identityMemberIdsSql(`${eAlias}.id`)})
+          AND ${[...memberConditions, ...(segmentFilter ? [`member.id IN (${segmentFilter.sql})`] : [])].join(' AND ')}
+      )`] : [])
 			.join(" AND ");
 
 	const whereClause = renderWhere("e", "et");
 
 	const sortColumnMap: Record<string, string> = {
 		name: "e.name",
+		domain: "e.metadata->>'domain'",
 		created_at: "e.created_at",
 		total_content: "total_content",
 		active_connections: "active_connections",
@@ -2388,12 +2189,19 @@ export async function listEntities(
 	const sortOrderSql = normalizedSortOrder === "asc" ? "ASC" : "DESC";
 	const orderBy = `${sortColumnMap[sortBy]} ${sortOrderSql}, e.id ASC`;
 
+  const visibility = buildConnectionVisibilityClause({
+    organizationId: ctx.organizationId, userId: ctx.userId, baseParamIndex: params.length + 1,
+  }, 'ev');
+  params.push(...visibility.params);
+  const parentReadPredicate = entityReadPolicySql(readRestrictions, 'pe', params);
+  const childReadPredicate = entityReadPolicySql(readRestrictions, 'c', params);
+
 	const baseQuery = `
     FROM entities e
     JOIN entity_types et ON et.id = e.entity_type_id
-    LEFT JOIN entities pe ON e.parent_id = pe.id
+    LEFT JOIN entities pe ON e.parent_id = pe.id AND ${parentReadPredicate}
     LEFT JOIN entity_types pet ON pet.id = pe.entity_type_id
-    LEFT JOIN LATERAL (SELECT COUNT(*) as cnt FROM current_event_records ev WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}) tc ON true
+    LEFT JOIN LATERAL (SELECT COUNT(*) as cnt FROM current_event_records ev WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')} AND ev.organization_id = e.organization_id ${visibility.sql}) tc ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(DISTINCT c.connector_key) as cnt
       FROM feeds f
@@ -2403,7 +2211,7 @@ export async function listEntities(
         AND ${feedLinkedToBusinessEntitySql('e.id', 'f', 'c', 'e.organization_id')}
     ) ac ON true
     LEFT JOIN LATERAL (SELECT COUNT(*) as cnt FROM automations i WHERE e.id = ANY(i.entity_ids)) ic ON true
-    LEFT JOIN LATERAL (SELECT COUNT(*) as cnt FROM entities c WHERE c.parent_id = e.id) cc ON true
+    LEFT JOIN LATERAL (SELECT COUNT(*) as cnt FROM entities c WHERE c.parent_id = e.id AND ${childReadPredicate}) cc ON true
     WHERE ${whereClause}
   `;
 
@@ -2415,7 +2223,7 @@ export async function listEntities(
   // BY only, no LATERALs — and enrich just those rows. Sorts by computed
   // columns (total_content, …) need the counts for ordering, so they keep the
   // single-query shape.
-  const plainSort = sortBy === 'name' || sortBy === 'created_at';
+  const plainSort = sortBy === 'name' || sortBy === 'created_at' || sortBy === 'domain';
   const pageIdClause = plainSort
     ? `AND e.id = ANY(ARRAY(
          SELECT e2.id FROM entities e2
@@ -2427,7 +2235,7 @@ export async function listEntities(
     : '';
 
   const pageQuery = `SELECT
-      e.id, et.slug AS entity_type, e.name, e.slug, e.parent_id, e.metadata, e.created_at,
+      e.id, et.slug AS entity_type, e.name, e.slug, pe.id AS parent_id, e.metadata, e.created_at,
       COALESCE(tc.cnt, 0) as total_content,
       COALESCE(ac.cnt, 0) as active_connections,
       COALESCE(ic.cnt, 0) as automations_count,
@@ -2475,7 +2283,8 @@ export async function listEntities(
 
   const totalCount = Number(totalCountResult[0]?.total_count || 0);
 
-  return { entities, hasMore, totalCount, limit, offset, sortBy, sortOrder: normalizedSortOrder };
+  const readableEntities = await filterEntityReadRows(sql, await attachEntityIdentities(sql, entities), readRestrictions);
+  return { entities: readableEntities, hasMore, totalCount, limit, offset, sortBy, sortOrder: normalizedSortOrder };
 }
 
 /**
@@ -2662,6 +2471,7 @@ export async function batchLoadRelationships(
 	entityIds: number[],
 	specs: RelationshipColumnSpec[],
 	organizationId: string,
+	readRestrictions: EntityReadRestrictions = [],
 ): Promise<Map<number, Record<string, RelatedEntityInfo[]>>> {
   const result = new Map<number, Record<string, RelatedEntityInfo[]>>();
   if (entityIds.length === 0 || specs.length === 0) return result;
@@ -2689,6 +2499,12 @@ export async function batchLoadRelationships(
       AND (r.from_entity_id = ANY(${idArray}::bigint[]) OR r.to_entity_id = ANY(${idArray}::bigint[]))
   `;
 
+  const endpoints = rows.flatMap(row => [
+    { id: Number(row.from_id), entity_type: String(row.from_entity_type) },
+    { id: Number(row.to_id), entity_type: String(row.to_entity_type) },
+  ]);
+  const allowed = new Set((await filterEntityReadRows(sql, endpoints, readRestrictions)).map(row => row.id));
+
   // Build a direction lookup per spec
   const specByType = new Map<string, 'outbound' | 'inbound' | 'both'>();
   for (const spec of specs) {
@@ -2696,6 +2512,7 @@ export async function batchLoadRelationships(
   }
 
   for (const row of rows) {
+    if (!allowed.has(Number(row.from_id)) || !allowed.has(Number(row.to_id))) continue;
     const relType = row.relationship_type_slug as string;
     const direction = specByType.get(relType) ?? 'both';
     const fromId = Number(row.from_entity_id);

@@ -732,6 +732,8 @@ async function loadCandidatePolicies(args: {
 	entityId?: number | null;
 	/** agent_config: target agents.id being updated/deleted. Loads blanket + that target. */
 	targetAgentId?: string | null;
+	/** Read envelopes load bounded policy configuration once for every record scope. */
+	allEntityScopes?: boolean;
 	sql?: DbClient;
 }): Promise<EntityApprovalPolicyRow[]> {
 	const sql = args.sql ?? getDb();
@@ -762,8 +764,8 @@ async function loadCandidatePolicies(args: {
 		AND connector_key IS NULL AND connection_id IS NULL AND operation_category IS NULL
 		AND operation_key IS NULL
       AND (target_agent_id IS NULL OR target_agent_id = ${args.targetAgentId ?? null})
-      AND (entity_type_slug IS NULL OR entity_type_slug = ${args.entityTypeSlug ?? null})
-      AND (entity_id IS NULL OR entity_id = ${args.entityId ?? null})
+      AND (${args.allEntityScopes === true} OR entity_type_slug IS NULL OR entity_type_slug = ${args.entityTypeSlug ?? null})
+      AND (${args.allEntityScopes === true} OR entity_id IS NULL OR entity_id = ${args.entityId ?? null})
   `;
 	const list = [...rows];
 	await attachEffects(sql, list);
@@ -868,6 +870,20 @@ export async function evaluateEntityMutation(args: {
 	// Reads never queue: approval is treated as deny (stricter than auto, no inbox).
 	if (args.action === "read" && decision === "require_approval") return "deny";
 	return decision;
+}
+
+/** The read default is auto; max-restrictive whole-record restrictions can only narrow it.
+ * Reuse principal/owner matching and stored-effect normalization from the policy resolver.
+ */
+export async function loadEntityReadRestrictions(args: {
+  organizationId: string; principalKind: EntityPolicyPrincipalKind; principalId?: string | null;
+  ownerAgentId?: string | null; ownerResolved?: boolean; sql: DbClient;
+}): Promise<Array<{ entity_type_slug: string | null; entity_id: number | null }>> {
+  if (args.principalKind === 'user') return [];
+  if (args.ownerResolved === false) return [{ entity_type_slug: null, entity_id: null }];
+  const rows = await loadCandidatePolicies({ ...args, principalKind: args.principalKind, allEntityScopes: true });
+  return rows.filter(row => row.field_path === null && row.effects.read !== undefined && row.effects.read !== 'auto')
+    .map(row => ({ entity_type_slug: row.entity_type_slug, entity_id: row.entity_id === null ? null : Number(row.entity_id) }));
 }
 
 /**

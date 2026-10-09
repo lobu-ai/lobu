@@ -4,8 +4,7 @@ import { runMutationGate } from '../authz/entity-mutation-gate';
 import { type ActingPrincipal, resolveActingPrincipal, resolveStoredActingPrincipal } from '../authz/entity-policy';
 import { type DbClient, pgBigintArray } from '../db/client';
 import { loadLiveEntityIdentities } from '../entity-resolution/identities';
-import { assessEntityResolution, normalizedResolutionRuleKeys, readEntityResolutionRules, RESOLUTION_FINGERPRINT_VERSION, type ResolutionIdentity } from '../entity-resolution/policy';
-import { gainedEvidence } from '../entity-resolution/evidence-strength';
+import { assessIdentityGroups, normalizedResolutionRuleKeys, readEntityResolutionRules, RESOLUTION_FINGERPRINT_VERSION, type ResolutionIdentity } from '../entity-resolution/policy';
 import type { ToolContext } from '../tools/registry';
 import { ToolUserError } from './errors';
 import { insertEdgeChangeEventInTransaction, stableJson } from './insert-event';
@@ -22,6 +21,25 @@ interface PairSupport {
   policy: string;
   keys: string[];
   fingerprint: string;
+}
+
+/** Historical unknown evidence stays conservative; it is never treated as no evidence. */
+function isCurrentSupport(value: unknown): value is PairSupport {
+  if (!value || typeof value !== 'object') return false;
+  const support = value as PairSupport;
+  return support.version === SUPPORT_VERSION && typeof support.policy === 'string'
+    && typeof support.fingerprint === 'string' && Array.isArray(support.pair)
+    && support.pair.length === 2 && support.pair.every(Number.isSafeInteger)
+    && Array.isArray(support.keys) && support.keys.every(key => {
+      if (typeof key !== 'string') return false;
+      try {
+        const parts: unknown = JSON.parse(key);
+        return Array.isArray(parts) && (parts.length === 3 || parts.length === 6)
+          && Number.isSafeInteger(parts[0]) && Array.isArray(parts[1])
+          && parts[1].length > 0 && parts[1].every(field => typeof field === 'string')
+          && typeof parts[2] === 'string';
+      } catch { return false; }
+    });
 }
 
 function supportSnapshot(policy: string, pair: number[], values: Iterable<string>): PairSupport {
@@ -52,6 +70,9 @@ export interface IdentityAssociationProposal extends IdentityAssociationInput {
   support: PairSupport;
   suppression_support: PairSupport;
   topology: string;
+  evidence_fingerprint: string;
+  member_support: Record<string, PairSupport>;
+  prior_decisions: Array<{ kind: string; id: number }>;
   current: Array<{ id: number; name: string; parent: number | null }>;
   requester: { kind: ActingPrincipal['kind']; id: string | null; userId: string | null };
   attribution?: ApprovalAttribution;
@@ -75,26 +96,6 @@ export interface IdentityAssociationDecision {
   reason: string;
   relationshipId?: number;
   proposal?: IdentityAssociationProposal;
-}
-
-/** An opted-in type cannot still be physically merged, including previews. */
-export async function assertPhysicalMergeAllowed(db: DbClient, organizationId: string, entityTypeSlug: string): Promise<void> {
-  const rows = await db`
-    SELECT 1 FROM entity_relationship_types t
-    WHERE t.organization_id = ${organizationId} AND t.purpose = 'identity'
-      AND t.deleted_at IS NULL AND t.status = 'active'
-      AND (NOT EXISTS (SELECT 1 FROM entity_relationship_type_rules WHERE relationship_type_id = t.id AND deleted_at IS NULL)
-        OR EXISTS (SELECT 1 FROM entity_relationship_type_rules WHERE relationship_type_id = t.id AND deleted_at IS NULL
-          AND source_entity_type_slug = ${entityTypeSlug} AND target_entity_type_slug = ${entityTypeSlug}))
-    LIMIT 1
-  `;
-  if (rows.length) throw new ToolUserError('This type uses identity associations; use entities.link/unlink instead of physical merge or resolve_duplicates', 409);
-}
-
-export async function assertPhysicalMergeMembersAllowed(db: DbClient, org: string, ids: number[]): Promise<void> {
-  const types = await db<{ slug: string }>`SELECT t.slug FROM entity_types t WHERE t.id IN
-    (SELECT entity_type_id FROM entities WHERE organization_id = ${org} AND id = ANY(${pgBigintArray(ids)}::bigint[]))`;
-  for (const type of types) await assertPhysicalMergeAllowed(db, org, type.slug);
 }
 
 /** Matched normalized keys retain original records and source provenance, never row/version ids. */
@@ -122,63 +123,171 @@ function pairSupport(records: StoredRecord[], identities: Map<number, Resolution
   return supportSnapshot(policy, records.map(row => Number(row.id)), keys);
 }
 
-/** Accumulate at rejection time: pending proposals may overlap or be decided out of order. */
-export async function rememberIdentityRejection(db: DbClient, org: string, runId: number, proposal: IdentityAssociationProposal): Promise<void> {
-  const [previous] = await db<{ id: number; support: PairSupport }>`
-    SELECT id, COALESCE(action_input->'suppression_support', action_input->'support') AS support FROM runs
-    WHERE organization_id = ${org} AND approval_status = 'rejected' AND action_key = 'entity_change'
-      AND action_input->>'operation' = 'link' AND action_input->>'identity_pair' = ${proposal.identity_pair}
-      AND id <> ${runId}
-    ORDER BY id DESC LIMIT 1
+/** Indexed lookups preserve the original member pair after either root changes. */
+async function rejectedPairDecisions(db: DbClient, org: string, key: string, excludeRunId: number | null = null) {
+  return db<{ id: number; support: unknown }>`
+    (SELECT id, action_input->'member_support'->${key}::text AS support FROM runs
+      WHERE organization_id = ${org} AND approval_status = 'rejected' AND action_key = 'entity_change'
+        AND (${excludeRunId}::bigint IS NULL OR id <> ${excludeRunId})
+        AND action_input->>'operation' = 'link' AND action_input->>'identity_pair' = ${key}
+      ORDER BY id DESC LIMIT 1)
+    UNION ALL
+    (SELECT id, action_input->'member_support'->${key}::text AS support FROM runs
+      WHERE organization_id = ${org} AND approval_status = 'rejected' AND action_key = 'entity_change'
+        AND (${excludeRunId}::bigint IS NULL OR id <> ${excludeRunId})
+        AND action_input->>'operation' = 'link' AND (action_input->'member_support') ? ${key}
+      ORDER BY id DESC LIMIT 1)
   `;
-  const support = proposal.suppression_support;
-  if (!previous || previous.support?.version !== SUPPORT_VERSION || previous.support.policy !== support.policy) return;
-  const remembered = supportSnapshot(support.policy, support.pair, [...support.keys, ...previous.support.keys]);
-  // Readers use the highest run id, even when an older proposal is rejected last.
-  await db`UPDATE runs SET action_input = jsonb_set(action_input, '{suppression_support}', ${db.json(remembered)}::jsonb)
-    WHERE id = ${Math.max(runId, Number(previous.id))} AND organization_id = ${org}`;
 }
 
-async function suppression(db: DbClient, org: string, pair: number[], support: PairSupport, assessment: ReturnType<typeof assessEntityResolution>) {
-  const decisions = await db<{ support: PairSupport }>`
-    (SELECT COALESCE(action_input->'suppression_support', action_input->'support') AS support FROM runs
-      WHERE organization_id = ${org} AND approval_status = 'rejected' AND action_key = 'entity_change'
-        AND action_input->>'operation' = 'link' AND action_input->>'identity_pair' = ${stableJson(pair)} ORDER BY id DESC LIMIT 1)
-    UNION ALL
-    (SELECT COALESCE(metadata->${IDENTITY_DECISION_METADATA_KEY}::text->'suppression_support', metadata->${IDENTITY_DECISION_METADATA_KEY}::text->'support') AS support FROM entity_relationships
-      WHERE organization_id = ${org} AND LEAST(from_entity_id, to_entity_id) = ${pair[0]}
-        AND GREATEST(from_entity_id, to_entity_id) = ${pair[1]}
-        AND metadata ? ${IDENTITY_DECISION_METADATA_KEY} AND deleted_at IS NOT NULL
-      ORDER BY updated_at DESC LIMIT 1)
-  `;
-  let reconsider = decisions.length > 0;
-  const previousKeys = new Set(decisions.filter(row => row.support?.version === SUPPORT_VERSION && row.support.policy === support.policy).flatMap(row => row.support.keys));
+/** Accumulate at rejection time, including overlapping proposals rejected out of order. */
+export async function rememberIdentityRejection(db: DbClient, org: string, runId: number, proposal: IdentityAssociationProposal): Promise<void> {
+  for (const [key, support] of Object.entries(proposal.member_support)) {
+    const previous = await rejectedPairDecisions(db, org, key, runId);
+    const opaque = previous.find(row => !isCurrentSupport(row.support));
+    let remembered: unknown;
+    let targetId: number;
+    if (isCurrentSupport(support) && !opaque) {
+      const matching = previous.filter((row): row is { id: number; support: PairSupport } =>
+        isCurrentSupport(row.support) && row.support.policy === support.policy);
+      const keys = matching.flatMap(row => row.support.keys);
+      remembered = supportSnapshot(support.policy, support.pair, [...support.keys, ...keys]);
+      targetId = Math.max(runId, ...matching.map(row => Number(row.id)));
+    } else {
+      // Latest-decision lookups must retain opaque evidence even when an older
+      // historical proposal is rejected after a newer, fully known proposal.
+      remembered = opaque ? opaque.support : support;
+      targetId = Math.max(runId, ...previous.map(row => Number(row.id)));
+    }
+    // Keep the accumulated support on the newest indexed decision even when an
+    // older proposal is rejected last. Other member pairs remain untouched.
+    await db`UPDATE runs SET action_input = jsonb_set(action_input, '{member_support}',
+      action_input->'member_support' || ${db.json({ [key]: remembered })}::jsonb)
+      WHERE id = ${targetId} AND organization_id = ${org}`;
+  }
+}
+
+interface RememberedPairDecision { kind: 'rejection' | 'withdrawal'; id: number; support: unknown }
+
+/** Bounded original pairs, each using the latest indexed decision; never scan history. */
+async function loadPairDecisions(db: DbClient, org: string, pairs: number[][]) {
+  if (pairs.length === 0) return new Map<string, RememberedPairDecision[]>();
+  const rows = await db<RememberedPairDecision & { pair_key: string }>`
+    SELECT requested.pair_key, decision.*
+    FROM jsonb_to_recordset(${db.json(pairs.map(pair => ({ pair_key: stableJson(pair), a: pair[0], b: pair[1] })))}::jsonb)
+      AS requested(pair_key text, a bigint, b bigint)
+    CROSS JOIN LATERAL (
+      (SELECT 'rejection' AS kind, id, action_input->'member_support'->requested.pair_key AS support FROM runs
+        WHERE organization_id = ${org} AND approval_status = 'rejected' AND action_key = 'entity_change'
+          AND action_input->>'operation' = 'link' AND action_input->>'identity_pair' = requested.pair_key
+        ORDER BY id DESC LIMIT 1)
+      UNION ALL
+      (SELECT 'rejection' AS kind, id, action_input->'member_support'->requested.pair_key AS support FROM runs
+        WHERE organization_id = ${org} AND approval_status = 'rejected' AND action_key = 'entity_change'
+          AND action_input->>'operation' = 'link' AND (action_input->'member_support') ? requested.pair_key
+        ORDER BY id DESC LIMIT 1)
+      UNION ALL
+      (SELECT 'withdrawal' AS kind, id, metadata->${IDENTITY_DECISION_METADATA_KEY}::text->'member_support'->requested.pair_key AS support FROM entity_relationships
+        WHERE organization_id = ${org} AND LEAST(from_entity_id, to_entity_id) = requested.a
+          AND GREATEST(from_entity_id, to_entity_id) = requested.b
+          AND metadata ? ${IDENTITY_DECISION_METADATA_KEY} AND deleted_at IS NOT NULL
+        ORDER BY updated_at DESC LIMIT 1)
+      UNION ALL
+      (SELECT 'withdrawal' AS kind, id, metadata->${IDENTITY_DECISION_METADATA_KEY}::text->'member_support'->requested.pair_key AS support FROM entity_relationships
+        WHERE organization_id = ${org} AND deleted_at IS NOT NULL
+          AND (metadata->${IDENTITY_DECISION_METADATA_KEY}::text->'member_support') ? requested.pair_key
+        ORDER BY updated_at DESC LIMIT 1)
+    ) decision`;
+  const result = new Map<string, RememberedPairDecision[]>();
+  for (const row of rows) {
+    const list = result.get(row.pair_key) ?? [];
+    list.push(row); result.set(row.pair_key, list);
+  }
+  return result;
+}
+
+function suppression(pair: number[], support: PairSupport, decisions: RememberedPairDecision[]) {
+  const refs = decisions.map(row => ({ kind: row.kind, id: Number(row.id) }));
+  const reconsider = decisions.length > 0;
+  const previousKeys = new Set(decisions.flatMap(row =>
+    isCurrentSupport(row.support) && row.support.policy === support.policy ? row.support.keys : []));
   const keys = [...new Set([...previousKeys, ...support.keys])].sort();
   const remembered = supportSnapshot(support.policy, pair, keys);
-  if (decisions.some(row => !row.support || row.support.version !== SUPPORT_VERSION)) return { suppressed: true, reconsider, remembered };
-  if (decisions.some(row => row.support.policy === support.policy) && support.keys.every(key => previousKeys.has(key))) {
-    return { suppressed: true, reconsider, remembered };
+  if (decisions.some(row => !isCurrentSupport(row.support))) return { suppressed: true, hardSuppressed: true, previousKeys: [...previousKeys], reconsider, remembered, refs };
+  if (decisions.some(row => isCurrentSupport(row.support) && row.support.policy === support.policy) && support.keys.every(key => previousKeys.has(key))) {
+    return { suppressed: true, hardSuppressed: false, previousKeys: [...previousKeys], reconsider, remembered, refs };
   }
-  // Preserve both orientations and multi-loser rejections. The GIN expression
-  // also covers proposals predating entity_ids; no events-history scan/backfill.
-  const legacy = await db<{ action_input: { entity_ids?: number[]; policy_hash?: string; evidence?: Array<{ kind: string; identifier: string }> } }>`
-    SELECT action_input FROM runs
-    WHERE organization_id = ${org} AND approval_status = 'rejected' AND action_key = 'entity_change'
-      AND action_input->>'operation' = 'merge'
-      AND lobu_resolution_members(action_input) @> ${db.json(pair)}::jsonb
-    ORDER BY id DESC LIMIT 1
-  `;
-  if (legacy.length) {
-    reconsider = true;
-    const previous = legacy[0].action_input;
-    // A group verdict does not prove independent consent for any constituent
-    // pair. Keep it suppressed unless a human explicitly revisits that pair.
-    if ((previous.entity_ids?.length ?? 1) > 1 || !previous.policy_hash ||
-      (previous.policy_hash === assessment.policyHash && gainedEvidence(previous.evidence ?? [], assessment.evidence).length === 0)) {
-      return { suppressed: true, reconsider, remembered };
+  return { suppressed: false, hardSuppressed: false, previousKeys: [...previousKeys], reconsider, remembered, refs };
+}
+
+function associationEvidence(left: StoredRecord[], right: StoredRecord[], identities: Map<number, ResolutionIdentity[]>, pair: number[]) {
+  const candidate = (row: StoredRecord) => ({ id: Number(row.id), metadata: row.metadata ?? {}, identities: identities.get(Number(row.id)) ?? [] });
+  const assessment = assessIdentityGroups({ metadataSchema: left[0].metadata_schema,
+    left: left.map(candidate), right: right.map(candidate) });
+  const policy = digest([RESOLUTION_FINGERPRINT_VERSION, assessment.policyHash]);
+  const memberSupport = Object.fromEntries(left.flatMap(a => right.map(b => {
+    const endpoints = [a, b].sort((x, y) => Number(x.id) - Number(y.id));
+    const support = pairSupport(endpoints, identities, policy);
+    return [stableJson(support.pair), support];
+  })));
+  const support = supportSnapshot(policy, pair, Object.values(memberSupport).flatMap(item => item.keys));
+  return { assessment, policy, memberSupport, support };
+}
+
+function associationHistory(memberSupport: Record<string, PairSupport>, support: PairSupport, pair: number[], memory: Map<string, RememberedPairDecision[]>) {
+  const priorDecisions = Object.values(memberSupport).map(item => suppression(item.pair, item, memory.get(stableJson(item.pair)) ?? []));
+  // Changing representatives must not count the same normalized evidence again.
+  // A genuinely new value/source anywhere across the components permits review,
+  // even when other cross-member pairs have no matching evidence at all.
+  const evidenceKey = (key: string) => stableJson((JSON.parse(key) as unknown[]).slice(1));
+  const previousEvidence = new Set(priorDecisions.flatMap(item => item.previousKeys).map(evidenceKey));
+  const gainedSupport = support.keys.some(key => !previousEvidence.has(evidenceKey(key)));
+  const prior = { suppressed: priorDecisions.some(item => item.hardSuppressed) ||
+      (priorDecisions.some(item => item.suppressed) && !gainedSupport),
+    reconsider: priorDecisions.some(item => item.reconsider),
+    remembered: supportSnapshot(support.policy, pair, priorDecisions.flatMap(item => item.remembered.keys)) };
+  const rememberedMembers = Object.fromEntries(Object.keys(memberSupport).map((key, index) =>
+    [key, priorDecisions[index].remembered]));
+  const priorRefs = [...new Map(priorDecisions.flatMap(item => item.refs).map(ref =>
+    [`${ref.kind}:${ref.id}`, ref])).values()].sort((a, b) => a.kind.localeCompare(b.kind) || a.id - b.id);
+  return { prior, rememberedMembers, priorRefs };
+}
+
+/** Read-only component assessment. Load decisions once and evaluate each record's
+ * mutation gate once. Execution rechecks policy, evidence and topology under locks.
+ */
+export async function discoverIdentityJoin(db: DbClient, ctx: ToolContext, groups: StoredRecord[][],
+  identities: Map<number, ResolutionIdentity[]>, sharesIdentity: (a: number, b: number) => boolean,
+): Promise<{ from: number; to: number; memberCount: number } | null> {
+  const actor = await resolveActingPrincipal(db, { organizationId: ctx.organizationId, userId: ctx.userId,
+    agentId: ctx.agentId, sessionAutomationId: ctx.actingAutomationId });
+  const eligible: StoredRecord[][] = [];
+  for (const group of groups) {
+    let allowed = true;
+    for (const record of group) {
+      const gate = await runMutationGate({ action: 'link', organizationId: ctx.organizationId, sql: db,
+        principalKind: actor.kind, principalId: actor.id, ownerAgentId: actor.ownerAgentId, ownerResolved: actor.ownerResolved,
+        entityId: Number(record.id), entityTypeSlug: record.slug, entityOrgId: record.organization_id,
+        attribution: actor.kind === 'automation' ? 'automation' : 'agent' });
+      if (gate.outcome === 'deny') { allowed = false; break; }
     }
+    if (allowed) eligible.push(group);
   }
-  return { suppressed: false, reconsider, remembered };
+  const candidates = eligible.flatMap((right, index) => eligible.slice(index + 1).flatMap(left =>
+    left.some(a => right.some(b => sharesIdentity(Number(a.id), Number(b.id)))) ? [{ left, right }] : []));
+  const pairs = candidates.flatMap(({ left, right }) => left.flatMap(a => right.map(b =>
+    [Number(a.id), Number(b.id)].sort((x, y) => x - y))));
+  const memory = actor.kind === 'user' ? new Map<string, RememberedPairDecision[]>()
+    : await loadPairDecisions(db, ctx.organizationId, pairs);
+  for (const { left, right } of candidates) {
+    // Discovery passes the current root first in each group.
+    const from = Number(left[0].id), to = Number(right[0].id);
+    const pair = [from, to].sort((a, b) => a - b);
+    const { memberSupport, support } = associationEvidence(left, right, identities, pair);
+    if (actor.kind !== 'user' && associationHistory(memberSupport, support, pair, memory).prior.suppressed) continue;
+    return { from, to, memberCount: left.length + right.length };
+  }
+  return null;
 }
 
 /** One transaction-local decision path for preview, execution and approval. */
@@ -206,6 +315,7 @@ export async function decideIdentityAssociation(db: DbClient, input: IdentityAss
       FROM members m JOIN entity_relationships r ON m.id IN (r.from_entity_id, r.to_entity_id)
         JOIN entity_relationship_types t ON t.id = r.relationship_type_id
       WHERE r.organization_id = ${ctx.organizationId} AND r.deleted_at IS NULL AND t.purpose = 'identity'
+        AND t.organization_id = ${ctx.organizationId} AND t.status = 'active' AND t.deleted_at IS NULL
     ) SELECT id FROM members LIMIT 53
   `;
   const memberIds = members.map(row => Number(row.id)).sort((a, b) => a - b);
@@ -225,6 +335,7 @@ export async function decideIdentityAssociation(db: DbClient, input: IdentityAss
     SELECT r.id, r.from_entity_id, r.to_entity_id, r.relationship_type_id, r.metadata
     FROM entity_relationships r JOIN entity_relationship_types t ON t.id = r.relationship_type_id
     WHERE r.organization_id = ${ctx.organizationId} AND t.purpose = 'identity' AND r.deleted_at IS NULL
+      AND t.organization_id = ${ctx.organizationId} AND t.status = 'active' AND t.deleted_at IS NULL
       AND r.from_entity_id = ANY(${pgBigintArray(memberIds)}::bigint[]) ORDER BY r.id FOR UPDATE OF r
   `;
   const topology = digest({ members: memberIds, edges: edges.map(edge => [Number(edge.id), Number(edge.from_entity_id), Number(edge.to_entity_id), Number(edge.relationship_type_id)]) });
@@ -243,21 +354,39 @@ export async function decideIdentityAssociation(db: DbClient, input: IdentityAss
     withdrawn = !!previous;
   }
   if (input.operation === 'unlink' && ((!existing && !withdrawn) || (existing && input.relationship_id && Number(existing.id) !== input.relationship_id))) return refuse('Identity association is no longer live');
-  const endpoints = pair.map(id => records.find(row => Number(row.id) === id)!);
-  const identities = await loadLiveEntityIdentities(db, { organizationId: ctx.organizationId, entityIds: pair, forUpdate: true });
-  const assessment = assessEntityResolution({ metadataSchema: endpoints[0].metadata_schema,
-    winner: { id: pair[1], metadata: endpoints[1].metadata ?? {}, identities: identities.get(pair[1]) },
-    losers: [{ id: pair[0], metadata: endpoints[0].metadata ?? {}, identities: identities.get(pair[0]) }] });
-  // No entityTypeSlug is supplied: identity association has no person/company defaults.
-  const support = pairSupport(endpoints, identities, digest([RESOLUTION_FINGERPRINT_VERSION, assessment.policyHash]));
-  if (approved && approved.support.fingerprint !== support.fingerprint) throw new IdentityAssociationStaleError();
+  // Removing the requested edge partitions unlink into the same two sides that
+  // link evaluates. This also keeps the fingerprint stable across retries.
+  const adjacency = new Map(memberIds.map(id => [id, [] as number[]]));
+  for (const edge of edges) {
+    if (Number(edge.id) === Number(existing?.id)) continue;
+    adjacency.get(Number(edge.from_entity_id))?.push(Number(edge.to_entity_id));
+    adjacency.get(Number(edge.to_entity_id))?.push(Number(edge.from_entity_id));
+  }
+  const leftIds = new Set<number>();
+  const visit = (id: number) => {
+    if (leftIds.has(id)) return;
+    leftIds.add(id);
+    for (const next of adjacency.get(id) ?? []) visit(next);
+  };
+  visit(pair[0]);
+  const left = records.filter(row => leftIds.has(Number(row.id)));
+  const right = records.filter(row => !leftIds.has(Number(row.id)));
+  if (right.length === 0 && !withdrawn) return refuse('Identity endpoints already belong to the same component');
+  const identities = await loadLiveEntityIdentities(db, { organizationId: ctx.organizationId, entityIds: memberIds, forUpdate: true });
+  const { assessment, policy, memberSupport, support } = associationEvidence(left, right, identities, pair);
+  const evidenceFingerprint = digest({ assessment: assessment.fingerprint,
+    sources: Object.values(memberSupport).map(item => item.fingerprint), topology });
+  if (approved && (approved.evidence_fingerprint !== evidenceFingerprint || approved.support?.fingerprint !== support.fingerprint)) {
+    throw new IdentityAssociationStaleError();
+  }
   const actor = approved
     ? await resolveStoredActingPrincipal(db, ctx.organizationId, approved.requester.kind, approved.requester.id)
     : await resolveActingPrincipal(db, { organizationId: ctx.organizationId, userId: ctx.userId, agentId: ctx.agentId,
         explicitAutomationId: input.automation_id, sessionAutomationId: ctx.actingAutomationId });
-  if (approved) for (const id of pair) await requireWriteAccess(db, id, { ...ctx, userId: approved.requester.userId });
+  if (approved) for (const id of memberIds) await requireWriteAccess(db, id, { ...ctx, userId: approved.requester.userId });
   let review = false;
-  for (const record of endpoints) {
+  for (const record of records) {
+    await requireWriteAccess(db, Number(record.id), ctx);
     const gate = await runMutationGate({ action: input.operation, organizationId: ctx.organizationId, sql: db,
       principalKind: actor.kind, principalId: actor.id, ownerAgentId: actor.ownerAgentId, ownerResolved: actor.ownerResolved,
       entityId: Number(record.id), entityTypeSlug: record.slug, entityOrgId: record.organization_id,
@@ -267,21 +396,36 @@ export async function decideIdentityAssociation(db: DbClient, input: IdentityAss
   }
   if (withdrawn) return { outcome: 'apply', reason: 'Identity association was already withdrawn', relationshipId: input.relationship_id };
   if (input.operation === 'link' && existing) return { outcome: 'apply', reason: 'Identity association already exists', relationshipId: Number(existing.id) };
-  const prior = await suppression(db, ctx.organizationId, pair, support, assessment);
+  const memory = await loadPairDecisions(db, ctx.organizationId, Object.values(memberSupport).map(item => item.pair));
+  const { prior, rememberedMembers, priorRefs } = associationHistory(memberSupport, support, pair, memory);
+  if (approved && stableJson(approved.prior_decisions) !== stableJson(priorRefs)) throw new IdentityAssociationStaleError();
+  if (input.operation === 'link' && actor.kind === 'user') review ||= prior.reconsider;
   if (input.operation === 'link' && actor.kind !== 'user') {
     if (prior.suppressed) return { outcome: 'suppressed', reason: 'Unchanged or reduced support was already rejected or withdrawn' };
     review ||= prior.reconsider || assessment.decision === 'review';
   }
-  const reason = review ? 'Identity association requires human review under the current resolution and write policies' : 'Identity association is allowed by the current policies';
-  const proposal: IdentityAssociationProposal = { ...input, dry_run: undefined, identity_pair: stableJson(pair), support, suppression_support: prior.remembered, topology,
+  const reason = review && prior.reconsider ? `Reconsider ${priorRefs.map(ref => `${ref.kind} #${ref.id}`).join(', ')} with fresh human approval.`
+    : review ? 'Identity association requires human review under the current resolution and write policies' : 'Identity association is allowed by the current policies';
+  // Keep the aggregate support field: entityChangeIdempotencyKey hashes the whole
+  // proposal, so removing it would duplicate unchanged pending approval requests.
+  const proposal: IdentityAssociationProposal = { ...input, dry_run: undefined, identity_pair: stableJson(pair), support, suppression_support: prior.remembered, topology, evidence_fingerprint: evidenceFingerprint, member_support: rememberedMembers, prior_decisions: priorRefs,
     current: records.map(row => ({ id: Number(row.id), name: row.name, parent: Number(edges.find(edge => Number(edge.from_entity_id) === Number(row.id))?.to_entity_id) || null })),
     requester: approved?.requester ?? { kind: actor.kind, id: actor.id, userId: ctx.userId ?? null },
     attribution: actor.kind === 'automation' ? 'automation' : 'agent', reason };
   if (review && !approved) return { outcome: 'review', reason, proposal };
   if (input.dry_run) return { outcome: 'apply', reason };
-  const accepted = existing?.metadata[IDENTITY_DECISION_METADATA_KEY] as { support?: PairSupport } | undefined;
-  const suppressionKeys = [...new Set([...prior.remembered.keys, ...(accepted?.support?.policy === support.policy ? accepted.support.keys : [])])].sort();
-  const decision = { outcome: input.operation === 'link' ? 'accepted' : 'withdrawn', support, topology,
+  const accepted = existing?.metadata[IDENTITY_DECISION_METADATA_KEY] as { member_support: Record<string, unknown> } | undefined;
+  const acceptedMembers = accepted?.member_support ?? {};
+  const decisionMembers: Record<string, unknown> = { ...rememberedMembers };
+  for (const [key, acceptedSupport] of Object.entries(acceptedMembers)) {
+    if (!isCurrentSupport(acceptedSupport)) { decisionMembers[key] = acceptedSupport; continue; }
+    if (acceptedSupport.policy !== policy) continue;
+    decisionMembers[key] = supportSnapshot(policy, acceptedSupport.pair,
+      [...(rememberedMembers[key]?.keys ?? []), ...acceptedSupport.keys]);
+  }
+  const suppressionKeys = [...new Set(Object.values(decisionMembers).flatMap(item => isCurrentSupport(item) ? item.keys : []))].sort();
+  const decision = { outcome: input.operation === 'link' ? 'accepted' : 'withdrawn', support, topology, member_support: decisionMembers,
+    prior_decisions: priorRefs,
     suppression_support: supportSnapshot(support.policy, pair, suppressionKeys),
     requester: proposal.requester, decided_by: ctx.userId ?? null };
   const relationshipId = await withIdentityPrivilege(db, async () => {

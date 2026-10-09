@@ -8,7 +8,7 @@ const originalStderrWrite = process.stderr.write.bind(process.stderr);
 const originalConsoleError = console.error;
 const originalToken = process.env.LOBU_API_TOKEN;
 const originalIdle = process.env.LOBU_CHAT_IDLE_TIMEOUT_MS;
-const exampleDir = join(import.meta.dir, "../../../../examples/market");
+const exampleDir = join(import.meta.dir, "../../../../examples/personal-agent");
 
 function captureTerminal(
   output: { stdout: string[]; stderr: string[] },

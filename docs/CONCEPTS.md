@@ -32,6 +32,70 @@ then the feature map. `AUTOMATIONS.md` holds the Automation primitive contract;
   agent does, sources bound what it may read, outputs declare what a completed
   run persists. See `AUTOMATIONS.md`.
 
+## Entity identity groups
+
+A workspace can declare a relationship type with `purpose: "identity"` for its
+stored entity types. Linking two current roots associates their records and
+makes the target the representative. Each record keeps its ID and metadata;
+unlinking an edge splits off its source subtree. There is no new permanent
+person ID.
+
+Participating live records expose `identity: { root_id, member_ids }` on reads.
+`member_ids` is sorted and bounded to 26 records; `root_id` is the current
+representative and can change. Persist record IDs when referring to a record.
+
+- `entities.get`, updates, deletes, and `listLinks` address the exact record.
+- `entities.list` returns one representative per group. One member must satisfy
+  the complete set of search, parent, attribute, and segment filters; display
+  fields and sort order come from the representative.
+- `knowledge.search` returns the strongest matching member once per group,
+  before applying the result limit. Its metadata remains that member's own.
+- Entity-scoped history and content counts include the group's visible events,
+  retaining source permissions and identifier scope. Connection, child, and
+  assigned Automation counts continue to describe the exact record.
+
+Identity decisions evaluate every member on both sides. Composite identifiers
+must come from one record; a match cannot combine fields from different members.
+A conflicting unique identifier anywhere in either group requires review, and
+write policies apply to every affected member. Approvals recheck the current
+members, normalized evidence, policy, and original requester's access.
+
+Rejections and withdrawals retain their original member pairs when roots change.
+Unchanged or reduced support stays suppressed. New normalized evidence can queue
+fresh human review; an explicit human reconsideration also requires a new
+approval that identifies the prior decisions.
+
+`link` and `unlink` results distinguish applied changes, queued approvals,
+suppression, and dry-run previews. Only an applied link returns `relationship`;
+only an applied unlink returns `success: true`.
+
+Ordinary relationships and system authorization edges do not form these groups.
+Reserved, derived, source-backed, deleted, and nonparticipating records have no
+identity descriptor. Identity associations retain the original records and history;
+physical merge, redirect, and undo operations are retired.
+
+The entity SDK has ten named methods: `discoverDuplicates`, `list`, `get`,
+`create`, `update`, `delete`, `link`, `unlink`, `updateLink`, and `listLinks`.
+Use `entity_id` and `entity_type` in their inputs. Schema-defined fields belong
+in `metadata`; filter them with `filters`. There are no `manage` or `search`
+aliases or implicit field shortcuts.
+
+Duplicate discovery requires one applicable active relationship with
+`purpose: "identity"` and explicit `x-lobu-resolution.rules` on the entity type.
+Each rule names `fields`, a normalizer (`email`, `phone`, or `exact`), and
+`onMatch: "auto_link"` or `"review"`. No entity type receives implicit rules.
+Discovery proposes at most one current root pair per whole matching component;
+apply it with `link` and rediscover after each join. Groups retain up to 26
+records. Preview, queued, suppressed, and applied receipts are distinct.
+Record-level read policies withhold an entire group when any member is denied;
+source permissions still govern history.
+
+The physical-merge redirect column and its execution helpers are removed.
+Existing installations upgrade through the first retirement release, which
+requires owner-verified cleanup and removes runtime readers before the column
+drop. Historical ledger snapshots remain audit-only and do not support undo;
+authentication identity provenance is retained.
+
 ## The event lifecycle (end to end)
 
 ```mermaid

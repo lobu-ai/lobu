@@ -7,7 +7,6 @@
  * URL pattern: /:owner/entity-type/entity-slug/...
  */
 
-import * as Sentry from '@sentry/node';
 import { type Static, Type } from '@sinclair/typebox';
 import { findUngrantedMemberWorkspace, formatUngrantedMemberMessage, resolveGrantedWorkspaceTarget } from '../auth/oauth/workspace-grants';
 import { getDb } from '../db/client';
@@ -78,15 +77,6 @@ const ViewTemplateTabSchema = Type.Object({
 });
 type ViewTemplateTab = Static<typeof ViewTemplateTabSchema>;
 
-const MergedRecordSchema = Type.Object({
-  id: Type.Integer(),
-  name: Type.String(),
-  slug: Type.String(),
-  metadata: Type.Record(Type.String(), Type.Unknown()),
-  merged_at: Type.String(),
-  can_unmerge: Type.Boolean(),
-});
-
 // ResolvedEntityDetails = ResolvedPathEntity + detail fields. TypeBox has no
 // `extends`; compose via intersect so the derived type stays a single source.
 export const ResolvedEntityDetailsSchema = Type.Intersect([
@@ -121,8 +111,6 @@ export const ResolvedEntityDetailsSchema = Type.Intersect([
     // row; `measure_columns` are its aggregate columns. Stored entities omit both.
     is_derived: Type.Optional(Type.Boolean()),
     measure_columns: Type.Optional(Type.Array(Type.String())),
-    /** Tombstoned source rows currently forwarded to this canonical entity. */
-    merged_records: Type.Optional(Type.Array(MergedRecordSchema)),
   }),
 ]);
 export type ResolvedEntityDetails = Static<typeof ResolvedEntityDetailsSchema>;
@@ -282,7 +270,6 @@ export const ResolvePathResultSchema = Type.Object({
   siblings: Type.Array(SiblingEntitySchema),
   bootstrap: Type.Union([ResolvePathBootstrapSchema, Type.Null()]),
   counts: WorkspaceCountsSchema,
-  redirect: Type.Union([Type.Object({ to: Type.String() }), Type.Null()]),
 });
 export type ResolvePathResult = Static<typeof ResolvePathResultSchema>;
 
@@ -308,10 +295,7 @@ export const resolvePath = withValidatedArgs(
   'resolve_path',
   ResolvePathSchema,
   (args: ResolvePathArgs, _env: Env, ctx: AccountToolContext): Promise<ResolvePathResult> =>
-    Sentry.startSpan(
-      { name: 'resolve_path', op: 'function', attributes: { path: args.path } },
-      () => _resolvePath(args, ctx)
-    )
+    _resolvePath(args, ctx)
 );
 
 async function _resolvePath(
@@ -345,9 +329,7 @@ async function _resolvePath(
 
   const sql = getDb();
 
-  const resolved = await Sentry.startSpan({ name: 'resolveOwner', op: 'db' }, () =>
-    getWorkspaceProvider().resolveOwner(ownerSlug, 'organization')
-  );
+  const resolved = await getWorkspaceProvider().resolveOwner(ownerSlug, 'organization');
 
   if (!resolved) {
     throw new ToolUserError('Workspace is not available for this authorization', 404);
@@ -572,13 +554,6 @@ async function _resolvePath(
         resolvedEntity = derived;
         continue;
       }
-      const redirect = await resolveMergedEntityRedirect(sql, workspace, segment, parentId);
-      if (redirect) {
-        // A redirect response is followed, not rendered — the client re-resolves
-        // at `redirect.to` and gets real counts there. Spending a query to fill
-        // a field nothing reads would be pure latency, so leave it zeroed.
-        return { ...emptyResult(workspace, null), redirect };
-      }
       throw new ToolUserError(
         `Entity not found for ${segment.entity_type}/${segment.slug}`,
         404
@@ -608,25 +583,23 @@ async function _resolvePath(
       eventsCount,
       [connectionsCount],
       [automationsCount],
-    ] = await Sentry.startSpan({ name: 'entity:counts', op: 'db' }, () =>
-      Promise.all([
-        fetchContentCount(sql, workspace.id, Number(entityRow.id), excludeWorkspaceAudit),
-        sql.unsafe<{ cnt: number }>(
-          `SELECT COUNT(DISTINCT cn.connector_key) as cnt
-           FROM feeds f
-           JOIN connections cn ON cn.id = f.connection_id
-           WHERE f.organization_id = $1
-             AND f.deleted_at IS NULL
-             AND cn.deleted_at IS NULL
-             AND ${feedLinkedToBusinessEntitySql('$2::int', 'f', 'cn', '$1')}`,
-          [workspace.id, Number(entityRow.id)],
-        ),
-        sql`SELECT COUNT(*) as cnt FROM automations i
-              WHERE ${Number(entityRow.id)}::int = ANY(i.entity_ids)
-                AND i.organization_id = ${workspace.id}
-                AND i.status = 'active'`,
-      ])
-    );
+    ] = await Promise.all([
+      fetchContentCount(sql, workspace.id, Number(entityRow.id), excludeWorkspaceAudit),
+      sql.unsafe<{ cnt: number }>(
+        `SELECT COUNT(DISTINCT cn.connector_key) as cnt
+         FROM feeds f
+         JOIN connections cn ON cn.id = f.connection_id
+         WHERE f.organization_id = $1
+           AND f.deleted_at IS NULL
+           AND cn.deleted_at IS NULL
+           AND ${feedLinkedToBusinessEntitySql('$2::int', 'f', 'cn', '$1')}`,
+        [workspace.id, Number(entityRow.id)],
+      ),
+      sql`SELECT COUNT(*) as cnt FROM automations i
+            WHERE ${Number(entityRow.id)}::int = ANY(i.entity_ids)
+              AND i.organization_id = ${workspace.id}
+              AND i.status = 'active'`,
+    ]);
     const processedEntityTabs: ViewTemplateTab[] = [];
     const entityCleanTpl = null;
     const redactedTemplateData: Record<string, unknown[]> | null = null;
@@ -688,52 +661,6 @@ async function _resolvePath(
   let children: ChildEntity[] = [];
   let siblings: SiblingEntity[] = [];
 
-  if (
-    resolvedEntity &&
-    !resolvedEntity.is_derived &&
-    isAdminOrOwnerRole(roleInResolvedWorkspace)
-  ) {
-    const mergedRows = await sql<{
-      id: number;
-      name: string;
-      slug: string;
-      metadata: Record<string, unknown>;
-      merged_at: Date | string;
-      can_unmerge: boolean;
-    }>`
-      SELECT loser.id, loser.name, loser.slug, loser.metadata,
-             operation.created_at AS merged_at,
-             operation.winner_entity_id = ${resolvedEntity.id}
-               AND NOT EXISTS (
-                 SELECT 1
-                 FROM entity_merge_operations later
-                 WHERE later.organization_id = operation.organization_id
-                   AND later.winner_entity_id = operation.winner_entity_id
-                   AND later.status = 'active'
-                   AND later.id > operation.id
-               ) AS can_unmerge
-      FROM entity_merge_operations operation
-      JOIN entities loser
-        ON loser.id = operation.loser_entity_id
-       AND loser.organization_id = operation.organization_id
-      WHERE operation.organization_id = ${workspace.id}
-        AND loser.merged_into = ${resolvedEntity.id}
-        AND operation.status = 'active'
-      ORDER BY operation.created_at DESC, operation.id DESC
-    `;
-    resolvedEntity = {
-      ...resolvedEntity,
-      merged_records: mergedRows.map((row) => ({
-        id: Number(row.id),
-        name: row.name,
-        slug: row.slug,
-        metadata: row.metadata ?? {},
-        merged_at: new Date(row.merged_at).toISOString(),
-        can_unmerge: row.can_unmerge,
-      })),
-    };
-  }
-
   if (resolvedEntity && !resolvedEntity.is_derived) {
     // Fetch children + siblings without per-row COUNT subqueries.
     // content_count is omitted to avoid expensive GIN index scans over the events table.
@@ -794,7 +721,6 @@ async function _resolvePath(
     siblings,
     bootstrap,
     counts,
-    redirect: null,
   };
 }
 
@@ -806,66 +732,6 @@ type DbClient = ReturnType<typeof getDb>;
 
 function toVersionNumber(v: unknown): number | null {
   return v ? Number(v) : null;
-}
-
-async function resolveMergedEntityRedirect(
-  sql: DbClient,
-  workspace: ResolvedWorkspace,
-  segment: { entity_type: string; slug: string },
-  parentId: number | null
-): Promise<{ to: string } | null> {
-  const rows = await sql<{
-    loser_name: string;
-    winner_id: number;
-  }>`
-    SELECT loser.name AS loser_name, winner.id AS winner_id
-    FROM entities loser
-    JOIN entity_types loser_type ON loser_type.id = loser.entity_type_id
-    JOIN entities winner
-      ON winner.id = loser.merged_into
-     AND winner.organization_id = loser.organization_id
-     AND winner.deleted_at IS NULL
-    WHERE loser.organization_id = ${workspace.id}
-      AND loser.deleted_at IS NOT NULL
-      AND loser_type.slug = ${segment.entity_type}
-      AND loser.slug = ${segment.slug}
-      AND (
-        (${parentId}::bigint IS NULL AND loser.parent_id IS NULL)
-        OR loser.parent_id = ${parentId}
-      )
-    LIMIT 1
-  `;
-  const merged = rows[0];
-  if (!merged) return null;
-
-  const path = await sql<{ entity_type: string; slug: string; depth: number }>`
-    WITH RECURSIVE canonical_path AS (
-      SELECT entity.id, entity.parent_id, type.slug AS entity_type,
-             entity.slug, 0 AS depth
-      FROM entities entity
-      JOIN entity_types type ON type.id = entity.entity_type_id
-      WHERE entity.id = ${merged.winner_id}
-        AND entity.organization_id = ${workspace.id}
-      UNION ALL
-      SELECT parent.id, parent.parent_id, type.slug AS entity_type,
-             parent.slug, canonical_path.depth + 1
-      FROM canonical_path
-      JOIN entities parent ON parent.id = canonical_path.parent_id
-      JOIN entity_types type ON type.id = parent.entity_type_id
-      WHERE parent.organization_id = ${workspace.id}
-    )
-    SELECT entity_type, slug, depth
-    FROM canonical_path
-    ORDER BY depth DESC
-  `;
-  if (path.length === 0) return null;
-  const suffix = path
-    .flatMap((item) => [item.entity_type, item.slug])
-    .map(encodeURIComponent)
-    .join('/');
-  return {
-    to: `/${encodeURIComponent(workspace.slug)}/${suffix}?merged_from=${encodeURIComponent(merged.loser_name)}`,
-  };
 }
 
 /**
@@ -963,7 +829,6 @@ function emptyResult(
     siblings: [],
     bootstrap,
     counts,
-    redirect: null,
   };
 }
 

@@ -664,7 +664,10 @@ export async function createSyncRun(
       // here, from having found that run on the way in.
       return { ok: false, reason: 'already_active' };
     }
-    logger.error({ error }, `[queue] Failed to create sync run for feed ${feedId}`);
+    // Expected admission failures are reported by the scheduling/API boundary.
+    if (!(error instanceof ToolUserError && error.httpStatus < 500)) {
+      logger.error({ error }, `[queue] Failed to create sync run for feed ${feedId}`);
+    }
     throw error;
   }
 }

@@ -12,11 +12,7 @@
 export const SDK_FIELD_ALIASES: Readonly<
 	Record<string, Readonly<Record<string, string>>>
 > = {
-	// intuitive `id` for the entity/feed id field
-	"entities.get": { id: "entity_id" },
-	"entities.delete": { id: "entity_id" },
-	// runtime field is `entity_type` (as `entities.list` exposes it); callers guess `type`
-	"entities.create": { type: "entity_type" },
+	// intuitive `id` for the feed id field
 	"feeds.get": { id: "feed_id" },
 	// schedules use plain `id`; callers guess `schedule_id`
 	"schedules.update": { schedule_id: "id" },

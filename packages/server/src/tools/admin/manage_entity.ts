@@ -1,4 +1,4 @@
-import { assertPhysicalMergeMembersAllowed, decideIdentityAssociation, type IdentityAssociationInput } from "../../utils/identity-association";
+import { decideIdentityAssociation, type IdentityAssociationInput } from "../../utils/identity-association";
 /**
  * Tool: manage_entity
  *
@@ -15,12 +15,10 @@ import { assertPhysicalMergeMembersAllowed, decideIdentityAssociation, type Iden
  * - unlink: Soft-delete a relationship
  * - update_link: Update metadata/confidence/source on a relationship
  * - list_links: List relationships for an entity with filters
- * - merge: Fold confirmed duplicates into one canonical entity
  * - discover_duplicates: Page whole duplicate components across one entity type (read-only)
- * - resolve_duplicates: Apply an entity type's configured resolution policy
- * - unmerge: Reverse a ledger-backed merge when its after-state is unchanged
  */
 
+import { type EntityReadRestrictions, entityReadPolicySql, entityReadRestrictions, filterEntityReadRows } from "../../authz/entity-read-policy";
 import { deriveToolActorSource } from '../../utils/apply-context';
 import { randomUUID } from "node:crypto";
 
@@ -39,12 +37,9 @@ import {
 	type ManageEntityResult,
 	ManageEntityResultSchema,
 	ManageEntitySchema,
-	MergeEntitiesAction,
 	type RelationshipCountByType,
 	type RelationshipRow,
-	ResolveDuplicatesAction,
 	UnlinkEntitiesAction,
-	UnmergeEntityAction,
 	UpdateEntityAction,
 	UpdateLinkAction,
 } from "@lobu/core/contracts/tools/manage-entity";
@@ -55,7 +50,6 @@ import {
 } from "../../authz/entity-mutation-gate";
 import {
 	EntityRowValidationError,
-	type EntityRowValidationVerdict,
 	RESERVED_COLUMN_NAMES,
 } from "../../authz/entity-row-validation";
 import {
@@ -68,16 +62,9 @@ import { resolveAutomationAttribution } from "../../automations/automation-sourc
 import {
 	type DbClient,
 	getDb,
-	pgBigintArray,
 	pgTextArray,
 } from "../../db/client";
-import { discoverWorkspaceResolutionGroups, discoverWorkspaceResolutionPage } from "../../entity-resolution/discovery";
-import { loadLiveEntityIdentities } from "../../entity-resolution/identities";
-import {
-	assessEntityResolution,
-	RESOLUTION_FINGERPRINT_VERSION,
-} from "../../entity-resolution/policy";
-import { wasResolutionRejected } from "../../entity-resolution/rejection";
+import { discoverWorkspaceResolutionPage } from "../../entity-resolution/discovery";
 import type { Env } from "../../index";
 import {
 	batchLoadRelationships,
@@ -89,11 +76,6 @@ import {
 	type RelationshipColumnSpec,
 	updateEntity,
 } from "../../utils/entity-management";
-import {
-	applyMergeGroup,
-	applyUnmerge,
-	previewMerge,
-} from "../../utils/entity-merge";
 import { authzScopeFromToolContext } from "../../authz/scope";
 import { ToolUserError } from "../../utils/errors";
 import { readSourceRecordLinks } from "../../utils/source-record-reads";
@@ -134,7 +116,7 @@ import {
 import { validateEntityMetadata } from "../../utils/schema-validation";
 import { buildEntityUrl } from "../../utils/url-builder";
 import { trackAutomationReaction } from "../../utils/automation-reactions";
-import { isAdminOrOwnerRole, isInProcessSystemCall } from "../access-control";
+import { isInProcessSystemCall } from "../access-control";
 import { MEMBER_ENTITY_TYPE_SLUG } from "../constants";
 import type { ToolContext } from "../registry";
 import {
@@ -143,7 +125,7 @@ import {
 	toEntityInfo,
 } from "../view-urls";
 import { action, defineActionTool } from "./action-tool";
-import { proposeEntityChange, proposeEntityDelete, proposeEntityMerge } from "./entity-field-approval";
+import { proposeEntityChange, proposeEntityDelete } from "./entity-field-approval";
 
 export { ManageEntityResultSchema, ManageEntitySchema };
 
@@ -309,10 +291,7 @@ const manageEntityTool = defineActionTool("manage_entity", {
 	unlink: action(UnlinkEntitiesAction, handleUnlink),
 	update_link: action(UpdateLinkAction, handleUpdateLink),
 	list_links: action(ListLinksAction, handleListLinks),
-	merge: action(MergeEntitiesAction, handleMerge),
 	discover_duplicates: action(DiscoverDuplicatesAction, handleDiscoverDuplicates),
-	resolve_duplicates: action(ResolveDuplicatesAction, handleResolveDuplicates),
-	unmerge: action(UnmergeEntityAction, handleUnmerge),
 });
 
 export const manageEntity = manageEntityTool.run;
@@ -433,14 +412,6 @@ async function handleCreate(
 			userId: ctx.userId,
 			sessionAutomationId: ctx.actingAutomationId ?? null,
 		})) ?? "system";
-
-	// All fields available on all entity types - DB constraints handle validation
-	entityData.domain = args.domain ?? null;
-	entityData.category = args.category ?? null;
-	entityData.platform_type = args.platform_type ?? null;
-	entityData.main_market = args.main_market ?? null;
-	entityData.market = args.market ?? null;
-	entityData.link = args.link ?? null;
 
 	// Content body (used by memory entities)
 	if (args.content !== undefined) {
@@ -698,15 +669,6 @@ async function handleUpdate(
 	if (args.slug !== undefined) updateData.slug = args.slug;
 	if (args.parent_id !== undefined) updateData.parent_id = args.parent_id;
 
-	// Type-specific fields
-	if (args.domain !== undefined) updateData.domain = args.domain;
-	if (args.category !== undefined) updateData.category = args.category;
-	if (args.platform_type !== undefined)
-		updateData.platform_type = args.platform_type;
-	if (args.main_market !== undefined) updateData.main_market = args.main_market;
-	if (args.market !== undefined) updateData.market = args.market;
-	if (args.link !== undefined) updateData.link = args.link;
-
 	// Content body
 	if (args.content !== undefined) updateData.content = args.content;
 
@@ -869,326 +831,6 @@ async function handleUpdate(
 // redactMemberEmail) lives in utils/member-entity-type.ts, shared with
 // search_memory so the two surfaces cannot drift.
 
-/**
- * Fold a duplicate entity (`entity_id`, the loser) into the one it really is
- * (`winner_entity_id`). Humans must be admin/owner. Agents and automations may
- * auto-merge only when the entity type policy proves the match; every other
- * candidate queues human review. The heavy lifting (merge attributes, move
- * identities and edges, tombstone + forward each loser, flatten chains) is in
- * `applyMergeGroup`; this handler is the org-scoped gate + validation.
- */
-async function handleMerge(
-	args: Static<typeof MergeEntitiesAction>,
-	ctx: ToolContext,
-): Promise<ManageEntityResult> {
-	const actor = await actingPrincipalFor(args, ctx);
-	const denialAttemptId = randomUUID();
-	if (actor.kind === "user" && !isAdminOrOwnerRole(ctx.memberRole)) {
-		throw new ToolUserError("Only an admin or owner may merge entities", 403);
-	}
-	// Both merge outcomes — the queued proposal and the auto-merge decision —
-	// record the same Automation, so resolve it once for the handler.
-	const mergeAttribution = await resolveAutomationAttribution(
-		ctx,
-		args.automation_source
-	);
-	const loserIds = [
-		...new Set(
-			args.duplicate_entity_ids ?? (args.entity_id ? [args.entity_id] : []),
-		),
-	].sort((a, b) => a - b);
-	const winnerId = args.winner_entity_id;
-	if (loserIds.length === 0)
-		throw new ToolUserError(
-			"entity_id or duplicate_entity_ids is required for merge",
-			400,
-		);
-	if (loserIds.includes(winnerId))
-		throw new ToolUserError("winner_entity_id cannot also be a duplicate", 400);
-	if (loserIds.length > 25)
-		throw new ToolUserError("A merge can include at most 25 duplicates", 400);
-
-	const sql = getDb();
-	await assertPhysicalMergeMembersAllowed(sql, ctx.organizationId, [...loserIds, winnerId]);
-	// Every duplicate and the winner must be live and in the caller's org — never
-	// merge across a tenant boundary or into a deleted/foreign entity.
-	const rows = (await sql`
-    SELECT e.id, e.entity_type_id, e.metadata, et.metadata_schema,
-           et.slug AS entity_type_slug
-    FROM entities e
-    JOIN entity_types et ON et.id = e.entity_type_id
-	WHERE e.organization_id = ${ctx.organizationId}
-	      AND e.id = ANY(${pgBigintArray([...loserIds, winnerId])}::bigint[])
-	      AND e.deleted_at IS NULL
-	`) as Array<{
-		id: number;
-		entity_type_id: number;
-		metadata: Record<string, unknown>;
-		metadata_schema: Record<string, unknown> | null;
-		entity_type_slug: string;
-	}>;
-	const found = new Set(rows.map((r) => Number(r.id)));
-	for (const loserId of loserIds) {
-		if (!found.has(loserId))
-			throw new ToolUserError(
-				`Entity ${loserId} not found in this workspace`,
-				404,
-			);
-	}
-	if (!found.has(winnerId))
-		throw new ToolUserError(
-			`Entity ${winnerId} not found in this workspace`,
-			404,
-		);
-	const entityTypeIds = new Set(rows.map((row) => Number(row.entity_type_id)));
-	if (entityTypeIds.size !== 1) {
-		throw new ToolUserError(
-			"Duplicate and canonical entities must have the same entity type",
-			400,
-		);
-	}
-
-	let resolution: ReturnType<typeof assessEntityResolution> | null = null;
-	if (actor.kind !== "user") {
-		const byId = new Map(rows.map((row) => [Number(row.id), row]));
-		const winner = byId.get(winnerId);
-		if (!winner) {
-			throw new ToolUserError(
-				`Entity ${winnerId} not found in this workspace`,
-				404,
-			);
-		}
-		const identities = await loadLiveEntityIdentities(sql, {
-			organizationId: ctx.organizationId,
-			entityIds: [...loserIds, winnerId],
-		});
-		resolution = assessEntityResolution({
-			metadataSchema: winner.metadata_schema,
-			entityTypeSlug: winner.entity_type_slug,
-			winner: {
-				id: winnerId,
-				metadata: winner.metadata ?? {},
-				identities: identities.get(winnerId) ?? [],
-			},
-			losers: loserIds.map((loserId) => ({
-				id: loserId,
-				metadata: byId.get(loserId)?.metadata ?? {},
-				identities: identities.get(loserId) ?? [],
-			})),
-		});
-	}
-
-	const previewResponse = (
-		outcome: "apply" | "review" | "suppressed" | "refused",
-		reason: string,
-	): ManageEntityResult => ({
-		action: "merge",
-		success: true,
-		message: {
-			apply: "Dry run: the merge would be applied",
-			review: `Dry run: the merge would require human review — ${reason}`,
-			suppressed: "Dry run: this unchanged candidate was already rejected; review would be suppressed",
-			refused: `Dry run: the merge would NOT be applied — ${reason}`,
-		}[outcome],
-		winner_entity_id: winnerId,
-		loser_entity_id: loserIds[0],
-		loser_entity_ids: loserIds,
-		moved_identities: 0,
-		repointed_edges: 0,
-		dry_run: true,
-		preview: { outcome, reason },
-	});
-	const isReviewableMergeRule = (verdict: EntityRowValidationVerdict) =>
-		verdict.outcome === "escalate" &&
-		verdict.fields.length === 1 &&
-		verdict.fields[0] === RESERVED_COLUMN_NAMES.mergedInto;
-
-	/**
-	 * Send this merge to a human instead of applying it. Two deciders reach here
-	 * with the same card, the same suppression rule and the same shape, differing
-	 * only in who asked and why:
-	 *
-	 *  - the resolution POLICY, before any write is attempted — "is this the same
-	 *    record?" — which answers `review` when the identity evidence is not
-	 *    conclusive;
-	 *  - the type's write RULE, from inside the merge kernel — "may this record be
-	 *    merged away?" — which answers `escalate` however certain the identity is.
-	 *
-	 * They are different questions, so the second can override a policy that was
-	 * sure: certainty about identity is not consent to the write. `reason` is
-	 * whichever decider spoke, so the card says why it is waiting. A dry run
-	 * reports the review (or its suppression) and never queues a card.
-	 */
-	const queueMergeForReview = async (
-		policy: NonNullable<typeof resolution>,
-		reason: string,
-	): Promise<ManageEntityResult> => {
-		const attribution = attributionFor(actor);
-		const rejected = await wasResolutionRejected(sql, {
-			organizationId: ctx.organizationId,
-			fingerprint: policy.fingerprint,
-		});
-		if (args.dry_run) {
-			return previewResponse(rejected ? "suppressed" : "review", reason);
-		}
-		if (rejected) {
-			return {
-				action: "merge",
-				approval_suppressed: true,
-				message:
-					"This unchanged candidate was already rejected. It will be reconsidered when its evidence or policy changes.",
-				resolution: {
-					decision: "review",
-					reason,
-					evidence: policy.evidence,
-				},
-			};
-		}
-		const queued = await proposeEntityMerge(
-			ctx,
-			{
-				entity_ids: loserIds,
-				winner_entity_id: winnerId,
-				evidence: policy.evidence,
-				automation_id: mergeAttribution.automationId,
-				policy_hash: policy.policyHash,
-				resolution_fingerprint: policy.fingerprint,
-				resolution_fingerprint_version: RESOLUTION_FINGERPRINT_VERSION,
-				attribution,
-				reason,
-				// The proposer's own words, kept strictly separate from `reason` (the
-				// machine-computed verdict). Displayed as a claim attributed to
-				// whoever proposed the merge — it is never evidence and never affects
-				// the auto-merge decision, which is recomputed server-side above.
-				proposer_rationale: args.merge_rationale?.trim() || null,
-			},
-			policy.resolutionKeys,
-			mergeAttribution.runId,
-		);
-		return {
-			action: "merge",
-			approval_queued: true,
-			approval_url: queued.approvalUrl,
-			approval_run_id: queued.runId,
-			approval_action: "merge",
-			approval_proposal: {
-				entity_id: loserIds[0],
-				entity_ids: loserIds,
-				winner_entity_id: winnerId,
-			},
-			approval_attribution: attribution,
-			next_steps: ["The merge is waiting for human approval."],
-			resolution: {
-				decision: "review",
-				reason,
-				evidence: policy.evidence,
-			},
-		};
-	};
-
-	if (actor.kind !== "user" && resolution?.decision === "review") {
-		return await queueMergeForReview(resolution, resolution.reason);
-	}
-
-	// Follow the same policy-first ordering as execution. The kernel rechecks
-	// write rules under lock when applying; preview does not enforce or write.
-	if (args.dry_run) {
-		const verdict = await previewMerge({ loserIds, winnerId });
-		if (resolution && verdict && isReviewableMergeRule(verdict)) {
-			return await queueMergeForReview(resolution, verdict.reason);
-		}
-		return previewResponse(
-			verdict ? "refused" : "apply",
-			verdict?.reason ?? resolution?.reason ?? "A workspace administrator may confirm this merge.",
-		);
-	}
-
-	let result: Awaited<ReturnType<typeof applyMergeGroup>>;
-	try {
-		result = await applyMergeGroup({
-			orgId: ctx.organizationId,
-			loserIds,
-			winnerId,
-			mergedBy: ctx.agentId ?? ctx.userId ?? "system",
-			expectedResolutionFingerprint:
-				actor.kind === "user" ? undefined : resolution?.fingerprint,
-			resolution:
-				actor.kind === "user"
-					? {
-							decision: "human",
-							evidence: args.merge_evidence ?? [],
-						}
-					: {
-							decision: "auto_merge",
-							sourceRunId: mergeAttribution.runId,
-							automationId: mergeAttribution.automationId,
-							policyHash: resolution?.policyHash ?? null,
-							evidence: resolution?.evidence ?? [],
-						},
-		});
-	} catch (err) {
-		const denial = ruleDenialFrom(err);
-		if (denial) {
-			// applyMergeGroup rolled back before this handler regains control.
-			await recordToolDenial({
-				ctx,
-				attemptId: denialAttemptId,
-				actor,
-				automationId: mergeAttribution.automationId,
-				denial,
-			});
-		}
-		// The write rule judges the merge under lock inside the kernel, so its
-		// verdict arrives only once the policy has already decided to apply. Route
-		// the one escalation this card can replay — the merge card's grant is the
-		// hardcoded literal `[$merged_into]`, so an escalate naming anything else
-		// would mint a card that throws the moment a reviewer approves it. Those,
-		// and every deny, still fail closed.
-		//
-		// Scoped to a non-user actor because that is the only path with a
-		// resolution to card against: the card carries the policy hash, evidence
-		// and fingerprint the suppression check re-reads, and a human-initiated
-		// merge computes none of them. A human's merge is UNCHANGED by this — it
-		// keeps the explicit 409 it already returned. Whether an escalate should
-		// card a human's own merge too is a separate question, and answering it
-		// needs a decision about what such a card is keyed on, not this catch.
-		if (
-			actor.kind !== "user" &&
-			resolution &&
-			err instanceof EntityRowValidationError &&
-			isReviewableMergeRule(err.verdict)
-		) {
-			return await queueMergeForReview(resolution, err.verdict.reason);
-		}
-		throw new ToolUserError(
-			`Merge failed: ${err instanceof Error ? err.message : String(err)}`,
-			409,
-		);
-	}
-
-	return {
-		action: "merge",
-		success: true,
-		message: `Merged ${loserIds.length} duplicate ${loserIds.length === 1 ? "entity" : "entities"} into ${winnerId} (${result.movedIdentities} identities moved, ${result.repointedEdges} edges re-pointed).`,
-		winner_entity_id: winnerId,
-		loser_entity_id: loserIds[0],
-		loser_entity_ids: loserIds,
-		moved_identities: result.movedIdentities,
-		repointed_edges: result.repointedEdges,
-		resolution: {
-			decision: actor.kind === "user" ? "human" : "auto_merge",
-			reason:
-				actor.kind === "user"
-					? "A workspace administrator confirmed the merge."
-					: (resolution?.reason ?? "A deterministic identity rule matched."),
-			evidence:
-				actor.kind === "user"
-					? (args.merge_evidence ?? [])
-					: (resolution?.evidence ?? []),
-		},
-	};
-}
-
 async function handleDiscoverDuplicates(
 	args: Static<typeof DiscoverDuplicatesAction>,
 	ctx: ToolContext,
@@ -1204,129 +846,7 @@ async function handleDiscoverDuplicates(
 	return discoverWorkspaceResolutionPage(getDb(), {
 		organizationId: ctx.organizationId, entityType: args.entity_type,
 		limit: args.limit, cursor: args.cursor,
-	});
-}
-
-async function handleResolveDuplicates(
-	args: Static<typeof ResolveDuplicatesAction>,
-	ctx: ToolContext,
-): Promise<ManageEntityResult> {
-	// The schema already requires >= 2 unique ids; sorted for a stable order.
-	const candidateIds = [...args.candidate_entity_ids].sort((a, b) => a - b);
-	await assertPhysicalMergeMembersAllowed(getDb(), ctx.organizationId, candidateIds);
-	let discovery: Awaited<ReturnType<typeof discoverWorkspaceResolutionGroups>>;
-	try {
-		discovery = await discoverWorkspaceResolutionGroups(getDb(), {
-			organizationId: ctx.organizationId,
-			candidateIds,
-			maxGroups: 199,
-			maxOperations: 199,
-		});
-	} catch (error) {
-		throw new ToolUserError(
-			error instanceof Error ? error.message : String(error),
-			409,
-		);
-	}
-
-	let autoMerged = 0;
-	let approvalsQueued = 0;
-	let approvalsSuppressed = 0;
-	for (const group of discovery.groups) {
-		for (const loserId of group.loserIds) {
-			const result = await handleMerge(
-				{
-					action: "merge",
-					winner_entity_id: group.winnerId,
-					duplicate_entity_ids: [loserId],
-				},
-				ctx,
-			);
-			if ("success" in result && result.success) autoMerged += 1;
-			else if ("approval_queued" in result && result.approval_queued) {
-				approvalsQueued += 1;
-			} else if (
-				"approval_suppressed" in result &&
-				result.approval_suppressed
-			) {
-				approvalsSuppressed += 1;
-			}
-		}
-	}
-
-	return {
-		action: "resolve_duplicates",
-		candidates_scanned: discovery.candidatesScanned,
-		groups_found: discovery.groups.length,
-		auto_merged: autoMerged,
-		approvals_queued: approvalsQueued,
-		approvals_suppressed: approvalsSuppressed,
-		oversized_groups: discovery.oversizedGroupCount,
-		deferred_candidates: discovery.deferredCandidateCount,
-	};
-}
-
-/**
- * Reverse a merge: split a tombstoned loser (`entity_id`) back out of the winner
- * it was folded into. The winner is recovered from the loser's own `merged_into`
- * pointer (not passed in). Admin/owner only, org-fenced. Exact ledger restoration
- * and the legacy marker fallback live in `applyUnmerge`; this handler is the gate
- * + validation.
- */
-async function handleUnmerge(
-	args: Static<typeof UnmergeEntityAction>,
-	ctx: ToolContext,
-): Promise<ManageEntityResult> {
-	if (!isAdminOrOwnerRole(ctx.memberRole)) {
-		throw new ToolUserError(
-			"Only an admin or owner may un-merge entities",
-			403,
-		);
-	}
-	const loserId = args.entity_id;
-
-	const sql = getDb();
-	// The loser is a TOMBSTONE (deleted_at set by the merge), so we validate org
-	// membership without the live filter the merge handler uses. It must exist and
-	// currently be forwarded (merged_into set) — otherwise there's nothing to undo.
-	const [row] = (await sql`
-    SELECT id, merged_into FROM entities
-    WHERE organization_id = ${ctx.organizationId} AND id = ${loserId}
-  `) as Array<{ id: number; merged_into: number | null }>;
-	if (!row)
-		throw new ToolUserError(
-			`Entity ${loserId} not found in this workspace`,
-			404,
-		);
-	if (row.merged_into === null) {
-		throw new ToolUserError(
-			`Entity ${loserId} is not merged into anything — nothing to un-merge`,
-			409,
-		);
-	}
-
-	let result: Awaited<ReturnType<typeof applyUnmerge>>;
-	try {
-		result = await applyUnmerge({
-			orgId: ctx.organizationId,
-			loserId,
-			unmergedBy: ctx.agentId ?? ctx.userId ?? "system",
-		});
-	} catch (err) {
-		throw new ToolUserError(
-			`Un-merge failed: ${err instanceof Error ? err.message : String(err)}`,
-			409,
-		);
-	}
-
-	return {
-		action: "unmerge",
-		success: true,
-		message: `Un-merged entity ${loserId} out of ${result.winnerId} (${result.restoredIdentities} identities restored).`,
-		winner_entity_id: result.winnerId,
-		loser_entity_id: loserId,
-		restored_identities: result.restoredIdentities,
-	};
+	}, ctx);
 }
 
 async function handleList(
@@ -1342,12 +862,13 @@ async function handleList(
 	}
 
 	// Type-scoped list: fail closed before querying when the principal can't read
-	// that type. Cross-type list filters after (see below).
+	// that type. Record and cross-type restrictions filter before pagination.
 	if (args.entity_type) {
 		await assertEntityReadAllowed(args, ctx, args.entity_type);
 	}
 
 	const sql = getDb();
+	const readRestrictions = await entityReadRestrictions(sql, ctx, await actingPrincipalFor(args, ctx));
 
 	// Run list query and entity type schema fetch in parallel
 	const [listResult, entityTypeRow] = await Promise.all([
@@ -1356,9 +877,6 @@ async function handleList(
 				entity_type: args.entity_type,
 				parent_id: args.parent_id,
 				search: args.search,
-				category: args.category,
-				main_market: args.main_market,
-				market: args.market,
 				segment: args.segment,
 				filters: args.filters,
 				limit: args.limit,
@@ -1368,6 +886,7 @@ async function handleList(
 			},
 			env,
 			ctx,
+			readRestrictions,
 		),
 		args.entity_type
 			? sql`SELECT metadata_schema FROM entity_types WHERE slug = ${args.entity_type} AND organization_id = ${ctx.organizationId} AND deleted_at IS NULL LIMIT 1`.then(
@@ -1376,43 +895,8 @@ async function handleList(
 			: Promise.resolve(null),
 	]);
 
-	let { entities, hasMore, totalCount, limit, offset, sortBy, sortOrder } =
+	const { entities, hasMore, totalCount, limit, offset, sortBy, sortOrder } =
 		listResult;
-
-	// Cross-type list: drop rows whose type the agent may not read. Humans skip
-	// the gate above; agents with a blanket auto keep everything.
-	if (!args.entity_type && entities.length > 0) {
-		const actor = await actingPrincipalFor(args, ctx);
-		if (actor.kind !== "user") {
-			const typeCache = new Map<string, boolean>();
-			const allowed: typeof entities = [];
-			for (const e of entities) {
-				const slug = e.entity_type;
-				let ok = typeCache.get(slug);
-				if (ok === undefined) {
-					const decision = await evaluateEntityMutation({
-						organizationId: ctx.organizationId,
-						principalKind: actor.kind,
-						principalId: actor.id,
-						ownerAgentId: actor.ownerAgentId,
-						ownerResolved: actor.ownerResolved,
-						action: "read",
-						entityTypeSlug: slug,
-						sql,
-					});
-					ok = decision === "allow";
-					typeCache.set(slug, ok);
-				}
-				if (ok) allowed.push(e);
-			}
-			// Prefer not leaking exact denied-row counts; keep hasMore from the
-			// underlying query so later pages with allowed types still surface.
-			if (allowed.length !== entities.length) {
-				entities = allowed;
-				totalCount = allowed.length;
-			}
-		}
-	}
 
 	// Batch-load relationships if schema declares x-table-relationships
 	const schema = entityTypeRow?.metadata_schema as Record<
@@ -1426,9 +910,9 @@ async function handleList(
 	// Batch-load relationships and linked-column lookups in parallel.
 	const [relMap, linkedEntities] = await Promise.all([
 		relSpecs.length > 0 && entityIds.length > 0
-			? batchLoadRelationships(entityIds, relSpecs, ctx.organizationId)
+			? batchLoadRelationships(entityIds, relSpecs, ctx.organizationId, readRestrictions)
 			: Promise.resolve(new Map()),
-		resolveLinkedColumns(entities, schema, ctx.organizationId),
+		resolveLinkedColumns(entities, schema, ctx.organizationId, readRestrictions),
 	]);
 
 	const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
@@ -1445,6 +929,7 @@ async function handleList(
 					: rawMetadata;
 			return {
 				id: e.id,
+				...(e.identity ? { identity: e.identity } : {}),
 				entity_type: e.entity_type,
 				name: e.name,
 				slug: e.slug,
@@ -1495,6 +980,7 @@ async function resolveLinkedColumns(
 	entities: Array<{ metadata?: Record<string, any> | null }>,
 	schema: Record<string, unknown> | null,
 	organizationId: string,
+	readRestrictions: EntityReadRestrictions,
 ): Promise<
 	Record<
 		string,
@@ -1556,12 +1042,12 @@ async function resolveLinkedColumns(
 				const rows =
 					lookupField === "slug"
 						? await sql<{
-								slug: string;
+								id: number; slug: string;
 								entity_type: string;
 								name: string;
 								lookup_value: string;
 							}>`
-              SELECT e.slug, et.slug AS entity_type, e.name, e.slug AS lookup_value
+              SELECT e.id, e.slug, et.slug AS entity_type, e.name, e.slug AS lookup_value
               FROM entities e
               JOIN entity_types et ON et.id = e.entity_type_id
               WHERE e.organization_id = ${organizationId}
@@ -1570,12 +1056,12 @@ async function resolveLinkedColumns(
                 AND e.slug = ANY(${valuesLiteral}::text[])
             `
 						: await sql<{
-								slug: string;
+								id: number; slug: string;
 								entity_type: string;
 								name: string;
 								lookup_value: string;
 							}>`
-              SELECT e.slug, et.slug AS entity_type, e.name, (e.metadata->>${lookupField}) AS lookup_value
+              SELECT e.id, e.slug, et.slug AS entity_type, e.name, (e.metadata->>${lookupField}) AS lookup_value
               FROM entities e
               JOIN entity_types et ON et.id = e.entity_type_id
               WHERE e.organization_id = ${organizationId}
@@ -1588,7 +1074,7 @@ async function resolveLinkedColumns(
 					string,
 					{ slug: string; entity_type: string; name: string }
 				> = {};
-      for (const r of rows) {
+      for (const r of await filterEntityReadRows(sql, rows, readRestrictions)) {
         if (r.lookup_value == null) continue;
 					bucketMap[r.lookup_value] = {
 						slug: r.slug,
@@ -1610,7 +1096,8 @@ async function handleGet(
 	ctx: ToolContext,
 	includeDeleted = false,
 ): Promise<ManageEntityResult> {
-	const entity = await getEntity(entityId, env, ctx, { includeDeleted });
+	const readRestrictions = await entityReadRestrictions(getDb(), ctx);
+	const entity = await getEntity(entityId, env, ctx, { includeDeleted, readRestrictions });
 
 	if (!entity) {
 		throw new ToolUserError(`Entity with ID ${entityId} not found`, 404);
@@ -1650,6 +1137,7 @@ async function handleGet(
 		action: "get",
     entity: {
       id: entity.id,
+      ...(entity.identity ? { identity: entity.identity } : {}),
       entity_type: entity.entity_type,
       name: entity.name,
       slug: entity.slug,
@@ -1989,13 +1477,18 @@ async function handleIdentityAssociation(input: IdentityAssociationInput, ctx: T
   if (decision.outcome === 'refused' && !input.dry_run) throw new ToolUserError(decision.reason, 409);
   const queued = decision.outcome === 'review' && !input.dry_run && decision.proposal
     ? await proposeEntityChange(ctx, decision.proposal, parentRunId) : null;
-  const base = { dry_run: input.dry_run, preview: { outcome: decision.outcome, reason: decision.reason },
-    approval_queued: queued ? true : undefined, approval_run_id: queued?.runId,
-    approval_url: queued?.approvalUrl, approval_suppressed: decision.outcome === 'suppressed' || undefined };
-  if (input.operation === 'unlink') return { action: 'unlink', success: true, message: decision.reason, ...base };
+  if (input.dry_run) return { action: input.operation, dry_run: true,
+    preview: { outcome: decision.outcome, reason: decision.reason } };
+  if (queued) return { action: input.operation, approval_queued: true,
+    approval_run_id: queued.runId, approval_url: queued.approvalUrl };
+  if (decision.outcome === 'suppressed') return input.operation === 'link'
+    ? { action: 'link', approval_suppressed: true, message: decision.reason }
+    : { action: 'unlink', approval_suppressed: true, message: decision.reason };
+  if (input.operation === 'unlink') return { action: 'unlink', success: true, message: decision.reason };
   const rows = decision.relationshipId ? await sql.unsafe<RelationshipRow>(
     `SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1`, [decision.relationshipId]) : [];
-  return { action: 'link', relationship: rows[0], ...base };
+  if (!rows[0]) throw new ToolUserError('Identity association did not produce a relationship', 409);
+  return { action: 'link', relationship: rows[0] };
 }
 
 async function handleLink(
@@ -2459,6 +1952,9 @@ async function handleListLinks(
 		params.push(args.confidence_min);
 		paramIdx++;
 	}
+
+	const readRestrictions = await entityReadRestrictions(sql, ctx, await actingPrincipalFor(args, ctx));
+	conditions.push(entityReadPolicySql(readRestrictions, 'fe', params), entityReadPolicySql(readRestrictions, 'te', params));
 
 	const whereClause = conditions.join(" AND ");
 

@@ -1,29 +1,17 @@
 import { createHash } from "node:crypto";
+import { type EntityResolutionRule as ResolutionRule, InvalidEntityResolutionPolicyError,
+  parseEntityResolutionPolicy } from "@lobu/core/contracts/tools/manage-entity-schema";
+import { ToolUserError } from "../utils/errors";
 
 /**
- * Version of the inputs `assessEntityResolution` hashes into `fingerprint`.
- *
- * Bump this whenever the hashed input set changes shape — adding a field,
- * changing normalization, reading a new source. A fingerprint mismatch only
- * proves drift within the same version: across versions the digests can differ
- * even when nothing about the entities changed.
- *
- * v1 → v2: #2152 added `entity_identities` rows alongside `entities.metadata`
- * as rule-field inputs. Proposals minted before it stored metadata-only
- * digests, which current recomputation cannot compare. Because the version
- * stamp was added later, unstamped mismatches are conservatively refreshed:
- * their exact historical format cannot be inferred from the digest alone.
- * v2 → v3: #2849 added identity tenant scope keys to rule matching and the
- * fingerprint. Equal normalized identifiers from different tenants are no
- * longer merge evidence.
- * v3 → v4: rule keys use canonical structured tuples instead of control-byte
- * delimiters, so valid identifiers and tenant keys cannot collide.
+ * Version of the normalized policy and group-membership inputs in a decision
+ * fingerprint. Bump whenever normalization or the hashed input shape changes.
  */
 export const RESOLUTION_FINGERPRINT_VERSION = 4;
 
-type ResolutionDecision = "auto_merge" | "review";
+type ResolutionDecision = "auto_link" | "review";
 
-export interface ResolutionEvidence {
+interface ResolutionEvidence {
 	kind: string;
 	identifier: string;
 }
@@ -43,47 +31,13 @@ interface ResolutionEntity {
 	identities?: ResolutionIdentity[];
 }
 
-/**
- * One entity's normalized rule keys, grouped under the same labels used by
- * `evidence.kind`. This is a readable view of the rule evaluation included in
- * the resolution fingerprint. Rules that normalize no values are omitted.
- */
-export interface ResolutionKeySet {
-	id: number;
-	keys: Record<string, string[]>;
-}
-
-export interface EntityResolutionAssessment {
+interface IdentityGroupAssessment {
 	decision: ResolutionDecision;
 	evidence: ResolutionEvidence[];
 	policyHash: string;
 	fingerprint: string;
 	reason: string;
-	resolutionKeys: ResolutionKeySet[];
 }
-
-interface ResolutionRule {
-	fields: string[];
-	normalizer: "email" | "phone" | "exact";
-	onMatch: ResolutionDecision;
-}
-
-/**
- * Plural rule fields that name the same thing as their singular form, so the
- * human-facing reason says "email or phone" rather than listing all four.
- * Deliberately an explicit map: any field not listed here is printed verbatim.
- */
-const RULE_FIELD_ALIASES: Record<string, string> = {
-	emails: "email",
-	phones: "phone",
-};
-
-const DEFAULT_PERSON_RESOLUTION_RULES: ResolutionRule[] = [
-	{ fields: ["email"], normalizer: "email", onMatch: "review" },
-	{ fields: ["emails"], normalizer: "email", onMatch: "review" },
-	{ fields: ["phone"], normalizer: "phone", onMatch: "review" },
-	{ fields: ["phones"], normalizer: "phone", onMatch: "review" },
-];
 
 function canonicalJson(value: unknown): string {
 	if (Array.isArray(value)) {
@@ -153,82 +107,23 @@ function normalizeValues(
 	].sort();
 }
 
-export function readEntityResolutionRules(
-	schema: unknown,
-	options?: { entityTypeSlug?: string | null },
-): ResolutionRule[] {
-	if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
-		return options?.entityTypeSlug === "person"
-			? DEFAULT_PERSON_RESOLUTION_RULES
-			: [];
-	}
+export function readEntityResolutionRules(schema: unknown): ResolutionRule[] {
+	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return [];
 	const config = (schema as Record<string, unknown>)["x-lobu-resolution"];
-	if (config === undefined) {
-		return options?.entityTypeSlug === "person"
-			? DEFAULT_PERSON_RESOLUTION_RULES
-			: [];
+	if (config === undefined) return [];
+	try {
+		return parseEntityResolutionPolicy(config);
+	} catch (error) {
+		if (!(error instanceof InvalidEntityResolutionPolicyError)) throw error;
+		throw new ToolUserError(`[invalid_schema] metadata_schema.x-lobu-resolution: ${error.message}`, 400);
 	}
-	if (!config || typeof config !== "object" || Array.isArray(config)) return [];
-	const rules = (config as Record<string, unknown>).rules;
-	if (!Array.isArray(rules)) return [];
-	return rules.flatMap((candidate) => {
-		if (
-			!candidate ||
-			typeof candidate !== "object" ||
-			Array.isArray(candidate)
-		) {
-			return [];
-		}
-		const record = candidate as Record<string, unknown>;
-		const fields = Array.isArray(record.fields)
-			? [
-					...new Set(
-						record.fields.flatMap((field) =>
-							typeof field === "string" && field.trim().length > 0
-								? [field.trim()]
-								: [],
-						),
-					),
-				]
-			: [];
-		const normalizer = record.normalizer;
-		const onMatch = record.onMatch;
-		if (
-			fields.length === 0 ||
-			(normalizer !== "email" &&
-				normalizer !== "phone" &&
-				normalizer !== "exact") ||
-			(onMatch !== "auto_merge" && onMatch !== "review")
-		) {
-			return [];
-		}
-		return [{ fields, normalizer, onMatch }];
-	});
 }
 
 type NormalizedResolutionPart = readonly [value: string, scopeKey: string | null];
 
 /** Render a canonical structured rule key for human-facing evidence. */
 function renderRuleKey(key: string): string {
-	let decoded: unknown;
-	try {
-		decoded = JSON.parse(key);
-	} catch {
-		return key;
-	}
-	if (!Array.isArray(decoded)) return key;
-	const parts = decoded.flatMap((candidate): NormalizedResolutionPart[] => {
-		if (
-			!Array.isArray(candidate) ||
-			candidate.length !== 2 ||
-			typeof candidate[0] !== "string" ||
-			(candidate[1] !== null && typeof candidate[1] !== "string")
-		) {
-			return [];
-		}
-		return [[candidate[0], candidate[1]]];
-	});
-	if (parts.length !== decoded.length) return key;
+	const parts = JSON.parse(key) as NormalizedResolutionPart[];
 	return parts
 		.map(([value, scopeKey]) =>
 			scopeKey === null ? value : `${value} [tenant: ${scopeKey}]`,
@@ -285,122 +180,65 @@ export function normalizedResolutionRuleKeys(
 }
 
 /**
- * Decide whether a duplicate proposal is deterministic under its entity type's
- * schema. The caller-provided evidence is deliberately ignored: every value is
- * recomputed from the locked workspace entities and the versioned type policy.
+ * Assess two existing identity groups using only their declared schema rules.
+ * Each record supplies its own complete rule keys; composite fields never cross
+ * record boundaries. One direct automatic match suffices unless any populated
+ * unique rule conflicts anywhere in the combined group.
  */
-export function assessEntityResolution(input: {
+export function assessIdentityGroups(input: {
 	metadataSchema: unknown;
-	entityTypeSlug?: string | null;
-	winner: ResolutionEntity;
-	losers: ResolutionEntity[];
-}): EntityResolutionAssessment {
-	const rules = readEntityResolutionRules(input.metadataSchema, {
-		entityTypeSlug: input.entityTypeSlug,
-	});
-	const policyHash = digest(rules);
-	const evidence: ResolutionEvidence[] = [];
-	const normalizedIdentities = [input.winner, ...input.losers]
-		.map((entity) => ({
-			id: entity.id,
-			values: rules.map((rule) => normalizedResolutionRuleKeys(entity, rule)),
-		}))
+	left: ResolutionEntity[];
+	right: ResolutionEntity[];
+}): IdentityGroupAssessment {
+	const rules = readEntityResolutionRules(input.metadataSchema);
+	const normalize = (records: ResolutionEntity[]) => records
+		.map(record => ({ id: record.id,
+			values: rules.map(rule => normalizedResolutionRuleKeys(record, rule)) }))
 		.sort((left, right) => left.id - right.id);
-	let allLosersHaveAutoMatch = rules.length > 0;
-	let conflictingAutoIdentity = false;
+	const left = normalize(input.left);
+	const right = normalize(input.right);
+	const normalized = [...left, ...right].sort((left, right) => left.id - right.id);
+	const evidence = new Map<string, ResolutionEvidence>();
+	let automaticMatch = false;
+	let conflict = false;
 
-	for (const loser of input.losers) {
-		let loserHasAutoMatch = false;
-		for (const rule of rules) {
-			const winnerKeys = normalizedResolutionRuleKeys(input.winner, rule);
-			const loserKeys = normalizedResolutionRuleKeys(loser, rule);
-			if (winnerKeys.length === 0 || loserKeys.length === 0) continue;
-			const loserKeySet = new Set(loserKeys);
-			const matches = winnerKeys.filter((key) => loserKeySet.has(key));
-			if (rule.onMatch === "auto_merge" && matches.length === 0) {
-				conflictingAutoIdentity = true;
-			}
-			if (matches.length === 0) continue;
-			for (const match of matches) {
-				evidence.push({
-					kind: rule.fields.join(" + "),
-					identifier: renderRuleKey(match),
-				});
-			}
-			if (rule.onMatch === "auto_merge") loserHasAutoMatch = true;
+	rules.forEach((rule, index) => {
+		const leftKeys = new Set(left.flatMap(record => record.values[index]));
+		const rightKeys = new Set(right.flatMap(record => record.values[index]));
+		const matches = [...leftKeys].filter(key => rightKeys.has(key)).sort();
+		for (const key of matches) {
+			const item = { kind: rule.fields.join(" + "), identifier: renderRuleKey(key) };
+			evidence.set(canonicalJson([item.kind, item.identifier]), item);
 		}
-		allLosersHaveAutoMatch &&= loserHasAutoMatch;
-	}
-
-	const deduplicatedEvidence = [
-		...new Map(
-			evidence.map((item) => [`${item.kind}\u0000${item.identifier}`, item]),
-		).values(),
-	];
-	const evidenceKinds = [
-		...new Set(deduplicatedEvidence.map((item) => item.kind)),
-	];
-	// Name the fields this entity type actually resolves on ("email or phone"
-	// for person) rather than assuming — another type may key on something else,
-	// and a type with no rules at all resolves on nothing. Only the known
-	// singular/plural aliases are coalesced: stripping a trailing "s" from
-	// arbitrary configured paths would mangle custom names like `status`.
-	const ruleFieldLabel = [
-		...new Set(
-			rules.flatMap((rule) =>
-				rule.fields.map((field) => RULE_FIELD_ALIASES[field] ?? field),
-			),
-		),
-	].join(" or ");
-	const decision =
-		allLosersHaveAutoMatch && !conflictingAutoIdentity
-			? "auto_merge"
-			: "review";
-	const fingerprint = digest({
-		policyHash,
-		winnerId: input.winner.id,
-		loserIds: input.losers.map((entity) => entity.id).sort((a, b) => a - b),
-		normalizedIdentities,
+		if (rule.onMatch !== "auto_link") return;
+		automaticMatch ||= matches.length > 0;
+		// A missing value is not a conflict. Two populated, disjoint key sets
+		// are, even when both records already belong to the same group.
+		const populated = normalized.map(record => record.values[index]).filter(keys => keys.length > 0);
+		conflict ||= populated.some((keys, i) => populated.slice(i + 1)
+			.some(other => !keys.some(key => other.includes(key))));
 	});
-	// Derive the snapshot view from the same normalized values used above without
-	// changing the fingerprint input.
-	const resolutionKeys: ResolutionKeySet[] = normalizedIdentities.map(
-		({ id, values }) => {
-			const keysByLabel = new Map<string, string[]>();
-			values.forEach((ruleKeys, index) => {
-				if (ruleKeys.length === 0) return;
-				const rule = rules[index]!;
-				const label = rule.fields.join(" + ");
-				const existingKeys = keysByLabel.get(label) ?? [];
-				keysByLabel.set(
-					label,
-					[
-						...new Set([...existingKeys, ...ruleKeys].map(renderRuleKey)),
-					].sort(),
-				);
-			});
-			return { id, keys: Object.fromEntries(keysByLabel) };
-		},
-	);
 
+	const matchedEvidence = [...evidence.values()].sort((a, b) =>
+		a.kind.localeCompare(b.kind) || a.identifier.localeCompare(b.identifier));
+	const policyHash = digest(rules);
+	const automatic = automaticMatch && !conflict;
+	const fieldLabels = [...new Set(rules.flatMap(rule => rule.fields))].join(" or ");
+	const matchedLabels = [...new Set(matchedEvidence.map(item => item.kind))].join(" and ");
 	return {
-		decision,
-		evidence: deduplicatedEvidence,
+		decision: automatic ? "auto_link" : "review",
+		evidence: matchedEvidence,
 		policyHash,
-		fingerprint,
-		resolutionKeys,
-		// Addressed to the human deciding the approval, so each branch says what
-		// the workspace could verify and what it now needs from them — not what
-		// the rules engine did internally.
-		reason:
-			decision === "auto_merge"
-				? "The entity type declares this normalized identity unique."
-				: conflictingAutoIdentity
-					? "These records carry conflicting identities that are configured as unique, so merging them needs your judgement."
-					: deduplicatedEvidence.length > 0
-						? `Matching ${evidenceKinds.join(" and ")} points to the same thing, but that is not enough to merge automatically under this entity type's policy, so it needs your judgement.`
-						: ruleFieldLabel
-							? `No matching ${ruleFieldLabel} could be verified automatically, so this merge needs your judgement.`
-							: "This entity type has no automatic matching rules, so every merge needs your judgement.",
+		fingerprint: digest({ policyHash, normalized,
+			left: left.map(record => record.id), right: right.map(record => record.id) }),
+		reason: conflict
+			? "Members carry conflicting values declared unique; human review is required."
+			: automatic
+				? "Direct member evidence satisfies the declared automatic matching policy."
+				: matchedEvidence.length > 0
+					? `Matching ${matchedLabels} needs human review under the entity type's policy.`
+					: fieldLabels
+						? `No matching ${fieldLabels} could be verified; human review is required.`
+						: "This entity type has no identity matching rules; human review is required.",
 	};
 }

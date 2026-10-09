@@ -122,8 +122,8 @@ export interface EntityWriteRow<Fields = Record<string, unknown>> {
   /** `{ ...committed, ...patch }`, i.e. the row as it would commit. */
   next: Partial<Fields> & Record<string, unknown>;
   /**
-   * Deletes and merges use the existing row-shaped contract: they arrive as
-   * `op: "update"` with `$deleted` or `$merged_into` changing respectively.
+   * Deletes use the existing row-shaped contract: they arrive as
+   * `op: "update"` with `$deleted` changing.
    */
   op: "create" | "update";
   /**
@@ -218,18 +218,18 @@ export interface EntityType {
   /**
    * Entity-resolution policy (the `x-lobu-resolution` metadata_schema key the
    * server reads to decide whether duplicate entities sharing a normalized
-   * identity auto-merge or queue human review). Declared here so the policy is
+   * identity auto-link or queue human review). Declared here so the policy is
    * git-audited like the rest of the schema; `lobu apply` folds it into the
    * type's metadata_schema. A rule's `fields` are metadata keys or identity
    * namespaces (e.g. `email`), `normalizer` is `email` | `phone` | `exact`, and
-   * `onMatch` is `auto_merge` | `review`. When the key is absent, `person`
-   * falls back to email/phone review rules; other entity types have no rules.
+   * `onMatch` is `auto_link` | `review`. A type without an explicit policy
+   * has no matching rules. Association preserves each record and its ID.
    */
   resolutionPolicy?: {
     rules: Array<{
       fields: string[];
       normalizer: "email" | "phone" | "exact";
-      onMatch: "auto_merge" | "review";
+      onMatch: "auto_link" | "review";
     }>;
   };
   metadata?: Record<string, unknown>;
@@ -734,6 +734,15 @@ export interface AutomationEntityOutput {
 export interface AutomationEventOutput {
   /** Semantic type assigned to every standard event draft in this output. */
   event: string;
+  /**
+   * Optional one to four metadata fields forming one exact composite identity
+   * tuple, scoped to the semantic type (not the Automation, so a migration can
+   * seed rows the Automation later adopts). Every draft must contain every
+   * field in `metadata` as a non-blank string, safe integer, or boolean.
+   * Field order is significant. When set, each run supersedes the current
+   * event carrying the same key values. Omit for append-only per-item logs.
+   */
+  key?: string[];
 }
 
 export type AutomationOutput = AutomationEntityOutput | AutomationEventOutput;

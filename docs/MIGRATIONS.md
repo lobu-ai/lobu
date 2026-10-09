@@ -224,3 +224,25 @@ If the migration partially applied (column created, index missing, view missing)
 
 - [PR #767](https://github.com/lobu-ai/lobu/pull/767) — the boot-time schema-version assertion that catches behind-DB images at startup.
 - The post-incident commentary on the original migration ([#765](https://github.com/lobu-ai/lobu/pull/765)) for what "operational note" looks like when a migration's risks are flagged but not addressed.
+
+### Retiring physical entity merges
+
+Existing installations must first deploy the release containing
+`20261009020000_retire_physical_entity_merge.sql`. Use that release's audited
+maintenance tool to retire redirects, active ledgers, pending decisions, and
+saved callers before its deployment. Keep its verified backup outside the
+checkout. The maintenance tool remains available in that release; it is omitted
+after the redirect column is removed.
+
+The following release removes the null `entities.merged_into` column and its
+index, foreign key, and temporary fence. Its preflight requires the validated
+first-release fence whenever the column exists. Complete the first rollout
+before deploying this contract release; a database fence alone does not prove
+that every old reader has stopped. Fresh installs replay the history in order.
+
+The contract release also drops the obsolete rejected-merge index, proposal
+helper, and winner-history index. Identity decision indexes remain, as do
+`entity_identities.merged_from_entity_id` and its provenance index. Historical
+`entity_merge_operations` rows and their audit constraints remain intact;
+execution and undo stay retired. The retained source-run index supports its
+foreign key. These migrations do not delete audit rows or rewrite events.

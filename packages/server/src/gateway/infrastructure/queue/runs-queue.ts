@@ -23,7 +23,6 @@ import {
 	createLogger,
 	getErrorMessage,
 } from "@lobu/core";
-import * as Sentry from "@sentry/node";
 import { intervals } from "../../../config/intervals.js";
 import { getDb, getDbListener, type DbClient } from "../../../db/client.js";
 import { incrementCounter } from "../../metrics/prometheus.js";
@@ -56,21 +55,12 @@ const STALE_SWEEP_INTERVAL_MS = 30_000;
 /** Max time to wait for in-flight handlers during graceful stop. */
 const SHUTDOWN_DRAIN_MS = 30_000;
 
-function queueBreadcrumb(
+function logQueueTransition(
   category: string,
   message: string,
   data: Record<string, unknown>,
 ): void {
-  try {
-    Sentry.addBreadcrumb({
-      category: `runs-queue.${category}`,
-      level: "info",
-      message,
-      data,
-    });
-  } catch {
-    // Sentry init may not be present in tests; ignore.
-  }
+  logger.info({ category: `runs-queue.${category}`, ...data }, message);
 }
 // Claim visibility timeout + heartbeat cadence live in config/intervals.ts
 // (`runsClaimVisibilityTimeoutMs` / `runsClaimHeartbeatIntervalMs`),
@@ -419,7 +409,7 @@ export class RunsQueue implements IMessageQueue {
       );
     }
 
-    queueBreadcrumb("enqueue", `Enqueued run ${id}`, {
+    logQueueTransition("enqueue", `Enqueued run ${id}`, {
       runId: id,
       queueName,
       runType,
@@ -644,7 +634,7 @@ export class RunsQueue implements IMessageQueue {
     `;
     const row = rows[0];
     if (!row) return null;
-    queueBreadcrumb("claim", `Claimed run ${row.id}`, {
+    logQueueTransition("claim", `Claimed run ${row.id}`, {
       runId: Number(row.id),
       queueName: worker.queueName,
       attempts: Number(row.attempts ?? 0),
@@ -741,7 +731,7 @@ export class RunsQueue implements IMessageQueue {
         AND status = 'claimed'
         AND claimed_by = ${this.claimedBy}
     `;
-    queueBreadcrumb("complete", `Completed run ${runId}`, { runId });
+    logQueueTransition("complete", `Completed run ${runId}`, { runId });
   }
 
   private async markFailed(runId: number, err: unknown): Promise<void> {
@@ -772,9 +762,7 @@ export class RunsQueue implements IMessageQueue {
         queue: row.queue_name ?? "unknown",
       });
     }
-    // Logged as a warning; not emitted to Sentry. Per-run terminal failures
-    // are high-volume and low-actionable (each is a separate event in Sentry,
-    // burning the org quota with no per-incident signal beyond the log).
+    // Per-run terminal failures remain warnings to avoid an alert per failed run.
     // The aggregate "we have failed runs" signal lives on lobu_runs_failed_total.
     logger.warn(`Run ${runId} failed after retries: ${message}`);
   }
@@ -799,7 +787,7 @@ export class RunsQueue implements IMessageQueue {
         AND status = 'claimed'
         AND claimed_by = ${this.claimedBy}
     `;
-    queueBreadcrumb("retry", `Scheduled retry for run ${runId}`, {
+    logQueueTransition("retry", `Scheduled retry for run ${runId}`, {
       runId,
       attempt,
       delaySeconds: delay,
@@ -835,7 +823,7 @@ export class RunsQueue implements IMessageQueue {
         AND status = 'claimed'
         AND claimed_by = ${this.claimedBy}
     `;
-    queueBreadcrumb("release", `Released run ${runId} on shutdown`, { runId });
+    logQueueTransition("release", `Released run ${runId} on shutdown`, { runId });
   }
 
   /**
@@ -916,8 +904,7 @@ export class RunsQueue implements IMessageQueue {
            RETURNING id`,
         );
         if (result.count > 0) {
-          // Operational housekeeping, not an incident — log it, but don't
-          // page Sentry (Seer flagged the alert super-low actionability).
+          // Reclamation is operational housekeeping; retain a warning for diagnosis.
           logger.warn(
             `Reclaimed ${result.count} stale runs (claimed > ${
               thresholdMs / 1000

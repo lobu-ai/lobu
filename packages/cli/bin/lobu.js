@@ -5,7 +5,7 @@
 //
 // The floor is Node 22 because Lobu's agent-code sandbox (isolated-vm) only
 // has native builds for Node 22–24 and 26+. Separately, on Node < 20 the
-// bundled server's undici (via @sentry/node) references the `File` global and
+// bundled server's undici references the `File` global and
 // the very first `import` of the bundle throws a cryptic
 // `ReferenceError: File is not defined` — before any Lobu code, including the
 // server's own assert-node-version guard, can run (ESM hoists the graph's

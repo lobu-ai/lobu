@@ -1,6 +1,8 @@
 import { generateWorkerToken, mintGatewayMcpToken } from '@lobu/core';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { clearInMemoryMcpSessionsForTests } from '../../../mcp-handler';
+import { buildClientSDK } from '../../../sandbox/client-sdk';
+import type { Env } from '../../../index';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -8,6 +10,7 @@ import {
   createTestEntity,
   createTestOrganization,
   createTestUser,
+  ownerToolContext,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
@@ -141,43 +144,51 @@ describe('worker MCP session agent identity', () => {
     return JSON.parse(json.result.content[0].text) as T;
   }
 
-  it('queues a person merge from an agent conversation turn for human approval instead of applying it', async () => {
+  it('queues an identity link from an agent conversation turn for human approval instead of applying it', async () => {
     const sessionId = await initWorkerMcpSession();
-    const winner = await createTestEntity({
+    const root = await createTestEntity({
       name: 'Jane Doe',
       entity_type: 'person',
       organization_id: org.id,
       created_by: user.id,
     });
-    const loser = await createTestEntity({
+    const member = await createTestEntity({
       name: 'J. Doe',
       entity_type: 'person',
       organization_id: org.id,
       created_by: user.id,
     });
+    const human = buildClientSDK({ ...ownerToolContext(org.id, user.id), tokenType: 'session' }, {} as Env);
+    await human.entitySchema.updateType({ slug: 'person', metadata_schema: {
+      'x-lobu-resolution': { rules: [{ fields: ['record_key'], normalizer: 'exact', onMatch: 'review' }] },
+    } });
+    await human.entitySchema.createRelType({ slug: 'same_person', name: 'Same person', purpose: 'identity' });
+    await human.entitySchema.addRule({ slug: 'same_person', source_entity_type_slug: 'person', target_entity_type_slug: 'person' });
+    const sql = getTestDb();
+    await sql`UPDATE entities SET metadata = '{"record_key":"shared-fixture"}'::jsonb WHERE id IN (${member.id}, ${root.id})`;
+    const before = await sql`SELECT id, name, metadata, deleted_at FROM entities WHERE id IN (${member.id}, ${root.id}) ORDER BY id`;
 
     const result = await callTool<{
       approval_queued?: boolean;
       approval_run_id?: number;
     }>(sessionId, 'manage_entity', {
-      action: 'merge',
-      entity_id: loser.id,
-      winner_entity_id: winner.id,
+      action: 'link',
+      from_entity_id: member.id,
+      to_entity_id: root.id,
+      relationship_type_slug: 'same_person',
     });
 
     expect(result.approval_queued).toBe(true);
     expect(result.approval_run_id).toEqual(expect.any(Number));
 
-    const sql = getTestDb();
-    const [entity] = await sql`
-      SELECT merged_into, deleted_at FROM entities WHERE id = ${loser.id}
-    `;
-    expect(entity.merged_into).toBeNull();
-    expect(entity.deleted_at).toBeNull();
+    expect(await sql`SELECT id, name, metadata, deleted_at FROM entities WHERE id IN (${member.id}, ${root.id}) ORDER BY id`).toEqual(before);
+    expect(await sql`SELECT id FROM entity_relationships WHERE organization_id = ${org.id}
+      AND from_entity_id = ${member.id} AND to_entity_id = ${root.id} AND deleted_at IS NULL`).toEqual([]);
     const [run] = await sql`
-      SELECT approval_status FROM runs WHERE id = ${result.approval_run_id}
+      SELECT approval_status, action_input FROM runs WHERE id = ${result.approval_run_id}
     `;
     expect(run.approval_status).toBe('pending');
+    expect(run.action_input.requester).toEqual({ kind: 'agent', id: AGENT_ID, userId: user.id });
   });
 
   it('binds the token-verified agent even when initialize clientInfo names a different agent', async () => {

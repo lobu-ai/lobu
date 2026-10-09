@@ -6,9 +6,9 @@
  * Omit `query` to list all content with filters.
  */
 
+import { entityReadRestrictions, filterEntityReadRows } from '../../authz/entity-read-policy';
 import type { ContentItem } from '@lobu/connector-sdk';
 import {
-  evaluateEntityMutation,
   resolveActingPrincipal,
 } from '../../authz/entity-policy';
 import { hasRequiredMcpScope } from '../../auth/tool-access';
@@ -272,7 +272,7 @@ async function getContentImpl(
     );
   }
 
-  // Agent/automation: entity-type read policy (same envelope as manage_entity /
+  // Agent/automation: entity read policy (same envelope as manage_entity /
   // search_memory). Humans skip — role ACL is separate.
   if (ctx.agentId || ctx.actingAutomationId) {
     const actor = await resolveActingPrincipal(getDb(), {
@@ -282,6 +282,13 @@ async function getContentImpl(
       sessionAutomationId: ctx.actingAutomationId ?? null,
     });
     if (actor.kind !== 'user') {
+      const restrictions = await entityReadRestrictions(sql, ctx, actor);
+      const assertReadable = async (records: Array<{ id: number | string }>) => {
+        if ((await filterEntityReadRows(sql, records, restrictions)).length !== records.length) {
+          throw new ToolUserError('Policy denies reading one or more requested entities for this principal.', 403);
+        }
+      };
+      const requestedRecords: Array<{ id: number | string }> = [];
       const typeSlugs = new Set<string>();
       if (args.record) typeSlugs.add(args.record.type);
       if (args.entity_types?.length) {
@@ -290,21 +297,22 @@ async function getContentImpl(
         }
       }
       if (args.entity_id) {
-        const typeRows = await sql`
-          SELECT et.slug AS entity_type
+        const typeRows = await sql<{ id: number; entity_type: string }>`
+          SELECT e.id, et.slug AS entity_type
           FROM entities e
           JOIN entity_types et ON et.id = e.entity_type_id
           WHERE e.id = ${args.entity_id}
             AND e.organization_id = ${ctx.organizationId}
           LIMIT 1
         `;
+        requestedRecords.push(...typeRows);
         if (typeRows[0]?.entity_type) {
           typeSlugs.add(String(typeRows[0].entity_type));
         }
       }
       if (args.content_ids?.length) {
-        const eventTypeRows = await sql<{ entity_type: string | null }>`
-          SELECT DISTINCT et.slug AS entity_type
+        const eventTypeRows = await sql<{ id: number | null; entity_type: string | null }>`
+          SELECT DISTINCT e.id, et.slug AS entity_type
           FROM events ev
           LEFT JOIN LATERAL unnest(ev.entity_ids) linked(entity_id) ON TRUE
           LEFT JOIN entities e
@@ -329,29 +337,22 @@ async function getContentImpl(
               )
             )
         `;
+        requestedRecords.push(...eventTypeRows.flatMap(row => row.id === null ? [] : [{ id: row.id }]));
         for (const row of eventTypeRows) {
           // Unbound events use the workspace-wide $member policy envelope.
           typeSlugs.add(row.entity_type ? String(row.entity_type) : '$member');
         }
       }
       for (const slug of typeSlugs) {
-        const decision = await evaluateEntityMutation({
-          organizationId: ctx.organizationId,
-          principalKind: actor.kind,
-          principalId: actor.id,
-          ownerAgentId: actor.ownerAgentId,
-          ownerResolved: actor.ownerResolved,
-          action: 'read',
-          entityTypeSlug: slug,
-          sql: getDb(),
-        });
-        if (decision === 'deny') {
+        if (restrictions.some(rule => rule.entity_id === null &&
+          (rule.entity_type_slug === null || rule.entity_type_slug === slug))) {
           throw new ToolUserError(
             `Policy denies reading entities of type '${slug}' for this principal.`,
             403,
           );
         }
       }
+      await assertReadable(requestedRecords);
     }
   }
 

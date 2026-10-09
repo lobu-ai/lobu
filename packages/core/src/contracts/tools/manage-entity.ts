@@ -24,12 +24,11 @@ const EntityType = Type.String({
 
 const EntityId = Type.Integer({
   minimum: 1,
-  description:
-    "[get/update/delete/list_links/merge/unmerge] Entity ID to operate on",
+  description: "[get/update/delete/list_links] Entity ID to operate on",
 });
 
 // Attributes an entity carries. `create` and `update` share the set; `list`
-// filters on `parent_id`, `category`, `main_market` and `market`.
+// filters on `parent_id` and schema-declared metadata using `filters`.
 const EntityFields = {
   name: Type.String({
     description: "[create/update] Entity name",
@@ -48,22 +47,6 @@ const EntityFields = {
     description:
       "[create/update] Parent entity ID (for hierarchical entities).",
   }),
-  domain: Type.String({
-    description: "[create/update] Primary domain (e.g., spotify.com)",
-  }),
-  category: Type.String({
-    description: "[create/update/list] Industry category",
-  }),
-  platform_type: Type.String({
-    description: "[create/update] Platform type (b2b, b2c, b2b2c)",
-  }),
-  main_market: Type.String({
-    description: "[create/update/list] Primary market (ISO 3166-1 alpha-2)",
-  }),
-  market: Type.String({
-    description: "[create/update/list] Market/region (ISO 3166-1 alpha-2)",
-  }),
-  link: Type.String({ description: "[create/update] Entity URL" }),
 };
 
 // Custom metadata (validated against entity type's JSON schema)
@@ -73,10 +56,10 @@ const Metadata = Type.Record(Type.String(), Type.Unknown(), {
 });
 
 // Carried by exactly the variants whose handler reads it: the principal seam
-// (`create`, `update`, `list`, `delete`, `merge`), the read gate that consults
+// (`create`, `update`, `list`, `delete`), the read gate that consults
 // it (`list_links`), and reaction tracking (`link`). `get` and
 // `discover_duplicates` resolve their read gate without one, and
-// `unlink`/`update_link`/`resolve_duplicates`/`unmerge` never consult it —
+// `unlink`/`update_link` never consult it —
 // declaring it there would advertise an inert field.
 const AutomationSource = Type.Object(
   {
@@ -95,7 +78,7 @@ const AutomationSource = Type.Object(
 
 const DryRun = Type.Boolean({
   description:
-    "[delete, merge, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For merge or identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.",
+    "[delete, identity link/unlink] Preflight only. For delete: report what it would remove/detach. For identity link/unlink: preview apply, human review, rejected-candidate suppression, or refusal using current policy and write rules. Mutates nothing and never queues an approval.",
 });
 
 const IncludeDeleted = Type.Boolean({
@@ -154,12 +137,6 @@ export const CreateEntityAction = Type.Object({
   content: Type.Optional(EntityFields.content),
   slug: Type.Optional(EntityFields.slug),
   parent_id: Type.Optional(EntityFields.parent_id),
-  domain: Type.Optional(EntityFields.domain),
-  category: Type.Optional(EntityFields.category),
-  platform_type: Type.Optional(EntityFields.platform_type),
-  main_market: Type.Optional(EntityFields.main_market),
-  market: Type.Optional(EntityFields.market),
-  link: Type.Optional(EntityFields.link),
   metadata: Type.Optional(Metadata),
   automation_source: Type.Optional(AutomationSource),
 });
@@ -174,12 +151,6 @@ export const UpdateEntityAction = Type.Object({
   content: Type.Optional(EntityFields.content),
   slug: Type.Optional(EntityFields.slug),
   parent_id: Type.Optional(EntityFields.parent_id),
-  domain: Type.Optional(EntityFields.domain),
-  category: Type.Optional(EntityFields.category),
-  platform_type: Type.Optional(EntityFields.platform_type),
-  main_market: Type.Optional(EntityFields.main_market),
-  market: Type.Optional(EntityFields.market),
-  link: Type.Optional(EntityFields.link),
   metadata: Type.Optional(Metadata),
   // Human-correction annotation
   field_note: Type.Optional(
@@ -211,9 +182,6 @@ export const ListEntitiesAction = Type.Object({
     })
   ),
   search: Type.Optional(Type.String({ description: "[list] Search by name" })),
-  category: Type.Optional(EntityFields.category),
-  main_market: Type.Optional(EntityFields.main_market),
-  market: Type.Optional(EntityFields.market),
   segment: Type.Optional(
     Type.String({
       description:
@@ -252,24 +220,45 @@ export const DeleteEntityAction = Type.Object({
   automation_source: Type.Optional(AutomationSource),
 });
 
-const IdentityDecisionFields = {
-  dry_run: Type.Optional(Type.Boolean()),
-  preview: Type.Optional(
-    Type.Object({
-      outcome: Type.Union([
-        Type.Literal("apply"),
-        Type.Literal("review"),
-        Type.Literal("suppressed"),
-        Type.Literal("refused"),
-      ]),
-      reason: Type.String(),
-    })
-  ),
-  approval_queued: Type.Optional(Type.Boolean()),
-  approval_suppressed: Type.Optional(Type.Boolean()),
-  approval_run_id: Type.Optional(Type.Number()),
-  approval_url: Type.Optional(Type.String()),
-};
+const IdentityPreview = Type.Object({
+  outcome: Type.Union([
+    Type.Literal("apply"),
+    Type.Literal("review"),
+    Type.Literal("suppressed"),
+    Type.Literal("refused"),
+  ]),
+  reason: Type.String(),
+});
+
+function IdentityDecisionResults<A extends "link" | "unlink">(action: A) {
+  return [
+    Type.Object(
+      {
+        action: Type.Literal(action),
+        dry_run: Type.Literal(true),
+        preview: IdentityPreview,
+      },
+      { additionalProperties: false }
+    ),
+    Type.Object(
+      {
+        action: Type.Literal(action),
+        approval_queued: Type.Literal(true),
+        approval_run_id: Type.Integer({ minimum: 1 }),
+        approval_url: Type.Optional(Type.String()),
+      },
+      { additionalProperties: false }
+    ),
+    Type.Object(
+      {
+        action: Type.Literal(action),
+        approval_suppressed: Type.Literal(true),
+        message: Type.String(),
+      },
+      { additionalProperties: false }
+    ),
+  ];
+}
 
 export const LinkEntitiesAction = Type.Object({
   dry_run: Type.Optional(DryRun),
@@ -353,53 +342,6 @@ export const ListLinksAction = Type.Object({
   automation_source: Type.Optional(AutomationSource),
 });
 
-export const MergeEntitiesAction = Type.Object({
-  action: Type.Literal("merge", {
-    description:
-      "Fold a duplicate entity (entity_id) into the one it really is (winner_entity_id). The loser is tombstoned + forwarded; its identities, aliases, edges, and events recall against the winner. Events are never rewritten. Use when two entities are confirmed the same real-world thing.",
-  }),
-  // Merge target (the survivor) — the loser is passed as `entity_id`.
-  winner_entity_id: Type.Number({
-    description:
-      "[merge] The surviving entity that absorbs `entity_id` (the duplicate).",
-  }),
-  entity_id: Type.Optional(EntityId),
-  duplicate_entity_ids: Type.Optional(
-    Type.Array(Type.Number(), {
-      minItems: 1,
-      maxItems: 25,
-      uniqueItems: true,
-      description:
-        "[merge] All duplicate entities to fold into winner_entity_id. Use this for a duplicate group; entity_id remains supported for a single duplicate.",
-    })
-  ),
-  merge_evidence: Type.Optional(
-    Type.Array(
-      Type.Object({
-        kind: Type.String({ maxLength: 64 }),
-        identifier: Type.String({ maxLength: 512 }),
-        identity_ids: Type.Optional(
-          Type.Array(Type.Number(), { maxItems: 50 })
-        ),
-      }),
-      {
-        maxItems: 25,
-        description:
-          "[merge] Optional structured evidence for human-initiated merge provenance. Agent and Automation evidence is always recomputed from the entity type's resolution policy.",
-      }
-    )
-  ),
-  merge_rationale: Type.Optional(
-    Type.String({
-      maxLength: 500,
-      description:
-        "[merge] Why you believe these are the same thing, in one sentence, for the human reviewing the approval card (e.g. 'Same phone digits; the shell is a WhatsApp handle for this contact.'). Shown as your claim, clearly separated from the workspace's own policy verdict — it never counts as proof and never affects whether the merge auto-applies.",
-    })
-  ),
-  dry_run: Type.Optional(DryRun),
-  automation_source: Type.Optional(AutomationSource),
-});
-
 export const DiscoverDuplicatesAction = Type.Object({
   action: Type.Literal("discover_duplicates", {
     description:
@@ -424,28 +366,6 @@ export const DiscoverDuplicatesAction = Type.Object({
   ),
 });
 
-export const ResolveDuplicatesAction = Type.Object({
-  action: Type.Literal("resolve_duplicates", {
-    description:
-      "Discover duplicate components among candidate_entity_ids using the entity type's x-lobu-resolution policy, then auto-merge deterministic matches or queue review.",
-  }),
-  candidate_entity_ids: Type.Array(Type.Integer({ minimum: 1 }), {
-    minItems: 2,
-    maxItems: 5000,
-    uniqueItems: true,
-    description:
-      "[resolve_duplicates] Candidate entity IDs. The server re-reads their values and applies the entity type's resolution policy.",
-  }),
-});
-
-export const UnmergeEntityAction = Type.Object({
-  action: Type.Literal("unmerge", {
-    description:
-      "Reverse a merge from its durable ledger: restore the loser's identities, canonical attributes, and relationships, then un-tombstone it. Fails closed if later edits made exact reversal unsafe.",
-  }),
-  entity_id: EntityId,
-});
-
 export const ManageEntitySchema = Type.Union([
   CreateEntityAction,
   UpdateEntityAction,
@@ -456,10 +376,7 @@ export const ManageEntitySchema = Type.Union([
   UnlinkEntitiesAction,
   UpdateLinkAction,
   ListLinksAction,
-  MergeEntitiesAction,
   DiscoverDuplicatesAction,
-  ResolveDuplicatesAction,
-  UnmergeEntityAction,
 ]);
 
 export type ManageEntityArgs = Static<typeof ManageEntitySchema>;
@@ -535,6 +452,18 @@ export type RelationshipCountByType = Static<
   typeof RelationshipCountByTypeSchema
 >;
 
+/** Server-derived grouping. Persist record IDs; the representative can change. */
+export const EntityIdentitySchema = Type.Object({
+  root_id: Type.Integer({ minimum: 1 }),
+  member_ids: Type.Array(Type.Integer({ minimum: 1 }), {
+    minItems: 1,
+    maxItems: 26,
+    uniqueItems: true,
+  }),
+});
+
+export type EntityIdentity = Static<typeof EntityIdentitySchema>;
+
 /**
  * Shared entity shape across the create/update/get/list variants (the superset
  * of fields; each variant marks its extras optional). `metadata` and the
@@ -543,6 +472,7 @@ export type RelationshipCountByType = Static<
  */
 export const ManageEntityItemSchema = Type.Object({
   id: Type.Integer(),
+  identity: Type.Optional(EntityIdentitySchema),
   entity_type: Type.String(),
   name: Type.String(),
   slug: Type.String(),
@@ -674,21 +604,24 @@ export const ManageEntityResultSchema = Type.Union([
     approval_current: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     approval_attribution: Type.Optional(ApprovalAttributionSchema),
   }),
-  Type.Object({
-    action: Type.Literal("link"),
-    relationship: Type.Optional(RelationshipRowSchema),
-    ...IdentityDecisionFields,
-  }),
+  ...IdentityDecisionResults("link"),
+  Type.Object(
+    { action: Type.Literal("link"), relationship: RelationshipRowSchema },
+    { additionalProperties: false }
+  ),
   Type.Object({
     action: Type.Literal("update_link"),
     relationship: RelationshipRowSchema,
   }),
-  Type.Object({
-    action: Type.Literal("unlink"),
-    ...IdentityDecisionFields,
-    success: Type.Boolean(),
-    message: Type.String(),
-  }),
+  ...IdentityDecisionResults("unlink"),
+  Type.Object(
+    {
+      action: Type.Literal("unlink"),
+      success: Type.Literal(true),
+      message: Type.String(),
+    },
+    { additionalProperties: false }
+  ),
   Type.Object({
     action: Type.Literal("list_links"),
     record_links: Type.Array(
@@ -721,85 +654,6 @@ export const ManageEntityResultSchema = Type.Union([
       has_more: Type.Boolean(),
     }),
   }),
-  Type.Union([
-    Type.Object({
-      action: Type.Literal("merge"),
-      success: Type.Boolean(),
-      message: Type.String(),
-      winner_entity_id: Type.Integer(),
-      loser_entity_id: Type.Integer(),
-      loser_entity_ids: Type.Optional(Type.Array(Type.Integer())),
-      moved_identities: Type.Integer(),
-      repointed_edges: Type.Integer(),
-      // Preflight only. A dry run reports the policy/review outcome and writes nothing,
-      // so moved_identities/repointed_edges are 0 and mean "not attempted".
-      dry_run: Type.Optional(Type.Boolean()),
-      preview: Type.Optional(
-        Type.Object(
-          {
-            outcome: Type.Union([
-              Type.Literal("apply"),
-              Type.Literal("review"),
-              Type.Literal("suppressed"),
-              Type.Literal("refused"),
-            ]),
-            reason: Type.String(),
-          },
-          {
-            description:
-              "Dry-run prediction from current evidence, rejection memory, and write rules. Execution rechecks under lock.",
-          }
-        )
-      ),
-      resolution: Type.Optional(
-        Type.Object({
-          decision: Type.Union([
-            Type.Literal("auto_merge"),
-            Type.Literal("human"),
-          ]),
-          reason: Type.String(),
-          evidence: Type.Array(
-            Type.Object({ kind: Type.String(), identifier: Type.String() })
-          ),
-        })
-      ),
-    }),
-    Type.Object({
-      action: Type.Literal("merge"),
-      approval_queued: Type.Literal(true),
-      approval_url: Type.Optional(Type.String()),
-      approval_run_id: Type.Integer(),
-      approval_action: Type.Literal("merge"),
-      approval_proposal: Type.Object({
-        entity_id: Type.Integer(),
-        entity_ids: Type.Optional(Type.Array(Type.Integer())),
-        winner_entity_id: Type.Integer(),
-      }),
-      approval_attribution: ApprovalAttributionSchema,
-      next_steps: Type.Array(Type.String()),
-      resolution: Type.Optional(
-        Type.Object({
-          decision: Type.Literal("review"),
-          reason: Type.String(),
-          evidence: Type.Array(
-            Type.Object({ kind: Type.String(), identifier: Type.String() })
-          ),
-        })
-      ),
-    }),
-    Type.Object({
-      action: Type.Literal("merge"),
-      approval_suppressed: Type.Literal(true),
-      message: Type.String(),
-      resolution: Type.Object({
-        decision: Type.Literal("review"),
-        reason: Type.String(),
-        evidence: Type.Array(
-          Type.Object({ kind: Type.String(), identifier: Type.String() })
-        ),
-      }),
-    }),
-  ]),
   Type.Object({
     action: Type.Literal("discover_duplicates"),
     candidates_scanned: Type.Integer(),
@@ -815,39 +669,14 @@ export const ManageEntityResultSchema = Type.Union([
         deferred_candidates: Type.Integer(),
         decisions: Type.Array(
           Type.Object({
-            winner_entity_id: Type.Integer(),
-            loser_entity_id: Type.Integer(),
-            fingerprint: Type.String({
-              description:
-                "Existing resolution assessment fingerprint for this pair and current evidence/policy; execution rechecks.",
-            }),
+            from_entity_id: Type.Integer(),
+            to_entity_id: Type.Integer(),
+            relationship_type_slug: Type.String(),
           })
         ),
       })
     ),
     next_cursor: Type.Union([Type.String(), Type.Null()]),
-  }),
-  Type.Object({
-    action: Type.Literal("resolve_duplicates"),
-    candidates_scanned: Type.Integer(),
-    groups_found: Type.Integer(),
-    auto_merged: Type.Integer(),
-    approvals_queued: Type.Integer(),
-    approvals_suppressed: Type.Integer(),
-    oversized_groups: Type.Integer(),
-    deferred_candidates: Type.Integer({
-      description:
-        "Candidates connected only through another record; reconsidered after direct merges apply.",
-    }),
-  }),
-  Type.Object({
-    action: Type.Literal("unmerge"),
-    success: Type.Boolean(),
-    message: Type.String(),
-    winner_entity_id: Type.Integer(),
-    loser_entity_id: Type.Integer(),
-    /** Identities restored to the loser with their prior provenance markers. */
-    restored_identities: Type.Integer(),
   }),
 ]);
 export type ManageEntityResult = Static<typeof ManageEntityResultSchema>;
@@ -855,4 +684,40 @@ export type ManageEntityResult = Static<typeof ManageEntityResultSchema>;
 export type EntityDiscoverDuplicatesResult = Extract<
   ManageEntityResult,
   { action: "discover_duplicates" }
+>;
+
+export type EntityCreateResult = Extract<
+  ManageEntityResult,
+  { action: "create" }
+>;
+
+export type EntityUpdateResult = Extract<
+  ManageEntityResult,
+  { action: "update" }
+>;
+
+export type EntityGetResult = Extract<ManageEntityResult, { action: "get" }>;
+
+export type EntityListResult = Extract<ManageEntityResult, { action: "list" }>;
+
+export type EntityDeleteResult = Extract<
+  ManageEntityResult,
+  { action: "delete" }
+>;
+
+export type EntityLinkResult = Extract<ManageEntityResult, { action: "link" }>;
+
+export type EntityUnlinkResult = Extract<
+  ManageEntityResult,
+  { action: "unlink" }
+>;
+
+export type EntityUpdateLinkResult = Extract<
+  ManageEntityResult,
+  { action: "update_link" }
+>;
+
+export type EntityListLinksResult = Extract<
+  ManageEntityResult,
+  { action: "list_links" }
 >;

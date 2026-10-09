@@ -16,7 +16,6 @@ import {
   enabledInlineGuardrails,
   resolveAgentGuardrails,
 } from "../guardrails/aggregator.js";
-import * as Sentry from "@sentry/node";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { platformMetadataString } from "../connections/platform-metadata.js";
 import { recordGuardrailTrip } from "../guardrails/audit.js";
@@ -190,18 +189,7 @@ export class MessageConsumer {
       await this.queue.work(
         "messages",
         async (job: SharedQueueJob<MessagePayload>) => {
-          return await Sentry.startSpan(
-            {
-              name: "orchestrator.process_queue_job",
-              op: "orchestrator.queue_processing",
-              attributes: {
-                "job.id": job?.id || "unknown",
-              },
-            },
-            async () => {
-              return this.handleMessage(job);
-            }
-          );
+          return this.handleMessage(job);
         }
       );
 
@@ -239,9 +227,6 @@ export class MessageConsumer {
     // Extract or generate trace ID for logging (backwards compatible)
     const traceId =
       extractTraceId(data) || generateTraceId(data?.messageId || jobId);
-
-    // Add traceId to Sentry scope for correlation
-    Sentry.getCurrentScope().setTag("traceId", traceId);
 
     // Create child span for queue processing (linked to message_received span)
     const queueSpan = createChildSpan("queue_processing", traceparent, {
@@ -661,7 +646,6 @@ export class MessageConsumer {
         message: getErrorMessage(error),
       });
       queueSpan?.end();
-      Sentry.captureException(error);
       logger.error({ traceId, jobId, error }, "Message job failed");
 
       // Re-throw for queue retry handling

@@ -81,6 +81,7 @@ import {
 } from "../utils/inline-attachments";
 import { insertEvent, recordLifecycleEvent } from "../utils/insert-event";
 import logger from "../utils/logger";
+import { logRunFailure } from "../runs/log-run-failure";
 import { reconcileConnectorRelationshipClaims } from "../utils/relationship-claims";
 import { stripNul, stripNulDeep } from "../utils/strip-nul";
 import {
@@ -1007,7 +1008,6 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 							origin_id: item.id,
 							sanitized: browserRun,
 							err: browserRun ? sanitizeBrowserText(errorMessage(err)) : err,
-							sentryReported: true,
 						},
 						"[stream] Insert failed for item"
 					);
@@ -1298,8 +1298,8 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 						: tx`,
 	          items_collected = ${req.items_collected ?? 0},
 	          error_message = ${req.error_message ?? null},${dryGuardedCheckpoint}`,
-				returning: tx`feed_id, connection_id, dry_run, error_message, checkpoint IS NOT NULL AS committed_checkpoint`,
-			})) as unknown as Array<{
+				returning: tx`id, status, run_type, connector_key, exit_reason, exit_code, exit_signal, feed_id, connection_id, dry_run, error_message, checkpoint IS NOT NULL AS committed_checkpoint`,
+			})) as unknown as Array<Parameters<typeof logRunFailure>[0] & {
 				feed_id: number | null;
 				connection_id: number | null;
 				dry_run: boolean;
@@ -1413,6 +1413,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			return c.json({ success: false, reason: "already_finalized" });
 		}
 		const { runRows } = finalized;
+		logRunFailure(runRows[0]);
 		await announceFeedAutoPause(finalized.recordedFailure);
 
 		// Persist refreshed browser auth data on the auth profile.
@@ -1542,7 +1543,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 			}
 		}
 
-		logger.info({ run_id: req.run_id, status: req.status }, "Run completed");
+		if (req.status === "success") logger.info({ run_id: req.run_id, status: req.status }, "Run completed");
 
 		return c.json({ success: true });
 	} catch (err: unknown) {
@@ -1732,7 +1733,7 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 	// The stdout tail is stashed for diagnosis (why didn't the agent call
 	// complete_window?); the worker redacts before sending.
 	const failRun = async (reason: string): Promise<boolean> => {
-		return sql.begin(async (tx) => {
+		const transitioned = await sql.begin(async (tx) => {
 			const failedRows = (await tx`
         UPDATE runs
         SET status = 'failed',
@@ -1770,6 +1771,9 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 			);
 			return true;
 		});
+		if (transitioned) logRunFailure({ id: runId, status: "failed", run_type: "automation",
+			exit_reason: body.exit_reason, exit_code: body.exit_code, exit_signal: body.exit_signal });
+		return transitioned;
 	};
 
 	const emitCompletionEvent = (
@@ -2420,8 +2424,8 @@ export async function completeAuthRun(c: Context<{ Bindings: Env }>) {
 					: sql`,
           error_message = ${req.error_message ?? null},
           auth_signal = NULL`,
-			returning: sql`auth_profile_id, organization_id`,
-		})) as unknown as Array<{
+			returning: sql`id, status, run_type, connector_key, exit_reason, exit_code, exit_signal, auth_profile_id, organization_id`,
+		})) as unknown as Array<Parameters<typeof logRunFailure>[0] & {
 			auth_profile_id: number | null;
 			organization_id: string;
 		}>;
@@ -2440,6 +2444,7 @@ export async function completeAuthRun(c: Context<{ Bindings: Env }>) {
 			return c.json({ success: false, reason: "already_finalized" });
 		}
 
+		logRunFailure(runRows[0]);
 		const authProfileId = runRows[0]?.auth_profile_id ?? null;
 		const organizationId = runRows[0]?.organization_id;
 
@@ -2479,7 +2484,7 @@ export async function completeAuthRun(c: Context<{ Bindings: Env }>) {
       `;
 		}
 
-		logger.info(
+		if (req.status === "success") logger.info(
 			{ run_id: req.run_id, status: req.status },
 			"Auth run completed"
 		);
@@ -2554,7 +2559,7 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 				extraSet: tx`,
 					action_output = ${actionOutput ? tx.json(actionOutput) : null},
 					error_message = ${req.error_message ?? null}`,
-				returning: tx`organization_id, run_type, action_key, approval_status`,
+				returning: tx`id, status, connector_key, exit_reason, exit_code, exit_signal, organization_id, run_type, action_key, approval_status`,
 			});
 			if (rows.length === 0) return rows;
 
@@ -2605,6 +2610,8 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 			return c.json({ success: false, reason: "already_finalized" });
 		}
 
+		logRunFailure(updatedRuns[0] as Parameters<typeof logRunFailure>[0]);
+
 		// The transaction committed; from here these artifacts are durable run output.
 		publishedActionArtifactIds = [];
 		const organizationId = (updatedRuns[0] as any)?.organization_id;
@@ -2613,7 +2620,7 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 			emit(organizationId, { keys: ["contents-filtered", "notifications"] });
 		}
 
-		logger.info(
+		if (req.status === "success") logger.info(
 			{ run_id: req.run_id, status: req.status },
 			"Action run completed"
 		);

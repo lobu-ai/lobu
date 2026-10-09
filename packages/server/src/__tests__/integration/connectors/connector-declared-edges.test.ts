@@ -93,11 +93,11 @@ describe('connector-declared relationships', () => {
       createDefaultFeed: false,
     });
     const manualInvoice = (await workspace.owner.entities.create({
-      type: 'invoice',
+      entity_type: 'invoice',
       name: 'INV-1001',
     })) as { entity: { id: number } };
     const manualCustomer = (await workspace.owner.entities.create({
-      type: 'customer',
+      entity_type: 'customer',
       name: 'Acme Ltd',
     })) as { entity: { id: number } };
     await sql`
@@ -202,7 +202,7 @@ describe('connector-declared relationships', () => {
     // withdrew its previous assertion. Preserve the existing connector claim
     // until every referenced attribution resolves again.
     const conflictingCustomer = (await workspace.owner.entities.create({
-      type: 'customer',
+      entity_type: 'customer',
       name: 'Rival GmbH',
     })) as { entity: { id: number } };
     await sql`
@@ -328,8 +328,7 @@ describe('connector-declared relationships', () => {
       'manual',
     ]);
 
-    await workspace.owner.entities.manage({
-      action: 'update_link',
+    await workspace.owner.entities.updateLink({
       relationship_id: Number(edges[0].id),
       metadata: { reviewed: true },
     });
@@ -388,8 +387,7 @@ describe('connector-declared relationships', () => {
     ]);
 
     await expect(
-      workspace.owner.entities.manage({
-        action: 'unlink',
+      workspace.owner.entities.unlink({
         relationship_id: Number(newSource?.id),
       })
     ).rejects.toThrow(/source-managed/i);
@@ -438,8 +436,7 @@ describe('connector-declared relationships', () => {
     `;
     expect(sourceAfterDeclarationRemoval.deleted_at).not.toBeNull();
 
-    await workspace.owner.entities.manage({
-      action: 'unlink',
+    await workspace.owner.entities.unlink({
       relationship_id: Number(oldManual?.id),
     });
     const [oldAfterUnlink] = await sql`

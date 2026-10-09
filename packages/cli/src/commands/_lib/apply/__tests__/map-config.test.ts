@@ -522,7 +522,7 @@ describe("mapProjectToDesiredState", () => {
       name: "Person",
       resolutionPolicy: {
         rules: [
-          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+          { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
           { fields: ["phone"], normalizer: "phone", onMatch: "review" },
         ],
       },
@@ -537,7 +537,7 @@ describe("mapProjectToDesiredState", () => {
     expect(byKey.person?.resolutionPolicy).toEqual({
       "x-lobu-resolution": {
         rules: [
-          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+          { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
           { fields: ["phone"], normalizer: "phone", onMatch: "review" },
         ],
       },
@@ -555,7 +555,7 @@ describe("mapProjectToDesiredState", () => {
           {
             fields: [],
             normalizer: "email",
-            onMatch: "auto_merge",
+            onMatch: "auto_link",
           },
         ],
       },
@@ -563,6 +563,20 @@ describe("mapProjectToDesiredState", () => {
     expect(() =>
       mapProjectToDesiredState(defineConfig({ agents: [], entities: [bad] }))
     ).toThrow(/invalid resolutionPolicy/i);
+  });
+
+  test("rejects the retired physical merge policy instead of silently accepting it", () => {
+    const bad = defineEntityType({
+      key: "contact_record",
+      resolutionPolicy: {
+        rules: [
+          { fields: ["email"], normalizer: "email", onMatch: "auto_merge" },
+        ],
+      } as never,
+    });
+    expect(() =>
+      mapProjectToDesiredState(defineConfig({ agents: [], entities: [bad] }))
+    ).toThrow(/onMatch: "auto_link"\|"review"/);
   });
 
   test("rejects a resolutionPolicy without a rules array", () => {
@@ -574,6 +588,35 @@ describe("mapProjectToDesiredState", () => {
     expect(() =>
       mapProjectToDesiredState(defineConfig({ agents: [], entities: [bad] }))
     ).toThrow(/expected rules to be an array/i);
+  });
+
+  test.each([
+    null,
+    { rules: [null] },
+    { rules: [false] },
+    { rules: Array<unknown>(1) },
+    {
+      rules: [
+        {
+          fields: Object.assign(Array<unknown>(2), { 0: "email" }),
+          normalizer: "email",
+          onMatch: "auto_link",
+        },
+      ],
+    },
+    {
+      rules: [
+        { fields: ["email", 42], normalizer: "email", onMatch: "auto_link" },
+      ],
+    },
+  ])("rejects malformed resolution policies with an actionable validation error: %j", (resolutionPolicy) => {
+    const bad = defineEntityType({
+      key: "synthetic-record",
+      resolutionPolicy,
+    } as never);
+    expect(() =>
+      mapProjectToDesiredState(defineConfig({ agents: [], entities: [bad] }))
+    ).toThrow(/invalid resolutionPolicy/i);
   });
 
   test("rejects invalid metrics at load time (measure naming a missing eventSet)", () => {
@@ -849,6 +892,26 @@ describe("mapProjectToDesiredState", () => {
     expect(dw?.outputs).toEqual({
       prices: { entity: "price", key: ["sku"] },
       alerts: { event: "price_changed" },
+    });
+  });
+
+  test("preserves key on event outputs so keyed state supersedes", () => {
+    const crm = defineAgent({ id: "crm" });
+    const automation = defineAutomation({
+      agent: crm,
+      slug: "voice",
+      skills: ["s"],
+      outputs: {
+        profiles: { event: "voice_profile", key: ["channel", "mode"] },
+        notes: { event: "observation" },
+      },
+    });
+    const dw = mapProjectToDesiredState(
+      defineConfig({ agents: [crm], automations: [automation] })
+    ).automations[0];
+    expect(dw?.outputs).toEqual({
+      profiles: { event: "voice_profile", key: ["channel", "mode"] },
+      notes: { event: "observation" },
     });
   });
 
