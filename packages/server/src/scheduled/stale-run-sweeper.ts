@@ -9,10 +9,11 @@
  *   - the agent-turn sweep (worker-api/agent-turn.ts) — `agent_turn` on the
  *     connector reaper's threshold, one row per transaction so the timeout
  *     can publish the client's `thread_response` alongside it
- *   - the automation sweep (automations/automation.ts) — 3min heartbeat-stale fast
- *     path + 2h coarse TTL for runs that never heartbeated
+ *   - the automation sweep (automations/automation.ts) — explicit external lease
+ *     expiry, otherwise a 3min heartbeat-stale path + 2h coarse TTL
  *
- * Both share one predicate shape: a run with a live heartbeat signal is
+ * External Automation leases use expires_at exclusively. Other runs share
+ * one predicate shape: a run with a live heartbeat signal is
  * judged on `last_heartbeat_at` against the heartbeat threshold; a run
  * without one is judged on `COALESCE(claimed_at, created_at)` against the
  * coarse threshold. What differs per caller is which rows count as
@@ -29,6 +30,7 @@
 import { PG_INTERVAL_PATTERN } from "../config/intervals";
 import type { DbClient } from "../db/client";
 import { classifyRunOutcome } from "../runs/run-outcome";
+import { AUTOMATION_RUN_TYPE } from "../runs/run-types";
 
 interface StaleRunSweepSpec {
 	/** `runs.run_type` values covered by this sweep. */
@@ -67,6 +69,12 @@ interface StaleRunSweepSpec {
 }
 
 const RUN_TYPE_PATTERN = /^[a-z_]+$/;
+
+// External Automation processors own an explicit, renewable window lease.
+// A page continuation also stamps a heartbeat, but that does not opt the
+// processor into the worker heartbeat deadline. Other lanes (notably device
+// actions) use expires_at as an unclaimed horizon, not an execution lease.
+const AUTOMATION_LEASE_SQL = `(run_type = '${AUTOMATION_RUN_TYPE}' AND expires_at IS NOT NULL)`;
 
 /** Validate + quote a `<n> <unit>` literal as a SQL interval expression. */
 function intervalSql(literal: string): string {
@@ -125,17 +133,20 @@ export function buildStaleRunWhereSql(spec: StaleRunSweepSpec): string {
 	const inProgressPredicate = `
       (status IN ('claimed', 'running')
        AND (
-         -- Fast path: the executor was heartbeating, then went silent.
-         (${hasHeartbeatSql(spec.heartbeatSemantics)}
-          AND last_heartbeat_at
-              < current_timestamp - ${intervalSql(spec.heartbeatStaleInterval)})
-         OR
-         -- Coarse backstop: ONLY for runs without a live heartbeat signal, so a
-         -- heartbeating run that legitimately outlives the coarse TTL (fresh
-         -- heartbeat) is never killed here.
-         (${neverHeartbeatedSql(spec.heartbeatSemantics)}
-          AND COALESCE(claimed_at, created_at)
-              < current_timestamp - ${intervalSql(spec.coarseStaleInterval)})
+         (${AUTOMATION_LEASE_SQL} AND expires_at <= current_timestamp)
+         OR (NOT ${AUTOMATION_LEASE_SQL} AND (
+           -- Fast path: the executor was heartbeating, then went silent.
+           (${hasHeartbeatSql(spec.heartbeatSemantics)}
+            AND last_heartbeat_at
+                < current_timestamp - ${intervalSql(spec.heartbeatStaleInterval)})
+           OR
+           -- Coarse backstop: ONLY for runs without a live heartbeat signal, so a
+           -- heartbeating run that legitimately outlives the coarse TTL (fresh
+           -- heartbeat) is never killed here.
+           (${neverHeartbeatedSql(spec.heartbeatSemantics)}
+            AND COALESCE(claimed_at, created_at)
+                < current_timestamp - ${intervalSql(spec.coarseStaleInterval)})
+         ))
        ))`;
 	const statusPredicate = spec.includePending
 		? `((status = 'pending'
@@ -205,6 +216,7 @@ export async function markStaleRunsAsTimeout(
               run_type,
               approved_input->>'dispatch_source' AS dispatch_source,
               CASE
+                WHEN ${AUTOMATION_LEASE_SQL} THEN 'External Automation window lease expired'
                 WHEN ${hasHeartbeatSql(spec.heartbeatSemantics)} THEN $1
                 ELSE $2
               END AS timeout_error
