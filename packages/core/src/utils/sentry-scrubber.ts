@@ -2,9 +2,8 @@ import { isSecretKey, redactUriCredentials } from "./secret-redaction";
 
 /**
  * Structural stand-in for the SDK's event shape. Declared here rather than
- * imported so one scrubber serves BOTH Sentry majors in this repo -- this
- * package is on @sentry/node ^10 and @lobu/server on ^9 -- without coupling
- * the shared module to either one's type graph. `sdkProcessingMetadata` is the
+ * imported so logging and browser telemetry can reuse the scrubber without
+ * coupling the shared module to the SDK's type graph. `sdkProcessingMetadata` is the
  * only field the walk treats specially; everything else is structural.
  */
 interface SentryEventLike {
@@ -70,7 +69,8 @@ const URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
  * The separator absorbs trailing whitespace because cookie serialization is
  * `a=b; c=d`: without it every pair after the first space goes unredacted.
  */
-const QUERY_PAIR_PATTERN = /([?&;]\s*|^)([A-Za-z0-9_.\-%[\]]+)=([^&;\s"'<>]*)/g;
+const QUERY_PAIR_PATTERN =
+  /([?&;]\s*|^)([A-Za-z0-9_.\-%[\]]+)=("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&;\s"'<>]*)/g;
 
 function decodeKey(raw: string): string {
   try {
@@ -104,15 +104,22 @@ function scrubString(value: string): string {
       }
     }
   );
-  return withoutUrlQueries.replace(
+  const withoutQueries = withoutUrlQueries.replace(
     QUERY_PAIR_PATTERN,
     (match, lead: string, name: string) =>
       isSecretQueryParam(name) ? `${lead}${name}=[REDACTED]` : match
   );
+  // Error messages can embed key=value diagnostics outside a URL. Keep codes
+  // and states useful there; only credential-named assignments are sensitive.
+  return withoutQueries.replace(
+    /(\s)([A-Za-z0-9_.%-]+)=("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&;\s"'<>]*)/g,
+    (match, lead: string, name: string) =>
+      isSecretObjectKey(decodeKey(name)) ? `${lead}${name}=[REDACTED]` : match
+  );
 }
 
 /**
- * Recursively remove credential material from values headed for Sentry.
+ * Recursively remove credential material from diagnostic values.
  * This is deliberately defensive: telemetry must never make an unusual
  * application value or a circular error object throw another error.
  */
@@ -152,6 +159,11 @@ export function scrubSentryValue(value: unknown): unknown {
       if (current.stack) serialized.stack = scrubString(current.stack);
       if (current.cause !== undefined)
         serialized.cause = scrub(current.cause, depth + 1);
+      // AggregateError.errors is non-enumerable, just like cause and stack.
+      // Reuse the same walk so nested failures keep their codes without
+      // bypassing credential redaction, depth limits, or cycle detection.
+      if ("errors" in current && Array.isArray(current.errors))
+        serialized.errors = scrub(current.errors, depth + 1);
       for (const key of Object.keys(current)) {
         serialized[key] = isSecretObjectKey(key)
           ? "[REDACTED]"
@@ -232,12 +244,11 @@ export function scrubSentryErrorEvent<T extends SentryEventLike>(event: T): T {
  * Sampled wherever tracing is on -- but sampled is not exempt: a span's
  * attributes carry the request URL, which is the very `?token=` vector the
  * error path scrubs. Without this they reach Sentry unscrubbed. Rates are the
- * consumer's business, not this module's (the gateway traces, the worker sets
- * tracesSampleRate 0, so there it is installed and inert).
+ * consumer's business, not this module's.
  */
 // Generic rather than naming TransactionEvent: @sentry/node does not
 // re-export that type. Inference recovers it exactly at the
-// beforeSendTransaction call site, in either major.
+// beforeSendTransaction call site.
 export function scrubSentryTransactionEvent<T extends SentryEventLike>(
   event: T
 ): T {

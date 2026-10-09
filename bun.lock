@@ -398,7 +398,6 @@
         "@react-email/components": "^1.0.12",
         "@react-email/render": "^2.0.7",
         "@scalar/hono-api-reference": "^0.9.39",
-        "@sentry/node": "^10.74.0",
         "@sinclair/typebox": "^0.34.41",
         "@vercel/sandbox": "^2.2.1",
         "ajv": "^8.17.1",

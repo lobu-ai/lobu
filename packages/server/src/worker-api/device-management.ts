@@ -17,7 +17,7 @@ import { findExistingPersonalOrg } from '../auth/personal-org-provisioning';
 import { PersonalAccessTokenService } from '../auth/tokens';
 import { getDb, parsePgTextArray, pgBigintArray } from '../db/client';
 import type { Env } from '../index';
-import { captureServerError } from '../sentry';
+import { captureServerError } from '../diagnostics';
 import { errorMessage } from '../utils/errors';
 import { recordLifecycleEvent } from '../utils/insert-event';
 import logger from '../utils/logger';

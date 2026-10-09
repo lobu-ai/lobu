@@ -7,6 +7,51 @@ import {
 const SECRET = "SENTRY_SECRET_SENTINEL";
 
 describe("Sentry credential scrubber", () => {
+  it("preserves aggregate children and their causes with the same redaction and cycle bounds", () => {
+    const child = Object.assign(
+      new Error(`connection failed token=${SECRET}`),
+      {
+        code: "ECONNREFUSED",
+        password: SECRET,
+      }
+    );
+    const aggregate = new AggregateError([child], "multiple failures");
+    const outer = new Error("outer", { cause: aggregate });
+    child.cause = outer;
+    const value = scrubSentryValue(outer) as {
+      cause: { errors: Record<string, unknown>[] };
+    };
+    expect(value.cause.errors[0].code).toBe("ECONNREFUSED");
+    expect(value.cause.errors[0].stack).toContain("sentry-scrubber.test.ts");
+    expect(value.cause.errors[0].cause).toBe("[CIRCULAR]");
+    expect(JSON.stringify(value)).not.toContain(SECRET);
+  });
+
+  it("redacts inline credential assignments without hiding diagnostic codes", () => {
+    const error = new Error(
+      `failed token=${SECRET} password=${SECRET} code=ECONNREFUSED`
+    );
+    const value = JSON.stringify(scrubSentryValue(error));
+    expect(value).not.toContain(SECRET);
+    expect(value).toContain("code=ECONNREFUSED");
+  });
+  it("redacts quoted credentials in inline assignments and query pairs", () => {
+    for (const assignment of [
+      `password="${SECRET} with spaces"`,
+      `token='${SECRET} with spaces'`,
+      `password="${SECRET} with \\"escaped quotes\\""`,
+    ]) {
+      for (const prefix of ["", "failed ", "/path?", "other=value; "]) {
+        const value = JSON.stringify(
+          scrubSentryValue(
+            new Error(`${prefix}${assignment} code=ECONNREFUSED`)
+          )
+        );
+        expect(value).not.toContain(SECRET);
+        expect(value).toContain("code=ECONNREFUSED");
+      }
+    }
+  });
   it("does not retain serialization hooks that can bypass scrubbing", () => {
     const payload = {
       data: { toJSON: () => ({ authorization: "synthetic-secret" }) },

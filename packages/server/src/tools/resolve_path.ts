@@ -7,7 +7,6 @@
  * URL pattern: /:owner/entity-type/entity-slug/...
  */
 
-import * as Sentry from '@sentry/node';
 import { type Static, Type } from '@sinclair/typebox';
 import { findUngrantedMemberWorkspace, formatUngrantedMemberMessage, resolveGrantedWorkspaceTarget } from '../auth/oauth/workspace-grants';
 import { getDb } from '../db/client';
@@ -296,10 +295,7 @@ export const resolvePath = withValidatedArgs(
   'resolve_path',
   ResolvePathSchema,
   (args: ResolvePathArgs, _env: Env, ctx: AccountToolContext): Promise<ResolvePathResult> =>
-    Sentry.startSpan(
-      { name: 'resolve_path', op: 'function', attributes: { path: args.path } },
-      () => _resolvePath(args, ctx)
-    )
+    _resolvePath(args, ctx)
 );
 
 async function _resolvePath(
@@ -333,9 +329,7 @@ async function _resolvePath(
 
   const sql = getDb();
 
-  const resolved = await Sentry.startSpan({ name: 'resolveOwner', op: 'db' }, () =>
-    getWorkspaceProvider().resolveOwner(ownerSlug, 'organization')
-  );
+  const resolved = await getWorkspaceProvider().resolveOwner(ownerSlug, 'organization');
 
   if (!resolved) {
     throw new ToolUserError('Workspace is not available for this authorization', 404);
@@ -589,25 +583,23 @@ async function _resolvePath(
       eventsCount,
       [connectionsCount],
       [automationsCount],
-    ] = await Sentry.startSpan({ name: 'entity:counts', op: 'db' }, () =>
-      Promise.all([
-        fetchContentCount(sql, workspace.id, Number(entityRow.id), excludeWorkspaceAudit),
-        sql.unsafe<{ cnt: number }>(
-          `SELECT COUNT(DISTINCT cn.connector_key) as cnt
-           FROM feeds f
-           JOIN connections cn ON cn.id = f.connection_id
-           WHERE f.organization_id = $1
-             AND f.deleted_at IS NULL
-             AND cn.deleted_at IS NULL
-             AND ${feedLinkedToBusinessEntitySql('$2::int', 'f', 'cn', '$1')}`,
-          [workspace.id, Number(entityRow.id)],
-        ),
-        sql`SELECT COUNT(*) as cnt FROM automations i
-              WHERE ${Number(entityRow.id)}::int = ANY(i.entity_ids)
-                AND i.organization_id = ${workspace.id}
-                AND i.status = 'active'`,
-      ])
-    );
+    ] = await Promise.all([
+      fetchContentCount(sql, workspace.id, Number(entityRow.id), excludeWorkspaceAudit),
+      sql.unsafe<{ cnt: number }>(
+        `SELECT COUNT(DISTINCT cn.connector_key) as cnt
+         FROM feeds f
+         JOIN connections cn ON cn.id = f.connection_id
+         WHERE f.organization_id = $1
+           AND f.deleted_at IS NULL
+           AND cn.deleted_at IS NULL
+           AND ${feedLinkedToBusinessEntitySql('$2::int', 'f', 'cn', '$1')}`,
+        [workspace.id, Number(entityRow.id)],
+      ),
+      sql`SELECT COUNT(*) as cnt FROM automations i
+            WHERE ${Number(entityRow.id)}::int = ANY(i.entity_ids)
+              AND i.organization_id = ${workspace.id}
+              AND i.status = 'active'`,
+    ]);
     const processedEntityTabs: ViewTemplateTab[] = [];
     const entityCleanTpl = null;
     const redactedTemplateData: Record<string, unknown[]> | null = null;
