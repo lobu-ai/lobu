@@ -8,11 +8,61 @@
 
 const REDACTED = '[REDACTED]';
 
-// Value charset for assignment-style secrets: word + URL-safe base64 + the
-// dot/dollar/percent that show up in OAuth tokens (e.g. ya29.a0AfH6SM…) and
-// signed cookies. Excludes whitespace, quote, brace, and bracket so the
-// pattern stops at the boundary of the value.
-const SECRET_VALUE = `[\\w\\-.~+/=:%$]{12,}`;
+// Keep this module dependency-free: it is also bundled into connector isolates.
+const SECRET_KEY = /(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]access)?[_-]?key|private[_-]?key|token|secret|password|passwd|credentials?|authorization|auth|bearer|cookies?|set[_-]cookie|session[_-]?id)s?$/i;
+
+// Consume whole key tokens once, then scan only explicitly assigned secret values.
+// A length threshold misses short passwords; unbounded key-search regexes can
+// repeatedly rescan long malformed log lines.
+function redactAssignments(text: string): string {
+  const keys = /[\w.-]+/g;
+  const assignment = /(?:\\*["'])?\s*[:=]\s*(\\*["'])?/y;
+  const parts: string[] = [];
+  let copied = 0;
+  let key: RegExpExecArray | null;
+  while ((key = keys.exec(text))) {
+    const normalized = key[0].replace(/([a-z0-9])([A-Z])/g, '$1_$2');
+    if (
+      !SECRET_KEY.test(normalized) &&
+      !/^AWS_[A-Z0-9_]*(?:KEY|TOKEN|SECRET)$/.test(key[0])
+    ) continue;
+    assignment.lastIndex = keys.lastIndex;
+    const separator = assignment.exec(text);
+    if (!separator) continue;
+    const start = assignment.lastIndex;
+    const delimiter = separator[1];
+    let end = start;
+    if (delimiter) {
+      const quote = delimiter.at(-1);
+      const escapes = delimiter.length - 1;
+      // JSON embedded in a log may have one or more escaping layers. A quote
+      // closes this value only at the same layer as its opening delimiter.
+      while (end < text.length) {
+        const runStart = end;
+        while (text[end] === '\\') end++;
+        const slashes = end - runStart;
+        if (text[end] === quote && slashes % (2 * (escapes + 1)) === escapes) {
+          end -= escapes;
+          break;
+        }
+        if (end < text.length) end++;
+      }
+    } else {
+      if (text.startsWith(REDACTED, start)) {
+        keys.lastIndex = start + REDACTED.length;
+        continue;
+      }
+      while (end < text.length && !/[\s,;&}\]"']/.test(text[end])) end++;
+    }
+    if (end > start) {
+      parts.push(text.slice(copied, start), REDACTED);
+      copied = end;
+    }
+    keys.lastIndex = end;
+  }
+  parts.push(text.slice(copied));
+  return parts.join('');
+}
 
 const PATTERNS: Array<{ regex: RegExp; replacement: string }> = [
   // HTTP Authorization header (e.g. "Authorization: Bearer abc...") — match
@@ -30,44 +80,17 @@ const PATTERNS: Array<{ regex: RegExp; replacement: string }> = [
 
   // Google OAuth access token shape (ya29.<varies>) — high-confidence.
   { regex: /ya29\.[\w\-.]{20,}/g, replacement: REDACTED },
-
-  // URI userinfo: `scheme://user:pass@host` — redact the password segment.
-  // Captures any scheme; replaces password while preserving structure.
+  // Bound the scheme search so a long non-URI token is not rescanned at every
+  // character. Retain the scheme, username and host for diagnostics.
   {
-    regex: /([a-z][a-z0-9+\-.]*:\/\/[^:/\s]+):([^@/\s]+)@/gi,
+    regex: /([a-z][a-z0-9+.-]{0,63}:\/\/[^:/\s]+):([^@/\s]+)@/gi,
     replacement: `$1:${REDACTED}@`,
-  },
-
-  // CH_API_KEY=value (literal env-var key from the connector ecosystem)
-  {
-    regex: /(CH_API_KEY)(["'\s:=]+["']?)([\w\-]+)(["']?)/gi,
-    replacement: `$1$2${REDACTED}$4`,
-  },
-
-  // AWS_<SOMETHING>_KEY / AWS_<SOMETHING>_TOKEN env-style.
-  {
-    regex: new RegExp(
-      `(AWS_[A-Z0-9_]*(?:KEY|TOKEN|SECRET))(["'\\s:=]+["']?)(${SECRET_VALUE})(["']?)`,
-      'g'
-    ),
-    replacement: `$1$2${REDACTED}$4`,
-  },
-
-  // JSON/YAML/env-var style `api_key=...`, `apikey: "..."`, `access_token: ...`,
-  // `secret = "..."`, `refresh_token: ...`, `id_token=...`, `_authToken: ...`,
-  // `password: "..."`, `client_secret=...`.
-  {
-    regex: new RegExp(
-      `((?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|_?auth[_-]?token|client[_-]?secret|secret|password))(["'\\s:=]+["']?)(${SECRET_VALUE})(["']?)`,
-      'gi'
-    ),
-    replacement: `$1$2${REDACTED}$4`,
   },
 ];
 
 export function redactOutput(text: string): string {
   if (!text) return text;
-  let result = text;
+  let result = redactAssignments(text);
   for (const { regex, replacement } of PATTERNS) {
     result = result.replace(regex, replacement);
   }

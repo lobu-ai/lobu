@@ -91,11 +91,48 @@ describe('redactOutput', () => {
     }
   });
 
-  test('does not redact short api_key-like values (avoid false positives on word "key")', () => {
-    // The api_key pattern requires a 12+ char value to avoid eating things like
-    // "no apikey set" or "key: id".
-    const input = 'api_key: short';
+  test('redacts explicit assignments regardless of length, quoting or key style', () => {
+    const cases = [
+      ['password=secret7', 'secret7'],
+      ['token=synthetic-opaque-token', 'synthetic-opaque-token'],
+      ['api_key: z', 'z'],
+      ['AWS_SESSION_TOKEN=z', 'z'],
+      ['clientSecret="has spaces and ! punctuation"', 'has spaces and ! punctuation'],
+      ['password=short!@#$%^*()', 'short!@#$%^*()'],
+      [JSON.stringify({ message: JSON.stringify({ password: 'embedded secret' }) }), 'embedded secret'],
+      [JSON.stringify(JSON.stringify({ token: 'twice escaped secret' })), 'twice escaped secret'],
+      [JSON.stringify({ password: 'has a "quote" and tail' }), 'tail'],
+    ];
+    for (const [input, secret] of cases) {
+      const output = redactOutput(input);
+      expect(output).not.toContain(secret);
+      expect(output).toContain('[REDACTED]');
+    }
+  });
+
+  test('keeps embedded JSON readable through repeated escaping layers', () => {
+    let input = JSON.stringify({ password: 'space, \"quote\" and \\ tail', status: 500 });
+    for (let depth = 0; depth < 4; depth++) {
+      let output = redactOutput(input);
+      for (let i = 0; i < depth; i++) output = JSON.parse(output);
+      expect(JSON.parse(output)).toEqual({ password: '[REDACTED]', status: 500 });
+      expect(redactOutput(redactOutput(input))).toBe(redactOutput(input));
+      input = JSON.stringify(input);
+    }
+  });
+
+  test('bounds work on long non-URI tokens and malformed assignments', () => {
+    const start = performance.now();
+    for (const input of ['a'.repeat(200_000), 'a-'.repeat(100_000), 'password' + ' '.repeat(200_000)]) {
+      expect(redactOutput(input)).toBe(input);
+    }
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+
+  test('preserves nearby diagnostic fields and prose without assignments', () => {
+    const input = 'no apikey set; tokenizer=ok password_policy=strict key=id status=500';
     expect(redactOutput(input)).toBe(input);
+    expect(redactOutput('password=secret7 status=500')).toBe('password=[REDACTED] status=500');
   });
 });
 

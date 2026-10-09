@@ -3,6 +3,12 @@ import { beforeAll, expect, it } from "vitest";
 import { IsolateExecutor } from "@lobu/connector-worker/executor/isolate";
 import { createIsolateConnectorCompiler } from "../../../packages/connector-worker/src/compile/index";
 
+const credentialLogs = [
+  "failed password=secret7 token=synthetic-opaque-token",
+  'failed password="synthetic spaced password"',
+  `embedded ${JSON.stringify({ password: "synthetic quoted password", token: "synthetic-embedded-token" })}`,
+  `escaped ${JSON.stringify(JSON.stringify({ password: "synthetic escaped password", token: "synthetic-escaped-token" }))}`,
+];
 let code: string;
 beforeAll(async () => {
   code =
@@ -50,6 +56,10 @@ it("runs query_logs inside the native isolate through the existing HTTP auth cap
                       detail: "Bearer synthetic-label-secret",
                     },
                     values: [
+                      ...credentialLogs.map((line, index) => [
+                        String(index + 1),
+                        line,
+                      ]),
                       [
                         "1791000000000000000",
                         JSON.stringify({
@@ -75,12 +85,30 @@ it("runs query_logs inside the native isolate through the existing HTTP auth cap
   expect(seen[0]?.searchParams.get("limit")).toBe("20");
   expect(result.output).toMatchObject({
     truncated: false,
-    records: [
-      {
-        log: { cookie: "[REDACTED]", stack: "Error: fixture\n at test.ts:2:1" },
-      },
-    ],
+    records: expect.arrayContaining([
+      expect.objectContaining({
+        log: expect.objectContaining({
+          cookie: "[REDACTED]",
+          stack: "Error: fixture\n at test.ts:2:1",
+        }),
+      }),
+    ]),
   });
+  expect(result.output).toHaveProperty(
+    "records.length",
+    credentialLogs.length + 1
+  );
+  for (const secret of [
+    "secret7",
+    "synthetic-opaque-token",
+    "synthetic spaced password",
+    "synthetic quoted password",
+    "synthetic-embedded-token",
+    "synthetic escaped password",
+    "synthetic-escaped-token",
+  ]) {
+    expect(JSON.stringify(result)).not.toContain(secret);
+  }
   expect(JSON.stringify(result)).not.toContain("secret-fixture");
   expect(JSON.stringify(result)).not.toContain("synthetic-label-secret");
   expect(JSON.stringify(result)).not.toContain("synthetic-message-secret");

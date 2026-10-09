@@ -10,7 +10,7 @@ export const input = {
         type: "object",
         properties: {
           title: { type: "string", maxLength: 160 },
-          content: { type: "string", minLength: 1, maxLength: 3500 },
+          content: { type: "string", minLength: 1, maxLength: 1000 },
           metadata: { type: "object" },
         },
         required: ["content"],
@@ -32,6 +32,8 @@ export default async (
   ).digests;
   const digest = drafts[0];
   if (!digest) return;
+  // The notification validator counts UTF-16 units; JSON Schema counts code points.
+  const body = digest.content.slice(0, 1000).replace(/[\uD800-\uDBFF]$/, "");
   const automationId = Number(ctx.window.automation_id);
   if (!Number.isSafeInteger(automationId) || automationId <= 0)
     throw new Error("Invalid Automation ID");
@@ -45,13 +47,10 @@ export default async (
       AND metadata @> '{"delivery":[{"platform":"slack","attempts":[{"status":"provider_accepted"}]}]}'::jsonb
     ORDER BY created_at DESC, id DESC LIMIT 10
   `)) as Array<{ payload_text?: string | null }>;
-  if (
-    previous.some((row) => row.payload_text?.trim() === digest.content.trim())
-  )
-    return;
+  if (previous.some((row) => row.payload_text?.trim() === body.trim())) return;
   await client.notifications.send({
     title: digest.title || "Lobu production",
-    body: digest.content,
+    body,
     recipients: "admins",
     idempotency_key: `product-activity-digest:run:${ctx.window.run_id}`,
     automation_source: {

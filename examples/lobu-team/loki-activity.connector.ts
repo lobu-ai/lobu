@@ -233,8 +233,7 @@ export async function queryLokiLogs(
         log: scrubSentryValue(log),
       };
       // Structured keys and credentials embedded in log text need both scrubbers.
-      // Bound text redaction work: the shared URI pattern scales poorly on
-      // long unbroken lines, so omit oversized records rather than risk a timeout.
+      // Omit oversized fields to keep individual evidence records bounded.
       let oversizedField = false;
       const serialized = JSON.stringify(record, (_key, value) => {
         if (typeof value !== "string") return value;
