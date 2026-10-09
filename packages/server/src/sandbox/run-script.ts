@@ -32,6 +32,7 @@ import { enumerateSDKManifest, type SDKMode } from "./sdk-manifest";
 import { McpScopeRequiredError } from "../tools/access-control";
 import { getSdkPreflight } from "./sdk-preflight";
 import { ToolUserError } from "../utils/errors";
+import { raceAbort } from "../utils/race-abort";
 
 export interface RunLimits {
 	memoryMb?: number;
@@ -74,6 +75,8 @@ export function isSkippedUnderDryRun(args: {
 export interface RunScriptOptions {
 	source: string;
 	context?: Record<string, unknown>;
+	/** Host cancellation, kept outside the guest context and combined with the deadline. */
+	abortSignal?: AbortSignal;
 	/**
 	 * Preview mode for full-SDK scripts. Read calls still execute so scripts can
 	 * inspect state, but write/external SDK calls are skipped and returned in
@@ -453,6 +456,10 @@ function classifyRuntimeError(
 		return { name: "ValidationError", message, ...classification };
 	}
 
+	if (rawName === "TimeoutError" || rawName === "AbortError" || rawName === "RuntimeUnavailable") {
+		return { name: rawName, message, ...classification };
+	}
+
 	const isTimeout = /script execution timed out|TimeoutError/i.test(rawMessage);
 	const isQuota = /QuotaExceeded/.test(rawMessage);
 	const isSleepLimit = /SleepLimitExceeded/.test(rawMessage);
@@ -544,55 +551,6 @@ function clampLimits(limits?: RunLimits): Required<RunLimits> {
 	};
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const timeout = new Promise<never>((_, reject) => {
-		timer = setTimeout(() => {
-			reject(
-				new Error(
-					`TimeoutError: script exceeded ${timeoutMs}ms wall-clock budget`,
-				),
-			);
-		}, timeoutMs);
-	});
-	return Promise.race([promise, timeout]).finally(() => {
-		if (timer) clearTimeout(timer);
-	});
-}
-
-function raceAgainstAbort<T>(
-	promise: Promise<T>,
-	signal: AbortSignal,
-): Promise<T> {
-	if (signal.aborted) {
-		return Promise.reject(
-			signal.reason instanceof Error
-				? signal.reason
-				: new Error("AbortError: signal aborted"),
-		);
-	}
-	return new Promise<T>((resolve, reject) => {
-		const onAbort = () => {
-			reject(
-				signal.reason instanceof Error
-					? signal.reason
-					: new Error("AbortError: signal aborted"),
-			);
-		};
-		signal.addEventListener("abort", onAbort, { once: true });
-		promise.then(
-			(value) => {
-				signal.removeEventListener("abort", onAbort);
-				resolve(value);
-			},
-			(err) => {
-				signal.removeEventListener("abort", onAbort);
-				reject(err);
-			},
-		);
-	});
-}
-
 export function sleepAgainstAbort(ms: number, signal: AbortSignal): Promise<void> {
 	if (!Number.isFinite(ms) || !Number.isInteger(ms) || ms < 0) {
 		return Promise.reject(
@@ -669,7 +627,15 @@ function guestPreamble(errorTokenReader: string): string {
 const __ctxData = JSON.parse(__ctx_json);
 const ctx = Object.freeze({
   ...__ctxData,
-  sleep: async (ms) => __sleep.apply(undefined, [ms], { result: { promise: true, copy: true } }),
+  sleep: async (ms) => {
+    const result = await __sleep.apply(undefined, [ms], { result: { promise: true, copy: true } });
+    if (result) {
+      const envelope = JSON.parse(result);
+      const error = new Error(envelope.error.message);
+      error.name = envelope.error.name;
+      throw error;
+    }
+  },
 });
 const { client, takeErrorToken: ${errorTokenReader} } = (() => {
 const __hostSdkDispatch = __sdk_dispatch;
@@ -922,25 +888,13 @@ export async function runScript(
 		"prototype",
 	]);
 
-	// Wall-clock timeout. Each dispatch races the abort signal so the script
-	// returns promptly; upstream DB/HTTP itself doesn't cancel today.
+	// One budget includes runtime loading, compilation, guest work, and SDK calls.
+	// The signal releases opted-in handlers; it cannot roll back committed effects.
+	const deadline = started + limits.timeoutMs;
+	const timeoutMessage = `TimeoutError: script exceeded ${limits.timeoutMs}ms wall-clock budget`;
 	const abortController = new AbortController();
-	const abortTimer = setTimeout(() => {
-		abortController.abort(
-			new Error(
-				`TimeoutError: script exceeded ${limits.timeoutMs}ms wall-clock budget`,
-			),
-		);
-	}, limits.timeoutMs);
-
-	// Resolve the SDK lazily so callers that pass a builder receive the
-	// wall-clock signal — opted-in handlers race their work against it to
-	// unblock the awaiting caller on timeout.
-	const baseSdk: ClientSDK =
-		typeof options.sdk === "function"
-			? options.sdk(abortController.signal)
-			: options.sdk;
-
+	let baseSdk: ClientSDK;
+	let finished = false;
 	const logs: LogEntry[] = [];
 	const sdkCallTrace: SdkCallTraceEntry[] = [];
 	const sideEffectPreview: SdkCallTraceEntry[] = [];
@@ -993,7 +947,8 @@ export async function runScript(
 
 	/**
 	 * Terminal failure: the guest sent an oversized single message, exhausted
-	 * call quota, or bypassed a saturated console bridge. A thrown error would
+	 * call quota, outlived its deadline, was cancelled, or bypassed a saturated
+	 * console bridge. A thrown error would
 	 * not help — the guest can catch it and loop, and every loop iteration still
 	 * crosses a payload. Disposing the isolate makes the failure uncatchable.
 	 */
@@ -1002,6 +957,7 @@ export async function runScript(
 		terminalState.name = name;
 		terminalState.message = message;
 		terminated = true;
+		abortController.abort(terminalError());
 		try {
 			if (isolate && !isolate.isDisposed) {
 				// A guest parked on `await __sdk_dispatch` is NOT executing, so
@@ -1014,6 +970,42 @@ export async function runScript(
 		} catch {
 			// Isolate already finished; the terminal state carries the failure.
 		}
+	}
+
+	function terminalError(): Error {
+		return Object.assign(new Error(terminalState.message), { name: terminalState.name });
+	}
+
+	function assertActive(): void {
+		if (!finished && !terminated && Date.now() >= deadline) {
+			terminateRun("TimeoutError", timeoutMessage);
+		}
+		if (terminated) throw terminalError();
+		if (finished) throw abortController.signal.reason;
+	}
+
+	const onCallerAbort = () => {
+		const reason = options.abortSignal?.reason;
+		terminateRun(
+			reason instanceof Error && reason.name === "TimeoutError" ? "TimeoutError" : "AbortError",
+			reason instanceof Error ? reason.message : "Script execution cancelled",
+		);
+	};
+	const abortTimer = setTimeout(
+		() => terminateRun("TimeoutError", timeoutMessage),
+		Math.max(0, deadline - Date.now()),
+	);
+	options.abortSignal?.addEventListener("abort", onCallerAbort, { once: true });
+	if (options.abortSignal?.aborted) onCallerAbort();
+
+	function finishRun(): void {
+		finished = true;
+		clearTimeout(abortTimer);
+		options.abortSignal?.removeEventListener("abort", onCallerAbort);
+		// Close the host scope on success too: detached guest promises must not
+		// dispatch later, and abort-aware handlers must release their resources.
+		abortController.abort(Object.assign(new Error("Script execution finished"), { name: "AbortError" }));
+		if (isolate && !isolate.isDisposed) isolate.dispose();
 	}
 
 	/** True when the single message fits the per-message cap; otherwise the run is terminated. */
@@ -1054,35 +1046,84 @@ export async function runScript(
 	const appendTrace = makeTraceAppender(limits.traceBytes);
 	const appendPreview = makeTraceAppender(limits.traceBytes);
 
-	const ivm = await loadIsolatedVm();
-	if (!ivm) {
-		clearTimeout(abortTimer);
-		return {
-			success: false,
-			logs: [],
-			error: {
-				name: "RuntimeUnavailable",
-				message:
-					"isolated-vm is not installed for this platform. Install with `bun install` on a supported Node version (22–24 with prebuilt binaries, or any version with python3 + build-essential available).",
-			},
-			durationMs: Date.now() - started,
-			sdkCalls: 0,
-			skippedCalls: 0,
-			traceDropped: 0,
-			sdkCallTrace,
-			startedSideEffects: [...startedSideEffects.entries()].map(
-				([path, { access, count }]) => ({ path, access, count }),
-			),
-			requiredMcpScopes: [...requiredMcpScopes],
-			sideEffectPreview,
-		};
+	// Never reject a host Reference promise across a disposed isolate. Preserve
+	// typed SDK errors in envelopes, including failures during workspace lookup.
+	function sdkErrorEnvelope(error: unknown): string | null {
+		if (terminated) return terminalEnvelope();
+		if (error instanceof McpScopeRequiredError) {
+			requiredMcpScopes.add(error.requiredScope);
+			const json = JSON.stringify({
+				__lobu_sdk_dispatch: 1,
+				ok: false,
+				error: {
+					name: error.name,
+					message: error.message,
+					classificationToken:
+						trustErrorClassification("PERMISSION"),
+				},
+			});
+			return guardMessage(json) ? json : terminalEnvelope();
+		}
+		if (error instanceof ClientSdkActionError) {
+			const code = classifyClientSdkActionResult(error.result);
+			const json = JSON.stringify({
+				__lobu_sdk_dispatch: 1,
+				ok: false,
+				error: {
+					name: error.name,
+					message: error.message,
+					details: safeErrorDetails(error.result),
+					classificationToken: trustErrorClassification(code),
+				},
+			});
+			return guardMessage(json) ? json : terminalEnvelope();
+		}
+		if (error instanceof ToolUserError) {
+			const code = classifyToolUserError(error);
+			const json = JSON.stringify({
+				__lobu_sdk_dispatch: 1,
+				ok: false,
+				error: {
+					name: error.name,
+					message: error.message,
+					classificationToken: trustErrorClassification(code),
+				},
+			});
+			return guardMessage(json) ? json : terminalEnvelope();
+		}
+		if (isToolError(error)) {
+			const json = JSON.stringify({
+				__lobu_sdk_dispatch: 1,
+				ok: false,
+				error: {
+					name: error.name,
+					message: error.message,
+					classificationToken:
+						trustErrorClassification(error.code),
+				},
+			});
+			return guardMessage(json) ? json : terminalEnvelope();
+		}
+		const failure = classifyRuntimeError(error);
+		const json = JSON.stringify({ __lobu_sdk_dispatch: 1, ok: false, error: failure });
+		return guardMessage(json) ? json : terminalEnvelope();
 	}
 
+	let ivm: IsolatedVmRuntime | null = null;
 	let compiled: string;
 	let SourceCompileErrorClass:
 		| typeof import("../utils/compiler-core").SourceCompileError
 		| undefined;
 	try {
+		assertActive();
+		baseSdk = typeof options.sdk === "function" ? options.sdk(abortController.signal) : options.sdk;
+		ivm = await raceAbort(loadIsolatedVm(), abortController.signal);
+		assertActive();
+		if (!ivm) {
+			throw Object.assign(new Error(
+				"isolated-vm is not installed for this platform. Install with `bun install` on a supported Node version (22–24 with prebuilt binaries, or any version with python3 + build-essential available).",
+			), { name: "RuntimeUnavailable" });
+		}
 		// Deferred: `compiler-core` pulls in esbuild and resolves the connector
 		// SDK entry at module scope, neither of which a run-free process needs.
 		const {
@@ -1090,7 +1131,8 @@ export async function runScript(
 			computeCodeHash,
 			ISOLATE_LANE_BUILD_OPTIONS,
 			SourceCompileError,
-		} = await import("../utils/compiler-core");
+		} = await raceAbort(import("../utils/compiler-core"), abortController.signal);
+		assertActive();
 		SourceCompileErrorClass = SourceCompileError;
 		// Compilation is `mkdtemp` + `writeFile` + a full esbuild bundle + read
 		// back — filesystem I/O and a bundler per call. Measured locally, a cold
@@ -1112,11 +1154,12 @@ export async function runScript(
 			compiledSourceCache.set(cacheKey, cached);
 			compiled = cached.code;
 		} else {
-			const result = await compileSource(options.source, {
+			const result = await raceAbort(compileSource(options.source, {
 				tmpPrefix: ".execute-compile-",
 				label: "ExecuteCompiler",
 				buildOptions: ISOLATE_LANE_BUILD_OPTIONS,
-			});
+			}), abortController.signal);
+			assertActive();
 			compiled = result.compiledCode;
 			const bytes = Buffer.byteLength(compiled, "utf8");
 			// Two concurrent runs of one new source both compile and both land
@@ -1137,8 +1180,9 @@ export async function runScript(
 				compiledSourceCacheBytes -= oldest.value[1].bytes;
 			}
 		}
-	} catch (err) {
-		clearTimeout(abortTimer);
+	} catch (caught) {
+		const err = terminated ? terminalError() : caught;
+		finishRun();
 		const isSourceCompileFailure =
 			SourceCompileErrorClass !== undefined &&
 			err instanceof SourceCompileErrorClass;
@@ -1152,7 +1196,9 @@ export async function runScript(
 		return {
 			success: false,
 			logs,
-			error: {
+			error: terminated || (err instanceof Error && err.name === "RuntimeUnavailable")
+				? classifyRuntimeError(err)
+				: {
 				name: isSourceCompileFailure ? "ValidationError" : "CompileError",
 				message,
 				code: isSourceCompileFailure ? "VALIDATION" : "INTERNAL",
@@ -1174,6 +1220,7 @@ export async function runScript(
 	}
 
 	try {
+		assertActive();
 		isolate = new ivm.Isolate({ memoryLimit: limits.memoryMb });
 		const context = await isolate.createContext();
 		const jail = context.global;
@@ -1182,228 +1229,167 @@ export async function runScript(
 		await jail.set(
 			"__sdk_dispatch",
 			new ivm.Reference(async (path: string, payloadJson: string) => {
-				// Once terminated, don't run any more SDK work (DB/HTTP).
-				if (terminated) {
-					return terminalEnvelope();
-				}
-				sdkCalls++;
-				if (sdkCalls > limits.sdkCallQuota) {
-					// Quota exhaustion is terminal (uncatchable) so a guest cannot
-					// catch the error and keep crossing payloads.
-					terminateRun("QuotaExceeded", quotaMessage);
-					return terminalEnvelope();
-				}
-				if (abortController.signal.aborted) {
-					throw new Error(
-						`TimeoutError: script exceeded ${limits.timeoutMs}ms wall-clock budget`,
-					);
-				}
-				if (!guardMessage(payloadJson)) {
-					return terminalEnvelope();
-				}
-
-				const { args, orgPath } = JSON.parse(payloadJson) as {
-					args: unknown[];
-					orgPath: string[];
-				};
-
-				// Re-enforce the manifest on the host: reject any method the manifest
-				// wouldn't advertise, regardless of run mode (dry-run only skips writes
-				// for the modes that have it — it is not an authorization gate).
-				if (!allowedDispatchPaths.has(path)) {
-					throw new Error(`Unknown SDK method: '${path}'`);
-				}
-				// Cross-org access is gated here too, not just by the manifest omitting
-				// `org` from `topLevel`.
-				if (!allowCrossOrg && orgPath.length > 0) {
-					throw new Error(
-						"CrossOrgAccessDenied: cross-org access is not available here.",
-					);
-				}
-
-				let target: ClientSDK = baseSdk;
-				for (const slug of orgPath) {
-					if (
-						typeof slug !== "string" ||
-						FORBIDDEN_ORG_SLUGS.has(slug) ||
-						!Object.hasOwn(target, "org")
-					) {
-						throw new Error(`Invalid org slug: '${String(slug)}'`);
+				try {
+					assertActive();
+					sdkCalls++;
+					if (sdkCalls > limits.sdkCallQuota) {
+						// Quota exhaustion is terminal (uncatchable) so a guest cannot
+						// catch the error and keep crossing payloads.
+						terminateRun("QuotaExceeded", quotaMessage);
+						return terminalEnvelope();
 					}
-					target = await target.org(slug);
-				}
+					if (!guardMessage(payloadJson)) {
+						return terminalEnvelope();
+					}
 
-				const dispatchPromise: Promise<unknown> = (async () => {
-					if (path === "log") {
-						target.log(
-							args[0] as string,
-							args[1] as Record<string, unknown> | undefined,
-						);
-						appendTrace.append(sdkCallTrace, {
-							path,
-							orgPath,
-							access: METHOD_METADATA[path]?.access ?? "unknown",
-							args: traceArgs(args),
-							skipped: false,
-						});
-						return undefined;
-					}
-					if (path === "query") {
-						appendTrace.append(sdkCallTrace, {
-							path,
-							orgPath,
-							access: METHOD_METADATA[path]?.access ?? "unknown",
-							args: traceArgs(args),
-							skipped: false,
-						});
-						return target.query(args[0] as string, args[1] as Parameters<ClientSDK["query"]>[1]);
-					}
-					const [ns, method] = path.split(".");
-					// `__sdk_dispatch` is a guest-visible global, so a malicious script
-					// could call it directly with an inherited path like `entities.constructor`.
-					// Restrict to own enumerable namespaces and own methods; the guest-side
-					// manifest filter is the friendly path, this is the security backstop.
-					if (!ns || !method || !Object.hasOwn(target, ns)) {
-						throw new Error(`Unknown SDK namespace: '${ns}'`);
-					}
-					const namespace = (
-						target as unknown as Record<
-							string,
-							Record<string, (...a: unknown[]) => unknown>
-						>
-					)[ns];
-					if (
-						!namespace ||
-						typeof namespace !== "object" ||
-						!Object.hasOwn(namespace, method) ||
-						typeof namespace[method] !== "function"
-					) {
+					const { args, orgPath } = JSON.parse(payloadJson) as {
+						args: unknown[];
+						orgPath: string[];
+					};
+
+					// Re-enforce the manifest on the host: reject any method the manifest
+					// wouldn't advertise, regardless of run mode (dry-run only skips writes
+					// for the modes that have it — it is not an authorization gate).
+					if (!allowedDispatchPaths.has(path)) {
 						throw new Error(`Unknown SDK method: '${path}'`);
 					}
-					const access = METHOD_METADATA[path]?.access ?? "unknown";
-					// Belt-and-suspenders: in read mode the guest-side manifest already
-					// drops non-read methods, but enforce it here too so a future
-					// namespace refactor (e.g. class instances) can't silently re-expose
-					// the write surface to a read-only script.
-					if (sdkMode === "read" && access !== "read") {
+					// Cross-org access is gated here too, not just by the manifest omitting
+					// `org` from `topLevel`.
+					if (!allowCrossOrg && orgPath.length > 0) {
 						throw new Error(
-							`Forbidden: SDK method '${path}' is not allowed in read mode`,
+							"CrossOrgAccessDenied: cross-org access is not available here.",
 						);
 					}
-					const trace: SdkCallTraceEntry = {
-						path,
-						orgPath,
-						access,
-						args: traceArgs(args),
-						skipped: isSkippedUnderDryRun({
-							dryRun: options.dryRun,
-							dryRunDispatchPaths: options.dryRunDispatchPaths,
-							access,
-							path,
-						}),
-					};
-					// Skipped (dry-run) calls live only in `side_effect_preview`;
-					// dispatched calls only in `sdk_call_trace` — no double shipping.
-					if (trace.skipped) {
-						const preflight = getSdkPreflight(namespace[method]);
-						if (!preflight) throw new Error(`Missing SDK preflight adapter: '${path}'`);
-						const result = await preflight(...args);
-						const preview = {
-							...trace,
-							args: traceArgs(result.args),
-							required_access: result.required_access,
-							authorization_status: result.authorization_status,
-						};
-						skippedCalls++;
-						appendPreview.append(sideEffectPreview, preview);
-						return { dry_run: true, skipped_call: path, access };
-					}
-					// Count change-capable dispatches separately from the trace. The
-					// trace is a byte-capped ring that evicts OLDEST entries, so a
-					// long run's early writes disappear from it — exactly the runs
-					// most likely to time out. This tally is unbounded (one small
-					// entry per distinct path, no arguments) so the public
-					// started-side-effect summary cannot silently lose them.
-					if (access === "write" || access === "external" || access === "admin") {
-						startedSideEffects.set(path, {
-							access,
-							count: (startedSideEffects.get(path)?.count ?? 0) + 1,
-						});
-					}
-					appendTrace.append(sdkCallTrace, trace);
-					return namespace[method](...args);
-				})();
 
-				let result: unknown;
-				try {
-					result = await raceAgainstAbort(
-						dispatchPromise,
-						abortController.signal,
-					);
+					let target: ClientSDK = baseSdk;
+					for (const slug of orgPath) {
+						if (
+							typeof slug !== "string" ||
+							FORBIDDEN_ORG_SLUGS.has(slug) ||
+							!Object.hasOwn(target, "org")
+						) {
+							throw new Error(`Invalid org slug: '${String(slug)}'`);
+						}
+						target = await raceAbort(target.org(slug), abortController.signal);
+						assertActive();
+					}
+
+					const dispatchPromise: Promise<unknown> = (async () => {
+						assertActive();
+						if (path === "log") {
+							target.log(
+								args[0] as string,
+								args[1] as Record<string, unknown> | undefined,
+							);
+							appendTrace.append(sdkCallTrace, {
+								path,
+								orgPath,
+								access: METHOD_METADATA[path]?.access ?? "unknown",
+								args: traceArgs(args),
+								skipped: false,
+							});
+							return undefined;
+						}
+						if (path === "query") {
+							appendTrace.append(sdkCallTrace, {
+								path,
+								orgPath,
+								access: METHOD_METADATA[path]?.access ?? "unknown",
+								args: traceArgs(args),
+								skipped: false,
+							});
+							return target.query(args[0] as string, args[1] as Parameters<ClientSDK["query"]>[1]);
+						}
+						const [ns, method] = path.split(".");
+						// `__sdk_dispatch` is a guest-visible global, so a malicious script
+						// could call it directly with an inherited path like `entities.constructor`.
+						// Restrict to own enumerable namespaces and own methods; the guest-side
+						// manifest filter is the friendly path, this is the security backstop.
+						if (!ns || !method || !Object.hasOwn(target, ns)) {
+							throw new Error(`Unknown SDK namespace: '${ns}'`);
+						}
+						const namespace = (
+							target as unknown as Record<
+								string,
+								Record<string, (...a: unknown[]) => unknown>
+							>
+						)[ns];
+						if (
+							!namespace ||
+							typeof namespace !== "object" ||
+							!Object.hasOwn(namespace, method) ||
+							typeof namespace[method] !== "function"
+						) {
+							throw new Error(`Unknown SDK method: '${path}'`);
+						}
+						const access = METHOD_METADATA[path]?.access ?? "unknown";
+						// Belt-and-suspenders: in read mode the guest-side manifest already
+						// drops non-read methods, but enforce it here too so a future
+						// namespace refactor (e.g. class instances) can't silently re-expose
+						// the write surface to a read-only script.
+						if (sdkMode === "read" && access !== "read") {
+							throw new Error(
+								`Forbidden: SDK method '${path}' is not allowed in read mode`,
+							);
+						}
+						const trace: SdkCallTraceEntry = {
+							path,
+							orgPath,
+							access,
+							args: traceArgs(args),
+							skipped: isSkippedUnderDryRun({
+								dryRun: options.dryRun,
+								dryRunDispatchPaths: options.dryRunDispatchPaths,
+								access,
+								path,
+							}),
+						};
+						// Skipped (dry-run) calls live only in `side_effect_preview`;
+						// dispatched calls only in `sdk_call_trace` — no double shipping.
+						if (trace.skipped) {
+							const preflight = getSdkPreflight(namespace[method]);
+							if (!preflight) throw new Error(`Missing SDK preflight adapter: '${path}'`);
+							const result = await preflight(...args);
+							assertActive();
+							const preview = {
+								...trace,
+								args: traceArgs(result.args),
+								required_access: result.required_access,
+								authorization_status: result.authorization_status,
+							};
+							skippedCalls++;
+							appendPreview.append(sideEffectPreview, preview);
+							return { dry_run: true, skipped_call: path, access };
+						}
+						assertActive();
+						// Count change-capable dispatches separately from the trace. The
+						// trace is a byte-capped ring that evicts OLDEST entries, so a
+						// long run's early writes disappear from it — exactly the runs
+						// most likely to time out. This tally is unbounded (one small
+						// entry per distinct path, no arguments) so the public
+						// started-side-effect summary cannot silently lose them.
+						if (access === "write" || access === "external" || access === "admin") {
+							startedSideEffects.set(path, {
+								access,
+								count: (startedSideEffects.get(path)?.count ?? 0) + 1,
+							});
+						}
+						appendTrace.append(sdkCallTrace, trace);
+						return namespace[method](...args);
+					})();
+
+					const result = await raceAbort(dispatchPromise, abortController.signal);
+					assertActive();
+					const json = JSON.stringify({
+						__lobu_sdk_dispatch: 1,
+						ok: true,
+						has_value: result !== undefined,
+						...(result === undefined ? {} : { value: result }),
+					});
+					return guardMessage(json) ? json : terminalEnvelope();
 				} catch (error) {
-					if (error instanceof McpScopeRequiredError) {
-						requiredMcpScopes.add(error.requiredScope);
-						const json = JSON.stringify({
-							__lobu_sdk_dispatch: 1,
-							ok: false,
-								error: {
-									name: error.name,
-									message: error.message,
-									classificationToken:
-										trustErrorClassification("PERMISSION"),
-							},
-						});
-						return guardMessage(json) ? json : terminalEnvelope();
-					}
-					if (error instanceof ClientSdkActionError) {
-						const code = classifyClientSdkActionResult(error.result);
-						const json = JSON.stringify({
-							__lobu_sdk_dispatch: 1,
-							ok: false,
-							error: {
-									name: error.name,
-									message: error.message,
-									details: safeErrorDetails(error.result),
-									classificationToken: trustErrorClassification(code),
-							},
-						});
-						return guardMessage(json) ? json : terminalEnvelope();
-					}
-					if (error instanceof ToolUserError) {
-						const code = classifyToolUserError(error);
-						const json = JSON.stringify({
-							__lobu_sdk_dispatch: 1,
-							ok: false,
-							error: {
-									name: error.name,
-									message: error.message,
-									classificationToken: trustErrorClassification(code),
-							},
-						});
-						return guardMessage(json) ? json : terminalEnvelope();
-					}
-					if (isToolError(error)) {
-						const json = JSON.stringify({
-							__lobu_sdk_dispatch: 1,
-							ok: false,
-							error: {
-									name: error.name,
-									message: error.message,
-									classificationToken:
-										trustErrorClassification(error.code),
-							},
-						});
-						return guardMessage(json) ? json : terminalEnvelope();
-					}
-					throw error;
+					return sdkErrorEnvelope(error);
 				}
-				const json = JSON.stringify({
-					__lobu_sdk_dispatch: 1,
-					ok: true,
-					has_value: result !== undefined,
-					...(result === undefined ? {} : { value: result }),
-				});
-				return guardMessage(json) ? json : terminalEnvelope();
 			}),
 		);
 
@@ -1437,7 +1423,13 @@ export async function runScript(
 		await jail.set(
 			"__sleep",
 			new ivm.Reference(async (ms: number) => {
-				await sleepAgainstAbort(ms, abortController.signal);
+				try {
+					assertActive();
+					await sleepAgainstAbort(ms, abortController.signal);
+					return null;
+				} catch (error) {
+					return sdkErrorEnvelope(error);
+				}
 			}),
 		);
 
@@ -1455,17 +1447,16 @@ export async function runScript(
 		const script = await isolate.compileScript(
 			`${guestPreamble(errorTokenReader)}\n${compiled}\n${options.extractExport ? EXTRACT_RUNNER : guestRunner(errorTokenReader)}`,
 		);
-		const returnJson = (await withTimeout(
+		assertActive();
+		const returnJson = await raceAbort(
 			script.run(context, {
-				timeout: limits.timeoutMs,
+				timeout: Math.max(1, deadline - Date.now()),
 				promise: true,
 				copy: true,
 			}) as Promise<string | null>,
-			limits.timeoutMs,
-		)) as string | null;
-		if (terminated) {
-			throw new Error(terminalState.message);
-		}
+			abortController.signal,
+		);
+		assertActive();
 		if (returnJson) {
 			const envelopeBytes = Buffer.byteLength(returnJson, "utf8");
 			// `extractExport` reads a JSON Schema; a partially-cut schema would
@@ -1547,6 +1538,7 @@ export async function runScript(
 			}
 		}
 
+		assertActive();
 		return {
 			success: true,
 			...(!options.extractExport
@@ -1570,7 +1562,7 @@ export async function runScript(
 	} catch (err) {
 		// A terminal failure disposes the isolate, which rejects with a raw
 		// termination error — report the terminal reason instead.
-		const e = (terminated ? new Error(terminalState.message) : err) as Error;
+		const e = (terminated ? terminalError() : err) as Error;
 		return {
 			success: false,
 			logs,
@@ -1587,9 +1579,6 @@ export async function runScript(
 			sideEffectPreview,
 		};
 	} finally {
-		clearTimeout(abortTimer);
-		if (isolate && !isolate.isDisposed) {
-			isolate.dispose();
-		}
+		finishRun();
 	}
 }

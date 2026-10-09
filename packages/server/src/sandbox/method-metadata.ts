@@ -49,18 +49,9 @@ export type MethodMetadata = MethodAccessMetadata & {
 export const RUNTIME_HELPER_METADATA: Record<string, MethodMetadata> = {
 	"ctx.sleep": {
 		summary:
-			"Pause a sandbox script for 0–30000ms. The wait aborts at the script's overall timeout; use it between SDK reads when polling.",
+			"Pause a sandbox script for 0–30000ms for a short, bounded retry delay. The wait ends at cancellation or the script deadline, which is terminal even if caught. For long device work, return a background operation run_id and read operations.getRun in a later invocation instead of polling here.",
 		access: "read",
 		example: "await ctx.sleep(1000);",
-		usageExample: `// Poll a run without exposing unrestricted timer globals.
-export default async (ctx, client) => {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const run = await client.operations.getRun(123);
-    if (run.status !== 'pending') return run;
-    await ctx.sleep(1000);
-  }
-  throw new Error('Run did not finish in time');
-};`,
 	},
 };
 

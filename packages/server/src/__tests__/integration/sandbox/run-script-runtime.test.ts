@@ -697,6 +697,165 @@ describe("sandbox runtime", () => {
   });
 });
 
+
+describe("sandbox terminal deadlines", () => {
+  it.each(["sleep", "SDK"])("cannot catch a %s deadline and report success", async (kind) => {
+    const result = await runScript({
+      source: kind === "sleep"
+        ? "export default async(ctx) => { try { await ctx.sleep(500); } catch {} return 'caught'; };"
+        : "export default async(_ctx, c) => { try { await c.query('SELECT 1'); } catch {} return 'caught'; };",
+      sdk: stubSDK({ query: async () => { await new Promise(r => setTimeout(r, 200)); return []; } }),
+      limits: { timeoutMs: 100 },
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.name).toBe("TimeoutError");
+    expect(result.returnValue).toBeUndefined();
+  });
+
+  it("bounds compilation and never starts the guest after expiry", async () => {
+    const { compileSource } = await import("../../../utils/compiler-core");
+    const actual = await vi.importActual<typeof import("../../../utils/compiler-core")>("../../../utils/compiler-core");
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(compileSource).mockImplementationOnce(async (...args) => {
+      await gate;
+      return actual.compileSource(...args);
+    });
+    const pending = runScript({
+      source: "// delayed-compile-deadline\nexport default async () => 'ran';",
+      sdk: stubSDK(),
+      limits: { timeoutMs: 50 },
+    });
+    try {
+      const early = await Promise.race([
+        pending,
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 200)),
+      ]);
+      expect(early).toMatchObject({ success: false, error: { name: "TimeoutError" } });
+    } finally {
+      release();
+      await pending;
+    }
+  });
+
+  it("does not dispatch after workspace resolution crosses the deadline", async () => {
+    const source = "export default async(_ctx, c) => (await c.org('synthetic-scope')).query('SELECT 1');";
+    await runScript({ source, sdk: stubSDK({ org: async () => stubSDK({ query: async () => [] }) }), allowCrossOrg: true });
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const query = vi.fn(async () => []);
+    const pending = runScript({
+      source,
+      sdk: stubSDK({ org: async () => { entered(); await gate; return stubSDK({ query }); } }),
+      allowCrossOrg: true,
+      limits: { timeoutMs: 100 },
+    });
+    try {
+      await started;
+      expect(await pending).toMatchObject({ success: false, error: { name: "TimeoutError" } });
+    } finally {
+      release();
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("terminates caught failures and cleanup without unhandled bridge rejections", async () => {
+    const query = vi.fn(async () => { await new Promise(resolve => setTimeout(resolve, 200)); return []; });
+    const result = await runScript({
+      source: "export default async(_ctx, c) => { try { await c.query('first'); } catch {} finally { try { await c.query('cleanup'); } catch {} } return 'caught'; };",
+      sdk: stubSDK({ query }),
+      limits: { timeoutMs: 100 },
+    });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(result).toMatchObject({ success: false, error: { name: "TimeoutError" } });
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates caller cancellation to the handler and rejects caught aborts", async () => {
+    const controller = new AbortController();
+    let handlerSignal: AbortSignal | undefined;
+    const result = await runScript({
+      source: "export default async(_ctx, c) => { try { await c.query('cancel'); } catch {} return 'caught'; };",
+      abortSignal: controller.signal,
+      sdk: (signal) => {
+        handlerSignal = signal;
+        return stubSDK({ query: async () => {
+          controller.abort(new Error("caller stopped"));
+          await new Promise(resolve => setTimeout(resolve, 100));
+          return [];
+        } });
+      },
+      limits: { timeoutMs: 1000 },
+    });
+    expect(handlerSignal?.aborted).toBe(true);
+    expect(result).toMatchObject({ success: false, error: { name: "AbortError", message: "caller stopped" } });
+  });
+
+  it("never compiles or dispatches an already cancelled invocation", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const query = vi.fn(async () => []);
+    const before = await compileCallCount();
+    const result = await runScript({
+      source: "// pre-cancelled-guest\nexport default async(_ctx,c) => c.query('SELECT 1');",
+      sdk: stubSDK({ query }),
+      abortSignal: controller.signal,
+    });
+    expect(result).toMatchObject({ success: false, error: { name: "AbortError" } });
+    expect(query).not.toHaveBeenCalled();
+    expect(await compileCallCount()).toBe(before);
+  });
+
+  it("blocks detached SDK dispatch after successful scope exit", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const query = vi.fn(async () => []);
+    const result = await runScript({
+      source: "export default async(_ctx,c) => { c.org('synthetic-scope').query('late').catch(() => {}); await c.query('barrier'); return 'done'; };",
+      allowCrossOrg: true,
+      sdk: stubSDK({
+        org: async () => { entered(); await gate; return stubSDK({ query }); },
+        query: async () => { await started; return []; },
+      }),
+    });
+    release();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(result).toMatchObject({ success: true, returnValue: "done" });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("retains completed writes and reports dispatched side effects on timeout", async () => {
+    const committed: string[] = [];
+    const result = await runScript({
+      source: "export default async(ctx,c) => { await c.entities.update({ entity_id: 101, metadata: { name: 'synthetic' } }); await ctx.sleep(500); };",
+      sdk: stubSDK({ entities: { update: async () => { committed.push("saved"); return {}; } } as never }),
+      maxAccessLevel: "admin",
+      limits: { timeoutMs: 100 },
+    });
+    expect(result).toMatchObject({ success: false, error: { name: "TimeoutError" } });
+    expect(committed).toEqual(["saved"]);
+    expect(result.startedSideEffects).toEqual([{ path: "entities.update", access: "write", count: 1 }]);
+  });
+
+  it("closes the handler cancellation scope after a successful script", async () => {
+    let handlerSignal: AbortSignal | undefined;
+    const result = await runScript({
+      source: "export default async(_ctx,c) => c.query('scope-success');",
+      sdk: signal => {
+        handlerSignal = signal;
+        return stubSDK({ query: async () => { expect(signal.aborted).toBe(false); return [1]; } });
+      },
+    });
+    expect(result).toMatchObject({ success: true, returnValue: [1] });
+    expect(handlerSignal?.aborted).toBe(true);
+  });
+});
+
 describe("compiled-source memo", () => {
   const stub = stubSDK();
 

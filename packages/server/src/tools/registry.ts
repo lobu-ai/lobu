@@ -180,11 +180,11 @@ export interface ToolContext {
   /** Whether an unqualified direct search should fan out over live grants. */
   directSearchFederation: boolean;
   /**
-   * Set by the sandbox when the script's wall-clock budget runs out. Handlers
-   * that opt in (today: `query_sql` and `client.query`) race their work
-   * against this signal so the awaiting caller unblocks immediately. The
-   * underlying postgres connection isn't cancelled — `statement_timeout` is
-   * the actual server-side cap.
+   * Host cancellation scope. The sandbox aborts it at its deadline, caller
+   * cancellation, or scope exit (including success), so opted-in handlers can
+   * stop waiting and release resources. This is not a transaction boundary:
+   * committed writes remain committed, and a promise race does not cancel the
+   * underlying postgres query — `statement_timeout` remains its server-side cap.
    */
   abortSignal?: AbortSignal;
   /** Original request URL, used to derive public-facing origin for URL generation */
@@ -354,7 +354,7 @@ const AGENT_TOOLS: ToolDefinition[] = [
     name: 'query_sdk',
     scope: 'account',
     description:
-      'Run capability-scoped, read-only TypeScript through the Lobu SDK. On bare OAuth /mcp, select a workspace with await client.org(target) before workspace methods. Query entities, relationships, feeds, operations, metrics, and authorized connected-source data; write, administrative, and external-action methods are rejected by the sandbox. Use `run_sdk` for mutations, `search_sdk` to discover methods, and `await ctx.sleep(ms)` for bounded polling. Lobu appends a private audit/activity record for the invocation.',
+      'Run capability-scoped, read-only TypeScript through the Lobu SDK. On bare OAuth /mcp, select a workspace with await client.org(target) before workspace methods. Query entities, relationships, feeds, operations, metrics, and authorized connected-source data; write, administrative, and external-action methods are rejected by the sandbox. Use `run_sdk` for mutations and `search_sdk` to discover methods. Keep batches within the wall-clock budget and return a partial result with a cursor before expiry; reserve `ctx.sleep(ms)` for short bounded retries. Start long device work in `run_sdk` with operations.execute({ ..., background: true }) and check operations.getRun later. Lobu appends a private audit/activity record for the invocation.',
     inputSchema: QuerySchema,
     outputSchema: SdkScriptResultSchema,
     // Private connector reads do not mutate an external/public system.
