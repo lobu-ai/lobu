@@ -442,6 +442,99 @@ export function syncScope(
   return "full";
 }
 
+/**
+ * Everything the MCP iframe bundle compiles: the apps themselves plus the
+ * shared components, hooks, libs, styles, and build configuration they pull
+ * in (see module comment on why this list is explicit). Any touch forces the
+ * reboot path — dev-native.sh rebuilds the bundle at boot because Vite HMR
+ * cannot reach it, and the gateway serves built assets from in-memory caches
+ * that only a restart clears.
+ *
+ * Deliberately explicit rather than prefix-broad (ui/button.tsx rather than
+ * the whole components/ui dir): an under-broad list silently serves stale
+ * iframe content, while precision keeps ordinary UI iteration on the fast
+ * HMR path. The closure test fails loudly if mcp-apps imports drift outside
+ * this set.
+ */
+const MCP_REBUILD_PREFIXES = [
+  "packages/owletto/src/mcp-apps/",
+  "packages/owletto/src/lib/json-renderer/",
+];
+
+const MCP_REBUILD_FILES = new Set([
+  "packages/owletto/src/components/agents/interaction-card.tsx",
+  "packages/owletto/src/components/entities/entity-view-templates.ts",
+  "packages/owletto/src/components/entity-tabs/connections-tab/dynamic-connector-form.tsx",
+  "packages/owletto/src/components/entity-tabs/events-tab/navigation.ts",
+  "packages/owletto/src/components/schema-value-editors.tsx",
+  "packages/owletto/src/components/ui/button.tsx",
+  "packages/owletto/src/components/ui/checkbox.tsx",
+  "packages/owletto/src/components/ui/form-draft-conflict.tsx",
+  "packages/owletto/src/components/ui/input.tsx",
+  "packages/owletto/src/components/ui/select.tsx",
+  "packages/owletto/src/components/ui/spinner.tsx",
+  "packages/owletto/src/components/ui/table.tsx",
+  "packages/owletto/src/components/ui/textarea.tsx",
+  "packages/owletto/src/hooks/use-form-draft.ts",
+  "packages/owletto/src/lib/api-diagnostics.ts",
+  "packages/owletto/src/lib/api.ts",
+  "packages/owletto/src/lib/api/agent-permissions.ts",
+  "packages/owletto/src/lib/api/agents.ts",
+  "packages/owletto/src/lib/api/attention-cache.ts",
+  "packages/owletto/src/lib/api/automations.ts",
+  "packages/owletto/src/lib/api/clients.ts",
+  "packages/owletto/src/lib/api/connections.ts",
+  "packages/owletto/src/lib/api/content-query-keys.ts",
+  "packages/owletto/src/lib/api/content.ts",
+  "packages/owletto/src/lib/api/core.ts",
+  "packages/owletto/src/lib/api/entities.ts",
+  "packages/owletto/src/lib/api/hook-factory.ts",
+  "packages/owletto/src/lib/api/notifications.ts",
+  "packages/owletto/src/lib/api/runs.ts",
+  "packages/owletto/src/lib/api/sandboxes.ts",
+  "packages/owletto/src/lib/api/search-memory.ts",
+  "packages/owletto/src/lib/auth-state.tsx",
+  "packages/owletto/src/lib/auth.ts",
+  "packages/owletto/src/lib/embedded-auth.ts",
+  "packages/owletto/src/lib/event-filters.ts",
+  "packages/owletto/src/lib/filter-utils.ts",
+  "packages/owletto/src/lib/form-input-draft.ts",
+  "packages/owletto/src/lib/public-bootstrap.ts",
+  "packages/owletto/src/lib/reserved.ts",
+  "packages/owletto/src/lib/source-attribution.ts",
+  "packages/owletto/src/lib/subdomain.ts",
+  "packages/owletto/src/lib/telemetry.ts",
+  "packages/owletto/src/lib/url.ts",
+  "packages/owletto/src/lib/utils.ts",
+  "packages/owletto/src/index.css",
+  "packages/owletto/src/fonts.css",
+  "packages/owletto/postcss.config.js",
+  "packages/owletto/vite.config.mcp.ts",
+  "packages/owletto/vite.config.mcp-review.ts",
+  "packages/owletto/mcp-app-harness.html",
+]);
+
+export function needsMcpRebuild(path: string): boolean {
+  if (MCP_REBUILD_FILES.has(path)) return true;
+  return MCP_REBUILD_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+/**
+ * Scope with the MCP rule folded in: iframe inputs always mean the reboot
+ * path, everything else defers to the frontend/full split.
+ */
+export function resolveScope(
+  changedPaths: string[],
+  envChanged: boolean
+): SyncScope {
+  if (changedPaths.some((path) => needsMcpRebuild(path))) return "full";
+  return syncScope(
+    changedPaths.filter((path) => !path.startsWith("packages/owletto/")),
+    changedPaths.filter((path) => path.startsWith("packages/owletto/")),
+    envChanged
+  );
+}
+
 interface SyncPlan {
   /** Full remote truth after this sync (for the next manifest). */
   fullList: string[];
@@ -955,11 +1048,14 @@ export async function applyTreeSync(
   const plan = planSync(prevManifest, full, effective);
   const changedPaths = [...plan.upload, ...plan.remove];
   const envChanged = state?.envHash !== envHash;
-  const scope = syncScope(
-    changedPaths.filter((path) => !path.startsWith("packages/owletto/")),
-    changedPaths.filter((path) => path.startsWith("packages/owletto/")),
-    envChanged
-  );
+  // MCP iframe sources (and their shared inputs) compile into a separately
+  // built bundle that Vite HMR cannot reach, and the gateway caches the built
+  // assets in memory — so any touch forces the reboot path, which rebuilds
+  // via dev-native.sh and restarts the server with cold caches.
+  const scope = resolveScope(changedPaths, envChanged);
+  if (scope === "full" && changedPaths.some((path) => needsMcpRebuild(path))) {
+    console.log(">> MCP app sources changed — rebooting to rebuild the bundle");
+  }
   const upload = plan.upload;
   if (upload.length === 0 && plan.remove.length === 0 && !envChanged) {
     console.log(">> tree unchanged since last sync — nothing to upload");

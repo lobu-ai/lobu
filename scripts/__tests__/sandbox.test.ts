@@ -6,13 +6,15 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, normalize, resolve } from "node:path";
 import {
   HOST_ONLY_ENV_KEYS,
   SANDBOX_CONTROLLED_ENV_KEYS,
@@ -34,6 +36,7 @@ import {
   listTreeFiles,
   lockfileEntries,
   loginLink,
+  needsMcpRebuild,
   orphanSandboxNames,
   parseLsFilesS,
   parsePorcelainZ,
@@ -42,6 +45,7 @@ import {
   previewUrlFor,
   readSyncState,
   resolveOwnerEmail,
+  resolveScope,
   sandboxName,
   sanitizedEnv,
   sessionTokenFrom,
@@ -1382,5 +1386,200 @@ describe("incremental sync regressions", () => {
       fetchMock.mockRestore();
       rmSync(statePath, { force: true });
     }
+  });
+});
+
+describe("needsMcpRebuild", () => {
+  test("matches apps, shared inputs, styles, and build config", () => {
+    expect(
+      needsMcpRebuild("packages/owletto/src/mcp-apps/review/main.tsx")
+    ).toBe(true);
+    expect(
+      needsMcpRebuild("packages/owletto/src/components/ui/button.tsx")
+    ).toBe(true);
+    expect(
+      needsMcpRebuild("packages/owletto/src/lib/json-renderer/data-table.tsx")
+    ).toBe(true);
+    expect(needsMcpRebuild("packages/owletto/src/index.css")).toBe(true);
+    expect(needsMcpRebuild("packages/owletto/vite.config.mcp.ts")).toBe(true);
+  });
+
+  test("leaves ordinary SPA and server code on the fast path", () => {
+    expect(
+      needsMcpRebuild("packages/owletto/src/components/sidebar/app-sidebar.tsx")
+    ).toBe(false);
+    expect(needsMcpRebuild("packages/owletto/src/main.tsx")).toBe(false);
+    expect(needsMcpRebuild("packages/server/src/index.ts")).toBe(false);
+    expect(needsMcpRebuild("scripts/sandbox.ts")).toBe(false);
+  });
+});
+
+describe("resolveScope", () => {
+  test("routes iframe inputs to the reboot path even when alone", () => {
+    expect(
+      resolveScope(["packages/owletto/src/mcp-apps/review/main.tsx"], false)
+    ).toBe("full");
+    expect(
+      resolveScope(
+        ["packages/owletto/src/components/sidebar/app-sidebar.tsx"],
+        false
+      )
+    ).toBe("frontend");
+    expect(resolveScope([], false)).toBe("none");
+    expect(resolveScope([], true)).toBe("full");
+  });
+});
+
+describe("mcp bundle coverage", () => {
+  const owlettoSrc = resolve(import.meta.dir, "../../packages/owletto/src");
+
+  function resolveImport(
+    spec: string,
+    fromFile: string
+  ): string | string[] | "external" | null {
+    const candidates = (base: string) => {
+      const stripped = base.endsWith(".js") ? base.slice(0, -3) : null;
+      return [
+        base,
+        ...(stripped ? [`${stripped}.ts`] : []),
+        `${base}.ts`,
+        `${base}.tsx`,
+        `${base}.css`,
+        join(base, "index.ts"),
+        join(base, "index.tsx"),
+      ];
+    };
+    const pick = (base: string): string | string[] | null => {
+      for (const candidate of candidates(base)) {
+        try {
+          if (statSync(candidate).isFile()) return candidate;
+        } catch {
+          // try next suffix
+        }
+      }
+      // A directory spec (tailwind `@source`, extensionless folder imports):
+      // expand to the source files beneath it.
+      try {
+        if (statSync(base).isDirectory()) {
+          return walkSources(base);
+        }
+      } catch {
+        // not a directory either
+      }
+      return null;
+    };
+    if (spec.startsWith("@/")) return pick(join(owlettoSrc, spec.slice(2)));
+    if (spec.startsWith("."))
+      return pick(normalize(join(dirname(fromFile), spec)));
+    return "external";
+  }
+
+  function walkSources(dir: string): string[] {
+    const out: string[] = [];
+    const entries = readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === "node_modules") continue;
+      if (/\.(test|stories)\.[^.]+$/.test(entry.name)) continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...walkSources(full));
+      else if (/\.(ts|tsx|css)$/.test(entry.name)) out.push(full);
+    }
+    return out;
+  }
+
+  function reachableFiles(entries: string[]): {
+    files: string[];
+    unresolved: string[];
+  } {
+    const repoRoot = resolve(owlettoSrc, "..", "..", "..");
+    const seen = new Set<string>();
+    const unresolved: string[] = [];
+    const queue = [...entries];
+    const inScope = (target: string) => {
+      const normalized = normalize(target);
+      return (
+        normalized.startsWith(`${repoRoot}/`) &&
+        !normalized.includes("/node_modules/")
+      );
+    };
+    while (queue.length > 0) {
+      const file = queue.pop() as string;
+      if (seen.has(file)) continue;
+      seen.add(file);
+      // Test fixtures ride alongside sources but never enter a bundle.
+      if (/\.(test|stories)\.[^.]+$/.test(file)) continue;
+      let source: string;
+      try {
+        source = readFileSync(file, "utf8");
+      } catch {
+        unresolved.push(file);
+        continue;
+      }
+      const specs = new Set<string>();
+      // A whole-statement `import type` is erased at compile (enforced by
+      // verbatimModuleSyntax) so it contributes no bytes to the bundle.
+      // Inline `type` qualifiers inside value imports still traverse —
+      // conservative, since their sibling values do ship.
+      const importPattern =
+        /^\s*import(\s+type)?\s+(?:[^;]*?\sfrom\s+)?["']([^"']+)["']/gm;
+      for (const match of source.matchAll(importPattern)) {
+        if (!match[1]) specs.add(match[2]);
+      }
+      // Only the apps' own stylesheets contribute `@source` inputs: the MCP
+      // vite plugin strips every `@source` line out of the shared stylesheet
+      // before the iframe build, so index.css's broad SPA scans never feed it.
+      // (`@import` above is a real file inclusion and is always followed.)
+      const styleInputs =
+        file.startsWith(`${owlettoSrc}/mcp-apps/`) && file.endsWith(".css");
+      for (const match of source.matchAll(
+        /@(?:import|source)\s+["']([^"']+)["']/g
+      )) {
+        if (match[0].startsWith("@source") && !styleInputs) continue;
+        specs.add(match[1]);
+      }
+      for (const spec of specs) {
+        if (
+          spec === "tailwindcss" ||
+          (!spec.startsWith("@") && !spec.startsWith("."))
+        ) {
+          continue;
+        }
+        const resolved = resolveImport(spec, file);
+        if (resolved === null) {
+          unresolved.push(`${file} -> ${spec}`);
+        } else if (resolved !== "external") {
+          for (const target of Array.isArray(resolved)
+            ? resolved
+            : [resolved]) {
+            // Dependencies live outside the synced tree (or in node_modules,
+            // which is never uploaded): they cannot stale the bundle.
+            if (inScope(target) && !seen.has(target)) queue.push(target);
+          }
+        }
+      }
+    }
+    return { files: [...seen], unresolved };
+  }
+
+  test("every module the iframe bundle compiles is reboot-covered", () => {
+    if (!existsSync(join(owlettoSrc, "mcp-apps"))) return;
+    const repoRoot = resolve(owlettoSrc, "..", "..", "..");
+    const { files, unresolved } = reachableFiles([
+      join(owlettoSrc, "mcp-apps/interaction/main.tsx"),
+      join(owlettoSrc, "mcp-apps/review/main.tsx"),
+    ]);
+    // node_modules content is never synced, so it cannot stale the bundle.
+    const relevant = unresolved.filter(
+      (entry) =>
+        !entry.includes("/node_modules/") &&
+        normalize(entry.split(" -> ")[0]).startsWith(`${repoRoot}/`)
+    );
+    expect(relevant).toEqual([]);
+    const uncovered = files
+      .map((file) => normalize(file).replace(`${repoRoot}/`, ""))
+      .filter(
+        (path) => path.startsWith("packages/owletto/") && !needsMcpRebuild(path)
+      );
+    expect(uncovered).toEqual([]);
   });
 });
