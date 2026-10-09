@@ -1402,6 +1402,9 @@ describe("needsMcpRebuild", () => {
     ).toBe(true);
     expect(needsMcpRebuild("packages/owletto/src/index.css")).toBe(true);
     expect(needsMcpRebuild("packages/owletto/vite.config.mcp.ts")).toBe(true);
+    expect(
+      needsMcpRebuild("packages/owletto/scripts/version-mcp-app-assets.mjs")
+    ).toBe(true);
   });
 
   test("leaves ordinary SPA and server code on the fast path", () => {
@@ -1427,6 +1430,15 @@ describe("resolveScope", () => {
     ).toBe("frontend");
     expect(resolveScope([], false)).toBe("none");
     expect(resolveScope([], true)).toBe("full");
+  });
+
+  test("an asset-versioning-script-only change triggers boot", () => {
+    expect(
+      resolveScope(
+        ["packages/owletto/scripts/version-mcp-app-assets.mjs"],
+        false
+      )
+    ).toBe("full");
   });
 });
 

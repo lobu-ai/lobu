@@ -512,6 +512,11 @@ const MCP_REBUILD_FILES = new Set([
   "packages/owletto/vite.config.mcp.ts",
   "packages/owletto/vite.config.mcp-review.ts",
   "packages/owletto/mcp-app-harness.html",
+  // Invoked by the build itself, not imported: build:mcp-apps post-processes
+  // the emitted HTML through this script, so it shapes output bytes exactly
+  // like a source edit does. (check-mcp-app-bundle.mjs only verifies and is
+  // deliberately excluded.)
+  "packages/owletto/scripts/version-mcp-app-assets.mjs",
 ]);
 
 export function needsMcpRebuild(path: string): boolean {
