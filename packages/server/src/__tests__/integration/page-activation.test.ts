@@ -718,23 +718,23 @@ describe("page-activated operation runs", () => {
 			    activation_tab_id = 29
 			WHERE id = ${recreated.browser_handoff.run_id}
 		`;
-		const completedList = await listNotifications({
+		const preparingList = await listNotifications({
 			organizationId: seeded.org.id,
 			userId: seeded.user.id,
 		});
-		expect(completedList.notifications[0]?.browser_handoff).toMatchObject({
+		expect(preparingList.notifications[0]?.browser_handoff).toMatchObject({
 			run_id: recreated.browser_handoff.run_id,
 			state: "preparing",
 		});
-		const completedResponse = await appFor(
+		const preparingResponse = await appFor(
 			seeded.user.id,
 			seeded.org.id,
 		).request(
 			`/notifications/${createdNotification.event_id}/browser-handoff/recreate`,
 			{ method: "POST" },
 		);
-		expect(completedResponse.status).toBe(409);
-		await expect(completedResponse.json()).resolves.toMatchObject({
+		expect(preparingResponse.status).toBe(409);
+		await expect(preparingResponse.json()).resolves.toMatchObject({
 			error: expect.stringContaining("already activated"),
 		});
 	});
@@ -782,10 +782,9 @@ describe("page-activated operation runs", () => {
 		// recent-window slice would drop it, but the "stays until Done" contract
 		// must keep it in the lens regardless.
 		//
-		// Only while it is still openable. A draft with no linked run resolves
-		// `expired` — it can never be activated — and pinning THAT past the
-		// window permanently spent one of the caller's `limit` slots on a dead
-		// card. Both are seeded here so the two states cannot drift apart again.
+		// Waiting, preparing, and prepared drafts remain until Done. A draft
+		// with no linked run resolves `expired`; once read, it must not consume
+		// an attention slot. Seed both a ready draft and an expired one here.
 		await createNotificationForUsers([seeded.user.id], {
 			organizationId: seeded.org.id,
 			type: "agent_message",

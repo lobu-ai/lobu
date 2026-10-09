@@ -84,10 +84,10 @@ interface CreateNotificationParams {
 	/**
 	 * Who the chat fan-out may reach when no explicit target resolves.
 	 *
-	 * `"org"` (the default) keeps the org-wide broadcast every informational
-	 * notification relies on: with no target, post into every channel any of the
-	 * org's agents is bound to. `"targeted"` fails CLOSED — an unresolved target
-	 * delivers to NO channel rather than everywhere.
+	 * `"org"` posts into every channel any of the org's agents is bound to when
+	 * no target resolves. `"targeted"` fails CLOSED — an unresolved target
+	 * delivers to NO channel rather than everywhere. Browser handoffs default
+	 * to `"targeted"`; other callers default to `"org"`.
 	 *
 	 * Approvals are `"targeted"`. An approval is a decision exactly one human
 	 * makes, and `notification_targets` already addresses precisely the org's
