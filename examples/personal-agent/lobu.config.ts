@@ -1226,7 +1226,7 @@ Deduplicate within the run by connection plus origin_id. Choose at most three pr
 
 Return up to three useful findings with creator, canonical post URL, source ID, what was actually observed, practical value, and uncertainty. Keep research private in the run result; do not ingest a raw timeline mirror or publish/send anything.
 
-The intended later Automation may like strong, visually verified matches automatically, as the user requested. Its deduplication, cadence, and action budget belong to the Automation rather than the connector. This preview does not enable that behavior. Comments and publication must remain user-submitted actions.`,
+The intended later Automation may like strong, visually verified matches automatically, as the user requested. Its deduplication, cadence, and action budget belong to the Automation rather than the connector. This preview does not enable them. Comments and publication must remain user-submitted actions.`,
 });
 
 export default defineConfig({
