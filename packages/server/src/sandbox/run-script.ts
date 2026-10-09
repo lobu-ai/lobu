@@ -1104,7 +1104,15 @@ export async function runScript(
 			});
 			return guardMessage(json) ? json : terminalEnvelope();
 		}
-		const failure = classifyRuntimeError(error);
+		// Classification belongs at the script-result boundary: guest catch blocks
+		// still need the host error's name and diagnostic message.
+		const failure = {
+			name: boundScriptErrorText(error instanceof Error ? error.name : "Error", MAX_SCRIPT_ERROR_NAME_BYTES),
+			message: boundScriptErrorText(
+				error instanceof Error ? error.message : errorFieldText(error, "Script execution failed"),
+				MAX_SCRIPT_ERROR_MESSAGE_BYTES,
+			),
+		};
 		const json = JSON.stringify({ __lobu_sdk_dispatch: 1, ok: false, error: failure });
 		return guardMessage(json) ? json : terminalEnvelope();
 	}

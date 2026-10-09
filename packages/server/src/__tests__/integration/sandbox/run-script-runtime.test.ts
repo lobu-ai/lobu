@@ -348,6 +348,31 @@ describe("sandbox runtime", () => {
     });
   });
 
+  it.each([Error, TypeError, RangeError])("preserves a caught host %s name and message", async (ErrorClass) => {
+    const result = await runScript({
+      source: `export default async (_ctx, client) => {
+        try { await client.query('failure'); }
+        catch (error) { return { name: error.name, message: error.message }; }
+      };`,
+      sdk: stubSDK({ query: async () => { throw new ErrorClass("host failure"); } }),
+    });
+    expect(result).toMatchObject({
+      success: true,
+      returnValue: { name: ErrorClass.name, message: "host failure" },
+    });
+  });
+
+  it("preserves the diagnostic from a non-Error host rejection", async () => {
+    const result = await runScript({
+      source: "export default async (_ctx, client) => client.query('failure');",
+      sdk: stubSDK({ query: () => Promise.reject("upstream failed") }),
+    });
+    expect(result).toMatchObject({
+      success: false,
+      error: { name: "ScriptError", message: "upstream failed" },
+    });
+  });
+
   it("preserves a structured transient ToolUserError classification", async () => {
     const sdk = stubSDK({
       entities: {
