@@ -4687,7 +4687,7 @@ export type ManageOperationsResponses = {
           browser_url?: string;
           browser_handoff?: {
             run_id: number | null;
-            state: "ready" | "expired" | "completed";
+            state: "ready" | "preparing" | "expired" | "completed";
             expires_at: string | null;
             error_message: string | null;
           };

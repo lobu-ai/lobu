@@ -124,6 +124,52 @@ describe("page-activated operation runs", () => {
 	beforeEach(cleanupTestDatabase);
 	afterAll(cleanupTestDatabase);
 
+	it("keeps an approved Ask draft actionable after its notification is read", async () => {
+		const seeded = await seed();
+		await sql`UPDATE runs SET approval_status = 'approved' WHERE id = ${seeded.run.id}`;
+		const result = await notify({
+			action: "send", title: "Approved draft", recipients: [seeded.user.id],
+			browser_url: "https://x.com/ada/status/123", browser_handoff_run_id: seeded.run.id,
+		}, {} as never, {
+			organizationId: seeded.org.id, userId: seeded.user.id, memberRole: "owner",
+			isAuthenticated: true, tokenType: "oauth", scopedToOrg: false,
+			allowCrossOrg: true, scopes: ["mcp:admin"], sourceContext: null,
+		} as ToolContext);
+		await sql`UPDATE notification_targets SET read_at = now() WHERE event_id = ${result.event_id}`;
+		const notifications = await listNotifications({
+			organizationId: seeded.org.id, userId: seeded.user.id, attentionOnly: true,
+		});
+		expect(notifications.notifications[0]?.browser_handoff).toMatchObject({ run_id: seeded.run.id, state: "ready" });
+		const feed = await listOrgActivity({
+			organizationId: seeded.org.id, userId: seeded.user.id, ownerSlug: seeded.org.slug,
+			includeRuns: false, aggregate: false,
+		});
+		expect(feed.items.find(item => item.notification_id === result.event_id)?.browser_handoff?.state).toBe("ready");
+	});
+
+	it("keeps preparation visible after opening and only reports completion after the action succeeds", async () => {
+		const seeded = await seed();
+		const created = await createNotificationForUsers([seeded.user.id], {
+			organizationId: seeded.org.id, type: "agent_message", title: "Prepare a draft",
+			browserUrl: "https://x.com/ada/status/123", browserRunId: seeded.run.id,
+		});
+		await sql`UPDATE notification_targets SET read_at = now() WHERE event_id = ${created.eventId}`;
+		const activated = await request(appFor(seeded.user.id, seeded.org.id), "chrome-mini", seeded.run.id, "https://x.com/ada/status/123");
+		expect(activated.status).toBe(200);
+		for (const status of ["pending", "running", "completed"] as const) {
+			await sql`UPDATE runs SET status = ${status} WHERE id = ${seeded.run.id}`;
+			const listed = await listNotifications({ organizationId: seeded.org.id, userId: seeded.user.id, attentionOnly: true });
+			expect(listed.notifications[0]?.browser_handoff).toMatchObject({
+				run_id: seeded.run.id, state: status === "completed" ? "completed" : "preparing",
+			});
+			const activity = await listOrgActivity({ organizationId: seeded.org.id, userId: seeded.user.id, ownerSlug: seeded.org.slug, includeRuns: false });
+			expect(activity.items.find(item => item.notification_id === created.eventId)?.browser_handoff?.state).toBe(status === "completed" ? "completed" : "preparing");
+		}
+		await sql`UPDATE runs SET status = 'failed', error_message = 'Composer text did not match' WHERE id = ${seeded.run.id}`;
+		const failed = await listNotifications({ organizationId: seeded.org.id, userId: seeded.user.id });
+		expect(failed.notifications[0]?.browser_handoff).toMatchObject({ state: "expired", error_message: "Composer text did not match" });
+	});
+
 	it("runs the real Chrome activation entry through the server handler with exact query identity", async () => {
 		const seeded = await seed();
 		await sql`UPDATE runs SET activation_target_urls = ARRAY['https://example.test/item?id=111']::text[] WHERE id = ${seeded.run.id}`;
@@ -532,7 +578,7 @@ describe("page-activated operation runs", () => {
 		).rejects.toThrow("Page activation requires a server-executed connector operation");
 	});
 
-	it("carries the browser action URL through notifications and the shared activity feed", async () => {
+	it.each(["failed", "timeout", "cancelled"] as const)("recreates a %s browser handoff through notifications and the shared activity feed", async (status) => {
 		const seeded = await seed();
 		const agent = await createTestAgent({ organizationId: seeded.org.id, agentId: "page-draft-agent" });
 		await sql`UPDATE runs SET policy_principal_kind = 'agent', policy_principal_id = ${agent.agentId} WHERE id = ${seeded.run.id}`;
@@ -596,7 +642,7 @@ describe("page-activated operation runs", () => {
 
 		await sql`
 			UPDATE runs
-			SET status = 'failed',
+			SET status = ${status},
 			    error_message = 'Composer controls changed',
 			    activated_at = NOW(),
 			    activated_by_device_worker_id = ${seeded.workers[0]?.id}::uuid,
@@ -672,23 +718,23 @@ describe("page-activated operation runs", () => {
 			    activation_tab_id = 29
 			WHERE id = ${recreated.browser_handoff.run_id}
 		`;
-		const completedList = await listNotifications({
+		const preparingList = await listNotifications({
 			organizationId: seeded.org.id,
 			userId: seeded.user.id,
 		});
-		expect(completedList.notifications[0]?.browser_handoff).toMatchObject({
+		expect(preparingList.notifications[0]?.browser_handoff).toMatchObject({
 			run_id: recreated.browser_handoff.run_id,
-			state: "completed",
+			state: "preparing",
 		});
-		const completedResponse = await appFor(
+		const preparingResponse = await appFor(
 			seeded.user.id,
 			seeded.org.id,
 		).request(
 			`/notifications/${createdNotification.event_id}/browser-handoff/recreate`,
 			{ method: "POST" },
 		);
-		expect(completedResponse.status).toBe(409);
-		await expect(completedResponse.json()).resolves.toMatchObject({
+		expect(preparingResponse.status).toBe(409);
+		await expect(preparingResponse.json()).resolves.toMatchObject({
 			error: expect.stringContaining("already activated"),
 		});
 	});
@@ -736,10 +782,9 @@ describe("page-activated operation runs", () => {
 		// recent-window slice would drop it, but the "stays until Done" contract
 		// must keep it in the lens regardless.
 		//
-		// Only while it is still openable. A draft with no linked run resolves
-		// `expired` — it can never be activated — and pinning THAT past the
-		// window permanently spent one of the caller's `limit` slots on a dead
-		// card. Both are seeded here so the two states cannot drift apart again.
+		// Waiting, preparing, and prepared drafts remain until Done. A draft
+		// with no linked run resolves `expired`; once read, it must not consume
+		// an attention slot. Seed both a ready draft and an expired one here.
 		await createNotificationForUsers([seeded.user.id], {
 			organizationId: seeded.org.id,
 			type: "agent_message",

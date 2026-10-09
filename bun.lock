@@ -17,7 +17,7 @@
     },
     "packages/cli": {
       "name": "@lobu/cli",
-      "version": "20.2.0",
+      "version": "21.2.1",
       "bin": {
         "lobu": "bin/lobu.js",
       },
@@ -52,7 +52,7 @@
     },
     "packages/client": {
       "name": "@lobu/client",
-      "version": "20.2.0",
+      "version": "21.2.1",
       "devDependencies": {
         "@hey-api/client-fetch": "^0.13.1",
         "@hey-api/openapi-ts": "^0.99.0",
@@ -61,7 +61,7 @@
     },
     "packages/connector-sdk": {
       "name": "@lobu/connector-sdk",
-      "version": "20.2.0",
+      "version": "21.2.1",
       "dependencies": {
         "@lobu/core": "workspace:*",
         "@sinclair/typebox": "^0.34.41",
@@ -77,7 +77,7 @@
     },
     "packages/connector-worker": {
       "name": "@lobu/connector-worker",
-      "version": "20.2.0",
+      "version": "21.2.1",
       "bin": {
         "connector-worker": "./dist/bin.js",
       },
@@ -126,7 +126,7 @@
     },
     "packages/core": {
       "name": "@lobu/core",
-      "version": "20.2.0",
+      "version": "21.2.1",
       "dependencies": {
         "@opentelemetry/api": "^1.9.0",
         "@opentelemetry/exporter-trace-otlp-grpc": "^0.222.0",
@@ -158,7 +158,7 @@
     },
     "packages/embeddings": {
       "name": "@lobu/embeddings",
-      "version": "20.2.0",
+      "version": "21.2.1",
       "dependencies": {
         "@hono/node-server": "^2.0.11",
         "@xenova/transformers": "^2.17.2",
@@ -206,7 +206,6 @@
         "@radix-ui/react-slot": "^1.2.4",
         "@radix-ui/react-tabs": "^1.1.13",
         "@radix-ui/react-tooltip": "^1.2.8",
-        "@sentry/react": "^10.51.0",
         "@shadcn/react": "^0.2.1",
         "@tanstack/react-query": "^5.64.0",
         "@tanstack/react-router": "^1.95.0",
@@ -263,7 +262,7 @@
     },
     "packages/pgvector-embedded": {
       "name": "@lobu/pgvector-embedded",
-      "version": "20.2.0",
+      "version": "21.2.1",
       "devDependencies": {
         "@types/node": "20.19.9",
         "typescript": "^5.7.2",
@@ -271,7 +270,7 @@
     },
     "packages/plugin-api": {
       "name": "@lobu/plugin-api",
-      "version": "20.2.0",
+      "version": "21.2.1",
       "dependencies": {
         "@sinclair/typebox": "^0.34.41",
       },
@@ -297,7 +296,7 @@
     },
     "packages/plugin-host": {
       "name": "@lobu/plugin-host",
-      "version": "20.2.0",
+      "version": "21.2.1",
       "dependencies": {
         "@lobu/plugin-api": "workspace:*",
       },
@@ -364,7 +363,7 @@
     },
     "packages/promptfoo-provider": {
       "name": "@lobu/promptfoo-provider",
-      "version": "20.2.0",
+      "version": "21.2.1",
       "devDependencies": {
         "@types/node": "^20.10.0",
         "typescript": "^5.3.3",
@@ -438,7 +437,7 @@
     },
     "packages/views": {
       "name": "@lobu/views",
-      "version": "20.1.0",
+      "version": "21.2.1",
       "dependencies": {
         "@lobu/core": "workspace:*",
       },
@@ -1523,16 +1522,6 @@
 
     "@selderee/plugin-htmlparser2": ["@selderee/plugin-htmlparser2@0.11.0", "", { "dependencies": { "domhandler": "^5.0.3", "selderee": "^0.11.0" } }, "sha512-P33hHGdldxGabLFjPPpaTxVolMrzrcegejx+0GxjrIb9Zv48D8yAIA/QTDR2dFl7Uz7urX8aX6+5bCZslr+gWQ=="],
 
-    "@sentry-internal/browser-utils": ["@sentry-internal/browser-utils@10.53.1", "", { "dependencies": { "@sentry/core": "10.53.1" } }, "sha512-X4d6y8sBMjmNhcDW4eMBU3ASsNIMz8dqaFkhyIMN/dkYr/yZKnbRZPaVuVUGvHKjnlficPpIH0/HK9KBjrYxPw=="],
-
-    "@sentry-internal/feedback": ["@sentry-internal/feedback@10.53.1", "", { "dependencies": { "@sentry/core": "10.53.1" } }, "sha512-vVpTI/aEYN5d9IgZeYJWMqVaN0+iFgidSrYNAsZTh1US5sJUzF/wrl+68KdpmCtFROrN3jiAn1oPSwL5CKvEJA=="],
-
-    "@sentry-internal/replay": ["@sentry-internal/replay@10.53.1", "", { "dependencies": { "@sentry-internal/browser-utils": "10.53.1", "@sentry/core": "10.53.1" } }, "sha512-wZNzTBYkgGUPWMuUQv7L64+OJmoCnz7GQNiTrTFK6EVAjJXFBCSsPp/nhif0bLhbk8+0g4xz633uOhpXuQbFdw=="],
-
-    "@sentry-internal/replay-canvas": ["@sentry-internal/replay-canvas@10.53.1", "", { "dependencies": { "@sentry-internal/replay": "10.53.1", "@sentry/core": "10.53.1" } }, "sha512-aueLaf/2prExwA76BGU5/bOXCKWqtt6jQXWA6WJQNrmKpPEtZJB4ypnpsou0McXQCF8tur2Y8U0TEkwQP13yJQ=="],
-
-    "@sentry/browser": ["@sentry/browser@10.53.1", "", { "dependencies": { "@sentry-internal/browser-utils": "10.53.1", "@sentry-internal/feedback": "10.53.1", "@sentry-internal/replay": "10.53.1", "@sentry-internal/replay-canvas": "10.53.1", "@sentry/core": "10.53.1" } }, "sha512-zXF373hzUOGzUOrqd8xb1U3LQi5uYC3mwv+z5OMKUUinQlu30tTWBs7ypy6YTchtix9QlYaHWlayUF8vBZ5UjA=="],
-
     "@sentry/conventions": ["@sentry/conventions@0.16.0", "", {}, "sha512-fO9PLmHdVURcSPUpWCItWAtgKiMwGdJHbovoSEyLplX5sxs2ugvI4CBPTrkkgqhObnZOD0CnWBKDzSVQYBKEyQ=="],
 
     "@sentry/core": ["@sentry/core@10.74.0", "", { "dependencies": { "@sentry/conventions": "^0.16.0" } }, "sha512-u9rY8vcZfktccwm6LznfCZlqP5C9A+p76r4/pFS1grqpuTO0m21Cl8rosnlESrDGP/Xd9tfr91rWYk0jPH8jeQ=="],
@@ -1542,8 +1531,6 @@
     "@sentry/node-core": ["@sentry/node-core@10.74.0", "", { "dependencies": { "@sentry/conventions": "^0.16.0", "@sentry/core": "10.74.0", "@sentry/opentelemetry": "10.74.0", "import-in-the-middle": "^3.0.0" }, "peerDependencies": { "@opentelemetry/api": "^1.9.0", "@opentelemetry/core": "^1.30.1 || ^2.1.0", "@opentelemetry/exporter-trace-otlp-http": ">=0.57.0 <1", "@opentelemetry/instrumentation": ">=0.57.1 <1", "@opentelemetry/sdk-trace-base": "^1.30.1 || ^2.1.0" }, "optionalPeers": ["@opentelemetry/api", "@opentelemetry/core", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/instrumentation", "@opentelemetry/sdk-trace-base"] }, "sha512-btgZXcGmkOGgojbxHo/gfGiyqYpzC9E8zVR78Q3MtM6Xnemk9gwJiQlhNmEX/FM+C36WBRPZrdcZcnMaJhbfJw=="],
 
     "@sentry/opentelemetry": ["@sentry/opentelemetry@10.74.0", "", { "dependencies": { "@sentry/conventions": "^0.16.0", "@sentry/core": "10.74.0" }, "peerDependencies": { "@opentelemetry/api": "^1.9.0", "@opentelemetry/core": "^1.30.1 || ^2.1.0", "@opentelemetry/sdk-trace-base": "^1.30.1 || ^2.1.0" } }, "sha512-ua5mt0NDBfye+/ACKjAw9Ad2i+y42lOLvhxXZepZXjszblMz80MEsIZflMB7uLZUCTNH7MbZN8tlzCy8KsJKmQ=="],
-
-    "@sentry/react": ["@sentry/react@10.53.1", "", { "dependencies": { "@sentry/browser": "10.53.1", "@sentry/core": "10.53.1" }, "peerDependencies": { "react": "^16.14.0 || 17.x || 18.x || 19.x" } }, "sha512-lrwNq5T/zW84l60894TpKHPcvFuc1I/Hnohecc0TfYVpIcYYuw2orCHoU4v4wgkFaJUpegVetbgdOphViyLVjA=="],
 
     "@sentry/server-utils": ["@sentry/server-utils@10.74.0", "", { "dependencies": { "@sentry/conventions": "^0.16.0", "@sentry/core": "10.74.0" } }, "sha512-AHmPIGE8yVRyywpZRhAkm/H0cHTgsQSPhFZFbaeQLcYHFE/eOP9bAMh8Nj/Apr7WMagFXYHd04tR/63BxtLgKw=="],
 
@@ -3856,18 +3843,6 @@
     "@scalar/types/nanoid": ["nanoid@5.1.16", "", { "bin": { "nanoid": "bin/nanoid.js" } }, "sha512-kVrnsrJqMR8+oLJnGEmSWw9BivK5mt7H3FZatVRjrc5wGqFYuBxX1yG7+A7Gi5AefkX6t/oCkizcQgpu0cY1dQ=="],
 
     "@scalar/types/zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
-
-    "@sentry-internal/browser-utils/@sentry/core": ["@sentry/core@10.53.1", "", {}, "sha512-XG4ezlkyuAPjBC5+9kXC94rXXuqYTw9NRhfaDHssbTFaGnqBR8vQX2UUgZfY7ucbeelRDGfBu1sywoU+mB04uA=="],
-
-    "@sentry-internal/feedback/@sentry/core": ["@sentry/core@10.53.1", "", {}, "sha512-XG4ezlkyuAPjBC5+9kXC94rXXuqYTw9NRhfaDHssbTFaGnqBR8vQX2UUgZfY7ucbeelRDGfBu1sywoU+mB04uA=="],
-
-    "@sentry-internal/replay/@sentry/core": ["@sentry/core@10.53.1", "", {}, "sha512-XG4ezlkyuAPjBC5+9kXC94rXXuqYTw9NRhfaDHssbTFaGnqBR8vQX2UUgZfY7ucbeelRDGfBu1sywoU+mB04uA=="],
-
-    "@sentry-internal/replay-canvas/@sentry/core": ["@sentry/core@10.53.1", "", {}, "sha512-XG4ezlkyuAPjBC5+9kXC94rXXuqYTw9NRhfaDHssbTFaGnqBR8vQX2UUgZfY7ucbeelRDGfBu1sywoU+mB04uA=="],
-
-    "@sentry/browser/@sentry/core": ["@sentry/core@10.53.1", "", {}, "sha512-XG4ezlkyuAPjBC5+9kXC94rXXuqYTw9NRhfaDHssbTFaGnqBR8vQX2UUgZfY7ucbeelRDGfBu1sywoU+mB04uA=="],
-
-    "@sentry/react/@sentry/core": ["@sentry/core@10.53.1", "", {}, "sha512-XG4ezlkyuAPjBC5+9kXC94rXXuqYTw9NRhfaDHssbTFaGnqBR8vQX2UUgZfY7ucbeelRDGfBu1sywoU+mB04uA=="],
 
     "@slack/socket-mode/ws": ["ws@8.21.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g=="],
 
