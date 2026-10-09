@@ -85,12 +85,27 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
   expect(stored).toMatchObject({
     managed_agent_id: agent.agentId,
     delivery_target: delivery,
-    triggers: [],
-    execution_config: null,
-    next_run_at: null,
-    schedule: null,
+    triggers: [
+      {
+        kind: "schedule",
+        cron: "*/20 * * * *",
+        timezone: "UTC",
+        skip_if_unchanged: false,
+      },
+    ],
+    execution_config: { executor: { kind: "external" } },
+    schedule: "*/20 * * * *",
   });
   expect(new Date(stored.next_window_start).toISOString()).toBe(checkpoint);
+
+  expect(new Date(stored.next_run_at).getTime()).toBeGreaterThan(Date.now());
+  await sql`UPDATE automations SET next_run_at = NOW() - INTERVAL '1 second' WHERE id = ${id}`;
+  const activity = (await workspace.owner.operations.listActivity({
+    kinds: ["automation_due"],
+  })) as { items: Array<{ automation_id: number }> };
+  expect(activity.items.map((item) => item.automation_id)).toContain(
+    Number(id)
+  );
 
   // Keeping the delivery principal must still permit the external MCP lifecycle.
   const claimed = await workspace.owner.automations.claimNextWindow({
@@ -106,10 +121,15 @@ test("external cutover preserves bound Slack delivery and the checkpoint", async
     client_id: "synthetic-external-client",
   });
   const [advanced] =
-    await sql`SELECT next_window_start FROM automations WHERE id = ${id}`;
+    await sql`SELECT next_window_start, next_run_at FROM automations WHERE id = ${id}`;
   expect(new Date(advanced.next_window_start).toISOString()).toBe(
     claimed.context.window_end
   );
+  expect(new Date(advanced.next_run_at).getTime()).toBeGreaterThan(Date.now());
+  const after = (await workspace.owner.operations.listActivity({
+    kinds: ["automation_due"],
+  })) as { items: unknown[] };
+  expect(after.items).toEqual([]);
 });
 
 test("hands off log counts without samples while preserving activity and pageable checkpoints", async () => {

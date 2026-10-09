@@ -13,7 +13,7 @@ function needsApproval(result: unknown): boolean {
   );
 }
 
-/** Selected-workspace SDK setup. The external MCP client owns the timer.
+/** Selected-workspace SDK setup. The Automation owns cadence; the external MCP client owns wakeups.
  * Keep this Automation out of broad `lobu apply --prune` operations.
  * Supply the raw sibling reaction source; no generated script is stored here.
  */
@@ -51,16 +51,16 @@ export async function configureProductActivityDigest(
   });
   if (needsApproval(reaction)) return reaction;
   // Bound Slack delivery uses the existing agent as its policy principal.
-  // Empty triggers and a cleared script executor leave execution to the MCP client.
+  // Keep cadence stopped until the version is installed; external mode prevents hosted dispatch.
   const executor = await client.automations.update({
     automation_id: automationId,
     triggers: [],
     device_worker_id: null,
     agent_kind: null,
-    execution_config: null,
+    execution_config: { executor: { kind: "external" } },
   });
   if (needsApproval(executor)) return executor;
-  return client.automations.createVersion({
+  const version = await client.automations.createVersion({
     automation_id: automationId,
     prompt: productActivityPrompt,
     sources: productActivitySources,
@@ -73,5 +73,17 @@ export async function configureProductActivityDigest(
     change_notes:
       "External MCP only; preserve checkpoint and delivery destination, remove unconditional script delivery.",
     set_as_current: true,
+  });
+  if (needsApproval(version)) return version;
+  return client.automations.update({
+    automation_id: automationId,
+    triggers: [
+      {
+        kind: "schedule",
+        cron: "*/20 * * * *",
+        timezone: "UTC",
+        skip_if_unchanged: false,
+      },
+    ],
   });
 }

@@ -37,7 +37,7 @@ function harness(pendingAt?: number, status = "completed") {
 
 describe("external production digest configuration", () => {
   test("stops at each approval before attempting dependent mutations", async () => {
-    for (const pendingAt of [1, 2, 3, 4]) {
+    for (const pendingAt of [1, 2, 3, 4, 5]) {
       const h = harness(pendingAt);
       expect(await h.run()).toEqual(h.pending);
       expect(h.calls).toHaveLength(pendingAt);
@@ -52,7 +52,7 @@ describe("external production digest configuration", () => {
     }
   });
 
-  test("installs the reaction before clearing the executor and enabling analysis", async () => {
+  test("installs analysis before enabling the external schedule", async () => {
     const h = harness();
     await h.run();
     expect(h.calls).toEqual([
@@ -60,13 +60,25 @@ describe("external production digest configuration", () => {
       "set_reaction_script",
       "update",
       "create_version",
+      "update",
     ]);
-    expect(h.automations.update).toHaveBeenLastCalledWith({
+    expect(h.automations.update).toHaveBeenNthCalledWith(2, {
       automation_id: "42",
       triggers: [],
       device_worker_id: null,
       agent_kind: null,
-      execution_config: null,
+      execution_config: { executor: { kind: "external" } },
+    });
+    expect(h.automations.update).toHaveBeenLastCalledWith({
+      automation_id: "42",
+      triggers: [
+        {
+          kind: "schedule",
+          cron: "*/20 * * * *",
+          timezone: "UTC",
+          skip_if_unchanged: false,
+        },
+      ],
     });
   });
 });
