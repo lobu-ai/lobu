@@ -18,9 +18,7 @@ import {
 } from "@lobu/cli/config";
 import { duplicateCandidateQuery } from "./duplicate-report.reaction.ts";
 import type DuplicateReportReaction from "./duplicate-report.reaction.ts";
-import type GoogleTakeoutConnector from "./google-takeout.connector.ts";
 import type HackerNewsConnector from "./hackernews.connector.ts";
-import type InstagramTakeoutConnector from "./instagram-takeout.connector.ts";
 import type LinkedInConnector from "./linkedin.connector.ts";
 import type LinkedInFlagReaction from "./linkedin-flag.reaction.ts";
 import {
@@ -35,7 +33,6 @@ import { takeoutConfig } from "./takeout-dirs.ts";
 import { taskBuilderPrompt } from "./task-builder.prompt.ts";
 import type TaskBuilderReaction from "./task-builder.reaction.ts";
 import type TaskRules from "./task.rules.ts";
-import type TwitterTakeoutConnector from "./twitter-takeout.connector.ts";
 
 const hourlyTaskCollaboratorSkill = defineSkill({
   name: "hourly-task-collaborator",
@@ -495,8 +492,7 @@ const account = defineEntityType({
 // Deliberately derived, not stored: obligations are inferred from the spend
 // stream, so a stored entity would need reconciling every run (detected vs
 // changed vs cancelled). The backing view recomputes status from recency
-// instead. If this ever gets slow, materialize on write like net-worth
-// snapshots — until then the view is the long-term shape.
+// instead.
 const subscriptionBackingSql = `
 WITH card AS (
   SELECT
@@ -755,6 +751,8 @@ const revolutConnection = defineConnection({
   slug: "revolut-buremba",
   connector: "revolut",
   name: "Revolut",
+  // Keep scrape affinity: omission is an explicit unpin on reapply.
+  deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
   feeds: [
     // Apply replaces feed config wholesale. Preserve checkpointed syncs and the
     // 60s passcode grace period within the device worker's ~95s run budget.
@@ -789,10 +787,8 @@ const takeoutConnection = defineConnection({
       feed: "keep",
       config: takeoutConfig("GOOGLE_KEEP_TAKEOUT_DIR", "google-keep"),
     },
-    {
-      feed: "maps",
-      config: takeoutConfig("GOOGLE_MAPS_TAKEOUT_DIR", "google-maps"),
-    },
+    // Omit maps while reusing the installed takeout definition. Installing
+    // the local definition requires a runtime that supports node:fs.
   ],
 });
 
@@ -975,6 +971,8 @@ const midasConnection = defineConnection({
   slug: "midas",
   connector: "midas",
   name: "Midas",
+  // Keep scrape affinity: omission is an explicit unpin on reapply.
+  deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
   feeds: [{ feed: "assets", config: {} }],
 });
 
@@ -1030,6 +1028,25 @@ const gmailConnection = defineConnection({
 // examples/personal-finance — not here. With prune:true they are removed from
 // buremba if present.
 
+const worksAt = defineRelationshipType({
+  key: "works_at",
+  name: "Works At",
+  description: "Person employed by / associated with a company",
+});
+
+const founderOf = defineRelationshipType({
+  key: "founder_of",
+  name: "Founder Of",
+  description: "A person founded or co-founded a company.",
+});
+
+const sameAs = defineRelationshipType({
+  key: "same_as",
+  name: "Same As",
+  description:
+    "Maps a private person profile to its canonical public identity. The mapping and private profile remain visible only to this workspace.",
+});
+
 const mentions = defineRelationshipType({
   key: "mentions",
   name: "Mentions",
@@ -1077,7 +1094,7 @@ const hourlyTaskCollaborator = defineAutomation({
   agent: personalAgent,
   slug: "hourly-task-collaborator",
   name: "Hourly Task Collaborator",
-  model: "chatgpt/gpt-6-astra",
+  // Omitted model preserves the Automation's existing execution setting on apply.
   triggers: [every("0 * * * *", { timezone: "Europe/London" })],
   minCooldownSeconds: 300,
   outputs: {
@@ -1125,7 +1142,6 @@ const duplicateEntityResolution = defineAutomation({
   reaction: reactionFromFile<typeof DuplicateReportReaction>(
     "./duplicate-report.reaction.ts"
   ),
-  skills: ["duplicate-entity-resolution-real-v3-final"],
 });
 
 // The LinkedIn assistant runs on the same device and CLI as the hourly task
@@ -1180,6 +1196,39 @@ const linkedInFeedFlagger = defineAutomation({
   ),
 });
 
+// Adopted 2026-10-08 from the live UI-created experiment so apply stops
+// blocking on it. Manual-only (no triggers), read-only TikTok research.
+// REMOVE together with its API row when the experiment ends.
+const tiktokPracticalAiResearch = defineAutomation({
+  agent: personalAgent,
+  slug: "tiktok-practical-ai-research",
+  description:
+    "Manual research preview for practical AI agents, tools, and workflows. No schedule or TikTok writes; visual Automation handoff awaits verification.",
+  tags: ["tiktok", "research", "manual-preview"],
+  sources: {
+    manual_context: context("SELECT CURRENT_TIMESTAMP AS observed_at"),
+  },
+  prompt: `Execute the research steps before completing this run. This is an active manual READ-ONLY research request, not a request to acknowledge a future plan. A successful empty completeWindow({extracted_data:{}}) is not a valid result.
+
+First read your Automation context and retain its window_token. Then actually call operations.listAvailable({connection_id:680}) and feeds.readMany({reads:[{feed_id:669,limit:5}],timeout_ms:30000}); call these through the workspace-scoped client. This source read is explicitly authorized. If For You fails, try Following feed 670 once, then Search feed 671 with query "AI agent workflow". Record each attempt and its returned count or exact error. These reads are allowed even when visual inspection is unavailable.
+
+For at least one relevant returned candidate, call the read action inspect_post and attempt to open the returned image. Calling this read action through run_sdk is allowed; prohibiting TikTok writes means do not call set_like, prepare_comment, follow, send, or publish. If you cannot open pixels, still report the observed caption and canonical URL as metadata-only evidence and explain that visuals are unverified. Do not infer that there are no matches from a tool or image limitation.
+
+Before completing, populate extracted_data with a nonempty summary explaining source attempts, observations and limitations using the completion schema from the Automation context. Include up to three findings if supported. Never claim you read a feed without a real feed result. No outbound notifications or messages.
+
+Manual research preview for TikTok. This version must not execute TikTok writes: no likes, unlikes, comments, follows, messages, or publishing. It has no schedule or event trigger. Automatic likes remain pending a verified image-to-agent path.
+
+The user's approved interest is practical AI agents, useful tools, and real work workflows. Prefer concrete demonstrations, clear implementation steps, and evidence of a useful outcome. Treat broad hype, unsupported claims, and captions without demonstrated substance as weak matches.
+
+Use the private tiktok.web connection 680 through its existing paired browser. Discover current operations with operations.listAvailable before acting. Read bounded source snapshots using feeds.readMany: For You feed 669, Following feed 670, and optionally Search feed 671 with a specific query such as "AI agent workflow". Read at most ten posts per feed and use sequential calls to avoid competing browser focus. A missing or failed source is unavailable, not empty. Do not claim complete timeline or trend coverage.
+
+Deduplicate within the run by connection plus origin_id. Choose at most three promising candidates for inspect_post. For a video, request valid sample times within its reported duration; start with frame 0 and choose later frames only when duration is known. For a photo post, inspect up to three valid photo_indices. Actually open image attachments with a vision-capable tool before describing visual content. A URL or caption is not proof that you saw pixels. If this runtime cannot open the images, mark visual inspection unverified and explain the limitation. Audio is not inspected.
+
+Return up to three useful findings with creator, canonical post URL, source ID, what was actually observed, practical value, and uncertainty. Keep research private in the run result; do not ingest a raw timeline mirror or publish/send anything.
+
+The intended later Automation may like strong, visually verified matches automatically, as the user requested. Its deduplication, cadence, and action budget belong to the Automation rather than the connector. This preview does not enable them. Comments and publication must remain user-submitted actions.`,
+});
+
 export default defineConfig({
   // Source of truth for buremba definitions. Deletes org-owned entity /
   // relationship types and automations absent from this config (including
@@ -1194,15 +1243,9 @@ export default defineConfig({
     connectorFromFile<typeof LinkedInConnector>("./linkedin.connector.ts"),
     connectorFromFile<typeof HackerNewsConnector>("./hackernews.connector.ts"),
     connectorFromFile<typeof SpotifyConnector>("./spotify.connector.ts"),
-    connectorFromFile<typeof GoogleTakeoutConnector>(
-      "./google-takeout.connector.ts"
-    ),
-    connectorFromFile<typeof TwitterTakeoutConnector>(
-      "./twitter-takeout.connector.ts"
-    ),
-    connectorFromFile<typeof InstagramTakeoutConnector>(
-      "./instagram-takeout.connector.ts"
-    ),
+    // Reuse installed takeout definitions: the local sources need filesystem
+    // access unavailable in the V8 isolate. Referenced connections protect
+    // their installed definitions from prune.
   ],
   org: "buremba",
   orgName: "Buremba Org",
@@ -1219,13 +1262,14 @@ export default defineConfig({
     goal,
     learning,
   ],
-  relationships: [mentions, connectedWith],
+  relationships: [worksAt, mentions, connectedWith, founderOf, sameAs],
   automations: [
     hourlyTaskCollaborator,
     duplicateEntityResolution,
     midasNetWorth,
     linkedInInterestProfile,
     linkedInFeedFlagger,
+    tiktokPracticalAiResearch,
   ],
   authProfiles: [
     gmailAccountAuth,

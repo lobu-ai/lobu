@@ -63,8 +63,9 @@ test("LinkedIn flagger windows read live and complete without stored sources", a
     });
   }
 
-  // Distractors only: nothing syncs home_feed rows anymore, so no stored
-  // row may leak into the flagger window.
+  // Stored rows, including earlier home-feed syncs, must not enter the live window.
+  await seed("linkedin", "home_feed", "post");
+  await seed("linkedin", "home_feed", "comment");
   await seed("x", "home_feed", "post");
   await seed("linkedin", "profile", "profile");
   const created = await workspace.owner.automations.create({
