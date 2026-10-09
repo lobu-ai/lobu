@@ -508,7 +508,7 @@ export type SearchSdkResponse = SearchSdkResponses[keyof SearchSdkResponses];
 export type QuerySdkData = {
   body: {
     /**
-     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, files, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
+     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, files, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms retry delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods. Keep batches small, measure elapsed time, and adjust batch size to reserve time for saving progress and cleanup before the deadline. Return partial results with a continuation cursor deliberately before expiry. Await every SDK call; parallelize only independent work and limit contention on the same device. For long device operations, use `run_sdk` with `operations.execute({ ..., background: true, idempotency_key })`, return the durable run_id, and read `operations.getRun(run_id)` in a later invocation instead of sleeping in a polling loop. Prefer browser readiness checks to fixed waits. Timeout or cancellation ends the script as a failure even if caught; it does not roll back completed writes or prove external work stopped.
      */
     script: string;
     /**
@@ -754,7 +754,7 @@ export type QuerySqlResponse = QuerySqlResponses[keyof QuerySqlResponses];
 export type RunSdkData = {
   body: {
     /**
-     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, files, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.
+     * TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, files, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms retry delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods. Keep batches small, measure elapsed time, and adjust batch size to reserve time for saving progress and cleanup before the deadline. Return partial results with a continuation cursor deliberately before expiry. Await every SDK call; parallelize only independent work and limit contention on the same device. For long device operations, use `run_sdk` with `operations.execute({ ..., background: true, idempotency_key })`, return the durable run_id, and read `operations.getRun(run_id)` in a later invocation instead of sleeping in a polling loop. Prefer browser readiness checks to fixed waits. Timeout or cancellation ends the script as a failure even if caught; it does not roll back completed writes or prove external work stopped.
      */
     script: string;
     /**
@@ -4704,6 +4704,13 @@ export type ManageOperationsResponses = {
           feed_name?: string;
           automation_id?: number;
           automation_name?: string;
+          next_action?: {
+            method: "automations.claimNextWindow";
+            input: {
+              automation_id: string;
+              run_id?: number;
+            };
+          };
           agent_id?: string;
           agent_name?: string;
           client_id?: string;
@@ -5200,11 +5207,14 @@ export type ManageAutomationsData = {
           timezone?: string | null;
           execution?: "window";
           active_run?: "coalesce";
+          /**
+           * Native executors may skip unchanged source windows. External executors always receive due windows and decide whether to emit output.
+           */
           skip_if_unchanged?: boolean;
         }
     >;
     /**
-     * [create/update] Optional managed agent that executes this Automation's runs (server dispatch lane). Null clears the assignment; an Automation with neither managed_agent_id nor device_worker_id is manual-only and may be completed by an external MCP client. [list] Optional owner filter.
+     * [create/update] Optional managed agent that owns this Automation. Normally executes its runs; an explicit external executor retains the agent only as the permission and delivery principal. Null clears the assignment. Without a managed agent, device pin, or external executor, an Automation is manual-only. [list] Optional owner filter.
      */
     managed_agent_id?: string | null;
     /**
@@ -5257,16 +5267,17 @@ export type ManageAutomationsData = {
      */
     model_config?: unknown;
     execution_config?: null | {
-      /**
-       * Run this TypeScript module directly in the Automation sandbox. Export default async (ctx, client). The runtime pins the script and window at activation and completes the run only after success. SDK writes retain the owning agent's permissions. Use ctx.window.run_id for retry idempotency.
-       */
-      executor?: {
-        kind: "script";
-        source: string;
-        params?: {
-          [key: string]: unknown;
-        };
-      };
+      executor?:
+        | {
+            kind: "script";
+            source: string;
+            params?: {
+              [key: string]: unknown;
+            };
+          }
+        | {
+            kind: "external";
+          };
       /**
        * Wall-clock cap in seconds for the device-worker CLI run (default 600).
        */
@@ -5849,6 +5860,9 @@ export type GetAutomationResponses = {
             timezone?: string | null;
             execution?: "window";
             active_run?: "coalesce";
+            /**
+             * Native executors may skip unchanged source windows. External executors always receive due windows and decide whether to emit output.
+             */
             skip_if_unchanged?: boolean;
           }
       >;
@@ -5869,16 +5883,17 @@ export type GetAutomationResponses = {
       device_worker_id?: string | null;
       agent_kind?: string | null;
       execution_config?: {
-        /**
-         * Run this TypeScript module directly in the Automation sandbox. Export default async (ctx, client). The runtime pins the script and window at activation and completes the run only after success. SDK writes retain the owning agent's permissions. Use ctx.window.run_id for retry idempotency.
-         */
-        executor?: {
-          kind: "script";
-          source: string;
-          params?: {
-            [key: string]: unknown;
-          };
-        };
+        executor?:
+          | {
+              kind: "script";
+              source: string;
+              params?: {
+                [key: string]: unknown;
+              };
+            }
+          | {
+              kind: "external";
+            };
         /**
          * Wall-clock cap in seconds for the device-worker CLI run (default 600).
          */

@@ -9,5 +9,9 @@ export default defineConfig({
     format: "prettier",
     importFileExtension: ".js",
   },
-  plugins: ["@hey-api/typescript", "@hey-api/sdk", "@hey-api/client-fetch"],
+  plugins: [
+    "@hey-api/typescript",
+    "@hey-api/sdk",
+    { name: "@hey-api/client-fetch", baseUrl: "http://localhost:8787" },
+  ],
 });
