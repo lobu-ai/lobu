@@ -243,10 +243,28 @@ function betterAuthTokenAuth(
 // `userInfoUrl` (e.g. Slack's openid.connect.userInfo) returns `sub` (stable
 // user id) plus the usual email/name/picture claims.
 function mapOidcProfileToUser(profile: Record<string, unknown>) {
+	const nonempty = (value: unknown): string | undefined =>
+		typeof value === "string" && value.trim().length > 0
+			? value.trim()
+			: undefined;
+	const email = typeof profile.email === "string" ? profile.email : undefined;
+	const emailPrefix =
+		typeof email === "string" && email.includes("@")
+			? nonempty(email.split("@")[0])
+			: undefined;
 	return {
 		id: String(profile.sub ?? ""),
-		email: typeof profile.email === "string" ? profile.email : undefined,
-		name: typeof profile.name === "string" ? profile.name : undefined,
+		email,
+		// AgentID permits inboxes with no display name, and Better Auth will
+		// not create a user without one (the callback fails with
+		// error=name_is_missing). Fall back through the stable handle, the
+		// email local-part, then sub — never an owner claim, which is human
+		// PII the sign-in may not even have granted.
+		name:
+			nonempty(profile.name) ??
+			nonempty(profile.preferred_username) ??
+			emailPrefix ??
+			nonempty(profile.sub),
 		image: typeof profile.picture === "string" ? profile.picture : undefined,
 		emailVerified: profile.email_verified === true,
 	};

@@ -361,4 +361,20 @@ describe('non-OIDC login provider config (PKCE / basic-auth / extra params)', ()
     const { userinfoUrl, ...noUserinfo } = baseRow;
     expect(buildGenericOAuthEntry(noUserinfo, 'cid', 'secret')).toBeNull();
   });
+
+  it('falls back to handle/email/sub when the OIDC profile has no name (AgentID unnamed inboxes)', () => {
+    const map = buildGenericOAuthEntry(baseRow, 'cid', 'secret')!.mapProfileToUser;
+    expect(
+      map({ sub: 's1', name: 'Agent Name', email: 'agent@acme.agentmail.to' }).name,
+    ).toBe('Agent Name');
+    expect(
+      map({ sub: 's1', preferred_username: 'support_acme-agentmail-to' }).name,
+    ).toBe('support_acme-agentmail-to');
+    expect(map({ sub: 's1', email: 'support@acme.agentmail.to' }).name).toBe(
+      'support',
+    );
+    expect(map({ sub: 'opaque-subject-1' }).name).toBe('opaque-subject-1');
+    // Blank names trim to nothing and fall through like an absent claim.
+    expect(map({ sub: 's1', name: '   ', email: 'a@b.c' }).name).toBe('a');
+  });
 });
