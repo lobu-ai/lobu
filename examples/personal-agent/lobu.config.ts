@@ -751,8 +751,7 @@ const revolutConnection = defineConnection({
   slug: "revolut-buremba",
   connector: "revolut",
   name: "Revolut",
-  // Scrape affinity: prod truth (paired browser with the signed-in session).
-  // Omitting the pin would read as an explicit unpin on reapply.
+  // Keep scrape affinity: omission is an explicit unpin on reapply.
   deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
   feeds: [
     // Apply replaces feed config wholesale. Preserve checkpointed syncs and the
@@ -972,8 +971,7 @@ const midasConnection = defineConnection({
   slug: "midas",
   connector: "midas",
   name: "Midas",
-  // Scrape affinity: prod truth. Omitting the pin would read as an explicit
-  // unpin on reapply and reroute live syncs.
+  // Keep scrape affinity: omission is an explicit unpin on reapply.
   deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
   feeds: [{ feed: "assets", config: {} }],
 });
@@ -1096,7 +1094,7 @@ const hourlyTaskCollaborator = defineAutomation({
   agent: personalAgent,
   slug: "hourly-task-collaborator",
   name: "Hourly Task Collaborator",
-  // No model pin: runs on the external agent runtime, which owns model choice.
+  // Omitted model preserves the Automation's existing execution setting on apply.
   triggers: [every("0 * * * *", { timezone: "Europe/London" })],
   minCooldownSeconds: 300,
   outputs: {
@@ -1245,11 +1243,9 @@ export default defineConfig({
     connectorFromFile<typeof LinkedInConnector>("./linkedin.connector.ts"),
     connectorFromFile<typeof HackerNewsConnector>("./hackernews.connector.ts"),
     connectorFromFile<typeof SpotifyConnector>("./spotify.connector.ts"),
-    // Takeout connectors intentionally NOT installed: they read machine-local
-    // archive directories, which a V8 isolate can never do (no filesystem),
-    // so their bundles fail isolate eligibility. The .connector.ts files and
-    // the paused prod connections stay; live connections exempt their
-    // installed definitions from prune, so nothing is uninstalled.
+    // Reuse installed takeout definitions: the local sources need filesystem
+    // access unavailable in the V8 isolate. Referenced connections protect
+    // their installed definitions from prune.
   ],
   org: "buremba",
   orgName: "Buremba Org",

@@ -34,17 +34,10 @@ describe("duplicate entity resolution configuration", () => {
     ]);
   });
 
-  // Every Automation this config declares needs a reachable trigger for the
-  // same reason — except explicitly manual runs, which fire only on demand.
-  // Naming only the one Automation above would let the next
-  // trigger-less declaration through — the guard has to cover the class.
-  test("every declared Automation has at least one trigger unless manual", () => {
-    // Automations adopted as triggerless on purpose (manual runs).
-    const manual = new Set(["tiktok-practical-ai-research"]);
+  test("only the manual research preview is triggerless", () => {
     const triggerless = (config.automations ?? [])
       .filter((automation) => (automation.triggers ?? []).length === 0)
-      .map((automation) => automation.slug)
-      .filter((slug) => !manual.has(slug));
-    expect(triggerless).toEqual([]);
+      .map((automation) => automation.slug);
+    expect(triggerless).toEqual(["tiktok-practical-ai-research"]);
   });
 });
