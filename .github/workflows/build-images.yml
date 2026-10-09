@@ -248,7 +248,6 @@ jobs:
             APP_GIT_SHA=${{ github.sha }}
             APP_BUILD_TIME=${{ github.event.head_commit.timestamp || github.run_id }}
             SKIP_WEB_BUILD=${{ steps.submodule.outputs.stubbed == 'true' }}
-            VITE_SENTRY_DSN=${{ secrets.VITE_SENTRY_DSN }}
             VITE_FARO_URL=https://telemetry.lobu.ai/collect
             VITE_ENVIRONMENT=production
 

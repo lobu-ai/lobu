@@ -214,16 +214,6 @@ describe("lobu init --yes", () => {
   );
 
   test(
-    "--sentry writes SENTRY_DSN",
-    async () => {
-      await initCommand(cwd, "sentry-on", { yes: true, sentry: true });
-      const env = readFileSync(join(cwd, "sentry-on", ".env"), "utf-8");
-      expect(env).toMatch(/SENTRY_DSN=/);
-    },
-    INIT_TIMEOUT
-  );
-
-  test(
     "--hosted-slack writes a hosted (no-token) slack connection",
     async () => {
       await initCommand(cwd, "hosted-on", { yes: true, hostedSlack: true });
@@ -303,6 +293,22 @@ describe("agent scaffold", () => {
       console.log = original;
     }
     expect(logs.join("\n")).toContain('name: "Sales \\"Bot\\" v2"');
+  });
+});
+
+describe("retired Sentry controls", () => {
+  test("built CLI no longer offers remote error reporting", () => {
+    const cliEntry = join(import.meta.dir, "..", "..", "bin", "lobu.js");
+    for (const args of [["--help"], ["init", "--help"]]) {
+      const result = Bun.spawnSync({
+        cmd: [process.execPath, cliEntry, ...args],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      const output = new TextDecoder().decode(result.stdout);
+      expect(output).not.toMatch(/sentry|\btelemetry\b/i);
+    }
   });
 });
 

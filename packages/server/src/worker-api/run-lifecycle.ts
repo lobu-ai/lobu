@@ -1008,7 +1008,6 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 							origin_id: item.id,
 							sanitized: browserRun,
 							err: browserRun ? sanitizeBrowserText(errorMessage(err)) : err,
-							sentryReported: true,
 						},
 						"[stream] Insert failed for item"
 					);

@@ -128,13 +128,9 @@ function assertSingleConnectorWorkerIdentity(metafile, outfile) {
 //                             dynamically imports ./server-main.bundle.mjs.
 //   server-main.bundle.mjs  — the real server graph (server.ts + all deps).
 //
-// The gate MUST be its own file so esbuild can't hoist the server graph's
-// @sentry/node → undici import above the check. On Node 18, undici references
-// the absent `File` global and throws `File is not defined` at load —
-// before any in-graph guard could run. Keeping the graph behind a runtime
-// dynamic import to a *separate* bundle means undici only loads after the gate
-// passes. server-entry.ts constructs the sibling URL at runtime so esbuild
-// cannot resolve and inline it.
+// Keep the gate separate so esbuild cannot hoist dependencies that require
+// newer Node globals or native ABIs above the version check. server-entry.ts
+// constructs the sibling URL at runtime to prevent inlining.
 await buildBundle('src/server.ts', 'dist/server-main.bundle.mjs');
 await buildBundle('src/server-entry.ts', 'dist/server.bundle.mjs');
 

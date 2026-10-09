@@ -102,7 +102,6 @@ export * from "./secret-refs";
 // Reserved path / entity-type slug lists + kind helpers (single source)
 export * from "./reserved";
 // Observability
-export { getSentry, initSentry } from "./sentry";
 export { extractTraceId, generateTraceId } from "./trace";
 // Core types
 export type {
@@ -141,7 +140,7 @@ export * from "./utils/network-domains";
 export * from "./utils/retry";
 export * from "./utils/sanitize";
 export * from "./utils/secret-redaction";
-export * from "./utils/sentry-scrubber";
+export * from "./utils/diagnostic-scrubber";
 // Shared Lobu runtime session.jsonl parser (gateway + worker).
 export {
   entryToMessage,

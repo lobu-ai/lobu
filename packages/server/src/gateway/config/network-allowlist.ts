@@ -4,52 +4,16 @@ import { isUnrestrictedMode } from "@lobu/connector-sdk/egress-policy";
 const logger = createLogger("network-allowlist");
 
 /**
- * Parse the Sentry ingest host from SENTRY_DSN, e.g.
- * `https://<key>@o123.ingest.de.sentry.io/456` → `o123.ingest.de.sentry.io`.
- *
- * Worker subprocesses report provider/model failures to Sentry via the gateway
- * proxy (HTTP_PROXY), so the proxy must admit this host or the capture POSTs
- * are silently 403'd. We add the EXACT host (not a wildcard) so widening the
- * allowlist for telemetry can't be abused to reach arbitrary `*.sentry.io`.
- *
- * Returns null when no DSN is configured (nothing to allow) or it can't be
- * parsed (fail closed — don't punch a hole for a malformed value).
- */
-function getSentryIngestHost(): string | null {
-  const dsn = process.env.SENTRY_DSN;
-  if (!dsn) return null;
-  try {
-    return new URL(dsn).hostname.toLowerCase() || null;
-  } catch {
-    logger.warn("SENTRY_DSN is set but not a valid URL — not allowlisting it");
-    return null;
-  }
-}
-
-/**
  * Load allowed domains from environment
  *
  * Rules:
  * - Not set: Complete isolation (deny all)
  * - "*": Unrestricted access (allow all)
  * - "domain1,domain2": Allowlist mode (deny by default, allow only these)
- *
- * When SENTRY_DSN is configured, the Sentry ingest host is appended to the
- * allowlist so worker telemetry (provider/model failure captures) can leave
- * via the gateway proxy. This holds even in complete-isolation mode: only the
- * single Sentry host is added, everything else stays denied. In unrestricted
- * (`*`) mode no addition is needed.
  */
 export function loadAllowedDomains(): string[] {
-  const sentryHost = getSentryIngestHost();
   const allowedDomains = process.env.WORKER_ALLOWED_DOMAINS;
   if (!allowedDomains) {
-    if (sentryHost) {
-      logger.warn(
-        `⚠️  WORKER_ALLOWED_DOMAINS not set - workers are network-isolated except the Sentry ingest host (${sentryHost})`
-      );
-      return [sentryHost];
-    }
     logger.warn(
       "⚠️  WORKER_ALLOWED_DOMAINS not set - workers will have NO internet access (complete isolation)"
     );
@@ -58,7 +22,7 @@ export function loadAllowedDomains(): string[] {
 
   const trimmed = allowedDomains.trim();
 
-  // Special case: * means unrestricted access (Sentry already reachable).
+  // Special case: * means unrestricted access.
   if (trimmed === "*") {
     logger.debug("WORKER_ALLOWED_DOMAINS=* - unrestricted internet access");
     return ["*"];
@@ -72,15 +36,7 @@ export function loadAllowedDomains(): string[] {
         .filter((d) => d.length > 0)
     ) ?? [];
 
-  if (sentryHost && !parsed.includes(sentryHost)) {
-    parsed.push(sentryHost);
-  }
-
-  logger.debug(
-    `Loaded ${parsed.length} allowed domains from WORKER_ALLOWED_DOMAINS${
-      sentryHost ? " (+ Sentry ingest host)" : ""
-    }`
-  );
+  logger.debug(`Loaded ${parsed.length} allowed domains from WORKER_ALLOWED_DOMAINS`);
   return parsed;
 }
 
