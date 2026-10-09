@@ -578,7 +578,7 @@ describe("page-activated operation runs", () => {
 		).rejects.toThrow("Page activation requires a server-executed connector operation");
 	});
 
-	it("carries the browser action URL through notifications and the shared activity feed", async () => {
+	it.each(["failed", "timeout", "cancelled"] as const)("recreates a %s browser handoff through notifications and the shared activity feed", async (status) => {
 		const seeded = await seed();
 		const agent = await createTestAgent({ organizationId: seeded.org.id, agentId: "page-draft-agent" });
 		await sql`UPDATE runs SET policy_principal_kind = 'agent', policy_principal_id = ${agent.agentId} WHERE id = ${seeded.run.id}`;
@@ -642,7 +642,7 @@ describe("page-activated operation runs", () => {
 
 		await sql`
 			UPDATE runs
-			SET status = 'failed',
+			SET status = ${status},
 			    error_message = 'Composer controls changed',
 			    activated_at = NOW(),
 			    activated_by_device_worker_id = ${seeded.workers[0]?.id}::uuid,
