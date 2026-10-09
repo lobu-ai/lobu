@@ -32,14 +32,17 @@
  * successful sync (recorded per sandbox in the OS temp dir), skip
  * `bun install` when lockfiles are unchanged, and skip the reboot when only
  * `packages/owletto/` changed — Vite HMR absorbs frontend changes, and a
- * preview health check proves it. Anything else (or an unhealthy preview)
- * takes the full path. FRESH=1 forces the full path unconditionally.
+ * preview health check confirms availability. `up` reboots for other changes;
+ * `sync` leaves a healthy app running and records any pending reboot/install
+ * for the next `up`. FRESH=1 forces a full sync, install, and boot.
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
+  readlinkSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -202,10 +205,12 @@ function gitFiles(root: string): string[] {
  * the repo: it is machine-local bookkeeping). Missing state — a first sync,
  * a cleared /tmp, or FRESH=1 — means the full path.
  */
-export interface SyncState {
+interface SyncState {
   lobuHead: string | null;
   owlettoHead: string | null;
   lockHash: string | null;
+  envHash?: string;
+  pendingBoot?: boolean;
   /** Content hashes of files uploaded by the last sync, remote-tree paths. */
   files?: Record<string, string>;
 }
@@ -223,6 +228,8 @@ export function readSyncState(path: string): SyncState | null {
       lobuHead: typeof raw.lobuHead === "string" ? raw.lobuHead : null,
       owlettoHead: typeof raw.owlettoHead === "string" ? raw.owlettoHead : null,
       lockHash: typeof raw.lockHash === "string" ? raw.lockHash : null,
+      ...(typeof raw.envHash === "string" ? { envHash: raw.envHash } : {}),
+      ...(raw.pendingBoot === true ? { pendingBoot: true } : {}),
       files:
         files && typeof files === "object"
           ? Object.fromEntries(
@@ -250,31 +257,15 @@ function gitHead(cwd: string): string | null {
   }
 }
 
-/**
- * Null-separated `git status --porcelain -z -uall` into paths. Rename/copy
- * entries span two chunks (`R  old\0new`); only the new path syncs, while
- * the old one falls out through the manifest diff. Stray chunks without a
- * status prefix are dropped rather than uploaded — tar -T fails the whole
- * sync on a missing file, so the upload list must never contain guesses.
- */
+/** Git's -z format puts the destination first, then the rename/copy source. */
 export function parsePorcelainZ(output: string): string[] {
-  const chunks = output.split("\0").filter((c) => c.length > 0);
+  const chunks = output.split("\0");
   const paths: string[] = [];
-  let renamePending = false;
-  for (const chunk of chunks) {
-    const match = chunk.match(/^(.{2}) (.*)$/s);
-    if (!match) {
-      if (renamePending) {
-        paths.push(chunk);
-        renamePending = false;
-      }
-      continue;
-    }
-    if (match[1][0] === "R" || match[1][0] === "C") {
-      renamePending = true;
-      continue;
-    }
+  for (let i = 0; i < chunks.length; i++) {
+    const match = chunks[i].match(/^(.{2}) (.*)$/s);
+    if (!match) continue;
     paths.push(match[2]);
+    if (/[RC]/.test(match[1])) i++;
   }
   return paths;
 }
@@ -314,7 +305,7 @@ function diffNames(cwd: string, oldHead: string | null): string[] | null {
   }
 }
 
-export interface TreeChanges {
+interface TreeChanges {
   /** Syncable paths, prefixed for the remote tree (submodule filtered out). */
   files: string[];
   /** `.env` changed: never uploaded via the tree, but needs a reboot. */
@@ -428,7 +419,7 @@ export function changedSince(
   return { files, envChanged };
 }
 
-export type SyncScope = "none" | "frontend" | "full";
+type SyncScope = "none" | "frontend" | "full";
 
 /**
  * Pure scope decision over already-filtered change lists. `.env` travels
@@ -451,7 +442,7 @@ export function syncScope(
   return "full";
 }
 
-export interface SyncPlan {
+interface SyncPlan {
   /** Full remote truth after this sync (for the next manifest). */
   fullList: string[];
   /** Files to upload (subset of fullList). */
@@ -492,84 +483,29 @@ export function hashEntries(entries: Array<[string, string]>): string {
   return hash.digest("hex");
 }
 
-/** sha256 of one local file, or null when unreadable. */
-export function hashFile(path: string): string | null {
-  try {
-    return createHash("sha256").update(readFileSync(path)).digest("hex");
-  } catch {
-    return null;
-  }
+/** Fingerprint content, executable mode, and symlink target without dereferencing. */
+function hashFile(path: string): string {
+  const stat = lstatSync(path);
+  return createHash("sha256")
+    .update(`${stat.mode & 0o777}:`)
+    .update(
+      stat.isSymbolicLink()
+        ? `symlink:${readlinkSync(path)}`
+        : readFileSync(path)
+    )
+    .digest("hex");
 }
 
-/**
- * Previously-uploaded paths whose local content no longer matches the
- * recorded hash — e.g. an experiment reverted to HEAD, which git ranges
- * read as "unchanged" while the sandbox still holds the experiment.
- * Missing files are skipped: the manifest diff deletes them remotely.
- */
-export function verifyRecorded(
-  root: string,
-  recorded: Record<string, string>
-): string[] {
-  const drifted: string[] = [];
-  for (const [path, hash] of Object.entries(recorded)) {
-    const current = hashFile(join(root, path));
-    if (current !== null && current !== hash) drifted.push(path);
-  }
-  return drifted;
-}
-
-/**
- * Next state's file map: drop removals, refresh uploads with current
- * hashes. Unlisted paths keep their recorded hash for the next verify.
- */
-export function refreshFileHashes(
-  root: string,
-  prev: Record<string, string>,
-  remove: string[],
-  upload: string[]
-): Record<string, string> {
-  const removed = new Set(remove);
-  const next: Record<string, string> = {};
-  for (const [path, hash] of Object.entries(prev)) {
-    if (!removed.has(path)) next[path] = hash;
-  }
-  for (const path of upload) {
-    const current = hashFile(join(root, path));
-    if (current !== null) next[path] = current;
-  }
-  return next;
-}
-
-function readIfExists(path: string): [string, string] | null {
-  try {
-    return [path, readFileSync(path, "utf8")];
-  } catch {
-    return null;
-  }
-}
-
-/** Lockfile inputs to `bun install`: root plus every workspace manifest. */
+/** Lockfiles, workspace manifests, and patches consumed by the root install. */
 export function lockfileEntries(root: string): Array<[string, string]> {
-  const entries: Array<[string, string]> = [];
-  for (const name of ["bun.lock", "package.json"]) {
-    const hit = readIfExists(join(root, name));
-    if (hit) entries.push([name, hit[1]]);
-  }
-  let packages: string[] = [];
-  try {
-    packages = sh("git", ["ls-files", "packages/*/package.json"], root)
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-  } catch {
-    packages = [];
-  }
-  for (const name of packages) {
-    const hit = readIfExists(join(root, name));
-    if (hit) entries.push([name, hit[1]]);
-  }
-  return entries;
+  const { files, subFiles } = listTreeFiles(root);
+  return [...files, ...subFiles.map((file) => `packages/owletto/${file}`)]
+    .filter(
+      (file) =>
+        /(^|\/)(package\.json|bun\.lockb?|bunfig\.toml|\.npmrc)$/.test(file) ||
+        file.startsWith("patches/")
+    )
+    .map((file) => [file, readFileSync(join(root, file)).toString("base64")]);
 }
 
 /**
@@ -587,7 +523,7 @@ export function dirtyNotice(parent: string[], sub: string[]): string | null {
 }
 
 /** Preview health from this machine: 2xx on the SPA root within the budget. */
-export async function previewHealthy(
+async function previewHealthy(
   url: string,
   timeoutMs = 120_000
 ): Promise<boolean> {
@@ -608,8 +544,7 @@ export async function previewHealthy(
 }
 
 /** Archive-exclusion shared by full and delta uploads (see buildTarball). */
-function isSyncExcluded(path: string, prefix = ""): boolean {
-  const relative = prefix ? path.slice(prefix.length) : path;
+function isSyncExcluded(relative: string): boolean {
   return (
     relative === ".env" ||
     relative === ".env.local" ||
@@ -617,6 +552,16 @@ function isSyncExcluded(path: string, prefix = ""): boolean {
     relative === "packages/owletto" ||
     relative.startsWith("packages/owletto/")
   );
+}
+
+function fileExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 /**
@@ -630,10 +575,16 @@ export function listTreeFiles(root: string): {
 } {
   const sub = join(root, "packages/owletto");
   return {
-    files: gitFiles(root).filter((f) => !isSyncExcluded(f)),
+    files: [...new Set(gitFiles(root))].filter(
+      (f) => !isSyncExcluded(f) && fileExists(join(root, f))
+    ),
     subFiles: existsSync(join(sub, ".git"))
-      ? gitFiles(sub).filter(
-          (f) => f !== ".env" && f !== ".env.local" && !isAppleDouble(f)
+      ? [...new Set(gitFiles(sub))].filter(
+          (f) =>
+            f !== ".env" &&
+            f !== ".env.local" &&
+            !isAppleDouble(f) &&
+            fileExists(join(sub, f))
         )
       : [],
   };
@@ -651,45 +602,47 @@ function writeNullList(path: string, files: string[]) {
  */
 export function buildTarball(root: string, only?: Set<string>): string {
   const stage = mkdtempSync(join(tmpdir(), "lobu-sandbox-"));
-  const tar = join(stage, "tree.tar.gz");
-  const { files, subFiles } = listTreeFiles(root);
-  const wanted = (path: string) =>
-    !only ||
-    only.has(path) ||
-    [...only].some((dir) => path.startsWith(`${dir}/`));
-  const uploadFiles = files.filter(wanted);
-  const uploadSub = subFiles.filter((f) => wanted(`packages/owletto/${f}`));
+  try {
+    const tar = join(stage, "tree.tar.gz");
+    const { files, subFiles } = listTreeFiles(root);
+    const wanted = (path: string) => !only || only.has(path);
+    const uploadFiles = files.filter(wanted);
+    const uploadSub = subFiles.filter((f) => wanted(`packages/owletto/${f}`));
 
-  const listFile = join(stage, "files.txt");
-  writeNullList(listFile, uploadFiles);
-  sh(
-    "tar",
-    ["-czf", tar, "-C", root, "--null", "-T", listFile],
-    undefined,
-    NO_APPLEDOUBLE
-  );
-
-  // Submodule content at its current checkout. The sandbox has no .git and
-  // owletto is private, so it cannot fetch this itself. Without a checkout
-  // there is nothing to archive; the manifest (full truth, below) already
-  // reflects the empty set.
-  const sub = join(root, "packages/owletto");
-  if (existsSync(join(sub, ".git"))) {
-    const subTar = join(stage, "owletto.tar.gz");
-    const subList = join(stage, "sub.txt");
-    writeNullList(subList, uploadSub);
+    const listFile = join(stage, "files.txt");
+    writeNullList(listFile, uploadFiles);
     sh(
       "tar",
-      ["-czf", subTar, "-C", sub, "--null", "-T", subList],
+      ["-czf", tar, "-C", root, "--null", "-T", listFile],
       undefined,
       NO_APPLEDOUBLE
     );
+
+    // Submodule content at its current checkout. The sandbox has no .git and
+    // owletto is private, so it cannot fetch this itself. Without a checkout
+    // there is nothing to archive; the manifest (full truth, below) already
+    // reflects the empty set.
+    const sub = join(root, "packages/owletto");
+    if (existsSync(join(sub, ".git"))) {
+      const subTar = join(stage, "owletto.tar.gz");
+      const subList = join(stage, "sub.txt");
+      writeNullList(subList, uploadSub);
+      sh(
+        "tar",
+        ["-czf", subTar, "-C", sub, "--null", "-T", subList],
+        undefined,
+        NO_APPLEDOUBLE
+      );
+    }
+    writeNullList(join(stage, "manifest.bin"), [
+      ...files,
+      ...subFiles.map((file) => `packages/owletto/${file}`),
+    ]);
+    return stage;
+  } catch (error) {
+    rmSync(stage, { recursive: true, force: true });
+    throw error;
   }
-  writeNullList(join(stage, "manifest.bin"), [
-    ...files,
-    ...subFiles.map((file) => `packages/owletto/${file}`),
-  ]);
-  return stage;
 }
 
 /**
@@ -949,7 +902,8 @@ export function fullSyncReason(
   fresh: boolean,
   changes: TreeChanges | null
 ): string | null {
-  if (fresh || state === null) return "no prior sync state";
+  if (fresh) return "FRESH=1 requested";
+  if (state === null) return "no prior sync state";
   if (prevManifest === null) return "no remote manifest";
   if (changes === null) return "change range uncomputable";
   if (!state.files || Object.keys(state.files).length === 0) {
@@ -978,6 +932,9 @@ export async function applyTreeSync(
 }> {
   const heads = currentHeads(root, sub);
   const lockHash = hashEntries(lockfileEntries(root));
+  const env = sanitizedEnv(root);
+  const envHash = hashEntries(env === null ? [] : [[".env", env]]);
+  const nextFiles = hashTreeFiles(root);
   const fresh = process.env.FRESH === "1";
   const changes = !fresh && state ? changedSince(root, sub, state) : null;
   const fullReason = fullSyncReason(state, prevManifest, fresh, changes);
@@ -986,33 +943,25 @@ export async function applyTreeSync(
     await syncTree(sandbox, root);
     return {
       scope: "full" as const,
-      next: { ...heads, lockHash, files: await hashTreeFiles(root) },
+      next: { ...heads, lockHash, envHash, files: nextFiles },
     };
   }
-  const { files, subFiles } = listTreeFiles(root);
-  const full = [
-    ...files,
-    ...subFiles.map((file) => `packages/owletto/${file}`),
-  ];
-  const fullSet = new Set(full);
+  const full = Object.keys(nextFiles);
   const prevFiles = state?.files ?? {};
-  const drifted = verifyRecorded(root, prevFiles).filter((path) =>
-    fullSet.has(path)
+  const remoteFiles = new Set(prevManifest);
+  const effective = full.filter(
+    (path) => !remoteFiles.has(path) || nextFiles[path] !== prevFiles[path]
   );
-  const effective = [...new Set([...changes.files, ...drifted])];
-  const parentChanged = effective.filter(
-    (path) => !path.startsWith("packages/owletto/")
+  const plan = planSync(prevManifest, full, effective);
+  const changedPaths = [...plan.upload, ...plan.remove];
+  const envChanged = state?.envHash !== envHash;
+  const scope = syncScope(
+    changedPaths.filter((path) => !path.startsWith("packages/owletto/")),
+    changedPaths.filter((path) => path.startsWith("packages/owletto/")),
+    envChanged
   );
-  const owlettoChanged = effective.filter((path) =>
-    path.startsWith("packages/owletto/")
-  );
-  const scope = syncScope(parentChanged, owlettoChanged, changes.envChanged);
-  const plan = planSync(prevManifest, full, scope === "none" ? [] : effective);
-  // Drifted paths are already inside `effective`, so `plan.upload` covers
-  // them; intersect again for the edge where a drifted path vanished locally
-  // (it then belongs only to `remove` via the manifest diff).
-  const upload = plan.upload.filter((path) => fullSet.has(path));
-  if (upload.length === 0 && plan.remove.length === 0) {
+  const upload = plan.upload;
+  if (upload.length === 0 && plan.remove.length === 0 && !envChanged) {
     console.log(">> tree unchanged since last sync — nothing to upload");
   } else {
     const stage = buildTarball(root, new Set(upload));
@@ -1025,12 +974,11 @@ export async function applyTreeSync(
       rmSync(stage, { recursive: true, force: true });
     }
   }
-  const next = refreshFileHashes(root, prevFiles, plan.remove, upload);
-  return { scope, next: { ...heads, lockHash, files: next } };
+  return { scope, next: { ...heads, lockHash, envHash, files: nextFiles } };
 }
 
 /** Content hashes for every syncable path (full-truth file map). */
-async function hashTreeFiles(root: string): Promise<Record<string, string>> {
+function hashTreeFiles(root: string): Record<string, string> {
   const { files, subFiles } = listTreeFiles(root);
   const full = [
     ...files,
@@ -1038,13 +986,12 @@ async function hashTreeFiles(root: string): Promise<Record<string, string>> {
   ];
   const next: Record<string, string> = {};
   for (const path of full) {
-    const hash = hashFile(join(root, path));
-    if (hash !== null) next[path] = hash;
+    next[path] = hashFile(join(root, path));
   }
   return next;
 }
 
-async function syncIncremental(
+export async function syncIncremental(
   sandbox: Sandbox,
   root: string,
   name: string
@@ -1054,23 +1001,20 @@ async function syncIncremental(
   const fresh = process.env.FRESH === "1";
   const state = fresh ? null : readSyncState(syncStatePath(name));
   const prevManifest = await readRemoteManifest(sandbox);
+  rmSync(syncStatePath(name), { force: true });
   const applied = await applyTreeSync(sandbox, root, sub, state, prevManifest);
-  writeSyncState(syncStatePath(name), applied.next);
   const link = await sandbox.getPreviewLink(APP_PORT);
   const url = String(link?.url ?? link);
-  if (await previewHealthy(url)) {
+  if (!fresh && sandbox.public && (await previewHealthy(url))) {
+    writeSyncState(syncStatePath(name), {
+      ...applied.next,
+      lockHash: state?.lockHash ?? null,
+      pendingBoot: state?.pendingBoot || applied.scope === "full",
+    });
     return console.log(`synced ${name} (preview healthy, app left running)`);
   }
-  console.log(`>> preview unhealthy after sync — rebooting ${name}`);
-  await bootApp(sandbox, url, {
-    workerApiToken: generateBearerToken(),
-    embeddingsServiceToken: generateBearerToken(),
-  });
-  if (!(await waitReady(sandbox))) {
-    console.error(`\n  ${name} did not recover. See: make sandbox-logs`);
-    process.exit(1);
-  }
-  return console.log(`synced ${name} (rebooted, preview healthy)`);
+  // Recovery must use the same install and private boot/seat checks as `up`.
+  await upIncremental(sandbox, root, name);
 }
 
 /** Previous remote manifest, or null when the sandbox never synced. */
@@ -1112,7 +1056,7 @@ async function printAppUrls(sandbox: Sandbox): Promise<void> {
  * and delta removals (uploaded list). The case guard is load-bearing: a
  * malicious or corrupted list must not escape the checkout.
  */
-export function removeLoopStatement(sourceFile: string): string {
+function removeLoopStatement(sourceFile: string): string {
   return (
     `(cd ${WORKSPACE} && while IFS= read -r -d '' path; do ` +
     `case "$path" in ''|.|..|/*|../*|*/../*|*/..) echo "invalid sync path: $path" >&2; exit 1;; esac; ` +
@@ -1755,13 +1699,20 @@ async function main() {
     await sandbox.start();
   }
 
+  await upIncremental(sandbox, root, name);
+}
+
+export async function upIncremental(
+  sandbox: Sandbox,
+  root: string,
+  name: string
+): Promise<void> {
   const sub = join(root, "packages/owletto");
   warnDirty(root, sub);
   const fresh = process.env.FRESH === "1";
   const state = fresh ? null : readSyncState(syncStatePath(name));
 
-  // Full path: unknown prior state, FRESH=1, or explicitly forced below.
-  // Keeps the proven boot-and-claim sequence byte for byte.
+  // Every reboot closes the public preview until the seat checks pass.
   const fullBoot = async (why: string) => {
     console.log(why);
     const link = await sandbox.getPreviewLink(APP_PORT);
@@ -1808,8 +1759,8 @@ async function main() {
   };
 
   const prevManifest = await readRemoteManifest(sandbox);
+  rmSync(syncStatePath(name), { force: true });
   const applied = await applyTreeSync(sandbox, root, sub, state, prevManifest);
-  writeSyncState(syncStatePath(name), applied.next);
   const scope = applied.scope;
   const lockChanged = (state?.lockHash ?? null) !== applied.next.lockHash;
 
@@ -1829,27 +1780,20 @@ async function main() {
     console.log(">> bun install skipped (lockfiles unchanged)");
   }
 
-  if (scope === "full" || lockChanged || !nodeModules) {
+  if (scope === "full" || state?.pendingBoot || lockChanged || !nodeModules) {
     await fullBoot(">> rebooting for server-side changes");
+    writeSyncState(syncStatePath(name), applied.next);
     return;
   }
-  // Frontend-only: Vite HMR absorbs the upload — but prove it instead of
-  // asserting it. An unhealthy preview falls back to the full boot.
-  await printAppUrls(sandbox);
+  // A root response proves preview availability, not that a browser applied HMR.
   const link = await sandbox.getPreviewLink(APP_PORT);
-  if (await previewHealthy(String(link?.url ?? link))) {
-    return console.log(`\n  ${name} ready (HMR update, no reboot)\n`);
+  if (sandbox.public && (await previewHealthy(String(link?.url ?? link)))) {
+    writeSyncState(syncStatePath(name), applied.next);
+    await printAppUrls(sandbox);
+    return console.log(`\n  ${name} ready (preview healthy, no reboot)\n`);
   }
-  console.log(">> preview unhealthy after sync — rebooting");
-  await bootApp(sandbox, String(link?.url ?? link), {
-    workerApiToken: generateBearerToken(),
-    embeddingsServiceToken: generateBearerToken(),
-  });
-  if (!(await waitReady(sandbox))) {
-    console.error(`\n  ${name} did not recover. See: make sandbox-logs`);
-    process.exit(1);
-  }
-  return console.log(`\n  ${name} ready (rebooted after unhealthy preview)\n`);
+  await fullBoot(">> preview unhealthy or private — rebooting");
+  writeSyncState(syncStatePath(name), applied.next);
 }
 
 // Importing this module (the tests do) must not launch a sandbox.

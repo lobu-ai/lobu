@@ -28,7 +28,7 @@ help:
 	@echo "  make review-fix [BASE=<branch>]            - Pre-review fixer: reviewer CLI with write access fixes review-grade findings in the tree; posts nothing"
 	@echo "  make ui-review [ARTIFACT=<https-url>]       - Record Owletto UI proof; complete forward pointer diffs touching no hosted surface pass as not applicable; OPEN=1 opens the merged PR"
 	@echo "  make sandbox                                - Boot/refresh this worktree's remote Daytona dev stack (server + its own Postgres) and print the preview URL (incremental by default; FRESH=1 forces full sync, install, boot)"
-	@echo "  make sandbox-sync                           - Push the working tree to the sandbox without restarting the app"
+	@echo "  make sandbox-sync                           - Push the working tree to the sandbox; keep a healthy app running, recover it otherwise"
 	@echo "  make sandbox-run CMD='<cmd>'                - Run a command (build, test suite) inside the sandbox instead of on this Mac"
 	@echo "  make sandbox-logs / sandbox-url             - Tail the sandbox app log / print its preview URL"
 	@echo "  make sandbox-stop                           - Stop the sandbox (frees the running-memory quota; disk and database survive)"

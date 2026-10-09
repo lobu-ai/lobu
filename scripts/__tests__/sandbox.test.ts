@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { gunzipSync } from "node:zlib";
@@ -14,6 +16,7 @@ import { join, resolve } from "node:path";
 import {
   HOST_ONLY_ENV_KEYS,
   SANDBOX_CONTROLLED_ENV_KEYS,
+  applyTreeSync,
   authenticatedUrl,
   bootEnv,
   buildTarball,
@@ -44,7 +47,9 @@ import {
   sessionTokenFrom,
   signInScript,
   signUpScript,
+  syncIncremental,
   syncScope,
+  upIncremental,
   syncStatePath,
   writeSyncState,
 } from "../sandbox";
@@ -810,74 +815,7 @@ describe("fullSyncReason", () => {
         true,
         changes
       )
-    ).toBe("no prior sync state");
-  });
-});
-
-describe("fullSyncReason", () => {
-  test("names each fallback before the delta path", () => {
-    const changes = { files: [], envChanged: false };
-    expect(fullSyncReason(null, [], false, changes)).toBe(
-      "no prior sync state"
-    );
-    expect(
-      fullSyncReason(
-        { lobuHead: "a", owlettoHead: null, lockHash: null },
-        null,
-        false,
-        changes
-      )
-    ).toBe("no remote manifest");
-    expect(
-      fullSyncReason(
-        { lobuHead: "a", owlettoHead: null, lockHash: null },
-        [],
-        false,
-        null
-      )
-    ).toBe("change range uncomputable");
-    expect(
-      fullSyncReason(
-        { lobuHead: "a", owlettoHead: null, lockHash: null },
-        [],
-        false,
-        changes
-      )
-    ).toBe("no file map yet");
-    expect(
-      fullSyncReason(
-        { lobuHead: "a", owlettoHead: null, lockHash: null, files: {} },
-        [],
-        false,
-        changes
-      )
-    ).toBe("no file map yet");
-    expect(
-      fullSyncReason(
-        {
-          lobuHead: "a",
-          owlettoHead: null,
-          lockHash: null,
-          files: { "a.ts": "h" },
-        },
-        ["a.ts"],
-        false,
-        changes
-      )
-    ).toBeNull();
-    expect(
-      fullSyncReason(
-        {
-          lobuHead: "a",
-          owlettoHead: null,
-          lockHash: null,
-          files: { "a.ts": "h" },
-        },
-        ["a.ts"],
-        true,
-        changes
-      )
-    ).toBe("no prior sync state");
+    ).toBe("FRESH=1 requested");
   });
 });
 
@@ -960,7 +898,7 @@ describe("parsePorcelainZ", () => {
   });
 
   test("maps a rename to its new path only", () => {
-    expect(parsePorcelainZ("R  old.ts\0new.ts\0")).toEqual(["new.ts"]);
+    expect(parsePorcelainZ("R  new.ts\0old.ts\0")).toEqual(["new.ts"]);
   });
 
   test("empty output means a clean tree", () => {
@@ -1092,7 +1030,7 @@ describe("changedSince", () => {
 
 describe("lockfileEntries", () => {
   test("hashes bun.lock plus workspace manifests and moves on edit", () => {
-    const root = temporaryDirectory("sandbox-lock-");
+    const root = fixtureRepo();
     writeFileSync(join(root, "bun.lock"), "lock v1\n");
     writeFileSync(join(root, "package.json"), '{"name":"root"}\n');
     mkdirSync(join(root, "packages", "a"), { recursive: true });
@@ -1116,5 +1054,333 @@ describe("buildTarball delta", () => {
     const names = entries(join(stage, "tree.tar.gz"));
     expect(names).toContain("a.ts");
     expect(names).not.toContain("b.ts");
+    expect(
+      readFileSync(join(stage, "manifest.bin"), "utf8").split("\0")
+    ).toContain("b.ts");
+  });
+});
+
+describe("incremental sync regressions", () => {
+  function remote() {
+    const uploads = new Map<string, Buffer>();
+    const commands: string[] = [];
+    let failCommand: string | undefined;
+    const sandbox = {
+      id: "synthetic-sandbox",
+      public: true,
+      state: "started",
+      refreshData: async () => undefined,
+      getPreviewLink: async () => ({ url: "https://sandbox.example.test" }),
+      sandboxApi: {
+        updatePublicStatus: async (_id: string, value: boolean) => {
+          commands.push(`public:${value}`);
+          sandbox.public = value;
+        },
+      },
+      fs: {
+        uploadFile: async (source: string, target: string) => {
+          uploads.set(target, readFileSync(source));
+        },
+      },
+      process: {
+        executeCommand: async (command: string) => {
+          commands.push(command);
+          if (failCommand && command.includes(failCommand))
+            return { exitCode: 1, result: "synthetic failure" };
+          let result = "";
+          if (command.startsWith("cat /workspace/.lobu-sandbox-manifest"))
+            result =
+              uploads.get("/tmp/lobu-sandbox-manifest")?.toString() ?? "";
+          else if (command.includes("test -d /workspace/lobu/node_modules"))
+            result = "yes";
+          else if (command.includes("/proc/net/tcp")) result = "free";
+          else if (command.includes("pgrep")) result = "stopped";
+          else if (command.includes("/health/ready")) result = "200";
+          else if (command.startsWith("cat /workspace/.lobu-sandbox-seat"))
+            result = JSON.stringify({
+              email: "owner@example.test",
+              password: "synthetic-password",
+              created_at: "2026-01-01",
+            });
+          else if (command.includes("/api/auth/sign-in/email"))
+            result = '{"token":"synthetic-session"}';
+          else if (command.includes("/api/auth/sign-up/email"))
+            result = '403\n{"code":"SIGN_UP_DISABLED_IN_SINGLE_USER_MODE"}';
+          return { exitCode: 0, result };
+        },
+      },
+    } as unknown as Parameters<typeof applyTreeSync>[0];
+    return {
+      sandbox,
+      uploads,
+      commands,
+      fail: (command?: string) => {
+        failCommand = command;
+      },
+    };
+  }
+
+  test("excludes unstaged deletions from archives and removes them remotely", async () => {
+    const root = fixtureRepo();
+    const sub = join(root, "packages/owletto");
+    const { sandbox, uploads } = remote();
+    const first = await applyTreeSync(sandbox, root, sub, null, null);
+    rmSync(join(root, "README.md"));
+    const next = await applyTreeSync(
+      sandbox,
+      root,
+      sub,
+      first.next,
+      Object.keys(first.next.files!)
+    );
+    expect(next.scope).toBe("full");
+    expect(uploads.get("/tmp/lobu-sync-remove")?.toString()).toContain(
+      "README.md\0"
+    );
+  });
+
+  test("uploads ignored env edits even when the source tree is unchanged", async () => {
+    const root = fixtureRepo();
+    writeFileSync(join(root, ".gitignore"), ".env\n");
+    execFileSync("git", ["add", ".gitignore"], { cwd: root });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qm",
+        "ignore env",
+      ],
+      { cwd: root }
+    );
+    writeFileSync(join(root, ".env"), "FEATURE=old\n");
+    const sub = join(root, "packages/owletto");
+    const { sandbox, uploads } = remote();
+    const first = await applyTreeSync(sandbox, root, sub, null, null);
+    uploads.clear();
+    writeFileSync(join(root, ".env"), "FEATURE=new\n");
+    const next = await applyTreeSync(
+      sandbox,
+      root,
+      sub,
+      first.next,
+      Object.keys(first.next.files!)
+    );
+    expect(next.scope).toBe("full");
+    expect(uploads.get("/workspace/lobu/.env")?.toString()).toBe(
+      "FEATURE=new\n"
+    );
+  });
+
+  test("does not re-upload unchanged uncommitted files", async () => {
+    const root = fixtureRepo();
+    writeFileSync(join(root, "README.md"), "dirty\n");
+    const sub = join(root, "packages/owletto");
+    const { sandbox, uploads } = remote();
+    const first = await applyTreeSync(sandbox, root, sub, null, null);
+    uploads.clear();
+    const next = await applyTreeSync(
+      sandbox,
+      root,
+      sub,
+      first.next,
+      Object.keys(first.next.files!)
+    );
+    expect(next.scope).toBe("none");
+    expect(uploads.size).toBe(0);
+  });
+
+  test("removing an uploaded untracked backend file requests a reboot", async () => {
+    const root = fixtureRepo();
+    writeFileSync(join(root, "scratch.ts"), "export const x = 1;\n");
+    const sub = join(root, "packages/owletto");
+    const { sandbox } = remote();
+    const first = await applyTreeSync(sandbox, root, sub, null, null);
+    rmSync(join(root, "scratch.ts"));
+    const next = await applyTreeSync(
+      sandbox,
+      root,
+      sub,
+      first.next,
+      Object.keys(first.next.files!)
+    );
+    expect(next.scope).toBe("full");
+  });
+
+  test("dependency fingerprint includes submodule and untracked workspace manifests", () => {
+    const root = fixtureRepo();
+    addOwlettoSubmodule(root);
+    const before = hashEntries(lockfileEntries(root));
+    writeFileSync(
+      join(root, "packages/owletto/package.json"),
+      '{"dependencies":{"example":"1"}}'
+    );
+    const subChanged = hashEntries(lockfileEntries(root));
+    expect(subChanged).not.toBe(before);
+    mkdirSync(join(root, "packages/new-workspace"));
+    writeFileSync(
+      join(root, "packages/new-workspace/package.json"),
+      '{"name":"new-workspace"}'
+    );
+    expect(hashEntries(lockfileEntries(root))).not.toBe(subChanged);
+  });
+
+  for (const failure of ["bun install", "nohup"]) {
+    test(`a failed ${failure} leaves no checkpoint and retries the full lifecycle`, async () => {
+      const root = fixtureRepo();
+      const name = sandboxName(root);
+      const statePath = syncStatePath(name);
+      const { sandbox, commands, fail } = remote();
+      try {
+        await upIncremental(sandbox, root, name);
+        expect(readSyncState(statePath)).not.toBeNull();
+        writeFileSync(join(root, "bun.lock"), "new lock\n");
+        fail(failure);
+        await expect(upIncremental(sandbox, root, name)).rejects.toThrow(
+          "synthetic failure"
+        );
+        expect(readSyncState(statePath)).toBeNull();
+        fail();
+        commands.length = 0;
+        await upIncremental(sandbox, root, name);
+        expect(
+          commands.some((command) => command.includes("bun install"))
+        ).toBe(true);
+        const boot = commands.findIndex((command) => command.includes("nohup"));
+        expect(commands.indexOf("public:false")).toBeLessThan(boot);
+        expect(commands.indexOf("public:true")).toBeGreaterThan(boot);
+        expect(readSyncState(statePath)).not.toBeNull();
+      } finally {
+        rmSync(statePath, { force: true });
+      }
+    });
+  }
+
+  test("sync preserves pending install and reboot work for the next up", async () => {
+    const root = fixtureRepo();
+    const name = sandboxName(root);
+    const statePath = syncStatePath(name);
+    const { sandbox, commands } = remote();
+    const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("ok")
+    );
+    try {
+      await upIncremental(sandbox, root, name);
+      const installed = readSyncState(statePath)!.lockHash;
+      writeFileSync(join(root, "bun.lock"), "changed lock\n");
+      await syncIncremental(sandbox, root, name);
+      expect(readSyncState(statePath)?.lockHash).toBe(installed);
+      expect(readSyncState(statePath)?.pendingBoot).toBe(true);
+      commands.length = 0;
+      await upIncremental(sandbox, root, name);
+      expect(commands.some((command) => command.includes("bun install"))).toBe(
+        true
+      );
+      expect(commands.some((command) => command.includes("nohup"))).toBe(true);
+      expect(readSyncState(statePath)?.pendingBoot).not.toBe(true);
+    } finally {
+      fetchMock.mockRestore();
+      rmSync(statePath, { force: true });
+    }
+  });
+
+  test("tracks executable bits, symlinks, reverted edits, and env removal", async () => {
+    const root = fixtureRepo();
+    const sub = join(root, "packages/owletto");
+    writeFileSync(join(root, ".env"), "FEATURE=old\n");
+    const { sandbox, uploads, commands } = remote();
+    let applied = await applyTreeSync(sandbox, root, sub, null, null);
+    const sync = async () => {
+      applied = await applyTreeSync(
+        sandbox,
+        root,
+        sub,
+        applied.next,
+        Object.keys(applied.next.files!)
+      );
+    };
+    chmodSync(join(root, "README.md"), 0o755);
+    await sync();
+    expect(applied.scope).toBe("full");
+    symlinkSync("missing-target", join(root, "link"));
+    await sync();
+    expect(applied.next.files).toHaveProperty("link");
+    writeFileSync(join(root, "README.md"), "experiment\n");
+    await sync();
+    execFileSync("git", ["restore", "README.md"], { cwd: root });
+    await sync();
+    expect(applied.scope).toBe("full");
+    uploads.clear();
+    commands.length = 0;
+    rmSync(join(root, ".env"));
+    await sync();
+    expect(applied.scope).toBe("full");
+    expect(commands).toContain("rm -f /workspace/lobu/.env");
+  });
+
+  test("frontend edits and removals keep the frontend scope", async () => {
+    const root = fixtureRepo();
+    addOwlettoSubmodule(root);
+    const sub = join(root, "packages/owletto");
+    const { sandbox } = remote();
+    const first = await applyTreeSync(sandbox, root, sub, null, null);
+    writeFileSync(join(sub, "app.ts"), "export const app = false;\n");
+    const edit = await applyTreeSync(
+      sandbox,
+      root,
+      sub,
+      first.next,
+      Object.keys(first.next.files!)
+    );
+    expect(edit.scope).toBe("frontend");
+    rmSync(join(sub, "app.ts"));
+    const removal = await applyTreeSync(
+      sandbox,
+      root,
+      sub,
+      edit.next,
+      Object.keys(edit.next.files!)
+    );
+    expect(removal.scope).toBe("frontend");
+  });
+
+  test("a warm up skips install and boot, while FRESH forces both", async () => {
+    const root = fixtureRepo();
+    const name = sandboxName(root);
+    const statePath = syncStatePath(name);
+    const { sandbox, commands, uploads } = remote();
+    const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("ok")
+    );
+    const previousFresh = process.env.FRESH;
+    try {
+      delete process.env.FRESH;
+      await upIncremental(sandbox, root, name);
+      commands.length = 0;
+      const initialArchive = uploads.get("/tmp/tree.tar.gz");
+      await upIncremental(sandbox, root, name);
+      expect(
+        commands.some(
+          (command) =>
+            command.includes("bun install") || command.includes("nohup")
+        )
+      ).toBe(false);
+      expect(uploads.get("/tmp/tree.tar.gz")).toBe(initialArchive);
+      commands.length = 0;
+      process.env.FRESH = "1";
+      await upIncremental(sandbox, root, name);
+      expect(commands.some((command) => command.includes("bun install"))).toBe(
+        true
+      );
+      expect(commands.some((command) => command.includes("nohup"))).toBe(true);
+    } finally {
+      if (previousFresh === undefined) delete process.env.FRESH;
+      else process.env.FRESH = previousFresh;
+      fetchMock.mockRestore();
+      rmSync(statePath, { force: true });
+    }
   });
 });
