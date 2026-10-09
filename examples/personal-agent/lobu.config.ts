@@ -851,17 +851,10 @@ const instagramTakeoutConnection = defineConnection({
 });
 
 const xAccountAuth = defineAuthProfile({
-  slug: "x-twitter-account",
+  slug: "x-browser-account-2",
   connector: "x",
-  authKind: "oauth_account",
-  name: "X Account",
-});
-
-const xAppAuth = defineAuthProfile({
-  slug: "x-twitter-oauth-app",
-  connector: "x",
-  authKind: "oauth_app",
-  name: "X OAuth App",
+  authKind: "browser_session",
+  name: "X Mac mini browser account",
 });
 
 const xConnection = defineConnection({
@@ -870,11 +863,10 @@ const xConnection = defineConnection({
   name: "X",
   // Keep the adopted connection's identity, remote feed settings and cadence.
   // Declaring config: {} would replace existing per-feed browser settings.
-  // Both auth bindings are prod truth: omitting one reads as an explicit
-  // clear on reapply and the server rejects clearing required auth.
-  deviceWorkerId: "706aa825-5f82-4ce2-80d1-c09cd7908001",
+  // These feeds use the verified Mac mini browser account. OAuth alone does
+  // not supply a browser dispatcher, even when a device pin is present.
+  deviceWorkerId: "2e8a0557-ddd9-48a9-913e-f476163c0cd2",
   authProfile: xAccountAuth,
-  appAuthProfile: xAppAuth,
   feeds: [
     { feed: "bookmarks" },
     { feed: "my_tweets" },
@@ -1265,7 +1257,6 @@ export default defineConfig({
     spotifyAccountAuth,
     spotifyAppAuth,
     xAccountAuth,
-    xAppAuth,
   ],
   connections: [
     midasConnection,
