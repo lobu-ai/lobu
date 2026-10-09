@@ -6,7 +6,7 @@ import type { Env } from '../../../index';
 import type { ToolContext } from '../../../tools/registry';
 import { handleCompleteWindow } from '../../../tools/admin/manage_automations/complete-window';
 import { captureSideEffect } from '../../../gateway/routes/internal/capture-mode';
-import { createEvalRun } from '../../../runs/eval-runs';
+import { createLegacyCapturedRun } from '../../setup/legacy-captured-run';
 import { createAutomationRun } from '../../../runs/queue-service';
 import { computePendingWindow } from '../../../utils/window-utils';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -114,8 +114,8 @@ async function setup() {
     TEST_ENV,
     liveContext
   );
-  const evalRun = await createEvalRun(
-    { sourceRunId: sourceRun.runId, caseKey: 'capture' },
+  const evalRun = await createLegacyCapturedRun(
+    sourceRun.runId,
     sql as unknown as DbClient
   );
   if (!evalRun) throw new Error('eval run was not created');

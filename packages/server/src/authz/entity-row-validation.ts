@@ -64,7 +64,7 @@ export interface EntityRowValidationVerdict {
  * closed the DEFAULT for every caller. Only a caller with approval machinery to
  * route an escalation into opts in by catching this and reading {@link verdict}
  * — `updateEntity`, automation promotion (`promote-keyed-entities`), and
- * `manage_entity` deletion. Link auto-create and eval scaffolding have
+ * `manage_entity` deletion. Link auto-create has
  * nowhere to queue a card, so for them a rule that asked for review must stop the
  * write — which is exactly what an uncaught throw does.
  *
@@ -399,7 +399,7 @@ async function enforceCompiledRules(params: {
  * Mint a validated patch WITHOUT running validation.
  *
  * For platform bookkeeping that legitimately sits outside tenant state rules —
- * eval scaffolding and ACL graph upkeep. Deliberately named and greppable: an exemption should be visible in review, unlike the
+ * ACL graph upkeep. Deliberately named and greppable: an exemption should be visible in review, unlike the
  * implicit bypass that every direct `patchEntityRows` caller enjoyed before
  * this seam existed.
  *

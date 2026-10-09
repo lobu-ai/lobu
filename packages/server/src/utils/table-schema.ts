@@ -497,13 +497,9 @@ export const QUERYABLE_SCHEMA = {
         // most recent `completed` run, written by a trigger on `runs`. Plain
         // timestamptz, no secret, and it is what the listing orders by — so
         // SQL must expose it or the ordering can't be audited from query_sql.
-        'last_run_completed_at',
-        // Materialized eval quality, written by the scorer at score time. No
-        // secret, and exposing it is the point: a quality number nobody can
-        // query is a number nobody can check.
-        'latest_eval_score',
-        'latest_eval_at',
-        'latest_eval_run_id'
+        // Retired latest_eval_* columns remain physically until all replicas
+        // run this projection; only a subsequent release can drop them safely.
+        'last_run_completed_at'
       ),
     },
     // event_classifications

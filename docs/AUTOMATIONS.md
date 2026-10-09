@@ -49,12 +49,21 @@ External effects are at-least-once: use `ctx.window.run_id` in idempotency keys.
 Scripts must handle gated or pending SDK results before returning success.
 
 Script jobs cannot use device pins, agent skills, extraction outputs, or model/
-CLI settings; those require agent execution. Scripted eval capture is currently
-unavailable and fails explicitly. An optional reaction still runs after the
+CLI settings; those require agent execution. Scripted capture execution is
+unsupported and fails explicitly. An optional reaction still runs after the
 script's successful completion, through the existing durable reaction queue.
 For agent Automations, completion still precedes their reaction.
 Event scripts use silent triggers and send any desired replies through the SDK;
 `reply_to_source` is reserved for agent responses.
+
+Evaluation fixtures and assertions belong to the owning project in
+`examples/<project>/evals/`. Run deterministic scenarios through the SDK and
+real handlers against a disposable test database; use the Agent API and
+`packages/promptfoo-provider` for model-driven sessions. The discovery-surface
+harness in `examples/lobu-crm/evals/` exercises real models with the SDK sandbox.
+These paths do not require workspace eval-case entities, suite endpoints, or a
+background scorer. Historical captured runs retain their side-effect guards;
+their stored run type is compatibility state, not a case-management API.
 
 `lobu apply` preserves an omitted executor; `executor: "agent"` explicitly removes
 a stored script executor. Switching an existing reaction-driven job requires
