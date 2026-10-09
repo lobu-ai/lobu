@@ -114,6 +114,15 @@ describe('redactOutput', () => {
     }
   });
 
+  test('preserves case-insensitive matching for credential assignments', () => {
+    for (const key of ['password', 'clientSecret', 'api_key', 'authorization', 'cookie', 'AWS_CUSTOM_KEY']) {
+      for (const variant of [key, key.toLowerCase(), key.toUpperCase(), [...key].map((char, index) => index % 2 ? char.toUpperCase() : char.toLowerCase()).join('')]) {
+        const output = redactOutput(`failed ${variant}=synthetic-case-secret status=500`);
+        expect(output).toBe(`failed ${variant}=[REDACTED] status=500`);
+      }
+    }
+  });
+
   test('redacts authentication schemes across dotted keys and assignment formats', () => {
     for (const key of ['authorization', 'auth', 'nested.authorization', 'db.password', 'config.api_key']) {
       for (const separator of ['=', ': ']) {

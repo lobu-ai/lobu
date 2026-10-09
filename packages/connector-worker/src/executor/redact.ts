@@ -40,8 +40,9 @@ function redactAssignments(text: string): string {
   while ((key = keys.exec(text))) {
     const normalized = key[0].replace(/([a-z0-9])([A-Z])/g, '$1_$2');
     if (
+      !SECRET_KEY.test(key[0]) &&
       !SECRET_KEY.test(normalized) &&
-      !/^AWS_[A-Z0-9_]*(?:KEY|TOKEN|SECRET)$/.test(key[0])
+      !/^AWS_[A-Z0-9_]*(?:KEY|TOKEN|SECRET)$/i.test(key[0])
     ) continue;
     assignment.lastIndex = keys.lastIndex;
     const separator = assignment.exec(text);

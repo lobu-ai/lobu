@@ -4,6 +4,7 @@ import { IsolateExecutor } from "@lobu/connector-worker/executor/isolate";
 import { createIsolateConnectorCompiler } from "../../../packages/connector-worker/src/compile/index";
 
 const credentialLogs = [
+  "failed pAsSwOrD=synthetic-mixed-case-secret aWs_Custom_Key=synthetic-mixed-aws-secret",
   "failed password=secret7 token=synthetic-opaque-token",
   "authorization=Bearer synthetic-bearer-secret status=500",
   "auth=Basic c3ludGhldGljOnNlY3JldA== status=500",
@@ -104,6 +105,8 @@ it("runs query_logs inside the native isolate through the existing HTTP auth cap
     credentialLogs.length + 1
   );
   for (const secret of [
+    "synthetic-mixed-case-secret",
+    "synthetic-mixed-aws-secret",
     "secret7",
     "synthetic-bearer-secret",
     "c3ludGhldGljOnNlY3JldA==",

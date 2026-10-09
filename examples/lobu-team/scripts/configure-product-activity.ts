@@ -50,10 +50,11 @@ export async function configureProductActivityDigest(
     reaction_script: reactionScript,
   });
   if (needsApproval(reaction)) return reaction;
+  // Bound Slack delivery uses the existing agent as its policy principal.
+  // Empty triggers and a cleared script executor leave execution to the MCP client.
   const executor = await client.automations.update({
     automation_id: automationId,
     triggers: [],
-    managed_agent_id: null,
     device_worker_id: null,
     agent_kind: null,
     execution_config: null,

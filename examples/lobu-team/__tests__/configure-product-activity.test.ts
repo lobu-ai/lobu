@@ -64,7 +64,6 @@ describe("external production digest configuration", () => {
     expect(h.automations.update).toHaveBeenLastCalledWith({
       automation_id: "42",
       triggers: [],
-      managed_agent_id: null,
       device_worker_id: null,
       agent_kind: null,
       execution_config: null,

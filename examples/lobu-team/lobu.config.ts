@@ -454,6 +454,6 @@ export default defineConfig({
     lobuTeamSlack,
   ],
   // The external digest is maintained by scripts/configure-product-activity.ts.
-  // Apply without prune: external-only execution has no defineAutomation agent.
+  // Apply without prune: preserve its existing delivery agent and manual Automation.
   automations: [lunchOpen, lunchFinalize, engineeringTaskRunner],
 });
