@@ -1,16 +1,21 @@
 import { Hono } from 'hono';
-import { describe, expect, it, vi } from 'vitest';
-import { captureServerError, isSentryReported, trackMCPToolCall } from '../sentry';
-import { ToolUserError } from '../utils/errors';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+beforeEach(() => {
+  vi.resetModules();
+  vi.doUnmock('../utils/logger');
+  vi.doUnmock('../diagnostics');
+});
 
 describe('operational errors reach stdout without a Sentry transport', () => {
   it('retains the original caught route stack and marks the request to avoid duplicate capture', async () => {
+    const { captureServerError, isErrorReported } = await import('../diagnostics');
     const app = new Hono();
     const error = new Error('synthetic handler failure');
     let reported = false;
     app.get('/synthetic', (c) => {
       captureServerError(c, error, 'synthetic_route', 503);
-      reported = isSentryReported(c);
+      reported = isErrorReported(c);
       return c.json({ error: 'unavailable' }, 503);
     });
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -28,12 +33,14 @@ describe('operational errors reach stdout without a Sentry transport', () => {
   });
 
   it('logs operational MCP failures and keeps expected caller errors quiet', async () => {
+    const { trackMCPToolCall } = await import('../diagnostics');
+    const { ToolUserError } = await import('../utils/errors');
     const failure = new Error('synthetic MCP failure');
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     let output = '';
     try {
-      await expect(trackMCPToolCall('synthetic_tool', {}, async () => { throw failure; })).rejects.toBe(failure);
-      await expect(trackMCPToolCall('synthetic_tool', {}, async () => {
+      await expect(trackMCPToolCall('synthetic_tool', async () => { throw failure; })).rejects.toBe(failure);
+      await expect(trackMCPToolCall('synthetic_tool', async () => {
         throw new ToolUserError('synthetic invalid input', 400);
       })).rejects.toBeInstanceOf(ToolUserError);
       output = write.mock.calls.map(([line]) => String(line)).join('');

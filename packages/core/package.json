@@ -289,7 +289,6 @@
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.222.0",
     "@opentelemetry/resources": "^2.11.0",
     "@opentelemetry/semantic-conventions": "^1.28.0",
-    "@sentry/node": "^10.74.0",
     "winston": "^3.17.0"
   },
   "devDependencies": {

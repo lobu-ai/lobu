@@ -106,7 +106,6 @@ Local dev:
   validate                 Validate lobu.config.ts
   doctor                   Health checks (deps, DB, pgvector, ports, keys)
   runtime install [...]    Preinstall runtime components for offline use
-  telemetry                Show / toggle anonymous error reporting
   opencode-plugin <action> Install, inspect, or remove interactive OpenCode support
 
 Cloud:
@@ -177,8 +176,6 @@ Memory:
       "Custom memory MCP URL (with --memory lobu-custom)"
     )
     .option("--otel-endpoint <url>", "OpenTelemetry collector endpoint")
-    .option("--sentry", "Enable Sentry error reporting")
-    .option("--no-sentry", "Disable Sentry without prompting")
     .option(
       "--hosted-slack",
       "Use the hosted Lobu Slack bot (no bot token) in lobu.config.ts"
@@ -200,12 +197,7 @@ Memory:
     .action(
       async (
         name: string | undefined,
-        // Commander's raw shape: `sentry` is a tristate (true=--sentry,
-        // false=--no-sentry, undefined=neither) and `fromOrg` is string|true.
-        // Every other field maps 1:1 onto InitOptions, so we spread and only
-        // normalize those two below.
-        options: Omit<InitOptions, "sentry" | "noSentry" | "fromOrg"> & {
-          sentry?: boolean;
+        options: Omit<InitOptions, "fromOrg"> & {
           fromOrg?: string | true;
         }
       ) => {
@@ -219,8 +211,6 @@ Memory:
               : options.fromOrg;
         await initCommand(process.cwd(), name, {
           ...options,
-          sentry: options.sentry === true,
-          noSentry: options.sentry === false,
           fromOrg,
         });
       }
@@ -1247,35 +1237,6 @@ Memory:
     .action(async (options: { memoryOnly?: boolean }) => {
       const { doctorCommand } = await import("./commands/doctor.js");
       await doctorCommand(options);
-    });
-
-  // ─── telemetry ──────────────────────────────────────────────────────
-  const telemetry = program
-    .command("telemetry")
-    .description("Show or toggle anonymous error reporting (Sentry)");
-  telemetry
-    .command("status", { isDefault: true })
-    .description("Show whether telemetry is on or off")
-    .action(async () => {
-      const { telemetryStatusCommand } = await import(
-        "./commands/telemetry.js"
-      );
-      await telemetryStatusCommand();
-    });
-  telemetry
-    .command("on")
-    .description("Enable telemetry (writes SENTRY_DSN to .env)")
-    .option("--dsn <dsn>", "Custom Sentry DSN (defaults to Lobu's)")
-    .action(async (options: { dsn?: string }) => {
-      const { telemetryOnCommand } = await import("./commands/telemetry.js");
-      await telemetryOnCommand(options);
-    });
-  telemetry
-    .command("off")
-    .description("Disable telemetry (removes SENTRY_DSN from .env)")
-    .action(async () => {
-      const { telemetryOffCommand } = await import("./commands/telemetry.js");
-      await telemetryOffCommand();
     });
 
   // ─── memory ─────────────────────────────────────────────────────────

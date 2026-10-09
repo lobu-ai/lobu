@@ -20,7 +20,7 @@ import {
 } from '../auth/tool-access';
 import type { Env } from '../index';
 import { recordMcpConversationActivity } from '../lobu/stores/mcp-client-conversations';
-import { trackMCPToolCall } from '../sentry';
+import { trackMCPToolCall } from '../diagnostics';
 import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
@@ -272,7 +272,7 @@ export function checkToolAccess(
 }
 
 /**
- * Execute a tool by name with access control and Sentry tracking.
+ * Execute a tool by name with access control and operational error logging.
  * Returns the raw tool result (caller decides formatting).
  *
  * Arg validation does NOT live here: every registered handler is wrapped
@@ -384,7 +384,7 @@ export async function executeTool(
           runId: toolContext.actingRunId ?? declaredSource?.runId ?? null,
         },
         () =>
-          trackMCPToolCall(toolName, args, () =>
+          trackMCPToolCall(toolName, () =>
             isAccountContentRead(toolName, authCtx)
               ? getAccountContent(args, env, authCtx)
               : tool.scope === 'account'

@@ -561,23 +561,26 @@ export async function reconcileAutomationRuns(
  * silently dropped, the device executor crashing or its process being
  * abandoned, etc).
  *
- * Two reap paths, both keyed on the run's OWN liveness so they're correct
- * under N replicas (a run actively executing anywhere keeps its heartbeat
- * fresh, so no replica's sweep touches it):
+ * Three reap paths, all keyed on the run's persisted liveness so they're
+ * correct under N replicas:
  *
- *  1. Heartbeat-stale (fast, ~minutes): a run whose executor heartbeats —
- *     the device AutomationDispatcher beats every {@link AUTOMATION_HEARTBEAT_MS}ms
- *     during the turn — and has gone silent past the window. We require
- *     `last_heartbeat_at > claimed_at` (i.e. it beat at least once after being
+ *  1. Explicit external lease: a claimed window with expires_at is governed
+ *     only by that expiry. Reading another page renews the lease and stamps a
+ *     heartbeat, but does not opt an external processor into worker heartbeats.
+ *  2. Heartbeat-stale (fast, ~minutes): a run without an external lease whose
+ *     executor heartbeats, then goes silent past the window. The device
+ *     AutomationDispatcher beats every {@link AUTOMATION_HEARTBEAT_MS}ms during
+ *     the turn. A heartbeat counts only when `last_heartbeat_at > claimed_at`
+ *     (i.e. it beat at least once after being
  *     claimed) so this NEVER fires for a client that doesn't heartbeat: the
  *     claim sets `last_heartbeat_at == claimed_at`, so a non-heartbeating run
  *     stays equal and falls through to the coarse path. Fully backward
  *     compatible with older Mac apps.
- *  2. Coarse TTL (generous, 2h): the legacy backstop for runs that never
- *     heartbeat — measured from the claim/creation. Kept so a long but live
- *     non-heartbeating turn isn't killed prematurely.
+ *  3. Coarse TTL (generous, 2h): the legacy backstop for runs without an
+ *     external lease that never heartbeat — measured from the claim/creation.
+ *     Kept so a long but live non-heartbeating turn isn't killed prematurely.
  *
- * Both paths run through the shared `markStaleRunsAsTimeout` core
+ * All paths run through the shared `markStaleRunsAsTimeout` core
  * (scheduled/stale-run-sweeper.ts) with 'beat-after-claim' heartbeat
  * semantics; thresholds live in config/intervals.ts
  * (AUTOMATION_RUN_STALE_INTERVAL / AUTOMATION_RUN_HEARTBEAT_STALE_INTERVAL).
@@ -648,10 +651,10 @@ export async function sweepStaleAutomationRuns(
  * after triggering but before claiming, and that abandoned pending row must not
  * wedge later manual or scheduled activation. Their timeout never advances a
  * schedule cursor; claimed/running work remains governed by the separate
- * heartbeat and coarse execution paths. Scheduled device runs remain durable
- * past the TTL while their exact snapshot owner exists. If that row is deleted,
- * only the stale orphan times out; its schedule cursor stays due so current
- * ownership retries the same window.
+ * lease, heartbeat and coarse execution paths. Scheduled device runs remain
+ * durable past the TTL while their exact snapshot owner exists. If that row is
+ * deleted, only the stale orphan times out; its schedule cursor stays due so
+ * current ownership retries the same window.
  */
 async function finalizeStalePendingAutomationRuns(
 	sql: DbClient,

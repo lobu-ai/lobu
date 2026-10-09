@@ -6,7 +6,7 @@
  */
 
 import type { DbClient } from '../db/client';
-import { scrubSentryValue } from '@lobu/core';
+import { scrubDiagnosticValue } from '@lobu/core';
 import { fetchCredentialedPublicUrl } from '@lobu/connector-worker/egress';
 import { cancelResponseBody } from '../utils/bounded-response';
 import {
@@ -309,7 +309,7 @@ export class CredentialService {
       };
     } catch (error) {
       logger.error(
-        { err: scrubSentryValue(error), token_origin: tokenOrigin },
+        { err: scrubDiagnosticValue(error), token_origin: tokenOrigin },
         '[Credentials] Generic token refresh error'
       );
       return null;

@@ -1,17 +1,6 @@
 import { isSecretKey, redactUriCredentials } from "./secret-redaction";
 
 /**
- * Structural stand-in for the SDK's event shape. Declared here rather than
- * imported so one scrubber serves BOTH Sentry majors in this repo -- this
- * package is on @sentry/node ^10 and @lobu/server on ^9 -- without coupling
- * the shared module to either one's type graph. `sdkProcessingMetadata` is the
- * only field the walk treats specially; everything else is structural.
- */
-interface SentryEventLike {
-  sdkProcessingMetadata?: Record<string, unknown> | undefined;
-}
-
-/**
  * Secret as a QUERY PARAMETER name, and only there. `code` is an OAuth
  * authorization code in `?code=…` but a Node/Postgres error code
  * (`ECONNREFUSED`, `23505`) as an object key; `state` and `key` are the same
@@ -35,7 +24,7 @@ const SECRET_KEY_SEGMENTS = new Set(["signature", "sig"]);
  */
 const SECRET_KEY_EXACT = new Set(["codeverifier", "sessionstate"]);
 
-/** Deep enough to outlive Sentry's own normalize(); short of unbounded work. */
+/** Bound recursive work on diagnostic values. */
 const MAX_DEPTH = 8;
 const MAX_ENTRIES = 1000;
 
@@ -64,13 +53,14 @@ function isSecretObjectKey(key: string): boolean {
 }
 const URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
 /**
- * A relative URL (`/api/v1/files/a?token=…`) and Sentry's own
+ * A relative URL (`/api/v1/files/a?token=…`) and a raw
  * `request.query_string` (`token=…`, no scheme and no path) never match
  * URL_PATTERN, so the signed-download token would survive a URL-only scrub.
  * The separator absorbs trailing whitespace because cookie serialization is
  * `a=b; c=d`: without it every pair after the first space goes unredacted.
  */
-const QUERY_PAIR_PATTERN = /([?&;]\s*|^)([A-Za-z0-9_.\-%[\]]+)=([^&;\s"'<>]*)/g;
+const QUERY_PAIR_PATTERN =
+  /([?&;]\s*|^)([A-Za-z0-9_.\-%[\]]+)=("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&;\s"'<>]*)/g;
 
 function decodeKey(raw: string): string {
   try {
@@ -89,34 +79,42 @@ function scrubString(value: string): string {
   // `postgres://user:pa55@host/db` carries its credential in the userinfo, not
   // in a query pair or a secret-named key, so neither pass below would see it.
   const withoutUriCredentials = redactUriCredentials(value);
-  const withoutUrlQueries = withoutUriCredentials.replace(
-    URL_PATTERN,
-    (candidate) => {
-      // Trailing sentence punctuation is not part of the URL, but it is part of
-      // the message: strip it to parse, then put it back.
-      const trailing = candidate.match(/[),.;]+$/)?.[0] ?? "";
-      const bare = trailing ? candidate.slice(0, -trailing.length) : candidate;
-      try {
-        const url = new URL(bare);
-        return `${url.origin}${url.pathname}${trailing}`;
-      } catch {
-        return candidate;
-      }
-    }
-  );
-  return withoutUrlQueries.replace(
+  // Scrub quoted query values before URL matching stops at their opening quote
+  // and removes the key that identifies the remaining text as a credential.
+  const withoutQueries = withoutUriCredentials.replace(
     QUERY_PAIR_PATTERN,
+    (match, lead: string, name: string, raw: string) =>
+      isSecretQueryParam(name)
+        ? `${lead}${name}=[REDACTED]${raw.match(/[),.;]+$/)?.[0] ?? ""}`
+        : match
+  );
+  const withoutUrlQueries = withoutQueries.replace(URL_PATTERN, (candidate) => {
+    // Trailing sentence punctuation is not part of the URL, but it is part of
+    // the message: strip it to parse, then put it back.
+    const trailing = candidate.match(/[),.;]+$/)?.[0] ?? "";
+    const bare = trailing ? candidate.slice(0, -trailing.length) : candidate;
+    try {
+      const url = new URL(bare);
+      return `${url.origin}${url.pathname}${trailing}`;
+    } catch {
+      return candidate;
+    }
+  });
+  // Error messages can embed key=value diagnostics outside a URL. Keep codes
+  // and states useful there; only credential-named assignments are sensitive.
+  return withoutUrlQueries.replace(
+    /(\s)([A-Za-z0-9_.%-]+)=("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&;\s"'<>]*)/g,
     (match, lead: string, name: string) =>
-      isSecretQueryParam(name) ? `${lead}${name}=[REDACTED]` : match
+      isSecretObjectKey(decodeKey(name)) ? `${lead}${name}=[REDACTED]` : match
   );
 }
 
 /**
- * Recursively remove credential material from values headed for Sentry.
+ * Recursively remove credential material from diagnostic values.
  * This is deliberately defensive: telemetry must never make an unusual
  * application value or a circular error object throw another error.
  */
-export function scrubSentryValue(value: unknown): unknown {
+export function scrubDiagnosticValue(value: unknown): unknown {
   const seen = new WeakSet<object>();
 
   function scrub(current: unknown, depth = 0): unknown {
@@ -125,9 +123,7 @@ export function scrubSentryValue(value: unknown): unknown {
     if (typeof current === "function") return "[Function]";
     if (current === null || typeof current !== "object") return current;
     if (seen.has(current)) return "[CIRCULAR]";
-    // beforeBreadcrumb runs BEFORE Sentry's own normalize(), so without a cap
-    // a single console breadcrumb carrying a huge or deeply nested object is
-    // fully deep-cloned on the hot path only to be truncated moments later.
+    // Bound deeply nested values before cloning them on the logging hot path.
     if (depth >= MAX_DEPTH) return "[TRUNCATED]";
     // Tracks the current PATH, not every node ever visited. Two siblings may
     // legitimately hold the same reference, and reporting the second one as
@@ -152,6 +148,11 @@ export function scrubSentryValue(value: unknown): unknown {
       if (current.stack) serialized.stack = scrubString(current.stack);
       if (current.cause !== undefined)
         serialized.cause = scrub(current.cause, depth + 1);
+      // AggregateError.errors is non-enumerable, just like cause and stack.
+      // Reuse the same walk so nested failures keep their codes without
+      // bypassing credential redaction, depth limits, or cycle detection.
+      if ("errors" in current && Array.isArray(current.errors))
+        serialized.errors = scrub(current.errors, depth + 1);
       for (const key of Object.keys(current)) {
         serialized[key] = isSecretObjectKey(key)
           ? "[REDACTED]"
@@ -203,48 +204,4 @@ export function scrubSentryValue(value: unknown): unknown {
   }
 
   return scrub(value);
-}
-
-/**
- * `sdkProcessingMetadata` holds the live Scope -> Client -> options graph, and
- * @sentry/core deletes the field outright in createEventEnvelope. Deep-walking
- * it is therefore pure per-event work on a structure that never ships, and it
- * is the only part of a prepared event holding class instances. Detach it for
- * the walk and put the original reference back.
- */
-function scrubEvent<T extends SentryEventLike>(event: T): T {
-  const { sdkProcessingMetadata } = event;
-  const scrubbed = scrubSentryValue({
-    ...event,
-    sdkProcessingMetadata: undefined,
-  }) as T;
-  if (sdkProcessingMetadata !== undefined) {
-    scrubbed.sdkProcessingMetadata = sdkProcessingMetadata;
-  }
-  return scrubbed;
-}
-
-export function scrubSentryErrorEvent<T extends SentryEventLike>(event: T): T {
-  return scrubEvent(event);
-}
-
-/**
- * Sampled wherever tracing is on -- but sampled is not exempt: a span's
- * attributes carry the request URL, which is the very `?token=` vector the
- * error path scrubs. Without this they reach Sentry unscrubbed. Rates are the
- * consumer's business, not this module's (the gateway traces, the worker sets
- * tracesSampleRate 0, so there it is installed and inert).
- */
-// Generic rather than naming TransactionEvent: @sentry/node does not
-// re-export that type. Inference recovers it exactly at the
-// beforeSendTransaction call site, in either major.
-export function scrubSentryTransactionEvent<T extends SentryEventLike>(
-  event: T
-): T {
-  return scrubEvent(event);
-}
-
-/** Never drops a breadcrumb; it only rewrites credential material in place. */
-export function scrubSentryBreadcrumb<T extends object>(breadcrumb: T): T {
-  return scrubSentryValue(breadcrumb) as T;
 }

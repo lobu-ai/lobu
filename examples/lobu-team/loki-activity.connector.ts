@@ -1,4 +1,4 @@
-import { scrubSentryValue } from "../../packages/core/src/utils/sentry-scrubber";
+import { scrubDiagnosticValue } from "../../packages/core/src/utils/diagnostic-scrubber";
 import {
   isSecretOutputKey,
   redactOutput,
@@ -249,7 +249,7 @@ export async function queryLokiLogs(
       });
       // Redact assignments first: URL-query scrubbing alone can consume an
       // unquoted auth scheme and leave its credential without a recognizable key.
-      const scrubbed = scrubSentryValue(JSON.parse(serialized));
+      const scrubbed = scrubDiagnosticValue(JSON.parse(serialized));
       const size = new TextEncoder().encode(
         JSON.stringify(scrubbed)
       ).byteLength;

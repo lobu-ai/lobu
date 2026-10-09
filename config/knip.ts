@@ -104,7 +104,7 @@ const config: KnipConfig = {
         // loads. Both are esbuild entrypoints, so knip can't see them via imports.
         "src/server-entry.ts",
         "src/server.ts",
-        // Sentry preload (node --import) and embedded-Postgres boot.
+        // Diagnostic preload (node --import) and embedded-Postgres boot.
         "src/instrument.ts",
         "src/embedded-runtime.ts",
         "src/utils/assert-node-version.ts",

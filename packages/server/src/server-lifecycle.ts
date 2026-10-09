@@ -16,7 +16,6 @@
 import http from "node:http";
 import v8 from "node:v8";
 import { getRequestListener } from "@hono/node-server";
-import * as Sentry from "@sentry/node";
 import { Hono } from "hono";
 import { pinoLogger } from "hono-pino";
 import { closeDbSingleton } from "./db/client";
@@ -32,7 +31,7 @@ import {
 import { startStaleRunReaper } from "./scheduled/check-stalled-executions";
 import { startEmbeddedConnectorWorker } from "./scheduled/embedded-connector-worker";
 import { bootTaskScheduler } from "./scheduled/jobs";
-import { isSentryReported, markSentryReported } from "./sentry";
+import { isErrorReported, markErrorReported } from "./diagnostics";
 import { BootConfigError } from "./utils/errors";
 import logger from "./utils/logger";
 import { initWorkspaceProvider } from "./workspace";
@@ -120,7 +119,7 @@ export function serializeBootError(err: unknown): Record<string, unknown> {
  * Exits with status 1 and never returns.
  */
 export function reportBootFailure(err: unknown): never {
-	// Expected setup gates should not be logged or reported to Sentry as crashes.
+	// Expected setup gates should not be reported as crashes.
 	if (err instanceof BootConfigError) {
 		process.stderr.write(`${err.message}\n`);
 		process.exit(1);
@@ -150,7 +149,7 @@ export function reportBootFailure(err: unknown): never {
  *   2. env-inject                (`Object.assign(c.env, env)` — preserves
  *      `c.env.incoming` so the Node adapter's `getConnInfo` keeps working)
  *   3. request logger             (covers both `/lobu` and the main app)
- *   4. sentry 5xx response capture (for inner-catch returns that never throw)
+ *   4. structured 5xx response capture (for inner-catch returns that never throw)
  *   5. `app.onError` for thrown exceptions
  *
  * Route mounts:
@@ -203,13 +202,11 @@ export function buildWrapperApp(
 	//   (b) routes that try/catch internally and `return c.json(..., 500)` —
 	//       the framework never sees the exception, so onError doesn't fire.
 	//       This post-response middleware catches anything with status >= 500
-	//       so silent 500s still reach Sentry.
+	//       so silent 500s still reach the collector.
 	// Either layer marks the request reported so we don't double-count.
-	// `Sentry.captureMessage` no-ops when `Sentry.init` was skipped (no DSN),
-	// so this is safe to wire unconditionally.
 	wrapper.use("*", async (c, next) => {
 		await next();
-		if (c.res.status >= 500 && !isSentryReported(c)) {
+		if (c.res.status >= 500 && !isErrorReported(c)) {
 			let body: unknown = null;
 			try {
 				body = await c.res.clone().json();
@@ -218,7 +215,7 @@ export function buildWrapperApp(
 			}
 			// Readiness probes intentionally 503 `{status:"draining"}` during the
 			// graceful-shutdown drain (SHUTDOWN_READINESS_DRAIN_MS) — capturing
-			// that turns every deploy rollover into a Sentry issue
+			// that turns every deploy rollover into an incident
 			// (LOBU-BACKEND-X). Skip ONLY that exact shape: a health 5xx with any
 			// other body (DB unreachable, crash) is a real incident and must
 			// still report.
@@ -239,49 +236,20 @@ export function buildWrapperApp(
 					? (body as { error: string }).error
 					: null) ?? `HTTP ${c.res.status} from ${c.req.method} ${c.req.path}`;
 			logger.error({ source: "http_response", http_method: c.req.method,
-				res_status: c.res.status, path: c.req.path, sentryReported: true }, message);
-			Sentry.captureMessage(message, {
-				level: "error",
-				tags: {
-					source: "http_response",
-					http_method: c.req.method,
-					http_status: String(c.res.status),
-				},
-				extra: {
-					path: c.req.path,
-					// `extra`, not `tags`: Host is client-supplied, so as an indexed
-					// tag its value cardinality is unbounded by anything we control.
-					host: c.req.header("host") ?? "unknown",
-					response_body: body,
-				},
-			});
-			markSentryReported(c);
+				res_status: c.res.status, path: c.req.path }, message);
+
+			markErrorReported(c);
 		}
 	});
 
 	// 4. Catch-all error handler for thrown exceptions that bubble past route
 	// catches. Preserves the original stack trace.
 	wrapper.onError((err, c) => {
-		if (!isSentryReported(c)) {
-			Sentry.captureException(err, {
-				tags: {
-					source: "app_onError",
-					http_method: c.req.method,
-				},
-				extra: {
-					path: c.req.path,
-					// See above: client-supplied, so never an indexed tag.
-					host: c.req.header("host") ?? "unknown",
-				},
-			});
-			markSentryReported(c);
+		if (!isErrorReported(c)) {
+			logger.error({ err, source: "app_onError", http_method: c.req.method,
+				res_status: 500, path: c.req.path }, "Unhandled error in HTTP handler");
+			markErrorReported(c);
 		}
-		// `sentryReported:true` tells the pino → Sentry forwarder in logger.ts
-		// to skip — Sentry already has this exception via captureException above.
-		logger.error(
-			{ err, path: c.req.path, sentryReported: true },
-			"Unhandled error in HTTP handler",
-		);
 		return c.json({ error: "Internal server error" }, 500);
 	});
 

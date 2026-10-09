@@ -19,7 +19,7 @@
 // asserts on load, so this side-effect import MUST be first.
 import "./utils/assert-node-version";
 
-// Sentry must init before any other imports for auto-instrumentation.
+// Load configuration and fatal diagnostics before the server graph.
 import "./instrument";
 import { checkJudgeShadowingAllowlist } from "./gateway/config/network-allowlist";
 

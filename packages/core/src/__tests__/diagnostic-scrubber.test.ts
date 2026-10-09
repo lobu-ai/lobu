@@ -1,12 +1,62 @@
 import { describe, expect, it } from "bun:test";
-import {
-  scrubSentryErrorEvent,
-  scrubSentryValue,
-} from "../utils/sentry-scrubber";
+import { scrubDiagnosticValue } from "../utils/diagnostic-scrubber";
 
-const SECRET = "SENTRY_SECRET_SENTINEL";
+const SECRET = "DIAGNOSTIC_SECRET_SENTINEL";
 
-describe("Sentry credential scrubber", () => {
+describe("diagnostic credential scrubber", () => {
+  it("preserves aggregate children and their causes with the same redaction and cycle bounds", () => {
+    const child = Object.assign(
+      new Error(`connection failed token=${SECRET}`),
+      {
+        code: "ECONNREFUSED",
+        password: SECRET,
+      }
+    );
+    const aggregate = new AggregateError([child], "multiple failures");
+    const outer = new Error("outer", { cause: aggregate });
+    child.cause = outer;
+    const value = scrubDiagnosticValue(outer) as {
+      cause: { errors: Record<string, unknown>[] };
+    };
+    expect(value.cause.errors[0].code).toBe("ECONNREFUSED");
+    expect(value.cause.errors[0].stack).toContain(
+      "diagnostic-scrubber.test.ts"
+    );
+    expect(value.cause.errors[0].cause).toBe("[CIRCULAR]");
+    expect(JSON.stringify(value)).not.toContain(SECRET);
+  });
+
+  it("redacts inline credential assignments without hiding diagnostic codes", () => {
+    const error = new Error(
+      `failed token=${SECRET} password=${SECRET} code=ECONNREFUSED`
+    );
+    const value = JSON.stringify(scrubDiagnosticValue(error));
+    expect(value).not.toContain(SECRET);
+    expect(value).toContain("code=ECONNREFUSED");
+  });
+  it("redacts quoted credentials in inline assignments and query pairs", () => {
+    for (const assignment of [
+      `password="${SECRET} with spaces"`,
+      `token='${SECRET} with spaces'`,
+      `password="${SECRET} with \\"escaped quotes\\""`,
+    ]) {
+      for (const prefix of [
+        "",
+        "failed ",
+        "/path?",
+        "https://example.test/path?",
+        "other=value; ",
+      ]) {
+        const value = JSON.stringify(
+          scrubDiagnosticValue(
+            new Error(`${prefix}${assignment} code=ECONNREFUSED`)
+          )
+        );
+        expect(value).not.toContain(SECRET);
+        expect(value).toContain("code=ECONNREFUSED");
+      }
+    }
+  });
   it("does not retain serialization hooks that can bypass scrubbing", () => {
     const payload = {
       data: { toJSON: () => ({ authorization: "synthetic-secret" }) },
@@ -14,20 +64,20 @@ describe("Sentry credential scrubber", () => {
         toJSON: () => ({ cookie: "synthetic-secret" }),
       }),
     };
-    const serialized = JSON.stringify(scrubSentryValue(payload));
+    const serialized = JSON.stringify(scrubDiagnosticValue(payload));
     expect(serialized).not.toContain("synthetic-secret");
     expect(serialized).toContain("synthetic error");
   });
 
   it("removes URL queries and fragments while preserving route paths", () => {
-    const value = scrubSentryValue(
+    const value = scrubDiagnosticValue(
       `GET https://example.test/api/v1/files/a?token=${SECRET}&state=x#fragment`
     );
     expect(value).toBe("GET https://example.test/api/v1/files/a");
   });
 
   it("removes every query value, including duplicate, encoded, and mixed-case credentials", () => {
-    const event = scrubSentryErrorEvent({
+    const event = scrubDiagnosticValue({
       request: {
         url: `https://example.test/api/v1/files/artifact?ToKeN=${SECRET}&token=${SECRET}&sigNature=${SECRET}&x%2Dapi%2Dkey=${SECRET}#${SECRET}`,
       },
@@ -47,7 +97,7 @@ describe("Sentry credential scrubber", () => {
       CoOkIe: SECRET,
       items: [{ signature: SECRET, safeRoute: "/api/v1/files/a" }],
     };
-    const result = scrubSentryValue(nested) as Record<string, unknown>;
+    const result = scrubDiagnosticValue(nested) as Record<string, unknown>;
     expect(JSON.stringify(result)).not.toContain(SECRET);
     expect((result.items as Array<Record<string, unknown>>)[0]?.safeRoute).toBe(
       "/api/v1/files/a"
@@ -66,7 +116,7 @@ describe("Sentry credential scrubber", () => {
     };
     circular.self = circular;
 
-    const event = scrubSentryErrorEvent({
+    const event = scrubDiagnosticValue({
       message: error.message,
       extra: circular,
       breadcrumbs: [
@@ -94,14 +144,14 @@ describe("Sentry credential scrubber", () => {
   it("redacts credentials in relative URLs and bare query strings", () => {
     // Neither has a scheme, so a URL-only scrub never sees them. This is the
     // signed-download-token vector the scrubber exists to close.
-    const relative = scrubSentryValue(
+    const relative = scrubDiagnosticValue(
       `GET /api/v1/files/a?token=${SECRET}&page=2`
     ) as string;
     expect(relative).not.toContain(SECRET);
     expect(relative).toContain("/api/v1/files/a");
     expect(relative).toContain("page=2");
 
-    const queryString = scrubSentryValue({
+    const queryString = scrubDiagnosticValue({
       request: { query_string: `signature=${SECRET}&limit=10` },
     }) as { request: { query_string: string } };
     expect(queryString.request.query_string).not.toContain(SECRET);
@@ -111,8 +161,8 @@ describe("Sentry credential scrubber", () => {
   it("redacts cookie pairs written with a space after the separator", () => {
     // Cookie serialization is `a=b; c=d`. Without whitespace in the
     // separator, only the first pair anchors and every later credential
-    // survives in a raw string headed for Sentry.
-    const scrubbed = scrubSentryValue(
+    // survives in a raw string headed for telemetry.
+    const scrubbed = scrubDiagnosticValue(
       `set-cookie rejected: theme=dark; token=${SECRET}; limit=10`
     ) as string;
     expect(scrubbed).not.toContain(SECRET);
@@ -121,7 +171,7 @@ describe("Sentry credential scrubber", () => {
   });
 
   it("keeps triage fields whose names merely contain a secret word", () => {
-    const result = scrubSentryValue({
+    const result = scrubDiagnosticValue({
       status_code: 500,
       error_code: "E_TIMEOUT",
       stack_key: "abc",
@@ -135,7 +185,7 @@ describe("Sentry credential scrubber", () => {
     // `code`/`state`/`key` are credentials in `?code=…` and diagnostics as
     // object keys. Redacting the key form blanks the Node errno and the
     // Postgres SQLSTATE, which are the first things read during triage.
-    const result = scrubSentryValue({
+    const result = scrubDiagnosticValue({
       code: "ECONNREFUSED",
       state: "running",
       pgCode: "23505",
@@ -151,7 +201,7 @@ describe("Sentry credential scrubber", () => {
   it("uses the shared secret-key denylist rather than a private copy", () => {
     // These are all classified by @lobu/core's isSecretKey; a hand-rolled
     // local pattern silently missed every one of them.
-    const result = scrubSentryValue({
+    const result = scrubDiagnosticValue({
       auth: SECRET,
       dsn: SECRET,
       private_key: SECRET,
@@ -170,7 +220,7 @@ describe("Sentry credential scrubber", () => {
   });
 
   it("redacts URI userinfo credentials that carry no query string at all", () => {
-    const result = scrubSentryValue(
+    const result = scrubDiagnosticValue(
       `connect failed: postgres://lobu:${SECRET}@db.internal:5432/lobu`
     ) as string;
     expect(result).not.toContain(SECRET);
@@ -180,7 +230,7 @@ describe("Sentry credential scrubber", () => {
   it("redacts signature headers whose squashed form no exact set can hold", () => {
     // `X-Hub-Signature-256` squashes to `xhubsignature256`; matching the whole
     // key against a set silently missed every real signature header.
-    const result = scrubSentryValue({
+    const result = scrubDiagnosticValue({
       "X-Hub-Signature-256": SECRET,
       "X-Amz-Signature": SECRET,
       "x-slack-signature": SECRET,
@@ -190,7 +240,7 @@ describe("Sentry credential scrubber", () => {
     expect(result["X-Amz-Signature"]).toBe("[REDACTED]");
     expect(result["x-slack-signature"]).toBe("[REDACTED]");
     expect(result.design).toBe("kept");
-    expect(scrubSentryValue(`X-Amz-Signature=${SECRET}&limit=1`)).toBe(
+    expect(scrubDiagnosticValue(`X-Amz-Signature=${SECRET}&limit=1`)).toBe(
       "X-Amz-Signature=[REDACTED]&limit=1"
     );
   });
@@ -198,7 +248,7 @@ describe("Sentry credential scrubber", () => {
   it("keeps the code_verifier and session_state coverage of the sanitizer it replaced", () => {
     // The shared denylist classifies neither: `verifier` and `state` are not
     // suffixes it knows, and both are far too broad to add as segments.
-    const result = scrubSentryValue({
+    const result = scrubDiagnosticValue({
       code_verifier: SECRET,
       session_state: SECRET,
       codeVerifier: SECRET,
@@ -216,7 +266,7 @@ describe("Sentry credential scrubber", () => {
     // `seen` tracks the current path; a repeated non-ancestor reference is
     // ordinary structure sharing, not a cycle.
     const shared = { api_key: SECRET, note: "kept" };
-    const result = scrubSentryValue({ x: shared, y: shared }) as Record<
+    const result = scrubDiagnosticValue({ x: shared, y: shared }) as Record<
       string,
       Record<string, string>
     >;
@@ -226,20 +276,20 @@ describe("Sentry credential scrubber", () => {
 
     const cycle: Record<string, unknown> = { name: "root" };
     cycle.self = cycle;
-    expect((scrubSentryValue(cycle) as Record<string, unknown>).self).toBe(
+    expect((scrubDiagnosticValue(cycle) as Record<string, unknown>).self).toBe(
       "[CIRCULAR]"
     );
   });
 
   it("keeps trailing sentence punctuation outside the URL it strips", () => {
-    const result = scrubSentryValue(
+    const result = scrubDiagnosticValue(
       `see https://example.test/a?token=${SECRET}, then retry.`
     ) as string;
     expect(result).toBe("see https://example.test/a, then retry.");
   });
 
   it("summarizes built-ins that a plain walk would flatten or explode", () => {
-    const result = scrubSentryValue({
+    const result = scrubDiagnosticValue({
       at: new Date("2026-08-31T12:00:00.000Z"),
       buf: Buffer.from("abcd"),
       seen: new Set([1, 2]),
@@ -255,7 +305,7 @@ describe("Sentry credential scrubber", () => {
     // name/message/stack live on the prototype, so Object.keys sees none of
     // them and a plain walk would discard the whole error.
     const error = new Error(`boom at https://example.test/f?token=${SECRET}`);
-    const result = scrubSentryValue({ cause: error }) as {
+    const result = scrubDiagnosticValue({ cause: error }) as {
       cause: { name: string; message: string; stack?: string };
     };
     expect(result.cause.name).toBe("Error");

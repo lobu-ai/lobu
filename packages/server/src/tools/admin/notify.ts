@@ -221,7 +221,7 @@ async function handleSend(
       WHERE id = ${args.browser_handoff_run_id}
         AND organization_id = ${ctx.organizationId}
         AND run_type = 'action'
-        AND approval_status = 'auto'
+        AND approval_status IN ('auto', 'approved')
         AND activation_kind = 'page_visit'
       LIMIT 1
     `;
@@ -409,6 +409,10 @@ async function handleSend(
     browserRunId: args.browser_handoff_run_id ?? null,
     idempotencyKey: args.idempotency_key ?? null,
     connectionId: args.connection_id ?? null,
+    // Explicit inbox recipients are not consent to the default org-wide chat
+    // broadcast. An explicit connection or configured Automation destination
+    // still routes normally; an unavailable target must not widen the audience.
+    deliveryScope: Array.isArray(recipients) ? 'targeted' : undefined,
     // An ask builds its chat card from the SAME schema the web row reads, via
     // the shared approval-card builder — so a yes/no question gets working
     // Slack buttons and a question needing input gets a link instead of

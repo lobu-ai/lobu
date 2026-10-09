@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getRuntimeInfo,
   resolveRuntimeEnvironment,
-  resolveSentryRuntime,
+  resolveDiagnosticRuntime,
 } from '../runtime-info';
 
 describe('resolveRuntimeEnvironment', () => {
@@ -17,15 +17,15 @@ describe('resolveRuntimeEnvironment', () => {
   });
 });
 
-describe('resolveSentryRuntime', () => {
+describe('resolveDiagnosticRuntime', () => {
   it('ignores the baked-in NODE_ENV=production when ENVIRONMENT is missing', () => {
     // Docker images always set NODE_ENV=production; only an explicit
-    // ENVIRONMENT in the supplied snapshot may tag Sentry events as production.
+    // ENVIRONMENT in the supplied snapshot may tag diagnostics as production.
     // An unrelated host value must not leak into an explicit test/runtime snapshot.
     const previousEnvironment = process.env.ENVIRONMENT;
     process.env.ENVIRONMENT = 'production';
     try {
-      expect(resolveSentryRuntime({ NODE_ENV: 'production' })).toEqual({
+      expect(resolveDiagnosticRuntime({ NODE_ENV: 'production' })).toEqual({
         environment: 'development',
         isDevelopment: true,
         devTaggedAsProduction: false,
@@ -41,7 +41,7 @@ describe('resolveSentryRuntime', () => {
 
   it('tags production only when ENVIRONMENT declares it', () => {
     expect(
-      resolveSentryRuntime({ ENVIRONMENT: 'production', NODE_ENV: 'production' })
+      resolveDiagnosticRuntime({ ENVIRONMENT: 'production', NODE_ENV: 'production' })
     ).toEqual({
       environment: 'production',
       isDevelopment: false,
@@ -51,7 +51,7 @@ describe('resolveSentryRuntime', () => {
 
   it('downgrades only a development runtime carrying a production tag', () => {
     expect(
-      resolveSentryRuntime({ ENVIRONMENT: 'production', NODE_ENV: 'development' })
+      resolveDiagnosticRuntime({ ENVIRONMENT: 'production', NODE_ENV: 'development' })
     ).toEqual({
       environment: 'development',
       isDevelopment: true,

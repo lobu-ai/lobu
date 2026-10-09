@@ -197,7 +197,7 @@ expect_grep "lobu --help" "CLI for deploying and managing AI agents on Lobu" "$W
 expect_exit "lobu <unknown-command> -> usage error" 1 "$WT" definitely-not-a-command
 expect_fail_grep "lobu environment -> renamed sandbox" "renamed to lobu sandbox" "$WT" environment list
 
-note "init / validate / doctor / telemetry / agent scaffold (static)"
+note "init / validate / doctor / agent scaffold (static)"
 expect_grep "lobu init --list-providers" "--provider" "$WT" init --list-providers
 
 # Scaffold the project we'll boot. Mirror sdk-e2e: scaffold, drop package.json
@@ -269,11 +269,10 @@ else
   pass "lobu doctor (DB check healthy)"
 fi
 
-expect_grep "lobu telemetry status" "Telemetry:" "$PROJ" telemetry status
-expect_grep "lobu telemetry (default status)" "Telemetry:" "$PROJ" telemetry
-expect_grep "lobu telemetry on" "Telemetry enabled" "$PROJ" telemetry on
-expect_grep "lobu telemetry status (now on)" "Telemetry: on" "$PROJ" telemetry status
-expect_grep "lobu telemetry off" "Telemetry disabled" "$PROJ" telemetry off
+expect_fail_grep "lobu telemetry is retired" "unknown command 'telemetry'" "$PROJ" telemetry
+expect_fail_grep "lobu telemetry status is retired" "unknown command 'telemetry'" "$PROJ" telemetry status
+expect_fail_grep "lobu telemetry on is retired" "unknown command 'telemetry'" "$PROJ" telemetry on
+expect_fail_grep "lobu telemetry off is retired" "unknown command 'telemetry'" "$PROJ" telemetry off
 
 expect_grep "lobu agent scaffold (local)" "Scaffolded agent" "$PROJ" agent scaffold helper --name Helper
 expect_fail_grep "lobu agent scaffold (dup -> graceful)" "already exists" "$PROJ" agent scaffold helper

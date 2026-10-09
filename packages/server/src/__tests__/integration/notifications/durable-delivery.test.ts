@@ -729,7 +729,7 @@ describe("durable notification delivery", () => {
   it.each([
     "ready", "activated", "running", "timeout", "expired",
     "approval-required", "lost-identity", "not-page-activated",
-    "ready-with-approval", "resolved-separate-approval",
+    "ready-with-approval", "ready-approved", "resolved-separate-approval", "legacy-broadcast",
   ])("checks current browser handoff readiness: %s", async (state) => {
     const h = await setup();
     const sql = getTestDb();
@@ -749,7 +749,7 @@ describe("durable notification delivery", () => {
         activated_at, activated_by_device_worker_id, activation_tab_id
       ) VALUES (
         ${h.org.id}, 'action', 'synthetic-browser-draft',
-        ${state === "approval-required" ? "pending" : "auto"},
+        ${state === "approval-required" ? "pending" : state === "ready-approved" ? "approved" : "auto"},
         ${state === "running" || state === "timeout" ? state : "pending"},
         ${state === "not-page-activated" ? null : "page_visit"},
         CASE WHEN ${state === "not-page-activated"} THEN NULL ELSE ARRAY['https://example.test/draft']::text[] END,
@@ -773,9 +773,18 @@ describe("durable notification delivery", () => {
       ...h.params,
       browserRunId: Number(run.id),
       browserUrl: "https://example.test/draft",
+      // This fixture deliberately exercises an explicitly requested broadcast;
+      // ordinary browser handoffs now default to their owner's inbox.
+      deliveryScope: "org",
       decisionRunId,
     });
-    await deliverNotificationTask({ organizationId: h.org.id, eventId: Number(event.eventId) });
+    if (state === "legacy-broadcast") {
+      // Simulate a pre-fix queue snapshot that defaulted to every org channel.
+      await sql`UPDATE events SET metadata = metadata #- '{delivery_request,context,deliveryScope}' WHERE id = ${Number(event.eventId)}`;
+    }
+    const delivery = deliverNotificationTask({ organizationId: h.org.id, eventId: Number(event.eventId) });
+    if (state === "legacy-broadcast") await expect(delivery).rejects.toThrow("binding_unavailable");
+    else await delivery;
     expect(h.post).toHaveBeenCalledTimes(state.startsWith("ready") ? 2 : 0);
   });
 

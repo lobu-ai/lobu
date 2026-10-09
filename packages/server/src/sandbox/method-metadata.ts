@@ -49,18 +49,9 @@ export type MethodMetadata = MethodAccessMetadata & {
 export const RUNTIME_HELPER_METADATA: Record<string, MethodMetadata> = {
 	"ctx.sleep": {
 		summary:
-			"Pause a sandbox script for 0–30000ms. The wait aborts at the script's overall timeout; use it between SDK reads when polling.",
+			"Pause a sandbox script for 0–30000ms for a short, bounded retry delay. The wait ends at cancellation or the script deadline, which is terminal even if caught. For long device work, return a background operation run_id and read operations.getRun in a later invocation instead of polling here.",
 		access: "read",
 		example: "await ctx.sleep(1000);",
-		usageExample: `// Poll a run without exposing unrestricted timer globals.
-export default async (ctx, client) => {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const run = await client.operations.getRun(123);
-    if (run.status !== 'pending') return run;
-    await ctx.sleep(1000);
-  }
-  throw new Error('Run did not finish in time');
-};`,
 	},
 };
 
@@ -528,10 +519,10 @@ export default async (_ctx, client) => {
 	},
 	"notifications.send": {
 		summary:
-			"Send a notification to org users. With a flat object `input_schema`, it becomes a human question on the existing approval/rejection rail: in-app surfaces render answer controls, chat delivery links to Lobu when input is needed, and the returned `run_id` can be read with `operations.getRun` until its output contains `{ answer: ... }`. Supported answer schemas contain primitive fields, scalar enum choices, string or scalar-enum arrays, and optional nullable wrappers; nested objects, references, combinators other than those nullable wrappers, constants, and string/number/array constraints are rejected. An unsupported `input_schema` fails the call with HTTP 422. Without `input_schema`, it sends an FYI. With `semantic_type`, the notification renders as a content event through the event-kind pipeline: `data` feeds the kind's `jsonTemplate` in the Memory/Events view, the inbox keeps the markdown `body`, and the kind is validated against `$member.event_kinds` (422 on an unregistered kind or invalid non-empty data). Both fan out to active bot connections. Pass `automation_source` from a reaction for feedback attribution.",
+			"Send a notification to org users. With a flat object `input_schema`, it becomes a human question on the existing approval/rejection rail: in-app surfaces render answer controls, chat delivery links to Lobu when input is needed, and the returned `run_id` can be read with `operations.getRun` until its output contains `{ answer: ... }`. Supported answer schemas contain primitive fields, scalar enum choices, string or scalar-enum arrays, and optional nullable wrappers; nested objects, references, combinators other than those nullable wrappers, constants, and string/number/array constraints are rejected. An unsupported `input_schema` fails the call with HTTP 422. Without `input_schema`, it sends an FYI. With `semantic_type`, the notification renders as a content event through the event-kind pipeline: `data` feeds the kind's `jsonTemplate` in the Memory/Events view, the inbox keeps the markdown `body`, and the kind is validated against `$member.event_kinds` (422 on an unregistered kind or invalid non-empty data). Explicit user recipients and browser handoffs stay in the inbox unless a connection or Automation delivery destination is configured. Other notifications fan out to active bot connections. Use `browser_url` with `browser_handoff_run_id` to link a page-activated operation. Pass `automation_source` from a reaction for feedback attribution.",
 		access: "write",
 		signature:
-			"notifications.send(input: { title: string; body?: string; card?: CardElement; recipients?: 'admins' | 'all' | string[]; resource_url?: string; idempotency_key?: string; connection_id?: string; data?: object; semantic_type?: string; input_schema?: object; automation_source?: { automation_id: number; run_id: number } }): Promise<{ notified_count: number; event_id: number | null; url: string | null; run_id?: number }>",
+			"notifications.send(input: { title: string; body?: string; card?: CardElement; recipients?: 'admins' | 'all' | string[]; resource_url?: string; browser_url?: string; browser_handoff_run_id?: number; idempotency_key?: string; connection_id?: string; data?: object; semantic_type?: string; input_schema?: object; automation_source?: { automation_id: number; run_id: number } }): Promise<{ notified_count: number; event_id: number | null; url: string | null; run_id?: number }>",
 		example:
 			"await client.notifications.send({ title: 'Choose a launch window', input_schema: { type: 'object', properties: { window: { enum: ['Monday', 'Friday'] } }, required: ['window'] } });",
 		usageExample: `// Ask a human and return the durable handle the caller can poll.

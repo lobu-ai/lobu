@@ -9,6 +9,7 @@ import type { Env } from '../../../index';
 import type { ToolContext } from '../../../tools/registry';
 import { handleClaimNextWindow } from '../../../tools/admin/manage_automations/claim-next-window';
 import { handleCompleteWindow } from '../../../tools/admin/manage_automations/complete-window';
+import { sweepStaleAutomationRuns } from '../../../automations/automation';
 
 const ENV = { JWT_SECRET: 'test-jwt-secret-for-testing-only' } as Env;
 
@@ -167,5 +168,87 @@ describe('external MCP claim then completion', () => {
       SELECT next_window_start FROM automations WHERE id = ${automationId}
     `;
     expect(new Date(after.next_window_start).toISOString()).toBe(claimed.context.window_end);
+  });
+
+  it('keeps a paginated external claim completable until its explicit lease expires', async () => {
+    for (const content of ['First arrival', 'Second arrival']) {
+      await createTestEvent({ entity_id: entityId, organization_id: orgId, content });
+    }
+    const first = await api.automations.claimNextWindow({
+      automation_id: String(automationId), limit: 1, lease_seconds: 1800,
+    });
+    expect(first.context.page.has_more).toBe(true);
+    const cursor = first.context.page.next_cursor!;
+    const second = await api.automations.claimNextWindow({
+      automation_id: String(automationId), run_id: first.run_id,
+      before_occurred_at: cursor.occurred_at, before_id: cursor.id,
+      limit: 1, lease_seconds: 1800,
+    });
+    expect(second.context.page.has_more).toBe(false);
+    // The continuation advances the heartbeat past the claim. A processor can
+    // then legitimately spend more than three minutes investigating this window.
+    await sql`
+      UPDATE runs SET claimed_at = NOW() - INTERVAL '10 minutes',
+        last_heartbeat_at = NOW() - INTERVAL '4 minutes'
+      WHERE id = ${first.run_id}
+    `;
+    expect((await sweepStaleAutomationRuns(sql)).timedOut).toBe(0);
+    const completed = await api.automations.completeWindow({
+      automation_id: String(automationId), run_id: first.run_id,
+      window_tokens: [first.context.window_token, second.context.window_token],
+      extracted_data: { signals: [] },
+    });
+    expect(completed.completed_now).toBe(true);
+    const [after] = await sql`SELECT next_window_start FROM automations WHERE id = ${automationId}`;
+    expect(new Date(after.next_window_start).toISOString()).toBe(first.context.window_end);
+  });
+
+  it('keeps a live external lease beyond the coarse claim-age backstop', async () => {
+    const claimed = await api.automations.claimNextWindow({
+      automation_id: String(automationId), lease_seconds: 1800,
+    });
+    await sql`
+      UPDATE runs SET claimed_at = NOW() - INTERVAL '3 hours',
+        last_heartbeat_at = NOW() - INTERVAL '3 hours'
+      WHERE id = ${claimed.run_id}
+    `;
+    expect((await sweepStaleAutomationRuns(sql)).timedOut).toBe(0);
+    const completed = await api.automations.completeWindow({
+      automation_id: String(automationId), run_id: claimed.run_id,
+      window_token: claimed.context.window_token, extracted_data: { signals: [] },
+    });
+    expect(completed.completed_now).toBe(true);
+  });
+
+  it.each([false, true])('expires a lease exactly once, preserving the mark and fencing old completion (continued=%s)', async (continued) => {
+    const claimed = await api.automations.claimNextWindow({
+      automation_id: String(automationId), lease_seconds: 1800,
+    });
+    if (continued) {
+      await api.automations.claimNextWindow({
+        automation_id: String(automationId), run_id: claimed.run_id,
+        lease_seconds: 1800,
+      });
+    }
+    await sql`UPDATE runs SET expires_at = NOW() - INTERVAL '1 second' WHERE id = ${claimed.run_id}`;
+    const swept = await Promise.all([sweepStaleAutomationRuns(sql), sweepStaleAutomationRuns(sql)]);
+    expect(swept[0].timedOut + swept[1].timedOut).toBe(1);
+    const [expired] = await sql`SELECT status, error_message FROM runs WHERE id = ${claimed.run_id}`;
+    expect(expired).toMatchObject({ status: 'timeout', error_message: 'External Automation window lease expired' });
+    const [mark] = await sql`SELECT next_window_start FROM automations WHERE id = ${automationId}`;
+    expect(new Date(mark.next_window_start).toISOString()).toBe(claimed.context.window_start);
+
+    const retry = await api.automations.claimNextWindow({ automation_id: String(automationId) });
+    expect(retry.run_id).not.toBe(claimed.run_id);
+    expect(retry.context.window_start).toBe(claimed.context.window_start);
+    await expect(api.automations.completeWindow({
+      automation_id: String(automationId), run_id: claimed.run_id,
+      window_token: claimed.context.window_token, extracted_data: { signals: [] },
+    })).rejects.toThrow(/already claimed by another executor/);
+    const completed = await api.automations.completeWindow({
+      automation_id: String(automationId), run_id: retry.run_id,
+      window_token: retry.context.window_token, extracted_data: { signals: [] },
+    });
+    expect(completed.completed_now).toBe(true);
   });
 });

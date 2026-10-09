@@ -517,6 +517,7 @@ export const ManageOperationsResultSchema = Type.Union([
             run_id: Type.Union([Type.Integer(), Type.Null()]),
             state: Type.Union([
               Type.Literal("ready"),
+              Type.Literal("preparing"),
               Type.Literal("expired"),
               Type.Literal("completed"),
             ]),
