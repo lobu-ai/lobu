@@ -1154,7 +1154,6 @@ const duplicateEntityResolution = defineAutomation({
   reaction: reactionFromFile<typeof DuplicateReportReaction>(
     "./duplicate-report.reaction.ts"
   ),
-  skills: ["duplicate-entity-resolution-real-v3-final"],
 });
 
 // The LinkedIn assistant runs on the same device and CLI as the hourly task
