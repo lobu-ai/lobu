@@ -124,8 +124,7 @@ function pairSupport(records: StoredRecord[], identities: Map<number, Resolution
 }
 
 /** Indexed lookups preserve the original member pair after either root changes. */
-async function rejectedPairDecisions(db: DbClient, org: string, pair: number[], excludeRunId: number | null = null) {
-  const key = stableJson(pair);
+async function rejectedPairDecisions(db: DbClient, org: string, key: string, excludeRunId: number | null = null) {
   return db<{ id: number; support: unknown }>`
     (SELECT id, action_input->'member_support'->${key}::text AS support FROM runs
       WHERE organization_id = ${org} AND approval_status = 'rejected' AND action_key = 'entity_change'
@@ -144,15 +143,22 @@ async function rejectedPairDecisions(db: DbClient, org: string, pair: number[], 
 /** Accumulate at rejection time, including overlapping proposals rejected out of order. */
 export async function rememberIdentityRejection(db: DbClient, org: string, runId: number, proposal: IdentityAssociationProposal): Promise<void> {
   for (const [key, support] of Object.entries(proposal.member_support)) {
-    // A normalized historical proposal may carry null or an unknown version.
-    // Reject it normally, retaining its opaque map entry without inventing evidence.
-    if (!isCurrentSupport(support)) continue;
-    const previous = await rejectedPairDecisions(db, org, support.pair, runId);
-    const matching = previous.filter((row): row is { id: number; support: PairSupport } =>
-      isCurrentSupport(row.support) && row.support.policy === support.policy);
-    const keys = matching.flatMap(row => row.support.keys);
-    const remembered = supportSnapshot(support.policy, support.pair, [...support.keys, ...keys]);
-    const targetId = Math.max(runId, ...matching.map(row => Number(row.id)));
+    const previous = await rejectedPairDecisions(db, org, key, runId);
+    const opaque = previous.find(row => !isCurrentSupport(row.support));
+    let remembered: unknown;
+    let targetId: number;
+    if (isCurrentSupport(support) && !opaque) {
+      const matching = previous.filter((row): row is { id: number; support: PairSupport } =>
+        isCurrentSupport(row.support) && row.support.policy === support.policy);
+      const keys = matching.flatMap(row => row.support.keys);
+      remembered = supportSnapshot(support.policy, support.pair, [...support.keys, ...keys]);
+      targetId = Math.max(runId, ...matching.map(row => Number(row.id)));
+    } else {
+      // Latest-decision lookups must retain opaque evidence even when an older
+      // historical proposal is rejected after a newer, fully known proposal.
+      remembered = opaque ? opaque.support : support;
+      targetId = Math.max(runId, ...previous.map(row => Number(row.id)));
+    }
     // Keep the accumulated support on the newest indexed decision even when an
     // older proposal is rejected last. Other member pairs remain untouched.
     await db`UPDATE runs SET action_input = jsonb_set(action_input, '{member_support}',

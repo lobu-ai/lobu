@@ -72,7 +72,7 @@ describe('governed stored identity associations', () => {
       await tx`ALTER TABLE entity_relationships DISABLE TRIGGER lobu_guard_identity_edges`;
       await tx`UPDATE entity_relationships SET metadata = metadata #- '{_lobu_identity_decision,member_support}' WHERE id = ${id}`;
       if (evidence !== 'known') await tx`UPDATE entity_relationships SET metadata = jsonb_set(metadata,
-        '{_lobu_identity_decision,suppression_support}', ${JSON.stringify(evidence === 'null' ? null : { version: 99, opaque: 'retained' })}::jsonb) WHERE id = ${id}`;
+        '{_lobu_identity_decision,suppression_support}', ${sql.json({ evidence: evidence === 'null' ? null : { version: 99, opaque: 'retained' } })}::jsonb->'evidence') WHERE id = ${id}`;
       await tx`ALTER TABLE entity_relationships ENABLE TRIGGER lobu_guard_identity_edges`;
     });
     const [before] = await sql`SELECT * FROM entity_relationships WHERE id = ${id}`;
@@ -124,7 +124,7 @@ describe('governed stored identity associations', () => {
     const pending = runId(await agent.entities.link(input));
     await sql`UPDATE runs SET action_input = action_input - 'member_support' - 'evidence_fingerprint' - 'prior_decisions' WHERE id = ${pending}`;
     if (evidence !== 'known') await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{suppression_support}',
-      ${JSON.stringify(evidence === 'null' ? null : { version: 99, opaque: 'retained' })}::jsonb) WHERE id = ${pending}`;
+      ${sql.json({ evidence: evidence === 'null' ? null : { version: 99, opaque: 'retained' } })}::jsonb->'evidence') WHERE id = ${pending}`;
     const [before] = await sql`SELECT * FROM runs WHERE id = ${pending}`;
     await sql.begin(tx => tx.unsafe(normalization()));
     const [after] = await sql`SELECT * FROM runs WHERE id = ${pending}`;
@@ -482,6 +482,26 @@ describe('governed stored identity associations', () => {
       for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: [email] } });
       expect(await agent.entities.link({ ...input, dry_run: true })).toMatchObject({ preview: { outcome: 'suppressed' } });
     }
+  });
+
+  it.each([
+    [false, null], [true, null],
+    [false, { version: 99, opaque: 'retained' }], [true, { version: 99, opaque: 'retained' }],
+  ])('retains opaque historical rejections when proposals overlap (reverse=%s, support=%j)', async (reverse, evidence) => {
+    const { sql, human, agent, input, ids: [a, b] } = await graph(2, 'review');
+    const first = runId(await agent.entities.link(input));
+    await sql`UPDATE runs SET action_input = jsonb_set(action_input - 'member_support', '{suppression_support}',
+      ${sql.json({ evidence })}::jsonb->'evidence') WHERE id = ${first}`;
+    const [legacy] = await sql`SELECT action_input FROM runs WHERE id = ${first}`;
+    expect(legacy.action_input.suppression_support).toEqual(evidence);
+    await sql.begin(tx => tx.unsafe(normalization()));
+    for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: ['second@example.test'] } });
+    const second = runId(await agent.entities.link(input));
+    for (const id of reverse ? [second, first] : [first, second]) await human.operations.reject({ run_id: id });
+    const [latest] = await sql`SELECT action_input->'member_support' AS members FROM runs WHERE id = ${second}`;
+    expect(latest.members[JSON.stringify([a, b])]).toEqual(evidence);
+    for (const id of [a, b]) await human.entities.update({ entity_id: id, metadata: { emails: ['fresh@example.test'] } });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
   });
 
   it('fingerprints scoped normalized source support without identity-row ids', async () => {
