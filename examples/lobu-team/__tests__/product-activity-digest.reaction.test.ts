@@ -66,6 +66,15 @@ describe("production digest delivery", () => {
     expect(recovery.send).toHaveBeenCalledTimes(1);
   });
 
+  test("reports a recurring failure after an accepted recovery", async () => {
+    const h = harness(
+      [{ content: "Connection unavailable." }],
+      ["Connection recovered.", "Connection unavailable."]
+    );
+    await h.run();
+    expect(h.send).toHaveBeenCalledTimes(1);
+  });
+
   test("every accepted boundary body passes the real notification validator", async () => {
     const validate = new Ajv().compile(input);
     for (const content of [

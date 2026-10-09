@@ -5,9 +5,14 @@ import { createIsolateConnectorCompiler } from "../../../packages/connector-work
 
 const credentialLogs = [
   "failed password=secret7 token=synthetic-opaque-token",
+  "authorization=Bearer synthetic-bearer-secret status=500",
+  "auth=Basic c3ludGhldGljOnNlY3JldA== status=500",
+  "db.password=synthetic-dotted-password config.api_key=synthetic-dotted-key status=500",
   'failed password="synthetic spaced password"',
   `embedded ${JSON.stringify({ password: "synthetic quoted password", token: "synthetic-embedded-token" })}`,
   `escaped ${JSON.stringify(JSON.stringify({ password: "synthetic escaped password", token: "synthetic-escaped-token" }))}`,
+  `embedded ${JSON.stringify({ credentials: { pass: "synthetic-nested-secret" }, status: 500 })}`,
+  JSON.stringify({ message: "auth=Basic synthetic-nested-basic status=500" }),
 ];
 let code: string;
 beforeAll(async () => {
@@ -100,12 +105,18 @@ it("runs query_logs inside the native isolate through the existing HTTP auth cap
   );
   for (const secret of [
     "secret7",
+    "synthetic-bearer-secret",
+    "c3ludGhldGljOnNlY3JldA==",
+    "synthetic-dotted-password",
+    "synthetic-dotted-key",
     "synthetic-opaque-token",
     "synthetic spaced password",
     "synthetic quoted password",
     "synthetic-embedded-token",
     "synthetic escaped password",
     "synthetic-escaped-token",
+    "synthetic-nested-secret",
+    "synthetic-nested-basic",
   ]) {
     expect(JSON.stringify(result)).not.toContain(secret);
   }

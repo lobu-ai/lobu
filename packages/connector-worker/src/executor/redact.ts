@@ -9,14 +9,31 @@
 const REDACTED = '[REDACTED]';
 
 // Keep this module dependency-free: it is also bundled into connector isolates.
-const SECRET_KEY = /(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]access)?[_-]?key|private[_-]?key|token|secret|password|passwd|credentials?|authorization|auth|bearer|cookies?|set[_-]cookie|session[_-]?id)s?$/i;
+const SECRET_KEY = /(?:^|[_.-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]access)?[_-]?key|private[_-]?key|token|secret|password|passwd|credentials?|authorization|auth|bearer|cookies?|set[_-]cookie|session[_-]?id)s?$/i;
+
+function quotedValueEnd(text: string, start: number, delimiter: string): number {
+  const quote = delimiter.at(-1);
+  const escapes = delimiter.length - 1;
+  // A quote closes embedded JSON only at the opening delimiter's escaping layer.
+  let end = start;
+  while (end < text.length) {
+    const runStart = end;
+    while (text[end] === '\\') end++;
+    if (text[end] === quote && (end - runStart) % (2 * (escapes + 1)) === escapes) {
+      return end - escapes;
+    }
+    if (end < text.length) end++;
+  }
+  return end;
+}
 
 // Consume whole key tokens once, then scan only explicitly assigned secret values.
 // A length threshold misses short passwords; unbounded key-search regexes can
 // repeatedly rescan long malformed log lines.
 function redactAssignments(text: string): string {
   const keys = /[\w.-]+/g;
-  const assignment = /(?:\\*["'])?\s*[:=]\s*(\\*["'])?/y;
+  const assignment = /(\\*["'])?\s*[:=]\s*(\\*["'])?/y;
+  const authScheme = /(?:Bearer|Basic)\s+/iy;
   const parts: string[] = [];
   let copied = 0;
   let key: RegExpExecArray | null;
@@ -30,32 +47,41 @@ function redactAssignments(text: string): string {
     const separator = assignment.exec(text);
     if (!separator) continue;
     const start = assignment.lastIndex;
-    const delimiter = separator[1];
+    const delimiter = separator[2];
     let end = start;
+    let replacement = REDACTED;
+    if (!delimiter && text.startsWith(REDACTED, start)) {
+      keys.lastIndex = start + REDACTED.length;
+      continue;
+    }
     if (delimiter) {
-      const quote = delimiter.at(-1);
-      const escapes = delimiter.length - 1;
-      // JSON embedded in a log may have one or more escaping layers. A quote
-      // closes this value only at the same layer as its opening delimiter.
-      while (end < text.length) {
-        const runStart = end;
+      end = quotedValueEnd(text, start, delimiter);
+    } else if (text[start] === '{' || text[start] === '[') {
+      // Secret containers hide every descendant, even those with ordinary keys.
+      let depth = 0;
+      do {
+        const quoteStart = end;
         while (text[end] === '\\') end++;
-        const slashes = end - runStart;
-        if (text[end] === quote && slashes % (2 * (escapes + 1)) === escapes) {
-          end -= escapes;
-          break;
+        if (text[end] === '"' || text[end] === "'") {
+          const quote = text.slice(quoteStart, end + 1);
+          end = quotedValueEnd(text, end + 1, quote) + quote.length;
+          continue;
         }
-        if (end < text.length) end++;
-      }
+        if (text[end] === '{' || text[end] === '[') depth++;
+        if (text[end] === '}' || text[end] === ']') depth--;
+        end++;
+      } while (depth > 0 && end < text.length);
+      const quote = separator[1] ?? '"';
+      replacement = `${quote}${REDACTED}${quote}`;
     } else {
-      if (text.startsWith(REDACTED, start)) {
-        keys.lastIndex = start + REDACTED.length;
-        continue;
-      }
+      // An unquoted authentication value includes its scheme and credential.
+      // Removing only the scheme would hide it from later token redaction.
+      authScheme.lastIndex = start;
+      if (authScheme.test(text)) end = authScheme.lastIndex;
       while (end < text.length && !/[\s,;&}\]"']/.test(text[end])) end++;
     }
     if (end > start) {
-      parts.push(text.slice(copied, start), REDACTED);
+      parts.push(text.slice(copied, start), replacement);
       copied = end;
     }
     keys.lastIndex = end;

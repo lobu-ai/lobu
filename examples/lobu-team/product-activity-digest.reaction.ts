@@ -37,17 +37,17 @@ export default async (
   const automationId = Number(ctx.window.automation_id);
   if (!Number.isSafeInteger(automationId) || automationId <= 0)
     throw new Error("Invalid Automation ID");
-  // The agent handles semantic novelty. This bounded check also catches an
-  // identical report across windows; only an accepted delivery counts as seen.
+  // Only suppress consecutive identical reports: an older match may predate
+  // a recovery. The agent handles semantic novelty across the wider history.
   const previous = (await client.query(`
     SELECT payload_text FROM events
     WHERE automation_id = ${automationId}
       AND semantic_type = 'notification'
       AND created_at >= NOW() - INTERVAL '7 days'
       AND metadata @> '{"delivery":[{"platform":"slack","attempts":[{"status":"provider_accepted"}]}]}'::jsonb
-    ORDER BY created_at DESC, id DESC LIMIT 10
+    ORDER BY created_at DESC, id DESC LIMIT 1
   `)) as Array<{ payload_text?: string | null }>;
-  if (previous.some((row) => row.payload_text?.trim() === body.trim())) return;
+  if (previous[0]?.payload_text?.trim() === body.trim()) return;
   await client.notifications.send({
     title: (digest.title || "Lobu production")
       .slice(0, 160)

@@ -229,8 +229,8 @@ export async function queryLokiLogs(
       }
       const record = {
         timestamp_ns: value[0],
-        labels: scrubSentryValue(stream.stream ?? {}),
-        log: scrubSentryValue(log),
+        labels: stream.stream ?? {},
+        log,
       };
       // Structured keys and credentials embedded in log text need both scrubbers.
       // Omit oversized fields to keep individual evidence records bounded.
@@ -243,7 +243,12 @@ export async function queryLokiLogs(
         }
         return redactOutput(value);
       });
-      const size = new TextEncoder().encode(serialized).byteLength;
+      // Redact assignments first: URL-query scrubbing alone can consume an
+      // unquoted auth scheme and leave its credential without a recognizable key.
+      const scrubbed = scrubSentryValue(JSON.parse(serialized));
+      const size = new TextEncoder().encode(
+        JSON.stringify(scrubbed)
+      ).byteLength;
       if (
         oversizedField ||
         records.length >= limit ||
@@ -252,7 +257,7 @@ export async function queryLokiLogs(
         truncated = true;
         continue;
       }
-      records.push(JSON.parse(serialized));
+      records.push(scrubbed as (typeof records)[number]);
       outputBytes += size;
     }
   }
