@@ -90,6 +90,11 @@ beforeAll(async () => {
 });
 
 describe("promoteEvalCase", () => {
+	test("rejects a case backed by an external executor with a managed owner", async () => {
+		const externalRunId = await insertAutomationRun({ executor: { kind: "external" } });
+		const result = await promoteEvalCase({ sourceRunId: externalRunId, caseKey: "external" });
+		expect(result).toMatchObject({ ok: false, reason: "not_dispatchable" });
+	});
 	// Promote writes an entity TYPE, an entity and an identity claim; a failure
 	// at the claim must leave none of them. A trigger that raises on the claim
 	// insert is the only way to fail exactly that step from outside.

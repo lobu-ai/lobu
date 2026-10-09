@@ -739,6 +739,7 @@ async function getAutomationImpl(
     const recentRunStatuses = await loadRecentAutomationRunStatuses(sql, [automationId]);
     const automationHealth = computeAutomationHealth({
       status: automationRow.status,
+      externalExecutor: automationRow.execution_config?.executor?.kind === 'external',
       nextRunAt: automationRow.next_run_at,
       consecutiveScheduledFailures:
         automationRow.consecutive_scheduled_failures,

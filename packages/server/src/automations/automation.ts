@@ -63,9 +63,10 @@ type AutomationRunStatus =
 	| "timeout";
 
 interface DueAutomationRow {
+	execution_config?: unknown;
 	id: number;
 	organization_id: string;
-	managed_agent_id: string;
+	managed_agent_id: string | null;
 	schedule: string | null;
 	status?: string;
 	/** Automation is pinned to a user-owned device worker (e.g. Lobu Mac app). */
@@ -244,7 +245,7 @@ async function loadAutomationForAutomation(
 	automationId: number
 ): Promise<DueAutomationRow | null> {
 	const rows = await sql<DueAutomationRow>`
-    SELECT id, organization_id, managed_agent_id, schedule, status, triggers,
+    SELECT id, organization_id, managed_agent_id, schedule, status, triggers, execution_config,
            device_worker_id::text AS device_worker_id, agent_kind
     FROM automations
     WHERE id = ${automationId}
@@ -274,6 +275,7 @@ async function enqueueAutomationRunForRecord(
 		agentId: automation.managed_agent_id ?? null,
 		deviceWorkerId: automation.device_worker_id ?? null,
 		agentKind: automation.agent_kind ?? null,
+		executionConfig: automation.execution_config,
 	});
 	if (!executor && dispatchSource !== "manual") {
 		throw new Error(
@@ -298,7 +300,9 @@ async function enqueueAutomationRunForRecord(
 	const runParams = {
 			organizationId: automation.organization_id,
 			automationId: automation.id,
-			agentId: executor?.kind === "agent" ? executor.agentId : null,
+			agentId: executor?.kind === "external"
+				? automation.managed_agent_id
+				: executor?.kind === "agent" ? executor.agentId : null,
 			windowStart: windowStart.toISOString(),
 			windowEnd: windowEnd.toISOString(),
 			dispatchSource,
@@ -818,11 +822,12 @@ export async function materializeDueAutomationRuns(
 			// dispatch-time `ensureAutomationAgentExists` check stays as a delete-after-select
 			// backstop.
 			const dueAutomations = await sql<DueAutomationRow>`
-				SELECT w.id, w.organization_id, w.managed_agent_id, w.schedule, w.triggers,
+				SELECT w.id, w.organization_id, w.managed_agent_id, w.schedule, w.triggers, w.execution_config,
 				       w.entity_ids, w.created_by, w.current_version_id,
                w.device_worker_id::text AS device_worker_id, w.agent_kind
         FROM automations w
         WHERE w.status = 'active'
+          AND w.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
           AND w.schedule IS NOT NULL
           AND w.next_run_at IS NOT NULL
           AND w.next_run_at <= current_timestamp
@@ -876,6 +881,7 @@ export async function materializeDueAutomationRuns(
         SELECT count(*)::int AS count
         FROM automations w
         WHERE w.status = 'active'
+          AND w.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
           AND w.schedule IS NOT NULL
           AND w.next_run_at IS NOT NULL
           AND w.next_run_at <= current_timestamp
@@ -1259,6 +1265,7 @@ async function claimAutomationRun(
         -- Runs with NO agent and NO device pin are manual-open: any connected
         -- MCP client may execute and complete them (write-tier
         -- complete_window). The server dispatcher must leave them pending.
+        AND r.approved_input->'executor'->>'kind' IS DISTINCT FROM 'external'
         AND r.approved_input->>'agent_id' IS NOT NULL
         AND r.approved_input->>'agent_id' <> ''
         ${specificRunClause}

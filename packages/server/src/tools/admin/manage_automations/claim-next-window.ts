@@ -1,3 +1,4 @@
+import { encodeExternalAutomationClaimOwner } from '../../../automations/external-claim-owner';
 import type { AutomationClaimNextWindowResult } from '@lobu/core/contracts/tools/manage-automations';
 import type { DbClient } from '../../../db/client';
 import { getDb } from '../../../db/client';
@@ -24,39 +25,7 @@ const MAX_LEASE_SECONDS = 3600;
 const SCRIPT_EXTERNAL_CLAIM_ERROR =
   'Script Automations execute through the runtime and cannot be claimed by an external processor.';
 
-/**
- * The durable owner of an Automation window claim.
- *
- * Deliberately excludes `mcp_session_id`. An MCP session is a transport
- * artifact, not an identity: ChatGPT opens a NEW session per tool call (75
- * sessions in 24 minutes, each used exactly once), so a session-scoped owner
- * makes `claim_next_window` -> `complete_window` structurally impossible — the
- * completion never matches the claim, the lease expires, and the same window is
- * re-served forever. Ownership is the caller, and the caller outlives the
- * session.
- *
- * What still fences a completion: the signed `window_token` binds the exact run,
- * attempt and lease; claims serialize per Automation; and the lease expires. So
- * the narrowing this drops is only "a different session of the SAME user, agent
- * and OAuth client", which is the same principal by every other measure.
- */
-export function encodeExternalAutomationClaimOwner(
-  ctx: ToolContext,
-  action: 'claim_next_window' | 'complete_window' = 'claim_next_window'
-): string {
-  const identity = {
-    user_id: ctx.userId ?? null,
-    agent_id: ctx.agentId ?? null,
-    client_id: ctx.clientId ?? null,
-  };
-  if (Object.values(identity).every((value) => value == null)) {
-    throw new ToolUserError(
-      `${action} requires an identified caller to own the window lease.`,
-      403
-    );
-  }
-  return `external:${JSON.stringify(identity)}`;
-}
+export { encodeExternalAutomationClaimOwner } from '../../../automations/external-claim-owner';
 
 export function isExternalAutomationClaimOwner(value: string): boolean {
   if (!value.startsWith('external:')) return false;
@@ -145,8 +114,10 @@ export async function handleClaimNextWindow(
       device_worker_id: string | null;
       agent_kind: string | null;
       executor_kind: string | null;
+      next_run_at: string | Date | null;
+      schedule_auto_paused_at: string | Date | null;
     }>`
-      SELECT organization_id, schedule, managed_agent_id, device_worker_id, agent_kind,
+      SELECT organization_id, schedule, next_run_at, schedule_auto_paused_at, managed_agent_id, device_worker_id, agent_kind,
              execution_config->'executor'->>'kind' AS executor_kind
       FROM automations
       WHERE id = ${automationId}
@@ -250,9 +221,11 @@ export async function handleClaimNextWindow(
         id: number;
         window_end: string;
         executor_kind: string | null;
+        agent_id: string | null;
       }>`
         SELECT id, approved_input->>'window_end' AS window_end,
-               approved_input->'executor'->>'kind' AS executor_kind
+               approved_input->'executor'->>'kind' AS executor_kind,
+               approved_input->>'agent_id' AS agent_id
         FROM runs
         WHERE automation_id = ${automationId}
           AND run_type = 'automation'
@@ -264,11 +237,21 @@ export async function handleClaimNextWindow(
       // An existing run owns the executor snapshot. Only consult the live
       // Automation when this claim would create a new run; otherwise a config
       // edit could retroactively move already-queued work between lanes.
+      const executorKind = queued ? queued.executor_kind : automation.executor_kind;
+      const agentId = queued ? queued.agent_id : automation.managed_agent_id;
+      if (executorKind === 'external' && ctx.agentId && agentId && agentId !== ctx.agentId) {
+        throw new ToolUserError('This external Automation belongs to another agent.', 403);
+      }
       if (
         queued?.executor_kind === 'script' ||
         (!queued && automation.executor_kind === 'script')
       ) {
         throw new ToolUserError(SCRIPT_EXTERNAL_CLAIM_ERROR, 409);
+      }
+      if (!queued && automation.executor_kind === 'external' && automation.schedule &&
+          (automation.schedule_auto_paused_at || !automation.next_run_at ||
+           new Date(automation.next_run_at).getTime() > now.getTime())) {
+        throw new ToolUserError('This external Automation is not due. Read its schedule and next_run_at before checking again.', 409);
       }
       if (queued) windowEnd = new Date(queued.window_end);
       const run = queued

@@ -13,6 +13,7 @@ import { buildResourcePermalink } from "../../../utils/url-builder";
 import { AGENT_ASK_ACTION_KEY } from "../../../notifications/ask";
 import { resolveAskAffordance } from "../../../notifications/ask-schema";
 import { ENTITY_CHANGE_ACTION_KEYS } from "../entity-field-approval";
+import { listExternalAutomationWork, type ExternalActivityCaller } from '../../../automations/external-activity';
 
 /**
  * Approval families a human may settle straight from a feed row, without
@@ -108,6 +109,10 @@ export type ActivityCard = {
 	device_worker_id?: string;
 	device_label?: string;
 	device_platform?: string;
+	next_action?: {
+		method: 'automations.claimNextWindow';
+		input: { automation_id: string; run_id?: number };
+	};
 };
 
 type RawCard = ActivityCard & {
@@ -529,6 +534,8 @@ export async function listOrgActivity(opts: {
 	 * notifications (org/user-scoped, not attributable to an agent).
 	 */
 	agentId?: string;
+	/** Trusted caller identity, independent of the agent display filter. */
+	caller?: ExternalActivityCaller;
 }): Promise<{ items: ActivityCard[]; total: number; limit: number }> {
 	const limit = Math.min(Math.max(opts.limit ?? 24, 1), 50);
 	// Notifications are not agent-attributable, so an agent-scoped feed omits
@@ -732,6 +739,40 @@ export async function listOrgActivity(opts: {
 			.map(({ collapseKey, itemsCollected, atMs, ...card }) => card);
 	}
 
+	if (includeRuns && (!kindFilter || kindFilter.has('automation_due'))) {
+		const work = await listExternalAutomationWork({
+			organizationId: opts.organizationId,
+			caller: opts.caller ?? { userId: opts.userId, agentId: null, clientId: null },
+			agentId: opts.agentId,
+			limit,
+		});
+		const workCards: ActivityCard[] = work.map((entry) => {
+			const resume = entry.run_status === 'running' || entry.run_status === 'claimed';
+			const at = entry.created_at ?? entry.next_run_at!;
+			return {
+				id: `automation_due:${entry.id}`,
+				kind: 'automation_due', title: entry.name,
+				body: resume ? 'Resume your claimed window and complete it.' : 'External Automation work is ready to claim.',
+				at: at instanceof Date ? at.toISOString() : String(at),
+				status: resume ? 'running' : 'due', count: 1,
+				href: `/${encodeURIComponent(opts.ownerSlug)}/automations/${entry.id}`,
+				automation_id: Number(entry.id),
+				...(entry.run_id != null ? { run_id: Number(entry.run_id) } : {}),
+				next_action: { method: 'automations.claimNextWindow', input: {
+					automation_id: String(entry.id),
+					...(resume ? { run_id: Number(entry.run_id) } : {}),
+				} },
+			};
+		});
+		// Current work is independent of the recent-history cap. Completion removes
+		// it through the existing run/checkpoint state, not an inbox acknowledgement.
+		const pinned = items.filter((card) => card.notification_id != null && pinnedAttentionIds.has(card.notification_id));
+		const currentWork = workCards.slice(0, Math.max(0, limit - pinned.length));
+		const history = items.filter((card) => !pinned.includes(card));
+		const fillCount = Math.max(0, limit - pinned.length - currentWork.length);
+		items = [...pinned, ...currentWork, ...(fillCount > 0 ? history.slice(-fillCount) : [])]
+			.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+	}
 	return { items, total: items.length, limit };
 }
 

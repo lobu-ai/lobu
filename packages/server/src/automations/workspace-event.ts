@@ -190,6 +190,7 @@ async function findMatchingWorkspaceEventActivations(
     WHERE w.organization_id = ${organizationId}
       AND w.status = 'active'
       AND w.current_version_id IS NOT NULL
+      AND w.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
       AND (w.managed_agent_id IS NOT NULL OR w.device_worker_id IS NOT NULL)
       AND w.triggers @> ${db.json(needle)}::jsonb
     ORDER BY w.id ASC

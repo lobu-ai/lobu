@@ -55,6 +55,8 @@ const FAILED_RUN_STATUSES = new Set(['failed', 'timeout']);
 export interface AutomationHealthInput {
   /** Automation `status` (only `active` automations can be degraded). */
   status: string | null | undefined;
+  /** External clients own polling; a due window is not a missed native dispatch. */
+  externalExecutor?: boolean;
   /** `automations.next_run_at` — the scheduler cursor. */
   nextRunAt: string | Date | null | undefined;
   /** Consecutive terminal failures from executed scheduled runs. */
@@ -176,7 +178,7 @@ export function computeAutomationHealth(
 
   // Missed firing: next_run_at is well in the past and nothing is dispatching.
   const nextRunMs = toMs(input.nextRunAt);
-  if (!runInFlight && nextRunMs != null && nextRunMs < now - missedFiringMarginMs()) {
+  if (!input.externalExecutor && !runInFlight && nextRunMs != null && nextRunMs < now - missedFiringMarginMs()) {
     const overdueMin = Math.round((now - nextRunMs) / 60_000);
     reasons.push(`missed firing: next_run_at overdue by ~${overdueMin} min`);
   }

@@ -471,9 +471,9 @@ function buildAutomationProposal(
       args.prompt,
       args.skills,
       args.reaction_script,
-      args.execution_config?.executor?.source,
+      args.execution_config?.executor?.kind === 'script' ? args.execution_config.executor.source : undefined,
     );
-    if (!args.managed_agent_id) {
+    if (!args.managed_agent_id && args.execution_config?.executor?.kind !== 'external') {
       throw new ToolUserError(
         'managed_agent_id is required to create an Automation (the agent that executes it).'
       );

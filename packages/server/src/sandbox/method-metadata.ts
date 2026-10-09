@@ -874,6 +874,10 @@ export default async (_ctx, client) => {
 		access: "external",
 		enforcedTier: "write",
 	},
+	"operations.listActivity": {
+		summary: "Read the existing workspace activity feed: notifications, runs, and due external Automations. Use kinds: [\"automation_due\"] for actionable external work without recent history; follow next_action to claim or resume. Polling does not claim, renew, or acknowledge anything. agent_id is a display filter, not identity.",
+		access: "read",
+	},
 	"operations.listAvailable": {
 		summary:
 			"Search declared connector capabilities, including disconnected connectors. Pass connection_id to list the operations declared by that connection's connector with that connection's per-target readiness (errors if the connection is not visible); connector_key/query/kind filter the wider catalog. Returns readiness plus every visible execution target; backend configuration is never exposed.",

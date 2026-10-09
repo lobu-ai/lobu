@@ -32,6 +32,11 @@ const adminCtx: ToolContext = {
 };
 
 describe("sdkSearch", () => {
+	it("discovers activity polling for a read-only MCP client", async () => {
+		const result = await sdkSearch({ query: "operations.listActivity" }, stubEnv, readCtx);
+		expect(result.match_count).toBe(1);
+		expect(result.results[0]).toContain("automation_due");
+	});
 	it.each([
 		"agents",
 		"entitySchema",

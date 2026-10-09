@@ -4,6 +4,11 @@ import { computeAutomationHealth } from "../../automations/automation-health";
 const NOW = 1_700_000_000_000;
 
 describe("computeAutomationHealth", () => {
+	it("does not mistake externally due work for a missed native dispatch, but surfaces failure", () => {
+		const input = { status: "active", nextRunAt: new Date(NOW - 3600_000), externalExecutor: true };
+		expect(computeAutomationHealth(input, NOW).health).toBe("healthy");
+		expect(computeAutomationHealth({ ...input, latestRunStatus: "failed" }, NOW).health).toBe("degraded");
+	});
 	it("puts the durable schedule auto-pause reason first", () => {
 		const result = computeAutomationHealth(
 			{

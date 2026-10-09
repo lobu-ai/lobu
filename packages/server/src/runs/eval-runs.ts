@@ -96,7 +96,8 @@ export async function loadReplayableSource(
 		typeof payload.device_worker_id === "string"
 			? payload.device_worker_id.trim()
 			: "";
-	if (devicePin || !agentId) {
+	if (devicePin || !agentId ||
+		(payload.executor as { kind?: string } | undefined)?.kind === "external") {
 		logger.warn(
 			{
 				sourceRunId,

@@ -6,13 +6,13 @@ engine would still add something real.
 
 ## The core model
 
-An Automation is a versioned task owned by an agent. Its fields have separate
+An Automation is a versioned task with an optional owning agent. Its fields have separate
 jobs:
 
 | Primitive | What it decides | What it does not decide |
 |---|---|---|
 | Trigger | When a run starts | What durable context the run may read |
-| Executor | Whether a managed agent, device CLI, or sandboxed script runs the job | When it starts |
+| Executor | Whether a managed agent, device CLI, sandboxed script, or external MCP client runs the job | When it starts |
 | Prompt and skills | What the agent should do | When it starts |
 | Sources | What additional governed data a window reads | Whether new data activates it |
 | Outputs | Which entity rows or append-only events a completed window persists | External side effects |
@@ -70,7 +70,8 @@ not share one admission clock:
 
 | Work | Due work is admitted by | Why |
 |---|---|---|
-| Scheduled Automation | The per-minute `automation` TaskScheduler tick | Execution is server-dispatched and the tick also reconciles stranded runs. |
+| Native scheduled Automation | The per-minute `automation` TaskScheduler tick | The tick dispatches work and reconciles stranded runs. |
+| External scheduled Automation | The external client's `claimNextWindow` call | The client discovers due work through activity; Lobu does not dispatch it. |
 | Connector feed | An eligible idle worker poll | Capability, placement, and worker liveness are known before a run is created, avoiding durable but unclaimable syncs. |
 
 The consolidation boundary is therefore the durable run and event lifecycle,
@@ -79,6 +80,34 @@ workspace-output events, and schedules all create the same Automation run shape;
 the periodic Automation tick is the recovery path when immediate event dispatch
 fails. Moving feed admission into the global clock would add a second placement
 queue without removing any existing mechanism.
+
+## External execution and activity discovery
+
+Set `execution_config: { executor: { kind: "external" } }` for manual or
+scheduled processing by an external MCP client. Keep cadence and timezone on
+the normal schedule trigger. Lobu leaves due work on `next_run_at` until the
+client claims it; it never launches a hosted agent or device CLI for this mode.
+An optional `managed_agent_id` remains the permission and delivery principal.
+Event triggers, device pins, and hosted/CLI execution settings are incompatible.
+The native `skip_if_unchanged` optimization does not apply: the external client
+examines each due window and decides whether it merits any output.
+
+An authorized agent should query `operations.listActivity({ kinds:
+["automation_due"] })` on startup, between tasks, and approximately every minute
+while its own scheduler is awake. This is a read-only wrapper of the existing
+`list_activity` action. It returns due external work and the caller's unfinished
+claims, with `next_action` pointing to `automations.claimNextWindow`. Other live
+claim owners are excluded. Completed history cannot displace due work in this
+filtered view; unfiltered activity preserves human attention notifications.
+
+The caller owns wakeups. MCP instructions advise polling but do not start a
+scheduler, and device daemon credentials retain their existing worker-only
+scope. Select each authorized workspace explicitly with `client.org(slug)`;
+`agent_id` is a display filter, not authenticated identity. Discovery does not
+claim, renew a lease, mark notifications read, or send messages. Claim before
+processing, renew before lease expiry, and complete even quiet windows with
+empty output. On a claim conflict, refresh activity. Existing reactions decide
+whether completion should send a notification.
 
 ## Window recovery and external processors
 

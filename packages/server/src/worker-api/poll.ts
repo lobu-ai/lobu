@@ -973,6 +973,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             OR (
               ${isUserScopedWorker}
               AND r.run_type = 'automation'
+              AND r.approved_input->'executor'->>'kind' IS DISTINCT FROM 'external'
               AND ${deviceWorkerId}::uuid IS NOT NULL
               AND (
                 r.target_device_worker_id = ${deviceWorkerId}::uuid

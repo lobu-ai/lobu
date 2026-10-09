@@ -173,7 +173,13 @@ export const AutomationScheduleTriggerSchema = Type.Object(
         default: "coalesce",
       })
     ),
-    skip_if_unchanged: Type.Optional(Type.Boolean({ default: true })),
+    skip_if_unchanged: Type.Optional(
+      Type.Boolean({
+        default: true,
+        description:
+          "Native executors may skip unchanged source windows. External executors always receive due windows and decide whether to emit output.",
+      })
+    ),
   },
   { additionalProperties: false }
 );
@@ -323,9 +329,26 @@ export type AutomationScriptExecutor = Static<
   typeof AutomationScriptExecutorSchema
 >;
 
+export const AutomationExternalExecutorSchema = Type.Object(
+  { kind: Type.Literal("external") },
+  {
+    additionalProperties: false,
+    description:
+      "An authorized external MCP client claims and completes this Automation. Manual and schedule window activations only. The schedule remains authoritative; Lobu does not start a hosted agent or device CLI. managed_agent_id may retain the owning delivery principal.",
+  }
+);
+export type AutomationExecutor =
+  | AutomationScriptExecutor
+  | Static<typeof AutomationExternalExecutorSchema>;
+
 export const AutomationExecutionConfigSchema = Type.Object(
   {
-    executor: Type.Optional(AutomationScriptExecutorSchema),
+    executor: Type.Optional(
+      Type.Union([
+        AutomationScriptExecutorSchema,
+        AutomationExternalExecutorSchema,
+      ])
+    ),
     timeout_seconds: Type.Optional(
       Type.Integer({
         minimum: 1,
@@ -379,7 +402,7 @@ export const AutomationExecutionConfigSchema = Type.Object(
   {
     additionalProperties: false,
     description:
-      "[create/update] Per-Automation execution settings: a sandboxed script executor, device-worker CLI flags, or the server-side finalize-nudge budget. Omitted fields fall back to dispatcher/CLI/global defaults; pass null to clear.",
+      "[create/update] Per-Automation execution settings: an external MCP client, a sandboxed script executor, device-worker CLI flags, or the server-side finalize-nudge budget. Omitted fields fall back to dispatcher/CLI/global defaults; pass null to clear.",
   }
 );
 export type AutomationExecutionConfig = Static<
@@ -664,7 +687,7 @@ export const ManageAutomationsSchema = Type.Object(
     managed_agent_id: Type.Optional(
       Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
         description:
-          "[create/update] Optional managed agent that executes this Automation's runs (server dispatch lane). Null clears the assignment; an Automation with neither managed_agent_id nor device_worker_id is manual-only and may be completed by an external MCP client. [list] Optional owner filter.",
+          "[create/update] Optional managed agent that owns this Automation. Normally executes its runs; an explicit external executor retains the agent only as the permission and delivery principal. Null clears the assignment. Without a managed agent, device pin, or external executor, an Automation is manual-only. [list] Optional owner filter.",
       })
     ),
     status: Type.Optional(

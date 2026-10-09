@@ -242,6 +242,7 @@ export async function handleCreateVersion(
       deviceWorkerId:
         (automationRows[0].device_worker_id as string | null) ?? null,
       agentKind: (automationRows[0].agent_kind as string | null) ?? null,
+      executionConfig: automationRows[0].execution_config,
     };
     assertAutomationExecutorsResolve(
       triggerWrite.triggers as AutomationTriggerInput[],

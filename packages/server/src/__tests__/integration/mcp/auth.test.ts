@@ -1803,6 +1803,17 @@ describe('MCP Authentication', () => {
       const initBody = await init.json();
       expect(initBody.result?.instructions).not.toContain('primary workspace');
       expect(initBody.result?.instructions).toContain('client.org(');
+      expect(initBody.result?.instructions).toContain('operations.listActivity');
+      expect(initBody.result?.instructions).toContain('roughly every 60 seconds');
+      const attention = await mcpToolsCall<any>('query_sdk', {
+        script: `export default async (_ctx, client) => {
+          const target = await client.org(${JSON.stringify(singletonOrg.slug)});
+          return target.operations.listActivity({ kinds: ['automation_due'] });
+        };`,
+      }, { token });
+      expect(attention.success).toBe(true);
+      expect(attention.return_value.items).toEqual([]);
+      expect(initBody.result?.instructions).not.toContain('### Saving (do this automatically)');
     });
 
     it('uses the selected workspace role for cross-org SDK mutations on unscoped OAuth only', async () => {
