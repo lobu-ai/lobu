@@ -121,6 +121,8 @@ export function scrubSentryValue(value: unknown): unknown {
 
   function scrub(current: unknown, depth = 0): unknown {
     if (typeof current === "string") return scrubString(current);
+    // A copied toJSON hook could reintroduce secrets after this walk finishes.
+    if (typeof current === "function") return "[Function]";
     if (current === null || typeof current !== "object") return current;
     if (seen.has(current)) return "[CIRCULAR]";
     // beforeBreadcrumb runs BEFORE Sentry's own normalize(), so without a cap

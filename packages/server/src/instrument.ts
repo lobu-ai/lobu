@@ -104,11 +104,13 @@ if (dsn) {
     if (maxMs >= thresholdMs) {
       const rounded = Math.round(maxMs);
       // Loud log so it's visible in pod logs even without Sentry.
-      console.error(
-        `[event-loop] STALL detected: loop blocked ~${rounded}ms ` +
-          `(threshold ${thresholdMs}ms). The loop could not run timers/IO for ` +
-          `this long — a synchronous block, GC pause, or CPU starvation.`
-      );
+      console.error(JSON.stringify({
+        level: 'warn', service: 'lobu-server', source: 'event-loop',
+        release: process.env.APP_GIT_SHA,
+        msg: 'Event loop stalled', stallMs: rounded, thresholdMs,
+        p99Ms: Math.round(h.percentile(99) / 1e6),
+        meanMs: Math.round(h.mean / 1e6),
+      }));
       if (dsn) {
         Sentry.captureMessage(`Event loop stalled ~${rounded}ms`, {
           level: 'warning',

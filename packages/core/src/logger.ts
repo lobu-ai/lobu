@@ -5,6 +5,7 @@ const USE_WINSTON_LOGGER = process.env.USE_WINSTON_LOGGER === "true";
 const USE_JSON_FORMAT = process.env.LOG_FORMAT === "json";
 
 import winston from "winston";
+import { scrubSentryValue } from "./utils/sentry-scrubber";
 
 export interface Logger {
   error: (message: any, ...args: any[]) => void;
@@ -26,7 +27,7 @@ function createRedactingReplacer() {
       return {
         name: value.name,
         message: value.message,
-        stack: value.stack?.split("\n")[0],
+        stack: value.stack,
       };
     }
 
@@ -41,7 +42,11 @@ function createRedactingReplacer() {
 
 function safeStringify(value: unknown, space?: number): string {
   try {
-    return JSON.stringify(value, createRedactingReplacer(), space);
+    return JSON.stringify(
+      scrubSentryValue(value),
+      createRedactingReplacer(),
+      space
+    );
   } catch {
     return "[unserializable]";
   }
@@ -89,6 +94,7 @@ function createConsoleLogger(serviceName: string): Logger {
         timestamp,
         level: lvl,
         service: serviceName,
+        release: process.env.APP_GIT_SHA,
         message: msgStr,
         ...(args.length > 0
           ? { data: args.length === 1 ? args[0] : args }
@@ -101,7 +107,7 @@ function createConsoleLogger(serviceName: string): Logger {
       msgStr += ` ${safeStringify(args.length === 1 ? args[0] : args)}`;
     }
 
-    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${msgStr}`;
+    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${scrubSentryValue(msgStr)}`;
   };
 
   return {
@@ -170,9 +176,14 @@ export function createLogger(serviceName: string): Logger {
     format: winston.format.combine(
       winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
       winston.format.errors({ stack: true }),
-      winston.format.splat()
+      winston.format.splat(),
+      winston.format((info) => {
+        // Preserve Winston's symbol fields while applying the same boundary
+        // scrubbing as the default console transport.
+        return Object.assign(info, scrubSentryValue(info));
+      })()
     ),
-    defaultMeta: { service: serviceName },
+    defaultMeta: { service: serviceName, release: process.env.APP_GIT_SHA },
     transports,
   });
 

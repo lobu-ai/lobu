@@ -9,6 +9,7 @@ import type { Context } from 'hono';
 import * as Sentry from '@sentry/node';
 import { ToolUserError } from './utils/errors';
 import { getErrorMessage, scrubSentryValue } from '@lobu/core';
+import logger from './utils/logger';
 
 const SENTRY_CAPTURED_FLAG = 'sentryErrorCaptured';
 
@@ -41,6 +42,8 @@ export function captureServerError(
   httpStatus: number
 ): void {
   if (error instanceof ToolUserError) return;
+  logger.error({ error, source, http_method: c.req.method, res_status: httpStatus,
+    path: c.req.path, sentryReported: true }, 'HTTP handler failed');
   Sentry.captureException(error, {
     tags: {
       source,
@@ -99,6 +102,8 @@ export async function trackMCPToolCall<T>(
         const isUserError = error instanceof ToolUserError;
 
         if (!isUserError) {
+          logger.error({ error, tool_name: toolName, source: 'mcp_tool', sentryReported: true },
+            'MCP tool failed');
           Sentry.captureException(error, {
             tags: {
               tool_name: toolName,

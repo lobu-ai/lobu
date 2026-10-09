@@ -238,6 +238,8 @@ export function buildWrapperApp(
 				typeof (body as { error?: unknown }).error === "string"
 					? (body as { error: string }).error
 					: null) ?? `HTTP ${c.res.status} from ${c.req.method} ${c.req.path}`;
+			logger.error({ source: "http_response", http_method: c.req.method,
+				res_status: c.res.status, path: c.req.path, sentryReported: true }, message);
 			Sentry.captureMessage(message, {
 				level: "error",
 				tags: {

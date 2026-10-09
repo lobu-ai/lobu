@@ -341,6 +341,11 @@ describe("buildWrapperApp", () => {
 		expect(message).toBe("inner caught");
 		expect(opts.level).toBe("error");
 		expect(opts.tags.source).toBe("http_response");
+		const { default: logger } = await import("../utils/logger");
+		expect(logger.error).toHaveBeenCalledWith(
+			expect.objectContaining({ source: "http_response", res_status: 500 }),
+			"inner caught",
+		);
 	});
 
 	it("suppresses ONLY the draining readiness 503; other health 5xx still report", async () => {

@@ -7,6 +7,18 @@ import {
 const SECRET = "SENTRY_SECRET_SENTINEL";
 
 describe("Sentry credential scrubber", () => {
+  it("does not retain serialization hooks that can bypass scrubbing", () => {
+    const payload = {
+      data: { toJSON: () => ({ authorization: "synthetic-secret" }) },
+      error: Object.assign(new Error("synthetic error"), {
+        toJSON: () => ({ cookie: "synthetic-secret" }),
+      }),
+    };
+    const serialized = JSON.stringify(scrubSentryValue(payload));
+    expect(serialized).not.toContain("synthetic-secret");
+    expect(serialized).toContain("synthetic error");
+  });
+
   it("removes URL queries and fragments while preserving route paths", () => {
     const value = scrubSentryValue(
       `GET https://example.test/api/v1/files/a?token=${SECRET}&state=x#fragment`
