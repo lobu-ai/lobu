@@ -54,7 +54,7 @@ DATABASE_URL=postgresql://localhost:5432/lobu_mcp_discovery_test \
 ```
 
 Requirements: a reachable Postgres with `vector` + `pg_trgm`; a Node 22–24 binary
-with isolated-vm prebuilds (`node` on PATH, or `NODE22_BIN`); a
+with isolated-vm prebuilds (default `/opt/homebrew/opt/node@22/bin/node`); a
 Gemini API key in `.env`.
 
 ## Tasks

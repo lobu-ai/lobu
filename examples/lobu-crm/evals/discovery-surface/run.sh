@@ -20,19 +20,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # repo root = four levels up from examples/lobu-crm/evals/discovery-surface
 ROOT="$(cd "$HERE/../../../.." && pwd)"
 
-# Use the installed Node (22–24 for isolated-vm), or an explicit override.
-NODE22_BIN="${NODE22_BIN:-$(command -v node)}"
+# Node 22 (isolated-vm prebuilt ABI). Override with NODE22_BIN if elsewhere.
+NODE22_BIN="${NODE22_BIN:-/opt/homebrew/opt/node@22/bin/node}"
 if [ ! -x "$NODE22_BIN" ]; then
   echo "node@22 not found at $NODE22_BIN — set NODE22_BIN to a Node 22–24 binary (isolated-vm needs it)." >&2
   exit 1
-fi
-
-# Node's env-file loader preserves explicitly supplied variables, especially
-# DATABASE_URL. Do not source .env as shell code or let it replace the caller's
-# disposable test database.
-ENV_ARGS=()
-if [ -f "$ROOT/.env" ]; then
-  ENV_ARGS+=("--env-file=$ROOT/.env")
 fi
 
 # Default to a local throwaway test DB if the caller didn't set one.
@@ -43,4 +35,10 @@ case "$DATABASE_URL" in
 esac
 
 export TSX_TSCONFIG_PATH="$HERE/tsconfig.json"
-exec "$NODE22_BIN" "${ENV_ARGS[@]}" --import "$ROOT/node_modules/tsx/dist/loader.mjs" "$HERE/run.ts" "$@"
+# Node's env-file loader preserves explicitly supplied variables, especially
+# DATABASE_URL. Keep the no-file branch compatible with macOS Bash 3.2, where
+# expanding an empty array with `set -u` fails before Node can start.
+if [ -f "$ROOT/.env" ]; then
+  exec "$NODE22_BIN" "--env-file=$ROOT/.env" --import "$ROOT/node_modules/tsx/dist/loader.mjs" "$HERE/run.ts" "$@"
+fi
+exec "$NODE22_BIN" --import "$ROOT/node_modules/tsx/dist/loader.mjs" "$HERE/run.ts" "$@"
