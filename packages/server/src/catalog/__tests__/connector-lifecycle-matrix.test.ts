@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { listCatalogConnectorDefinitions } from "../../utils/connector-catalog";
 
 const EXPECTED_BUNDLED_CONNECTORS = [
+	"agentid",
 	"discord",
 	"github",
 	"google.calendar",
