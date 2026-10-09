@@ -590,6 +590,35 @@ describe("mapProjectToDesiredState", () => {
     ).toThrow(/expected rules to be an array/i);
   });
 
+  test.each([
+    null,
+    { rules: [null] },
+    { rules: [false] },
+    { rules: Array<unknown>(1) },
+    {
+      rules: [
+        {
+          fields: Object.assign(Array<unknown>(2), { 0: "email" }),
+          normalizer: "email",
+          onMatch: "auto_link",
+        },
+      ],
+    },
+    {
+      rules: [
+        { fields: ["email", 42], normalizer: "email", onMatch: "auto_link" },
+      ],
+    },
+  ])("rejects malformed resolution policies with an actionable validation error: %j", (resolutionPolicy) => {
+    const bad = defineEntityType({
+      key: "synthetic-record",
+      resolutionPolicy,
+    } as never);
+    expect(() =>
+      mapProjectToDesiredState(defineConfig({ agents: [], entities: [bad] }))
+    ).toThrow(/invalid resolutionPolicy/i);
+  });
+
   test("rejects invalid metrics at load time (measure naming a missing eventSet)", () => {
     const bad = defineEntityType({
       key: "company",

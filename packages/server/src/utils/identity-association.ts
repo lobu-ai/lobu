@@ -23,6 +23,25 @@ interface PairSupport {
   fingerprint: string;
 }
 
+/** Historical unknown evidence stays conservative; it is never treated as no evidence. */
+function isCurrentSupport(value: unknown): value is PairSupport {
+  if (!value || typeof value !== 'object') return false;
+  const support = value as PairSupport;
+  return support.version === SUPPORT_VERSION && typeof support.policy === 'string'
+    && typeof support.fingerprint === 'string' && Array.isArray(support.pair)
+    && support.pair.length === 2 && support.pair.every(Number.isSafeInteger)
+    && Array.isArray(support.keys) && support.keys.every(key => {
+      if (typeof key !== 'string') return false;
+      try {
+        const parts: unknown = JSON.parse(key);
+        return Array.isArray(parts) && (parts.length === 3 || parts.length === 6)
+          && Number.isSafeInteger(parts[0]) && Array.isArray(parts[1])
+          && parts[1].length > 0 && parts[1].every(field => typeof field === 'string')
+          && typeof parts[2] === 'string';
+      } catch { return false; }
+    });
+}
+
 function supportSnapshot(policy: string, pair: number[], values: Iterable<string>): PairSupport {
   const snapshot = { version: SUPPORT_VERSION, policy, pair, keys: [...new Set(values)].sort() };
   return { ...snapshot, fingerprint: digest(snapshot) };
@@ -51,9 +70,9 @@ export interface IdentityAssociationProposal extends IdentityAssociationInput {
   support: PairSupport;
   suppression_support: PairSupport;
   topology: string;
-  evidence_fingerprint?: string;
-  member_support?: Record<string, PairSupport>;
-  prior_decisions?: Array<{ kind: string; id: number }>;
+  evidence_fingerprint: string;
+  member_support: Record<string, PairSupport>;
+  prior_decisions: Array<{ kind: string; id: number }>;
   current: Array<{ id: number; name: string; parent: number | null }>;
   requester: { kind: ActingPrincipal['kind']; id: string | null; userId: string | null };
   attribution?: ApprovalAttribution;
@@ -105,11 +124,9 @@ function pairSupport(records: StoredRecord[], identities: Map<number, Resolution
 }
 
 /** Indexed lookups preserve the original member pair after either root changes. */
-async function rejectedPairDecisions(db: DbClient, org: string, pair: number[], excludeRunId: number | null = null) {
-  const key = stableJson(pair);
-  return db<{ id: number; support: PairSupport }>`
-    (SELECT id, COALESCE(action_input->'member_support'->${key}::text,
-        action_input->'suppression_support', action_input->'support') AS support FROM runs
+async function rejectedPairDecisions(db: DbClient, org: string, key: string, excludeRunId: number | null = null) {
+  return db<{ id: number; support: unknown }>`
+    (SELECT id, action_input->'member_support'->${key}::text AS support FROM runs
       WHERE organization_id = ${org} AND approval_status = 'rejected' AND action_key = 'entity_change'
         AND (${excludeRunId}::bigint IS NULL OR id <> ${excludeRunId})
         AND action_input->>'operation' = 'link' AND action_input->>'identity_pair' = ${key}
@@ -125,22 +142,32 @@ async function rejectedPairDecisions(db: DbClient, org: string, pair: number[], 
 
 /** Accumulate at rejection time, including overlapping proposals rejected out of order. */
 export async function rememberIdentityRejection(db: DbClient, org: string, runId: number, proposal: IdentityAssociationProposal): Promise<void> {
-  const members = proposal.member_support ?? { [proposal.identity_pair]: proposal.suppression_support };
-  for (const [key, support] of Object.entries(members)) {
-    const previous = await rejectedPairDecisions(db, org, support.pair, runId);
-    const matching = previous.filter(row => row.support?.version === SUPPORT_VERSION && row.support.policy === support.policy);
-    const keys = matching.flatMap(row => row.support.keys);
-    const remembered = supportSnapshot(support.policy, support.pair, [...support.keys, ...keys]);
-    const targetId = Math.max(runId, ...matching.map(row => Number(row.id)));
+  for (const [key, support] of Object.entries(proposal.member_support)) {
+    const previous = await rejectedPairDecisions(db, org, key, runId);
+    const opaque = previous.find(row => !isCurrentSupport(row.support));
+    let remembered: unknown;
+    let targetId: number;
+    if (isCurrentSupport(support) && !opaque) {
+      const matching = previous.filter((row): row is { id: number; support: PairSupport } =>
+        isCurrentSupport(row.support) && row.support.policy === support.policy);
+      const keys = matching.flatMap(row => row.support.keys);
+      remembered = supportSnapshot(support.policy, support.pair, [...support.keys, ...keys]);
+      targetId = Math.max(runId, ...matching.map(row => Number(row.id)));
+    } else {
+      // Latest-decision lookups must retain opaque evidence even when an older
+      // historical proposal is rejected after a newer, fully known proposal.
+      remembered = opaque ? opaque.support : support;
+      targetId = Math.max(runId, ...previous.map(row => Number(row.id)));
+    }
     // Keep the accumulated support on the newest indexed decision even when an
     // older proposal is rejected last. Other member pairs remain untouched.
     await db`UPDATE runs SET action_input = jsonb_set(action_input, '{member_support}',
-      COALESCE(action_input->'member_support', '{}'::jsonb) || ${db.json({ [key]: remembered })}::jsonb)
+      action_input->'member_support' || ${db.json({ [key]: remembered })}::jsonb)
       WHERE id = ${targetId} AND organization_id = ${org}`;
   }
 }
 
-interface RememberedPairDecision { kind: 'rejection' | 'withdrawal'; id: number; support: PairSupport }
+interface RememberedPairDecision { kind: 'rejection' | 'withdrawal'; id: number; support: unknown }
 
 /** Bounded original pairs, each using the latest indexed decision; never scan history. */
 async function loadPairDecisions(db: DbClient, org: string, pairs: number[][]) {
@@ -150,8 +177,7 @@ async function loadPairDecisions(db: DbClient, org: string, pairs: number[][]) {
     FROM jsonb_to_recordset(${db.json(pairs.map(pair => ({ pair_key: stableJson(pair), a: pair[0], b: pair[1] })))}::jsonb)
       AS requested(pair_key text, a bigint, b bigint)
     CROSS JOIN LATERAL (
-      (SELECT 'rejection' AS kind, id, COALESCE(action_input->'member_support'->requested.pair_key,
-          action_input->'suppression_support', action_input->'support') AS support FROM runs
+      (SELECT 'rejection' AS kind, id, action_input->'member_support'->requested.pair_key AS support FROM runs
         WHERE organization_id = ${org} AND approval_status = 'rejected' AND action_key = 'entity_change'
           AND action_input->>'operation' = 'link' AND action_input->>'identity_pair' = requested.pair_key
         ORDER BY id DESC LIMIT 1)
@@ -161,9 +187,7 @@ async function loadPairDecisions(db: DbClient, org: string, pairs: number[][]) {
           AND action_input->>'operation' = 'link' AND (action_input->'member_support') ? requested.pair_key
         ORDER BY id DESC LIMIT 1)
       UNION ALL
-      (SELECT 'withdrawal' AS kind, id, COALESCE(metadata->${IDENTITY_DECISION_METADATA_KEY}::text->'member_support'->requested.pair_key,
-          metadata->${IDENTITY_DECISION_METADATA_KEY}::text->'suppression_support',
-          metadata->${IDENTITY_DECISION_METADATA_KEY}::text->'support') AS support FROM entity_relationships
+      (SELECT 'withdrawal' AS kind, id, metadata->${IDENTITY_DECISION_METADATA_KEY}::text->'member_support'->requested.pair_key AS support FROM entity_relationships
         WHERE organization_id = ${org} AND LEAST(from_entity_id, to_entity_id) = requested.a
           AND GREATEST(from_entity_id, to_entity_id) = requested.b
           AND metadata ? ${IDENTITY_DECISION_METADATA_KEY} AND deleted_at IS NOT NULL
@@ -185,11 +209,12 @@ async function loadPairDecisions(db: DbClient, org: string, pairs: number[][]) {
 function suppression(pair: number[], support: PairSupport, decisions: RememberedPairDecision[]) {
   const refs = decisions.map(row => ({ kind: row.kind, id: Number(row.id) }));
   const reconsider = decisions.length > 0;
-  const previousKeys = new Set(decisions.filter(row => row.support?.version === SUPPORT_VERSION && row.support.policy === support.policy).flatMap(row => row.support.keys));
+  const previousKeys = new Set(decisions.flatMap(row =>
+    isCurrentSupport(row.support) && row.support.policy === support.policy ? row.support.keys : []));
   const keys = [...new Set([...previousKeys, ...support.keys])].sort();
   const remembered = supportSnapshot(support.policy, pair, keys);
-  if (decisions.some(row => !row.support || row.support.version !== SUPPORT_VERSION)) return { suppressed: true, hardSuppressed: true, previousKeys: [...previousKeys], reconsider, remembered, refs };
-  if (decisions.some(row => row.support.policy === support.policy) && support.keys.every(key => previousKeys.has(key))) {
+  if (decisions.some(row => !isCurrentSupport(row.support))) return { suppressed: true, hardSuppressed: true, previousKeys: [...previousKeys], reconsider, remembered, refs };
+  if (decisions.some(row => isCurrentSupport(row.support) && row.support.policy === support.policy) && support.keys.every(key => previousKeys.has(key))) {
     return { suppressed: true, hardSuppressed: false, previousKeys: [...previousKeys], reconsider, remembered, refs };
   }
   return { suppressed: false, hardSuppressed: false, previousKeys: [...previousKeys], reconsider, remembered, refs };
@@ -351,7 +376,7 @@ export async function decideIdentityAssociation(db: DbClient, input: IdentityAss
   const { assessment, policy, memberSupport, support } = associationEvidence(left, right, identities, pair);
   const evidenceFingerprint = digest({ assessment: assessment.fingerprint,
     sources: Object.values(memberSupport).map(item => item.fingerprint), topology });
-  if (approved && (approved.evidence_fingerprint !== evidenceFingerprint || approved.support.fingerprint !== support.fingerprint)) {
+  if (approved && (approved.evidence_fingerprint !== evidenceFingerprint || approved.support?.fingerprint !== support.fingerprint)) {
     throw new IdentityAssociationStaleError();
   }
   const actor = approved
@@ -373,7 +398,7 @@ export async function decideIdentityAssociation(db: DbClient, input: IdentityAss
   if (input.operation === 'link' && existing) return { outcome: 'apply', reason: 'Identity association already exists', relationshipId: Number(existing.id) };
   const memory = await loadPairDecisions(db, ctx.organizationId, Object.values(memberSupport).map(item => item.pair));
   const { prior, rememberedMembers, priorRefs } = associationHistory(memberSupport, support, pair, memory);
-  if (approved && stableJson(approved.prior_decisions ?? []) !== stableJson(priorRefs)) throw new IdentityAssociationStaleError();
+  if (approved && stableJson(approved.prior_decisions) !== stableJson(priorRefs)) throw new IdentityAssociationStaleError();
   if (input.operation === 'link' && actor.kind === 'user') review ||= prior.reconsider;
   if (input.operation === 'link' && actor.kind !== 'user') {
     if (prior.suppressed) return { outcome: 'suppressed', reason: 'Unchanged or reduced support was already rejected or withdrawn' };
@@ -381,24 +406,25 @@ export async function decideIdentityAssociation(db: DbClient, input: IdentityAss
   }
   const reason = review && prior.reconsider ? `Reconsider ${priorRefs.map(ref => `${ref.kind} #${ref.id}`).join(', ')} with fresh human approval.`
     : review ? 'Identity association requires human review under the current resolution and write policies' : 'Identity association is allowed by the current policies';
+  // Keep the aggregate support field: entityChangeIdempotencyKey hashes the whole
+  // proposal, so removing it would duplicate unchanged pending approval requests.
   const proposal: IdentityAssociationProposal = { ...input, dry_run: undefined, identity_pair: stableJson(pair), support, suppression_support: prior.remembered, topology, evidence_fingerprint: evidenceFingerprint, member_support: rememberedMembers, prior_decisions: priorRefs,
     current: records.map(row => ({ id: Number(row.id), name: row.name, parent: Number(edges.find(edge => Number(edge.from_entity_id) === Number(row.id))?.to_entity_id) || null })),
     requester: approved?.requester ?? { kind: actor.kind, id: actor.id, userId: ctx.userId ?? null },
     attribution: actor.kind === 'automation' ? 'automation' : 'agent', reason };
   if (review && !approved) return { outcome: 'review', reason, proposal };
   if (input.dry_run) return { outcome: 'apply', reason };
-  const accepted = existing?.metadata[IDENTITY_DECISION_METADATA_KEY] as {
-    support?: PairSupport; suppression_support?: PairSupport; member_support?: Record<string, PairSupport>;
-  } | undefined;
-  const acceptedMembers = accepted?.member_support ?? (accepted?.support
-    ? { [stableJson(accepted.support.pair)]: accepted.suppression_support ?? accepted.support } : {});
+  const accepted = existing?.metadata[IDENTITY_DECISION_METADATA_KEY] as { member_support: Record<string, unknown> } | undefined;
+  const acceptedMembers = accepted?.member_support ?? {};
+  const decisionMembers: Record<string, unknown> = { ...rememberedMembers };
   for (const [key, acceptedSupport] of Object.entries(acceptedMembers)) {
-    if (acceptedSupport.version !== SUPPORT_VERSION || acceptedSupport.policy !== policy) continue;
-    rememberedMembers[key] = supportSnapshot(policy, acceptedSupport.pair,
+    if (!isCurrentSupport(acceptedSupport)) { decisionMembers[key] = acceptedSupport; continue; }
+    if (acceptedSupport.policy !== policy) continue;
+    decisionMembers[key] = supportSnapshot(policy, acceptedSupport.pair,
       [...(rememberedMembers[key]?.keys ?? []), ...acceptedSupport.keys]);
   }
-  const suppressionKeys = [...new Set(Object.values(rememberedMembers).flatMap(item => item.keys))].sort();
-  const decision = { outcome: input.operation === 'link' ? 'accepted' : 'withdrawn', support, topology, member_support: rememberedMembers,
+  const suppressionKeys = [...new Set(Object.values(decisionMembers).flatMap(item => isCurrentSupport(item) ? item.keys : []))].sort();
+  const decision = { outcome: input.operation === 'link' ? 'accepted' : 'withdrawn', support, topology, member_support: decisionMembers,
     prior_decisions: priorRefs,
     suppression_support: supportSnapshot(support.policy, pair, suppressionKeys),
     requester: proposal.requester, decided_by: ctx.userId ?? null };

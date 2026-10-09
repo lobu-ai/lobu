@@ -8,10 +8,10 @@ import type { ResolutionIdentity } from "./policy";
  * filter lives in the policy itself.
  *
  * Pass `forUpdate: true` only from within an open transaction (the staleness
- * re-check inside `applyMergeGroup`) so the evidence rows stay locked through
- * the following merge. Read-only callers (discovery, pre-approval preview) omit
+ * re-check inside `decideIdentityAssociation`) so the evidence rows stay locked
+ * through the identity decision. Read-only discovery callers omit
  * it: `FOR UPDATE` in an auto-committed statement releases the lock immediately
- * and only contends with concurrent merges for no benefit.
+ * and only contends with concurrent identity writes for no benefit.
  */
 export async function loadLiveEntityIdentities(
 	db: DbClient,

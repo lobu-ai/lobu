@@ -11,19 +11,22 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import {
   addUserToOrganization,
   createTestOrganization,
+  createTestPAT,
   createTestUser,
 } from '../../setup/test-fixtures';
-import { TestApiClient } from '../../setup/test-mcp-client';
+import { TestApiClient, TestMcpClient } from '../../setup/test-mcp-client';
 import { cleanupTestDatabase } from '../../setup/test-db';
 
 describe('entity schema CRUD', () => {
   let owner: TestApiClient;
+  let wire: TestMcpClient;
 
   beforeAll(async () => {
     await cleanupTestDatabase();
     const org = await createTestOrganization({ name: 'Schema Test Org' });
     const user = await createTestUser({ email: 'schema-owner@test.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
+    wire = new TestMcpClient({ token: (await createTestPAT(user.id, org.id, { scope: 'mcp:admin' })).token, orgSlug: org.slug });
     owner = await TestApiClient.for({
       organizationId: org.id,
       userId: user.id,
@@ -32,6 +35,42 @@ describe('entity schema CRUD', () => {
   });
 
   describe('entity_type', () => {
+    it.each([
+      { rules: [{ fields: ['email', 42], normalizer: 'email', onMatch: 'auto_link' }] },
+      { rules: [{ fields: ['email'], normalizer: 'email', onMatch: 'auto_merge' }] },
+      { rules: [null] },
+      { rules: [{ fields: ['email'], normalizer: 'email', onMatch: 'auto_link' }, { fields: [] }] },
+    ])('rejects malformed resolution policy before create or update writes: %j', async policy => {
+      const slug = 'invalid-resolution-rule';
+      const malformed = { 'x-lobu-resolution': policy };
+      await expect(owner.entity_schema.createType({ slug, name: 'Invalid rule', metadata_schema: malformed }))
+        .rejects.toThrow(/invalid_schema.*x-lobu-resolution/);
+      expect(await owner.entity_schema.getType(slug)).toMatchObject({ entity_type: null });
+
+      const original = { type: 'object', properties: { email: { type: 'string' } },
+        'x-lobu-resolution': { rules: [{ fields: ['email'], normalizer: 'email', onMatch: 'review' }] } };
+      await owner.entity_schema.createType({ slug, name: 'Valid rule', metadata_schema: original });
+      await expect(owner.entity_schema.updateType({ slug, metadata_schema: malformed }))
+        .rejects.toThrow(/invalid_schema.*x-lobu-resolution/);
+      expect(await owner.entity_schema.getType(slug)).toMatchObject({ entity_type: { metadata_schema: original } });
+      await owner.entity_schema.updateType({ slug, metadata_schema: { type: 'object', properties: original.properties } });
+      expect(await owner.entity_schema.getType(slug)).toMatchObject({ entity_type: {
+        metadata_schema: { type: 'object', properties: original.properties },
+      } });
+      await owner.entity_schema.deleteType({ slug });
+    });
+
+    it('rejects malformed matching policy through the authenticated MCP SDK path', async () => {
+      const result = await wire.runSdk(`export default async (_ctx, client) => {
+        return client.entitySchema.createType({ slug: 'malformed-wire-policy', name: 'Malformed policy',
+          metadata_schema: { 'x-lobu-resolution': { rules: [
+            { fields: ['email', 42], normalizer: 'email', onMatch: 'auto_link' }
+          ] } } });
+      }`);
+      expect(result).toMatchObject({ success: false, error: { code: 'VALIDATION', message: expect.stringMatching(/invalid_schema.*x-lobu-resolution/) } });
+      expect(await owner.entity_schema.getType('malformed-wire-policy')).toMatchObject({ entity_type: null });
+    });
+
     it('creates → reads back → updates → deletes', async () => {
       await owner.entity_schema.createType({
         slug: 'lifecycle-asset',

@@ -1,5 +1,64 @@
 import { type Static, Type } from "@sinclair/typebox";
 
+export interface EntityResolutionRule {
+  fields: string[];
+  normalizer: "email" | "phone" | "exact";
+  onMatch: "auto_link" | "review";
+}
+
+export class InvalidEntityResolutionPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidEntityResolutionPolicyError";
+  }
+}
+
+/** Validate the whole policy before normalizing; dropping a field can weaken a match. */
+export function parseEntityResolutionPolicy(
+  value: unknown
+): EntityResolutionRule[] {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !Array.isArray((value as Record<string, unknown>).rules)
+  ) {
+    throw new InvalidEntityResolutionPolicyError(
+      "expected rules to be an array"
+    );
+  }
+  return Array.from(
+    (value as Record<string, unknown>).rules as unknown[],
+    (candidate, index) => {
+      const rule =
+        candidate && typeof candidate === "object" && !Array.isArray(candidate)
+          ? (candidate as Record<string, unknown>)
+          : {};
+      if (
+        !Array.isArray(rule.fields) ||
+        rule.fields.length === 0 ||
+        !Array.from(rule.fields).every(
+          (field): field is string =>
+            typeof field === "string" && field.trim().length > 0
+        ) ||
+        (rule.normalizer !== "email" &&
+          rule.normalizer !== "phone" &&
+          rule.normalizer !== "exact") ||
+        (rule.onMatch !== "auto_link" && rule.onMatch !== "review")
+      ) {
+        throw new InvalidEntityResolutionPolicyError(
+          `rule ${index}: expected { fields: nonempty string[], normalizer: "email"|"phone"|"exact", onMatch: "auto_link"|"review" }`
+        );
+      }
+      return {
+        fields: [...new Set(rule.fields.map((field) => field.trim()))],
+        normalizer: rule.normalizer,
+        onMatch: rule.onMatch,
+      };
+    }
+  );
+}
+
 // ============================================
 // Typebox Schema
 // ============================================

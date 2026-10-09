@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { type EntityResolutionRule as ResolutionRule, InvalidEntityResolutionPolicyError,
+  parseEntityResolutionPolicy } from "@lobu/core/contracts/tools/manage-entity-schema";
+import { ToolUserError } from "../utils/errors";
 
 /**
  * Version of the normalized policy and group-membership inputs in a decision
@@ -34,12 +37,6 @@ interface IdentityGroupAssessment {
 	policyHash: string;
 	fingerprint: string;
 	reason: string;
-}
-
-interface ResolutionRule {
-	fields: string[];
-	normalizer: "email" | "phone" | "exact";
-	onMatch: ResolutionDecision;
 }
 
 function canonicalJson(value: unknown): string {
@@ -113,42 +110,13 @@ function normalizeValues(
 export function readEntityResolutionRules(schema: unknown): ResolutionRule[] {
 	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return [];
 	const config = (schema as Record<string, unknown>)["x-lobu-resolution"];
-	if (!config || typeof config !== "object" || Array.isArray(config)) return [];
-	const rules = (config as Record<string, unknown>).rules;
-	if (!Array.isArray(rules)) return [];
-	return rules.flatMap((candidate) => {
-		if (
-			!candidate ||
-			typeof candidate !== "object" ||
-			Array.isArray(candidate)
-		) {
-			return [];
-		}
-		const record = candidate as Record<string, unknown>;
-		const fields = Array.isArray(record.fields)
-			? [
-					...new Set(
-						record.fields.flatMap((field) =>
-							typeof field === "string" && field.trim().length > 0
-								? [field.trim()]
-								: [],
-						),
-					),
-				]
-			: [];
-		const normalizer = record.normalizer;
-		const onMatch = record.onMatch;
-		if (
-			fields.length === 0 ||
-			(normalizer !== "email" &&
-				normalizer !== "phone" &&
-				normalizer !== "exact") ||
-			(onMatch !== "auto_link" && onMatch !== "review")
-		) {
-			return [];
-		}
-		return [{ fields, normalizer, onMatch }];
-	});
+	if (config === undefined) return [];
+	try {
+		return parseEntityResolutionPolicy(config);
+	} catch (error) {
+		if (!(error instanceof InvalidEntityResolutionPolicyError)) throw error;
+		throw new ToolUserError(`[invalid_schema] metadata_schema.x-lobu-resolution: ${error.message}`, 400);
+	}
 }
 
 type NormalizedResolutionPart = readonly [value: string, scopeKey: string | null];

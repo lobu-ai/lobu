@@ -40,14 +40,25 @@ describe("explicit identity resolution policy", () => {
 	it("accepts auto_link and rejects the retired automatic merge setting", () => {
 		expect(readEntityResolutionRules(singleRule(["account"], "exact", "auto_link")))
 			.toEqual([{ fields: ["account"], normalizer: "exact", onMatch: "auto_link" }]);
-		expect(readEntityResolutionRules(singleRule(["account"], "exact", "auto_merge"))).toEqual([]);
+		expect(() => readEntityResolutionRules(singleRule(["account"], "exact", "auto_merge"))).toThrow(/invalid_schema/);
 	});
 
-	it("ignores malformed rules and trims only explicitly configured field paths", () => {
-		expect(readEntityResolutionRules({ "x-lobu-resolution": { rules: [
-			null, [], { fields: [] }, { fields: ["value"], normalizer: "unknown", onMatch: "review" },
-			{ fields: [" account ", "account", "", null], normalizer: "exact", onMatch: "review" },
-		] } })).toEqual([{ fields: ["account"], normalizer: "exact", onMatch: "review" }]);
+	it("rejects an entire malformed policy rather than weakening a composite match", () => {
+		const malformed = { "x-lobu-resolution": { rules: [
+			{ fields: ["email", 42], normalizer: "email", onMatch: "auto_link" },
+		] } };
+		expect(() => pair({ id: 1, metadata: { email: "shared@example.test" } },
+			{ id: 2, metadata: { email: "shared@example.test" } }, malformed)).toThrow(/invalid_schema/);
+		const mixed = { "x-lobu-resolution": { rules: [schema["x-lobu-resolution"].rules[0], null] } };
+		expect(() => readEntityResolutionRules(mixed)).toThrow(/invalid_schema/);
+	});
+
+	it("trims and deduplicates valid field paths without dropping malformed fields", () => {
+		expect(readEntityResolutionRules(singleRule([" account ", "account"])))
+			.toEqual([{ fields: ["account"], normalizer: "exact", onMatch: "review" }]);
+		for (const fields of [["account", ""], ["account", null], ["account", 42]]) {
+			expect(() => readEntityResolutionRules(singleRule(fields as string[]))).toThrow(/invalid_schema/);
+		}
 	});
 
 	it("keeps configured singular and plural field paths distinct", () => {
