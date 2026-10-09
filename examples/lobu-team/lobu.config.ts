@@ -11,7 +11,6 @@ import {
   every,
   field,
   reactionFromFile,
-  scriptFromFile,
   secret,
   skillFromFile,
   Type,
@@ -19,8 +18,6 @@ import {
 import type DeliverooConnector from "./deliveroo.connector.ts";
 import type LokiActivityConnector from "./loki-activity.connector.ts";
 import type lunchDeliverooReaction from "./lunch-deliveroo.reaction.ts";
-import type productActivityDigestScript from "./product-activity-digest.script.ts";
-
 const lunchOpenSkill = defineSkill({
   name: "lunch-open",
   content:
@@ -266,14 +263,6 @@ Before completing the Automation run, append engineering-task.checkpoint linked 
 Use the existing GitHub connector and approval flow. Never bypass an approval or merge without the required review and verification evidence.`,
 });
 
-const productOps = defineAgent({
-  id: "product-ops",
-  name: "product-ops",
-  description:
-    "Summarizes Lobu production activity from organization-owned read-only feeds",
-  providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
-});
-
 // Reuse the Lobu Team read-only database credentials already stored in Lobu.
 // Apply preserves the live secret because credentials are intentionally omitted.
 const productActivityDbAuth = defineAuthProfile({
@@ -435,32 +424,6 @@ const productionLogs = defineConnection({
   ],
 });
 
-const productActivityDigest = defineAutomation({
-  agent: productOps,
-  slug: "product-activity-digest",
-  name: "Lobu production activity digest",
-  description:
-    "Every 20 minutes, summarize new signups, logins, connections, MCP clients, and Kubernetes log activity; stay silent when nothing happened.",
-  triggers: [
-    // Shifted one minute off the natural :5 anchor: only a changed schedule
-    // clears schedule_auto_paused_at after an auto-pause (byte-identical
-    // triggers and prompt-only versions deliberately do not). Same 20-minute
-    // rhythm, still 3-4 minutes after both feeds sync.
-    every("6,26,46 * * * *", {
-      skip_if_unchanged: false,
-    }),
-  ],
-  minCooldownSeconds: 60,
-  tags: ["product-ops", "production", "slack"],
-  executor: scriptFromFile<typeof productActivityDigestScript>(
-    "./product-activity-digest.script.ts",
-    { exclude_email: "emrekabakci@gmail.com" }
-  ),
-  // Explicit removal: apply clears the previously installed reaction AFTER
-  // installing the executor above, so the digest never runs twice.
-  reaction: null,
-});
-
 const lobuTeamSlack = defineConnection({
   slug: "lobu-team-slack",
   connector: "slack",
@@ -480,7 +443,7 @@ export default defineConfig({
   orgName: "Lobu Team",
   orgDescription: "Lobu Team agents and internal operations",
   organizationId: "UdNAH1bb3csC842vhOgxAHVcfX4tYU5A",
-  agents: [foodOrdering, developer, productOps],
+  agents: [foodOrdering, developer],
   authProfiles: [productActivityDbAuth],
   entities: [lunchRun, engineeringTask],
   relationships: [targetsRepository],
@@ -490,10 +453,7 @@ export default defineConfig({
     productionLogs,
     lobuTeamSlack,
   ],
-  automations: [
-    lunchOpen,
-    lunchFinalize,
-    productActivityDigest,
-    engineeringTaskRunner,
-  ],
+  // The external digest is maintained by scripts/configure-product-activity.ts.
+  // Apply without prune: preserve its existing delivery agent and manual Automation.
+  automations: [lunchOpen, lunchFinalize, engineeringTaskRunner],
 });

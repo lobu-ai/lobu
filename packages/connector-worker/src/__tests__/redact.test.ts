@@ -91,11 +91,110 @@ describe('redactOutput', () => {
     }
   });
 
-  test('does not redact short api_key-like values (avoid false positives on word "key")', () => {
-    // The api_key pattern requires a 12+ char value to avoid eating things like
-    // "no apikey set" or "key: id".
-    const input = 'api_key: short';
+  test('redacts explicit assignments regardless of length, quoting or key style', () => {
+    const cases = [
+      ['password=secret7', 'secret7'],
+      ['authorization=Bearer syntheticsecret123 status=500', 'syntheticsecret123'],
+      ['auth=Basic dTpw status=500', 'dTpw'],
+      ['db.password=syntheticsecret123 status=500', 'syntheticsecret123'],
+      ['config.api_key=syntheticsecret123 status=500', 'syntheticsecret123'],
+      ['token=synthetic-opaque-token', 'synthetic-opaque-token'],
+      ['api_key: z', 'z'],
+      ['AWS_SESSION_TOKEN=z', 'z'],
+      ['clientSecret="has spaces and ! punctuation"', 'has spaces and ! punctuation'],
+      ['password=short!@#$%^*()', 'short!@#$%^*()'],
+      [JSON.stringify({ message: JSON.stringify({ password: 'embedded secret' }) }), 'embedded secret'],
+      [JSON.stringify(JSON.stringify({ token: 'twice escaped secret' })), 'twice escaped secret'],
+      [JSON.stringify({ password: 'has a "quote" and tail' }), 'tail'],
+    ];
+    for (const [input, secret] of cases) {
+      const output = redactOutput(input);
+      expect(output).not.toContain(secret);
+      expect(output).toContain('[REDACTED]');
+    }
+  });
+
+  test('preserves case-insensitive matching for credential assignments', () => {
+    for (const key of ['password', 'clientSecret', 'api_key', 'authorization', 'cookie', 'AWS_CUSTOM_KEY']) {
+      for (const variant of [key, key.toLowerCase(), key.toUpperCase(), [...key].map((char, index) => index % 2 ? char.toUpperCase() : char.toLowerCase()).join('')]) {
+        const output = redactOutput(`failed ${variant}=synthetic-case-secret status=500`);
+        expect(output).toBe(`failed ${variant}=[REDACTED] status=500`);
+      }
+    }
+  });
+
+  test('redacts credential suffixes without requiring a prefix separator', () => {
+    for (const prefix of ['', 'PG', 'custom', 'db.', 'nested.config-', 'prefixAWS_']) {
+      for (const key of ['PASSWORD', 'apikey', 'accessToken', 'refresh_token', 'id-token', 'authToken', 'clientSecret', 'secret', 'AWS_CUSTOM_KEY']) {
+        for (const separator of ['=', ': ']) {
+          const input = `${prefix}${key}${separator}synthetic-concatenated-secret status=500`;
+          expect(redactOutput(input)).toBe(`${prefix}${key}${separator}[REDACTED] status=500`);
+        }
+      }
+    }
+  });
+
+  test('redacts authentication schemes across dotted keys and assignment formats', () => {
+    for (const key of ['authorization', 'auth', 'nested.authorization', 'db.password', 'config.api_key']) {
+      for (const separator of ['=', ': ']) {
+        for (const scheme of ['Bearer', 'Basic']) {
+          for (const credential of ['x', 'synthetic-secret-value']) {
+            for (const value of [`${scheme} ${credential}`, JSON.stringify(`${scheme} ${credential}`)]) {
+              const output = redactOutput(`${key}${separator}${value} status=500`);
+              expect(output).not.toContain(credential);
+              expect(output).toContain('[REDACTED]');
+            }
+          }
+        }
+      }
+    }
+  });
+
+  test('keeps embedded JSON readable through repeated escaping layers', () => {
+    let input = JSON.stringify({ password: 'space, \"quote\" and \\ tail', status: 500 });
+    for (let depth = 0; depth < 4; depth++) {
+      let output = redactOutput(input);
+      for (let i = 0; i < depth; i++) output = JSON.parse(output);
+      expect(JSON.parse(output)).toEqual({ password: '[REDACTED]', status: 500 });
+      expect(redactOutput(redactOutput(input))).toBe(redactOutput(input));
+      input = JSON.stringify(input);
+    }
+  });
+
+  test('redacts complete object and array credential assignments', () => {
+    for (const value of [
+      { user: 'example', pass: 'synthetic-nested-secret', nested: { value: 'brace } and "quote"' } },
+      ['synthetic-nested-secret', { value: 'bracket ] and \\ tail' }],
+    ]) {
+      let input = JSON.stringify({ credentials: value, status: 500 });
+      for (let depth = 0; depth < 4; depth++) {
+        const output = redactOutput(`embedded ${input} diagnostic=kept`);
+        expect(output).not.toContain('synthetic-nested-secret');
+        expect(output).toContain('status');
+        expect(output).toContain('diagnostic=kept');
+        expect(redactOutput(output)).toBe(output);
+        let parsed = redactOutput(input);
+        for (let i = 0; i < depth; i++) parsed = JSON.parse(parsed);
+        expect(JSON.parse(parsed)).toEqual({ credentials: '[REDACTED]', status: 500 });
+        input = JSON.stringify(input);
+      }
+    }
+  });
+
+  test('bounds work on long non-URI tokens and malformed assignments', () => {
+    const start = performance.now();
+    for (const input of ['a'.repeat(200_000), 'a-'.repeat(100_000), 'password' + ' '.repeat(200_000)]) {
+      expect(redactOutput(input)).toBe(input);
+    }
+    expect(redactOutput('credentials:{' + '\\'.repeat(200_000))).toBe('credentials:"[REDACTED]"');
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+
+  test('preserves nearby diagnostic fields and prose without assignments', () => {
+    const input = 'no apikey set; tokenizer=ok password_policy=strict key=id status=500';
     expect(redactOutput(input)).toBe(input);
+    expect(redactOutput('password=secret7 status=500')).toBe('password=[REDACTED] status=500');
+    expect(redactOutput('password=[REDACTED] status=500')).toBe('password=[REDACTED] status=500');
   });
 });
 

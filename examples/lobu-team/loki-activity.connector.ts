@@ -1,4 +1,11 @@
+import { scrubSentryValue } from "../../packages/core/src/utils/sentry-scrubber";
 import {
+  isSecretOutputKey,
+  redactOutput,
+} from "../../packages/connector-worker/src/executor/redact";
+import {
+  type ActionContext,
+  type ActionResult,
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
@@ -129,6 +136,150 @@ export async function queryLokiActivity(
     error_samples: severity.error_samples,
     warning_samples: severity.warning_samples,
     http_samples: http.http_samples,
+  };
+}
+
+interface LokiLogQuery {
+  query: string;
+  start: string;
+  end: string;
+  limit?: number;
+}
+
+/** Bounded on-demand evidence; the activity feed remains the durable cursor. */
+export async function queryLokiLogs(
+  config: LokiActivityConfig,
+  input: LokiLogQuery,
+  fetchImpl: FetchLike = fetch
+) {
+  const start = Date.parse(input.start);
+  const end = Date.parse(input.end);
+  const limit = input.limit ?? 100;
+  if (!input.query?.trim() || input.query.length > 2000)
+    throw new Error("Provide a LogQL query of at most 2000 characters");
+  if (
+    !Number.isFinite(start) ||
+    !Number.isFinite(end) ||
+    end <= start ||
+    end - start > 6 * 60 * 60 * 1000
+  )
+    throw new Error("Provide a valid time range of at most 6 hours");
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200)
+    throw new Error("limit must be between 1 and 200");
+  const url = lokiUrl(config.LOKI_URL, "/loki/api/v1/query_range");
+  url.searchParams.set("query", input.query);
+  url.searchParams.set("start", String(BigInt(start) * 1_000_000n));
+  url.searchParams.set("end", String(BigInt(end) * 1_000_000n));
+  url.searchParams.set("direction", "backward");
+  url.searchParams.set("limit", String(limit));
+  const response = await fetchImpl(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok)
+    throw new Error(`Loki query failed with ${response.status}`);
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Loki returned no response body");
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > 2_000_000)
+        throw new Error("Loki response exceeds 2 MB; narrow the query");
+      chunks.push(part.value);
+    }
+  } finally {
+    await reader.cancel();
+    reader.releaseLock();
+  }
+  const buffer = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.length;
+  }
+  const body = JSON.parse(new TextDecoder().decode(buffer));
+  if (
+    body.status !== "success" ||
+    body.data?.resultType !== "streams" ||
+    !Array.isArray(body.data.result)
+  )
+    throw new Error("Use a LogQL log query, not a metric query");
+  const records: Array<{
+    timestamp_ns: string;
+    labels: unknown;
+    log: unknown;
+  }> = [];
+  let outputBytes = 0;
+  let truncated = false;
+  for (const stream of body.data.result) {
+    for (const value of stream.values ?? []) {
+      if (
+        !Array.isArray(value) ||
+        typeof value[0] !== "string" ||
+        !/^\d+$/.test(value[0]) ||
+        typeof value[1] !== "string"
+      )
+        throw new Error("Loki returned an invalid log record");
+      let log: unknown = value[1];
+      try {
+        log = JSON.parse(value[1]);
+      } catch {
+        /* Plain infrastructure log. */
+      }
+      const record = {
+        timestamp_ns: value[0],
+        labels: stream.stream ?? {},
+        log,
+      };
+      // Structured keys and credentials embedded in log text need both scrubbers.
+      // Omit oversized fields to keep individual evidence records bounded.
+      let oversizedField = false;
+      const serialized = JSON.stringify(record, (key, value) => {
+        if (isSecretOutputKey(key)) return "[REDACTED]";
+        if (typeof value !== "string") return value;
+        if (value.length > 8192) {
+          oversizedField = true;
+          return null;
+        }
+        return redactOutput(value);
+      });
+      // Redact assignments first: URL-query scrubbing alone can consume an
+      // unquoted auth scheme and leave its credential without a recognizable key.
+      const scrubbed = scrubSentryValue(JSON.parse(serialized));
+      const size = new TextEncoder().encode(
+        JSON.stringify(scrubbed)
+      ).byteLength;
+      if (
+        oversizedField ||
+        records.length >= limit ||
+        outputBytes + size > 100_000
+      ) {
+        truncated = true;
+        continue;
+      }
+      records.push(scrubbed as (typeof records)[number]);
+      outputBytes += size;
+    }
+  }
+  records.sort((a, b) =>
+    a.timestamp_ns === b.timestamp_ns
+      ? 0
+      : BigInt(a.timestamp_ns) > BigInt(b.timestamp_ns)
+        ? -1
+        : 1
+  );
+  return {
+    records,
+    start: new Date(start).toISOString(),
+    end: new Date(end).toISOString(),
+    limit,
+    truncated: truncated || records.length === limit,
+    coverage:
+      "A bounded sample; records with string fields over 8192 characters are omitted. Narrow the query or time range when truncated. No feed checkpoint is advanced.",
   };
 }
 
@@ -309,7 +460,7 @@ export default class LokiActivityConnector extends ConnectorRuntime<
     name: "Kubernetes logs",
     description:
       "Collect error, warning, and HTTP failure counts plus recent samples from Lobu production Loki in aligned 20-minute windows.",
-    version: "1.1.3",
+    version: "1.2.0",
     authSchema: {
       methods: [
         {
@@ -326,6 +477,26 @@ export default class LokiActivityConnector extends ConnectorRuntime<
           ],
         },
       ],
+    },
+    actions: {
+      query_logs: {
+        key: "query_logs",
+        name: "Query production logs",
+        kind: "read",
+        description:
+          "Investigate logs through the connection's existing Loki access. Use LogQL, an explicit range of at most 6 hours and at most 200 records. Results are scrubbed and bounded; truncated does not mean complete coverage.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", minLength: 1, maxLength: 2000 },
+            start: { type: "string", format: "date-time" },
+            end: { type: "string", format: "date-time" },
+            limit: { type: "integer", minimum: 1, maximum: 200, default: 100 },
+          },
+          required: ["query", "start", "end"],
+          additionalProperties: false,
+        },
+      },
     },
     feeds: {
       activity: {
@@ -356,6 +527,18 @@ export default class LokiActivityConnector extends ConnectorRuntime<
       additionalProperties: false,
     },
   };
+
+  async execute(ctx: ActionContext): Promise<ActionResult> {
+    if (ctx.actionKey !== "query_logs")
+      return { success: false, error: `Unknown action '${ctx.actionKey}'` };
+    return {
+      success: true,
+      output: await queryLokiLogs(
+        ctx.config as unknown as LokiActivityConfig,
+        ctx.input as unknown as LokiLogQuery
+      ),
+    };
+  }
 
   private async syncFeed(
     ctx: SyncContext<LokiActivityCheckpoint, LokiActivityConfig>

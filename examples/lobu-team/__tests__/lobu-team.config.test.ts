@@ -8,7 +8,6 @@ describe("Lobu Team configuration", () => {
     expect(config.automations?.map((automation) => automation.slug)).toEqual([
       "lobu-team-lunch-open",
       "lobu-team-lunch-finalize",
-      "product-activity-digest",
       "engineering-task-runner-dogfood-35364",
     ]);
   });
@@ -94,26 +93,12 @@ describe("Lobu Team configuration", () => {
       config: { LOKI_URL: "https://loki.lobu.ai" },
     });
 
-    const digest = config.automations?.find(
-      (automation) => automation.slug === "product-activity-digest"
-    );
-    expect(digest?.triggers).toEqual([
-      {
-        kind: "schedule",
-        cron: "6,26,46 * * * *",
-        skip_if_unchanged: false,
-      },
-    ]);
-    expect(digest?.sources).toBeUndefined();
-    expect(digest?.prompt).toBeUndefined();
-    expect(digest?.reaction).toBeNull();
-    expect(digest?.agent).toMatchObject({
-      id: "product-ops",
-      providers: [{ id: "gemini", model: "gemini-2.5-flash" }],
-    });
-    expect(digest?.executor).toMatchObject({
-      kind: "scriptSource",
-      path: "./product-activity-digest.script.ts",
-    });
+    // External MCP owns the digest timer; applying team config must not
+    // silently restore a hosted executor.
+    expect(
+      config.automations?.some(
+        (automation) => automation.slug === "product-activity-digest"
+      )
+    ).toBe(false);
   });
 });

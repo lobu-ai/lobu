@@ -2,10 +2,226 @@ import { runSync } from "./sync-harness";
 import { describe, expect, it, mock, spyOn } from "bun:test";
 import LokiActivityConnector, {
   queryLokiActivity,
+  queryLokiLogs,
   windowsToCollect,
 } from "../loki-activity.connector.ts";
 
 describe("Lobu Team Loki activity connector", () => {
+  it("uses the text credential rules for structured logs and labels", async () => {
+    const credentials = Object.fromEntries(
+      [
+        "PGPASSWORD",
+        "customapikey",
+        "nested.AWS_CUSTOM_KEY",
+        "aWs_Custom_Key",
+      ].map((key) => [key, { value: "synthetic-structured-secret" }])
+    );
+    const result = await queryLokiLogs(
+      { LOKI_URL: "https://loki.example.test", namespace: "synthetic" },
+      {
+        query: '{namespace="synthetic"}',
+        start: "2026-10-01T00:00:00Z",
+        end: "2026-10-01T01:00:00Z",
+      },
+      async () =>
+        Response.json({
+          status: "success",
+          data: {
+            resultType: "streams",
+            result: [
+              {
+                stream: Object.fromEntries(
+                  Object.keys(credentials).map((key) => [
+                    key,
+                    "synthetic-label-secret",
+                  ])
+                ),
+                values: [
+                  [
+                    "1",
+                    JSON.stringify({
+                      credentialsByName: credentials,
+                      status: 500,
+                    }),
+                  ],
+                ],
+              },
+            ],
+          },
+        })
+    );
+    expect(JSON.stringify(result)).not.toContain("synthetic-structured-secret");
+    expect(JSON.stringify(result)).not.toContain("synthetic-label-secret");
+    expect(result.records[0]?.log).toMatchObject({
+      credentialsByName: Object.fromEntries(
+        Object.keys(credentials).map((key) => [key, "[REDACTED]"])
+      ),
+      status: 500,
+    });
+  });
+
+  it("scrubs credentials in plain logs, nested messages, and labels", async () => {
+    const result = await queryLokiLogs(
+      { LOKI_URL: "https://loki.example.test", namespace: "synthetic" },
+      {
+        query: '{namespace="synthetic"}',
+        start: "2026-10-01T00:00:00Z",
+        end: "2026-10-01T01:00:00Z",
+      },
+      async () =>
+        Response.json({
+          status: "success",
+          data: {
+            resultType: "streams",
+            result: [
+              {
+                stream: { detail: "Bearer synthetic-label-secret" },
+                values: [
+                  ["0", "PGPASSWORD=synthetic-concatenated-secret"],
+                  ["1", "Authorization: Basic synthetic-header-secret"],
+                  [
+                    "2",
+                    JSON.stringify({
+                      message:
+                        "request failed with Bearer synthetic-message-secret",
+                      error: {
+                        stack:
+                          "Error: failed\npassword=synthetic-password-secret\n at test.ts:1:1",
+                      },
+                    }),
+                  ],
+                ],
+              },
+            ],
+          },
+        })
+    );
+    const serialized = JSON.stringify(result);
+    for (const secret of [
+      "label",
+      "header",
+      "message",
+      "password",
+      "concatenated",
+    ]) {
+      expect(serialized).not.toContain(`synthetic-${secret}-secret`);
+    }
+    expect(serialized).toContain("test.ts:1:1");
+  });
+
+  it("bounds investigation, preserves stack evidence, and scrubs credentials", async () => {
+    const fake = mock(async () =>
+      Response.json({
+        status: "success",
+        data: {
+          resultType: "streams",
+          result: [
+            {
+              stream: { app: "server" },
+              values: [
+                [
+                  "1791000000000000000",
+                  JSON.stringify({
+                    level: "error",
+                    message: "failed",
+                    stack: "Error: failed\n at source.ts:4:1",
+                    authorization: "private-secret",
+                  }),
+                ],
+              ],
+            },
+          ],
+        },
+      })
+    );
+    const input = {
+      query: '{namespace="synthetic"}',
+      start: "2026-10-01T00:00:00Z",
+      end: "2026-10-01T01:00:00Z",
+      limit: 1,
+    };
+    const result = await queryLokiLogs(
+      { LOKI_URL: "https://loki.example.test", namespace: "synthetic" },
+      input,
+      fake
+    );
+    expect(result.records[0]?.log).toMatchObject({
+      stack: "Error: failed\n at source.ts:4:1",
+      authorization: "[REDACTED]",
+    });
+    expect(result.truncated).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("private-secret");
+    for (const bad of [
+      { limit: 201 },
+      { limit: 0 },
+      { start: "invalid" },
+      { end: "2026-10-02T01:00:00Z" },
+      { query: "" },
+    ]) {
+      await expect(
+        queryLokiLogs(
+          { LOKI_URL: "https://loki.example.test", namespace: "synthetic" },
+          { ...input, ...bad },
+          fake
+        )
+      ).rejects.toThrow();
+    }
+    expect(fake).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports bounded output and rejects non-log and oversized upstream responses", async () => {
+    const config = {
+      LOKI_URL: "https://loki.example.test",
+      namespace: "synthetic",
+    };
+    const input = {
+      query: '{namespace="synthetic"}',
+      start: "2026-10-01T00:00:00Z",
+      end: "2026-10-01T01:00:00Z",
+    };
+    const hugeLog = await queryLokiLogs(config, input, async () =>
+      Response.json({
+        status: "success",
+        data: {
+          resultType: "streams",
+          result: [
+            {
+              stream: {},
+              values: [
+                ["1", "x".repeat(110000)],
+                ["2", "kept"],
+              ],
+            },
+          ],
+        },
+      })
+    );
+    expect(hugeLog.truncated).toBe(true);
+    expect(hugeLog.records).toHaveLength(1);
+    await expect(
+      queryLokiLogs(config, input, async () =>
+        Response.json({
+          status: "success",
+          data: { resultType: "matrix", result: [] },
+        })
+      )
+    ).rejects.toThrow("log query");
+    await expect(
+      queryLokiLogs(
+        config,
+        input,
+        async () => new Response("x".repeat(2000001))
+      )
+    ).rejects.toThrow("2 MB");
+    await expect(
+      queryLokiLogs(
+        config,
+        input,
+        async () => new Response("failed", { status: 503 })
+      )
+    ).rejects.toThrow("503");
+  });
+
   it("keeps the endpoint in public config and declares only the HTTP credential", () => {
     const { definition } = new LokiActivityConnector();
     expect(definition.optionsSchema).toMatchObject({
