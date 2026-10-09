@@ -17,22 +17,36 @@ import {
   authenticatedUrl,
   bootEnv,
   buildTarball,
+  changedSince,
   credentialsFromConfig,
+  currentHeads,
+  dirtyNotice,
   ExpiredCliTokenError,
+  fullSyncReason,
   generateBearerToken,
   generatePassword,
+  hashEntries,
   interpretSignUp,
   isAppleDouble,
+  listTreeFiles,
+  lockfileEntries,
   loginLink,
   orphanSandboxNames,
+  parseLsFilesS,
+  parsePorcelainZ,
   parseWorktreeRoots,
+  planSync,
   previewUrlFor,
+  readSyncState,
   resolveOwnerEmail,
   sandboxName,
   sanitizedEnv,
   sessionTokenFrom,
   signInScript,
   signUpScript,
+  syncScope,
+  syncStatePath,
+  writeSyncState,
 } from "../sandbox";
 
 const temporaryDirectories: string[] = [];
@@ -719,5 +733,388 @@ describe("orphanSandboxNames", () => {
     expect(orphanSandboxNames([sandboxName(gone)], [elsewhere])).toEqual([
       sandboxName(gone),
     ]);
+  });
+});
+
+describe("listTreeFiles", () => {
+  test("splits parent and submodule listings for the remote tree", () => {
+    const root = fixtureRepo();
+    addOwlettoSubmodule(root);
+    const { files, subFiles } = listTreeFiles(root);
+    expect(files).toContain("README.md");
+    expect(files.some((f) => f.startsWith("packages/owletto"))).toBe(false);
+    expect(subFiles).toContain("app.ts");
+  });
+});
+
+describe("fullSyncReason", () => {
+  test("names each fallback before the delta path", () => {
+    const changes = { files: [], envChanged: false };
+    expect(fullSyncReason(null, [], false, changes)).toBe(
+      "no prior sync state"
+    );
+    expect(
+      fullSyncReason(
+        { lobuHead: "a", owlettoHead: null, lockHash: null },
+        null,
+        false,
+        changes
+      )
+    ).toBe("no remote manifest");
+    expect(
+      fullSyncReason(
+        { lobuHead: "a", owlettoHead: null, lockHash: null },
+        [],
+        false,
+        null
+      )
+    ).toBe("change range uncomputable");
+    expect(
+      fullSyncReason(
+        { lobuHead: "a", owlettoHead: null, lockHash: null },
+        [],
+        false,
+        changes
+      )
+    ).toBe("no file map yet");
+    expect(
+      fullSyncReason(
+        { lobuHead: "a", owlettoHead: null, lockHash: null, files: {} },
+        [],
+        false,
+        changes
+      )
+    ).toBe("no file map yet");
+    expect(
+      fullSyncReason(
+        {
+          lobuHead: "a",
+          owlettoHead: null,
+          lockHash: null,
+          files: { "a.ts": "h" },
+        },
+        ["a.ts"],
+        false,
+        changes
+      )
+    ).toBeNull();
+    expect(
+      fullSyncReason(
+        {
+          lobuHead: "a",
+          owlettoHead: null,
+          lockHash: null,
+          files: { "a.ts": "h" },
+        },
+        ["a.ts"],
+        true,
+        changes
+      )
+    ).toBe("no prior sync state");
+  });
+});
+
+describe("fullSyncReason", () => {
+  test("names each fallback before the delta path", () => {
+    const changes = { files: [], envChanged: false };
+    expect(fullSyncReason(null, [], false, changes)).toBe(
+      "no prior sync state"
+    );
+    expect(
+      fullSyncReason(
+        { lobuHead: "a", owlettoHead: null, lockHash: null },
+        null,
+        false,
+        changes
+      )
+    ).toBe("no remote manifest");
+    expect(
+      fullSyncReason(
+        { lobuHead: "a", owlettoHead: null, lockHash: null },
+        [],
+        false,
+        null
+      )
+    ).toBe("change range uncomputable");
+    expect(
+      fullSyncReason(
+        { lobuHead: "a", owlettoHead: null, lockHash: null },
+        [],
+        false,
+        changes
+      )
+    ).toBe("no file map yet");
+    expect(
+      fullSyncReason(
+        { lobuHead: "a", owlettoHead: null, lockHash: null, files: {} },
+        [],
+        false,
+        changes
+      )
+    ).toBe("no file map yet");
+    expect(
+      fullSyncReason(
+        {
+          lobuHead: "a",
+          owlettoHead: null,
+          lockHash: null,
+          files: { "a.ts": "h" },
+        },
+        ["a.ts"],
+        false,
+        changes
+      )
+    ).toBeNull();
+    expect(
+      fullSyncReason(
+        {
+          lobuHead: "a",
+          owlettoHead: null,
+          lockHash: null,
+          files: { "a.ts": "h" },
+        },
+        ["a.ts"],
+        true,
+        changes
+      )
+    ).toBe("no prior sync state");
+  });
+});
+
+describe("syncScope", () => {
+  test("empty change sets mean nothing to do", () => {
+    expect(syncScope([], [], false)).toBe("none");
+  });
+
+  test("owletto-only changes stay frontend", () => {
+    expect(syncScope([], ["packages/owletto/src/a.ts"], false)).toBe(
+      "frontend"
+    );
+  });
+
+  test("any parent change means a full reboot", () => {
+    expect(syncScope(["scripts/sandbox.ts"], [], false)).toBe("full");
+    expect(
+      syncScope(["scripts/sandbox.ts"], ["packages/owletto/src/a.ts"], false)
+    ).toBe("full");
+  });
+
+  test(".env forces a reboot without entering any upload", () => {
+    expect(syncScope([], [], true)).toBe("full");
+  });
+});
+
+describe("hashEntries", () => {
+  test("is deterministic and order-independent", () => {
+    const a: Array<[string, string]> = [
+      ["bun.lock", "lock"],
+      ["package.json", "{}"],
+    ];
+    const b: Array<[string, string]> = [
+      ["package.json", "{}"],
+      ["bun.lock", "lock"],
+    ];
+    expect(hashEntries(a)).toBe(hashEntries(b));
+    expect(hashEntries(a)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("changes when any content changes", () => {
+    expect(hashEntries([["bun.lock", "a"]])).not.toBe(
+      hashEntries([["bun.lock", "b"]])
+    );
+  });
+});
+
+describe("planSync", () => {
+  test("null changes upload the full list", () => {
+    const plan = planSync(["old.ts"], ["a.ts", "b.ts"], null);
+    expect(plan.upload).toEqual(["a.ts", "b.ts"]);
+    expect(plan.remove).toEqual(["old.ts"]);
+    expect(plan.fullList).toEqual(["a.ts", "b.ts"]);
+  });
+
+  test("uploads only changed files and removes vanished ones", () => {
+    const plan = planSync(
+      ["a.ts", "gone.ts"],
+      ["a.ts", "b.ts"],
+      ["b.ts", "gone.ts"]
+    );
+    expect(plan.upload).toEqual(["b.ts"]);
+    expect(plan.remove).toEqual(["gone.ts"]);
+  });
+
+  test("a changed-but-deleted path only lands in remove, never in tar", () => {
+    const plan = planSync(["gone.ts"], ["a.ts"], ["gone.ts"]);
+    expect(plan.upload).toEqual([]);
+    expect(plan.remove).toEqual(["gone.ts"]);
+  });
+});
+
+describe("parsePorcelainZ", () => {
+  test("reads modified, added, and untracked paths", () => {
+    expect(parsePorcelainZ(" M a.ts\0A  b.ts\0?? c.ts\0")).toEqual([
+      "a.ts",
+      "b.ts",
+      "c.ts",
+    ]);
+  });
+
+  test("maps a rename to its new path only", () => {
+    expect(parsePorcelainZ("R  old.ts\0new.ts\0")).toEqual(["new.ts"]);
+  });
+
+  test("empty output means a clean tree", () => {
+    expect(parsePorcelainZ("")).toEqual([]);
+  });
+});
+
+describe("parseLsFilesS", () => {
+  test("reads the staged gitlink SHA", () => {
+    expect(
+      parseLsFilesS(
+        "160000 0123456789abcdef0123456789abcdef01234567 0\tpackages/owletto\n"
+      )
+    ).toBe("0123456789abcdef0123456789abcdef01234567");
+  });
+
+  test("returns null when the path is not a submodule", () => {
+    expect(parseLsFilesS("")).toBeNull();
+    expect(parseLsFilesS("100644 abc123 0\tREADME.md\n")).toBeNull();
+  });
+});
+
+describe("dirtyNotice", () => {
+  test("stays silent on a clean tree", () => {
+    expect(dirtyNotice([], [])).toBeNull();
+  });
+
+  test("counts parent and submodule files separately", () => {
+    const notice = dirtyNotice(["a.ts", "b.ts"], ["packages/owletto/x.ts"]);
+    expect(notice).toContain("2 file(s)");
+    expect(notice).toContain("1 in owletto");
+  });
+});
+
+describe("syncState", () => {
+  test("round-trips and rejects corrupt files", () => {
+    const dir = temporaryDirectory("sandbox-state-");
+    const path = syncStatePath("test-name", dir);
+    expect(readSyncState(path)).toBeNull();
+    writeSyncState(path, {
+      lobuHead: "aaa",
+      owlettoHead: "bbb",
+      lockHash: "ccc",
+      files: { "a.ts": "h1" },
+    });
+    expect(readSyncState(path)).toEqual({
+      lobuHead: "aaa",
+      owlettoHead: "bbb",
+      lockHash: "ccc",
+      files: { "a.ts": "h1" },
+    });
+    writeFileSync(path, "not json{{{");
+    expect(readSyncState(path)).toBeNull();
+  });
+});
+
+describe("changedSince", () => {
+  function commitAll(root: string, message: string) {
+    execFileSync("git", ["add", "-A"], { cwd: root });
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", message],
+      { cwd: root }
+    );
+  }
+
+  test("lists committed edits plus untracked files, minus .env", () => {
+    const root = fixtureRepo();
+    const sub = join(root, "packages/owletto");
+    const before = currentHeads(root, sub);
+    writeFileSync(join(root, "README.md"), "changed\n");
+    writeFileSync(join(root, "scratch.ts"), "export const a = 1;\n");
+    writeFileSync(join(root, ".env"), "DATABASE_URL=x\n");
+    const changes = changedSince(root, sub, before);
+    expect(changes?.files).toContain("README.md");
+    expect(changes?.files).toContain("scratch.ts");
+    expect(changes?.files).not.toContain(".env");
+    expect(changes?.envChanged).toBe(true);
+  });
+
+  test("returns null for an unknown range instead of guessing", () => {
+    const root = fixtureRepo();
+    const sub = join(root, "packages/owletto");
+    expect(
+      changedSince(root, sub, { lobuHead: null, owlettoHead: null })
+    ).toBeNull();
+  });
+
+  test("stays incremental when the pointer trails the checkout", () => {
+    const root = fixtureRepo();
+    addOwlettoSubmodule(root);
+    commitAll(root, "add submodule");
+    const sub = join(root, "packages/owletto");
+    const before = currentHeads(root, sub);
+    // Advance the checkout past the recorded pointer: the index trails, but
+    // old..HEAD still covers everything the pointer names.
+    writeFileSync(join(sub, "app.ts"), "export const app = 2;\n");
+    execFileSync("git", ["add", "app.ts"], { cwd: sub });
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "ahead"],
+      { cwd: sub }
+    );
+    const changes = changedSince(root, sub, before);
+    expect(changes?.files).toContain("packages/owletto/app.ts");
+  });
+
+  test("returns null when the index names content the checkout lacks", () => {
+    const root = fixtureRepo();
+    addOwlettoSubmodule(root);
+    commitAll(root, "add submodule");
+    const sub = join(root, "packages/owletto");
+    // Advance the submodule, stage the new pointer in the parent, then rewind
+    // the checkout: the index names C2 while the checkout sits at C1, so the
+    // recorded range would miss C2's content.
+    writeFileSync(join(sub, "app.ts"), "export const app = 2;\n");
+    execFileSync("git", ["add", "app.ts"], { cwd: sub });
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "ahead"],
+      { cwd: sub }
+    );
+    execFileSync("git", ["add", "packages/owletto"], { cwd: root });
+    execFileSync("git", ["reset", "-q", "--hard", "HEAD~1"], { cwd: sub });
+    const before = currentHeads(root, sub);
+    expect(changedSince(root, sub, before)).toBeNull();
+  });
+});
+
+describe("lockfileEntries", () => {
+  test("hashes bun.lock plus workspace manifests and moves on edit", () => {
+    const root = temporaryDirectory("sandbox-lock-");
+    writeFileSync(join(root, "bun.lock"), "lock v1\n");
+    writeFileSync(join(root, "package.json"), '{"name":"root"}\n');
+    mkdirSync(join(root, "packages", "a"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "a", "package.json"),
+      '{"name":"a"}\n'
+    );
+    const before = hashEntries(lockfileEntries(root));
+    writeFileSync(join(root, "bun.lock"), "lock v2\n");
+    expect(hashEntries(lockfileEntries(root))).not.toBe(before);
+  });
+});
+
+describe("buildTarball delta", () => {
+  test("an only-set archives the subset while the manifest stays full", () => {
+    const root = fixtureRepo();
+    writeFileSync(join(root, "a.ts"), "export const a = 1;\n");
+    writeFileSync(join(root, "b.ts"), "export const b = 1;\n");
+    const stage = buildTarball(root, new Set(["a.ts"]));
+    temporaryDirectories.push(stage);
+    const names = entries(join(stage, "tree.tar.gz"));
+    expect(names).toContain("a.ts");
+    expect(names).not.toContain("b.ts");
   });
 });
