@@ -59,7 +59,7 @@ export type ActivityCard = {
 	browser_url?: string;
 	browser_handoff?: {
 		run_id: number | null;
-		state: "ready" | "expired" | "completed";
+		state: "ready" | "preparing" | "expired" | "completed";
 		expires_at: string | null;
 		error_message: string | null;
 	};
@@ -186,6 +186,7 @@ function buildNotificationCard(
 	if (
 		rawBrowserHandoff &&
 		(rawBrowserHandoff.state === "ready" ||
+			rawBrowserHandoff.state === "preparing" ||
 			rawBrowserHandoff.state === "expired" ||
 			rawBrowserHandoff.state === "completed")
 	) {
@@ -429,9 +430,8 @@ function collapseKeyForRun(row: {
  * `listNotifications`'s `attentionOnly` predicate is the same rule expressed in
  * SQL, so the LIMIT is spent on cards that survive this filter.
  *
- * A browser-handoff draft qualifies only while it is still openable. `completed`
- * (already activated) and `expired` (can never be activated) have nothing left
- * to do; pinning those made month-old dead drafts outrank live work.
+ * Waiting, preparing, and prepared drafts need a human handoff until Done.
+ * Expired drafts remain history unless unread; opening is not completion.
  */
 function cardNeedsAttention(card: RawCard): boolean {
 	if (card.interaction_type === "authorization") return card.interaction_status === "pending";
@@ -441,7 +441,9 @@ function cardNeedsAttention(card: RawCard): boolean {
 function cardHasPendingDecision(card: RawCard): boolean {
 	return (
 		card.interaction_status === "pending" ||
-		card.browser_handoff?.state === "ready"
+		card.browser_handoff?.state === "ready" ||
+		card.browser_handoff?.state === "preparing" ||
+		card.browser_handoff?.state === "completed"
 	);
 }
 

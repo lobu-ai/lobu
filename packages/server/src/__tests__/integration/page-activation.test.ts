@@ -124,6 +124,52 @@ describe("page-activated operation runs", () => {
 	beforeEach(cleanupTestDatabase);
 	afterAll(cleanupTestDatabase);
 
+	it("keeps an approved Ask draft actionable after its notification is read", async () => {
+		const seeded = await seed();
+		await sql`UPDATE runs SET approval_status = 'approved' WHERE id = ${seeded.run.id}`;
+		const result = await notify({
+			action: "send", title: "Approved draft", recipients: [seeded.user.id],
+			browser_url: "https://x.com/ada/status/123", browser_handoff_run_id: seeded.run.id,
+		}, {} as never, {
+			organizationId: seeded.org.id, userId: seeded.user.id, memberRole: "owner",
+			isAuthenticated: true, tokenType: "oauth", scopedToOrg: false,
+			allowCrossOrg: true, scopes: ["mcp:admin"], sourceContext: null,
+		} as ToolContext);
+		await sql`UPDATE notification_targets SET read_at = now() WHERE event_id = ${result.event_id}`;
+		const notifications = await listNotifications({
+			organizationId: seeded.org.id, userId: seeded.user.id, attentionOnly: true,
+		});
+		expect(notifications.notifications[0]?.browser_handoff).toMatchObject({ run_id: seeded.run.id, state: "ready" });
+		const feed = await listOrgActivity({
+			organizationId: seeded.org.id, userId: seeded.user.id, ownerSlug: seeded.org.slug,
+			includeRuns: false, aggregate: false,
+		});
+		expect(feed.items.find(item => item.notification_id === result.event_id)?.browser_handoff?.state).toBe("ready");
+	});
+
+	it("keeps preparation visible after opening and only reports completion after the action succeeds", async () => {
+		const seeded = await seed();
+		const created = await createNotificationForUsers([seeded.user.id], {
+			organizationId: seeded.org.id, type: "agent_message", title: "Prepare a draft",
+			browserUrl: "https://x.com/ada/status/123", browserRunId: seeded.run.id,
+		});
+		await sql`UPDATE notification_targets SET read_at = now() WHERE event_id = ${created.eventId}`;
+		const activated = await request(appFor(seeded.user.id, seeded.org.id), "chrome-mini", seeded.run.id, "https://x.com/ada/status/123");
+		expect(activated.status).toBe(200);
+		for (const status of ["pending", "running", "completed"] as const) {
+			await sql`UPDATE runs SET status = ${status} WHERE id = ${seeded.run.id}`;
+			const listed = await listNotifications({ organizationId: seeded.org.id, userId: seeded.user.id, attentionOnly: true });
+			expect(listed.notifications[0]?.browser_handoff).toMatchObject({
+				run_id: seeded.run.id, state: status === "completed" ? "completed" : "preparing",
+			});
+			const activity = await listOrgActivity({ organizationId: seeded.org.id, userId: seeded.user.id, ownerSlug: seeded.org.slug, includeRuns: false });
+			expect(activity.items.find(item => item.notification_id === created.eventId)?.browser_handoff?.state).toBe(status === "completed" ? "completed" : "preparing");
+		}
+		await sql`UPDATE runs SET status = 'failed', error_message = 'Composer text did not match' WHERE id = ${seeded.run.id}`;
+		const failed = await listNotifications({ organizationId: seeded.org.id, userId: seeded.user.id });
+		expect(failed.notifications[0]?.browser_handoff).toMatchObject({ state: "expired", error_message: "Composer text did not match" });
+	});
+
 	it("runs the real Chrome activation entry through the server handler with exact query identity", async () => {
 		const seeded = await seed();
 		await sql`UPDATE runs SET activation_target_urls = ARRAY['https://example.test/item?id=111']::text[] WHERE id = ${seeded.run.id}`;
@@ -678,7 +724,7 @@ describe("page-activated operation runs", () => {
 		});
 		expect(completedList.notifications[0]?.browser_handoff).toMatchObject({
 			run_id: recreated.browser_handoff.run_id,
-			state: "completed",
+			state: "preparing",
 		});
 		const completedResponse = await appFor(
 			seeded.user.id,

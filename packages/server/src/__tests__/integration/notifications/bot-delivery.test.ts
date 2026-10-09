@@ -75,6 +75,38 @@ describe("resolveBotDeliveryTargets", () => {
     await cleanupTestDatabase();
   });
 
+	it.each(["recipients", "browser_handoff"] as const)("does not broadcast an owner-addressed %s notification", async (addressing) => {
+		const org = await createTestOrganization();
+		const user = await createTestUser();
+		await addUserToOrganization(user.id, org.id, "owner");
+		const agent = await createTestAgent({ organizationId: org.id, agentId: "notifier" });
+		await seedSlackConnection({ organizationId: org.id, agentId: agent.agentId, connectionId: "conn-notifier" });
+		await seedBinding({ organizationId: org.id, agentId: agent.agentId, connectionId: "conn-notifier", channelId: "slack:C_UNRELATED" });
+		const sql = getTestDb();
+		const [run] = await sql`
+			INSERT INTO runs (organization_id, run_type, action_key, approval_status, status,
+				created_by_user_id, activation_kind, activation_target_urls, expires_at, run_metadata)
+			VALUES (${org.id}, 'action', 'prepare_comment', 'auto', 'pending', ${user.id},
+				'page_visit', ARRAY['https://social.example/post/123']::text[], now() + interval '1 day',
+				${sql.json({ page_activation_identity: "exact" })})
+			RETURNING id
+		`;
+		const result = await notify({
+			action: "send", title: "Review your draft",
+			...(addressing === "recipients"
+				? { recipients: [user.id] }
+				: { browser_url: "https://social.example/post/123", browser_handoff_run_id: Number(run.id) }),
+		}, {} as never, {
+			organizationId: org.id, userId: user.id, memberRole: "owner", isAuthenticated: true,
+			tokenType: "oauth", scopedToOrg: false, allowCrossOrg: true, scopes: ["mcp:admin"], sourceContext: null,
+		} as ToolContext);
+		const [event] = await sql`SELECT metadata FROM events WHERE id = ${result.event_id}`;
+		expect(event.metadata.delivery_request.targets).toEqual([]);
+		expect(event.metadata.delivery_request.ownerDm).toBeNull();
+		const targets = await sql`SELECT user_id FROM notification_targets WHERE event_id = ${result.event_id}`;
+		expect(targets).toEqual([{ user_id: user.id }]);
+	});
+
 	it("resolves an active connection to its bound channel", async () => {
     const org = await createTestOrganization();
 		const agent = await createTestAgent({
@@ -443,6 +475,7 @@ describe("resolveBotDeliveryTargets", () => {
 		const repeatArgs = {
 			action: "send" as const,
 			title: "Strict Automation delivery",
+			recipients: [user.id],
 			idempotency_key: "strict-automation-delivery",
 		};
 		const first = (await notify(

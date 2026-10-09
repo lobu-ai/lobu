@@ -1019,13 +1019,13 @@ async function snapshotNotificationDelivery(
 		connectionId: params.connectionId,
 		channelId: params.channelId,
 		teamId: params.teamId,
-		deliveryScope: params.deliveryScope,
+		deliveryScope: params.deliveryScope ?? (params.browserRunId != null ? "targeted" : undefined),
 		ownerUserId: params.ownerUserId,
 		decisionRunId: params.decisionRunId,
 		actionOrigin: params.actionOrigin,
 		automationId: params.automationId,
 	};
-	const plan = await resolveNotificationDeliveryPlan(params, sql);
+	const plan = await resolveNotificationDeliveryPlan({ ...params, deliveryScope: context.deliveryScope }, sql);
 	const ownerDm =
 		params.ownerUserId &&
 		!plan.strictAutomationTarget &&
@@ -1242,7 +1242,7 @@ export async function deliverNotificationTask(
 						}>`
 							SELECT id, approval_status, COALESCE(
 								run_type = 'action' AND status = 'pending'
-								AND approval_status = 'auto'
+								AND approval_status IN ('auto', 'approved')
 								AND activation_kind = 'page_visit'
 								AND run_metadata->>'page_activation_identity' = 'exact'
 								AND activated_at IS NULL
@@ -1268,6 +1268,9 @@ export async function deliverNotificationTask(
 
 					const current = await resolveNotificationDeliveryPlan({
 						...context,
+						// Older queue snapshots lacked the browser handoff default.
+						// Revalidate them without reviving implicit org-wide delivery.
+						deliveryScope: context.deliveryScope ?? (browserRunId != null ? "targeted" : undefined),
 						organizationId: input.organizationId,
 					}, tx);
 					if (request.strictAutomationTarget && !current.strictAutomationTarget) {
@@ -1585,12 +1588,15 @@ export async function listNotifications(opts: {
 	// drafts and unreachable approvals must not consume the attention budget.
 	const pendingDecision = sql`COALESCE((
 		t.browser_url IS NOT NULL
-		AND browser_run.status = 'pending'
-		AND browser_run.activated_at IS NULL
-		AND browser_run.approval_status = 'auto'
+		AND browser_run.approval_status IN ('auto', 'approved')
 		AND browser_run.activation_kind = 'page_visit'
-		AND browser_run.run_metadata->>'page_activation_identity' = 'exact'
-		AND browser_run.expires_at > current_timestamp
+		AND (
+			browser_run.status = 'completed'
+			OR (browser_run.status IN ('pending', 'running') AND browser_run.activated_at IS NOT NULL)
+			OR (browser_run.status = 'pending' AND browser_run.activated_at IS NULL
+				AND browser_run.run_metadata->>'page_activation_identity' = 'exact'
+				AND browser_run.expires_at > current_timestamp)
+		)
 	) OR (
 		ar.approval_status = 'pending'
 		AND (pe.connection_id IS NULL OR pc.id IS NOT NULL)
@@ -1630,7 +1636,8 @@ export async function listNotifications(opts: {
           'expires_at', NULL,
           'error_message', 'This browser handoff is no longer linked to a draft. Open the page yourself, or ask for a fresh draft.'
         )
-        WHEN browser_run.status IN ('failed', 'timeout') THEN
+        WHEN browser_run.status IN ('failed', 'timeout', 'cancelled')
+          OR browser_run.approval_status NOT IN ('auto', 'approved') THEN
           jsonb_build_object(
             'run_id', browser_run.id,
             'state', 'expired',
@@ -1640,10 +1647,18 @@ export async function listNotifications(opts: {
               'The browser draft could not be populated. Recreate it to try again.'
             )
           )
-        WHEN browser_run.status = 'completed' OR browser_run.activated_at IS NOT NULL THEN
+        WHEN browser_run.status = 'completed' THEN
           jsonb_build_object(
             'run_id', browser_run.id,
             'state', 'completed',
+            'expires_at', browser_run.expires_at,
+            'error_message', NULL
+          )
+        WHEN browser_run.activated_at IS NOT NULL
+          AND browser_run.status IN ('pending', 'running') THEN
+          jsonb_build_object(
+            'run_id', browser_run.id,
+            'state', 'preparing',
             'expires_at', browser_run.expires_at,
             'error_message', NULL
           )
@@ -1659,7 +1674,7 @@ export async function listNotifications(opts: {
             'error_message', 'The original page target was lost. Create a new draft with its full URL.'
           )
         WHEN browser_run.status = 'pending'
-          AND browser_run.approval_status = 'auto'
+          AND browser_run.approval_status IN ('auto', 'approved')
           AND browser_run.activation_kind = 'page_visit'
           AND browser_run.expires_at > current_timestamp THEN
           jsonb_build_object(
