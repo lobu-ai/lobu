@@ -123,6 +123,17 @@ describe('redactOutput', () => {
     }
   });
 
+  test('redacts credential suffixes without requiring a prefix separator', () => {
+    for (const prefix of ['', 'PG', 'custom', 'db.', 'nested.config-', 'prefixAWS_']) {
+      for (const key of ['PASSWORD', 'apikey', 'accessToken', 'refresh_token', 'id-token', 'authToken', 'clientSecret', 'secret', 'AWS_CUSTOM_KEY']) {
+        for (const separator of ['=', ': ']) {
+          const input = `${prefix}${key}${separator}synthetic-concatenated-secret status=500`;
+          expect(redactOutput(input)).toBe(`${prefix}${key}${separator}[REDACTED] status=500`);
+        }
+      }
+    }
+  });
+
   test('redacts authentication schemes across dotted keys and assignment formats', () => {
     for (const key of ['authorization', 'auth', 'nested.authorization', 'db.password', 'config.api_key']) {
       for (const separator of ['=', ': ']) {

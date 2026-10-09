@@ -4,6 +4,12 @@ import { IsolateExecutor } from "@lobu/connector-worker/executor/isolate";
 import { createIsolateConnectorCompiler } from "../../../packages/connector-worker/src/compile/index";
 
 const credentialLogs = [
+  JSON.stringify({
+    PGPASSWORD: "synthetic-structured-password",
+    customapikey: "synthetic-structured-key",
+    AWS_CUSTOM_KEY: { value: "synthetic-structured-aws-secret" },
+  }),
+  "PGPASSWORD=synthetic-concatenated-password customapikey=synthetic-concatenated-key nested.AWS_CUSTOM_KEY=synthetic-prefixed-aws-secret",
   "failed pAsSwOrD=synthetic-mixed-case-secret aWs_Custom_Key=synthetic-mixed-aws-secret",
   "failed password=secret7 token=synthetic-opaque-token",
   "authorization=Bearer synthetic-bearer-secret status=500",
@@ -59,6 +65,7 @@ it("runs query_logs inside the native isolate through the existing HTTP auth cap
                   {
                     stream: {
                       app: "server",
+                      AWS_CUSTOM_KEY: "synthetic-structured-label-secret",
                       detail: "Bearer synthetic-label-secret",
                     },
                     values: [
@@ -105,6 +112,13 @@ it("runs query_logs inside the native isolate through the existing HTTP auth cap
     credentialLogs.length + 1
   );
   for (const secret of [
+    "synthetic-structured-password",
+    "synthetic-structured-key",
+    "synthetic-structured-aws-secret",
+    "synthetic-structured-label-secret",
+    "synthetic-concatenated-password",
+    "synthetic-concatenated-key",
+    "synthetic-prefixed-aws-secret",
     "synthetic-mixed-case-secret",
     "synthetic-mixed-aws-secret",
     "secret7",

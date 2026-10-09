@@ -9,7 +9,15 @@
 const REDACTED = '[REDACTED]';
 
 // Keep this module dependency-free: it is also bundled into connector isolates.
-const SECRET_KEY = /(?:^|[_.-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]access)?[_-]?key|private[_-]?key|token|secret|password|passwd|credentials?|authorization|auth|bearer|cookies?|set[_-]cookie|session[_-]?id)s?$/i;
+// Match credential suffixes even in concatenated names such as PGPASSWORD.
+// The token scanner bounds the work; requiring a prefix delimiter loses secrets.
+const SECRET_KEY = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]access)?[_-]?key|private[_-]?key|token|secret|password|passwd|credentials?|authorization|auth|bearer|cookies?|set[_-]cookie|session[_-]?id)s?$/i;
+
+export function isSecretOutputKey(key: string): boolean {
+  const normalized = key.replace(/([a-z0-9])([A-Z])/g, '$1_$2');
+  return SECRET_KEY.test(key) || SECRET_KEY.test(normalized) ||
+    (key.toUpperCase().includes('AWS_') && /(?:KEY|TOKEN|SECRET)$/i.test(key));
+}
 
 function quotedValueEnd(text: string, start: number, delimiter: string): number {
   const quote = delimiter.at(-1);
@@ -38,12 +46,7 @@ function redactAssignments(text: string): string {
   let copied = 0;
   let key: RegExpExecArray | null;
   while ((key = keys.exec(text))) {
-    const normalized = key[0].replace(/([a-z0-9])([A-Z])/g, '$1_$2');
-    if (
-      !SECRET_KEY.test(key[0]) &&
-      !SECRET_KEY.test(normalized) &&
-      !/^AWS_[A-Z0-9_]*(?:KEY|TOKEN|SECRET)$/i.test(key[0])
-    ) continue;
+    if (!isSecretOutputKey(key[0])) continue;
     assignment.lastIndex = keys.lastIndex;
     const separator = assignment.exec(text);
     if (!separator) continue;

@@ -1,5 +1,8 @@
 import { scrubSentryValue } from "../../packages/core/src/utils/sentry-scrubber";
-import { redactOutput } from "../../packages/connector-worker/src/executor/redact";
+import {
+  isSecretOutputKey,
+  redactOutput,
+} from "../../packages/connector-worker/src/executor/redact";
 import {
   type ActionContext,
   type ActionResult,
@@ -136,7 +139,7 @@ export async function queryLokiActivity(
   };
 }
 
-export interface LokiLogQuery {
+interface LokiLogQuery {
   query: string;
   start: string;
   end: string;
@@ -235,7 +238,8 @@ export async function queryLokiLogs(
       // Structured keys and credentials embedded in log text need both scrubbers.
       // Omit oversized fields to keep individual evidence records bounded.
       let oversizedField = false;
-      const serialized = JSON.stringify(record, (_key, value) => {
+      const serialized = JSON.stringify(record, (key, value) => {
+        if (isSecretOutputKey(key)) return "[REDACTED]";
         if (typeof value !== "string") return value;
         if (value.length > 8192) {
           oversizedField = true;

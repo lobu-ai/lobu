@@ -7,6 +7,59 @@ import LokiActivityConnector, {
 } from "../loki-activity.connector.ts";
 
 describe("Lobu Team Loki activity connector", () => {
+  it("uses the text credential rules for structured logs and labels", async () => {
+    const credentials = Object.fromEntries(
+      [
+        "PGPASSWORD",
+        "customapikey",
+        "nested.AWS_CUSTOM_KEY",
+        "aWs_Custom_Key",
+      ].map((key) => [key, { value: "synthetic-structured-secret" }])
+    );
+    const result = await queryLokiLogs(
+      { LOKI_URL: "https://loki.example.test", namespace: "synthetic" },
+      {
+        query: '{namespace="synthetic"}',
+        start: "2026-10-01T00:00:00Z",
+        end: "2026-10-01T01:00:00Z",
+      },
+      async () =>
+        Response.json({
+          status: "success",
+          data: {
+            resultType: "streams",
+            result: [
+              {
+                stream: Object.fromEntries(
+                  Object.keys(credentials).map((key) => [
+                    key,
+                    "synthetic-label-secret",
+                  ])
+                ),
+                values: [
+                  [
+                    "1",
+                    JSON.stringify({
+                      credentialsByName: credentials,
+                      status: 500,
+                    }),
+                  ],
+                ],
+              },
+            ],
+          },
+        })
+    );
+    expect(JSON.stringify(result)).not.toContain("synthetic-structured-secret");
+    expect(JSON.stringify(result)).not.toContain("synthetic-label-secret");
+    expect(result.records[0]?.log).toMatchObject({
+      credentialsByName: Object.fromEntries(
+        Object.keys(credentials).map((key) => [key, "[REDACTED]"])
+      ),
+      status: 500,
+    });
+  });
+
   it("scrubs credentials in plain logs, nested messages, and labels", async () => {
     const result = await queryLokiLogs(
       { LOKI_URL: "https://loki.example.test", namespace: "synthetic" },
@@ -24,6 +77,7 @@ describe("Lobu Team Loki activity connector", () => {
               {
                 stream: { detail: "Bearer synthetic-label-secret" },
                 values: [
+                  ["0", "PGPASSWORD=synthetic-concatenated-secret"],
                   ["1", "Authorization: Basic synthetic-header-secret"],
                   [
                     "2",
@@ -43,7 +97,13 @@ describe("Lobu Team Loki activity connector", () => {
         })
     );
     const serialized = JSON.stringify(result);
-    for (const secret of ["label", "header", "message", "password"]) {
+    for (const secret of [
+      "label",
+      "header",
+      "message",
+      "password",
+      "concatenated",
+    ]) {
       expect(serialized).not.toContain(`synthetic-${secret}-secret`);
     }
     expect(serialized).toContain("test.ts:1:1");
