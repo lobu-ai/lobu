@@ -30,7 +30,7 @@ import { ToolUserError } from "../utils/errors";
 const SCRIPT_FIELDS = {
   script: Type.String({
     description:
-      "TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, files, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms polling delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods and `ctx.sleep`.",
+      "TypeScript source. Must `export default async (ctx, client) => { ... }` — `ctx` is `{ organization_id, user_id, mode, files, sleep(ms) }`, where `await ctx.sleep(ms)` provides a bounded, abort-aware 0–30000ms retry delay; unrestricted timer globals are unavailable. `client` is the ClientSDK. Bare OAuth has organization_id=null: first select const workspace = await client.org(target) for workspace methods; account discovery and conversation titles work on the root client. The script's return value comes back as `return_value`; return it only for computed results and bounded samples. For bulk data prefer `client.query` / `query_sql` or paginated SDK reads — a return over the output cap is replaced by a `return_value_preview` head and a `return_truncated` report instead of shipping the full set to the model. Use `search_sdk` to discover SDK methods. Keep batches small, measure elapsed time, and adjust batch size to reserve time for saving progress and cleanup before the deadline. Return partial results with a continuation cursor deliberately before expiry. Await every SDK call; parallelize only independent work and limit contention on the same device. For long device operations, use `run_sdk` with `operations.execute({ ..., background: true, idempotency_key })`, return the durable run_id, and read `operations.getRun(run_id)` in a later invocation instead of sleeping in a polling loop. Prefer browser readiness checks to fixed waits. Timeout or cancellation ends the script as a failure even if caught; it does not roll back completed writes or prove external work stopped.",
     minLength: 1,
     maxLength: 100_000,
   }),
@@ -445,6 +445,7 @@ async function runSandbox(
   };
   const result = await runScript({
     source: args.script,
+    abortSignal: ctx.abortSignal,
     sdk: (abortSignal) => buildClientSDK(sdkContext, env, { mode, allowCrossOrg, abortSignal }),
     sdkMode: mode,
     allowCrossOrg,
