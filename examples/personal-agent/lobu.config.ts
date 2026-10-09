@@ -494,8 +494,7 @@ const account = defineEntityType({
 // Deliberately derived, not stored: obligations are inferred from the spend
 // stream, so a stored entity would need reconciling every run (detected vs
 // changed vs cancelled). The backing view recomputes status from recency
-// instead. If this ever gets slow, materialize on write like net-worth
-// snapshots — until then the view is the long-term shape.
+// instead.
 const subscriptionBackingSql = `
 WITH card AS (
   SELECT
@@ -791,9 +790,8 @@ const takeoutConnection = defineConnection({
       feed: "keep",
       config: takeoutConfig("GOOGLE_KEEP_TAKEOUT_DIR", "google-keep"),
     },
-    // No maps feed: the installed google.takeout definition only knows
-    // keep + youtube, and takeout connectors can't be reinstalled (isolate
-    // lane rejects node:fs). Maps history stays in the archive.
+    // Omit maps while reusing the installed takeout definition. Installing
+    // the local definition requires a runtime that supports node:fs.
   ],
 });
 
@@ -1053,8 +1051,6 @@ const sameAs = defineRelationshipType({
     "Maps a private person profile to its canonical public identity. The mapping and private profile remain visible only to this workspace.",
 });
 
-// Historical social-signal entity rows still exist. Prune must retain their
-// type until an explicit data migration removes them.
 const mentions = defineRelationshipType({
   key: "mentions",
   name: "Mentions",
