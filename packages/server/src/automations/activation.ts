@@ -177,6 +177,7 @@ export async function findMatchingAutomationActivations(
 		FROM automations w
 		JOIN automation_versions v ON v.id = w.current_version_id
 		WHERE w.status = 'active'
+		  AND w.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
 		  AND (w.managed_agent_id IS NOT NULL OR w.device_worker_id IS NOT NULL)
 		  AND ${triggerFilter}
 		  ${organizationFilter}

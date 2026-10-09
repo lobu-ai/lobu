@@ -259,6 +259,7 @@ export async function handleCreate(
     agentId: args.managed_agent_id ?? null,
     deviceWorkerId: args.device_worker_id ?? null,
     agentKind: args.agent_kind ?? null,
+    executionConfig: args.execution_config,
   };
   // Resolve entity output targets BEFORE the row is written.
   await assertOutputEntityTypesExist(sql, organizationId, outputs);
@@ -676,6 +677,7 @@ export async function handleUpdate(
         : currentRow.device_worker_id,
     agentKind:
       args.agent_kind !== undefined ? args.agent_kind : currentRow.agent_kind,
+    executionConfig: effectiveExecutionConfig,
   };
   assertAutomationExecutorsResolve(
     triggerWrite.triggers as AutomationTriggerInput[],
@@ -1100,6 +1102,7 @@ export async function handleCreateFromVersion(
     agentId: (version.managed_agent_id as string | null) ?? null,
     deviceWorkerId: (version.device_worker_id as string | null) ?? null,
     agentKind: (version.agent_kind as string | null) ?? null,
+    executionConfig: version.execution_config,
   };
   // The executor is copied verbatim onto every clone, and a version can
   // outlive the executor it names (managed_agent_id/device_worker_id have no FK, so a

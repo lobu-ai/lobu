@@ -80,6 +80,7 @@ async function loadTriggerExecution(
     agentId: payload.agent_id,
     deviceWorkerId: payload.device_worker_id,
     agentKind: payload.agent_kind,
+    executionConfig: { executor: payload.executor },
   });
   let persistedExecution: AutomationTriggerExecution;
   if (executor?.kind === "agent") {

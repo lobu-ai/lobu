@@ -10,6 +10,7 @@ import type {
 	OperationExecuteInput,
 	OperationListAvailableInput,
 	OperationListRunsInput,
+	OperationListActivityInput,
 	OperationRejectInput,
 } from "@lobu/core/contracts/tools/manage-operations";
 import type { Env } from "../../index";
@@ -22,6 +23,7 @@ export interface OperationsNamespace {
 	listAvailable(input?: OperationListAvailableInput): Promise<unknown>;
 	execute(input: OperationExecuteInput): Promise<unknown>;
 	listRuns(input?: OperationListRunsInput): Promise<unknown>;
+	listActivity(input?: OperationListActivityInput): Promise<unknown>;
 	getRun(run_id: number): Promise<unknown>;
 	cancel(run_id: number): Promise<unknown>;
 	approve(input: OperationApproveInput): Promise<unknown>;
@@ -44,6 +46,7 @@ export function buildOperationsNamespace(
 		listAvailable: method("list_available", { publicMethod: "listAvailable" }),
 		execute: method("execute"),
 		listRuns: method("list_runs", { publicMethod: "listRuns" }),
+		listActivity: method("list_activity", { publicMethod: "listActivity" }),
 		getRun: method("get_run", {
 			publicMethod: "getRun",
 			mapArgs: (run_id) => ({

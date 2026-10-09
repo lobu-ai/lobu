@@ -52,6 +52,7 @@ export async function findSubscribedWorkspaceEventTypes(
     WHERE w.organization_id = ${organizationId}
       AND w.status = 'active'
       AND w.current_version_id IS NOT NULL
+      AND w.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
       AND (w.managed_agent_id IS NOT NULL OR w.device_worker_id IS NOT NULL)
       AND trigger.value->>'kind' = 'event'
       AND trigger.value->>'source' = 'workspace'

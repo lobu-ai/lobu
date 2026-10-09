@@ -252,6 +252,7 @@ export async function handleList(
 
 		const automationHealth = computeAutomationHealth({
 			status: automation.status,
+			externalExecutor: automation.execution_config?.executor?.kind === 'external',
 			nextRunAt: automation.next_run_at,
 			consecutiveScheduledFailures:
 				automation.consecutive_scheduled_failures,

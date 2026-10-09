@@ -125,6 +125,29 @@ describe('headless Automation claim gate (automations.execute)', () => {
     await cleanupTestDatabase();
   });
 
+  it('never lets a paired device claim a frozen external snapshot', async () => {
+    const ctx = await setupDevicePinnedAutomation({
+      workerId: 'external-snapshot-device', platform: 'headless',
+      capabilities: { 'automations.execute': true },
+    });
+    const { token } = await createWorkerBoundPat(ctx.workspace.users.owner.id,
+      ctx.workspace.org.id, 'external-snapshot-device');
+    const triggered = await post(`/api/workers/me/automations/${ctx.automationId}/trigger`, { token });
+    expect(triggered.status).toBe(200);
+    const { run_id } = await triggered.json() as { run_id: number };
+    // A legacy/retargeted row may retain a device pin: the frozen executor is
+    // authoritative even when the other device admission predicates match.
+    await ctx.sql`UPDATE runs SET approved_input = approved_input ||
+      jsonb_build_object('executor', jsonb_build_object('kind', 'external')) WHERE id = ${run_id}`;
+    const polled = await post('/api/workers/poll', { token, body: {
+      worker_id: 'external-snapshot-device', capabilities: { 'automations.execute': true },
+    } });
+    expect(polled.status).toBe(200);
+    expect((await polled.json() as { run_id?: number }).run_id).toBeUndefined();
+    const [row] = await ctx.sql`SELECT status FROM runs WHERE id = ${run_id}`;
+    expect(row.status).toBe('pending');
+  });
+
   // First test in the file pays the on-demand connector-catalog compile on the
   // trigger path; give it room so the claim gate itself (not cold-start time)
   // decides the outcome.

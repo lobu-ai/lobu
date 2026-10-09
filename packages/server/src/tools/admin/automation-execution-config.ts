@@ -7,7 +7,8 @@ import { ToolUserError } from '../../utils/errors';
 import { isAdminOrOwnerRole } from '../access-control';
 
 export function automationScriptExecutor(config: unknown): AutomationScriptExecutor | undefined {
-  return (config as AutomationExecutionConfig | null | undefined)?.executor;
+  const executor = (config as AutomationExecutionConfig | null | undefined)?.executor;
+  return executor?.kind === 'script' ? executor : undefined;
 }
 
 /**

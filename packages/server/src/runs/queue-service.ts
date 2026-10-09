@@ -16,7 +16,7 @@ import {
   resolvedEventExecution,
   type AutomationEventTrigger,
   type AutomationWorkspaceEventTrigger,
-  type AutomationScriptExecutor,
+  type AutomationExecutor,
   type AutomationSource,
 } from '@lobu/core/contracts/tools/manage-automations';
 import { normalizeAutomationSources } from '../automations/source-refs';
@@ -68,11 +68,12 @@ export type AutomationActivationSignal =
   | WorkspaceEventTriggerSignal;
 
 export interface AutomationRunPayload {
-  /** Execution code is pinned with the run, never reloaded from a live Automation on retry. */
-  executor?: AutomationScriptExecutor;
+  /** Executor selection and script code are pinned with the run, never reloaded on retry. */
+  executor?: AutomationExecutor;
   automation_id: number;
   /**
-   * The managed agent executing this run. Absent for device-executed runs
+   * The managed agent executing this run, or the external executor's optional
+   * permission and delivery principal. Absent for device-executed runs
    * (the device lane claims via `device_worker_id`) and for manual runs open
    * to any connected MCP client.
    */

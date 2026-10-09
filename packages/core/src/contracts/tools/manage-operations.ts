@@ -271,7 +271,7 @@ export const ListActivityAction = Type.Object({
    * Failures never merge with successes. Default true.
    */
   aggregate: Type.Optional(Type.Boolean({ default: true })),
-  /** Restrict run kinds: automation | sync | action | notification (default all). */
+  /** Restrict kinds: automation_due | automation | sync | action | notification (default all). */
   kinds: Type.Optional(Type.Array(Type.String())),
   /**
    * Scope the feed to a single agent: only that agent's Automation runs are
@@ -550,6 +550,15 @@ export const ManageOperationsResultSchema = Type.Union([
         feed_name: Type.Optional(Type.String()),
         automation_id: Type.Optional(Type.Integer()),
         automation_name: Type.Optional(Type.String()),
+        next_action: Type.Optional(
+          Type.Object({
+            method: Type.Literal("automations.claimNextWindow"),
+            input: Type.Object({
+              automation_id: Type.String(),
+              run_id: Type.Optional(Type.Integer()),
+            }),
+          })
+        ),
         agent_id: Type.Optional(Type.String()),
         agent_name: Type.Optional(Type.String()),
         client_id: Type.Optional(Type.String()),
@@ -626,6 +635,11 @@ export type OperationExecuteInput = ActionInput<
   ManageOperationsArgs,
   "execute"
 >;
+export type OperationListActivityInput = ActionInput<
+  ManageOperationsArgs,
+  "list_activity"
+>;
+
 export type OperationListRunsInput = ActionInput<
   ManageOperationsArgs,
   "list_runs"

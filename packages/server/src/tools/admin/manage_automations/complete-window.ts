@@ -339,7 +339,11 @@ export async function handleCompleteWindow(
     typeof approvedInputRecord.device_worker_id === 'string'
       ? approvedInputRecord.device_worker_id.trim()
       : '';
-  const manualOpenRun = !assignedAgentId && !assignedDeviceWorkerId;
+  const externalExecutor = (approvedInputRecord.executor as { kind?: string } | undefined)?.kind === 'external';
+  if (externalExecutor && ctx.agentId && assignedAgentId && assignedAgentId !== ctx.agentId) {
+    throw new ToolUserError('This external Automation belongs to another agent.', 403);
+  }
+  const manualOpenRun = (!assignedAgentId && !assignedDeviceWorkerId) || externalExecutor;
 
   if (snapshotVersionId != null && runRows[0].version_id != null && snapshotVersionId !== Number(runRows[0].version_id)) {
     throw new ToolUserError('Completion must use the version pinned to the Automation run.', 409);

@@ -141,6 +141,7 @@ describe("createEvalRun", () => {
 			{ ...payload, device_worker_id: "99999999-8888-7777-6666-555555555555" },
 		],
 		["manual-open", { ...payload, agent_id: undefined }],
+		["external with owner", { ...payload, executor: { kind: "external" } }],
 	])("refuses to replay a %s run it could never dispatch", async (_l, input) => {
 		const [run] = await sql<{ id: number }[]>`
       INSERT INTO runs (

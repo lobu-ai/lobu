@@ -57,7 +57,7 @@ function renderSchemaFields(schema: unknown): string {
 
 export type WorkspaceInstructionAudience = 'managed-agent' | 'direct-mcp';
 
-const DIRECT_MCP_INSTRUCTIONS = [
+export const DIRECT_MCP_INSTRUCTIONS = [
   '## Lobu — Workspace Memory',
   '',
   "Lobu provides access to persistent workspace memory. Use Lobu's tools only when they are relevant to the user's request.",
@@ -69,6 +69,12 @@ const DIRECT_MCP_INSTRUCTIONS = [
   '- `query_sdk` runs capability-scoped, read-only TypeScript.',
   '- `query_sql` runs member-safe, read-only SQL.',
   '- Use read tools to discover workspace-specific schema and capabilities instead of assuming they exist.',
+  '',
+  '### Staying up to date',
+  '- When the user has authorized ongoing Automation processing, connected MCP agents (including agents running on a device) should read `operations.listActivity` on startup, between tasks, and roughly every 60 seconds while their own scheduler is awake. Select the intended workspace with `client.org(slug)` first.',
+  '- Use `kinds: ["automation_due"]` for due work and owned unfinished claims; read unfiltered activity for notifications. Follow each returned `next_action`, process bounded source pages, and always call `automations.completeWindow`, including quiet windows with empty output. A 409 means work changed or another client claimed it; refresh activity.',
+  '- The Automation schedule and timezone own cadence. Polling only discovers work: it does not acknowledge notifications, renew leases, or send messages. Refresh claims with `claimNextWindow` before their lease expires. Keep the same authenticated agent/client identity when resuming.',
+  '- MCP does not wake a sleeping client. Arrange wakeups in your own scheduler; use bounded calls, not a sleep loop inside `run_sdk`. A paired device daemon token only serves its existing worker poll and is not permission to use workspace MCP tools.',
   '',
   '### Writes and approvals',
   '- `save_memory` stores a requested fact or note. Use it only when the user asks to remember or save information, or explicitly confirms a proposed save.',

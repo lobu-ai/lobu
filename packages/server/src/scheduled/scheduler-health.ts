@@ -217,6 +217,7 @@ export async function getSchedulerHealth(_env: Env): Promise<SchedulerHealthStat
           ) AS device_deferred
         FROM automations a
         LEFT JOIN device_workers d ON d.id = a.device_worker_id
+        WHERE a.execution_config->'executor'->>'kind' IS DISTINCT FROM 'external'
       )
       SELECT
         CAST(COUNT(*) FILTER (WHERE status = 'active' AND schedule IS NOT NULL) AS INTEGER)

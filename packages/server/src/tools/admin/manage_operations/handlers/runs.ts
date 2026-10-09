@@ -35,6 +35,7 @@ export async function handleListActivity(
 		aggregate: args.aggregate,
 		kinds: args.kinds,
 		agentId: args.agent_id,
+		caller: ctx,
 	});
 	return {
 		action: "list_activity",
