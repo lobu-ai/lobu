@@ -2,6 +2,23 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import { log, setDebug } from '../daemon/log.js';
 
 describe('daemon log', () => {
+  test('keeps arbitrary diagnostic values from interrupting failure reporting', () => {
+    const stderr = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() => log.error({ bytes: 1n }, 'connector failed')).not.toThrow();
+      expect(JSON.parse(String(stderr.mock.calls[0]?.[0]))).toMatchObject({
+        level: 'error', data: [{ bytes: '1' }],
+      });
+      const diagnostic = { toJSON() { return { authorization: 'synthetic-secret' }; } };
+      expect(() => log.error(diagnostic, 'connector failed')).not.toThrow();
+      const serialized = String(stderr.mock.calls[1]?.[0]);
+      expect(JSON.parse(serialized)).toMatchObject({ level: 'error', service: 'lobu-worker' });
+      expect(serialized).not.toContain('synthetic-secret');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   test('writes parseable severity and a scrubbed error stack to stderr only', () => {
     const stderr = spyOn(console, 'error').mockImplementation(() => {});
     const stdout = spyOn(console, 'log').mockImplementation(() => {});

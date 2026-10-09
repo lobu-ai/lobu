@@ -293,9 +293,9 @@ export async function executeRun(
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    log.info(
+    log.error(
       `[executor] Unhandled ${job.run_type ?? 'unknown'} run ${job.run_id} failure:`,
-      message
+      error
     );
     try {
       await reportTerminalFailure(client, job, message);
@@ -458,7 +458,7 @@ async function executeSyncRun(
     stopHeartbeat();
 
     const errorMessage = error instanceof Error ? error.message : String(error);
-    log.error(`[executor] Sync run ${run_id} failed:`, errorMessage);
+    log.error(`[executor] Sync run ${run_id} failed:`, error);
 
     const diag = extractExecutionDiagnostics(error);
 
@@ -651,7 +651,7 @@ async function executeActionRun(
     return { itemsCollected: 0 };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    log.error(`[executor] Action run ${run_id} failed:`, errorMessage);
+    log.error(`[executor] Action run ${run_id} failed:`, error);
 
     if (terminalPayloadStarted || monitor.revoked()) {
       return { itemsCollected: 0, error: errorMessage };
@@ -845,7 +845,7 @@ async function executeAuthRun(
   } catch (error) {
     clearInterval(heartbeatInterval);
     const errorMessage = error instanceof Error ? error.message : String(error);
-    log.error(`[executor] Auth run ${run_id} failed:`, errorMessage);
+    log.error(`[executor] Auth run ${run_id} failed:`, error);
 
     const diag = extractExecutionDiagnostics(error);
 
@@ -1015,7 +1015,7 @@ async function executeEmbedBackfillRun(
     return { itemsCollected: results.length };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    log.error(`[executor] Embed backfill run ${run_id} failed:`, errorMessage);
+    log.error(`[executor] Embed backfill run ${run_id} failed:`, error);
 
     await client.complete({
       run_id,
