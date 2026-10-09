@@ -38,13 +38,11 @@ describe("consolidated net-worth configuration", () => {
     ).toBe(false);
   });
 
-  test("replaces the legacy asset type with an account metric grain", () => {
-    expect(config.entities?.some((entity) => entity.key === "asset")).toBe(
-      false
-    );
-    const account = config.entities?.find((entity) => entity.key === "account");
-    expect(account?.measures).toHaveProperty("spend");
-    expect(account?.measures).toHaveProperty("transaction_count");
+  test("keeps the personal entity model limited to people and collaborative tasks", () => {
+    expect(config.entities?.map((entity) => entity.key).sort()).toEqual([
+      "person",
+      "task",
+    ]);
   });
 
   test("declares a same-org catalog quote handle without shipping duplicate source", () => {
