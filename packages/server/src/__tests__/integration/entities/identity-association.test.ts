@@ -61,6 +61,91 @@ describe('governed stored identity associations', () => {
     expect(await sql`SELECT * FROM entity_relationships WHERE id = ${id}`).toEqual(before);
   });
 
+  const normalization = () => readFileSync(resolve(process.cwd(), '../../db/migrations/20261009040000_normalize_identity_decisions.sql'), 'utf8').split('-- migrate:down')[0];
+
+  it.each(['known', 'null', 'unknown'])('normalizes withdrawn history with %s evidence without reviving it', async (evidence) => {
+    const { sql, human, ids: [a, b], link } = await graph();
+    const id = linked(await link(b, a));
+    await human.entities.unlink({ relationship_id: id });
+    await human.entity_schema.deleteRelType({ slug: 'same_record' });
+    await sql.begin(async tx => {
+      await tx`ALTER TABLE entity_relationships DISABLE TRIGGER lobu_guard_identity_edges`;
+      await tx`UPDATE entity_relationships SET metadata = metadata #- '{_lobu_identity_decision,member_support}' WHERE id = ${id}`;
+      if (evidence !== 'known') await tx`UPDATE entity_relationships SET metadata = jsonb_set(metadata,
+        '{_lobu_identity_decision,suppression_support}', ${JSON.stringify(evidence === 'null' ? null : { version: 99, opaque: 'retained' })}::jsonb) WHERE id = ${id}`;
+      await tx`ALTER TABLE entity_relationships ENABLE TRIGGER lobu_guard_identity_edges`;
+    });
+    const [before] = await sql`SELECT * FROM entity_relationships WHERE id = ${id}`;
+    await sql.begin(tx => tx.unsafe(normalization()));
+    const [after] = await sql`SELECT * FROM entity_relationships WHERE id = ${id}`;
+    expect(after).toEqual({ ...before, metadata: { ...before.metadata, _lobu_identity_decision: {
+      ...before.metadata._lobu_identity_decision,
+      member_support: { [JSON.stringify([a, b])]: before.metadata._lobu_identity_decision.suppression_support },
+    } } });
+    await sql.begin(tx => tx.unsafe(normalization()));
+    expect(await sql`SELECT * FROM entity_relationships WHERE id = ${id}`).toEqual([after]);
+    const [guard] = await sql`SELECT tgenabled FROM pg_trigger WHERE tgname = 'lobu_guard_identity_edges'`;
+    expect(guard.tgenabled).toBe('O');
+    await expect(sql`UPDATE entity_relationships SET confidence = 0.5 WHERE id = ${id}`).rejects.toThrow();
+  });
+
+  it('adds only the missing original pair to a partial map, preserving opaque member entries', async () => {
+    const { sql, agent, input, ids: [a, b, c] } = await graph(3, 'review');
+    const pending = runId(await agent.entities.link(input));
+    const partial = { [JSON.stringify([a, c])]: null };
+    await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{member_support}', ${sql.json(partial)}::jsonb) WHERE id = ${pending}`;
+    const [before] = await sql`SELECT * FROM runs WHERE id = ${pending}`;
+    await sql.begin(tx => tx.unsafe(normalization()));
+    expect(await sql`SELECT * FROM runs WHERE id = ${pending}`).toEqual([{ ...before, action_input: {
+      ...before.action_input, member_support: { ...partial, [JSON.stringify([a, b])]: before.action_input.suppression_support },
+    } }]);
+  });
+
+  it('rolls back history normalization and restores the guard when a later decision is invalid', async () => {
+    const { sql, agent, input, human, ids: [a, b], link } = await graph(2, 'review');
+    const pending = runId(await agent.entities.link(input));
+    await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{member_support}', 'null'::jsonb) WHERE id = ${pending}`;
+    const id = linked(await link(a, b));
+    await human.entities.unlink({ relationship_id: id });
+    await sql.begin(async tx => {
+      await tx`ALTER TABLE entity_relationships DISABLE TRIGGER lobu_guard_identity_edges`;
+      await tx`UPDATE entity_relationships SET metadata = metadata #- '{_lobu_identity_decision,member_support}' WHERE id = ${id}`;
+      await tx`ALTER TABLE entity_relationships ENABLE TRIGGER lobu_guard_identity_edges`;
+    });
+    const before = await sql`SELECT * FROM entity_relationships WHERE id = ${id}`;
+    await expect(sql.begin(tx => tx.unsafe(normalization()))).rejects.toThrow(/Invalid identity member support map/);
+    expect(await sql`SELECT * FROM entity_relationships WHERE id = ${id}`).toEqual(before);
+    const [guard] = await sql`SELECT tgenabled FROM pg_trigger WHERE tgname = 'lobu_guard_identity_edges'`;
+    expect(guard.tgenabled).toBe('O');
+  });
+
+  it.each(['known', 'null', 'unknown'])('keeps old pending proposals stale and their %s rejection evidence intact', async (evidence) => {
+    const { sql, agent, human, input, ids: [a, b] } = await graph(2, 'review');
+    const pending = runId(await agent.entities.link(input));
+    await sql`UPDATE runs SET action_input = action_input - 'member_support' - 'evidence_fingerprint' - 'prior_decisions' WHERE id = ${pending}`;
+    if (evidence !== 'known') await sql`UPDATE runs SET action_input = jsonb_set(action_input, '{suppression_support}',
+      ${JSON.stringify(evidence === 'null' ? null : { version: 99, opaque: 'retained' })}::jsonb) WHERE id = ${pending}`;
+    const [before] = await sql`SELECT * FROM runs WHERE id = ${pending}`;
+    await sql.begin(tx => tx.unsafe(normalization()));
+    const [after] = await sql`SELECT * FROM runs WHERE id = ${pending}`;
+    expect(after).toEqual({ ...before, action_input: { ...before.action_input,
+      member_support: { [JSON.stringify([a, b])]: before.action_input.suppression_support } } });
+    await expect(human.operations.approve({ run_id: pending })).rejects.toThrow(/stale/);
+    // A stale approval is still rejectable; opaque evidence must not become an empty map.
+    await human.operations.reject({ run_id: pending });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
+  });
+
+  it.each(['not-json', '42', '[]'])('fails closed on malformed historical evidence key %s', async (key) => {
+    const { sql, agent, human, input, ids: [a, b] } = await graph(2, 'review');
+    const pending = runId(await agent.entities.link(input));
+    await human.operations.reject({ run_id: pending });
+    const [row] = await sql`SELECT action_input FROM runs WHERE id = ${pending}`;
+    row.action_input.member_support[JSON.stringify([a, b])].keys = [key];
+    await sql`UPDATE runs SET action_input = ${sql.json(row.action_input)}::jsonb WHERE id = ${pending}`;
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
+  });
+
   it('retains the identity purpose through public create/get', async () => {
     const { workspace } = await graph();
     const result = await workspace.owner.entity_schema.getRelType('same_record');
@@ -511,6 +596,24 @@ describe('governed stored identity associations', () => {
     await link(a, b);
     expect(await agent.entities.link({ from_entity_id: b, to_entity_id: c, relationship_type_slug: 'same_record' }))
       .toMatchObject({ approval_suppressed: true });
+  });
+
+  it('retains the original pair rejection when regrouping and later restoring its policy', async () => {
+    const { human, agent, ids: [a, b, c, d], link, metadataSchema } = await graph(4, 'review');
+    const original = await agent.entities.link({ from_entity_id: a, to_entity_id: c, relationship_type_slug: 'same_record' });
+    await human.operations.reject({ run_id: runId(original) });
+    await link(a, b);
+    await link(c, d);
+    await human.entity_schema.updateType({ slug: 'contact-record', metadata_schema: {
+      'x-lobu-resolution': { rules: [
+        { fields: ['emails'], normalizer: 'email', onMatch: 'review' },
+        { fields: ['phone'], normalizer: 'phone', onMatch: 'review' },
+      ] },
+    } });
+    const input = { from_entity_id: b, to_entity_id: d, relationship_type_slug: 'same_record' };
+    await human.operations.reject({ run_id: runId(await agent.entities.link(input)) });
+    await human.entity_schema.updateType({ slug: 'contact-record', metadata_schema: metadataSchema });
+    expect(await agent.entities.link(input)).toMatchObject({ approval_suppressed: true });
   });
 
   it('retains accepted member support when withdrawal follows an evidence edit', async () => {

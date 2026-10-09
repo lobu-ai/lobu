@@ -2,16 +2,10 @@ import { describe, expect, test } from "bun:test";
 import config from "../lobu.config";
 
 describe("duplicate entity resolution configuration", () => {
-  test("declares email association and phone review policies explicitly", () => {
+  test("keeps identity matching disabled with the workspace configuration", () => {
     const person = config.entities?.find((entity) => entity.key === "person");
-    expect(person?.resolutionPolicy).toEqual({
-      rules: [
-        { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
-        { fields: ["emails"], normalizer: "email", onMatch: "auto_link" },
-        { fields: ["phone"], normalizer: "phone", onMatch: "review" },
-        { fields: ["phones"], normalizer: "phone", onMatch: "review" },
-      ],
-    });
+    expect(person).toBeDefined();
+    expect(person?.resolutionPolicy).toBeUndefined();
   });
 
   // Automation `triggers` are always-managed by apply: an omitted key projects

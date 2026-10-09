@@ -236,18 +236,6 @@ const person = defineEntityType({
       description: "WhatsApp chat the message belongs to.",
     },
   },
-  // This workspace permits automatic identity association on normalized email
-  // matches. Each source record keeps its ID and metadata. Phone matches require
-  // review because numbers can be shared. The reporting Automation only reports
-  // candidates; this policy governs explicit association requests.
-  resolutionPolicy: {
-    rules: [
-      { fields: ["email"], normalizer: "email", onMatch: "auto_link" },
-      { fields: ["emails"], normalizer: "email", onMatch: "auto_link" },
-      { fields: ["phone"], normalizer: "phone", onMatch: "review" },
-      { fields: ["phones"], normalizer: "phone", onMatch: "review" },
-    ],
-  },
 });
 
 // System chat-surface unit (Slack etc.). Declared so prune does not attempt to

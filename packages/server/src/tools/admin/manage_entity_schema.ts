@@ -13,6 +13,8 @@ import {
   ManageEntitySchemaResultSchema,
   ManageEntitySchemaSchema,
   ManageEntitySchemaProposalSchema,
+  InvalidEntityResolutionPolicyError,
+  parseEntityResolutionPolicy,
   type AuditEntry,
   type EntityTypeRow,
   type ManageEntitySchemaArgs,
@@ -1033,11 +1035,20 @@ function assertValidEventKindInteractions(
   }
 }
 
-function validateEntityMetadataSchemaDisplayConfig(
+function validateEntityMetadataSchemaConfig(
   metadataSchema: Record<string, unknown> | undefined
 ): void {
   if (!metadataSchema || typeof metadataSchema !== 'object' || Array.isArray(metadataSchema)) {
     return;
+  }
+
+  if (metadataSchema['x-lobu-resolution'] !== undefined) {
+    try {
+      parseEntityResolutionPolicy(metadataSchema['x-lobu-resolution']);
+    } catch (error) {
+      if (!(error instanceof InvalidEntityResolutionPolicyError)) throw error;
+      throw invalidSchema(`metadata_schema.x-lobu-resolution: ${error.message}`);
+    }
   }
 
   if (metadataSchema[COLLECTION_PRESENTATION_KEY] !== undefined) {
@@ -1311,7 +1322,7 @@ async function prepareEntityTypeCreate(
     );
   }
 
-  validateEntityMetadataSchemaDisplayConfig(args.metadata_schema);
+  validateEntityMetadataSchemaConfig(args.metadata_schema);
   assertValidBacking(args.backing);
 
   // metadata_schema is stored as the author sent it — measure/dimension roles for
@@ -1441,7 +1452,7 @@ async function etHandleUpdate(
 
   const beforePayload = { ...current } as Record<string, unknown>;
   if (args.metadata_schema !== undefined) {
-    validateEntityMetadataSchemaDisplayConfig(args.metadata_schema);
+    validateEntityMetadataSchemaConfig(args.metadata_schema);
   }
   assertValidMetricsConfig(args.metrics_config);
   assertValidBacking(args.backing);
