@@ -103,6 +103,8 @@ function depsWith(
 			{
 				connectorKey: "slack",
 				provider: "slack",
+				displayName: "Slack",
+				faviconDomain: "slack.com",
 				loginScopes: [],
 				clientIdKey: "SLACK_CLIENT_ID",
 				clientSecretKey: "SLACK_CLIENT_SECRET",
@@ -306,6 +308,8 @@ describe("persistLoginChatIdentity", () => {
 						{
 							connectorKey: "slack",
 							provider: "slack",
+							displayName: "Slack",
+							faviconDomain: "slack.com",
 							loginScopes: [],
 							clientIdKey: "SLACK_CLIENT_ID",
 							clientSecretKey: "SLACK_CLIENT_SECRET",

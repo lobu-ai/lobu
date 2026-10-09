@@ -104,6 +104,8 @@ describe('login provider helpers', () => {
       {
         connectorKey: 'google.gmail',
         provider: 'google',
+        displayName: 'Google',
+        faviconDomain: null,
         loginScopes: ['openid', 'email', 'profile'],
         clientIdKey: 'GOOGLE_CLIENT_ID',
         clientSecretKey: 'GOOGLE_CLIENT_SECRET',
@@ -111,6 +113,8 @@ describe('login provider helpers', () => {
       {
         connectorKey: 'github.issues',
         provider: 'github',
+        displayName: 'Github',
+        faviconDomain: null,
         loginScopes: ['read:user', 'user:email'],
         clientIdKey: 'GH_ID',
         clientSecretKey: 'GH_SECRET',
@@ -118,6 +122,8 @@ describe('login provider helpers', () => {
       {
         connectorKey: 'twitter.timeline',
         provider: 'twitter',
+        displayName: 'Twitter',
+        faviconDomain: null,
         loginScopes: ['users.read', 'tweet.read', 'offline.access', 'users.email'],
         clientIdKey: 'TWITTER_CLIENT_ID',
         clientSecretKey: 'TWITTER_CLIENT_SECRET',
@@ -158,12 +164,50 @@ describe('login provider helpers', () => {
     expect(configs.map((c) => c.provider)).toEqual(['google']);
     expect(warnSpy).not.toHaveBeenCalled();
   });
+
+  it('derives displayName/faviconDomain from the owning connector row', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const configs = collectEnabledLoginProviderConfigs([
+      {
+        key: 'agentid',
+        name: 'AgentID',
+        favicon_domain: 'agentid.com',
+        auth_schema: {
+          methods: [
+            { type: 'oauth', provider: 'agentid', loginScopes: ['openid', 'email', 'profile'] },
+          ],
+        },
+      },
+      {
+        // No name → capitalized provider key; no favicon → null.
+        key: 'noname',
+        auth_schema: {
+          methods: [{ type: 'oauth', provider: 'noname', loginScopes: ['openid'] }],
+        },
+      },
+      {
+        // Blank name trims to nothing → same fallback as absent.
+        key: 'blankname',
+        name: '   ',
+        auth_schema: {
+          methods: [{ type: 'oauth', provider: 'blankname', loginScopes: ['openid'] }],
+        },
+      },
+    ]);
+    expect(configs).toMatchObject([
+      { provider: 'agentid', displayName: 'AgentID', faviconDomain: 'agentid.com' },
+      { provider: 'noname', displayName: 'Noname', faviconDomain: null },
+      { provider: 'blankname', displayName: 'Blankname', faviconDomain: null },
+    ]);
+  });
 });
 
 describe('mergeLoginProviderConfigs', () => {
   const baselineGoogle = {
     connectorKey: 'google.gmail',
     provider: 'google',
+    displayName: 'Gmail',
+    faviconDomain: 'mail.google.com',
     loginScopes: ['openid', 'email', 'profile'],
     clientIdKey: 'GOOGLE_CLIENT_ID',
     clientSecretKey: 'GOOGLE_CLIENT_SECRET',
@@ -171,6 +215,8 @@ describe('mergeLoginProviderConfigs', () => {
   const baselineGithub = {
     connectorKey: 'github.issues',
     provider: 'github',
+    displayName: 'GitHub',
+    faviconDomain: 'github.com',
     loginScopes: ['read:user'],
     clientIdKey: 'GITHUB_CLIENT_ID',
     clientSecretKey: 'GITHUB_CLIENT_SECRET',
@@ -187,6 +233,8 @@ describe('mergeLoginProviderConfigs', () => {
     const orgOnly = {
       connectorKey: 'okta.sso',
       provider: 'okta',
+      displayName: 'Acme SSO',
+      faviconDomain: null,
       loginScopes: ['openid'],
       clientIdKey: 'OKTA_CLIENT_ID',
       clientSecretKey: 'OKTA_CLIENT_SECRET',
@@ -199,6 +247,8 @@ describe('mergeLoginProviderConfigs', () => {
     const orgGoogle = {
       connectorKey: 'org.google',
       provider: 'google',
+      displayName: 'Org Google',
+      faviconDomain: null,
       loginScopes: ['openid', 'email'],
       clientIdKey: 'ORG_GOOGLE_ID',
       clientSecretKey: 'ORG_GOOGLE_SECRET',
@@ -260,6 +310,8 @@ describe('non-OIDC login provider config (PKCE / basic-auth / extra params)', ()
   const baseRow: EnabledLoginProviderConfig = {
     connectorKey: 'custom.pkce',
     provider: 'custompkce',
+    displayName: 'Custom PKCE',
+    faviconDomain: null,
     loginScopes: ['openid', 'email'],
     clientIdKey: 'CUSTOMPKCE_CLIENT_ID',
     clientSecretKey: 'CUSTOMPKCE_CLIENT_SECRET',
@@ -308,5 +360,21 @@ describe('non-OIDC login provider config (PKCE / basic-auth / extra params)', ()
   it('returns null (→ socialProviders route) when any endpoint is missing', () => {
     const { userinfoUrl, ...noUserinfo } = baseRow;
     expect(buildGenericOAuthEntry(noUserinfo, 'cid', 'secret')).toBeNull();
+  });
+
+  it('falls back to handle/email/sub when the OIDC profile has no name (AgentID unnamed inboxes)', () => {
+    const map = buildGenericOAuthEntry(baseRow, 'cid', 'secret')!.mapProfileToUser;
+    expect(
+      map({ sub: 's1', name: 'Agent Name', email: 'agent@acme.agentmail.to' }).name,
+    ).toBe('Agent Name');
+    expect(
+      map({ sub: 's1', preferred_username: 'support_acme-agentmail-to' }).name,
+    ).toBe('support_acme-agentmail-to');
+    expect(map({ sub: 's1', email: 'support@acme.agentmail.to' }).name).toBe(
+      'support',
+    );
+    expect(map({ sub: 'opaque-subject-1' }).name).toBe('opaque-subject-1');
+    // Blank names trim to nothing and fall through like an absent claim.
+    expect(map({ sub: 's1', name: '   ', email: 'a@b.c' }).name).toBe('a');
   });
 });
