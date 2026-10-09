@@ -342,7 +342,6 @@ export async function restToolProxy(
 	} catch (error) {
 		if (error instanceof ToolNotRegisteredError) {
 			logger.warn({ error, tool_name: error.toolName, source: "rest_proxy" }, "Requested tool is not registered");
-
 		}
 		return restErrorResponse(c, error);
 	}

@@ -52,8 +52,7 @@ app:
   # Non-secret environment variables
   env:
     NODE_ENV: production
-    # Tags all Sentry events so a prod deploy can never report under
-    # environment=development.
+    # Label structured diagnostics with the deployment environment.
     ENVIRONMENT: production
     # Hold teardown after SIGTERM so /health/ready returns 503 and kube-proxy
     # removes this pod from the Service endpoints before in-flight connections
@@ -205,7 +204,7 @@ worker:
     # the fleet worker until it finishes. Two leaves headroom for the Node
     # host beyond the two 512MB isolate heaps, even at the 2Gi request floor.
     WORKER_MAX_CONCURRENT_JOBS: "2"
-    # Tag Sentry events from the worker/embeddings deployment as production.
+    # Label worker and embedding diagnostics as production.
     ENVIRONMENT: production
 
   # Transformer model cache volume

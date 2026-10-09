@@ -11,7 +11,7 @@ describe('fatal process diagnostics', () => {
   ]) {
     it(`records a sanitized fatal error and exits: ${expression}`, () => {
       const child = spawnSync(process.execPath, ['--import', 'tsx', '--import', instrument, '-e',
-        `const failure = new Error('synthetic fatal token="synthetic-fatal-secret with spaces"', { cause: { password: 'synthetic-cause-secret' } }); ${expression}`], {
+        `const failure = new Error('synthetic fatal token="synthetic-fatal-secret with spaces" https://example.test/path?password="synthetic-url-secret with spaces"', { cause: { password: 'synthetic-cause-secret' } }); ${expression}`], {
         env: { ...process.env, SENTRY_DSN: '', NODE_ENV: 'test', ENVIRONMENT: 'test' },
         encoding: 'utf8', timeout: 10_000,
       });
@@ -24,6 +24,7 @@ describe('fatal process diagnostics', () => {
       expect(fatal.error.stack).toContain('[eval]');
       expect(child.stdout + child.stderr).not.toContain('synthetic-fatal-secret');
       expect(child.stdout + child.stderr).not.toContain('synthetic-cause-secret');
+      expect(child.stdout + child.stderr).not.toContain('synthetic-url-secret');
     });
   }
   it('retains nested aggregate failures and their structured codes at process exit', () => {

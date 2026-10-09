@@ -2,7 +2,7 @@
 import dotenv from 'dotenv';
 import { writeSync } from 'node:fs';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { scrubSentryValue } from '@lobu/core';
+import { scrubDiagnosticValue } from '@lobu/core';
 import { resolveDiagnosticRuntime } from './utils/runtime-info';
 
 // This entry point runs before the server graph reads configuration.
@@ -13,7 +13,7 @@ dotenv.config();
 // Node also routes unhandled rejections here under its default throw policy.
 process.on('uncaughtException', (error, origin) => {
   try {
-    writeSync(1, `${JSON.stringify(scrubSentryValue({
+    writeSync(1, `${JSON.stringify(scrubDiagnosticValue({
       level: 'fatal', service: 'lobu-server', source: origin,
       time: Date.now(), release: process.env.APP_GIT_SHA,
       environment: resolveDiagnosticRuntime().environment,

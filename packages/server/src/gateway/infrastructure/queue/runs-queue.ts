@@ -762,8 +762,7 @@ export class RunsQueue implements IMessageQueue {
         queue: row.queue_name ?? "unknown",
       });
     }
-    // Per-run terminal failures remain warnings; the analyst correlates repeated
-    // failures using their run and queue identifiers rather than alerting per log.
+    // Per-run terminal failures remain warnings to avoid an alert per failed run.
     // The aggregate "we have failed runs" signal lives on lobu_runs_failed_total.
     logger.warn(`Run ${runId} failed after retries: ${message}`);
   }

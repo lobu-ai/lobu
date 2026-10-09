@@ -5,7 +5,7 @@ const USE_WINSTON_LOGGER = process.env.USE_WINSTON_LOGGER === "true";
 const USE_JSON_FORMAT = process.env.LOG_FORMAT === "json";
 
 import winston from "winston";
-import { scrubSentryValue } from "./utils/sentry-scrubber";
+import { scrubDiagnosticValue } from "./utils/diagnostic-scrubber";
 
 export interface Logger {
   error: (message: any, ...args: any[]) => void;
@@ -43,7 +43,7 @@ function createRedactingReplacer() {
 function safeStringify(value: unknown, space?: number): string {
   try {
     return JSON.stringify(
-      scrubSentryValue(value),
+      scrubDiagnosticValue(value),
       createRedactingReplacer(),
       space
     );
@@ -107,7 +107,7 @@ function createConsoleLogger(serviceName: string): Logger {
       msgStr += ` ${safeStringify(args.length === 1 ? args[0] : args)}`;
     }
 
-    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${scrubSentryValue(msgStr)}`;
+    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${scrubDiagnosticValue(msgStr)}`;
   };
 
   return {
@@ -180,7 +180,7 @@ export function createLogger(serviceName: string): Logger {
       winston.format((info) => {
         // Preserve Winston's symbol fields while applying the same boundary
         // scrubbing as the default console transport.
-        return Object.assign(info, scrubSentryValue(info));
+        return Object.assign(info, scrubDiagnosticValue(info));
       })()
     ),
     defaultMeta: { service: serviceName, release: process.env.APP_GIT_SHA },

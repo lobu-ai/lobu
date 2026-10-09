@@ -129,7 +129,7 @@ describe("server.bundle.mjs Node gate (direct `node bundle` path)", () => {
   // bin/lobu.js. The build (build-server-bundle.mjs) makes server.bundle.mjs a
   // tiny gate entry that checks the Node version, then dynamically imports the
   // real graph (server-main.bundle.mjs). The split is required: an in-file
-  // guard can't beat ESM hoisting of the graph's @sentry/node → undici import,
+  // guard can't beat ESM hoisting of the graph's undici import,
   // which crashes old Node with `ReferenceError: File is not defined`.
   //
   // NOTE: on this Node 26 host, spoofing only the version STRING can't trigger

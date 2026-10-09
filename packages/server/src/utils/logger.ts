@@ -1,5 +1,5 @@
 import { isSecretKey } from '@lobu/core';
-import { scrubSentryValue } from '@lobu/core';
+import { scrubDiagnosticValue } from '@lobu/core';
 import pino from 'pino';
 
 /**
@@ -56,7 +56,7 @@ const diagnosticStream: pino.DestinationStream = {
   write(line: string): void {
     let parsed: unknown;
     try {
-      parsed = scrubSentryValue(JSON.parse(line));
+      parsed = scrubDiagnosticValue(JSON.parse(line));
     } catch {
       // Never fall back to emitting an unredacted record on a logging failure.
       process.stdout.write('{"level":"error","msg":"Log record could not be serialized safely"}\n');

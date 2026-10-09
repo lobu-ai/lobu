@@ -47,8 +47,6 @@ export interface InitOptions {
   memory?: string;
   memoryUrl?: string;
   otelEndpoint?: string;
-  sentry?: boolean;
-  noSentry?: boolean;
   hostedSlack?: boolean;
   listProviders?: boolean;
   /** Scaffold files without installing project dependencies. */
@@ -614,35 +612,6 @@ export async function initCommand(
     envSecrets.push({
       envVar: "OTEL_EXPORTER_OTLP_ENDPOINT",
       value: otelEndpoint,
-    });
-  }
-
-  let enableSentry = false;
-  if (options.sentry === true) {
-    enableSentry = true;
-  } else if (options.noSentry === true) {
-    enableSentry = false;
-  } else if (!useDefaults) {
-    enableSentry = await confirm({
-      message:
-        "Share anonymous error reports with Sentry to help improve Lobu?",
-      default: false,
-    });
-  }
-
-  if (enableSentry) {
-    envSecrets.push({
-      envVar: "SENTRY_DSN",
-      value:
-        "https://63abd848f1338116c41d4a8a29091c7c@o4511547660042240.ingest.us.sentry.io/4511547664171008",
-    });
-    // The shared community DSN reports into the same Sentry project as the
-    // hosted deployment, and instrument.ts defaults environment to
-    // "production" — tag self-hosted installs so their errors are filterable
-    // and never read as hosted-prod incidents.
-    envSecrets.push({
-      envVar: "ENVIRONMENT",
-      value: "self-host",
     });
   }
 
