@@ -10,6 +10,8 @@ import { safeParseUrl } from "./base-url";
 
 interface AuthConfig {
 	social: Record<string, boolean>;
+	/** Connector display metadata; keys mirror the enabled providers in `social`. */
+	socialMeta: Record<string, { name: string; faviconDomain: string | null }>;
 	magicLink: boolean;
 	phone: boolean;
 	emailPassword: boolean;
@@ -32,6 +34,8 @@ type TokenEndpointAuthMethod =
 export interface EnabledLoginProviderConfig {
 	connectorKey: string;
 	provider: string;
+	displayName: string;
+	faviconDomain: string | null;
 	loginScopes: string[];
 	clientIdKey: string;
 	clientSecretKey: string;
@@ -70,6 +74,8 @@ type OAuthMethod = {
 
 type LoginProviderConfigRow = {
 	key: string;
+	name?: string | null;
+	favicon_domain?: string | null;
 	auth_schema: { methods?: OAuthMethod[] } | string | null;
 };
 
@@ -161,6 +167,8 @@ export function collectEnabledLoginProviderConfigs(
 			configs.push({
 				connectorKey,
 				provider,
+				displayName: row.name?.trim() || provider.charAt(0).toUpperCase() + provider.slice(1),
+				faviconDomain: row.favicon_domain?.trim() || null,
 				loginScopes,
 				clientIdKey: hasValue(method.clientIdKey)
 					? method.clientIdKey!
@@ -447,6 +455,8 @@ async function getBaselineLoginProviderConfigs(): Promise<
 	const defs = await listCatalogConnectorDefinitions();
 	const rows: LoginProviderConfigRow[] = defs.map((def) => ({
 		key: def.key,
+		name: def.name,
+		favicon_domain: def.favicon_domain,
 		auth_schema:
 			(def.auth_schema as LoginProviderConfigRow["auth_schema"]) ?? null,
 	}));
@@ -486,7 +496,7 @@ export async function getEnabledLoginProviderConfigs(
 
 	const db = getDb();
 	const rows = await db`
-    SELECT key, auth_schema
+    SELECT key, name, favicon_domain, auth_schema
     FROM connector_definitions
     WHERE login_enabled = true
       AND status = 'active'
@@ -517,6 +527,7 @@ export async function getAuthConfig(
 	const isProduction = runtimeNodeEnv === "production";
 
 	const social: AuthConfig["social"] = {};
+	const socialMeta: AuthConfig["socialMeta"] = {};
 
 	const envRecord = env as Record<string, string | undefined>;
 	const allowedGlobalProviders = hasValue(envRecord.LOBU_GLOBAL_LOGIN_PROVIDERS)
@@ -541,6 +552,10 @@ export async function getAuthConfig(
 			hasValue(clientSecret ?? undefined)
 		) {
 			social[config.provider] = true;
+			socialMeta[config.provider] = {
+				name: config.displayName,
+				faviconDomain: config.faviconDomain,
+			};
 		}
 	}
 
@@ -587,6 +602,7 @@ export async function getAuthConfig(
 
 	return {
 		social,
+		socialMeta,
 		magicLink,
 		phone,
 		emailPassword,

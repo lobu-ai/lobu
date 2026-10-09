@@ -46,6 +46,7 @@ const CREDENTIAL_ENV_KEYS = [
 	"LINKEDIN",
 	"MICROSOFT",
 	"SLACK",
+	"AGENTID",
 ].flatMap((provider) => [`${provider}_CLIENT_ID`, `${provider}_CLIENT_SECRET`]);
 
 describe("login provider baseline (integration)", () => {
@@ -78,6 +79,11 @@ describe("login provider baseline (integration)", () => {
 		const config = await getAuthConfig(ENV, { organizationId: null });
 		expect(config.social.google).toBe(true);
 		expect(config.social.github).toBe(true);
+		expect(Object.keys(config.socialMeta).sort()).toEqual(
+			Object.keys(config.social).sort(),
+		);
+		expect(typeof config.socialMeta.google.name).toBe("string");
+		expect(config.socialMeta.google.name.length).toBeGreaterThan(0);
 	});
 
 	it("exposes the SAME baseline for an org with no login_enabled connectors (the /market case)", async () => {
@@ -88,6 +94,22 @@ describe("login provider baseline (integration)", () => {
 		});
 		expect(config.social.google).toBe(true);
 		expect(config.social.github).toBe(true);
+	});
+
+	it("exposes AgentID metadata only when its credentials resolve", async () => {
+		const enabled = await getAuthConfig({
+			AGENTID_CLIENT_ID: "test-agentid-id",
+			AGENTID_CLIENT_SECRET: "test-agentid-secret",
+		} as unknown as Env, { organizationId: null });
+		expect(enabled.social.agentid).toBe(true);
+		expect(enabled.socialMeta.agentid).toEqual({
+			name: "AgentID",
+			faviconDomain: "agentid.com",
+		});
+
+		const disabled = await getAuthConfig(ENV, { organizationId: null });
+		expect(disabled.social.agentid).toBeUndefined();
+		expect(disabled.socialMeta.agentid).toBeUndefined();
 	});
 
 	it("hides providers whose credentials are absent (no silent enable)", async () => {
