@@ -97,6 +97,20 @@ describe("provider registry contract (config/providers.json)", () => {
 		expect(mappings.OPENAI_BASE_URL).toBe(mappings.OPENAI_API_BASE_URL);
 	});
 
+	test("deployment OpenAI URL overrides retain Chat Completions", () => {
+		const prior = process.env.OPENAI_API_BASE_URL;
+		try {
+			process.env.OPENAI_API_BASE_URL = "https://deployment.example.test/v1";
+			const openai = flattened.find(({ id }) => id === "openai")!.provider;
+			const module = buildModule("openai", openai);
+			expect(module.getUpstreamConfig()?.upstreamBaseUrl).toBe(process.env.OPENAI_API_BASE_URL);
+			expect(resolveSdkCompat(module.sdkCompat)?.api).toBe("openai-completions");
+		} finally {
+			if (prior === undefined) delete process.env.OPENAI_API_BASE_URL;
+			else process.env.OPENAI_API_BASE_URL = prior;
+		}
+	});
+
 	test("OpenAI API exposes its supported transcription route", () => {
 		const openai = flattened.find(({ id }) => id === "openai")?.provider;
 		expect(openai).toBeDefined();

@@ -16,7 +16,7 @@
  * the calling feature fails open.
  */
 
-import { createLogger, getErrorMessage, isSdkCompat, retryWithBackoff } from "@lobu/core";
+import { createLogger, getErrorMessage, retryWithBackoff } from "@lobu/core";
 import {
   getOrgDefaultModel,
   resolveInferenceProviderCredential,
@@ -156,9 +156,7 @@ export async function resolveCompletionTarget(
     (module) => module.providerId === config.kind
   );
   const sdkCompat = resolveOrgProviderProtocol(
-    config.kind, config.baseUrl,
-    isSdkCompat(providerModule?.sdkCompat) ? providerModule.sdkCompat : undefined,
-    providerModule?.getUpstreamConfig?.()?.upstreamBaseUrl,
+    providerModule, config.kind, config.baseUrl,
   );
   if (providerModule && !isGatewayCompletionProtocol(sdkCompat)) {
     logger.warn(

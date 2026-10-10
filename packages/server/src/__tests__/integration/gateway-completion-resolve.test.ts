@@ -19,6 +19,7 @@ import {
 } from '@lobu/core';
 import { createInferenceProvider } from '../../lobu/stores/provider-secrets';
 import { resolveCompletionTarget } from '../../gateway/inference/gateway-completion';
+import { ApiKeyProviderModule } from '../../gateway/auth/api-key-provider-module';
 import { ChatGPTOAuthModule } from '../../gateway/auth/chatgpt/chatgpt-oauth-module';
 import { getDb } from '../../db/client';
 import { cleanupTestDatabase } from '../setup/test-db';
@@ -136,6 +137,33 @@ describe('resolveCompletionTarget protocol gating', () => {
       baseUrl: 'https://api.openai.com/v1', sdkCompat: 'openai-responses', model: 'test-model',
     });
   });
+
+  it.each([undefined, 'https://api.openai.com/v1/'])(
+    'resolves the effective protocol with a deployment override and org URL %s', async (baseUrl) => {
+      const prior = process.env.OPENAI_API_BASE_URL;
+      try {
+        process.env.OPENAI_API_BASE_URL = 'https://deployment.example.test/v1';
+        const org = await createTestOrganization();
+        const created = await createInferenceProvider({
+          organizationId: org.id, slug: 'openai', kind: 'openai', apiKey: 'sk-override-test',
+          capabilities: { text: { model: 'test-model', ...(baseUrl ? { base_url: baseUrl } : {}) } },
+        });
+        if ('error' in created) throw new Error(created.error);
+        moduleRegistry.register(new ApiKeyProviderModule({
+          providerId: 'openai', slug: 'openai', sdkCompat: 'openai-responses',
+          upstreamBaseUrl: 'https://api.openai.com/v1', envVarName: 'OPENAI_API_KEY',
+          providerDisplayName: 'OpenAI', providerIconUrl: '', apiKeyInstructions: '', apiKeyPlaceholder: '',
+          authProfilesManager: {} as never,
+        }) as unknown as ModuleInterface);
+        const target = await resolveCompletionTarget(org.id, 'openai/test-model');
+        expect(target?.baseUrl).toBe(baseUrl ? 'https://api.openai.com/v1' : process.env.OPENAI_API_BASE_URL);
+        expect(target?.sdkCompat).toBe(baseUrl ? 'openai-responses' : undefined);
+      } finally {
+        if (prior === undefined) delete process.env.OPENAI_API_BASE_URL;
+        else process.env.OPENAI_API_BASE_URL = prior;
+      }
+    },
+  );
 
   // Seed a real credential so these refusals reach the protocol check instead
   // of passing accidentally at the earlier missing-credential guard.

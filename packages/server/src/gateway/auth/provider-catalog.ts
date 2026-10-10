@@ -36,18 +36,19 @@ const logger = createLogger("provider-catalog");
  */
 const PROVIDER_HEALTH_PREFERENCE_TTL_MS = 15 * 60 * 1000;
 
-/** The form persists the catalog URL too; only a different URL is a custom endpoint. */
+/** Select the transport for the row's URL, including deployment-level overrides. */
 export function resolveOrgProviderProtocol(
+  module: ModelProviderModule | undefined,
   kind: string,
   baseUrl: string | undefined,
-  protocol: SdkCompat | undefined,
-  catalogBaseUrl: string | undefined,
 ): SdkCompat | undefined {
-  if (kind === "openai") {
-    if (baseUrl && baseUrl.replace(/\/+$/, "") !== catalogBaseUrl?.replace(/\/+$/, "")) {
-      return "openai";
-    }
-    if (protocol === "openai") return "openai-responses";
+  if (module instanceof ApiKeyProviderModule) {
+    return module.getSdkCompatForUpstream(baseUrl);
+  }
+  const protocol = isSdkCompat(module?.sdkCompat) ? module.sdkCompat : undefined;
+  if (kind === "openai" && baseUrl &&
+      baseUrl.replace(/\/+$/, "") !== module?.getUpstreamConfig?.()?.upstreamBaseUrl.replace(/\/+$/, "")) {
+    return "openai";
   }
   return protocol;
 }
@@ -135,10 +136,10 @@ export function buildProviderCatalog(
         ];
 
       const apiKeyModule = module instanceof ApiKeyProviderModule ? module : null;
-      const sdkCompat = config?.sdkCompat ?? module.sdkCompat ?? null;
+      const sdkCompat = module.sdkCompat ?? config?.sdkCompat ?? null;
       const defaultModel = config?.defaultModel ?? apiKeyModule?.defaultModel ?? null;
       const upstream = apiKeyModule?.getUpstreamConfig();
-      const baseUrl = config?.upstreamBaseUrl ?? upstream?.upstreamBaseUrl ?? "";
+      const baseUrl = upstream?.upstreamBaseUrl ?? config?.upstreamBaseUrl ?? "";
 
       entries.push({
         slug: module.providerId,
@@ -473,9 +474,7 @@ export class ProviderCatalogService {
       const row = orgRowsBySlug?.get(providerId);
       const catalogEntry = row && catalogByKind?.get(row.kind);
       const rowProtocol = row && resolveOrgProviderProtocol(
-        row.kind, row.capabilities.text?.base_url,
-        isSdkCompat(staticModule?.sdkCompat) ? staticModule.sdkCompat : undefined,
-        catalogEntry?.baseUrl,
+        moduleMap.get(row.kind), row.kind, row.capabilities.text?.base_url,
       );
       if (staticModule && (!rowProtocol || rowProtocol === staticModule.sdkCompat)) {
         modules.push(staticModule);
@@ -487,13 +486,9 @@ export class ProviderCatalogService {
         // created before kind carried a protocol, and custom endpoints, are
         // OpenAI-compatible). An unknown kind contributes no baseUrl, so such a
         // row still routes only if it names its own upstream.
-        const sdkCompat = resolveOrgProviderProtocol(
-          row.kind, row.capabilities.text?.base_url, catalogEntry?.sdkCompat,
-          catalogEntry?.baseUrl,
-        ) ?? "openai";
         const synthesized = this.synthesizeOrgProviderModule(
           row,
-          sdkCompat,
+          rowProtocol ?? "openai",
           catalogEntry?.baseUrl
         );
         if (synthesized) modules.push(synthesized);

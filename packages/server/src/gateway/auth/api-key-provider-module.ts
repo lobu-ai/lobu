@@ -73,7 +73,20 @@ export class ApiKeyProviderModule extends BaseProviderModule {
       config.authProfilesManager,
     );
     this.apiKeyConfig = config;
+    this.sdkCompat = this.getSdkCompatForUpstream();
     this.name = `${config.providerId}-api-key`;
+  }
+
+  /** OpenAI URL overrides may only support Chat Completions; compare with the catalog URL. */
+  getSdkCompatForUpstream(baseUrl?: string): SdkCompat | undefined {
+    const protocol = this.apiKeyConfig.sdkCompat;
+    if (this.providerId === "openai" && protocol === "openai-responses") {
+      const effective = baseUrl ?? this.getUpstreamConfig()?.upstreamBaseUrl;
+      if (effective?.replace(/\/+$/, "") !== this.apiKeyConfig.upstreamBaseUrl?.replace(/\/+$/, "")) {
+        return "openai";
+      }
+    }
+    return protocol;
   }
 
   /**

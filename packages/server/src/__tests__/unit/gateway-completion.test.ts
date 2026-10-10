@@ -91,18 +91,48 @@ describe("gatewayCompletion", () => {
       output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "partial" }] }],
     });
     await expect(gatewayCompletion({ target: { ...TARGET, sdkCompat: "openai-responses" },
-      systemPrompt: "s", userPrompt: "u", timeoutMs: 5000, maxTokens: 8,
+      systemPrompt: "s", userPrompt: "u", timeoutMs: 5000, maxTokens: 16,
     })).rejects.toBeInstanceOf(GatewayCompletionTruncatedError);
     expect(calls).toHaveLength(1);
   });
 
-  test.each(["failed", "incomplete", "cancelled"])("Responses %s never returns partial text", async (status) => {
+  test.each(["failed", "incomplete", "cancelled", "queued", "in_progress"])("Responses %s never returns partial text", async (status) => {
     const { calls } = stubFetch({ status,
       output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "partial" }] }],
     });
     await expect(gatewayCompletion({ target: { ...TARGET, sdkCompat: "openai-responses" },
       systemPrompt: "s", userPrompt: "u", timeoutMs: 5000,
     })).rejects.toThrow("did not complete");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("Responses collects assistant text across output items and content parts", async () => {
+    const { calls } = stubFetch({ status: "completed", output: [
+      { type: "reasoning", summary: [] },
+      { type: "message", role: "assistant", content: [
+        { type: "output_text", text: "first " },
+        { type: "output_text", text: "second " },
+      ] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "third" }] },
+    ] });
+    expect(await gatewayCompletion({
+      target: { ...TARGET, sdkCompat: "openai-responses" },
+      systemPrompt: "s", userPrompt: "u", timeoutMs: 5000,
+    })).toBe("first second third");
+    expect(JSON.parse(String(calls[0]?.init.body))).not.toHaveProperty("max_output_tokens");
+  });
+
+  test.each([
+    { name: "empty output", output: [] },
+    { name: "refusal", output: [
+      { type: "message", role: "assistant", content: [{ type: "refusal", refusal: "Cannot comply" }] },
+    ] },
+  ])("Responses $name fails without retrying", async ({ output }) => {
+    const { calls } = stubFetch({ status: "completed", output });
+    await expect(gatewayCompletion({
+      target: { ...TARGET, sdkCompat: "openai-responses" },
+      systemPrompt: "s", userPrompt: "u", timeoutMs: 5000,
+    })).rejects.toThrow("returned no text");
     expect(calls).toHaveLength(1);
   });
 
