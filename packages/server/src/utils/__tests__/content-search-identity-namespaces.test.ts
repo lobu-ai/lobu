@@ -26,6 +26,14 @@ describe('content-search identity namespace registry bridge', () => {
     expect(sql).toContain("COALESCE(ei.scope_key, '')");
   });
 
+  it('shares one identity traversal across the direct and namespace branches', () => {
+    const sql = entityLinkMatchSql('$1::bigint', 'f');
+    expect(sql.match(/FROM entities seed/g)).toHaveLength(1);
+    expect(sql).toContain('e2.entity_ids && ARRAY(SELECT id FROM identity_members)');
+    expect(sql.match(/ei.entity_id IN \(SELECT id FROM identity_members\)/g))
+      .toHaveLength(STANDARD_IDENTITY_NAMESPACES.length);
+  });
+
   it('emits indexed LinkedIn identity branches for entity-link matching', () => {
     const sql = entityLinkMatchSql('$1', 'f');
     expect(sql).toContain("ei.namespace = 'linkedin_slug'");

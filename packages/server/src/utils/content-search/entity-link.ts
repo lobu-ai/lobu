@@ -6,7 +6,7 @@
 
 import { EVENT_RECALL_IDENTITY_NAMESPACES } from '@lobu/connector-sdk/identity-namespaces';
 import { type DbClient, pgTextArray } from '../../db/client';
-import { identityMemberIdsSql } from '../entity-identity';
+import { identityMemberIdsSql, identityMembersCteBody } from '../entity-identity';
 import { CONNECTOR_RECALL_NAMESPACES } from '../../identity/connector-identity-modules';
 import {
   IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY,
@@ -48,7 +48,8 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * Events are append-only, so (2) is how connector-driven auto-linking is
  * surfaced at read time — `entity_ids` is never mutated post-insert.
  *
- * Shape: `alias.id IN (WITH entity_link_ids AS MATERIALIZED (UNION …) SELECT id FROM entity_link_ids)`.
+ * The shared `identity_members` CTE resolves the component once for all
+ * attribution branches. `entity_link_ids` materializes their candidate-id union.
  * Each standard namespace gets its own UNION branch with a literal
  * `ei.namespace = '<ns>'` so Postgres can evaluate the join against
  * `entity_identities` first, then probe `events` via the per-namespace
@@ -61,12 +62,13 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * scan so the branches can use their attribution indexes.
  */
 export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
-  const directBranch = directEntityLinkBranch(paramRef);
+  const directBranch = `SELECT e2.id FROM events e2
+    WHERE e2.entity_ids && ARRAY(SELECT id FROM identity_members)`;
 
   const standardBranches = STANDARD_IDENTITY_NAMESPACES.map(
     (ns) => `SELECT e2.id FROM events e2
       JOIN entity_identities ei
-        ON ei.entity_id IN (${identityMemberIdsSql(paramRef)})
+        ON ei.entity_id IN (SELECT id FROM identity_members)
        AND ei.namespace = '${ns}'
        AND ei.deleted_at IS NULL
       WHERE e2.metadata ? '${ns}'
@@ -75,7 +77,11 @@ export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
   );
 
   const branches = [directBranch, ...standardBranches].join('\n    UNION\n    ');
-  return `${alias}.id IN (WITH entity_link_ids AS MATERIALIZED (\n    ${branches}\n  ) SELECT id FROM entity_link_ids)`;
+  return `${alias}.id IN (WITH RECURSIVE identity_members(id, organization_id, entity_type_id) AS (
+    ${identityMembersCteBody(paramRef)}
+  ), entity_link_ids AS MATERIALIZED (
+    ${branches}
+  ) SELECT id FROM entity_link_ids)`;
 }
 
 /** Match the IDs of the current identity component. */

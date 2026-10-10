@@ -24,16 +24,25 @@ export function identityRootSql(entityAlias: string): string {
 /** Trusted SQL reference only. The database bounds live identity components to 26 records. */
 export function identityMemberIdsSql(entityRef: string): string {
   return `WITH RECURSIVE identity_members(id, organization_id, entity_type_id) AS (
-    SELECT seed.id, seed.organization_id, seed.entity_type_id FROM entities seed
-    WHERE seed.id = ${entityRef}
+    ${identityMembersCteBody(entityRef)}
+  ) SELECT id FROM identity_members`;
+}
+
+/**
+ * The recursive body behind {@link identityMemberIdsSql}, without the
+ * surrounding WITH clause, so attribution branches can share one traversal.
+ * The CTE must be named `identity_members` — the body self-references it.
+ */
+export function identityMembersCteBody(seedRef: string): string {
+  return `SELECT seed.id, seed.organization_id, seed.entity_type_id FROM entities seed
+    WHERE seed.id = ${seedRef}
     UNION
     SELECT next.id, next.organization_id, next.entity_type_id
     FROM identity_members member
     JOIN LATERAL (${identityEdgesSql('member')}) edge
       ON member.id IN (edge.from_entity_id, edge.to_entity_id)
     JOIN entities next ON next.id = CASE WHEN edge.from_entity_id = member.id
-      THEN edge.to_entity_id ELSE edge.from_entity_id END
-  ) SELECT id FROM identity_members`;
+      THEN edge.to_entity_id ELSE edge.from_entity_id END`;
 }
 
 export function identityRootIdSql(entityRef: string): string {
