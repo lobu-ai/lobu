@@ -36,6 +36,11 @@ import {
  */
 const HEAL_MIGRATIONS = [
 	{
+		files: ["20261010223001_runs_org_default_view.sql"],
+		index: "idx_runs_org_default_view",
+		seedSql: `CREATE INDEX IF NOT EXISTS idx_runs_org_default_view ON runs (id)`,
+	},
+	{
 		files: ["20261007010001_identity_association_indexes.sql"],
 		index: "idx_identity_withdrawal_pair",
 		seedSql: `CREATE INDEX IF NOT EXISTS idx_identity_withdrawal_pair ON entity_relationships (id)`,
