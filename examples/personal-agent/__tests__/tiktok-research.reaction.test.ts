@@ -124,6 +124,35 @@ describe("TikTok research delivery", () => {
     }
   });
 
+  test("accepts typographic quotation differences without relaxing word matching", async () => {
+    const h = harness();
+    h.runs[901] = {
+      ...receipt(),
+      output: {
+        post: {
+          ...receipt().output.post,
+          text: "My assistant’s memory stores “project context” across sessions.",
+        },
+      },
+    };
+    const quote =
+      "My assistant's memory stores 'project context' across sessions.";
+    const result = await notifyTikTokResearch(
+      context([{ ...finding, caption_quote: quote }]),
+      h.client
+    );
+    expect(result.notified).toBe(1);
+    await expect(
+      notifyTikTokResearch(
+        context([
+          { ...finding, caption_quote: quote.replace("stores", "deletes") },
+        ]),
+        h.client
+      )
+    ).rejects.toThrow("Unverified");
+    expect(h.sends).toHaveLength(1);
+  });
+
   test("rejects failed, foreign and stale inspection receipts before any delivery", async () => {
     for (const patch of [
       { status: "failed" },

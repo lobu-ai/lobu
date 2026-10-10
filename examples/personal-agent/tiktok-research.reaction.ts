@@ -43,7 +43,10 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 function normalized(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
+  return value
+    .replace(/["“”‘’]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export default async function notifyTikTokResearch(
