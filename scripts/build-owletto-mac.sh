@@ -99,8 +99,10 @@ if [ -d "$SPARKLE/Updater.app" ]; then
 fi
 [ -f "$SPARKLE/Autoupdate" ] && codesign "${OPTS[@]}" "$SPARKLE/Autoupdate"
 codesign "${OPTS[@]}" "$APP/Contents/Frameworks/Sparkle.framework"
-codesign "${OPTS[@]}" "$APP"
+# Re-signing discards Xcode's entitlements unless supplied again.
+codesign "${OPTS[@]}" --entitlements "$MAC/Owletto/Owletto.entitlements" "$APP"
 codesign --verify --deep --strict "$APP"
+python3 "$ROOT/scripts/verify-mac-app-entitlements.py" "$APP" "$MAC/Owletto/Owletto.entitlements"
 
 echo ">> Built: $APP"
 
