@@ -475,12 +475,21 @@ const xConnection = defineConnection({
   ],
 });
 
+const linkedinAccountAuth = defineAuthProfile({
+  slug: "linkedin-browser-account",
+  connector: "linkedin",
+  authKind: "browser_session",
+  name: "LinkedIn browser account",
+});
+
 const linkedinConnection = defineConnection({
   slug: "linkedin-buremba",
   connector: "linkedin",
   name: "LinkedIn",
-  // Scrape affinity for live reads through the paired Chrome extension.
-  deviceWorkerId: "706aa825-5f82-4ce2-80d1-c09cd7908001",
+  // Keep the verified browser account attached on reapply. A device pin alone
+  // does not supply the authenticated browser session for live reads.
+  deviceWorkerId: "0727b16f-a1e3-419c-96f5-d47d5c76f0bc",
+  authProfile: linkedinAccountAuth,
   feeds: [
     // Apply never prunes feeds. Clear the old schedule explicitly so live
     // reads do not leave the previous periodic ingestion running.
@@ -843,6 +852,7 @@ export default defineConfig({
     spotifyAccountAuth,
     spotifyAppAuth,
     xAccountAuth,
+    linkedinAccountAuth,
   ],
   connections: [
     midasConnection,
