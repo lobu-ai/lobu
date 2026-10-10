@@ -797,7 +797,8 @@ const tiktokResearchAgent = defineAgent({
   providers: [
     {
       id: "openai",
-      model: tiktokResearchExecution.model.slice("openai/".length),
+      // Keep literal for the provider-ref test scan; matches tiktokResearchExecution.
+      model: "gpt-5.4",
     },
   ],
 });

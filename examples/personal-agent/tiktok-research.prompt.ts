@@ -2,7 +2,7 @@
 // The declarative CLI manages model and preserves an existing effort setting.
 export const tiktokResearchExecution = {
   model: "openai/gpt-5.4",
-  effort: "medium",
+  effort: "high",
 } as const;
 
 export const tiktokResearchPrompt = `Research evidence for an AI teammate: personal-assistant memory, personal CRM, company knowledge, multiplayer AI, or MCP gateways. Execute this manual Automation now. Return ZERO to two useful findings; there is no quota. Topic relevance is not evidence.

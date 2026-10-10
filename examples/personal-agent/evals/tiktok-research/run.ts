@@ -163,6 +163,10 @@ async function evaluate(scenario: Scenario, trial: number) {
   const completions: Completion[] = [];
   const errors: string[] = [];
   const scripts: Array<{ source: string; result: unknown }> = [];
+  const sdkCalls = new Set<string>();
+  const sourceTexts: string[] = [];
+  const seenSourceTexts = new Set<string>();
+  const returnedInspections = new Set<number>();
   const violations: string[] = [];
   const forbidden: string[] = [];
   const issuedTokens = new Map<string, number>();
@@ -276,6 +280,15 @@ async function evaluate(scenario: Scenario, trial: number) {
         else assert.ok(read.query?.trim());
         const rows = scenario.reads[reads.length - 1];
         assert.ok(rows, "unexpected additional read");
+        sourceTexts.push(
+          ...(rows === "failed"
+            ? ["UPSTREAM_5XX"]
+            : rows
+                .filter(
+                  (row) => row.origin_id !== scenario.delivered?.origin_id
+                )
+                .map((row) => row.text))
+        );
         return {
           action: "read_feeds",
           results: [
@@ -370,6 +383,7 @@ async function evaluate(scenario: Scenario, trial: number) {
       },
       getRun: async (runId: number) => {
         assert.ok(receipts.has(runId), "receipt must come from this run");
+        lastInspectionScript = scriptNumber;
         return {
           run: {
             id: runId,
@@ -396,6 +410,11 @@ async function evaluate(scenario: Scenario, trial: number) {
           validate(args.extracted_data),
           JSON.stringify(validate.errors)
         );
+        if (
+          [...receipts.keys()].some((runId) => !returnedInspections.has(runId))
+        ) {
+          violations.push("Return inspected captions before completing");
+        }
         completionProvenance.push({
           sameScript: issuedTokens.get(args.window_tokens[0]) === scriptNumber,
           sourceResultsReturned:
@@ -446,6 +465,7 @@ async function evaluate(scenario: Scenario, trial: number) {
     execute: async (_id: string, params: unknown) => {
       const args = params as { script: string };
       scriptNumber++;
+      sourceTexts.length = 0;
       const result = await runScript({
         source: args.script,
         sdk: sdk as unknown as ClientSDK,
@@ -454,7 +474,28 @@ async function evaluate(scenario: Scenario, trial: number) {
         limits: { timeoutMs: 5000, sdkCallQuota: 30 },
       });
       scripts.push({ source: args.script, result: result.returnValue });
+      const returned = JSON.stringify(result.returnValue) ?? "";
+      if (
+        sourceTexts.some(
+          (text) =>
+            !seenSourceTexts.has(text) &&
+            !returned.includes(JSON.stringify(text).slice(1, -1))
+        )
+      ) {
+        violations.push(
+          "Return source captions/errors before deciding the next stage"
+        );
+      }
+      for (const text of sourceTexts) {
+        if (returned.includes(JSON.stringify(text).slice(1, -1)))
+          seenSourceTexts.add(text);
+      }
+      for (const [runId, post] of receipts) {
+        if (returned.includes(JSON.stringify(post.text).slice(1, -1)))
+          returnedInspections.add(runId);
+      }
       for (const call of result.sdkCallTrace) {
+        sdkCalls.add(call.path);
         if (!allowedMethods.has(call.path)) forbidden.push(call.path);
       }
       if (!result.success)
@@ -506,6 +547,14 @@ async function evaluate(scenario: Scenario, trial: number) {
     assert.equal(agent.state.errorMessage, undefined);
     assert.deepEqual(violations, [], "SDK fixture contract violations");
     assert.deepEqual(forbidden, []);
+    for (const method of [
+      "connections.list",
+      "feeds.list",
+      "operations.listAvailable",
+      "notifications.list",
+    ]) {
+      assert.ok(sdkCalls.has(method), `missing discovery: ${method}`);
+    }
     assert.equal(completions.length, 1, "complete exactly once");
     assert.deepEqual(
       reads.map((read) => read.feed_id),
