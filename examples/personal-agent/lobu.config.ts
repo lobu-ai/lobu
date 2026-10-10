@@ -33,6 +33,8 @@ import { takeoutConfig } from "./takeout-dirs.ts";
 import { taskBuilderPrompt } from "./task-builder.prompt.ts";
 import type TaskBuilderReaction from "./task-builder.reaction.ts";
 import type TaskRules from "./task.rules.ts";
+import { tiktokResearchPrompt } from "./tiktok-research.prompt.ts";
+import type TikTokResearchReaction from "./tiktok-research.reaction.ts";
 
 const hourlyTaskCollaboratorSkill = defineSkill({
   name: "hourly-task-collaborator",
@@ -774,37 +776,32 @@ const linkedInFeedFlagger = defineAutomation({
   ),
 });
 
-// Adopted 2026-10-08 from the live UI-created experiment so apply stops
-// blocking on it. Manual-only (no triggers), read-only TikTok research.
-// REMOVE together with its API row when the experiment ends.
-const tiktokPracticalAiResearch = defineAutomation({
-  agent: personalAgent,
-  slug: "tiktok-practical-ai-research",
+// Keep research inference separate from the personal agent's configured models.
+const tiktokResearchAgent = defineAgent({
+  id: "tiktok-research",
+  name: "TikTok research",
   description:
-    "Manual research preview for practical AI agents, tools, and workflows. No schedule or TikTok writes; visual Automation handoff awaits verification.",
+    "Manual, read-only AI teammate research with verified inbox leads.",
+  providers: [{ id: "openai", model: "gpt-4.1" }],
+});
+
+// Manual research: prove useful leads before enabling a cadence.
+const tiktokPracticalAiResearch = defineAutomation({
+  agent: tiktokResearchAgent,
+  slug: "tiktok-practical-ai-research",
+  name: "TikTok practical AI research",
+  description:
+    "Manual AI teammate research with verified inspection receipts and private, deduplicated inbox leads. No TikTok writes or schedule.",
+  model: null,
   tags: ["tiktok", "research", "manual-preview"],
+  triggers: [],
   sources: {
     manual_context: context("SELECT CURRENT_TIMESTAMP AS observed_at"),
   },
-  prompt: `Execute the research steps before completing this run. This is an active manual READ-ONLY research request, not a request to acknowledge a future plan. A successful empty completeWindow({extracted_data:{}}) is not a valid result.
-
-First read your Automation context and retain its window_token. Then actually call operations.listAvailable({connection_id:680}) and feeds.readMany({reads:[{feed_id:669,limit:5}],timeout_ms:30000}); call these through the workspace-scoped client. This source read is explicitly authorized. If For You fails, try Following feed 670 once, then Search feed 671 with query "AI agent workflow". Record each attempt and its returned count or exact error. These reads are allowed even when visual inspection is unavailable.
-
-For at least one relevant returned candidate, call the read action inspect_post and attempt to open the returned image. Calling this read action through run_sdk is allowed; prohibiting TikTok writes means do not call set_like, prepare_comment, follow, send, or publish. If you cannot open pixels, still report the observed caption and canonical URL as metadata-only evidence and explain that visuals are unverified. Do not infer that there are no matches from a tool or image limitation.
-
-Before completing, populate extracted_data with a nonempty summary explaining source attempts, observations and limitations using the completion schema from the Automation context. Include up to three findings if supported. Never claim you read a feed without a real feed result. No outbound notifications or messages.
-
-Manual research preview for TikTok. This version must not execute TikTok writes: no likes, unlikes, comments, follows, messages, or publishing. It has no schedule or event trigger. Automatic likes remain pending a verified image-to-agent path.
-
-The user's approved interest is practical AI agents, useful tools, and real work workflows. Prefer concrete demonstrations, clear implementation steps, and evidence of a useful outcome. Treat broad hype, unsupported claims, and captions without demonstrated substance as weak matches.
-
-Use the private tiktok.web connection 680 through its existing paired browser. Discover current operations with operations.listAvailable before acting. Read bounded source snapshots using feeds.readMany: For You feed 669, Following feed 670, and optionally Search feed 671 with a specific query such as "AI agent workflow". Read at most ten posts per feed and use sequential calls to avoid competing browser focus. A missing or failed source is unavailable, not empty. Do not claim complete timeline or trend coverage.
-
-Deduplicate within the run by connection plus origin_id. Choose at most three promising candidates for inspect_post. For a video, request valid sample times within its reported duration; start with frame 0 and choose later frames only when duration is known. For a photo post, inspect up to three valid photo_indices. Actually open image attachments with a vision-capable tool before describing visual content. A URL or caption is not proof that you saw pixels. If this runtime cannot open the images, mark visual inspection unverified and explain the limitation. Audio is not inspected.
-
-Return up to three useful findings with creator, canonical post URL, source ID, what was actually observed, practical value, and uncertainty. Keep research private in the run result; do not ingest a raw timeline mirror or publish/send anything.
-
-The intended later Automation may like strong, visually verified matches automatically, as the user requested. Its deduplication, cadence, and action budget belong to the Automation rather than the connector. This preview does not enable them. Comments and publication must remain user-submitted actions.`,
+  prompt: tiktokResearchPrompt,
+  reaction: reactionFromFile<typeof TikTokResearchReaction>(
+    "./tiktok-research.reaction.ts"
+  ),
 });
 
 export default defineConfig({
@@ -829,7 +826,7 @@ export default defineConfig({
   orgName: "Buremba Org",
   orgDescription:
     "Personal agent tracking people, collaborative tasks, and financial context.",
-  agents: [personalAgent],
+  agents: [personalAgent, tiktokResearchAgent],
   entities: [person, task],
   relationships: [worksAt, mentions, connectedWith, founderOf, sameAs],
   automations: [
