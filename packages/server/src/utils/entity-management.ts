@@ -1983,7 +1983,7 @@ export async function deleteEntity(
   // physical helper `hardDeleteEntityRows` itself stays unguarded and is
   // deliberately exempt: its other callers are rollback paths that destroy a row
   // the platform created moments earlier in the same request
-  // (`entity-link-upsert`, `promote-keyed-entities`, `eval-cases`). Judging
+  // (`entity-link-upsert`, `promote-keyed-entities`). Judging
   // those would let a tenant rule wedge a half-built
   // record in place, which is the failure the rollback exists to prevent.
   //

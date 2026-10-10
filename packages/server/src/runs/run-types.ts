@@ -1,10 +1,9 @@
 /**
- * Automation run types and the execution mode derived from them (evals PR 2,
- * lobu#2564).
+ * Automation run types and the execution mode derived from them.
  *
- * An Automation run executes for real. An eval run replays a window to score it
- * and must never touch the outside world. Rather than a second table or an
- * `is_eval` column, an eval is a `runs.run_type` value — which means the ~18
+ * An Automation run executes for real. Historical `automation_eval` rows must
+ * remain captured after retirement of the product eval feature. Keeping their
+ * distinct `runs.run_type` value means the
  * existing `run_type = 'automation'` predicates across the scheduler, reapers,
  * coalescing and automation-health exclude evals with no code change at all.
  * Only the execution path opts back in, via {@link AUTOMATION_RUN_TYPES}.
@@ -18,13 +17,12 @@
 /** An Automation run whose side effects really happen. */
 export const AUTOMATION_RUN_TYPE = "automation";
 
-/** A replay of an Automation window for scoring. Side effects are captured. */
+/** Legacy stored replay discriminator. Retained so old runs stay captured. */
 export const AUTOMATION_EVAL_RUN_TYPE = "automation_eval";
 
 /**
  * Run types the Automation execution path accepts: claim, session creation,
- * window completion, run completion — plus the run-thread read, so an eval's
- * transcript can be read back for scoring.
+ * window completion, run completion — plus historical run-thread reads.
  *
  * Deliberately NOT used by scheduling, coalescing or health predicates —
  * those stay `= 'automation'` so evals never compete with, suppress, or degrade

@@ -15,7 +15,7 @@ import { getDb } from "../../../db/client";
 import { ApiResponseRenderer } from "../../../gateway/api/response-renderer";
 import { UnifiedThreadResponseConsumer } from "../../../gateway/platform/unified-thread-consumer";
 import type { Env } from "../../../index";
-import { createEvalRun } from "../../../runs/eval-runs";
+import { createLegacyCapturedRun } from "../../setup/legacy-captured-run";
 import { createAutomationRun } from "../../../runs/queue-service";
 import {
 	AUTOMATION_EVAL_RUN_TYPE,
@@ -1890,11 +1890,10 @@ describe("automation contract", () => {
 				WHERE automation_id = ${automationId} AND run_type = ${AUTOMATION_RUN_TYPE}
 				RETURNING id
 			`;
-			const evalRun = await createEvalRun(
-				{ sourceRunId: source.id, caseKey: "orphan" },
+			const evalRun = await createLegacyCapturedRun(
+				source.id,
 				sql as unknown as DbClient
 			);
-			expect(evalRun?.created).toBe(true);
 
 			// Strand it exactly as a dispatcher crash between claim and POST would.
 			await sql`
@@ -1931,8 +1930,8 @@ describe("automation contract", () => {
 				WHERE automation_id = ${automationId} AND run_type = ${AUTOMATION_RUN_TYPE}
 				RETURNING id
 			`;
-			const evalRun = await createEvalRun(
-				{ sourceRunId: source.id, caseKey: "schedule" },
+			const evalRun = await createLegacyCapturedRun(
+				source.id,
 				sql as unknown as DbClient
 			);
 
@@ -1968,8 +1967,8 @@ describe("automation contract", () => {
 				WHERE automation_id = ${automationId} AND run_type = ${AUTOMATION_RUN_TYPE}
 				RETURNING id
 			`;
-			const evalRun = await createEvalRun(
-				{ sourceRunId: source.id, caseKey: "stale" },
+			const evalRun = await createLegacyCapturedRun(
+				source.id,
 				sql as unknown as DbClient
 			);
 

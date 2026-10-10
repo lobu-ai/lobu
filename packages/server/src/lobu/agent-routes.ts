@@ -45,8 +45,6 @@ import {
 	resolveProviderRegistryPath,
 } from "../gateway/services/provider-registry-service";
 import type { Env } from "../index";
-import { promoteEvalCase, setEvalCaseJudgeModel } from "../runs/eval-cases";
-import { readEvalResults, runEvalSuite } from "../runs/eval-suite";
 import { getApplyContext } from "../utils/apply-context";
 import { recordConfigChangeEvent } from "../utils/insert-event";
 import logger from "../utils/logger";
@@ -243,10 +241,8 @@ export function requireSessionOrAdminPat(c: any): Response | null {
  * `requireOrganizationSettingsAdmin` and the manage_agents tool's admin
  * tier, both of which treat the role check as non-authorizable: an
  * `mcp:admin` scope alone never elevates a plain member, and a demoted
- * owner's stale admin token stays denied. The eval routes
- * (`POST /evals/cases`, `POST /automations/:automationId/evals/run`) are out
- * of this gate's scope: they keep the weaker session-or-admin-PAT tier, so a
- * plain member can still run them. So are the deployment routes, whose POST
+ * owner's stale admin token stays denied. The deployment routes are outside
+ * this gate's scope: their POST
  * already runs a finer-grained check of its own (a member may file a
  * non-authorizing `blocked` report but not a `succeeded` baseline).
  */
@@ -1345,146 +1341,6 @@ routes.delete("/inference-providers/:slug", async (c) => {
 		state: null,
 	});
 	return c.json({ success: true });
-});
-
-// ── Evals ────────────────────────────────────────────────────────────────────
-// Registered with the other literal-prefix routes, ahead of the `/:agentId`
-// block below, so a future `/:agentId/...` route of the same shape can never
-// shadow them.
-//
-// This is the surface the eval program was missing. `promoteEvalCase` and
-// `replayEvalCase` shipped in #2584 with NO caller anywhere outside their own
-// module — the whole flow was unreachable, so nothing could promote a case and
-// nothing could read a result. Scores with no way to ask for them are not a
-// feature.
-
-/**
- * Promote a real Automation run into a reusable eval case.
- *
- * `expectation` is what the judge grades against; without one a case is still
- * useful (the code metrics run) but nothing measures whether the OUTPUT was
- * right. `judgeModel` is the per-case override — name a model different from
- * the one under eval to avoid a model grading its own work.
- */
-routes.post("/evals/cases", async (c) => {
-	const denied = requireSessionOrAdminPat(c);
-	if (denied) return denied;
-	const orgId = requireOrgId(c);
-	if (typeof orgId !== "string") return orgId;
-
-	const body = (await c.req.json().catch(() => ({}))) as {
-		runId?: unknown;
-		caseKey?: unknown;
-		expectation?: unknown;
-		judgeModel?: unknown;
-	};
-	const runId = Number(body.runId);
-	if (!Number.isSafeInteger(runId) || runId < 1) {
-		return c.json({ error: "runId is required" }, 400);
-	}
-
-	const result = await promoteEvalCase({
-		sourceRunId: runId,
-		caseKey: typeof body.caseKey === "string" ? body.caseKey : "default",
-		expectation:
-			typeof body.expectation === "string" ? body.expectation : undefined,
-		createdBy: (c.get("user") as { id?: string } | undefined)?.id ?? null,
-		// Promote resolves the org from the RUN, so this is what stops a caller
-		// creating a case inside another tenant's workspace by run id. It has to
-		// be checked BEFORE the write, not after — see `promoteEvalCase`.
-		organizationId: orgId,
-	});
-
-	if (!result.ok) {
-		// `not_found` is the only 404 here — it also covers a run belonging to
-		// another org. The other rejections mean the run exists but cannot be
-		// replayed, which is a 422: the caller asked for something coherent that
-		// this run cannot support.
-		const status = result.reason === "not_found" ? 404 : 422;
-		return c.json({ error: result.reason }, status);
-	}
-
-	if (typeof body.judgeModel === "string" && body.judgeModel.trim()) {
-		await setEvalCaseJudgeModel(
-			result.evalCase.entityId,
-			orgId,
-			body.judgeModel.trim(),
-		);
-	}
-
-	return c.json(
-		{
-			case: {
-				...result.evalCase,
-				judgeModel:
-					typeof body.judgeModel === "string" ? body.judgeModel.trim() : null,
-			},
-			created: result.created,
-		},
-		201,
-	);
-});
-
-/**
- * Replay an Automation's active case suite under capture mode.
- *
- * Defaults to several trials per case because a single run is not a
- * measurement — our own research evals swung ±1 task on identical batteries.
- */
-routes.post("/automations/:automationId/evals/run", async (c) => {
-	// Admin-tier: each call queues up to cases × trials replays, and every one
-	// of them spends inference budget.
-	const denied = requireSessionOrAdminPat(c);
-	if (denied) return denied;
-	const orgId = requireOrgId(c);
-	if (typeof orgId !== "string") return orgId;
-
-	const automationId = Number(c.req.param("automationId"));
-	if (!Number.isSafeInteger(automationId) || automationId < 1) {
-		return c.json({ error: "automationId must be a number" }, 400);
-	}
-
-	const body = (await c.req.json().catch(() => ({}))) as {
-		caseIds?: unknown;
-		trials?: unknown;
-	};
-	const caseIds = Array.isArray(body.caseIds)
-		? body.caseIds.map(Number).filter((n) => Number.isSafeInteger(n) && n > 0)
-		: undefined;
-
-	const result = await runEvalSuite({
-		organizationId: orgId,
-		automationId,
-		caseIds: caseIds?.length ? caseIds : undefined,
-		trials: typeof body.trials === "number" ? body.trials : undefined,
-	});
-	return c.json(result, 202);
-});
-
-/**
- * Read the suite's answer: per case latest vs previous, and which cases moved
- * by more than their own noise.
- *
- * Reads case ENTITIES only. Never aggregates `eval_score` events — the scorer
- * materializes each case's rolling window at write time precisely so this stays
- * a bounded config-table read.
- */
-routes.get("/automations/:automationId/evals/results", async (c) => {
-	const orgId = requireOrgId(c);
-	if (typeof orgId !== "string") return orgId;
-
-	const automationId = Number(c.req.param("automationId"));
-	if (!Number.isSafeInteger(automationId) || automationId < 1) {
-		return c.json({ error: "automationId must be a number" }, 400);
-	}
-
-	const trialsParam = Number(c.req.query("trials"));
-	const results = await readEvalResults({
-		organizationId: orgId,
-		automationId,
-		trials: Number.isFinite(trialsParam) ? trialsParam : undefined,
-	});
-	return c.json(results);
 });
 
 // ── Get agent detail ─────────────────────────────────────────────────────────

@@ -313,7 +313,7 @@ async function main() {
     JSON.stringify(all, null, 2)
   );
   console.log("\nWrote raw metrics to last-run.json\n");
-  process.exit(0);
+  process.exit(passes === all.length ? 0 : 1);
 }
 
 main();

@@ -4,8 +4,7 @@ Does an agent, given ONLY the default cloud Lobu MCP tools and NO skill
 scaffolding, DISCOVER how to perform operations across the FULL MCP surface
 starting from bare natural-language intent?
 
-This is the sibling of `../tool-surface/` (which compared tool-surface SHAPES).
-Here there is a single arm — the discrete default-cloud MCP surface — and the
+There is a single arm — the discrete default-cloud MCP surface. The
 question is discovery: can the model find the right operation via `search_sdk` +
 the tool descriptions, then execute it via `run_sdk` / `query_sdk` / `query_sql`?
 
@@ -23,8 +22,7 @@ the tool descriptions, then execute it via `run_sdk` / `query_sdk` / `query_sql`
   cloud agent would.
 - **Sandbox:** the REAL isolated-vm sandbox. `run_sdk` / `query_sdk` actually
   compile and run the model's TypeScript against the live `ClientSDK` +
-  Postgres. (This is the key difference from tool-surface, which stubbed the
-  sandbox tools out.)
+  Postgres.
 - **DB + handlers:** the real Lobu handlers against a real Postgres (server
   package fixtures + migrations on a `*test*` database).
 - **Checks:** every task asserts resulting DB / entity / event / run STATE.
@@ -35,15 +33,14 @@ the tool descriptions, then execute it via `run_sdk` / `query_sdk` / `query_sql`
 
 `run_sdk` / `query_sdk` need isolated-vm, whose native addon only loads under
 Node 22–24 — not under Bun. So this harness runs under **`node@22` + tsx**. The
-repo-root `tsconfig.json` `paths` map `@lobu/*` to `src`, which lets tsx resolve
-the workspace transitively (the built `dist` is CJS and its `export *`
-re-exports don't bind cleanly through node's ESM loader). `run.sh` handles all
-of this.
+local `tsconfig.json` resolves built workspace packages, matching the server
+integration harness and preserving Node module interoperability. Build them
+with `make build-packages` before running `run.sh`.
 
 ## Run it
 
 ```bash
-# GEMINI_API_KEY is sourced from the repo .env automatically.
+# GEMINI_API_KEY is loaded from the repo .env; caller env takes precedence.
 # DATABASE_URL must be a throwaway *test* Postgres (name contains "test");
 # the harness runs migrations (DROP SCHEMA public CASCADE) against it.
 DATABASE_URL=postgresql://localhost:5432/lobu_mcp_discovery_test \

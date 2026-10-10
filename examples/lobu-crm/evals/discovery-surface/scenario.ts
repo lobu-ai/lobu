@@ -14,11 +14,9 @@
  * REAL isolated-vm sandbox — so `run_sdk` / `query_sdk` actually compile and run
  * the model's TypeScript against the live ClientSDK + Postgres. isolated-vm's
  * native addon only loads under Node 22–24 (not Bun), so this whole harness runs
- * under `node@22 + tsx` (see run.sh); the repo-root tsconfig `paths` map
- * `@lobu/*` to `src`, which lets tsx resolve the workspace transitively.
+ * under Node + tsx (see run.sh), resolving the built workspace packages.
  *
- * DB setup + org/user fixtures are shared with the tool-surface scenario so we
- * never duplicate the migration machinery.
+ * DB setup + org/user fixtures use the server test harness directly.
  */
 
 import type { Sql } from "postgres";
@@ -40,12 +38,15 @@ import {
   addUserToOrganization,
 } from "../../../../packages/server/src/__tests__/setup/test-fixtures";
 import {
-  ensureMigrated as ensureMigratedShared,
-  db as sharedDb,
-} from "../tool-surface/scenario";
+  getTestDb,
+  setupTestDatabase,
+} from "../../../../packages/server/src/__tests__/setup/test-db";
+import { initWorkspaceProvider } from "../../../../packages/server/src/workspace";
 
-export type { ScenarioOrg } from "../tool-surface/scenario";
-import type { ScenarioOrg } from "../tool-surface/scenario";
+export interface ScenarioOrg {
+  org: { id: string; slug: string; name: string };
+  ctx: ToolContext;
+}
 
 const ENV: Env = {
   ENVIRONMENT: "test",
@@ -57,12 +58,13 @@ const ENV: Env = {
 };
 
 export function db(): Sql {
-  return sharedDb();
+  return getTestDb();
 }
 
-/** Run migrations + bring up the workspace provider (shared with tool-surface). */
+/** Run migrations + bring up the workspace provider in the disposable test DB. */
 export async function ensureMigrated(): Promise<void> {
-  await ensureMigratedShared();
+  await setupTestDatabase();
+  await initWorkspaceProvider();
 }
 
 /**
@@ -225,7 +227,7 @@ export async function seedEntity(
     {
       script: `export default async (ctx, client) => {
         const e = await client.entities.create(${JSON.stringify({
-          type,
+          entity_type: type,
           name,
           metadata,
         })});
