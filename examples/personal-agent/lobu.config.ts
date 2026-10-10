@@ -383,28 +383,6 @@ const takeoutConnection = defineConnection({
   ],
 });
 
-const twitterTakeoutConnection = defineConnection({
-  slug: "twitter-takeout-buremba",
-  connector: "twitter.takeout",
-  name: "X/Twitter Takeout Local",
-  feeds: [
-    { feed: "tweets", config: takeoutConfig("TWITTER_TAKEOUT_DIR", "twitter") },
-    {
-      feed: "messages",
-      config: takeoutConfig("TWITTER_TAKEOUT_DIR", "twitter"),
-    },
-    { feed: "likes", config: takeoutConfig("TWITTER_TAKEOUT_DIR", "twitter") },
-    {
-      feed: "followers",
-      config: takeoutConfig("TWITTER_TAKEOUT_DIR", "twitter"),
-    },
-    {
-      feed: "following",
-      config: takeoutConfig("TWITTER_TAKEOUT_DIR", "twitter"),
-    },
-  ],
-});
-
 const instagramTakeoutConnection = defineConnection({
   slug: "instagram-takeout-buremba",
   connector: "instagram.takeout",
@@ -868,7 +846,6 @@ export default defineConfig({
     marketQuotesConnection,
     revolutConnection,
     takeoutConnection,
-    twitterTakeoutConnection,
     instagramTakeoutConnection,
     linkedinConnection,
     hackerNewsConnection,
