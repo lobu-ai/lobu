@@ -12,6 +12,7 @@
 -- individually rerunnable so a partial failure can retry.
 
 -- migrate:up transaction:false
+-- lobu:no-quiesce
 
 DO $heal$
 BEGIN
