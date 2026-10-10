@@ -54,7 +54,8 @@ describe.skipIf(process.platform !== "darwin")(
         "-o",
         join(app, "Contents/MacOS/fixture"),
       ]);
-    });
+      // First clang run on a loaded macOS runner can exceed bun's 5s default.
+    }, 60_000);
     afterAll(() => rmSync(work, { recursive: true, force: true }));
 
     it("covers local, signed release, and ad-hoc release paths", () => {
