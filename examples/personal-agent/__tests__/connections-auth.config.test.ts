@@ -13,8 +13,8 @@ const BOUND = [
   },
   {
     slug: "x-twitter-bu7emba",
-    authProfile: "x-twitter-account",
-    appAuthProfile: "x-twitter-oauth-app",
+    authProfile: "x-browser-account-2",
+    appAuthProfile: undefined,
   },
   {
     slug: "spotify-buremba",
@@ -24,7 +24,7 @@ const BOUND = [
 ];
 
 describe("adopted connection auth bindings", () => {
-  test.each(BOUND)("$slug retains its account and app auth bindings", ({
+  test.each(BOUND)("$slug retains its selected auth bindings", ({
     slug,
     authProfile,
     appAuthProfile,
@@ -34,9 +34,14 @@ describe("adopted connection auth bindings", () => {
     );
     expect(connection).toBeDefined();
     expect(connection?.authProfile).toMatchObject({ slug: authProfile });
-    expect(connection?.appAuthProfile).toMatchObject({
-      slug: appAuthProfile,
-    });
+    if (appAuthProfile) {
+      expect(connection?.appAuthProfile).toMatchObject({
+        slug: appAuthProfile,
+      });
+    } else {
+      expect(connection?.appAuthProfile).toBeUndefined();
+      expect(connection?.authProfile?.authKind).toBe("browser_session");
+    }
   });
 
   test("every bound profile is declared with a matching kind", () => {
@@ -44,8 +49,12 @@ describe("adopted connection auth bindings", () => {
       (config.authProfiles ?? []).map((profile) => [profile.slug, profile])
     );
     for (const { authProfile, appAuthProfile } of BOUND) {
-      expect(profiles.get(authProfile)?.authKind).toBe("oauth_account");
-      expect(profiles.get(appAuthProfile)?.authKind).toBe("oauth_app");
+      expect(profiles.get(authProfile)?.authKind).toBe(
+        appAuthProfile ? "oauth_account" : "browser_session"
+      );
+      if (appAuthProfile) {
+        expect(profiles.get(appAuthProfile)?.authKind).toBe("oauth_app");
+      }
     }
   });
 });
