@@ -160,19 +160,40 @@ describe('canonical identity root list/search/count', () => {
     const wrongScope = await event(b, { entity_ids: [], metadata: {
       email: 'group@example.test', [IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY]: { email: 'source-b' },
     } });
+    const directAndScoped = await event(b, { metadata: {
+      email: 'group@example.test', [IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY]: { email: 'source-a' },
+    } });
+    const hiddenScoped = await event(b, { entity_ids: [], connection_id: privateConnection.id, metadata: {
+      email: 'group@example.test', [IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY]: { email: 'source-a' },
+    } });
+    await getTestDb()`INSERT INTO entity_identities (organization_id, entity_id, namespace, identifier, scope_key)
+      VALUES (${workspace.org.id}, ${c}, 'email', 'root@example.test', NULL)`;
+    const rootScoped = await event(c, { entity_ids: [], metadata: { email: 'root@example.test' } });
+
+    // Separate roots exercise multiple batched count arms, including an
+    // edgeless direct-only root and scoped/unscoped identity claims.
+    for (const sort_by of ['name', 'created_at', 'domain', 'total_content']) {
+      const page = await list({ sort_by });
+      for (const id of [a, b, c]) {
+        const history = await human.knowledge.read({ entity_id: id, limit: 100 });
+        expect(Number(page.entities.find(row => Number(row.id) === id)?.total_content)).toBe(history.content.length);
+      }
+    }
     await link(a, b);
     const outer = await link(b, c);
-    const relevant = new Set([direct.id, root.id, hidden.id, failedSource.id, scoped.id, wrongScope.id]);
+    const relevant = new Set([direct.id, root.id, hidden.id, failedSource.id, scoped.id, wrongScope.id, directAndScoped.id, hiddenScoped.id, rootScoped.id]);
     let visibleCount = 0;
     for (const id of [a, b, c]) {
       for (const query of [undefined, 'group history fixture']) {
         const history = await human.knowledge.read({ entity_id: id, query, limit: 100 }) as { content: Array<{ id: number }> };
         if (query === undefined) visibleCount = history.content.length;
         expect(new Set(history.content.map(row => Number(row.id)).filter(id => relevant.has(id))))
-          .toEqual(new Set([direct.id, root.id, scoped.id]));
+          .toEqual(new Set([direct.id, root.id, scoped.id, directAndScoped.id, rootScoped.id]));
       }
     }
-    expect(Number((await list()).entities[0].total_content)).toBe(visibleCount);
+    for (const sort_by of ['name', 'created_at', 'domain', 'total_content']) {
+      expect(Number((await list({ sort_by })).entities[0].total_content)).toBe(visibleCount);
+    }
     const searched = await human.knowledge.search({ query: 'Bravo' }) as UnifiedSearchResult;
     expect(searched.matches[0].stats.content_count).toBe(visibleCount);
     await human.entities.unlink({ relationship_id: Number(outer.relationship.id) });

@@ -48,13 +48,17 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * Events are append-only, so (2) is how connector-driven auto-linking is
  * surfaced at read time — `entity_ids` is never mutated post-insert.
  *
- * Shape: `alias.id IN (UNION …)`. Each standard namespace gets its own UNION
- * branch with a literal `ei.namespace = '<ns>'` so Postgres can evaluate the
- * join against `entity_identities` first, then probe `events` via the
- * per-namespace partial BTREE index `idx_events_metadata_<ns>`. Writing this
- * as a top-level OR of EXISTS branches — or as a single identity branch with
- * `OR` across namespaces — forces Parallel Seq Scan on `events` because the
- * namespace becomes a join filter instead of a restrictable predicate.
+ * Shape: `alias.id IN (WITH entity_link_ids AS MATERIALIZED (UNION …) SELECT id FROM entity_link_ids)`.
+ * Each standard namespace gets its own UNION branch with a literal
+ * `ei.namespace = '<ns>'` so Postgres can evaluate the join against
+ * `entity_identities` first, then probe `events` via the per-namespace
+ * partial BTREE index `idx_events_metadata_<ns>`. Writing this as a top-level
+ * OR of EXISTS branches — or as a single identity branch with `OR` across
+ * namespaces — forces Parallel Seq Scan on `events` because the namespace
+ * becomes a join filter instead of a restrictable predicate.
+ *
+ * MATERIALIZED keeps the candidate-id union separate from the outer event
+ * scan so the branches can use their attribution indexes.
  */
 export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
   const directBranch = directEntityLinkBranch(paramRef);
@@ -71,7 +75,7 @@ export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
   );
 
   const branches = [directBranch, ...standardBranches].join('\n    UNION\n    ');
-  return `${alias}.id IN (\n    ${branches}\n  )`;
+  return `${alias}.id IN (WITH entity_link_ids AS MATERIALIZED (\n    ${branches}\n  ) SELECT id FROM entity_link_ids)`;
 }
 
 /** Match the IDs of the current identity component. */
@@ -124,7 +128,7 @@ export async function fetchEntityIdentityScopes(
 }
 
 /**
- * Build the same `<alias>.id IN (UNION …)` predicate as `entityLinkMatchSql`,
+ * Build the same materialized candidate-id predicate as `entityLinkMatchSql`,
  * but emit only the branches an entity actually needs.
  *
  * Differences from `entityLinkMatchSql`:
@@ -149,7 +153,38 @@ export function buildEntityLinkUnion(opts: {
   baseParamIndex: number;
 }): { sql: string; params: string[] } {
   const alias = opts.alias ?? 'f';
-  const direct = directEntityLinkBranch(`${opts.entityIdLiteral}::bigint`);
+  const { branches, params } = buildEntityLinkBranches({
+    entityIdLiteral: opts.entityIdLiteral,
+    scopes: opts.scopes,
+    baseParamIndex: opts.baseParamIndex,
+  });
+  return {
+    sql: `${alias}.id IN (WITH entity_link_ids AS MATERIALIZED (\n    ${branches.join('\n    UNION\n    ')}\n  ) SELECT id FROM entity_link_ids)`,
+    params,
+  };
+}
+
+/**
+ * The standalone `SELECT e2.id ...` branches behind {@link buildEntityLinkUnion}:
+ * always the direct `entity_ids` branch, plus one indexed probe per pre-fetched
+ * identity scope. Batch counts apply org/liveness/visibility filters to each
+ * branch before deduplication, avoiding an outer scan of the event table.
+ */
+export function buildEntityLinkBranches(opts: {
+  /** Already-validated entity id, will be inlined as `<id>::bigint`. */
+  entityIdLiteral: number;
+  scopes: EntityIdentityScope[];
+  baseParamIndex: number;
+  /**
+   * Override for the direct branch's member array. Defaults to the recursive
+   * identity-members CTE; pass `` `ARRAY[<id>]` `` when the entity provably
+   * has no identity edges (its own whole group) to skip graph traversal.
+   */
+  directMembersSql?: string;
+}): { branches: string[]; params: string[] } {
+  const direct = opts.directMembersSql
+    ? `SELECT e2.id FROM events e2 WHERE e2.entity_ids && ${opts.directMembersSql}`
+    : directEntityLinkBranch(`${opts.entityIdLiteral}::bigint`);
   const params: string[] = [];
   let paramIndex = opts.baseParamIndex;
 
@@ -168,9 +203,5 @@ export function buildEntityLinkUnion(opts: {
     paramIndex += 2;
   }
 
-  const branches = [direct, ...scopeBranches].join('\n    UNION\n    ');
-  return {
-    sql: `${alias}.id IN (\n    ${branches}\n  )`,
-    params,
-  };
+  return { branches: [direct, ...scopeBranches], params };
 }
