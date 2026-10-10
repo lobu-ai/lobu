@@ -36,6 +36,22 @@ const logger = createLogger("provider-catalog");
  */
 const PROVIDER_HEALTH_PREFERENCE_TTL_MS = 15 * 60 * 1000;
 
+/** The form persists the catalog URL too; only a different URL is a custom endpoint. */
+export function resolveOrgProviderProtocol(
+  kind: string,
+  baseUrl: string | undefined,
+  protocol: SdkCompat | undefined,
+  catalogBaseUrl: string | undefined,
+): SdkCompat | undefined {
+  if (kind === "openai") {
+    if (baseUrl && baseUrl.replace(/\/+$/, "") !== catalogBaseUrl?.replace(/\/+$/, "")) {
+      return "openai";
+    }
+    if (protocol === "openai") return "openai-responses";
+  }
+  return protocol;
+}
+
 /**
  * True when an `error` row is recent enough to still steer routing. An absent or
  * unparseable timestamp returns false — losing the preference degrades to the
@@ -454,31 +470,27 @@ export class ProviderCatalogService {
     const modules: ModelProviderModule[] = [];
     for (const providerId of providerIds) {
       const staticModule = moduleMap.get(providerId);
-      if (staticModule) {
+      const row = orgRowsBySlug?.get(providerId);
+      const catalogEntry = row && catalogByKind?.get(row.kind);
+      const rowProtocol = row && resolveOrgProviderProtocol(
+        row.kind, row.capabilities.text?.base_url,
+        isSdkCompat(staticModule?.sdkCompat) ? staticModule.sdkCompat : undefined,
+        catalogEntry?.baseUrl,
+      );
+      if (staticModule && (!rowProtocol || rowProtocol === staticModule.sdkCompat)) {
         modules.push(staticModule);
         continue;
       }
-      const row = orgRowsBySlug?.get(providerId);
       if (row) {
         // Resolve the row's protocol and fallback upstream from its catalog
         // `kind`. Unknown/absent protocol ⇒ default to openai (legacy rows
         // created before kind carried a protocol, and custom endpoints, are
         // OpenAI-compatible). An unknown kind contributes no baseUrl, so such a
         // row still routes only if it names its own upstream.
-        const catalogEntry = catalogByKind?.get(row.kind);
-        // A catalog-backed alias of the official OpenAI provider must preserve
-        // OpenAI's Responses transport. `sdkCompat: "openai"` is the generic
-        // Chat Completions protocol for third-party compatible endpoints, but
-        // Lobu routes the official OpenAI provider through Responses so current
-        // reasoning models can use tools. Keep custom tenant upstreams on their
-        // declared compatibility protocol; only the trusted catalog fallback is
-        // known to be official OpenAI.
-        const sdkCompat =
-          row.kind === "openai" &&
-          !row.capabilities.text?.base_url &&
-          catalogEntry?.sdkCompat === "openai"
-            ? "openai-responses"
-            : catalogEntry?.sdkCompat ?? "openai";
+        const sdkCompat = resolveOrgProviderProtocol(
+          row.kind, row.capabilities.text?.base_url, catalogEntry?.sdkCompat,
+          catalogEntry?.baseUrl,
+        ) ?? "openai";
         const synthesized = this.synthesizeOrgProviderModule(
           row,
           sdkCompat,

@@ -19,7 +19,7 @@ interface ApiKeyProviderConfig {
   baseUrlEnvVarName?: string;
   /** Relative path to fetch model list (e.g. "/v1/models"). Enables generic model fetching. */
   modelsEndpoint?: string;
-  /** Wire protocol (see SDK_COMPAT_PROTOCOLS). "openai" also maps OPENAI_BASE_URL in proxy. */
+  /** Wire protocol (see SDK_COMPAT_PROTOCOLS). The OpenAI provider also maps OPENAI_BASE_URL. */
   sdkCompat?: SdkCompat;
   /** How the API key is presented upstream ("x-api-key" for Anthropic; Bearer otherwise). */
   apiKeyHeader?: "authorization" | "x-api-key";
@@ -96,7 +96,8 @@ export class ApiKeyProviderModule extends BaseProviderModule {
   ): Record<string, string> {
     const mappings = super.getProxyBaseUrlMappings(proxyUrl, agentId, context);
     if (
-      this.apiKeyConfig.sdkCompat === "openai" &&
+      (this.apiKeyConfig.sdkCompat === "openai" ||
+        this.apiKeyConfig.sdkCompat === "openai-responses") &&
       this.providerId === "openai"
     ) {
       const slug = this.providerConfig.slug || this.providerId;

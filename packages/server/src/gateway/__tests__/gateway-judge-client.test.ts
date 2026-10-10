@@ -340,12 +340,13 @@ describe("resolveSystemJudgeTarget", () => {
       expect(result.target.baseUrl).toBe("https://api.openai.com/v1");
       expect(result.target.model).toBe("gpt-4o-mini");
       expect(result.target.apiKey).toBe("sk-deployment-owned");
+      expect(result.target.sdkCompat).toBe("openai-responses");
     }
   });
 
   test("refuses an anthropic-protocol provider even when its system key IS set", async () => {
-    // The regression this guards: gatewayCompletion speaks only
-    // OpenAI-compatible /chat/completions. A deployment that still holds
+    // The regression this guards: gatewayCompletion supports Chat Completions
+    // and Responses, not Anthropic's Messages protocol. A deployment that holds
     // ANTHROPIC_API_KEY must not have `claude/...` accepted and then posted to
     // an endpoint that cannot parse it.
     const prevRegistry = process.env[REGISTRY_ENV];

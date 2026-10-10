@@ -18,7 +18,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isSdkCompat } from "@lobu/core";
+import { isSdkCompat, resolveSdkCompat } from "@lobu/core";
 import { providerCompletionUrl } from "../../__tests__/live-providers/provider-protocol.js";
 import { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
 import { resolveProviderRegistryFromRaw } from "../services/provider-registry-service.js";
@@ -87,6 +87,14 @@ describe("provider registry contract (config/providers.json)", () => {
 			"qwen2.5-72b-instruct",
 		]);
 		expect(qwen!.defaultModel).toBe("qwen-max");
+	});
+
+	test("official OpenAI agent turns use Responses for reasoning with tools", () => {
+		const openai = flattened.find(({ id }) => id === "openai")!.provider;
+		const module = buildModule("openai", openai);
+		expect(resolveSdkCompat(module.sdkCompat)?.api).toBe("openai-responses");
+		const mappings = module.getProxyBaseUrlMappings("https://proxy.example.test", "agent-test");
+		expect(mappings.OPENAI_BASE_URL).toBe(mappings.OPENAI_API_BASE_URL);
 	});
 
 	test("OpenAI API exposes its supported transcription route", () => {

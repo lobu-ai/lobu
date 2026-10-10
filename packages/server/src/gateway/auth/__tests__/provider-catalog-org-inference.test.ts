@@ -235,6 +235,30 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
     expect(mod.sdkCompat).toBe("openai-responses");
   });
 
+  test.each(["openai", "custom-openai"])("custom endpoint %s keeps Chat Completions", async (slug) => {
+    registerCatalogModule("openai", "openai-responses", "https://api.openai.com/v1");
+    const catalog = makeCatalog({
+      models: [`${slug}/custom-model`],
+      orgRows: [customUpstreamRow(slug, { kind: "openai" })],
+    });
+    const [module] = await catalog.getInstalledModules("agent-1", "org-1");
+    expect(module!.sdkCompat).toBe("openai");
+  });
+
+  test.each(["openai", "my-openai"])("catalog-prefilled endpoint %s keeps Responses", async (slug) => {
+    registerCatalogModule("openai", "openai-responses", "https://api.openai.com/v1");
+    for (const baseUrl of [undefined, "https://api.openai.com/v1", "https://api.openai.com/v1/"]) {
+      const catalog = makeCatalog({
+        models: [`${slug}/test-model`],
+        orgRows: [customUpstreamRow(slug, {
+          capabilities: { text: { model: "test-model", base_url: baseUrl } },
+        })],
+      });
+      const [module] = await catalog.getInstalledModules("agent-1", "org-1");
+      expect(module!.sdkCompat).toBe("openai-responses");
+    }
+  });
+
   test("an OAuth kind contributes NO fallback upstream", async () => {
     // An OAuth provider (chatgpt, claude) registers as a plain module, not an
     // ApiKeyProviderModule, so buildProviderCatalog() reports baseUrl "" for it
