@@ -9,7 +9,7 @@ import {
   ApiKeyProviderModule as ApiKeyProviderModuleImpl,
   type ApiKeyProviderModule,
 } from "../api-key-provider-module.js";
-import { ProviderCatalogService } from "../provider-catalog.js";
+import { buildProviderCatalog, ProviderCatalogService } from "../provider-catalog.js";
 
 /**
  * Register a fake catalog module so buildProviderCatalog() (called inside
@@ -213,7 +213,7 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
   test("an official OpenAI alias uses Responses, not Chat Completions", async () => {
     registerCatalogModule(
       "openai",
-      "openai",
+      "openai-responses",
       "https://api.openai.com/v1"
     );
     const catalog = makeCatalog({
@@ -233,6 +233,56 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
       "https://api.openai.com/v1"
     );
     expect(mod.sdkCompat).toBe("openai-responses");
+  });
+
+  test.each(["openai", "custom-openai"])("custom endpoint %s keeps Chat Completions", async (slug) => {
+    registerCatalogModule("openai", "openai-responses", "https://api.openai.com/v1");
+    const catalog = makeCatalog({
+      models: [`${slug}/custom-model`],
+      orgRows: [customUpstreamRow(slug, { kind: "openai" })],
+    });
+    const [module] = await catalog.getInstalledModules("agent-1", "org-1");
+    expect(module!.sdkCompat).toBe("openai");
+  });
+
+  test.each(["openai", "my-openai"])("catalog-prefilled endpoint %s keeps Responses", async (slug) => {
+    registerCatalogModule("openai", "openai-responses", "https://api.openai.com/v1");
+    for (const baseUrl of [undefined, "https://api.openai.com/v1", "https://api.openai.com/v1/"]) {
+      const catalog = makeCatalog({
+        models: [`${slug}/test-model`],
+        orgRows: [customUpstreamRow(slug, {
+          capabilities: { text: { model: "test-model", base_url: baseUrl } },
+        })],
+      });
+      const [module] = await catalog.getInstalledModules("agent-1", "org-1");
+      expect(module!.sdkCompat).toBe("openai-responses");
+    }
+  });
+
+  test.each(["openai", "my-openai"])("deployment override routes %s using Chat Completions", async (slug) => {
+    const prior = process.env.OPENAI_API_BASE_URL;
+    try {
+      process.env.OPENAI_API_BASE_URL = "https://deployment.example.test/v1";
+      registerCatalogModule("openai", "openai-responses", "https://api.openai.com/v1");
+      const catalog = makeCatalog({ models: [`${slug}/test-model`], orgRows: [customUpstreamRow(slug, {
+        kind: "openai", capabilities: { text: { model: "test-model" } }, hasCustomUpstream: false,
+      })] });
+      const modules = await catalog.getInstalledModules("agent-1", "org-1");
+      expect(modules[0]?.sdkCompat).toBe("openai");
+      expect(modules[0]?.getUpstreamConfig?.()?.upstreamBaseUrl).toBe(process.env.OPENAI_API_BASE_URL);
+      const official = makeCatalog({ models: [`${slug}/test-model`], orgRows: [customUpstreamRow(slug, {
+        kind: "openai", capabilities: { text: { model: "test-model", base_url: "https://api.openai.com/v1/" } },
+      })] });
+      expect((await official.getInstalledModules("agent-1", "org-1"))[0]?.sdkCompat).toBe("openai-responses");
+      expect(buildProviderCatalog({ openai: {
+        sdkCompat: "openai-responses", upstreamBaseUrl: "https://api.openai.com/v1",
+      } as never }).find(entry => entry.slug === "openai")).toMatchObject({
+        sdkCompat: "openai", baseUrl: process.env.OPENAI_API_BASE_URL,
+      });
+    } finally {
+      if (prior === undefined) delete process.env.OPENAI_API_BASE_URL;
+      else process.env.OPENAI_API_BASE_URL = prior;
+    }
   });
 
   test("an OAuth kind contributes NO fallback upstream", async () => {

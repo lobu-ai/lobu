@@ -1,10 +1,9 @@
 /**
  * `resolveCompletionTarget` protocol gating, against REAL provider rows.
  *
- * These features speak ONE wire protocol: OpenAI-compatible
- * `POST {baseUrl}/chat/completions`. A provider whose upstream speaks anything
- * else must resolve to null so the caller fails open, rather than posting a
- * chat/completions body somewhere that cannot parse it.
+ * These features support API-key Chat Completions and Responses transports.
+ * Unsupported protocols resolve to null so callers fail open without sending
+ * a request the upstream cannot parse.
  *
  * A real row is required: the resolver returns null on a missing credential
  * LONG before it reaches the protocol check, so a registry-only test would
@@ -20,6 +19,7 @@ import {
 } from '@lobu/core';
 import { createInferenceProvider } from '../../lobu/stores/provider-secrets';
 import { resolveCompletionTarget } from '../../gateway/inference/gateway-completion';
+import { ApiKeyProviderModule } from '../../gateway/auth/api-key-provider-module';
 import { ChatGPTOAuthModule } from '../../gateway/auth/chatgpt/chatgpt-oauth-module';
 import { getDb } from '../../db/client';
 import { cleanupTestDatabase } from '../setup/test-db';
@@ -98,6 +98,73 @@ function registerOpenAiCompatible(providerId: string, upstreamBaseUrl: string) {
 }
 
 describe('resolveCompletionTarget protocol gating', () => {
+  it('resolves an API-key Responses provider with its transport', async () => {
+    const orgId = await newOrgWithProvider('responses-provider', 'test-model');
+    register({ name: 'responses-provider', providerId: 'responses-provider',
+      sdkCompat: 'openai-responses',
+      getUpstreamConfig: () => ({ slug: 'responses-provider', upstreamBaseUrl: 'https://responses.example.test/v1' }),
+    });
+    expect(await resolveCompletionTarget(orgId)).toMatchObject({
+      sdkCompat: 'openai-responses', baseUrl: 'https://responses.example.test/v1', model: 'test-model',
+    });
+  });
+
+  it.each(['openai', 'custom-openai'])('custom endpoint %s retains Chat Completions', async (slug) => {
+    const org = await createTestOrganization();
+    const created = await createInferenceProvider({ organizationId: org.id, slug, kind: 'openai',
+      apiKey: 'sk-custom-test', capabilities: { text: { model: 'custom-model', base_url: 'https://custom.example.test/v1' } },
+    });
+    if ('error' in created) throw new Error(created.error);
+    register({ name: 'openai', providerId: 'openai', sdkCompat: 'openai-responses',
+      getUpstreamConfig: () => ({ slug: 'openai', upstreamBaseUrl: 'https://api.openai.com/v1' }),
+    });
+    const target = await resolveCompletionTarget(org.id, `${slug}/custom-model`);
+    expect(target?.baseUrl).toBe('https://custom.example.test/v1');
+    expect(target?.sdkCompat).toBeUndefined();
+  });
+
+  it.each(['openai', 'my-openai'])('catalog-prefilled endpoint %s uses Responses', async (slug) => {
+    const org = await createTestOrganization();
+    const created = await createInferenceProvider({
+      organizationId: org.id, slug, kind: 'openai', apiKey: 'sk-official-test',
+      capabilities: { text: { model: 'test-model', base_url: 'https://api.openai.com/v1/' } },
+    });
+    if ('error' in created) throw new Error(created.error);
+    register({ name: 'openai', providerId: 'openai', sdkCompat: 'openai-responses',
+      getUpstreamConfig: () => ({ slug: 'openai', upstreamBaseUrl: 'https://api.openai.com/v1' }),
+    });
+    expect(await resolveCompletionTarget(org.id, `${slug}/test-model`)).toMatchObject({
+      baseUrl: 'https://api.openai.com/v1', sdkCompat: 'openai-responses', model: 'test-model',
+    });
+  });
+
+  it.each([undefined, 'https://api.openai.com/v1/'])(
+    'resolves the effective protocol with a deployment override and org URL %s', async (baseUrl) => {
+      const prior = process.env.OPENAI_API_BASE_URL;
+      try {
+        process.env.OPENAI_API_BASE_URL = 'https://deployment.example.test/v1';
+        const org = await createTestOrganization();
+        const created = await createInferenceProvider({
+          organizationId: org.id, slug: 'openai', kind: 'openai', apiKey: 'sk-override-test',
+          capabilities: { text: { model: 'test-model', ...(baseUrl ? { base_url: baseUrl } : {}) } },
+        });
+        if ('error' in created) throw new Error(created.error);
+        moduleRegistry.register(new ApiKeyProviderModule({
+          providerId: 'openai', slug: 'openai', sdkCompat: 'openai-responses',
+          upstreamBaseUrl: 'https://api.openai.com/v1', envVarName: 'OPENAI_API_KEY',
+          providerDisplayName: 'OpenAI', providerIconUrl: '', apiKeyInstructions: '', apiKeyPlaceholder: '',
+          authProfilesManager: {} as never,
+        }) as unknown as ModuleInterface);
+        const target = await resolveCompletionTarget(org.id, 'openai/test-model');
+        expect(target?.baseUrl).toBe(baseUrl ? 'https://api.openai.com/v1' : process.env.OPENAI_API_BASE_URL);
+        expect(target?.sdkCompat).toBe(baseUrl ? 'openai-responses' : undefined);
+      } finally {
+        if (prior === undefined) delete process.env.OPENAI_API_BASE_URL;
+        else process.env.OPENAI_API_BASE_URL = prior;
+      }
+    },
+  );
+
   // Seed a real credential so these refusals reach the protocol check instead
   // of passing accidentally at the earlier missing-credential guard.
   it.each([undefined, 'openai-codex'])(

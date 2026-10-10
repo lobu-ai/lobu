@@ -11,8 +11,9 @@
  * these features can use. Gateway features resolve the org-owned provider row
  * independently of worker execution.
  *
- * OAuth-backed rows (no API key) and non-OpenAI wire protocols are
- * deliberately unsupported here; the calling feature fails open.
+ * API-key Chat Completions and Responses are supported. OAuth-backed rows
+ * (no API key) and other wire protocols are deliberately unsupported here;
+ * the calling feature fails open.
  */
 
 import { createLogger, getErrorMessage, retryWithBackoff } from "@lobu/core";
@@ -20,6 +21,7 @@ import {
   getOrgDefaultModel,
   resolveInferenceProviderCredential,
 } from "../../lobu/stores/provider-secrets.js";
+import { resolveOrgProviderProtocol } from "../auth/provider-catalog.js";
 import { getModelProviderModules } from "../modules/module-system.js";
 
 const logger = createLogger("gateway-completion");
@@ -29,13 +31,19 @@ export interface GatewayCompletionTarget {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Internal transport choice; omitted targets retain Chat Completions. */
+  sdkCompat?: "openai" | "openai-responses";
+}
+
+export function isGatewayCompletionProtocol(value: unknown): value is "openai" | "openai-responses" {
+  return value === "openai" || value === "openai-responses";
 }
 
 interface GatewayCompletionRequest {
   target: GatewayCompletionTarget;
   systemPrompt: string;
   userPrompt: string;
-  /** Defaults to 0 — these callers all want deterministic, parseable output. */
+  /** Chat Completions only; defaults to 0. Responses keeps the model default. */
   temperature?: number;
   timeoutMs: number;
   /**
@@ -147,7 +155,10 @@ export async function resolveCompletionTarget(
   const providerModule = getModelProviderModules().find(
     (module) => module.providerId === config.kind
   );
-  if (providerModule && providerModule.sdkCompat !== "openai") {
+  const sdkCompat = resolveOrgProviderProtocol(
+    providerModule, config.kind, config.baseUrl,
+  );
+  if (providerModule && !isGatewayCompletionProtocol(sdkCompat)) {
     logger.warn(
       { slug, kind: config.kind, sdkCompat: providerModule.sdkCompat },
       "provider does not use the OpenAI-compatible protocol; gateway completion skipped"
@@ -183,6 +194,7 @@ export async function resolveCompletionTarget(
     baseUrl: baseUrl.replace(/\/+$/, ""),
     apiKey: config.apiKey,
     model,
+    ...(sdkCompat === "openai-responses" ? { sdkCompat } : {}),
   };
 }
 
@@ -266,23 +278,31 @@ async function callCompletionOnce(
 ): Promise<string> {
   const { target } = request;
 
-  const response = await fetch(`${target.baseUrl}/chat/completions`, {
+  const responses = target.sdkCompat === "openai-responses";
+  // Enrichment callers set temperature, but reasoning models can reject it at
+  // their default effort. Keep Responses sampling at the model default.
+  const body = responses ? {
+    model: target.model,
+    instructions: request.systemPrompt,
+    input: [{ role: "user", content: request.userPrompt }],
+    store: false,
+    ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
+  } : {
+    model: target.model,
+    temperature: request.temperature ?? 0,
+    ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
+    messages: [
+      { role: "system", content: request.systemPrompt },
+      { role: "user", content: request.userPrompt },
+    ],
+  };
+  const response = await fetch(`${target.baseUrl}/${responses ? "responses" : "chat/completions"}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${target.apiKey}`,
     },
-    body: JSON.stringify({
-      model: target.model,
-      temperature: request.temperature ?? 0,
-      ...(request.maxTokens !== undefined
-        ? { max_tokens: request.maxTokens }
-        : {}),
-      messages: [
-        { role: "system", content: request.systemPrompt },
-        { role: "user", content: request.userPrompt },
-      ],
-    }),
+    body: JSON.stringify(body),
     signal,
   });
 
@@ -291,6 +311,25 @@ async function callCompletionOnce(
       response.status,
       `Gateway completion failed: ${response.status} ${response.statusText}`
     );
+  }
+
+  if (responses) {
+    const data = await response.json() as {
+      status?: string;
+      incomplete_details?: { reason?: string };
+      output?: Array<{ type?: string; role?: string; content?: Array<{ type?: string; text?: string }> }>;
+    };
+    if (data.status === "incomplete" && data.incomplete_details?.reason === "max_output_tokens") {
+      throw new GatewayCompletionTruncatedError(request.maxTokens);
+    }
+    if (data.status !== "completed") throw new Error("Gateway Responses request did not complete");
+    const content = (data.output ?? [])
+      .filter((item) => item.type === "message" && item.role === "assistant")
+      .flatMap((item) => item.content ?? [])
+      .filter((part) => part.type === "output_text" && typeof part.text === "string")
+      .map((part) => part.text).join("");
+    if (!content) throw new Error("Gateway completion returned no text");
+    return content;
   }
 
   const data = (await response.json()) as ChatCompletionResponse;

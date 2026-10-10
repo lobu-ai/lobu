@@ -420,7 +420,7 @@
           "upstreamBaseUrl": "https://api.openai.com/v1",
           "apiKeyInstructions": "Get your API key from <a href=\"https://platform.openai.com/api-keys\" target=\"_blank\" class=\"text-blue-600 hover:underline\">OpenAI Dashboard</a>",
           "apiKeyPlaceholder": "sk-...",
-          "sdkCompat": "openai",
+          "sdkCompat": "openai-responses",
           "modalities": ["text", "image", "stt", "tts"],
           "stt": {
             "enabled": true,

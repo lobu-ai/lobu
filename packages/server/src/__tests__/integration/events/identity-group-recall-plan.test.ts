@@ -5,6 +5,13 @@
  * then probes events.entity_ids through its GIN index. Seed enough events for
  * the planner to prefer that index, and verify both the plan and exact recall
  * from every member. Wall-clock timing is deliberately not an assertion.
+ *
+ * The UNION runs behind a MATERIALIZED barrier (`entity_link_ids` CTE) so the
+ * planner cannot flatten it into a hash-and-sweep over the org's history;
+ * the outer query may still legitimately sweep a small events table (hashing
+ * a materialized few-thousand-id CTE beats thousands of PK probes), which is
+ * why the no-seq-scan assertion below targets the `e2` branch alias rather
+ * than the outer query.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -112,9 +119,15 @@ describe('identity-group recall — query plan stays index-driven', () => {
     const plan = await planFor(
       buildEntityLinkUnion({ entityIdLiteral: root, scopes: [], alias: 'e', baseParamIndex: 1 }).sql
     );
-    // The hot path must not regress to a Seq Scan on the (large) events table.
-    expect(plan).not.toMatch(/Seq Scan on events/);
+    // The UNION must stay behind its MATERIALIZED barrier: flattening it lets
+    // the planner hash a few ids and sweep the org's history per entity.
+    expect(plan).toMatch(/CTE Scan on entity_link_ids/);
+    // Every UNION branch probes its index (GIN on entity_ids for the direct
+    // branch). The outer query may still sweep a small table when hashing the
+    // materialized CTE is genuinely cheaper, so the no-seq-scan pin targets
+    // the `e2` branch alias, not the outer `e`.
     expect(plan).toMatch(/Bitmap Index Scan on idx_events_entity_ids/);
+    expect(plan).not.toMatch(/Seq Scan on events e2/);
   });
 
   it('resolves the identity component once instead of once per event', async () => {

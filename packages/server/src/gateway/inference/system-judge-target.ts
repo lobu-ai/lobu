@@ -26,6 +26,7 @@ import {
 import {
   type GatewayCompletionTarget,
   splitModelRef,
+  isGatewayCompletionProtocol,
 } from "./gateway-completion.js";
 
 const logger = createLogger("system-judge-target");
@@ -121,9 +122,8 @@ export async function resolveSystemJudgeTarget(
     };
   }
 
-  // Same protocol gate the shared client applies. gatewayCompletion speaks
-  // OpenAI-compatible /chat/completions and nothing else.
-  if (config.sdkCompat !== "openai") {
+  // Use the shared client's protocol gate so judges and enrichment stay aligned.
+  if (!isGatewayCompletionProtocol(config.sdkCompat)) {
     return {
       ok: false,
       reason: "no-system-provider",
@@ -151,6 +151,7 @@ export async function resolveSystemJudgeTarget(
       baseUrl: baseUrl.replace(/\/+$/, ""),
       apiKey,
       model: parts.model,
+      ...(config.sdkCompat === "openai-responses" ? { sdkCompat: config.sdkCompat } : {}),
     },
   };
 }

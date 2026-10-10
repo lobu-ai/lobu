@@ -36,6 +36,23 @@ const logger = createLogger("provider-catalog");
  */
 const PROVIDER_HEALTH_PREFERENCE_TTL_MS = 15 * 60 * 1000;
 
+/** Select the transport for the row's URL, including deployment-level overrides. */
+export function resolveOrgProviderProtocol(
+  module: ModelProviderModule | undefined,
+  kind: string,
+  baseUrl: string | undefined,
+): SdkCompat | undefined {
+  if (module instanceof ApiKeyProviderModule) {
+    return module.getSdkCompatForUpstream(baseUrl);
+  }
+  const protocol = isSdkCompat(module?.sdkCompat) ? module.sdkCompat : undefined;
+  if (kind === "openai" && baseUrl &&
+      baseUrl.replace(/\/+$/, "") !== module?.getUpstreamConfig?.()?.upstreamBaseUrl.replace(/\/+$/, "")) {
+    return "openai";
+  }
+  return protocol;
+}
+
 /**
  * True when an `error` row is recent enough to still steer routing. An absent or
  * unparseable timestamp returns false — losing the preference degrades to the
@@ -119,10 +136,10 @@ export function buildProviderCatalog(
         ];
 
       const apiKeyModule = module instanceof ApiKeyProviderModule ? module : null;
-      const sdkCompat = config?.sdkCompat ?? module.sdkCompat ?? null;
+      const sdkCompat = module.sdkCompat ?? config?.sdkCompat ?? null;
       const defaultModel = config?.defaultModel ?? apiKeyModule?.defaultModel ?? null;
       const upstream = apiKeyModule?.getUpstreamConfig();
-      const baseUrl = config?.upstreamBaseUrl ?? upstream?.upstreamBaseUrl ?? "";
+      const baseUrl = upstream?.upstreamBaseUrl ?? config?.upstreamBaseUrl ?? "";
 
       entries.push({
         slug: module.providerId,
@@ -454,34 +471,24 @@ export class ProviderCatalogService {
     const modules: ModelProviderModule[] = [];
     for (const providerId of providerIds) {
       const staticModule = moduleMap.get(providerId);
-      if (staticModule) {
+      const row = orgRowsBySlug?.get(providerId);
+      const catalogEntry = row && catalogByKind?.get(row.kind);
+      const rowProtocol = row && resolveOrgProviderProtocol(
+        moduleMap.get(row.kind), row.kind, row.capabilities.text?.base_url,
+      );
+      if (staticModule && (!rowProtocol || rowProtocol === staticModule.sdkCompat)) {
         modules.push(staticModule);
         continue;
       }
-      const row = orgRowsBySlug?.get(providerId);
       if (row) {
         // Resolve the row's protocol and fallback upstream from its catalog
         // `kind`. Unknown/absent protocol ⇒ default to openai (legacy rows
         // created before kind carried a protocol, and custom endpoints, are
         // OpenAI-compatible). An unknown kind contributes no baseUrl, so such a
         // row still routes only if it names its own upstream.
-        const catalogEntry = catalogByKind?.get(row.kind);
-        // A catalog-backed alias of the official OpenAI provider must preserve
-        // OpenAI's Responses transport. `sdkCompat: "openai"` is the generic
-        // Chat Completions protocol for third-party compatible endpoints, but
-        // Lobu routes the official OpenAI provider through Responses so current
-        // reasoning models can use tools. Keep custom tenant upstreams on their
-        // declared compatibility protocol; only the trusted catalog fallback is
-        // known to be official OpenAI.
-        const sdkCompat =
-          row.kind === "openai" &&
-          !row.capabilities.text?.base_url &&
-          catalogEntry?.sdkCompat === "openai"
-            ? "openai-responses"
-            : catalogEntry?.sdkCompat ?? "openai";
         const synthesized = this.synthesizeOrgProviderModule(
           row,
-          sdkCompat,
+          rowProtocol ?? "openai",
           catalogEntry?.baseUrl
         );
         if (synthesized) modules.push(synthesized);

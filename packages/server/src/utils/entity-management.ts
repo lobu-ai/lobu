@@ -43,7 +43,12 @@ import { entitySegmentPredicate } from "../metrics/compiler";
 import { isAdminOrOwnerRole, isInProcessSystemCall } from "../tools/access-control";
 import { querySqlImpl } from "../tools/admin/query_sql";
 import type { ToolContext } from "../tools/registry";
-import { entityLinkMatchSql } from "./content-search";
+import {
+	buildEntityLinkBranches,
+	entityLinkMatchSql,
+	STANDARD_IDENTITY_NAMESPACES,
+	type EntityIdentityScope,
+} from "./content-search";
 import { buildConnectionVisibilityClause } from "./content-search/visibility";
 import {
 	computeFieldMerge,
@@ -2023,10 +2028,89 @@ export async function deleteEntity(
 }
 
 /**
- * List entities with filters
- * Uses dynamic query fragments for scoped filtering
- * Only returns entities from readable organizations (user's org + public)
+ * Count a page's linked content with org/liveness/visibility filters on each
+ * indexed event probe. UNION deduplicates direct and identity attribution
+ * before counting, without an outer event-table scan for every listed entity.
  */
+async function batchTotalContentCounts(
+	db: DbClient,
+	opts: {
+		organizationId: string;
+		userId: string | null;
+		entityIds: number[];
+	},
+): Promise<Map<number, number>> {
+	const counts = new Map<number, number>();
+	const entityIds = opts.entityIds;
+	if (entityIds.length === 0) return counts;
+
+	// Conservative edge check: an entity with no live relationship at all is
+	// its own whole identity group. Anything with an edge keeps the full
+	// members CTE so ordinary relationships cannot group unrelated records.
+	const edgedRows = await db.unsafe<{ id: number | string }>(
+		`SELECT v.id FROM (VALUES ${entityIds.map((eid) => `(${eid})`).join(',')}) v(id)
+     WHERE EXISTS (SELECT 1 FROM entity_relationships ir WHERE ir.from_entity_id = v.id AND ir.deleted_at IS NULL)
+        OR EXISTS (SELECT 1 FROM entity_relationships ir WHERE ir.to_entity_id = v.id AND ir.deleted_at IS NULL)`,
+	);
+	const edged = new Set(edgedRows.map((row) => Number(row.id)));
+
+	// Claims live on any group member, not just the listed root — expand
+	// through the identity graph exactly like the `ei.entity_id IN (...)`
+	// side of the legacy predicate, attributing member claims to the root.
+	// Edgeless entities probe their own id directly (same result, no CTE).
+	const scopeRows = await db.unsafe<{ eid: number | string; namespace: unknown; identifier: unknown; scope_key: unknown }>(
+		entityIds
+			.map(
+				(eid) => `SELECT ${eid}::bigint AS eid, identity.namespace, identity.identifier, identity.scope_key
+     FROM entity_identities identity
+     WHERE ${edged.has(eid) ? `identity.entity_id IN (${identityMemberIdsSql(`${eid}::bigint`)})` : `identity.entity_id = ${eid}`}
+       AND identity.deleted_at IS NULL
+       AND identity.namespace = ANY('${pgTextArray([...STANDARD_IDENTITY_NAMESPACES])}'::text[])`,
+			)
+			.join('\nUNION ALL\n'),
+	);
+	const scopesByEntity = new Map<number, EntityIdentityScope[]>();
+	for (const row of scopeRows) {
+		const eid = Number(row.eid);
+		const list = scopesByEntity.get(eid) ?? [];
+		list.push({
+			namespace: String(row.namespace),
+			identifier: String(row.identifier),
+			scopeKey: row.scope_key == null ? null : String(row.scope_key),
+		});
+		scopesByEntity.set(eid, list);
+	}
+
+	const params: unknown[] = [opts.organizationId];
+	const orgParam = "$1::text";
+	const visibility = buildConnectionVisibilityClause({
+		organizationId: opts.organizationId, userId: opts.userId, baseParamIndex: params.length + 1,
+	}, 'e2');
+	params.push(...visibility.params);
+	const arms: string[] = [];
+	for (const eid of entityIds) {
+		const { branches, params: branchParams } = buildEntityLinkBranches({
+			entityIdLiteral: eid,
+			scopes: scopesByEntity.get(eid) ?? [],
+			baseParamIndex: params.length + 1,
+			directMembersSql: edged.has(eid) ? undefined : `ARRAY[${eid}::bigint]`,
+		});
+		params.push(...branchParams);
+		const probed = branches
+			.map((branch) => `${branch} AND e2.organization_id = ${orgParam} AND e2.superseded_by IS NULL ${visibility.sql}`)
+			.join('\n    UNION\n    ');
+		arms.push(`SELECT ${eid}::bigint AS eid, COUNT(*) AS cnt FROM (\n    ${probed}\n  ) u`);
+	}
+
+	const rows = await db.unsafe<{ eid: number | string; cnt: number | string }>(
+		arms.join('\nUNION ALL\n'),
+		params,
+	);
+	for (const row of rows) counts.set(Number(row.eid), Number(row.cnt));
+	return counts;
+}
+
+/** List readable identity roots within the caller's organization. */
 export async function listEntities(
 	filters: {
 		entity_type?: string;
@@ -2154,8 +2238,8 @@ export async function listEntities(
 	conditions.push(entityReadPolicySql(readRestrictions, '{e}', params));
 
 	// Render the shared conditions for a given pair of table aliases. The
-	// outer query uses e/et; the page-id prefetch subquery below re-binds the
-	// very same $N params to e2/et2 (single statement, single param list).
+	// enrichment uses e/et; the page-id query uses e2/et2 with the same filter
+	// parameters.
 	const renderWhere = (eAlias: string, etAlias: string) =>
 		conditions
 			.map((c) =>
@@ -2189,19 +2273,26 @@ export async function listEntities(
 	const sortOrderSql = normalizedSortOrder === "asc" ? "ASC" : "DESC";
 	const orderBy = `${sortColumnMap[sortBy]} ${sortOrderSql}, e.id ASC`;
 
+	// Each statement binds only the parameter prefix its placeholders use:
+	// filters, then enrichment policies, then event visibility.
+	const filterParamCount = params.length;
+  const parentReadPredicate = entityReadPolicySql(readRestrictions, 'pe', params);
+  const childReadPredicate = entityReadPolicySql(readRestrictions, 'c', params);
+	const enrichParamCount = params.length;
+
   const visibility = buildConnectionVisibilityClause({
     organizationId: ctx.organizationId, userId: ctx.userId, baseParamIndex: params.length + 1,
   }, 'ev');
   params.push(...visibility.params);
-  const parentReadPredicate = entityReadPolicySql(readRestrictions, 'pe', params);
-  const childReadPredicate = entityReadPolicySql(readRestrictions, 'c', params);
+
+  const plainSort = sortBy === 'name' || sortBy === 'created_at' || sortBy === 'domain';
 
 	const baseQuery = `
     FROM entities e
     JOIN entity_types et ON et.id = e.entity_type_id
     LEFT JOIN entities pe ON e.parent_id = pe.id AND ${parentReadPredicate}
     LEFT JOIN entity_types pet ON pet.id = pe.entity_type_id
-    LEFT JOIN LATERAL (SELECT COUNT(*) as cnt FROM current_event_records ev WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')} AND ev.organization_id = e.organization_id ${visibility.sql}) tc ON true
+    ${plainSort ? '' : `LEFT JOIN LATERAL (SELECT COUNT(*) as cnt FROM current_event_records ev WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')} AND ev.organization_id = e.organization_id ${visibility.sql}) tc ON true`}
     LEFT JOIN LATERAL (
       SELECT COUNT(DISTINCT c.connector_key) as cnt
       FROM feeds f
@@ -2215,28 +2306,23 @@ export async function listEntities(
     WHERE ${whereClause}
   `;
 
-  // Two-stage page fetch. The four per-row count LATERALs make enrichment
-  // expensive (~ms..100ms per row), and with ORDER BY + LIMIT the planner
-  // still evaluates them for EVERY filter-matching row before the top-N sort
-  // picks the page (2,042 market companies ≈ 8s per page load). When sorting
-  // by a plain entity column we resolve the page ids first — filters + ORDER
-  // BY only, no LATERALs — and enrich just those rows. Sorts by computed
-  // columns (total_content, …) need the counts for ordering, so they keep the
-  // single-query shape.
-  const plainSort = sortBy === 'name' || sortBy === 'created_at' || sortBy === 'domain';
-  const pageIdClause = plainSort
-    ? `AND e.id = ANY(ARRAY(
-         SELECT e2.id FROM entities e2
-         JOIN entity_types et2 ON et2.id = e2.entity_type_id
-         WHERE ${renderWhere('e2', 'et2')}
-         ORDER BY ${sortColumnMap[sortBy].replace(/^e\./, 'e2.')} ${sortOrderSql}, e2.id ASC
-         LIMIT ${limit + 1} OFFSET ${offset}
-       ))`
-    : '';
-
-  const pageQuery = `SELECT
+  // Plain-column sorts select page ids before enrichment and batch the
+  // content counts. Computed sorts need counts before selecting the page.
+  const pageIdQuery = `SELECT e2.id FROM entities e2
+          JOIN entity_types et2 ON et2.id = e2.entity_type_id
+          WHERE ${renderWhere('e2', 'et2')}
+          ORDER BY ${sortColumnMap[sortBy].replace(/^e\./, 'e2.')} ${sortOrderSql}, e2.id ASC
+          LIMIT ${limit + 1} OFFSET ${offset}`;
+  // Enrichment joins each produce at most one row per entity, so the total
+  // needs only the filters.
+  const countFrom = `
+    FROM entities e
+    JOIN entity_types et ON et.id = e.entity_type_id
+    WHERE ${whereClause}
+  `;
+  const pageQuery = (pageIdClause = '') => `SELECT
       e.id, et.slug AS entity_type, e.name, e.slug, pe.id AS parent_id, e.metadata, e.created_at,
-      COALESCE(tc.cnt, 0) as total_content,
+      ${plainSort ? '0' : 'COALESCE(tc.cnt, 0)'} as total_content,
       COALESCE(ac.cnt, 0) as active_connections,
       COALESCE(ic.cnt, 0) as automations_count,
       COALESCE(cc.cnt, 0) as children_count,
@@ -2247,16 +2333,44 @@ export async function listEntities(
     LIMIT ${limit + 1}
     ${plainSort ? '' : `OFFSET ${offset}`}`;
   const fetchPage = async (db: DbClient) => {
-    const totalCountResult = await db.unsafe<{ total_count: number }>(
-      `SELECT CAST(COUNT(*) AS INTEGER) as total_count ${baseQuery}`,
-      params
-    );
-    const result = await db.unsafe<CreatedEntity>(pageQuery, params);
-    return { totalCountResult, result };
+    if (!plainSort) {
+      const totalCountResult = await db.unsafe<{ total_count: number }>(
+        `SELECT CAST(COUNT(*) AS INTEGER) as total_count ${baseQuery}`,
+        params
+      );
+      const result = await db.unsafe<CreatedEntity>(pageQuery(), params);
+      return { totalCountResult, result, hasMoreIds: null as boolean | null };
+    }
+    const pageIds = (
+      await db.unsafe<{ id: number | string }>(pageIdQuery, params.slice(0, filterParamCount))
+    ).map((row) => Number(row.id));
+    const hasMoreIds = pageIds.length > limit;
+    const ids = hasMoreIds ? pageIds.slice(0, limit) : pageIds;
+    const [totalCountResult, result, contentCounts] = await Promise.all([
+      db.unsafe<{ total_count: number }>(
+        `SELECT CAST(COUNT(*) AS INTEGER) as total_count ${countFrom}`,
+        params.slice(0, filterParamCount)
+      ),
+      ids.length > 0
+        ? db.unsafe<CreatedEntity>(
+            pageQuery(`AND e.id = ANY('${pgBigintArray(ids)}'::bigint[])`),
+            params.slice(0, enrichParamCount),
+          )
+        : Promise.resolve([] as CreatedEntity[]),
+      batchTotalContentCounts(db, {
+        organizationId: ctx.organizationId,
+        userId: ctx.userId ?? null,
+        entityIds: ids,
+      }),
+    ]);
+    for (const row of result) {
+      row.total_content = contentCounts.get(Number(row.id)) ?? 0;
+    }
+    return { totalCountResult, result, hasMoreIds };
   };
   // Parsing and scoping do not prevent function side effects or expensive
   // expressions. Run authored predicates with the SQL tools' execution limits.
-  const { totalCountResult, result } = segmentFilter
+  const { totalCountResult, result, hasMoreIds } = segmentFilter
     ? await sql
         .begin(async (tx) => {
           await tx.unsafe('SET TRANSACTION READ ONLY');
@@ -2276,7 +2390,7 @@ export async function listEntities(
         })
     : await fetchPage(sql);
 
-  const hasMore = result.length > limit;
+  const hasMore = hasMoreIds ?? result.length > limit;
   const entities = hasMore
     ? (result.slice(0, limit) as unknown as CreatedEntity[])
     : (result as unknown as CreatedEntity[]);

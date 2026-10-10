@@ -11,6 +11,7 @@
 
 export type { EntityIdentityScope } from './content-search/entity-link';
 export {
+  buildEntityLinkBranches,
   buildEntityLinkUnion,
   entityLinkMatchSql,
   fetchEntityIdentityScopes,
