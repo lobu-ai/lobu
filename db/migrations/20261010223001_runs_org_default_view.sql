@@ -1,6 +1,5 @@
 -- migrate:up transaction:false
 -- lobu:no-quiesce
--- lobu:no-quiesce
 
 -- handleListRuns (packages/server/src/tools/admin/manage_operations/handlers/runs.ts)
 -- defaults to excluding chat_message and pages by (created_at DESC, id DESC).
