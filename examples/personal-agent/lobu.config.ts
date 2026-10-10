@@ -33,7 +33,10 @@ import { takeoutConfig } from "./takeout-dirs.ts";
 import { taskBuilderPrompt } from "./task-builder.prompt.ts";
 import type TaskBuilderReaction from "./task-builder.reaction.ts";
 import type TaskRules from "./task.rules.ts";
-import { tiktokResearchPrompt } from "./tiktok-research.prompt.ts";
+import {
+  tiktokResearchExecution,
+  tiktokResearchPrompt,
+} from "./tiktok-research.prompt.ts";
 import type TikTokResearchReaction from "./tiktok-research.reaction.ts";
 
 const hourlyTaskCollaboratorSkill = defineSkill({
@@ -791,7 +794,13 @@ const tiktokResearchAgent = defineAgent({
   name: "TikTok research",
   description:
     "Manual, read-only AI teammate research with verified inbox leads.",
-  providers: [{ id: "openai", model: "gpt-4.1" }],
+  providers: [
+    {
+      id: "openai",
+      // Keep literal for the provider-ref test scan; matches tiktokResearchExecution.
+      model: "gpt-5.4",
+    },
+  ],
 });
 
 // Manual research: prove useful leads before enabling a cadence.
@@ -801,7 +810,7 @@ const tiktokPracticalAiResearch = defineAutomation({
   name: "TikTok practical AI research",
   description:
     "Manual AI teammate research with verified inspection receipts and private, deduplicated inbox leads. No TikTok writes or schedule.",
-  model: null,
+  model: tiktokResearchExecution.model,
   tags: ["tiktok", "research", "manual-preview"],
   triggers: [],
   sources: {

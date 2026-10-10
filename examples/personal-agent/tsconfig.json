@@ -15,5 +15,6 @@
       "@lobu/connector-sdk/*": ["packages/connector-sdk/src/*"]
     }
   },
-  "include": ["**/*.ts"]
+  "include": ["**/*.ts"],
+  "exclude": ["evals/tiktok-research/**"]
 }

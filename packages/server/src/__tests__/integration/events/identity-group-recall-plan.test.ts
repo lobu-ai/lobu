@@ -15,7 +15,7 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
-import { buildEntityLinkUnion } from '../../../utils/content-search/entity-link';
+import { buildEntityLinkUnion, entityLinkMatchSql } from '../../../utils/content-search/entity-link';
 import { pgBigintArray } from '../../../db/client';
 import { lockIdentityOrganization, withIdentityPrivilege } from '../../../utils/relationship-validation';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -101,10 +101,11 @@ describe('identity-group recall — query plan stays index-driven', () => {
     await sql`ANALYZE entities`;
   }, 120_000);
 
-  async function planFor(predicate: string): Promise<string> {
+  async function planFor(predicate: string, params: number[] = []): Promise<string> {
     const sql = getTestDb();
     const out = await sql.unsafe(
-      `EXPLAIN (ANALYZE, FORMAT TEXT) SELECT count(*) FROM events e WHERE ${predicate}`
+      `EXPLAIN (ANALYZE, FORMAT TEXT) SELECT count(*) FROM events e WHERE ${predicate}`,
+      params
     );
     return out.map((r) => (r as Record<string, string>)['QUERY PLAN']).join('\n');
   }
@@ -142,17 +143,37 @@ describe('identity-group recall — query plan stays index-driven', () => {
     expect(plan).not.toMatch(/SubPlan[\s\S]*?on entities/);
   });
 
+  it.each(['literal', 'parameter'])('shares the %s identity traversal across all namespace branches', async (mode) => {
+    const plan = await planFor(
+      entityLinkMatchSql(mode === 'literal' ? `${root}::bigint` : '$1::bigint', 'e'),
+      mode === 'literal' ? [] : [root]
+    );
+    expect(plan).toMatch(/CTE identity_members/);
+    const seedScans = plan.match(/on entities seed[^\n]*loops=(\d+)/g) ?? [];
+    expect(seedScans).toHaveLength(1);
+    expect(Number(/loops=(\d+)/.exec(seedScans[0])?.[1])).toBe(1);
+    expect(plan).toMatch(/CTE Scan on entity_link_ids/);
+    expect(plan).toMatch(/Bitmap Index Scan on idx_events_entity_ids/);
+    expect(plan).not.toMatch(/Seq Scan on events e2/);
+    expect(plan).not.toMatch(/SubPlan[\s\S]*?on entities/);
+  });
+
   it('recalls exactly the same stamped events from the root and every member', async () => {
     const sql = getTestDb();
     for (const entityId of [root, ...members]) {
       const predicate = buildEntityLinkUnion({
         entityIdLiteral: entityId, scopes: [], alias: 'e', baseParamIndex: 1,
       });
-      const [row] = await sql.unsafe<{ n: number }[]>(
-        `SELECT count(*)::int AS n FROM events e WHERE ${predicate.sql}`,
-        predicate.params
-      );
-      expect(row.n).toBe(expectedEventCount);
+      for (const candidate of [
+        predicate,
+        { sql: entityLinkMatchSql('$1::bigint', 'e'), params: [entityId] },
+      ]) {
+        const [row] = await sql.unsafe<{ n: number }[]>(
+          `SELECT count(*)::int AS n FROM events e WHERE ${candidate.sql}`,
+          candidate.params
+        );
+        expect(row.n).toBe(expectedEventCount);
+      }
     }
   });
 });

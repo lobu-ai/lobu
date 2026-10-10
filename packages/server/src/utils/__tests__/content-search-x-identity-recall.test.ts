@@ -9,7 +9,7 @@ import {
 } from '../../__tests__/setup/test-fixtures';
 import { cleanupTestDatabase, getTestDb } from '../../__tests__/setup/test-db';
 import { IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY } from '../../identity/scope-projection';
-import { buildEntityLinkUnion, fetchEntityIdentityScopes } from '../content-search/entity-link';
+import { buildEntityLinkUnion, entityLinkMatchSql, fetchEntityIdentityScopes } from '../content-search/entity-link';
 
 describe('content-search X identity recall', () => {
   beforeEach(async () => {
@@ -60,12 +60,16 @@ describe('content-search X identity recall', () => {
       alias: 'f',
       baseParamIndex: 1,
     });
-    const rows = await sql.unsafe(
-      `SELECT f.id FROM events f WHERE ${predicate.sql} ORDER BY f.id`,
-      predicate.params
-    );
-
-    expect(rows.map((row) => Number(row.id))).toEqual([event.id]);
+    for (const candidate of [
+      predicate,
+      { sql: entityLinkMatchSql('$1::bigint', 'f'), params: [person.id] },
+    ]) {
+      const rows = await sql.unsafe(
+        `SELECT f.id FROM events f WHERE ${candidate.sql} ORDER BY f.id`,
+        candidate.params
+      );
+      expect(rows.map((row) => Number(row.id))).toEqual([event.id]);
+    }
   });
 
   it('does not cross-link equal identifiers from different tenant scopes', async () => {
@@ -121,11 +125,27 @@ describe('content-search X identity recall', () => {
         alias: 'f',
         baseParamIndex: 1,
       });
-      const rows = await sql.unsafe(
-        `SELECT f.id FROM events f WHERE ${predicate.sql} ORDER BY f.id`,
-        predicate.params
-      );
-      expect(rows.map((row) => Number(row.id))).toEqual([expectedEventId]);
+      for (const candidate of [
+        predicate,
+        { sql: entityLinkMatchSql('$1::bigint', 'f'), params: [entityId] },
+      ]) {
+        const rows = await sql.unsafe(
+          `SELECT f.id FROM events f WHERE ${candidate.sql} ORDER BY f.id`,
+          candidate.params
+        );
+        expect(rows.map((row) => Number(row.id))).toEqual([expectedEventId]);
+      }
     }
+
+    const correlated = await sql.unsafe(
+      `SELECT candidate.id AS entity_id, f.id FROM entities candidate
+       JOIN events f ON ${entityLinkMatchSql('candidate.id', 'f')}
+       WHERE candidate.id IN ($1, $2) ORDER BY candidate.id, f.id`,
+      [tenantA.id, tenantB.id]
+    );
+    expect(correlated.map((row) => [Number(row.entity_id), Number(row.id)])).toEqual([
+      [tenantA.id, eventA.id],
+      [tenantB.id, eventB.id],
+    ]);
   });
 });
