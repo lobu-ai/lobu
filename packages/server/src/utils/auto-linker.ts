@@ -24,8 +24,10 @@ interface EntityCandidate {
   entity_type: string;
 }
 
-// Per-org entity name cache (60s TTL)
+// Per-process cache (60s TTL); concurrent events in the same org share a fetch.
+// This only reduces duplicate reads; correctness does not require a shared cache.
 const entityCache = new Map<string, { entities: EntityCandidate[]; ts: number }>();
+const inflightFetches = new Map<string, Promise<EntityCandidate[]>>();
 const CACHE_TTL_MS = 60_000;
 const MAX_CONTENT_LENGTH = 5_000;
 const MAX_AUTO_LINKS = 20;
@@ -34,26 +36,37 @@ const MIN_NAME_LENGTH = 3;
 async function getOrgEntities(organizationId: string): Promise<EntityCandidate[]> {
   const cached = entityCache.get(organizationId);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.entities;
+  const inflight = inflightFetches.get(organizationId);
+  if (inflight) return inflight;
 
   const sql = getDb();
-  const rows = await sql`
-    SELECT e.id, e.name, et.slug AS entity_type
-    FROM entities e
-    JOIN entity_types et ON et.id = e.entity_type_id
-    WHERE e.organization_id = ${organizationId}
-      AND e.deleted_at IS NULL
-      AND length(e.name) >= ${MIN_NAME_LENGTH}
-    ORDER BY length(e.name) DESC
-  `;
+  const fetch = (async () => {
+    try {
+      const rows = await sql`
+        SELECT e.id, e.name, length(e.name) AS name_length, et.slug AS entity_type
+        FROM entities e
+        JOIN entity_types et ON et.id = e.entity_type_id
+        WHERE e.organization_id = ${organizationId}
+          AND e.deleted_at IS NULL
+          AND length(e.name) >= ${MIN_NAME_LENGTH}
+      `;
 
-  const entities = rows.map((r) => ({
-    id: Number(r.id),
-    name: r.name as string,
-    entity_type: r.entity_type as string,
-  }));
+      // Sort once per refresh using PostgreSQL's character count, not UTF-16 units.
+      rows.sort((a, b) => Number(b.name_length) - Number(a.name_length) || Number(a.id) - Number(b.id));
+      const entities = rows.map((r) => ({
+        id: Number(r.id),
+        name: r.name as string,
+        entity_type: r.entity_type as string,
+      }));
 
-  entityCache.set(organizationId, { entities, ts: Date.now() });
-  return entities;
+      entityCache.set(organizationId, { entities, ts: Date.now() });
+      return entities;
+    } finally {
+      inflightFetches.delete(organizationId);
+    }
+  })();
+  inflightFetches.set(organizationId, fetch);
+  return fetch;
 }
 
 function ensureMentionsType(organizationId: string): Promise<number> {
