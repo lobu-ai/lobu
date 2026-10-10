@@ -435,7 +435,9 @@ jobs:
           # Framework itself + umbrella app last, so they seal the
           # updated inner signatures.
           codesign "${OPTS[@]}" "$APP/Contents/Frameworks/Sparkle.framework"
-          codesign "${OPTS[@]}" "$APP"
+          # The final seal must retain the app's native permission entitlements.
+          codesign "${OPTS[@]}" \
+            --entitlements packages/owletto/apps/mac/Owletto/Owletto.entitlements "$APP"
 
           # Verify before we hand it to notarytool.
           codesign --verify --deep --strict --verbose=2 "$APP"
@@ -460,6 +462,15 @@ jobs:
           codesign --force --sign - "$AUTH_CLI"
           codesign --force --sign - "$DAEMON"
           codesign --force --deep --sign - "$APP"
+          # Sign only the outer app with its permissions, not every nested helper.
+          codesign --force --sign - \
+            --entitlements packages/owletto/apps/mac/Owletto/Owletto.entitlements "$APP"
+
+      - name: Verify signed app entitlements
+        run: |
+          python3 scripts/verify-mac-app-entitlements.py \
+            "$RUNNER_TEMP/Lobu.xcarchive/Products/Applications/Lobu.app" \
+            packages/owletto/apps/mac/Owletto/Owletto.entitlements
 
       - name: Build DMG
         run: |
