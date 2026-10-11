@@ -17,6 +17,11 @@ docs below for shipped semantics.
   existing event, Automation, and delivery infrastructure; verified boundaries,
   implementation slices, and acceptance criteria (not a shipped contract).
 
+- **`design/discoverable-connections.md`** — proposed `discoverable` connection
+  visibility: members can ask a private connection's owner for help, the
+  owner's Automation researches privately, and only an authorized reply is
+  shared (not a shipped contract).
+
 - **`design/access-resources.md`** — consolidation of Lobu's shipped
   connector-resource ACL foundation into one visibility-envelope model for
   generic entities, ERP data, actions, agents, and derived outputs.
