@@ -359,13 +359,19 @@ const productActivityDb = defineConnection({
                 coalesce(nullif(m.client_software_id, ''), nullif(client.client_name, ''), 'Unknown client'),
                 coalesce(nullif(u.name, ''), 'Unknown user'),
                 u.email,
-                coalesce(o.name, 'Account activity'),
+                coalesce((
+                  SELECT string_agg(o.name, ', ' ORDER BY o.name)
+                  FROM mcp_client_conversation_workspaces w
+                  JOIN organization o ON o.id = w.organization_id
+                  WHERE w.user_id = m.user_id
+                    AND w.client_identity = m.client_identity
+                    AND w.conversation_id = m.conversation_id
+                ), 'Account activity'),
                 CASE WHEN m.last_action IS NOT NULL THEN 'last action: ' || m.last_action END,
                 m.call_count || ' total calls'
               )
             FROM mcp_client_conversations m
             LEFT JOIN oauth_clients client ON client.id = m.client_id
-            LEFT JOIN organization o ON o.id = m.organization_id
             JOIN "user" u ON u.id = m.user_id
             WHERE m.call_count > 0
               AND coalesce(u.principal_kind, 'human') = 'human'

@@ -52,8 +52,11 @@ it("includes account activity and keeps actor identity across workspace changes"
   expect(
     before.find((row) => row.payload_text.includes(user.email))?.payload_text
   ).toContain("Account activity");
+  expect(
+    before.find((row) => row.payload_text.includes(second.email))?.payload_text
+  ).toContain(org.name);
 
-  // The production writer clears organization_id after crossing workspaces.
+  // Later account-level calls keep the workspace the conversation ran in.
   await recordMcpConversationActivity({
     ctx: { ...account, userId: second.id },
     toolName: "query_sdk",
@@ -66,6 +69,9 @@ it("includes account activity and keeps actor identity across workspace changes"
   expect(
     after.find((row) => row.payload_text.includes(second.email))?.payload_text
   ).toContain("2 total calls");
+  expect(
+    after.find((row) => row.payload_text.includes(second.email))?.payload_text
+  ).toContain(org.name);
   expect(after.every((row) => !row.payload_text.includes("0 failed"))).toBe(
     true
   );
