@@ -45,11 +45,11 @@
  */
 
 import {
-  requireBrowser,
   type ChromeActionDispatcher,
-  type RuntimeConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
+  type RuntimeConnectorDefinition,
+  requireBrowser,
   type SyncContext,
   type SyncResult,
 } from "@lobu/connector-sdk";
@@ -846,7 +846,7 @@ const INVEST_DOM_EXPR = `(async () => {
     const host = location.hostname;
     const path = location.pathname;
     const authed = host === "invest.revolut.com" && path.indexOf("signin") < 0 && path.indexOf("passcode") < 0;
-    if (!authed) return { authed: false, ready: false, host, path, href: location.href };
+    if (!authed) return { authed: false, ready: false, host, path, href: location.origin + location.pathname };
     const sections = Object.entries(accountTypes).map(([label, accountType]) => {
       const leaf = exactLeaf(label);
       const container = accountContainer(leaf);
@@ -877,11 +877,11 @@ const INVEST_DOM_EXPR = `(async () => {
           positions
         };
       });
-      return { authed: true, ready: true, host, path, href: location.href, accounts };
+      return { authed: true, ready: true, host, path, href: location.origin + location.pathname, accounts };
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  return { authed: location.hostname === "invest.revolut.com", ready: false, host: location.hostname, path: location.pathname, href: location.href, accounts: [] };
+  return { authed: location.hostname === "invest.revolut.com", ready: false, host: location.hostname, path: location.pathname, href: location.origin + location.pathname, accounts: [] };
 })()`;
 
 // Generic "retry the crawl while it returns no data" mechanism. The blocking
@@ -991,17 +991,28 @@ const pageBatchExpr = (internalPocketId: string): string => {
     const res = await fetchPage(url);
     if (res.err) { window.__lobuDone = true; window.__lobuStop = res.err; break; }
     const page = res.page;
-    if (!Array.isArray(page) || page.length === 0) { window.__lobuDone = true; window.__lobuStop = "empty"; break; }
+    if (!Array.isArray(page)) { window.__lobuDone = true; window.__lobuStop = "parseerr"; break; }
+    if (page.length === 0) { window.__lobuDone = true; window.__lobuStop = "empty"; break; }
     let oldest = Infinity; let added = 0;
     for (const t of page) {
-      const id = t && t.id; const sd = Number(t && t.startedDate);
-      if (Number.isFinite(sd) && sd < oldest) oldest = sd;
-      if (typeof id === "string" && !window.__lobuSeen[id]) { window.__lobuSeen[id] = 1; rows.push(t); added++; }
+      const id = t && t.id; const sd = t && t.startedDate;
+      if (typeof id !== "string" || !id || typeof sd !== "number" || !Number.isFinite(sd)) {
+        window.__lobuDone = true; window.__lobuStop = "parseerr"; break;
+      }
+      if (sd < oldest) oldest = sd;
+      if (!window.__lobuSeen[id]) { window.__lobuSeen[id] = 1; rows.push(t); added++; }
     }
+    if (window.__lobuDone) break;
     const prevCursor = window.__lobuCursor == null ? Infinity : window.__lobuCursor;
-    if (!Number.isFinite(oldest) || !(oldest < prevCursor)) { window.__lobuDone = true; window.__lobuStop = "no_progress"; break; }
+    if (!(oldest < prevCursor)) {
+      window.__lobuDone = true;
+      // An inclusive cursor may repeat the boundary. Any other stalled page
+      // is not evidence that we reached the start of history.
+      window.__lobuStop = added === 0 && page.every(t => t.startedDate === prevCursor)
+        ? "no_new" : "no_progress";
+      break;
+    }
     window.__lobuCursor = oldest;
-    if (added === 0) { window.__lobuDone = true; window.__lobuStop = "no_new"; break; }
     await new Promise(x => setTimeout(x, 80));
   }
   return { done: window.__lobuDone, rows: rows, stop: window.__lobuStop };
@@ -1073,25 +1084,53 @@ async function crawlFetchPaging(
   let apiCallCount = 0;
   for (let batch = 0; batch < maxBatches; batch++) {
     const b = await dispatcher.dispatch<{
-      value?: { done?: boolean; rows?: unknown };
+      value?: { done?: boolean; rows?: unknown; stop?: string | null };
     }>("evaluate", {
       tab_id: tabId,
       expression: PAGE_BATCH_EXPR,
       allowed_origins: allowed,
     });
     const v = b.value ?? {};
-    if (Array.isArray(v.rows) && v.rows.length > 0) {
+    if (v.stop === "http_401") {
+      await dispatcher
+        .dispatch("focus_tab", { tab_id: tabId })
+        .catch(() => undefined);
+      // Discard partial history and use the existing sign-in wait/retry path.
+      return { items: [], apiCallCount: 0 };
+    }
+    if (
+      (v.stop && !["empty", "no_new"].includes(v.stop)) ||
+      (v.done && !v.stop)
+    ) {
+      throw new Error(
+        `Revolut transaction crawl failed (${v.stop}); no checkpoint was advanced.`
+      );
+    }
+    if (!Array.isArray(v.rows) || typeof v.done !== "boolean") {
+      throw new Error(
+        "Revolut transaction crawl returned an incomplete response; no checkpoint was advanced."
+      );
+    }
+    const transactions = parseTransactionsResponse(v.rows);
+    if (transactions.length !== v.rows.length) {
+      throw new Error(
+        "Revolut transaction crawl returned malformed rows; no checkpoint was advanced."
+      );
+    }
+    if (v.rows.length > 0) {
       apiCallCount += 1;
-      for (const t of parseTransactionsResponse(v.rows)) {
+      for (const t of transactions) {
         if (!seen.has(t.id)) {
           seen.add(t.id);
           items.push(t);
         }
       }
     }
-    if (v.done) break;
+    if (v.done) return { items, apiCallCount };
   }
-  return { items, apiCallCount };
+  throw new Error(
+    "Revolut transaction history is incomplete: crawl budget exhausted; no checkpoint was advanced."
+  );
 }
 
 const configSchema = {
@@ -1178,10 +1217,14 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
     name: "Revolut",
     description:
       "Syncs exact Revolut transactions and current Invest balances through your paired Owletto Chrome session, with no separate connector login.",
-    version: "4.8.1",
+    version: "4.8.2",
     faviconDomain: "app.revolut.com",
     browser: {
-      origins: ["https://app.revolut.com", "https://invest.revolut.com"],
+      origins: [
+        "https://app.revolut.com",
+        "https://invest.revolut.com",
+        "https://sso.revolut.com",
+      ],
     },
     authSchema: {
       // Auth is implicit via the paired Owletto extension's signed-in Chrome —
@@ -1281,7 +1324,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
       tab_id: tabId,
       expression: `({
         authed: location.hostname === "invest.revolut.com" && location.pathname.indexOf("signin") < 0 && location.pathname.indexOf("passcode") < 0,
-        href: location.href
+        href: location.origin + location.pathname
       })`,
       allowed_origins: REVOLUT_ALLOWED_ORIGINS,
     });

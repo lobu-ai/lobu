@@ -1663,12 +1663,27 @@ export class ApplyClient {
   // ── Feeds (managed per-connection) ────────────────────────────────────────
 
   async listFeeds(connectionId: number): Promise<RemoteFeed[]> {
-    const body = await this.feedsTool<{ feeds?: RemoteFeed[] }>({
-      action: "list_feeds",
-      connection_id: connectionId,
-      limit: 500,
-    });
-    return body.feeds ?? [];
+    const feeds: RemoteFeed[] = [];
+    // Identity checks must see every page, including duplicates beyond the first.
+    for (;;) {
+      const body = await this.feedsTool<{
+        feeds?: RemoteFeed[];
+        has_more?: boolean;
+      }>({
+        action: "list_feeds",
+        connection_id: connectionId,
+        limit: 500,
+        offset: feeds.length,
+      });
+      const page = body.feeds ?? [];
+      feeds.push(...page);
+      if (!body.has_more) return feeds;
+      if (page.length === 0) {
+        throw new ApiError(
+          `Could not list all feeds for connection ${connectionId}: the server returned an empty page with more feeds remaining. Retry apply.`
+        );
+      }
+    }
   }
 
   async createFeed(payload: {

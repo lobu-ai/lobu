@@ -1,9 +1,9 @@
 import {
-  requireBrowser,
   type ChromeActionDispatcher,
-  type RuntimeConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
+  type RuntimeConnectorDefinition,
+  requireBrowser,
   type SyncContext,
   type SyncResult,
 } from "@lobu/connector-sdk";
@@ -502,9 +502,11 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
     name: "Midas",
     description:
       "Syncs Midas portfolio holdings via the Owletto Chrome extension.",
-    version: "1.1.1",
+    version: "1.1.2",
     faviconDomain: "atlas.getmidas.com",
-    browser: { origins: ["https://atlas.getmidas.com"] },
+    browser: {
+      origins: ["https://atlas.getmidas.com", "https://sso.getmidas.com"],
+    },
     authSchema: {
       methods: [{ type: "none" }],
     },
@@ -590,11 +592,31 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
 
     // SPA settle: headings paint before Atlas appends the numeric rows. Wait
     // for a section total inside Pozisyonlar, not just for an early marker.
-    const textObs = await dispatcher.dispatch<{ value?: string }>("evaluate", {
-      tab_id: nav.tab_id,
-      expression: MIDAS_DASHBOARD_TEXT_EXPRESSION,
-      allowed_origins: [...MIDAS_ALLOWED_ORIGINS],
-    });
+    let textObs: { value?: string };
+    try {
+      textObs = await dispatcher.dispatch<{ value?: string }>("evaluate", {
+        tab_id: nav.tab_id,
+        expression: MIDAS_DASHBOARD_TEXT_EXPRESSION,
+        allowed_origins: [...MIDAS_ALLOWED_ORIGINS],
+      });
+    } catch (error) {
+      // A late SSO redirect destroys the in-page readiness promise. Exclude
+      // OAuth query/fragment values before the diagnostic leaves the page.
+      const location = await dispatcher
+        .dispatch<{ value?: string }>("evaluate", {
+          tab_id: nav.tab_id,
+          expression: "location.origin + location.pathname",
+          allowed_origins: [...MIDAS_ALLOWED_ORIGINS],
+        })
+        .catch(() => null);
+      if (location?.value && isMidasAuthWall(location.value)) {
+        await notifyMidasAuthWall(dispatcher);
+        throw new Error(
+          "Midas session needs sign-in. Sign in at atlas.getmidas.com in this Chrome profile, then re-run the sync."
+        );
+      }
+      throw error;
+    }
 
     const bodyText = textObs.value ?? "";
     const snapshot = parseMidasDashboardText(bodyText);

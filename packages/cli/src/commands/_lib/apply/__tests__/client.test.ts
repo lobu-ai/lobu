@@ -3,6 +3,23 @@ import { ApiError } from "../../../memory/_lib/errors.js";
 import { ApplyClient, isDuplicateError } from "../client.js";
 
 describe("ApplyClient", () => {
+  test("listFeeds rejects an incomplete empty page instead of planning from partial state", async () => {
+    const client = new ApplyClient(
+      {
+        apiBaseUrl: "https://example.test",
+        orgSlug: "fixture",
+        token: "test-token",
+      },
+      (async () =>
+        new Response(
+          JSON.stringify({ feeds: [], has_more: true })
+        )) as typeof fetch
+    );
+    await expect(client.listFeeds(3)).rejects.toThrow(
+      "empty page with more feeds remaining"
+    );
+  });
+
   test("sends relationship purpose on the schema API", async () => {
     const calls: Record<string, unknown>[] = [];
     const client = new ApplyClient(

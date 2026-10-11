@@ -32,6 +32,20 @@ interface FakeThread {
   messages: FakeMessage[];
 }
 
+/** Render the distinct Gmail index/message resources from a full fixture. */
+function threadResource(url: string, thread: ReturnType<typeof toThreadResponse>) {
+  const parsed = new URL(url);
+  const id = parsed.pathname.match(/\/messages\/([^/]+)$/)?.[1];
+  if (id) {
+    const message = thread.messages.find(message => message.id === decodeURIComponent(id));
+    if (!message) throw new Error(`Missing message fixture: ${id}`);
+    return { ...message, threadId: thread.id };
+  }
+  return parsed.searchParams.get('format') === 'minimal'
+    ? { id: thread.id, historyId: thread.historyId, messages: thread.messages.map(({ id }) => ({ id })) }
+    : thread;
+}
+
 /**
  * Fake Gmail HTTP client: serves paginated threads.list and threads/<id>
  * lookups from the given fixtures. Header values come from the per-message
@@ -43,6 +57,7 @@ function fakeHttp(
   failThreadIds: ReadonlySet<string> = new Set()
 ) {
   const byId = new Map(threads.map((t) => [t.id, t]));
+  let currentThread: ReturnType<typeof toThreadResponse>;
   return {
     raw: async (url: string) => {
       onRequest?.(url);
@@ -56,8 +71,9 @@ function fakeHttp(
           text: async () => '',
         } as unknown as Response;
       }
-      const body = threadMatch
-        ? toThreadResponse(byId.get(threadMatch[1]))
+      if (threadMatch) currentThread = toThreadResponse(byId.get(threadMatch[1]));
+      const body = threadMatch || /\/messages\/[^/]+$/.test(u.pathname)
+        ? threadResource(url, currentThread)
         : (() => {
             const start = Number(u.searchParams.get('pageToken') ?? 0);
             const limit = Number(u.searchParams.get('maxResults') ?? 100);
@@ -160,7 +176,7 @@ test('person-building sync requests its label union and attribution headers', as
 
   expect(new URL(urls[0]).searchParams.get('q')).toContain('{label:INBOX label:SENT}');
   const threadUrl = urls.find((url) => url.includes('/threads/t-human')) ?? '';
-  expect(new URL(threadUrl).searchParams.get('format')).toBe('full');
+  expect(new URL(threadUrl).searchParams.get('format')).toBe('minimal');
 });
 
 describe('Gmail replied signal (promote-on-interaction)', () => {
@@ -666,7 +682,7 @@ describe('complete Gmail sync input', () => {
     expect(result.events[0].payload_text).toContain('Original request with details past the snippet.');
     expect(result.events[0].payload_text).toContain('The work is complete. Teşekkürler.');
     expect(result.events[0].occurred_at.toISOString()).toBe('2026-07-02T11:00:00.000Z');
-    expect(new URL(urls[1]).searchParams.get('format')).toBe('full');
+    expect(new URL(urls[1]).searchParams.get('format')).toBe('minimal');
     expect(result.events[0].origin_id).toBe('thread-full');
   });
 
@@ -686,9 +702,9 @@ describe('complete Gmail sync input', () => {
     connector.createClient = () => ({ raw: async (url: string) => {
       urls.push(url);
       const u = new URL(url);
-      const id = u.pathname.match(/\/threads\/([^/]+)$/)?.[1];
+      const id = u.pathname.match(/\/threads\/([^/]+)$/)?.[1] ?? u.pathname.match(/\/messages\/m-([^/]+)$/)?.[1];
       return { ok: true, status: 200, json: async () => id
-        ? toThreadResponse({ id, messages: [{ id: 'm-' + id, body: id }] })
+        ? threadResource(url, toThreadResponse({ id, messages: [{ id: 'm-' + id, body: id }] }))
         : u.searchParams.get('pageToken') === 'page-two'
           ? { threads: [{ id: 'older' }] }
           : { threads: [{ id: 'newer' }], nextPageToken: 'page-two' },
@@ -704,7 +720,7 @@ describe('complete Gmail sync input', () => {
     const second = await runSync(connector, context(first.checkpoint, { max_results: 1, lookback_days: 1 }));
     expect(first.events.map((event) => event.origin_id)).toEqual(['newer']);
     expect(second.events.map((event) => event.origin_id)).toEqual(['older']);
-    const lists = urls.filter((url) => !new URL(url).pathname.match(/\/threads\//)).map((url) => new URL(url));
+    const lists = urls.filter((url) => new URL(url).pathname.endsWith('/threads')).map((url) => new URL(url));
     expect(lists[1].searchParams.get('pageToken')).toBe('page-two');
     expect(lists[1].searchParams.get('q')).toBe(lists[0].searchParams.get('q'));
     expect(new Date(second.checkpoint.last_sync_at).getTime()).toBeGreaterThan(Date.parse(prior.last_sync_at));
@@ -760,9 +776,9 @@ describe('complete Gmail sync input', () => {
   test.each(['empty', 'undated'])('does not advance past malformed %s thread data', async (kind) => {
     const connector = new GmailConnector();
     connector.createClient = () => ({ raw: async (url: string) => ({
-      ok: true, status: 200, json: async () => url.includes('/threads/')
+      ok: true, status: 200, json: async () => url.includes('/threads/') || url.includes('/messages/')
         ? kind === 'empty' ? { id: kind, messages: [] }
-          : toThreadResponse({ id: kind, messages: [{ id: 'm', date: 'invalid-date' }] })
+          : threadResource(url, toThreadResponse({ id: kind, messages: [{ id: 'm', date: 'invalid-date' }] }))
         : { threads: [{ id: kind }] },
     }) });
     await expect(runSync(connector, context())).rejects.toThrow(/Gmail returned/);
@@ -775,8 +791,8 @@ describe('complete Gmail sync input', () => {
       raw: async (url: string) => {
         urls.push(url);
         const u = new URL(url);
-        const id = u.pathname.match(/\/threads\/([^/]+)$/)?.[1];
-        if (id) return { ok: true, status: 200, json: async () => toThreadResponse({ id, messages: [{ id: `m-${id}` }] }) };
+        const id = u.pathname.match(/\/threads\/([^/]+)$/)?.[1] ?? u.pathname.match(/\/messages\/m-([^/]+)$/)?.[1];
+        if (id) return { ok: true, status: 200, json: async () => threadResource(url, toThreadResponse({ id, messages: [{ id: `m-${id}` }] })) };
         if (u.searchParams.get('pageToken') === 'retired') {
           return { ok: false, status: 400, text: async () => 'Invalid pageToken' };
         }
@@ -792,7 +808,7 @@ describe('complete Gmail sync input', () => {
       })
     );
     // Same window, first page — not a fresh window, and not a wedged run.
-    const lists = urls.filter((url) => !url.includes('/threads/'));
+    const lists = urls.filter((url) => new URL(url).pathname.endsWith('/threads'));
     expect(lists).toHaveLength(2);
     expect(new URL(lists[1]).searchParams.get('pageToken')).toBeNull();
     expect(new URL(lists[1]).searchParams.get('q')).toBe('after:1 before:2 (label:INBOX)');
@@ -851,8 +867,8 @@ describe('Gmail externally stored message bodies', () => {
           text: async () => 'body fetch failed',
           json: async () => {
             if (attachment) return { data: Buffer.from(BODY).toString('base64url') };
-            if (!url.includes('/threads/')) return { threads: [{ id: 'thread-body' }] };
-            return {
+            if (new URL(url).pathname.endsWith('/threads')) return { threads: [{ id: 'thread-body' }] };
+            return threadResource(url, {
               id: 'thread-body',
               messages: [
                 {
@@ -874,7 +890,7 @@ describe('Gmail externally stored message bodies', () => {
                   },
                 },
               ],
-            };
+            } as ReturnType<typeof toThreadResponse>);
           },
         };
       },
@@ -929,7 +945,7 @@ describe('Gmail empty MIME alternatives', () => {
       status: attachmentStatus,
       text: async () => 'body unavailable',
       json: async () => url.includes('/attachments/') ? { data: '' }
-        : url.includes('/threads/') ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+        : url.includes('/threads/') || url.includes('/messages/') ? threadResource(url, { ...thread, messages: [{ ...thread.messages[0], payload }] })
         : { threads: [{ id: 'alternatives' }] },
     }) });
     return connector;
@@ -992,7 +1008,7 @@ describe('Gmail multipart body sections', () => {
         status: externalStatus,
         text: async () => 'body unavailable',
         json: async () => url.includes('/attachments/') ? { data: Buffer.from('Please sign the final section.').toString('base64url') }
-          : url.includes('/threads/') ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+          : url.includes('/threads/') || url.includes('/messages/') ? threadResource(url, { ...thread, messages: [{ ...thread.messages[0], payload }] })
           : { threads: [{ id: thread.id }] },
       };
     } });
@@ -1061,8 +1077,8 @@ describe('Gmail MIME syntax', () => {
       const thread = toThreadResponse({ id: 'mime-thread', messages: [{ id: 'mime-message' }] });
       connector.createClient = () => ({ raw: async (url: string) => ({
         ok: true,
-        json: async () => url.includes('/threads/')
-          ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+        json: async () => url.includes('/threads/') || url.includes('/messages/')
+          ? threadResource(url, { ...thread, messages: [{ ...thread.messages[0], payload }] })
           : { threads: [{ id: thread.id }] },
       }) });
       const body = mode === 'sync'
@@ -1095,8 +1111,10 @@ describe('Gmail poison-thread quarantine', () => {
     connector.createClient = () => ({ raw: async (url: string) => {
       urls.push(url);
       const id = new URL(url).pathname.match(/\/threads\/([^/]+)$/)?.[1];
-      return { ok: true, status: 200, json: async () => id
-        ? threads.find((thread) => thread.id === id)
+      const messageId = new URL(url).pathname.match(/\/messages\/([^/]+)$/)?.[1];
+      const thread = threads.find(thread => id ? thread.id === id : thread.messages.some(message => message.id === messageId));
+      return { ok: true, status: 200, json: async () => thread
+        ? threadResource(url, thread)
         : { threads: threads.map((thread) => ({ id: thread.id })) },
       };
     } });
@@ -1118,7 +1136,7 @@ describe('Gmail poison-thread quarantine', () => {
     expect(Date.parse(result.checkpoint.last_sync_at)).toBeGreaterThan(Date.parse(checkpoint.last_sync_at));
     expect(result.checkpoint.pending).toBeUndefined();
     expect(result.metadata.items_skipped).toBe(1);
-    expect(urls).toHaveLength(3);
+    expect(urls).toHaveLength(6);
     expect(checkpoint).not.toHaveProperty('skipped_threads');
 
     // Rewalking the boundary deduplicates diagnostics without mutating state.
@@ -1172,7 +1190,7 @@ describe('Gmail MIME body charset', () => {
     connector.createClient = () => ({ raw: async (url: string) => ({
       ok: true,
       json: async () => url.includes('/attachments/') ? { data: bytes.toString('base64url') }
-        : url.includes('/threads/') ? { ...thread, messages: [{ ...thread.messages[0], payload }] }
+        : url.includes('/threads/') || url.includes('/messages/') ? threadResource(url, { ...thread, messages: [{ ...thread.messages[0], payload }] })
         : { threads: [{ id: thread.id }] },
     }) });
     return connector;
@@ -1238,7 +1256,7 @@ describe('Gmail readable HTML sync bodies', () => {
       urls.push(url);
       return { ok: true, status: 200, json: async () => url.includes('/attachments/')
         ? { data: Buffer.from(html).toString('base64url') }
-        : url.includes('/threads/') ? thread : { threads: [{ id: thread.id }] } };
+        : url.includes('/threads/') || url.includes('/messages/') ? threadResource(url, thread) : { threads: [{ id: thread.id }] } };
     } });
     return { connector, urls };
   }
@@ -1314,7 +1332,7 @@ describe('Gmail attachment download', () => {
               const bytes = id === 'att-csv' ? Buffer.from(CSV) : PNG;
               return { data: bytes.toString('base64url'), size: bytes.length };
             }
-            return {
+            return threadResource(url, {
               id: 'thread-att',
               messages: [
                 {
@@ -1332,7 +1350,7 @@ describe('Gmail attachment download', () => {
                   },
                 },
               ],
-            };
+            } as ReturnType<typeof toThreadResponse>);
           },
         };
       },
@@ -1421,5 +1439,116 @@ describe('Gmail attachment download', () => {
     const result = await download({ message_id: 'message-att', attachment_id: 'att-png' });
     expect(result.output.attachments[0].filename).toBe('att-png');
     expect(result.output.attachments[0].mime_type).toBe('application/octet-stream');
+  });
+});
+
+describe('Gmail threads larger than the per-response transport cap', () => {
+  const credentials = { accessToken: 'synthetic-token' };
+  const context = { feedKey: 'threads', config: {}, checkpoint: {}, credentials };
+
+  function setup(messageFailure?: number | 'oversized') {
+    const connector = new GmailConnector();
+    const thread = toThreadResponse({ id: 'large-thread', messages: Array.from({ length: 18 }, (_, i) => ({
+      id: `large-message-${i}`, body: 'x'.repeat(750_000) + `END-${i}`,
+    })) });
+    const urls: string[] = [];
+    connector.createClient = () => ({ raw: async (url: string) => {
+      urls.push(url);
+      const parsed = new URL(url);
+      const messageId = parsed.pathname.match(/\/messages\/([^/]+)$/)?.[1];
+      if (messageId === 'large-message-17' && messageFailure) {
+        if (messageFailure === 'oversized') throw new Error('fetch response body exceeded the 16777216-byte cap');
+        return { ok: false, status: messageFailure, text: async () => 'synthetic provider failure' };
+      }
+      const body = messageId ? thread.messages.find(message => message.id === messageId)
+        : parsed.pathname.endsWith('/threads/large-thread')
+          ? parsed.searchParams.get('format') === 'minimal'
+            ? { id: thread.id, historyId: thread.historyId, messages: thread.messages.map(({ id }) => ({ id })) }
+            : thread
+          : { threads: [{ id: thread.id }] };
+      if (Buffer.byteLength(JSON.stringify(body)) > 16 * 1024 * 1024) {
+        throw new Error('fetch response body exceeded the 16777216-byte cap');
+      }
+      return { ok: true, status: 200, json: async () => body };
+    } });
+    return { connector, urls };
+  }
+
+  test.each(['sync', 'get_thread'])('%s reads every message without a combined full-thread response', async mode => {
+    const { connector, urls } = setup();
+    const output = mode === 'sync'
+      ? (await runSync(connector, context)).events[0].payload_text
+      : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'large-thread' }, credentials })).output.messages.map((m: { body: string }) => m.body).join('\n');
+    for (let i = 0; i < 18; i++) expect(output).toContain(`END-${i}`);
+    const indexUrl = new URL(urls.find(url => url.includes('/threads/large-thread'))!);
+    expect(indexUrl.searchParams.get('format')).toBe('minimal');
+    expect(indexUrl.searchParams.get('fields')).toBe('id,historyId,messages(id)');
+    expect(urls.filter(url => /\/messages\/[^/]+\?format=full$/.test(url))).toHaveLength(18);
+  });
+
+  test.each([404, 503, 'oversized'] as const)('does not checkpoint an incomplete thread after message failure %s', async failure => {
+    const { connector } = setup(failure);
+    const commit = mock(async () => {});
+    await expect(runSync(connector, { ...context, commit })).rejects.toThrow(failure === 'oversized' ? 'cap' : String(failure));
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  test.each([404, 503, 'oversized'] as const)('get_thread refuses partial output after message failure %s', async failure => {
+    const { connector } = setup(failure);
+    const result = await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'large-thread' }, credentials });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(failure === 'oversized' ? 'cap' : String(failure));
+    expect(result.output).toBeUndefined();
+  });
+
+  test.each([
+    ['wrong thread index', { id: 'another-thread', messages: [{ id: 'message' }] }, {}],
+    ['missing message id', { id: 'thread', messages: [{}] }, {}],
+    ['duplicate message id', { id: 'thread', messages: [{ id: 'message' }, { id: 'message' }] }, {}],
+    ['wrong message id', { id: 'thread', messages: [{ id: 'message' }] }, { id: 'another-message', threadId: 'thread', payload: {} }],
+    ['wrong message thread', { id: 'thread', messages: [{ id: 'message' }] }, { id: 'message', threadId: 'another-thread', payload: {} }],
+    ['missing payload', { id: 'thread', messages: [{ id: 'message' }] }, { id: 'message', threadId: 'thread' }],
+  ])('does not commit malformed provider data: %s', async (_kind, index, message) => {
+    const connector = new GmailConnector();
+    connector.createClient = () => ({ raw: async (url: string) => ({
+      ok: true, status: 200, json: async () => url.includes('/messages/') ? message
+        : url.includes('/threads/') ? index : { threads: [{ id: 'thread' }] },
+    }) });
+    const commit = mock(async () => {});
+    await expect(runSync(connector, { ...context, commit })).rejects.toThrow('Gmail returned');
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  test('bounds in-flight message reads and preserves index order when they complete out of order', async () => {
+    const connector = new GmailConnector();
+    const thread = toThreadResponse({ id: 'concurrent-thread', messages: Array.from({ length: 9 }, (_, i) => ({ id: `message-${i}` })) });
+    let active = 0;
+    let peak = 0;
+    const completed: string[] = [];
+    const pending: Array<() => void> = [];
+    connector.createClient = () => ({ raw: async (url: string) => {
+      const body = threadResource(url, thread);
+      if (url.includes('/messages/')) {
+        active++;
+        peak = Math.max(peak, active);
+        const id = new URL(url).pathname.split('/').pop() ?? '';
+        await new Promise<void>(resolve => {
+          pending.push(resolve);
+          queueMicrotask(() => {
+            for (const release of pending.splice(0).reverse()) release();
+          });
+        });
+        completed.push(id);
+        active--;
+      }
+      return { ok: true, status: 200, json: async () => body };
+    } });
+    const result = await connector.execute({ actionKey: 'get_thread', input: { thread_id: thread.id }, credentials });
+    expect(result.success).toBe(true);
+    const ids = thread.messages.map(message => message.id);
+    expect(result.output.messages.map((message: { id: string }) => message.id)).toEqual(ids);
+    expect(completed).not.toEqual(ids);
+    expect(peak).toBe(4);
+    expect(active).toBe(0);
   });
 });

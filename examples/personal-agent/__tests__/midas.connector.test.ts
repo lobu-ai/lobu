@@ -1,4 +1,5 @@
 import { runSync } from "./sync-harness";
+
 /**
  * Midas connector — extension dispatcher wiring + dashboard DOM text parsing.
  *
@@ -8,12 +9,13 @@ import { runSync } from "./sync-harness";
  *  - European number format for both USD and TRY on the TR UI
  */
 
+import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { runInNewContext } from "node:vm";
+import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 import type { MidasCheckpoint } from "../midas.connector";
 import { connectorSdkMock } from "./connector-sdk.mock";
-import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 
 // Stub @lobu/connector-sdk (it pulls in playwright) so the connector imports
 // without the browser stack. Shared superset — see connector-sdk.mock.ts.
@@ -595,4 +597,76 @@ describe("MidasConnector.sync", () => {
       } as never)
     ).rejects.toThrow(/Failed to parse Midas dashboard/);
   });
+});
+
+test("reports sign-in when SSO navigation interrupts the dashboard read", async () => {
+  const connector = new MidasConnector();
+  const calls: string[] = [];
+  let diagnostic: unknown;
+  const dispatcher = {
+    dispatch: async (action: string, input: Record<string, unknown>) => {
+      const admitted = constrainBrowserInput(
+        connector.definition.browser!,
+        action,
+        input
+      );
+      calls.push(action);
+      if (action === "navigate")
+        return { tab_id: 42, current_url: MIDAS_DASHBOARD_URL };
+      if (
+        action === "evaluate" &&
+        input.expression === MIDAS_DASHBOARD_TEXT_EXPRESSION
+      ) {
+        throw new Error(
+          '{"code":-32000,"message":"Inspected target navigated or closed"}'
+        );
+      }
+      if (action === "evaluate") {
+        // The diagnostic must pass the same post-redirect origin gate as Chrome.
+        if (
+          !(admitted.allowed_origins as string[]).some(
+            (origin) => origin === "https://sso.getmidas.com"
+          )
+        )
+          throw new Error("origin denied");
+        diagnostic = runInNewContext(input.expression as string, {
+          location: new URL(
+            "https://sso.getmidas.com/giris?code=synthetic-secret#synthetic-token"
+          ),
+        });
+        return { value: diagnostic };
+      }
+      return {};
+    },
+  };
+  await expect(
+    runSync(connector, {
+      feedKey: "assets",
+      config: {},
+      checkpoint: {},
+      browser: dispatcher,
+    } as never)
+  ).rejects.toThrow(/session needs sign-in/);
+  expect(diagnostic).toBe("https://sso.getmidas.com/giris");
+  expect(calls).toContain("show_notification");
+});
+
+test("preserves an unrelated dashboard read failure", async () => {
+  const failure = new Error("synthetic unrelated failure");
+  const dispatcher = {
+    dispatch: async (action: string, input: Record<string, unknown>) => {
+      if (action === "navigate")
+        return { tab_id: 42, current_url: MIDAS_DASHBOARD_URL };
+      if (input.expression === MIDAS_DASHBOARD_TEXT_EXPRESSION) throw failure;
+      return { value: MIDAS_DASHBOARD_URL };
+    },
+  };
+  await expect(
+    runSync(new MidasConnector(), {
+      feedKey: "assets",
+      config: {},
+      checkpoint: {},
+      browser: dispatcher,
+    } as never)
+  ).rejects.toBe(failure);
 });

@@ -3,9 +3,10 @@ import type { Env } from '../../../index';
 import { agentRoutes } from '../../../lobu/agent-routes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoreServices } from '../../../gateway/services/core-services';
-import type { IMessageQueue, QueueJob } from '../../../gateway/infrastructure/queue/types';
+import type { IMessageQueue } from '../../../gateway/infrastructure/queue/types';
 import { bootTaskScheduler } from '../../../scheduled/jobs';
 import { QUERYABLE_SCHEMA } from '../../../utils/table-schema';
+import { getDb } from '../../../db/client';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import { createTestPAT } from '../../setup/test-fixtures';
 import { TestWorkspace } from '../../setup/test-mcp-client';
@@ -37,20 +38,20 @@ describe('retired product evals', () => {
     }
   });
 
-  it('stops querying eval columns before a later release drops them physically', () => {
+  it('removes retired eval columns from both storage and queryable schema', async () => {
     const automation = QUERYABLE_SCHEMA.tables.find((table) => table.name === 'automations');
     expect(automation).toBeDefined();
     expect(automation!.columns.filter((column) => column.name.startsWith('latest_eval_'))).toEqual([]);
+    expect(await getDb()`SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'automations'
+        AND column_name IN ('latest_eval_score', 'latest_eval_at', 'latest_eval_run_id')`).toEqual([]);
   });
 
-  it('drains an old scorer tick without boot seeding or scheduling a successor', async () => {
-    const workers = new Map<string, (job: QueueJob<any>) => Promise<void>>();
+  it('neither registers nor seeds the retired scorer', async () => {
     const send = vi.fn(async () => 'synthetic-task-id');
     const queue = {
       send,
-      work: async (name: string, handler: (job: QueueJob<any>) => Promise<void>) => {
-        workers.set(name, handler);
-      },
+      work: async () => {},
     } as unknown as IMessageQueue;
     const scheduler = await bootTaskScheduler({
       getQueue: () => queue,
@@ -60,12 +61,7 @@ describe('retired product evals', () => {
       expect(send.mock.calls.some((call: unknown[]) =>
         (call[1] as { name?: string } | undefined)?.name === 'score-eval-runs'
       )).toBe(false);
-      send.mockClear();
-      await workers.get('task')!({
-        id: '999',
-        data: { name: 'score-eval-runs', payload: {}, __scheduledTick: '2026-01-01T00:00:00.000Z' },
-      } as QueueJob<any>);
-      expect(send).not.toHaveBeenCalled();
+      expect(scheduler.hasHandler('score-eval-runs')).toBe(false);
     } finally {
       scheduler.stop();
     }

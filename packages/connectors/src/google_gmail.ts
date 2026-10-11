@@ -541,16 +541,10 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       for (const threadStub of threads) {
         inspected++;
         try {
-          const response = await http.raw(`${this.BASE_URL}/threads/${threadStub.id}?format=full`);
-          // A thread deleted between list and get has nothing left to sync.
-          // Other failures must fail the run so the same window is retried
-          // rather than checkpointed as complete.
-          if (response.status === 404) continue;
-          if (!response.ok) {
-            throw new Error(`Gmail threads.get error (${response.status}): ${await response.text()}`);
-          }
-          const thread = (await response.json()) as GmailThreadGetResponse;
-          if (!thread.messages?.length) throw new Error('Gmail returned a thread without messages');
+          const thread = await this.loadThread(http, threadStub.id);
+          // A thread deleted between list and index has nothing left to sync.
+          // A failure fetching any indexed message must retry the whole thread.
+          if (!thread) continue;
           const messages = [...thread.messages].sort((a, b) => Number(a.internalDate) - Number(b.internalDate));
           const firstMessage = messages[0];
           const latestMessage = messages[messages.length - 1];
@@ -1015,19 +1009,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       return { success: false, error: 'thread_id is required.' };
     }
 
-    const url = `${this.BASE_URL}/threads/${threadId}?format=full`;
-    const response = await http.raw(url);
-
-    if (!response.ok) {
-      const errText = await response.text();
-      return { success: false, error: `Gmail thread error (${response.status}): ${errText}` };
-    }
-
-    const thread = (await response.json()) as GmailThreadGetResponse;
-    const subject =
-      thread.messages.length > 0
-        ? this.getHeader(thread.messages[0], 'Subject') || '(no subject)'
-        : '(no subject)';
+    const thread = await this.loadThread(http, threadId);
+    if (!thread) return { success: false, error: 'Gmail thread error (404): thread not found' };
+    const subject = this.getHeader(thread.messages[0], 'Subject') || '(no subject)';
 
     const messages = [];
     for (const msg of thread.messages) {
@@ -1060,6 +1044,34 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
   // -------------------------------------------------------------------------
   // Helpers
   // -------------------------------------------------------------------------
+
+  /** Keep each HTTP response bounded by one message, even for long threads. */
+  private async loadThread(http: HttpClient, threadId: string): Promise<GmailThreadGetResponse | null> {
+    const params = new URLSearchParams({ format: 'minimal', fields: 'id,historyId,messages(id)' });
+    const response = await http.raw(`${this.BASE_URL}/threads/${encodeURIComponent(threadId)}?${params}`);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`Gmail threads.get error (${response.status}): ${await response.text()}`);
+    const index = await response.json() as { id: string; historyId: string; messages?: Array<{ id: string }> };
+    if (index.id !== threadId || !index.messages?.length) throw new Error('Gmail returned a thread without valid identity or messages');
+    const ids = index.messages.map(message => message.id);
+    if (ids.some(id => typeof id !== 'string' || !id) || new Set(ids).size !== ids.length) {
+      throw new Error('Gmail returned malformed message identities');
+    }
+    const messages: GmailMessage[] = [];
+    // Bound provider concurrency without serializing dozens of independent reads.
+    for (let start = 0; start < ids.length; start += 4) {
+      messages.push(...await Promise.all(ids.slice(start, start + 4).map(async id => {
+        const result = await http.raw(`${this.BASE_URL}/messages/${encodeURIComponent(id)}?format=full`);
+        if (!result.ok) throw new Error(`Gmail messages.get error (${result.status}): ${await result.text()}`);
+        const message = await result.json() as GmailMessage;
+        if (message.id !== id || message.threadId !== threadId || !message.payload) {
+          throw new Error('Gmail returned malformed message identity or payload');
+        }
+        return message;
+      })));
+    }
+    return { id: index.id, historyId: index.historyId, messages };
+  }
 
   private feedScope(config: GmailConfig): string {
     const labels = Array.isArray(config.labels)
