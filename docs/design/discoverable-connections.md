@@ -12,10 +12,11 @@ Revalidate this baseline before implementation.
 ## Problem
 
 An agent working for one member often needs information that only lives in
-another member's private connection, such as a colleague's work email. Today
-the agent has two options, and neither works well: it cannot see that the
-connection exists, or the connection must be made `org`-visible, which shares
-all of its data. Personal OAuth connections cannot be `org`-visible at all.
+another member's private connection, such as a colleague's work email. Current
+connection visibility offers private owner access or `org` visibility, still
+subject to resource ACLs and connector policy. It has no metadata-only option
+for discovering a private connection. Personal OAuth connections cannot be
+`org`-visible at all.
 
 The missing piece is a way to ask the connection's owner for help without
 gaining read access to the connection.
@@ -37,16 +38,24 @@ server enforces who can read the request, the research, and the answer.
 
 | Building block | Where |
 | --- | --- |
-| `connections.visibility` is `'private'` or `'org'`. One compiler decides row visibility: a connection is visible when it is `org`, or when the principal created it. A `null` principal sees only `org` connections. | [`packages/server/src/authz/connection-visibility.ts`](../../packages/server/src/authz/connection-visibility.ts) |
+| `connections.visibility` is `'private'` or `'org'`. The connection-level gate admits a connection when it is `org`, or when the principal created it. A `null` principal sees only `org` connections. Resource ACLs still apply to its content. | [`packages/server/src/authz/connection-visibility.ts`](../../packages/server/src/authz/connection-visibility.ts), [`resource-visibility.ts`](../../packages/server/src/authz/resource-visibility.ts) |
 | Personal-credential (`oauth_account`) connections can never be `org`-visible; a trigger rejects it. | [`db/migrations/20260703200000_connection_personal_cred_private_guard.sql`](../../db/migrations/20260703200000_connection_personal_cred_private_guard.sql) |
-| Source reads for a run are checked with the run creator as the principal, so an owner's Automation can read the owner's private connection while keeping its own identity for policy. | [`packages/server/src/authz/operation-run-policy.ts`](../../packages/server/src/authz/operation-run-policy.ts) |
-| Organization connector policy (Auto / Ask / Block) is the single approval evaluator. | `evaluateConnectorPolicy` in `packages/server/src/authz/connector-policy.ts` |
+| Headless Automation operation discovery and execution use the Automation creator for connection visibility while retaining the autonomous policy principal. Source-window reads likewise fall back to `automation.created_by` when there is no caller identity. | [`automation-connection-visibility.ts`](../../packages/server/src/authz/automation-connection-visibility.ts), [`automation-mode.ts`](../../packages/server/src/tools/get_content/automation-mode.ts) |
+| Organization connector policy (Auto / Ask / Block) is the single approval evaluator for connector operations. | `evaluateConnectorPolicy` in [`connector-policy.ts`](../../packages/server/src/authz/connector-policy.ts) |
 | Durable events, Automation triggers and runs, notifications, and the delivery queue. | [`docs/AUTOMATIONS.md`](../AUTOMATIONS.md) |
 
 Because the visibility compiler treats every value other than `org` as
 owner-only, a new non-`org` value is denied to other members by construction on
 every read seam that uses it. Any code that compares `visibility = 'private'`
 directly must be audited before adding the value.
+
+These building blocks do not yet enforce the proposed audiences for derived
+content. [`notification_targets`](../../packages/server/src/notifications/service.ts)
+scopes inbox recipients and read state, not event-body confidentiality. The
+[resource gate](../../packages/server/src/authz/resource-visibility.ts) admits
+server-authored interaction events for organization members, subject to the
+separate connection gate. Protected request, research, and approval bodies
+therefore need audience enforcement before enabling this flow.
 
 ## Proposed flow
 
@@ -70,9 +79,10 @@ The requesting agent supplies the question, a justification, the requested
 source, and a proposed reply destination. The server resolves the requester and
 owner identities; neither comes from client text.
 
-Persist one protected request event, then enqueue two independent jobs:
+In one transaction, persist one protected request event and enqueue two
+independent jobs:
 
-- notify the owner through their inbox or configured channel;
+- notify the owner through their inbox or a configured channel with an authorized audience;
 - activate the Automation the owner selected to handle these requests.
 
 A matching event subscription alone must never authorize another Automation to
@@ -97,9 +107,10 @@ owner's earlier authorization.
 | Released answer | Explicitly authorized recipients |
 
 This covers notifications, approvals, attachments, search, and direct reads.
-New owner-private runs do not inherit the admin oversight that ordinary team
-sessions have: administrators govern the feature without automatically reading
-the owner's email.
+New owner-private runs must not inherit the owner/admin oversight of the
+existing [Automation transcript route](../../packages/server/src/gateway/routes/public/agent-history.ts):
+workspace administrators govern the feature without automatically reading the
+connection owner's email.
 
 ### 5. Release
 
@@ -108,9 +119,9 @@ instead create a standing rule for automatic replies, for example: "this
 Automation may answer Maya from this source, in our direct conversation, until
 Friday."
 
-Organization connector policy still applies. Block stops the run; Ask requires
-an authorized human; Auto permits unattended execution but does not by itself
-grant permission to disclose data.
+Organization connector policy still applies to each connector operation. Block
+denies the operation; Ask requires an authorized human; Auto permits unattended
+execution of that operation. None of these grants permission to disclose data.
 
 An instruction such as "only share work-related information" is agent judgment,
 not a privacy guarantee. The enforceable boundaries are selected sources,
