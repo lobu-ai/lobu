@@ -10,9 +10,9 @@ import { runSync } from "./sync-harness";
  */
 
 import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 import { JSDOM } from "jsdom";
 import { connectorSdkMock } from "./connector-sdk.mock";
-import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 
@@ -909,5 +909,175 @@ describe("Revolut Finance snapshots", () => {
     expect(calls.some((call) => call.action === "show_notification")).toBe(
       true
     );
+  });
+});
+
+describe("Revolut retail completeness and sign-in", () => {
+  test("handles SSO after the redirected-origin gate", async () => {
+    const connector = new RevolutTransactionsConnector();
+    const dispatcher = {
+      dispatch: async (action: string, input: Record<string, unknown>) => {
+        const admitted = constrainBrowserInput(
+          connector.definition.browser!,
+          action,
+          input
+        );
+        if (action === "navigate") return { tab_id: 42 };
+        if (action === "evaluate") {
+          if (
+            !(admitted.allowed_origins as string[]).includes(
+              "https://sso.revolut.com"
+            )
+          )
+            throw new Error("origin denied");
+          return { value: { authed: false } };
+        }
+        return {};
+      },
+    };
+    await expect(
+      runSync(connector, {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0 },
+        checkpoint: {},
+        browser: dispatcher,
+      } as never)
+    ).rejects.toThrow(/sign.in|passcode/i);
+  });
+
+  test.each([
+    "http_503",
+    "neterr",
+    "parseerr",
+    "no_headers",
+    "budget",
+  ])("refuses partial transaction history after %s", async (stop) => {
+    let reads = 0;
+    const commit = mock(async () => undefined);
+    const dispatcher = {
+      dispatch: async (action: string) => {
+        if (action === "navigate") return { tab_id: 42 };
+        if (action !== "evaluate") return {};
+        if (reads++ === 0) return { value: { authed: true, captured: true } };
+        return {
+          value: {
+            done: stop !== "budget",
+            stop: stop === "budget" ? null : stop,
+            rows: [
+              {
+                id: "synthetic-transaction",
+                type: "CARD_PAYMENT",
+                amount: -100,
+                currency: "GBP",
+                startedDate: 1717000000000,
+              },
+            ],
+          },
+        };
+      },
+    };
+    await expect(
+      runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0, max_scrolls: 1 },
+        checkpoint: {},
+        browser: dispatcher,
+        commit,
+      } as never)
+    ).rejects.toThrow(/incomplete|failed/i);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  test("requests sign-in without committing partial history after an API 401", async () => {
+    let reads = 0;
+    const calls: string[] = [];
+    const commit = mock(async () => undefined);
+    const dispatcher = {
+      dispatch: async (action: string) => {
+        calls.push(action);
+        if (action === "navigate") return { tab_id: 42 };
+        if (action !== "evaluate") return {};
+        if (reads++ === 0) return { value: { authed: true, captured: true } };
+        return {
+          value: { done: true, stop: "http_401", rows: SAMPLE_RESPONSE },
+        };
+      },
+    };
+    await expect(
+      runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0 },
+        checkpoint: {},
+        browser: dispatcher,
+        commit,
+      } as never)
+    ).rejects.toMatchObject({ name: "RevolutAuthWallError" });
+    expect(commit).not.toHaveBeenCalled();
+    expect(calls).toContain("focus_tab");
+    expect(calls).toContain("show_notification");
+  });
+
+  test.each([
+    { name: "non-array response", page: {}, complete: false },
+    { name: "missing cursor", page: [{ id: "malformed" }], complete: false },
+    { name: "missing id", page: [{ startedDate: 1 }], complete: false },
+    {
+      name: "missing amount",
+      page: [{ id: "malformed", startedDate: 1, currency: "GBP" }],
+      complete: false,
+    },
+    { name: "empty final page", page: [], complete: true },
+    {
+      name: "repeated boundary row",
+      page: [SAMPLE_RESPONSE[0]],
+      complete: true,
+    },
+  ])("executes paging through $name", async ({ page, complete }) => {
+    const dom = new JSDOM("", {
+      url: "https://app.revolut.com/transactions",
+      runScripts: "outside-only",
+    });
+    let fetches = 0;
+    Object.assign(dom.window, {
+      __lobuHeaders: { "x-device-id": "synthetic-device" },
+      __lobuSeen: {},
+      __lobuCursor: null,
+      __lobuDone: false,
+      __lobuStop: null,
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => (fetches++ === 0 ? SAMPLE_RESPONSE : page),
+      }),
+      setTimeout: (callback: () => void) => callback(),
+    });
+    let reads = 0;
+    const commit = mock(async () => undefined);
+    const dispatcher = {
+      dispatch: async (action: string, input: Record<string, unknown>) => {
+        if (action === "navigate") return { tab_id: 42 };
+        if (action !== "evaluate") return {};
+        if (reads++ === 0) return { value: { authed: true, captured: true } };
+        return { value: await dom.window.eval(input.expression as string) };
+      },
+    };
+    try {
+      const result = runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0, max_scrolls: 1 },
+        checkpoint: {},
+        browser: dispatcher,
+        commit,
+      } as never);
+      if (complete) {
+        expect((await result).events).toHaveLength(SAMPLE_RESPONSE.length);
+        expect(commit).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(result).rejects.toThrow(/incomplete|failed|malformed/i);
+        expect(commit).not.toHaveBeenCalled();
+      }
+    } finally {
+      dom.window.close();
+    }
   });
 });
