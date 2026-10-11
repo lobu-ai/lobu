@@ -10,6 +10,7 @@ import { runSync } from "./sync-harness";
  */
 
 import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 import { JSDOM } from "jsdom";
 import { connectorSdkMock } from "./connector-sdk.mock";
@@ -767,10 +768,11 @@ describe("Revolut Finance snapshots", () => {
                     authed: true,
                     href: "https://invest.revolut.com/home",
                   }
-                : {
-                    authed: false,
-                    href: "https://sso.revolut.com/passcode",
-                  },
+                : await runInNewContext(input.expression as string, {
+                    location: new URL(
+                      "https://sso.revolut.com/passcode?code=synthetic-secret#synthetic-token"
+                    ),
+                  }),
           };
         }
         return {};
@@ -783,7 +785,9 @@ describe("Revolut Finance snapshots", () => {
         feedKey: "balances",
         browser: dispatcher,
       } as never)
-    ).rejects.toThrow(/no investment data returned/);
+    ).rejects.toThrow(
+      "no investment data returned from https://sso.revolut.com/passcode)"
+    );
     expect(calls.some((call) => call.action === "network_intercept_stop")).toBe(
       true
     );
@@ -888,10 +892,11 @@ describe("Revolut Finance snapshots", () => {
         if (action === "navigate") return { tab_id: 42 };
         if (action === "evaluate") {
           return {
-            value: {
-              authed: false,
-              href: "https://sso.revolut.com/passcode",
-            },
+            value: await runInNewContext(input.expression as string, {
+              location: new URL(
+                "https://sso.revolut.com/passcode?code=synthetic-secret#synthetic-token"
+              ),
+            }),
           };
         }
         return {};
@@ -904,7 +909,9 @@ describe("Revolut Finance snapshots", () => {
         feedKey: "balances",
         browser: dispatcher,
       } as never)
-    ).rejects.toThrow(/needs sign-in \(no investment data returned/);
+    ).rejects.toThrow(
+      "no investment data returned from https://sso.revolut.com/passcode)"
+    );
     expect(calls.some((call) => call.action === "focus_tab")).toBe(true);
     expect(calls.some((call) => call.action === "show_notification")).toBe(
       true
@@ -925,8 +932,8 @@ describe("Revolut retail completeness and sign-in", () => {
         if (action === "navigate") return { tab_id: 42 };
         if (action === "evaluate") {
           if (
-            !(admitted.allowed_origins as string[]).includes(
-              "https://sso.revolut.com"
+            !(admitted.allowed_origins as string[]).some(
+              (origin) => origin === "https://sso.revolut.com"
             )
           )
             throw new Error("origin denied");
@@ -950,6 +957,8 @@ describe("Revolut retail completeness and sign-in", () => {
     "neterr",
     "parseerr",
     "no_headers",
+    "no_progress",
+    "missing_stop",
     "budget",
   ])("refuses partial transaction history after %s", async (stop) => {
     let reads = 0;
@@ -962,7 +971,7 @@ describe("Revolut retail completeness and sign-in", () => {
         return {
           value: {
             done: stop !== "budget",
-            stop: stop === "budget" ? null : stop,
+            stop: ["budget", "missing_stop"].includes(stop) ? null : stop,
             rows: [
               {
                 id: "synthetic-transaction",
@@ -1027,6 +1036,17 @@ describe("Revolut retail completeness and sign-in", () => {
       complete: false,
     },
     { name: "empty final page", page: [], complete: true },
+    { name: "repeated whole page", page: SAMPLE_RESPONSE, complete: false },
+    {
+      name: "new row without cursor progress",
+      page: [{ ...SAMPLE_RESPONSE[0], id: "synthetic-stalled-transaction" }],
+      complete: false,
+    },
+    {
+      name: "repeated row newer than the cursor",
+      page: [SAMPLE_RESPONSE[1]],
+      complete: false,
+    },
     {
       name: "repeated boundary row",
       page: [SAMPLE_RESPONSE[0]],

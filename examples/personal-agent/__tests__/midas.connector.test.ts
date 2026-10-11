@@ -12,6 +12,7 @@ import { runSync } from "./sync-harness";
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { runInNewContext } from "node:vm";
 import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 import type { MidasCheckpoint } from "../midas.connector";
 import { connectorSdkMock } from "./connector-sdk.mock";
@@ -601,6 +602,7 @@ describe("MidasConnector.sync", () => {
 test("reports sign-in when SSO navigation interrupts the dashboard read", async () => {
   const connector = new MidasConnector();
   const calls: string[] = [];
+  let diagnostic: unknown;
   const dispatcher = {
     dispatch: async (action: string, input: Record<string, unknown>) => {
       const admitted = constrainBrowserInput(
@@ -622,14 +624,17 @@ test("reports sign-in when SSO navigation interrupts the dashboard read", async 
       if (action === "evaluate") {
         // The diagnostic must pass the same post-redirect origin gate as Chrome.
         if (
-          !(admitted.allowed_origins as string[]).includes(
-            "https://sso.getmidas.com"
+          !(admitted.allowed_origins as string[]).some(
+            (origin) => origin === "https://sso.getmidas.com"
           )
         )
           throw new Error("origin denied");
-        return {
-          value: "https://sso.getmidas.com/giris?code=synthetic-secret",
-        };
+        diagnostic = runInNewContext(input.expression as string, {
+          location: new URL(
+            "https://sso.getmidas.com/giris?code=synthetic-secret#synthetic-token"
+          ),
+        });
+        return { value: diagnostic };
       }
       return {};
     },
@@ -642,6 +647,7 @@ test("reports sign-in when SSO navigation interrupts the dashboard read", async 
       browser: dispatcher,
     } as never)
   ).rejects.toThrow(/session needs sign-in/);
+  expect(diagnostic).toBe("https://sso.getmidas.com/giris");
   expect(calls).toContain("show_notification");
 });
 

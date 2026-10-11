@@ -600,12 +600,12 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
         allowed_origins: [...MIDAS_ALLOWED_ORIGINS],
       });
     } catch (error) {
-      // A late SSO redirect destroys the in-page readiness promise. Diagnose
-      // only the current URL; never replay arbitrary page code after failure.
+      // A late SSO redirect destroys the in-page readiness promise. Exclude
+      // OAuth query/fragment values before the diagnostic leaves the page.
       const location = await dispatcher
         .dispatch<{ value?: string }>("evaluate", {
           tab_id: nav.tab_id,
-          expression: "location.href",
+          expression: "location.origin + location.pathname",
           allowed_origins: [...MIDAS_ALLOWED_ORIGINS],
         })
         .catch(() => null);

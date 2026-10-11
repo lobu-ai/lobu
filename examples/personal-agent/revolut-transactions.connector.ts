@@ -846,7 +846,7 @@ const INVEST_DOM_EXPR = `(async () => {
     const host = location.hostname;
     const path = location.pathname;
     const authed = host === "invest.revolut.com" && path.indexOf("signin") < 0 && path.indexOf("passcode") < 0;
-    if (!authed) return { authed: false, ready: false, host, path, href: location.href };
+    if (!authed) return { authed: false, ready: false, host, path, href: location.origin + location.pathname };
     const sections = Object.entries(accountTypes).map(([label, accountType]) => {
       const leaf = exactLeaf(label);
       const container = accountContainer(leaf);
@@ -877,11 +877,11 @@ const INVEST_DOM_EXPR = `(async () => {
           positions
         };
       });
-      return { authed: true, ready: true, host, path, href: location.href, accounts };
+      return { authed: true, ready: true, host, path, href: location.origin + location.pathname, accounts };
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  return { authed: location.hostname === "invest.revolut.com", ready: false, host: location.hostname, path: location.pathname, href: location.href, accounts: [] };
+  return { authed: location.hostname === "invest.revolut.com", ready: false, host: location.hostname, path: location.pathname, href: location.origin + location.pathname, accounts: [] };
 })()`;
 
 // Generic "retry the crawl while it returns no data" mechanism. The blocking
@@ -1004,9 +1004,15 @@ const pageBatchExpr = (internalPocketId: string): string => {
     }
     if (window.__lobuDone) break;
     const prevCursor = window.__lobuCursor == null ? Infinity : window.__lobuCursor;
-    if (!(oldest < prevCursor)) { window.__lobuDone = true; window.__lobuStop = "no_progress"; break; }
+    if (!(oldest < prevCursor)) {
+      window.__lobuDone = true;
+      // An inclusive cursor may repeat the boundary. Any other stalled page
+      // is not evidence that we reached the start of history.
+      window.__lobuStop = added === 0 && page.every(t => t.startedDate === prevCursor)
+        ? "no_new" : "no_progress";
+      break;
+    }
     window.__lobuCursor = oldest;
-    if (added === 0) { window.__lobuDone = true; window.__lobuStop = "no_new"; break; }
     await new Promise(x => setTimeout(x, 80));
   }
   return { done: window.__lobuDone, rows: rows, stop: window.__lobuStop };
@@ -1078,7 +1084,7 @@ async function crawlFetchPaging(
   let apiCallCount = 0;
   for (let batch = 0; batch < maxBatches; batch++) {
     const b = await dispatcher.dispatch<{
-      value?: { done?: boolean; rows?: unknown; stop?: string };
+      value?: { done?: boolean; rows?: unknown; stop?: string | null };
     }>("evaluate", {
       tab_id: tabId,
       expression: PAGE_BATCH_EXPR,
@@ -1092,7 +1098,10 @@ async function crawlFetchPaging(
       // Discard partial history and use the existing sign-in wait/retry path.
       return { items: [], apiCallCount: 0 };
     }
-    if (v.stop && !["empty", "no_progress", "no_new"].includes(v.stop)) {
+    if (
+      (v.stop && !["empty", "no_new"].includes(v.stop)) ||
+      (v.done && !v.stop)
+    ) {
       throw new Error(
         `Revolut transaction crawl failed (${v.stop}); no checkpoint was advanced.`
       );
@@ -1315,7 +1324,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
       tab_id: tabId,
       expression: `({
         authed: location.hostname === "invest.revolut.com" && location.pathname.indexOf("signin") < 0 && location.pathname.indexOf("passcode") < 0,
-        href: location.href
+        href: location.origin + location.pathname
       })`,
       allowed_origins: REVOLUT_ALLOWED_ORIGINS,
     });
