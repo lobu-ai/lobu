@@ -72,7 +72,7 @@ interface WireCall {
   body: Record<string, unknown>;
 }
 
-function makeFetch() {
+function makeFetch(remoteFeeds = [REMOTE_FEED]) {
   const calls: WireCall[] = [];
 
   const json = (payload: unknown) =>
@@ -119,7 +119,14 @@ function makeFetch() {
       });
     }
     if (urlStr.includes("/manage_feeds")) {
-      if (body.action === "list_feeds") return json({ feeds: [REMOTE_FEED] });
+      if (body.action === "list_feeds") {
+        const offset = Number(body.offset ?? 0);
+        const limit = Number(body.limit ?? 500);
+        return json({
+          feeds: remoteFeeds.slice(offset, offset + limit),
+          has_more: offset + limit < remoteFeeds.length,
+        });
+      }
       return json({ feed: REMOTE_FEED });
     }
     if (urlStr.includes("/manage_connections")) {
@@ -196,6 +203,54 @@ describe("apply wire payloads: undeclared fields are never sent", () => {
       currentContext: "prod",
       contexts: { prod: { url: "https://app.lobu.ai/api/v1" } },
     });
+  });
+
+  test.each([
+    "original-first",
+    "duplicate-first",
+    "across-pages",
+  ])("refuses ambiguous feed matching before any write (%s)", async (order) => {
+    const dir = mkProject(
+      configWithFeed(
+        `{ feed: "threads", config: { lookback_days: 30 } }`,
+        `name: "Work Gmail",`
+      )
+    );
+    const duplicate = {
+      ...REMOTE_FEED,
+      id: 368,
+      config: { lookback_days: 90 },
+    };
+    const feeds =
+      order === "duplicate-first"
+        ? [duplicate, REMOTE_FEED]
+        : [REMOTE_FEED, duplicate];
+    if (order === "across-pages") {
+      feeds.splice(
+        1,
+        0,
+        ...Array.from({ length: 499 }, (_, i) => ({
+          ...REMOTE_FEED,
+          id: 1000 + i,
+          feed_key: `synthetic-other-feed-${i}`,
+        }))
+      );
+    }
+    const { fetchStub, calls } = makeFetch(feeds);
+    await expect(runApply(dir, fetchStub)).rejects.toThrow(
+      /multiple feeds.*threads.*gmail-main/i
+    );
+    expect(
+      calls.filter(
+        (call) =>
+          ![
+            "list",
+            "list_installed",
+            "list_feeds",
+            "list_auth_profiles",
+          ].includes(String(call.body.action))
+      )
+    ).toEqual([]);
   });
 
   test("an update triggered by another field never carries an undeclared schedule", async () => {

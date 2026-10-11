@@ -1592,6 +1592,7 @@ describe("executePlan — an update writes only the fields the diff flagged", ()
               name: "Threads",
               config: { labels: ["INBOX"] },
             },
+            remote: remoteWithGmail().feedsByConnectionId.get(3)![0]!,
             changedFields,
           };
     return {
@@ -1678,6 +1679,50 @@ describe("executePlan — an update writes only the fields the diff flagged", ()
     // The cron the config never declared is not in the payload at all, so the
     // server's tri-state leaves it alone.
     expect("schedule" in payload).toBe(false);
+  });
+
+  test.each([
+    "reordered",
+    "removed",
+  ])("feed updates keep the planned target when snapshot feeds are %s", async (change) => {
+    const updateFeed = mock(async () => ({}) as never);
+    const client = { updateFeed } as unknown as ApplyClient;
+    const state = stateWith({
+      definitions: [],
+      authProfiles: [],
+      connections: [gmailConnection],
+    });
+    const remote = remoteWithGmail();
+    const plan = computeDiff(state, remote);
+    const feeds = remote.feedsByConnectionId.get(3)!;
+    remote.feedsByConnectionId.set(
+      3,
+      change === "reordered" ? [{ ...feeds[0]!, id: 10 }, ...feeds] : []
+    );
+
+    await executePlan({ client, state, plan, remote }, []);
+
+    expect(updateFeed.mock.calls).toEqual([[9, { name: "Threads" }]]);
+  });
+
+  test("a feed update without a planned target never falls back to create", async () => {
+    const updateFeed = mock(async () => ({}) as never);
+    const createFeed = mock(async () => ({}) as never);
+    const client = { updateFeed, createFeed } as unknown as ApplyClient;
+    const state = stateWith({
+      definitions: [],
+      authProfiles: [],
+      connections: [gmailConnection],
+    });
+    const plan = planFor("feed", ["name"]);
+    const row = plan.rows[0]!;
+    if (row.kind === "feed") delete row.remote;
+
+    await expect(
+      executePlan({ client, state, plan, remote: remoteWithGmail() }, [])
+    ).rejects.toThrow("has no planned remote target");
+    expect(updateFeed).not.toHaveBeenCalled();
+    expect(createFeed).not.toHaveBeenCalled();
   });
 
   test("a name-only connection change never sends config", async () => {

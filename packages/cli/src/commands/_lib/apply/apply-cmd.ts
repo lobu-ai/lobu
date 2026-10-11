@@ -1186,19 +1186,18 @@ export async function executePlan(
         `feed "${feed.feedKey}" references connection "${row.connectionSlug}" which has no remote ID — connection create may have failed`
       );
     }
-    const existingConn = remoteConnBySlug.get(row.connectionSlug);
-    const remoteFeed = existingConn
-      ? (ctx.remote.feedsByConnectionId.get(existingConn.id) ?? []).find(
-          (f) => f.feed_key === feed.feedKey
-        )
-      : undefined;
-    if (remoteFeed && row.verb === "update") {
+    // Apply the exact identity selected by the plan, never rematch by feed key.
+    if (row.verb === "update") {
+      if (!row.remote)
+        throw new ApiError(
+          `Feed update "${row.id}" has no planned remote target`
+        );
       // Same rule as connections and Automations: the diff decides what gets
       // written. An undeclared cadence or config produces no changed-field, so
       // it never reaches the wire and the server keeps what the feed has. An
       // explicit `schedule: null` IS a declared change and still clears it.
       await ctx.client.updateFeed(
-        remoteFeed.id,
+        row.remote.id,
         buildUpdatePayload(UPDATE_FIELD_TABLES.feed, row.changedFields, feed)
       );
     } else {

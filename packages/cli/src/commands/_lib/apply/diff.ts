@@ -2392,10 +2392,26 @@ export function computeDiff(
             (a, b) => a.feed_key.localeCompare(b.feed_key)
           )
         : [];
-      const remoteFeedByKey = new Map(remoteFeeds.map((f) => [f.feed_key, f]));
+      const remoteFeedsByKey = new Map<string, typeof remoteFeeds>();
+      for (const feed of remoteFeeds) {
+        const matches = remoteFeedsByKey.get(feed.feed_key) ?? [];
+        matches.push(feed);
+        remoteFeedsByKey.set(feed.feed_key, matches);
+      }
       const desiredFeedKeys = new Set(conn.feeds.map((f) => f.feedKey));
       for (const feed of conn.feeds) {
-        rows.push(diffFeed(conn.slug, feed, remoteFeedByKey.get(feed.feedKey)));
+        const matches = remoteFeedsByKey.get(feed.feedKey) ?? [];
+        if (matches.length > 1) {
+          throw new ValidationError(
+            `Multiple feeds with key "${feed.feedKey}" exist on connection "${conn.slug}" (IDs: ${matches
+              .map((match) => match.id)
+              .sort((a, b) => a - b)
+              .join(
+                ", "
+              )}). Manage these feeds individually in Connectors or remove duplicates before applying this feed. Omitting the feed from config leaves its settings unchanged.`
+          );
+        }
+        rows.push(diffFeed(conn.slug, feed, matches[0]));
       }
       for (const remoteFeed of remoteFeeds) {
         if (!desiredFeedKeys.has(remoteFeed.feed_key)) {

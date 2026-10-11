@@ -1354,6 +1354,39 @@ describe("apply diff — connectors", () => {
     ).toBe("noop");
   });
 
+  test.each([
+    false,
+    true,
+  ])("rejects duplicate remote feed identities regardless of order (%s)", (reverse) => {
+    const remote = remoteWithFeedCron("0 * * * *");
+    const first = remote.feedsByConnectionId.get(7)![0]!;
+    const duplicate = {
+      ...first,
+      id: first.id + 1,
+      config: { pocket: "synthetic-other-pocket" },
+    };
+    remote.feedsByConnectionId.set(
+      7,
+      reverse ? [duplicate, first] : [first, duplicate]
+    );
+    expect(() => computeDiff(connectorState(), remote)).toThrow(
+      /multiple feeds.*stories.*hn-frontpage/i
+    );
+  });
+
+  test("leaves undeclared duplicate feeds as drift without choosing a target", () => {
+    const state = connectorState();
+    state.connectors.connections[0]!.feeds = [];
+    const remote = remoteWithFeedCron("0 * * * *");
+    const first = remote.feedsByConnectionId.get(7)![0]!;
+    remote.feedsByConnectionId.set(7, [first, { ...first, id: first.id + 1 }]);
+    const rows = computeDiff(state, remote).rows.filter(
+      (row) => row.kind === "feed"
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.verb === "drift")).toBe(true);
+  });
+
   // The config declares the feed but not its cadence. A cron set in the UI is
   // not drift the config gets to overwrite — apply must leave it alone, which
   // means the row is a noop, not an update that writes null.
