@@ -315,4 +315,80 @@ describe('client activity scopes route', () => {
     };
     expect(filteredBody.clients.some((client) => client.kind === 'mcp')).toBe(false);
   });
+
+  it('filters scopes to the requested workspace while keeping bare and multi-org rows', async () => {
+    const otherOrg = await createTestOrganization({
+      name: 'Client activity scopes other',
+      slug: 'client-activity-scopes-other',
+    });
+    await addUserToOrganization(userId, otherOrg.id, 'owner');
+    const claude = { clientId: claudeClientId };
+    await record({
+      ...claude,
+      organizationId: otherOrg.id,
+      mcpConversationId: 'org-b-only-conversation',
+      mcpSessionId: 'org-b-only-transport',
+    });
+    await record({
+      ...claude,
+      organizationId,
+      mcpConversationId: 'shared-conversation',
+      mcpSessionId: 'shared-transport-a',
+    });
+    await record({
+      ...claude,
+      organizationId: otherOrg.id,
+      mcpConversationId: 'shared-conversation',
+      mcpSessionId: 'shared-transport-b',
+    });
+    await recordMcpConversationActivity({
+      ctx: {
+        ...context(claude),
+        organizationId: null,
+        mcpSessionId: 'bare-account-transport',
+      },
+      toolName: 'list_organizations',
+      failed: false,
+    });
+    await getDb()`
+      UPDATE mcp_client_conversations
+      SET last_activity_at = now() + interval '1 minute'
+      WHERE user_id = ${userId} AND client_id = ${claudeClientId}
+        AND conversation_id = 'org-b-only-conversation'
+    `;
+
+    const idsOf = async (query: string) => {
+      const response = await get(`/api/me/clients/activity-scopes${query}`, { token });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { scopes: Array<{ activityId: string }> };
+      return body.scopes.map((scope) => scope.activityId);
+    };
+
+    const scopedToFirst = await idsOf(`?client_ids=${claudeClientId}&organization_id=${organizationId}`);
+    expect(scopedToFirst.sort()).toEqual([
+      'bare-account-transport', 'claude-transport', 'shared-conversation',
+    ]);
+
+    const scopedToOther = await idsOf(`?client_ids=${claudeClientId}&organization_id=${otherOrg.id}`);
+    expect(scopedToOther.sort()).toEqual([
+      'bare-account-transport', 'org-b-only-conversation', 'shared-conversation',
+    ]);
+
+    const limited = await idsOf(`?client_ids=${claudeClientId}&organization_id=${organizationId}&limit=1`);
+    expect(limited).toHaveLength(1);
+    expect(scopedToFirst).toContain(limited[0]);
+
+    const unscoped = await idsOf(`?client_ids=${claudeClientId}`);
+    expect(unscoped.sort()).toEqual([
+      'bare-account-transport', 'claude-transport', 'org-b-only-conversation', 'shared-conversation',
+    ]);
+  });
+
+  it('rejects an overlong organization filter', async () => {
+    const response = await get(
+      `/api/me/clients/activity-scopes?organization_id=${'x'.repeat(129)}`,
+      { token },
+    );
+    expect(response.status).toBe(400);
+  });
 });

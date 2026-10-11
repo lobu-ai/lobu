@@ -72,6 +72,10 @@ routes.get("/", mcpAuth, async (c) => {
 	}
 	const excludeCommandClients =
 		c.req.query("exclude_command_clients") === "true";
+	const organizationId = c.req.query("organization_id")?.trim() || null;
+	if (organizationId !== null && organizationId.length > 128) {
+		return c.json({ error: "Invalid organization ID" }, 400);
+	}
 	const activityKind = c.req.query("activity_kind")?.trim() || null;
 	if (
 		activityKind !== null &&
@@ -81,6 +85,9 @@ routes.get("/", mcpAuth, async (c) => {
 		return c.json({ error: "Invalid activity kind" }, 400);
 	}
 	const sql = getDb();
+	// Bare account calls and multi-org sessions record NULL organization_id;
+	// the filter below keeps those visible everywhere rather than letting
+	// them vanish from every workspace.
 	const rows = await sql<ActivityScopeRow>`
     WITH unread_notifications AS (
       SELECT e.client_id,
@@ -123,6 +130,11 @@ routes.get("/", mcpAuth, async (c) => {
       ${
 				clientIds.length > 0
 					? sql`AND mc.client_id = ANY(${pgTextArray(clientIds)}::text[])`
+					: sql``
+			}
+      ${
+				organizationId
+					? sql`AND (mc.organization_id IS NULL OR mc.organization_id = ${organizationId})`
 					: sql``
 			}
       AND mc.call_count > 0
