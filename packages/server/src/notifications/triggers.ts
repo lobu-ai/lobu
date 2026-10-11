@@ -602,6 +602,38 @@ export async function notifyBrowserAuthExpired(params: {
 	}));
 }
 
+/**
+ * A connection that was collecting has stopped. The connector-health scan owns
+ * the verdict and the once-per-episode claim; this only tells the org's admins,
+ * who are the people able to fix a binding, a device, or a token. `summary` is
+ * scan-authored copy; `lastError` comes from the connector and is escaped.
+ */
+export async function notifyConnectionStoppedCollecting(params: {
+	orgId: string;
+	connectionId: number;
+	connectorKey: string;
+	displayName: string | null;
+	summary: string;
+	lastError: string | null;
+}): Promise<void> {
+	const label = params.displayName?.trim() || params.connectorKey;
+	const body = params.lastError
+		? `${params.summary}\n\nLast error: ${escapeMarkdownText(params.lastError.slice(0, 500))}`
+		: params.summary;
+	await notifyOrgAdmins(params.orgId, (orgSlug) => ({
+		type: "generic",
+		title: `${label} needs attention`,
+		body,
+		resourceType: "connection",
+		resourceId: String(params.connectionId),
+		resourceUrl: connectionDetailUrl(
+			orgSlug,
+			params.connectorKey,
+			params.connectionId,
+		),
+	}));
+}
+
 export async function notifyInvitationReceived(params: {
 	orgId: string;
 	userId: string;

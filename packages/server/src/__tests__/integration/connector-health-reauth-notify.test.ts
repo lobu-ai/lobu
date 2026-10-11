@@ -4,8 +4,8 @@
  * When a connection goes unhealthy because its SITE SESSION expired (e.g. an
  * extension-scrape connector like Revolut whose Revolut login lapsed), the
  * health scan must notify the org's admins to re-login — on top of the operator
- * Slack alert. A connection that's unhealthy for a NON-auth reason (offline
- * device / transport) must NOT produce that user notification. And the notice
+ * log alert. A connection that's unhealthy for a NON-auth reason (offline
+ * device / transport) must NOT produce a sign-in notification. And the notice
  * fires once per unhealthy episode (deduped by the unhealthy_alerted_at claim).
  */
 
@@ -84,11 +84,28 @@ async function authNotifsFor(
   `) as unknown as Array<{ id: number; title: string; semantic_type: string }>;
 }
 
+async function stoppedNotifsFor(
+  orgId: string,
+  connectionId: number,
+): Promise<Array<{ id: number; title: string; payload_text: string | null }>> {
+  const sql = getTestDb();
+  return (await sql`
+    SELECT e.id, e.title, e.payload_text
+    FROM events e
+    WHERE e.organization_id = ${orgId}
+      AND EXISTS (SELECT 1 FROM notification_targets nt WHERE nt.event_id = e.id)
+      AND e.metadata->>'notification_type' = 'generic'
+      AND e.metadata->>'resource_type' = 'connection'
+      AND e.metadata->>'resource_id' = ${String(connectionId)}
+  `) as unknown as Array<{ id: number; title: string; payload_text: string | null }>;
+}
+
 describe('connector-health → browser-auth-expired notification', () => {
   let orgId: string;
   let ownerId: string;
   let authConnId: number;
   let offlineConnId: number;
+  let neverStartedConnId: number;
 
   beforeAll(async () => {
     await cleanupTestDatabase();
@@ -128,6 +145,17 @@ describe('connector-health → browser-auth-expired notification', () => {
     );
   });
 
+  beforeAll(async () => {
+    // (C) Set up but never collected — unhealthy, yet not an outage to report.
+    neverStartedConnId = await seedConn(orgId, ownerId, 'revolut', 'revolut-never');
+    const sql = getTestDb();
+    await sql`
+      INSERT INTO feeds (
+        organization_id, connection_id, feed_key, status, created_at, updated_at
+      ) VALUES (${orgId}, ${neverStartedConnId}, 'transactions', 'active', NOW(), NOW())
+    `;
+  });
+
   afterAll(async () => {
     await cleanupTestDatabase();
   });
@@ -140,7 +168,7 @@ describe('connector-health → browser-auth-expired notification', () => {
     expect(flagged.has(authConnId)).toBe(true);
     expect(flagged.has(offlineConnId)).toBe(true);
 
-    // ...but only the expired-session one produced a user notification.
+    // ...but only the expired-session one produced a sign-in notification.
     expect(res.authNotified).toBe(1);
 
     const authNotifs = await authNotifsFor(orgId, authConnId);
@@ -161,11 +189,42 @@ describe('connector-health → browser-auth-expired notification', () => {
     expect(await authNotifsFor(orgId, offlineConnId)).toHaveLength(0);
   });
 
+  it('tells the admins a collecting connection stopped, with its last error', async () => {
+    // The scan above already claimed this episode; the notice it sent is here.
+    const stopped = await stoppedNotifsFor(orgId, offlineConnId);
+    expect(stopped).toHaveLength(1);
+    expect(stopped[0].title).toBe('Conn revolut-offline needs attention');
+    expect(stopped[0].payload_text).toContain('Every feed on this connection is failing');
+    expect(stopped[0].payload_text).toContain('No online paired Owletto Chrome extension');
+
+    const sql = getTestDb();
+    const targets = (await sql`
+      SELECT user_id FROM notification_targets WHERE event_id = ${Number(stopped[0].id)}
+    `) as unknown as Array<{ user_id: string }>;
+    expect(targets.map((t) => t.user_id)).toContain(ownerId);
+
+    // The expired session got its specific notice, not this one as well.
+    expect(await stoppedNotifsFor(orgId, authConnId)).toHaveLength(0);
+  });
+
+  it('does not report a connection that never collected as stopped', async () => {
+    const sql = getTestDb();
+    const [row] = (await sql`
+      SELECT unhealthy_alerted_at FROM connections WHERE id = ${neverStartedConnId}
+    `) as unknown as Array<{ unhealthy_alerted_at: Date | null }>;
+    // Flagged for operators...
+    expect(row.unhealthy_alerted_at).not.toBeNull();
+    // ...but no admin was told an abandoned setup is an outage.
+    expect(await stoppedNotifsFor(orgId, neverStartedConnId)).toHaveLength(0);
+  });
+
   it('does not re-notify while still unhealthy (deduped by the unhealthy claim)', async () => {
     const res = await runConnectorHealthCheck();
     expect(res.newlyAlerted).toBe(0);
     expect(res.authNotified).toBe(0);
-    // Still exactly one notification — no duplicate on the second scan.
+    expect(res.stoppedNotified).toBe(0);
+    // Still exactly one notification each — no duplicate on the second scan.
     expect(await authNotifsFor(orgId, authConnId)).toHaveLength(1);
+    expect(await stoppedNotifsFor(orgId, offlineConnId)).toHaveLength(1);
   });
 });

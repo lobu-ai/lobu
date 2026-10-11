@@ -19,6 +19,7 @@ import { cleanupExpiredMcpAppResultSnapshots } from '../mcp-app-result-snapshots
 import logger from '../utils/logger';
 import { runAutomationTick } from '../automations/automation';
 import { runAutomationAutoPauseNotificationSweep } from '../automations/auto-pause-notifications';
+import { runAutomationScheduleOverdueNotificationSweep } from '../automations/schedule-overdue-notifications';
 import type { AutomationReactionTaskPayload } from '../automations/reaction-enqueue';
 import { runAutomationReactionTask } from '../automations/reaction-task';
 import type { AutomationDigestTaskPayload } from '../automations/digest-enqueue';
@@ -255,8 +256,8 @@ function registerMaintenanceTasks(
   // that stopped syncing for days) which per-feed auto-pause alone can't catch
   // (it only fires when a worker actually runs). Single-claimant per tick;
   // alerts fire on the transition into unhealthy via a Postgres-mediated marker
-  // (connections.unhealthy_alerted_at), and ride the existing pino→Sentry→Slack
-  // path — no new alerting infra.
+  // (connections.unhealthy_alerted_at): a structured log line for operators
+  // and an in-product notification to the org's admins.
   //
   // Also redelivers feed.auto_paused signals if activation was lost after a
   // hard pause (idempotent delivery_id). Remediation Automations come from the
@@ -308,6 +309,25 @@ function registerMaintenanceTasks(
       }
     },
     { cron: '*/5 * * * *' },
+  );
+
+  // A schedule that stopped running without failing — an external-executor
+  // Automation no client claims, or one the dispatcher never materializes —
+  // moves neither the failure counter nor auto-pause. Tell the admins once per
+  // stalled cursor. Single-claimant per tick; deduped on the events
+  // idempotency index.
+  scheduler.register(
+    'automation-schedule-overdue-notifications',
+    async () => {
+      const result = await runAutomationScheduleOverdueNotificationSweep();
+      if (result.notified > 0 || result.errors > 0) {
+        logger.info(
+          { ...result },
+          '[task] automation-schedule-overdue-notifications swept'
+        );
+      }
+    },
+    { cron: '*/15 * * * *' },
   );
 
   // Read-only detector for members whose trusted $member claim is missing or
