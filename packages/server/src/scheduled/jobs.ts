@@ -404,11 +404,6 @@ function registerMaintenanceTasks(
     { cron: '31 3 * * *' },
   );
 
-  // Rolling retirement: old replicas may still seed scorer ticks. Consume them
-  // without scoring or scheduling successors. Remove this compatibility handler
-  // after every replica has upgraded and the old task rows have drained.
-  scheduler.register('score-eval-runs', async () => {});
-
   // Automation tick: reconcile in-flight runs, materialize newly-due runs,
   // dispatch pending runs. The orphaned-runs reset is bounded and idempotent
   // so it runs every tick — no per-pod first-tick latch needed.

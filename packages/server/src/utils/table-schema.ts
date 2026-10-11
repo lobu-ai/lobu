@@ -497,8 +497,6 @@ export const QUERYABLE_SCHEMA = {
         // most recent `completed` run, written by a trigger on `runs`. Plain
         // timestamptz, no secret, and it is what the listing orders by — so
         // SQL must expose it or the ordering can't be audited from query_sql.
-        // Retired latest_eval_* columns remain physically until all replicas
-        // run this projection; only a subsequent release can drop them safely.
         'last_run_completed_at'
       ),
     },
