@@ -678,6 +678,9 @@ async function approvalOrigin(row: ApprovalContentItem, ctx: ToolContext): Promi
   return resolveInteractionActionOrigin({
     organizationId: ctx.organizationId,
     userId: runs[0]?.created_by_user_id ?? null,
+    // This view is returned to the calling viewer only, so the requester sees
+    // their own conversation title and anyone else sees just the client.
+    viewerUserId: ctx.userId ?? null,
     automationId,
     conversationId,
     // get_content's `platform` column carries the event's connector_key, never a

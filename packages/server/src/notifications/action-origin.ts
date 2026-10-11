@@ -41,9 +41,17 @@ async function automationOrigin(
 	};
 }
 
+/**
+ * An MCP conversation is private to its user (Recent and the activity page
+ * are owner-only), and its title is agent-written free text. Most origins are
+ * computed once and shown to other people — approvers, notify recipients, a
+ * stored run approval read back later — so the title is included only when the
+ * caller renders for exactly one viewer and that viewer owns the conversation.
+ */
 async function mcpConversationOrigin(
 	userId: string | null,
 	activity: { clientIdentity: string; activityId: string },
+	viewerUserId: string | null,
 ): Promise<ActionOrigin> {
 	const rows = await getDb()<{
 		title: string | null;
@@ -57,8 +65,9 @@ async function mcpConversationOrigin(
 		  AND mc.conversation_id = ${activity.activityId}
 		LIMIT 1
 	`;
-	const title = rows[0]?.title?.trim();
-	const client = rows[0]?.client_name?.trim();
+	const ownerIsSoleViewer = userId !== null && viewerUserId === userId;
+	const title = ownerIsSoleViewer ? rows[0]?.title?.trim() : null;
+	const client = rows[0]?.client_name?.trim() || null;
 	return {
 		kind: "conversation",
 		label: title
@@ -76,15 +85,20 @@ async function resolveConversationActionOrigin(params: {
 	agentId?: string | null;
 	clientIdentity?: string | null;
 	userId?: string | null;
+	viewerUserId?: string | null;
 }): Promise<ActionOrigin> {
 	let title: string | null = null;
 	const sourcePlatform = params.platform?.trim().toLowerCase() || null;
 	const storedPlatform = sourcePlatform === "api" ? "web" : sourcePlatform;
 	if (storedPlatform === "mcp" && params.conversationId && params.clientIdentity) {
-		return mcpConversationOrigin(params.userId ?? null, {
-			clientIdentity: params.clientIdentity,
-			activityId: params.conversationId,
-		});
+		return mcpConversationOrigin(
+			params.userId ?? null,
+			{
+				clientIdentity: params.clientIdentity,
+				activityId: params.conversationId,
+			},
+			params.viewerUserId ?? null,
+		);
 	}
 	if (storedPlatform && params.conversationId) {
 		const rows = await getDb()<{
@@ -116,7 +130,13 @@ export async function resolveInteractionActionOrigin(params: {
 	conversationId?: string | null;
 	agentId?: string | null;
 	clientIdentity?: string | null;
+	/** Owner of the MCP conversation the action came from. */
 	userId?: string | null;
+	/**
+	 * The single person this origin is rendered for. Set it only when the
+	 * result is shown to that one viewer and never stored or fanned out.
+	 */
+	viewerUserId?: string | null;
 	automationId?: number | null;
 	source?: string | null;
 }): Promise<ActionOrigin> {
@@ -149,6 +169,7 @@ export async function resolveInteractionActionOrigin(params: {
 		agentId: params.agentId,
 		clientIdentity: params.clientIdentity,
 		userId: params.userId,
+		viewerUserId: params.viewerUserId,
 	}).catch(() => ({ kind: "conversation", label: fallback }));
 }
 
@@ -162,7 +183,8 @@ export async function resolveActionOrigin(
 		}
 		const mcpActivity = currentMcpActivityAttribution(ctx);
 		if (mcpActivity) {
-			return await mcpConversationOrigin(ctx.userId, mcpActivity);
+			// The result is stored and shown to other people, so never the title.
+			return await mcpConversationOrigin(ctx.userId, mcpActivity, null);
 		}
 		if (ctx.sourceContext?.conversationId) {
 			return await resolveConversationActionOrigin({

@@ -1387,7 +1387,19 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
       headers: { 'mcp-session-id': memberSessionId },
       token: memberWriteToken,
     });
-    const memberCapability = (await memberViewResponse.json()).result?._meta?.[
+    const memberViewBody = await memberViewResponse.json();
+    expect(memberViewBody.result?.isError).not.toBe(true);
+    expect(memberViewBody.result?.structuredContent?.blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'text',
+          label: 'Conversation',
+          value: 'Test Client conversation',
+        }),
+      ])
+    );
+    expect(JSON.stringify(memberViewBody)).not.toContain('Release approval E2E');
+    const memberCapability = memberViewBody.result?._meta?.[
       'lobu/approval-capability'
     ];
     expect(typeof memberCapability).toBe('string');
@@ -1443,6 +1455,15 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     expect(view?.icon).toBe('agent');
     expect(view?.impact).toEqual({ level: 'normal' });
     expect(view?.tone).toBe('default');
+    expect(view?.blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'text',
+          label: 'Conversation',
+          value: 'Test Client — Release approval E2E',
+        }),
+      ])
+    );
     expect(view?.actions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

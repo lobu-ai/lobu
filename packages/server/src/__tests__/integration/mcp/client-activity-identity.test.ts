@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { getDb } from '../../../db/client';
 import { recordMcpConversationActivity, setCurrentMcpConversationTitle } from '../../../lobu/stores/mcp-client-conversations';
-import { resolveActionOrigin } from '../../../notifications/action-origin';
+import { resolveActionOrigin, resolveInteractionActionOrigin } from '../../../notifications/action-origin';
 import { resolveMcpActivitySessionIds } from '../../../tools/get_content/mcp-activity-filter';
 import type { ToolContext } from '../../../tools/registry';
 import { cleanupTestDatabase } from '../../setup/test-db';
@@ -59,8 +59,23 @@ describe('MCP activity actor identity', () => {
     expect(await resolveMcpActivitySessionIds(getDb(), userId, [clientId], 'shared-host-id')).toEqual([first.mcpSessionId]);
     expect(await resolveMcpActivitySessionIds(getDb(), otherUserId, [clientId], 'shared-host-id')).toEqual([second.mcpSessionId]);
     await expect(resolveMcpActivitySessionIds(getDb(), null, [clientId], 'shared-host-id')).rejects.toThrow(/not found/i);
-    expect(await resolveActionOrigin(first)).toMatchObject({ label: expect.stringContaining('My conversation') });
-    expect(await resolveActionOrigin(second)).toMatchObject({ label: expect.stringContaining('Other private conversation') });
+    // Action cards go to other people (approvers, notify recipients), so the
+    // private, agent-written conversation title must never be the provenance.
+    expect(await resolveActionOrigin(first)).toEqual({ kind: 'conversation', label: 'Test Client conversation' });
+    expect(await resolveActionOrigin(second)).toEqual({ kind: 'conversation', label: 'Test Client conversation' });
+    expect(await resolveInteractionActionOrigin({
+      organizationId: org.id, platform: 'mcp', conversationId: 'shared-host-id',
+      clientIdentity: clientId, userId,
+    })).toEqual({ kind: 'conversation', label: 'Test Client conversation' });
+    expect(await resolveInteractionActionOrigin({
+      organizationId: org.id, platform: 'mcp', conversationId: 'shared-host-id',
+      clientIdentity: clientId, userId, viewerUserId: otherUserId,
+    })).toEqual({ kind: 'conversation', label: 'Test Client conversation' });
+    // A per-viewer render for the conversation's owner may name it.
+    expect(await resolveInteractionActionOrigin({
+      organizationId: org.id, platform: 'mcp', conversationId: 'shared-host-id',
+      clientIdentity: clientId, userId, viewerUserId: userId,
+    })).toEqual({ kind: 'conversation', label: 'Test Client — My conversation' });
     const response = await get(`/api/me/clients/activity-scopes`, { token });
     expect(response.status).toBe(200);
     const body = await response.json() as { scopes: Array<{ title: string }> };
