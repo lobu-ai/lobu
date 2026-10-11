@@ -13,7 +13,11 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { injectPgvector, resolveEmbeddedNativeDir } from '@lobu/pgvector-embedded';
+import {
+  ensureNativeLibSonames,
+  installPgvector,
+  resolveEmbeddedNativeDir,
+} from '@lobu/pgvector-embedded';
 import exitHook from 'async-exit-hook';
 import EmbeddedPostgres from 'embedded-postgres';
 import { withFreePortRetry } from './free-port';
@@ -122,7 +126,10 @@ export async function startEmbeddedBackend(): Promise<EmbeddedBackend> {
   // our own, so a kill can never accumulate disk (see reapStaleClusters).
   reapStaleClusters();
 
-  injectPgvector(resolveEmbeddedNativeDir());
+  ensureNativeLibSonames(resolveEmbeddedNativeDir());
+  // Staged outside the installed binary tree, like the embedded runtime. One
+  // shared dir is safe: installPgvector is idempotent and swaps files atomically.
+  const { postgresFlags } = installPgvector(join(tmpdir(), 'lobu-test-pgvector'));
 
   // embedded-postgres needs a concrete port at construction. Ask the OS for a
   // free one and retry on collision rather than picking a random high port and
@@ -141,6 +148,7 @@ export async function startEmbeddedBackend(): Promise<EmbeddedBackend> {
       password: 'postgres',
       port: candidate,
       persistent: false,
+      postgresFlags,
       onLog: (message) => {
         log += message;
       },

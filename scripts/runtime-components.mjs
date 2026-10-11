@@ -96,7 +96,12 @@ export function runtimeVerificationSource(key, component) {
   );
   if (key === "postgres")
     verify.push(
-      'const pg = await import("./index.mjs"); pg.injectPgvector(pg.resolveEmbeddedNativeDir());'
+      // Install time, as the cache owner: hydrate the binary's SONAME links and
+      // prove pgvector stages. Runtime stages it per data root and never writes
+      // into this tree, which another user may not be able to write.
+      'const pg = await import("./index.mjs"); pg.ensureNativeLibSonames(pg.resolveEmbeddedNativeDir());',
+      'import { mkdtempSync, rmSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";',
+      'const staged = mkdtempSync(join(tmpdir(), "lobu-pgvector-verify-")); try { pg.installPgvector(join(staged, "pgvector")); } finally { rmSync(staged, { recursive: true, force: true }); }'
     );
   if (key === "embeddings") verify.push('await import("./embeddings.js");');
   if (key === "device")

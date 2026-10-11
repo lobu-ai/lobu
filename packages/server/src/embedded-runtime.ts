@@ -129,7 +129,11 @@ function findFreePort(): Promise<number> {
  * SQL_ASCII). initdb only runs on first cluster init (guarded by the caller), so
  * existing clusters keep their original locale/encoding.
  */
-export function embeddedPgOptions(databaseDir: string, port: number) {
+export function embeddedPgOptions(
+	databaseDir: string,
+	port: number,
+	postgresFlags: string[] = [],
+) {
 	return {
 		databaseDir,
 		user: "postgres",
@@ -137,6 +141,7 @@ export function embeddedPgOptions(databaseDir: string, port: number) {
 		port,
 		persistent: true,
 		initdbFlags: ["--locale=C", "--encoding=UTF8"],
+		postgresFlags,
 		createPostgresUser: runningAsRoot(),
 	};
 }
@@ -488,7 +493,7 @@ export function hydrateEmbeddedPgSymlinks(nativeDir: string): void {
 }
 
 /**
- * Spawn an embedded PostgreSQL (injecting pgvector), set process.env.DATABASE_URL
+ * Spawn an embedded PostgreSQL (with pgvector staged), set process.env.DATABASE_URL
  * to its TCP URL, fork the embeddings child, and return the lifecycle hooks.
  */
 export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
@@ -510,17 +515,23 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 	// entry by absolute URL keeps native package resolution inside that cache.
 	const component = componentEntry ? await import(pathToFileURL(componentEntry).href) : null;
 	const { default: EmbeddedPostgres } = component ?? await import("embedded-postgres");
-	const { injectPgvector, resolveEmbeddedNativeDir } = component ?? await importPgvectorEmbedded();
+	const { ensureNativeLibSonames, installPgvector, resolveEmbeddedNativeDir } =
+		component ?? await importPgvectorEmbedded();
 	const nativeDir = resolveEmbeddedNativeDir();
 
 	// The bundled Postgres binary needs its SONAME symlinks in place before it can
 	// load (the postinstall that creates them is skipped by bun / some installers).
+	// Both are best-effort no-ops when the links already exist.
 	hydrateEmbeddedPgSymlinks(nativeDir);
+	ensureNativeLibSonames(nativeDir);
 
-	// embedded-postgres bundles pg_trgm but not pgvector — inject the host
-	// platform's prebuilt vector library into the binary tree before boot
-	// (idempotent). cube + earthdistance are already in the stock binary.
-	injectPgvector(nativeDir);
+	// embedded-postgres bundles pg_trgm but not pgvector. Stage the host
+	// platform's prebuilt pgvector next to the cluster (a user-owned dir) and
+	// point postgres at it via search-path flags — never copy into the installed
+	// binary tree, which a multi-user or root-owned install makes read-only.
+	// cube + earthdistance are already in the stock binary.
+	const pgvectorDir = join(dataRoot, ".lobu", "pgvector");
+	const pgvector = installPgvector(pgvectorDir);
 
 	const pgPort =
 		parseInt(process.env.LOBU_PG_PORT || "", 10) || (await findFreePort());
@@ -530,7 +541,7 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 	// retain the lease for rollback on boot failure and restoration after stop.
 	const traversalLease = runningAsRoot()
 		? ensureEmbeddedPgTraversal(
-				[nativeDir, join(dataRoot, ".lobu")],
+				[nativeDir, join(dataRoot, ".lobu"), pgvectorDir],
 				ensureEmbeddedPostgresIdentity(),
 			)
 		: null;
@@ -562,7 +573,9 @@ export async function startEmbeddedRuntime(): Promise<EmbeddedRuntime> {
 		};
 		process.once("exit", exitRestore);
 	}
-	const pg = new EmbeddedPostgres(embeddedPgOptions(pgDataDir, pgPort));
+	const pg = new EmbeddedPostgres(
+		embeddedPgOptions(pgDataDir, pgPort, pgvector.postgresFlags),
+	);
 
 	let embeddingsChild: Awaited<ReturnType<typeof startEmbeddings>> | null = null;
 	let postgresStarted = false;

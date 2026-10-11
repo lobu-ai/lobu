@@ -2,9 +2,10 @@
  * @lobu/pgvector-embedded
  *
  * `embedded-postgres` ships vanilla PostgreSQL binaries with no pgvector. This
- * package carries small prebuilt pgvector artifacts and injects the host
- * platform's into the live `@embedded-postgres/<platform>/native` tree so
- * `CREATE EXTENSION vector` resolves at runtime.
+ * package carries small prebuilt pgvector artifacts and stages the host
+ * platform's into a caller-owned directory, returning the PostgreSQL search-path
+ * flags that make `CREATE EXTENSION vector` resolve from there. The installed
+ * `@embedded-postgres` package is never written to (see `installPgvector`).
  *
  * Layout: the compiled library is platform-specific (`prebuilt/<platform>/
  * vector.{so,dylib}`); `vector.control` + `vector--<version>.sql` are
@@ -17,11 +18,15 @@
  * so a library built against PG 18.x loads into `embedded-postgres`'s PG 18.x.
  */
 import {
-  cpSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
   symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -116,55 +121,107 @@ export function ensureNativeLibSonames(
   }
 }
 
+/** Result of `installPgvector`. */
+export interface PgvectorInstall {
+  /**
+   * `postgres` argv that prepends the staged dirs to the compiled-in search
+   * paths: `<target>/share` to `extension_control_path` (PostgreSQL appends
+   * `/extension`) and `<target>/lib` to `dynamic_library_path`.
+   */
+  postgresFlags: string[];
+}
+
+function isPgvectorLibrary(file: string): boolean {
+  return file === "vector.so" || file === "vector.dylib";
+}
+
+function isPgvectorExtensionFile(file: string): boolean {
+  return (
+    file === "vector.control" ||
+    (file.startsWith("vector--") && file.endsWith(".sql"))
+  );
+}
+
+/** Copy `src` to `dst` unless `dst` already holds the same bytes; atomic via rename. */
+function syncFile(src: string, dst: string): void {
+  const bytes = readFileSync(src);
+  if (existsSync(dst) && readFileSync(dst).equals(bytes)) return;
+  const tmp = `${dst}.${process.pid}.tmp`;
+  writeFileSync(tmp, bytes, { mode: 0o644 });
+  renameSync(tmp, dst);
+}
+
+/** Make `dir` exist with world-traversable mode (root boots drop to a `postgres` user). */
+function ensureDir(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  chmodSync(dir, 0o755);
+}
+
 /**
- * Copy the host platform's prebuilt pgvector files into an embedded-postgres
- * `native` tree so `CREATE EXTENSION vector` works, and hydrate the macOS ICU
- * SONAME symlinks so `initdb` can link. Idempotent — returns early if pgvector
- * is already present in the tree.
+ * Stage the host platform's prebuilt pgvector under `targetDir` (a directory the
+ * current user owns, e.g. the embedded cluster's data root) and return the
+ * PostgreSQL flags that make `CREATE EXTENSION vector` resolve from there.
  *
- * @param nativeDir absolute path to `.../native`; defaults to the resolved
- *   host-platform `@embedded-postgres` package.
+ * Never writes into the installed `@embedded-postgres` package: that tree
+ * belongs to whoever installed the CLI (multi-user Homebrew, root-owned global
+ * npm, a read-only app bundle), so a runtime copy into it fails with EACCES for
+ * every other user. PostgreSQL 18 searches `extension_control_path` for control
+ * files and `dynamic_library_path` for the module — it strips the `$libdir/`
+ * prefix from `module_pathname`/`probin`, so clusters created when pgvector was
+ * injected into the package tree (probin `$libdir/vector`) keep loading too.
+ *
+ * Idempotent: unchanged files are left alone, changed ones are replaced, and
+ * stale pgvector files from another version are removed.
  */
-export function injectPgvector(
-  nativeDir: string = resolveEmbeddedNativeDir(),
+export function installPgvector(
+  targetDir: string,
   platform: string = currentPlatformKey()
-): void {
-  // Always (re)hydrate the dylib SONAME symlinks — needed for initdb to link
-  // even when pgvector was already injected on a prior run.
-  ensureNativeLibSonames(nativeDir);
-
-  const libDst = join(nativeDir, "lib", "postgresql");
-  const extDst = join(nativeDir, "share", "postgresql", "extension");
-
-  // Already injected (or shipped) — nothing to do.
-  if (existsSync(join(extDst, "vector.control"))) return;
-
+): PgvectorInstall {
   if (!hasPrebuilt(platform)) {
     throw new Error(
       `@lobu/pgvector-embedded: no prebuilt pgvector for "${platform}". ` +
         "Run scripts/build.sh for this platform, or set DATABASE_URL to use an external Postgres."
     );
   }
+  // Both settings are colon-separated search paths.
+  if (targetDir.includes(":")) {
+    throw new Error(
+      `@lobu/pgvector-embedded: cannot stage pgvector under "${targetDir}": ` +
+        "PostgreSQL search paths are colon-separated, so the path must not contain ':'."
+    );
+  }
 
-  mkdirSync(libDst, { recursive: true });
-  mkdirSync(extDst, { recursive: true });
+  const libDir = join(targetDir, "lib");
+  const shareDir = join(targetDir, "share");
+  const extDir = join(shareDir, "extension");
+  for (const dir of [targetDir, libDir, shareDir, extDir]) ensureDir(dir);
 
-  // Platform-specific compiled library → lib/postgresql.
   const binDir = prebuiltDir(platform);
-  for (const file of readdirSync(binDir)) {
-    if (file.endsWith(".so") || file.endsWith(".dylib")) {
-      cpSync(join(binDir, file), join(libDst, file));
+  const libFiles = readdirSync(binDir).filter(isPgvectorLibrary);
+  const extFiles = readdirSync(PREBUILT_ROOT).filter(isPgvectorExtensionFile);
+  for (const file of libFiles) syncFile(join(binDir, file), join(libDir, file));
+  for (const file of extFiles)
+    syncFile(join(PREBUILT_ROOT, file), join(extDir, file));
+
+  // Drop pgvector files a previous version staged (old upgrade scripts, a
+  // renamed library) so the search paths only ever see this version. Only
+  // pgvector-shaped names are touched — never another boot's in-flight `.tmp`.
+  for (const [dir, keep, isOurs] of [
+    [libDir, libFiles, isPgvectorLibrary],
+    [extDir, extFiles, isPgvectorExtensionFile],
+  ] as const) {
+    for (const file of readdirSync(dir)) {
+      if (isOurs(file) && !keep.includes(file))
+        rmSync(join(dir, file), { force: true });
     }
   }
 
-  // Shared control + version SQL (vendored once at the prebuilt root) →
-  // share/postgresql/extension.
-  for (const file of readdirSync(PREBUILT_ROOT)) {
-    if (
-      file === "vector.control" ||
-      (file.startsWith("vector--") && file.endsWith(".sql"))
-    ) {
-      cpSync(join(PREBUILT_ROOT, file), join(extDst, file));
-    }
-  }
+  return {
+    postgresFlags: [
+      "-c",
+      `extension_control_path=${shareDir}:$system`,
+      "-c",
+      `dynamic_library_path=${libDir}:$libdir`,
+    ],
+  };
 }

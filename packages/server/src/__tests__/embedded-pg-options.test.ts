@@ -16,6 +16,14 @@ describe("embeddedPgOptions", () => {
 		expect(opts.port).toBe(6123);
 		expect(opts.persistent).toBe(true);
 	});
+
+	it("passes postgres flags through (pgvector search paths)", () => {
+		const flags = ["-c", "dynamic_library_path=/data/.lobu/pgvector/lib:$libdir"];
+		expect(embeddedPgOptions("/tmp/pgdata", 5599, flags).postgresFlags).toEqual(
+			flags,
+		);
+		expect(embeddedPgOptions("/tmp/pgdata", 5599).postgresFlags).toEqual([]);
+	});
 });
 
 // Postgres refuses to run as root, so `lobu run` died on first boot for anyone

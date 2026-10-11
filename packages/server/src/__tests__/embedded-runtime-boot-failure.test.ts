@@ -7,10 +7,19 @@ const postgres = vi.hoisted(() => ({
 	initialise: vi.fn<() => Promise<void>>(),
 	start: vi.fn<() => Promise<void>>(),
 	stop: vi.fn<() => Promise<void>>(),
+	options: [] as Array<{ postgresFlags?: string[] }>,
+}));
+
+const PGVECTOR_FLAGS = ["-c", "dynamic_library_path=/staged/lib:$libdir"];
+const pgvector = vi.hoisted(() => ({
+	installPgvector: vi.fn<(dir: string) => { postgresFlags: string[] }>(),
 }));
 
 vi.mock("embedded-postgres", () => ({
 	default: class FakeEmbeddedPostgres {
+		constructor(options: { postgresFlags?: string[] }) {
+			postgres.options.push(options);
+		}
 		initialise = postgres.initialise;
 		start = postgres.start;
 		stop = postgres.stop;
@@ -18,7 +27,8 @@ vi.mock("embedded-postgres", () => ({
 }));
 
 vi.mock("@lobu/pgvector-embedded", () => ({
-	injectPgvector: vi.fn(),
+	ensureNativeLibSonames: vi.fn(),
+	installPgvector: pgvector.installPgvector,
 	resolveEmbeddedNativeDir: () => process.cwd(),
 }));
 
@@ -34,6 +44,8 @@ describe("startEmbeddedRuntime boot failure cleanup", () => {
 		postgres.initialise.mockResolvedValue();
 		postgres.start.mockRejectedValue(new Error("postgres start failed"));
 		postgres.stop.mockImplementation(() => new Promise(() => undefined));
+		postgres.options.length = 0;
+		pgvector.installPgvector.mockReturnValue({ postgresFlags: PGVECTOR_FLAGS });
 		vi.spyOn(process, "getuid").mockReturnValue(501);
 		const root = mkdtempSync(join(tmpdir(), "lobu-pg-start-failure-"));
 		roots.push(root);
@@ -60,5 +72,19 @@ describe("startEmbeddedRuntime boot failure cleanup", () => {
 		expect(postgres.initialise).toHaveBeenCalledOnce();
 		expect(postgres.start).toHaveBeenCalledOnce();
 		expect(postgres.stop).not.toHaveBeenCalled();
+	});
+
+	// A non-owner of the CLI install (multi-user Homebrew, root-owned global
+	// npm) cannot write into the installed @embedded-postgres tree, so pgvector
+	// is staged under the user's own data root and loaded via postgres flags.
+	it("stages pgvector under the data root and hands its flags to postgres", async () => {
+		await expect(startEmbeddedRuntime()).rejects.toThrow("postgres start failed");
+
+		const root = roots[roots.length - 1]!;
+		expect(pgvector.installPgvector).toHaveBeenCalledWith(
+			join(root, ".lobu", "pgvector"),
+		);
+		expect(postgres.options).toHaveLength(1);
+		expect(postgres.options[0]!.postgresFlags).toEqual(PGVECTOR_FLAGS);
 	});
 });
