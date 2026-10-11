@@ -97,7 +97,7 @@ async function sourcePost(browser: ChromeActionDispatcher, tabId: number, url: s
 	}
 }
 
-export async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedReadResult> {
+async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedReadResult> {
 	if (ctx.cursor || ctx.offset || ctx.sort || ctx.window || ctx.match) throw new Error("TikTok snapshot feeds do not support pagination, sorting, time windows, or exact-match filters");
 	if (ctx.query && ctx.feedKey !== "search") throw new Error("Use the TikTok search feed for queries");
 	if (ctx.limit !== undefined && (!Number.isInteger(ctx.limit) || ctx.limit < 1)) throw new Error("limit must be a positive integer");
@@ -155,7 +155,7 @@ export async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedRead
 
 export default class TikTokConnector extends ConnectorRuntime {
 	readonly definition: RuntimeConnectorDefinition = {
-		key: "tiktok.web", name: "TikTok", version: "1.0.2", faviconDomain: "tiktok.com",
+		key: "tiktok.web", name: "TikTok", version: "1.0.3", faviconDomain: "tiktok.com",
 		description: "Read TikTok through your signed-in paired browser, inspect post visuals, set likes, and prepare comments for human submission. Automations decide what to read and act on.",
 		browser: { origins: ORIGINS, authMethods: ["browser"], accountProbe: { url: ORIGIN, expression: expression("identity") } },
 		authSchema: { methods: [{ type: "browser", mode: "live" }] },

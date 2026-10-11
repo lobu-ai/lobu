@@ -64,7 +64,7 @@ describe("TikTok source records", () => {
 });
 
 describe("serialized TikTok page adapter", () => {
-	function fixture(cardIds = [post.id]) {
+	function fixture(cardIds = [post.id], verificationRequired = false) {
 		const clickedPosts: string[] = [];
 		const playedPosts: string[] = [];
 		const editor = { getClientRects: () => [1], textContent: "My existing draft" };
@@ -72,7 +72,8 @@ describe("serialized TikTok page adapter", () => {
 			let pressed = "false";
 			const like = { getAttribute: () => pressed, click: () => { pressed = pressed === "true" ? "false" : "true"; clickedPosts.push(id); } };
 			const video = { muted: false, readyState: 2, duration: 20, currentTime: 0, seeking: false, play: async () => { playedPosts.push(id); }, pause: () => {}, scrollIntoView: () => {} };
-			return { getClientRects: () => [1], querySelectorAll: () => [{ href: `https://www.tiktok.com/@example_creator/video/${id}` }], querySelector: (selector: string) => {
+			return { getClientRects: () => [1], querySelectorAll: () => [], querySelector: (selector: string) => {
+			if (selector === '[data-e2e="more-menu-icon"]') return { getAttribute: (name: string) => name === "data-more-menu-item-id" ? id : null };
 			if (selector.startsWith('a[href=')) return {};
 			if (selector === '[data-e2e="video-desc"]') return { textContent: post.desc };
 			if (selector === '[data-e2e="like-icon"]') return like;
@@ -81,13 +82,13 @@ describe("serialized TikTok page adapter", () => {
 			} };
 		});
 		const document = {
-			querySelector: (selector: string) => selector === "#__UNIVERSAL_DATA_FOR_REHYDRATION__" ? { textContent: JSON.stringify({ __DEFAULT_SCOPE__: { "webapp.app-context": { user: { uid: "7000000000000000003", uniqueId: "example_account" } }, "webapp.video-detail": { itemInfo: { itemStruct: post } } } }) } : cards[0],
+			querySelector: (selector: string) => selector === "#captcha-verify-container-main-page" ? (verificationRequired ? { getClientRects: () => [1] } : null) : selector === "#__UNIVERSAL_DATA_FOR_REHYDRATION__" ? { textContent: JSON.stringify({ __DEFAULT_SCOPE__: { "webapp.app-context": { user: { uid: "7000000000000000003", uniqueId: "example_account" } }, "webapp.video-detail": { itemInfo: { itemStruct: post } } } }) } : cards[0],
 			querySelectorAll: (selector: string) => selector === '[data-e2e="recommend-list-item-container"]' ? cards : [editor],
 		};
 		const url = "https://www.tiktok.com/@example_creator/video/7000000000000000001";
 		const location = new URL(url);
 		const run = new Function("document", "location", "command", "args", "setTimeout", `return (${tiktokPage.toString()})(command,args)`);
-		return { run: (command: string, args: Record<string, unknown> = {}) => run(document, location, command, { url, ...args }, (callback: () => void) => callback()), clicks: () => clickedPosts.length, clickedPosts, playedPosts };
+		return { run: (command: string, args: Record<string, unknown> = {}) => run(document, location, command, { url, ...args }, (callback: () => void) => callback()), location, clicks: () => clickedPosts.length, clickedPosts, playedPosts };
 	}
 
 	test("runs without module bindings, clicks once, and leaves a matching state alone", async () => {
@@ -104,12 +105,42 @@ describe("serialized TikTok page adapter", () => {
 		expect(f.clicks()).toBe(0);
 	});
 
-	test("binds controls and video frames to the post ID when a creator repeats a caption", async () => {
+	test("refuses navigation while waiting for the target card before touching controls or media", async () => {
+		for (const command of ["detail", "mute", "photo", "set_like", "frame", "open_comment", "comment_text"]) {
+			const f = fixture();
+			const pending = f.run(command, { source_item: post, liked: true, seconds: 5 });
+			f.location.pathname = "/@example_creator/video/7000000000000000099";
+			await expect(pending).rejects.toThrow("different post");
+			expect(f.clickedPosts).toEqual([]);
+			expect(f.playedPosts).toEqual([]);
+		}
+	});
+
+	test("refuses navigation during control, playback, or composer waits", async () => {
+		for (const command of ["set_like", "frame", "open_comment"]) {
+			const f = fixture();
+			const pending = f.run(command, { source_item: post, liked: true, seconds: 5 });
+			await Promise.resolve();
+			f.location.pathname = "/@example_creator/video/7000000000000000099";
+			await expect(pending).rejects.toThrow("different post");
+		}
+	});
+
+	test("binds controls and video frames to the DOM post ID without relying on a permalink", async () => {
 		const f = fixture(["7000000000000000009", post.id]);
 		await f.run("set_like", { liked: true });
 		await f.run("frame", { seconds: 5 });
 		expect(f.clickedPosts).toEqual([post.id]);
 		expect(f.playedPosts).toEqual([post.id]);
+	});
+
+	test("reports verification before reading source data or touching controls and media", async () => {
+		const f = fixture([post.id], true);
+		for (const command of ["identity", "snapshot", "post_links", "detail", "set_like", "frame"]) {
+			await expect(f.run(command, { liked: true, seconds: 5 })).rejects.toThrow("TikTok verification required");
+		}
+		expect(f.clickedPosts).toEqual([]);
+		expect(f.playedPosts).toEqual([]);
 	});
 
 	test("refuses absent or ambiguous post identity before touching controls or media", async () => {

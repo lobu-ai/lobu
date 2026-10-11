@@ -2,6 +2,9 @@
 // keep every dependency inside this function, as in the WhatsApp page adapter.
 export async function tiktokPage(command, args = {}) {
 	const visible = (e) => !!e && e.getClientRects().length > 0;
+	if (visible(document.querySelector("#captcha-verify-container-main-page"))) {
+		throw new Error("TikTok verification required; complete the challenge in the connected browser");
+	}
 	const scope = () => {
 		const script = document.querySelector("#__UNIVERSAL_DATA_FOR_REHYDRATION__");
 		return script ? JSON.parse(script.textContent).__DEFAULT_SCOPE__ || {} : {};
@@ -44,23 +47,23 @@ export async function tiktokPage(command, args = {}) {
 	const detail = args.source_item || await wait(() => scope()["webapp.video-detail"]?.itemInfo?.itemStruct);
 	const target = new URL(args.url);
 	if (!/^[A-Za-z0-9_.]{1,64}$/.test(detail.author?.uniqueId || "")) throw new Error("TikTok post author is invalid");
-	if (location.origin !== target.origin || location.pathname !== target.pathname || detail.id !== target.pathname.split("/").pop()) {
-		throw new Error("TikTok post changed; refusing to act on a different post");
-	}
+	const assertTarget = () => {
+		if (location.origin !== target.origin || location.pathname !== target.pathname || detail.id !== target.pathname.split("/").pop()) {
+			throw new Error("TikTok post changed; refusing to act on a different post");
+		}
+	};
+	assertTarget();
 	const card = await wait(() => {
-		// Captions can be reused by one creator. Bind the DOM controls/media to
-		// the canonical post permalink before using either, not just its text.
+		// The rendered card has no permalink. Its menu carries the source post
+		// ID, which distinguishes posts even when a creator reuses a caption.
 		const matches = [...document.querySelectorAll('[data-e2e="recommend-list-item-container"]')].filter(candidate =>
-			visible(candidate) && [...candidate.querySelectorAll('a[href*="/video/"],a[href*="/photo/"]')].some(link => {
-				try {
-					const permalink = new URL(link.href, location.origin);
-					return permalink.origin === target.origin && permalink.pathname === target.pathname;
-				} catch { return false; }
-			})
+			visible(candidate) && candidate.querySelector('[data-e2e="more-menu-icon"]')?.getAttribute("data-more-menu-item-id") === detail.id
 		);
 		if (matches.length > 1) throw new Error("TikTok displayed post identity is ambiguous");
 		return matches[0];
 	});
+	// A user-owned tab can change posts while the rendered card is loading.
+	assertTarget();
 	const author = card.querySelector(`a[href="/@${detail.author.uniqueId}"]`);
 	const description = card.querySelector('[data-e2e="video-desc"]');
 	const compact = text => String(text || "").replace(/\s+/g, "").trim();
@@ -90,6 +93,7 @@ export async function tiktokPage(command, args = {}) {
 		const slide = card.querySelector(".swiper-slide-active");
 		const image = slide?.querySelector("img");
 		await wait(() => image?.complete && image.naturalWidth > 0);
+		assertTarget();
 		slide.scrollIntoView({ block: "center", behavior: "instant" });
 		return { photo_index: index, photo_count: count };
 	}
@@ -100,6 +104,7 @@ export async function tiktokPage(command, args = {}) {
 			likeButton.click();
 			await wait(() => liked() === args.liked);
 		}
+		assertTarget();
 		return { liked: liked(), changed: before !== args.liked };
 	}
 	if (command === "frame") {
@@ -108,11 +113,13 @@ export async function tiktokPage(command, args = {}) {
 		video.muted = true;
 		await video.play();
 		await wait(() => video.readyState >= 2 && Number.isFinite(video.duration) && video.duration > 0);
+		assertTarget();
 		video.pause();
 		const seconds = args.seconds;
 		if (!Number.isFinite(seconds) || seconds < 0 || seconds >= video.duration) throw new Error("Frame time is outside the video duration");
 		video.currentTime = seconds;
 		await wait(() => !video.seeking && Math.abs(video.currentTime - seconds) < 0.15 && video.readyState >= 2);
+		assertTarget();
 		video.scrollIntoView({ block: "center", behavior: "instant" });
 		return { seconds: video.currentTime, duration_seconds: video.duration };
 	}
@@ -124,6 +131,7 @@ export async function tiktokPage(command, args = {}) {
 			button.click();
 		}
 		const editor = await wait(() => [...document.querySelectorAll('[contenteditable="true"][role="textbox"]')].find(visible));
+		assertTarget();
 		if (editor.textContent.trim()) throw new Error("The comment composer already contains text; preserving the user's draft");
 		editor.scrollIntoView({ block: "center", behavior: "instant" });
 		return { opened: true };
