@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,10 @@ export async function probePreview(baseUrl, request = fetch) {
   for (const path of ["/health/ready", "/", "/@vite/client", "/src/main.tsx"]) {
     const url = new URL(baseUrl);
     url.pathname = path;
+    // Vite strips `t` and `import` queries before looking in its transform
+    // cache. A distinct module URL must exercise esbuild even on a warm app.
+    if (path === "/src/main.tsx")
+      url.searchParams.set("lobu_health", randomUUID());
     try {
       const response = await request(url, {
         headers: { Accept: path === "/" ? "text/html" : "*/*" },
@@ -16,7 +21,8 @@ export async function probePreview(baseUrl, request = fetch) {
       if (!response.ok) {
         return {
           status:
-            path !== "/health/ready" && response.status === 500
+            path !== "/health/ready" &&
+            ![502, 503, 504].includes(response.status)
               ? "failed"
               : "starting",
           detail: `${path}: HTTP ${response.status}`,

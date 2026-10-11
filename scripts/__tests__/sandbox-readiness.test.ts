@@ -12,6 +12,24 @@ import { probePreview, startupStatus } from "../lib/preview-health.mjs";
 import { previewHealthy, waitReady } from "../sandbox";
 
 describe("sandbox frontend readiness", () => {
+  test("checks a fresh transform when the cached entry survives compiler failure", async () => {
+    const request = async (input: URL) => {
+      const url = new URL(input);
+      if (url.pathname === "/")
+        return new Response(
+          '<script type="module" src="/src/main.tsx"></script>'
+        );
+      if (url.pathname === "/src/main.tsx" && url.search)
+        return new Response("Not found", { status: 404 });
+      return new Response("export {};", {
+        headers: { "content-type": "application/javascript" },
+      });
+    };
+    expect(
+      (await probePreview("https://preview.example.test", request)).status
+    ).toBe("failed");
+  });
+
   test("rejects an HTML shell whose Vite entry cannot transform", async () => {
     const fetchMock = spyOn(globalThis, "fetch").mockImplementation(
       async (input) => {
