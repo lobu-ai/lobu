@@ -145,6 +145,15 @@ describe('Recent attributes account conversations to the workspaces they ran in'
     )) as { content?: Array<{ workspace_slug: string }> };
     expect(federated.content?.map((c) => c.workspace_slug)).toContain(second.slug);
     expect(await workspacesOf('federated-search')).toEqual([second.id]);
+    const summaries = await getDb()`
+      SELECT organization_id, payload_data FROM events
+      WHERE metadata->>'mcp_conversation_id' = 'federated-search'
+        AND metadata->>'event_type' = 'tool_invocation.workspace_activity'
+    `;
+    expect(summaries.map((row) => ({ ...row }))).toEqual([{
+      organization_id: second.id,
+      payload_data: { tool_name: 'search_memory', sdk_methods: ['search'], success: true },
+    }]);
 
     // Naming a workspace targets it even when nothing matched there.
     await executeTool(
