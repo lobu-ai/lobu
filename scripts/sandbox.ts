@@ -55,6 +55,7 @@ import {
   Image,
   type Sandbox,
 } from "@daytonaio/sdk";
+import { probePreview } from "./lib/preview-health.mjs";
 
 const MEMORY_GB = Number(process.env.SANDBOX_MEMORY_GB ?? 4);
 const CPU = Number(process.env.SANDBOX_CPU ?? 4);
@@ -620,22 +621,17 @@ export function dirtyNotice(parent: string[], sub: string[]): string | null {
   );
 }
 
-/** Preview health from this machine: 2xx on the SPA root within the budget. */
-async function previewHealthy(
+/** Check API, HTML and Vite transforms before reusing a preview. */
+export async function previewHealthy(
   url: string,
   timeoutMs = 120_000
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url, {
-        headers: { Accept: "text/html" },
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (response.status >= 200 && response.status < 300) return true;
-    } catch {
-      // Not up yet — keep polling until the budget runs out.
-    }
+    const probe = await probePreview(url);
+    if (probe.status === "ready") return true;
+    if (probe.status === "failed") return false;
+    if (Date.now() >= deadline) break;
     await new Promise((r) => setTimeout(r, 5_000));
   }
   return false;
@@ -1286,7 +1282,8 @@ export function bootEnv(options: {
 async function stopApp(sandbox: Sandbox) {
   await exec(
     sandbox,
-    "pkill -f '[d]ev-native.sh' || true; " +
+    "pkill -f '[s]andbox-launch.sh' || true; " +
+      "pkill -f '[d]ev-native.sh' || true; " +
       "pkill -f '[@]lobu/server' || true; " +
       "pkill -f '[s]rc/server.ts' || true; " +
       "pkill -f '[l]obu run' || true",
@@ -1351,7 +1348,7 @@ async function bootApp(
   // plus closed stdin detaches it and lets exec return immediately.
   await exec(
     sandbox,
-    `cd ${WORKSPACE} && ( env ${env} nohup ./scripts/dev-native.sh > /workspace/dev.log 2>&1 </dev/null & ) ; echo started`,
+    `cd ${WORKSPACE} && rm -f /workspace/dev.exit /workspace/dev.pid /workspace/dev.oom-kills && ( env ${env} nohup bash ./scripts/lib/sandbox-launch.sh > /workspace/dev.log 2>&1 </dev/null & ) ; echo started`,
     120
   );
 }
@@ -1608,20 +1605,26 @@ async function mintLoginLink(
 }
 
 /**
- * The first boot builds every workspace package, which takes minutes — so
+ * A cold boot builds development dependencies, which takes minutes — so
  * returning a URL right after launch would be a lie. Poll readiness from
  * inside the sandbox and say plainly whether it came up.
  */
-async function waitReady(sandbox: Sandbox, timeoutSec = 900): Promise<boolean> {
+export async function waitReady(
+  sandbox: Sandbox,
+  timeoutSec = 900
+): Promise<boolean> {
   const deadline = Date.now() + timeoutSec * 1000;
   let lastNote = 0;
   while (Date.now() < deadline) {
     const out = await exec(
       sandbox,
-      `curl -sf -o /dev/null -w '%{http_code}' http://127.0.0.1:${APP_PORT}/health/ready || echo down`,
-      60
-    ).catch(() => "down");
-    if (/^2\d\d/.test(out.trim())) return true;
+      `cd ${WORKSPACE} && node scripts/lib/preview-health.mjs`,
+      150
+    );
+    const probe = JSON.parse(out.trim()) as { status: string; detail?: string };
+    if (probe.status === "failed")
+      throw new Error(`Sandbox startup failed: ${probe.detail}`);
+    if (probe.status === "ready") return true;
     if (Date.now() - lastNote > 60_000) {
       lastNote = Date.now();
       const tail = await exec(
@@ -1822,29 +1825,34 @@ export async function upIncremental(
     // public from the last `up`, so without this the whole build-and-wait window
     // serves on a public URL before claimSeat and assertSignUpClosed have run.
     await setPublic(sandbox, false);
-    console.log(">> booting app (first boot builds every workspace package)");
+    console.log(
+      ">> booting app (build dependencies, then check API and frontend)"
+    );
     await bootApp(sandbox, url, {
       workerApiToken: generateBearerToken(),
       embeddingsServiceToken: generateBearerToken(),
     });
-    const ready = await waitReady(sandbox);
-
-    if (!ready) {
+    try {
+      if (!(await waitReady(sandbox)))
+        throw new Error(`${name} did not become ready`);
+    } catch (error) {
       console.error(
-        `\n  ${name} did not become ready. Last log lines:\n` +
-          (await exec(
-            sandbox,
-            "tail -n 25 /workspace/dev.log || true",
-            60
-          ).catch(() => ""))
+        await exec(sandbox, "tail -n 25 /workspace/dev.log || true", 60).catch(
+          () => ""
+        )
       );
-      process.exit(1);
+      throw error;
     }
     // The order is the whole point: the preview is private above, so we take the
     // one seat single-user mode allows, PROVE that sign-up is shut, and only then
     // drop the preview key.
     const { seat, sessionToken } = await claimSeat(sandbox, root);
     await assertSignUpClosed(sandbox);
+    // Auth setup and Vite's background optimizer can peak after the first
+    // health response. Recheck before exposing or persisting a ready preview.
+    if (!(await waitReady(sandbox))) {
+      throw new Error(`${name} became unavailable during account setup`);
+    }
     await setPublic(sandbox, true);
     const login = sessionToken ? loginLink(url, sessionToken) : undefined;
 
@@ -1899,8 +1907,13 @@ export async function upIncremental(
 
 // Importing this module (the tests do) must not launch a sandbox.
 if (import.meta.main) {
-  main().catch((err) => {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  });
+  main().then(
+    // Daytona's client can retain handles after a completed command. All work
+    // above is awaited; a finished `make sandbox` must return to its caller.
+    () => process.exit(0),
+    (err) => {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  );
 }

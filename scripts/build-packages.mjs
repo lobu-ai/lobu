@@ -3,6 +3,11 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import {
+  buildConcurrency,
+  memoryLimit,
+  nodeOptionsForMemory,
+} from "./lib/dev-resources.mjs";
 
 const knownArgs = new Set(["--skip-applications"]);
 const unknownArgs = process.argv.slice(2).filter((arg) => !knownArgs.has(arg));
@@ -22,12 +27,15 @@ function packageBuild(packageName, script = "build") {
   };
 }
 
-function runBuild(build) {
+function runBuild(build, memory) {
   console.log(`   📦 Building ${build.label}...`);
   return new Promise((resolve) => {
     const child = spawn("bun", build.args, {
       cwd: build.cwd,
-      env: process.env,
+      env: {
+        ...process.env,
+        NODE_OPTIONS: nodeOptionsForMemory(process.env.NODE_OPTIONS, memory),
+      },
       stdio: "inherit",
     });
     child.on("error", (error) => resolve({ ...build, error }));
@@ -36,10 +44,24 @@ function runBuild(build) {
 }
 
 async function runLayer(label, builds) {
+  const memory = memoryLimit();
+  const concurrency = Math.min(builds.length, buildConcurrency(memory));
   console.log(
-    `🔹 ${label} (${builds.length} parallel build${builds.length === 1 ? "" : "s"})`
+    `🔹 ${label} (${builds.length} builds, at most ${concurrency} parallel)`
   );
-  const results = await Promise.all(builds.map(runBuild));
+  const results = [];
+  for (let offset = 0; offset < builds.length; offset += concurrency) {
+    results.push(
+      ...(await Promise.all(
+        builds
+          .slice(offset, offset + concurrency)
+          .map((build) =>
+            runBuild(build, memory ? memory / concurrency : undefined)
+          )
+      ))
+    );
+    if (results.some((result) => result.error || result.code !== 0)) break;
+  }
   const failures = results.filter(
     (result) => result.error || result.code !== 0
   );

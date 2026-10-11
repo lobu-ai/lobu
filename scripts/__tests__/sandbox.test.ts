@@ -1065,6 +1065,19 @@ describe("buildTarball delta", () => {
 });
 
 describe("incremental sync regressions", () => {
+  async function healthyPreviewResponse(input: Parameters<typeof fetch>[0]) {
+    const path = new URL(String(input)).pathname;
+    return new Response(
+      path === "/"
+        ? '<script type="module" src="/src/main.tsx"></script>'
+        : "export {};",
+      {
+        headers: {
+          "content-type": path === "/" ? "text/html" : "application/javascript",
+        },
+      }
+    );
+  }
   function remote() {
     const uploads = new Map<string, Buffer>();
     const commands: string[] = [];
@@ -1099,7 +1112,8 @@ describe("incremental sync regressions", () => {
             result = "yes";
           else if (command.includes("/proc/net/tcp")) result = "free";
           else if (command.includes("pgrep")) result = "stopped";
-          else if (command.includes("/health/ready")) result = "200";
+          else if (command.includes("node scripts/lib/preview-health.mjs"))
+            result = '{"status":"ready"}';
           else if (command.startsWith("cat /workspace/.lobu-sandbox-seat"))
             result = JSON.stringify({
               email: "owner@example.test",
@@ -1268,8 +1282,8 @@ describe("incremental sync regressions", () => {
     const name = sandboxName(root);
     const statePath = syncStatePath(name);
     const { sandbox, commands } = remote();
-    const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("ok")
+    const fetchMock = spyOn(globalThis, "fetch").mockImplementation(
+      healthyPreviewResponse
     );
     try {
       await upIncremental(sandbox, root, name);
@@ -1351,13 +1365,43 @@ describe("incremental sync regressions", () => {
     expect(removal.scope).toBe("frontend");
   });
 
+  test("keeps the preview private when startup fails during account setup", async () => {
+    const root = fixtureRepo();
+    const name = sandboxName(root);
+    const { sandbox, commands } = remote();
+    const original = sandbox.process.executeCommand.bind(sandbox.process);
+    let probes = 0;
+    sandbox.process.executeCommand = async (...args) => {
+      if (
+        args[0].includes("node scripts/lib/preview-health.mjs") &&
+        ++probes === 2
+      ) {
+        return {
+          exitCode: 0,
+          result:
+            '{"status":"failed","detail":"container OOM killed 1 process(es) during startup"}',
+        };
+      }
+      return original(...args);
+    };
+    try {
+      await expect(upIncremental(sandbox, root, name)).rejects.toThrow(
+        "OOM killed"
+      );
+      expect(commands).not.toContain("public:true");
+      expect(readSyncState(syncStatePath(name))).toBeNull();
+    } finally {
+      rmSync(syncStatePath(name), { force: true });
+    }
+  });
+
   test("a warm up skips install and boot, while FRESH forces both", async () => {
     const root = fixtureRepo();
     const name = sandboxName(root);
     const statePath = syncStatePath(name);
     const { sandbox, commands, uploads } = remote();
-    const fetchMock = spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("ok")
+    const fetchMock = spyOn(globalThis, "fetch").mockImplementation(
+      healthyPreviewResponse
     );
     const previousFresh = process.env.FRESH;
     try {

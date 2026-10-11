@@ -64,10 +64,13 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-if [ ! -d packages/core/dist ] || [ ! -d packages/connector-sdk/dist ]; then
-  echo "📦 Building workspace packages (one-time)…"
-  make build-packages
-fi
+# A dist directory can survive a failed build. Run the dependency graph on
+# every boot so partial/stale artifacts never count as a successful build.
+# The server and SPA run from source; production bundles are not needed here.
+NODE_OPTIONS="$(node scripts/lib/dev-resources.mjs)"
+export NODE_OPTIONS
+echo "📦 Building development dependencies…"
+node scripts/build-packages.mjs --skip-applications
 
 # Interactive cards run in a self-contained MCP App iframe rather than Vite's
 # SPA graph. Build that payload before boot so approvals/questions never render
@@ -112,6 +115,11 @@ if [ -f .env.local ]; then
 fi
 set +a
 
+# .env may specify Node flags too. Reapply the container budget after sourcing
+# it so the runtime gets the same protection as the build processes.
+NODE_OPTIONS="$(node scripts/lib/dev-resources.mjs)"
+export NODE_OPTIONS
+
 if [[ -n "$_PRESET_DATABASE_URL_SET" ]]; then export DATABASE_URL="$_PRESET_DATABASE_URL"; fi
 if [[ -n "$_PRESET_PGSSLMODE_SET" ]]; then export PGSSLMODE="$_PRESET_PGSSLMODE"; fi
 if [[ -n "$_PRESET_HOST_SET" ]]; then export HOST="$_PRESET_HOST"; fi
@@ -133,6 +141,14 @@ export PUBLIC_GATEWAY_URL="${PUBLIC_GATEWAY_URL:-http://localhost:${PORT}/lobu}"
 export LOBU_PROVIDER_REGISTRY_PATH="${LOBU_PROVIDER_REGISTRY_PATH:-$REPO_ROOT/config/providers.json}"
 export LOBU_DEV_PROJECT_PATH="${LOBU_DEV_PROJECT_PATH:-$REPO_ROOT}"
 export LOBU_WORKSPACE_ROOT="${LOBU_WORKSPACE_ROOT:-$REPO_ROOT/workspaces}"
+
+# Measured cold pre-bundling uses nearly 1 GiB in esbuild while the server
+# uses another 1 GiB. Finish it before starting Postgres and the server so
+# those peaks do not overlap. Vite reuses this cache on subsequent boots.
+if [ "$NODE_ENV" = development ]; then
+  echo "📦 Preparing Vite development dependencies…"
+  ( cd packages/owletto && bun run dev optimize )
+fi
 
 mkdir -p "$LOBU_WORKSPACE_ROOT"
 
