@@ -502,7 +502,7 @@ export default class MidasConnector extends ConnectorRuntime<MidasCheckpoint> {
     name: "Midas",
     description:
       "Syncs Midas portfolio holdings via the Owletto Chrome extension.",
-    version: "1.1.1",
+    version: "1.1.2",
     faviconDomain: "atlas.getmidas.com",
     browser: {
       origins: ["https://atlas.getmidas.com", "https://sso.getmidas.com"],

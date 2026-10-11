@@ -1208,7 +1208,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
     name: "Revolut",
     description:
       "Syncs exact Revolut transactions and current Invest balances through your paired Owletto Chrome session, with no separate connector login.",
-    version: "4.8.1",
+    version: "4.8.2",
     faviconDomain: "app.revolut.com",
     browser: {
       origins: [
