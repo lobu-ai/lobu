@@ -529,25 +529,42 @@ interface ClassifiedFeed {
    *  long-silent device, or stalled) — the only signal that feeds the degraded ratio, so one
    *  transiently failing feed on a small connection stays quiet. */
   persistent: boolean;
+  /** Overdue expected feed whose current claimed run has no outcome yet; it
+   *  holds an open alert episode instead of recovering it. */
+  inFlightOverdue: boolean;
 }
 
 /**
- * Has this scheduled feed gone `cfg.stallGraceHours` past its first missed run
- * without finishing one? See {@link STALL_GRACE_HOURS}.
+ * Where this scheduled feed stands against `cfg.stallGraceHours` past its first
+ * missed run with nothing finished. See {@link STALL_GRACE_HOURS}.
+ *
+ * - `stalled` — overdue, and `last_error` says the latest attempt ended
+ *   without finishing.
+ * - `in_flight` — overdue, but a run is claimed right now: the claim stamps
+ *   `pending` and clears `last_error` on every retry, so the outcome is not
+ *   known yet. It must neither raise an alert nor end one, or each retry of a
+ *   stalled feed would recover the episode and the next failure alert again.
+ * - `null` — not overdue, or not this rule's to judge.
  *
  * A feed without a cron has no due time to measure from (most sync feeds are
  * dispatched by other paths), and a feed that never finished is Rule E's. A
  * pinned device that is not polling is not a stall: nothing claims the run, and
- * whether that silence matters is the device-offline rule's decision.
+ * whether that silence matters is the device-offline rule's decision. A feed
+ * resumed after a clean pause keeps its old `last_sync_at` but has no error and
+ * is not `pending` until claimed.
  */
-function feedStalled(row: FeedHealthRow, cfg: ConnectorHealthConfig, nowMs: number): boolean {
-  if (!row.schedule || !row.last_error) return false;
+function feedStallState(
+  row: FeedHealthRow,
+  cfg: ConnectorHealthConfig,
+  nowMs: number
+): 'stalled' | 'in_flight' | null {
+  if (!row.schedule) return null;
   const lastFinishedMs = tsTimeOrNull(row.last_sync_at);
-  if (lastFinishedMs === undefined) return false;
+  if (lastFinishedMs === undefined) return null;
   const graceMs = cfg.stallGraceHours * 60 * 60 * 1000;
   if (row.device_pinned) {
     const seenMs = tsTimeOrNull(row.device_last_seen_at);
-    if (seenMs === undefined || nowMs - seenMs > graceMs) return false;
+    if (seenMs === undefined || nowMs - seenMs > graceMs) return null;
   }
   let firstMissedMs: number;
   try {
@@ -556,9 +573,11 @@ function feedStalled(row: FeedHealthRow, cfg: ConnectorHealthConfig, nowMs: numb
     ).getTime();
   } catch {
     // An unparseable cron never dispatches; that is not this rule's outage.
-    return false;
+    return null;
   }
-  return nowMs - firstMissedMs > graceMs;
+  if (nowMs - firstMissedMs <= graceMs) return null;
+  if (row.last_error) return 'stalled';
+  return row.last_sync_status === 'pending' ? 'in_flight' : null;
 }
 
 function classifyFeed(
@@ -598,7 +617,8 @@ function classifyFeed(
   // `DEVICE_OFFLINE_HOURS` for why this is not the semantics module's
   // dispatch-grade 120s `attention='device_offline'`.
   const deviceStale = row.device_stale === true;
-  const stalled = expected && feedStalled(row, cfg, nowMs);
+  const stallState = expected ? feedStallState(row, cfg, nowMs) : null;
+  const stalled = stallState === 'stalled';
 
   // Failing: a single most-recent-run failure counts (Rule A must stay
   // sensitive to one bad run), past the persistent threshold, the pinned
@@ -614,7 +634,7 @@ function classifyFeed(
   const persistent =
     expected && (cf >= cfg.failureThreshold || deviceStale || stalled);
 
-  return { expected, failing, persistent };
+  return { expected, failing, persistent, inFlightOverdue: stallState === 'in_flight' };
 }
 
 /**
@@ -843,6 +863,12 @@ export async function runConnectorHealthCheck(
     const classified = classify(connectionRows, cfg, nowMs);
 
     if (!classified) {
+      // An overdue feed mid-retry has no verdict yet. Leave any open episode
+      // standing until a run actually finishes or fails again.
+      const holding = connectionRows.some(
+        (row) => row.feed_id != null && classifyFeed(row, cfg, nowMs).inFlightOverdue
+      );
+      if (holding) continue;
       // Healthy: re-arm the alert if it was previously flagged. The conditional
       // WHERE makes this a no-op for connections that were already healthy, and
       // counts a real recovery exactly once across replicas.

@@ -1509,4 +1509,67 @@ describe('connector-health alerter', () => {
     const res = await runConnectorHealthCheck();
     expect(res.details.some((d) => d.connectionId === resumed.id)).toBe(false);
   });
+
+  // The worker claim stamps `pending` and clears `last_error` on every retry,
+  // so a scan landing mid-run cannot tell a stalled feed from a recovered one.
+  // It must hold the episode, or the next failed attempt alerts again for the
+  // same outage.
+  it('holds a stalled episode across a retry claim instead of recovering it', async () => {
+    const sql = getTestDb();
+    const day = 24 * 60 * 60 * 1000;
+    const flapping = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'spotify',
+      slug: 'stalled-across-retries',
+      createdAt: OLD,
+    });
+    const dependencyError = 'Choose a paired Chrome browser for this connection before running it.';
+    await seedFeed({
+      orgId,
+      connectionId: flapping.id,
+      feedKey: 'a',
+      schedule: '*/5 * * * *',
+      lastSyncStatus: 'pending',
+      lastSyncAt: new Date(Date.now() - 2 * day),
+      consecutiveFailures: 0,
+      lastError: dependencyError,
+    });
+    const marker = async () =>
+      ((await sql`
+        SELECT unhealthy_alerted_at FROM connections WHERE id = ${flapping.id}
+      `) as unknown as Array<{ unhealthy_alerted_at: Date | null }>)[0]
+        .unhealthy_alerted_at;
+
+    expect(reasonFor((await runConnectorHealthCheck()).details, flapping.id)).toBe(
+      'all_feeds_failing',
+    );
+    const alertedAt = await marker();
+    expect(alertedAt).not.toBeNull();
+
+    // A retry is claimed (poll.ts marked_feed): pending, error cleared.
+    await sql`
+      UPDATE feeds SET last_sync_status = 'pending', last_error = NULL
+      WHERE connection_id = ${flapping.id}
+    `;
+    await runConnectorHealthCheck();
+    expect(await marker()).toEqual(alertedAt);
+
+    // The retry fails on the same dependency: still one episode, no new alert.
+    await sql`
+      UPDATE feeds SET last_error = ${dependencyError}
+      WHERE connection_id = ${flapping.id}
+    `;
+    await runConnectorHealthCheck();
+    expect(await marker()).toEqual(alertedAt);
+
+    // A sync that actually finishes ends the episode.
+    await sql`
+      UPDATE feeds
+      SET last_sync_status = 'success', last_sync_at = NOW(), last_error = NULL
+      WHERE connection_id = ${flapping.id}
+    `;
+    await runConnectorHealthCheck();
+    expect(await marker()).toBeNull();
+  });
 });
