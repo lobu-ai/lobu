@@ -60,18 +60,23 @@ function expectPinnedIdentity(
 }
 
 describe("Mac device connector registry", () => {
-  test("is sorted, unique, and excludes the retired Mac WhatsApp connector", () => {
+  test("is sorted, unique, and excludes retired Mac connectors", () => {
     const keys = macDeviceConnectorDefinitions.map(({ key }) => key);
     expect(keys).toEqual([...keys].sort());
     expect(new Set(keys).size).toBe(keys.length);
     expect(macDeviceConnectorRegistry["whatsapp.local"]).toBeUndefined();
-    expect(keys).toEqual(
-      [
-        ...new Set(
-          Object.keys(pinnedManifestHashes).map((id) => id.split("@")[0])
-        ),
-      ].sort()
-    );
+    expect(macDeviceConnectorRegistry["apple.system_audio"]).toBeUndefined();
+    // Active inventory is independent of historical manifest hash pins.
+    expect(keys).toEqual([
+      "apple.calendar",
+      "apple.computer_use",
+      "apple.health",
+      "apple.photos",
+      "apple.reminders",
+      "apple.screen_time",
+      "local.directory",
+      "os.shell",
+    ]);
   });
 
   test("pins the manifest identities and preserves semantic metadata", () => {
