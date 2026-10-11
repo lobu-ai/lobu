@@ -228,7 +228,12 @@ export async function searchContentBySingleQuery(
   // present) so a hostile float can't break out of the comparison expression.
   const minSimilarityParamIdx = baseParamIdx + (hasEmbedding ? 1 : 0);
 
-  const standardFiltersSQL = `($2::bigint IS NULL OR ${searchEntityLinkSql})
+  // As in buildStandardWhereSql, allow semi-joins while keeping the entity
+  // parameter typed even when the link predicate inlines its id.
+  const entityFilterSQL = entityId != null
+    ? `${searchEntityLinkSql} AND ($2::bigint IS NOT NULL)`
+    : `($2::bigint IS NULL OR ${searchEntityLinkSql})`;
+  const standardFiltersSQL = `${entityFilterSQL}
           AND ${connectionCondition}
           AND ${feedCondition}
           AND ${runCondition}

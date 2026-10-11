@@ -602,7 +602,7 @@ describe('device-backed source feed read', () => {
       (err: unknown) => err as { code?: string; retryable?: boolean; message: string }
     );
     expect(error).toMatchObject({ code: 'PERMISSION', retryable: false });
-    expect(error?.message).toMatch(/requires setup.*local_directory.*finish setup.*retry/i);
+    expect(error?.message).toMatch(/requires setup.*local_directory.*Permissions.*retry/i);
     expect(await readRunRows()).toHaveLength(0);
   });
 });

@@ -505,7 +505,9 @@ export async function listContentInternal(
     // is never evaluated. Cheap.
     standardEntityLinkSql = entityLinkMatchSql('$1::bigint');
   }
-  const standardWhereSql = buildStandardWhereSql(standardEntityLinkSql);
+  const standardWhereSql = buildStandardWhereSql(standardEntityLinkSql, {
+    entityScoped: entityId != null,
+  });
 
   const paramsAfterEntityLink = [...standardParams, ...standardEntityLinkParams];
   const orgScope = buildOrgScopeWhere({

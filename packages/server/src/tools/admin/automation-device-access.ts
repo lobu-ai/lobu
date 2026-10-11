@@ -1,4 +1,5 @@
 import type { DbClient } from '../../db/client';
+import { describeNonDeviceWorkerId } from '../../utils/device-worker-id';
 import { ToolUserError } from '../../utils/errors';
 import { isAdminOrOwnerRole } from '../access-control';
 
@@ -83,6 +84,8 @@ export async function assertDeviceWorkerAccess(
   if (deviceWorkerId === undefined || deviceWorkerId === null) return;
   const trimmed = deviceWorkerId.trim();
   if (!trimmed) return;
+  const notADeviceId = await describeNonDeviceWorkerId(sql, trimmed, caller.userId);
+  if (notADeviceId) throw new ToolUserError(notADeviceId, 400);
 
   const rows = (await sql`
     SELECT id, user_id, organization_id

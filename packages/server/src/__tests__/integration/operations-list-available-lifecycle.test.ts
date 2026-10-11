@@ -582,7 +582,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 			next_action: { action: "open_setup", manual: true },
 		});
 		expect(create.execution_targets[0]?.reason).toMatch(
-			/browser\.debugger.*finish setup.*retry/i,
+			/browser\.debugger.*Permissions.*retry/i,
 		);
 
 		const listed = (await manageFeeds(
@@ -595,7 +595,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 				id: feed.id,
 				attention: "setup_required",
 				attention_reason: expect.stringMatching(
-					/browser\.debugger.*finish setup.*retry/i,
+					/browser\.debugger.*Permissions.*retry/i,
 				),
 			}),
 		);
