@@ -151,8 +151,9 @@ export function describeDeviceConnectorSetupRequired(
 ): string {
   return (
     `${readiness.source.metadata.name} is available on an online device, but setup is incomplete: ` +
-    `'${readiness.source.requiredCapability}' has not been granted. ` +
-    'Open the paired device app, finish setup, then retry.'
+    `the device is not reporting the '${readiness.source.requiredCapability}' permission. ` +
+    "Grant it in the paired device app's Permissions settings (on a Mac, Lobu's Settings → Permissions). " +
+    'Some operating-system permissions only take effect after the app is quit and reopened. Then retry.'
   );
 }
 

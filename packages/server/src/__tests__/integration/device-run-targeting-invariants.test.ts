@@ -261,6 +261,18 @@ describe("device run targeting and execution invariants", () => {
 		expect(runsB.runs.some((r) => r.id === runRow!.id)).toBe(false);
 	});
 
+	it("answers a list_runs worker-id filter with the device id, not a database error", async () => {
+		// The filter binds `::uuid`; the device's worker id used to reach the
+		// cast and surface as a 500.
+		await expect(
+			manageOperations(
+				{ action: "list_runs", device_worker_id: deviceA.workerId },
+				{} as Env,
+				ctx,
+			),
+		).rejects.toThrow(new RegExp(`worker id.*${deviceA.id}`));
+	});
+
 	it("does not attribute a server-executed run to a device pinned after it completed", async () => {
 		const sql = getTestDb();
 		// A connection that is NOT device-pinned, running server-side: both

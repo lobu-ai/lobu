@@ -1206,6 +1206,27 @@ describe('automation CRUD', () => {
       ).rejects.toThrow(/device you own|not found or not accessible/i);
     });
 
+    it('answers a worker id with the device id, not a database error (create)', async () => {
+      // `device_workers.id` is a uuid; the device's worker id (`mac-<uuid>`)
+      // used to reach the uuid cast and surface as a 500.
+      const deviceId = await seedDevice({
+        userId: ownerUserId,
+        organizationId: ownerOrgId,
+        worker: 'mac-worker-id-shape',
+      });
+      await expect(
+        owner.automations.manage({
+          action: 'create',
+          entity_id: entityId,
+          slug: 'device-pin-worker-id',
+          name: 'Device Pin Worker Id',
+          prompt: 'x',
+          managed_agent_id: agentId,
+          device_worker_id: 'mac-worker-id-shape',
+        })
+      ).rejects.toThrow(new RegExp(`worker id.*${deviceId}`));
+    });
+
     it('rejects pinning to a nonexistent device (create)', async () => {
       await expect(
         owner.automations.manage({

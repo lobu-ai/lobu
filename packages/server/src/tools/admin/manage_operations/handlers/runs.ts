@@ -12,6 +12,7 @@ import {
 	pgBigintArray,
 	pgTextArray,
 } from "../../../../db/client";
+import { describeNonDeviceWorkerId } from "../../../../utils/device-worker-id";
 import { ToolUserError } from "../../../../utils/errors";
 import type { ToolContext } from "../../../registry";
 import { listOrgActivity } from "../activity-feed";
@@ -175,6 +176,8 @@ export async function handleListRuns(
     where = sql`${where} AND r.feed_id = ANY(${pgBigintArray(args.feed_ids)}::bigint[])`;
   }
   if (args.device_worker_id) {
+    const notADeviceId = await describeNonDeviceWorkerId(sql, args.device_worker_id, ctx.userId);
+    if (notADeviceId) throw new ToolUserError(notADeviceId, 400);
     // Same expression as the projected `device_worker_id`, so the filter can
     // never again answer a different question than the field it filters on.
     where = sql`${where} AND ${runDeviceAttribution(sql)} = ${args.device_worker_id}::uuid`;

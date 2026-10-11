@@ -3,6 +3,7 @@
  */
 
 import { getDb } from '../../../../db/client';
+import { describeNonDeviceWorkerId } from '../../../../utils/device-worker-id';
 import { getPrimaryAuthProfileForKind } from '../../../../utils/auth-profiles';
 import {
   DEVICE_WORKER_FRESH_INTERVAL,
@@ -94,6 +95,9 @@ export async function resolveDeviceBinding(params: {
     }
     return { deviceWorkerId: null };
   }
+
+  const notADeviceId = await describeNonDeviceWorkerId(sql, deviceWorkerId, params.userId);
+  if (notADeviceId) return { error: notADeviceId };
 
   const rows = (await sql`
     SELECT dw.id, dw.user_id, dw.platform, dw.capabilities, dw.label, dw.organization_id,

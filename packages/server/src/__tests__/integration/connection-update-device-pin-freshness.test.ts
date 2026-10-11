@@ -119,6 +119,27 @@ describe("connections.update device pin freshness", () => {
 		return row?.device_worker_id ?? null;
 	}
 
+	it("answers a worker id with the device id instead of a database error", async () => {
+		// A worker_id is not the device row UUID required by device_worker_id.
+		// Report the correct identifier before the UUID column cast.
+		const device = await seedDevice("Worker Id Mac", null);
+		const [row] = (await sql`
+      SELECT worker_id FROM device_workers WHERE id = ${device}::uuid
+    `) as unknown as Array<{ worker_id: string }>;
+		const conn = await seedConnectionOnDevice(null);
+
+		const result = await update(conn, row.worker_id);
+
+		expect(String(result.error)).toContain(device);
+		expect(await pinOf(conn)).toBeNull();
+
+		// An identifier that is neither shape nor a known worker still gets a
+		// validation answer, not a database error.
+		const unknown = await update(conn, "not-a-device");
+		expect(String(unknown.error)).toMatch(/device id/i);
+		expect(await pinOf(conn)).toBeNull();
+	});
+
 	it("rejects a pin to a device outside the freshness window", async () => {
 		// The reported shape: the device advertises the capability and is owned by
 		// the caller in this workspace, but its last heartbeat is well past the
