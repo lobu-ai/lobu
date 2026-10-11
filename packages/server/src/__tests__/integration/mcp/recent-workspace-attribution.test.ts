@@ -135,4 +135,24 @@ describe('Recent attributes account conversations to the workspaces they ran in'
     `;
     expect(summaries).toHaveLength(0);
   });
+
+  it('shows a federated search only in the workspaces that returned results', async () => {
+    const federated = (await executeTool(
+      'search_memory',
+      { query: 'Recent attribution note', include_content: true },
+      {} as Env,
+      { ...auth, mcpConversationId: 'federated-search' },
+    )) as { content?: Array<{ workspace_slug: string }> };
+    expect(federated.content?.map((c) => c.workspace_slug)).toContain(second.slug);
+    expect(await workspacesOf('federated-search')).toEqual([second.id]);
+
+    // Naming a workspace targets it even when nothing matched there.
+    await executeTool(
+      'search_memory',
+      { query: 'Recent attribution note', workspace: first.slug },
+      {} as Env,
+      { ...auth, mcpConversationId: 'narrowed-search' },
+    );
+    expect(await workspacesOf('narrowed-search')).toEqual([first.id]);
+  });
 });

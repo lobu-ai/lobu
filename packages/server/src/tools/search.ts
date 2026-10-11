@@ -48,6 +48,7 @@ import { expandSearchQueries } from '../utils/query-expansion';
 import { buildEntityUrl, getPublicWebUrl } from '../utils/url-builder';
 import { getWorkspaceProvider } from '../workspace';
 import { requireWorkspaceContext } from './access-control';
+import { recordWorkspaceActivity } from '../sandbox/workspace-activity';
 import { getContent } from './get_content';
 import type { AccountToolContext, ToolContext } from './registry';
 import { markAcceptedInternalFields, withValidatedArgs } from './validate-args';
@@ -312,6 +313,15 @@ function emptyResult(overrides: Partial<UnifiedSearchResult> = {}): UnifiedSearc
     metadata: { total_matches: 0, page_size: 0 },
     ...overrides,
   };
+}
+
+function hasSearchHits(result: UnifiedSearchResult): boolean {
+  return Boolean(
+    result.entity ||
+      result.matches.length ||
+      result.content?.length ||
+      result.conversation_messages?.length
+  );
 }
 
 function withRecall<T extends UnifiedSearchResult>(
@@ -1333,7 +1343,7 @@ async function searchImpl(
   // response while labeling its coverage as explicitly selected.
   if (targets.length === 1 && args.workspace) {
     const target = targets[0];
-    return searchWorkspaceImpl(
+    const result = await searchWorkspaceImpl(
       args,
       env,
       {
@@ -1350,6 +1360,8 @@ async function searchImpl(
         coverageScope: 'selected_workspace',
       }
     );
+    recordWorkspaceActivity(ctx, target.id, 'search');
+    return result;
   }
 
   // An explicit public entity is global reference data, so resolve it once.
@@ -1400,6 +1412,13 @@ async function searchImpl(
       )
   );
 
+  settled.forEach((item, index) => {
+    // Recent lists a federated search only in the workspaces it found
+    // something in; every granted workspace is searched, most return nothing.
+    if (item.status === 'fulfilled' && hasSearchHits(item.value)) {
+      recordWorkspaceActivity(ctx, targets[index].id, 'search');
+    }
+  });
   for (const item of settled) {
     if (item.status === 'rejected') {
       // The response exposes only a sanitized availability state. Full errors

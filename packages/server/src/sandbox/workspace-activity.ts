@@ -13,8 +13,17 @@ export function bindClientContext(client: object, ctx: AccountToolContext): void
  */
 export function recordWorkspaceSdkCall(client: object, path: string): void {
 	const ctx = clientContexts.get(client);
-	if (!ctx?.organizationId || !ctx.workspaceActivity) return;
-	const paths = ctx.workspaceActivity.get(ctx.organizationId) ?? new Set<string>();
-	paths.add(path);
-	ctx.workspaceActivity.set(ctx.organizationId, paths);
+	if (ctx?.organizationId) recordWorkspaceActivity(ctx, ctx.organizationId, path);
+}
+
+/** Record that `method` did work in `organizationId` for this tool invocation. */
+export function recordWorkspaceActivity(
+	ctx: Pick<AccountToolContext, "workspaceActivity">,
+	organizationId: string,
+	method: string,
+): void {
+	if (!ctx.workspaceActivity) return;
+	const methods = ctx.workspaceActivity.get(organizationId) ?? new Set<string>();
+	methods.add(method);
+	ctx.workspaceActivity.set(organizationId, methods);
 }
