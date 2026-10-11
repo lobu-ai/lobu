@@ -2,11 +2,14 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { getDb } from '../../../db/client';
 import type { Env } from '../../../index';
 import { type AuthContext, executeTool } from '../../../tools/execute';
+import { issueTemplateActionCapability } from '../../../interactions/template-action-capability';
+import { insertEvent } from '../../../utils/insert-event';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import {
   addUserToOrganization,
   createTestAccessToken,
+  createTestEntity,
   createTestOAuthClient,
   createTestOrganization,
   createTestUser,
@@ -163,5 +166,38 @@ describe('Recent attributes account conversations to the workspaces they ran in'
       { ...auth, mcpConversationId: 'narrowed-search' },
     );
     expect(await workspacesOf('narrowed-search')).toEqual([first.id]);
+  });
+
+  it('shows a card action clicked from an account session in the workspace it ran in', async () => {
+    const entity = await createTestEntity({
+      name: 'Recent attribution decision', entity_type: 'recent-decision',
+      organization_id: first.id, created_by: auth.userId!,
+    });
+    await getDb()`
+      UPDATE entity_types SET event_kinds = ${getDb().json({
+        decision: {
+          jsonTemplate: { type: 'button', props: { label: 'Ship', value: 'ship', onClick: '@choose' } },
+          interactions: { choose: { emits: 'decision_cast' } },
+        },
+        decision_cast: { description: 'A recorded decision' },
+      })} WHERE organization_id = ${first.id} AND slug = 'recent-decision'
+    `;
+    const source = await insertEvent({
+      entityIds: [entity.id], organizationId: first.id, originId: 'recent-attribution-decision',
+      payloadType: 'empty', semanticType: 'decision', payloadData: {},
+    });
+    const session = { ...auth, mcpConversationId: 'card-action' } as typeof auth & {
+      userId: string; clientId: string; mcpSessionId: string;
+    };
+    // The card was rendered from the workspace, which the capability records.
+    const capability = issueTemplateActionCapability([source.id], { ...session, organizationId: first.id });
+    const result = (await executeTool(
+      'invoke_event_action',
+      { source_event_id: source.id, action: 'choose', value: 'ship', interaction_id: 'recent-card-action' },
+      {} as Env,
+      { ...session, mcpAppEventActionCapability: capability },
+    )) as { created?: boolean };
+    expect(result.created).toBe(true);
+    expect(await workspacesOf('card-action')).toEqual([first.id]);
   });
 });

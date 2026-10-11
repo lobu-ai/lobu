@@ -1252,6 +1252,9 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
       ])
     );
 
+    // Rendering targeted the workspace by argument; clear that so the
+    // capability-only callback below must attribute the workspace itself.
+    await getDb()`DELETE FROM mcp_client_conversation_workspaces WHERE conversation_id = ${sessionId}`;
     const rejectResponse = await post('/mcp', {
       body: {
         jsonrpc: '2.0',
@@ -1286,6 +1289,12 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
       organization_id: targetOrg.id,
       approval_status: 'rejected',
     });
+    // The callback did work in the target workspace, so its Recent lists it.
+    const attributed = await getDb()`
+      SELECT organization_id FROM mcp_client_conversation_workspaces
+      WHERE conversation_id = ${sessionId}
+    `;
+    expect(attributed.map((row) => row.organization_id)).toEqual([targetOrg.id]);
 
     const scopedSessionId = await initSession(`/mcp/${otherOrg.slug}`, {
       sessionToken: crossOrgToken,

@@ -39,6 +39,7 @@ import {
 import type { AccountToolContext, ToolContext } from './registry';
 import { withValidatedArgs } from './validate-args';
 import { getOrgUrlContext } from './view-urls';
+import { recordWorkspaceActivity } from '../sandbox/workspace-activity';
 
 const TITLE_MAX_LENGTH = 200;
 const BLOCK_MAX_ITEMS = 100;
@@ -1006,6 +1007,7 @@ const resolveApprovalImpl = async (
   if ('error' in result && typeof result.error === 'string') {
     throw new ToolUserError(result.error, 409);
   }
+  recordWorkspaceActivity(ctx, approvalCtx.organizationId, 'resolve_approval');
   return buildApprovalView(args.run_id, env, approvalCtx);
 };
 

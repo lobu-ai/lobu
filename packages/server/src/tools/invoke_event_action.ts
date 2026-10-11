@@ -1,3 +1,4 @@
+import { recordWorkspaceActivity } from "../sandbox/workspace-activity";
 import { type Static, Type } from "@sinclair/typebox";
 import type { Env } from "../index";
 import { invokeTemplateEventAction } from "../interactions/template-event-actions";
@@ -61,6 +62,7 @@ async function invokeEventActionImpl(
 		},
 		source: { clientId: ctx.clientId ?? null },
 	});
+	recordWorkspaceActivity(ctx, target.organizationId, "invoke_event_action");
 	return {
 		created: result.created,
 		event_id: result.eventId,
