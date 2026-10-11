@@ -5,6 +5,18 @@ import { logoutCommand } from "./commands/logout.js";
 import { whoamiCommand } from "./commands/whoami.js";
 
 /**
+ * The approval page names the requester from this registration, so Lobu.app's
+ * sign-in shows the app the user just clicked instead of "Lobu CLI".
+ */
+const MAC_APP_CLIENT_NAME = "Lobu for Mac";
+/**
+ * `lobu:` is the URL scheme the Release Lobu.app registers (the only build
+ * that bundles this helper). After approval the browser page links back to
+ * the app instead of telling the user to return to a terminal.
+ */
+const MAC_APP_RETURN_TO = "lobu://";
+
+/**
  * Small, self-contained CLI surface bundled with Owletto.app. The desktop app
  * needs auth to remain compatible even when a separately installed global CLI
  * lags behind its Sparkle update. Keep this entrypoint limited to the commands
@@ -41,7 +53,12 @@ async function runMacAuthCli(
         email?: string;
         waitForApproval?: boolean;
       }) => {
-        await loginCommand({ ...options, cliVersion: version });
+        await loginCommand({
+          ...options,
+          cliVersion: version,
+          clientName: MAC_APP_CLIENT_NAME,
+          approvalReturnTo: MAC_APP_RETURN_TO,
+        });
       }
     );
 

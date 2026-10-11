@@ -14,6 +14,7 @@ import {
   DEVICE_CODE_GRANT_TYPE,
   discoverOAuth,
   fetchUserInfo,
+  LOBU_CLI_CLIENT_NAME,
   type OAuthDiscovery,
   OAuthError,
   pollDeviceToken,
@@ -29,6 +30,17 @@ interface LoginOptions {
   force?: boolean;
   /** Forwarded to RFC 7591 dynamic client registration as `software_version`. */
   cliVersion?: string;
+  /**
+   * RFC 7591 `client_name` the approval page shows the user. Defaults to the
+   * terminal CLI; the helper bundled in Lobu.app passes its own name.
+   */
+  clientName?: string;
+  /**
+   * Native deep link the browser approval page sends the user back to once
+   * the code is approved (the web page's `return_to`). Absent for the terminal
+   * CLI, whose approval page tells the user to return to their terminal.
+   */
+  approvalReturnTo?: string;
   /** Suppress spinner output; bail out non-interactively if the server rejects polling. */
   quiet?: boolean;
   /**
@@ -44,6 +56,17 @@ interface LoginOptions {
    * pre-minted PAT. Requires the server to advertise `agent_auth.claim_email_endpoint`.
    */
   email?: string;
+}
+
+function withApprovalReturnTo(url: string, returnTo: string | undefined) {
+  if (!returnTo) return url;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set("return_to", returnTo);
+    return parsed.toString();
+  } catch {
+    return url;
+  }
 }
 
 /**
@@ -137,7 +160,11 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
   console.log(chalk.dim(`  Issuer:  ${discovery.issuer}`));
 
   const client = await tryOAuthStep(() =>
-    registerClient(registrationEndpoint, options.cliVersion ?? "unknown")
+    registerClient(
+      registrationEndpoint,
+      options.cliVersion ?? "unknown",
+      options.clientName ?? LOBU_CLI_CLIENT_NAME
+    )
   );
   if (!client) return;
 
@@ -179,8 +206,10 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
       chalk.dim("  Waiting for the user to approve from their email...\n")
     );
   } else {
-    const verificationUrl =
-      authorization.verificationUriComplete ?? authorization.verificationUri;
+    const verificationUrl = withApprovalReturnTo(
+      authorization.verificationUriComplete ?? authorization.verificationUri,
+      options.approvalReturnTo
+    );
 
     console.log(chalk.dim("\n  Open this URL to approve the login:"));
     console.log(chalk.cyan(`  ${verificationUrl}`));

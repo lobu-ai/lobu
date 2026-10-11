@@ -6,7 +6,8 @@
  * device authorization grant (RFC 8628) + refresh-token grant.
  */
 
-const CLIENT_NAME = "Lobu CLI";
+/** Registered name of the terminal `lobu` CLI. */
+export const LOBU_CLI_CLIENT_NAME = "Lobu CLI";
 const SOFTWARE_ID = "lobu-cli";
 // `connections:token` is requested explicitly so the resulting login token can
 // fetch managed-connector access tokens from the cloud (POST
@@ -131,10 +132,11 @@ export async function discoverOAuth(apiUrl: string): Promise<OAuthDiscovery> {
  */
 export async function registerClient(
   registrationEndpoint: string,
-  softwareVersion: string
+  softwareVersion: string,
+  clientName: string
 ): Promise<RegisteredClient> {
   const body = await postJson(registrationEndpoint, {
-    client_name: CLIENT_NAME,
+    client_name: clientName,
     software_id: SOFTWARE_ID,
     software_version: softwareVersion,
     grant_types: [GRANT_DEVICE_CODE, GRANT_REFRESH_TOKEN],

@@ -7,6 +7,7 @@ import {
   OAuthError,
   pollDeviceToken,
   refreshTokens,
+  LOBU_CLI_CLIENT_NAME,
   registerClient,
   revokeToken,
   startDeviceAuthorization,
@@ -208,7 +209,8 @@ describe("oauth", () => {
 
       const client = await registerClient(
         "https://issuer.example.com/register",
-        "1.2.3"
+        "1.2.3",
+        LOBU_CLI_CLIENT_NAME
       );
 
       expect(client).toEqual({
@@ -231,7 +233,11 @@ describe("oauth", () => {
       setFetch(() => jsonResponse({}));
 
       try {
-        await registerClient("https://issuer.example.com/register", "1.0.0");
+        await registerClient(
+          "https://issuer.example.com/register",
+          "1.0.0",
+          LOBU_CLI_CLIENT_NAME
+        );
         throw new Error("Expected registerClient to throw.");
       } catch (err) {
         expect(err).toBeInstanceOf(OAuthError);
@@ -248,7 +254,11 @@ describe("oauth", () => {
       );
 
       try {
-        await registerClient("https://issuer.example.com/register", "1.0.0");
+        await registerClient(
+          "https://issuer.example.com/register",
+          "1.0.0",
+          LOBU_CLI_CLIENT_NAME
+        );
         throw new Error("Expected registerClient to throw.");
       } catch (err) {
         expect(err).toBeInstanceOf(OAuthError);
