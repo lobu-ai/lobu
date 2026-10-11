@@ -73,8 +73,17 @@ export function buildStandardParams(
  * passing it in avoids re-emitting (and re-planning) the 7-branch generic
  * UNION for every query.
  */
-export function buildStandardWhereSql(entityLinkSql: string): string {
-  return `($1::bigint IS NULL OR ${entityLinkSql})
+export function buildStandardWhereSql(
+  entityLinkSql: string,
+  opts?: { entityScoped?: boolean },
+): string {
+  // Keep entity-scoped subqueries outside an OR so the planner can use a
+  // semi-join. Retain a typed $1 reference: the link inlines the entity id,
+  // but PostgreSQL still needs a type for every supplied parameter slot.
+  const linkExpr = opts?.entityScoped
+    ? `${entityLinkSql} AND ($1::bigint IS NOT NULL)`
+    : `($1::bigint IS NULL OR ${entityLinkSql})`;
+  return `${linkExpr}
           AND ($2::text IS NULL OR f.connector_key = $2::text)
           AND ($3::timestamptz IS NULL OR f.occurred_at >= $3::timestamptz)
           AND ($4::timestamptz IS NULL OR f.occurred_at <= $4::timestamptz)
