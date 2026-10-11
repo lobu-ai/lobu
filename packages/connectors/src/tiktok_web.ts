@@ -179,7 +179,9 @@ export default class TikTokConnector extends ConnectorRuntime {
 				if (url.includes("/photo/")) throw new Error("Photo comment drafts are not supported yet");
 				const body = ctx.input.body;
 				if (typeof body !== "string" || !body.trim()) throw new Error("Comment body is required");
-				const nav = await browser.dispatch("navigate", { url, require_page_activation: true, allowed_origins: ORIGINS });
+				// Page activation preserves query parameters and fragments, unlike source permalinks.
+				const activatedUrl = new URL(String(ctx.input.post_url)).href;
+				const nav = await browser.dispatch("navigate", { url: activatedUrl, require_page_activation: true, allowed_origins: ORIGINS });
 				if (typeof nav.tab_id !== "number") throw new Error("User-owned post tab is not active");
 				await page(browser, nav.tab_id, "open_comment", { url });
 				const tree = await browser.dispatch("get_accessibility_tree", { tab_id: nav.tab_id, filter: "interactive", allowed_origins: ORIGINS });
@@ -188,7 +190,7 @@ export default class TikTokConnector extends ConnectorRuntime {
 				await browser.dispatch("type_ref", { tab_id: nav.tab_id, ref: { document_epoch: tree.document_epoch, ref_id: editors[0].ref_id }, text: body, clear_first: false, allowed_origins: ORIGINS });
 				const staged = await page(browser, nav.tab_id, "comment_text", { url });
 				if (staged.text !== body) throw new Error("TikTok comment draft did not match the requested text; review it in the browser");
-				return { success: true, output: { prepared: true, submitted: false, post_url: url, tab_id: nav.tab_id, body } };
+				return { success: true, output: { prepared: true, submitted: false, post_url: activatedUrl, tab_id: nav.tab_id, body } };
 			}
 			if (ctx.actionKey !== "set_like" && ctx.actionKey !== "inspect_post") throw new Error("Unsupported TikTok action");
 			if (ctx.actionKey === "set_like" && typeof ctx.input.liked !== "boolean") throw new Error("liked must be a boolean");

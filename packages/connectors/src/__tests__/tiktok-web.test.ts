@@ -64,25 +64,30 @@ describe("TikTok source records", () => {
 });
 
 describe("serialized TikTok page adapter", () => {
-	function fixture() {
-		let pressed = "false";
-		let clicks = 0;
-		const like = { getAttribute: () => pressed, click: () => { pressed = pressed === "true" ? "false" : "true"; clicks++; } };
+	function fixture(cardIds = [post.id]) {
+		const clickedPosts: string[] = [];
+		const playedPosts: string[] = [];
 		const editor = { getClientRects: () => [1], textContent: "My existing draft" };
-		const card = { querySelector: (selector: string) => {
+		const cards = cardIds.map(id => {
+			let pressed = "false";
+			const like = { getAttribute: () => pressed, click: () => { pressed = pressed === "true" ? "false" : "true"; clickedPosts.push(id); } };
+			const video = { muted: false, readyState: 2, duration: 20, currentTime: 0, seeking: false, play: async () => { playedPosts.push(id); }, pause: () => {}, scrollIntoView: () => {} };
+			return { getClientRects: () => [1], querySelectorAll: () => [{ href: `https://www.tiktok.com/@example_creator/video/${id}` }], querySelector: (selector: string) => {
 			if (selector.startsWith('a[href=')) return {};
 			if (selector === '[data-e2e="video-desc"]') return { textContent: post.desc };
 			if (selector === '[data-e2e="like-icon"]') return like;
+			if (selector === "video") return video;
 			return null;
-		} };
+			} };
+		});
 		const document = {
-			querySelector: (selector: string) => selector === "#__UNIVERSAL_DATA_FOR_REHYDRATION__" ? { textContent: JSON.stringify({ __DEFAULT_SCOPE__: { "webapp.app-context": { user: { uid: "7000000000000000003", uniqueId: "example_account" } }, "webapp.video-detail": { itemInfo: { itemStruct: post } } } }) } : card,
-			querySelectorAll: () => [editor],
+			querySelector: (selector: string) => selector === "#__UNIVERSAL_DATA_FOR_REHYDRATION__" ? { textContent: JSON.stringify({ __DEFAULT_SCOPE__: { "webapp.app-context": { user: { uid: "7000000000000000003", uniqueId: "example_account" } }, "webapp.video-detail": { itemInfo: { itemStruct: post } } } }) } : cards[0],
+			querySelectorAll: (selector: string) => selector === '[data-e2e="recommend-list-item-container"]' ? cards : [editor],
 		};
 		const url = "https://www.tiktok.com/@example_creator/video/7000000000000000001";
 		const location = new URL(url);
-		const run = new Function("document", "location", "command", "args", `return (${tiktokPage.toString()})(command,args)`);
-		return { run: (command: string, args: Record<string, unknown> = {}) => run(document, location, command, { url, ...args }), clicks: () => clicks };
+		const run = new Function("document", "location", "command", "args", "setTimeout", `return (${tiktokPage.toString()})(command,args)`);
+		return { run: (command: string, args: Record<string, unknown> = {}) => run(document, location, command, { url, ...args }, (callback: () => void) => callback()), clicks: () => clickedPosts.length, clickedPosts, playedPosts };
 	}
 
 	test("runs without module bindings, clicks once, and leaves a matching state alone", async () => {
@@ -97,6 +102,24 @@ describe("serialized TikTok page adapter", () => {
 		const f = fixture();
 		await expect(f.run("set_like", { liked: true, source_item: { ...post, id: "7000000000000000099" } })).rejects.toThrow("different post");
 		expect(f.clicks()).toBe(0);
+	});
+
+	test("binds controls and video frames to the post ID when a creator repeats a caption", async () => {
+		const f = fixture(["7000000000000000009", post.id]);
+		await f.run("set_like", { liked: true });
+		await f.run("frame", { seconds: 5 });
+		expect(f.clickedPosts).toEqual([post.id]);
+		expect(f.playedPosts).toEqual([post.id]);
+	});
+
+	test("refuses absent or ambiguous post identity before touching controls or media", async () => {
+		for (const cardIds of [["7000000000000000009"], [post.id, post.id]]) {
+			const f = fixture(cardIds);
+			await expect(f.run("set_like", { liked: true })).rejects.toThrow();
+			await expect(f.run("frame", { seconds: 5 })).rejects.toThrow();
+			expect(f.clickedPosts).toEqual([]);
+			expect(f.playedPosts).toEqual([]);
+		}
 	});
 
 	test("preserves text already in the user's comment composer", async () => {
@@ -246,5 +269,23 @@ describe("TikTok actions", () => {
 		});
 		expect((await action(dispatcher, "prepare_comment", { body: "Example draft" })).success).toBe(false);
 		expect(calls.some(call => call.action === "type_ref")).toBe(false);
+	});
+
+	test("preserves the exact page-activation URL for comment drafts", async () => {
+		for (const suffix of ["?share=1&tag=a&tag=b", "#comments", "?share=1#comments"]) {
+			const activatedUrl = `${postUrl}${suffix}`;
+			const outputs = [{ opened: true }, { text: "Example draft" }];
+			const { dispatcher } = browser((action, input) => {
+				if (action === "navigate") {
+					if (input.url !== activatedUrl) throw new Error("Activated URL does not match");
+					return { tab_id: 7 };
+				}
+				if (action === "evaluate") return { value: outputs.shift() };
+				if (action === "get_accessibility_tree") return { document_epoch: 1, tree: [{ role: "textbox", ref_id: 4 }] };
+				return {};
+			});
+			expect(await action(dispatcher, "prepare_comment", { post_url: activatedUrl, body: "Example draft" }))
+				.toMatchObject({ success: true, output: { prepared: true, submitted: false, post_url: activatedUrl } });
+		}
 	});
 });

@@ -47,7 +47,20 @@ export async function tiktokPage(command, args = {}) {
 	if (location.origin !== target.origin || location.pathname !== target.pathname || detail.id !== target.pathname.split("/").pop()) {
 		throw new Error("TikTok post changed; refusing to act on a different post");
 	}
-	const card = await wait(() => document.querySelector('[data-e2e="recommend-list-item-container"]'));
+	const card = await wait(() => {
+		// Captions can be reused by one creator. Bind the DOM controls/media to
+		// the canonical post permalink before using either, not just its text.
+		const matches = [...document.querySelectorAll('[data-e2e="recommend-list-item-container"]')].filter(candidate =>
+			visible(candidate) && [...candidate.querySelectorAll('a[href*="/video/"],a[href*="/photo/"]')].some(link => {
+				try {
+					const permalink = new URL(link.href, location.origin);
+					return permalink.origin === target.origin && permalink.pathname === target.pathname;
+				} catch { return false; }
+			})
+		);
+		if (matches.length > 1) throw new Error("TikTok displayed post identity is ambiguous");
+		return matches[0];
+	});
 	const author = card.querySelector(`a[href="/@${detail.author.uniqueId}"]`);
 	const description = card.querySelector('[data-e2e="video-desc"]');
 	const compact = text => String(text || "").replace(/\s+/g, "").trim();
