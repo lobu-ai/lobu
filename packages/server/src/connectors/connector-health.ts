@@ -530,9 +530,10 @@ interface ClassifiedFeed {
    *  long-silent device, or stalled) — the only signal that feeds the degraded ratio, so one
    *  transiently failing feed on a small connection stays quiet. */
   persistent: boolean;
-  /** Overdue expected feed whose current claimed run has no outcome yet; it
-   *  holds an open alert episode instead of recovering it. */
-  inFlightOverdue: boolean;
+  /** Overdue expected feed whose outcome cannot be judged right now (a run
+   *  in flight, or its device asleep); it holds an open alert episode instead
+   *  of recovering it. */
+  holdsEpisode: boolean;
 }
 
 /**
@@ -541,32 +542,28 @@ interface ClassifiedFeed {
  *
  * - `stalled` — overdue, and `last_error` says the latest attempt ended
  *   without finishing.
- * - `in_flight` — overdue, but a run is claimed right now: the claim stamps
- *   `pending` and clears `last_error` on every retry, so the outcome is not
- *   known yet. It must neither raise an alert nor end one, or each retry of a
- *   stalled feed would recover the episode and the next failure alert again.
+ * - `held` — overdue, but its outcome cannot be judged right now: a run is
+ *   claimed (the claim stamps `pending` and clears `last_error` on every
+ *   retry), or its pinned device is not polling (nothing can be claimed, and
+ *   whether that silence matters is the device-offline rule's decision). Such a
+ *   feed must neither raise an alert nor end one, or a retry or a laptop sleep
+ *   would recover the episode and the next failure alert again.
  * - `null` — not overdue, or not this rule's to judge.
  *
  * A feed without a cron has no due time to measure from (most sync feeds are
  * dispatched by other paths), and a feed that never finished is Rule E's. A
- * pinned device that is not polling is not a stall: nothing claims the run, and
- * whether that silence matters is the device-offline rule's decision. A feed
- * resumed after a clean pause keeps its old `last_sync_at` but has no error and
- * is not `pending` until claimed.
+ * feed resumed after a clean pause keeps its old `last_sync_at` but has no
+ * error and is not `pending` until claimed.
  */
 function feedStallState(
   row: FeedHealthRow,
   cfg: ConnectorHealthConfig,
   nowMs: number
-): 'stalled' | 'in_flight' | null {
+): 'stalled' | 'held' | null {
   if (!row.schedule) return null;
   const lastFinishedMs = tsTimeOrNull(row.last_sync_at);
   if (lastFinishedMs === undefined) return null;
   const graceMs = cfg.stallGraceHours * 60 * 60 * 1000;
-  if (row.device_pinned) {
-    const seenMs = tsTimeOrNull(row.device_last_seen_at);
-    if (seenMs === undefined || nowMs - seenMs > graceMs) return null;
-  }
   let firstMissedMs: number;
   try {
     firstMissedMs = new Date(
@@ -577,8 +574,12 @@ function feedStallState(
     return null;
   }
   if (nowMs - firstMissedMs <= graceMs) return null;
+  if (row.device_pinned) {
+    const seenMs = tsTimeOrNull(row.device_last_seen_at);
+    if (seenMs === undefined || nowMs - seenMs > graceMs) return 'held';
+  }
   if (row.last_error) return 'stalled';
-  return row.last_sync_status === 'pending' ? 'in_flight' : null;
+  return row.last_sync_status === 'pending' ? 'held' : null;
 }
 
 function classifyFeed(
@@ -635,7 +636,7 @@ function classifyFeed(
   const persistent =
     expected && (cf >= cfg.failureThreshold || deviceStale || stalled);
 
-  return { expected, failing, persistent, inFlightOverdue: stallState === 'in_flight' };
+  return { expected, failing, persistent, holdsEpisode: stallState === 'held' };
 }
 
 /**
@@ -864,10 +865,10 @@ export async function runConnectorHealthCheck(
     const classified = classify(connectionRows, cfg, nowMs);
 
     if (!classified) {
-      // An overdue feed mid-retry has no verdict yet. Leave any open episode
-      // standing until a run actually finishes or fails again.
+      // An overdue feed mid-retry or on a sleeping device has no verdict yet.
+      // Leave any open episode standing until a run actually finishes.
       const holding = connectionRows.some(
-        (row) => row.feed_id != null && classifyFeed(row, cfg, nowMs).inFlightOverdue
+        (row) => row.feed_id != null && classifyFeed(row, cfg, nowMs).holdsEpisode
       );
       if (holding) continue;
       // Healthy: re-arm the alert if it was previously flagged. The conditional

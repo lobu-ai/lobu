@@ -1572,4 +1572,62 @@ describe('connector-health alerter', () => {
     await runConnectorHealthCheck();
     expect(await marker()).toBeNull();
   });
+
+  // A laptop that sleeps through a stalled episode suspends judgment; it is not
+  // a recovery. Reconnecting into the same failure must not alert twice.
+  it('holds a stalled episode while its pinned device sleeps', async () => {
+    const sql = getTestDb();
+    const day = 24 * 60 * 60 * 1000;
+    const hour = 60 * 60 * 1000;
+    const device = await seedDeviceWorker({
+      orgId,
+      userId,
+      workerId: 'worker-sleeps-mid-stall',
+      lastSeenAt: new Date(Date.now() - 60 * 1000),
+    });
+    const conn = await seedConnection({
+      orgId,
+      userId,
+      connectorKey: 'spotify',
+      slug: 'stalled-then-asleep',
+      createdAt: OLD,
+      deviceWorkerId: device,
+    });
+    const dependencyError = 'Choose a paired Chrome browser for this connection before running it.';
+    await seedFeed({
+      orgId,
+      connectionId: conn.id,
+      feedKey: 'a',
+      schedule: '*/5 * * * *',
+      lastSyncStatus: 'pending',
+      lastSyncAt: new Date(Date.now() - 2 * day),
+      consecutiveFailures: 0,
+      lastError: dependencyError,
+    });
+    const marker = async () =>
+      ((await sql`
+        SELECT unhealthy_alerted_at FROM connections WHERE id = ${conn.id}
+      `) as unknown as Array<{ unhealthy_alerted_at: Date | null }>)[0]
+        .unhealthy_alerted_at;
+
+    expect(reasonFor((await runConnectorHealthCheck()).details, conn.id)).toBe(
+      'all_feeds_failing',
+    );
+    const alertedAt = await marker();
+    expect(alertedAt).not.toBeNull();
+
+    // The laptop sleeps for 10 hours: past the stall grace, short of offline.
+    await sql`
+      UPDATE device_workers SET last_seen_at = ${new Date(Date.now() - 10 * hour)}
+      WHERE id = ${device}
+    `;
+    await runConnectorHealthCheck();
+    expect(await marker()).toEqual(alertedAt);
+
+    // It wakes into the same dependency failure: still the same episode.
+    await sql`UPDATE device_workers SET last_seen_at = NOW() WHERE id = ${device}`;
+    const woke = await runConnectorHealthCheck();
+    expect(woke.newlyAlerted).toBe(0);
+    expect(await marker()).toEqual(alertedAt);
+  });
 });
