@@ -577,7 +577,7 @@ export async function notifyBrowserAuthExpired(params: {
 	 * stored auth profile — those just need the user to re-login on the site.
 	 */
 	authProfileSlug?: string | null;
-}): Promise<void> {
+}, transaction?: DbClient): Promise<void> {
 	await notifyOrgAdmins(params.orgId, (orgSlug) => ({
 		type: "browser_auth_expired",
 		title: `${params.connectorKey} needs sign-in`,
@@ -599,7 +599,7 @@ export async function notifyBrowserAuthExpired(params: {
 			params.connectorKey,
 			params.connectionId,
 		),
-	}));
+	}), transaction);
 }
 
 /**
@@ -615,7 +615,7 @@ export async function notifyConnectionStoppedCollecting(params: {
 	displayName: string | null;
 	summary: string;
 	lastError: string | null;
-}): Promise<void> {
+}, transaction?: DbClient): Promise<void> {
 	const label = params.displayName?.trim() || params.connectorKey;
 	const body = params.lastError
 		? `${params.summary}\n\nLast error: ${escapeMarkdownText(params.lastError.slice(0, 500))}`
@@ -631,7 +631,7 @@ export async function notifyConnectionStoppedCollecting(params: {
 			params.connectorKey,
 			params.connectionId,
 		),
-	}));
+	}), transaction);
 }
 
 export async function notifyInvitationReceived(params: {

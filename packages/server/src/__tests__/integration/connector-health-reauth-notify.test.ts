@@ -227,4 +227,34 @@ describe('connector-health → browser-auth-expired notification', () => {
     expect(await authNotifsFor(orgId, authConnId)).toHaveLength(1);
     expect(await stoppedNotifsFor(orgId, offlineConnId)).toHaveLength(1);
   });
+
+  // The marker is the once-per-episode claim. If it commits while the notice
+  // fails to persist, every later scan sees the episode as already announced
+  // and the admins are never told. Both must land together or not at all.
+  it('retries a notification that failed to persist on the next scan', async () => {
+    const sql = getTestDb();
+    const connId = await seedConn(orgId, ownerId, 'revolut', 'revolut-retry');
+    await seedFailingFeed(orgId, connId, 'transactions', 'Upstream returned HTTP 502');
+
+    const failed = await runConnectorHealthCheck({
+      notifyStopped: async () => {
+        throw new Error('notification insert failed');
+      },
+    });
+    expect(failed.details.some((d) => d.connectionId === connId)).toBe(true);
+    expect(failed.stoppedNotified).toBe(0);
+    const [afterFailure] = (await sql`
+      SELECT unhealthy_alerted_at FROM connections WHERE id = ${connId}
+    `) as unknown as Array<{ unhealthy_alerted_at: Date | null }>;
+    expect(afterFailure.unhealthy_alerted_at).toBeNull();
+    expect(await stoppedNotifsFor(orgId, connId)).toHaveLength(0);
+
+    const retried = await runConnectorHealthCheck();
+    expect(retried.stoppedNotified).toBe(1);
+    expect(await stoppedNotifsFor(orgId, connId)).toHaveLength(1);
+    const [afterRetry] = (await sql`
+      SELECT unhealthy_alerted_at FROM connections WHERE id = ${connId}
+    `) as unknown as Array<{ unhealthy_alerted_at: Date | null }>;
+    expect(afterRetry.unhealthy_alerted_at).not.toBeNull();
+  });
 });

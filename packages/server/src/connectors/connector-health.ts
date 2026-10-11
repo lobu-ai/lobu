@@ -90,6 +90,7 @@ import {
   notifyBrowserAuthExpired,
   notifyConnectionStoppedCollecting,
 } from '../notifications/triggers';
+import { emit } from '../events/emitter';
 import logger from '../utils/logger';
 import { nextRunAt as nextRunAtFromCron } from '../utils/cron';
 import { aclConnectionIdSql, isAclErrorMessage } from '../authz/acl-observability';
@@ -902,17 +903,70 @@ export async function runConnectorHealthCheck(
     // Transition claim: only the replica whose UPDATE actually flips the marker
     // NULL→now() owns the alert. Concurrent ticks on other replicas get zero
     // rows back and stay silent — Postgres-mediated, no in-memory dedupe.
-    const claimed = (await sql`
-      UPDATE connections
-      SET unhealthy_alerted_at = now(), updated_at = now()
-      WHERE id = ${connectionId}
-        AND unhealthy_alerted_at IS NULL
-      RETURNING id
-    `) as unknown as Array<{ id: string }>;
+    //
+    // The admins' notification commits in the SAME transaction as the claim.
+    // The marker is what tells every later scan this episode was announced, so
+    // a marker committed beside a notice that failed to persist would silence
+    // the episode for good. On failure both roll back and the next tick
+    // retries; the scan itself moves on to the next connection.
+    const summary = stoppedCollectingSummary(detail);
+    const authExpired =
+      reason !== 'acl_failed' && isBrowserAuthExpiredError(detail.lastError);
+    let claimed: boolean;
+    try {
+      claimed = await sql.begin(async (tx) => {
+        const rows = (await tx`
+          UPDATE connections
+          SET unhealthy_alerted_at = now(), updated_at = now()
+          WHERE id = ${connectionId}
+            AND unhealthy_alerted_at IS NULL
+          RETURNING id
+        `) as unknown as Array<{ id: string }>;
+        if (rows.length === 0) return false; // already alerted on a prior tick
 
-    if (claimed.length === 0) continue; // already alerted on a prior tick
+        // An expired site session gets its specific "needs sign-in" notice; any
+        // other stop of a collecting connection gets the generic one.
+        if (authExpired) {
+          await notifyAuthExpired(
+            {
+              orgId: first.organization_id,
+              connectionId,
+              connectorKey: first.connector_key,
+            },
+            tx
+          );
+        } else if (summary) {
+          await notifyStopped(
+            {
+              orgId: first.organization_id,
+              connectionId,
+              connectorKey: first.connector_key,
+              displayName: first.display_name,
+              summary,
+              lastError: detail.lastError,
+            },
+            tx
+          );
+        }
+        return true;
+      });
+    } catch (err) {
+      logger.warn(
+        { err, connection_id: connectionId },
+        '[connector-health] failed to record unhealthy transition; retrying next tick'
+      );
+      continue;
+    }
+    if (!claimed) continue;
 
     result.newlyAlerted += 1;
+    if (authExpired) result.authNotified += 1;
+    else if (summary) result.stoppedNotified += 1;
+    if (authExpired || summary) {
+      emit(first.organization_id, {
+        keys: ['notifications', 'notifications-unread-count'],
+      });
+    }
 
     // The operator alert, in the hosted logs. A stable `msg` keeps it
     // groupable per reason; the structured fields carry the org/connector
@@ -931,49 +985,6 @@ export async function runConnectorHealthCheck(
       },
       `[connector-health] connector unhealthy (${reason}): ${first.connector_key}`
     );
-
-    // On the unhealthy transition, tell the org's admins: the operator alert
-    // above cannot reach the person who has to sign in, re-bind a browser, or
-    // replace a token. An expired site session gets its specific "needs
-    // sign-in" notice; any other stop of a collecting connection gets the
-    // generic one. Deduped by the same unhealthy_alerted_at claim, so each
-    // fires once per episode. Best-effort: a notification failure must not
-    // break the scan.
-    if (reason !== 'acl_failed' && isBrowserAuthExpiredError(detail.lastError)) {
-      try {
-        await notifyAuthExpired({
-          orgId: first.organization_id,
-          connectionId,
-          connectorKey: first.connector_key,
-        });
-        result.authNotified += 1;
-      } catch (err) {
-        logger.warn(
-          { err, connection_id: connectionId },
-          '[connector-health] failed to send browser-auth-expired notification'
-        );
-      }
-    } else {
-      const summary = stoppedCollectingSummary(detail);
-      if (summary) {
-        try {
-          await notifyStopped({
-            orgId: first.organization_id,
-            connectionId,
-            connectorKey: first.connector_key,
-            displayName: first.display_name,
-            summary,
-            lastError: detail.lastError,
-          });
-          result.stoppedNotified += 1;
-        } catch (err) {
-          logger.warn(
-            { err, connection_id: connectionId },
-            '[connector-health] failed to send stopped-collecting notification'
-          );
-        }
-      }
-    }
   }
 
   return result;
