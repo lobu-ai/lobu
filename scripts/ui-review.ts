@@ -11,11 +11,11 @@ import {
   COMPARE_FILE_CAP,
   findProofComment,
   isArtifactProof,
-  isUnhostedRange,
   isHttpsArtifact,
-  permittedFluxTailParent,
+  isUnhostedRange,
   type OwlettoPullRequest,
   parseProof,
+  permittedFluxTailParent,
   proofMatches,
   selectOwlettoPullRequest,
   type UiReviewComment,
@@ -378,7 +378,17 @@ function main(): number {
   ]);
   const owlettoRepo = githubRepoFromRemote(owlettoRemote);
 
-  const basePointer = getPointer(lobuRepo, parentPr.baseRefOid);
+  // The target branch can advance independently; review only this PR's range.
+  // Filter in gh so a large parent diff cannot overflow the subprocess buffer.
+  const mergeBase = run("gh", [
+    "api",
+    `repos/${lobuRepo}/compare/${parentPr.baseRefOid}...${parentPr.headRefOid}`,
+    "--jq",
+    ".merge_base_commit.sha // empty",
+  ]);
+  if (!mergeBase)
+    throw new Error("GitHub comparison did not return a merge base");
+  const basePointer = getPointer(lobuRepo, mergeBase);
   const headPointer = getPointer(lobuRepo, parentPr.headRefOid);
   if (basePointer === headPointer) {
     const parentComment = findComment(lobuRepo, parentPr.number, PARENT_MARKER);

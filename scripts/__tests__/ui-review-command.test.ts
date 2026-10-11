@@ -108,10 +108,26 @@ if (
   process.exit(92);
 }
 
-if (endpoint.includes("/contents/packages/owletto?ref=")) {
-  const sha = endpoint.endsWith(process.env.MOCK_BASE_COMMIT)
-    ? process.env.MOCK_BASE_POINTER
-    : process.env.MOCK_HEAD_POINTER;
+if (endpoint.startsWith("repos/lobu-ai/lobu/compare/")) {
+  const mergeBase = process.env.MOCK_MISSING_MERGE_BASE === "1"
+    ? undefined : { sha: process.env.MOCK_MERGE_BASE_COMMIT || process.env.MOCK_BASE_COMMIT };
+  const jqIndex = args.indexOf("--jq");
+  if (jqIndex !== -1) {
+    if (args[jqIndex + 1] !== ".merge_base_commit.sha // empty") process.exit(93);
+    process.stdout.write(mergeBase?.sha ?? "");
+  } else {
+    output({
+      merge_base_commit: mergeBase,
+      files: process.env.MOCK_LARGE_PARENT_COMPARISON === "1"
+        ? [{ filename: "bun.lock", patch: "x".repeat(2 * 1024 * 1024) }] : [],
+    });
+  }
+} else if (endpoint.includes("/contents/packages/owletto?ref=")) {
+  const sha = process.env.MOCK_MERGE_BASE_COMMIT && endpoint.endsWith(process.env.MOCK_MERGE_BASE_COMMIT)
+    ? process.env.MOCK_MERGE_BASE_POINTER
+    : endpoint.endsWith(process.env.MOCK_BASE_COMMIT)
+      ? process.env.MOCK_BASE_POINTER
+      : process.env.MOCK_HEAD_POINTER;
   output({ type: "submodule", sha });
 } else if (endpoint.includes("/commits/") && endpoint.endsWith("/pulls")) {
   const candidate = endpoint.split("/commits/")[1].split("/pulls")[0];
@@ -257,6 +273,65 @@ function expectExit(
 }
 
 describe("ui-review command", () => {
+  it("resolves the merge base when the parent comparison exceeds the subprocess buffer", () => {
+    const fixture = createFixture();
+    const result = runUiReview(fixture, {
+      MOCK_BASE_POINTER: HEAD_POINTER,
+      MOCK_LARGE_PARENT_COMPARISON: "1",
+    });
+    expectExit(result, 0);
+    expect(readState(fixture.stateFile).calls.at(-1)?.payload).toMatchObject({
+      state: "success",
+      description: "No Owletto pointer change",
+    });
+  });
+
+  it("ignores a pointer update that landed only on the target branch", () => {
+    const fixture = createFixture();
+    const mergeBase = "b".repeat(40);
+    const result = runUiReview(fixture, {
+      MOCK_MERGE_BASE_COMMIT: mergeBase,
+      MOCK_MERGE_BASE_POINTER: HEAD_POINTER,
+    });
+    expectExit(result, 0);
+    const calls = readState(fixture.stateFile).calls;
+    expect(calls.at(-1)?.payload).toMatchObject({
+      state: "success",
+      description: "No Owletto pointer change",
+    });
+    expect(
+      calls.some((call) => call.endpoint.startsWith("repos/lobu-ai/owletto/"))
+    ).toBe(false);
+  });
+
+  it("still requires UI proof when a PR and its target both update the pointer", () => {
+    const fixture = createFixture();
+    const result = runUiReview(fixture, {
+      MOCK_BASE_POINTER: HEAD_POINTER,
+      MOCK_MERGE_BASE_COMMIT: "b".repeat(40),
+      MOCK_MERGE_BASE_POINTER: BASE_POINTER,
+    });
+    expectExit(result, 2);
+    expect(readState(fixture.stateFile).calls.at(-1)?.payload).toMatchObject({
+      state: "error",
+      description: "UI proof missing; rerun make ui-review with ARTIFACT=...",
+    });
+  });
+
+  it("fails closed when GitHub cannot identify the PR merge base", () => {
+    const fixture = createFixture();
+    const result = runUiReview(fixture, {
+      MOCK_BASE_POINTER: HEAD_POINTER,
+      MOCK_MISSING_MERGE_BASE: "1",
+    });
+    expectExit(result, 2);
+    expect(
+      readState(fixture.stateFile)
+        .calls.filter((call) => call.endpoint.includes("/statuses/"))
+        .at(-1)?.payload.state
+    ).toBe("pending");
+  });
+
   it("clears stale parent copy when the Owletto pointer no longer changes", () => {
     const fixture = createFixture();
     const state = readState(fixture.stateFile);
