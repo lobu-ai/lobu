@@ -91,8 +91,8 @@ describe('MCP activity actor identity', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ call_count: 2 });
     const workspaces = await getDb()`SELECT organization_id FROM mcp_client_conversation_workspaces
-      WHERE user_id = ${userId} AND conversation_id = 'two-targets' ORDER BY organization_id`;
-    expect(workspaces.map(row => row.organization_id)).toEqual([org.id, secondOrg.id].sort());
+      WHERE user_id = ${userId} AND conversation_id = 'two-targets'`;
+    expect(workspaces.map(row => row.organization_id).sort()).toEqual([org.id, secondOrg.id].sort());
     const response = await get(`/api/me/clients/activity-scopes`, { token });
     const body = await response.json() as { scopes: Array<{ activityId: string; callCount: number }> };
     expect(body.scopes.find(row => row.activityId === 'two-targets')?.callCount).toBe(2);

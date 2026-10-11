@@ -72,20 +72,18 @@ describe('MCP conversation workspaces migration', () => {
       const rows = await tx`
         SELECT user_id, conversation_id, organization_id
         FROM mcp_client_conversation_workspaces
-        ORDER BY conversation_id, user_id, organization_id
       `;
-      expect(rows.map(row => ({ ...row }))).toEqual([
+      const sorted = (list: Array<Record<string, string>>) => list
+        .map(row => [row.conversation_id, row.user_id, row.organization_id].join(' '))
+        .sort();
+      expect(sorted(rows.map(row => ({ ...row })))).toEqual(sorted([
         { user_id: user.id, conversation_id: 'bound', organization_id: first.id },
-        ...[
-          { user_id: user.id, conversation_id: 'shared-explicit', organization_id: first.id },
-          { user_id: other.id, conversation_id: 'shared-explicit', organization_id: first.id },
-        ].sort((a, b) => a.user_id.localeCompare(b.user_id)),
+        { user_id: user.id, conversation_id: 'shared-explicit', organization_id: first.id },
+        { user_id: other.id, conversation_id: 'shared-explicit', organization_id: first.id },
         { user_id: other.id, conversation_id: 'shared-id', organization_id: first.id },
-        ...[
-          { user_id: user.id, conversation_id: 'spans-both', organization_id: first.id },
-          { user_id: user.id, conversation_id: 'spans-both', organization_id: second.id },
-        ].sort((a, b) => a.organization_id.localeCompare(b.organization_id)),
-      ]);
+        { user_id: user.id, conversation_id: 'spans-both', organization_id: first.id },
+        { user_id: user.id, conversation_id: 'spans-both', organization_id: second.id },
+      ]));
       const [knownActor] = await tx`
         SELECT last_activity_at = now() - interval '1 hour' AS retained_timestamp
         FROM mcp_client_conversation_workspaces

@@ -65,8 +65,7 @@ describe('Recent attributes account conversations to the workspaces they ran in'
     (await getDb()`
       SELECT organization_id FROM mcp_client_conversation_workspaces
       WHERE user_id = ${auth.userId} AND conversation_id = ${conversation}
-      ORDER BY organization_id
-    `).map((row) => row.organization_id as string);
+    `).map((row) => row.organization_id as string).sort();
 
   it('shows a read-only research conversation only in the workspace it read', async () => {
     const result = await run('research-first', 'query_sdk',
