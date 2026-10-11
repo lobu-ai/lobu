@@ -1620,8 +1620,11 @@ export async function waitReady(
       sandbox,
       `cd ${WORKSPACE} && node scripts/lib/preview-health.mjs`,
       150
-    );
-    const probe = JSON.parse(out.trim()) as { status: string; detail?: string };
+    ).catch(() => undefined);
+    // An unavailable remote command provides no startup verdict. Retry within
+    // the deadline, but keep malformed responses and explicit failures fatal.
+    const probe: { status: string; detail?: string } =
+      out === undefined ? { status: "starting" } : JSON.parse(out.trim());
     if (probe.status === "failed")
       throw new Error(`Sandbox startup failed: ${probe.detail}`);
     if (probe.status === "ready") return true;

@@ -46,7 +46,8 @@ describe("sandbox frontend readiness", () => {
       }
     );
     try {
-      expect(await previewHealthy("https://preview.example.test", 1)).toBe(
+      // A generous budget: only an immediate "failed" verdict returns in time.
+      expect(await previewHealthy("https://preview.example.test", 60_000)).toBe(
         false
       );
     } finally {
@@ -54,14 +55,57 @@ describe("sandbox frontend readiness", () => {
     }
   });
 
+  test("retries a temporary Daytona transport failure", async () => {
+    let attempts = 0;
+    const sandbox = {
+      process: {
+        executeCommand: async (command: string) => {
+          if (!command.includes("preview-health.mjs"))
+            return { exitCode: 0, result: "" };
+          if (++attempts === 1) throw new Error("temporary transport failure");
+          return { exitCode: 0, result: '{"status":"ready"}' };
+        },
+      },
+    } as unknown as Parameters<typeof waitReady>[0];
+    expect(await waitReady(sandbox, 30)).toBe(true);
+    expect(attempts).toBe(2);
+  }, 15_000);
+
+  test("retries a failed remote probe command without swallowing startup failures", async () => {
+    let attempts = 0;
+    const sandbox = {
+      process: {
+        executeCommand: async (command: string) => {
+          if (!command.includes("preview-health.mjs"))
+            return { exitCode: 0, result: "" };
+          if (++attempts === 1) return { exitCode: 1, result: "" };
+          return {
+            exitCode: 0,
+            result:
+              '{"status":"failed","detail":"startup exited with code 37"}',
+          };
+        },
+      },
+    } as unknown as Parameters<typeof waitReady>[0];
+    await expect(waitReady(sandbox, 30)).rejects.toThrow("37");
+    expect(attempts).toBe(2);
+  }, 15_000);
+
+  test("fails immediately for a malformed probe response", async () => {
+    const sandbox = {
+      process: {
+        executeCommand: async () => ({ exitCode: 0, result: "invalid JSON" }),
+      },
+    } as unknown as Parameters<typeof waitReady>[0];
+    await expect(waitReady(sandbox, 30)).rejects.toBeInstanceOf(SyntaxError);
+  });
+
   test("fails immediately after a startup process exits", async () => {
     const sandbox = {
       process: {
-        executeCommand: async (command: string) => ({
+        executeCommand: async () => ({
           exitCode: 0,
-          result: command.includes("/health/ready")
-            ? "200"
-            : '{"status":"failed","detail":"startup exited with code 137"}',
+          result: '{"status":"failed","detail":"startup exited with code 137"}',
         }),
       },
     } as unknown as Parameters<typeof waitReady>[0];
