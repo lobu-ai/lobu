@@ -18,6 +18,7 @@ const LOBU_COMMAND_CLIENT_SOFTWARE_ID = "lobu-cli";
 interface ActivityScopeRow {
 	activity_kind: "conversation" | "session";
 	conversation_id: string;
+	organization_id: string | null;
 	client_id: string;
 	client_name: string | null;
 	title: string | null;
@@ -87,7 +88,9 @@ routes.get("/", mcpAuth, async (c) => {
 	const sql = getDb();
 	// Bare account calls and multi-org sessions record NULL organization_id;
 	// the filter below keeps those visible everywhere rather than letting
-	// them vanish from every workspace.
+	// them vanish from every workspace. The response carries the column so
+	// clients can send those rows to the account reader, the only feed that
+	// holds all of their calls.
 	const rows = await sql<ActivityScopeRow>`
     WITH unread_notifications AS (
       SELECT e.client_id,
@@ -107,7 +110,8 @@ routes.get("/", mcpAuth, async (c) => {
         ) IS NOT NULL
       GROUP BY e.client_id, activity_id
     )
-    SELECT mc.activity_kind, mc.conversation_id, mc.client_id, oc.client_name,
+    SELECT mc.activity_kind, mc.conversation_id, mc.organization_id, mc.client_id,
+      oc.client_name,
       mc.title, mc.last_action, mc.first_activity_at, mc.last_activity_at,
       mc.call_count, mc.failed_count,
       EXISTS (
@@ -153,6 +157,7 @@ routes.get("/", mcpAuth, async (c) => {
 		scopes: rows.map((row) => ({
 			activityId: row.conversation_id,
 			activityKind: row.activity_kind,
+			organizationId: row.organization_id,
 			isLive: row.is_live,
 			clientId: row.client_id,
 			clientName: row.client_name,

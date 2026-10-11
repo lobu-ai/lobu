@@ -382,6 +382,22 @@ describe('client activity scopes route', () => {
     expect(unscoped.sort()).toEqual([
       'bare-account-transport', 'claude-transport', 'org-b-only-conversation', 'shared-conversation',
     ]);
+
+    // Rows kept in every workspace carry no organization, so clients can send
+    // them to the account reader instead of a partial workspace feed.
+    const response = await get(`/api/me/clients/activity-scopes?client_ids=${claudeClientId}`, { token });
+    const body = (await response.json()) as {
+      scopes: Array<{ activityId: string; organizationId: string | null }>;
+    };
+    const organizationOf = Object.fromEntries(
+      body.scopes.map((scope) => [scope.activityId, scope.organizationId]),
+    );
+    expect(organizationOf).toEqual({
+      'bare-account-transport': null,
+      'claude-transport': organizationId,
+      'org-b-only-conversation': otherOrg.id,
+      'shared-conversation': null,
+    });
   });
 
   it('rejects an overlong organization filter', async () => {
