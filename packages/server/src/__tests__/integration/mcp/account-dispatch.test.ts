@@ -40,8 +40,9 @@ describe('account MCP dispatch', () => {
     expect(result).toMatchObject({ success: true, return_value: { current: null, count: 2, workspace: null } });
     const title = await call('run_sdk', { script: 'export default async (ctx, client) => client.conversations.setTitle({ title: "Account activity" });' });
     expect(title).toMatchObject({ success: true, return_value: { title: 'Account activity' } });
-    const [activity] = await getDb()`SELECT organization_id, title FROM mcp_client_conversations WHERE user_id=${auth.userId} AND conversation_id='account-conversation'`;
-    expect(activity).toMatchObject({ organization_id: null, title: 'Account activity' });
+    const [activity] = await getDb()`SELECT title FROM mcp_client_conversations WHERE user_id=${auth.userId} AND conversation_id='account-conversation'`;
+    expect(activity).toMatchObject({ title: 'Account activity' });
+    expect(await getDb()`SELECT 1 FROM mcp_client_conversation_workspaces WHERE user_id=${auth.userId} AND conversation_id='account-conversation'`).toHaveLength(0);
     const [audit] = await getDb()`SELECT organization_id, created_by FROM events WHERE client_id=${auth.clientId} AND payload_data->>'tool_name'='run_sdk' ORDER BY id DESC LIMIT 1`;
     expect(audit).toMatchObject({ organization_id: null, created_by: auth.userId });
   });

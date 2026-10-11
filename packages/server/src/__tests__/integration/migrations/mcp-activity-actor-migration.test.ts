@@ -26,6 +26,8 @@ describe('MCP activity actor migration', () => {
       // Reconstruct the retired schema only within this rolled-back transaction.
       await tx`DELETE FROM mcp_client_conversations`;
       await tx.unsafe(`
+        DROP TABLE mcp_client_conversation_workspaces;
+        ALTER TABLE mcp_client_conversations ADD COLUMN organization_id text REFERENCES organization(id) ON DELETE CASCADE;
         ALTER TABLE mcp_client_conversations DROP CONSTRAINT mcp_client_conversations_actor_pkey;
         ALTER TABLE mcp_client_conversations ALTER COLUMN user_id DROP NOT NULL;
         ALTER TABLE mcp_client_conversations ALTER COLUMN organization_id SET NOT NULL;

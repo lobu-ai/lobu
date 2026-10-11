@@ -151,7 +151,7 @@ describe('client activity scopes route', () => {
     }>>`
       SELECT conversation_id, activity_kind
       FROM mcp_client_conversations
-      WHERE organization_id = ${organizationId}
+      WHERE user_id = ${userId}
         AND conversation_id IN ('chatgpt-conversation-a', 'chatgpt-transport-only', 'claude-transport')
       ORDER BY conversation_id
     `;
@@ -253,7 +253,7 @@ describe('client activity scopes route', () => {
     await sql`
       UPDATE mcp_client_conversations
       SET last_activity_at = now() + interval '1 minute'
-      WHERE organization_id = ${organizationId}
+      WHERE user_id = ${userId}
         AND conversation_id = 'command-transport'
     `;
     const response = await get(
@@ -316,7 +316,7 @@ describe('client activity scopes route', () => {
     expect(filteredBody.clients.some((client) => client.kind === 'mcp')).toBe(false);
   });
 
-  it('filters scopes to the requested workspace while keeping bare and multi-org rows', async () => {
+  it('lists activity only in the workspaces it ran in, ordered by its activity there', async () => {
     const otherOrg = await createTestOrganization({
       name: 'Client activity scopes other',
       slug: 'client-activity-scopes-other',
@@ -351,10 +351,16 @@ describe('client activity scopes route', () => {
       failed: false,
     });
     await getDb()`
-      UPDATE mcp_client_conversations
+      UPDATE mcp_client_conversation_workspaces
       SET last_activity_at = now() + interval '1 minute'
-      WHERE user_id = ${userId} AND client_id = ${claudeClientId}
-        AND conversation_id = 'org-b-only-conversation'
+      WHERE user_id = ${userId} AND conversation_id = 'shared-conversation'
+        AND organization_id = ${otherOrg.id}
+    `;
+    // The account-level row is newer, but a workspace orders by its own rows.
+    await getDb()`
+      UPDATE mcp_client_conversations
+      SET last_activity_at = now() + interval '2 minutes'
+      WHERE user_id = ${userId} AND conversation_id = 'org-b-only-conversation'
     `;
 
     const idsOf = async (query: string) => {
@@ -364,15 +370,15 @@ describe('client activity scopes route', () => {
       return body.scopes.map((scope) => scope.activityId);
     };
 
+    // A workspace lists only activity that ran in it; account-only activity
+    // appears in none of them.
     const scopedToFirst = await idsOf(`?client_ids=${claudeClientId}&organization_id=${organizationId}`);
-    expect(scopedToFirst.sort()).toEqual([
-      'bare-account-transport', 'claude-transport', 'shared-conversation',
-    ]);
+    expect(scopedToFirst.sort()).toEqual(['claude-transport', 'shared-conversation']);
 
+    // Each workspace orders by its own last call: the shared conversation was
+    // last active in the other workspace, so it leads there only.
     const scopedToOther = await idsOf(`?client_ids=${claudeClientId}&organization_id=${otherOrg.id}`);
-    expect(scopedToOther.sort()).toEqual([
-      'bare-account-transport', 'org-b-only-conversation', 'shared-conversation',
-    ]);
+    expect(scopedToOther).toEqual(['shared-conversation', 'org-b-only-conversation']);
 
     const limited = await idsOf(`?client_ids=${claudeClientId}&organization_id=${organizationId}&limit=1`);
     expect(limited).toHaveLength(1);
@@ -383,19 +389,26 @@ describe('client activity scopes route', () => {
       'bare-account-transport', 'claude-transport', 'org-b-only-conversation', 'shared-conversation',
     ]);
 
-    // Rows kept in every workspace carry no organization, so clients can send
-    // them to the account reader instead of a partial workspace feed.
-    const response = await get(`/api/me/clients/activity-scopes?client_ids=${claudeClientId}`, { token });
-    const body = (await response.json()) as {
-      scopes: Array<{ activityId: string; organizationId: string | null }>;
+    // A workspace listing names that workspace on every row, so clients open
+    // its nested activity page; the account listing names none and routes to
+    // the account reader.
+    const organizationsOf = async (query: string) => {
+      const response = await get(`/api/me/clients/activity-scopes${query}`, { token });
+      const body = (await response.json()) as {
+        scopes: Array<{ activityId: string; organizationId: string | null }>;
+      };
+      return Object.fromEntries(
+        body.scopes.map((scope) => [scope.activityId, scope.organizationId]),
+      );
     };
-    const organizationOf = Object.fromEntries(
-      body.scopes.map((scope) => [scope.activityId, scope.organizationId]),
-    );
-    expect(organizationOf).toEqual({
-      'bare-account-transport': null,
-      'claude-transport': organizationId,
+    expect(await organizationsOf(`?client_ids=${claudeClientId}&organization_id=${otherOrg.id}`)).toEqual({
       'org-b-only-conversation': otherOrg.id,
+      'shared-conversation': otherOrg.id,
+    });
+    expect(await organizationsOf(`?client_ids=${claudeClientId}`)).toEqual({
+      'bare-account-transport': null,
+      'claude-transport': null,
+      'org-b-only-conversation': null,
       'shared-conversation': null,
     });
   });

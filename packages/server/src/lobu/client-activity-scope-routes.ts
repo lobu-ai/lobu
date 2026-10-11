@@ -86,11 +86,19 @@ routes.get("/", mcpAuth, async (c) => {
 		return c.json({ error: "Invalid activity kind" }, 400);
 	}
 	const sql = getDb();
-	// Bare account calls and multi-org sessions record NULL organization_id;
-	// the filter below keeps those visible everywhere rather than letting
-	// them vanish from every workspace. The response carries the column so
-	// clients can send those rows to the account reader, the only feed that
-	// holds all of their calls.
+	// A workspace lists only activity attributed to it at write time, ordered
+	// by its own last call there. Unfiltered (account) reads list every row
+	// with a null organizationId, which clients route to the account reader.
+	const workspace = organizationId
+		? sql`JOIN public.mcp_client_conversation_workspaces w
+        ON w.user_id = mc.user_id
+        AND w.client_identity = mc.client_identity
+        AND w.conversation_id = mc.conversation_id
+        AND w.organization_id = ${organizationId}`
+		: sql``;
+	const lastActivityAt = organizationId
+		? sql`w.last_activity_at`
+		: sql`mc.last_activity_at`;
 	const rows = await sql<ActivityScopeRow>`
     WITH unread_notifications AS (
       SELECT e.client_id,
@@ -110,9 +118,11 @@ routes.get("/", mcpAuth, async (c) => {
         ) IS NOT NULL
       GROUP BY e.client_id, activity_id
     )
-    SELECT mc.activity_kind, mc.conversation_id, mc.organization_id, mc.client_id,
+    SELECT mc.activity_kind, mc.conversation_id,
+      ${organizationId}::text AS organization_id, mc.client_id,
       oc.client_name,
-      mc.title, mc.last_action, mc.first_activity_at, mc.last_activity_at,
+      mc.title, mc.last_action, mc.first_activity_at,
+      ${lastActivityAt} AS last_activity_at,
       mc.call_count, mc.failed_count,
       EXISTS (
         SELECT 1
@@ -126,6 +136,7 @@ routes.get("/", mcpAuth, async (c) => {
       COALESCE(notification_count.unread_notification_count, 0)::integer
         AS unread_notification_count
     FROM public.mcp_client_conversations mc
+    ${workspace}
     JOIN public.oauth_clients oc ON oc.id = mc.client_id
     LEFT JOIN unread_notifications notification_count
       ON notification_count.client_id = mc.client_id
@@ -136,20 +147,15 @@ routes.get("/", mcpAuth, async (c) => {
 					? sql`AND mc.client_id = ANY(${pgTextArray(clientIds)}::text[])`
 					: sql``
 			}
-      ${
-				organizationId
-					? sql`AND (mc.organization_id IS NULL OR mc.organization_id = ${organizationId})`
-					: sql``
-			}
       AND mc.call_count > 0
       ${activityKind ? sql`AND mc.activity_kind = ${activityKind}` : sql``}
-      AND mc.last_activity_at > now() - make_interval(days => ${ACTIVITY_WINDOW_DAYS})
+      AND ${lastActivityAt} > now() - make_interval(days => ${ACTIVITY_WINDOW_DAYS})
       ${
 				excludeCommandClients
 					? sql`AND mc.client_software_id IS DISTINCT FROM ${LOBU_COMMAND_CLIENT_SOFTWARE_ID}`
 					: sql``
 			}
-    ORDER BY mc.last_activity_at DESC
+    ORDER BY ${lastActivityAt} DESC
     LIMIT ${limit}
   `;
 

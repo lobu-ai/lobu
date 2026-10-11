@@ -1357,8 +1357,7 @@ describe('MCP App resources — ui:// serving (host-authored view)', () => {
     await getDb()`
       UPDATE mcp_client_conversations
       SET title = 'Release approval E2E'
-      WHERE organization_id = ${org.id}
-        AND client_id = ${client.client_id}
+      WHERE client_id = ${client.client_id}
         AND conversation_id = ${hostConversationId}
     `;
 

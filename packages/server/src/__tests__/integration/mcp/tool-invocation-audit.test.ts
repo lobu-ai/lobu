@@ -652,11 +652,13 @@ describe('tool invocation audit coverage', () => {
     const conversations = await db<
       Array<{ conversation_id: string; last_action: string; call_count: number }>
     >`
-      SELECT conversation_id, last_action, call_count::int AS call_count
-      FROM mcp_client_conversations
-      WHERE organization_id = ${orgId}
-        AND client_identity = ${clientId}
-        AND conversation_id = ${conversationId}
+      SELECT mc.conversation_id, mc.last_action, mc.call_count::int AS call_count
+      FROM mcp_client_conversations mc
+      JOIN mcp_client_conversation_workspaces w
+        ON w.user_id = mc.user_id AND w.client_identity = mc.client_identity
+        AND w.conversation_id = mc.conversation_id AND w.organization_id = ${orgId}
+      WHERE mc.client_identity = ${clientId}
+        AND mc.conversation_id = ${conversationId}
     `;
     expect(conversations).toEqual([
       {
@@ -667,12 +669,11 @@ describe('tool invocation audit coverage', () => {
     ]);
   });
 
-  it('audits a pre-handler denial under the bound org without clearing the conversation workspace', async () => {
+  it('audits a pre-handler denial under the bound org and keeps the conversation in it', async () => {
     // Every throw before the handler runs — role/scope denial, deployment
     // pause, an unresolvable workspace target — now reaches the audit/activity
-    // writers. A bound connection's org is already verified by auth, so it must
-    // survive: `mcp_client_conversations.organization_id` collapses to NULL the
-    // moment an upsert arrives with a different value, and that is permanent.
+    // writers. A bound connection's org is already verified by auth, so the
+    // failed call still attributes the conversation to that workspace.
     const conversationId = 'denied-call-session';
     const ctx = {
       ...authCtxFor('oauth'),
@@ -694,12 +695,15 @@ describe('tool invocation audit coverage', () => {
     expect(row!.payload_data.success).toBe(false);
 
     const [conversation] = await getDb()`
-      SELECT organization_id, call_count::int AS call_count, failed_count::int AS failed_count
-      FROM mcp_client_conversations
+      SELECT call_count::int AS call_count, failed_count::int AS failed_count,
+        (SELECT jsonb_agg(w.organization_id) FROM mcp_client_conversation_workspaces w
+          WHERE w.user_id = mc.user_id AND w.client_identity = mc.client_identity
+            AND w.conversation_id = mc.conversation_id) AS workspaces
+      FROM mcp_client_conversations mc
       WHERE client_identity = ${clientId} AND conversation_id = ${conversationId}
     `;
     expect(conversation).toMatchObject({
-      organization_id: orgId,
+      workspaces: [orgId],
       call_count: 2,
       failed_count: 1,
     });

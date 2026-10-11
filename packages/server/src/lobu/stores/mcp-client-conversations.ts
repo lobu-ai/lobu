@@ -1,5 +1,5 @@
 import { createLogger } from "@lobu/core";
-import { getDb } from "../../db/client.js";
+import { getDb, pgTextArray } from "../../db/client.js";
 import type { ToolContext } from "../../tools/registry.js";
 
 const logger = createLogger("mcp-client-conversations");
@@ -76,12 +76,24 @@ export function normalizeMcpConversationTitle(value: string): string {
 	return [...cleaned].slice(0, MAX_TITLE_LENGTH).join("");
 }
 
-type ActivityWriteContext = McpActivityContext & Pick<ToolContext, "userId" | "agentId"> & {
-	organizationId: string | null;
-};
+type ActivityWriteContext = McpActivityContext & Pick<ToolContext, "userId" | "agentId">;
+
+type ActivityRecordContext = ActivityWriteContext &
+	Pick<ToolContext, "workspaceActivity"> & { organizationId: string | null };
+
+/**
+ * Workspaces an invocation did work in: the connection's own workspace, plus
+ * every workspace a nested SDK call completed in. One conversation can span
+ * several, and appears in each of their Recent lists.
+ */
+function attributedWorkspaceIds(ctx: ActivityRecordContext): string[] {
+	const ids = new Set(ctx.workspaceActivity?.keys() ?? []);
+	if (ctx.organizationId) ids.add(ctx.organizationId);
+	return [...ids];
+}
 
 export async function recordMcpConversationActivity(args: {
-	ctx: ActivityWriteContext;
+	ctx: ActivityRecordContext;
 	toolName: string;
 	failed: boolean;
 }): Promise<void> {
@@ -95,18 +107,19 @@ export async function recordMcpConversationActivity(args: {
 		const label = args.toolName;
 		const clientId = oauthClientId(args.ctx);
 		const sessionIds = transportSessionIds(args.ctx);
-		await sql`
+		const userId = args.ctx.userId;
+		const workspaceIds = attributedWorkspaceIds(args.ctx);
+		await sql.begin(async (tx) => {
+			await tx`
       INSERT INTO public.mcp_client_conversations (
-        organization_id, client_identity, conversation_id, transport_session_ids,
+        client_identity, conversation_id, transport_session_ids,
         client_id, user_id, agent_id, last_action, tools, call_count, failed_count
       ) VALUES (
-        ${args.ctx.organizationId}, ${identity.clientIdentity}, ${identity.activityId},
-        ${sql.json(sessionIds)}, ${clientId}, ${args.ctx.userId},
-        ${args.ctx.agentId ?? null}, ${label}, ${sql.json([args.toolName])}, 1, ${args.failed ? 1 : 0}
+        ${identity.clientIdentity}, ${identity.activityId},
+        ${tx.json(sessionIds)}, ${clientId}, ${userId},
+        ${args.ctx.agentId ?? null}, ${label}, ${tx.json([args.toolName])}, 1, ${args.failed ? 1 : 0}
       )
       ON CONFLICT (user_id, client_identity, conversation_id) DO UPDATE SET
-        organization_id = CASE WHEN public.mcp_client_conversations.organization_id = EXCLUDED.organization_id
-          THEN EXCLUDED.organization_id ELSE NULL END,
         transport_session_ids = CASE
           WHEN jsonb_array_length(EXCLUDED.transport_session_ids) = 0
             OR public.mcp_client_conversations.transport_session_ids ? (EXCLUDED.transport_session_ids->>0)
@@ -122,6 +135,17 @@ export async function recordMcpConversationActivity(args: {
         failed_count = public.mcp_client_conversations.failed_count + EXCLUDED.failed_count,
         last_activity_at = now(), updated_at = now()
     `;
+			if (workspaceIds.length === 0) return;
+			await tx`
+      INSERT INTO public.mcp_client_conversation_workspaces (
+        user_id, client_identity, conversation_id, organization_id
+      )
+      SELECT ${userId}, ${identity.clientIdentity}, ${identity.activityId}, workspace.id
+      FROM unnest(${pgTextArray(workspaceIds)}::text[]) AS workspace(id)
+      ON CONFLICT (user_id, client_identity, conversation_id, organization_id)
+      DO UPDATE SET last_activity_at = now()
+    `;
+		});
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		logger.warn(
@@ -152,17 +176,15 @@ export async function setCurrentMcpConversationTitle(
 	// overwrites it moments later, and the read path hides the row until it does.
 	await sql`
     INSERT INTO public.mcp_client_conversations (
-      organization_id, client_identity, conversation_id, transport_session_ids,
+      client_identity, conversation_id, transport_session_ids,
       client_id, user_id, agent_id, title, last_action
     ) VALUES (
-      ${ctx.organizationId}, ${identity.clientIdentity}, ${identity.activityId},
+      ${identity.clientIdentity}, ${identity.activityId},
       ${sql.json(sessionIds)}, ${clientId}, ${ctx.userId},
       ${ctx.agentId ?? null}, ${title}, 'set_title'
     )
     ON CONFLICT (user_id, client_identity, conversation_id)
     DO UPDATE SET title = EXCLUDED.title,
-      organization_id = CASE WHEN public.mcp_client_conversations.organization_id = EXCLUDED.organization_id
-        THEN EXCLUDED.organization_id ELSE NULL END,
       transport_session_ids = CASE
         WHEN jsonb_array_length(EXCLUDED.transport_session_ids) = 0
           OR public.mcp_client_conversations.transport_session_ids ? (EXCLUDED.transport_session_ids->>0)

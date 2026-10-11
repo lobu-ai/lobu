@@ -83,13 +83,16 @@ describe('MCP activity actor identity', () => {
     expect(body.scopes.map(row => row.title)).not.toContain('Other private conversation');
   });
 
-  it('keeps one actor activity when the execution target changes', async () => {
+  it('keeps one actor activity attributed to every workspace it ran in', async () => {
     await recordMcpConversationActivity({ ctx: context(userId, 'two-targets'), toolName: 'run_sdk', failed: false });
     await recordMcpConversationActivity({ ctx: context(userId, 'two-targets', secondOrg.id), toolName: 'query_sdk', failed: false });
-    const rows = await getDb()`SELECT organization_id, call_count FROM mcp_client_conversations
+    const rows = await getDb()`SELECT call_count FROM mcp_client_conversations
       WHERE user_id = ${userId} AND conversation_id = 'two-targets'`;
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ organization_id: null, call_count: 2 });
+    expect(rows[0]).toMatchObject({ call_count: 2 });
+    const workspaces = await getDb()`SELECT organization_id FROM mcp_client_conversation_workspaces
+      WHERE user_id = ${userId} AND conversation_id = 'two-targets' ORDER BY organization_id`;
+    expect(workspaces.map(row => row.organization_id)).toEqual([org.id, secondOrg.id].sort());
     const response = await get(`/api/me/clients/activity-scopes`, { token });
     const body = await response.json() as { scopes: Array<{ activityId: string; callCount: number }> };
     expect(body.scopes.find(row => row.activityId === 'two-targets')?.callCount).toBe(2);
@@ -101,10 +104,12 @@ describe('MCP activity actor identity', () => {
     await Promise.all(Array.from({ length: 8 }, (_, index) => recordMcpConversationActivity({
       ctx: { ...ctx, mcpSessionId: `reconnect-${index}` }, toolName: 'list_organizations', failed: index === 0,
     })));
-    const [row] = await getDb()`SELECT organization_id, title, call_count, failed_count,
+    const [row] = await getDb()`SELECT title, call_count, failed_count,
       transport_session_ids, activity_kind FROM mcp_client_conversations
       WHERE user_id = ${userId} AND conversation_id = 'unbound-title'`;
-    expect(row).toMatchObject({ organization_id: null, title: 'Account conversation',
+    expect(await getDb()`SELECT 1 FROM mcp_client_conversation_workspaces
+      WHERE user_id = ${userId} AND conversation_id = 'unbound-title'`).toHaveLength(0);
+    expect(row).toMatchObject({ title: 'Account conversation',
       call_count: 8, failed_count: 1, activity_kind: 'conversation' });
     expect(row.transport_session_ids).toHaveLength(9);
   });

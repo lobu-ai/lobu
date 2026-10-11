@@ -17,6 +17,7 @@ import type { AccountToolContext, ToolContext } from "../tools/registry";
 import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace, formatUngrantedMemberMessage } from "../auth/oauth/workspace-grants";
 import { raceAbort } from "../utils/race-abort";
 import { METHOD_METADATA } from "./method-metadata";
+import { bindClientContext } from "./workspace-activity";
 import type { SDKMode } from "./sdk-manifest";
 
 /**
@@ -319,6 +320,7 @@ export function buildClientSDK(
 		},
 	};
 
+	bindClientContext(sdk, ctx);
 	if (mode === "read") Object.freeze(sdk);
 	return sdk;
 }

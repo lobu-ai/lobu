@@ -131,6 +131,13 @@ export interface ToolContext {
   sdkBrowserInvocation?: { nonce: string; title: string };
   /** Persistent MCP session id driving this call; null off the MCP transport. */
   mcpSessionId?: string | null;
+  /**
+   * Workspaces this tool invocation did work in, keyed by organization id, with
+   * the SDK methods that completed there. `executeTool` creates one per
+   * invocation; every context copy (including `client.org(x)`) shares the
+   * reference, so nested SDK calls record into the outer invocation.
+   */
+  workspaceActivity?: WorkspaceActivity;
   /** True only for an MCP session that negotiated the standard Apps UI extension. */
   mcpAppsSupported?: boolean | null;
   /**
@@ -201,6 +208,8 @@ export interface ToolContext {
   approvalRequesterId?: string | null;
   approvalApproverId?: string | null;
 }
+
+export type WorkspaceActivity = Map<string, Set<string>>;
 
 /** Account dispatch may have no execution workspace; leaf handlers remain workspace-bound. */
 export type AccountToolContext = Omit<ToolContext, 'organizationId'> & { organizationId: string | null };

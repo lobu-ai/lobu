@@ -201,31 +201,49 @@ async function indexValidity(
 	return row ?? { exists: false, valid: null };
 }
 
-// This historical index migration also creates a now-retired merge index and
-// requires its retired SQL helper. Concurrent DDL cannot be rolled back, so
-// exercise that exact migration in a disposable database, never the current one.
-async function withHistoricalIdentityIndexes(check: (sql: DbClient) => Promise<void>) {
-	const database = `identity_index_test_${randomUUID().replaceAll("-", "")}`;
+// Concurrent DDL cannot be rolled back, so a historical index migration that
+// needs a retired schema runs in a disposable database, never the current one.
+async function withDisposableDatabase(
+	setup: (sql: DbClient) => Promise<void>,
+	check: (sql: DbClient) => Promise<void>,
+) {
+	const database = `index_heal_test_${randomUUID().replaceAll("-", "")}`;
 	const admin = getDb();
 	await admin.unsafe(`CREATE DATABASE ${database}`);
 	const url = new URL(process.env.DATABASE_URL!);
 	url.pathname = `/${database}`;
 	const sql = postgres(url.toString(), { max: 1, ...PROD_PG_VALUE_OPTIONS });
 	try {
-		await sql.unsafe(`
-			CREATE TABLE entity_relationships (id bigint, organization_id text,
-				from_entity_id bigint, to_entity_id bigint, updated_at timestamptz,
-				metadata jsonb, deleted_at timestamptz);
-			CREATE TABLE runs (id bigint, organization_id text, action_input jsonb,
-				approval_status text, action_key text);
-		`);
-		const source = readFileSync(join(resolveMigrationsDir(), "20261007010000_identity_association_guards.sql"), "utf8");
-		await sql.unsafe(source.slice(source.indexOf("CREATE OR REPLACE FUNCTION lobu_resolution_members"), source.indexOf("-- migrate:down")));
+		await setup(sql as unknown as DbClient);
 		await check(sql as unknown as DbClient);
 	} finally {
 		await sql.end();
 		await admin.unsafe(`DROP DATABASE ${database}`);
 	}
+}
+
+// This historical index migration also creates a now-retired merge index and
+// requires its retired SQL helper.
+async function historicalIdentitySchema(sql: DbClient) {
+	await sql.unsafe(`
+		CREATE TABLE entity_relationships (id bigint, organization_id text,
+			from_entity_id bigint, to_entity_id bigint, updated_at timestamptz,
+			metadata jsonb, deleted_at timestamptz);
+		CREATE TABLE runs (id bigint, organization_id text, action_input jsonb,
+			approval_status text, action_key text);
+	`);
+	const source = readFileSync(join(resolveMigrationsDir(), "20261007010000_identity_association_guards.sql"), "utf8");
+	await sql.unsafe(source.slice(source.indexOf("CREATE OR REPLACE FUNCTION lobu_resolution_members"), source.indexOf("-- migrate:down")));
+}
+
+// This index keys the per-row workspace column that the Recent projection
+// later replaced with `mcp_client_conversation_workspaces`.
+async function historicalMcpActivitySchema(sql: DbClient) {
+	await sql.unsafe(`
+		CREATE TABLE mcp_client_conversations (organization_id text, client_id text,
+			activity_kind text, last_activity_at timestamptz, call_count bigint,
+			conversation_id text);
+	`);
 }
 
 describe("INVALID concurrent-index heal in transaction:false migrations", () => {
@@ -279,7 +297,9 @@ describe("INVALID concurrent-index heal in transaction:false migrations", () => 
 			expect(after).toEqual({ exists: true, valid: true });
 		};
 		if (files[0] === "20261007010001_identity_association_indexes.sql") {
-			await withHistoricalIdentityIndexes(verify);
+			await withDisposableDatabase(historicalIdentitySchema, verify);
+		} else if (files[0] === "20260803155100_mcp_activity_scope_client_idx.sql") {
+			await withDisposableDatabase(historicalMcpActivitySchema, verify);
 		} else {
 			await verify(getDb());
 		}

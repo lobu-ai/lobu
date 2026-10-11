@@ -26,7 +26,7 @@ import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { enforceRoleScopeAccess, requireWorkspaceContext } from './access-control';
-import { recordToolInvocationAudit } from './audit';
+import { recordToolInvocationAudit, recordWorkspaceActivityAudit } from './audit';
 import { getAccountContent } from './get_content';
 import {
   getTool,
@@ -35,6 +35,7 @@ import {
   type TokenType,
   type ToolContext,
   type ToolSourceContext,
+  type WorkspaceActivity,
 } from './registry';
 
 export interface AuthContext {
@@ -297,7 +298,8 @@ export async function executeTool(
   // so a rejected invocation is audited against the workspace this connection
   // was already bound to (null on bare account MCP) and never against the
   // requested target, which may be unauthorized or nonexistent.
-  let toolContext: AccountToolContext = toAccountToolContext(authCtx);
+  const workspaceActivity: WorkspaceActivity = new Map();
+  let toolContext: AccountToolContext = { ...toAccountToolContext(authCtx), workspaceActivity };
   try {
     const field = getTool(toolName)?.workspaceTarget;
     const target = field ? args[field] : undefined;
@@ -326,7 +328,7 @@ export async function executeTool(
       authCtx = { ...authCtx, organizationId: workspace.organizationId, memberRole: workspace.memberRole };
     }
     const requiredAccess = checkToolAccess(toolName, args, authCtx);
-    toolContext = toAccountToolContext(authCtx);
+    toolContext = { ...toAccountToolContext(authCtx), workspaceActivity };
 
     // A capture run records the effect it WOULD have had instead of performing
     // it. SDK capture and eval-window finalization enforce their own
@@ -413,11 +415,9 @@ export async function executeTool(
       durationMs: Date.now() - startTime,
       ctx: toolContext,
     });
-    await recordMcpConversationActivity({
-      ctx: toolContext,
-      toolName,
-      failed: isSoftErrorResult(result),
-    });
+    const failed = isSoftErrorResult(result);
+    await recordWorkspaceActivityAudit({ ctx: toolContext, toolName, failed });
+    await recordMcpConversationActivity({ ctx: toolContext, toolName, failed });
     return result;
   } catch (error) {
     // Stamp the correlation id onto typed errors so the response boundaries can
@@ -432,11 +432,8 @@ export async function executeTool(
       durationMs: Date.now() - startTime,
       ctx: toolContext,
     });
-    await recordMcpConversationActivity({
-      ctx: toolContext,
-      toolName,
-      failed: true,
-    });
+    await recordWorkspaceActivityAudit({ ctx: toolContext, toolName, failed: true });
+    await recordMcpConversationActivity({ ctx: toolContext, toolName, failed: true });
     throw error;
   }
 }

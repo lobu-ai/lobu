@@ -352,3 +352,50 @@ export async function recordToolInvocationAudit(
     );
   }
 }
+
+/**
+ * One audit row in each OTHER workspace a tool invocation did work in, so that
+ * workspace's activity page shows the call. The connection's own workspace
+ * already holds the invocation row. The row names only the SDK methods that ran
+ * in that workspace: the request and result can carry other workspaces' data.
+ */
+export async function recordWorkspaceActivityAudit(params: {
+  toolName: string;
+  failed: boolean;
+  ctx: ToolInvocationAuditParams['ctx'] & Pick<ToolContext, 'workspaceActivity'>;
+}): Promise<void> {
+  for (const [organizationId, methods] of params.ctx.workspaceActivity ?? []) {
+    if (organizationId === params.ctx.organizationId) continue;
+    try {
+      await insertEvent({
+        entityIds: [],
+        organizationId,
+        originId: `tool_invocation:${params.toolName}:${Date.now()}:${randomUUID()}`,
+        title: `${params.toolName} ${params.failed ? 'failed' : 'completed'}`,
+        payloadType: 'empty',
+        payloadData: {
+          tool_name: params.toolName,
+          sdk_methods: [...methods].sort(),
+          success: !params.failed,
+        },
+        semanticType: AUDIT_SEMANTIC_TYPE,
+        originType: 'tool_invocation',
+        metadata: {
+          category: 'audit',
+          event_type: 'tool_invocation.workspace_activity',
+          tool_name: params.toolName,
+          token_type: params.ctx.tokenType,
+          agent_id: params.ctx.agentId ?? null,
+          ...currentMcpActivityEventMetadata(params.ctx),
+        },
+        createdBy: params.ctx.userId ?? null,
+        clientId: params.ctx.clientId ?? null,
+      }, { notifyContentChange: false });
+    } catch (auditError) {
+      logger.warn(
+        { err: auditError, toolName: params.toolName },
+        'Failed to record workspace activity audit event'
+      );
+    }
+  }
+}

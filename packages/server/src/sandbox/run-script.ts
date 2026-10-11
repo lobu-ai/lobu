@@ -18,6 +18,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { ClientSDK } from "./client-sdk";
+import { recordWorkspaceSdkCall } from "./workspace-activity";
 import {
 	classifyToolError,
 	isRetryable,
@@ -1282,6 +1283,9 @@ export async function runScript(
 						assertActive();
 					}
 
+					// Set only when a real method dispatches: `log` and dry-run skips
+					// did no work in the target workspace.
+					let dispatched = false;
 					const dispatchPromise: Promise<unknown> = (async () => {
 						assertActive();
 						if (path === "log") {
@@ -1306,6 +1310,7 @@ export async function runScript(
 								args: traceArgs(args),
 								skipped: false,
 							});
+							dispatched = true;
 							return target.query(args[0] as string, args[1] as Parameters<ClientSDK["query"]>[1]);
 						}
 						const [ns, method] = path.split(".");
@@ -1383,11 +1388,13 @@ export async function runScript(
 							});
 						}
 						appendTrace.append(sdkCallTrace, trace);
+						dispatched = true;
 						return namespace[method](...args);
 					})();
 
 					const result = await raceAbort(dispatchPromise, abortController.signal);
 					assertActive();
+					if (dispatched) recordWorkspaceSdkCall(target, path);
 					const json = JSON.stringify({
 						__lobu_sdk_dispatch: 1,
 						ok: true,
