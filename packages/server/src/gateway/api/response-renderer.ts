@@ -15,6 +15,7 @@ import { labelProviderErrorBody } from "../../utils/url-builder.js";
 import type { ThreadResponsePayload } from "../infrastructure/queue/types.js";
 import type { ResponseRenderer } from "../platform/response-renderer.js";
 import type { SseManager } from "../services/sse-manager.js";
+import { dispatchNextPendingAutomationRuns } from "../../automations/automation.js";
 import { resolveAutomationRunsByMessageIds } from "../../automations/run-completion.js";
 import { readCurrentSuggestion } from "../suggestions/persist-suggestion.js";
 
@@ -247,7 +248,12 @@ export class ApiResponseRenderer implements ResponseRenderer {
     for (const id of payload.processedMessageIds ?? []) {
       if (id) ids.add(id);
     }
-    await resolveAutomationRunsByMessageIds(ids, result);
+    const { automationIds } = await resolveAutomationRunsByMessageIds(
+      ids,
+      result
+    );
+    // A follow-up queued behind this run is unclaimable until it ends.
+    await dispatchNextPendingAutomationRuns(automationIds);
   }
 
   /**

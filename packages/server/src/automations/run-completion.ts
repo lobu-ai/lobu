@@ -227,13 +227,13 @@ export async function resolveAutomationRunsByMessageIds(
 	messageIds: Iterable<string>,
 	result: AutomationTerminalResult,
 	db?: DbClient
-): Promise<{ resolved: number }> {
+): Promise<{ resolved: number; automationIds: number[] }> {
 	const ids = Array.from(new Set(Array.from(messageIds).filter(Boolean)));
-	if (ids.length === 0) return { resolved: 0 };
+	if (ids.length === 0) return { resolved: 0, automationIds: [] };
 
 	const sql = db ?? getDb();
 	const rows = await sql`
-    SELECT r.id, r.run_type, r.approved_input, w.execution_config
+    SELECT r.id, r.run_type, r.automation_id, r.approved_input, w.execution_config
     FROM runs r
     LEFT JOIN automations w ON w.id = r.automation_id
     WHERE r.run_type = ANY(${AUTOMATION_RUN_TYPES_PG}::text[])
@@ -242,15 +242,21 @@ export async function resolveAutomationRunsByMessageIds(
   `;
 
 	let resolved = 0;
+	const automationIds = new Set<number>();
 	for (const row of rows) {
 		const typedRow = row as {
 			id: unknown;
 			run_type: string;
+			automation_id: unknown;
 			approved_input: Record<string, unknown> | null;
 			execution_config: Record<string, unknown> | null;
 		};
 		const runId = Number(typedRow.id);
 		if (!Number.isFinite(runId)) continue;
+		const automationId = Number(typedRow.automation_id);
+		if (typedRow.automation_id != null && Number.isFinite(automationId)) {
+			automationIds.add(automationId);
+		}
 
 		if (!result.ok) {
 			const notBefore = providerQuotaResetNotBefore(
@@ -310,7 +316,7 @@ export async function resolveAutomationRunsByMessageIds(
 		}
 	}
 
-	return { resolved };
+	return { resolved, automationIds: Array.from(automationIds) };
 }
 
 function describeFinalizeMiss(budget: number): string {

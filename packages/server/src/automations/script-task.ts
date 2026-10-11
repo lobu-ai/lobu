@@ -6,7 +6,7 @@ import { classifyRunOutcome } from '../runs/run-outcome';
 import logger from '../utils/logger';
 import { advanceAutomationArrivalMark } from '../utils/window-utils';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from './schedule-cursor';
-import { startDueAutomationWindow } from './automation';
+import { dispatchNextPendingAutomationRuns, startDueAutomationWindow } from './automation';
 import { executeAutomationScript } from './reaction-executor';
 import { reactionErrorIsNonTransient } from './reaction-task';
 import { markAutomationRunFailed } from './run-completion';
@@ -102,15 +102,20 @@ export async function runAutomationScriptTask(
   }
   if (!result.success || error) {
     if (attempt >= 3 || reactionErrorIsNonTransient(error)) {
-      await markAutomationRunFailed(
-        sql,
-        payload.sourceRunId,
-        error ?? 'Automation script failed'
-      );
+      if (
+        await markAutomationRunFailed(
+          sql,
+          payload.sourceRunId,
+          error ?? 'Automation script failed'
+        )
+      ) {
+        await dispatchNextPendingAutomationRuns([payload.automationId], sql);
+      }
       return;
     }
     throw new Error(error ?? 'Automation script failed');
   }
+  let completedNow = false;
   const backlogDue = await sql.begin(async (tx) => {
     // Match completeWindow's Automation-before-run lock order and pin the
     // optional reaction decision to the same transaction as completion.
@@ -131,6 +136,7 @@ export async function runAutomationScriptTask(
       RETURNING id
     `;
     if (!completed) return false;
+    completedNow = true;
     let expedited = false;
     if (input.dispatch_source !== 'event') {
       const markMoved = await advanceAutomationArrivalMark(
@@ -175,5 +181,8 @@ export async function runAutomationScriptTask(
         '[automation] Next backlog window left to the scheduler tick'
       );
     }
+  } else if (completedNow) {
+    // A run queued behind this one is claimable only now that it committed.
+    await dispatchNextPendingAutomationRuns([payload.automationId], sql);
   }
 }

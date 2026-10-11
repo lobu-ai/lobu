@@ -12,7 +12,7 @@ import { beforeEach, describe, expect, mock, test } from "bun:test";
 import { ApiResponseRenderer } from "../response-renderer.js";
 import type { ThreadResponsePayload } from "../../infrastructure/queue/types.js";
 
-const resolveRunsMock = mock(async () => ({ resolved: 0 }));
+const resolveRunsMock = mock(async () => ({ resolved: 0, automationIds: [] }));
 mock.module("../../../automations/run-completion.js", () => ({
   resolveAutomationRunsByMessageIds: resolveRunsMock,
 }));
@@ -30,7 +30,7 @@ function makeRenderer() {
 
 beforeEach(() => {
   resolveRunsMock.mockReset();
-  resolveRunsMock.mockResolvedValue({ resolved: 0 });
+  resolveRunsMock.mockResolvedValue({ resolved: 0, automationIds: [] });
 });
 
 const basePayload = (over: Partial<ThreadResponsePayload>): ThreadResponsePayload =>

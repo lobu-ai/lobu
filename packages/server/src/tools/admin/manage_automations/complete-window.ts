@@ -31,6 +31,7 @@ import { isUniqueViolation } from '../../../utils/pg-errors';
 import { persistAutomationEventOutput } from '../../../utils/persist-automation-event-output';
 import { validateStableKeyComponents } from '../../../utils/stable-keys';
 import { deriveAutomationExtractionSchema } from '../../../utils/automation-extraction-schema';
+import { dispatchNextPendingAutomationRuns } from '../../../automations/automation';
 import { advanceAutomationScheduleAfterSuccessfulWindow } from '../../../automations/schedule-cursor';
 import { enqueueAutomationReaction } from '../../../automations/reaction-enqueue';
 import { enqueueAutomationDigest } from '../../../automations/digest-enqueue';
@@ -1002,6 +1003,11 @@ export async function handleCompleteWindow(
           '[complete-window] failed to queue deferred entity approval'
         )
       );
+  }
+
+  // The window committed, so a run queued behind this one is claimable now.
+  if (result.completed_now) {
+    await dispatchNextPendingAutomationRuns([Number(automationId)]);
   }
 
   // `queued` means the handoff committed inside the window transaction above,

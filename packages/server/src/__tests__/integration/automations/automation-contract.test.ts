@@ -1725,8 +1725,10 @@ describe("automation contract", () => {
 
 		it("re-dispatches for a finalize nudge when the reply produced no window (first miss)", async () => {
 			// Soft miss: the agent replied but skipped complete_window. Instead of
-			// failing closed on the first miss, the run is re-dispatched (pending)
-			// for one more bounded attempt — finalize_nudge_count records it.
+			// failing closed on the first miss, the run is requeued for one more
+			// bounded attempt — finalize_nudge_count records it — and dispatched
+			// right away rather than on the next minute tick. The test server runs
+			// no embedded Lobu, so that dispatch claims it and then fails it.
 			const messageId = randomUUID();
 			const { sql, runId } = await makeRunningAutomationRun(messageId);
 
@@ -1736,10 +1738,11 @@ describe("automation contract", () => {
 			} as never);
 
 			const [run] = await sql`
-        SELECT status, error_message, approved_input FROM runs WHERE id = ${runId}
+        SELECT status, claimed_by, error_message, approved_input FROM runs WHERE id = ${runId}
       `;
-			expect(String(run.status)).toBe("pending");
-			expect(run.error_message).toBeNull();
+			expect(run.claimed_by).toBe("lobu-dispatcher");
+			expect(run.status).toBe("failed");
+			expect(run.error_message).toBe("Embedded Lobu is not available.");
 			expect(
 				Number(
 					(run.approved_input as { finalize_nudge_count?: unknown })

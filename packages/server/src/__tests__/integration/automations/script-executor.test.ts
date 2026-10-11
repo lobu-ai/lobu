@@ -357,6 +357,51 @@ describe('Automation script executor', () => {
     expect(again!.action_output).toEqual(run!.action_output);
   });
 
+  it.each([
+    ['completed', SOURCE],
+    ['failed', 'export default async () => 42;'],
+  ])('dispatches a run queued behind the script as soon as it is %s', async (status, source) => {
+    const { sql, workspace, agentId, automationId, taskRunId, payload } =
+      await dispatchedScript(source);
+    // A scheduled window dedupes onto the active run; an event queues behind it.
+    const followUp = await createAutomationEventRun({
+      organizationId: workspace.org.id,
+      automationId,
+      agentId,
+      trigger: {
+        kind: 'event',
+        connector_key: 'github',
+        event_types: ['pull_request.created'],
+        execution: 'window',
+        output: 'silent',
+      },
+      signal: {
+        connector_key: 'github',
+        event_type: 'pull_request.created',
+        delivery_id: 'synthetic-follow-up',
+        label: 'Follow-up event',
+        input_text: 'Synthetic event',
+      },
+    });
+    expect(followUp.runId).toBeTruthy();
+    // Unclaimable while the script run is in flight.
+    expect(
+      await dispatchPendingAutomationRuns({ runIds: [followUp.runId!] })
+    ).toMatchObject({ claimed: 0 });
+
+    await runAutomationScriptTask(payload, TEST_ENV, taskRunId);
+
+    const [finished] =
+      await sql`SELECT status FROM runs WHERE id = ${payload.sourceRunId}`;
+    expect(finished!.status).toBe(status);
+    const [next] =
+      await sql`SELECT status FROM runs WHERE id = ${followUp.runId}`;
+    expect(next!.status).toBe('running');
+    expect(
+      await sql`SELECT id FROM runs WHERE parent_run_id = ${followUp.runId} AND action_key = 'automation-script'`
+    ).toHaveLength(1);
+  });
+
   it('accepts no return value as an empty action output', async () => {
     const noValue = await dispatchedScript('export default async () => {};');
     await runAutomationScriptTask(noValue.payload, TEST_ENV, noValue.taskRunId);

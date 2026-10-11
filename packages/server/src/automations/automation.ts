@@ -8,7 +8,7 @@ import {
 } from "../automations/workspace-event-contract";
 import { intervals } from "../config/intervals";
 import type { DbClient } from "../db/client";
-import { getDb, pgTextArray } from "../db/client";
+import { getDb, pgBigintArray, pgTextArray } from "../db/client";
 import { getInternalGatewayUrl } from "../gateway/config/index";
 import { incrementCounter, setGauge } from "../gateway/metrics/prometheus";
 import type { Env } from "../index";
@@ -543,11 +543,12 @@ export async function reconcileAutomationRuns(
 		);
 
 	if (completedMessageIds.length > 0) {
-		await resolveAutomationRunsByMessageIds(
+		const { automationIds } = await resolveAutomationRunsByMessageIds(
 			completedMessageIds,
 			{ ok: true },
 			sql
 		);
+		await dispatchNextPendingAutomationRuns(automationIds, sql);
 		reconciled += completedMessageIds.length;
 	}
 
@@ -1569,6 +1570,49 @@ export async function dispatchPendingAutomationRuns(options?: {
 	}
 
 	return { claimed, dispatched, reconciled, failed };
+}
+
+/**
+ * Dispatch the pending runs of Automations whose active run just ended.
+ *
+ * A run queued while another is in flight (coalesce/queue) cannot be claimed:
+ * the claim's one-active-run guard rejects it, so the fast dispatch at enqueue
+ * claims nothing. Without this the run waits for the minute `automation` tick.
+ * Call it only after completion or a finalize requeue has committed, so the
+ * previous run no longer holds the claim guard. Bound each pass like the
+ * scheduler: dispatch failures can otherwise drain an entire queue inline.
+ * Best-effort: the tick stays the backstop, and the claim's own filters leave
+ * device-pinned and external runs to their executors.
+ */
+export async function dispatchNextPendingAutomationRuns(
+	automationIds: Iterable<number>,
+	db?: DbClient
+): Promise<void> {
+	const ids = Array.from(new Set(automationIds)).filter((id) =>
+		Number.isFinite(id)
+	);
+	if (ids.length === 0) return;
+	const sql = db ?? getDb();
+	try {
+		const pending = await sql<{ id: string }>`
+			SELECT id FROM runs
+			WHERE automation_id = ANY(${pgBigintArray(ids)}::bigint[])
+			  AND run_type = ANY(${AUTOMATION_RUN_TYPES_PG}::text[])
+			  AND status = 'pending'
+			ORDER BY created_at ASC
+			LIMIT 100
+		`;
+		if (pending.length === 0) return;
+		await dispatchPendingAutomationRuns({
+			db: sql,
+			runIds: pending.map((row) => Number(row.id)),
+		});
+	} catch (error) {
+		logger.warn(
+			{ error, automationIds: ids },
+			"[automations] Failed to dispatch next pending run after completion"
+		);
+	}
 }
 
 /**
