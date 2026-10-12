@@ -137,6 +137,7 @@ test("LinkedIn sign-in never provisions source accounts, connections or feeds", 
   expect(await resolveRequestOrganizationId(request)).toBe(org.id);
   await provisionConnectorFromSocialLogin({
     env,
+    organizationId: org.id,
     request,
     account: {
       id: "synthetic-linkedin-account",

@@ -136,14 +136,13 @@ describe('social-login connection provisioning dedupes by account', () => {
     return older;
   }
 
-  async function runProvision() {
+  async function runProvision(organizationId: string) {
     const { provisionConnectorFromSocialLogin } = await import(
       '../../../auth/social-login-provisioning'
     );
     await provisionConnectorFromSocialLogin({
       env: {} as Env,
-      // Provisioning resolves the org from the request URL's first path segment
-      // (the `api`/`auth` top-level routes are reserved, so the slug must lead).
+      organizationId,
       request: new Request('https://example.test/acme/oauth2/callback/google'),
       account: {
         id: 'google-sub-1',
@@ -177,7 +176,7 @@ describe('social-login connection provisioning dedupes by account', () => {
       )
     `;
 
-    await runProvision();
+    await runProvision(org.id);
 
     expect(provisionCalls).toBe(0);
     const rows = await connectionRows(sql, org.id);
@@ -208,7 +207,7 @@ describe('social-login connection provisioning dedupes by account', () => {
       )
     `;
 
-    await runProvision();
+    await runProvision(org.id);
 
     expect(provisionCalls).toBe(0);
     const rows = await connectionRows(sql, org.id);
@@ -230,7 +229,7 @@ describe('social-login connection provisioning dedupes by account', () => {
       )
     `;
 
-    await runProvision();
+    await runProvision(org.id);
 
     expect(provisionCalls).toBe(0);
     const rows = await connectionRows(sql, org.id);
@@ -263,7 +262,7 @@ describe('social-login connection provisioning dedupes by account', () => {
       )
     `;
 
-    await runProvision();
+    await runProvision(org.id);
 
     expect(provisionCalls).toBe(0);
     const rows = await sql<{ id: number; auth_profile_id: number | null; status: string; visibility: string }[]>`

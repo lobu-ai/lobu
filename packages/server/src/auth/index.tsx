@@ -44,6 +44,7 @@ import {
 	resolveRequestOrganizationId,
 } from "./config";
 import { memberRoleAuthHook } from "./member-roles";
+import { bindOAuthOrganization } from "./oauth-organization-context";
 import {
 	findExistingPersonalOrg,
 	isPersonalOrgDeletionBlocked,
@@ -831,6 +832,13 @@ export async function createAuth(
 		hooks: { before: memberRoleAuthHook },
 
 		databaseHooks: {
+			verification: {
+				create: {
+					before: async (verification, context) => ({
+						data: { ...verification, value: bindOAuthOrganization(verification, organizationId, context) },
+					}),
+				},
+			},
 			user: {
 				create: {
 					before: async (user, ctx) => {
@@ -975,6 +983,7 @@ export async function createAuth(
 							);
 							await provisionConnectorFromSocialLogin({
 								env,
+								organizationId,
 								request: context?.request ?? undefined,
 								account: accountSummary,
 							});
@@ -1015,6 +1024,7 @@ export async function createAuth(
 							);
 							await provisionConnectorFromSocialLogin({
 								env,
+								organizationId,
 								request: context?.request ?? undefined,
 								account: accountSummary,
 							});

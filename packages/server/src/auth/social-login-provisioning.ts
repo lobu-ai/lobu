@@ -12,7 +12,6 @@ import logger from '../utils/logger';
 import { syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
 import { hasAllScopes, mergeOAuthScopeAuthData, normalizeScopeList } from './oauth/scopes';
 import { createProvisionedConnection } from '../utils/provisioned-connection';
-import { resolveRequestOrganizationId } from './config';
 
 interface BetterAuthAccountLike {
   id: string;
@@ -25,9 +24,11 @@ interface BetterAuthAccountLike {
 export async function provisionConnectorFromSocialLogin(params: {
   env: Env;
   request?: Request | null;
+  /** Resolved before Better Auth consumes the callback state. */
+  organizationId: string | null;
   account: BetterAuthAccountLike;
 }): Promise<void> {
-  const organizationId = await resolveRequestOrganizationId(params.request ?? undefined);
+  const { organizationId } = params;
   if (!organizationId) return;
 
   const provider = params.account.providerId?.trim().toLowerCase();

@@ -269,8 +269,8 @@ describe("slack sign-in slack_user_id e2e (real BetterAuth handler)", () => {
 		});
 
 		// Build the auth instance bound to Acme (callbackURL carries the org slug,
-		// which resolveRequestOrganizationId reads). The same instance serves both
-		// the sign-in start and the callback exchange (mock token URL baked in).
+		// which resolveRequestOrganizationId reads). The callback below builds a
+		// fresh instance, which must recover Acme from the stored OAuth state.
 		const callbackURL = `${ORIGIN}/${ORG_SLUG}`;
 		const signInRequest = new Request(`${ORIGIN}/api/auth/sign-in/oauth2`, {
 			method: "POST",
@@ -303,12 +303,13 @@ describe("slack sign-in slack_user_id e2e (real BetterAuth handler)", () => {
 		// 3) Hit the BetterAuth callback with the code+state and the state cookie.
 		//    This triggers the real token exchange (mock /token) → id_token decode
 		//    → account link → account.create.after hook → persistLoginChatIdentity.
-		const callbackRes = await auth.handler(
-			new Request(callbackLocation as string, {
-				method: "GET",
-				headers: { cookie: stateCookie, referer: callbackURL },
-			}),
-		);
+		const callbackRequest = new Request(callbackLocation as string, {
+			method: "GET",
+			headers: { cookie: stateCookie },
+		});
+		clearAuthCacheForTests();
+		const callbackAuth = await createAuth(getEnvFromProcess(), callbackRequest);
+		const callbackRes = await callbackAuth.handler(callbackRequest);
 		// A successful callback redirects (302) to the callbackURL; an error path
 		// redirects to /api/auth/error?error=... — assert we did NOT error.
 		expect(callbackRes.status).toBe(302);

@@ -7,6 +7,7 @@ import {
 import { listCatalogConnectorDefinitions } from "../utils/connector-catalog";
 import { TtlCache } from "../utils/ttl-cache";
 import { safeParseUrl } from "./base-url";
+import { resolveOAuthCallbackOrganization } from "./oauth-organization-context";
 
 interface AuthConfig {
 	social: Record<string, boolean>;
@@ -376,6 +377,8 @@ async function extractCandidateOrgSlugs(request?: Request): Promise<string[]> {
 export async function resolveRequestOrganizationId(
 	request?: Request,
 ): Promise<string | null> {
+	const callbackOrganizationId = await resolveOAuthCallbackOrganization(request);
+	if (callbackOrganizationId !== undefined) return callbackOrganizationId;
 	const candidateSlugs = await extractCandidateOrgSlugs(request);
 	if (candidateSlugs.length === 0) return null;
 

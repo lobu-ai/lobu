@@ -13,6 +13,7 @@ import type { Context, Next } from "hono";
 import { Hono } from "hono";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
+import { HTTPException } from "hono/http-exception";
 import { LOBU_LOGO_PNG_BASE64 } from "./assets/logo";
 import { createAuth } from "./auth";
 import { resolveBaseUrl } from "./auth/base-url";
@@ -580,7 +581,13 @@ app.get("/health/scheduler", async (c) => {
  * been removed in favour of the always-correct DB-hook chokepoint.
  */
 app.on(["GET", "POST"], "/api/auth/*", async (c) => {
-	const auth = await createAuth(c.env, c.req.raw);
+	let auth: Awaited<ReturnType<typeof createAuth>>;
+	try {
+		auth = await createAuth(c.env, c.req.raw);
+	} catch (error) {
+		if (error instanceof HTTPException) return error.getResponse();
+		throw error;
+	}
 	// better-call crashes with "Unexpected end of JSON input" when a POST has
 	// Content-Type: application/json but an empty body. Ensure a valid body.
 	let request = c.req.raw;

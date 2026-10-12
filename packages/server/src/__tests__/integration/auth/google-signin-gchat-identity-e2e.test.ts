@@ -262,12 +262,13 @@ describe("google sign-in → gchat sender identity e2e (real BetterAuth handler)
 
 		// 3) Real token exchange → id_token decode → account link →
 		//    account.create.after hook → persistLoginChatIdentity.
-		const callbackRes = await auth.handler(
-			new Request(callbackLocation as string, {
-				method: "GET",
-				headers: { cookie: [stateCookie, sessionCookie].filter(Boolean).join("; "), referer: callbackURL },
-			}),
-		);
+		const callbackRequest = new Request(callbackLocation as string, {
+			method: "GET",
+			headers: { cookie: [stateCookie, sessionCookie].filter(Boolean).join("; ") },
+		});
+		clearAuthCacheForTests();
+		const callbackAuth = await createAuth(getEnvFromProcess(), callbackRequest);
+		const callbackRes = await callbackAuth.handler(callbackRequest);
 		expect(callbackRes.status).toBe(302);
 		if (scenario === "owned-elsewhere") {
 			expect(callbackRes.headers.get("location")).toContain("account_already_linked_to_different_user");

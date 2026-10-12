@@ -122,6 +122,7 @@ describe('social-login provisioning isolates scopes per connector', () => {
     );
     await provisionConnectorFromSocialLogin({
       env: {} as Env,
+      organizationId: org.id,
       request: new Request('https://example.test/acme/oauth2/callback/google'),
       account: {
         id: 'google-sub-1',
