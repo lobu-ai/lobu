@@ -112,7 +112,12 @@ export async function createAuth(
 	//     the endpoints by provider id (google, github, …).
 	const socialProviders: Record<
 		string,
-		{ clientId: string; clientSecret: string; scope?: string[] }
+		{
+			clientId: string;
+			clientSecret: string;
+			scope: string[];
+			disableDefaultScope: true;
+		}
 	> = {};
 	const genericOAuthConfigs: GenericOAuthEntry[] = [];
 
@@ -144,11 +149,12 @@ export async function createAuth(
 		if (socialProviders[provider]) continue;
 
 		// Pass the connector-declared login scopes directly to Better Auth.
-		// Each connector owns its OAuth configuration; core does not inject defaults.
+		// Library defaults must not silently broaden the connector's permissions.
 		socialProviders[provider] = {
 			clientId,
 			clientSecret,
-			...(row.loginScopes.length > 0 && { scope: row.loginScopes }),
+			scope: row.loginScopes,
+			disableDefaultScope: true,
 		};
 	}
 

@@ -6,6 +6,7 @@
  */
 
 import logger from '../utils/logger';
+import { twitterOAuthProvider } from './twitter-oauth';
 import { fetchCredentialedPublicUrl } from '@lobu/connector-worker/egress';
 import { cancelResponseBody } from '../utils/bounded-response';
 import {
@@ -38,6 +39,7 @@ type ResolvedProviderConfig = Omit<
 };
 
 const providers: Record<string, OAuthProviderConfig> = {
+  twitter: twitterOAuthProvider,
   google: {
     authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
     tokenUrl: 'https://oauth2.googleapis.com/token',

@@ -3188,7 +3188,7 @@ export default class XConnector extends ConnectorRuntime {
 		name: "X (Twitter)",
 		description:
 			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, and reads the chronological Following timeline live through the X API. Links social actors into the person graph.",
-		version: "3.14.1",
+		version: "3.14.2",
 		faviconDomain: "x.com",
 		browser: {
 			origins: ["https://x.com", "https://twitter.com"],
@@ -3222,18 +3222,13 @@ export default class XConnector extends ConnectorRuntime {
 						"bookmark.read",
 						"dm.read",
 					],
-					loginScopes: [
-						"users.read",
-						"tweet.read",
-						"like.read",
-						"bookmark.read",
-						"dm.read",
-						"offline.access",
-						"users.email",
-					],
+					// X requires tweet.read for /2/users/me, even for identity-only login.
+					loginScopes: ["users.read", "tweet.read", "users.email"],
 					authorizationUrl: "https://x.com/i/oauth2/authorize",
 					tokenUrl: "https://api.x.com/2/oauth2/token",
-					userinfoUrl: "https://api.x.com/2/users/me?user.fields=username",
+					// No userinfoUrl: declaring one routes sign-in through generic OIDC,
+					// which cannot read X's nested profile. Connect gets it from the
+					// server's built-in twitter provider config instead.
 					tokenEndpointAuthMethod: "client_secret_basic",
 					usePkce: true,
 					clientIdKey: "TWITTER_CLIENT_ID",
@@ -3243,7 +3238,7 @@ export default class XConnector extends ConnectorRuntime {
 					setupInstructions:
 						"Create an X OAuth 2.0 app, add {{redirect_uri}} as the callback URL, then paste the client ID and client secret below.",
 					loginProvisioning: {
-						autoCreateConnection: true,
+						autoCreateConnection: false,
 					},
 				},
 				{

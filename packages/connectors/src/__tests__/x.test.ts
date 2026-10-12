@@ -830,6 +830,22 @@ describe("buildHomeFeedTweets", () => {
 });
 
 describe("XConnector definition", () => {
+	test("keeps sign-in separate from source access", () => {
+		const oauth = new XConnector().definition.authSchema.methods.find(
+			(method) => method.type === "oauth",
+		);
+		expect(oauth).toMatchObject({
+			loginScopes: ["users.read", "tweet.read", "users.email"],
+			loginProvisioning: { autoCreateConnection: false },
+			requiredScopes: ["tweet.read", "users.read", "offline.access"],
+			authorizationUrl: "https://x.com/i/oauth2/authorize",
+			tokenUrl: "https://api.x.com/2/oauth2/token",
+			usePkce: true,
+		});
+		// X nests its profile under `data`, so sign-in uses Better Auth's built-in twitter provider.
+		expect(oauth).not.toHaveProperty("userinfoUrl");
+	});
+
 	test("verifies the stable signed-in id and ignores a stale cookie on the login page", async () => {
 		const probe = new Function("document", "location", `return ${new XConnector().definition.browser.accountProbe.expression}`);
 		const document = { cookie: "twid=u%3D123456", querySelector: () => ({ getAttribute: () => "/renamed-handle" }) };
@@ -2107,7 +2123,7 @@ describe("isReplySubmitLabel", () => {
 
 describe("prepare_reply action contract", () => {
 	test("pins the connector version for catalog upgrades", () => {
-		expect(new XConnector().definition.version).toBe("3.14.1");
+		expect(new XConnector().definition.version).toBe("3.14.2");
 	});
 
 	test("classifies staging a reply as a write for org policy", () => {
