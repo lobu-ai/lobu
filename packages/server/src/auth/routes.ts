@@ -20,6 +20,7 @@ import { findExistingPersonalOrg } from './personal-org-provisioning';
 import { hostOnlyExpiry } from './session-cookie-scope';
 import { OAuthClientsStore } from './oauth/clients';
 import { OAuthProvider } from './oauth/provider';
+import type { AuthInfo } from './oauth/types';
 import {
   AVAILABLE_PAT_SCOPES,
   canMintWebSession,
@@ -372,6 +373,39 @@ async function mintSessionCookieValue(
 }
 
 /**
+ * Chrome extensions before 0.9.4 sign the side panel in with a credential that
+ * lacks mcp:admin: the device-only child PAT from a desktop-app pairing, or the
+ * read-only device-code grant the extension used to request. Store updates take
+ * days to reach every browser, so /extension-session keeps accepting exactly
+ * those two shapes until active Chrome workers report 0.9.4 or later
+ * (`device_workers.app_version`); then delete this.
+ */
+async function isPre094ChromePanelCredential(
+  sql: ReturnType<typeof createDbClientFromEnv>,
+  authInfo: AuthInfo
+): Promise<boolean> {
+  if (!authInfo.scopes.includes('device_worker:run') || authInfo.resource) return false;
+  if (authInfo.tokenType === 'pat') {
+    if (!authInfo.workerId) return false;
+    const rows = await sql`
+      SELECT 1 FROM device_workers
+      WHERE user_id = ${authInfo.userId}
+        AND worker_id = ${authInfo.workerId}
+        AND platform = 'chrome-extension'
+      LIMIT 1
+    `;
+    return rows.length > 0;
+  }
+  if (authInfo.authorizationGrantType !== 'device_code') return false;
+  const rows = await sql`
+    SELECT 1 FROM oauth_clients
+    WHERE id = ${authInfo.clientId} AND software_id = 'owletto-chrome'
+    LIMIT 1
+  `;
+  return rows.length > 0;
+}
+
+/**
  * Resolve a `?token=…` deep-link credential to its user and organization.
  * Accepts all three credential shapes the deep-link callers hold:
  *   - Personal Access Tokens (`owl_pat_*`, `personal_access_tokens`)
@@ -386,13 +420,18 @@ async function mintSessionCookieValue(
  */
 async function resolveDeepLinkToken(
   c: Context<{ Bindings: Env }>,
-  token: string
+  token: string,
+  options: { acceptPre094ChromePanel?: boolean } = {}
 ): Promise<{ userId: string; organizationId: string | null } | 'insufficient_scope' | null> {
   const sql = createDbClientFromEnv(c.env);
   const baseUrl = resolveBaseUrl({ request: c.req.raw });
   const authInfo = await new OAuthProvider(sql, baseUrl).verifyAccessToken(token);
   if (authInfo?.userId) {
-    if (!canMintWebSession(authInfo)) return 'insufficient_scope';
+    const allowed =
+      canMintWebSession(authInfo) ||
+      (options.acceptPre094ChromePanel === true &&
+        (await isPre094ChromePanelCredential(sql, authInfo)));
+    if (!allowed) return 'insufficient_scope';
     return {
       userId: authInfo.userId,
       organizationId: authInfo.organizationId,
@@ -499,7 +538,7 @@ credentialRoutes.post('/extension-session', async (c) => {
     );
   }
 
-  const identity = await resolveDeepLinkToken(c, token);
+  const identity = await resolveDeepLinkToken(c, token, { acceptPre094ChromePanel: true });
   if (identity === 'insufficient_scope') {
     return c.json(
       {

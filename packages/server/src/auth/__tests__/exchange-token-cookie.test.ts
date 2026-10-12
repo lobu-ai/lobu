@@ -12,6 +12,7 @@ import {
 } from '../../__tests__/setup/test-fixtures';
 import { get, postForm } from '../../__tests__/setup/test-helpers';
 import { clearAuthCacheForTests } from '../index';
+import { PersonalAccessTokenService } from '../tokens';
 import {
   verifySettingsSessionOrToken,
   verifySettingsToken,
@@ -163,6 +164,63 @@ describe('deep-link token exchange', () => {
     expect(cookie).toMatch(/SameSite=Lax/i);
     expect(cookie).not.toMatch(/Partitioned/i);
     expect(cookie).not.toMatch(/SameSite=None/i);
+  });
+
+  // Store updates take days to reach every browser, so the side panel of an
+  // extension older than 0.9.4 keeps signing in with the credential it holds,
+  // but only on /extension-session and only for those two Chrome shapes.
+  async function chromeChildPat(slug: string, platform: string): Promise<string> {
+    const org = await createTestOrganization({ slug });
+    const user = await createTestUser({ email: `${slug}@test.example.com` });
+    await addUserToOrganization(user.id, org.id, 'owner');
+    const workerId = `${platform}:${slug}`;
+    const sql = getTestDb();
+    await sql`
+      INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id)
+      VALUES (${user.id}, ${workerId}, ${platform}, '[]'::jsonb, ${org.id})
+    `;
+    const minted = await new PersonalAccessTokenService(sql).create(user.id, org.id, `device:${platform}:x`, {
+      scope: 'device_worker:run',
+      workerId,
+    });
+    return minted.token;
+  }
+
+  async function chromeOAuthPairing(slug: string, softwareId: string): Promise<string> {
+    const org = await createTestOrganization({ slug });
+    const user = await createTestUser({ email: `${slug}@test.example.com` });
+    await addUserToOrganization(user.id, org.id, 'owner');
+    const client = await createTestOAuthClient({ software_id: softwareId });
+    // A private scope makes the fixture mint this as a device_code grant.
+    const { token } = await createTestAccessToken(user.id, org.id, client.client_id, {
+      scope: 'device_worker:run profile:read mcp:read',
+    });
+    return token;
+  }
+
+  it.each([
+    ['a desktop-paired Chrome child PAT', () => chromeChildPat('xt-old-chrome-child', 'chrome-extension')],
+    ['a read-only Chrome OAuth pairing', () => chromeOAuthPairing('xt-old-chrome-oauth', 'owletto-chrome')],
+  ])('keeps a pre-0.9.4 side panel signed in with %s, on /extension-session only', async (_label, mint) => {
+    const token = await mint();
+
+    const session = await postForm('/api/extension-session', { token });
+    expect(session.status).toBe(200);
+    expect(((await session.json()) as { session_token?: string }).session_token).toBeTruthy();
+
+    const exchange = await get(`/api/exchange-token?token=${encodeURIComponent(token)}&next=%2F`);
+    expect(exchange.status).toBe(302);
+    expect(exchange.headers.get('location')).toMatch(/^\/auth\/login\?/);
+    expect(exchange.headers.get('set-cookie')).toBeNull();
+  });
+
+  it.each([
+    ['a headless child PAT', () => chromeChildPat('xt-headless-child', 'headless')],
+    ['a read-only device grant from another client', () => chromeOAuthPairing('xt-other-oauth', 'some-other-app')],
+  ])('still refuses %s on /extension-session', async (_label, mint) => {
+    const res = await postForm('/api/extension-session', { token: await mint() });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error?: string }).error).toBe('insufficient_scope');
   });
 
   it.each(['development', 'production'])('minted cookie authenticates under %s Node settings on loopback HTTP', async (nodeEnv) => {
