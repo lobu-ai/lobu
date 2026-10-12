@@ -35,15 +35,13 @@ export async function waitFor(
   throw lastError;
 }
 
-export interface ChatBridgeInstance {
+interface ChatBridgeInstance {
   connection: PlatformConnection;
   conversationState: ConversationStateStore;
   chat: Chat;
 }
 
 export interface AssembledChatBridge {
-  queue: RunsQueue;
-  producer: QueueProducer;
   /**
    * The connection registry the bridge reads; also satisfies what
    * `ChatResponseBridge` needs to render a completion on this "replica".
@@ -117,8 +115,6 @@ export async function startAssembledChatBridge(
   attach(chat, state, connection);
 
   return {
-    queue,
-    producer,
     manager,
     attach,
     stop: async () => {

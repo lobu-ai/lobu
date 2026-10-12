@@ -120,6 +120,15 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
   let connectionDbId: number;
   let slackPostMessage: ReturnType<typeof mock>;
 
+  async function deliver(request: Request, target = chat): Promise<Response> {
+    const tasks: Promise<unknown>[] = [];
+    const response = await target.webhooks.slack(request, {
+      waitUntil: (task) => tasks.push(task),
+    });
+    await Promise.all(tasks);
+    return response;
+  }
+
   beforeAll(async () => {
     await ensureDbForGatewayTests();
   });
@@ -229,7 +238,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       WHERE organization_id = 'org-slack-grid-e2e'
         AND managed_agent_id = 'agent-slack-grid-e2e'
     `;
-    const response = await chat.webhooks.slack(signedEventRequest(slackEvent({
+    const response = await deliver(signedEventRequest(slackEvent({
       eventId: "Ev_DEVICE_CHAT_TEST",
       channel: CHANNEL_ID,
       ts: "1787292000.101010",
@@ -266,7 +275,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
   test("first-contact message.im posts a setup notice without a DM Automation", async () => {
     const sql = getDb();
     const dmTs = "1787292001.000821";
-    const response = await chat.webhooks.slack(
+    const response = await deliver(
       signedEventRequest(
         slackEvent({
           eventId: "Ev_GRID_DM_FIRST_CONTACT_20260821",
@@ -321,7 +330,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       user: "U_BURAK",
     });
 
-    const first = await chat.webhooks.slack(signedEventRequest(channelPayload));
+    const first = await deliver(signedEventRequest(channelPayload));
     expect(first.status).toBe(200);
 
     await waitFor(async () => {
@@ -387,11 +396,10 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
         await state.get("slack:event-delivered:Ev_GRID_CHANNEL_20260821"),
       ).toBe(true);
     });
-    const retry = await chat.webhooks.slack(
+    const retry = await deliver(
       signedEventRequest(channelPayload, 1),
     );
     expect(retry.status).toBe(200);
-    await new Promise((resolve) => setTimeout(resolve, 50));
     const afterRetry = await sql`
       SELECT id FROM runs WHERE run_type = 'chat_message'
     `;
@@ -425,7 +433,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       teamId: WORKSPACE_TEAM_ID,
     });
     const linkedDmTs = "1787292001.100821";
-    const linkedDmResponse = await chat.webhooks.slack(
+    const linkedDmResponse = await deliver(
       signedEventRequest(
         slackEvent({
           eventId: "Ev_GRID_DM_LINKED_20260821",
@@ -499,10 +507,9 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
         botId: "B_OTHER_APP",
       }),
     ]) {
-      const response = await chat.webhooks.slack(signedEventRequest(ownOrBot));
+      const response = await deliver(signedEventRequest(ownOrBot));
       expect(response.status).toBe(200);
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
     const afterBots = await sql`
       SELECT id FROM runs WHERE run_type = 'chat_message'
     `;
@@ -607,7 +614,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     });
     expect(replies).toEqual([`Linked this chat to agent \`${targetAgent}\`. Say hi — I'll reply here from now on.`]);
 
-    const response = await chat.webhooks.slack(signedEventRequest(slackEvent({
+    const response = await deliver(signedEventRequest(slackEvent({
       eventId: "Ev_CROSS_WORKSPACE", channel, ts: "1787292010.000001",
       text: "Create the follow-up task", user: "U_LINK_ADMIN",
     })));
@@ -627,7 +634,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     expect(linked?.organizationId).toBe(targetOrg);
     const [automation] = await getDb()`SELECT created_by FROM automations WHERE organization_id = ${targetOrg}`;
     expect(automation?.created_by).toBe(user.id);
-    const mentionResponse = await chat.webhooks.slack(signedEventRequest(slackEvent({
+    const mentionResponse = await deliver(signedEventRequest(slackEvent({
       eventId: "Ev_CROSS_WORKSPACE_MENTION", channel, ts: "1787292011.000001",
       eventType: "app_mention", text: `<@${BOT_USER_ID}> Follow up`, user: "U_LINK_ADMIN",
     })));
@@ -781,7 +788,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
   // connection shares the Postgres state prefix. A Slack message id is its
   // channel-local `ts`, so when two Lobu installations sit in the same channel
   // the second installation's copy of the message is dropped as a duplicate of
-  // the first. The durable-ingress PR must scope this key to the installation.
+  // the first.
   test("a second installation in the same channel loses the message to the shared SDK dedupe key", async () => {
     const sql = getDb();
     const secondOrg = "org-slack-second-install";
@@ -853,19 +860,18 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
         eventId, channel: CHANNEL_ID, ts, text: "One message, two installations", user: "U_BURAK",
       }));
     // Slack delivers the same channel message to each app with its own event id.
-    expect((await chat.webhooks.slack(message("Ev_FIRST_APP", sharedTs))).status).toBe(200);
+    expect((await deliver(message("Ev_FIRST_APP", sharedTs))).status).toBe(200);
     await waitFor(async () => {
       const rows = await sql`SELECT organization_id FROM runs WHERE run_type = 'chat_message'`;
       expect(rows).toEqual([{ organization_id: "org-slack-grid-e2e" }]);
     });
-    expect((await secondChat.webhooks.slack(message("Ev_SECOND_APP", sharedTs))).status).toBe(200);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect((await deliver(message("Ev_SECOND_APP", sharedTs), secondChat)).status).toBe(200);
     const afterCollision = await sql`SELECT organization_id FROM runs WHERE run_type = 'chat_message'`;
     expect(afterCollision).toEqual([{ organization_id: "org-slack-grid-e2e" }]);
 
     // Control: the second installation is correctly wired — a message with a
     // ts the first installation never saw reaches its own Automation.
-    expect((await secondChat.webhooks.slack(message("Ev_SECOND_APP_UNIQUE", "1787292100.000002"))).status).toBe(200);
+    expect((await deliver(message("Ev_SECOND_APP_UNIQUE", "1787292100.000002"), secondChat)).status).toBe(200);
     await waitFor(async () => {
       const rows = await sql`SELECT organization_id FROM runs WHERE run_type = 'chat_message' ORDER BY id`;
       expect(rows).toEqual([

@@ -1,20 +1,20 @@
 /**
  * Characterization: the Lobu principal a chat turn's tool calls run as.
  *
- * A Slack or Google Chat message enqueues a turn whose one credential is a
- * worker token minted for the PLATFORM sender (`userId` = the chat user id,
- * never a Lobu user). When the turn calls Lobu's own MCP tools, the gateway
+ * Ordinary chat turns use a worker token whose `userId` is the platform
+ * sender. This suite constructs the Slack token's internal MCP hop directly;
+ * it does not exercise ingress or the proxy's pre-tool policy. In production,
+ * when the turn calls Lobu's own MCP tools, the gateway
  * narrows that token to the gateway-mcp kind and stamps the direct-auth
  * header (`gateway/auth/mcp/proxy-shared.ts`). The embedded multi-tenant
- * middleware then attributes every call to the AGENT OWNER
- * (`agents.owner_user_id`) and requires that owner to be an org owner/admin.
+ * middleware attributes calls without an `adminActorUserId` claim to the
+ * agent owner (`agents.owner_user_id`), when present, and requires that user
+ * to be an org owner/admin. Admin-tools turns carry a separate verified actor.
  *
- * CURRENT (known gap, intentionally changed by the chat-sender-authority PR):
- * a chat turn acts as the agent owner, not as the verified sender. A sender
- * whose chat identity is linked to an ordinary member — or who is not a Lobu
- * user at all — still writes memory as the owner with admin scopes. These
- * tests lock that attribution so the later change shows up as an intentional
- * diff here rather than as an unnoticed regression.
+ * CURRENT (known gap): without that actor claim, a sender linked to an
+ * ordinary member still writes memory as the owner with admin scopes. These
+ * tests characterize that attribution so changing it requires an intentional
+ * update here.
  */
 
 import { generateWorkerToken, mintGatewayMcpToken } from '@lobu/core';
@@ -151,8 +151,7 @@ describe('chat turn principal (CURRENT: agent owner)', () => {
       WHERE organization_id = ${org.id} AND title = 'chat principal note'
     `;
     // CURRENT (known gap): attributed to the agent owner, not the linked
-    // sender (`linkedMember`). The sender-authority PR flips this to the
-    // verified sender's member.
+    // sender (`linkedMember`).
     expect(rows).toEqual([{ created_by: owner.id }]);
   });
 

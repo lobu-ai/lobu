@@ -292,7 +292,6 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     // Google retries the same message resource: Chat SDK's message-id dedupe
     // admits it once, so neither the run nor the transcript row is duplicated.
     expect(await deliver(event)).toBe(200);
-    await new Promise((resolve) => setTimeout(resolve, 100));
     expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(1);
     expect(await sql`SELECT id FROM channel_messages WHERE connection_id = ${RUNTIME_CONNECTION_ID}`).toHaveLength(1);
     // Nothing was posted back to Google during ingress.
@@ -312,9 +311,8 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     expect(await sql`SELECT id FROM channel_messages WHERE connection_id = ${RUNTIME_CONNECTION_ID}`).toHaveLength(0);
   });
 
-  // CURRENT: the connection's own `agent_id` answers an unmatched DM. The
-  // Automation-binding PR migrates this fallback into an Automation and
-  // deletes it; this test is expected to change in that PR.
+  // CURRENT: the connection's own `agent_id` answers an unmatched DM without
+  // materializing an Automation.
   test("a DM with no Automation falls back to the connection's owning agent", async () => {
     await start(OWNING_AGENT_ID);
     expect(await deliver(directMessage("dm-owner-1", "what's on my plate"))).toBe(200);
@@ -373,19 +371,16 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
   });
 
   // CURRENT (known gap): under N>1 replicas the `thread_response` rows are
-  // claimed competitively. Google Chat uses the live-streaming default
-  // strategy, which never delivers from `finalText`: a completion claimed by a
-  // replica that streamed no deltas posts nothing, and the replica that did
-  // stream them never sees the terminal row to close its stream. Slack is
-  // immune (post-once from `finalText`). The delivery-durability PR must make
-  // this deliver exactly once.
-  test("a completion claimed by a replica that streamed no deltas posts nothing", async () => {
+  // claimed competitively. For agents without output guardrails, Google Chat's
+  // live-streaming path does not deliver `finalText` on a replica with no local
+  // stream. Guardrail-enabled turns have a separate final-text delivery path;
+  // Slack's strategy also consumes finalText without a local stream.
+  test("without output guardrails, a completion on a replica with no deltas posts nothing", async () => {
     const payload = await queueLinkedSpaceTurn("inbound-crosspod");
 
     // Replica B claims only the terminal row.
     const replicaB = new ChatResponseBridge(bridge.manager as never);
     await replicaB.handleCompletion({ ...payload, finalText: "The full answer." }, "s");
-    await new Promise((resolve) => setTimeout(resolve, 100));
     expect(created).toEqual([]);
     expect(updated).toEqual([]);
   });

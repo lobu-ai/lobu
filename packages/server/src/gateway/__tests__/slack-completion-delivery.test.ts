@@ -147,7 +147,7 @@ describe("Slack completion delivery (cross-replica #1087/#1099)", () => {
     ]);
   });
 
-  test("an oversized paragraph splits on lines, then hard-slices, in order and without loss", async () => {
+  test("oversized paragraphs preserve line contents and order when splitting and hard-slicing", async () => {
     const { instance, postMessage } = fakeInstanceWithSlackSpy();
     const longLine = "y".repeat(25_000);
     const lines = `${"a".repeat(6_000)}\n${"b".repeat(6_000)}`;
@@ -163,12 +163,12 @@ describe("Slack completion delivery (cross-replica #1087/#1099)", () => {
     const posted = postMessage.mock.calls.map(
       (call: any[]) => call[0] as { markdown_text: string; thread_ts?: string },
     );
-    expect(posted.map((p) => p.markdown_text.length)).toEqual([
-      6_000, 6_000, 11_000, 11_000, 3_000,
+    expect(posted.map((p) => p.markdown_text)).toEqual([
+      "a".repeat(6_000), "b".repeat(6_000),
+      "y".repeat(11_000), "y".repeat(11_000), "y".repeat(3_000),
     ]);
     // Every chunk stays in the same thread.
     for (const p of posted) expect(p.thread_ts).toBe("1700000000.123456");
-    expect(posted.slice(2).map((p) => p.markdown_text).join("")).toBe(longLine);
   });
 
   test("without a Slack Web API client the reply falls back to the SDK target, cleaned", async () => {
@@ -189,8 +189,7 @@ describe("Slack completion delivery (cross-replica #1087/#1099)", () => {
   // CURRENT (known gap): chunk posts carry no receipts and failure is not
   // per-chunk. When a later chunk fails, the strategy re-posts the WHOLE
   // cleaned body through the SDK target, so the chunks that already landed are
-  // duplicated. The Adapter-delivery PR (native posting bypass at
-  // platform-strategies/slack.ts) must make chunk delivery resumable.
+  // duplicated (platform-strategies/slack.ts).
   test("a failure after the first chunk re-posts the entire body through the SDK", async () => {
     let calls = 0;
     const postMessage = mock(async () => {
