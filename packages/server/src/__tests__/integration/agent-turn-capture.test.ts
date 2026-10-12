@@ -21,7 +21,7 @@ import { WorkerGateway } from '../../gateway/worker-dispatch/worker-gateway';
 import { __setChatInstanceManagerForTests } from '../../lobu/gateway';
 import * as db from '../../db/client';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
-import { createTestAgent, createTestOrganization, createTestUser, addUserToOrganization, insertChatConnectionRow } from '../setup/test-fixtures';
+import { createTestAgent, createTestOrganization, createTestUser, addUserToOrganization, insertChatConnectionRow, linkChatIdentityInGraph, seedSystemEntityTypes } from '../setup/test-fixtures';
 import { createTestAutomationSubscription } from '../setup/automation-subscriptions';
 import { post } from '../setup/test-helpers';
 
@@ -70,9 +70,13 @@ describe('native capture over HTTP and Postgres', () => {
 
   beforeAll(async () => {
     await cleanupTestDatabase();
+    await seedSystemEntityTypes();
     org = await createTestOrganization();
     const owner = await createTestUser();
     await addUserToOrganization(owner.id, org.id, 'owner');
+    // A chat turn acts as its sender's linked member, so the Slack sender below
+    // must be linked for its tools to reach the embedded MCP lane at all.
+    await linkChatIdentityInGraph({ organizationId: org.id, userId: owner.id, platform: 'slack', teamId: 'T0CAPTURE', platformUserId: 'U0CAPTURE' });
     await createTestAgent({ organizationId: org.id, agentId: AGENT, ownerUserId: owner.id });
     await insertChatConnectionRow({ id: CONNECTION, organizationId: org.id, agentId: AGENT, platform: 'slack' });
     await createTestAutomationSubscription({ organizationId: org.id, agentId: AGENT, connectionSlug: `agentconn-${CONNECTION}`, platform: 'slack', channelId: 'slack:C_CAPTURE' });
@@ -111,14 +115,14 @@ describe('native capture over HTTP and Postgres', () => {
       getProxyBaseUrlMappings: (url: string, agentId: string) => ({ ANTHROPIC_BASE_URL: `${url}/anthropic/a/${agentId}/o/${org.id}/u/${owner.id}` }),
       buildCredentialPlaceholder: (_agentId: string, context: { workerToken: string }) => context.workerToken,
     };
-    const message = { userId: owner.id, conversationId: 'capture-conversation', messageId: 'capture-message', channelId: 'C_CAPTURE',
+    const message = { userId: 'U0CAPTURE', conversationId: 'capture-conversation', messageId: 'capture-message', channelId: 'C_CAPTURE',
       agentId: AGENT, organizationId: org.id, platform: 'slack', messageText: 'Capture tool attempts',
       // This suite's baseline `token` must be a CAPTURE credential, so the run
       // asks for capture the only way that works: `platformMetadata`, which is
       // where `buildWorkerTokenClaims` reads it from and which originates
       // server-side. The producer no longer pins the mode — doing so made an
       // ordinary live turn report success while performing no side effects.
-      platformMetadata: { connectionId: CONNECTION, executionMode: 'capture' }, agentOptions: { model: 'capture-fixture-provider/fixture' },
+      platformMetadata: { connectionId: CONNECTION, teamId: 'T0CAPTURE', executionMode: 'capture' }, agentOptions: { model: 'capture-fixture-provider/fixture' },
     } as MessagePayload;
     const sql = getTestDb();
     const [source] = await sql`
@@ -133,7 +137,7 @@ describe('native capture over HTTP and Postgres', () => {
     const [run] = await getTestDb()`SELECT id, action_input FROM runs WHERE run_type = 'agent_turn'`;
     runId = run.id; token = run.action_input.credential;
     const identity = verifyWorkerToken(token)!;
-    expect(identity).toMatchObject({ runId, executionMode: 'capture' });
+    expect(identity).toMatchObject({ runId, executionMode: 'capture', actorUserId: owner.id });
     expect(identity.automationRunId).toBeUndefined();
     live = generateWorkerToken(identity.userId, identity.conversationId, identity.deploymentName, { ...identity, executionMode: 'live' });
   });

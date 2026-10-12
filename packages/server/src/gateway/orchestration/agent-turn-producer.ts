@@ -59,6 +59,7 @@ import {
   resolveTurnAttachments,
 } from "./agent-turn-attachments.js";
 import { notifyThreadResponse, type TurnFailure } from "./turn-liveness.js";
+import { isChatSenderTurn, replyOnlyTurnInstructions, resolveChatTurnActor } from "./chat-turn-actor.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 
 const logger = createLogger("agent-turn-producer");
@@ -528,28 +529,40 @@ function resolveModelMetadata(
  * organization, conversation, run and optional runtime sandbox. The secret
  * proxy accepts it as the provider credential and binds it to the agent in the
  * URL; the MCP and runtime routes authenticate the same token.
+ *
+ * A chat turn's token also carries the member its sender is linked to in this
+ * organization as `actorUserId` (see chat-turn-actor.ts). It is resolved here,
+ * server-side, from the verified identity graph — never taken from the worker
+ * or the message — and its absence makes the turn reply-only.
  */
-function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRuntimeSelection): string {
+export async function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRuntimeSelection): Promise<string> {
+  const claims = buildWorkerTokenClaims({
+    channelId: data.channelId,
+    teamId: data.teamId,
+    agentId: data.agentId,
+    organizationId: data.organizationId,
+    platform: data.platform,
+    platformMetadata: data.platformMetadata,
+    // The remote runtime reads all of these off the SIGNED token, never a
+    // body: which sandbox, and the egress and package sets the org set.
+    runtimeProviderId: runtime?.runtimeProviderId,
+    sandboxId: runtime?.sandboxId,
+    allowedDomains: data.networkConfig?.allowedDomains,
+    deniedDomains: data.networkConfig?.deniedDomains,
+    nixPackages: data.nixConfig?.packages,
+  });
+  const actorUserId = await resolveChatTurnActor({
+    organizationId: data.organizationId,
+    senderId: data.userId,
+    claims,
+  });
   return generateWorkerToken(
     data.userId,
     data.conversationId,
     `agent-turn:${data.messageId}`,
     {
-      ...buildWorkerTokenClaims({
-        channelId: data.channelId,
-        teamId: data.teamId,
-        agentId: data.agentId,
-        organizationId: data.organizationId,
-        platform: data.platform,
-        platformMetadata: data.platformMetadata,
-        // The remote runtime reads all of these off the SIGNED token, never a
-        // body: which sandbox, and the egress and package sets the org set.
-        runtimeProviderId: runtime?.runtimeProviderId,
-        sandboxId: runtime?.sandboxId,
-        allowedDomains: data.networkConfig?.allowedDomains,
-        deniedDomains: data.networkConfig?.deniedDomains,
-        nixPackages: data.nixConfig?.packages,
-      }),
+      ...claims,
+      ...(actorUserId ? { actorUserId } : {}),
       messageId: data.messageId,
       // No `executionMode`/`automationRunId` override here ON PURPOSE.
       // `buildWorkerTokenClaims` above already derives both from
@@ -945,7 +958,12 @@ export async function enqueueAgentTurn(
       SELECT nextval(pg_get_serial_sequence('runs', 'id')) AS id
     `;
     const runId = allocated!.id;
-    const workerToken = mintTurnToken(data, runId, deps.runtime);
+    const workerToken = await mintTurnToken(data, runId, deps.runtime);
+    const turnClaims = verifyWorkerToken(workerToken);
+    if (!turnClaims) throw new Error("the turn's own worker token does not verify");
+    // Read off the signed claims, exactly as the MCP lane will: a chat turn
+    // with no linked-member actor is reply-only.
+    const replyOnly = isChatSenderTurn(turnClaims) && !turnClaims.actorUserId;
     const provider = await resolveTurnProvider(module, {
       agentId: data.agentId,
       organizationId: data.organizationId,
@@ -980,7 +998,15 @@ export async function enqueueAgentTurn(
         })
       : null;
     let failedServers: string[] = [];
-    if (!deps.mcp) {
+    if (replyOnly) {
+      // No Lobu tools and no memory hooks: the MCP lane refuses this token, so
+      // discovering against it would only log a failure on every turn.
+      mcpInstructions = [replyOnlyTurnInstructions(data.platform)];
+      logger.info(
+        { agentId: data.agentId, messageId: data.messageId, platform: data.platform },
+        "Agent turn is reply-only: the chat sender is not a linked member of this organization"
+      );
+    } else if (!deps.mcp) {
       logger.info(
         { agentId: data.agentId },
         "Agent turn: the MCP surface is not wired, so the turn has only standard tools"

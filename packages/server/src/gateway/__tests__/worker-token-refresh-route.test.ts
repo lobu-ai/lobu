@@ -146,7 +146,7 @@ function mintToken(opts: {
     ...(opts.adminGrant
       ? {
           adminTools: ["manage_agents"],
-          adminActorUserId: "auth-user-1",
+          actorUserId: "auth-user-1",
         }
       : {}),
     allowedDomains: ["api.example.com"],
@@ -202,7 +202,7 @@ describe("POST /worker/token/refresh", () => {
     expect(data!.deploymentName).toBe(credentialScope("m1"));
     expect(data!.organizationId).toBe("org-1");
     expect(data!.adminTools).toEqual(["manage_agents"]);
-    expect(data!.adminActorUserId).toBe("auth-user-1");
+    expect(data!.actorUserId).toBe("auth-user-1");
     // Egress claims must BOTH survive refresh — dropping allowedDomains
     // breaks the sandbox network (deny-all), dropping deniedDomains
     // silently re-opens denied hosts on remote runtimes.

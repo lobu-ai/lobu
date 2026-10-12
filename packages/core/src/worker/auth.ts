@@ -110,11 +110,15 @@ export interface WorkerTokenData {
    */
   adminTools?: string[];
   /**
-   * Lobu auth user authorized for {@link adminTools}. Chat turns keep the
-   * platform principal in `userId`, so direct MCP auth must not reinterpret a
-   * Slack/Telegram id as a `member.userId`. Present iff `adminTools` is present.
+   * The Lobu auth user (`member.userId`) this turn acts as on the direct MCP
+   * lane, resolved SERVER-SIDE at mint from verified state — for a chat turn,
+   * the member the platform sender is linked to in this organization. Chat
+   * turns keep the platform principal in `userId`, so direct MCP auth must
+   * never reinterpret a Slack/Telegram id as a `member.userId`; it reads this
+   * claim instead and re-checks the membership on every request. Required
+   * whenever {@link adminTools} is present.
    */
-  adminActorUserId?: string;
+  actorUserId?: string;
   /**
    * Selected runtime-provider id (e.g. "vercel"), resolved from the agent's
    * environment at token-mint time. The generic `/internal/runtime/exec` route
@@ -194,8 +198,8 @@ export interface WorkerTokenOptions {
    * Admin-tool allowlist for this turn. See WorkerTokenData.adminTools.
    */
   adminTools?: string[];
-  /** Lobu auth user bound to the admin-tools allowlist. */
-  adminActorUserId?: string;
+  /** Lobu auth user the turn acts as. See WorkerTokenData.actorUserId. */
+  actorUserId?: string;
   /** Selected runtime provider id. See WorkerTokenData.runtimeProviderId. */
   runtimeProviderId?: string;
   /** Selected sandbox id backing the runtime credential. See WorkerTokenData.sandboxId. */
@@ -242,7 +246,7 @@ function generateToken(
     runId: options.runId,
     messageId: options.messageId,
     adminTools: options.adminTools,
-    adminActorUserId: options.adminActorUserId,
+    actorUserId: options.actorUserId,
     runtimeProviderId: options.runtimeProviderId,
     sandboxId: options.sandboxId,
     allowedDomains: options.allowedDomains,
@@ -447,25 +451,21 @@ function verifyToken(
         return null;
       }
     }
-    // The admin-tools pair is inseparable: the allowlist limits WHAT may
-    // run and the resolved auth subject says WHO authorized it. Accepting one
-    // without the other either makes the allowlist unusable or tempts callers
-    // to reinterpret the platform-scoped `userId` as an auth user again.
-    if (
-      (data.adminTools === undefined) !==
-      (data.adminActorUserId === undefined)
-    ) {
-      logger.error(
-        "Worker token rejected: adminTools and adminActorUserId must be set together"
-      );
+    // The allowlist limits WHAT may run; the resolved auth subject says WHO
+    // authorized it. An allowlist without its actor would tempt callers to
+    // reinterpret the platform-scoped `userId` as an auth user again. The
+    // reverse is valid: an ordinary chat turn acts as its sender with no
+    // admin allowlist at all.
+    if (data.adminTools !== undefined && data.actorUserId === undefined) {
+      logger.error("Worker token rejected: adminTools requires actorUserId");
       return null;
     }
     if (
-      data.adminActorUserId !== undefined &&
-      (typeof data.adminActorUserId !== "string" || !data.adminActorUserId)
+      data.actorUserId !== undefined &&
+      (typeof data.actorUserId !== "string" || !data.actorUserId)
     ) {
       logger.error(
-        "Worker token rejected: adminActorUserId must be a non-empty string"
+        "Worker token rejected: actorUserId must be a non-empty string"
       );
       return null;
     }

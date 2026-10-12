@@ -709,16 +709,16 @@ export function isPersonalCredentialKind(profileKind?: string | null): boolean {
 }
 
 /**
- * Explain the agent-ownership boundary of a personal connection.
+ * Explain who can reach a personal connection from an agent run.
  *
- * Chat-triggered runs resolve connections as the AGENT OWNER, never the message
- * sender (`workspace/multi-tenant.ts` selects `owner_user_id FROM agents`), and
- * a private connection is visible only via `created_by = principal`
- * (`authz/connection-visibility.ts`). So when a member connects their own
- * Gmail/calendar and then DMs an agent someone ELSE owns, the credential
- * lookup returns ZERO ROWS — not an error. The agent simply behaves as if the
- * connection does not exist, which is indistinguishable from "the agent chose
- * not to use it".
+ * A private connection is visible only via `created_by = principal`
+ * (`authz/connection-visibility.ts`). A chat turn's principal is the member
+ * its sender is linked to (`gateway/orchestration/chat-turn-actor.ts`), so the
+ * creator's own linked chat messages reach it; a headless Automation run still
+ * acts as the AGENT OWNER (`workspace/multi-tenant.ts`), so only Automations
+ * on agents the creator owns do. Runs acting as another member return
+ * ZERO ROWS — not an error — and the agent behaves as if the connection does
+ * not exist.
  *
  * Forcing personal credentials to `private` is correct and is NOT changed here
  * (org-visible would expose that user's inbox org-wide). This only makes the
@@ -731,10 +731,10 @@ export function personalConnectionScopeWarning(params: {
   if (params.visibility !== 'private') return undefined;
   if (!isPersonalCredentialKind(params.profileKind)) return undefined;
   return (
-    'This personal connection is private to you. Agent runs resolve connections as ' +
-    'the AGENT OWNER, not the person who sent the message — so only agents YOU own ' +
-    'can use it. When you message an agent owned by another member, the lookup ' +
-    'returns nothing and the agent behaves as if this connection does not exist.'
+    'This personal connection is private to you. An agent can use it when you message ' +
+    'the agent from a chat account linked to your membership, and in Automations on ' +
+    'agents YOU own, which run as the AGENT OWNER. Runs that act as another member ' +
+    'find nothing, and the agent behaves as if this connection does not exist.'
   );
 }
 

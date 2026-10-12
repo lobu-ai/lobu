@@ -83,6 +83,34 @@ export async function resolveChatUserIdentity(
 }
 
 /**
+ * The member of `organizationId` a chat sender is, with their CURRENT role, or
+ * null when the sender is unlinked, ambiguous, or linked to a Lobu user who is
+ * not a member of that organization.
+ *
+ * The one place "chat sender → org member" is decided: approval clicks and the
+ * principal a chat turn acts as both call this, so they can never disagree
+ * about who a sender is. Callers layer their own role policy on the result.
+ */
+export async function resolveChatSenderMember(
+	platform: string,
+	teamId: string | undefined,
+	platformUserId: string,
+	organizationId: string,
+): Promise<{ userId: string; role: string } | null> {
+	const userId = await resolveChatUserIdentity(platform, teamId, platformUserId);
+	if (!userId) return null;
+	const rows = await getDb()<{ role: string }>`
+    SELECT m.role
+    FROM "member" m
+    WHERE m."userId" = ${userId}
+      AND m."organizationId" = ${organizationId}
+    LIMIT 2
+  `;
+	if (rows.length !== 1) return null;
+	return { userId, role: rows[0].role };
+}
+
+/**
  * The REVERSE lookup: the platform user id a Lobu user has on `platform`
  * within `teamId`, or null. Used to address an owner directly on a platform
  * one of the org's bot connections lives in.

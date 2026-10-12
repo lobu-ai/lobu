@@ -18,6 +18,7 @@ import { getDb } from '../db/client';
 import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import { getRevokedTokenStore } from '../gateway/auth/revoked-token-store';
 import { DEVICE_CHAT_RUN_SOURCE } from '../gateway/services/run-worker-access';
+import { CHAT_SENDER_NOT_LINKED, isChatSenderTurn } from '../gateway/orchestration/chat-turn-actor';
 import { resolveRestToolGetRoute } from '../http/rest-tool-routes';
 import type { Env } from '../index';
 import { checkApplyPause } from '../utils/deployment-pause';
@@ -357,13 +358,16 @@ export class MultiTenantProvider implements WorkspaceProvider {
           403
         );
       }
-      // For an admin-tools turn (per-run token carries `adminTools`), attribute
-      // the call to the verified Lobu auth subject (`adminActorUserId`, carried
-      // separately from the platform-scoped `userId`) rather than the agent's
-      // provisioning owner — so the role check and audit reflect the actual
-      // actor. Non-admin-tools worker direct-auth keeps the agent-owner attribution.
+      // Who the call acts as. `actorUserId` is the verified Lobu auth subject
+      // the server signed at mint, carried separately from the platform-scoped
+      // `userId`: the member a chat turn's sender is linked to, or the actor
+      // behind an admin-tools allowlist. A chat turn WITHOUT one is reply-only
+      // and refused here — never the agent owner, whose admin identity and
+      // private connections a stranger would otherwise borrow (see
+      // gateway/orchestration/chat-turn-actor.ts). Only headless turns, which
+      // have no sender, keep the agent-owner attribution.
       const isAdminToolsTurn = !!tokenData.adminTools?.length;
-      if (isAdminToolsTurn && !tokenData.adminActorUserId) {
+      if (isAdminToolsTurn && !tokenData.actorUserId) {
         return c.json(
           { error: 'invalid_token', error_description: 'Worker token missing admin-tools actor' },
           401,
@@ -372,10 +376,19 @@ export class MultiTenantProvider implements WorkspaceProvider {
           }
         );
       }
+      const chatSenderTurn = isChatSenderTurn(tokenData);
+      if (chatSenderTurn && !tokenData.actorUserId) {
+        return c.json(
+          { error: 'insufficient_scope', error_description: CHAT_SENDER_NOT_LINKED },
+          403
+        );
+      }
       const directAuthUserId =
-        tokenData.adminActorUserId ??
+        tokenData.actorUserId ??
         (agentRows[0]?.owner_user_id as string | undefined) ??
         tokenData.userId;
+      // Re-read on every request, so a member removed after the token was
+      // minted loses access at once rather than when the token expires.
       const roleRows = await sql`
         SELECT role
         FROM "member"
@@ -384,7 +397,16 @@ export class MultiTenantProvider implements WorkspaceProvider {
         LIMIT 1
       `;
       const directAuthRole = roleRows[0]?.role as string | undefined;
-      if (!directAuthRole || !['owner', 'admin'].includes(directAuthRole)) {
+      if (chatSenderTurn && !isAdminToolsTurn) {
+        // A chat sender acts with their OWN role; an ordinary member is
+        // admitted and the tool layer caps them at member access.
+        if (!directAuthRole) {
+          return c.json(
+            { error: 'insufficient_scope', error_description: CHAT_SENDER_NOT_LINKED },
+            403
+          );
+        }
+      } else if (!directAuthRole || !['owner', 'admin'].includes(directAuthRole)) {
         return c.json(
           { error: 'insufficient_scope', error_description: 'Agent owner is not an organization admin' },
           403

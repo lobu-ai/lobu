@@ -43,6 +43,8 @@ import {
   createTestOrganization,
   createTestPAT,
   createTestUser,
+  linkChatIdentityInGraph,
+  seedSystemEntityTypes,
 } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
 
@@ -1153,6 +1155,66 @@ describe('agent turn producer', () => {
     expect(envelope.turn.system_prompt.endsWith(
       `\n\nUse query_sdk before run_sdk.\n\nCurrent date: ${new Date().toISOString().slice(0, 10)}`,
     )).toBe(true);
+  });
+
+  it('makes an unlinked chat sender reply-only: no actor, no Lobu tools, and a link instruction', async () => {
+    const org = await createTestOrganization();
+    const fixture = mcpFixture();
+    await enqueueMessage({
+      ...messageFor(org.id),
+      userId: 'U0UNLINKED',
+      platform: 'slack',
+      platformMetadata: { connectionId: 'conn-slack-1', teamId: 'T0REPLYONLY' },
+    }, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: fixture.mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const envelope = run.action_input as {
+      turn: { tools?: { definitions?: unknown[] }; system_prompt: string; memory?: unknown };
+      credential: string;
+    };
+    expect(verifyWorkerToken(envelope.credential)).toMatchObject({ userId: 'U0UNLINKED', platform: 'slack' });
+    expect(verifyWorkerToken(envelope.credential)?.actorUserId).toBeUndefined();
+    // Nothing was discovered against a token the MCP lane would refuse.
+    expect(fixture.listed).toEqual([]);
+    expect(envelope.turn.tools?.definitions).toEqual([]);
+    expect(envelope.turn.memory).toBeUndefined();
+    expect(envelope.turn.system_prompt).toContain('## Workspace access');
+    expect(envelope.turn.system_prompt).toContain('sign in to Lobu with their Slack account');
+  });
+
+  it('signs a linked chat sender as the actor and discovers tools as that member', async () => {
+    await seedSystemEntityTypes();
+    const org = await createTestOrganization();
+    const member = await createTestUser({ email: 'turn-linked-member@example.test' });
+    await addUserToOrganization(member.id, org.id, 'member');
+    await linkChatIdentityInGraph({
+      organizationId: org.id, userId: member.id, platform: 'slack', teamId: 'T0LINKED', platformUserId: 'U0LINKED',
+    });
+    const fixture = mcpFixture();
+    await enqueueMessage({
+      ...messageFor(org.id),
+      userId: 'U0LINKED',
+      platform: 'slack',
+      // The bridge's top-level team is a routing key; the native team rides metadata.
+      teamId: 'slack:T0LINKED',
+      platformMetadata: { connectionId: 'conn-slack-1', teamId: 'T0LINKED' },
+    }, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: fixture.mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const envelope = run.action_input as { turn: { system_prompt: string }; credential: string };
+    expect(verifyWorkerToken(envelope.credential)).toMatchObject({ userId: 'U0LINKED', actorUserId: member.id });
+    expect(fixture.listed).toEqual([{ mcpId: 'lobu-memory', agentId: AGENT_ID, token: envelope.credential }]);
+    expect(envelope.turn.system_prompt).not.toContain('## Workspace access');
   });
 
   it('omits instructions from an MCP server with no tools', async () => {

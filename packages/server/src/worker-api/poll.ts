@@ -34,7 +34,10 @@ import {
 import {
   buildAutomationRunWorkerAccess,
   buildDeviceChatRunWorkerAccess,
+  DEVICE_CHAT_RUN_SOURCE,
 } from '../gateway/services/run-worker-access';
+import { resolveChatTurnActor } from '../gateway/orchestration/chat-turn-actor';
+import { buildWorkerTokenClaims } from '../gateway/orchestration/worker-token-claims';
 import {
   readSnapshotJsonl,
   transcriptText,
@@ -1589,6 +1592,20 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       expires_at: number;
     };
     try {
+      const platform =
+        typeof message?.platform === 'string' ? message.platform : undefined;
+      const teamId =
+        typeof message?.teamId === 'string' ? message.teamId : undefined;
+      // The device turn's chat sender decides its principal, exactly as for a
+      // cloud chat turn; an unlinked sender gets a reply-only session.
+      const actorUserId = await resolveChatTurnActor({
+        organizationId: row.organization_id,
+        senderId: userId,
+        claims: {
+          ...buildWorkerTokenClaims({ channelId, platform, teamId, platformMetadata }),
+          source: DEVICE_CHAT_RUN_SOURCE,
+        },
+      });
       const access = buildDeviceChatRunWorkerAccess({
         agentId: row.chat_agent_id,
         conversationId,
@@ -1596,11 +1613,10 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         organizationId: row.organization_id,
         userId,
         channelId,
-        platform:
-          typeof message?.platform === 'string' ? message.platform : undefined,
-        teamId:
-          typeof message?.teamId === 'string' ? message.teamId : undefined,
+        platform,
+        teamId,
         platformMetadata,
+        actorUserId,
       });
       agentSession = {
         conversation_id: access.conversationId,
