@@ -475,6 +475,22 @@ export function apiUrlToGatewayOrigin(url: string): string {
   }
 }
 
+/**
+ * Origin that serves the tool API (`/api/{org}/{tool}`) behind an MCP URL.
+ *
+ * The hosted MCP resource `https://lobu.ai/mcp` is an edge proxy for `/mcp`
+ * only (it is the RFC 8707 resource identifier, deliberately not the gateway
+ * host), so a tool call built from its origin answers 405. The hosted gateway
+ * serves the tool API behind it; every other installation serves both from
+ * one origin.
+ */
+export function toolApiOriginForMcpUrl(mcpUrl: string): string {
+  const origin = apiUrlToGatewayOrigin(mcpUrl);
+  return origin === apiUrlToGatewayOrigin(DEFAULT_LOBU_MCP_URL)
+    ? apiUrlToGatewayOrigin(DEFAULT_CONTEXT_URL)
+    : origin;
+}
+
 export async function findContextByUrl(
   apiUrl: string
 ): Promise<ResolvedContext | undefined> {

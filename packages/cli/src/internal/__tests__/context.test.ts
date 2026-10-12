@@ -20,6 +20,7 @@ import {
   loadContextConfig,
   removeContext,
   setActiveOrg,
+  toolApiOriginForMcpUrl,
 } from "../context";
 
 describe("context management", () => {
@@ -503,5 +504,23 @@ describe("context management", () => {
     expect(config.contexts.local).toEqual({
       url: "http://localhost:8787/api/v1",
     });
+  });
+
+  test("tool API origin: the hosted MCP edge maps to the hosted gateway", () => {
+    expect(toolApiOriginForMcpUrl("https://lobu.ai/mcp")).toBe(
+      "https://app.lobu.ai"
+    );
+    expect(toolApiOriginForMcpUrl("https://lobu.ai/mcp/acme")).toBe(
+      "https://app.lobu.ai"
+    );
+    expect(toolApiOriginForMcpUrl("https://app.lobu.ai/mcp/acme")).toBe(
+      "https://app.lobu.ai"
+    );
+    expect(toolApiOriginForMcpUrl("http://localhost:8787/mcp")).toBe(
+      "http://localhost:8787"
+    );
+    expect(
+      toolApiOriginForMcpUrl("https://gateway.test/lobu/mcp/lobu-memory")
+    ).toBe("https://gateway.test");
   });
 });

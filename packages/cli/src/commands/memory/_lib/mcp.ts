@@ -1,6 +1,7 @@
 import { MCP_PROTOCOL_VERSION } from "@lobu/core";
+import { toolApiOriginForMcpUrl } from "../../../internal/context.js";
 import { extractApiError } from "../../../internal/http.js";
-import { ApiError, wrongHostHint } from "./errors.js";
+import { ApiError } from "./errors.js";
 import {
   getUsableToken,
   orgFromMcpUrl,
@@ -137,7 +138,7 @@ async function mcpFetch(
     const hint =
       res.status === 401
         ? `${authContext}. Try --context <name> or run \`lobu context use <name>\`.`
-        : `${authContext}${wrongHostHint(res.status)}`;
+        : authContext;
     throw new ApiError(
       `MCP request failed via ${usedUrl}: ${res.status} ${res.statusText}${hint}`,
       res.status
@@ -239,7 +240,7 @@ export async function mcpRpc(
 }
 
 /**
- * Shared REST-proxy call against `{origin}/api/{orgSlug}/{path}`, reusing the
+ * Shared REST-proxy call against `{tool API origin}/api/{orgSlug}/{path}`, reusing the
  * same auth resolution and localhost/docker-host fallback as `mcpRpc`. Returns
  * the raw handler result as parsed JSON (no MCP envelope). Throws `ApiError` on
  * non-2xx, surfacing the server's `{ error }` message when present.
@@ -271,8 +272,7 @@ async function restCall<T>(
     throw new ApiError(opts.noOrgMessage(mcpUrl));
   }
 
-  const baseUrl = new URL(mcpUrl).origin;
-  const endpoint = `${baseUrl}/api/${orgSlug}/${path}`;
+  const endpoint = `${toolApiOriginForMcpUrl(mcpUrl)}/api/${orgSlug}/${path}`;
 
   const { response: res, usedUrl } = await fetchMcpWithFallback(endpoint, {
     method: opts.method,
@@ -300,7 +300,7 @@ async function restCall<T>(
     const hint =
       res.status === 401
         ? `${authContext}. Try --context <name> or run \`lobu context use <name>\`.`
-        : `${authContext}${wrongHostHint(res.status)}`;
+        : authContext;
     throw new ApiError(
       `${opts.failureLabel} failed via ${usedUrl}: ${message}${hint}`,
       res.status

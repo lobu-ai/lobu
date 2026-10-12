@@ -7,7 +7,7 @@ import type {
 } from "../../_lib/apply/desired-state.js";
 import { loadDesiredStateFromConfig } from "../../_lib/apply/desired-state.js";
 import { isPlatformOwnedRelationshipSlug } from "../../_lib/platform-owned-types.js";
-import { ApiError, ValidationError, wrongHostHint } from "./errors.js";
+import { ApiError, ValidationError } from "./errors.js";
 import {
   getSessionForOrg,
   getUsableToken,
@@ -16,6 +16,7 @@ import {
   resolveOrg,
   resolveServerUrl,
 } from "./memory-auth.js";
+import { toolApiOriginForMcpUrl } from "../../../internal/context.js";
 import { printError, printText } from "../../../internal/output.js";
 import {
   type DataRecordType,
@@ -139,14 +140,6 @@ function loadDataRecords(dataPath: string): ParsedDataRecord[] {
   }));
 }
 
-function deriveApiBaseUrl(mcpUrl: string): string {
-  const url = new URL(mcpUrl);
-  url.pathname = "";
-  url.search = "";
-  url.hash = "";
-  return url.toString().replace(/\/+$/, "");
-}
-
 export async function callTool(
   ctx: SeedContext,
   toolName: string,
@@ -176,7 +169,7 @@ export async function callTool(
     throw new ApiError(
       res.ok
         ? `Invalid JSON from ${toolName} via ${url}: ${detail}`
-        : `${toolName} failed via ${url}: ${detail}${wrongHostHint(res.status)}`,
+        : `${toolName} failed via ${url}: ${detail}`,
       res.status
     );
   }
@@ -515,7 +508,7 @@ export async function seedMemoryWorkspace(
     orgOverride,
     opts.context
   );
-  const apiBaseUrl = deriveApiBaseUrl(mcpUrl);
+  const apiBaseUrl = toolApiOriginForMcpUrl(mcpUrl);
   const dryRun = opts.dryRun ?? false;
   const ctx: SeedContext = { apiBaseUrl, orgSlug, token, dryRun };
 

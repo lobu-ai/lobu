@@ -2,7 +2,7 @@ import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { MCP_PROTOCOL_VERSION } from "@lobu/core";
 import * as internal from "../../../internal/index.js";
 import { memoryRunCommand } from "../run.js";
-import { mcpRpc } from "./mcp.js";
+import { mcpRpc, restToolCall } from "./mcp.js";
 import {
   getSessionForOrg,
   getUsableToken,
@@ -19,7 +19,7 @@ function mockProdMemoryContext() {
     source: "config",
   });
   spyOn(internal, "getMemoryUrl").mockImplementation(async () => CLOUD_MCP_URL);
-  spyOn(internal, "getActiveOrg").mockImplementation(async () => "buremba");
+  spyOn(internal, "getActiveOrg").mockImplementation(async () => "acme");
   spyOn(internal, "findContextByMemoryUrl").mockResolvedValue({
     name: "lobu",
     url: "https://app.lobu.ai/api/v1",
@@ -64,11 +64,11 @@ describe("memory auth URL resolution", () => {
   test("getUsableToken keeps the active context when memory URL matches", async () => {
     mockProdMemoryContext();
 
-    const result = await getUsableToken("https://lobu.ai/mcp/buremba");
+    const result = await getUsableToken("https://lobu.ai/mcp/acme");
 
     expect(result?.token).toBe("prod-token");
     expect(result?.contextName).toBe("prod");
-    expect(result?.session.org).toBe("buremba");
+    expect(result?.session.org).toBe("acme");
     expect(internal.findContextByMemoryUrl).not.toHaveBeenCalled();
   });
 
@@ -114,7 +114,7 @@ describe("memory auth URL resolution", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     try {
-      await memoryRunCommand(undefined, undefined, { org: "buremba" });
+      await memoryRunCommand(undefined, undefined, { org: "acme" });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -122,6 +122,37 @@ describe("memory auth URL resolution", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(writeSpy).toHaveBeenCalledWith(
       expect.stringContaining("search_memory")
+    );
+  });
+
+  test("tool calls on the hosted MCP URL go to the hosted gateway", async () => {
+    mockProdMemoryContext();
+    const originalFetch = globalThis.fetch;
+    const fetchMock = mock(
+      async (_url: string, _init?: RequestInit) =>
+        new Response(JSON.stringify({ ok: true }), { status: 200 })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      await restToolCall("https://lobu.ai/mcp/acme", "manage_connections", {
+        action: "list",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://app.lobu.ai/api/acme/manage_connections",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer prod-token",
+        },
+        body: JSON.stringify({ action: "list" }),
+      }
     );
   });
 
@@ -138,7 +169,7 @@ describe("memory auth URL resolution", () => {
 
     try {
       await expect(
-        mcpRpc("https://lobu.ai/mcp/buremba", "tools/list")
+        mcpRpc("https://lobu.ai/mcp/acme", "tools/list")
       ).rejects.toThrow(/using context "prod"/);
     } finally {
       globalThis.fetch = originalFetch;
@@ -204,7 +235,7 @@ describe("memory auth URL resolution", () => {
       let code: number | undefined;
       try {
         code = await runWithExitBaseline(async () => {
-          await memoryRunCommand("search_memory", "{}", { org: "buremba" });
+          await memoryRunCommand("search_memory", "{}", { org: "acme" });
         });
       } finally {
         restore();
@@ -223,7 +254,7 @@ describe("memory auth URL resolution", () => {
       try {
         code = await runWithExitBaseline(async () => {
           await memoryRunCommand("run_sdk", JSON.stringify({ script: "x" }), {
-            org: "buremba",
+            org: "acme",
           });
         });
       } finally {
@@ -241,7 +272,7 @@ describe("memory auth URL resolution", () => {
       try {
         code = await runWithExitBaseline(async () => {
           await memoryRunCommand("run_sdk", JSON.stringify({ script: "x" }), {
-            org: "buremba",
+            org: "acme",
           });
         });
       } finally {
