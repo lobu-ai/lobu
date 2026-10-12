@@ -582,6 +582,9 @@ function normalizedSearchResults(
       occurred_at: message.occurred_at,
       from_me: message.from_me,
       sender_jid: message.sender_jid ?? null,
+      sender_phone: message.sender_phone ?? null,
+      push_name: message.push_name ?? null,
+      is_group: message.is_group,
       quoted_id: message.quoted_id ?? null,
     });
   }
@@ -608,7 +611,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.7",
+    version: "1.0.8",
     faviconDomain: "whatsapp.com",
     authSchema: { methods: [{ type: "browser", mode: "live" }] },
     browser: {
@@ -1256,6 +1259,9 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         { name: "occurred_at", type: "string" },
         { name: "from_me", type: "boolean" },
         { name: "sender_jid", type: "string" },
+        { name: "sender_phone", type: "string" },
+        { name: "push_name", type: "string" },
+        { name: "is_group", type: "boolean" },
         { name: "quoted_id", type: "string" },
       ],
       nextCursor: response.nextCursor,

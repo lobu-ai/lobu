@@ -185,6 +185,25 @@ describe("WhatsApp live source reads", () => {
     expect(page.calls.some((call) => call.action === "feed_listen")).toBe(false);
   });
 
+  it("returns sender identity on live rows so subscribers need no synced copy", async () => {
+    const page = makeDispatcher({
+      probe: READY,
+      read_messages: { ok: true, results: [
+        message("inbound"),
+        message("group", { chat_jid: "120363000000000000@g.us", sender_jid: "15557654321@s.whatsapp.net", push_name: "Bob" }),
+        message("outbound", { from_me: true }),
+      ], hasMore: false },
+    });
+    const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null, browser: page.dispatcher });
+    expect(result.rows).toMatchObject([
+      { id: "inbound", push_name: "Alice", sender_phone: "15551234567", is_group: false },
+      { id: "group", push_name: "Bob", sender_phone: "15557654321", is_group: true },
+      { id: "outbound", push_name: null, sender_phone: null, is_group: false },
+    ]);
+    const columns = result.columns?.map((column) => column.name);
+    expect(columns).toEqual(expect.arrayContaining(["push_name", "sender_phone", "is_group"]));
+  });
+
   it("preserves the continuation of an empty filtered page", async () => {
     const page = makeDispatcher({ probe: READY,
       read_messages: { ok: true, results: [], nextCursor: "next-page", hasMore: true },
@@ -928,8 +947,8 @@ describe("sync over the generic chrome bridge", () => {
     );
   });
 
-  it("bumps the WhatsApp connector version for source subscriptions", () => {
-    expect(connector.definition.version).toBe("1.0.7");
+  it("bumps the WhatsApp connector version for live sender fields", () => {
+    expect(connector.definition.version).toBe("1.0.8");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
