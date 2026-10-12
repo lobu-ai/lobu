@@ -760,7 +760,11 @@ export async function createAuth(
 						),
 					});
 				},
-				expiresIn: 60 * 15, // 15 minutes
+				expiresIn: 60 * 15, // 15 minutes — time box for the link
+				// Tolerate Gmail/Defender prefetch burning the first GET
+				// (scanner + user click). Each verify still mints a session,
+				// so keep this low; long-term fix is POST-confirm or OTP.
+				allowedAttempts: 3,
 			}),
 
 			// Phone number authentication via WhatsApp
