@@ -14,7 +14,11 @@ import {
   getConfiguredPublicOrigin,
   getConfiguredSubdomainZone,
 } from './utils/public-origin';
-import { RESERVED_PATHS_SET } from './utils/reserved';
+import {
+  OWNER_ROUTE_SEGMENTS,
+  REMOVED_OWNER_SEGMENTS,
+  RESERVED_PATHS_SET,
+} from './utils/reserved';
 
 interface PublicOrganization {
   id: string;
@@ -99,13 +103,16 @@ interface SitemapEntry {
 const PUBLIC_HTML_CACHE_CONTROL = 'public, max-age=300, stale-while-revalidate=86400';
 const PUBLIC_XML_CACHE_CONTROL = 'public, max-age=1800, stale-while-revalidate=86400';
 const PUBLIC_LIST_LIMIT = 50;
-const PUBLIC_APP_ROUTE_PREFIXES = new Set([
-  'agents',
-  'automations',
-  'connectors',
-  'events',
-  'members',
+// Owner-level app sections (and removed legacy pages) the SPA owns: new entity
+// types cannot take these slugs and the SPA splat guard 404s old ones, so a
+// path through one is never public content.
+const PUBLIC_APP_ROUTE_PREFIXES: ReadonlySet<string> = new Set([
+  ...OWNER_ROUTE_SEGMENTS,
+  ...REMOVED_OWNER_SEGMENTS,
 ]);
+// Top-level SPA routes that stay outside `/$owner` on an org subdomain; mirrors
+// NON_OWNER_TOP_LEVELS in packages/owletto/src/lib/subdomain-history.ts.
+const SUBDOMAIN_GLOBAL_ROUTES: ReadonlySet<string> = new Set(['auth', 'oauth', 'account', 'me']);
 
 function getPublicOrigin(requestUrl: string): string {
   return getConfiguredPublicOrigin() ?? new URL(requestUrl).origin;
@@ -995,6 +1002,10 @@ export async function buildPublicPageModel(
   subdomainOrg?: string | null
 ): Promise<PublicPageModel | null> {
   const rawPath = `/${path.replace(/^\/+|\/+$/g, '')}`;
+  // Global routes on org subdomains belong to the SPA. Prefixing them first
+  // would resolve /account/settings as an entity path and cache a public 404
+  // for an otherwise valid app page.
+  if (subdomainOrg && SUBDOMAIN_GLOBAL_ROUTES.has(rawPath.split('/')[1] ?? '')) return null;
   // On a subdomain host, synthesize the owner segment when the request path
   // doesn't already carry it, so downstream segment-based routing works
   // identically to the canonical-host (`app.lobu.ai/{org}/...`) form.
