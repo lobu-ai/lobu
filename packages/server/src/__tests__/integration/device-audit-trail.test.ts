@@ -7,6 +7,7 @@
 import { Hono } from 'hono';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { AuthInfo } from '../../auth/oauth/types';
+import { PersonalAccessTokenService } from '../../auth/tokens';
 import type { Env } from '../../index';
 import { reapStaleDeviceWorkers } from '../../scheduled/reap-stale-device-workers';
 import {
@@ -230,5 +231,101 @@ describe('device audit trail', () => {
     const [activePat] = await patIds(active.user.id, 'headless:shared-name');
     expect(stalePat.revoked_at).not.toBeNull();
     expect(activePat.revoked_at).toBeNull();
+  });
+  it('revokes device PATs whose device is gone after 30 idle days, and only those', async () => {
+    const sql = getTestDb();
+    const owner = await personalUser('audit-orphan@test.example.com');
+    const other = await personalUser('audit-orphan-other@test.example.com');
+    const mint = async (who: string, workerId: string) => {
+      const response = await deviceApp(who)('POST', '/api/me/devices/mint-child-token', {
+        platform: 'headless', worker_id: workerId,
+      });
+      expect(response.status).toBe(200);
+    };
+    await mint(owner.user.id, 'headless:orphan-old');
+    await mint(owner.user.id, 'headless:orphan-recent');
+    await mint(owner.user.id, 'headless:still-paired');
+    await mint(other.user.id, 'headless:orphan-old');
+    // Orphan two of the owner's tokens the way pre-revocation deletes did:
+    // the device row goes, the PAT stays live.
+    await sql`
+      DELETE FROM device_workers
+      WHERE user_id = ${owner.user.id} AND worker_id IN ('headless:orphan-old', 'headless:orphan-recent')
+    `;
+    await sql`
+      UPDATE personal_access_tokens
+      SET created_at = now() - interval '60 days', last_used_at = now() - interval '31 days'
+      WHERE worker_id IN ('headless:orphan-old', 'headless:still-paired')
+    `;
+    await sql`
+      UPDATE personal_access_tokens
+      SET created_at = now() - interval '60 days', last_used_at = now() - interval '1 day'
+      WHERE user_id = ${owner.user.id} AND worker_id = 'headless:orphan-recent'
+    `;
+
+    const result = await reapStaleDeviceWorkers();
+
+    expect(result.orphanedTokens).toBe(1);
+    const [old] = await patIds(owner.user.id, 'headless:orphan-old');
+    const [recent] = await patIds(owner.user.id, 'headless:orphan-recent');
+    const [paired] = await patIds(owner.user.id, 'headless:still-paired');
+    const [othersSameId] = await patIds(other.user.id, 'headless:orphan-old');
+    expect(old.revoked_at).not.toBeNull();
+    // Used within 30 days: may still re-create its device by polling.
+    expect(recent.revoked_at).toBeNull();
+    // Idle, but its device still exists: the stale-device path owns it.
+    expect(paired.revoked_at).toBeNull();
+    // Same worker_id, different user, device present.
+    expect(othersSameId.revoked_at).toBeNull();
+    const audit = await auditRows('access_token_deleted', String(old.id));
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ organization_id: owner.org.id, created_by: null });
+    expect(audit[0].metadata.extra).toMatchObject({ reason: 'orphaned' });
+  });
+
+  it('handles never-used, expired, revoked, and unbound orphan tokens idempotently', async () => {
+    const sql = getTestDb();
+    const { user, org } = await personalUser('audit-orphan-eligibility@test.example.com');
+    const tokens = new PersonalAccessTokenService(sql);
+    const cases = [
+      { name: 'legacy-never-used', ageDays: 60, expired: false, revoked: false, bound: true, reap: true },
+      { name: 'fresh-never-used', ageDays: 1, expired: false, revoked: false, bound: true, reap: false },
+      { name: 'already-expired', ageDays: 60, expired: true, revoked: false, bound: true, reap: false },
+      { name: 'already-revoked', ageDays: 60, expired: false, revoked: true, bound: true, reap: false },
+      { name: 'ordinary-pat', ageDays: 60, expired: false, revoked: false, bound: false, reap: false },
+    ];
+    for (const fixture of cases) {
+      const token = await tokens.create(user.id, org.id, fixture.name, {
+        workerId: fixture.bound ? `headless:${fixture.name}` : undefined,
+      });
+      // These legacy tokens have never polled or registered a device row.
+      await sql`
+        UPDATE personal_access_tokens
+        SET created_at = now() - ${fixture.ageDays} * interval '1 day',
+            expires_at = CASE WHEN ${fixture.expired} THEN now() - interval '1 day' ELSE NULL END,
+            revoked_at = CASE WHEN ${fixture.revoked} THEN now() - interval '1 day' ELSE NULL END
+        WHERE id = ${token.id}
+      `;
+    }
+    const snapshot = () => sql`
+      SELECT id, name, revoked_at FROM personal_access_tokens
+      WHERE user_id = ${user.id} ORDER BY id
+    `;
+    const before = await snapshot();
+
+    expect((await reapStaleDeviceWorkers()).orphanedTokens).toBe(1);
+    const after = await snapshot();
+    for (const [index, fixture] of cases.entries()) {
+      if (fixture.reap) {
+        expect(after[index].revoked_at).not.toBeNull();
+        const audit = await auditRows('access_token_deleted', String(after[index].id));
+        expect(audit).toHaveLength(1);
+        expect(audit[0].metadata.extra).toMatchObject({ reason: 'orphaned' });
+      } else {
+        expect(after[index]).toEqual(before[index]);
+      }
+    }
+    expect((await reapStaleDeviceWorkers()).orphanedTokens).toBe(0);
+    expect(await snapshot()).toEqual(after);
   });
 });
