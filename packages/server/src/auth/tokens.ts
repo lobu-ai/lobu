@@ -10,6 +10,38 @@ import type { DbClient } from '../db/client';
 import type { AuthInfo, PATCreateResponse, PATListItem, StoredPAT } from './oauth/types';
 import { AVAILABLE_SCOPES, POLICY_WRITE_SCOPE } from './oauth/scopes';
 import { calculateExpiry, generatePAT, getPATPrefix, hashToken, parseScopes } from './oauth/utils';
+import { recordLifecycleEvent } from '../utils/insert-event';
+
+/** The PAT columns the audit trail records. Never the token or its hash. */
+export interface AuditedAccessToken {
+  id: number;
+  organization_id: string | null;
+  name: string;
+  worker_id?: string | null;
+}
+
+/**
+ * Record a PAT mint (`created`) or revocation (`deleted`) in the token's
+ * workspace audit trail. Call it after the write commits; `reason` says which
+ * path did it (`api`, `local-init`, `device-mint`, `device-deleted`, …).
+ */
+export function recordAccessTokenEvent(
+  op: 'created' | 'deleted',
+  token: AuditedAccessToken,
+  actorUserId: string | null,
+  reason: string
+): void {
+  if (!token.organization_id) return;
+  recordLifecycleEvent({
+    organizationId: token.organization_id,
+    entityType: 'access_token',
+    op,
+    entityId: token.id,
+    summary: `Access token "${token.name}" ${op === 'created' ? 'created' : 'revoked'}`,
+    extra: { reason, worker_id: token.worker_id ?? null },
+    createdBy: actorUserId,
+  });
+}
 
 /**
  * Personal Access Token Service

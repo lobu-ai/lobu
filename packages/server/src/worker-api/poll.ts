@@ -635,6 +635,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           entityId: upserted[0].id,
           summary: `Device "${label ?? worker_id}" registered`,
           extra: { platform, worker_id, app_version },
+          createdBy: registrationUserId,
         });
       }
 

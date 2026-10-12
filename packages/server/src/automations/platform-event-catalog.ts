@@ -59,7 +59,7 @@ export function withPlatformAutomationEvents<T extends { key: string }>(
 // Workspace source: the audit funnel's vocabulary
 // ============================================
 
-/** Transitions every config- and lifecycle-shaped subject reports. */
+/** Standard transitions for config- and lifecycle-shaped subjects. */
 const CRUD_OPS = ["created", "updated", "deleted"] as const;
 
 /**
@@ -71,6 +71,8 @@ const CRUD_OPS = ["created", "updated", "deleted"] as const;
  * listed here is a compile error rather than an event nothing can subscribe to.
  */
 export const AUDIT_LIFECYCLE_SUBJECTS = [
+	// Personal access tokens: minted (`created`) and revoked (`deleted`).
+	"access_token",
 	"agent",
 	"automation",
 	"client",
@@ -109,7 +111,11 @@ function buildWorkspacePlatformEventTypes(): Map<string, string> {
 		add(subject, CRUD_OPS, `Workspace identity — ${subject}`);
 	}
 	for (const subject of AUDIT_LIFECYCLE_SUBJECTS) {
-		add(subject, CRUD_OPS, `Platform object — ${subject}`);
+		add(
+			subject,
+			subject === "access_token" ? ["created", "deleted"] : CRUD_OPS,
+			`Platform object — ${subject}`,
+		);
 	}
 	// Entity rows report under one subject; `entity_type` on the trigger is what
 	// narrows a subscription to invoices or tickets. Only `updated` is emitted —

@@ -301,9 +301,9 @@ describe('device mint (mint-child-token)', () => {
 
     expect((await mint()).status).toBe(200);
 
-    // `deleteDeviceWorker` ("forget this device" on the Devices page) drops the
-    // row WITHOUT revoking the PAT bound to that worker_id. Re-registering the
-    // same id must not then leave two live credentials polling as one device.
+    // A device row can be gone while its PAT is still live (devices forgotten
+    // before deletion revoked bound PATs). Re-registering the same id must not
+    // then leave two live credentials polling as one device.
     await sql`
       DELETE FROM device_workers
       WHERE user_id = ${user.id} AND worker_id = 'headless:forgotten-box'

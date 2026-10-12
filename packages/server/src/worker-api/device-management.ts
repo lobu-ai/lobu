@@ -15,7 +15,11 @@ import type { Context } from 'hono';
 import { createAuth } from '../auth';
 import { canMintWebSession } from '../auth/oauth/scopes';
 import { findExistingPersonalOrg } from '../auth/personal-org-provisioning';
-import { PersonalAccessTokenService } from '../auth/tokens';
+import {
+  type AuditedAccessToken,
+  PersonalAccessTokenService,
+  recordAccessTokenEvent,
+} from '../auth/tokens';
 import { getDb, parsePgTextArray, pgBigintArray } from '../db/client';
 import type { Env } from '../index';
 import { captureServerError } from '../diagnostics';
@@ -375,9 +379,13 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
       VALUES (${userId}, ${workerId}, ${platform}, ${db.json([])}, ${label}, ${organizationId})
       ON CONFLICT (user_id, worker_id) DO UPDATE
         SET last_seen_at = NOW()
-    `;
+      RETURNING id, (xmax = 0) AS inserted
+    ` as unknown as Promise<Array<{ id: string; inserted: boolean }>>;
 
-    let created: { id: number; token: string; expires_at: Date | null } | null;
+    type Minted = { id: number; name: string; token: string; expires_at: Date | null };
+    let created: Minted | null;
+    let device: { id: string; inserted: boolean } | undefined;
+    let revoked: AuditedAccessToken[] = [];
     // Any exact requested identity — fresh or reused — takes the same advisory
     // lock and re-checks under it. Without this, two replicas can both observe
     // a new CLI wizard id as absent, mint two live PATs, and only then race the
@@ -411,7 +419,7 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
         // lock order the reaper uses (DELETE device_workers → UPDATE PATs),
         // which avoids a cross-transaction deadlock when both touch the same
         // stale reused device at once.
-        await upsertDeviceWorker(tx);
+        [device] = await upsertDeviceWorker(tx);
         const minted = await new PersonalAccessTokenService(tx).create(
           userId,
           organizationId,
@@ -424,19 +432,20 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
           }
         );
         // Revoke on EVERY exact-identity path, not just the reuse one: a device
-        // deleted from the Devices page drops its `device_workers` row without
-        // revoking the PAT bound to that worker_id, so re-registering the same
-        // id would otherwise leave two live credentials polling as one device.
+        // row can be gone while its PAT is still live (devices forgotten before
+        // deletion revoked bound PATs), so re-registering the same id would
+        // otherwise leave two live credentials polling as one device.
         // When the cross-platform fallback above swapped in a fresh uuid this
         // matches nothing, which is exactly right.
-        await tx`
+        revoked = (await tx`
           UPDATE personal_access_tokens
           SET revoked_at = NOW(), updated_at = NOW()
           WHERE user_id = ${userId}
             AND worker_id = ${workerId}
             AND id <> ${minted.id}
             AND revoked_at IS NULL
-        `;
+          RETURNING id, organization_id, name, worker_id
+        `) as unknown as AuditedAccessToken[];
         return minted;
       });
     } else {
@@ -453,10 +462,32 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
       );
       // Fresh row — no staleness to race against, so the upsert runs outside a
       // transaction (the INSERT sets last_seen_at = NOW() via the column default).
-      await upsertDeviceWorker(sql);
+      [device] = await upsertDeviceWorker(sql);
     }
     if (!created) {
       return c.json(CHILD_SELF_MINT_ONLY, 403);
+    }
+    // Poll only records a device it inserts itself, so a device paired here is
+    // audited here: by the time it polls, its row already exists.
+    if (device?.inserted) {
+      recordLifecycleEvent({
+        organizationId,
+        entityType: 'device',
+        op: 'created',
+        entityId: device.id,
+        summary: `Device "${label ?? workerId}" registered`,
+        extra: { platform, worker_id: workerId, via: 'mint-child-token' },
+        createdBy: userId,
+      });
+    }
+    recordAccessTokenEvent(
+      'created',
+      { id: created.id, organization_id: organizationId, name: created.name, worker_id: workerId },
+      userId,
+      'device-mint'
+    );
+    for (const token of revoked) {
+      recordAccessTokenEvent('deleted', token, userId, 'device-remint');
     }
 
     // Also mint a Better Auth session token for a Chrome sibling. Its side
@@ -594,11 +625,16 @@ export async function updateDeviceWorkerOrg(c: Context<{ Bindings: Env }>) {
 
     const updated = await sql.begin(async (tx) => {
       const owned = (await tx`
-        SELECT organization_id FROM device_workers WHERE id = ${deviceWorkerId} AND user_id = ${userId} LIMIT 1
-      `) as unknown as Array<{ organization_id: string | null }>;
-      if (owned.length === 0) return false;
+        SELECT organization_id, label, worker_id FROM device_workers
+        WHERE id = ${deviceWorkerId} AND user_id = ${userId}
+        LIMIT 1
+        FOR UPDATE
+      `) as unknown as Array<{ organization_id: string | null; label: string | null; worker_id: string }>;
+      if (owned.length === 0) return null;
+      const before = owned[0];
+      const moved = organizationId !== null && before.organization_id !== organizationId;
 
-      if (organizationId && owned[0].organization_id !== organizationId) {
+      if (moved) {
         const affected = (await tx`
           UPDATE connections
           SET device_worker_id = NULL,
@@ -625,10 +661,38 @@ export async function updateDeviceWorkerOrg(c: Context<{ Bindings: Env }>) {
           WHERE id = ${deviceWorkerId} AND user_id = ${userId}
         `;
       }
-      return true;
+      return { before, moved };
     });
     if (!updated) {
       return c.json({ error: 'Device not found or not owned by you' }, 404);
+    }
+    const { before, moved } = updated;
+    const renamed = hasLabel && (nextLabel ?? null) !== before.label;
+    const name = (hasLabel ? nextLabel : before.label) ?? before.worker_id;
+    const extra = {
+      worker_id: before.worker_id,
+      ...(moved ? { from_organization_id: before.organization_id, to_organization_id: organizationId } : {}),
+      ...(renamed ? { label_from: before.label, label_to: nextLabel ?? null } : {}),
+    };
+    // A move is recorded in both workspaces: the one that lost the device and
+    // the one that gained it.
+    const auditOrgs = new Set(
+      moved || renamed
+        ? [before.organization_id, moved ? organizationId : null].filter((id): id is string => !!id)
+        : []
+    );
+    for (const auditOrg of auditOrgs) {
+      recordLifecycleEvent({
+        organizationId: auditOrg,
+        entityType: 'device',
+        op: 'updated',
+        entityId: deviceWorkerId,
+        summary: moved
+          ? `Device "${name}" moved ${auditOrg === organizationId ? 'into this workspace' : 'to another workspace'}`
+          : `Device "${name}" renamed`,
+        extra,
+        createdBy: userId,
+      });
     }
     return c.json({ ok: true, ...(hasLabel ? { label: nextLabel ?? null } : {}) });
   } catch (err: unknown) {
@@ -644,8 +708,9 @@ export async function updateDeviceWorkerOrg(c: Context<{ Bindings: Env }>) {
  * 409 (listing the blockers) while active Automations are pinned to the device;
  * archived Automations are un-pinned. Connections pinned to it are un-pinned and
  * paused — they can't run anywhere without the device — and their active feeds
- * are paused. If the device app is still running it re-registers on its next
- * heartbeat as a fresh device.
+ * are paused. PATs bound to the device are revoked. A device signed in with
+ * an OAuth device grant re-registers on its next heartbeat as a fresh device;
+ * one running on a revoked PAT must be paired again.
  */
 export async function deleteDeviceWorker(c: Context<{ Bindings: Env }>) {
   const userId = c.var.user?.id;
@@ -716,7 +781,18 @@ export async function deleteDeviceWorker(c: Context<{ Bindings: Env }>) {
         `;
       }
       await tx`DELETE FROM device_workers WHERE id = ${deviceWorkerId} AND user_id = ${userId}`;
-      return { kind: 'deleted', device: owned[0] } as const;
+      // Revoke the forgotten device's bound PATs. Same lock order as the
+      // stale-device reaper: the device row first, then its PATs. An OAuth
+      // device grant carries no worker binding, so it is untouched here.
+      const revokedTokens = (await tx`
+        UPDATE personal_access_tokens
+        SET revoked_at = NOW(), updated_at = NOW()
+        WHERE user_id = ${userId}
+          AND worker_id = ${owned[0].worker_id}
+          AND revoked_at IS NULL
+        RETURNING id, organization_id, name, worker_id
+      `) as unknown as AuditedAccessToken[];
+      return { kind: 'deleted', device: owned[0], revokedTokens } as const;
     });
     if (result.kind === 'not_found') {
       return c.json({ error: 'Device not found or not owned by you' }, 404);
@@ -746,7 +822,12 @@ export async function deleteDeviceWorker(c: Context<{ Bindings: Env }>) {
         op: 'deleted',
         entityId: deviceWorkerId,
         summary: `Device "${result.device.label ?? result.device.worker_id}" removed`,
+        extra: { worker_id: result.device.worker_id, revoked_tokens: result.revokedTokens.length },
+        createdBy: userId,
       });
+    }
+    for (const token of result.revokedTokens) {
+      recordAccessTokenEvent('deleted', token, userId, 'device-deleted');
     }
     return c.json({ ok: true });
   } catch (err: unknown) {

@@ -88,7 +88,7 @@ describe('T2 — default PAT scope omits connections:token (real mint route)', (
 
     expect(res.status).toBe(201);
     const created = (await res.json()) as {
-      token: { token: string; scope: string | null };
+      token: { id: number; token: string; scope: string | null };
     };
     expect(created.token.token.startsWith('owl_pat_')).toBe(true);
     // The advertised scope is the default and excludes connections:token.
@@ -107,5 +107,17 @@ describe('T2 — default PAT scope omits connections:token (real mint route)', (
     // Sanity: the default mcp scopes are present.
     expect(storedScopes).toContain('mcp:read');
     expect(storedScopes).toContain('mcp:write');
+
+    // The mint is in the workspace audit trail, attributed to its creator.
+    let audit: Array<{ organization_id: string; created_by: string | null }> = [];
+    for (let i = 0; i < 60 && audit.length === 0; i++) {
+      audit = (await sql`
+        SELECT organization_id, created_by FROM events
+        WHERE origin_type = 'access_token_created'
+          AND metadata->>'entity_id' = ${String(created.token.id)}
+      `) as unknown as typeof audit;
+      if (audit.length === 0) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(audit).toEqual([{ organization_id: org.id, created_by: owner.id }]);
   });
 });

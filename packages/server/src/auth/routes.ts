@@ -27,7 +27,7 @@ import {
   DEFAULT_SCOPES_STRING,
   POLICY_WRITE_SCOPE,
 } from './oauth/scopes';
-import { PersonalAccessTokenService } from './tokens';
+import { PersonalAccessTokenService, recordAccessTokenEvent } from './tokens';
 
 const credentialRoutes = new Hono<{ Bindings: Env }>();
 
@@ -213,6 +213,12 @@ credentialRoutes.post('/:orgSlug/tokens', mcpAuth, async (c) => {
       scope,
       expiresInDays: normalizeExpiryDays(body.expiresInDays),
     });
+    recordAccessTokenEvent(
+      'created',
+      { id: token.id, organization_id: authorized.organizationId, name },
+      authorized.user.id,
+      'api'
+    );
     return c.json({ token }, 201);
   } catch (error) {
     return c.json({ error: errorMessage(error) }, 400);
@@ -949,6 +955,12 @@ credentialRoutes.post('/local-init', async (c) => {
       // by the agent-session and userinfo endpoints with a confusing 403/404.
       scope: 'device_worker:run mcp:read mcp:write mcp:admin profile:read',
     }
+  );
+  recordAccessTokenEvent(
+    'created',
+    { id: workerPat.id, organization_id: org.id, name: workerPat.name },
+    user.id,
+    'local-init'
   );
 
   return c.json({

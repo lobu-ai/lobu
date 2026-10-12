@@ -48,6 +48,12 @@ describe('platform event catalog', () => {
     expect(Object.keys(platformEventKinds())).not.toContain('change');
   });
 
+  test('offers token creation and revocation without an unimplemented update event', () => {
+    expect(isPlatformEventType('access_token.created')).toBe(true);
+    expect(isPlatformEventType('access_token.deleted')).toBe(true);
+    expect(isPlatformEventType('access_token.updated')).toBe(false);
+  });
+
   test('rejects malformed and unknown names', () => {
     expect(isPlatformEventType('device.onlien')).toBe(false);
     expect(isPlatformEventType('device')).toBe(false);

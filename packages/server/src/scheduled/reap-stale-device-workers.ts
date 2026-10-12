@@ -26,7 +26,9 @@
  * pure Postgres, so it's correct under N>1 app replicas.
  */
 
+import { type AuditedAccessToken, recordAccessTokenEvent } from '../auth/tokens';
 import { getDb, pgTextArray } from '../db/client';
+import { recordLifecycleEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
 
 export async function reapStaleDeviceWorkers(): Promise<{
@@ -83,7 +85,8 @@ export async function reapStaleDeviceWorkers(): Promise<{
   //    "malformed array literal" under postgres.js's extended-protocol path
   //    (see the note in worker-api/device-reconcile.ts). UUIDs are canonical
   //    lowercase, so text equality matches the uuid form 1:1.
-  const deleted = await sql.begin(async (tx) => {
+  type Reaped = { id: string; user_id: string; worker_id: string; organization_id: string | null; label: string | null };
+  const { deleted, revokedTokens } = await sql.begin(async (tx) => {
     // Pick the doomed set FIRST, re-checking every predicate and taking a row
     // lock, so the decision to delete is made once and nothing downstream can
     // disagree with it. `FOR UPDATE` makes a concurrent poll (which upserts
@@ -108,7 +111,7 @@ export async function reapStaleDeviceWorkers(): Promise<{
       FOR UPDATE
     `) as unknown as Array<{ id: string }>;
 
-    if (doomed.length === 0) return [];
+    if (doomed.length === 0) return { deleted: [] as Reaped[], revokedTokens: [] as AuditedAccessToken[] };
     const doomedIds = doomed.map((d) => d.id);
 
     // `automations.device_worker_id` is a NO ACTION FK, so a pin held by an
@@ -138,20 +141,43 @@ export async function reapStaleDeviceWorkers(): Promise<{
     const rows = (await tx`
       DELETE FROM device_workers
       WHERE id::text = ANY(${pgTextArray(doomedIds)}::text[])
-      RETURNING worker_id
-    `) as unknown as Array<{ worker_id: string }>;
+      RETURNING id, user_id, worker_id, organization_id, label
+    `) as unknown as Reaped[];
 
-    const workerIds = rows.map((r) => r.worker_id);
-    if (workerIds.length > 0) {
-      await tx`
-        UPDATE personal_access_tokens
-        SET revoked_at = NOW(), updated_at = NOW()
-        WHERE worker_id = ANY(${pgTextArray(workerIds)}::text[])
-          AND revoked_at IS NULL
-      `;
-    }
-    return rows;
+    // A device is (user_id, worker_id): another user's PAT on the same
+    // worker_id belongs to a different device and must stay live.
+    const revoked =
+      rows.length > 0
+        ? ((await tx`
+            UPDATE personal_access_tokens
+            SET revoked_at = NOW(), updated_at = NOW()
+            WHERE (user_id, worker_id) IN (
+                SELECT * FROM unnest(
+                  ${pgTextArray(rows.map((r) => r.user_id))}::text[],
+                  ${pgTextArray(rows.map((r) => r.worker_id))}::text[]
+                )
+              )
+              AND revoked_at IS NULL
+            RETURNING id, organization_id, name, worker_id
+          `) as unknown as AuditedAccessToken[])
+        : [];
+    return { deleted: rows, revokedTokens: revoked };
   });
+
+  for (const device of deleted) {
+    if (!device.organization_id) continue;
+    recordLifecycleEvent({
+      organizationId: device.organization_id,
+      entityType: 'device',
+      op: 'deleted',
+      entityId: device.id,
+      summary: `Device "${device.label ?? device.worker_id}" removed after 30 days offline`,
+      extra: { worker_id: device.worker_id, reason: 'stale' },
+    });
+  }
+  for (const token of revokedTokens) {
+    recordAccessTokenEvent('deleted', token, null, 'device-reaped');
+  }
 
   return { scanned: candidates.length, reaped: deleted.length };
 }
