@@ -10,36 +10,57 @@ runInNewContext(routes.slice(start, routes.indexOf('\n/**', start)), {
 });
 const script = html.match(/<script>([\s\S]*?)<\/script>/)![1];
 
-function harness(hash = '#token=synthetic-token&worker=synthetic-worker') {
+function harness(hash = '#token=synthetic-token&worker=synthetic-worker', postMessageThrows = false) {
   const requests: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void; options: RequestInit }> = [];
   const timers = new Map<number, () => void>();
   const paragraphs = [{ textContent: '' }, { textContent: '' }];
-  const buttons: Record<string, { onclick?: () => void }> = {};
+  const buttons: Record<string, { onclick?: () => void; remove: () => void }> = {};
   const body = {
     textContent: '', markup: '',
     set innerHTML(value: string) {
       this.markup = value;
-      for (const id of ['owl-retry', 'owl-settings']) if (value.includes(id)) buttons[id] = {};
+      for (const id of ['owl-retry', 'owl-settings']) {
+        if (value.includes(id)) buttons[id] = { remove: () => { delete buttons[id]; } };
+      }
     },
   };
   const redirects: string[] = [];
   const stored: string[] = [];
+  const posted: unknown[] = [];
+  const delays = new Map<number, number>();
+  const listeners = new Set<(event: { source: unknown; data: unknown }) => void>();
   let fragmentCleared = false;
   let timerId = 0;
+  const parent = { postMessage(data: unknown) {
+    if (postMessageThrows) throw new Error('parent unavailable');
+    posted.push(data);
+  } };
+  // What the side panel (or anything else) posts into this frame.
+  const receive = (source: unknown, data: unknown) => { for (const listener of [...listeners]) listener({ source, data }); };
   runInNewContext(script, {
     URLSearchParams, AbortController,
     location: { hash, pathname: '/api/extension-bootstrap', replace: (url: string) => redirects.push(url) },
     history: { replaceState() { fragmentCleared = true; } },
     document: { body, querySelectorAll: () => paragraphs, getElementById: (id: string) => buttons[id] },
     sessionStorage: { setItem: (_key: string, value: string) => stored.push(value) },
-    setTimeout(callback: () => void) { timers.set(++timerId, callback); return timerId; },
+    setTimeout(callback: () => void, ms: number) {
+      const id = ++timerId;
+      delays.set(id, ms);
+      timers.set(id, () => { timers.delete(id); callback(); });
+      return id;
+    },
     clearTimeout(id: number) { timers.delete(id); },
+    window: {
+      parent,
+      addEventListener: (_type: string, listener: (event: { source: unknown; data: unknown }) => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: (event: { source: unknown; data: unknown }) => void) => listeners.delete(listener),
+    },
     fetch: (_url: string, options: RequestInit) => {
       expect(fragmentCleared).toBe(true);
       return new Promise((resolve, reject) => requests.push({ resolve, reject, options }));
     },
   });
-  return { requests, timers, paragraphs, buttons, redirects, stored, body, fragmentCleared };
+  return { requests, timers, paragraphs, buttons, redirects, stored, body, fragmentCleared, posted, delays, listeners, receive, parent };
 }
 
 async function flush() { for (let i = 0; i < 10; i++) await Promise.resolve(); }
@@ -98,5 +119,61 @@ describe('extension bootstrap', () => {
     expect(h.redirects).toEqual(['/#worker=synthetic-worker']);
     expect(h.fragmentCleared).toBe(true);
     expect(h.timers.size).toBe(0);
+    expect(h.posted).toEqual([]);
+  });
+
+  it.each(['insufficient_scope', 'invalid_token'])('waits for panel recovery after %s before showing the fallback', async (error) => {
+    const h = harness();
+    h.requests[0].resolve({ ok: false, status: error === 'invalid_token' ? 401 : 403, json: async () => ({ error }) });
+    await flush();
+    expect(h.body.textContent).toBe('Reconnecting\u2026');
+    expect(h.body.markup).toBe('');
+    expect(h.posted).toEqual([{ owletto: 'session-rejected' }]);
+    expect(h.redirects).toEqual([]);
+    expect(h.stored).toEqual([]);
+    expect(h.timers.size).toBe(1);
+    const [id, expire] = [...h.timers.entries()][0];
+    expect(h.delays.get(id)).toBe(4000);
+    expire();
+    expect(h.timers.size).toBe(0);
+    expect(h.listeners.size).toBe(0);
+    if (error === 'insufficient_scope') {
+      expect(h.paragraphs[1].textContent).toContain('Re-pair to sign in');
+      expect(h.buttons['owl-retry']).toBeUndefined();
+      h.buttons['owl-settings'].onclick!();
+      expect(h.posted).toEqual([{ owletto: 'session-rejected' }, { owletto: 'open-settings' }]);
+    } else {
+      expect(h.paragraphs[1].textContent).toContain('expired');
+      h.buttons['owl-retry'].onclick!();
+      success(h.requests[1]);
+      await flush();
+      expect(h.redirects).toEqual(['/#worker=synthetic-worker']);
+      expect(h.stored).toEqual(['synthetic-session']);
+      expect(h.timers.size).toBe(0);
+    }
+  });
+
+  it('shows recovery immediately and clears the wait when notifying the panel throws', async () => {
+    const h = harness('#token=synthetic-token', true);
+    h.requests[0].resolve({ ok: false, status: 401, json: async () => ({ error: 'invalid_token' }) });
+    await flush();
+    expect(h.paragraphs[1].textContent).toContain('expired');
+    expect(h.buttons['owl-retry']).toBeDefined();
+    expect(h.timers.size).toBe(0);
+  });
+
+  it('shows recovery as soon as the panel reports it could not refresh, ignoring other senders', async () => {
+    const h = harness();
+    h.requests[0].resolve({ ok: false, status: 401, json: async () => ({ error: 'invalid_token' }) });
+    await flush();
+    expect(h.body.textContent).toBe('Reconnecting\u2026');
+    // Only the panel that embeds this frame can end the wait.
+    h.receive({}, { owletto: 'session-refresh-failed' });
+    h.receive(h.parent, { owletto: 'something-else' });
+    expect(h.body.markup).toBe('');
+    h.receive(h.parent, { owletto: 'session-refresh-failed' });
+    expect(h.paragraphs[1].textContent).toContain('expired');
+    expect(h.timers.size).toBe(0);
+    expect(h.listeners.size).toBe(0);
   });
 });
