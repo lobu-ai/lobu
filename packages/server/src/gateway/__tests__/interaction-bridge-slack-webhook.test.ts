@@ -448,4 +448,78 @@ describe("Slack block_actions → run-approval entity_field_change (Tier B)", ()
       typeof postedArg === "string" ? postedArg : postedArg?.markdown;
     expect(String(postedText)).toContain("couldn’t verify");
   });
+  async function clickAndReadReply(
+    h: ReturnType<typeof createRunApprovalHarness>,
+    opts: { teamId: string; userId: string; runId: number; messageTs: string },
+  ): Promise<string> {
+    const response = await h.chat.webhooks.slack(
+      buildSignedBlockActionsRequest(
+        SIGNING_SECRET,
+        blockActionsPayload({
+          teamId: opts.teamId,
+          userId: opts.userId,
+          channelId: "C_APPROVALS",
+          messageTs: opts.messageTs,
+          actionId: `run-approval:${opts.runId}:approve`,
+          value: "approve",
+        }),
+      ),
+    );
+    expect(response.status).toBe(200);
+    await waitFor(() => expect(h.postMessage).toHaveBeenCalled());
+    const postedArg = h.postMessage.mock.calls[0]?.[1];
+    return String(typeof postedArg === "string" ? postedArg : postedArg?.markdown);
+  }
+
+  async function expectUndecided(fx: { runId: number; entityId: number }) {
+    const [run] = await getDb()<{ approval_status: string | null }>`
+      SELECT approval_status FROM runs WHERE id = ${fx.runId}
+    `;
+    expect(run.approval_status).toBe("pending");
+    const [entity] = await getDb()<{ metadata: Record<string, unknown> }>`
+      SELECT metadata FROM entities WHERE id = ${fx.entityId}
+    `;
+    expect(entity.metadata.severity).toBe("critical");
+  }
+
+  test("another organization's installation cannot decide the run, even for an admin of both", async () => {
+    const fx = await seedPendingFieldChange();
+    // The same verified admin also administers a second workspace whose Slack
+    // installation receives a forwarded/copied card for the first org's run.
+    const otherOrg = await createTestOrganization({ name: "Other Approval Org" });
+    const [admin] = await getDb()<{ userId: string }>`
+      SELECT "userId" FROM member WHERE "organizationId" = ${fx.orgId} LIMIT 1
+    `;
+    await addUserToOrganization(admin.userId, otherOrg.id, "admin");
+    const h = createRunApprovalHarness({ organizationId: otherOrg.id, teamId: fx.teamId });
+
+    const reply = await clickAndReadReply(h, {
+      teamId: fx.teamId, userId: fx.adminSlackId, runId: fx.runId, messageTs: "1700000000.000700",
+    });
+
+    expect(reply).toContain("couldn’t find a pending approval for this card in this workspace");
+    await expectUndecided(fx);
+  });
+
+  test("a verified admin of a different organization cannot approve through this installation", async () => {
+    const fx = await seedPendingFieldChange();
+    const otherOrg = await createTestOrganization({ name: "Foreign Admin Org" });
+    const foreignAdmin = await createTestUser({ name: "Foreign Admin" });
+    await addUserToOrganization(foreignAdmin.id, otherOrg.id, "admin");
+    await linkChatIdentityInGraph({
+      organizationId: otherOrg.id,
+      platform: "slack",
+      userId: foreignAdmin.id,
+      teamId: fx.teamId,
+      platformUserId: "U-FOREIGN-ADMIN",
+    });
+    const h = createRunApprovalHarness({ organizationId: fx.orgId, teamId: fx.teamId });
+
+    const reply = await clickAndReadReply(h, {
+      teamId: fx.teamId, userId: "U-FOREIGN-ADMIN", runId: fx.runId, messageTs: "1700000000.000800",
+    });
+
+    expect(reply).toContain("couldn’t verify that your chat account maps to a Lobu admin");
+    await expectUndecided(fx);
+  });
 });

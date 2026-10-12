@@ -28,13 +28,14 @@ import { CommandDispatcher } from "../commands/command-dispatcher.js";
 import { createTestAutomationSubscription } from "../../__tests__/setup/automation-subscriptions.js";
 import { getDb } from "../../db/client.js";
 import { AutomationSubscriptionService } from "../channels/automation-subscription-service.js";
-import { ConversationStateStore } from "../connections/conversation-state-store.js";
-import { registerMessageHandlers } from "../connections/message-handler-bridge.js";
 import { getResponseStrategy } from "../connections/platform-strategies/index.js";
 import { createConnectedGatewayStateAdapter } from "../connections/state-adapter.js";
 import type { PlatformConnection } from "../connections/types.js";
-import { QueueProducer } from "../infrastructure/queue/queue-producer.js";
-import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
+import {
+  type AssembledChatBridge,
+  startAssembledChatBridge,
+  waitFor,
+} from "./helpers/chat-bridge-harness.js";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
@@ -112,28 +113,10 @@ function slackEvent(options: {
   };
 }
 
-async function waitFor(
-  check: () => void | Promise<void>,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const started = Date.now();
-  let lastError: unknown;
-  while (Date.now() - started < timeoutMs) {
-    try {
-      await check();
-      return;
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-  }
-  throw lastError;
-}
-
 describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => {
   let chat: Chat;
   let state: StateAdapter;
-  let queue: RunsQueue;
+  let bridge: AssembledChatBridge;
   let connectionDbId: number;
   let slackPostMessage: ReturnType<typeof mock>;
 
@@ -179,11 +162,6 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       channelId: CHANNEL_ID,
       teamId: WORKSPACE_TEAM_ID,
     });
-    queue = new RunsQueue();
-    await queue.start();
-    const producer = new QueueProducer(queue);
-    await producer.start();
-
     state = await createConnectedGatewayStateAdapter();
     const adapter = createSlackAdapter({
       signingSecret: SIGNING_SECRET,
@@ -225,38 +203,11 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       createdAt: 1,
       updatedAt: 1,
     };
-    const conversationState = new ConversationStateStore(state);
-    const subscriptions = new AutomationSubscriptionService();
-    const manager = {
-      has: (connectionId: string) => connectionId === RUNTIME_CONNECTION_ID,
-      getInstance: (connectionId: string) =>
-        connectionId === RUNTIME_CONNECTION_ID
-          ? { connection, conversationState, chat }
-          : undefined,
-    };
-    const services = {
-      getArtifactStore: () => null,
-      getPublicGatewayUrl: () => "https://gateway.example.test",
-      getAutomationSubscriptionService: () => subscriptions,
-      getAgentMetadataStore: () => undefined,
-      getUserAgentsStore: () => undefined,
-      getTranscriptionService: () => undefined,
-      getAgentSettingsStore: () => undefined,
-      getDeclaredAgentRegistry: () => undefined,
-      getProviderCatalogService: () => undefined,
-      getQueueProducer: () => producer,
-    };
-    registerMessageHandlers(
-      chat,
-      connection,
-      services as never,
-      manager as never,
-    );
+    bridge = await startAssembledChatBridge(chat, state, connection);
   });
 
   afterEach(async () => {
-    await chat?.shutdown();
-    await queue?.stop();
+    await bridge?.stop();
   });
 
   test.each(["codex", null])("a device-pinned channel preserves its supported dispatch for CLI %p", async (agentKind) => {
@@ -822,5 +773,105 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       expect(plan.replyTargets).toHaveLength(mention ? 1 : 0);
       expect(plan.backgroundTargets).toHaveLength(0);
     }
+  });
+
+  // CURRENT (known gap): Chat SDK dedupes inbound messages on
+  // `dedupe:<adapter name>:<message id>` BEFORE Lobu routing
+  // (node_modules/chat/dist/index.js routeIncomingMessage), and every
+  // connection shares the Postgres state prefix. A Slack message id is its
+  // channel-local `ts`, so when two Lobu installations sit in the same channel
+  // the second installation's copy of the message is dropped as a duplicate of
+  // the first. The durable-ingress PR must scope this key to the installation.
+  test("a second installation in the same channel loses the message to the shared SDK dedupe key", async () => {
+    const sql = getDb();
+    const secondOrg = "org-slack-second-install";
+    const secondConnectionId = "slackinst-second-install-e2e";
+    const secondBot = "U_SECOND_BOT";
+    await seedAgentRow("agent-slack-second-install", { organizationId: secondOrg });
+    const [secondRow] = await sql<{ id: number }[]>`
+      INSERT INTO connections (
+        organization_id, connector_key, slug, display_name, status,
+        credential_mode, external_tenant_id, config
+      ) VALUES (
+        ${secondOrg}, 'slack', ${secondConnectionId}, 'Second Slack',
+        'active', 'managed', ${WORKSPACE_TEAM_ID},
+        ${sql.json({
+          platform: "slack",
+          settings: { allowGroups: true },
+          chatMetadata: { teamId: WORKSPACE_TEAM_ID, botUserId: secondBot },
+        })}
+      )
+      RETURNING id
+    `;
+    if (!secondRow) throw new Error("second Slack connection was not seeded");
+    await createTestAutomationSubscription({
+      organizationId: secondOrg,
+      agentId: "agent-slack-second-install",
+      connectionId: Number(secondRow.id),
+      platform: "slack",
+      channelId: CHANNEL_ID,
+      teamId: WORKSPACE_TEAM_ID,
+    });
+    // A separate installation: its own adapter and Chat instance, but the same
+    // replica-shared Postgres state store every connection uses in production.
+    const secondState = await createConnectedGatewayStateAdapter();
+    const secondAdapter = createSlackAdapter({
+      signingSecret: SIGNING_SECRET,
+      botToken: "xoxb-test-second-boundary-token",
+      botUserId: secondBot,
+      userName: "lobu-second",
+    });
+    (secondAdapter as any).fetchMessages = mock(async () => ({ messages: [] }));
+    (secondAdapter as any).startTyping = mock(async () => undefined);
+    (secondAdapter as any).postMessage = mock(async () => ({ ts: "1787292100.999999" }));
+    const secondChat = new Chat({
+      userName: "lobu-second",
+      adapters: { slack: secondAdapter },
+      state: secondState,
+      logger: "silent",
+    });
+    bridge.attach(secondChat, secondState, {
+      id: secondConnectionId,
+      platform: "slack",
+      organizationId: secondOrg,
+      config: {
+        platform: "slack",
+        signingSecret: SIGNING_SECRET,
+        botToken: "xoxb-test-second-boundary-token",
+        botUserId: secondBot,
+      },
+      settings: { allowGroups: true },
+      metadata: { teamId: WORKSPACE_TEAM_ID, botUserId: secondBot },
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    const sharedTs = "1787292100.000001";
+    const message = (eventId: string, ts: string) =>
+      signedEventRequest(slackEvent({
+        eventId, channel: CHANNEL_ID, ts, text: "One message, two installations", user: "U_BURAK",
+      }));
+    // Slack delivers the same channel message to each app with its own event id.
+    expect((await chat.webhooks.slack(message("Ev_FIRST_APP", sharedTs))).status).toBe(200);
+    await waitFor(async () => {
+      const rows = await sql`SELECT organization_id FROM runs WHERE run_type = 'chat_message'`;
+      expect(rows).toEqual([{ organization_id: "org-slack-grid-e2e" }]);
+    });
+    expect((await secondChat.webhooks.slack(message("Ev_SECOND_APP", sharedTs))).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const afterCollision = await sql`SELECT organization_id FROM runs WHERE run_type = 'chat_message'`;
+    expect(afterCollision).toEqual([{ organization_id: "org-slack-grid-e2e" }]);
+
+    // Control: the second installation is correctly wired — a message with a
+    // ts the first installation never saw reaches its own Automation.
+    expect((await secondChat.webhooks.slack(message("Ev_SECOND_APP_UNIQUE", "1787292100.000002"))).status).toBe(200);
+    await waitFor(async () => {
+      const rows = await sql`SELECT organization_id FROM runs WHERE run_type = 'chat_message' ORDER BY id`;
+      expect(rows).toEqual([
+        { organization_id: "org-slack-grid-e2e" },
+        { organization_id: secondOrg },
+      ]);
+    });
   });
 });
