@@ -715,17 +715,23 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
   // reloads this frame with the new session or answers session-refresh-failed.
   // Hosts that never answer (older panels, the Mac menu bar) get the error
   // after a short wait.
+  var panelWait = null;
   function failAfterPanel(msg, repair) {
     document.body.textContent = "Reconnecting\\u2026";
     var shown = false;
     var timer = null;
-    function show() {
-      if (shown) return;
+    function stop() {
       shown = true;
       clearTimeout(timer);
       window.removeEventListener("message", onMessage);
+      if (panelWait === stop) panelWait = null;
+    }
+    function show() {
+      if (shown) return;
+      stop();
       fail(msg, repair);
     }
+    panelWait = stop;
     function onMessage(ev) {
       if (ev.source === window.parent && ev.data && ev.data.owletto === "session-refresh-failed") show();
     }
@@ -734,6 +740,7 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
     try { window.parent.postMessage({ owletto: "session-rejected" }, "*"); } catch (e) { show(); }
   }
   function attempt() {
+    if (panelWait) panelWait();
     if (activeAttempt) {
       clearTimeout(activeAttempt.timer);
       activeAttempt.controller.abort();
@@ -783,6 +790,17 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
         if (activeAttempt === current) activeAttempt = null;
       });
   }
+  // The panel hands this frame a fresh credential (after refreshing a rejected
+  // session) by changing only the fragment, which doesn't reload the page.
+  // Start over with the new token.
+  window.addEventListener("hashchange", function () {
+    var fresh = new URLSearchParams(location.hash.slice(1)).get("token");
+    if (!fresh) return;
+    history.replaceState(null, "", location.pathname);
+    token = fresh;
+    retried = false;
+    attempt();
+  });
   attempt();
 })();
 </script></body>`

@@ -510,9 +510,11 @@ describe('SSE ticket (/api/sse-ticket)', () => {
       sessionStorage: { setItem() {} },
       window: {
         parent,
-        addEventListener: (_type: string, fn: (ev: { source: unknown; data: unknown }) => void) => listeners.add(fn),
-        removeEventListener: (_type: string, fn: (ev: { source: unknown; data: unknown }) => void) =>
-          listeners.delete(fn),
+        // Only message listeners matter here; the page also listens for hashchange.
+        addEventListener: (type: string, fn: (ev: { source: unknown; data: unknown }) => void) =>
+          type === 'message' && listeners.add(fn),
+        removeEventListener: (type: string, fn: (ev: { source: unknown; data: unknown }) => void) =>
+          type === 'message' && listeners.delete(fn),
       },
       fetch: async (path: string, init: { body: string }) => {
         const res = await postForm(path, Object.fromEntries(new URLSearchParams(init.body)));

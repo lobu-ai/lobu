@@ -28,7 +28,14 @@ function harness(hash = '#token=synthetic-token&worker=synthetic-worker', postMe
   const stored: string[] = [];
   const posted: unknown[] = [];
   const delays = new Map<number, number>();
-  const listeners = new Set<(event: { source: unknown; data: unknown }) => void>();
+  type Listener = (event: { source?: unknown; data?: unknown }) => void;
+  const listenersByType = new Map<string, Set<Listener>>();
+  const listenersOf = (type: string) => {
+    if (!listenersByType.has(type)) listenersByType.set(type, new Set());
+    return listenersByType.get(type)!;
+  };
+  const listeners = listenersOf('message');
+  const location = { hash, pathname: '/api/extension-bootstrap', replace: (url: string) => redirects.push(url) };
   let fragmentCleared = false;
   let timerId = 0;
   const parent = { postMessage(data: unknown) {
@@ -37,10 +44,16 @@ function harness(hash = '#token=synthetic-token&worker=synthetic-worker', postMe
   } };
   // What the side panel (or anything else) posts into this frame.
   const receive = (source: unknown, data: unknown) => { for (const listener of [...listeners]) listener({ source, data }); };
+  // The panel re-pointing this frame at a new credential: only the fragment
+  // changes, so the browser fires hashchange instead of reloading.
+  const navigateFragment = (next: string) => {
+    location.hash = next;
+    for (const listener of [...listenersOf('hashchange')]) listener({});
+  };
   runInNewContext(script, {
     URLSearchParams, AbortController,
-    location: { hash, pathname: '/api/extension-bootstrap', replace: (url: string) => redirects.push(url) },
-    history: { replaceState() { fragmentCleared = true; } },
+    location,
+    history: { replaceState() { fragmentCleared = true; location.hash = ''; } },
     document: { body, querySelectorAll: () => paragraphs, getElementById: (id: string) => buttons[id] },
     sessionStorage: { setItem: (_key: string, value: string) => stored.push(value) },
     setTimeout(callback: () => void, ms: number) {
@@ -52,15 +65,15 @@ function harness(hash = '#token=synthetic-token&worker=synthetic-worker', postMe
     clearTimeout(id: number) { timers.delete(id); },
     window: {
       parent,
-      addEventListener: (_type: string, listener: (event: { source: unknown; data: unknown }) => void) => listeners.add(listener),
-      removeEventListener: (_type: string, listener: (event: { source: unknown; data: unknown }) => void) => listeners.delete(listener),
+      addEventListener: (type: string, listener: Listener) => listenersOf(type).add(listener),
+      removeEventListener: (type: string, listener: Listener) => listenersOf(type).delete(listener),
     },
     fetch: (_url: string, options: RequestInit) => {
       expect(fragmentCleared).toBe(true);
       return new Promise((resolve, reject) => requests.push({ resolve, reject, options }));
     },
   });
-  return { requests, timers, paragraphs, buttons, redirects, stored, body, fragmentCleared, posted, delays, listeners, receive, parent };
+  return { requests, timers, paragraphs, buttons, redirects, stored, body, fragmentCleared, posted, delays, listeners, receive, parent, navigateFragment };
 }
 
 async function flush() { for (let i = 0; i < 10; i++) await Promise.resolve(); }
@@ -175,5 +188,33 @@ describe('extension bootstrap', () => {
     expect(h.paragraphs[1].textContent).toContain('expired');
     expect(h.timers.size).toBe(0);
     expect(h.listeners.size).toBe(0);
+  });
+
+  it('signs in with the fresh token the panel hands over after a rejection', async () => {
+    const h = harness('#token=expired-session');
+    h.requests[0].resolve({ ok: false, status: 401, json: async () => ({ error: 'invalid_token' }) });
+    await flush();
+    expect(h.body.textContent).toBe('Reconnecting\u2026');
+    expect(h.posted).toEqual([{ owletto: 'session-rejected' }]);
+
+    h.navigateFragment('#token=fresh-session');
+    // The new attempt replaces the wait: no stale timer or listener can show
+    // the old error over it.
+    expect(h.listeners.size).toBe(0);
+    expect(h.requests).toHaveLength(2);
+    expect(new URLSearchParams(String(h.requests[1].options.body)).get('token')).toBe('fresh-session');
+    expect([...h.timers.keys()].map((id) => h.delays.get(id))).not.toContain(4000);
+
+    success(h.requests[1]);
+    await flush();
+    expect(h.redirects).toEqual(['/']);
+    expect(h.stored).toEqual(['synthetic-session']);
+    expect(h.timers.size).toBe(0);
+  });
+
+  it('ignores a fragment change that carries no token', async () => {
+    const h = harness('#token=synthetic-token');
+    h.navigateFragment('#something-else');
+    expect(h.requests).toHaveLength(1);
   });
 });
