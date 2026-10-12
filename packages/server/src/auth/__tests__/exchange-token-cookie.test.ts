@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cleanupTestDatabase } from '../../__tests__/setup/test-db';
+import { cleanupTestDatabase, getTestDb } from '../../__tests__/setup/test-db';
 import {
   addUserToOrganization,
   createTestAccessToken,
@@ -31,12 +31,13 @@ describe('deep-link token exchange', () => {
 
   async function patForNewUser(
     slug: string,
-    email: string
+    email: string,
+    scope = 'mcp:admin profile:read'
   ): Promise<{ token: string; orgId: string }> {
     const org = await createTestOrganization({ slug });
     const user = await createTestUser({ email });
     await addUserToOrganization(user.id, org.id, 'owner');
-    const { token } = await createTestPAT(user.id, org.id, { scope: 'profile:read' });
+    const { token } = await createTestPAT(user.id, org.id, { scope });
     return { token, orgId: org.id };
   }
 
@@ -80,8 +81,9 @@ describe('deep-link token exchange', () => {
     const user = await createTestUser({ email: 'xt-oauth@test.example.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
     const client = await createTestOAuthClient();
+    // A private scope makes the fixture mint this as a device_code grant.
     const { token } = await createTestAccessToken(user.id, org.id, client.client_id, {
-      scope: 'profile:read',
+      scope: 'mcp:admin device_worker:run profile:read',
     });
     expect(token.startsWith('owl_pat_')).toBe(false); // genuinely an OAuth access token
 
@@ -91,6 +93,64 @@ describe('deep-link token exchange', () => {
     const sessionToken = body.session_token ?? '';
     expect(sessionToken.length).toBeGreaterThan(0);
     expect(await activeOrgOf(sessionToken)).toBe(org.id);
+  });
+
+  async function oauthTokenForNewUser(
+    slug: string,
+    scope: string,
+    grantType: 'authorization_code' | 'device_code' | null
+  ): Promise<string> {
+    const org = await createTestOrganization({ slug });
+    const user = await createTestUser({ email: `${slug}@test.example.com` });
+    await addUserToOrganization(user.id, org.id, 'owner');
+    const client = await createTestOAuthClient();
+    const { token } = await createTestAccessToken(user.id, org.id, client.client_id, { scope });
+    // The shared fixture infers provenance from private scopes; set it
+    // explicitly to exercise both current and legacy public-scope grants.
+    const sql = getTestDb();
+    await sql`
+      UPDATE oauth_tokens SET authorization_grant_type = ${grantType}
+      WHERE user_id = ${user.id} AND client_id = ${client.client_id}
+    `;
+    return token;
+  }
+
+  it.each([
+    [
+      'a PAT without mcp:admin',
+      () => patForNewUser('xt-pat-ro', 'xt-pat-ro@test.example.com', 'mcp:read profile:read')
+        .then((p) => p.token),
+    ],
+    [
+      'a read-only device-code sign-in',
+      () => oauthTokenForNewUser('xt-dev-ro', 'mcp:read device_worker:run profile:read', 'device_code'),
+    ],
+    [
+      'an authorization-code token with mcp:admin',
+      () => oauthTokenForNewUser('xt-auth-admin', 'mcp:read mcp:write mcp:admin profile:read', 'authorization_code'),
+    ],
+    [
+      'a legacy OAuth token with mcp:admin',
+      () => oauthTokenForNewUser('xt-legacy-admin', 'mcp:read mcp:write mcp:admin profile:read', null),
+    ],
+  ])('refuses to turn %s into a web session', async (_label, mint) => {
+    const token = await mint();
+
+    const extension = await postForm('/api/extension-session', { token });
+    expect(extension.status).toBe(403);
+    expect(((await extension.json()) as { error?: string }).error).toBe('insufficient_scope');
+
+    const ticket = await get('/api/sse-ticket', { token });
+    expect(ticket.status).toBe(403);
+    expect(((await ticket.json()) as { error?: string }).error).toBe('insufficient_scope');
+
+    // The browser deep link falls back to the normal sign-in, keeping `next`.
+    const exchanged = await get(
+      `/api/exchange-token?token=${encodeURIComponent(token)}&next=${encodeURIComponent('/acme/agents')}`
+    );
+    expect(exchanged.status).toBe(302);
+    expect(exchanged.headers.get('location')).toBe('/auth/login?callbackUrl=%2Facme%2Fagents');
+    expect(exchanged.headers.get('set-cookie')).toBeNull();
   });
 
   it('GET /exchange-token keeps a first-party Lax cookie — never Partitioned/None (CLI/menu-bar)', async () => {
@@ -194,7 +254,7 @@ describe('deep-link token exchange', () => {
     const org = await createTestOrganization({ slug });
     const user = await createTestUser({ email: 'xt-bearer@test.example.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
-    const { token: pat } = await createTestPAT(user.id, org.id, { scope: 'profile:read' });
+    const { token: pat } = await createTestPAT(user.id, org.id, { scope: 'mcp:admin profile:read' });
 
     // Exchange the extension's deep-link token for a session token.
     const exchange = await postForm('/api/extension-session', { token: pat });
@@ -236,7 +296,7 @@ describe('SSE ticket (/api/sse-ticket)', () => {
     const org = await createTestOrganization({ slug });
     const user = await createTestUser({ email });
     await addUserToOrganization(user.id, org.id, 'owner');
-    const { token: pat } = await createTestPAT(user.id, org.id, { scope: 'profile:read' });
+    const { token: pat } = await createTestPAT(user.id, org.id, { scope: 'mcp:admin profile:read' });
     const exchange = await postForm('/api/extension-session', { token: pat });
     return ((await exchange.json()) as { session_token: string }).session_token;
   }

@@ -382,11 +382,18 @@ async function mintSessionCookieValue(
 async function resolveDeepLinkToken(
   c: Context<{ Bindings: Env }>,
   token: string
-): Promise<{ userId: string; organizationId: string | null } | null> {
+): Promise<{ userId: string; organizationId: string | null } | 'insufficient_scope' | null> {
   const sql = createDbClientFromEnv(c.env);
   const baseUrl = resolveBaseUrl({ request: c.req.raw });
   const authInfo = await new OAuthProvider(sql, baseUrl).verifyAccessToken(token);
   if (authInfo?.userId) {
+    // Device-code provenance does not establish first-party client identity:
+    // registration is open. This gate checks MCP scope and issuing flow;
+    // the resulting web session does not retain the credential's workspace limits.
+    const canExchange =
+      authInfo.scopes.includes('mcp:admin') &&
+      (authInfo.tokenType === 'pat' || authInfo.authorizationGrantType === 'device_code');
+    if (!canExchange) return 'insufficient_scope';
     return {
       userId: authInfo.userId,
       organizationId: authInfo.organizationId,
@@ -433,7 +440,15 @@ async function handleExchangeToken(
     );
   }
 
+  const next = rawNext ?? '/';
+  const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/';
+
   const identity = await resolveDeepLinkToken(c, trimmed);
+  if (identity === 'insufficient_scope') {
+    // Not an error for the person clicking the link: send them through the
+    // normal sign-in and on to where they were going.
+    return c.redirect(`/auth/login?callbackUrl=${encodeURIComponent(safeNext)}`, 302);
+  }
   if (!identity) {
     return c.json(
       { error: 'invalid_token', error_description: 'token is invalid, expired, or revoked' },
@@ -453,8 +468,6 @@ async function handleExchangeToken(
     c.header('Set-Cookie', minted.hostOnlyExpiryHeader, { append: true });
   }
 
-  const next = rawNext ?? '/';
-  const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/';
   return c.redirect(safeNext, 302);
 }
 
@@ -488,6 +501,15 @@ credentialRoutes.post('/extension-session', async (c) => {
   }
 
   const identity = await resolveDeepLinkToken(c, token);
+  if (identity === 'insufficient_scope') {
+    return c.json(
+      {
+        error: 'insufficient_scope',
+        error_description: 'a web session requires a PAT or device-code sign-in with mcp:admin',
+      },
+      403
+    );
+  }
   if (!identity) {
     return c.json(
       { error: 'invalid_token', error_description: 'token is invalid, expired, or revoked' },
@@ -539,6 +561,15 @@ credentialRoutes.get('/sse-ticket', async (c) => {
   }
 
   const identity = await resolveDeepLinkToken(c, bearer);
+  if (identity === 'insufficient_scope') {
+    return c.json(
+      {
+        error: 'insufficient_scope',
+        error_description: 'a web session requires a PAT or device-code sign-in with mcp:admin',
+      },
+      403
+    );
+  }
   if (!identity) {
     return c.json(
       { error: 'invalid_token', error_description: 'token is invalid, expired, or revoked' },

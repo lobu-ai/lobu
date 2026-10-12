@@ -55,7 +55,7 @@ describe('duplicate session cookies', () => {
     const org = await createTestOrganization({ slug });
     const user = await createTestUser({ email });
     await addUserToOrganization(user.id, org.id, 'owner');
-    const { token: pat } = await createTestPAT(user.id, org.id, { scope: 'profile:read' });
+    const { token: pat } = await createTestPAT(user.id, org.id, { scope: 'mcp:admin profile:read' });
 
     return await exchangeForSessionCookie(pat);
   }
@@ -136,7 +136,7 @@ describe('duplicate session cookies', () => {
     const org = await createTestOrganization({ slug });
     const user = await createTestUser({ email: 'dup-revoked@test.example.com' });
     await addUserToOrganization(user.id, org.id, 'owner');
-    const { token: pat } = await createTestPAT(user.id, org.id, { scope: 'profile:read' });
+    const { token: pat } = await createTestPAT(user.id, org.id, { scope: 'mcp:admin profile:read' });
 
     const doomed = await exchangeForSessionCookie(pat);
     const live = await exchangeForSessionCookie(pat);
