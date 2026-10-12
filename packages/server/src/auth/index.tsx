@@ -761,10 +761,11 @@ export async function createAuth(
 					});
 				},
 				expiresIn: 60 * 15, // 15 minutes — time box for the link
-				// Tolerate Gmail/Defender prefetch burning the first GET
-				// (scanner + user click). Each verify still mints a session,
-				// so keep this low; long-term fix is POST-confirm or OTP.
-				allowedAttempts: 3,
+				// Single-use is enforced by better-auth: the token is consumed
+				// atomically on the first verify GET, so Gmail/Defender prefetch
+				// can burn the link before the user clicks. `allowedAttempts`
+				// is not honored in this better-auth version — do not re-add
+				// it. Long-term fix is POST-confirm or email OTP.
 			}),
 
 			// Phone number authentication via WhatsApp
