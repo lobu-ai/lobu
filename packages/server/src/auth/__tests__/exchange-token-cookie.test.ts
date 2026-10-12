@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../__tests__/setup/test-db';
@@ -365,5 +366,74 @@ describe('SSE ticket (/api/sse-ticket)', () => {
     // to a token-less app (which would just hang on a spinner).
     expect(html).toContain('owl-retry');
     expect(html).toContain('function fail');
+  });
+
+  // A read-only pairing can never mint a session, so the page must lead with
+  // re-pairing (which asks for mcp:admin) instead of a Retry that loops forever.
+  it('bootstrap offers re-pairing when the paired token lacks mcp:admin', async () => {
+    const org = await createTestOrganization({ slug: 'xt-boot-ro' });
+    const user = await createTestUser({ email: 'xt-boot-ro@test.example.com' });
+    await addUserToOrganization(user.id, org.id, 'owner');
+    const client = await createTestOAuthClient();
+    // A private scope makes the fixture mint this as a device_code grant,
+    // the shape a pre-mcp:admin Chrome pairing holds.
+    const { token } = await createTestAccessToken(user.id, org.id, client.client_id, {
+      scope: 'mcp:read device_worker:run profile:read',
+    });
+    const html = await (await get('/api/extension-bootstrap')).text();
+    const script = html.slice(html.indexOf('<script>') + '<script>'.length, html.lastIndexOf('</script>'));
+
+    const body = { innerHTML: '', textContent: '' };
+    const message = { textContent: '' };
+    const buttons = new Map<string, { removed?: boolean; onclick?: () => void; remove?: () => void }>();
+    const posted: unknown[] = [];
+    let settled!: () => void;
+    const rendered = new Promise<void>((resolve) => {
+      settled = resolve;
+    });
+    const document = {
+      body: new Proxy(body, {
+        set(target, key, value) {
+          (target as Record<string | symbol, unknown>)[key] = value;
+          if (key === 'innerHTML') {
+            buttons.clear();
+            for (const id of ['owl-retry', 'owl-settings']) {
+              if (!String(value).includes(`id="${id}"`)) continue;
+              const button: { removed?: boolean; remove?: () => void } = {};
+              button.remove = () => {
+                button.removed = true;
+              };
+              buttons.set(id, button);
+            }
+            settled();
+          }
+          return true;
+        },
+      }),
+      querySelectorAll: () => [{}, message],
+      getElementById: (id: string) => buttons.get(id) ?? null,
+    };
+    runInNewContext(script, {
+      URLSearchParams,
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      document,
+      location: { hash: `#token=${encodeURIComponent(token)}`, pathname: '/api/extension-bootstrap', replace() {} },
+      history: { replaceState() {} },
+      sessionStorage: { setItem() {} },
+      window: { parent: { postMessage: (data: unknown) => posted.push(data) } },
+      fetch: async (path: string, init: { body: string }) => {
+        const res = await postForm(path, Object.fromEntries(new URLSearchParams(init.body)));
+        return { ok: res.status >= 200 && res.status < 300, status: res.status, json: res.json };
+      },
+    });
+    await rendered;
+
+    expect(message.textContent).toContain('Re-pair to sign in');
+    expect(body.innerHTML).toContain('>Re-pair</button>');
+    expect(buttons.get('owl-retry')?.removed).toBe(true);
+    buttons.get('owl-settings')?.onclick?.();
+    expect(posted).toEqual([{ owletto: 'open-settings' }]);
   });
 });

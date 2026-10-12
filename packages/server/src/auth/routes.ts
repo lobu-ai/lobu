@@ -642,7 +642,7 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
   if (!token) { location.replace("/"); return; }
   var retried = false;
   var activeAttempt = null;
-  function fail(msg) {
+  function fail(msg, repair) {
     // Surface a real error instead of redirecting to a token-less app, which
     // would just render signed-out and hang on a spinner — the exact failure
     // this whole flow exists to avoid. Retry re-submits the SAME deep-link
@@ -654,13 +654,16 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
       '<p style="margin:0 0 .5rem;font-weight:600">Could not connect to Lobu.</p>' +
       '<p style="margin:0 0 1rem;color:#a8a29e"></p>' +
       '<button id="owl-retry" style="font:inherit;padding:.4rem .9rem;border:1px solid #3f3f46;border-radius:.4rem;background:#18181b;color:inherit;cursor:pointer">Retry</button>' +
-      (retried
-        ? '<button id="owl-settings" style="font:inherit;margin-left:.5rem;padding:.4rem .9rem;border:1px solid #3f3f46;border-radius:.4rem;background:#18181b;color:inherit;cursor:pointer">Change server</button>'
+      (retried || repair
+        ? '<button id="owl-settings" style="font:inherit;margin-left:.5rem;padding:.4rem .9rem;border:1px solid #3f3f46;border-radius:.4rem;background:#18181b;color:inherit;cursor:pointer">' + (repair ? 'Re-pair' : 'Change server') + '</button>'
         : '') +
       '</div>';
     document.querySelectorAll("p")[1].textContent = msg;
     var b = document.getElementById("owl-retry");
-    if (b) b.onclick = function () { retried = true; attempt(); };
+    // Retrying a token that lacks the scope can never succeed; only re-pairing
+    // (which requests mcp:admin) can, so lead with that.
+    if (b && repair) b.remove();
+    else if (b) b.onclick = function () { retried = true; attempt(); };
     // The bootstrap page is a cross-origin iframe inside the extension side
     // panel and can't open Settings itself — ask the panel parent to switch to
     // its Settings view (origin-checked on the receiving end).
@@ -691,10 +694,16 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: body.toString(),
     })
-      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (r) {
+        if (r.ok) return r.json();
+        if (r.status === 403) return r.json().catch(function () { return null; });
+        return null;
+      })
       .then(function (data) {
         if (activeAttempt !== current) return;
-        if (data && data.session_token) {
+        if (data && data.error === "insufficient_scope") {
+          fail("This extension was paired with read-only access, which can't open the app. Re-pair to sign in.", true);
+        } else if (data && data.session_token) {
           try { sessionStorage.setItem("owletto.session_token", data.session_token); } catch (e) {}
           location.replace(next);
         } else {
