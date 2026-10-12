@@ -25,8 +25,10 @@ import {
 import { createConnectToken } from '../../../utils/connect-tokens';
 import { getConfiguredPublicGatewayUrl } from '../../../utils/public-origin';
 import {
+  collectFeedRequiredScopes,
   readGrantedScopesFromAuthData,
   readRequestedScopesFromAuthData,
+  selectReconnectOAuthScopes,
 } from '../../../auth/oauth/scopes';
 import { getWorkspaceRole } from '../../../utils/organization-access';
 import { callerIsAdmin } from './db-helpers';
@@ -613,13 +615,18 @@ export async function issueOAuthReconnectLink(params: {
   const appAuthProfileId = appSelection.appAuthProfile?.id;
   // A pending attempt must not change the requirements of a usable grant.
   // Keep selected scopes on the token; the callback commits them with credentials.
-  const requestedScopes = Array.from(new Set([
-    ...readGrantedScopesFromAuthData(authProfile.auth_data),
-    ...resolveRequestedOAuthScopes(oauthMethod, [
+  // Historical scopes survive only where the active definition still declares
+  // them. The callback records the scopes the provider actually grants.
+  const selection = selectReconnectOAuthScopes({
+    method: oauthMethod,
+    feedRequiredScopes: collectFeedRequiredScopes(connector.feeds_schema),
+    historicalScopes: readGrantedScopesFromAuthData(authProfile.auth_data),
+    requestedScopes: [
       ...readRequestedScopesFromAuthData(authProfile.auth_data),
       ...(params.requestedScopes ?? []),
-    ]),
-  ]));
+    ],
+  });
+  const requestedScopes = selection.requestedScopes;
 
   const connectToken = await createConnectToken({
     organizationId: ctx.organizationId,
@@ -629,11 +636,11 @@ export async function issueOAuthReconnectLink(params: {
     authType: 'oauth',
     authConfig: {
       ...buildOAuthConnectConfig(oauthMethod, requestedScopes),
-      // Ask for every scope the account already holds, including ones the
-      // connector no longer declares — `resolveRequestedOAuthScopes` filters
-      // those out, and consenting without them would downgrade the grant.
       scopes: requestedScopes,
       requestedScopes,
+      ...(selection.droppedHistoricalScopes.length > 0
+        ? { droppedHistoricalScopes: selection.droppedHistoricalScopes,
+          scopeSelection: `reconnect-preserve-declared@${connector.version}` } : {}),
       ...(appAuthProfileId ? { appAuthProfileId } : {}),
     },
     createdBy: ctx.userId,

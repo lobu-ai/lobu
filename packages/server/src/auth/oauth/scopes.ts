@@ -417,6 +417,71 @@ export function getFeedRequiredScopes(
 }
 
 /**
+ * Union of every feed entry's requiredScopes in a connector feeds_schema.
+ * Covers both the keyed-object shape (`{ items: { requiredScopes } }`) and
+ * list entries carrying a `key` field.
+ */
+export function collectFeedRequiredScopes(feedsSchema: unknown): string[] {
+  if (!feedsSchema || typeof feedsSchema !== 'object') return [];
+  const out: string[] = [];
+  for (const value of Object.values(feedsSchema as Record<string, unknown>)) {
+    if (value && typeof value === 'object') {
+      out.push(...normalizeScopeList((value as Record<string, unknown>).requiredScopes));
+    }
+  }
+  return Array.from(new Set(out));
+}
+
+export interface OAuthMethodScopes {
+  loginScopes?: unknown;
+  requiredScopes?: unknown;
+  optionalScopes?: unknown;
+}
+
+export interface ReconnectScopeSelection {
+  /** Scopes to request: manifest + honored asks + preserved declared history. */
+  requestedScopes: string[];
+  /**
+   * Historical scopes omitted from this request because nothing declares
+   * them anymore. Omitted from the request, not revoked at the provider.
+   */
+  droppedHistoricalScopes: string[];
+}
+
+/**
+ * Reconnect scope selection: re-request the current manifest and explicitly
+ * asked optionals, preserve historical scopes only where something still
+ * declares them (method login/required/optional or any feed requirement),
+ * and report the rest as dropped from the request. The provider determines
+ * the resulting grant; this selection does not revoke scopes itself.
+ */
+export function selectReconnectOAuthScopes(params: {
+  method: OAuthMethodScopes | null | undefined;
+  feedRequiredScopes?: unknown;
+  historicalScopes?: unknown;
+  requestedScopes?: unknown;
+}): ReconnectScopeSelection {
+  const manifest = [
+    ...normalizeScopeList(params.method?.loginScopes),
+    ...normalizeScopeList(params.method?.requiredScopes),
+  ];
+  const optionalSet = new Set(normalizeScopeList(params.method?.optionalScopes));
+  const explicit = normalizeScopeList(params.requestedScopes).filter((scope) => optionalSet.has(scope));
+  const declared = new Set([
+    ...manifest,
+    ...optionalSet,
+    ...normalizeScopeList(params.feedRequiredScopes),
+  ]);
+  const history = normalizeScopeList(params.historicalScopes);
+  const requested = [...new Set([...manifest, ...explicit, ...history.filter((scope) => declared.has(scope))])];
+  const requestedSet = new Set(requested);
+  return {
+    requestedScopes: requested,
+    droppedHistoricalScopes: history.filter((scope) => !requestedSet.has(scope)),
+  };
+}
+
+/**
  * Whether a bearer credential may be turned into a full web session.
  *
  * A web session carries everything the user can do in the browser, so only a

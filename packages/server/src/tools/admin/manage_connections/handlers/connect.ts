@@ -6,7 +6,11 @@ import { completeBrowserConnectionSetup } from '../../helpers/verify-browser-con
 import { selectedBrowserRequirement } from '../../../../connectors/browser-resource';
 import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-setup';
 import { getDb, pgBigintArray, type DbClient } from "../../../../db/client";
-import { normalizeScopeList } from "../../../../auth/oauth/scopes";
+import {
+	collectFeedRequiredScopes,
+	normalizeScopeList,
+	selectReconnectOAuthScopes,
+} from "../../../../auth/oauth/scopes";
 import { oauthAccountOwnershipError } from '../../../../authz/oauth-account-ownership';
 import { notifyConnectionPermissionRequest } from "../../../../notifications/triggers";
 import {
@@ -27,7 +31,6 @@ import {
   buildOAuthConnectConfig,
   issueOAuthReconnectLink,
   getOAuthMethods,
-  resolveRequestedOAuthScopes,
   resolveOAuthProfileApp,
   ensureEnvBackedOAuthAppProfile,
   getConnectBaseUrl,
@@ -303,14 +306,22 @@ async function handleConnectImpl(
       const provider = String(profile?.provider ?? app?.provider ?? oldConfig.provider ?? '').toLowerCase();
       const method = getOAuthMethods(connector.auth_schema).find(method => method.provider.toLowerCase() === provider);
       if (!method) return { error: 'The OAuth provider is no longer available. Review this connector’s app configuration.' };
-      // Previously requested/granted scopes are trusted. Only new requests are
-      // filtered by today's manifest, which may no longer list an existing grant.
-      const scopes = [...new Set([
-        ...(String(oldConfig.provider ?? '').toLowerCase() === provider
-          ? normalizeScopeList(oldConfig.requestedScopes ?? oldConfig.scopes) : []),
-        ...normalizeScopeList(profile?.account_scope ?? profile?.auth_data?.granted_scopes),
-        ...resolveRequestedOAuthScopes(method, args.requested_scopes),
-      ])];
+      // Revalidate pending requests as well as grants against the active definition.
+      const selection = selectReconnectOAuthScopes({
+        method,
+        feedRequiredScopes: collectFeedRequiredScopes(connector.feeds_schema),
+        historicalScopes: [
+          ...(String(oldConfig.provider ?? '').toLowerCase() === provider
+            ? normalizeScopeList(oldConfig.requestedScopes ?? oldConfig.scopes) : []),
+          ...normalizeScopeList(profile?.account_scope ?? profile?.auth_data?.granted_scopes),
+        ],
+        requestedScopes: args.requested_scopes,
+      });
+      const scopes = selection.requestedScopes;
+      const scopeAudit = {
+        droppedHistoricalScopes: selection.droppedHistoricalScopes,
+        scopeSelection: `reconnect-preserve-declared@${connector.version}`,
+      };
       const bindingsChanged = token.auth_profile_id !== target.auth_profile_id ||
         (appId !== null && oldConfig.appAuthProfileId !== appId);
       const needsRenewal = bindingsChanged || token.status !== 'pending' || new Date(token.expires_at).getTime() <= Date.now();
@@ -322,7 +333,7 @@ async function handleConnectImpl(
           ...(pendingMeta ? { pendingProfileMeta: { displayName: pendingMeta.displayName, slug: pendingMeta.slug,
             connectorKey: target.connector_key, provider: method.provider } } : {}),
           appAuthProfileId: appId,
-          scopes, requestedScopes: scopes };
+          scopes, requestedScopes: scopes, ...scopeAudit };
         // Invalidate the old bearer link and issue its replacement atomically.
         await tx`UPDATE connect_tokens SET status = 'expired' WHERE id = ${token.id}`;
         const fresh = await createConnectToken({ connectionId: target.id, authProfileId: target.auth_profile_id,
@@ -331,11 +342,9 @@ async function handleConnectImpl(
           WHERE id = ${target.id} AND organization_id = ${organizationId}`;
         return { token: fresh.token, expires_at: fresh.expires_at, target };
       }
-      if (args.requested_scopes) {
-        await tx`UPDATE connect_tokens
-          SET auth_config = COALESCE(auth_config, '{}'::jsonb) || ${tx.json({ scopes, requestedScopes: scopes })}::jsonb
-          WHERE id = ${token.id}`;
-      }
+      await tx`UPDATE connect_tokens
+        SET auth_config = COALESCE(auth_config, '{}'::jsonb) || ${tx.json({ scopes, requestedScopes: scopes, ...scopeAudit })}::jsonb
+        WHERE id = ${token.id}`;
       return { token: token.token as string, expires_at: token.expires_at as Date, target };
     });
     if (recovered.error) return { error: recovered.error, setup_url: setupUrl };

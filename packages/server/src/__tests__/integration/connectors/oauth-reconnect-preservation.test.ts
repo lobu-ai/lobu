@@ -381,17 +381,67 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     expect((await connectRoutes.request(new URL(initial.connect_url).pathname.replace('/lobu/connect', ''), {}, {} as Env)).status).toBe(404);
   });
 
-  it('preserves already granted scopes outside the current manifest when retrying reconnect setup', async () => {
+  it.each(['connection', 'profile'] as const)('filters %s reconnect history while retaining feed requirements', async (target) => {
     const s = await seed();
     const sql = getTestDb();
-    const legacy = 'legacy.already-granted';
+    const legacy = 'legacy.not-declared';
+    await sql`UPDATE connector_definitions SET auth_schema = jsonb_set(auth_schema, '{methods,0,optionalScopes}', ${sql.json([EXTRA])}::jsonb)
+      WHERE organization_id = ${s.org.id} AND key = ${KEY}`;
+    await sql`UPDATE auth_profiles SET auth_data = auth_data || ${sql.json({ granted_scopes: [BASE, OLD, legacy] })}::jsonb WHERE id = ${s.profile.id}`;
+    const before = await state(s.connection.id);
+    const result = (target === 'connection'
+      ? await s.client.reauthenticate(s.connection.id, { requested_scopes: [EXTRA] })
+      : await manageAuthProfiles({ action: 'update_auth_profile', auth_profile_slug: s.profile.slug,
+        requested_scopes: [EXTRA], reconnect: true }, {} as Env, s.ctx)) as { connect_url: string };
+    const token = new URL(result.connect_url).pathname.split('/').at(-3)!;
+    const start = await connectRoutes.request(`/${token}/oauth/start`, {}, {} as Env);
+    expect(new URL(start.headers.get('location')!).searchParams.get('scope')?.split(' ').sort()).toEqual([BASE, OLD, EXTRA].sort());
+    const [row] = await sql`SELECT auth_config FROM connect_tokens WHERE token = ${token}`;
+    expect(row.auth_config.droppedHistoricalScopes).toEqual([legacy]);
+    expect(await state(s.connection.id)).toEqual(before);
+  });
+
+  it.each([
+    [false, undefined], [false, [EXTRA]], [true, undefined], [true, [EXTRA]],
+  ] as const)('drops undeclared history on retry (expired=%s, requested=%j)', async (expired, requestedScopes) => {
+    const s = await seed();
+    const sql = getTestDb();
+    const legacy = 'legacy.not-declared';
     await sql`UPDATE account SET scope = ${[BASE, OLD, legacy].join(' ')} WHERE id = ${s.profile.account_id}`;
     await sql`UPDATE connections SET status = 'pending_auth' WHERE id = ${s.connection.id}`;
     const initial = await s.client.reauthenticate(s.connection.id) as { connect_url: string };
-    const retry = await s.client.connect({ connector_key: KEY, requested_scopes: [EXTRA] }) as { connect_url: string };
-    expect(retry.connect_url).toBe(initial.connect_url);
+    // Simulate a link issued before the definition stopped declaring this scope.
+    await sql`UPDATE connect_tokens SET auth_config = auth_config || ${sql.json({
+      scopes: [BASE, OLD, legacy], requestedScopes: [BASE, OLD, legacy],
+    })}::jsonb WHERE connection_id = ${s.connection.id} AND status = 'pending'`;
+    if (expired) await sql`UPDATE connect_tokens SET expires_at = NOW() - INTERVAL '1 hour'
+      WHERE connection_id = ${s.connection.id} AND status = 'pending'`;
+    const retry = await s.client.connect({ connector_key: KEY, requested_scopes: requestedScopes ? [...requestedScopes] : undefined }) as { connect_url: string };
+    if (expired) expect(retry.connect_url).not.toBe(initial.connect_url);
+    else expect(retry.connect_url).toBe(initial.connect_url);
     const start = await connectRoutes.request(new URL(retry.connect_url).pathname.replace('/lobu/connect', ''), {}, {} as Env);
-    expect(new URL(start.headers.get('location')!).searchParams.get('scope')?.split(' ')).toEqual(expect.arrayContaining([BASE, OLD, legacy, EXTRA]));
+    const scope = new URL(start.headers.get('location')!).searchParams.get('scope')?.split(' ');
+    expect(scope?.sort()).toEqual([BASE, OLD, ...(requestedScopes ?? [])].sort());
+    expect(scope).not.toContain(legacy);
+    const [token] = await sql`SELECT auth_config FROM connect_tokens WHERE connection_id = ${s.connection.id} AND status = 'pending'`;
+    expect(token.auth_config.droppedHistoricalScopes).toEqual([legacy]);
+    expect(typeof token.auth_config.scopeSelection).toBe('string');
+  });
+
+  it('clears a stale omission audit when the current definition declares the scope again', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    await sql`UPDATE connections SET status = 'pending_auth' WHERE id = ${s.connection.id}`;
+    await s.client.reauthenticate(s.connection.id);
+    await sql`UPDATE connect_tokens SET auth_config = auth_config || ${sql.json({
+      droppedHistoricalScopes: [OLD], scopeSelection: 'previous-selection',
+    })}::jsonb WHERE connection_id = ${s.connection.id} AND status = 'pending'`;
+    const retry = await s.client.connect({ connector_key: KEY, requested_scopes: [EXTRA] }) as { connect_url: string };
+    const start = await connectRoutes.request(new URL(retry.connect_url).pathname.replace('/lobu/connect', ''), {}, {} as Env);
+    expect(new URL(start.headers.get('location')!).searchParams.get('scope')?.split(' ')).toContain(OLD);
+    const [token] = await sql`SELECT auth_config FROM connect_tokens WHERE connection_id = ${s.connection.id} AND status = 'pending'`;
+    expect(token.auth_config.droppedHistoricalScopes).toEqual([]);
+    expect(token.auth_config.scopeSelection).not.toBe('previous-selection');
   });
 
   it('does not expose a different member profile-bound reconnect token through pending connect retries', async () => {

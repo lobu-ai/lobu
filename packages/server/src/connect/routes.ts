@@ -82,6 +82,9 @@ interface OAuthAuthConfig {
   pkceCodeVerifier?: string;
   redirectUri?: string;
   requestedScopes?: string[];
+  /** Historical scopes omitted from this request (undeclared, not revoked). */
+  droppedHistoricalScopes?: string[];
+  scopeSelection?: string;
   resource?: string;
 }
 
@@ -667,6 +670,24 @@ connectRoutes.get('/:token/oauth/start', requireConnectToken, async (c) => {
 
   if (!authUrl) {
     return c.json({ error: `Unsupported OAuth provider: ${authConfig.provider}` }, 400);
+  }
+
+  // Audit what actually leaves the server: with no callback, a provider-side
+  // refusal is otherwise invisible. Correlate by token row, never by bearer,
+  // state, or URL contents.
+  if (Array.isArray(authConfig.droppedHistoricalScopes) && authConfig.droppedHistoricalScopes.length > 0) {
+    logger.info(
+      {
+        connect_token_id: tokenRow.id,
+        connection_id: tokenRow.connection_id,
+        organization_id: tokenRow.organization_id,
+        connector_key: tokenRow.connector_key,
+        requested_scopes: authConfig.scopes ?? [],
+        dropped_historical_scopes: authConfig.droppedHistoricalScopes,
+        scope_selection: authConfig.scopeSelection ?? null,
+      },
+      'OAuth connect omitting undeclared historical scopes'
+    );
   }
 
   return c.redirect(authUrl);
