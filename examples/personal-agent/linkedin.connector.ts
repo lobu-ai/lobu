@@ -3192,7 +3192,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.14.0",
+    version: "3.15.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
     browser: {
@@ -3224,6 +3224,25 @@ export default class LinkedInConnector extends ConnectorRuntime<
           mode: "live",
         },
         { type: "none", label: "Local data export" },
+        // Keep browser first: connection setup uses the first authenticated
+        // method, while sign-in independently discovers OAuth loginScopes.
+        {
+          type: "oauth",
+          provider: "linkedin",
+          requiredScopes: ["openid", "profile", "email"],
+          loginScopes: ["openid", "profile", "email"],
+          loginProvisioning: { autoCreateConnection: false },
+          authorizationUrl: "https://www.linkedin.com/oauth/v2/authorization",
+          tokenUrl: "https://www.linkedin.com/oauth/v2/accessToken",
+          userinfoUrl: "https://api.linkedin.com/v2/userinfo",
+          tokenEndpointAuthMethod: "client_secret_post",
+          clientIdKey: "LINKEDIN_CLIENT_ID",
+          clientSecretKey: "LINKEDIN_CLIENT_SECRET",
+          description:
+            "Identity-only LinkedIn sign-in. Feeds use the browser or local exports.",
+          setupInstructions:
+            "Enable Sign In with LinkedIn using OpenID Connect in your LinkedIn app. Register {{redirect_uri}} for connector authorization and /api/auth/oauth2/callback/linkedin on the same Lobu origin for sign-in, then enter the client ID and client secret.",
+        },
       ],
     },
     feeds: {
