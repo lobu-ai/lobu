@@ -5,6 +5,8 @@
  * that normalize, compare, and persist scope lists across auth_data records.
  */
 
+import type { AuthInfo } from './types';
+
 /** All available scopes (including device-flow-only grants). */
 export const AVAILABLE_SCOPES = [
   'mcp:read',
@@ -412,4 +414,23 @@ export function getFeedRequiredScopes(
   }
 
   return [];
+}
+
+/**
+ * Whether a bearer credential may be turned into a full web session.
+ *
+ * A web session carries everything the user can do in the browser, so only a
+ * credential that already holds `mcp:admin` qualifies, and only from a flow
+ * whose holder signed in as the user: a PAT or a device-code grant.
+ * Device-code provenance does not establish first-party client identity
+ * (registration is open), and the resulting session does not keep the
+ * credential's workspace limits.
+ */
+export function canMintWebSession(
+  authInfo: Pick<AuthInfo, 'scopes' | 'tokenType' | 'authorizationGrantType'>
+): boolean {
+  return (
+    authInfo.scopes.includes('mcp:admin') &&
+    (authInfo.tokenType === 'pat' || authInfo.authorizationGrantType === 'device_code')
+  );
 }

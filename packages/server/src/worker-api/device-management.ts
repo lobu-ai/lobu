@@ -13,6 +13,7 @@
 import { isKnownPlatform } from '@lobu/core';
 import type { Context } from 'hono';
 import { createAuth } from '../auth';
+import { canMintWebSession } from '../auth/oauth/scopes';
 import { findExistingPersonalOrg } from '../auth/personal-org-provisioning';
 import { PersonalAccessTokenService } from '../auth/tokens';
 import { getDb, parsePgTextArray, pgBigintArray } from '../db/client';
@@ -458,13 +459,15 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
       return c.json(CHILD_SELF_MINT_ONLY, 403);
     }
 
-    // Also mint a Better Auth session token for a Chrome sibling. Its iframe
-    // needs a session cookie (not a PAT) to land signed-in; the extension
-    // installs this via /api/exchange-token. A headless daemon has no iframe,
-    // so minting a browser session for every daemon start would create an
-    // unused credential.
+    // Also mint a Better Auth session token for a Chrome sibling. Its side
+    // panel signs in with this, never with the device-only child PAT. A
+    // headless daemon has no iframe, so minting a browser session for every
+    // daemon start would create an unused credential. The caller must itself
+    // be allowed a web session, or this would turn any device-worker bearer
+    // into one.
     let sessionToken: string | null = null;
-    if (platform === 'chrome-extension') {
+    const callerAuth = c.var.mcpAuthInfo;
+    if (platform === 'chrome-extension' && callerAuth && canMintWebSession(callerAuth)) {
       try {
         const auth = await createAuth(c.env, c.req.raw);
         const ctx = await auth.$context;

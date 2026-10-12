@@ -433,7 +433,10 @@ describe('SSE ticket (/api/sse-ticket)', () => {
     expect(message.textContent).toContain('Re-pair to sign in');
     expect(body.innerHTML).toContain('>Re-pair</button>');
     expect(buttons.get('owl-retry')?.removed).toBe(true);
+    // The panel hears about the rejection first, so a desktop-paired panel can
+    // fetch a fresh credential without the user doing anything.
+    expect(posted).toEqual([{ owletto: 'session-rejected' }]);
     buttons.get('owl-settings')?.onclick?.();
-    expect(posted).toEqual([{ owletto: 'open-settings' }]);
+    expect(posted).toEqual([{ owletto: 'session-rejected' }, { owletto: 'open-settings' }]);
   });
 });

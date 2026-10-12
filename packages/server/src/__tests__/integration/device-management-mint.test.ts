@@ -7,6 +7,7 @@
 
 import { Hono } from 'hono';
 import { beforeAll, describe, expect, it } from 'vitest';
+import type { AuthInfo } from '../../auth/oauth/types';
 import type { Env } from '../../index';
 import { __resetPublicOriginCachesForTests } from '../../utils/public-origin';
 import { mintDeviceChildToken } from '../../worker-api/device-management';
@@ -59,14 +60,26 @@ async function markPersonalOrg(orgId: string, userId: string): Promise<void> {
   `;
 }
 
-function mintApp(userId: string): Hono<{ Bindings: Env; Variables: { user: { id: string }; mcpAuthInfo: { scopes: string[] } | null } }> {
-  const app = new Hono<{ Bindings: Env; Variables: { user: { id: string }; mcpAuthInfo: { scopes: string[] } | null } }>();
+type MintCaller = Pick<AuthInfo, 'scopes' | 'tokenType' | 'authorizationGrantType' | 'workerId'>;
+
+// The Mac app's own sign-in: a device-code grant that carries mcp:admin.
+const FIRST_PARTY_LOGIN: MintCaller = {
+  scopes: ['mcp:read', 'mcp:write', 'mcp:admin', 'device_worker:run'],
+  tokenType: 'access_token',
+  authorizationGrantType: 'device_code',
+};
+
+function mintApp(
+  userId: string,
+  caller: MintCaller = FIRST_PARTY_LOGIN
+): Hono<{ Bindings: Env; Variables: { user: { id: string }; mcpAuthInfo: MintCaller | null } }> {
+  const app = new Hono<{ Bindings: Env; Variables: { user: { id: string }; mcpAuthInfo: MintCaller | null } }>();
   app.post(
     '/api/me/devices/mint-child-token',
     async (c, next) => {
       // Device-scoped bearer: device_worker:run scope, NO MCP resource audience.
       c.set('user', { id: userId });
-      c.set('mcpAuthInfo', { scopes: ['device_worker:run'] });
+      c.set('mcpAuthInfo', caller);
       await next();
     },
     (c) => mintDeviceChildToken(c)
@@ -470,6 +483,39 @@ describe('device mint (mint-child-token)', () => {
     expect(new Set(pats.map((p) => p.worker_id))).toEqual(
       new Set([chromeBody.worker_id, headlessBody.worker_id])
     );
+  });
+
+  // The child PAT only runs device work; the browser session it rides with is
+  // a full web login, so only a caller that may hold one can pass it on.
+  it.each([
+    ['a device-worker-only bearer', { scopes: ['device_worker:run'], tokenType: 'pat' } as MintCaller],
+    [
+      'a read-only device-code grant',
+      {
+        scopes: ['mcp:read', 'profile:read', 'device_worker:run'],
+        tokenType: 'access_token',
+        authorizationGrantType: 'device_code',
+      } as MintCaller,
+    ],
+  ])('mints a Chrome child without a browser session for %s', async (_label, caller) => {
+    const personalOrg = await createTestOrganization({ name: 'Personal Weak Caller' });
+    const user = await createTestUser({ email: `weak-${crypto.randomUUID()}@test.example.com` });
+    await markPersonalOrg(personalOrg.id, user.id);
+    await addUserToOrganization(user.id, personalOrg.id, 'owner');
+
+    const res = await mintApp(user.id, caller).request(
+      '/api/me/devices/mint-child-token',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ platform: 'chrome-extension' }),
+      },
+      TEST_ENV
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { access_token: string; session_token: string | null };
+    expect(body.access_token).toMatch(/^owl_pat_/);
+    expect(body.session_token).toBeNull();
   });
 
   it('mints the exact requested macos identity without creating a browser session', async () => {

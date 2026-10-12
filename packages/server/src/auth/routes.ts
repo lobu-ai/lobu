@@ -20,7 +20,12 @@ import { findExistingPersonalOrg } from './personal-org-provisioning';
 import { hostOnlyExpiry } from './session-cookie-scope';
 import { OAuthClientsStore } from './oauth/clients';
 import { OAuthProvider } from './oauth/provider';
-import { AVAILABLE_PAT_SCOPES, DEFAULT_SCOPES_STRING, POLICY_WRITE_SCOPE } from './oauth/scopes';
+import {
+  AVAILABLE_PAT_SCOPES,
+  canMintWebSession,
+  DEFAULT_SCOPES_STRING,
+  POLICY_WRITE_SCOPE,
+} from './oauth/scopes';
 import { PersonalAccessTokenService } from './tokens';
 
 const credentialRoutes = new Hono<{ Bindings: Env }>();
@@ -387,13 +392,7 @@ async function resolveDeepLinkToken(
   const baseUrl = resolveBaseUrl({ request: c.req.raw });
   const authInfo = await new OAuthProvider(sql, baseUrl).verifyAccessToken(token);
   if (authInfo?.userId) {
-    // Device-code provenance does not establish first-party client identity:
-    // registration is open. This gate checks MCP scope and issuing flow;
-    // the resulting web session does not retain the credential's workspace limits.
-    const canExchange =
-      authInfo.scopes.includes('mcp:admin') &&
-      (authInfo.tokenType === 'pat' || authInfo.authorizationGrantType === 'device_code');
-    if (!canExchange) return 'insufficient_scope';
+    if (!canMintWebSession(authInfo)) return 'insufficient_scope';
     return {
       userId: authInfo.userId,
       organizationId: authInfo.organizationId,
@@ -696,11 +695,18 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
     })
       .then(function (r) {
         if (r.ok) return r.json();
-        if (r.status === 403) return r.json().catch(function () { return null; });
+        if (r.status === 401 || r.status === 403) {
+          return r.json().catch(function () { return null; });
+        }
         return null;
       })
       .then(function (data) {
         if (activeAttempt !== current) return;
+        if (data && (data.error === "insufficient_scope" || data.error === "invalid_token")) {
+          // A panel paired through the desktop app can fetch a fresh sign-in
+          // credential on its own; tell it so before falling back to the UI.
+          try { window.parent.postMessage({ owletto: "session-rejected" }, "*"); } catch (e) {}
+        }
         if (data && data.error === "insufficient_scope") {
           fail("This extension was paired with read-only access, which can't open the app. Re-pair to sign in.", true);
         } else if (data && data.session_token) {
