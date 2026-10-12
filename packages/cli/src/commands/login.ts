@@ -47,13 +47,11 @@ interface LoginOptions {
 }
 
 /**
- * Hard ceiling on the polling loop. RFC 8628 servers typically return
- * `expires_in: 600` (10 min), but if the server hands us a much longer
- * deadline we still don't want to hammer `/oauth/token` for an hour from
- * a backgrounded shell. 5 minutes matches the documented device-code
- * expiry and is generous for a human to scan a QR + approve.
+ * Bound background polling while allowing Lobu's full 15-minute device-code
+ * lifetime. A shorter server-advertised expiry still takes precedence.
+ * Stopping earlier can lose a browser approval while its code is still valid.
  */
-const POLL_HARD_TIMEOUT_MS = 5 * 60 * 1000;
+const POLL_HARD_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
  * `lobu login` runs the OAuth 2.0 device-code grant against the issuer

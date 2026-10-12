@@ -24,6 +24,7 @@ describe("login device-code approval", () => {
       expiresIn?: number;
       interval?: number;
       tokenResults?: Array<"success" | "pending">;
+      onPending?: () => void;
     } = {}
   ): { calls: string[] } {
     const calls: string[] = [];
@@ -65,6 +66,7 @@ describe("login device-code approval", () => {
       }
       if (url.endsWith("/oauth/token")) {
         if (tokenResults.shift() === "pending") {
+          options.onPending?.();
           return jsonResponse({ error: "authorization_pending" }, 400);
         }
         return jsonResponse({
@@ -177,6 +179,73 @@ describe("login device-code approval", () => {
     expect(saveSpy).toHaveBeenCalledTimes(1);
     expect(process.exitCode).not.toBe(1);
   });
+
+  for (const scenario of [
+    {
+      name: "supervised approval after five minutes",
+      expiresIn: 900,
+      elapsed: 360,
+      succeeds: true,
+    },
+    {
+      name: "email approval after five minutes",
+      expiresIn: 900,
+      elapsed: 360,
+      succeeds: true,
+      email: "user@example.com",
+    },
+    {
+      name: "shorter server expiry",
+      expiresIn: 60,
+      elapsed: 61,
+      succeeds: false,
+    },
+    {
+      name: "local ceiling for oversized server lifetimes",
+      expiresIn: 3600,
+      elapsed: 901,
+      succeeds: false,
+    },
+  ]) {
+    test(scenario.name, async () => {
+      spyOn(context, "resolveContext").mockResolvedValue({
+        name: "prod",
+        url: "https://lobu.test/api/v1",
+        source: "config",
+      });
+      spyOn(credentials, "loadCredentials").mockResolvedValue(null);
+      const saveSpy = spyOn(credentials, "saveCredentials").mockResolvedValue();
+      spyOn(process.stdout, "isTTY", "get").mockReturnValue(false);
+      spyOn(process.stdin, "isTTY", "get").mockReturnValue(false);
+      spyOn(console, "log").mockImplementation(() => undefined);
+      const start = Date.now();
+      const clock = spyOn(Date, "now").mockReturnValue(start);
+      const originalFetch = globalThis.fetch;
+      const originalExitCode = process.exitCode;
+      process.exitCode = 0;
+      const { calls } = mockOAuthServer({
+        expiresIn: scenario.expiresIn,
+        interval: 0,
+        tokenResults: ["pending", "success"],
+        onPending: () => clock.mockReturnValue(start + scenario.elapsed * 1000),
+      });
+      try {
+        await loginCommand({
+          context: "prod",
+          waitForApproval: !scenario.email,
+          email: scenario.email,
+        });
+        expect(
+          calls.filter((url) => url.endsWith("/oauth/token"))
+        ).toHaveLength(scenario.succeeds ? 2 : 1);
+        expect(saveSpy).toHaveBeenCalledTimes(scenario.succeeds ? 1 : 0);
+        expect(process.exitCode).toBe(scenario.succeeds ? 0 : 1);
+      } finally {
+        globalThis.fetch = originalFetch;
+        process.exitCode = originalExitCode;
+      }
+    });
+  }
 
   test("still fails fast for an unsupervised non-interactive login", async () => {
     spyOn(context, "resolveContext").mockResolvedValue({

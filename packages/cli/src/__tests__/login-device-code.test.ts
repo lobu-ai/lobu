@@ -10,8 +10,12 @@ const cli =
   process.env.LOBU_TEST_CLI ?? resolve(import.meta.dir, "../../bin/lobu.js");
 
 describe("device-code login under Node", () => {
-  for (const columns of [0, 80]) {
-    test(`saves credentials with ${columns} terminal columns`, async () => {
+  for (const { columns, approvalDelayMs } of [
+    { columns: 0, approvalDelayMs: 0 },
+    { columns: 80, approvalDelayMs: 0 },
+    { columns: 80, approvalDelayMs: 6 * 60 * 1000 },
+  ]) {
+    test(`saves credentials with ${columns} columns and ${approvalDelayMs}ms approval delay`, async () => {
       const scratch = await mkdtemp(join(tmpdir(), "lobu-login-"));
       const calls: string[] = [];
       let polls = 0;
@@ -40,7 +44,7 @@ describe("device-code login under Node", () => {
                 device_code: "test-device",
                 user_code: "TEST-CODE",
                 verification_uri: `${origin}/approve`,
-                expires_in: 60,
+                expires_in: 900,
                 interval: 1,
               });
             case "/token":
@@ -80,6 +84,17 @@ describe("device-code login under Node", () => {
           process.stderr.moveCursor = () => true;
           process.stderr.clearLine = () => true;
           process.stdin.setRawMode = () => process.stdin;
+          const now = Date.now.bind(Date);
+          let elapsed = 0;
+          Date.now = () => now() + elapsed;
+          const fetch = globalThis.fetch;
+          globalThis.fetch = async (...args) => {
+            const response = await fetch(...args);
+            if (response.url.endsWith('/token') && response.status === 400) {
+              elapsed = ${approvalDelayMs};
+            }
+            return response;
+          };
           `
         );
         const child = spawn(
