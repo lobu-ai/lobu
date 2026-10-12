@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 /**
  * Guard against drift between the SPA copy of RESERVED_SUBDOMAINS in
  * `packages/owletto/src/lib/subdomain.ts` and the backend canonical
- * list in `packages/server/src/index.ts`. Divergence would
+ * list in `packages/server/src/utils/public-origin.ts`. Divergence would
  * silently break subdomain → org resolution on one side.
  *
  * The SPA is a git submodule, so we read the file via fs and parse the
@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..', '..');
 const SPA_FILE = join(REPO_ROOT, 'packages/owletto/src/lib/subdomain.ts');
-const BACKEND_FILE = join(REPO_ROOT, 'packages/server/src/index.ts');
+const BACKEND_FILE = join(REPO_ROOT, 'packages/server/src/utils/public-origin.ts');
 
 function extractReservedSubdomains(filePath: string): string[] {
   const source = readFileSync(filePath, 'utf8');

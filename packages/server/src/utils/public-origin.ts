@@ -260,6 +260,26 @@ function isSubdomainCapableHost(host: string): boolean {
 }
 
 /**
+ * Subdomains that are infrastructure, never organization slugs. Single
+ * canonical list shared by the gateway middleware and auth org resolution;
+ * the SPA carries its own copy, kept in sync by
+ * subdomain-reserved-parity.test.ts. Additions here must land there too.
+ */
+export const RESERVED_SUBDOMAINS = new Set([
+  'www',
+  'api',
+  'app',
+  'admin',
+  'auth',
+  'mcp',
+  'static',
+  'assets',
+  'cdn',
+  'docs',
+  'mail',
+]);
+
+/**
  * Extracts the org slug from a Host header for `{org}.{zone}` requests.
  * Reserved subdomains (www, api, app, etc.) are skipped so infra hostnames are
  * not mistaken for org slugs. Returns null when the host does not belong to the

@@ -5,6 +5,11 @@ import {
 	normalizeAuthValues,
 } from "../utils/auth-profiles";
 import { listCatalogConnectorDefinitions } from "../utils/connector-catalog";
+import {
+	extractSubdomainOrg,
+	getSubdomainZone,
+	RESERVED_SUBDOMAINS,
+} from "../utils/public-origin";
 import { TtlCache } from "../utils/ttl-cache";
 import { safeParseUrl } from "./base-url";
 import { resolveOAuthCallbackOrganization } from "./oauth-organization-context";
@@ -322,12 +327,23 @@ function extractSlugFromPath(pathname: string): string | null {
 	return firstSegment;
 }
 
+function addSlugFromHost(
+	host: string | undefined | null,
+	target: Set<string>,
+): void {
+	const slug = extractSubdomainOrg(host, getSubdomainZone(), RESERVED_SUBDOMAINS);
+	if (slug) target.add(slug);
+}
+
 function addSlugFromUrl(
 	rawUrl: string | undefined | null,
 	target: Set<string>,
 ): void {
 	const parsed = safeParseUrl(rawUrl, "http://localhost");
 	if (!parsed) return;
+	// Per-org pages omit the org path prefix, so prefer their hostname.
+	// This selects login configuration; it does not grant organization access.
+	addSlugFromHost(parsed.hostname, target);
 	const slug = extractSlugFromPath(parsed.pathname);
 	if (slug) target.add(slug);
 
@@ -343,6 +359,9 @@ async function extractCandidateOrgSlugs(request?: Request): Promise<string[]> {
 	if (!request) return [];
 
 	const slugs = new Set<string>();
+	// Raw Host header first, mirroring the gateway subdomain middleware:
+	// covers requests whose URL was rewritten upstream but kept Host.
+	addSlugFromHost(request.headers.get("host"), slugs);
 	addSlugFromUrl(request.url, slugs);
 	addSlugFromUrl(request.headers.get("referer"), slugs);
 

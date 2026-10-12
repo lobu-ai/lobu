@@ -133,6 +133,7 @@ import {
 	getCanonicalRedirectUrl,
 	getConfiguredPublicOrigin,
 	getSubdomainZone,
+	RESERVED_SUBDOMAINS,
 	resolvePublicOrigin,
 } from "./utils/public-origin";
 import {
@@ -424,20 +425,6 @@ app.use("/*", async (c, next) => {
  * PUBLIC_GATEWAY_URL hostname. Reserved subdomains (www, api, app, admin, etc.)
  * are not treated as orgs.
  */
-const RESERVED_SUBDOMAINS = new Set([
-	"www",
-	"api",
-	"app",
-	"admin",
-	"auth",
-	"mcp",
-	"static",
-	"assets",
-	"cdn",
-	"docs",
-	"mail",
-]);
-
 app.use("/*", async (c, next) => {
 	const zone = getSubdomainZone();
 	const sub = extractSubdomainOrg(
