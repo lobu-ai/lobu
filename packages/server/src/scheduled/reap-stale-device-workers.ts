@@ -22,6 +22,12 @@
  * so a binding created between the candidate scan and the delete keeps the row
  * alive. Child PATs bound to the reaped worker_ids are revoked on the way out.
  *
+ * It also revokes ORPHANED device PATs: worker-bound, still live, with no
+ * device row for their (user_id, worker_id), and unused for the same 30 days.
+ * Device deletes revoke bound PATs today, but older deletes did not, and those
+ * tokens (some minted before child PATs expired) would otherwise live forever
+ * and could re-create their device by polling.
+ *
  * Single-claimant per tick via the runs-queue (like the other scheduled jobs);
  * pure Postgres, so it's correct under N>1 app replicas.
  */
@@ -34,7 +40,39 @@ import logger from '../utils/logger';
 export async function reapStaleDeviceWorkers(): Promise<{
   scanned: number;
   reaped: number;
+  orphanedTokens: number;
 }> {
+  const devices = await reapStaleDevices();
+  const orphanedTokens = await revokeOrphanedDeviceTokens();
+  return { ...devices, orphanedTokens };
+}
+
+/**
+ * A worker-bound PAT whose device row is gone and that has not been used for
+ * 30 days is dead weight. `COALESCE(last_used_at, created_at)` keeps a freshly
+ * minted token (its device row is written right after it) out of reach.
+ */
+async function revokeOrphanedDeviceTokens(): Promise<number> {
+  const revoked = (await getDb()`
+    UPDATE personal_access_tokens p
+    SET revoked_at = NOW(), updated_at = NOW()
+    WHERE p.worker_id IS NOT NULL
+      AND p.revoked_at IS NULL
+      AND (p.expires_at IS NULL OR p.expires_at > NOW())
+      AND COALESCE(p.last_used_at, p.created_at) < NOW() - interval '30 days'
+      AND NOT EXISTS (
+        SELECT 1 FROM device_workers d
+        WHERE d.user_id = p.user_id AND d.worker_id = p.worker_id
+      )
+    RETURNING p.id, p.organization_id, p.name, p.worker_id
+  `) as unknown as AuditedAccessToken[];
+  for (const token of revoked) {
+    recordAccessTokenEvent('deleted', token, null, 'orphaned');
+  }
+  return revoked.length;
+}
+
+async function reapStaleDevices(): Promise<{ scanned: number; reaped: number }> {
   const sql = getDb();
 
   // 1. Candidate scan: stale + no bindings. Read-only; the authoritative
@@ -185,7 +223,7 @@ export async function reapStaleDeviceWorkers(): Promise<{
 /** Scheduled-task wrapper: run the reaper and log a summary. */
 export async function runReapStaleDeviceWorkers(): Promise<void> {
   const result = await reapStaleDeviceWorkers();
-  if (result.reaped > 0) {
+  if (result.reaped > 0 || result.orphanedTokens > 0) {
     logger.info({ ...result }, '[task] reap-stale-device-workers completed');
   }
 }
