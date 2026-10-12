@@ -710,6 +710,29 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
       try { window.parent.postMessage({ owletto: "open-settings" }, "*"); } catch (e) {}
     };
   }
+  // A panel paired through the desktop app can fetch a fresh sign-in
+  // credential on its own, so tell it about the rejection and wait: it either
+  // reloads this frame with the new session or answers session-refresh-failed.
+  // Hosts that never answer (older panels, the Mac menu bar) get the error
+  // after a short wait.
+  function failAfterPanel(msg, repair) {
+    document.body.textContent = "Reconnecting\\u2026";
+    var shown = false;
+    var timer = null;
+    function show() {
+      if (shown) return;
+      shown = true;
+      clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+      fail(msg, repair);
+    }
+    function onMessage(ev) {
+      if (ev.source === window.parent && ev.data && ev.data.owletto === "session-refresh-failed") show();
+    }
+    window.addEventListener("message", onMessage);
+    timer = setTimeout(show, 4000);
+    try { window.parent.postMessage({ owletto: "session-rejected" }, "*"); } catch (e) { show(); }
+  }
   function attempt() {
     if (activeAttempt) {
       clearTimeout(activeAttempt.timer);
@@ -741,13 +764,10 @@ credentialRoutes.get('/extension-bootstrap', (c) => {
       })
       .then(function (data) {
         if (activeAttempt !== current) return;
-        if (data && (data.error === "insufficient_scope" || data.error === "invalid_token")) {
-          // A panel paired through the desktop app can fetch a fresh sign-in
-          // credential on its own; tell it so before falling back to the UI.
-          try { window.parent.postMessage({ owletto: "session-rejected" }, "*"); } catch (e) {}
-        }
         if (data && data.error === "insufficient_scope") {
-          fail("This extension was paired with read-only access, which can't open the app. Re-pair to sign in.", true);
+          failAfterPanel("This extension was paired with read-only access, which can't open the app. Re-pair to sign in.", true);
+        } else if (data && data.error === "invalid_token") {
+          failAfterPanel("Your session may have expired. Re-pair from the extension if this keeps happening.");
         } else if (data && data.session_token) {
           try { sessionStorage.setItem("owletto.session_token", data.session_token); } catch (e) {}
           location.replace(next);

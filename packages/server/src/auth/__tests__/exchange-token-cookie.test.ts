@@ -428,9 +428,11 @@ describe('SSE ticket (/api/sse-ticket)', () => {
 
   // A read-only pairing can never mint a session, so the page must lead with
   // re-pairing (which asks for mcp:admin) instead of a Retry that loops forever.
-  it('bootstrap offers re-pairing when the paired token lacks mcp:admin', async () => {
-    const org = await createTestOrganization({ slug: 'xt-boot-ro' });
-    const user = await createTestUser({ email: 'xt-boot-ro@test.example.com' });
+  // It first tells the panel and waits, so a desktop-paired panel can reload it
+  // with a fresh session before any error shows.
+  async function runReadOnlyBootstrap(slug: string, panelAnswers: boolean) {
+    const org = await createTestOrganization({ slug });
+    const user = await createTestUser({ email: `${slug}@test.example.com` });
     await addUserToOrganization(user.id, org.id, 'owner');
     const client = await createTestOAuthClient();
     // A private scope makes the fixture mint this as a device_code grant,
@@ -445,10 +447,29 @@ describe('SSE ticket (/api/sse-ticket)', () => {
     const message = { textContent: '' };
     const buttons = new Map<string, { removed?: boolean; onclick?: () => void; remove?: () => void }>();
     const posted: unknown[] = [];
+    const listeners = new Set<(ev: { source: unknown; data: unknown }) => void>();
+    const panelTimeouts: Array<() => void> = [];
+    let whileWaiting: { text: string; html: string } | null = null;
     let settled!: () => void;
     const rendered = new Promise<void>((resolve) => {
       settled = resolve;
     });
+    const parent = {
+      postMessage: (data: { owletto?: string }) => {
+        posted.push(data);
+        if (data.owletto !== 'session-rejected') return;
+        // The page posts from inside a try/catch, so record what it showed
+        // rather than asserting here.
+        whileWaiting = { text: body.textContent, html: body.innerHTML };
+        if (panelAnswers) {
+          queueMicrotask(() => {
+            for (const listener of listeners) listener({ source: parent, data: { owletto: 'session-refresh-failed' } });
+          });
+        } else {
+          queueMicrotask(() => panelTimeouts.shift()?.());
+        }
+      },
+    };
     const document = {
       body: new Proxy(body, {
         set(target, key, value) {
@@ -474,25 +495,47 @@ describe('SSE ticket (/api/sse-ticket)', () => {
     runInNewContext(script, {
       URLSearchParams,
       AbortController,
-      setTimeout,
+      // The wait for the panel runs on demand; the page's request timeout stays real.
+      setTimeout: (fn: () => void, ms: number) => {
+        if (ms < 15000) {
+          panelTimeouts.push(fn);
+          return 0;
+        }
+        return setTimeout(fn, ms);
+      },
       clearTimeout,
       document,
       location: { hash: `#token=${encodeURIComponent(token)}`, pathname: '/api/extension-bootstrap', replace() {} },
       history: { replaceState() {} },
       sessionStorage: { setItem() {} },
-      window: { parent: { postMessage: (data: unknown) => posted.push(data) } },
+      window: {
+        parent,
+        addEventListener: (_type: string, fn: (ev: { source: unknown; data: unknown }) => void) => listeners.add(fn),
+        removeEventListener: (_type: string, fn: (ev: { source: unknown; data: unknown }) => void) =>
+          listeners.delete(fn),
+      },
       fetch: async (path: string, init: { body: string }) => {
         const res = await postForm(path, Object.fromEntries(new URLSearchParams(init.body)));
         return { ok: res.status >= 200 && res.status < 300, status: res.status, json: res.json };
       },
     });
     await rendered;
+    return { body, message, buttons, posted, listeners, whileWaiting };
+  }
+
+  it.each([
+    ['the panel reports it could not refresh', 'xt-boot-ro', true],
+    ['the panel never answers (older panel, Mac menu bar)', 'xt-boot-ro-quiet', false],
+  ])('bootstrap offers re-pairing for a read-only token once %s', async (_label, slug, panelAnswers) => {
+    const { body, message, buttons, posted, listeners, whileWaiting } = await runReadOnlyBootstrap(slug, panelAnswers);
+
+    // While the panel works, the page says so instead of erroring.
+    expect(whileWaiting).toEqual({ text: 'Reconnecting\u2026', html: '' });
 
     expect(message.textContent).toContain('Re-pair to sign in');
     expect(body.innerHTML).toContain('>Re-pair</button>');
     expect(buttons.get('owl-retry')?.removed).toBe(true);
-    // The panel hears about the rejection first, so a desktop-paired panel can
-    // fetch a fresh credential without the user doing anything.
+    expect(listeners.size).toBe(0);
     expect(posted).toEqual([{ owletto: 'session-rejected' }]);
     buttons.get('owl-settings')?.onclick?.();
     expect(posted).toEqual([{ owletto: 'session-rejected' }, { owletto: 'open-settings' }]);
