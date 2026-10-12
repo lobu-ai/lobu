@@ -4,12 +4,13 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { hasPrebuilt, installPgvector } from "@lobu/pgvector-embedded";
 
 // `lobu run` used to copy pgvector into the installed @embedded-postgres tree
@@ -81,6 +82,38 @@ describe("installPgvector", () => {
 		expect(readFileSync(control).equals(pristine)).toBe(true);
 		expect(existsSync(stale)).toBe(false);
 		expect(existsSync(inFlight)).toBe(true);
+	});
+
+	it("keeps staged files readable by the postgres user under a restrictive umask", () => {
+		const dir = target();
+		const previous = process.umask(0o077);
+		try {
+			installPgvector(dir, PLATFORM);
+		} finally {
+			process.umask(previous);
+		}
+		expect(statSync(join(dir, "lib")).mode & 0o777).toBe(0o755);
+		expect(statSync(join(dir, "lib", LIBRARY)).mode & 0o777).toBe(0o644);
+		expect(
+			statSync(join(dir, "share", "extension", "vector.control")).mode & 0o777,
+		).toBe(0o644);
+	});
+
+	it("returns absolute search paths for a relative target", () => {
+		const dir = target();
+		const previous = process.cwd();
+		process.chdir(dirname(dir));
+		try {
+			const { postgresFlags } = installPgvector(basename(dir), PLATFORM);
+			expect(postgresFlags).toEqual([
+				"-c",
+				`extension_control_path=${join(realpathSync(dirname(dir)), basename(dir), "share")}:$system`,
+				"-c",
+				`dynamic_library_path=${join(realpathSync(dirname(dir)), basename(dir), "lib")}:$libdir`,
+			]);
+		} finally {
+			process.chdir(previous);
+		}
 	});
 
 	it("rejects a target the colon-separated search paths cannot express", () => {

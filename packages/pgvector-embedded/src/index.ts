@@ -29,7 +29,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
@@ -147,7 +147,9 @@ function syncFile(src: string, dst: string): void {
   const bytes = readFileSync(src);
   if (existsSync(dst) && readFileSync(dst).equals(bytes)) return;
   const tmp = `${dst}.${process.pid}.tmp`;
-  writeFileSync(tmp, bytes, { mode: 0o644 });
+  writeFileSync(tmp, bytes);
+  // Explicit chmod: writeFileSync's mode is narrowed by the umask.
+  chmodSync(tmp, 0o644);
   renameSync(tmp, dst);
 }
 
@@ -174,9 +176,11 @@ function ensureDir(dir: string): void {
  * stale pgvector files from another version are removed.
  */
 export function installPgvector(
-  targetDir: string,
+  target: string,
   platform: string = currentPlatformKey()
 ): PgvectorInstall {
+  // PostgreSQL requires absolute directories in both search paths.
+  const targetDir = resolve(target);
   if (!hasPrebuilt(platform)) {
     throw new Error(
       `@lobu/pgvector-embedded: no prebuilt pgvector for "${platform}". ` +
