@@ -6,6 +6,7 @@ import path from "node:path";
 import { JSDOM } from "jsdom";
 import { connectorSdkMock } from "./connector-sdk.mock";
 import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
+import { getSelectableMethods } from "../../../packages/owletto/src/components/entity-tabs/connections-tab/auth-helpers";
 
 // Stub @lobu/connector-sdk (it pulls in playwright) so the connector imports
 // without the browser stack. Shared superset — see connector-sdk.mock.ts.
@@ -3044,6 +3045,17 @@ describe("LinkedInConnector auth schema", () => {
     ]);
     expect(methods[0]).toMatchObject({ type: "browser", mode: "live" });
     expect(def.browser.authMethods).toEqual(["browser"]);
+    for (const configuredKeys of [
+      undefined,
+      new Set<string>(),
+      new Set(["LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET"]),
+    ]) {
+      expect(
+        getSelectableMethods(def.authSchema, configuredKeys).map(
+          (method) => method.type
+        )
+      ).toEqual(["browser", "none"]);
+    }
   });
 
   test("offers identity-only OAuth sign-in without provisioning source connections", () => {
@@ -3053,7 +3065,7 @@ describe("LinkedInConnector auth schema", () => {
     );
     expect(oauth).toMatchObject({
       provider: "linkedin",
-      requiredScopes: ["openid", "profile", "email"],
+      requiredScopes: [],
       loginScopes: ["openid", "profile", "email"],
       authorizationUrl: "https://www.linkedin.com/oauth/v2/authorization",
       tokenUrl: "https://www.linkedin.com/oauth/v2/accessToken",

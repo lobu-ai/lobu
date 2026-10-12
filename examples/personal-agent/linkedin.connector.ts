@@ -3229,7 +3229,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         {
           type: "oauth",
           provider: "linkedin",
-          requiredScopes: ["openid", "profile", "email"],
+          requiredScopes: [],
           loginScopes: ["openid", "profile", "email"],
           loginProvisioning: { autoCreateConnection: false },
           authorizationUrl: "https://www.linkedin.com/oauth/v2/authorization",
@@ -3241,7 +3241,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
           description:
             "Identity-only LinkedIn sign-in. Feeds use the browser or local exports.",
           setupInstructions:
-            "Enable Sign In with LinkedIn using OpenID Connect in your LinkedIn app. Register {{redirect_uri}} for connector authorization and /api/auth/oauth2/callback/linkedin on the same Lobu origin for sign-in, then enter the client ID and client secret.",
+            "Enable Sign In with LinkedIn using OpenID Connect in your LinkedIn app. Register /api/auth/oauth2/callback/linkedin on your Lobu origin for sign-in, then enter the client ID and client secret.",
         },
       ],
     },
