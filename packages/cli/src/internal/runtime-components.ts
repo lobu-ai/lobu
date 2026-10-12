@@ -1,6 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  readdirSync,
+  readFileSync,
+} from "node:fs";
 import {
   copyFile,
   mkdir,
@@ -187,12 +193,79 @@ async function downloadArtifact(
   await rm(tarball);
 }
 
+/**
+ * The first path under a package manager's cache this user cannot write, or
+ * null. Checks the cache and two levels below it, which covers the usual
+ * breakage: a cache created by an earlier `sudo npm`/root container step, so
+ * the top directory looks fine while `_cacache/*` is root-owned. A cache that
+ * does not exist yet is checked at its nearest existing parent.
+ */
+export function findUnwritableCachePath(cacheDir: string): string | null {
+  let probe = cacheDir;
+  while (!existsSync(probe)) {
+    const parent = dirname(probe);
+    if (parent === probe) return null;
+    probe = parent;
+  }
+  const visit = (path: string, depth: number): string | null => {
+    try {
+      accessSync(path, fsConstants.W_OK);
+    } catch {
+      return path;
+    }
+    if (depth === 0) return null;
+    let children: string[];
+    try {
+      children = readdirSync(path, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => join(path, entry.name));
+    } catch {
+      return path;
+    }
+    for (const child of children) {
+      const found = visit(child, depth - 1);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(probe, probe === cacheDir ? 2 : 0);
+}
+
+function packageManagerCacheDir(hasBun: boolean): string | null {
+  const [command, args] = hasBun
+    ? ["bun", ["pm", "cache"]]
+    : [
+        process.platform === "win32" ? "npm.cmd" : "npm",
+        ["config", "get", "cache"],
+      ];
+  const result = spawnSync(command, args as string[], { encoding: "utf8" });
+  const dir = result.status === 0 ? result.stdout.trim() : "";
+  return dir && isAbsolute(dir) ? dir : null;
+}
+
+export function unwritableCacheMessage(
+  tool: "bun" | "npm",
+  path: string
+): string {
+  const variable =
+    tool === "bun" ? "BUN_INSTALL_CACHE_DIR" : "npm_config_cache";
+  return [
+    `Lobu can't install its runtime: the ${tool} cache at ${path} is not writable by this user.`,
+    "This usually means an earlier step ran the package manager as root.",
+    `Fix the owner (sudo chown -R "$(id -u):$(id -g)" ${path}) or set ${variable} to a writable directory, then run the command again.`,
+  ].join("\n");
+}
+
 async function installDependencies(
   directory: string,
   signal?: AbortSignal
 ): Promise<void> {
   const hasBun =
     spawnSync("bun", ["--version"], { stdio: "ignore" }).status === 0;
+  const cacheDir = packageManagerCacheDir(hasBun);
+  const unwritable = cacheDir ? findUnwritableCachePath(cacheDir) : null;
+  if (unwritable)
+    throw new Error(unwritableCacheMessage(hasBun ? "bun" : "npm", unwritable));
   if (hasBun)
     await copyFile(
       join(directory, "dist/dependencies.bun.lock"),
@@ -224,7 +297,7 @@ async function installDependencies(
         ? done()
         : reject(
             new Error(
-              `Runtime dependency installation failed (${code ?? killed})`
+              `Runtime dependency installation failed: \`${command} ${args.join(" ")}\` exited with ${code ?? killed}. Its output is above.`
             )
           )
     );

@@ -77,9 +77,24 @@ Implications, by design:
 - **Egress uses the device's network.** Connector traffic from a device worker is not subject to
   the gateway's allowlist/blocklist/egress-judge — those govern locally-spawned workers, not a
   remote device. Treat a device-pinned cloud connector as running on that machine's network.
-- **Binding is authorized at bind time.** A connection can only be pinned to a device the requester
-  owns, or one explicitly granted to the org by its owner (`device_worker_org_grants`); revoking a
-  grant un-pins that org's connections.
+- **A device has one home workspace.** Each device row is owned by one user and attached to one
+  workspace (`device_workers.organization_id`). Pairing attaches it to the owner's personal
+  workspace; picking other workspaces on the approval screen grants MCP access only, never
+  placement. The owner moves a device with `PATCH /api/me/devices/:id`, which requires membership
+  of the destination, un-pins every connection pinned to the device, and pauses those connections
+  and their active feeds. There is no per-workspace grant table.
+- **Connection pins are authorized at bind time.** The requester must own the device, the device
+  must be attached to the connection's workspace, and it must have the connector's required
+  capability and be recently seen. Automatic wiring of advertised capabilities happens only in
+  the owner's personal workspace; a team workspace gets a device connection only when someone
+  connects it explicitly.
+- **Automation pins follow a separate rule.** The device owner may pin an Automation to their
+  device in any workspace; a workspace owner/admin may pin one to a device attached to that
+  workspace; authenticated internal callers (apply, Automation runs) are not re-checked.
+- **Run scope follows pins and membership.** A device claims runs in its token's workspace, its
+  owner's personal workspace, and any workspace where it has an active pinned Automation or a
+  live pinned connection while its owner is still a member. Leaving a workspace removes that
+  scope without touching the pins.
 
 ## Skills and policy
 

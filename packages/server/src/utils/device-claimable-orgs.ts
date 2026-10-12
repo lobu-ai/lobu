@@ -6,10 +6,12 @@
  * runs in any org where it has a pinned automation/connection AND its owner is
  * still a member of that org.
  *
- * The pin IS the consent: `evaluateDeviceWorkerAccess` only lets a device's
- * owner attach it to a resource, so a pin in org B means the owner explicitly
- * opted this device into serving org B. The membership join means access is
- * revoked automatically if the owner later leaves the org. Within-org claiming
+ * The pin IS the consent. A connection pin requires the device's owner and a
+ * device attached to that org (`device-binding.ts`); an Automation pin
+ * requires the owner, or an owner/admin of the org the device is attached to
+ * (`evaluateDeviceWorkerAccess`). Either way a pin in org B was placed by
+ * someone entitled to opt this device into serving org B. The membership join
+ * means access is revoked automatically if the owner later leaves the org. Within-org claiming
  * still follows the pinned/capability rules in the poll, so the device only
  * ever runs the resource it was actually pinned to.
  *
@@ -48,7 +50,7 @@ export async function resolveDeviceClaimableOrgs(
  * heartbeat). True when the run's org is in the worker's base scope, OR the
  * worker's user owns the device the run is pinned to — via either a pinned
  * connection (`device_owner`) or a pinned automation (`automation_device_owner`).
- * Pinning is the owner's consent, so a device may finish a run it was attached
+ * A pin is that consent (see above), so a device may finish a run it was attached
  * to in any org, mirroring the claim-side scope.
  */
 export function runInWorkerScope(

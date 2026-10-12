@@ -77,6 +77,20 @@ function withApprovalReturnTo(url: string, returnTo: string | undefined) {
 const POLL_HARD_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
+ * A device code is single-use and short-lived, and the approval page answers
+ * "Invalid or expired" both for an expired code and for one already used, so
+ * say up front when this one stops working and what to do after that.
+ */
+export function codeExpiryLine(deadline: number, now = Date.now()): string {
+  const minutes = Math.max(1, Math.round((deadline - now) / 60_000));
+  const at = new Date(deadline).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `  This code works once and expires in ${minutes} min (at ${at}). After that, run \`lobu login\` again for a new one.`;
+}
+
+/**
  * `lobu login` runs the OAuth 2.0 device-code grant against the issuer
  * advertised at `<apiUrl-origin>/.well-known/oauth-authorization-server`.
  * `--token <pat>` skips OAuth entirely for CI/CD.
@@ -177,6 +191,13 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
   // for a human at this terminal, ask the server to email an approval link to
   // `--email`. Approval happens out of band, so we then poll regardless of TTY.
   const emailClaim = Boolean(options.email);
+  // Cap the wait at the server-advertised lifetime AND our local ceiling.
+  // The local ceiling guards against a misconfigured issuer handing us an
+  // hour-long deadline that a backgrounded shell would otherwise honour.
+  const serverDeadline = Date.now() + authorization.expiresIn * 1000;
+  const localDeadline = Date.now() + POLL_HARD_TIMEOUT_MS;
+  const deadline = Math.min(serverDeadline, localDeadline);
+
   if (emailClaim) {
     const verificationUrl =
       authorization.verificationUriComplete ?? authorization.verificationUri;
@@ -202,6 +223,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
       chalk.dim(`  Code: ${chalk.bold.white(authorization.userCode)}`)
     );
     console.log(chalk.dim(`  Fallback approval URL: ${verificationUrl}`));
+    console.log(chalk.dim(codeExpiryLine(deadline)));
     console.log(
       chalk.dim("  Waiting for the user to approve from their email...\n")
     );
@@ -216,6 +238,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
     console.log(
       chalk.dim(`  Code: ${chalk.bold.white(authorization.userCode)}`)
     );
+    console.log(chalk.dim(codeExpiryLine(deadline)));
     if (
       authorization.verificationUriComplete &&
       authorization.verificationUriComplete !== authorization.verificationUri
@@ -256,13 +279,6 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
   const spinner = isInteractive
     ? ora("Waiting for authorization...").start()
     : null;
-
-  // Cap the wait at the server-advertised lifetime AND our local ceiling.
-  // The local ceiling guards against a misconfigured issuer handing us an
-  // hour-long deadline that a backgrounded shell would otherwise honour.
-  const serverDeadline = Date.now() + authorization.expiresIn * 1000;
-  const localDeadline = Date.now() + POLL_HARD_TIMEOUT_MS;
-  const deadline = Math.min(serverDeadline, localDeadline);
 
   // If the user kills the spawning shell (SIGHUP) or any supervisor sends
   // SIGTERM, exit promptly instead of inheriting the orphaned poll loop.
@@ -388,7 +404,11 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
     }
 
     spinner?.fail("Login request expired. Run `lobu login` again.");
-    if (!spinner) console.log(chalk.red("  Login request expired."));
+    if (!spinner) {
+      console.log(
+        chalk.red("  Login request expired. Run `lobu login` again.")
+      );
+    }
     console.log();
     process.exitCode = 1;
   } finally {

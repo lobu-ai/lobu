@@ -10,9 +10,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { chmod } from "node:fs/promises";
 import {
   ensureComponent,
+  findUnwritableCachePath,
   selectedRuntimeComponents,
+  unwritableCacheMessage,
   type ComponentDescriptor,
 } from "../internal/runtime-components.js";
 
@@ -294,5 +297,38 @@ describe("atomic runtime installation", () => {
     await expect(
       ensureComponent({ ...component, version: "../../data" })
     ).rejects.toThrow("identity");
+  });
+});
+
+// Root can write anywhere, so a permission fixture proves nothing there.
+const asUser = process.getuid?.() === 0 ? test.skip : test;
+
+describe("package manager cache preflight", () => {
+  asUser("finds a root-owned subdirectory under a writable cache", async () => {
+    const cache = await mkdtemp(join(tmpdir(), "lobu-cache-"));
+    directories.push(cache);
+    const locked = join(cache, "_cacache", "content-v2");
+    await mkdir(locked, { recursive: true });
+    await chmod(locked, 0o555);
+    try {
+      expect(findUnwritableCachePath(cache)).toBe(locked);
+    } finally {
+      await chmod(locked, 0o755);
+    }
+  });
+
+  test("accepts a writable cache and one that does not exist yet", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "lobu-cache-"));
+    directories.push(parent);
+    await mkdir(join(parent, "_cacache", "index-v5"), { recursive: true });
+    expect(findUnwritableCachePath(parent)).toBeNull();
+    expect(findUnwritableCachePath(join(parent, "missing", ".npm"))).toBeNull();
+  });
+
+  test("the message names the path and both ways out", () => {
+    const message = unwritableCacheMessage("npm", "/home/user/.npm/_cacache");
+    expect(message).toContain("/home/user/.npm/_cacache");
+    expect(message).toContain("chown -R");
+    expect(message).toContain("npm_config_cache");
   });
 });
