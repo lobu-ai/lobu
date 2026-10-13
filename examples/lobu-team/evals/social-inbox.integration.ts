@@ -222,7 +222,7 @@ describe("social inbox reaction in the production isolate", () => {
       operations: {
         getRun: readRun,
         listRuns: async () => ({
-          runs: await sql`SELECT id, status, automation_id, parent_run_id, connection_id, action_key AS operation_key, action_input AS input, created_by_user_id FROM runs WHERE organization_id = ${org.id} AND run_type = 'action' ORDER BY id DESC LIMIT 50`,
+          runs: await sql`SELECT id, status, approval_status, automation_id, parent_run_id, connection_id, action_key AS operation_key, action_input AS input, created_by_user_id FROM runs WHERE organization_id = ${org.id} AND run_type = 'action' ORDER BY id DESC LIMIT 50`,
         }),
         listAvailable: async () => ({
           operations: ["read_home_feed", "prepare_message"].map(

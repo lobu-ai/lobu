@@ -743,9 +743,15 @@ describe("LinkedIn source adapter", () => {
       stream = flight("Alex reacted to your post", "13h");
       const aged = await api.read({ feed: "notifications" });
       expect(aged.rows[0].revision).toEqual(initial.rows[0].revision);
+      expect(aged.rows[0].source_revision).toEqual(
+        initial.rows[0].source_revision
+      );
       stream = flight("Alex and Sam reacted to your post");
       const changed = await api.read({ feed: "notifications" });
       expect(changed.rows[0].revision).not.toEqual(initial.rows[0].revision);
+      expect(changed.rows[0].source_revision).not.toEqual(
+        initial.rows[0].source_revision
+      );
     } finally {
       dom.window.close();
     }

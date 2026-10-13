@@ -79,6 +79,7 @@ function harness(findings = [finding()]) {
         parent_run_id: ctx.window.run_id,
         created_by_user_id: "test-owner",
         status: "pending",
+        approval_status: "auto",
       });
       receipts.get(ctx.window.run_id)!.output = structuredClone(
         ctx.extracted_data
@@ -621,6 +622,73 @@ test("concurrent identical inbox candidates retain one durable draft", async () 
   h.ctx.extracted_data.inbox_findings = [inboxFinding()];
   await Promise.all([h.run(), h.run()]);
   expect(h.queued.size).toBe(1);
+});
+
+test("inbox discovery failure preserves independent post findings", async () => {
+  const h = harness();
+  h.ctx.extracted_data.inbox_findings = [
+    { ...inboxFinding(), platform: "tiktok", feed_key: "messages" },
+  ];
+  const listAvailable = h.client.operations.listAvailable;
+  h.client.operations.listAvailable = async (args?: any) => {
+    if (args?.connector_key === "tiktok.web")
+      throw new Error("Synthetic discovery failure");
+    return listAvailable();
+  };
+  const result = await h.run();
+  expect(result.findings).toHaveLength(1);
+  expect(result.inbox_findings[0]).toMatchObject({ status: "partial" });
+  expect(h.send.mock.calls.some(([card]) => card.browser_handoff_run_id)).toBe(
+    true
+  );
+});
+
+test.each([
+  "no new draft",
+  "target unavailable",
+])("draft recovery keeps queued replies: %s", async (condition) => {
+  const h = harness([]);
+  h.ctx.extracted_data.inbox_findings = [inboxFinding()];
+  h.send.mockImplementationOnce(async () => {
+    throw new Error("Synthetic notification failure");
+  });
+  await expect(h.run()).rejects.toThrow("Synthetic notification failure");
+  h.ctx.window.run_id = 78;
+  h.receipts.set(78, { ...h.receipts.get(77), output: null });
+  h.ctx.extracted_data.inbox_findings = [
+    {
+      ...inboxFinding(),
+      draft: condition === "no new draft" ? "" : "New reply",
+    },
+  ];
+  if (condition === "target unavailable") {
+    const available = await h.client.operations.listAvailable();
+    for (const operation of available.operations)
+      for (const target of operation.execution_targets)
+        target.executable = false;
+    h.client.operations.listAvailable = async () => available;
+  }
+  await h.run();
+  expect(h.execute).toHaveBeenCalledTimes(1);
+  expect(h.send.mock.calls.at(-1)![0].body).toContain(inboxFinding().draft);
+  expect(h.send.mock.calls.at(-1)![0].browser_handoff_run_id).toBe(90);
+});
+
+test("draft recovery cannot link an action still awaiting approval", async () => {
+  const h = harness([]);
+  h.ctx.extracted_data.inbox_findings = [inboxFinding()];
+  h.send.mockImplementationOnce(async () => {
+    throw new Error("Synthetic notification failure");
+  });
+  await expect(h.run()).rejects.toThrow("Synthetic notification failure");
+  for (const run of h.queued.values()) run.approval_status = "pending";
+  h.send.mockClear();
+  const result = await h.run();
+  expect(result.inbox_findings[0]).toMatchObject({ status: "partial" });
+  expect(
+    h.send.mock.calls.every(([card]) => !card.browser_handoff_run_id)
+  ).toBe(true);
+  expect(h.execute).toHaveBeenCalledTimes(1);
 });
 
 test("long source IDs retain distinct bounded delivery keys", async () => {

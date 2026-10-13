@@ -261,12 +261,18 @@ export default async function deliverSocialResearch(
   for (const platform of new Set(
     [...findings, ...inbox].map((f) => f.platform)
   )) {
-    const { operations } = (await client.operations.listAvailable({
-      connector_key: bindings[platform].connector,
-      limit: 100,
-      include_input_schema: false,
-    })) as { operations: Operation[] };
-    available.set(platform, operations);
+    try {
+      const { operations } = (await client.operations.listAvailable({
+        connector_key: bindings[platform].connector,
+        limit: 100,
+        include_input_schema: false,
+      })) as { operations: Operation[] };
+      available.set(platform, operations);
+    } catch (error) {
+      if (findings.some((finding) => finding.platform === platform))
+        throw error;
+      // Inbox verification reports the unavailable source independently below.
+    }
   }
   const seen = new Set<string>();
   const validated = [];
@@ -536,6 +542,10 @@ export default async function deliverSocialResearch(
         throw new Error(
           "An existing draft uses an older source revision; review it before preparing another reply"
         );
+      if (!["auto", "approved"].includes(run.approval_status))
+        throw new Error(
+          "The existing draft is not approved for browser handoff"
+        );
       if (!["pending", "running", "claimed", "completed"].includes(run.status))
         throw new Error(
           "The existing draft is no longer available; no replacement was queued"
@@ -649,13 +659,11 @@ export default async function deliverSocialResearch(
     let draftStatus = finding.draft
       ? "Draft saved for manual use."
       : "No reply suggested.";
-    if (message && finding.platform === "linkedin" && finding.draft) {
+    if (message && finding.platform === "linkedin") {
       const target = available
         .get("linkedin")
         ?.find((o) => o.operation_key === "prepare_message")
-        ?.execution_targets.find(
-          (t) => t.slug === bindings.linkedin.draft && t.executable
-        );
+        ?.execution_targets.find((t) => t.slug === bindings.linkedin.draft);
       if (target) {
         let prior;
         try {
@@ -673,7 +681,7 @@ export default async function deliverSocialResearch(
           draftStatus = prior.completed
             ? "The existing reply draft was already prepared; review it before sending."
             : "Use Open page to fill the existing reply; you click Send.";
-        } else {
+        } else if (finding.draft && target.executable) {
           let staged;
           try {
             staged = await client.operations.execute({
@@ -713,8 +721,10 @@ export default async function deliverSocialResearch(
             draftRun = staged.run_id;
             draftStatus = "Use Open page to fill the reply; you click Send.";
           } else draftStatus = `Draft operation: ${staged.status}`;
-        }
-      } else draftStatus = "Draft saved; browser handoff needs setup.";
+        } else if (finding.draft)
+          draftStatus = "Draft saved; browser handoff needs setup.";
+      } else if (finding.draft)
+        draftStatus = "Draft saved; browser handoff needs setup.";
     }
     const draftBlock = [
       ...(message && finding.platform === "tiktok"

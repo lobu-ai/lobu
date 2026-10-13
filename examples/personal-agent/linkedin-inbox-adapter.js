@@ -454,7 +454,10 @@ export function linkedInInboxProgram() {
         rows.map(async (row) => ({
           ...row,
           source_revision:
-            row.source_revision ?? (await digest(JSON.stringify(row))),
+            row.source_revision ??
+            (await digest(
+              JSON.stringify([row.id, row.text, row.url, row.notification_type])
+            )),
         }))
       ),
       hasMore: !!continuation,
