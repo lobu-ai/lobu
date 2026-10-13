@@ -361,6 +361,16 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
       expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(2);
     });
     expect(created).toHaveLength(1);
+
+    // Another replica (a fresh limiter with no cache of its own) shares the
+    // window through Postgres: it must not post the notice again either.
+    await getRateLimiter().flushPendingWrites();
+    resetRateLimiterForTests();
+    expect(await deliver(spaceMention("stranger-3", "anyone?", stranger))).toBe(200);
+    await waitFor(async () => {
+      expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(3);
+    });
+    expect(created).toHaveLength(1);
   });
 
   test("an unlinked sender over the hourly turn limit gets no turn", async () => {
@@ -377,6 +387,10 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     for (let i = 0; i < UNLINKED_SENDER_TURNS_PER_HOUR; i += 1) {
       expect(limiter.checkLimit(key, { limit: UNLINKED_SENDER_TURNS_PER_HOUR, windowSeconds: 3600 }).allowed).toBe(true);
     }
+    // The budget was spent on another replica: this one only sees it through
+    // the shared counter, never through its own (empty) cache.
+    await limiter.flushPendingWrites();
+    resetRateLimiterForTests();
 
     expect(await deliver(spaceMention("stranger-over", "one more", stranger))).toBe(200);
     const sql = getDb();
@@ -391,7 +405,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     // like a vouched stranger's, but the limit is keyed on being unlinked.
     const memberKey = `chat-unlinked-turn:${ORG_ID}:gchat:${sender.name}`;
     for (let i = 0; i < UNLINKED_SENDER_TURNS_PER_HOUR; i += 1) {
-      limiter.checkLimit(memberKey, { limit: UNLINKED_SENDER_TURNS_PER_HOUR, windowSeconds: 3600 });
+      getRateLimiter().checkLimit(memberKey, { limit: UNLINKED_SENDER_TURNS_PER_HOUR, windowSeconds: 3600 });
     }
     expect(await deliver(spaceMention("member-ok", "status?"))).toBe(200);
     await waitFor(async () => {

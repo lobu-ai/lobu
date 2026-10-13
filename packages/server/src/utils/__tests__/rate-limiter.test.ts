@@ -106,6 +106,46 @@ describe('RateLimiter (Postgres-backed fixed window)', () => {
     }
   });
 
+  it('consume decides from the committed cluster count, so a fresh replica cannot repeat a once-per-window action', async () => {
+    const key = uniqueKey('consume-once');
+    const once = { limit: 1, windowSeconds: 86400 };
+    const podA = new RateLimiter();
+    const podB = new RateLimiter();
+    try {
+      expect((await podA.consume(key, once)).allowed).toBe(true);
+      // Pod B has never seen this key; checkLimit's cache would admit it.
+      const second = await podB.consume(key, once);
+      expect(second.allowed).toBe(false);
+      expect(second.count).toBe(2);
+      // And a sync check on yet another empty cache shows the lag consume avoids.
+      const podC = new RateLimiter();
+      try {
+        expect(podC.checkLimit(key, once).allowed).toBe(true);
+        await podC.flushPendingWrites();
+      } finally {
+        podC.destroy();
+      }
+    } finally {
+      podA.destroy();
+      podB.destroy();
+    }
+  });
+
+  it('consume fails open to per-pod enforcement when the counters table is missing', async () => {
+    const db = getTestDb();
+    await db`ALTER TABLE rate_limit_counters RENAME TO rate_limit_counters_hidden`;
+    try {
+      const key = uniqueKey('consume-fail-open');
+      const config = { limit: 2, windowSeconds: 3600 };
+      expect((await limiter.consume(key, config)).allowed).toBe(true);
+      expect((await limiter.consume(key, config)).allowed).toBe(true);
+      // Local enforcement still applies, never a hard refusal before the limit.
+      expect((await limiter.consume(key, config)).allowed).toBe(false);
+    } finally {
+      await db`ALTER TABLE rate_limit_counters_hidden RENAME TO rate_limit_counters`;
+    }
+  });
+
   it('resets the count when the fixed window rolls over', async () => {
     const key = uniqueKey('window-roll');
     const config = { limit: 1, windowSeconds: 1 };
