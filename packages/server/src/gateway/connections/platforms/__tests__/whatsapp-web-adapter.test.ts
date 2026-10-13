@@ -44,6 +44,13 @@ function harness(
   return { adapter, calls };
 }
 
+async function waitUntil(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 100 && !condition(); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  expect(condition()).toBe(true);
+}
+
 function row(overrides: Partial<WhatsAppWebMessageRow> = {}): WhatsAppWebMessageRow {
   return {
     id: "RAWIN1",
@@ -61,7 +68,7 @@ function row(overrides: Partial<WhatsAppWebMessageRow> = {}): WhatsAppWebMessage
 describe("WhatsApp Web adapter outbound", () => {
   test("a post is exactly one send_message to the thread's chat", async () => {
     const { adapter, calls } = harness();
-    const sent = await adapter.postMessage(`whatsapp.web:${DM_JID}`, {
+    const sent = await adapter.postMessage(`whatsapp.web:101:${DM_JID}`, {
       markdown: "Hi **there**",
     });
 
@@ -72,12 +79,12 @@ describe("WhatsApp Web adapter outbound", () => {
       idempotencyKey: expect.stringMatching(/^fresh-/),
     });
     expect(sent.id).toBe("101:RAWOUT1");
-    expect(sent.threadId).toBe(`whatsapp.web:${DM_JID}`);
+    expect(sent.threadId).toBe(`whatsapp.web:101:${DM_JID}`);
   });
 
   test("markdown uses WhatsApp emphasis markers without rewriting code", async () => {
     const { adapter, calls } = harness();
-    await adapter.postMessage(`whatsapp.web:${DM_JID}`, {
+    await adapter.postMessage(`whatsapp.web:101:${DM_JID}`, {
       markdown: "**bold** *italic* ~~gone~~ `**literal**`",
     });
     expect(calls[0]?.input.text).toBe("*bold* _italic_ ~gone~ `**literal**`");
@@ -85,7 +92,7 @@ describe("WhatsApp Web adapter outbound", () => {
 
   test("headings, rules and tables render as WhatsApp text", async () => {
     const { adapter, calls } = harness();
-    await adapter.postMessage(`whatsapp.web:${DM_JID}`, {
+    await adapter.postMessage(`whatsapp.web:101:${DM_JID}`, {
       markdown: "# Title\n\n---\n\n| a | b |\n| - | - |\n| 1 | 2 |",
     });
     const text = String(calls[0]?.input.text);
@@ -98,8 +105,8 @@ describe("WhatsApp Web adapter outbound", () => {
     const { adapter } = harness([
       { status: "completed", output: { sent: true, chat_jid: LID_JID, message_id: "RAWOUT2" } },
     ]);
-    const sent = await adapter.postMessage(`whatsapp.web:${DM_JID}`, "ok");
-    expect(sent.threadId).toBe(`whatsapp.web:${DM_JID}`);
+    const sent = await adapter.postMessage(`whatsapp.web:101:${DM_JID}`, "ok");
+    expect(sent.threadId).toBe(`whatsapp.web:101:${DM_JID}`);
   });
 
   test("a stream is buffered and sent once with the final text", async () => {
@@ -109,7 +116,7 @@ describe("WhatsApp Web adapter outbound", () => {
       yield { type: "markdown_text" as const, text: "lo " };
       yield "world";
     }
-    const sent = await adapter.stream(`whatsapp.web:${GROUP_JID}`, chunks());
+    const sent = await adapter.stream(`whatsapp.web:101:${GROUP_JID}`, chunks());
     expect(calls).toHaveLength(1);
     expect(calls[0]?.input).toEqual({ chat_jid: GROUP_JID, text: "Hello world" });
     expect(sent?.id).toBe("101:RAWOUT1");
@@ -120,7 +127,7 @@ describe("WhatsApp Web adapter outbound", () => {
     async function* empty() {
       yield "  ";
     }
-    expect(await adapter.stream(`whatsapp.web:${DM_JID}`, empty())).toBeNull();
+    expect(await adapter.stream(`whatsapp.web:101:${DM_JID}`, empty())).toBeNull();
     expect(calls).toHaveLength(0);
   });
 
@@ -132,7 +139,7 @@ describe("WhatsApp Web adapter outbound", () => {
     test(`a ${outcome.status} send throws and is never retried`, async () => {
       const { adapter, calls } = harness([outcome]);
       await expect(
-        adapter.postMessage(`whatsapp.web:${DM_JID}`, "hi"),
+        adapter.postMessage(`whatsapp.web:101:${DM_JID}`, "hi"),
       ).rejects.toThrow(`send_message ${outcome.status}`);
       expect(calls).toHaveLength(1);
     });
@@ -141,7 +148,7 @@ describe("WhatsApp Web adapter outbound", () => {
   test("an executor error (ambiguous: the page may have sent) is not retried", async () => {
     const { adapter, calls } = harness([new Error("connection reset")]);
     await expect(
-      adapter.postMessage(`whatsapp.web:${DM_JID}`, "hi"),
+      adapter.postMessage(`whatsapp.web:101:${DM_JID}`, "hi"),
     ).rejects.toThrow("connection reset");
     expect(calls).toHaveLength(1);
   });
@@ -149,14 +156,14 @@ describe("WhatsApp Web adapter outbound", () => {
   test("a completed send without a message id is an error, not a retry", async () => {
     const { adapter, calls } = harness([{ status: "completed", output: { sent: true } }]);
     await expect(
-      adapter.postMessage(`whatsapp.web:${DM_JID}`, "hi"),
+      adapter.postMessage(`whatsapp.web:101:${DM_JID}`, "hi"),
     ).rejects.toThrow("without a message id");
     expect(calls).toHaveLength(1);
   });
 
   test("unsupported verbs throw NotImplementedError and run no operation", async () => {
     const { adapter, calls } = harness([]);
-    const thread = `whatsapp.web:${DM_JID}`;
+    const thread = `whatsapp.web:101:${DM_JID}`;
     await expect(adapter.editMessage()).rejects.toBeInstanceOf(NotImplementedError);
     await expect(adapter.deleteMessage()).rejects.toBeInstanceOf(NotImplementedError);
     await expect(adapter.addReaction()).rejects.toBeInstanceOf(NotImplementedError);
@@ -178,24 +185,33 @@ describe("WhatsApp Web adapter outbound", () => {
 describe("WhatsApp Web threads", () => {
   test("a 1:1 chat is a DM and a group is not", () => {
     const { adapter } = harness([]);
-    expect(adapter.isDM(`whatsapp.web:${DM_JID}`)).toBe(true);
-    expect(adapter.isDM(`whatsapp.web:${LID_JID}`)).toBe(true);
-    expect(adapter.isDM("whatsapp.web:15550000001@c.us")).toBe(true);
-    expect(adapter.isDM(`whatsapp.web:${GROUP_JID}`)).toBe(false);
-    expect(adapter.isDM("whatsapp.web:status@broadcast")).toBe(false);
+    expect(adapter.isDM(`whatsapp.web:101:${DM_JID}`)).toBe(true);
+    expect(adapter.isDM(`whatsapp.web:101:${LID_JID}`)).toBe(true);
+    expect(adapter.isDM("whatsapp.web:101:15550000001@c.us")).toBe(true);
+    expect(adapter.isDM(`whatsapp.web:101:${GROUP_JID}`)).toBe(false);
+    expect(adapter.isDM("whatsapp.web:101:status@broadcast")).toBe(false);
+  });
+
+  test("a thread of another connection is refused before any operation", async () => {
+    const { adapter, calls } = harness();
+    expect(() => adapter.isDM(`whatsapp.web:202:${DM_JID}`)).toThrow("Invalid WhatsApp Web thread ID");
+    await expect(adapter.postMessage(`whatsapp.web:202:${DM_JID}`, "hi")).rejects.toThrow(
+      "Invalid WhatsApp Web thread ID",
+    );
+    expect(calls).toHaveLength(0);
   });
 
   test("parsed messages land on their chat's thread with the sender as author", () => {
     const { adapter } = harness([]);
     const dm = adapter.parseMessage(row());
-    expect(dm.threadId).toBe(`whatsapp.web:${DM_JID}`);
+    expect(dm.threadId).toBe(`whatsapp.web:101:${DM_JID}`);
     expect(dm.author.userId).toBe(DM_JID);
     expect(dm.author.isMe).toBe(false);
 
     const group = adapter.parseMessage(
       row({ chat_jid: GROUP_JID, sender_jid: LID_JID, is_group: true }),
     );
-    expect(group.threadId).toBe(`whatsapp.web:${GROUP_JID}`);
+    expect(group.threadId).toBe(`whatsapp.web:101:${GROUP_JID}`);
     expect(group.author.userId).toBe(LID_JID);
 
     expect(adapter.parseMessage(row({ from_me: true })).author.isMe).toBe(true);
@@ -203,7 +219,7 @@ describe("WhatsApp Web threads", () => {
 
   test("openDM only addresses a person", async () => {
     const { adapter } = harness([]);
-    expect(await adapter.openDM(LID_JID)).toBe(`whatsapp.web:${LID_JID}`);
+    expect(await adapter.openDM(LID_JID)).toBe(`whatsapp.web:101:${LID_JID}`);
     await expect(adapter.openDM(GROUP_JID)).rejects.toThrow("Not a WhatsApp person JID");
   });
 });
@@ -211,6 +227,8 @@ describe("WhatsApp Web threads", () => {
 /** Just enough shared state for the Chat SDK's inbound path. */
 function sharedState() {
   const values = new Map<string, unknown>();
+  // Real exclusion, like Postgres: a held thread lock refuses a second holder.
+  const locks = new Set<string>();
   return {
     connect: async () => {},
     disconnect: async () => {},
@@ -229,8 +247,14 @@ function sharedState() {
     isSubscribed: async () => false,
     subscribe: async () => {},
     unsubscribe: async () => {},
-    acquireLock: async (threadId: string) => ({ threadId, token: "t", expiresAt: Date.now() + 60_000 }),
-    releaseLock: async () => {},
+    acquireLock: async (threadId: string) => {
+      if (locks.has(threadId)) return null;
+      locks.add(threadId);
+      return { threadId, token: "t", expiresAt: Date.now() + 60_000 };
+    },
+    releaseLock: async (lock: { threadId: string }) => {
+      locks.delete(lock.threadId);
+    },
     extendLock: async () => true,
     forceReleaseLock: async () => {},
     appendToList: async () => {},
@@ -244,7 +268,11 @@ function sharedState() {
 describe("WhatsApp Web inbound dedupe", () => {
   // Every WhatsApp Web connection registers an adapter under the same name and
   // the SDK dedupes on name + message id in shared (Postgres) state.
-  async function connectionChat(connectionId: string, state: ReturnType<typeof sharedState>) {
+  async function connectionChat(
+    connectionId: string,
+    state: ReturnType<typeof sharedState>,
+    handled: Promise<void> = Promise.resolve(),
+  ) {
     const { adapter } = harness([], connectionId);
     const chat = new Chat({
       userName: "bot",
@@ -255,6 +283,7 @@ describe("WhatsApp Web inbound dedupe", () => {
     const seen: string[] = [];
     chat.onDirectMessage(async (_thread: unknown, message: { id: string }) => {
       seen.push(message.id);
+      await handled;
     });
     await chat.initialize();
     const deliver = (raw: WhatsAppWebMessageRow) =>
@@ -270,6 +299,25 @@ describe("WhatsApp Web inbound dedupe", () => {
     await first.deliver(row());
     await first.deliver(row());
     await second.deliver(row());
+
+    expect(first.seen).toEqual(["101:RAWIN1"]);
+    expect(second.seen).toEqual(["202:RAWIN1"]);
+  });
+
+  test("two connections handle the same person's messages concurrently", async () => {
+    const state = sharedState();
+    let finish!: () => void;
+    const busy = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const first = await connectionChat("101", state, busy);
+    const second = await connectionChat("202", state);
+
+    const inFlight = first.deliver(row());
+    await waitUntil(() => first.seen.length === 1);
+    await second.deliver(row());
+    finish();
+    await inFlight;
 
     expect(first.seen).toEqual(["101:RAWIN1"]);
     expect(second.seen).toEqual(["202:RAWIN1"]);
@@ -297,8 +345,8 @@ describe("WhatsApp Web gateway delivery", () => {
 
   const payload = {
     messageId: "turn-1",
-    channelId: `whatsapp.web:${DM_JID}`,
-    conversationId: `whatsapp.web:${DM_JID}`,
+    channelId: `whatsapp.web:101:${DM_JID}`,
+    conversationId: `whatsapp.web:101:${DM_JID}`,
     userId: "sender",
     teamId: "",
     timestamp: 0,

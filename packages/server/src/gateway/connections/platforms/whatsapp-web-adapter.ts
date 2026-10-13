@@ -15,12 +15,13 @@
  * redelivery adopts the existing run. Streaming is buffered and posted once, so a
  * reply never becomes a placeholder followed by edits.
  *
- * Ids: a thread is one WhatsApp chat (`whatsapp.web:<chat jid>`); a 1:1 chat
- * is a DM and an `@g.us` chat is a group. Message ids are scoped by the
- * connection (`<connection id>:<raw id>`) because the Chat SDK dedupes inbound
- * messages on adapter name + message id, and every WhatsApp Web connection
- * shares one adapter name — two connections seeing the same raw id must not
- * suppress each other.
+ * Ids: a thread is one WhatsApp chat on one connection
+ * (`whatsapp.web:<connection id>:<chat jid>`); a 1:1 chat is a DM and an
+ * `@g.us` chat is a group. Message ids are scoped the same way
+ * (`<connection id>:<raw id>`). Every WhatsApp Web connection shares one
+ * adapter name and the Chat SDK's lock, subscription and dedupe state, so two
+ * connections seeing the same chat or raw id must not contend or suppress
+ * each other.
  */
 
 import {
@@ -138,16 +139,26 @@ export class WhatsAppWebAdapter implements Adapter<string, WhatsAppWebMessageRow
     return new Response("WhatsApp Web has no webhook transport", { status: 404 });
   }
 
+  /**
+   * Thread ids carry the connection: the Chat SDK locks, subscribes and dedupes
+   * by thread id in state shared by every connection, so two paired devices
+   * talking to the same person must never share one.
+   */
+  private get threadPrefix(): string {
+    return `${THREAD_PREFIX}${this.options.connectionId}:`;
+  }
+
   encodeThreadId(chatJid: string): string {
     if (!chatJid || chatJid.includes(":")) {
       throw new Error(`Invalid WhatsApp chat JID: ${chatJid}`);
     }
-    return `${THREAD_PREFIX}${chatJid}`;
+    return `${this.threadPrefix}${chatJid}`;
   }
 
+  /** The chat JID of one of THIS connection's threads; any other id is refused. */
   decodeThreadId(threadId: string): string {
-    const chatJid = threadId.startsWith(THREAD_PREFIX)
-      ? threadId.slice(THREAD_PREFIX.length)
+    const chatJid = threadId.startsWith(this.threadPrefix)
+      ? threadId.slice(this.threadPrefix.length)
       : "";
     if (!chatJid || chatJid.includes(":")) {
       throw new Error(`Invalid WhatsApp Web thread ID: ${threadId}`);

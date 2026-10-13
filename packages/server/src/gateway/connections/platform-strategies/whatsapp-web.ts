@@ -27,9 +27,9 @@ async function postOnce(
   const target =
     platformMetadataString(payload.platformMetadata, "responseThreadId") ??
     ctx.channelId;
-  const threadId = adapter.encodeThreadId(
-    stripPlatformPrefix(WHATSAPP_WEB_PLATFORM, target)
-  );
+  // Same canonical spelling `resolveChatTarget` uses; the adapter refuses a
+  // thread that belongs to another connection.
+  const threadId = `${WHATSAPP_WEB_PLATFORM}:${stripPlatformPrefix(WHATSAPP_WEB_PLATFORM, target)}`;
   const contentHash = createHash("sha256")
     .update(JSON.stringify(content))
     .digest("hex");
