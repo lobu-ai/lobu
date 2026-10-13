@@ -9,7 +9,7 @@ import { DEVICE_CHAT_MAX_CONTEXT_LENGTH } from "@lobu/core/contracts/worker/prot
 import type { DbClient } from "../db/client";
 import { getDb } from "../db/client";
 import { authorizedChatLinkIds } from "../gateway/channels/chat-link-authorization";
-import { runtimeConnectionIdToSlug } from "../lobu/stores/connections-projection";
+import { runtimeConnectionPredicate } from "../lobu/stores/connections-projection";
 import {
   type AutomationEventRunQueued,
   createAutomationEventRun,
@@ -241,19 +241,23 @@ export async function findMatchingAutomationActivations(
 /**
  * Resolve a Chat SDK runtime id to the integer connection id used by Automation
  * triggers, then perform the normal connector-neutral match. Runtime ids are
- * deliberately stable slugs (for example `slackinst-…`), not database ids.
+ * stable slugs (for example `slackinst-…`), or a connector-transport row's id.
  */
 export async function planAutomationActivationsForRuntimeConnection(
   args: RuntimeConnectionAutomationLookup,
   db: DbClient = getDb(),
 ): Promise<AutomationActivationPlan> {
   const connections = await db<{ id: number }>`
-		SELECT id
-		FROM connections
-		WHERE organization_id = ${args.connectionOrganizationId}
-		  AND slug = ${runtimeConnectionIdToSlug(args.runtimeConnectionId)}
-		  AND connector_key = ${args.signal.connector_key}
-		  AND deleted_at IS NULL
+		SELECT c.id
+		FROM connections c
+		WHERE c.organization_id = ${args.connectionOrganizationId}
+		  AND ${runtimeConnectionPredicate(db, args.runtimeConnectionId, {
+				id: db`c.id`,
+				slug: db`c.slug`,
+				credentialMode: db`c.credential_mode`,
+			})}
+		  AND c.connector_key = ${args.signal.connector_key}
+		  AND c.deleted_at IS NULL
 		LIMIT 1
   `;
   const connectionId = connections[0]?.id;

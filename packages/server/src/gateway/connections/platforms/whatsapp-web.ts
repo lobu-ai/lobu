@@ -8,6 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Env } from "../../../index.js";
+import { isConnectionRowRuntimeId } from "../../../lobu/stores/connections-projection.js";
 import { handleExecute } from "../../../tools/admin/manage_operations/handlers/execute.js";
 import type { ToolContext } from "../../../tools/registry.js";
 import type { PlatformConnection } from "../types.js";
@@ -27,10 +28,7 @@ export function connectionOperationsExecutor(
 ): WhatsAppWebOperationExecutor {
   const connectionId = Number(connection.id);
   const organizationId = connection.organizationId;
-  if (
-    !Number.isSafeInteger(connectionId) || connectionId <= 0 ||
-    String(connectionId) !== connection.id || !organizationId
-  ) {
+  if (!isConnectionRowRuntimeId(connection.id) || !organizationId) {
     throw new Error(
       `WhatsApp Web chat needs a persisted connector connection, got ${connection.id}`,
     );
@@ -87,6 +85,9 @@ export function connectionOperationsExecutor(
 
 export const whatsappWebPlatform: ChatPlatformDescriptor = {
   connectorTransport: true,
+
+  parseSourceMessage: (adapter, row) =>
+    (adapter as WhatsAppWebAdapter).parseSourceRow(row),
 
   createAdapter: async (_config, context) => {
     const connection = context?.connection;

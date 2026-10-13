@@ -12,6 +12,7 @@ import {
 	chatTenantAdvisoryLockKey,
 	connectionsRowToStored,
 	managedTenantAdvisoryLockKey,
+	isConnectionRowRuntimeId,
 	runtimeConnectionIdToSlug,
 	softDeleteChatConnectionProjection,
 	upsertChatConnectionProjection,
@@ -368,12 +369,6 @@ const CONNECTOR_TRANSPORT_ROW_SQL = `c.credential_mode IS NULL
 		  AND d.automation_events @> '[{"capabilities":{"replyToSource":true}}]'::jsonb
 	)`;
 
-/** A canonical positive integer (`connections.id`), not a chat slug. */
-function isPositiveIntegerId(value: string): boolean {
-	const id = Number(value);
-	return Number.isSafeInteger(id) && id > 0 && String(id) === value;
-}
-
 /** A connector-transport row's runtime id is its numeric `connections.id`. */
 function connectionRowToStored(row: Record<string, any>) {
 	const stored = connectionsRowToStored(row);
@@ -402,7 +397,7 @@ export function createPostgresAgentConnectionStore(
 			// A connector-transport row's runtime id is numeric. New chat slugs are
 			// never numeric, but a legacy one may be, so a miss here still falls
 			// through to the slug lookup below.
-			if (transportPlatforms.length > 0 && isPositiveIntegerId(connectionId)) {
+			if (transportPlatforms.length > 0 && isConnectionRowRuntimeId(connectionId)) {
 				const rows = await sql.unsafe(
 					`SELECT c.* FROM connections c
 					 WHERE c.id = $2::bigint AND c.deleted_at IS NULL

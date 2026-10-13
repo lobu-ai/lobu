@@ -6,7 +6,10 @@ import {
 	pgBigintArray,
 	tsTime,
 } from "../../db/client.js";
-import { runtimeConnectionIdToSlug } from "../../lobu/stores/connections-projection.js";
+import {
+	runtimeConnectionIdToSlug,
+	runtimeConnectionPredicate,
+} from "../../lobu/stores/connections-projection.js";
 import { requireOrgId } from "../../lobu/stores/org-context.js";
 import { getNextNumericId } from "../../tools/admin/helpers/db-helpers.js";
 import {
@@ -169,7 +172,8 @@ async function loadChatAutomationSubscriptions(
 		agentId?: string;
 		connectionId?: string;
 		connectionOrganizationId?: string;
-		connectionSlug?: string;
+		/** A chat runtime connection id (slug, or a connector-transport row id). */
+		runtimeConnectionId?: string;
 		channelId?: string;
 		limit?: number;
 		oldestFirst?: boolean;
@@ -181,11 +185,11 @@ async function loadChatAutomationSubscriptions(
 	// An admitted Automation may also carry triggers for other workspaces on
 	// this channel; return only the trigger row that matches this chat's team.
 	const linkedOrgFilter = filters.includeAuthorizedChatLinks &&
-		filters.connectionOrganizationId && filters.connectionSlug && native
+		filters.connectionOrganizationId && filters.runtimeConnectionId && native
 		? sql`OR (
 			s.automation_id IN (${authorizedChatLinkIds(sql, {
 				connectionOrganizationId: filters.connectionOrganizationId,
-				connection: { slug: filters.connectionSlug },
+				connection: { slug: runtimeConnectionIdToSlug(filters.runtimeConnectionId) },
 				channelId: native,
 				teamId: filters.teamId,
 			})})
@@ -204,8 +208,12 @@ async function loadChatAutomationSubscriptions(
 	const connectionOrgFilter = filters.connectionOrganizationId
 		? sql`AND s.connection_organization_id = ${filters.connectionOrganizationId}`
 		: sql``;
-	const connectionSlugFilter = filters.connectionSlug
-		? sql`AND s.connection_slug = ${filters.connectionSlug}`
+	const runtimeConnectionFilter = filters.runtimeConnectionId
+		? sql`AND ${runtimeConnectionPredicate(sql, filters.runtimeConnectionId, {
+				id: sql`s.connection_id`,
+				slug: sql`s.connection_slug`,
+				credentialMode: sql`s.credential_mode`,
+			})}`
 		: sql``;
 	const channelFilter = filters.channelId
 		? sql`AND (
@@ -239,7 +247,7 @@ async function loadChatAutomationSubscriptions(
 		  ${agentFilter}
 		  ${connectionIdFilter}
 		  ${connectionOrgFilter}
-		  ${connectionSlugFilter}
+		  ${runtimeConnectionFilter}
 		  ${channelFilter}
 		ORDER BY ${order}
 		${limit}
@@ -266,7 +274,7 @@ export class AutomationSubscriptionService {
 			includeAuthorizedChatLinks: !options.crossOrganization,
 			teamId: options.teamId,
 			connectionOrganizationId,
-			connectionSlug: runtimeConnectionIdToSlug(connectionId),
+			runtimeConnectionId: connectionId,
 			channelId,
 			limit: 1,
 		});

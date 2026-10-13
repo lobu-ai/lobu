@@ -14,7 +14,7 @@
 
 import type { StoredConnection } from "@lobu/core";
 import { createLogger } from "@lobu/core";
-import { type DbClient, tsTime } from "../../db/client";
+import { type DbClient, type DbQuery, tsTime } from "../../db/client";
 import { deleteConnectionAclRow } from "../../authz/acl-observability";
 import {
   lockOrganizationForRelationshipClaims,
@@ -47,6 +47,32 @@ export function runtimeConnectionIdToSlug(id: string): string {
   return id.startsWith(SLACK_INSTALLATION_ID_PREFIX)
     ? id
     : `${BYO_SLUG_PREFIX}${id}`;
+}
+
+/**
+ * A connector-transport connection (`credential_mode` NULL, e.g. a paired
+ * WhatsApp Web browser) has no chat slug: its runtime id is its canonical
+ * positive `connections.id`. Chat runtime ids are slugs.
+ */
+export function isConnectionRowRuntimeId(id: string): boolean {
+  const value = Number(id);
+  return Number.isSafeInteger(value) && value > 0 && String(value) === id;
+}
+
+/**
+ * The one SQL predicate for "the connection this chat runtime id names", over
+ * the caller's own columns: the chat slug, or — for a numeric runtime id — a
+ * connector-transport row by `connections.id`.
+ */
+export function runtimeConnectionPredicate(
+  sql: DbClient,
+  runtimeId: string,
+  columns: { id: DbQuery; slug: DbQuery; credentialMode: DbQuery },
+): DbQuery {
+  const bySlug = sql`${columns.slug} = ${runtimeConnectionIdToSlug(runtimeId)}`;
+  return isConnectionRowRuntimeId(runtimeId)
+    ? sql`(${bySlug} OR (${columns.credentialMode} IS NULL AND ${columns.id} = ${Number(runtimeId)}))`
+    : bySlug;
 }
 
 /** `connections.slug` → the runtime connection id (strips the BYO namespace;
