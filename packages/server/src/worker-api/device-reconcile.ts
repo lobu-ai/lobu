@@ -25,9 +25,10 @@ import { upsertConnectorDefinitionRecords } from '../utils/connector-definition-
 import { ensureUniqueConnectionSlug, isConnectionSlugUniqueViolation } from '../utils/connections';
 import {
   clearDevicePinTombstoneIfPinned,
-  clearDeviceUpgradeRequired,
-  DEVICE_UPGRADE_REQUIRED_PREFIX,
+  clearDeviceAutoPause,
+  deviceNotOfferedMessage,
   deviceUpgradeRequiredMessage,
+  isDeviceAutoPauseSql,
 } from '../utils/device-pin-tombstones';
 import {
   DEVICE_AUTOWIRE_SUPPRESSION_KEY,
@@ -405,7 +406,7 @@ async function ensureDeviceConnectorWired(
             currentSource.advertiserDeviceIds
           );
           if (teamPin) {
-            await clearDeviceUpgradeRequired(tx, { connectionId: readyConnectionId });
+            await clearDeviceAutoPause(tx, { connectionId: readyConnectionId });
           }
           return claimAuthorization(currentSource);
         });
@@ -672,7 +673,11 @@ async function ensureDeviceConnectorWired(
           LIMIT 1
         `) as unknown as Array<{ id: number }>;
 
-        if (existingFeed[0]?.id) {
+        if (existingFeed[0]?.id && teamPin) {
+          // A team connection is paused and resumed as a whole (the scheduler
+          // skips every feed of a paused connection), never feed by feed, so an
+          // existing feed's status is the user's own choice and is left alone.
+        } else if (existingFeed[0]?.id) {
           // Re-activate a feed paused only because its capability went away
           // (`pauseStaleDeviceFeeds` leaves `consecutive_failures` untouched),
           // but never resume a feed the failure policy hard-paused
@@ -744,7 +749,7 @@ async function ensureDeviceConnectorWired(
         currentSource?.advertiserDeviceIds ?? matchingDeviceIds
       );
       if (teamPin) {
-        await clearDeviceUpgradeRequired(tx, { connectionId });
+        await clearDeviceAutoPause(tx, { connectionId });
       }
       if (currentSource && !(await selectedArtifactMatches(tx, currentSource))) return null;
       return claimAuthorization(currentSource);
@@ -1052,8 +1057,8 @@ async function archiveVanishedDeviceConnectorDefinitions(
  * member's devices homed there gets its own private connection pinned to it,
  * decided per device by {@link teamDeviceAction} against the workspace's
  * INSTALLED definition — never against which devices happen to be online.
- * A pinned connection whose device no longer advertises the key has its feeds
- * paused. Unpinned rows are never adopted, and the shared definition is never
+ * A pinned connection whose device no longer advertises the key is paused as
+ * a whole; feeds are never paused or resumed here. Unpinned rows are never adopted, and the shared definition is never
  * archived from here (that stays a personal-workspace pass).
  */
 async function reconcileTeamHome(
@@ -1169,9 +1174,9 @@ async function reconcileTeamHome(
       deviceVersion: artifact.metadata.version,
     };
     const connectionId = pinnedRows.get(identity);
-    upgrades.push(() =>
+    upgrades.push(async () =>
       connectionId
-        ? pauseTeamDeviceConnection(userId, organizationId, connectionId, upgrade)
+        ? pauseTeamDeviceConnection(userId, connectionId, await upgradeReason(organizationId, upgrade))
         : createUpgradePendingConnection(userId, organizationId, artifact.key, deviceId, upgrade)
     );
   }
@@ -1183,7 +1188,13 @@ async function reconcileTeamHome(
     ...upgrades.map((run) => run()),
     ...pinned
       .filter((row) => !newest.has(`${row.connector_key}\u0000${row.device_id}`))
-      .map((row) => pauseTeamDeviceConnection(userId, organizationId, row.id, null)),
+      .map((row) =>
+        pauseTeamDeviceConnection(
+          userId,
+          row.id,
+          deviceNotOfferedMessage(installed.get(row.connector_key)?.name ?? row.connector_key)
+        )
+      ),
   ]);
   if (!pollingDeviceId) return reconciled;
   return pollerClaimAuthorizations(reconciled, pollingDeviceAuthorizations, activeKeysForPoller);
@@ -1196,39 +1207,29 @@ interface DeviceUpgrade {
 }
 
 /**
- * Pause one team device connection. With `upgrade`, only the CONNECTION is
- * paused and stamped with the version its device must run — the scheduler skips
- * every feed of a paused connection, so feed states are left exactly as the
- * user set them. Only an active, unstamped connection (or one already stamped)
- * is taken over: a connection the user paused is never stamped, so clearing the
- * stamp after the upgrade can never resume something the user turned off.
- * Without `upgrade` (the device stopped advertising the key), its active feeds
- * are paused instead. Best-effort.
+ * Pause one team device connection, as a whole, with `reason` — rows 4 (the
+ * device runs an older version) and 5 (the device stopped offering the
+ * connector). The scheduler skips every feed of a paused connection, so feed
+ * states are left exactly as the user set them. Only an active, unstamped
+ * connection (or one this pass already stamped) is taken over: a connection the
+ * user paused is never stamped, so clearing the stamp later can never resume
+ * something the user turned off. Best-effort.
  */
 async function pauseTeamDeviceConnection(
   userId: string,
-  organizationId: string,
   connectionId: number,
-  upgrade: DeviceUpgrade | null
+  reason: string
 ): Promise<void> {
   const sql = getDb();
   try {
-    if (upgrade) {
-      const reason = await upgradeReason(organizationId, upgrade);
-      await sql`
-        UPDATE connections
-        SET status = 'paused', error_message = ${reason}, updated_at = NOW()
-        WHERE id = ${connectionId}
-          AND (
-            (status = 'active' AND error_message IS NULL)
-            OR starts_with(error_message, ${DEVICE_UPGRADE_REQUIRED_PREFIX})
-          )
-      `;
-      return;
-    }
     await sql`
-      UPDATE feeds SET status = 'paused', updated_at = current_timestamp
-      WHERE connection_id = ${connectionId} AND status = 'active' AND deleted_at IS NULL
+      UPDATE connections
+      SET status = 'paused', error_message = ${reason}, updated_at = NOW()
+      WHERE id = ${connectionId}
+        AND (
+          (status = 'active' AND error_message IS NULL)
+          OR ${isDeviceAutoPauseSql(sql, 'error_message')}
+        )
     `;
   } catch (err) {
     logger.warn(

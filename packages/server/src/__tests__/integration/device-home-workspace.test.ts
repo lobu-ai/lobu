@@ -380,6 +380,7 @@ describe('device home workspace chosen at pairing', () => {
 
   describe('team version decision, one case per teamDeviceAction row', () => {
     const NEW = String(OS_SHELL_MANIFEST.version);
+    const DECLARED_FEED = { feeds_schema: { items: { name: 'Items', operations: ['sync'] } } };
     const OLD = '0.0.1';
     const reason =
       `Update Lobu on this device to use ${String(OS_SHELL_MANIFEST.name)} in Team: ` +
@@ -402,6 +403,11 @@ describe('device home workspace chosen at pairing', () => {
         teamOrgId,
         aliceOld: () => pollShell(aliceToken, 'old-box', { ...OS_SHELL_MANIFEST, version: OLD }),
         aliceNew: () => pollShell(aliceToken, 'old-box'),
+        /** The same polls with a manifest that DECLARES a synced feed. */
+        aliceOldFeed: () =>
+          pollShell(aliceToken, 'old-box', { ...OS_SHELL_MANIFEST, ...DECLARED_FEED, version: OLD }),
+        aliceNewFeed: () => pollShell(aliceToken, 'old-box', { ...OS_SHELL_MANIFEST, ...DECLARED_FEED }),
+        bobNewFeed: () => pollShell(bobToken, 'new-box', { ...OS_SHELL_MANIFEST, ...DECLARED_FEED }),
         aliceNone: async () => {
           const res = await post('/api/workers/poll', {
             token: aliceToken,
@@ -523,33 +529,36 @@ describe('device home workspace chosen at pairing', () => {
       [
         'row 4 then 3 — a manual pause survives the upgrade: nothing the user turned off is resumed',
         async (team) => {
-          await team.aliceOld();
-          await team.seedFeed(team.alice.userId);
-          await team.seedFeed(team.alice.userId);
+          await team.aliceOldFeed();
           const [own] = await team.connectionsOf(team.alice.userId);
-          // Alice turned one feed off herself while the connection was active.
-          await team.sql`
-            UPDATE feeds SET status = 'paused'
-            WHERE id = (SELECT MIN(id) FROM feeds WHERE connection_id = ${own.id})
-          `;
-          await team.bobNew();
-          await team.aliceOld();
-          await expectAliceUpgradePaused(team);
-          await team.aliceNew();
-          expect(await team.connectionsOf(team.alice.userId)).toEqual([
-            expect.objectContaining({ id: own.id, status: 'active', error_message: null, active_feeds: 1 }),
-          ]);
+          const declared = (await team.sql`
+            SELECT id, status FROM feeds WHERE connection_id = ${own.id} AND feed_key = 'items' AND deleted_at IS NULL
+          `) as unknown as Array<{ id: number; status: string }>;
+          expect(declared).toEqual([expect.objectContaining({ status: 'active' })]);
+          // Alice turned the declared feed off herself while the connection was active.
+          await team.sql`UPDATE feeds SET status = 'paused' WHERE id = ${declared[0].id}`;
+          const feedStatus = async () =>
+            ((await team.sql`SELECT status FROM feeds WHERE id = ${declared[0].id}`) as unknown as Array<{
+              status: string;
+            }>)[0].status;
 
-          // A connection Alice paused herself is never stamped, so the upgrade leaves it off.
+          await team.bobNewFeed();
+          await team.aliceOldFeed();
+          await expectAliceUpgradePaused(team);
+          await team.aliceNewFeed();
+          expect(await team.connectionsOf(team.alice.userId)).toEqual([
+            expect.objectContaining({ id: own.id, status: 'active', error_message: null }),
+          ]);
+          expect(await feedStatus()).toBe('paused');
+
+          // A connection Alice paused herself is never stamped, so the device check leaves it off.
           await team.sql`UPDATE connections SET status = 'paused' WHERE id = ${own.id}`;
-          await team.aliceOld();
+          await team.aliceOldFeed();
+          await team.aliceNewFeed();
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
             expect.objectContaining({ id: own.id, status: 'paused', error_message: null }),
           ]);
-          await team.aliceNew();
-          expect(await team.connectionsOf(team.alice.userId)).toEqual([
-            expect.objectContaining({ id: own.id, status: 'paused', error_message: null }),
-          ]);
+          expect(await feedStatus()).toBe('paused');
         },
       ],
       [
@@ -592,15 +601,24 @@ describe('device home workspace chosen at pairing', () => {
         },
       ],
       [
-        'row 5 + 7 — the device stops advertising: feeds pause, the definition is neither changed nor archived',
+        'row 5 + 7 — the device stops advertising: the connection pauses (feeds untouched) and resumes; the definition is neither changed nor archived',
         async (team) => {
           await team.aliceOld();
           await team.seedFeed(team.alice.userId);
           await team.aliceNone();
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
-            expect.objectContaining({ error_message: null, active_feeds: 0 }),
+            expect.objectContaining({
+              status: 'paused',
+              error_message: `${String(OS_SHELL_MANIFEST.name)} is no longer offered by this device.`,
+              active_feeds: 1,
+            }),
           ]);
           expect(await team.installed()).toBe(OLD);
+          // Offering it again resumes the same connection.
+          await team.aliceOld();
+          expect(await team.connectionsOf(team.alice.userId)).toEqual([
+            expect.objectContaining({ status: 'active', error_message: null, active_feeds: 1 }),
+          ]);
         },
       ],
       [

@@ -105,13 +105,16 @@ export async function clearDevicePinTombstoneIfPinned(
 
 
 /**
- * `connections.error_message` prefix stamped when a team-workspace member's
- * devices homed there advertise only an OLDER version of the connector than
- * the one the workspace runs. Their connection and its feeds are paused until
- * a device of theirs advertises the workspace's version; device
- * reconciliation then clears this stamp (`clearDeviceUpgradeRequired`).
+ * `connections.error_message` prefixes a TEAM-workspace device connection is
+ * stamped with when device reconciliation pauses it as a whole: its device
+ * advertises only an OLDER version than the workspace runs, or no longer
+ * offers the connector. Feeds are never touched (the scheduler skips a paused
+ * connection's feeds); reconciliation clears the stamp and re-activates the
+ * connection once the device serves the workspace's version again
+ * (`clearDeviceAutoPause`).
  */
-export const DEVICE_UPGRADE_REQUIRED_PREFIX = 'Update Lobu on this device to use ';
+const DEVICE_UPGRADE_REQUIRED_PREFIX = 'Update Lobu on this device to use ';
+const DEVICE_NOT_OFFERED_SUFFIX = ' is no longer offered by this device.';
 
 export function deviceUpgradeRequiredMessage(params: {
 	connectorName: string;
@@ -122,13 +125,23 @@ export function deviceUpgradeRequiredMessage(params: {
 	return `${DEVICE_UPGRADE_REQUIRED_PREFIX}${params.connectorName} in ${params.workspaceName}: this workspace runs version ${params.workspaceVersion}, your device has ${params.deviceVersion}.`;
 }
 
+export function deviceNotOfferedMessage(connectorName: string): string {
+	return `${connectorName}${DEVICE_NOT_OFFERED_SUFFIX}`;
+}
+
+/** SQL predicate, built on `db`: `column` holds one of the auto-pause stamps above. */
+export function isDeviceAutoPauseSql(db: DbClient, column: string) {
+	return db`(starts_with(${db.unsafe(column)}, ${DEVICE_UPGRADE_REQUIRED_PREFIX})
+    OR right(${db.unsafe(column)}, ${DEVICE_NOT_OFFERED_SUFFIX.length}) = ${DEVICE_NOT_OFFERED_SUFFIX})`;
+}
+
 /**
- * Clear an upgrade-required stamp once the connection's owner has a device
- * advertising the workspace's version: re-activate the connection. Only the
- * connection was paused for the upgrade (its feeds were left as the user set
- * them), so nothing else is resumed. Safe no-op for any other error message.
+ * Clear an auto-pause stamp once the connection's device serves the
+ * workspace's version again: re-activate the connection. Only the connection
+ * was paused (its feeds were left as the user set them), so nothing else is
+ * resumed. Safe no-op for any other error message, including a user's pause.
  */
-export async function clearDeviceUpgradeRequired(
+export async function clearDeviceAutoPause(
 	db: DbClient,
 	params: { connectionId: number },
 ): Promise<void> {
@@ -138,7 +151,7 @@ export async function clearDeviceUpgradeRequired(
         status = CASE WHEN status = 'paused' THEN 'active' ELSE status END,
         updated_at = NOW()
     WHERE id = ${params.connectionId}
-      AND starts_with(error_message, ${DEVICE_UPGRADE_REQUIRED_PREFIX})
+      AND ${isDeviceAutoPauseSql(db, 'error_message')}
       AND deleted_at IS NULL
   `;
 }
