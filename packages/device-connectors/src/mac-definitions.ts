@@ -509,7 +509,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
   },
   {
     key: "apple.reminders",
-    version: "0.2.0",
+    version: "0.3.0",
     name: "Reminders",
     description:
       "Sync your reminders (titles, notes, due dates, completion) from this Mac via Lobu for Mac. Reminders stay on the device.",
@@ -569,6 +569,165 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
             },
           },
         },
+      },
+    },
+    actions: {
+      create_reminder: {
+        key: "create_reminder",
+        name: "Create reminder",
+        description:
+          "Create a reminder in Apple Reminders on this Mac (syncs via the user's iCloud to their other devices). Returns the origin_id for later update/complete/delete calls.",
+        kind: "write",
+        annotations: {
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            title: {
+              type: "string",
+              minLength: 1,
+              maxLength: 500,
+              description: "Reminder title.",
+            },
+            notes: {
+              type: "string",
+              maxLength: 4000,
+              description: "Optional notes body.",
+            },
+            due: {
+              type: "string",
+              format: "date-time",
+              description:
+                "Optional due date as ISO 8601 (e.g. 2026-10-14T09:00:00+01:00).",
+            },
+            list: {
+              type: "string",
+              maxLength: 200,
+              description:
+                "Target reminder list by name. Defaults to the system default list when omitted or unmatched.",
+            },
+            priority: {
+              type: "integer",
+              minimum: 0,
+              maximum: 9,
+              description:
+                "EventKit priority 0 (none) through 9 (lowest); 1 is highest. Defaults to 0.",
+            },
+          },
+          required: ["title"],
+          additionalProperties: false,
+        },
+        outputSchema: { type: "object", additionalProperties: true },
+      },
+      update_reminder: {
+        key: "update_reminder",
+        name: "Update reminder",
+        description:
+          "Update title, notes, due date, list, or priority of an existing reminder. Only supplied fields change.",
+        kind: "write",
+        annotations: {
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            origin_id: {
+              type: "string",
+              minLength: 1,
+              description:
+                "Reminder identity as returned by create_reminder or the sync feed (the 'reminder:<identifier>' origin_id or the bare calendar item identifier).",
+            },
+            title: {
+              type: "string",
+              minLength: 1,
+              maxLength: 500,
+            },
+            notes: {
+              type: ["string", "null"],
+              maxLength: 4000,
+              description: "Null clears the notes.",
+            },
+            due: {
+              type: ["string", "null"],
+              description: "ISO 8601 due date. Null clears the due date.",
+            },
+            list: {
+              type: "string",
+              maxLength: 200,
+              description: "Move the reminder to the named list.",
+            },
+            priority: {
+              type: "integer",
+              minimum: 0,
+              maximum: 9,
+            },
+          },
+          required: ["origin_id"],
+          additionalProperties: false,
+        },
+        outputSchema: { type: "object", additionalProperties: true },
+      },
+      complete_reminder: {
+        key: "complete_reminder",
+        name: "Complete reminder",
+        description:
+          "Mark a reminder completed (or, with completed:false, reopen it).",
+        kind: "write",
+        annotations: {
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            origin_id: {
+              type: "string",
+              minLength: 1,
+              description:
+                "Reminder identity as returned by create_reminder or the sync feed.",
+            },
+            completed: {
+              type: "boolean",
+              default: true,
+              description: "False reopens a completed reminder.",
+            },
+          },
+          required: ["origin_id"],
+          additionalProperties: false,
+        },
+        outputSchema: { type: "object", additionalProperties: true },
+      },
+      delete_reminder: {
+        key: "delete_reminder",
+        name: "Delete reminder",
+        description:
+          "Permanently delete a reminder. Prefer complete_reminder when the user may want history.",
+        kind: "write",
+        annotations: {
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            origin_id: {
+              type: "string",
+              minLength: 1,
+              description:
+                "Reminder identity as returned by create_reminder or the sync feed.",
+            },
+          },
+          required: ["origin_id"],
+          additionalProperties: false,
+        },
+        outputSchema: { type: "object", additionalProperties: true },
       },
     },
   },
