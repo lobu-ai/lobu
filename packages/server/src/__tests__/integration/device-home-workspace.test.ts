@@ -90,7 +90,7 @@ async function workerPat(userId: string, organizationId: string, workerId: strin
   return token;
 }
 
-async function pollShell(token: string, workerId: string) {
+async function pollShell(token: string, workerId: string, manifest = OS_SHELL_MANIFEST) {
   const res = await post('/api/workers/poll', {
     token,
     body: {
@@ -99,7 +99,7 @@ async function pollShell(token: string, workerId: string) {
       app_version: '9.9.0',
       label: 'Build box',
       capabilities: { 'os.shell': true },
-      connector_manifests: [OS_SHELL_MANIFEST],
+      connector_manifests: [manifest],
       capacity_available: 0,
     },
   });
@@ -349,6 +349,56 @@ describe('device home workspace chosen at pairing', () => {
       [
         [alice.userId, aliceDevice.id, 'private', 'active'],
         [bob.userId, bobDevice.id, 'private', 'active'],
+      ].sort()
+    );
+  });
+
+  it('keeps a member on an older device manifest wired while a colleague runs a newer one', async () => {
+    const sql = getTestDb();
+    const alice = await seedUser('Older Extension');
+    const bob = await seedUser('Newer Extension');
+    const teamOrgId = await seedTeamOrg();
+    await addMember(teamOrgId, alice.userId, 'member');
+    await addMember(teamOrgId, bob.userId, 'member');
+    const olderManifest = { ...OS_SHELL_MANIFEST, version: '0.0.1' };
+    const aliceToken = await workerPat(alice.userId, teamOrgId, 'older-box');
+    const bobToken = await workerPat(bob.userId, teamOrgId, 'newer-box');
+
+    // Bob's newer manifest selects the workspace's one definition first.
+    await pollShell(bobToken, 'newer-box');
+    await pollShell(aliceToken, 'older-box', olderManifest);
+    const definitionVersion = async () =>
+      ((await sql`
+        SELECT version FROM connector_definitions
+        WHERE organization_id = ${teamOrgId} AND key = 'os.shell' AND status = 'active'
+      `) as unknown as Array<{ version: string }>)[0]?.version;
+    expect(await definitionVersion()).toBe(OS_SHELL_MANIFEST.version);
+
+    const connections = await shellConnections(teamOrgId);
+    expect(connections.map((row) => [row.created_by, row.status]).sort()).toEqual(
+      [
+        [alice.userId, 'active'],
+        [bob.userId, 'active'],
+      ].sort()
+    );
+    // os.shell declares no feeds; seed one on each member's connection.
+    for (const row of connections) {
+      await sql`
+        INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
+        VALUES (${teamOrgId}, ${row.id}, 'items', 'active', '* * * * *', NOW())
+      `;
+    }
+
+    await pollShell(aliceToken, 'older-box', olderManifest);
+    await pollShell(bobToken, 'newer-box');
+
+    expect(await definitionVersion()).toBe(OS_SHELL_MANIFEST.version);
+    expect(
+      (await shellConnections(teamOrgId)).map((row) => [row.created_by, row.status, row.active_feeds]).sort()
+    ).toEqual(
+      [
+        [alice.userId, 'active', 1],
+        [bob.userId, 'active', 1],
       ].sort()
     );
   });

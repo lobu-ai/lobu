@@ -1219,6 +1219,15 @@ export async function reconcileDeviceCapabilities(
   // home reads its own winners.
   let fleetManifestSources: DeviceConnectorSource[] = [];
   const homeManifestSources = new Map<string, DeviceConnectorSource[]>();
+  // organization → connector key → this user's devices homed there that
+  // advertise ANY retained version of the key. A shared workspace selects one
+  // definition across every member, so a member whose devices all run an
+  // older version advertises none of the winner. Their connection's wiring and
+  // feed liveness follow these devices instead, exactly as one user's older
+  // device keeps its retained version beside a newer one of their own: the
+  // definition is not downgraded, and claims stay exact-artifact (the older
+  // device is authorized only for the version it advertises).
+  const homeRetainedAdvertisers = new Map<string, Map<string, string[]>>();
   try {
     fleetManifestSources = await getDeviceManifestSourcesForUser({ sql, userId });
     for (const home of homes) {
@@ -1226,6 +1235,20 @@ export async function reconcileDeviceCapabilities(
         home.organizationId,
         await getDeviceManifestSourcesForUser({ sql, userId, home })
       );
+      const retained = new Map<string, string[]>();
+      if (!home.personal) {
+        for (const source of await getDeviceManifestSourcesForUser({
+          sql,
+          userId,
+          home,
+          includeRetainedVersions: true,
+        })) {
+          retained.set(source.key, [
+            ...new Set([...(retained.get(source.key) ?? []), ...source.advertiserDeviceIds]),
+          ]);
+        }
+      }
+      homeRetainedAdvertisers.set(home.organizationId, retained);
     }
   } catch (err) {
     logger.warn(
@@ -1284,7 +1307,9 @@ export async function reconcileDeviceCapabilities(
           [...byKey.values()].map((dc) => {
             const matchingDeviceIds =
               'source' in dc && dc.source === 'device-manifest'
-                ? dc.advertiserDeviceIds
+                ? dc.advertiserDeviceIds.length > 0
+                  ? dc.advertiserDeviceIds
+                  : (homeRetainedAdvertisers.get(home.organizationId)?.get(dc.key) ?? [])
                 : homeDeviceIds.filter((id) => deviceCaps.get(id)?.has(dc.requiredCapability));
             return matchingDeviceIds.length > 0
               ? ensureDeviceConnectorWired(
