@@ -260,6 +260,19 @@ export async function getDeviceManifestSourcesForUser(params: {
   // shadow an older capable advertiser and pause a working feed. When no
   // capable version exists, keep the newest inventory manifest so readiness
   // can still surface setup_required instead of making the connector vanish.
+  //
+  // A TEAM workspace's version only moves forward: a version older than the
+  // workspace's active definition never wins, so a newer member device going
+  // offline cannot downgrade the shared definition (or look like an upgrade to
+  // an older device). The personal workspace keeps online-preferred selection.
+  const versionFloor = new Map<string, string>();
+  if (home && !home.personal) {
+    const definitions = (await params.sql`
+      SELECT key, version FROM connector_definitions
+      WHERE organization_id = ${home.organizationId} AND status = 'active'
+    `) as unknown as Array<{ key: string; version: string }>;
+    for (const definition of definitions) versionFloor.set(definition.key, definition.version);
+  }
   const retainedManifests = new Map<string, StoredDeviceManifest>();
   const inventoryWinners = new Map<string, StoredDeviceManifest>();
   const capableWinners = new Map<string, StoredDeviceManifest>();
@@ -269,6 +282,8 @@ export async function getDeviceManifestSourcesForUser(params: {
       `${stored.manifest.key}\u0000${stored.manifest.version}\u0000${stored.manifest_hash}`,
       stored
     );
+    const floor = versionFloor.get(stored.manifest.key);
+    if (floor && compareSemverish(stored.manifest.version, floor) < 0) continue;
     const inventoryWinner = inventoryWinners.get(stored.manifest.key);
     if (!inventoryWinner || compareManifestWinner(stored, inventoryWinner) > 0) {
       inventoryWinners.set(stored.manifest.key, stored);

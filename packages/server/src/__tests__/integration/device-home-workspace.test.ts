@@ -513,6 +513,58 @@ describe('device home workspace chosen at pairing', () => {
     ]);
   });
 
+  it('never downgrades a team workspace version when its newer device goes offline', async () => {
+    const sql = getTestDb();
+    const alice = await seedUser('Stays Older');
+    const bob = await seedUser('Goes Offline');
+    const teamOrgId = await seedTeamOrg();
+    await addMember(teamOrgId, alice.userId, 'member');
+    await addMember(teamOrgId, bob.userId, 'member');
+    const workspaceVersion = String(OS_SHELL_MANIFEST.version);
+    const olderManifest = { ...OS_SHELL_MANIFEST, version: '0.0.1' };
+    const aliceToken = await workerPat(alice.userId, teamOrgId, 'steady-old-box');
+    const bobToken = await workerPat(bob.userId, teamOrgId, 'sleepy-new-box');
+    const reason =
+      `Update Lobu on this device to use ${String(OS_SHELL_MANIFEST.name)} in Team: ` +
+      `this workspace runs version ${workspaceVersion}, your device has 0.0.1.`;
+    const definitionVersion = async () =>
+      ((await sql`
+        SELECT version FROM connector_definitions
+        WHERE organization_id = ${teamOrgId} AND key = 'os.shell' AND status = 'active'
+      `) as unknown as Array<{ version: string }>)[0]?.version;
+    const connectionOf = async (userId: string) =>
+      ((await sql`
+        SELECT status, error_message FROM connections
+        WHERE organization_id = ${teamOrgId} AND connector_key = 'os.shell'
+          AND created_by = ${userId} AND deleted_at IS NULL
+      `) as unknown as Array<{ status: string; error_message: string | null }>)[0];
+
+    await pollShell(bobToken, 'sleepy-new-box');
+    await pollShell(aliceToken, 'steady-old-box', olderManifest);
+    expect(await connectionOf(alice.userId)).toEqual({ status: 'paused', error_message: reason });
+
+    // Bob's newer device stops polling: past the online window, still fresh.
+    await sql`
+      UPDATE device_workers SET last_seen_at = NOW() - INTERVAL '10 minutes'
+      WHERE user_id = ${bob.userId} AND worker_id = 'sleepy-new-box'
+    `;
+    await pollShell(aliceToken, 'steady-old-box', olderManifest);
+    expect(await definitionVersion()).toBe(workspaceVersion);
+    expect(await connectionOf(alice.userId)).toEqual({ status: 'paused', error_message: reason });
+    const aliceDevice = await deviceRow(alice.userId, 'steady-old-box');
+    expect(
+      (await reconcileDeviceCapabilities(alice.userId, aliceDevice.id)).filter(
+        (auth) => auth.connectorKey === 'os.shell' && auth.connectorVersion === workspaceVersion
+      )
+    ).toEqual([]);
+
+    // Bob's device returning changes nothing.
+    await pollShell(bobToken, 'sleepy-new-box');
+    expect(await definitionVersion()).toBe(workspaceVersion);
+    expect(await connectionOf(alice.userId)).toEqual({ status: 'paused', error_message: reason });
+    expect(await connectionOf(bob.userId)).toEqual({ status: 'active', error_message: null });
+  });
+
   it('does not attach a member device to an ownerless shared team connection', async () => {
     const sql = getTestDb();
     const alice = await seedUser('Orphan Owner');
