@@ -16,6 +16,10 @@ function adapter(fetcher: (url: string, init?: any) => Promise<any>) {
     TextDecoder,
     AbortSignal,
   });
+  Object.defineProperty(dom.window, "crypto", {
+    value: webcrypto,
+    configurable: true,
+  });
   dom.window.document.cookie = 'JSESSIONID="synthetic-csrf"';
   dom.window.eval(`(${linkedInInboxProgram.toString()})()`);
   return { dom, api: (dom.window as any).__lobuLinkedInInboxV1 };
@@ -846,6 +850,15 @@ describe("LinkedIn source adapter", () => {
       expect(result.rows[0].conversation_url).toBe(
         "https://www.linkedin.com/messaging/thread/synthetic-thread==/"
       );
+      Object.assign(message, { messageBodyRenderFormat: "RECALLED" });
+      const recalled = await api.read({ feed: "live_messages", limit: 20 });
+      expect(recalled.rows[0]).toMatchObject({ recalled: true, text: "" });
+      Object.assign(message, { messageBodyRenderFormat: "TEXT" });
+      expect(result.rows[0].source_revision).toMatch(/^[a-f0-9]{64}$/);
+      const originalRevision = result.rows[0].source_revision;
+      message.body.text = "Hello. Actually, wait until Friday.";
+      const edited = await api.read({ feed: "live_messages", limit: 20 });
+      expect(edited.rows[0].source_revision).not.toBe(originalRevision);
       expect(calls.some((url) => url.includes("%28"))).toBe(true);
       expect(calls.every((url) => !/mark|Seen|Read/.test(url))).toBe(true);
     } finally {

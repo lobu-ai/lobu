@@ -8,6 +8,7 @@ import reaction from "../social-research.reaction";
 const url = "https://www.linkedin.com/feed/update/urn:li:activity:123456789/";
 const text =
   "Agents need explicit decision boundaries and enough context to finish work.";
+const revision = "a".repeat(64);
 const finding = () => ({
   platform: "linkedin",
   source_url: url,
@@ -57,10 +58,34 @@ function harness(findings = [finding()]) {
     delivered.add(args.idempotency_key);
     return { event_id: 123, notified_count: 1, url: null };
   });
-  const execute = mock(async (_args: Record<string, any>) => ({
-    status: "in_progress",
-    run_id: 90,
-  }));
+  const queued = new Map<string, Record<string, any>>();
+  const execute = mock(async (args: Record<string, any>) => {
+    const old = queued.get(args.idempotency_key);
+    if (
+      old &&
+      (old.parent_run_id !== ctx.window.run_id ||
+        JSON.stringify(old.input) !== JSON.stringify(args.input))
+    )
+      throw new Error(
+        "Action idempotency key is already bound to a different request"
+      );
+    if (!old) {
+      queued.set(args.idempotency_key, {
+        id: 90,
+        connection_id: args.connection_id,
+        operation_key: args.operation_key,
+        input: args.input,
+        automation_id: 42,
+        parent_run_id: ctx.window.run_id,
+        created_by_user_id: "test-owner",
+        status: "pending",
+      });
+      receipts.get(ctx.window.run_id)!.output = structuredClone(
+        ctx.extracted_data
+      );
+    }
+    return { status: "in_progress", run_id: 90 };
+  });
   const ctx = {
     extracted_data: {
       summary: "Research complete",
@@ -80,13 +105,17 @@ function harness(findings = [finding()]) {
       id: "source-message",
       text,
       from_me: false,
+      recalled: false,
+      source_revision: revision,
       conversation_url:
         "https://www.linkedin.com/messaging/thread/test-thread/",
     },
   ];
-  const readMany = mock(async () => ({
-    results: [{ feed_id: 51, ok: true, rows: feedRows }],
-  }));
+  const readMany = mock(
+    async (_input: any): Promise<any> => ({
+      results: [{ feed_id: 51, ok: true, rows: feedRows }],
+    })
+  );
   const client = {
     query: async (sql: string) => {
       queries.push(sql);
@@ -103,6 +132,7 @@ function harness(findings = [finding()]) {
     connections: { list: async () => ({ connections: [] }) },
     operations: {
       getRun: async (id: number) => ({ run: receipts.get(id) }),
+      listRuns: async () => ({ runs: [...queued.values()], has_more: false }),
       listAvailable: async () => ({
         operations: [
           "read_home_feed",
@@ -139,6 +169,8 @@ function harness(findings = [finding()]) {
     send,
     execute,
     ctx,
+    client,
+    queued,
     run: () => reaction(ctx, client),
   };
 }
@@ -350,6 +382,7 @@ const inboxFinding = () => ({
   platform: "linkedin",
   feed_key: "live_messages",
   source_id: "source-message",
+  source_revision: revision,
   quote: text,
   summary: "An incoming question",
   why: "It asks about agent review.",
@@ -387,7 +420,61 @@ test("inbox cards re-read the source and queue a private message draft", async (
   expect(h.execute).toHaveBeenCalledTimes(1);
 });
 
-test("inbox source mismatch, outgoing or recalled messages fail before delivery", async () => {
+test("inbox cards at Unicode schema limits keep the draft within the notification limit", async () => {
+  for (const platform of ["linkedin", "tiktok"]) {
+    const h = harness([]);
+    const f = {
+      ...inboxFinding(),
+      platform,
+      feed_key: platform === "linkedin" ? "live_messages" : "messages",
+      summary: "🧪".repeat(120),
+      quote: "🧪".repeat(100),
+      why: "🧪".repeat(120),
+      limits: "🧪".repeat(120),
+      draft: "🧪".repeat(350),
+    };
+    h.ctx.extracted_data.inbox_findings = [f];
+    h.feedRows[0].text = f.quote;
+    if (platform === "tiktok") {
+      h.feedRows[0].conversation_url = "https://www.tiktok.com/messages";
+      h.feedRows[0].conversation_name = "🧪".repeat(80);
+      h.client.feeds.list = async () => ({
+        feeds: [{ id: 51, feed_key: "messages", connection_id: 14 }],
+      });
+    }
+    await h.run();
+    const card = h.send.mock.calls[0][0];
+    expect(card.body).toContain(f.draft);
+    expect(card.body.length).toBeLessThanOrEqual(1000);
+    expect(card.title.endsWith("\ud83e")).toBe(false);
+  }
+});
+
+test("a failed draft enqueue preserves independent inbox cards and reports partial coverage", async () => {
+  const h = harness([]);
+  h.ctx.extracted_data.inbox_findings = [
+    inboxFinding(),
+    { ...inboxFinding(), source_id: "other-message", draft: "" },
+  ];
+  h.feedRows.push({ ...h.feedRows[0], id: "other-message" });
+  h.execute.mockImplementationOnce(async () => {
+    throw new Error("Synthetic enqueue failure");
+  });
+  const result = await h.run();
+  expect(result.inbox_findings.some((f) => f.status === "partial")).toBe(true);
+  expect(
+    result.inbox_findings.some(
+      (f) => f.source_id === "other-message" && f.notification_id
+    )
+  ).toBe(true);
+  expect(
+    h.send.mock.calls.some(([card]) =>
+      card.title.includes("partially verified")
+    )
+  ).toBe(true);
+});
+
+test("invalid inbox evidence is skipped without discarding independent post findings", async () => {
   for (const changes of [
     { text: "unrelated" },
     { from_me: true },
@@ -397,10 +484,143 @@ test("inbox source mismatch, outgoing or recalled messages fail before delivery"
     const h = harness();
     h.ctx.extracted_data.inbox_findings = [inboxFinding()];
     Object.assign(h.feedRows[0], changes);
-    await expect(h.run()).rejects.toThrow();
-    expect(h.send).not.toHaveBeenCalled();
-    expect(h.execute).not.toHaveBeenCalled();
+    const result = await h.run();
+    expect(result.inbox_findings[0]).toMatchObject({ status: "partial" });
+    expect(result.findings).toHaveLength(1);
+    expect(
+      h.execute.mock.calls.every(
+        ([args]) => args.operation_key === "prepare_comment"
+      )
+    ).toBe(true);
   }
+});
+
+test("edits outside the quote, media changes and missing revisions cannot stage stale replies", async () => {
+  for (const changed of [
+    {
+      text: `${text} Actually, do not deliver anything until Friday.`,
+      source_revision: "b".repeat(64),
+    },
+    { has_attachments: true },
+    { has_uninspected_content: true },
+    { source_revision: undefined },
+  ]) {
+    const h = harness([]);
+    h.ctx.extracted_data.inbox_findings = [inboxFinding()];
+    Object.assign(h.feedRows[0], changed);
+    const result = await h.run();
+    expect(result.inbox_findings[0]).toMatchObject({ status: "partial" });
+    expect(h.execute).not.toHaveBeenCalled();
+    expect(
+      h.send.mock.calls.every(([card]) => !card.browser_handoff_run_id)
+    ).toBe(true);
+  }
+});
+
+test("bounded reread recovers a candidate displaced by first-page insertions", async () => {
+  const h = harness([]);
+  h.ctx.extracted_data.inbox_findings = [inboxFinding()];
+  h.readMany.mockImplementationOnce(async () => ({
+    results: [
+      {
+        feed_id: 51,
+        ok: true,
+        rows: Array.from({ length: 20 }, (_, i) => ({ id: `new-${i}` })),
+        next_cursor: "next-page",
+      },
+    ],
+  }));
+  await h.run();
+  expect(h.readMany).toHaveBeenCalledTimes(2);
+  expect(h.execute.mock.calls[0][0].operation_key).toBe("prepare_message");
+});
+
+test("expired anchors report partial verification without retrying the failed source", async () => {
+  const h = harness([]);
+  h.ctx.extracted_data.inbox_findings = [
+    { ...inboxFinding(), source_cursor: "expired-anchor" },
+  ];
+  h.readMany.mockImplementationOnce(async () => ({
+    results: [{ feed_id: 51, ok: false, rows: [] }],
+  }));
+  const result = await h.run();
+  expect(result.inbox_findings[0]).toMatchObject({ status: "partial" });
+  expect(h.readMany).toHaveBeenCalledTimes(1);
+  expect(h.execute).not.toHaveBeenCalled();
+});
+
+test("one failed inbox does not suppress another verified source or coverage notices", async () => {
+  const h = harness([]);
+  h.ctx.extracted_data.inbox_findings = [
+    inboxFinding(),
+    { ...inboxFinding(), source_id: "other", feed_key: "notifications" },
+  ];
+  h.ctx.extracted_data.inbox_coverage = [
+    "linkedin:live_messages",
+    "linkedin:notifications",
+    "tiktok:messages",
+    "tiktok:activity",
+  ].map((source) => ({
+    source,
+    status: "read",
+    items_read: 1,
+    detail: "Read",
+  }));
+  h.client.feeds.list = async () => ({
+    feeds: [
+      { id: 51, connection_id: 11, feed_key: "live_messages" },
+      { id: 52, connection_id: 11, feed_key: "notifications" },
+    ],
+  });
+  h.readMany.mockImplementation(async ({ reads }) => ({
+    results: reads.map((read: any) => ({
+      feed_id: read.feed_id,
+      ok: read.feed_id === 52,
+      rows:
+        read.feed_id === 52
+          ? [{ ...h.feedRows[0], id: "other", source_url: url }]
+          : [],
+    })),
+  }));
+  const result = await h.run();
+  expect(result.inbox_findings.some((x) => x.status === "partial")).toBe(true);
+  expect(result.inbox_findings.some((x) => x.notification_id)).toBe(true);
+  expect(
+    h.send.mock.calls.some(([card]) =>
+      card.title.includes("partially verified")
+    )
+  ).toBe(true);
+  expect(h.send).toHaveBeenCalled();
+});
+
+test("draft recovery across windows preserves the original body after notification failure", async () => {
+  const h = harness([]);
+  h.ctx.extracted_data.inbox_findings = [inboxFinding()];
+  h.send.mockImplementationOnce(async () => {
+    throw new Error("Synthetic notification failure");
+  });
+  await expect(h.run()).rejects.toThrow("Synthetic notification failure");
+  const original = inboxFinding().draft;
+  h.ctx.window.run_id = 78;
+  h.receipts.set(78, { ...h.receipts.get(77), output: null });
+  h.ctx.extracted_data.inbox_findings = [
+    { ...inboxFinding(), draft: "A regenerated answer" },
+  ];
+  await h.run();
+  expect(h.queued.size).toBe(1);
+  expect(h.execute).toHaveBeenCalledTimes(1);
+  expect(h.send.mock.calls.at(-1)![0].body).toContain(original);
+  expect(h.send.mock.calls.at(-1)![0].body).not.toContain(
+    "A regenerated answer"
+  );
+  expect(h.send.mock.calls.at(-1)![0].browser_handoff_run_id).toBe(90);
+});
+
+test("concurrent identical inbox candidates retain one durable draft", async () => {
+  const h = harness([]);
+  h.ctx.extracted_data.inbox_findings = [inboxFinding()];
+  await Promise.all([h.run(), h.run()]);
+  expect(h.queued.size).toBe(1);
 });
 
 test("long source IDs retain distinct bounded delivery keys", async () => {
