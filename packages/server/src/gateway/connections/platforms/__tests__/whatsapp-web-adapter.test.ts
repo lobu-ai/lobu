@@ -344,6 +344,32 @@ describe("WhatsApp Web gateway delivery", () => {
     expect(second.calls[0]?.idempotencyKey).toBe(first.calls[0]?.idempotencyKey);
   });
 
+  const settingsNotice = {
+    ...payload,
+    ephemeral: true,
+    content: "Finish setup: [Open settings](https://app.example.test/connect/claim?claim=abc)",
+  };
+
+  test("a settings notice is one send carrying its link as text", async () => {
+    const { bridge, calls } = gateway();
+    await bridge.handleEphemeral(settingsNotice);
+    expect(calls).toHaveLength(1);
+    expect(String(calls[0]?.input.text)).toContain(
+      "Open settings: https://app.example.test/connect/claim?claim=abc",
+    );
+  });
+
+  test("a failed settings-notice send is not followed by a fallback send", async () => {
+    for (const outcome of [
+      new Error("timed out"),
+      { status: "pending_approval", error: "awaiting approval" } as WhatsAppWebOperationOutcome,
+    ]) {
+      const { bridge, calls } = gateway([outcome]);
+      await bridge.handleEphemeral(settingsNotice);
+      expect(calls).toHaveLength(1);
+    }
+  });
+
   test("redelivered error and guardrail notices reuse their first operation", async () => {
     const first = gateway();
     const second = gateway();

@@ -851,28 +851,28 @@ export class ChatResponseBridge implements ResponseRenderer {
         );
 
         if (linkButtons.length > 0) {
+          const fallbackText = `${processedContent}\n\n${linkButtons.map((button) => `${button.text}: ${button.url}`).join("\n")}`;
+          const card = Card({
+            children: [
+              CardText(processedContent),
+              Actions(
+                linkButtons.map((button) =>
+                  LinkButton({ url: button.url, label: button.text })
+                )
+              ),
+            ],
+          });
           try {
-            const card = Card({
-              children: [
-                CardText(processedContent),
-                Actions(
-                  linkButtons.map((button) =>
-                    LinkButton({ url: button.url, label: button.text })
-                  )
-                ),
-              ],
-            });
-            await this.postContent(ctx, payload, target, {
-              card,
-              fallbackText: `${processedContent}\n\n${linkButtons.map((button) => `${button.text}: ${button.url}`).join("\n")}`,
-            });
+            await this.postContent(ctx, payload, target, { card, fallbackText });
             return;
           } catch (error) {
+            // A strategy-owned send may have been delivered before it failed,
+            // so a second post of the same notice could duplicate it.
+            if (ctx.strategy.post) throw error;
             logger.warn(
               { connectionId, error: String(error) },
               "Failed to render ephemeral settings button"
             );
-            const fallbackText = `${processedContent}\n\n${linkButtons.map((button) => `${button.text}: ${button.url}`).join("\n")}`;
             await this.postContent(ctx, payload, target, fallbackText.trim());
             return;
           }
