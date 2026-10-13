@@ -510,10 +510,8 @@ export default async function deliverSocialResearch(
         run.input?.conversation_url === url &&
         Number.isSafeInteger(run.parent_run_id)
     );
-    if (candidates.length > 8)
-      throw new Error(
-        "Draft recovery exceeds its bounded lookup; review existing drafts"
-      );
+    // The run page bounds this search. Older drafts for different source
+    // messages must not prevent a new reply in an active conversation.
     for (const run of candidates) {
       const { run: originalWindow } = await client.operations.getRun(
         run.parent_run_id

@@ -624,6 +624,46 @@ test("concurrent identical inbox candidates retain one durable draft", async () 
   expect(h.queued.size).toBe(1);
 });
 
+test.each([
+  9, 50,
+])("%s historical drafts do not suppress a new message in the same conversation", async (count) => {
+  const h = harness([]);
+  h.ctx.extracted_data.inbox_findings = [inboxFinding()];
+  for (let index = 0; index < count; index++) {
+    const parent = 1000 + index;
+    const original = {
+      ...inboxFinding(),
+      source_id: `older-message-${index}`,
+      draft: `Earlier reply ${index}`,
+    };
+    h.receipts.set(parent, {
+      automation_id: 42,
+      status: "completed",
+      output: { inbox_findings: [original] },
+    });
+    h.queued.set(`older-draft-${index}`, {
+      id: 2000 + index,
+      connection_id: 12,
+      operation_key: "prepare_message",
+      input: {
+        conversation_url: h.feedRows[0].conversation_url,
+        body: original.draft,
+      },
+      automation_id: 42,
+      parent_run_id: parent,
+      created_by_user_id: "test-owner",
+      status: "completed",
+      approval_status: "auto",
+    });
+  }
+  await h.run();
+  expect(h.execute).toHaveBeenCalledTimes(1);
+  expect(h.queued.size).toBe(count + 1);
+  expect(h.send).toHaveBeenCalledWith(
+    expect.objectContaining({ browser_handoff_run_id: 90 })
+  );
+});
+
 test("inbox discovery failure preserves independent post findings", async () => {
   const h = harness();
   h.ctx.extracted_data.inbox_findings = [
