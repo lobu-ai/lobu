@@ -39,8 +39,16 @@ export async function tiktokPage(command, args = {}) {
 		return { items: (d["webapp.updated-items"] || []).map(project) };
 	}
 	if (command === "post_links") {
-		const links = [...document.querySelectorAll('a[href*="/video/"],a[href*="/photo/"]')];
-		return { rows: links.filter(visible).map(a => ({
+		// Hidden preload links appear before search results render. Their presence
+		// satisfies wait_for_selector but cannot establish readable coverage.
+		const links = await wait(() => {
+			if (visible(document.querySelector("#captcha-verify-container-main-page"))) {
+				throw new Error("TikTok verification required; complete the challenge in the connected browser");
+			}
+			const rendered = [...document.querySelectorAll('a[href*="/video/"],a[href*="/photo/"]')].filter(visible);
+			return rendered.length ? rendered : null;
+		});
+		return { rows: links.map(a => ({
 			url: a.href, text: a.querySelector("img")?.alt || a.innerText || "",
 		})) };
 	}

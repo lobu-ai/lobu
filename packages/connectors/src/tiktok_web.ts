@@ -175,7 +175,7 @@ async function readTikTokInbox(ctx: FeedReadContext): Promise<FeedReadResult> {
 
 export default class TikTokConnector extends ConnectorRuntime {
 	readonly definition: RuntimeConnectorDefinition = {
-		key: "tiktok.web", name: "TikTok", version: "1.1.2", faviconDomain: "tiktok.com",
+		key: "tiktok.web", name: "TikTok", version: "1.1.3", faviconDomain: "tiktok.com",
 		description: "Read TikTok through your signed-in paired browser, inspect post visuals, set likes, and prepare comments for human submission. Automations decide what to read and act on.",
 		browser: { origins: ORIGINS, authMethods: ["browser"], accountProbe: { url: ORIGIN, expression: expression("identity") } },
 		authSchema: { methods: [{ type: "browser", mode: "live" }] },

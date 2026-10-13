@@ -64,6 +64,38 @@ describe("TikTok source records", () => {
 });
 
 describe("serialized TikTok page adapter", () => {
+	function searchFixture(visibleAfter: number, challengeAfter = Infinity) {
+		let polls = 0;
+		const hidden = { href: "https://www.tiktok.com/@hidden/video/7000000000000000009", getClientRects: () => [], querySelector: () => null, innerText: "hidden" };
+		const result = { href: "https://www.tiktok.com/@example_creator/video/7000000000000000001", getClientRects: () => polls >= visibleAfter ? [1] : [], querySelector: () => ({ alt: "Visible search caption" }) };
+		const document = {
+			querySelector: (selector: string) => selector === "#captcha-verify-container-main-page"
+				? { getClientRects: () => polls >= challengeAfter ? [1] : [] }
+				: { textContent: JSON.stringify({ __DEFAULT_SCOPE__: { "webapp.app-context": { user: { uid: "7000000000000000003", uniqueId: "example_account" } } } }) },
+			querySelectorAll: () => [hidden, result],
+		};
+		const run = new Function("document", "setTimeout", `return (${tiktokPage.toString()})("post_links")`);
+		return { run: () => run(document, (callback: () => void) => { polls++; callback(); }), polls: () => polls };
+	}
+
+	test("waits for visible search results after hidden preload links appear", async () => {
+		const f = searchFixture(3);
+		expect(await f.run()).toEqual({ rows: [{ url: "https://www.tiktok.com/@example_creator/video/7000000000000000001", text: "Visible search caption" }] });
+		expect(f.polls()).toBe(3);
+	});
+
+	test("bounds the search wait and rejects hidden-only results", async () => {
+		const f = searchFixture(Infinity);
+		await expect(f.run()).rejects.toThrow("TikTok page did not expose the requested content");
+		expect(f.polls()).toBe(40);
+	});
+
+	test("stops when verification appears while search results load", async () => {
+		const f = searchFixture(4, 2);
+		await expect(f.run()).rejects.toThrow("TikTok verification required");
+		expect(f.polls()).toBe(2);
+	});
+
 	function fixture(cardIds = [post.id], verificationRequired = false) {
 		const clickedPosts: string[] = [];
 		const playedPosts: string[] = [];
