@@ -6177,6 +6177,10 @@ export type ReadKnowledgeData = {
      */
     sort_order?: "asc" | "desc";
     /**
+     * Count every match for workspace listings/search (default: true; account activity reports page size). Pass false on an infinite feed to skip the exact count: `total` is then null and page.has_more is computed from one extra fetched row. Ignored by content_ids, include_superseded, and automation_id reads, which always count.
+     */
+    include_total?: boolean;
+    /**
      * When true and listing entity content without a query, include superseded historical events in addition to current records. Useful for explicit historical lookups such as original or previous values.
      */
     include_superseded?: boolean;
@@ -6243,7 +6247,7 @@ export type ReadKnowledgeResponses = {
    */
   200: {
     content: Array<unknown>;
-    total: number;
+    total: number | null;
     chain_total?: number;
     page: {
       limit: number;
