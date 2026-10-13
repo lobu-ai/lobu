@@ -171,6 +171,8 @@ function token(
     channelId: "chan-1",
     teamId: "team-1",
     platform: "slack",
+    chatAccess: "member",
+    actorUserId: "user-1",
     organizationId: "org-1",
     agentId: options.agentId,
     runtimeProviderId: options.runtimeProviderId,

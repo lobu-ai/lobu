@@ -16,6 +16,8 @@ describe("internal media routes", () => {
       channelId: "chan-1",
       teamId: "team-1",
       platform: "telegram",
+      chatAccess: "member",
+      actorUserId: "user-1",
       agentId: "hr-assistant",
     });
   });

@@ -474,6 +474,7 @@ export class MessageHandlerBridge {
       claim: claimAutomationCooldownStandalone,
       markZero: markZeroCooldownAutomationActivation,
     },
+    private resolveTurnActor: typeof resolveChatTurnActor = resolveChatTurnActor,
   ) {
     this.artifactStore = services.getArtifactStore();
     this.publicGatewayUrl = services.getPublicGatewayUrl();
@@ -1379,7 +1380,7 @@ export class MessageHandlerBridge {
     thread: any;
   }): Promise<boolean> {
     const platform = this.connection.platform;
-    const actor = await resolveChatTurnActor({
+    const actor = await this.resolveTurnActor({
       organizationId: args.organizationId,
       senderId: args.userId,
       claims: { platform, teamId: args.teamId },

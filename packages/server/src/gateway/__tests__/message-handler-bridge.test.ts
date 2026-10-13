@@ -25,6 +25,13 @@ import {
   TEST_GATEWAY_URL,
 } from "./setup.js";
 
+/**
+ * This routing suite has no database: admission resolves every sender as a
+ * linked member. Unlinked-sender admission is covered by the DB-backed
+ * Slack and Google Chat e2e suites.
+ */
+const linkedMemberActor = async () => ({ access: "member" as const, actorUserId: "member-routing-test" });
+
 /** The reply cooldown operations are injected so this unit suite stays DB-free. */
 const cooldownClaims: number[] = [];
 const activationMarks: number[] = [];
@@ -384,6 +391,8 @@ function createBridgeHarness(opts: {
     manager,
     undefined,
     async ({ signal }) => planAutomationActivations(signal, []),
+    undefined,
+    linkedMemberActor,
   );
 
   let adapter: unknown;
@@ -957,6 +966,7 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
           ),
         ),
       automationCooldown,
+      linkedMemberActor,
     );
     return {
       bridge,

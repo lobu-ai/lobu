@@ -43,6 +43,8 @@ describe("file routes", () => {
     const token = generateWorkerToken("user-1", "conv-1", "worker-1", {
       channelId: "channel-1",
       platform: "telegram",
+      chatAccess: "member",
+      actorUserId: "user-1",
     });
     const form = new FormData();
     form.set("file", new File([contents], filename, { type: "text/plain" }));
@@ -157,6 +159,8 @@ describe("file routes", () => {
     const token = generateWorkerToken("user-1", "conv-1", "worker-1", {
       channelId: "channel-1",
       platform: "telegram",
+      chatAccess: "member",
+      actorUserId: "user-1",
     });
     const form = new FormData();
     form.set("file", new File(["x"], "p.txt", { type: "text/plain" }));
@@ -193,6 +197,8 @@ describe("file routes", () => {
     const token = generateWorkerToken("user-1", "conv-1", "worker-1", {
       channelId: "channel-1",
       platform: "telegram",
+      chatAccess: "member",
+      actorUserId: "user-1",
     });
     const form = new FormData();
     form.set(field, new File(["small"], "oversized.bin"));
@@ -217,6 +223,8 @@ describe("file routes", () => {
     const token = generateWorkerToken("user-1", "conv-1", "worker-1", {
       channelId: "channel-1",
       platform: "telegram",
+      chatAccess: "member",
+      actorUserId: "user-1",
     });
     const chunk = new Uint8Array(1024 * 1024);
     let emitted = 0;
@@ -260,6 +268,8 @@ describe("file routes", () => {
     const token = generateWorkerToken("user-1", "conv-1", "worker-1", {
       channelId: "channel-1",
       platform: "telegram",
+      chatAccess: "member",
+      actorUserId: "user-1",
     });
     const form = new FormData();
     form.set(
@@ -281,6 +291,8 @@ describe("file routes", () => {
     const token = generateWorkerToken("user-1", "conv-1", "worker-1", {
       channelId: "channel-1",
       platform: "telegram",
+      chatAccess: "member",
+      actorUserId: "user-1",
     });
     const form = new FormData();
     const halfLimit = Math.floor(MAX_ARTIFACT_BYTES / 2);
