@@ -16,7 +16,7 @@
  *  2. The SETTLE. `agentEnd` starts the `save_memory` write and returns
  *     without waiting, which is correct on a runtime that outlives the turn and
  *     silently lossy on one that does not: this isolate is disposed the moment
- *     `runAgentTurn` resolves. `runTurnMemory` therefore awaits the plugin's
+ *     `runAgentTurn` resolves. `capture` therefore awaits the plugin's
  *     `settle()` before returning, so the capture actually reaches the gateway.
  */
 
@@ -48,7 +48,7 @@ export interface TurnMemoryContext {
     toolName: string,
     args: Record<string, unknown>,
     options?: { timeoutMs?: number }
-  ) => Promise<string>;
+  ) => Promise<TextResult>;
   /** Where a hook's own diagnostics go. The host redacts and budgets them. */
   logger: PluginLogger;
 }
@@ -66,21 +66,8 @@ function createTurnMemory(context: TurnMemoryContext): {
   // The plugin addresses its server as `lobu`; the turn says which server that
   // actually is. Routing on the turn's id rather than the plugin's literal is
   // what keeps the guest free of a hardcoded server name.
-  const invoke: MemoryToolInvoker = async (_gateway, _mcpId, toolName, args, options) => {
-    // The plugin's contract is a `TextResult`; a failed call is text the hook
-    // inspects (it skips a recall whose text starts with "error:"), never a
-    // throw. Matching that here keeps the hook's own branches live.
-    try {
-      const text = await context.callTool(context.mcpId, toolName, args, options);
-      return { content: [{ type: 'text', text }] } satisfies TextResult;
-    } catch (error) {
-      return {
-        content: [
-          { type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` },
-        ],
-      } satisfies TextResult;
-    }
-  };
+  const invoke: MemoryToolInvoker = (_gateway, _mcpId, toolName, args, options) =>
+    context.callTool(context.mcpId, toolName, args, options);
 
   const plugin = createMemoryPlugin(
     {
@@ -95,9 +82,7 @@ function createTurnMemory(context: TurnMemoryContext): {
     invoke
   );
 
-  // `PluginRuntimeContext` carries more than the memory hooks read (they use
-  // `logger` and `agentId`). The rest is filled
-  // with what this lane actually knows, and nothing is invented: a field this
+  // Fill `PluginRuntimeContext` with what this lane actually knows: a field this
   // lane has no value for stays empty rather than carrying a plausible lie.
   const runtime: PluginRuntimeContext = {
     logger: context.logger,

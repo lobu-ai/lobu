@@ -20,6 +20,7 @@
  */
 
 import type { AgentTool, AgentMessage } from '@mariozechner/pi-agent-core';
+import type { TextResult } from '@lobu/plugin-toolkit';
 import { createGatewayTools } from './gateway-tools.js';
 import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
@@ -53,6 +54,7 @@ interface McpToolReply {
   content?: Array<{ type?: string; text?: string }>;
   error?: string;
   isError?: boolean;
+  structuredContent?: unknown;
 }
 
 function joinText(content: McpToolReply['content']): string {
@@ -75,7 +77,7 @@ async function callMcpTool(
   tool: AgentTurnTool,
   args: unknown,
   timeoutMs = TOOL_CALL_TIMEOUT_MS
-): Promise<string> {
+): Promise<TextResult> {
   const url = `${gatewayUrl}/mcp/${encodeURIComponent(tool.mcpId)}/tools/${encodeURIComponent(tool.name)}`;
   let response: Response;
   try {
@@ -85,8 +87,9 @@ async function callMcpTool(
         Authorization: `Bearer ${credential}`,
         'Content-Type': 'application/json',
         // A retrieval result is summarised into the tool trace from its
-        // structured body; the gateway renders markdown unless asked.
-        ...(isRetrievalTool(tool.name) ? { 'x-mcp-format': 'json' } : {}),
+        // structured body; capture validates the save receipt. The gateway
+        // renders markdown unless asked.
+        ...(isRetrievalTool(tool.name) || tool.name === 'save_memory' ? { 'x-mcp-format': 'json' } : {}),
       },
       body: JSON.stringify(args ?? {}),
       signal: AbortSignal.timeout(timeoutMs),
@@ -106,10 +109,15 @@ async function callMcpTool(
     );
   }
   const text = joinText(reply.content);
-  if (!response.ok || reply.isError) {
+  if (!response.ok) {
     throw new Error(reply.error || text || `${tool.name} failed (${response.status})`);
   }
-  return text || `${tool.name} completed.`;
+  // Keep the canonical failure flag and receipt through the plugin boundary.
+  // Ordinary agent tools render this same result below; no second transport.
+  return {
+    ...reply,
+    content: [{ type: 'text', text: text || reply.error || '' }],
+  };
 }
 
 /**
@@ -166,10 +174,15 @@ function buildTools(
     description: tool.description,
     // A plain JSON schema: pi-ai validates arguments against it as-is.
     parameters: tool.inputSchema as never,
-    execute: async (_toolCallId: string, args: unknown) => ({
-      content: [{ type: 'text' as const, text: await callMcpTool(tools.gatewayUrl, credential, tool, args) }],
-      details: {},
-    }),
+    execute: async (_toolCallId: string, args: unknown) => {
+      const result = await callMcpTool(tools.gatewayUrl, credential, tool, args);
+      const text = joinText(result.content);
+      if (result.isError === true) throw new Error(String(result.error || text || `${tool.name} failed`));
+      return {
+        content: [{ type: 'text' as const, text: text || `${tool.name} completed.` }],
+        details: {},
+      };
+    },
   }));
   // Remote bash cannot open the isolate's seeded files.
   const bashCanRead = (tools.builtin ?? []).includes('bash') && !tools.remoteRuntime;

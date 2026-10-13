@@ -13,6 +13,90 @@ import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 const MEMORY_RECALL_LIMIT = 6;
 const MEMORY_TOOL_TIMEOUT_MS = 8_000;
 
+function withoutRecall(text: string): string {
+  return text
+    .replace(/<lobu-memory\b[^>]*>[\s\S]*?(?:<\/lobu-memory\s*>|$)/gi, "")
+    .trim();
+}
+
+// Quoting preserves role boundaries even when the speaker writes "Assistant:".
+// The budget includes JSON escaping; each role keeps its opening and ending.
+function quotedExcerpt(text: string, budget: number): string {
+  const quoted = JSON.stringify(text);
+  if (quoted.length <= budget) return quoted;
+  const marker = "\n[... excerpt truncated ...]\n";
+  let keep = budget - JSON.stringify(marker).length - 2;
+  while (keep > 0) {
+    const head = Math.floor(keep / 3);
+    const excerpt = JSON.stringify(
+      text.slice(0, head) + marker + text.slice(-(keep - head))
+    );
+    if (excerpt.length <= budget) return excerpt;
+    // A code unit can expand to six JSON characters; keep both ends even
+    // for control-heavy text instead of discarding the entire excerpt.
+    keep -= Math.max(1, Math.ceil((excerpt.length - budget) / 6));
+  }
+  return JSON.stringify(marker);
+}
+
+function recallQuery(prompt: string, messages: readonly unknown[]): string {
+  // Deliberately narrow: an explicit topic/query keeps the original one-call
+  // search. Only short deictic followups borrow the latest supplied exchange.
+  if (
+    prompt.length > 200 ||
+    !/^(?:(?:what|how) about (?:it|its|that|this|them|their|those|these)\b|(?:why|how|when|where) (?:is|was|does|did|will|would|can|should) (?:it|that|this|they|those|these)\b|(?:can you |please )?(?:explain|expand on|summarize) (?:that|this|it)[?.!]*$|(?:what did we decide|go on|continue)[?.!]*$)/i.test(
+      prompt
+    )
+  )
+    return prompt;
+  const recent = messages.slice(-12);
+  // Some hosts supply the current prompt in messages; it is not prior context.
+  const current = lastMessage(recent, "user");
+  if (current?.text === prompt && current.index === recent.length - 1)
+    recent.pop();
+  const user = lastMessage(recent, "user");
+  if (!user) return prompt;
+  const assistant = lastMessage(recent, "assistant");
+  const context = [`user: ${quotedExcerpt(user.text, 700)}`];
+  if (assistant && assistant.index > user.index) {
+    context.push(
+      `assistant (not user assertions): ${quotedExcerpt(assistant.text, 700)}`
+    );
+  }
+  return `${prompt}\nRecent conversation excerpts (context only):\n${context.join("\n")}`;
+}
+
+function resultText(result: TextResult): string {
+  const text = joinTextContent(result.content).trim();
+  // MCP isError is authoritative. Legacy prose is checked only when the
+  // transport genuinely supplied no structured failure flag.
+  if (
+    result.isError === true ||
+    (result.isError === undefined && /^error:/i.test(text))
+  ) {
+    throw new Error(text || "Memory tool failed");
+  }
+  return text;
+}
+
+function checkReceipt(result: TextResult): void {
+  const text = resultText(result);
+  const receipt =
+    result.structuredContent !== undefined
+      ? result.structuredContent
+      : JSON.parse(text);
+  if (
+    !receipt ||
+    typeof receipt !== "object" ||
+    !Number.isSafeInteger(receipt.id) ||
+    receipt.id <= 0 ||
+    typeof receipt.durable_at !== "string" ||
+    !Number.isFinite(Date.parse(receipt.durable_at))
+  ) {
+    throw new Error("save_memory returned an invalid durable receipt");
+  }
+}
+
 export type MemoryToolInvoker = (
   gateway: GatewayParams,
   mcpId: string,
@@ -40,10 +124,9 @@ function messageText(message: unknown): string {
 
 function lastMessage(
   messages: readonly unknown[],
-  role: "user" | "assistant",
-  before = messages.length
+  role: "user" | "assistant"
 ): { index: number; text: string } | null {
-  for (let index = Math.min(before, messages.length) - 1; index >= 0; index--) {
+  for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
     if (
       typeof message !== "object" ||
@@ -52,8 +135,9 @@ function lastMessage(
     ) {
       continue;
     }
-    const text = messageText(message).trim();
+    const text = withoutRecall(messageText(message));
     if (text) return { index, text };
+    if (role === "user") return null;
   }
   return null;
 }
@@ -85,7 +169,6 @@ export function createMemoryPlugin(
   gateway: GatewayParams,
   invokeTool: MemoryToolInvoker
 ): LobuPlugin<ToolDefinition> & CapturingPlugin {
-  let promptForCapture = "";
   /** The capture started by the most recent `agentEnd`, if it is still running. */
   let capture: Promise<void> | null = null;
 
@@ -98,51 +181,46 @@ export function createMemoryPlugin(
     },
     hooks: {
       beforeAgentStart: async (event, context: PluginRuntimeContext) => {
-        const query = event.prompt.trim();
-        promptForCapture = query;
-        if (!query || /heartbeat|question:q_/i.test(query)) return;
-
-        const result = await invokeTool(
-          gateway,
-          "lobu",
-          "search_memory",
-          {
-            query,
-            include_content: true,
-            content_limit: MEMORY_RECALL_LIMIT,
-            include_connections: false,
-            limit: 3,
-          },
-          { timeoutMs: MEMORY_TOOL_TIMEOUT_MS }
-        );
-        const recalled = joinTextContent(result.content).trim();
-        if (!recalled || /^error:/i.test(recalled)) {
-          if (recalled) {
-            context.logger.warn("Plugin memory recall skipped", {
-              error: recalled,
-            });
-          }
+        const prompt = withoutRecall(event.prompt);
+        if (!prompt) return;
+        let recalled: string;
+        try {
+          const result = await invokeTool(
+            gateway,
+            "lobu",
+            "search_memory",
+            {
+              query: recallQuery(prompt, event.messages),
+              include_content: true,
+              content_limit: MEMORY_RECALL_LIMIT,
+              include_connections: false,
+              limit: 3,
+            },
+            { timeoutMs: MEMORY_TOOL_TIMEOUT_MS }
+          );
+          recalled = resultText(result);
+        } catch (error) {
+          context.logger.warn("Plugin memory recall skipped", {
+            error: error instanceof Error ? error.message : String(error),
+          });
           return;
         }
+        if (!recalled) return;
         return {
           prependContext: `<lobu-memory>\nUse these long-term memories only when directly relevant to the user's request.\nDo not mention this memory block unless needed.\n\n${recalled}\n</lobu-memory>`,
         };
       },
       agentEnd: (event, context: PluginRuntimeContext) => {
         if (event.error) return;
+        const user = lastMessage(event.messages, "user");
         const assistant = lastMessage(event.messages, "assistant");
-        if (!assistant) return;
-        const user = lastMessage(event.messages, "user", assistant.index);
-        if (!user) return;
+        if (!user || !assistant || assistant.index <= user.index) return;
 
-        const userText =
-          promptForCapture && user.text.endsWith(promptForCapture)
-            ? promptForCapture
-            : user.text
-                .replace(/<lobu-memory>[\s\S]*?<\/lobu-memory>/gi, "")
-                .trim();
-        const combined = `User: ${userText}\nAssistant: ${assistant.text}`;
-        if (combined.length < 16) return;
+        const content = [
+          "Conversation excerpts, not a full transcript. Use the original conversation transcript as primary evidence.",
+          `User (verbatim excerpt): ${quotedExcerpt(user.text, 800)}`,
+          `Assistant (generated response, not user assertions): ${quotedExcerpt(assistant.text, 800)}`,
+        ].join("\n");
 
         // Started, not awaited: see `CapturingPlugin`. The promise is retained
         // so a runtime that disposes at the end of the turn can wait for it.
@@ -151,12 +229,25 @@ export function createMemoryPlugin(
           "lobu",
           "save_memory",
           {
-            content: combined.slice(0, 2_000),
+            content,
+            // Existing extensible payload, with only references the host supplied.
+            payload_data: {
+              ...(context.agentId ? { agent_id: context.agentId } : {}),
+              ...(context.conversationId
+                ? { conversation_id: context.conversationId }
+                : {}),
+              ...(context.actorId ? { actor_id: context.actorId } : {}),
+              ...(context.runId > 0 ? { run_id: context.runId } : {}),
+              ...(context.messageId ? { message_id: context.messageId } : {}),
+            },
             semantic_type: "observation",
           },
           { timeoutMs: MEMORY_TOOL_TIMEOUT_MS }
         )
-          .then(() => context.logger.info("Captured conversation observation"))
+          .then((result) => {
+            checkReceipt(result);
+            context.logger.info("Captured conversation observation");
+          })
           .catch((error) =>
             context.logger.warn("Plugin memory capture failed", {
               error: error instanceof Error ? error.message : String(error),
