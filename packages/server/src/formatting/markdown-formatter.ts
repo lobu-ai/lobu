@@ -24,7 +24,7 @@ interface FormattableContent {
   title: string | null;
   text_content: string;
   source_url: string | null;
-  score: number;
+  score: number | null;
   occurred_at: string;
   classifications?: Record<
     string,
@@ -43,7 +43,7 @@ interface FormattableContent {
     text_content: string;
     occurred_at: string;
     source_url: string;
-    score: number;
+    score: number | null;
   } | null;
 }
 
@@ -176,7 +176,7 @@ function formatContentItem(item: FormattableContent, opts: Required<ContentForma
   const date = formatDate(item.occurred_at);
   let metaLine = `${indent}[ID: ${item.id}] ${label} by ${author} • ${item.platform} • ${date}`;
 
-  if (opts.includeScore) {
+  if (opts.includeScore && item.score != null) {
     metaLine += ` • Score: ${item.score.toFixed(2)}`;
   }
 

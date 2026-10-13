@@ -204,7 +204,8 @@ export interface ContentRow {
   author_name?: string | null;
   title: string | null;
   source_url?: string | null;
-  score: number;
+  /** Raw numeric columns may arrive as strings; null means no score is available. */
+  score: number | string | null;
   metadata: Record<string, unknown> | null;
   classifications: Record<string, unknown> | null;
   created_at: string;
@@ -256,6 +257,13 @@ export function parseJson(value: unknown): any {
 
 export function toNumberOrUndefined(value: unknown): number | undefined {
   return value != null ? Number(value) : undefined;
+}
+
+/** Preserve missing scores while parsing numeric database values. */
+export function toNullableScore(value: unknown): number | null {
+  if (value == null) return null;
+  const score = Number(value);
+  return Number.isFinite(score) ? score : null;
 }
 
 export function parseRecordArray(value: unknown): Record<string, unknown>[] {
