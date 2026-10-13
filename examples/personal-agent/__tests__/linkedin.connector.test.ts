@@ -28,10 +28,6 @@ let resolveLinkedInShortPostUrl: any;
 let resolveHomeFeedPostUrls: any;
 let isGenericLinkedInFeedUrl: any;
 let isLinkedInAuthWall: any;
-let pickCommentButtonRef: any;
-let pickCommentTextboxRef: any;
-let isCommentSubmitLabel: any;
-let isCommentOpenLabel: any;
 let prepareLinkedInComment: any;
 let buildFillCommentExpression: any;
 let buildInjectHandoffBannerExpression: any;
@@ -99,10 +95,6 @@ beforeAll(async () => {
   resolveHomeFeedPostUrls = mod.resolveHomeFeedPostUrls;
   isGenericLinkedInFeedUrl = mod.isGenericLinkedInFeedUrl;
   isLinkedInAuthWall = mod.isLinkedInAuthWall;
-  pickCommentButtonRef = mod.pickCommentButtonRef;
-  pickCommentTextboxRef = mod.pickCommentTextboxRef;
-  isCommentSubmitLabel = mod.isCommentSubmitLabel;
-  isCommentOpenLabel = mod.isCommentOpenLabel;
   prepareLinkedInComment = mod.prepareLinkedInComment;
   buildFillCommentExpression = mod.buildFillCommentExpression;
   buildInjectHandoffBannerExpression = mod.buildInjectHandoffBannerExpression;
@@ -3357,36 +3349,6 @@ describe("prepare_comment helpers", () => {
     ).toBe(false);
   });
 
-  test("submit labels are never treated as open-composer controls", () => {
-    expect(isCommentSubmitLabel("Post")).toBe(true);
-    expect(isCommentSubmitLabel("Submit")).toBe(true);
-    expect(isCommentSubmitLabel("Send")).toBe(true);
-    expect(isCommentSubmitLabel("Post comment")).toBe(true);
-    expect(isCommentSubmitLabel("Comment")).toBe(false);
-    expect(isCommentOpenLabel("Comment")).toBe(true);
-    expect(isCommentOpenLabel("Post")).toBe(false);
-    expect(isCommentOpenLabel("Post a comment")).toBe(true);
-  });
-
-  test("pickComment*Ref finds composer controls without selecting Post", () => {
-    const tree = [
-      { ref_id: 1, role: "button", name: "Like", tag: "button" },
-      { ref_id: 2, role: "button", name: "Comment", tag: "button" },
-      { ref_id: 3, role: "button", name: "Repost", tag: "button" },
-      { ref_id: 4, role: "textbox", name: "Add a comment…", tag: "div" },
-      { ref_id: 5, role: "button", name: "Post", tag: "button" },
-    ];
-    expect(pickCommentButtonRef(tree, 7)).toEqual({
-      document_epoch: 7,
-      ref_id: 2,
-    });
-    expect(pickCommentTextboxRef(tree, 7)).toEqual({
-      document_epoch: 7,
-      ref_id: 4,
-    });
-    expect(pickCommentButtonRef(tree, 7)?.ref_id).not.toBe(5);
-  });
-
   test("buildFillCommentExpression embeds body safely and never auto-submits", () => {
     const expr = buildFillCommentExpression('hello "world"\nline2');
     expect(expr).toContain('hello \\"world\\"');
@@ -3435,7 +3397,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.15.1");
+    expect(c.definition.version).toBe("3.17.0");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
@@ -3667,67 +3629,6 @@ describe("prepare_comment helpers", () => {
     // Failure must not attempt any follow-up tab mutation.
     expect(log).not.toContain("release_tab");
     expect(log).not.toContain("focus_tab");
-  });
-
-  test("prepareLinkedInComment falls back to type_ref when evaluate is unavailable", async () => {
-    const log: string[] = [];
-    let evaluateCalls = 0;
-    const dispatcher = {
-      dispatch: async (key: string, input: Record<string, unknown>) => {
-        log.push(key);
-        if (key === "navigate") {
-          return {
-            tab_id: 9,
-            current_url:
-              "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567",
-          };
-        }
-        if (key === "wait_for_selector") return {};
-        if (key === "evaluate") {
-          evaluateCalls += 1;
-          // First call is fill; later is banner.
-          if (evaluateCalls === 1) {
-            throw new Error("evaluate unavailable");
-          }
-          return { value: { ok: true, anchored: false } };
-        }
-        if (key === "get_accessibility_tree") {
-          return {
-            document_epoch: 1,
-            tree: [
-              { ref_id: 1, role: "button", name: "Comment", tag: "button" },
-              {
-                ref_id: 2,
-                role: "textbox",
-                name: "Add a comment…",
-                tag: "div",
-              },
-              { ref_id: 3, role: "button", name: "Post", tag: "button" },
-            ],
-          };
-        }
-        if (key === "type_ref") {
-          expect((input.ref as { ref_id: number }).ref_id).toBe(2);
-          expect(input.text).toBe("hi");
-          return {};
-        }
-        throw new Error(`unexpected ${key} ${JSON.stringify(input)}`);
-      },
-    };
-
-    const result = await prepareLinkedInComment(dispatcher, {
-      postUrl:
-        "https://www.linkedin.com/feed/update/urn:li:activity:7312345678901234567",
-      body: "hi",
-    });
-    expect(result.method).toBe("type_ref");
-    expect(result.prepared).toBe(true);
-    expect(result.banner_shown).toBe(true);
-    expect(log).toContain("evaluate");
-    expect(log).toContain("type_ref");
-    expect(log).not.toContain("show_notification");
-    // Must not click the Post submit control.
-    expect(log).not.toContain("click_ref");
   });
 
   test("prepareLinkedInComment fails closed on auth wall", async () => {
