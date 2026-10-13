@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { describe, expect, mock, test } from "bun:test";
-import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
+import type { ReactionContext } from "@lobu/connector-sdk";
 import { notify } from "../../../packages/server/src/tools/admin/notify";
 import { getArgsValidator } from "../../../packages/server/src/tools/validate-args";
 import reaction from "../social-research.reaction";
@@ -74,9 +75,23 @@ function harness(findings = [finding()]) {
     automation: { id: 42 },
     window: { run_id: 77 },
   } as unknown as ReactionContext;
+  const feedRows: Record<string, any>[] = [
+    {
+      id: "source-message",
+      text,
+      from_me: false,
+      conversation_url:
+        "https://www.linkedin.com/messaging/thread/test-thread/",
+    },
+  ];
+  const readMany = mock(async () => ({
+    results: [{ feed_id: 51, ok: true, rows: feedRows }],
+  }));
   const client = {
     query: async (sql: string) => {
       queries.push(sql);
+      if (sql.includes("AS source_key"))
+        return [{ source_key: createHash("sha256").update(sql).digest("hex") }];
       if (sql.includes("FROM automations"))
         return [{ created_by: "test-owner" }];
       return [...delivered].some((key) => sql.includes(key))
@@ -94,6 +109,7 @@ function harness(findings = [finding()]) {
           "evaluate",
           "inspect_post",
           "prepare_comment",
+          "prepare_message",
         ].map((operation_key) => ({
           operation_key,
           execution_targets: connections.map((c) => ({
@@ -105,9 +121,17 @@ function harness(findings = [finding()]) {
       }),
       execute,
     },
+    feeds: {
+      list: async () => ({
+        feeds: [{ id: 51, feed_key: "live_messages", connection_id: 11 }],
+      }),
+      readMany,
+    },
     notifications: { send },
-  } as unknown as ReactionClient;
+  } as unknown as Parameters<typeof reaction>[1];
   return {
+    feedRows,
+    readMany,
     receipts,
     delivered,
     queries,
@@ -320,4 +344,79 @@ describe("social research cards and browser actions", () => {
     expect(card.body.length).toBeLessThanOrEqual(1000);
     expect(card.title.endsWith("\ud83e")).toBe(false);
   });
+});
+
+const inboxFinding = () => ({
+  platform: "linkedin",
+  feed_key: "live_messages",
+  source_id: "source-message",
+  quote: text,
+  summary: "An incoming question",
+  why: "It asks about agent review.",
+  limits: "Text only.",
+  draft: "Happy to explain the review flow.",
+});
+
+test("inbox cards re-read the source and queue a private message draft", async () => {
+  const h = harness([]);
+  h.ctx.extracted_data.inbox_findings = [inboxFinding()];
+  await h.run();
+  expect(h.readMany).toHaveBeenCalledTimes(1);
+  expect(h.execute).toHaveBeenCalledWith(
+    expect.objectContaining({
+      operation_key: "prepare_message",
+      input: expect.objectContaining({
+        conversation_url: h.feedRows[0].conversation_url,
+        body: inboxFinding().draft,
+      }),
+      activation: {
+        kind: "page_visit",
+        urls: [h.feedRows[0].conversation_url],
+      },
+    })
+  );
+  expect(h.send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      recipients: ["test-owner"],
+      resource_url: h.feedRows[0].conversation_url,
+      browser_handoff_run_id: 90,
+    })
+  );
+  await h.run();
+  expect(h.send).toHaveBeenCalledTimes(1);
+  expect(h.execute).toHaveBeenCalledTimes(1);
+});
+
+test("inbox source mismatch, outgoing or recalled messages fail before delivery", async () => {
+  for (const changes of [
+    { text: "unrelated" },
+    { from_me: true },
+    { recalled: true },
+    { id: "another-message" },
+  ]) {
+    const h = harness();
+    h.ctx.extracted_data.inbox_findings = [inboxFinding()];
+    Object.assign(h.feedRows[0], changes);
+    await expect(h.run()).rejects.toThrow();
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.execute).not.toHaveBeenCalled();
+  }
+});
+
+test("long source IDs retain distinct bounded delivery keys", async () => {
+  const h = harness([]);
+  const id = `source:${"a".repeat(480)}`;
+  h.feedRows[0].id = id;
+  h.ctx.extracted_data.inbox_findings = [{ ...inboxFinding(), source_id: id }];
+  await h.run();
+  expect(h.send.mock.calls[0][0].idempotency_key.length).toBeLessThan(250);
+  h.feedRows[0].id = `${id}b`;
+  h.ctx.extracted_data.inbox_findings = [
+    { ...inboxFinding(), source_id: `${id}b` },
+  ];
+  await h.run();
+  expect(h.send).toHaveBeenCalledTimes(2);
+  expect(h.send.mock.calls[0][0].idempotency_key).not.toBe(
+    h.send.mock.calls[1][0].idempotency_key
+  );
 });
