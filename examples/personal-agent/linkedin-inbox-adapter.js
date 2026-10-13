@@ -1,7 +1,8 @@
 /** Serialized into the signed-in page. All bindings must remain inside this function. */
 export function linkedInInboxProgram() {
   const key = "__lobuLinkedInInboxV1";
-  const version = 1;
+  // An identical program keeps a warm tab's listeners; any code change reinstalls.
+  const version = linkedInInboxProgram.toString();
   if (globalThis[key]?.version === version) return;
   globalThis[key]?.detach();
   const listeners = new Map();
@@ -400,8 +401,9 @@ export function linkedInInboxProgram() {
       }
       if (!Array.isArray(threads) || threads.length > 20)
         fail("Invalid message cursor");
-      if (!threads.length) return { rows: [], hasMore: false };
-      const messages = await messagesPage(threads[0], mailbox);
+      const messages = threads.length
+        ? await messagesPage(threads[0], mailbox)
+        : [];
       const after = cursor.after
         ? messages.findIndex((row) => row.id === cursor.after) + 1
         : 0;

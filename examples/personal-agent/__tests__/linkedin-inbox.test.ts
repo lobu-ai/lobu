@@ -55,6 +55,52 @@ function flight(text = "Alex reacted to your post", age = "12h") {
 }
 
 describe("LinkedIn source adapter", () => {
+  test("a changed program replaces the warm tab program without a manual version bump", () => {
+    const { dom, api } = adapter(async () => {
+      throw new Error("unexpected fetch");
+    });
+    try {
+      const program = linkedInInboxProgram.toString();
+      dom.window.eval(`(${program})()`);
+      expect((dom.window as any).__lobuLinkedInInboxV1).toBe(api);
+      dom.window.eval(
+        `(${program.replace("Source request failed", "Source request unavailable")})()`
+      );
+      expect((dom.window as any).__lobuLinkedInInboxV1).not.toBe(api);
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test("an empty inbox still checks that the signed-in account did not change", async () => {
+    let accountReads = 0;
+    const { dom, api } = adapter(async (url) => ({
+      ok: true,
+      json: async () =>
+        url === "/voyager/api/me"
+          ? {
+              miniProfile: {
+                entityUrn: `urn:li:fs_miniProfile:synthetic-${++accountReads}`,
+              },
+            }
+          : {
+              data: {
+                messengerConversationsByCategoryQuery: {
+                  elements: [],
+                  metadata: {},
+                },
+              },
+            },
+    }));
+    try {
+      await expect(
+        api.read({ feed: "live_messages", limit: 20 })
+      ).rejects.toThrow("account changed");
+    } finally {
+      dom.window.close();
+    }
+  });
+
   test.each([
     "</script >",
     "</script\n>",
