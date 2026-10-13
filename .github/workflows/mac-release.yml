@@ -62,8 +62,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version, e.g. 0.42.0 (must have a lobu-v<version> release)'
+        description: 'Build version, e.g. 0.42.0 or 0.42.0-dev'
         required: true
+      publish:
+        description: 'Attach the DMG to a release and update Sparkle; disable for an unpublished signed artifact'
+        type: boolean
+        default: true
   # Auto-fires every time release-please publishes a GitHub Release (which
   # happens once a `chore(main): release lobu X.Y.Z` PR is merged). The job
   # guard below filters out anything that isn't a `lobu-v*` tag, so other
@@ -268,10 +272,15 @@ jobs:
         id: mode
         env:
           CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          EVENT_NAME: ${{ github.event_name }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
           if [ -n "$CERT_P12_BASE64" ]; then
             echo "signed=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Building a SIGNED + notarized DMG."
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$PUBLISH" = "false" ]; then
+            echo "::error::Unpublished Mac builds require the signing certificate; refusing an unsigned replacement."
+            exit 1
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
             echo "::warning::APPLE_CERT_P12_BASE64 not set — building an UNSIGNED DMG (Gatekeeper warns on first open). Add the signing secrets to get a notarized build."
@@ -496,7 +505,31 @@ jobs:
             --wait
           xcrun stapler staple "$RUNNER_TEMP/Lobu.dmg"
 
+      # An explicit build-only dispatch keeps release assets and auto-update
+      # state untouched. The artifact records exact source provenance.
+      - name: Record unpublished build provenance
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          SIGNED: ${{ steps.mode.outputs.signed }}
+        run: |
+          set -euo pipefail
+          OWLETTO_SHA="$(git -C packages/owletto rev-parse HEAD)"
+          printf '{"commit":"%s","owletto_commit":"%s","version":"%s","signed":%s}' "$GITHUB_SHA" "$OWLETTO_SHA" "$VERSION" "$SIGNED" > "$RUNNER_TEMP/Lobu.build.json"
+
+      - name: Upload unpublished Mac build
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish
+        uses: actions/upload-artifact@v7
+        with:
+          name: Lobu-mac-${{ steps.v.outputs.version }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/Lobu.dmg
+            ${{ runner.temp }}/Lobu.build.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Attach DMG to the release
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         uses: softprops/action-gh-release@v3
         with:
           tag_name: lobu-v${{ steps.v.outputs.version }}
@@ -504,6 +537,7 @@ jobs:
           fail_on_unmatched_files: true
 
       - name: Sign update with Sparkle and publish appcast
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         env:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
