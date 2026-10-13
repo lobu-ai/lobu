@@ -16,7 +16,10 @@
  *   6. the hydrated message is matched again per Automation (its first
  *      matching trigger wins); background targets are queued on the source
  *      signal, and a group reply needs an Automation scoped to that group;
- *   7. the bridge runs its normal reply path for exactly the reply targets.
+ *   7. the bridge runs its normal reply path for exactly the reply targets,
+ *      and every post it makes for the message (a command's confirmation, a
+ *      notice) goes through the platform's keyed send, so a retried job
+ *      adopts the first send instead of dispatching another.
  *
  * It never goes through `chat.processMessage`: the Chat SDK writes its dedupe
  * marker before handling, so a failed attempt's retry would be dropped.
@@ -36,6 +39,7 @@ import { CHAT_SOURCE_INGRESS_QUEUE, type ChatSourceIngressJob } from "../../runs
 import { sourceFeedSubscriptions } from "../../runs/source-feed-subscriptions.js";
 import type { QueueJob } from "../infrastructure/queue/types.js";
 import type { ChatInstanceManager } from "./chat-instance-manager.js";
+import { getResponseStrategy } from "./platform-strategies/index.js";
 import { getPlatformDescriptor } from "./platforms/index.js";
 import { resolveChatTarget } from "./platforms/shared.js";
 
@@ -117,7 +121,26 @@ export async function handleChatSourceIngress(
     const replyTargets = plan.replyTargets.filter((target) =>
       (thread.isDM === true || target.trigger.match?.channel_id === parsed.channelId));
     if (replyTargets.length === 0) return;
-    await instance.messageBridge.handleAdmittedSourceMessage(thread, parsed.message, {
+    const post = getResponseStrategy(instance.connection.platform).post;
+    const ctx = {
+      connectionId: runtimeId,
+      instance,
+      channelId: thread.id,
+      platform: instance.connection.platform,
+    };
+    const keyedThread = post
+      ? new Proxy(thread, {
+          get: (target, prop) => {
+            if (prop === "post") {
+              return (content: unknown) =>
+                post({ ctx, threadId: target.id, messageId: parsed.message.id, content });
+            }
+            const value = Reflect.get(target, prop, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        })
+      : thread;
+    await instance.messageBridge.handleAdmittedSourceMessage(keyedThread, parsed.message, {
       signal: hydrated,
       replyTargets,
       backgroundTargets: [],

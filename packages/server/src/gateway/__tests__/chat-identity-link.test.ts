@@ -240,6 +240,27 @@ describe("chat identity link routes", () => {
     expect(await claimCount()).toBe(1);
   });
 
+  test("a WhatsApp Web device connection redeems its link by its numeric runtime id", async () => {
+    // Connector-transport chat runs under `connections.id` and holds no
+    // credential of its own.
+    const [row] = await getDb()`INSERT INTO connections (organization_id, connector_key, slug, status, visibility)
+      VALUES (${ORG_A}, 'whatsapp.web', 'whatsapp-web', 'active', 'private') RETURNING id`;
+    const senderJid = "15550001111@s.whatsapp.net";
+    const token = (await mintChatIdentityLink({
+      organizationId: ORG_A,
+      connectionId: String(row.id),
+      platform: "whatsapp.web",
+      teamId: undefined,
+      senderId: senderJid,
+      senderDisplayName: "WhatsApp Sender",
+    }))!;
+    expect((await submit(member, token)).status).toBe(200);
+    expect(await resolveChatSenderMember("whatsapp.web", undefined, senderJid, ORG_A)).toEqual({
+      userId: member.id,
+      role: "member",
+    });
+  });
+
   test("concurrent redemptions of one token succeed only once", async () => {
     await provisionMemberAndCoreIdentities(ORG_A, { userId: member.id, email: member.email, role: "member" });
     const token = (await mint())!;

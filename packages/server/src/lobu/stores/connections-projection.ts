@@ -61,15 +61,15 @@ export function isConnectionRowRuntimeId(id: string): boolean {
 
 /**
  * The one SQL predicate for "the connection this chat runtime id names", over
- * the caller's own columns: the chat slug, or — for a numeric runtime id — a
- * connector-transport row by `connections.id`.
+ * the caller's own columns: a credentialed chat row by slug, or — for a
+ * numeric runtime id — a connector-transport row by `connections.id`.
  */
 export function runtimeConnectionPredicate(
   sql: DbClient,
   runtimeId: string,
   columns: { id: DbQuery; slug: DbQuery; credentialMode: DbQuery },
 ): DbQuery {
-  const bySlug = sql`${columns.slug} = ${runtimeConnectionIdToSlug(runtimeId)}`;
+  const bySlug = sql`(${columns.credentialMode} IS NOT NULL AND ${columns.slug} = ${runtimeConnectionIdToSlug(runtimeId)})`;
   return isConnectionRowRuntimeId(runtimeId)
     ? sql`(${bySlug} OR (${columns.credentialMode} IS NULL AND ${columns.id} = ${Number(runtimeId)}))`
     : bySlug;

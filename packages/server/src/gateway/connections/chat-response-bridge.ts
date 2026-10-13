@@ -935,7 +935,7 @@ export class ChatResponseBridge implements ResponseRenderer {
     content: unknown
   ): Promise<unknown> {
     return ctx.strategy.post
-      ? ctx.strategy.post({ ctx, payload, content })
+      ? ctx.strategy.post({ ctx, threadId: target.id, messageId: payload.messageId, content })
       : target.post(content);
   }
 

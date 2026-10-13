@@ -67,7 +67,7 @@ let version: string;
 let manager: ChatInstanceManager;
 let queue: RunsQueue | null = null;
 let deviceMessages: DeviceMessage[];
-let failNext: "source read" | "turn dispatch" | null;
+let failNext: "source read" | "turn dispatch" | "send" | null;
 let enqueued: Array<Record<string, any>>;
 let sends: Array<{ input: Record<string, unknown>; idempotencyKey?: string }>;
 
@@ -237,6 +237,11 @@ describe("WhatsApp Web source chat", () => {
     vi.spyOn(executeHandler, "handleExecute").mockImplementation(async (args: any) => {
       if (args.operation_key !== "send_message") throw new Error(`unexpected operation ${args.operation_key}`);
       sends.push({ input: args.input, idempotencyKey: args.idempotency_key });
+      if (failNext === "send") {
+        // The device may have sent it; only the acknowledgment was lost.
+        failNext = null;
+        throw new Error("synthetic send timeout");
+      }
       return { action: "execute", status: "completed", output: { message_id: `SENT${sends.length}` } } as any;
     });
     manager = buildManager();
@@ -285,6 +290,18 @@ describe("WhatsApp Web source chat", () => {
     expect(enqueued).toHaveLength(1);
     await completeTurns();
     expect(sends).toHaveLength(1);
+  }, 60_000);
+
+  it("retries a command's confirmation under the same send key", async () => {
+    await insertAutomation("dm-reply", replyTo());
+    deviceMessages.push({ id: "SYNTHDM11", chat_jid: DM_JID, body: "/clear" });
+    failNext = "send";
+
+    await deliver("SYNTHDM11");
+    await drain();
+    expect(enqueued).toHaveLength(0);
+    expect(sends.length).toBeGreaterThan(1);
+    expect(new Set(sends.map((send) => send.idempotencyKey)).size).toBe(1);
   }, 60_000);
 
   it("does not answer a redelivered reference twice", async () => {

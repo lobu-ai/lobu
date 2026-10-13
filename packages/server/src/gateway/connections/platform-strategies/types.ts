@@ -104,14 +104,16 @@ export interface PlatformResponseStrategy {
   readonly deliversAtCompletion: boolean;
 
   /**
-   * Deliver one bridge-originated post for this payload (error, guardrail
-   * notice, ephemeral). Optional: without it the bridge posts through the
-   * resolved Chat SDK target. A transport whose send is not idempotent
-   * implements it so a redelivered payload adopts the first send.
+   * Deliver one bridge-originated post into `threadId` on behalf of
+   * `messageId` (a turn's error, guardrail notice or ephemeral, or a reply to
+   * an admitted source message). Optional: without it the bridge posts
+   * through the resolved Chat SDK target. A transport whose send is not
+   * idempotent implements it so a retry adopts the first send.
    */
   post?(args: {
     ctx: StrategyContext;
-    payload: ThreadResponsePayload;
+    threadId: string;
+    messageId: string;
     content: unknown;
   }): Promise<void>;
 }

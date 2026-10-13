@@ -16,7 +16,7 @@ import {
   deleteChatIdentityLink,
   readChatIdentityLink,
 } from '../lobu/stores/chat-identity-link';
-import { runtimeConnectionIdToSlug } from '../lobu/stores/connections-projection';
+import { runtimeConnectionPredicate } from '../lobu/stores/connections-projection';
 import { renderOAuthErrorPage } from '../gateway/auth/oauth-templates';
 import { escapeHtml } from '../utils/html';
 import logger from '../utils/logger';
@@ -107,9 +107,12 @@ async function memberRole(sql: DbClient, userId: string, organizationId: string)
 async function connectionIsLive(sql: DbClient, claim: ChatIdentityLinkClaim): Promise<boolean> {
   const rows = await sql`
     SELECT 1 FROM connections
-    WHERE slug = ${runtimeConnectionIdToSlug(claim.connectionId)}
+    WHERE ${runtimeConnectionPredicate(sql, claim.connectionId, {
+      id: sql`id`,
+      slug: sql`slug`,
+      credentialMode: sql`credential_mode`,
+    })}
       AND connector_key = ${claim.platform}
-      AND credential_mode IS NOT NULL
       AND status = 'active'
       AND deleted_at IS NULL
     LIMIT 1
