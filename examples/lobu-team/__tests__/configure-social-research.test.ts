@@ -47,6 +47,9 @@ test("reuses the X Automation and its reader, adds receipt evidence, and leaves 
   expect(version.prompt).toContain("read_run_id=r.run_id");
   expect(version.prompt).toContain("return {read_run_id,account:");
   expect(version.outputs).toBeNull();
+  expect(version.prompt).toContain("linkedin:live_messages");
+  expect(version.prompt).toContain("tiktok:activity");
+  expect(version.prompt).toContain("source_cursor");
   expect(
     h.automations.update.mock.calls.every(
       ([args]) => args.triggers.length === 0

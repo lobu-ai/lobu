@@ -26,6 +26,7 @@ import { Hono } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import type { AuthzScope } from '../../../authz/scope';
+import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { compileConnectorSource } from '../../../utils/connector-compiler';
 import {
   deviceManifestHash,
@@ -115,7 +116,8 @@ async function setDeviceCapabilities(capabilities: string[]): Promise<void> {
   `;
 }
 
-/** Rows the org has ever persisted from this connection, by any path. */
+let eventsBeforeRead = 0;
+/** New rows persisted during this case; earlier revocation audit cards remain. */
 async function countPersistence(): Promise<{ events: number; checkpointed: number }> {
   const sql = getTestDb();
   const [events] = (await sql`
@@ -125,7 +127,7 @@ async function countPersistence(): Promise<{ events: number; checkpointed: numbe
     SELECT count(*)::int AS n FROM feeds
     WHERE id = ${feedId} AND (checkpoint IS NOT NULL OR next_run_at IS NOT NULL)
   `) as Array<{ n: number }>;
-  return { events: events.n, checkpointed: checkpointed.n };
+  return { events: events.n - eventsBeforeRead, checkpointed: checkpointed.n };
 }
 
 async function readRunRows(): Promise<
@@ -257,6 +259,51 @@ describe('device-backed source feed read', () => {
     `;
     await getTestDb()`UPDATE feeds SET status = 'active' WHERE id = ${feedId}`;
     await getTestDb()`DELETE FROM runs WHERE organization_id = ${orgId}`;
+    eventsBeforeRead = Number((await sql`SELECT count(*) AS n FROM events WHERE organization_id = ${orgId}`)[0].n);
+  });
+
+  it.each(['auto', 'approval', 'deny', 'archived', 'creator', 'ownership'])('rechecks Automation authority before a native device claim: %s', async (change) => {
+    const sql = getTestDb();
+    const [automation] = await sql`WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
+      INSERT INTO automations (id, automation_group_id, organization_id, created_by, name, slug, triggers)
+      SELECT id, id, ${orgId}, ${userId}, 'Native source fixture', 'native-source-' || id, '[]'::jsonb FROM next_id RETURNING id`;
+    const setPolicy = (effect: 'auto' | 'approval' | 'deny') => upsertEntityApprovalPolicy(orgId, {
+      resourceClass: 'connector_action', connectorKey: CONNECTOR_KEY, operationCategory: 'read', effects: { execute: effect },
+    });
+    await setPolicy('auto');
+    const reading = readSourceFeed({
+      deadlineAt: Date.now() + 5000, signal: AbortSignal.timeout(5000), scope: scope(), feedId,
+      automationId: Number(automation.id),
+    }).then((result) => ({ result, error: null }), (error: unknown) => ({ result: null, error }));
+    try {
+      await expect.poll(async () => (await readRunRows()).length).toBe(1);
+      if (change === 'approval' || change === 'deny') await setPolicy(change);
+      if (change === 'archived') await sql`UPDATE automations SET status = 'archived' WHERE id = ${automation.id}`;
+      if (change === 'creator' || change === 'ownership') {
+        const other = await createTestUser();
+        await addUserToOrganization(other.id, orgId, 'member');
+        if (change === 'creator') await sql`UPDATE automations SET created_by = ${other.id} WHERE id = ${automation.id}`;
+        else await sql`UPDATE connections SET created_by = ${other.id} WHERE id = ${connectionId}`;
+      }
+      if (change === 'auto') {
+        await respondAsDevice({ status: 'success', action_output: { rows: DEVICE_ROWS, columns: DEVICE_COLUMNS } });
+        expect((await reading).result?.rows).toEqual(DEVICE_ROWS);
+      } else {
+        const response = await post('/api/workers/poll', { body: {
+          worker_id: WORKER_ID, platform: 'macos', app_version: '9.9.0', capabilities: { local_directory: true },
+        } });
+        expect(response.status).toBe(200);
+        expect((await response.json()).run_id).toBeUndefined();
+        expect((await readRunRows())[0].status).toBe('cancelled');
+        expect((await reading).error).toBeInstanceOf(Error);
+      }
+      expect((await readRunRows())[0]).toMatchObject({ action_output: null, action_input: { scrubbed: true } });
+    } finally {
+      await reading;
+      await setPolicy('auto');
+      await sql`UPDATE connections SET created_by = ${userId} WHERE id = ${connectionId}`;
+      await sql`DELETE FROM automations WHERE id = ${automation.id}`;
+    }
   });
 
   it('dispatches to the paired device, returns live rows, and retains nothing', async () => {

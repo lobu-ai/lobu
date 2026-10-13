@@ -39,6 +39,7 @@ import { readConnectorPolicyCollection, replaceConnectorPolicyCollection } from 
 import { globalCatalogRoutes, orgInstalledRoutes } from "./catalog/routes";
 import { connectionTokenRoutes } from "./connect/connection-token-route";
 import { setupRoutes } from "./connect/setup-routes";
+import { chatIdentityRoutes } from "./connect/chat-identity-routes";
 import { connectRoutes } from "./connect/routes";
 import { getDb } from "./db/client";
 import * as invalidationEmitter from "./events/emitter";
@@ -412,7 +413,9 @@ app.use("/*", async (c, next) => {
 		);
 	}
 
-	c.header("Referrer-Policy", "strict-origin-when-cross-origin");
+	if (!c.res.headers.has("Referrer-Policy")) {
+		c.header("Referrer-Policy", "strict-origin-when-cross-origin");
+	}
 	// Minimal permissions policy to prevent FLoC without blocking ChatGPT validation
 	c.header("Permissions-Policy", "interest-cohort=()");
 });
@@ -637,6 +640,13 @@ app.route("/mcp", oauthRoutes);
  * otherwise swallow `/connect/managed` as a connect-link token.
  */
 app.route("/", setupRoutes);
+
+/**
+ * One-click chat identity linking: the confirmation page a bot DM links to,
+ * and its same-origin form POST. Mounted before connectRoutes for the same
+ * reason as setupRoutes.
+ */
+app.route("/", chatIdentityRoutes);
 
 /**
  * Connect Link routes (unauthenticated, token-gated)

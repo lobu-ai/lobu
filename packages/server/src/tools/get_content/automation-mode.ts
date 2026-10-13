@@ -45,7 +45,7 @@ import {
 import type { GetContentArgs } from './schema';
 import type { ToolContext } from '../registry';
 import type { GetContentResult } from './types';
-import { parseJson, parseRecordArray } from './types';
+import { parseJson, parseRecordArray, toNullableScore } from './types';
 import { stableJson } from '../../utils/insert-event';
 
 // ============================================
@@ -149,7 +149,7 @@ function normalizeEventSources(
           text_content: rec.payload_text ?? rec.text_content,
           rating: (rec.metadata as Record<string, unknown>)?.rating || null,
           source_url: rec.source_url ?? rec.url,
-          score: Number(rec.score) || 0,
+          score: toNullableScore(rec.score),
           metadata: rec.metadata || {},
           classifications: {},
           created_at: rec.created_at,

@@ -332,14 +332,15 @@ export function linkedInInboxProgram() {
       `conversationUrn:${encode(conversation)}`,
       "messengerMessagesBySyncToken"
     );
-    return result.elements
-      .map((message) => {
+    const messages = await Promise.all(
+      result.elements.map(async (message) => {
         if (
           typeof message.entityUrn !== "string" ||
           !Number.isFinite(message.deliveredAt)
         )
           fail("Message identity or timestamp is unavailable");
         const member = message.sender?.participantType?.member;
+        const recalled = message.messageBodyRenderFormat === "RECALLED";
         return {
           id: message.entityUrn,
           conversation_id: conversation,
@@ -347,7 +348,23 @@ export function linkedInInboxProgram() {
           // Encoding '=' here leaves page-activated drafts waiting on a URL
           // that differs from the one the user actually visits.
           conversation_url: `https://www.linkedin.com/messaging/thread/${thread}/`,
-          text: message.body?.text ?? message.renderContentFallbackText ?? "",
+          text: recalled
+            ? ""
+            : (message.body?.text ?? message.renderContentFallbackText ?? ""),
+          recalled,
+          source_revision: await digest(
+            JSON.stringify([
+              message.entityUrn,
+              conversation,
+              message.body,
+              message.renderContentFallbackText,
+              message.renderContent,
+              message.messageBodyRenderFormat,
+              message.sender?.hostIdentityUrn,
+              message.deliveredAt,
+              message.lastEditedAt,
+            ])
+          ),
           has_attachments:
             Array.isArray(message.renderContent) &&
             message.renderContent.length > 0,
@@ -355,14 +372,18 @@ export function linkedInInboxProgram() {
           sender_name: clean(
             `${member?.firstName?.text ?? ""} ${member?.lastName?.text ?? ""}`
           ),
-          from_me: message.sender?.hostIdentityUrn === mailbox,
+          from_me:
+            typeof message.sender?.hostIdentityUrn === "string"
+              ? message.sender.hostIdentityUrn === mailbox
+              : null,
           occurred_at: new Date(message.deliveredAt).toISOString(),
         };
       })
-      .sort(
-        (a, b) =>
-          b.occurred_at.localeCompare(a.occurred_at) || a.id.localeCompare(b.id)
-      );
+    );
+    return messages.sort(
+      (a, b) =>
+        b.occurred_at.localeCompare(a.occurred_at) || a.id.localeCompare(b.id)
+    );
   }
   function cursorOf(raw, feed, mailbox) {
     if (!raw) return {};
@@ -429,7 +450,16 @@ export function linkedInInboxProgram() {
     if ((await account()) !== mailbox)
       fail("LinkedIn account changed during the read");
     return {
-      rows,
+      rows: await Promise.all(
+        rows.map(async (row) => ({
+          ...row,
+          source_revision:
+            row.source_revision ??
+            (await digest(
+              JSON.stringify([row.id, row.text, row.url, row.notification_type])
+            )),
+        }))
+      ),
       hasMore: !!continuation,
       ...(continuation
         ? {

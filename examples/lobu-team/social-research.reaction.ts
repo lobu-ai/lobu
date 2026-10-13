@@ -1,8 +1,15 @@
 import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
+import type { ClientSDK } from "../../packages/server/src/sandbox/client-sdk";
 
 export const input = {
   type: "object",
-  required: ["summary", "coverage", "findings"],
+  required: [
+    "summary",
+    "coverage",
+    "findings",
+    "inbox_findings",
+    "inbox_coverage",
+  ],
   properties: {
     summary: { type: "string", maxLength: 1600 },
     coverage: {
@@ -17,6 +24,62 @@ export const input = {
           status: { enum: ["read", "blocked", "partial"] },
           posts_read: { type: "integer", minimum: 0 },
           detail: { type: "string", maxLength: 600 },
+        },
+        additionalProperties: false,
+      },
+    },
+    inbox_coverage: {
+      type: "array",
+      minItems: 4,
+      maxItems: 4,
+      items: {
+        type: "object",
+        required: ["source", "status", "items_read", "detail"],
+        properties: {
+          source: {
+            enum: [
+              "linkedin:live_messages",
+              "linkedin:notifications",
+              "tiktok:messages",
+              "tiktok:activity",
+            ],
+          },
+          status: { enum: ["read", "partial", "blocked"] },
+          items_read: { type: "integer", minimum: 0 },
+          detail: { type: "string", maxLength: 600 },
+        },
+        additionalProperties: false,
+      },
+    },
+    inbox_findings: {
+      type: "array",
+      maxItems: 2,
+      items: {
+        type: "object",
+        required: [
+          "platform",
+          "feed_key",
+          "source_id",
+          "source_revision",
+          "quote",
+          "summary",
+          "why",
+          "limits",
+          "draft",
+        ],
+        properties: {
+          platform: { enum: ["linkedin", "tiktok"] },
+          feed_key: {
+            enum: ["live_messages", "notifications", "messages", "activity"],
+          },
+          source_id: { type: "string", minLength: 1, maxLength: 500 },
+          source_revision: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          source_cursor: { type: "string", maxLength: 100000 },
+          quote: { type: "string", minLength: 1, maxLength: 100 },
+          summary: { type: "string", minLength: 1, maxLength: 120 },
+          why: { type: "string", minLength: 1, maxLength: 120 },
+          limits: { type: "string", minLength: 1, maxLength: 120 },
+          draft: { type: "string", maxLength: 350 },
         },
         additionalProperties: false,
       },
@@ -55,6 +118,18 @@ export const input = {
 } as const;
 
 type Platform = "linkedin" | "x" | "tiktok";
+type InboxFinding = {
+  platform: "linkedin" | "tiktok";
+  feed_key: string;
+  source_id: string;
+  source_revision: string;
+  source_cursor?: string;
+  quote: string;
+  summary: string;
+  why: string;
+  limits: string;
+  draft: string;
+};
 type Finding = {
   platform: Platform;
   source_url: string;
@@ -125,9 +200,25 @@ function sourceRows(platform: Platform, output: Record<string, any>) {
 
 export default async function deliverSocialResearch(
   ctx: ReactionContext,
-  client: ReactionClient
+  // The executor supplies the existing full ClientSDK; feeds is not exposed in
+  // the narrower legacy ReactionClient convenience type. No runtime extension.
+  client: ReactionClient & Pick<ClientSDK, "feeds">
 ) {
   const findings = ctx.extracted_data.findings as Finding[];
+  const inbox = (ctx.extracted_data.inbox_findings ?? []) as InboxFinding[];
+  const inboxCoverage = (ctx.extracted_data.inbox_coverage ?? []) as Array<{
+    source: string;
+    status: string;
+    items_read: number;
+    detail: string;
+  }>;
+  if (
+    inbox.length > 2 ||
+    (inboxCoverage.length &&
+      (inboxCoverage.length !== 4 ||
+        new Set(inboxCoverage.map((c) => c.source)).size !== 4))
+  )
+    throw new Error("Invalid inbox coverage or finding count");
   const coverage = ctx.extracted_data.coverage as Array<{
     platform: Platform;
     status: string;
@@ -167,13 +258,21 @@ export default async function deliverSocialResearch(
   // Background reactions have no user identity. Operation discovery resolves
   // the Automation owner's access, including private paired browser profiles.
   const available = new Map<Platform, Operation[]>();
-  for (const platform of new Set(findings.map((f) => f.platform))) {
-    const { operations } = (await client.operations.listAvailable({
-      connector_key: bindings[platform].connector,
-      limit: 100,
-      include_input_schema: false,
-    })) as { operations: Operation[] };
-    available.set(platform, operations);
+  for (const platform of new Set(
+    [...findings, ...inbox].map((f) => f.platform)
+  )) {
+    try {
+      const { operations } = (await client.operations.listAvailable({
+        connector_key: bindings[platform].connector,
+        limit: 100,
+        include_input_schema: false,
+      })) as { operations: Operation[] };
+      available.set(platform, operations);
+    } catch (error) {
+      if (findings.some((finding) => finding.platform === platform))
+        throw error;
+      // Inbox verification reports the unavailable source independently below.
+    }
   }
   const seen = new Set<string>();
   const validated = [];
@@ -242,9 +341,220 @@ export default async function deliverSocialResearch(
     }
     validated.push({ finding, key, url, liked, binding });
   }
+  const inboxResults: Array<Record<string, unknown>> = [];
+  const verificationIssues = new Set<string>();
+  const partialInbox = (finding: InboxFinding, detail: string) => {
+    const source = `${finding.platform}:${finding.feed_key}`;
+    verificationIssues.add(source);
+    const coverage = inboxCoverage.find((c) => c.source === source);
+    if (coverage) Object.assign(coverage, { status: "partial", detail });
+    else
+      inboxCoverage.push({ source, status: "partial", items_read: 0, detail });
+    inboxResults.push({
+      source_id: finding.source_id,
+      status: "partial",
+      detail,
+    });
+  };
+  // Verify at most two candidates, each with at most two source pages. A moved
+  // or failed source must not suppress independently verified findings.
+  // A model-supplied source ID/quote never suffices to queue a reply.
+  const verifiedCandidates = await Promise.all(
+    inbox.map(async (finding) => {
+      try {
+        const expectedFeeds =
+          finding.platform === "linkedin"
+            ? ["live_messages", "notifications"]
+            : ["messages", "activity"];
+        if (!expectedFeeds.includes(finding.feed_key))
+          throw new Error("Inbox feed does not belong to this platform");
+        const binding = bindings[finding.platform];
+        const connection = available
+          .get(finding.platform)
+          ?.find((o) => o.operation_key === binding.readAction)
+          ?.execution_targets.find((t) => t.slug === binding.read);
+        if (!connection)
+          throw new Error("Inbox source connection is unavailable");
+        const listed = record(
+          await client.feeds.list({
+            connection_id: connection.connection_id,
+            limit: 100,
+          })
+        );
+        const feeds = Array.isArray(listed.feeds) ? listed.feeds : [];
+        const feed = feeds.find(
+          (f: any) =>
+            f.feed_key === finding.feed_key &&
+            f.connection_id === connection.connection_id
+        );
+        if (!feed) throw new Error("Inbox source feed is unavailable");
+        let row: Record<string, any> | undefined;
+        let cursor = finding.source_cursor;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const read = record(
+            await client.feeds.readMany({
+              reads: [
+                { feed_id: feed.id, limit: 20, ...(cursor ? { cursor } : {}) },
+              ],
+              timeout_ms: 20000,
+            })
+          );
+          const page = read.results?.[0];
+          if (
+            !page?.ok ||
+            page.feed_id !== feed.id ||
+            !Array.isArray(page.rows)
+          )
+            throw new Error(
+              "Inbox verification read failed; source coverage is incomplete"
+            );
+          row = page.rows.find(
+            (r: any) => String(r.origin_id ?? r.id) === finding.source_id
+          );
+          if (row || !page.next_cursor || page.next_cursor === cursor) break;
+          cursor = page.next_cursor;
+        }
+        const message = ["messages", "live_messages"].includes(
+          finding.feed_key
+        );
+        if (
+          !row ||
+          typeof row.text !== "string" ||
+          !quoteText(finding.quote) ||
+          !quoteText(row.text).includes(quoteText(finding.quote)) ||
+          !/^[a-f0-9]{64}$/.test(finding.source_revision ?? "") ||
+          row.source_revision !== finding.source_revision ||
+          (message &&
+            (row.from_me !== false ||
+              row.recalled !== false ||
+              row.has_attachments === true ||
+              row.has_uninspected_content === true))
+        )
+          throw new Error(
+            "Inbox finding lacks a matching incoming source record"
+          );
+        const url = String(
+          message
+            ? (row.conversation_url ?? row.source_url ?? "")
+            : (row.source_url ?? row.url ?? "")
+        );
+        if (
+          message &&
+          finding.platform === "linkedin" &&
+          !/^https:\/\/www\.linkedin\.com\/messaging\/thread\/[A-Za-z0-9_=-]+\/$/.test(
+            url
+          )
+        )
+          throw new Error("Invalid message conversation URL");
+        const origin =
+          finding.platform === "linkedin"
+            ? "https://www.linkedin.com"
+            : "https://www.tiktok.com";
+        if (url !== origin && !url.startsWith(`${origin}/`))
+          throw new Error("Invalid inbox source URL");
+        const identity = JSON.stringify([
+          finding.platform,
+          connection.connection_id,
+          finding.feed_key,
+          finding.source_id,
+        ]);
+        const [hash] = await client.query(
+          `SELECT encode(sha256(convert_to(${sqlString(identity)}, 'UTF8')), 'hex') AS source_key`
+        );
+        const digest = record(hash).source_key;
+        if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest))
+          throw new Error("Inbox source identity could not be hashed");
+        const key = `social-inbox:${digest}`;
+        if (seen.has(key))
+          throw new Error("Invalid or duplicate inbox source identity");
+        seen.add(key);
+        return { finding, row, url, key, message };
+      } catch (error) {
+        partialInbox(
+          finding,
+          error instanceof Error ? error.message : "Inbox verification failed"
+        );
+        return null;
+      }
+    })
+  );
+  const verifiedInbox = verifiedCandidates.filter(
+    (candidate) => candidate !== null
+  );
   const source = {
     automation_id: ctx.automation.id,
     run_id: ctx.window.run_id,
+  };
+  // Runs already retain the original parent window and input. Recover from
+  // that durable provenance instead of replaying an old key under a new parent.
+  const recoverInboxDraft = async (
+    finding: InboxFinding,
+    connectionId: number,
+    url: string
+  ) => {
+    const listed = record(
+      await client.operations.listRuns({
+        run_types: ["action"],
+        automation_ids: [ctx.automation.id],
+        connection_id: connectionId,
+        operation_key: "prepare_message",
+        limit: 50,
+      })
+    );
+    const candidates = (Array.isArray(listed.runs) ? listed.runs : []).filter(
+      (run: any) =>
+        run.connection_id === connectionId &&
+        run.automation_id === ctx.automation.id &&
+        run.operation_key === "prepare_message" &&
+        run.created_by_user_id === recipient &&
+        run.input?.conversation_url === url &&
+        Number.isSafeInteger(run.parent_run_id)
+    );
+    // The run page bounds this search. Older drafts for different source
+    // messages must not prevent a new reply in an active conversation.
+    for (const run of candidates) {
+      const { run: originalWindow } = await client.operations.getRun(
+        run.parent_run_id
+      );
+      if (
+        originalWindow?.automation_id !== ctx.automation.id ||
+        originalWindow.status !== "completed"
+      )
+        continue;
+      const prior = record(originalWindow.output).inbox_findings;
+      if (!Array.isArray(prior)) continue;
+      const originals = prior.filter(
+        (f: InboxFinding) =>
+          f.platform === finding.platform && f.draft === run.input.body
+      );
+      // Two indistinguishable bodies in one window cannot prove which source
+      // created this run. Never guess a handoff association.
+      if (originals.length !== 1) continue;
+      const original = originals[0] as InboxFinding;
+      if (
+        original.feed_key !== finding.feed_key ||
+        original.source_id !== finding.source_id
+      )
+        continue;
+      if (original.source_revision !== finding.source_revision)
+        throw new Error(
+          "An existing draft uses an older source revision; review it before preparing another reply"
+        );
+      if (!["auto", "approved"].includes(run.approval_status))
+        throw new Error(
+          "The existing draft is not approved for browser handoff"
+        );
+      if (!["pending", "running", "claimed", "completed"].includes(run.status))
+        throw new Error(
+          "The existing draft is no longer available; no replacement was queued"
+        );
+      return {
+        run_id: Number(run.id),
+        finding: original,
+        completed: run.status === "completed",
+      };
+    }
+    return null;
   };
   const results = [];
   for (const { finding, key, url, liked, binding } of validated) {
@@ -330,6 +640,133 @@ export default async function deliverSocialResearch(
       draft_status: draftStatus,
     });
   }
+  for (const item of verifiedInbox) {
+    const { row, url, key, message } = item;
+    let finding = item.finding;
+    const previous = await client.query(
+      `SELECT id FROM events WHERE metadata ? '_lobu_idempotency_key' AND metadata->>'_lobu_idempotency_key' = ${sqlString(key)} LIMIT 1`
+    );
+    if (previous.length) {
+      inboxResults.push({
+        source_id: finding.source_id,
+        status: "already_delivered",
+      });
+      continue;
+    }
+    let draftRun: number | undefined;
+    let draftStatus = finding.draft
+      ? "Draft saved for manual use."
+      : "No reply suggested.";
+    if (message && finding.platform === "linkedin") {
+      const target = available
+        .get("linkedin")
+        ?.find((o) => o.operation_key === "prepare_message")
+        ?.execution_targets.find((t) => t.slug === bindings.linkedin.draft);
+      if (target) {
+        let prior;
+        try {
+          prior = await recoverInboxDraft(finding, target.connection_id, url);
+        } catch (error) {
+          partialInbox(
+            finding,
+            error instanceof Error ? error.message : "Draft recovery failed"
+          );
+          continue;
+        }
+        if (prior) {
+          finding = prior.finding;
+          draftRun = prior.run_id;
+          draftStatus = prior.completed
+            ? "The existing reply draft was already prepared; review it before sending."
+            : "Use Open page to fill the existing reply; you click Send.";
+        } else if (finding.draft && target.executable) {
+          let staged;
+          try {
+            staged = await client.operations.execute({
+              connection_id: target.connection_id,
+              operation_key: "prepare_message",
+              input: { conversation_url: url, body: finding.draft },
+              activation: { kind: "page_visit", urls: [url] },
+              idempotency_key: `${key}:draft`,
+              automation_source: source,
+            });
+          } catch (error) {
+            // A concurrent reaction or an ambiguous enqueue response may have
+            // committed the draft. The uniqueness/provenance guards stay intact.
+            try {
+              prior = await recoverInboxDraft(
+                finding,
+                target.connection_id,
+                url
+              );
+              if (!prior) throw error;
+            } catch (recoveryError) {
+              partialInbox(
+                finding,
+                recoveryError instanceof Error
+                  ? recoveryError.message
+                  : "Draft enqueue or recovery failed"
+              );
+              continue;
+            }
+            finding = prior.finding;
+            staged = { status: "in_progress", run_id: prior.run_id };
+          }
+          if (
+            staged.status === "in_progress" &&
+            typeof staged.run_id === "number"
+          ) {
+            draftRun = staged.run_id;
+            draftStatus = "Use Open page to fill the reply; you click Send.";
+          } else draftStatus = `Draft operation: ${staged.status}`;
+        } else if (finding.draft)
+          draftStatus = "Draft saved; browser handoff needs setup.";
+      } else if (finding.draft)
+        draftStatus = "Draft saved; browser handoff needs setup.";
+    }
+    const draftBlock = [
+      ...(message && finding.platform === "tiktok"
+        ? [
+            `Conversation: ${clip(String(row.conversation_name ?? row.conversation_id), 80)}`,
+          ]
+        : []),
+      ...(finding.draft ? [`Suggested reply:\n${finding.draft}`] : []),
+      draftStatus,
+    ].join("\n\n");
+    const contextBudget = Math.floor((1000 - draftBlock.length - 60) / 3);
+    const sent = await client.notifications.send({
+      title: clip(`${finding.platform} inbox · ${finding.summary}`, 180),
+      body: [
+        `Why it matters: ${clip(finding.why, contextBudget)}`,
+        `Evidence: “${clip(finding.quote, contextBudget)}”`,
+        `Context: ${clip(finding.limits, contextBudget)}`,
+        draftBlock,
+      ].join("\n\n"),
+      recipients: [recipient],
+      resource_url: url,
+      ...(draftRun
+        ? { browser_url: url, browser_handoff_run_id: draftRun }
+        : {}),
+      idempotency_key: key,
+      automation_source: source,
+    });
+    inboxResults.push({
+      source_id: finding.source_id,
+      notification_id: sent.event_id,
+      draft_run_id: draftRun ?? null,
+    });
+  }
+  for (const blocked of inboxCoverage.filter(
+    (c) => c.status === "blocked" || verificationIssues.has(c.source)
+  )) {
+    await client.notifications.send({
+      title: `Social inbox ${blocked.status === "blocked" ? "could not read" : "partially verified"} · ${blocked.source}`,
+      body: clip(blocked.detail, 1000),
+      recipients: [recipient],
+      idempotency_key: `social-inbox:setup:${ctx.automation.id}:${blocked.source}:${new Date(start).toISOString().slice(0, 10)}`,
+      automation_source: source,
+    });
+  }
   for (const blocked of coverage.filter((c) => c.status === "blocked")) {
     await client.notifications.send({
       title: `Social research could not read · ${blocked.platform}`,
@@ -340,5 +777,10 @@ export default async function deliverSocialResearch(
     });
   }
   // Empty and blocked runs remain auditable; do not disguise unread sources as no findings.
-  return { coverage, findings: results };
+  return {
+    coverage,
+    inbox_coverage: inboxCoverage,
+    findings: results,
+    inbox_findings: inboxResults,
+  };
 }

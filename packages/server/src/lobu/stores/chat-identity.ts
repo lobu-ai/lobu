@@ -2,6 +2,31 @@ import { type DbClient, getDb } from "../../db/client.js";
 import { chatUserIdentityFor } from "./chat-identity-sources.js";
 
 /**
+ * `entity_identities.source_connector` of a chat identity proven by a redeemed
+ * DM link (connect/chat-identity-routes.ts) rather than by the provider's own
+ * sign-in. The link only proves what the connection that delivered it
+ * reported — and the organization that owns a BYO or device connection can
+ * report any sender — so such a row is trusted ONLY inside its own
+ * organization. Sign-in rows (`auth:signup`) are provider-proven and global.
+ */
+export const CHAT_LINK_IDENTITY_SOURCE = "chat:link";
+
+/**
+ * The one trust rule for a `chat_ei` row read as proof of who a user is:
+ * provider-proven rows hold everywhere; a link-proven row holds only in
+ * `organizationId`, and nowhere when it is null. Every reader that treats a
+ * chat identity as proof must apply this, or a link asserted by one org
+ * becomes proof for another.
+ */
+export function chatIdentityTrustedIn(
+	sql: DbClient,
+	organizationId: string | null,
+) {
+	return sql`(chat_ei.source_connector IS DISTINCT FROM ${CHAT_LINK_IDENTITY_SOURCE}
+        OR chat_ei.organization_id = ${organizationId})`;
+}
+
+/**
  * Resolve a chat-platform user to the Lobu `user` they are, using the entity
  * graph as the source of truth.
  *
@@ -49,6 +74,8 @@ export async function resolveChatUserIdentity(
 	platform: string,
 	teamId: string | undefined,
 	platformUserId: string,
+	/** Admits link-proven rows from this organization only; omitted = none. */
+	organizationId?: string,
 ): Promise<string | null> {
 	const identity = chatUserIdentityFor(platform);
 	if (!identity) return null;
@@ -76,6 +103,7 @@ export async function resolveChatUserIdentity(
       AND chat_ei.identifier = ${combined}
       AND chat_ei.scope_key IS NULL
       AND chat_ei.deleted_at IS NULL
+      AND ${chatIdentityTrustedIn(getDb(), organizationId ?? null)}
     LIMIT 2
   `;
 	if (rows.length !== 1) return null;
@@ -97,7 +125,7 @@ export async function resolveChatSenderMember(
 	platformUserId: string,
 	organizationId: string,
 ): Promise<{ userId: string; role: string } | null> {
-	const userId = await resolveChatUserIdentity(platform, teamId, platformUserId);
+	const userId = await resolveChatUserIdentity(platform, teamId, platformUserId, organizationId);
 	if (!userId) return null;
 	const rows = await getDb()<{ role: string }>`
     SELECT m.role
@@ -132,6 +160,8 @@ export async function resolveChatUserIdForUser(
 	userId: string,
 	platform: string,
 	teamId: string | null | undefined,
+	/** Admits link-proven rows from this organization only. */
+	organizationId: string,
 	sql: DbClient = getDb(),
 ): Promise<string | null> {
 	const identity = chatUserIdentityFor(platform);
@@ -163,6 +193,7 @@ export async function resolveChatUserIdForUser(
       AND auth_ei.source_connector = 'auth:signup'
       AND auth_ei.deleted_at IS NULL
       AND chat_ei.identifier LIKE ${`${likePrefix}%`}
+      AND ${chatIdentityTrustedIn(sql, organizationId)}
     LIMIT 2
   `;
 	// FAILS CLOSED on ambiguity, exactly like `resolveChatUserIdentity`. The

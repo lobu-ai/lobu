@@ -37,7 +37,8 @@ export interface ChatUserIdentity {
   /**
    * The Better Auth `providerId` whose sign-in PROVES this identity. The login
    * writer stamps the namespace only after a successful OAuth exchange with
-   * this provider; nothing else may mint the link.
+   * this provider. Other trusted chat-link flows must also prove control of
+   * this account before writing the namespace.
    */
   providerId: string;
   /** `entity_identities` namespace the key is stored under. */

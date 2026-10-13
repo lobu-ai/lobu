@@ -73,7 +73,7 @@ export async function configureSocialResearch(
       automation_id: automationId,
       name: "Social research and engagement",
       description:
-        "Read LinkedIn, X and TikTok one post at a time, retain source evidence, like eligible posts, and prepare comments for human submission.",
+        "Read social inboxes and LinkedIn, X and TikTok posts individually, verify source evidence, and prepare replies for human submission.",
       prompt: socialResearchPrompt(
         `Existing X read script (run unchanged, retain read_run_id):\n\n\`\`\`typescript\n${receiptReader}\n\`\`\``
       ),
@@ -86,7 +86,7 @@ export async function configureSocialResearch(
       ],
       outputs: null,
       change_notes:
-        "Combine social research with verified source cards and page-activated draft handoffs. Cadence stays disabled during live verification.",
+        "Include LinkedIn and TikTok inboxes in the same social run, with source-verified private cards and human-activated message drafts. Cadence stays disabled during live verification.",
       set_as_current: true,
     })
   );
