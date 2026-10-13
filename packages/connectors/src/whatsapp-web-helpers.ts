@@ -518,8 +518,8 @@ export type MessageContentKind = "text" | "media" | "revoked" | "system";
 
 export function messageContentKind(message: WhatsAppMessage): MessageContentKind {
   if (message.revoked) return "revoked";
-  if (messageBodyText(message)) return "text";
   if (message.is_system_event) return "system";
+  if (messageBodyText(message)) return "text";
   return Object.hasOwn(MEDIA_PLACEHOLDERS, mediaKind(message)) ? "media" : "system";
 }
 
@@ -532,7 +532,7 @@ export function messagePayloadText(message: WhatsAppMessage): string {
     case "media":
       return MEDIA_PLACEHOLDERS[mediaKind(message)];
     default:
-      return "[system event]";
+      return messageBodyText(message) || "[system event]";
   }
 }
 

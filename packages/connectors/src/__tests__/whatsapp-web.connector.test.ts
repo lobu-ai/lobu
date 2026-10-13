@@ -213,6 +213,8 @@ describe("WhatsApp live source reads", () => {
         message("image", { body: "", media_kind: "image" }),
         message("revoked", { revoked: true }),
         message("system", { body: "", is_system_event: true }),
+        message("system-body", { body: "Group subject changed", is_system_event: true }),
+        message("system-caption", { body: "", caption: "Group updated", is_system_event: true }),
       ], hasMore: false },
     });
     const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null, browser: page.dispatcher });
@@ -222,6 +224,8 @@ describe("WhatsApp live source reads", () => {
       ["image", "media", "[image]"],
       ["revoked", "revoked", "[revoked message]"],
       ["system", "system", "[system event]"],
+      ["system-body", "system", "Group subject changed"],
+      ["system-caption", "system", "Group updated"],
     ]);
     expect(result.columns?.map((column) => column.name)).toContain("content_kind");
   });
