@@ -1,7 +1,8 @@
 /** Serialized into the signed-in page. All bindings must remain inside this function. */
 export function linkedInInboxProgram() {
   const key = "__lobuLinkedInInboxV1";
-  // An identical program keeps a warm tab's listeners; any code change reinstalls.
+  // An identical program keeps a warm tab's listeners; any code change reinstalls
+  // and asks the replaced program's listeners to reattach.
   const version = linkedInInboxProgram.toString();
   if (globalThis[key]?.version === version) return;
   globalThis[key]?.detach();
@@ -655,12 +656,89 @@ export function linkedInInboxProgram() {
       offset = end;
     }
   }
-  function detach(id) {
-    for (const state of id ? [listeners.get(id)] : listeners.values()) {
-      if (!state) continue;
-      clearTimeout(state.timer);
-      window.removeEventListener("message", state.onReply);
-      listeners.delete(state.id);
+  const active = (listener) => listeners.get(listener.id) === listener;
+  function post(listener, record) {
+    window.postMessage(
+      {
+        type: "lobu-feed-record",
+        token: listener.token,
+        sequence: ++listener.sequence,
+        record,
+      },
+      location.origin
+    );
+  }
+  // The one way a listener ends. A reason asks the bridge to reattach from the
+  // durable checkpoint; only an explicit stop or a same-binding relisten is silent.
+  function stop(listener, reason) {
+    if (!active(listener)) return;
+    clearTimeout(listener.timer);
+    window.removeEventListener("message", listener.onReply);
+    listeners.delete(listener.id);
+    if (reason)
+      post(listener, {
+        id: `linkedin:${listener.feed}:source-observation-error`,
+        source_error: reason,
+      });
+  }
+  // Called by a replacing program version: its listeners cannot inherit this
+  // one's undelivered batches, so each reattaches instead of going silent.
+  function detach() {
+    for (const listener of [...listeners.values()])
+      stop(
+        listener,
+        "LinkedIn source program was replaced; reattach from the durable checkpoint"
+      );
+  }
+  // Unacknowledged batches are reposted unchanged on the next tick.
+  async function poll(listener) {
+    if (!active(listener)) return;
+    try {
+      if (!listener.batches.length) {
+        if ((await account()) !== listener.mailbox)
+          fail("LinkedIn account changed; reconnect this source");
+        const { feed, checkpoint, mailbox } = listener;
+        const result = await snapshot(
+          feed,
+          checkpoint?.linkedin_inbox,
+          mailbox
+        );
+        listener.batches = await batchesOf(feed, checkpoint, result);
+      }
+      if (active(listener)) post(listener, listener.batches[0]);
+    } catch {
+      stop(
+        listener,
+        "LinkedIn source observation failed; reconnect to recover without skipping changes"
+      );
+    }
+    if (active(listener))
+      listener.timer = setTimeout(() => poll(listener), 60000);
+  }
+  function receive(listener, event) {
+    if (
+      event.source !== window ||
+      event.origin !== location.origin ||
+      event.data?.token !== listener.token
+    )
+      return;
+    if (event.data.type === "lobu-feed-record:stop") return stop(listener);
+    if (
+      event.data.type !== "lobu-feed-record:ack" ||
+      event.data.sequence !== listener.sequence
+    )
+      return;
+    if (event.data.ok === false)
+      return stop(
+        listener,
+        "LinkedIn source delivery was rejected; reattach from the durable checkpoint"
+      );
+    if (event.data.ok && listener.batches.length) {
+      // Receipt means the browser durably buffered the batch. Only the server
+      // commits the final batch's checkpoint; a reattach starts from that value.
+      const done = listener.batches.shift();
+      if (done.checkpoint) listener.checkpoint = done.checkpoint.next;
+      else post(listener, listener.batches[0]);
     }
   }
   async function listen(input) {
@@ -673,87 +751,27 @@ export function linkedInInboxProgram() {
       (previous.feed !== input.feed || previous.account !== mailbox)
     )
       fail("Source checkpoint belongs to another account or feed");
-    detach(input.bridge_id);
-    const state = {
+    const prior = listeners.get(input.bridge_id);
+    if (prior) stop(prior);
+    const listener = {
       id: input.bridge_id,
+      token: input.token,
+      feed: input.feed,
+      mailbox,
+      // The last posted record; only its receipt may advance delivery.
       sequence: 0,
+      // The checkpoint the next snapshot starts from, set by the final batch's receipt.
       checkpoint: input.checkpoint ?? null,
+      // Undelivered batches of the current snapshot, in order.
       batches: [],
       timer: null,
     };
-    const post = (record) =>
-      window.postMessage(
-        {
-          type: "lobu-feed-record",
-          token: input.token,
-          sequence: ++state.sequence,
-          record,
-        },
-        location.origin
-      );
-    async function poll() {
-      if (listeners.get(state.id) !== state) return;
-      try {
-        if (!state.batches.length) {
-          if ((await account()) !== mailbox)
-            fail("LinkedIn account changed; reconnect this source");
-          const result = await snapshot(
-            input.feed,
-            state.checkpoint?.linkedin_inbox,
-            mailbox
-          );
-          state.batches = await batchesOf(input.feed, state.checkpoint, result);
-        }
-        // Unacknowledged batches are reposted unchanged on the next tick.
-        if (listeners.get(state.id) === state) post(state.batches[0]);
-      } catch {
-        if (listeners.get(state.id) === state) {
-          post({
-            id: `linkedin:${input.feed}:source-observation-error`,
-            source_error:
-              "LinkedIn source observation failed; reconnect to recover without skipping changes",
-          });
-          detach(state.id);
-        }
-      }
-      if (listeners.get(state.id) === state)
-        state.timer = setTimeout(poll, 60000);
-    }
-    state.onReply = (event) => {
-      if (
-        event.source !== window ||
-        event.origin !== location.origin ||
-        event.data?.token !== input.token
-      )
-        return;
-      if (event.data.type === "lobu-feed-record:stop") {
-        detach(state.id);
-        return;
-      }
-      if (
-        event.data.type !== "lobu-feed-record:ack" ||
-        event.data.sequence !== state.sequence
-      )
-        return;
-      if (event.data.ok && state.batches.length) {
-        // Receipt means the browser durably buffered the batch. Only the server
-        // commits the final batch's checkpoint; a reattach starts from that value.
-        const done = state.batches.shift();
-        if (done.checkpoint) state.checkpoint = done.checkpoint.next;
-        else post(state.batches[0]);
-      } else if (event.data.ok === false) {
-        post({
-          id: `linkedin:${input.feed}:source-observation-error`,
-          source_error:
-            "LinkedIn source delivery was rejected; reattach from the durable checkpoint",
-        });
-        detach(state.id);
-      }
-    };
-    listeners.set(state.id, state);
-    window.addEventListener("message", state.onReply);
-    await poll();
-    if (!listeners.has(state.id)) fail("Unable to attach source subscription");
+    listener.onReply = (event) => receive(listener, event);
+    listeners.set(listener.id, listener);
+    window.addEventListener("message", listener.onReply);
+    await poll(listener);
+    if (!listeners.has(listener.id))
+      fail("Unable to attach source subscription");
     return { listening: true };
   }
   globalThis[key] = { version, read, listen, detach, parseNotifications };

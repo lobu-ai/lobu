@@ -559,6 +559,112 @@ describe("LinkedIn source adapter", () => {
     }
   });
 
+  test("a replaced program asks every warm listener to reattach from its durable checkpoint", async () => {
+    const { dom, api } = adapter(async (url) =>
+      url === "/voyager/api/me"
+        ? {
+            ok: true,
+            json: async () => ({
+              miniProfile: {
+                entityUrn: "urn:li:fs_miniProfile:synthetic-self",
+              },
+            }),
+          }
+        : url.includes("messengerConversations.")
+          ? {
+              ok: true,
+              json: async () => ({
+                data: {
+                  messengerConversationsByCategoryQuery: {
+                    elements: [],
+                    metadata: {},
+                  },
+                },
+              }),
+            }
+          : {
+              ok: true,
+              text: async () =>
+                `<script>window.__como_rehydration__ = ${JSON.stringify([flight()])};</script>`,
+            }
+    );
+    Object.defineProperty(dom.window, "crypto", { value: webcrypto });
+    const timers: Array<() => Promise<void>> = [];
+    dom.window.setTimeout = ((callback: () => Promise<void>) => {
+      timers.push(callback);
+      return timers.length;
+    }) as any;
+    dom.window.clearTimeout = () => {
+      /* The harness drains its own timer queue. */
+    };
+    const sent: any[] = [];
+    dom.window.postMessage = (message: unknown) => {
+      sent.push(message);
+    };
+    const ack = (message: any) =>
+      dom.window.dispatchEvent(
+        new dom.window.MessageEvent("message", {
+          source: dom.window,
+          origin: "https://www.linkedin.com",
+          data: {
+            type: "lobu-feed-record:ack",
+            token: message.token,
+            sequence: message.sequence,
+            ok: true,
+          },
+        })
+      );
+    const replaced = linkedInInboxProgram
+      .toString()
+      .replace("Source request failed", "Source request unavailable");
+    let next: any;
+    try {
+      for (const feed of ["notifications", "live_messages"]) {
+        await api.listen({
+          feed,
+          bridge_id: `synthetic-${feed}`,
+          token: `token-${feed}`,
+        });
+      }
+      const [notifications, messages] = sent.splice(0);
+      // Only the messages batch is acknowledged; the notifications checkpoint
+      // was never persisted when the program changes.
+      ack(messages);
+      dom.window.eval(`(${replaced})()`);
+      next = (dom.window as any).__lobuLinkedInInboxV1;
+      expect(next).not.toBe(api);
+      expect(sent.map((m) => [m.token, typeof m.record.source_error])).toEqual([
+        ["token-notifications", "string"],
+        ["token-live_messages", "string"],
+      ]);
+      // The retired listeners neither poll nor accept late receipts.
+      sent.length = 0;
+      ack(notifications);
+      await Promise.all(timers.splice(0).map((timer) => timer()));
+      expect(sent).toEqual([]);
+      // Reattachment starts from the server's durable checkpoint only.
+      await next.listen({
+        feed: "notifications",
+        bridge_id: "synthetic-notifications",
+        token: "token-rebound",
+      });
+      expect(sent[0].record.checkpoint.previous).toBeNull();
+      await next.listen({
+        feed: "live_messages",
+        bridge_id: "synthetic-live_messages",
+        token: "token-rebound-messages",
+        checkpoint: messages.record.checkpoint.next,
+      });
+      expect(sent[1].record.checkpoint.previous).toEqual(
+        messages.record.checkpoint.next
+      );
+      expect(sent.some((m) => m.record.source_error)).toBe(false);
+    } finally {
+      next?.detach();
+      dom.window.close();
+    }
+  });
+
   test("an empty inbox still checks that the signed-in account did not change", async () => {
     let accountReads = 0;
     const { dom, api } = adapter(async (url) => ({
