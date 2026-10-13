@@ -537,7 +537,11 @@ async function getContentImpl(
     // 2. If no query + sort_by=score -> use getNormalizedScoreContent
     // 3. If no query + sort_by=date -> use searchContentByText with date sorting
     let rawContent: ContentRow[];
-    let total: number;
+    // null only when the caller opted out with include_total: false. Exact-id
+    // and include_superseded reads are bounded by their ids / one entity's
+    // history and always count; automation mode is a separate branch.
+    let total: number | null;
+    const includeTotal = args.include_total !== false;
     // Distinct-lineage count from the content_ids branch (one requested id can
     // resolve to a whole supersede chain). Surfaced as `chain_total` so callers
     // can distinguish "how many rows" (`total`) from "how many things I asked
@@ -651,18 +655,26 @@ async function getContentImpl(
         visibility_scope: visibilityScope,
       };
 
-      const [contentResult, countResult] = await Promise.all([
-        getNormalizedScoreContent(entityId, limit, offset, filters),
-        getNormalizedScoreContentCount(entityId, filters),
-      ]);
+      if (includeTotal) {
+        const [contentResult, countResult] = await Promise.all([
+          getNormalizedScoreContent(entityId, limit, offset, filters),
+          getNormalizedScoreContentCount(entityId, filters),
+        ]);
 
-      rawContent = contentResult;
-      total = countResult;
-      pageInfo = {
-        limit,
-        offset,
-        has_more: offset + rawContent.length < total,
-      };
+        rawContent = contentResult;
+        total = countResult;
+        pageInfo = {
+          limit,
+          offset,
+          has_more: offset + rawContent.length < total,
+        };
+      } else {
+        // No count: overfetch one row (same total order) as the has_more sentinel.
+        const probe = await getNormalizedScoreContent(entityId, limit + 1, offset, filters);
+        rawContent = probe.slice(0, limit);
+        total = null;
+        pageInfo = { limit, offset, has_more: probe.length > limit };
+      }
     } else {
       logger.info(`[get_content] ${args.query ? 'Search query provided' : 'Listing content'}`);
 
@@ -716,6 +728,7 @@ async function getContentImpl(
         before_id: args.before_id,
         after_occurred_at: args.after_occurred_at,
         after_id: args.after_id,
+        ...(!includeTotal && { include_total: false }),
       };
 
       // Primary single-query search. A capable agent already phrases its own
@@ -781,7 +794,10 @@ async function getContentImpl(
 
         // The caller's limit pages out of the FUSED ranking (offset is 0 here).
         rawContent = ranked.slice(0, limit);
-        total = ranked.length;
+        // The fused pool is a bounded set the request already holds, so its
+        // size costs nothing; still honor the opt-out so `total` keeps one
+        // meaning per request shape.
+        total = includeTotal ? ranked.length : null;
         pageInfo = { limit, offset: 0, has_more: poolTruncated || ranked.length > limit };
       }
     }
@@ -899,7 +915,9 @@ async function getContentImpl(
 
     // Hints for the client
     const hints: string[] = [];
-    if (offset + contentItems.length < total) {
+    if (total == null) {
+      if (pageInfo.has_more) hints.push('More results available.');
+    } else if (offset + contentItems.length < total) {
       hints.push(`${total - (offset + contentItems.length)} more results available.`);
     }
     if (result.entity_summary) {

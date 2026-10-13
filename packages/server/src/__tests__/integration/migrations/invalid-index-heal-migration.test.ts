@@ -36,6 +36,11 @@ import {
  */
 const HEAL_MIGRATIONS = [
 	{
+		files: ["20261013120000_events_live_org_effective_date.sql"],
+		index: "idx_events_live_org_effective_date",
+		seedSql: `CREATE INDEX IF NOT EXISTS idx_events_live_org_effective_date ON events (id)`,
+	},
+	{
 		files: ["20261010223002_events_org_guidance.sql"],
 		index: "idx_events_org_guidance",
 		seedSql: `CREATE INDEX IF NOT EXISTS idx_events_org_guidance ON events (id)`,

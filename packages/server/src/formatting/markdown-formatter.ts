@@ -1242,7 +1242,9 @@ function formatGetContentResult(result: any, _options: FormatterOptions): string
     past_feedback,
   } = result;
 
-  let md = `# \uD83D\uDCDD Content (${total} total)\n\n`;
+  // total is null when the caller opted out of counting (include_total: false).
+  const totalLabel = total == null ? 'total not counted' : `${total} total`;
+  let md = `# \uD83D\uDCDD Content (${totalLabel})\n\n`;
 
   // Automation mode: show window info and token
   if (window_token) {
@@ -1299,7 +1301,7 @@ function formatGetContentResult(result: any, _options: FormatterOptions): string
 
   // Pagination info
   const currentPage = Math.floor((page?.offset || 0) / (page?.limit || 50)) + 1;
-  md += `**Page**: ${currentPage} \u2022 **Showing**: ${content?.length || 0} of ${total} \u2022 **Has More**: ${page?.has_more ? 'Yes' : 'No'}\n\n`;
+  md += `**Page**: ${currentPage} \u2022 **Showing**: ${content?.length || 0}${total == null ? '' : ` of ${total}`} \u2022 **Has More**: ${page?.has_more ? 'Yes' : 'No'}\n\n`;
 
   // Classification stats summary (if included)
   if (classification_stats && Object.keys(classification_stats).length > 0) {

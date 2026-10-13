@@ -14,7 +14,7 @@ import type { ContentRow, GetContentResult } from './types';
 const AccountContentSchema = Type.Pick(GetContentSchema, [
   'client_ids', 'mcp_activity_id', 'content_ids', 'limit', 'offset',
   'before_occurred_at', 'before_id', 'after_occurred_at', 'after_id',
-  'sort_by', 'sort_order', 'include_classification',
+  'sort_by', 'sort_order', 'include_classification', 'include_total',
 ]);
 type AccountContentArgs = Static<typeof AccountContentSchema>;
 type AccountContentContext = Pick<AuthContext,
@@ -120,8 +120,11 @@ async function readAccountContent(
   });
   return {
     content,
-    // Like the chronological workspace reader, avoid counting growing history.
-    total: content.length,
+    // Like the chronological workspace reader, avoid counting growing history:
+    // this reader never counts, so `total` is the page size. Accepting the
+    // shared include_total opt-out keeps one caller shape across both readers,
+    // and an opted-out caller reads null as everywhere else.
+    total: args.include_total === false ? null : content.length,
     page: { limit, offset: 0, has_more: hasMore,
       has_older: after ? true : hasMore,
       has_newer: after ? hasMore : before },

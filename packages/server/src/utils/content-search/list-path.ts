@@ -43,10 +43,12 @@ import {
   buildExcludeAutomationClause,
   buildOrgScopeWhere,
   buildProducedByAutomationClause,
+  type OrgScopeWhere,
 } from './visibility';
 import {
   buildSemanticTypeFilterSql,
   buildStandardParams,
+  buildEffectiveAtRangeSql,
   buildStandardWhereSql,
   RUN_JOIN_SQL,
 } from './params';
@@ -55,16 +57,23 @@ import {
  * Shared count + query-pair execution for both `listContentInternal` branches.
  *
  * The two branches differ only in how they assemble `whereExpr` (the full
- * WHERE body, excluding the date cursor clause) and whether they need the
- * `automation_run_events` join (`joinSql`). Everything past the count — the
- * empty-result short-circuit, the `candidate_set/result_set` vs `result_set`
- * CTE pair, param indexing, dedup, and the response shape — is identical, so
- * it lives here. The generated SQL and parameter binding are unchanged.
+ * WHERE body, excluding the org scope and the date cursor clause) and whether
+ * they need the `automation_run_events` join (`joinSql`). Everything past
+ * that — the count, the empty-result short-circuit, the
+ * `candidate_set/result_set` vs `result_set` CTE pair, param indexing, dedup,
+ * and the response shape — is identical, so it lives here.
+ *
+ * `orgScope` stays structured rather than pre-spliced into `whereExpr`: an
+ * org-wide date feed under the linked-org bridge reads its two disjoint arms as
+ * separate ordered, index-bounded scans (see `buildDateCandidateSetSql`).
  */
 async function executeListQuery(args: {
   sql: DbClient;
   joinSql: string;
   whereExpr: string;
+  orgScope: OrgScopeWhere;
+  /** Redundant since/until bound on the indexed recency key; direct arm only. */
+  directArmRangeSql: string;
   countParams: any[];
   entityId: number | null;
   threadEntityLinkSqlForP: string | undefined;
@@ -72,13 +81,16 @@ async function executeListQuery(args: {
   useDateFeed: boolean;
   cursor: ReturnType<typeof resolveDateCursor>;
   orderByForResultSet: string;
+  orderByForProbe: string;
   latestClassificationsCteSql: string;
   mkFinalSelect: (withClassifications: boolean) => string;
   limit: number;
   effectiveOffset: number;
   fetchLimit: number;
+  includeTotal: boolean;
 }): Promise<ContentSearchResponse> {
-  const { sql, joinSql, whereExpr, countParams } = args;
+  const { sql, joinSql, countParams, includeTotal } = args;
+  const whereExpr = `${args.whereExpr} ${args.orgScope.sql}`;
 
   const countSql = `SELECT COUNT(*) as total FROM current_event_records f
       LEFT JOIN connections c ON c.id = f.connection_id
@@ -100,20 +112,38 @@ async function executeListQuery(args: {
     ? `${threadMetaCteSql},\n      ${args.latestClassificationsCteSql}`
     : threadMetaCteSql;
 
-  const querySQL = args.useDateFeed
-    ? `
+  const emptyResponse = () =>
+    emptyListResponse({
+      limit: args.limit,
+      effectiveOffset: args.effectiveOffset,
+      useDateFeed: args.useDateFeed,
+      cursor: args.cursor,
+      includeTotal,
+    });
+
+  let querySQL: string;
+  if (args.useDateFeed) {
+    const candidateSetSql = buildDateCandidateSetSql({
+      joinSql,
+      whereExpr: args.whereExpr,
+      // Entity-scoped feeds are already narrowed by the entity link; keep their
+      // scope (normally empty) as one predicate.
+      orgScope: args.entityId == null ? args.orgScope : { ...args.orgScope, branches: null },
+      cursorSql: cursorClause.sql,
+      // Same params, keyed on the fenced linked arm's output alias.
+      linkedCursorSql: buildDateCursorClause(
+        args.cursor,
+        'COALESCE(l.occurred_at, l.created_at)',
+        'l.id',
+        countParams.length + 1
+      ).sql,
+      directArmRangeSql: `${cursorClause.rangeSql} ${args.directArmRangeSql}`,
+      cursor: args.cursor,
+      limitParam: `$${limitIdx}`,
+    });
+    querySQL = `
       WITH RECURSIVE candidate_set AS (
-        SELECT
-          f.id,
-          f.occurred_at,
-          f.created_at
-        FROM current_event_records f
-        LEFT JOIN connections c ON c.id = f.connection_id
-        ${joinSql}
-        WHERE ${whereExpr}
-          ${cursorClause.sql}
-        ORDER BY ${buildDateCandidateOrderBy(args.cursor, 'f')}
-        LIMIT $${limitIdx}
+        ${candidateSetSql}
       ),
       result_set AS (
         SELECT
@@ -126,8 +156,9 @@ async function executeListQuery(args: {
         LIMIT ${validatedLimit}
       ),
       ${ctes}
-      ${args.mkFinalSelect(args.needClassifications)}`
-    : `
+      ${args.mkFinalSelect(args.needClassifications)}`;
+  } else if (includeTotal) {
+    querySQL = `
       WITH RECURSIVE result_set AS (
         SELECT
           f.id,
@@ -141,35 +172,64 @@ async function executeListQuery(args: {
       ),
       ${ctes}
       ${args.mkFinalSelect(args.needClassifications)}`;
+  } else {
+    // No total to compare the offset against: overfetch one id (limitIdx binds
+    // limit + 1 below) and trim it before enrichment. page_probe carries the
+    // sort keys so result_set can re-apply the same total order to keep the
+    // first `limit` ids; cursor_fetched_count reports whether the sentinel came.
+    querySQL = `
+      WITH RECURSIVE page_probe AS (
+        SELECT
+          f.id,
+          f.score,
+          f.occurred_at,
+          f.created_at
+        FROM current_event_records f
+        LEFT JOIN connections c ON c.id = f.connection_id
+        ${joinSql}
+        WHERE ${whereExpr}
+        ORDER BY ${args.orderByForResultSet}
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}
+      ),
+      result_set AS (
+        SELECT
+          pp.id,
+          (SELECT COUNT(*) FROM page_probe) as cursor_fetched_count
+        FROM page_probe pp
+        ORDER BY ${args.orderByForProbe}
+        LIMIT ${validatedLimit}
+      ),
+      ${ctes}
+      ${args.mkFinalSelect(args.needClassifications)}`;
+  }
 
   const queryParams = args.useDateFeed
     ? [...queryBaseParams, args.fetchLimit]
-    : [...queryBaseParams, args.limit, args.effectiveOffset];
+    : [...queryBaseParams, includeTotal ? args.limit : args.limit + 1, args.effectiveOffset];
 
-  let total: number;
+  let total: number | null;
   let rawRows: any[];
 
-  if (args.entityId == null) {
+  if (!includeTotal) {
+    // Opted out of the exact count: one query, and an empty page is simply an
+    // empty page. has_more comes from the overfetch, never from a count.
+    total = null;
+    rawRows = (await args.sql.unsafe(querySQL, queryParams)) as any[];
+    if (rawRows.length === 0) return emptyResponse();
+  } else if (args.entityId == null) {
     // Org-wide listing (the activity feed). The COUNT is one of the two
     // expensive scans here — it re-evaluates the full visibility predicate
     // across every live event — so run count + list in parallel instead of
     // serializing two full scans. The total stays exact on every page
     // (cursor pages included): ContentSearchResponse.total is part of the
-    // read_knowledge contract and callers rely on it.
+    // read_knowledge contract and callers rely on it unless they opt out.
     const [countResult, rows] = await Promise.all([
       sql.unsafe<{ total: number | string }>(countSql, countParams),
       args.sql.unsafe(querySQL, queryParams) as Promise<any[]>,
     ]);
     total = parseInt(String(countResult[0]?.total ?? '0'), 10);
     rawRows = rows;
-    if (total === 0 && rawRows.length === 0) {
-      return emptyListResponse({
-        limit: args.limit,
-        effectiveOffset: args.effectiveOffset,
-        useDateFeed: args.useDateFeed,
-        cursor: args.cursor,
-      });
-    }
+    if (total === 0 && rawRows.length === 0) return emptyResponse();
   } else {
     // Entity-scoped listing: count FIRST so empty matches short-circuit before
     // paying the enrichment planner cost — recursive thread_meta +
@@ -179,14 +239,7 @@ async function executeListQuery(args: {
     // across cursor pages, so keep both semantics here.
     const countResult = await sql.unsafe<{ total: number | string }>(countSql, countParams);
     total = parseInt(String(countResult[0]?.total ?? '0'), 10);
-    if (total === 0) {
-      return emptyListResponse({
-        limit: args.limit,
-        effectiveOffset: args.effectiveOffset,
-        useDateFeed: args.useDateFeed,
-        cursor: args.cursor,
-      });
-    }
+    if (total === 0) return emptyResponse();
     rawRows = (await args.sql.unsafe(querySQL, queryParams)) as any[];
   }
 
@@ -209,6 +262,83 @@ async function executeListQuery(args: {
   };
 }
 
+/**
+ * Body of the date feed's `candidate_set` CTE: the newest (or, after an
+ * `after` cursor, oldest) `limitParam` matching ids in cursor order.
+ *
+ * When the org scope splits into disjoint arms, each arm is its own ordered,
+ * LIMITed scan and the arms merge under the same order and LIMIT. That is the
+ * same row set as one scan over their OR — the arms are disjoint and each
+ * keeps its own top-N, so the global top-N is inside their union — but the
+ * direct arm now carries `f.organization_id = $org` as an index condition on
+ * idx_events_live_org_effective_date, which also matches the ORDER BY, so a
+ * page reads ~limit rows instead of every match in the org.
+ */
+export function buildDateCandidateSetSql(args: {
+  joinSql: string;
+  whereExpr: string;
+  orgScope: OrgScopeWhere | null;
+  cursorSql: string;
+  /** `cursorSql` over alias `l`, applied above the linked arm's fence. */
+  linkedCursorSql: string;
+  /**
+   * Bounds implied by the filters/cursor, restated on the indexed recency key.
+   * Only the direct arm gets them: there they become an index condition after
+   * `organization_id`. On the linked arm (cross-org rows reached through the
+   * GIN index) they matched no index prefix, and the planner chose a skip
+   * scan of the whole (org, time) index — ~1.1M index rows for 2k linked rows
+   * in the plan proof — so it is left with the plain filters.
+   */
+  directArmRangeSql: string;
+  cursor: ReturnType<typeof resolveDateCursor>;
+  limitParam: string;
+}): string {
+  const arm = (scopeSql: string) => `SELECT
+          f.id,
+          f.occurred_at,
+          f.created_at
+        FROM current_event_records f
+        LEFT JOIN connections c ON c.id = f.connection_id
+        ${args.joinSql}
+        WHERE ${args.whereExpr} ${scopeSql}
+          ${args.cursorSql}
+        ORDER BY ${buildDateCandidateOrderBy(args.cursor, 'f')}
+        LIMIT ${args.limitParam}`;
+
+  const branches = args.orgScope?.branches;
+  if (!branches) return arm(args.orgScope?.sql ?? '');
+
+  // The linked arm reads its rows through the GIN index on linked_org_ids and
+  // orders them in memory. `OFFSET 0` fences the subquery so the cursor's
+  // keyset predicate is not pushed into that scan: pushed down, the planner
+  // ANDed the GIN bitmap with a skip scan of the whole (org, time) index on the
+  // cursor bound (~1.1M index rows for 2k linked rows in the plan proof).
+  const linkedArm = `SELECT l.id, l.occurred_at, l.created_at
+        FROM (
+          SELECT
+            f.id,
+            f.occurred_at,
+            f.created_at
+          FROM current_event_records f
+          LEFT JOIN connections c ON c.id = f.connection_id
+          ${args.joinSql}
+          WHERE ${args.whereExpr} AND ${branches.linked}
+          OFFSET 0
+        ) l
+        WHERE TRUE ${args.linkedCursorSql}
+        ORDER BY ${buildDateCandidateOrderBy(args.cursor, 'l')}
+        LIMIT ${args.limitParam}`;
+
+  return `SELECT u.id, u.occurred_at, u.created_at
+        FROM (
+          (${arm(`AND ${branches.direct} ${args.directArmRangeSql}`)})
+          UNION ALL
+          (${linkedArm})
+        ) u
+        ORDER BY ${buildDateCandidateOrderBy(args.cursor, 'u')}
+        LIMIT ${args.limitParam}`;
+}
+
 export async function listContentInternal(
   sql: DbClient,
   options: ContentSearchOptions & { offset?: number },
@@ -221,6 +351,7 @@ export async function listContentInternal(
   const cursor = resolveDateCursor(options);
   const effectiveOffset = useDateFeed ? 0 : offset;
   const fetchLimit = useDateFeed ? limit + 1 : limit;
+  const includeTotal = options.include_total !== false;
 
   const sinceDate = options.since ? parseDateAlias(options.since).date : null;
   const untilDate = options.until ? toEndOfDay(parseDateAlias(options.until).date) : null;
@@ -236,6 +367,12 @@ export async function listContentInternal(
     options.sort_by,
     options.sort_order,
     'f',
+    'result_set'
+  );
+  const orderByForProbe = buildOrderByClause(
+    options.sort_by,
+    options.sort_order,
+    'pp',
     'result_set'
   );
   const orderByForFinalSelect = buildOrderByClause(
@@ -285,6 +422,7 @@ export async function listContentInternal(
 
     const baseConditions: string[] = [];
     const baseParams: any[] = [];
+    let orgScope: OrgScopeWhere = { sql: '', params: [], branches: null };
 
     // Pre-built entity-link fragment for thread_meta's recursive walk.
     // When entity_id is set we use the trimmed UNION; otherwise threadMeta
@@ -319,11 +457,12 @@ export async function listContentInternal(
     } else if (organizationId) {
       // Keep classification-filtered listings on the same direct/entity/
       // connection org scope as the standard listing path.
-      const orgScope = buildOrgScopeWhere({
+      // The predicate itself is handed to executeListQuery structurally (see
+      // `orgScope` there); only its params take their slot here.
+      orgScope = buildOrgScopeWhere({
         organization_id: organizationId,
         baseParamIndex: baseParams.length + 1,
       });
-      baseConditions.push(orgScope.sql.replace(/^AND\s+/, ''));
       baseParams.push(...orgScope.params);
       // Avoid treating the organization id in $1 as a bigint entity id while
       // walking parent threads.
@@ -338,13 +477,17 @@ export async function listContentInternal(
       baseParams.push(options.platform);
       baseConditions.push(`f.connector_key = $${baseParams.length}`);
     }
+    let sinceParam: string | null = null;
+    let untilParam: string | null = null;
     if (sinceDate) {
       baseParams.push(sinceDate.toISOString());
       baseConditions.push(`f.occurred_at >= $${baseParams.length}`);
+      sinceParam = `$${baseParams.length}::timestamptz`;
     }
     if (untilDate) {
       baseParams.push(untilDate.toISOString());
       baseConditions.push(`f.occurred_at <= $${baseParams.length}`);
+      untilParam = `$${baseParams.length}::timestamptz`;
     }
     if (options.run_id != null) {
       baseParams.push(options.run_id);
@@ -413,7 +556,7 @@ export async function listContentInternal(
       baseParams.length + 1
     );
     if (!classificationExists) {
-      return emptyListResponse({ limit, effectiveOffset, useDateFeed, cursor });
+      return emptyListResponse({ limit, effectiveOffset, useDateFeed, cursor, includeTotal });
     }
 
     baseConditions.push(...classificationExists.clauses);
@@ -454,6 +597,8 @@ export async function listContentInternal(
       sql,
       joinSql: '',
       whereExpr: `${whereSql} ${excludeClause.sql}${producedClause.sql}${analyzedClause.sql} ${visibilityClause.sql}${entityTypesClause.sql} ${futureClause.sql}`,
+      orgScope,
+      directArmRangeSql: buildEffectiveAtRangeSql(sinceParam, untilParam),
       countParams: allFilterParams,
       entityId: entityId ?? null,
       threadEntityLinkSqlForP: threadEntityLinkSql,
@@ -461,11 +606,13 @@ export async function listContentInternal(
       useDateFeed,
       cursor,
       orderByForResultSet,
+      orderByForProbe,
       latestClassificationsCteSql,
       mkFinalSelect,
       limit,
       effectiveOffset,
       fetchLimit,
+      includeTotal,
     });
   }
 
@@ -572,17 +719,22 @@ export async function listContentInternal(
           ${producedFilterClause.sql}
           ${analyzedFilterClause.sql}
           ${visibilityClause.sql}
-          ${orgScope.sql}${entityTypesClause.sql} ${futureClause.sql}`,
+          ${entityTypesClause.sql} ${futureClause.sql}`,
+    orgScope,
+    // $3/$4 are buildStandardParams' since/until slots.
+    directArmRangeSql: buildEffectiveAtRangeSql('$3::timestamptz', '$4::timestamptz'),
     countParams,
     threadEntityLinkSqlForP: standardEntityLinkSqlForP,
     needClassifications,
     useDateFeed,
     cursor,
     orderByForResultSet,
+    orderByForProbe,
     latestClassificationsCteSql,
     mkFinalSelect,
     limit,
     effectiveOffset,
     fetchLimit,
+    includeTotal,
   });
 }

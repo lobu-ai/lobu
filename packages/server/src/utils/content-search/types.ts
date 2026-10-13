@@ -119,6 +119,13 @@ export interface ContentSearchOptions {
   // already computed an embedding (e.g. search_memory receiving query_embedding).
   query_embedding?: number[];
 
+  /**
+   * Run the exact match COUNT. Default true; only an explicit `false` skips it,
+   * and the response then carries `total: null` with `has_more` computed from a
+   * one-row overfetch instead. History grows, so an infinite feed opts out.
+   */
+  include_total?: boolean;
+
   // Internal recall-only performance hint. When true, org-wide score searches may
   // use a bounded hybrid candidate set instead of the exact full match set. Do
   // not use for user-visible get_content pagination/totals.
@@ -204,7 +211,8 @@ export interface ContentSearchPageInfo {
 
 export interface ContentSearchResponse {
   content: ContentSearchResult[];
-  total: number;
+  /** Exact match count, or null when the caller passed `include_total: false`. */
+  total: number | null;
   page: ContentSearchPageInfo;
 }
 
@@ -254,21 +262,27 @@ export function buildDateCursorClause(
   occurredAtColumn: string,
   idColumn: string,
   baseParamIndex: number
-): { sql: string; params: unknown[] } {
-  if (!cursor) return { sql: '', params: [] };
+): { sql: string; rangeSql: string; params: unknown[] } {
+  if (!cursor) return { sql: '', rangeSql: '', params: [] };
 
   const occurredAtParam = `$${baseParamIndex}::timestamptz`;
   const idParam = `$${baseParamIndex + 1}::bigint`;
 
+  // `rangeSql` is implied by `sql` (same params) and is never needed for
+  // correctness. The planner cannot derive an index bound from the keyset OR,
+  // so a caller whose ordered scan has an index on (org, effective time) adds
+  // it to seek straight to the cursor instead of filtering every newer row.
   if (cursor.direction === 'before') {
     return {
       sql: `AND (${occurredAtColumn} < ${occurredAtParam} OR (${occurredAtColumn} = ${occurredAtParam} AND ${idColumn} < ${idParam}))`,
+      rangeSql: `AND ${occurredAtColumn} <= ${occurredAtParam}`,
       params: [cursor.occurredAtIso, cursor.id],
     };
   }
 
   return {
     sql: `AND (${occurredAtColumn} > ${occurredAtParam} OR (${occurredAtColumn} = ${occurredAtParam} AND ${idColumn} > ${idParam}))`,
+    rangeSql: `AND ${occurredAtColumn} >= ${occurredAtParam}`,
     params: [cursor.occurredAtIso, cursor.id],
   };
 }
@@ -317,7 +331,8 @@ export function buildFutureOccurredAtClause(
 export function buildPageInfo(params: {
   limit: number;
   offset: number;
-  total: number;
+  /** null when the count was skipped: offset pages then read `fetchedCount`. */
+  total: number | null;
   returnedCount: number;
   useDateFeed: boolean;
   cursor: DateCursor | null;
@@ -342,10 +357,16 @@ export function buildPageInfo(params: {
     };
   }
 
+  // Without a total, an offset page knows it is not the last one only from the
+  // one-row overfetch: the query fetched `limit + 1` ids and reports how many.
+  const hasMore =
+    params.total == null
+      ? Number(params.fetchedCount ?? 0) > params.limit
+      : params.offset + params.returnedCount < params.total;
   return {
     limit: params.limit,
     offset: params.offset,
-    has_more: params.offset + params.returnedCount < params.total,
+    has_more: hasMore,
   };
 }
 
@@ -355,10 +376,13 @@ export function emptyListResponse(args: {
   effectiveOffset: number;
   useDateFeed: boolean;
   cursor: DateCursor | null;
+  includeTotal: boolean;
 }): ContentSearchResponse {
   return {
     content: [],
-    total: 0,
+    // An opted-out caller always reads null, even on a page known to be empty,
+    // so `total` means one thing per request shape.
+    total: args.includeTotal ? 0 : null,
     page: buildPageInfo({
       limit: args.limit,
       offset: args.effectiveOffset,

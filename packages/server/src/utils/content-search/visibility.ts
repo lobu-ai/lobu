@@ -81,6 +81,17 @@ export function buildProducedByAutomationClause(
   };
 }
 
+export interface OrgScopeWhere {
+  /** `AND (...)` fragment for a WHERE body, or '' when no scoping applies. */
+  sql: string;
+  params: Array<string | number | null>;
+  /**
+   * Bare, disjoint predicates whose union is `sql`, or null when the scope
+   * cannot be split (legacy bridge predicate, or no scoping).
+   */
+  branches: { direct: string; linked: string } | null;
+}
+
 /**
  * Build an org/workspace-scoping WHERE clause using EXISTS (no JOIN needed).
  * Returns an empty string when no scoping is needed (for example, entity_id is
@@ -101,9 +112,9 @@ export function buildOrgScopeWhere(options: {
   organization_id?: string;
   strict_organization_scope?: boolean;
   baseParamIndex: number;
-}): { sql: string; params: Array<string | number | null> } {
+}): OrgScopeWhere {
   if (!options.organization_id || (options.entity_id && !options.strict_organization_scope)) {
-    return { sql: '', params: [] };
+    return { sql: '', params: [], branches: null };
   }
 
   const p = `$${options.baseParamIndex}::text`;
@@ -111,9 +122,18 @@ export function buildOrgScopeWhere(options: {
   // the entity + connection branches into one GIN-indexed condition instead
   // of per-row OR/EXISTS subplans. Gated until the one-time backfill is done.
   if (useLinkedOrgScope()) {
+    const direct = `f.organization_id = ${p}`;
     return {
-      sql: `AND (f.organization_id = ${p} OR f.linked_org_ids @> ARRAY[${p}]::text[])`,
+      sql: `AND (${direct} OR f.linked_org_ids @> ARRAY[${p}]::text[])`,
       params: [options.organization_id],
+      // The same predicate as two DISJOINT arms. Their union is exactly `sql`;
+      // `IS DISTINCT FROM` keeps a row that matches both arms in one of them.
+      // The OR above hides `organization_id` from the index, so a top-N read
+      // runs one ordered, index-bounded scan per arm and merges them instead.
+      branches: {
+        direct,
+        linked: `f.linked_org_ids @> ARRAY[${p}]::text[] AND f.organization_id IS DISTINCT FROM ${p}`,
+      },
     };
   }
   const directCond = `f.organization_id = ${p}`;
@@ -122,6 +142,7 @@ export function buildOrgScopeWhere(options: {
   return {
     sql: `AND (${directCond} OR ${entityCond} OR ${connCond})`,
     params: [options.organization_id],
+    branches: null,
   };
 }
 

@@ -81,4 +81,26 @@ describe('buildOrgScopeWhere', () => {
     expect(b.sql).toContain('$7::text');
     expect(b.sql).not.toContain('$1::text');
   });
+
+  it('exposes disjoint direct/linked arms only under the linked-org bridge', () => {
+    const previous = process.env.LOBU_LINKED_ORG_SCOPE;
+    try {
+      delete process.env.LOBU_LINKED_ORG_SCOPE;
+      expect(buildOrgScopeWhere({ organization_id: 'org_x', baseParamIndex: 2 }).branches).toBeNull();
+
+      process.env.LOBU_LINKED_ORG_SCOPE = '1';
+      const result = buildOrgScopeWhere({ organization_id: 'org_x', baseParamIndex: 2 });
+      expect(result.sql).toBe(
+        'AND (f.organization_id = $2::text OR f.linked_org_ids @> ARRAY[$2::text]::text[])'
+      );
+      expect(result.branches).toEqual({
+        direct: 'f.organization_id = $2::text',
+        linked:
+          'f.linked_org_ids @> ARRAY[$2::text]::text[] AND f.organization_id IS DISTINCT FROM $2::text',
+      });
+    } finally {
+      if (previous === undefined) delete process.env.LOBU_LINKED_ORG_SCOPE;
+      else process.env.LOBU_LINKED_ORG_SCOPE = previous;
+    }
+  });
 });

@@ -241,6 +241,13 @@ export const GetContentSchema = Type.Object({
       default: "desc",
     })
   ),
+  include_total: Type.Optional(
+    Type.Boolean({
+      description:
+        "Count every match for `total` (default: true). Pass false on an infinite feed to skip the exact count: `total` is then null and page.has_more is computed from one extra fetched row. Ignored by content_ids, include_superseded, and automation_id reads, which always count.",
+      default: true,
+    })
+  ),
   include_superseded: Type.Optional(
     Type.Boolean({
       description:

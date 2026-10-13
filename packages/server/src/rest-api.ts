@@ -575,6 +575,10 @@ export async function restListTools(c: Context<{ Bindings: Env }>) {
  * - platforms / platform (singular is mapped to platforms[])
  * - since, until, min_similarity, limit, offset, sort_by, sort_order, cursors
  * - engagement_min, engagement_max, run_id, content_ids, interaction_status
+ * - semantic_type, agent_id, client_ids, mcp_activity_id,
+ *   produced_by_automation_id, analyzed_by_automation_id
+ * - include_total (optional): "false"/"0" skips the exact count (total: null)
+ * - list params accept CSV (`a,b`), repeated keys (`k=a&k=b`), or both
  * - classification_filters (JSON object, e.g. {"topic":["security"]}) and
  *   classification_source; malformed filters are a 400, never ignored
  * - include_classification (optional): aggregates only — "summary"
@@ -583,27 +587,44 @@ export async function restListTools(c: Context<{ Bindings: Env }>) {
  * no client flag for that (legacy `include_classifications` was internal-only
  * and must never be forwarded into getContent).
  */
-function parseIdListParam(raw: string | undefined): number[] | undefined {
-	if (!raw) return undefined;
-	const ids = raw
-		.split(",")
-		.map((id) => safeParseInt(id.trim(), { min: 1 }))
+/**
+ * A list param arrives as CSV (`k=a,b`), as repeated keys (`k=a&k=b` — what
+ * URLSearchParams.append produces for an array), or as both. `c.req.query(k)`
+ * returns only the FIRST of repeated keys, so list params read `queries(k)`.
+ */
+type ListParamRaw = string | string[] | undefined;
+
+function splitListParam(raw: ListParamRaw): string[] {
+	if (raw === undefined) return [];
+	return (Array.isArray(raw) ? raw : [raw])
+		.flatMap((value) => value.split(","))
+		.map((value) => value.trim())
+		.filter((value) => value.length > 0);
+}
+
+function parseIdListParam(raw: ListParamRaw): number[] | undefined {
+	const ids = splitListParam(raw)
+		.map((id) => safeParseInt(id, { min: 1 }))
 		.filter((id): id is number => id !== undefined);
 	return ids.length > 0 ? ids : undefined;
 }
 
-function parseStringListParam(raw: string | undefined): string[] | undefined {
-	if (!raw) return undefined;
-	const values = raw
-		.split(",")
-		.map((value) => value.trim())
-		.filter((value) => value.length > 0);
+function parseStringListParam(raw: ListParamRaw): string[] | undefined {
+	const values = splitListParam(raw);
 	return values.length > 0 ? values : undefined;
+}
+
+/** `false`/`0` → false, `true`/`1` → true; anything else is omitted (default). */
+function parseBooleanParam(raw: string | undefined): boolean | undefined {
+	const value = raw?.trim().toLowerCase();
+	if (value === "false" || value === "0") return false;
+	if (value === "true" || value === "1") return true;
+	return undefined;
 }
 
 /** Merge `platforms=a,b` with legacy singular `platform=a` into schema `platforms`. */
 export function parsePlatformsQuery(
-	platformsCsv: string | undefined,
+	platformsCsv: ListParamRaw,
 	platformSingular: string | undefined
 ): string[] | undefined {
 	const fromList = parseStringListParam(platformsCsv);
@@ -641,12 +662,12 @@ export function parseKnowledgeSearchQuery(c: Context<{ Bindings: Env }>) {
 		query: c.req.query("query")?.trim() || undefined,
 		entity_id: safeParseInt(c.req.query("entity_id"), { min: 1 }),
 		connection_ids:
-			parseIdListParam(c.req.query("connection_ids")) ??
+			parseIdListParam(c.req.queries("connection_ids")) ??
 			(connectionId ? [connectionId] : undefined),
-		feed_ids: parseIdListParam(c.req.query("feed_ids")),
-		run_ids: parseIdListParam(c.req.query("run_ids")),
+		feed_ids: parseIdListParam(c.req.queries("feed_ids")),
+		run_ids: parseIdListParam(c.req.queries("run_ids")),
 		platforms: parsePlatformsQuery(
-			c.req.query("platforms"),
+			c.req.queries("platforms"),
 			c.req.query("platform")
 		),
 		since: c.req.query("since"),
@@ -664,7 +685,7 @@ export function parseKnowledgeSearchQuery(c: Context<{ Bindings: Env }>) {
 		),
 		classification_source: c.req.query("classification_source") || undefined,
 		run_id: safeParseInt(c.req.query("run_id"), { min: 1 }),
-		content_ids: parseIdListParam(c.req.query("content_ids")),
+		content_ids: parseIdListParam(c.req.queries("content_ids")),
 		min_similarity: safeParseFloat(c.req.query("min_similarity"), {
 			min: 0,
 			max: 1,
@@ -679,7 +700,23 @@ export function parseKnowledgeSearchQuery(c: Context<{ Bindings: Env }>) {
 		after_occurred_at: c.req.query("after_occurred_at") || undefined,
 		after_id: safeParseInt(c.req.query("after_id"), { min: 1 }),
 		interaction_status: c.req.query("interaction_status") || undefined,
-		entity_types: parseStringListParam(c.req.query("entity_types")),
+		entity_types: parseStringListParam(c.req.queries("entity_types")),
+		// The same filters the POST read_knowledge body accepts. The public
+		// feed sends these whenever its filter bar sets them; dropping them here
+		// silently answered an unfiltered question.
+		semantic_type: parseStringListParam(c.req.queries("semantic_type")),
+		agent_id: c.req.query("agent_id")?.trim() || undefined,
+		client_ids: parseStringListParam(c.req.queries("client_ids")),
+		mcp_activity_id: c.req.query("mcp_activity_id")?.trim() || undefined,
+		produced_by_automation_id: safeParseInt(
+			c.req.query("produced_by_automation_id"),
+			{ min: 1 }
+		),
+		analyzed_by_automation_id: safeParseInt(
+			c.req.query("analyzed_by_automation_id"),
+			{ min: 1 }
+		),
+		include_total: parseBooleanParam(c.req.query("include_total")),
 	};
 }
 

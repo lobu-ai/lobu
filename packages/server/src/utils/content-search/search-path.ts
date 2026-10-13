@@ -70,6 +70,7 @@ export async function searchContentBySingleQuery(
   const cursor = resolveDateCursor(options);
   const effectiveOffset = useDateFeed ? 0 : offset;
   const fetchLimit = useDateFeed ? limit + 1 : limit;
+  const includeTotal = options.include_total !== false;
   const trimmedQuery = queryText.trim();
 
   // One resolution for both the query vector and the stored vectors it is ranked
@@ -210,7 +211,9 @@ export async function searchContentBySingleQuery(
       options.classification_source,
       classificationParamIdx
     );
-    if (!exists) return emptyListResponse({ limit, effectiveOffset, useDateFeed, cursor });
+    if (!exists) {
+      return emptyListResponse({ limit, effectiveOffset, useDateFeed, cursor, includeTotal });
+    }
     classificationClause = {
       sql: exists.clauses.map((clause) => `AND ${clause}`).join('\n          '),
       params: exists.params,
@@ -482,6 +485,61 @@ export async function searchContentBySingleQuery(
         WHERE ${useCandidatePath ? standardFiltersSQL : searchWhereSQL}
       )`;
 
+  // An opted-out caller skips the exact count; the column stays (NULL) so the
+  // final select's shape does not depend on the option.
+  const fullCountCteSql = includeTotal
+    ? `full_count AS (
+        SELECT COUNT(*) as total_count FROM filtered_ids
+      )`
+    : `full_count AS (
+        SELECT NULL::bigint as total_count
+      )`;
+  // Without a total, an offset page learns it is not the last one from a
+  // one-row overfetch: result_probe takes limit + 1 (bound below) and
+  // result_set keeps the first `limit` under the same total order.
+  const probeOrderBy = preferChronologicalOrdering
+    ? buildOrderByClause('date', options.sort_order, 'rp', 'result_set')
+    : `rp.combined_score DESC, (rp.id % 997) ASC, COALESCE(rp.occurred_at, rp.created_at) DESC, rp.id DESC`;
+  const nonDateResultSetSql = includeTotal
+    ? `result_set AS (
+        SELECT
+          fi.id,
+          ${textRankExpr} as text_rank,
+          ${similarityExpr} as similarity,
+          ${combinedScoreExpr} as combined_score,
+          (SELECT total_count FROM full_count) as total_count,
+          NULL::bigint as cursor_fetched_count
+        FROM filtered_ids fi
+        ORDER BY ${resultSetOrderBy}
+        LIMIT $${limitParamIdx}
+        OFFSET $${offsetParamIdx}
+      )`
+    : `result_probe AS (
+        SELECT
+          fi.id,
+          fi.occurred_at,
+          fi.created_at,
+          ${textRankExpr} as text_rank,
+          ${similarityExpr} as similarity,
+          ${combinedScoreExpr} as combined_score
+        FROM filtered_ids fi
+        ORDER BY ${resultSetOrderBy}
+        LIMIT $${limitParamIdx}
+        OFFSET $${offsetParamIdx}
+      ),
+      result_set AS (
+        SELECT
+          rp.id,
+          rp.text_rank,
+          rp.similarity,
+          rp.combined_score,
+          NULL::bigint as total_count,
+          (SELECT COUNT(*) FROM result_probe) as cursor_fetched_count
+        FROM result_probe rp
+        ORDER BY ${probeOrderBy}
+        LIMIT ${validatedLimit}
+      )`;
+
   const querySQL = useDateFeed
     ? `
       WITH RECURSIVE filtered_ids AS (
@@ -494,9 +552,7 @@ export async function searchContentBySingleQuery(
           AND iwf.run_id = $6::int
         WHERE ${searchWhereSQL}
       ),
-      full_count AS (
-        SELECT COUNT(*) as total_count FROM filtered_ids
-      ),
+      ${fullCountCteSql},
       candidate_set AS (
         SELECT
           fi.id,
@@ -527,22 +583,8 @@ export async function searchContentBySingleQuery(
       ${searchFinalSelect}`
     : `
       WITH RECURSIVE ${useCandidatePath ? searchCandidatesCteSql : ''}${nonDateFilteredIdsCteSql},
-      full_count AS (
-        SELECT COUNT(*) as total_count FROM filtered_ids
-      ),
-      result_set AS (
-        SELECT
-          fi.id,
-          ${textRankExpr} as text_rank,
-          ${similarityExpr} as similarity,
-          ${combinedScoreExpr} as combined_score,
-          (SELECT total_count FROM full_count) as total_count,
-          NULL::bigint as cursor_fetched_count
-        FROM filtered_ids fi
-        ORDER BY ${resultSetOrderBy}
-        LIMIT $${limitParamIdx}
-        OFFSET $${offsetParamIdx}
-      ),
+      ${fullCountCteSql},
+      ${nonDateResultSetSql},
       ${ctes}
       ${searchFinalSelect}`;
 
@@ -584,7 +626,7 @@ export async function searchContentBySingleQuery(
     ...classificationClause.params,
     ...(hasEmbedding ? [toVectorLiteral(queryEmbedding!), minSimilarity] : []),
     ...cursorClause.params,
-    ...(useDateFeed ? [fetchLimit] : [limit, effectiveOffset]),
+    ...(useDateFeed ? [fetchLimit] : [includeTotal ? limit : limit + 1, effectiveOffset]),
   ];
   if (hasTextCandidates) {
     // $tsq for the fulltext candidate branch. null (all-stopword query) →
@@ -613,7 +655,7 @@ export async function searchContentBySingleQuery(
   }
 
   let emptyPageTotal: number | null = null;
-  if (!useDateFeed && rawRows.length === 0 && effectiveOffset > 0) {
+  if (includeTotal && !useDateFeed && rawRows.length === 0 && effectiveOffset > 0) {
     const countSQL = `
       WITH RECURSIVE ${useCandidatePath ? searchCandidatesCteSql : ''}${nonDateFilteredIdsCteSql}
       SELECT COUNT(*) as total_count FROM filtered_ids`;
@@ -622,8 +664,9 @@ export async function searchContentBySingleQuery(
     emptyPageTotal = parseInt(String(countRows[0]?.total_count ?? '0'), 10);
   }
 
-  const total =
-    rawRows.length > 0
+  const total = !includeTotal
+    ? null
+    : rawRows.length > 0
       ? parseInt(String(rawRows[0].total_count ?? '0'), 10)
       : (emptyPageTotal ?? 0);
   const content = needClassifications

@@ -102,6 +102,30 @@ export function buildStandardWhereSql(
           AND ($13::text[] IS NULL OR f.metadata->>'mcp_session_id' = ANY($13::text[]))`;
 }
 
+/**
+ * The feed's recency key, spelled exactly as idx_events_live_org_effective_date
+ * indexes it. A `since`/`until` bound on `f.occurred_at` alone is the filter's
+ * meaning; the same bound restated on this expression is implied by it (a
+ * non-NULL occurred_at is its own COALESCE) and is what lets the index bound
+ * the ordered scan to the window instead of filtering the org's whole history.
+ */
+const EFFECTIVE_AT_SQL = 'COALESCE(f.occurred_at, f.created_at)';
+
+/**
+ * The redundant `since`/`until` restatement on EFFECTIVE_AT_SQL, for the date
+ * feed's direct-org arm only (see buildDateCandidateSetSql). Each param is a
+ * `$N::timestamptz` slot that may bind NULL, or null when the caller has none.
+ */
+export function buildEffectiveAtRangeSql(
+  sinceParam: string | null,
+  untilParam: string | null
+): string {
+  const parts: string[] = [];
+  if (sinceParam) parts.push(`AND (${sinceParam} IS NULL OR ${EFFECTIVE_AT_SQL} >= ${sinceParam})`);
+  if (untilParam) parts.push(`AND (${untilParam} IS NULL OR ${EFFECTIVE_AT_SQL} <= ${untilParam})`);
+  return parts.join(' ');
+}
+
 export const RUN_JOIN_SQL = `LEFT JOIN automation_run_events iwf
           ON iwf.event_id = f.id
           AND ($5::int IS NOT NULL)

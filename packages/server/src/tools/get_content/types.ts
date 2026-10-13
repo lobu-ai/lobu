@@ -23,7 +23,12 @@ export type { ContentItem };
  */
 export const GetContentResultSchema = Type.Object({
   content: Type.Array(Type.Unknown()),
-  total: Type.Integer(),
+  /**
+   * Exact match count. null only when the caller passed `include_total: false`
+   * on a read that honors it (date/score listings and search); `page.has_more`
+   * is then computed without counting.
+   */
+  total: Type.Union([Type.Integer(), Type.Null()]),
   /**
    * content_ids reads only. `total` counts returned rows (a supersede chain
    * expands to all its rows); `chain_total` counts the distinct lineages those
