@@ -462,7 +462,7 @@ export function linkedInInboxProgram() {
   const BATCH_BYTES = 128 * 1024;
   // Each observer returns its checkpoint position, plus `more` when the round
   // continues on the next pass.
-  async function observeNotifications({ previous, observedAt, observe, gap }) {
+  async function observeNotifications({ previous, observe, gap }) {
     let payload;
     for (let page = 1; ; page++) {
       const { rows, next } = await notificationsPage(payload);
@@ -489,7 +489,8 @@ export function linkedInInboxProgram() {
       }
       payload = next;
     }
-    return { after: observedAt };
+    // `seen` is the whole position: an unchanged inbox repeats its checkpoint.
+    return {};
   }
   async function catchUpConversation(
     { previous, observe, gap },
@@ -522,7 +523,8 @@ export function linkedInInboxProgram() {
     }
   }
   async function catchUpMessages(pass, mailbox) {
-    const { previous, observedAt, startedAt } = pass;
+    const { previous, observedAt } = pass;
+    const startedAt = previous?.started_at ?? observedAt;
     // A round reads threads active since `since` and their messages since
     // `floor`. A round that spans passes keeps its lower bounds, and the next
     // round keeps its floor: a thread that moved above the resume cursor is
@@ -556,6 +558,7 @@ export function linkedInInboxProgram() {
       cursor = next;
       if (page === CONVERSATION_PAGES_PER_PASS) {
         return {
+          started_at: startedAt,
           after: previous.after,
           floor: previous.floor,
           round: { ...round, cursor },
@@ -564,13 +567,13 @@ export function linkedInInboxProgram() {
       }
     }
     return {
+      started_at: startedAt,
       after: round.until,
       floor: previous?.round ? round.floor : round.since,
     };
   }
   async function snapshot(feed, previous, mailbox) {
     const observedAt = Date.now();
-    const startedAt = previous?.started_at ?? observedAt;
     const observed = new Map();
     const events = [];
     // Returns whether the previous checkpoint already held this identity.
@@ -602,7 +605,7 @@ export function linkedInInboxProgram() {
         occurred_at: occurredAt ?? new Date(observedAt).toISOString(),
       });
     }
-    const pass = { previous, observedAt, startedAt, observe, gap };
+    const pass = { previous, observedAt, observe, gap };
     const { more = false, ...position } =
       feed === "notifications"
         ? await observeNotifications(pass)
@@ -612,7 +615,6 @@ export function linkedInInboxProgram() {
     const checkpoint = {
       feed,
       account: mailbox,
-      started_at: startedAt,
       ...position,
       // Keep this pass's identities first, in source order, then older ones.
       seen: Object.fromEntries(
@@ -774,5 +776,5 @@ export function linkedInInboxProgram() {
       fail("Unable to attach source subscription");
     return { listening: true };
   }
-  globalThis[key] = { version, read, listen, detach, parseNotifications };
+  globalThis[key] = { version, read, listen, detach };
 }

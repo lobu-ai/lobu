@@ -512,6 +512,7 @@ describe("LinkedIn source adapter", () => {
       linkedin_inbox: {
         feed: "notifications",
         account: "urn:li:fsd_profile:synthetic-self",
+        // Resume checkpoints persisted before notification timestamps were removed.
         started_at: Date.now() - 120000,
         after: Date.now() - 60000,
         seen: {},
@@ -533,9 +534,9 @@ describe("LinkedIn source adapter", () => {
         batch.events.filter((e: any) => e.event_type === "source.gap")
       ).toEqual([expect.objectContaining({ resource_type: "notification" })]);
       expect(batch.more).toBe(false);
-      expect(batch.checkpoint.next.linkedin_inbox.after).toBeGreaterThan(
-        checkpoint.linkedin_inbox.after
-      );
+      expect(
+        Object.keys(batch.checkpoint.next.linkedin_inbox.seen)
+      ).toHaveLength(10);
     } finally {
       api.detach();
       dom.window.close();
@@ -718,25 +719,29 @@ describe("LinkedIn source adapter", () => {
   });
 
   test("decodes Flight byte-length text and stable notification identities, without executing HTML", async () => {
-    const { dom, api } = adapter(async () => {
-      throw new Error("unexpected fetch");
-    });
+    let stream = flight("Alex 👋\nreacted to your post");
+    const { dom, api } = adapter(async () => ({
+      ok: true,
+      json: async () => ({
+        miniProfile: { entityUrn: "urn:li:fs_miniProfile:synthetic-self" },
+      }),
+      text: async () =>
+        `<script>window.__como_rehydration__ = ${JSON.stringify([stream])};</script>`,
+    }));
     try {
-      const rows = api.parseNotifications(
-        flight("Alex 👋\nreacted to your post")
-      );
+      const rows = await api.read({ feed: "notifications" });
       expect(rows.rows).toHaveLength(1);
       expect(rows.rows[0].text).toBe("Alex 👋 reacted to your post");
       expect(rows.rows[0].id).toContain("groupBy=urn:li:activity:1000");
       expect(rows.rows[0].occurred_at).toBeNull();
-      expect(
-        api.parseNotifications(flight("Alex reacted to your post", "13h"))
-          .rows[0].revision
-      ).toEqual(api.parseNotifications(flight()).rows[0].revision);
-      expect(
-        api.parseNotifications(flight("Alex and Sam reacted to your post"))
-          .rows[0].revision
-      ).not.toEqual(api.parseNotifications(flight()).rows[0].revision);
+      stream = flight();
+      const initial = await api.read({ feed: "notifications" });
+      stream = flight("Alex reacted to your post", "13h");
+      const aged = await api.read({ feed: "notifications" });
+      expect(aged.rows[0].revision).toEqual(initial.rows[0].revision);
+      stream = flight("Alex and Sam reacted to your post");
+      const changed = await api.read({ feed: "notifications" });
+      expect(changed.rows[0].revision).not.toEqual(initial.rows[0].revision);
     } finally {
       dom.window.close();
     }
@@ -746,16 +751,18 @@ describe("LinkedIn source adapter", () => {
     const calls: string[] = [];
     const { dom, api } = adapter(async (url) => {
       calls.push(url);
-      if (url !== "/voyager/api/me") throw new Error("must not call an action");
       return {
         ok: true,
         json: async () => ({
           miniProfile: { entityUrn: "urn:li:fs_miniProfile:synthetic-self" },
         }),
+        text: async () =>
+          `<script>window.__como_rehydration__ = ${JSON.stringify(['0:{"unknown":"shape"}\n'])};</script>`,
       };
     });
     try {
-      expect(() => api.parseNotifications('0:{"unknown":"shape"}\n')).toThrow();
+      await expect(api.read({ feed: "notifications" })).rejects.toThrow();
+      calls.length = 0;
       await expect(
         api.read({
           feed: "notifications",
@@ -848,6 +855,8 @@ describe("LinkedIn source adapter", () => {
 
   test("observes references only, advances after matching receipt, and retries an unaccepted batch", async () => {
     let headline = "Alex reacted to your post";
+    let age = "12h";
+    let now = 1700000000000;
     const { dom, api } = adapter(async (url) =>
       url === "/voyager/api/me"
         ? {
@@ -861,10 +870,11 @@ describe("LinkedIn source adapter", () => {
         : {
             ok: true,
             text: async () =>
-              `<script>window.__como_rehydration__ = ${JSON.stringify([flight(headline)])};</script>`,
+              `<script>window.__como_rehydration__ = ${JSON.stringify([flight(headline, age)])};</script>`,
           }
     );
     Object.defineProperty(dom.window, "crypto", { value: webcrypto });
+    dom.window.Date.now = () => now;
     const timers: Array<() => Promise<void>> = [];
     dom.window.setTimeout = ((callback: () => Promise<void>) => {
       timers.push(callback);
@@ -915,8 +925,17 @@ describe("LinkedIn source adapter", () => {
       );
       expect(JSON.stringify(sent[2])).not.toContain(headline);
       ack(sent[2]);
+      age = "13h";
+      now += 3600000;
       await timers.shift()!();
       expect(sent[3].record.events).toEqual([]);
+      expect(sent[3].record.checkpoint.next).toEqual(
+        sent[2].record.checkpoint.next
+      );
+      ack(sent[3]);
+      await timers.shift()!();
+      expect(sent[4].record).toEqual(sent[3].record);
+      expect(sent[4].sequence).toBeGreaterThan(sent[3].sequence);
       dom.window.dispatchEvent(
         new dom.window.MessageEvent("message", {
           source: dom.window,
@@ -925,17 +944,23 @@ describe("LinkedIn source adapter", () => {
         })
       );
       await timers.shift()!();
-      expect(sent).toHaveLength(4);
+      expect(sent).toHaveLength(5);
     } finally {
       api.detach();
       dom.window.close();
     }
   });
 
-  test("recognizes the continuation encoded as a Flight text record", () => {
-    const { dom, api } = adapter(async () => {
-      throw new Error("unexpected fetch");
-    });
+  test("recognizes the continuation encoded as a Flight text record", async () => {
+    let stream: string;
+    const { dom, api } = adapter(async () => ({
+      ok: true,
+      json: async () => ({
+        miniProfile: { entityUrn: "urn:li:fs_miniProfile:synthetic-self" },
+      }),
+      text: async () =>
+        `<script>window.__como_rehydration__ = ${JSON.stringify([stream])};</script>`,
+    }));
     try {
       const payload = {
         startIndex: 20,
@@ -947,8 +972,9 @@ describe("LinkedIn source adapter", () => {
         pagerId: "com.linkedin.sdui.pagers.notificationsList",
         requestedArguments: { payload },
       });
-      const stream = `${flight()}4:T${new TextEncoder().encode(request).length.toString(16)},${request}`;
-      expect(api.parseNotifications(stream).next).toEqual(payload);
+      stream = `${flight()}4:T${new TextEncoder().encode(request).length.toString(16)},${request}`;
+      const result = await api.read({ feed: "notifications" });
+      expect(JSON.parse(result.nextCursor).page).toEqual(payload);
     } finally {
       dom.window.close();
     }
