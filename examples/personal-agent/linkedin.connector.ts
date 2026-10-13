@@ -532,7 +532,8 @@ const HOME_FEED_SCRAPE_DEADLINE_MS = 25_000;
  * token (NOT numeric). These selectors live here, not in the extension.
  */
 const HOME_FEED_SCRAPE_CONFIG = {
-  scroll: { max: 8, stall: 3, waitMs: 1500 },
+  // Current LinkedIn pages scroll inside <main>, not document/window.
+  scroll: { max: 8, stall: 3, waitMs: 1500, deep: true },
   loggedOutWhen: {
     pathRegex: "/(login|authwall|uas/login|checkpoint|signup)\\b",
   },
@@ -824,7 +825,7 @@ async function readMyLinkedInActivity(
     parseRows: (rows) => rows,
     allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
     // One action run reads several pages; a run-scoped scratch tab is released
-    // after each scrape, so reuse LinkedIn's anchor tab like home_feed does.
+    // after each scrape, so reuse LinkedIn's anchor tab across these reads.
     persistent: true,
   });
   if (!profile.loggedIn) {
@@ -909,12 +910,17 @@ async function readHomeFeed(ctx: ActionContext): Promise<ActionResult> {
     ? Math.min(10, Math.max(1, Math.trunc(rawScrolls)))
     : 6;
   const dispatcher = requireBrowser(ctx);
+  // Timeline reads prioritize more posts. Expanding a busy comment thread
+  // spends the shared expansion deadline before the scraper can paginate.
+  // Already-rendered comments remain readable through the same row selector.
+  const { expandRows: _expandRows, ...timelineConfig } =
+    HOME_FEED_SCRAPE_CONFIG;
   const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
     dispatcher,
     url: "https://www.linkedin.com/feed/",
     config: {
-      ...HOME_FEED_SCRAPE_CONFIG,
-      scroll: { ...HOME_FEED_SCRAPE_CONFIG.scroll, max: maxScrolls },
+      ...timelineConfig,
+      scroll: { ...timelineConfig.scroll, max: maxScrolls },
     },
     parseRows: (raw) =>
       (raw as HomeFeedRow[]).map((row) => ({
@@ -922,7 +928,9 @@ async function readHomeFeed(ctx: ActionContext): Promise<ActionResult> {
         post_identity: decodeHomeFeedPostIdentity(row.post_identity),
       })),
     allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
-    persistent: true,
+    // A hidden warm tab can retain only the initial batch. The default scrape
+    // window gives LinkedIn a fresh rendering surface and closes after reading.
+    persistent: false,
   });
   if (!loggedIn) {
     return {
@@ -3192,7 +3200,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.15.0",
+    version: "3.15.1",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
     browser: {
@@ -3838,9 +3846,8 @@ export default class LinkedInConnector extends ConnectorRuntime<
    * Personalized home feed via the extension's content-script scrape. Network
    * capture can't read it (the CDP debugger stops the feed rendering), so we
    * dispatch a `cs_scrape` against linkedin.com/feed/ with the home-feed
-   * selectors. Prefer an already-loaded feed tab in the paired Chrome profile;
-   * otherwise reuse a site-persistent tab so a slow first hydration is still
-   * available to the next scheduled retry.
+   * selectors. Use the same fresh scrape window as timeline reads: a hidden
+   * persistent tab can leave LinkedIn's lazy-loaded feed on its initial batch.
    */
   private async syncHomeFeed(
     maxScrolls: number,
@@ -3860,7 +3867,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
           post_identity: decodeHomeFeedPostIdentity(row.post_identity),
         })),
       allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
-      persistent: true,
+      persistent: false,
     });
 
     if (!loggedIn) {

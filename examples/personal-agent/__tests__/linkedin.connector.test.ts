@@ -1851,7 +1851,7 @@ describe("LinkedInConnector home_feed", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].action).toBe("navigate");
     expect(calls[0].input.cs_scrape).toBe(true);
-    expect(calls[0].input.persistent).toBe(true);
+    expect(calls[0].input.persistent).toBe(false);
     expect(calls[0].input.existing_tab_match).toBeUndefined();
     expect(calls[0].input.focus).toBe(false);
     expect(calls[0].input.url).toBe("https://www.linkedin.com/feed/");
@@ -3435,7 +3435,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.15.0");
+    expect(c.definition.version).toBe("3.15.1");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
@@ -4097,6 +4097,102 @@ describe("prepare_comment helpers", () => {
     });
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/Not logged into LinkedIn/);
+  });
+
+  test("read_home_feed paginates the inner feed without expanding comment threads", async () => {
+    const card = (index: number) => `
+      <div componentkey="expandedfixture_${index}FeedType_MAIN_FEED_RELEVANCE">
+        <button aria-label="Open control menu for post by Fixture Author"></button>
+        <p>Feed post Fixture Author • 1st A useful timeline post number ${index} with enough text to read.</p>
+        <div id="urn:li:activity:740000000000000000${index}"></div>
+        <button>999 comments</button>
+      </div>`;
+    const dom = new JSDOM(`<main style="overflow-y: auto">${card(1)}</main>`, {
+      url: "https://www.linkedin.com/feed/foryou/",
+    });
+    Object.defineProperty(dom.window.HTMLElement.prototype, "innerText", {
+      configurable: true,
+      get() {
+        return this.textContent ?? "";
+      },
+    });
+    dom.window.scrollTo = () => undefined;
+    dom.window.document.documentElement.scrollTo = () => undefined;
+    const main = dom.window.document.querySelector("main")!;
+    Object.defineProperties(main, {
+      clientHeight: { value: 800 },
+      scrollHeight: { value: 4000 },
+    });
+    let loaded = 1;
+    let openedComments = 0;
+    main.addEventListener("click", () => {
+      openedComments += 1;
+    });
+    main.scrollTo = () => {
+      if (loaded < 3) main.insertAdjacentHTML("beforeend", card(++loaded));
+    };
+    const globals = {
+      document: dom.window.document,
+      window: dom.window,
+      location: dom.window.location,
+      getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    };
+    const saved = Object.keys(globals).map(
+      (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const
+    );
+    let scrapeInput: Record<string, unknown> = {};
+    try {
+      for (const [key, value] of Object.entries(globals)) {
+        Object.defineProperty(globalThis, key, {
+          configurable: true,
+          writable: true,
+          value,
+        });
+      }
+      const result = await new LinkedInConnector().execute({
+        actionKey: "read_home_feed",
+        input: { max_scrolls: 3 },
+        browser: {
+          dispatch: async (_action: string, input: Record<string, unknown>) => {
+            scrapeInput = input;
+            const config = input.scrape_config as Record<string, any>;
+            return {
+              result: await genericScrape({
+                ...config,
+                scroll: { ...config.scroll, waitMs: 0 },
+                // Keep a regressed comment-expansion path bounded in this test.
+                ...(config.expandRows
+                  ? {
+                      expandRows: {
+                        ...config.expandRows,
+                        maxDurationMs: 1,
+                        waitMs: 0,
+                      },
+                    }
+                  : {}),
+              }),
+            };
+          },
+        },
+      });
+      expect(result.success).toBe(true);
+      expect(
+        result.output.items.map((item: { id: string }) => item.id)
+      ).toEqual([
+        "li_home_activity_7400000000000000001",
+        "li_home_activity_7400000000000000002",
+        "li_home_activity_7400000000000000003",
+      ]);
+      expect(openedComments).toBe(0);
+      expect(scrapeInput.persistent).toBe(false);
+      expect(scrapeInput.focus).toBe(false);
+    } finally {
+      dom.window.close();
+      for (const [key, descriptor] of saved) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else delete (globalThis as Record<string, unknown>)[key];
+      }
+    }
   });
 
   test("read_home_feed returns addressable posts without storing events", async () => {
