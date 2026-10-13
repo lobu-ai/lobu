@@ -257,7 +257,12 @@ describe("social research cards and browser actions", () => {
           kind: "page_visit",
           urls: [postUrl],
         });
-      } else expect(h.execute).not.toHaveBeenCalled();
+      } else {
+        expect(h.execute).not.toHaveBeenCalled();
+        const body = h.send.mock.calls[0][0].body;
+        expect(body).toContain(finding().draft);
+        expect(body).not.toContain("needs setup");
+      }
     }
   });
 
@@ -268,7 +273,7 @@ describe("social research cards and browser actions", () => {
     (h.ctx.extracted_data.coverage as any[])[0].status = "blocked";
     await h.run();
     expect(h.send.mock.calls[0][0].title).toBe(
-      "Social research needs setup · linkedin"
+      "Social research could not read · linkedin"
     );
     expect(h.execute).not.toHaveBeenCalled();
   });
@@ -288,7 +293,7 @@ describe("social research cards and browser actions", () => {
     expect(h.send.mock.calls[0][0].body).toContain(f.draft);
   });
 
-  test("three detailed setup failures fit the notification and idempotency contracts", async () => {
+  test("three detailed blocked sources fit the notification and idempotency contracts", async () => {
     const h = harness([]);
     for (const c of h.ctx.extracted_data.coverage as any[]) {
       c.status = "blocked";

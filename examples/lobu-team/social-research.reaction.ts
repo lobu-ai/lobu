@@ -264,13 +264,13 @@ export default async function deliverSocialResearch(
     let draftStatus = finding.draft
       ? "Draft saved; browser handoff needs setup"
       : "No comment suggested";
+    // TikTok's prepare_comment does not support photo posts.
+    const photo = finding.platform === "tiktok" && url.includes("/photo/");
     if (finding.platform === "x" && finding.draft)
       draftStatus = "Draft saved for manual use on X";
-    if (
-      finding.draft &&
-      draftConnection &&
-      !(finding.platform === "tiktok" && url.includes("/photo/"))
-    ) {
+    if (photo && finding.draft)
+      draftStatus = "Draft saved for manual use on this TikTok photo post";
+    if (finding.draft && draftConnection && !photo) {
       const staged = await client.operations.execute({
         connection_id: draftConnection.connection_id,
         operation_key: "prepare_comment",
@@ -332,13 +332,13 @@ export default async function deliverSocialResearch(
   }
   for (const blocked of coverage.filter((c) => c.status === "blocked")) {
     await client.notifications.send({
-      title: `Social research needs setup · ${blocked.platform}`,
+      title: `Social research could not read · ${blocked.platform}`,
       body: clip(blocked.detail, 1000),
       recipients: [recipient],
       idempotency_key: `social-research:setup:${ctx.automation.id}:${blocked.platform}:${new Date(start).toISOString().slice(0, 10)}`,
       automation_source: source,
     });
   }
-  // Empty and blocked runs remain auditable; do not disguise setup failures as no findings.
+  // Empty and blocked runs remain auditable; do not disguise unread sources as no findings.
   return { coverage, findings: results };
 }
