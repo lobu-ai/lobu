@@ -71,6 +71,12 @@ import {
   maxEventCursor,
   takeBatch,
 } from "./takeout-utils.ts";
+import {
+  observeLinkedInInbox,
+  readLinkedInInbox,
+  type LinkedInInboxCheckpoint,
+} from "./linkedin-inbox.ts";
+import { prepareLinkedInDraft } from "./linkedin-drafts.ts";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -82,7 +88,7 @@ import {
  * checkpoints on last_job_id/last_timestamp). No production checkpoint exists,
  * so the rename is safe.
  */
-interface LinkedInCheckpoint {
+interface LinkedInCheckpoint extends LinkedInInboxCheckpoint {
   // Live feed cursors.
   last_post_id?: string;
   last_job_id?: string;
@@ -2926,7 +2932,7 @@ function notActionableMissingPostId(postUrlRaw: string): ActionResult {
 const LINKEDIN_TAKEOUT_FEEDS: Record<
   string,
   {
-    cursor: keyof LinkedInCheckpoint;
+    cursor: Exclude<keyof LinkedInCheckpoint, "linkedin_inbox">;
     read: (readCsv: TakeoutCsvReader) => EventEnvelope[];
   }
 > = {
@@ -2995,8 +3001,8 @@ export default class LinkedInConnector extends ConnectorRuntime<
     key: "linkedin",
     name: "LinkedIn",
     description:
-      "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.17.0",
+      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes and prepare message, post, or comment drafts for human submission. Also supports local LinkedIn Data Export CSV files.",
+    version: "3.18.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
     browser: {
@@ -3051,6 +3057,32 @@ export default class LinkedInConnector extends ConnectorRuntime<
     },
     feeds: {
       // ── Live (Chrome-extension) feeds ──────────────────────────
+      notifications: {
+        key: "notifications",
+        name: "Notifications",
+        description:
+          "Read notification content and links without marking them seen. Subscriptions check once per minute while the paired browser is online; grouped notification content changes activate Automations. Exact source timestamps are unavailable.",
+        read: (ctx) => readLinkedInInbox(ctx),
+        observe: (ctx) => observeLinkedInInbox(ctx),
+        webhook: { mode: "trigger", events: ["notification.changed"] },
+        eventKinds: {
+          "notification.changed": {
+            description: "A new or meaningfully changed LinkedIn notification",
+          },
+        },
+      },
+      live_messages: {
+        key: "live_messages",
+        name: "Live Messages",
+        description:
+          "Read recent messages from inbox conversations without marking them seen. The cursor pages conversations and their recent message pages, not a full history export. Subscriptions check once per minute while the browser is online and report catch-up gaps.",
+        read: (ctx) => readLinkedInInbox(ctx),
+        observe: (ctx) => observeLinkedInInbox(ctx),
+        webhook: { mode: "trigger", events: ["message.created"] },
+        eventKinds: {
+          "message.created": { description: "A new LinkedIn inbox message" },
+        },
+      },
       home_feed: {
         sync: (ctx) => this.syncFeed(ctx),
         key: "home_feed",
@@ -3275,6 +3307,47 @@ export default class LinkedInConnector extends ConnectorRuntime<
             liked: { type: "boolean" },
           },
           additionalProperties: false,
+        },
+      },
+      prepare_message: {
+        key: "prepare_message",
+        name: "Prepare message",
+        kind: "write",
+        description:
+          "Prepare a text reply in an exact existing conversation. Execute with activation: { kind: 'page_visit', urls: [conversation_url] }. When the user visits that URL, fill its empty composer. The user clicks Send. Never sends or overwrites a draft.",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["conversation_url", "body"],
+          additionalProperties: false,
+          properties: {
+            conversation_url: { type: "string", format: "uri" },
+            body: { type: "string", minLength: 1, maxLength: 3000 },
+          },
+        },
+      },
+      prepare_post: {
+        key: "prepare_post",
+        name: "Prepare personal post",
+        kind: "write",
+        description:
+          "Prepare a text post for the signed-in member. Execute with activation: { kind: 'page_visit', urls: ['https://www.linkedin.com/feed/foryou/'] }. When the user visits that page, open its personal post composer and fill an empty draft. The user clicks Post. Never publishes or overwrites a draft.",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["body"],
+          additionalProperties: false,
+          properties: {
+            body: { type: "string", minLength: 1, maxLength: 3000 },
+          },
         },
       },
       prepare_comment: {
@@ -3508,6 +3581,12 @@ export default class LinkedInConnector extends ConnectorRuntime<
             ctx.input.liked
           ),
         };
+      }
+      if (
+        ctx.actionKey === "prepare_message" ||
+        ctx.actionKey === "prepare_post"
+      ) {
+        return await prepareLinkedInDraft(ctx);
       }
       if (ctx.actionKey === "read_my_activity") {
         return await readMyLinkedInActivity(ctx);
@@ -3913,7 +3992,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
 
   private result(
     ctx: SyncContext<LinkedInCheckpoint, LinkedInConfig>,
-    key: keyof LinkedInCheckpoint,
+    key: Exclude<keyof LinkedInCheckpoint, "linkedin_inbox">,
     allEvents: EventEnvelope[],
     max: number
   ): LinkedInSyncPage {
