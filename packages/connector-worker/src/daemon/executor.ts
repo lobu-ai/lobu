@@ -10,8 +10,9 @@ import type { Env, EventEnvelope } from '@lobu/connector-sdk';
 import { stableStringify } from '@lobu/core/contracts/tools/view-content-hash';
 import type { AgentKind } from '@lobu/core/contracts/worker/device-automation';
 import { executeAutomationRun } from './automation.js';
+import { monitorActionRun } from './action-monitor.js';
 import {
-  executeDaemonBuiltin,
+  executeDaemonBuiltinActionRun,
   hasDaemonBuiltin,
   hasDaemonBuiltinConnector,
 } from './builtins/index.js';
@@ -525,25 +526,6 @@ function extractExecutionDiagnostics(error: unknown):
   };
 }
 
-/** Action work stops when its durable lease is revoked. Network failures alone
- * do not prove revocation; the gateway's structured 409 does. */
-function monitorActionRun(client: ExecutorClient, runId: number, cfg: ExecutorConfig) {
-  const controller = new AbortController();
-  const signal = cfg.shutdownSignal
-    ? AbortSignal.any([controller.signal, cfg.shutdownSignal])
-    : controller.signal;
-  const interval = setInterval(async () => {
-    try {
-      const response = await client.heartbeat(runId);
-      if (response?.continue === false) controller.abort();
-    } catch (error) {
-      if (error instanceof WorkerHttpError && error.status === 409) controller.abort();
-      else log.debug('[executor] Action heartbeat failed:', error);
-    }
-  }, cfg.heartbeatIntervalMs);
-  return { signal, revoked: () => controller.signal.aborted, stop: () => clearInterval(interval) };
-}
-
 /**
  * Execute an action run (async action with approval)
  */
@@ -665,67 +647,6 @@ async function executeActionRun(
     });
 
     return { itemsCollected: 0, error: errorMessage };
-  } finally {
-    monitor.stop();
-  }
-}
-
-async function executeDaemonBuiltinActionRun(
-  client: ExecutorClient,
-  job: PollResponse,
-  cfg: ExecutorConfig
-): Promise<{ itemsCollected: number; error?: string }> {
-  const { run_id, connector_key, action_key, action_input } = job;
-  if (!run_id || !connector_key || !action_key) {
-    throw new Error('Invalid daemon built-in action: missing run_id, connector_key, or action_key');
-  }
-  if (job.compiled_code) {
-    const message =
-      'operation_backend_unavailable: a daemon built-in payload must not contain compiled_code';
-    await completeActionOnce(client, {
-      run_id,
-      worker_id: client.id,
-      status: 'failed',
-      error_message: message,
-    });
-    return { itemsCollected: 0, error: message };
-  }
-
-  const monitor = monitorActionRun(client, run_id, cfg);
-
-  try {
-    const result = await executeDaemonBuiltin({
-      connectorKey: connector_key,
-      actionKey: action_key,
-      input: (action_input ?? {}) as Record<string, unknown>,
-      shutdownSignal: monitor.signal,
-    });
-    if (monitor.revoked()) return { itemsCollected: 0 };
-    if (!result.ok) {
-      const message = `${result.code}: ${result.error}`;
-      await completeActionOnce(client, {
-        run_id,
-        worker_id: client.id,
-        status: 'failed',
-        error_message: message,
-        ...(result.output ? { action_output: result.output } : {}),
-      });
-      return { itemsCollected: 0, error: message };
-    }
-
-    await completeActionOnce(client, {
-      run_id,
-      worker_id: client.id,
-      status: 'success',
-      action_output: result.output,
-    });
-    return { itemsCollected: 0 };
-  } catch (error) {
-    // Delivery uncertainty is not an execution failure. The immutable payload
-    // was retried above; never send a contradictory terminal result here.
-    const message = error instanceof Error ? error.message : String(error);
-    log.info(`[executor] Daemon built-in terminal delivery uncertain for ${run_id}:`, message);
-    return { itemsCollected: 0, error: message };
   } finally {
     monitor.stop();
   }

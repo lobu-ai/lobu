@@ -5,6 +5,7 @@ import {
 } from '@lobu/core/contracts/worker/device-automation';
 import type { PollResponse } from '@lobu/core/contracts/worker/protocol';
 import { executeAutomationRun, type AutomationExecutorConfig } from './automation.js';
+import { executeDaemonBuiltinActionRun, hasDaemonBuiltin } from './builtins/index.js';
 import { defaultDeviceMaxConcurrentJobs } from './device-concurrency.js';
 import { executeDeviceChatRun } from './device-chat.js';
 import type { AutomationAcpAdapters } from './automation-acp.js';
@@ -240,7 +241,7 @@ async function rejectUnadvertisedConnector(
 }
 
 /**
- * Whether the native bridge implements this run's connector.
+ * Whether the app advertised a local implementation of this run's connector.
  *
  * The daemon answers from the inventory the Mac app itself declared over the
  * bridge — the same manifests it advertises to the gateway — so what it will
@@ -250,7 +251,7 @@ async function rejectUnadvertisedConnector(
  * the contract's identity; a contract carrying its implementation cannot be
  * shared with a second endpoint.
  *
- * A payload carrying `compiled_code` is not bridge work by construction: the
+ * A payload carrying `compiled_code` is not local connector work: the
  * gateway ships code only for connectors the device does NOT implement.
  */
 export function bridgeImplementsRun(
@@ -265,6 +266,39 @@ export function bridgeImplementsRun(
       manifest !== null &&
       (manifest as { key?: unknown }).key === job.connector_key
   );
+}
+
+/**
+ * Run a connector claim the app advertised. A daemon built-in (os.shell) runs
+ * here, with the built-in owning timeout, cancellation and process reaping.
+ * Everything else is native app work over the bridge.
+ */
+export async function executeAdvertisedConnectorRun(
+  client: WorkerClient,
+  job: PollResponse,
+  dependencies: {
+    advertisementProvider: MutableWorkerAdvertisementProvider | undefined;
+    bridge: NativeBridgeClient | undefined;
+    shutdownSignal?: AbortSignal;
+  }
+): Promise<unknown> {
+  if (!bridgeImplementsRun(job, dependencies.advertisementProvider)) {
+    return rejectUnadvertisedConnector(client, job);
+  }
+  if (
+    job.run_type === 'action' &&
+    job.connector_key &&
+    job.action_key &&
+    hasDaemonBuiltin(job.connector_key, job.action_key)
+  ) {
+    return executeDaemonBuiltinActionRun(client, job, {
+      heartbeatIntervalMs: 30000,
+      ...(dependencies.shutdownSignal ? { shutdownSignal: dependencies.shutdownSignal } : {}),
+      platform: 'macos',
+    });
+  }
+  if (!dependencies.bridge) return rejectUnsupportedRun(client, job);
+  return executeNativeBridgeRun(client, dependencies.bridge, job);
 }
 
 export function createMacDeviceDaemon(
@@ -375,13 +409,11 @@ export function createMacDeviceDaemon(
         return executeDeviceChatRun(client, job, automationConfig);
       }
       if (job.run_type === 'sync' || job.run_type === 'action' || job.run_type === 'auth') {
-        if (!bridgeImplementsRun(job, dependencies.advertisementProvider)) {
-          return rejectUnadvertisedConnector(client, job);
-        }
-        if (!nativeBridge) {
-          return rejectUnsupportedRun(client, job);
-        }
-        return executeNativeBridgeRun(client, nativeBridge, job);
+        return executeAdvertisedConnectorRun(client, job, {
+          advertisementProvider: dependencies.advertisementProvider,
+          bridge: nativeBridge,
+          shutdownSignal: shutdownController.signal,
+        });
       }
       return rejectUnsupportedRun(client, job);
     },

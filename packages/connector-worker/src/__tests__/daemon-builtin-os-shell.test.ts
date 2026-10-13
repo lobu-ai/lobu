@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeRun } from '../daemon/executor.js';
@@ -133,6 +133,43 @@ describe('daemon-builtin os.shell', () => {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
       }
+    }
+  });
+
+  // The Mac contract is the signed-in user's login shell and environment; only
+  // the daemon's own credentials are withheld.
+  test.skipIf(!existsSync('/bin/zsh'))('runs a Mac command in the user login shell without daemon credentials', async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), 'lobu-shell-profile-'));
+    const names = ['WORKER_API_TOKEN', 'LOBU_API_TOKEN', 'LOBU_MEMORY_URL', 'SYNTHETIC_USER_SETTING', 'ZDOTDIR'];
+    const saved = names.map((name) => [name, process.env[name]] as const);
+    Object.assign(process.env, {
+      WORKER_API_TOKEN: 'worker-secret',
+      LOBU_API_TOKEN: 'api-secret',
+      LOBU_MEMORY_URL: 'https://memory.invalid',
+      SYNTHETIC_USER_SETTING: 'kept',
+      ZDOTDIR: profileDir,
+    });
+    try {
+      const result = await runShellBuiltin(
+        {
+          command:
+            '[[ -o login ]] && echo login; echo "${WORKER_API_TOKEN:-none} ${LOBU_API_TOKEN:-none} ${LOBU_MEMORY_URL:-none} $SYNTHETIC_USER_SETTING"; echo "$PATH"',
+          cwd: process.cwd(),
+        },
+        undefined,
+        'macos'
+      );
+      expect(result.success).toBe(true);
+      const [login, inherited, path] = result.stdout.trim().split('\n');
+      expect(login).toBe('login');
+      expect(inherited).toBe('none none none kept');
+      expect(path).toContain('/opt/homebrew/bin');
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      rmSync(profileDir, { recursive: true, force: true });
     }
   });
 
