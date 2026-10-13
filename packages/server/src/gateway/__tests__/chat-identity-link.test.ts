@@ -171,7 +171,8 @@ describe("chat identity link routes", () => {
     const html = await res.text();
     expect(html).toContain("Acme Synthetic");
     expect(html).toContain(member.email);
-    expect(html).toContain("any workspace where you are a member");
+    expect(html).toContain("bot will then act as you in <strong>Acme Synthetic</strong>");
+    expect(html).not.toContain("any workspace");
     expect(html).toContain("Group messages will continue to use only shared workspace access");
     expect(html).toContain(`gchat: ${SENDER.displayName} (${SENDER.name})`);
     expect(html).toContain('method="post"');

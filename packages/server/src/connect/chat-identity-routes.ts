@@ -223,7 +223,7 @@ export function createChatIdentityRoutes(deps: ChatIdentityRouteDeps = DEFAULT_D
     return c.html(
       connectPage(
         'Link your chat account',
-        `<p>Link this chat account to your Lobu account through <strong>${escapeHtml(orgName)}</strong>. Direct messages you send the bot will then act as you in any workspace where you are a member. Group messages will continue to use only shared workspace access.</p>` +
+        `<p>Link this chat account to your Lobu account through <strong>${escapeHtml(orgName)}</strong>. Direct messages you send the bot will then act as you in <strong>${escapeHtml(orgName)}</strong>. Group messages will continue to use only shared workspace access.</p>` +
           `<p>Chat account: <code>${escapeHtml(chatAccountLabel(claim))}</code><br>Lobu account: <code>${escapeHtml(lobuAccount)}</code></p>` +
           `<form method="post"><input type="hidden" name="token" value="${escapeHtml(token)}"><button type="submit">Link account</button></form>` +
           '<p>Not you? Sign in to Lobu with the right account first.</p>'
