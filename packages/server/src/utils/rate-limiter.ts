@@ -89,6 +89,26 @@ const MAX_PENDING_WRITES = 500;
 /**
  * Postgres-backed fixed-window rate limiter with a synchronous local facade.
  */
+/**
+ * The one atomic cluster-wide increment: bump this key's counter for the
+ * window and return the committed count (null if the row came back empty).
+ */
+async function upsertSharedCount(
+  db: DbClient,
+  key: string,
+  windowStartSec: number
+): Promise<number | null> {
+  const rows = await db<{ count: number }>`
+    INSERT INTO rate_limit_counters (key, window_start, count)
+    VALUES (${key}, ${new Date(windowStartSec * 1000)}, 1)
+    ON CONFLICT (key, window_start)
+    DO UPDATE SET count = rate_limit_counters.count + 1
+    RETURNING count
+  `;
+  const count = rows[0]?.count;
+  return typeof count === 'number' ? count : null;
+}
+
 export class RateLimiter {
   private windows = new Map<string, WindowState>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -202,15 +222,7 @@ export class RateLimiter {
   private async incrementShared(key: string, windowStartSec: number): Promise<number | null> {
     if (Date.now() < this.dbBackoffUntilMs) return null;
     try {
-      const rows = await getDb()<{ count: number }>`
-        INSERT INTO rate_limit_counters (key, window_start, count)
-        VALUES (${key}, ${new Date(windowStartSec * 1000)}, 1)
-        ON CONFLICT (key, window_start)
-        DO UPDATE SET count = rate_limit_counters.count + 1
-        RETURNING count
-      `;
-      const count = rows[0]?.count;
-      return typeof count === 'number' ? count : null;
+      return await upsertSharedCount(getDb(), key, windowStartSec);
     } catch (err) {
       this.noteDbFailure(err);
       return null;
@@ -245,17 +257,9 @@ export class RateLimiter {
       return;
     }
 
-    const windowStart = new Date(windowStartSec * 1000);
-    const write: Promise<void> = db<{ count: number }>`
-      INSERT INTO rate_limit_counters (key, window_start, count)
-      VALUES (${key}, ${windowStart}, 1)
-      ON CONFLICT (key, window_start)
-      DO UPDATE SET count = rate_limit_counters.count + 1
-      RETURNING count
-    `
-      .then((rows) => {
-        const sharedCount = rows[0]?.count;
-        if (typeof sharedCount !== 'number') return;
+    const write: Promise<void> = upsertSharedCount(db, key, windowStartSec)
+      .then((sharedCount) => {
+        if (sharedCount === null) return;
         const state = this.windows.get(key);
         // Only fold back into the same window; a rolled-over window starts fresh.
         if (state && state.windowStart === windowStartSec && sharedCount > state.sharedCount) {
