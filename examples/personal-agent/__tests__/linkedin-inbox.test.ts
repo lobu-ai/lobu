@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
 import { webcrypto } from "node:crypto";
 import { linkedInInboxProgram } from "../linkedin-inbox-adapter.js";
+import { observeLinkedInInbox, readLinkedInInbox } from "../linkedin-inbox";
+import LinkedInConnector from "../linkedin.connector";
 
 function adapter(fetcher: (url: string, init?: any) => Promise<any>) {
   const dom = new JSDOM("", {
@@ -55,6 +57,37 @@ function flight(text = "Alex reacted to your post", age = "12h") {
 }
 
 describe("LinkedIn source adapter", () => {
+  test("read and observe preserve a warm page's existing subscription", async () => {
+    const settledUrl = "https://www.linkedin.com/feed/foryou/";
+    expect(new LinkedInConnector().definition.browser?.accountProbe?.url).toBe(
+      settledUrl
+    );
+    let documentLoads = 0;
+    const browser = {
+      dispatch: async (operation: string, input: any) => {
+        if (operation === "navigate") {
+          expect(input.persistent).toBe(true);
+          // The extension retains a warm document only for the same route.
+          // LinkedIn redirects /feed/ to /feed/foryou/ on every navigation.
+          if (input.url !== settledUrl) documentLoads++;
+          return { tab_id: 42 };
+        }
+        if (operation === "feed_listen")
+          return {
+            bridge_id: "synthetic-bridge",
+            token: "synthetic-token",
+            listening: true,
+            subscription: { scope_key: "synthetic-scope" },
+          };
+        return { value: { rows: [], listening: true } };
+      },
+    };
+    await observeLinkedInInbox({ browser, feedKey: "notifications" } as any);
+    await observeLinkedInInbox({ browser, feedKey: "live_messages" } as any);
+    await readLinkedInInbox({ browser, feedKey: "notifications" } as any);
+    expect(documentLoads).toBe(0);
+  });
+
   test("a full recent message page reports a gap and advances instead of wedging on rebind", async () => {
     const now = Date.now();
     const mailbox = "urn:li:fsd_profile:synthetic-self";

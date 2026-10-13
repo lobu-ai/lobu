@@ -77,6 +77,7 @@ import {
   type LinkedInInboxCheckpoint,
 } from "./linkedin-inbox.ts";
 import { prepareLinkedInDraft } from "./linkedin-drafts.ts";
+import { LINKEDIN_HOME_URL } from "./linkedin-browser-script.ts";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -924,7 +925,7 @@ async function readHomeFeed(ctx: ActionContext): Promise<ActionResult> {
     HOME_FEED_SCRAPE_CONFIG;
   const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
     dispatcher,
-    url: "https://www.linkedin.com/feed/",
+    url: LINKEDIN_HOME_URL,
     config: {
       ...timelineConfig,
       scroll: { ...timelineConfig.scroll, max: maxScrolls },
@@ -3002,14 +3003,14 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes and prepare message, post, or comment drafts for human submission. Also supports local LinkedIn Data Export CSV files.",
-    version: "3.18.0",
+    version: "3.18.3",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
     browser: {
       authMethods: ["browser"],
       origins: ["https://www.linkedin.com"],
       accountProbe: {
-        url: "https://www.linkedin.com/feed/",
+        url: LINKEDIN_HOME_URL,
         // Only the self-profile endpoint; vanity profile URLs can be renamed.
         expression: `(async () => {
           const raw = document.cookie.split('; ').find(cookie => cookie.startsWith('JSESSIONID='));
@@ -3374,8 +3375,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "prepare_post",
         name: "Prepare personal post",
         kind: "write",
-        description:
-          "Prepare a text post for the signed-in member. Execute with activation: { kind: 'page_visit', urls: ['https://www.linkedin.com/feed/foryou/'] }. When the user visits that page, open its personal post composer and fill an empty draft. The user clicks Post. Never publishes or overwrites a draft.",
+        description: `Prepare a text post for the signed-in member. Execute with activation: { kind: 'page_visit', urls: ['${LINKEDIN_HOME_URL}'] }. When the user visits that page, open its personal post composer and fill an empty draft. The user clicks Post. Never publishes or overwrites a draft.`,
         annotations: {
           openWorldHint: true,
           destructiveHint: false,
@@ -3775,7 +3775,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
 
     // home_feed is the one feed that needs a content-script scrape (the CDP
     // debugger stops the personalized feed from rendering) and takes no
-    // company_url — it always reads linkedin.com/feed/.
+    // company_url — it always reads LINKEDIN_HOME_URL.
     if (feedKey === "home_feed") {
       const homeScrolls = readHomeScrollBudget(config);
       return this.syncHomeFeed(homeScrolls, checkpoint, requireBrowser(ctx));
@@ -3803,7 +3803,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
   /**
    * Personalized home feed via the extension's content-script scrape. Network
    * capture can't read it (the CDP debugger stops the feed rendering), so we
-   * dispatch a `cs_scrape` against linkedin.com/feed/ with the home-feed
+   * dispatch a `cs_scrape` against LINKEDIN_HOME_URL with the home-feed
    * selectors. Use the same fresh scrape window as timeline reads: a hidden
    * persistent tab can leave LinkedIn's lazy-loaded feed on its initial batch.
    */
@@ -3814,7 +3814,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
   ): Promise<LinkedInSyncPage> {
     const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
       dispatcher,
-      url: "https://www.linkedin.com/feed/",
+      url: LINKEDIN_HOME_URL,
       config: {
         ...HOME_FEED_SCRAPE_CONFIG,
         scroll: { ...HOME_FEED_SCRAPE_CONFIG.scroll, max: maxScrolls },

@@ -3,13 +3,16 @@ import {
   type ActionContext,
   type ActionResult,
 } from "@lobu/connector-sdk";
-import { linkedInScriptArgument } from "./linkedin-browser-script";
+import {
+  LINKEDIN_HOME_URL,
+  linkedInScriptArgument,
+} from "./linkedin-browser-script.ts";
 
 export function linkedInDraftUrl(
   kind: string,
   input: Record<string, unknown>
 ): string {
-  if (kind === "prepare_post") return "https://www.linkedin.com/feed/foryou/";
+  if (kind === "prepare_post") return LINKEDIN_HOME_URL;
   const url = new URL(String(input.conversation_url ?? ""));
   if (
     url.origin !== "https://www.linkedin.com" ||

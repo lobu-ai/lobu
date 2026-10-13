@@ -1846,7 +1846,7 @@ describe("LinkedInConnector home_feed", () => {
     expect(calls[0].input.persistent).toBe(false);
     expect(calls[0].input.existing_tab_match).toBeUndefined();
     expect(calls[0].input.focus).toBe(false);
-    expect(calls[0].input.url).toBe("https://www.linkedin.com/feed/");
+    expect(calls[0].input.url).toBe("https://www.linkedin.com/feed/foryou/");
     expect(
       (calls[0].input.scrape_config as { scroll: { max: number } }).scroll.max
     ).toBe(4);
@@ -3420,7 +3420,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.18.0");
+    expect(c.definition.version).toBe("3.18.3");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );

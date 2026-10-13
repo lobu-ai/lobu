@@ -1,3 +1,5 @@
+export const LINKEDIN_HOME_URL = "https://www.linkedin.com/feed/foryou/";
+
 /** Keep data inert in generated browser code, including an HTML script context. */
 export function linkedInScriptArgument(value: unknown): string {
   const json = JSON.stringify(value);

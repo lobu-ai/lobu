@@ -7,7 +7,10 @@ import {
   type ChromeActionDispatcher,
 } from "@lobu/connector-sdk";
 import { linkedInInboxProgram } from "./linkedin-inbox-adapter.js";
-import { linkedInScriptArgument } from "./linkedin-browser-script";
+import {
+  LINKEDIN_HOME_URL,
+  linkedInScriptArgument,
+} from "./linkedin-browser-script.ts";
 
 export interface LinkedInInboxCheckpoint {
   linkedin_inbox?: Record<string, unknown>;
@@ -16,8 +19,10 @@ export interface LinkedInInboxCheckpoint {
 async function readyTab(browser: ChromeActionDispatcher): Promise<number> {
   // Opening the inbox itself marks conversations seen. A scrape-owned neutral
   // tab supplies authentication without changing notification/message state.
+  // Use LinkedIn's settled route: /feed/ redirects and reloads the warm tab,
+  // destroying the other feed's listener on every read or observation setup.
   const tab = await browser.dispatch<{ tab_id?: number }>("navigate", {
-    url: "https://www.linkedin.com/feed/",
+    url: LINKEDIN_HOME_URL,
     persistent: true,
     wait_for_load: true,
   });
