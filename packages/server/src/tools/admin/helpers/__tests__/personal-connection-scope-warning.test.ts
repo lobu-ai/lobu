@@ -2,7 +2,8 @@
  * Gap 2: a personal OAuth connection is created successfully and is then
  * SILENTLY unreachable to runs that act as someone else.
  *
- * A chat turn acts as the member its sender is linked to; a headless
+ * A direct-message chat turn acts as the member its sender is linked to;
+ * group conversations act with no user and see org-shared connections. A headless
  * Automation run acts as the AGENT OWNER (`workspace/multi-tenant.ts`). A
  * private connection is visible only via `created_by = principal`
  * (`authz/connection-visibility.ts`), and a personal credential is FORCED

@@ -1470,9 +1470,8 @@ export class MessageHandlerBridge {
     messageText: string;
     isGroup: boolean;
     /**
-     * Authoritative inbound surface classification. Interaction clicks omit
-     * this: their conversationId/channelId relationship identifies threading,
-     * not whether the original surface was a DM or group channel.
+     * Authoritative DM flag from the SDK thread for messages and clicks.
+     * Absent when no SDK thread verdict is available.
      */
     isDirect?: boolean;
     thread: any;

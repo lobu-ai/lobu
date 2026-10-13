@@ -141,6 +141,17 @@ describe('RateLimiter (Postgres-backed fixed window)', () => {
       expect((await limiter.consume(key, config)).allowed).toBe(true);
       // Local enforcement still applies, never a hard refusal before the limit.
       expect((await limiter.consume(key, config)).allowed).toBe(false);
+
+      // Concurrent calls during the DB backoff must retain their own counts.
+      const concurrentKey = uniqueKey('consume-concurrent-fail-open');
+      const results = await Promise.all(
+        Array.from({ length: 3 }, () => limiter.consume(concurrentKey, config)),
+      );
+      expect(results.map(({ allowed, count }) => ({ allowed, count }))).toEqual([
+        { allowed: true, count: 1 },
+        { allowed: true, count: 2 },
+        { allowed: false, count: 3 },
+      ]);
     } finally {
       await db`ALTER TABLE rate_limit_counters_hidden RENAME TO rate_limit_counters`;
     }

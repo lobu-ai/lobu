@@ -87,9 +87,6 @@ const PG_UNDEFINED_TABLE = '42P01';
 const MAX_PENDING_WRITES = 500;
 
 /**
- * Postgres-backed fixed-window rate limiter with a synchronous local facade.
- */
-/**
  * The one atomic cluster-wide increment: bump this key's counter for the
  * window and return the committed count (null if the row came back empty).
  */
@@ -109,6 +106,7 @@ async function upsertSharedCount(
   return typeof count === 'number' ? count : null;
 }
 
+/** Postgres-backed fixed-window limiter with synchronous and awaited admission. */
 export class RateLimiter {
   private windows = new Map<string, WindowState>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -164,13 +162,15 @@ export class RateLimiter {
    * replica with an empty cache cannot admit a request another replica already
    * spent. FAILS OPEN like the rest of the module: when Postgres is
    * unavailable (error, backoff, missing table) the decision falls back to
-   * this pod's local count, never to a refusal.
+   * this request's cached count instead of rejecting solely for the DB error.
    */
   async consume(key: string, config: RateLimitConfig): Promise<RateLimitResult> {
     const { state, now } = this.countLocally(key, config);
+    // Other requests can increment this window while the DB write is pending.
+    const fallbackCount = Math.max(state.localCount, state.sharedCount + 1);
     const shared = await this.incrementShared(key, state.windowStart);
     if (shared === null) {
-      return this.result(Math.max(state.localCount, state.sharedCount + 1), config, now, state.windowStart);
+      return this.result(fallbackCount, config, now, state.windowStart);
     }
     if (shared > state.sharedCount) state.sharedCount = shared;
     return this.result(shared, config, now, state.windowStart);
