@@ -459,6 +459,19 @@ describe("WhatsApp Web gateway delivery", () => {
     expect(started).toHaveLength(1);
   });
 
+  test("a connector transport startup failure reaches the ingress queue for retry", async () => {
+    const failure = new Error("synthetic state-store outage");
+    let statusWrites = 0;
+    const manager = Object.assign(Object.create(ChatInstanceManager.prototype), {
+      instances: new Map(),
+      resolveStored: async () => ({ id: "101", platform: "whatsapp.web", status: "active" }),
+      hydrateFromRow: async () => { throw failure; },
+      writeConnectionStatus: async () => { statusWrites++; },
+    });
+    await expect(manager.warmConnection("101")).rejects.toBe(failure);
+    expect(statusWrites).toBe(0);
+  });
+
   test("an ownerless connection cannot dispatch as a system principal", () => {
     expect(() => connectionOperationsExecutor({
       id: "101", organizationId: "test-org", platform: "whatsapp.web",

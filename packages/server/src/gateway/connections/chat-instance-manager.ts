@@ -2015,6 +2015,7 @@ export class ChatInstanceManager {
     } catch (error) {
       if (existing) await this.stopInstance(id);
       logger.warn({ id, error: String(error) }, "Chat installation is unavailable");
+      if (getPlatformDescriptor(stored.platform)?.connectorTransport) throw error;
       return false;
     }
     if (existing && existing.rowVersion === stored.updatedAt &&
@@ -2036,6 +2037,10 @@ export class ChatInstanceManager {
         { id, error: String(error) },
 				"Failed to hydrate connection",
       );
+      // Source ingress acknowledges false as an intentional off-state. A
+      // startup outage must instead reach its durable queue for retry; the
+      // connector also owns status writes for this row.
+      if (getPlatformDescriptor(stored.platform)?.connectorTransport) throw error;
       await this.writeConnectionStatus(
         stored,
         "error",
