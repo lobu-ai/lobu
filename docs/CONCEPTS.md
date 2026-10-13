@@ -32,6 +32,45 @@ then the feature map. `AUTOMATIONS.md` holds the Automation primitive contract;
   agent does, sources bound what it may read, outputs declare what a completed
   run persists. See `AUTOMATIONS.md`.
 
+## Native event buttons
+
+A workspace-owned event kind may declare an `interactions` entry alongside
+its `jsonTemplate`. An `{ emits: "choice.recorded" }` entry writes an
+append-only interaction event for Automations to consume. An SDK entry instead
+runs on an explicit click in the native web event card:
+
+```json
+{
+  "refresh": {
+    "sdk": {
+      "mode": "read",
+      "timeout_ms": 30000,
+      "script": "export default async (ctx, client) => ({ total: 42 })"
+    }
+  }
+}
+```
+
+The template's button refers to `@refresh`. The server resolves the declaration
+from the current readable event and executes it through `query_sdk` (read) or
+`run_sdk` (full), using the signed-in clicker's permissions and connector policies.
+The browser supplies the action and rendered value, never executable code.
+SDK buttons currently require a web session with write access; they do not run
+from chat or MCP event-action adapters.
+
+A successful, complete object return value replaces the card's transient data.
+This refresh does not save or supersede the source event. Reloading restores the
+saved data until the user clicks again. Pending clicks are disabled; failures
+preserve the last successful display. Ordinary SDK and operation audits remain.
+
+Scripts receive `input.source_event_id`, `input.action`, `input.value`, and
+`input.interaction_id`. Action values must be offered by the saved template/data,
+not only by a previous transient result. There is no automatic retry or rollback:
+a timeout may leave a dispatched operation running. Scripts that perform effects
+should use `interaction_id` in operation idempotency keys and check operation
+receipts before returning a successful display. SDK scripts are bounded to
+90,000 characters and 60 seconds.
+
 ## Entity identity groups
 
 A workspace can declare a relationship type with `purpose: "identity"` for its

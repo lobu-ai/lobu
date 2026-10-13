@@ -317,13 +317,48 @@ export interface TemplateVisitor<T> {
   ): T[] | null;
 }
 
-/**
- * One event a template action is allowed to append. The action name is the
- * registry key; the template references it as `@name` and never names a tool
- * or executable handler.
- */
-export interface TemplateInteractionDefinition {
-  emits: string;
+/** An explicit user action either appends an event or returns transient SDK data. */
+export type TemplateInteractionDefinition =
+  | { emits: string; sdk?: never }
+  | TemplateSdkInteractionDefinition;
+
+export interface TemplateSdkInteractionDefinition {
+  emits?: never;
+  sdk: {
+    /** The workspace-owned script, never supplied by the clicking browser. */
+    script: string;
+    mode: "read" | "full";
+    timeout_ms?: number;
+  };
+}
+
+// Reserve room for the escaped input envelope inside run_sdk's 100,000 limit.
+export const MAX_TEMPLATE_SDK_SCRIPT_LENGTH = 90_000;
+export const MAX_TEMPLATE_SDK_TIMEOUT_MS = 60_000;
+
+/** Stored registry JSON is untyped; click time re-checks the authoring bounds. */
+export function isTemplateSdkInteractionDefinition(
+  value: unknown
+): value is TemplateSdkInteractionDefinition {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const definition = value as Record<string, unknown>;
+  // Object.hasOwn requires ES2022; core still targets ES2020.
+  const keys = Object.keys(definition);
+  if (keys.includes("emits") || !keys.includes("sdk")) return false;
+  const sdk = definition.sdk;
+  if (!sdk || typeof sdk !== "object" || Array.isArray(sdk)) return false;
+  const config = sdk as Record<string, unknown>;
+  return (
+    typeof config.script === "string" &&
+    config.script.trim().length > 0 &&
+    config.script.length <= MAX_TEMPLATE_SDK_SCRIPT_LENGTH &&
+    (config.mode === "read" || config.mode === "full") &&
+    (config.timeout_ms === undefined ||
+      (typeof config.timeout_ms === "number" &&
+        Number.isInteger(config.timeout_ms) &&
+        config.timeout_ms >= 1_000 &&
+        config.timeout_ms <= MAX_TEMPLATE_SDK_TIMEOUT_MS))
+  );
 }
 
 export type TemplateInteractionRegistry = Record<

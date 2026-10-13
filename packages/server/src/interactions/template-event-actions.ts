@@ -306,10 +306,12 @@ export function parseTemplateEventActionId(
 export function resolveTemplateInteraction(
 	interactions: TemplateInteractionRegistry | undefined,
 	action: string,
-): TemplateInteractionDefinition | null {
+): Extract<TemplateInteractionDefinition, { emits: string }> | null {
 	if (!interactions || !Object.hasOwn(interactions, action)) return null;
 	const interaction = interactions[action];
-	return interaction && typeof interaction.emits === "string"
+	return interaction &&
+		!Object.hasOwn(interaction, "sdk") &&
+		typeof interaction.emits === "string"
 		? interaction
 		: null;
 }
@@ -352,7 +354,9 @@ function deliveryMatches(
 	});
 }
 
-function validateInvocation(params: InvokeTemplateEventActionParams): void {
+export function validateTemplateEventActionInput(
+	params: InvokeTemplateEventActionParams,
+): void {
 	if (
 		!Number.isSafeInteger(params.sourceEventId) ||
 		params.sourceEventId <= 0
@@ -387,7 +391,7 @@ function validateInvocation(params: InvokeTemplateEventActionParams): void {
 export async function invokeTemplateEventAction(
 	params: InvokeTemplateEventActionParams,
 ): Promise<InvokedTemplateEventAction> {
-	validateInvocation(params);
+	validateTemplateEventActionInput(params);
 	return replayableAction(params, (key) => appendTemplateEventAction(params, key));
 }
 

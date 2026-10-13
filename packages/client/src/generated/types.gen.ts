@@ -1882,7 +1882,7 @@ export type ManageEntitySchemaData = {
      */
     color?: string;
     /**
-     * [entity_type: create/update] Event semantic types this type produces, keyed by semantic_type slug. Each entry can have a description, optional metadataSchema (JSON Schema), optional jsonTemplate (render template), and optional interactions registry mapping template action names to emitted event kinds. Supplying an object replaces the entire registry: read the current value and merge before updating. `null` clears all kinds; omit to leave unchanged.
+     * [entity_type: create/update] Event semantic types this type produces, keyed by semantic_type slug. Each entry can have a description, optional metadataSchema (JSON Schema), optional jsonTemplate (render template), and optional interactions mapping @actions to either { emits } or { sdk: { script, mode: 'read' | 'full', timeout_ms? } }. SDK actions run only on explicit web clicks with the viewer's permissions; their object return_value replaces local template data without saving an event. Scripts receive a const input containing source_event_id, action, value and interaction_id; use interaction_id for operation idempotency. SDK actions do not retry automatically. Supplying an object replaces the entire registry: read the current value and merge before updating. `null` clears all kinds; omit to leave unchanged.
      */
     event_kinds?: null | {
       [key: string]:
@@ -1900,6 +1900,13 @@ export type ManageEntitySchemaData = {
                 | unknown
                 | {
                     emits: string;
+                  }
+                | {
+                    sdk: {
+                      script: string;
+                      mode: "read" | "full";
+                      timeout_ms?: number;
+                    };
                   };
             };
           };
