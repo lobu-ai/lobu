@@ -12,7 +12,10 @@ import {
 } from "@lobu/connectors/slack-identity";
 import { fetchUserInfoWithRaw } from "../connect/oauth-providers";
 import { getDb } from "../db/client";
-import { CHAT_LINK_IDENTITY_SOURCE } from "../lobu/stores/chat-identity";
+import {
+	CHAT_LINK_IDENTITY_SOURCE,
+	chatIdentityTrustedIn,
+} from "../lobu/stores/chat-identity";
 import {
 	type ResolvedTenantMember,
 	resolveMemberOrgsForUser,
@@ -126,8 +129,7 @@ async function heldByAnotherUser(
       AND auth_ei.identifier <> ${userId}
       -- Only rows the resulting lookup would see: provider-proven rows
       -- anywhere, link-proven rows only in the org this link writes into.
-      AND (chat_ei.source_connector IS DISTINCT FROM ${CHAT_LINK_IDENTITY_SOURCE}
-        OR chat_ei.organization_id = ${linkOrganizationId})
+      AND ${chatIdentityTrustedIn(sql, linkOrganizationId)}
     LIMIT 1
   `;
 	return rows.length > 0;

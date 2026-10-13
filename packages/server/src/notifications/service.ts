@@ -403,6 +403,7 @@ export async function resolveOwnerDmTarget(
 			ownerUserId,
 			target.platform,
 			target.teamId,
+			organizationId,
 			sql,
 		);
 		if (!platformUserId) continue;

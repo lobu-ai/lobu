@@ -31,14 +31,25 @@ import {
   type TestUser,
 } from "../../__tests__/setup/test-fixtures.js";
 import { sessionCookieName } from "../../auth/session-cookie-scope.js";
-import { persistLoginChatIdentity, provisionMemberAndCoreIdentities } from "../../auth/subject-identities.js";
+import { SLACK_IDENTITY } from "@lobu/connectors/slack-identity";
+import {
+  adoptChatIdentityOntoMember,
+  persistLoginChatIdentity,
+  provisionMemberAndCoreIdentities,
+  withChatIdentityLock,
+} from "../../auth/subject-identities.js";
 import { createChatIdentityRoutes } from "../../connect/chat-identity-routes.js";
 import { getDb } from "../../db/client.js";
-import { resolveChatSenderMember, resolveChatUserIdentity } from "../../lobu/stores/chat-identity.js";
+import {
+  resolveChatSenderMember,
+  resolveChatUserIdentity,
+  resolveChatUserIdForUser,
+} from "../../lobu/stores/chat-identity.js";
 import { CHAT_IDENTITY_LINK_SCOPE, CHAT_IDENTITY_LINK_TTL_SECONDS, mintChatIdentityLink } from "../../lobu/stores/chat-identity-link.js";
 import { resolveMemberOrgsForUser } from "../../identity/member-orgs.js";
 import { resetRateLimiterForTests } from "../../utils/rate-limiter.js";
 import { gchatPlatform } from "../connections/platforms/gchat.js";
+import { resolveClaimingUserSlackIdentities } from "../connections/slack-claim-identities.js";
 import { createConnectedGatewayStateAdapter } from "../connections/state-adapter.js";
 import type { PlatformConnection } from "../connections/types.js";
 import { mintTurnToken } from "../orchestration/agent-turn-producer.js";
@@ -285,6 +296,32 @@ describe("chat identity link routes", () => {
     expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name)).toBe(owner.id);
     expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name, ORG_B)).toBe(owner.id);
     expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name, ORG_A)).toBeNull();
+  });
+
+  test("a redeemed link addresses owner DMs only for the org that offered it", async () => {
+    const token = (await mint(ORG_A))!;
+    expect((await submit(member, token)).status).toBe(200);
+    await addUserToOrganization(member.id, ORG_B, "member");
+    expect(await resolveChatUserIdForUser(member.id, "gchat", null, ORG_A)).not.toBeNull();
+    expect(await resolveChatUserIdForUser(member.id, "gchat", null, ORG_B)).toBeNull();
+  });
+
+  test("a redeemed link is never provider proof for a Slack installation claim", async () => {
+    const { memberEntityId } = await provisionMemberAndCoreIdentities(ORG_A, {
+      userId: member.id,
+      email: member.email,
+      role: "member",
+    });
+    const adopt = (key: string, proof: "provider" | "link") =>
+      withChatIdentityLock(SLACK_IDENTITY.USER_ID, key, (tx) =>
+        adoptChatIdentityOntoMember(tx, ORG_A, memberEntityId, SLACK_IDENTITY.USER_ID, key, member.id, proof),
+      );
+    expect(await adopt("TLINKTEAM:ULINKUSER", "link")).toBe("created");
+    expect(await resolveClaimingUserSlackIdentities(member.id)).toEqual([]);
+    expect(await adopt("TSIGNTEAM:USIGNUSER", "provider")).toBe("created");
+    expect(await resolveClaimingUserSlackIdentities(member.id)).toEqual([
+      { teamId: "TSIGNTEAM", slackUserId: "USIGNUSER" },
+    ]);
   });
 
   test("a non-member is told to ask an admin and nothing is linked", async () => {

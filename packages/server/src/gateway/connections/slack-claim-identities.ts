@@ -1,6 +1,7 @@
 import { SLACK_IDENTITY } from "@lobu/connectors/slack-identity";
 import { decodeJwtClaims } from "../../auth/jwt-claims.js";
 import { getDb, type DbClient } from "../../db/client.js";
+import { chatIdentityTrustedIn } from "../../lobu/stores/chat-identity.js";
 
 /**
  * Resolve all of the signed-in user's Slack identities as team/user pairs.
@@ -14,7 +15,7 @@ export async function resolveClaimingUserSlackIdentities(
   sql: DbClient = getDb(),
 ): Promise<Array<{ teamId: string; slackUserId: string }>> {
   const rows = (await sql`
-    SELECT DISTINCT ei.identifier
+    SELECT DISTINCT chat_ei.identifier
     FROM "member" m
     JOIN entity_identities auth_ei
       ON auth_ei.organization_id = m."organizationId"
@@ -23,13 +24,15 @@ export async function resolveClaimingUserSlackIdentities(
      AND auth_ei.scope_key IS NULL
      AND auth_ei.source_connector = 'auth:signup'
      AND auth_ei.deleted_at IS NULL
-    JOIN entity_identities ei
-      ON ei.organization_id = auth_ei.organization_id
-     AND ei.entity_id = auth_ei.entity_id
-     AND ei.namespace = ${SLACK_IDENTITY.USER_ID}
-     AND ei.scope_key IS NULL
-     AND ei.deleted_at IS NULL
+    JOIN entity_identities chat_ei
+      ON chat_ei.organization_id = auth_ei.organization_id
+     AND chat_ei.entity_id = auth_ei.entity_id
+     AND chat_ei.namespace = ${SLACK_IDENTITY.USER_ID}
+     AND chat_ei.scope_key IS NULL
+     AND chat_ei.deleted_at IS NULL
     WHERE m."userId" = ${userId}
+      -- An installation claim needs provider proof: no org's link qualifies.
+      AND ${chatIdentityTrustedIn(sql, null)}
   `) as Array<{ identifier: string }>;
   const fromGraph = rows
     .map((r) => String(r.identifier))
