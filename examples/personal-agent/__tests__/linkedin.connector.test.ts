@@ -3026,6 +3026,29 @@ describe("LinkedInConnector takeout identity attributions", () => {
   });
 });
 
+describe("LinkedInConnector automation events", () => {
+  test("declares every feed kind and source reference type", () => {
+    const def = new LinkedInConnector().definition;
+    const declared = def.automationEvents.map(
+      (event: { key: string }) => event.key
+    );
+    // Source deliveries require declared keys; the declaration also replaces
+    // the eventKinds-derived trigger catalog, so it must cover every feed kind.
+    for (const feed of Object.values(def.feeds) as Array<{
+      eventKinds?: Record<string, unknown>;
+      webhook?: { events: string[] };
+    }>) {
+      for (const kind of Object.keys(feed.eventKinds ?? {}))
+        expect(declared).toContain(kind);
+      for (const event of feed.webhook?.events ?? []) {
+        expect(declared).toContain(event);
+        expect(Object.keys(feed.eventKinds ?? {})).toContain(event);
+      }
+    }
+    expect(def.feeds.live_messages.webhook.events).toContain("source.gap");
+  });
+});
+
 describe("LinkedInConnector auth schema", () => {
   test("keeps browser and local export authentication independent of sign-in", () => {
     const def = new LinkedInConnector().definition;

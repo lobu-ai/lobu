@@ -3055,19 +3055,55 @@ export default class LinkedInConnector extends ConnectorRuntime<
         },
       ],
     },
+    // Source subscriptions deliver only declared keys. Declaring any replaces the
+    // eventKinds-derived catalog, so every feed kind is listed here.
+    automationEvents: [
+      {
+        key: "notification.changed",
+        label: "Notification Changed",
+        resourceType: "notification",
+        description:
+          "A new or changed notification reference. Read its content from the notifications feed.",
+      },
+      {
+        key: "message.created",
+        label: "Message Created",
+        resourceType: "message",
+        description:
+          "A new inbox message reference. Read its content from the live messages feed.",
+      },
+      {
+        key: "source.gap",
+        label: "Source Gap",
+        description:
+          "Catch-up reached the end of what LinkedIn exposes, so earlier changes at this conversation or notification position may be missing.",
+      },
+      { key: "post", label: "Post" },
+      { key: "comment", label: "Comment" },
+      { key: "job_posting", label: "Job Posting" },
+      { key: "message", label: "Message" },
+      { key: "connection", label: "Connection" },
+    ],
     feeds: {
       // ── Live (Chrome-extension) feeds ──────────────────────────
       notifications: {
         key: "notifications",
         name: "Notifications",
         description:
-          "Read notification content and links without marking them seen. Subscriptions check once per minute while the paired browser is online; grouped notification content changes activate Automations. Exact source timestamps are unavailable.",
+          "Read notification content and links without marking them seen. Subscriptions check once per minute while the paired browser is online; grouped notification content changes activate Automations, and catch-up beyond the scan budget reports a source gap. Exact source timestamps are unavailable.",
         read: (ctx) => readLinkedInInbox(ctx),
         observe: (ctx) => observeLinkedInInbox(ctx),
-        webhook: { mode: "trigger", events: ["notification.changed"] },
+        webhook: {
+          mode: "trigger",
+          events: ["notification.changed", "source.gap"],
+        },
         eventKinds: {
           "notification.changed": {
             description: "A new or meaningfully changed LinkedIn notification",
+          },
+          "source.gap": {
+            description:
+              "Catch-up scanned its page budget without reaching a known notification",
           },
         },
       },
@@ -3078,9 +3114,13 @@ export default class LinkedInConnector extends ConnectorRuntime<
           "Read recent messages from inbox conversations without marking them seen. The cursor pages conversations and their recent message pages, not a full history export. Subscriptions check once per minute while the browser is online and report catch-up gaps.",
         read: (ctx) => readLinkedInInbox(ctx),
         observe: (ctx) => observeLinkedInInbox(ctx),
-        webhook: { mode: "trigger", events: ["message.created"] },
+        webhook: { mode: "trigger", events: ["message.created", "source.gap"] },
         eventKinds: {
           "message.created": { description: "A new LinkedIn inbox message" },
+          "source.gap": {
+            description:
+              "A conversation's recent message page may hide older catch-up messages",
+          },
         },
       },
       home_feed: {

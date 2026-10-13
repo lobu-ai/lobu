@@ -445,95 +445,191 @@ export function linkedInInboxProgram() {
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
   }
+  // One observation pass is bounded source work. Message catch-up resumes from
+  // its checkpoint; notifications reorder at the top and report a gap instead.
+  const NOTIFICATION_PAGES_PER_PASS = 10;
+  const CONVERSATION_PAGES_PER_PASS = 2;
+  const RECENT_MESSAGE_PAGE = 20;
+  const SEEN_LIMIT = 256;
+  const BATCH_EVENTS = 500;
+  const BATCH_BYTES = 128 * 1024;
   async function snapshot(feed, previous, mailbox) {
     const observedAt = Date.now();
-    const startedAt = previous
-      ? Math.max(previous.started_at, previous.after - 60000)
-      : observedAt;
-    const seen = { ...(previous?.seen ?? {}) };
+    const startedAt = previous?.started_at ?? observedAt;
+    const observed = new Map();
     const events = [];
-    let cursor;
-    let complete = false;
-    for (let pageIndex = 0; pageIndex < 10; pageIndex++) {
-      let rows;
-      let next;
-      if (feed === "notifications") {
-        const page = await notificationsPage(cursor);
-        rows = page.rows;
-        next = page.next;
-      } else {
-        const page = await conversationsPage(mailbox, cursor);
-        const active = page.elements.filter(
-          (thread) => thread.lastActivityAt >= startedAt
-        );
-        rows = [];
+    // Returns whether the previous checkpoint already held this identity.
+    async function observe(row, eventType, resourceType, revisionText) {
+      const identity = await digest(row.id);
+      const revision =
+        revisionText === undefined ? identity : await digest(revisionText);
+      const prior = previous?.seen[identity];
+      if (previous && prior !== revision && !observed.has(identity)) {
+        events.push({
+          id: `${identity}:${revision}`,
+          event_type: eventType,
+          resource_type: resourceType,
+          resource_ref: row.id,
+          occurred_at: row.occurred_at ?? new Date(observedAt).toISOString(),
+        });
+      }
+      observed.set(identity, revision);
+      return prior !== undefined;
+    }
+    // The provider cannot show what lies beyond this position. Report it once
+    // per position and advance, rather than retrying or claiming completeness.
+    async function gap(resourceType, resourceRef, beyond, occurredAt) {
+      events.push({
+        id: `gap:${await digest(JSON.stringify([resourceRef, beyond]))}`,
+        event_type: "source.gap",
+        resource_type: resourceType,
+        resource_ref: resourceRef,
+        occurred_at: occurredAt ?? new Date(observedAt).toISOString(),
+      });
+    }
+    const checkpoint = { feed, account: mailbox, started_at: startedAt };
+    let more = false;
+    if (feed === "notifications") {
+      let payload;
+      for (let page = 1; ; page++) {
+        const { rows, next } = await notificationsPage(payload);
+        let anchored = false;
+        for (const row of rows) {
+          if (
+            await observe(
+              row,
+              "notification.changed",
+              "notification",
+              row.revision
+            )
+          )
+            anchored = true;
+        }
+        if (!previous || anchored || !next) break;
+        if (page === NOTIFICATION_PAGES_PER_PASS) {
+          await gap(
+            "notification",
+            "https://www.linkedin.com/notifications/",
+            rows.at(-1)?.id ?? page
+          );
+          break;
+        }
+        payload = next;
+      }
+      checkpoint.after = observedAt;
+    } else {
+      // A round reads threads active since `since` and their messages since
+      // `floor`. A round that spans passes keeps its lower bounds, and the next
+      // round keeps its floor: a thread that moved above the resume cursor is
+      // then read again from the top with the earlier floor.
+      const round = previous?.round ?? {
+        since: previous
+          ? Math.max(startedAt, previous.after - 60000)
+          : observedAt,
+        until: observedAt,
+        floor: previous?.floor ?? observedAt,
+        cursor: null,
+      };
+      round.floor = Math.min(round.floor, round.since);
+      let cursor = round.cursor;
+      for (let page = 1; ; page++) {
+        const result = await conversationsPage(mailbox, cursor);
+        const active = result.elements.filter((thread) => {
+          if (!Number.isFinite(thread.lastActivityAt))
+            fail("Conversation activity is unavailable");
+          return thread.lastActivityAt >= round.since;
+        });
         for (const thread of active) {
           const messages = await messagesPage(thread.entityUrn, mailbox);
-          // A full provider page newer than the checkpoint could hide more
-          // arrivals. Surface the gap instead of advancing beyond unseen data.
+          let reachedSeen = false;
+          for (const row of messages) {
+            if (Date.parse(row.occurred_at) < round.floor) continue;
+            if (await observe(row, "message.created", "message"))
+              reachedSeen = true;
+          }
+          const oldest = messages.at(-1);
+          // A full recent page that neither reaches the floor nor a message
+          // already observed may hide older arrivals. LinkedIn offers no
+          // further page here, so report the gap and continue.
           if (
-            messages.length >= 20 &&
-            messages.every((row) => Date.parse(row.occurred_at) >= startedAt)
+            previous &&
+            messages.length >= RECENT_MESSAGE_PAGE &&
+            !reachedSeen &&
+            Date.parse(oldest.occurred_at) >= round.floor
           ) {
-            fail(
-              "Message catch-up exceeds the recent source page; recovery is required"
+            await gap(
+              "conversation",
+              thread.entityUrn,
+              oldest.id,
+              oldest.occurred_at
             );
           }
-          rows.push(
-            ...messages.filter(
-              (row) => Date.parse(row.occurred_at) >= startedAt
-            )
-          );
         }
-        next =
-          active.length === page.elements.length
-            ? page.metadata?.nextCursor
+        const next =
+          active.length === result.elements.length
+            ? (result.metadata?.nextCursor ?? null)
             : null;
-      }
-      let anchored = false;
-      for (const row of rows) {
-        const identity = await digest(row.id);
-        const revision =
-          feed === "notifications" ? await digest(row.revision) : identity;
-        if (previous?.seen?.[identity]) anchored = true;
-        if (previous && previous.seen[identity] !== revision) {
-          events.push({
-            id: `${identity}:${revision}`,
-            event_type:
-              feed === "notifications"
-                ? "notification.changed"
-                : "message.created",
-            resource_type:
-              feed === "notifications" ? "notification" : "message",
-            resource_ref: row.id,
-            occurred_at: row.occurred_at ?? new Date().toISOString(),
-          });
+        if (next !== null && (typeof next !== "string" || next.length > 4096))
+          fail("Invalid conversation cursor");
+        if (!previous || next === null) break;
+        if (page === CONVERSATION_PAGES_PER_PASS) {
+          more = true;
+          cursor = next;
+          break;
         }
-        delete seen[identity];
-        seen[identity] = revision;
+        cursor = next;
       }
-      if (!previous || !next || (feed === "notifications" && anchored)) {
-        complete = true;
-        break;
+      if (more) {
+        checkpoint.after = previous.after;
+        checkpoint.floor = previous.floor;
+        checkpoint.round = { ...round, cursor };
+      } else {
+        checkpoint.after = round.until;
+        checkpoint.floor = previous?.round ? round.floor : round.since;
       }
-      cursor = next;
     }
-    if (!complete || events.length > 250)
-      fail(
-        "Source catch-up exceeds the observation budget; recovery is required"
-      );
     if ((await account()) !== mailbox)
       fail("LinkedIn account changed during observation");
-    return {
-      checkpoint: {
-        feed,
-        account: mailbox,
-        started_at: previous?.started_at ?? startedAt,
-        after: observedAt,
-        seen: Object.fromEntries(Object.entries(seen).slice(-256)),
-      },
-      events,
-    };
+    // Keep this pass's identities first, in source order, then older ones.
+    checkpoint.seen = Object.fromEntries(
+      [
+        ...observed,
+        ...Object.entries(previous?.seen ?? {}).filter(
+          ([identity]) => !observed.has(identity)
+        ),
+      ].slice(0, SEEN_LIMIT)
+    );
+    return { checkpoint, events, more };
+  }
+  // Ordered batches of at most 500 references and 128 KiB. Only the final
+  // batch carries the checkpoint, so an interruption cannot skip references.
+  async function batchesOf(feed, previous, result) {
+    const next = { linkedin_inbox: result.checkpoint };
+    const { events } = result;
+    const base = `${feed}:${await digest(JSON.stringify([previous, next, events]))}`;
+    const size = (batch) =>
+      new TextEncoder().encode(JSON.stringify(batch)).length;
+    const batches = [];
+    for (let offset = 0; ; ) {
+      const through = (end) => ({
+        id: `${base}:${offset}`,
+        events: events.slice(offset, end),
+        ...(end === events.length
+          ? { checkpoint: { previous, next }, more: result.more }
+          : {}),
+      });
+      let end = Math.min(offset + BATCH_EVENTS, events.length);
+      let batch = through(end);
+      while (size(batch) > BATCH_BYTES && end - offset > 1) {
+        end = offset + Math.floor((end - offset) / 2);
+        batch = through(end);
+      }
+      if (size(batch) > BATCH_BYTES)
+        fail("Source reference batch exceeds the browser record limit");
+      batches.push(batch);
+      if (end === events.length) return batches;
+      offset = end;
+    }
   }
   function detach(id) {
     for (const state of id ? [listeners.get(id)] : listeners.values()) {
@@ -558,7 +654,7 @@ export function linkedInInboxProgram() {
       id: input.bridge_id,
       sequence: 0,
       checkpoint: input.checkpoint ?? null,
-      pending: null,
+      batches: [],
       timer: null,
     };
     const post = (record) =>
@@ -574,7 +670,7 @@ export function linkedInInboxProgram() {
     async function poll() {
       if (listeners.get(state.id) !== state) return;
       try {
-        if (!state.pending) {
+        if (!state.batches.length) {
           if ((await account()) !== mailbox)
             fail("LinkedIn account changed; reconnect this source");
           const result = await snapshot(
@@ -582,19 +678,10 @@ export function linkedInInboxProgram() {
             state.checkpoint?.linkedin_inbox,
             mailbox
           );
-          const next = { linkedin_inbox: result.checkpoint };
-          state.pending = {
-            id: `${input.feed}:${await digest(JSON.stringify([state.checkpoint, next, result.events]))}`,
-            events: result.events,
-            checkpoint: { previous: state.checkpoint, next },
-          };
-          if (
-            new TextEncoder().encode(JSON.stringify(state.pending)).length >
-            128 * 1024
-          )
-            fail("Source reference batch exceeds the browser record limit");
+          state.batches = await batchesOf(input.feed, state.checkpoint, result);
         }
-        if (listeners.get(state.id) === state) post(state.pending);
+        // Unacknowledged batches are reposted unchanged on the next tick.
+        if (listeners.get(state.id) === state) post(state.batches[0]);
       } catch {
         if (listeners.get(state.id) === state) {
           post({
@@ -624,11 +711,12 @@ export function linkedInInboxProgram() {
         event.data.sequence !== state.sequence
       )
         return;
-      if (event.data.ok && state.pending) {
+      if (event.data.ok && state.batches.length) {
         // Receipt means the browser durably buffered the batch. Only the server
-        // commits this checkpoint; a reattach starts from that server value.
-        state.checkpoint = state.pending.checkpoint.next;
-        state.pending = null;
+        // commits the final batch's checkpoint; a reattach starts from that value.
+        const done = state.batches.shift();
+        if (done.checkpoint) state.checkpoint = done.checkpoint.next;
+        else post(state.batches[0]);
       } else if (event.data.ok === false) {
         post({
           id: `linkedin:${input.feed}:source-observation-error`,
