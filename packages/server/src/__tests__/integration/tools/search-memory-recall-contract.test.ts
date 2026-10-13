@@ -34,7 +34,7 @@ import { getDb } from '../../../db/client';
 import type { Env } from '../../../index';
 import type { ToolContext } from '../../../tools/registry';
 import { initWorkspaceProvider } from '../../../workspace';
-import { cleanupTestDatabase } from '../../setup/test-db';
+import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
   createTestConnection,
@@ -158,6 +158,41 @@ describe('search_memory > recall contract', () => {
       tokenType: 'session',
       memberRole: 'owner',
     } as ToolContext;
+  });
+
+  it('reports partial coverage when candidate SQL times out, then recovers on retry', async () => {
+    const args = {
+      query: 'synthetic recall timeout',
+      query_embedding: queryEmbedding,
+      include_content: true,
+      content_limit: 2,
+      min_similarity: 0.3,
+    };
+
+    // Hold the vector relation only in this disposable test database. Recall
+    // uses its own transaction, so the real candidate statement_timeout fires
+    // while entity lookup and source-feed discovery can still complete.
+    await getTestDb().begin(async (tx) => {
+      await tx`LOCK TABLE event_embeddings IN ACCESS EXCLUSIVE MODE`;
+      const result = await search(args, env, ctx);
+      expect(result.coverage?.status).toBe('partial');
+      expect(result.coverage?.local_sources).not.toContain('events');
+      expect(result.content).toBeUndefined();
+      expect(result.suggestion).toContain('partial');
+      expect(result.suggestion).not.toContain('entities.create');
+      expect(result.discovery_status).toBe('discovering');
+
+      const withEntity = await search({ ...args, query: 'Cognitive Links' }, env, ctx);
+      expect(withEntity.entity?.name).toBe('Cognitive Links');
+      expect(withEntity.coverage?.status).toBe('partial');
+      expect(withEntity.discovery_status).toBe('complete');
+      expect(withEntity.suggestion).toContain('partial');
+    });
+
+    const retried = await search(args, env, ctx);
+    expect(retried.coverage?.status).toBe('complete');
+    expect(retried.coverage?.local_sources).toContain('events');
+    expect(retried.content?.map((item) => item.id)).toEqual(expect.arrayContaining(strongIds));
   });
 
   it('opens an exact content id from reviewer-style "memory <id>" language', async () => {

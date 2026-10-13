@@ -328,9 +328,11 @@ function withRecall<T extends UnifiedSearchResult>(
   result: T,
   recall: Partial<UnifiedSearchResult>
 ): T {
-  // Each recall source already omits its facet when empty, so a plain merge is
-  // enough — no per-facet guards, no type-switch.
-  return Object.assign(result, recall);
+  Object.assign(result, recall);
+  if (recall.coverage?.status === 'partial' && !hasSearchHits(result)) {
+    result.discovery_status = 'discovering';
+  }
+  return result;
 }
 
 interface WorkspaceSearchExecution {
@@ -1301,6 +1303,10 @@ export async function gatherLocalRecall(
     sourceFeedsResult,
     localRecallFailed
   );
+  if (localRecallFailed) {
+    result.suggestion =
+      'Search returned partial results; one or more local memory sources was temporarily unavailable. Retry the search.';
+  }
   return result;
 }
 

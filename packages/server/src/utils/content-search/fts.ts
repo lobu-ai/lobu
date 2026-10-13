@@ -77,7 +77,6 @@ export function buildSearchDocumentExpr(alias: string): string {
 // each of the ivfflat ANN / fulltext GIN / trigram GIN is plenty for any sane
 // content_limit while keeping each index scan cheap.
 export const CANDIDATE_VECTOR_LIMIT = 200;
-// Backstop so a pathological candidate scan can't hang the request. Every caller
-// tolerates an empty content list, so failing fast and degrading to "no content"
-// beats a multi-minute query.
+// Bound pathological candidate scans. Failures propagate to recall's existing
+// partial-coverage handling rather than masquerading as successful empty results.
 export const CANDIDATE_QUERY_TIMEOUT_MS = 6000;

@@ -644,20 +644,12 @@ export async function searchContentBySingleQuery(
 
   let rawRows: any[];
   if (useCandidatePath) {
-    // Backstop: a pathological candidate scan degrades to "no content" (every
-    // caller tolerates an empty list) rather than hanging the request.
-    try {
-      rawRows = (await sql.begin(async (tx: DbClient) => {
-        await tx.unsafe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
-        return await tx.unsafe(querySQL, queryParams);
-      })) as any[];
-    } catch (err) {
-      logger.warn(
-        { err: getErrorMessage(err) },
-        '[content-search] candidate query failed; returning empty content'
-      );
-      rawRows = [];
-    }
+    // Preserve database failures (including their SQLSTATE) so recall can
+    // report partial coverage instead of claiming a successful empty search.
+    rawRows = (await sql.begin(async (tx: DbClient) => {
+      await tx.unsafe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
+      return await tx.unsafe(querySQL, queryParams);
+    })) as any[];
   } else {
     rawRows = (await sql.unsafe(querySQL, queryParams)) as any[];
   }
