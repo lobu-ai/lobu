@@ -593,10 +593,9 @@ const gmailConnection = defineConnection({
   ],
 });
 
-// Apple Reminders on the always-on Mac that shares Burak's iCloud account. The
-// feed is never scheduled: the task Automation reads it live and writes through
-// operations, so reminders are never copied into events. The pin is the paired
-// device's id, supplied at apply time; without it the connection stays undeclared.
+// Pin the Mac that shares Burak's iCloud account at apply time. Without a pin,
+// leave the connection undeclared. A null schedule disables automatic collection;
+// the task Automation reads the feed live instead of triggering a sync.
 const remindersDeviceWorkerId = process.env.REMINDERS_DEVICE_WORKER_ID;
 const remindersConnection = remindersDeviceWorkerId
   ? defineConnection({
