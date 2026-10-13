@@ -593,6 +593,21 @@ const gmailConnection = defineConnection({
   ],
 });
 
+// Apple Reminders on the always-on Mac that shares Burak's iCloud account. The
+// feed is never scheduled: the task Automation reads it live and writes through
+// operations, so reminders are never copied into events. The pin is the paired
+// device's id, supplied at apply time; without it the connection stays undeclared.
+const remindersDeviceWorkerId = process.env.REMINDERS_DEVICE_WORKER_ID;
+const remindersConnection = remindersDeviceWorkerId
+  ? defineConnection({
+      slug: "apple-reminders",
+      connector: "apple.reminders",
+      name: "Apple Reminders",
+      deviceWorkerId: remindersDeviceWorkerId,
+      feeds: [{ feed: "reminders", schedule: null }],
+    })
+  : null;
+
 // ── Relationships (only those the personal agent uses) ──────────
 // Tax-graph relationship types (account_contains, for_tax_year, …) belong in
 // examples/personal-finance — not here. With prune:true they are removed from
@@ -663,9 +678,9 @@ const midasNetWorth = defineAutomation({
 const hourlyTaskCollaborator = defineAutomation({
   agent: personalAgent,
   slug: "hourly-task-collaborator",
-  name: "Hourly Task Collaborator",
+  name: "Task Collaborator",
   // Omitted model preserves the Automation's existing execution setting on apply.
-  triggers: [every("0 * * * *", { timezone: "Europe/London" })],
+  triggers: [every("*/15 * * * *", { timezone: "Europe/London" })],
   minCooldownSeconds: 300,
   outputs: {
     tasks: {
@@ -852,5 +867,6 @@ export default defineConfig({
     xConnection,
     spotifyConnection,
     gmailConnection,
+    ...(remindersConnection ? [remindersConnection] : []),
   ],
 });
