@@ -236,7 +236,7 @@ export async function searchContentBySingleQuery(
   const entityFilterSQL = entityId != null
     ? `${searchEntityLinkSql} AND ($2::bigint IS NOT NULL)`
     : `($2::bigint IS NULL OR ${searchEntityLinkSql})`;
-  const standardFiltersSQL = `${entityFilterSQL}
+  const standardFiltersFor = (orgScopeSql: string) => `${entityFilterSQL}
           AND ${connectionCondition}
           AND ${feedCondition}
           AND ${runCondition}
@@ -265,7 +265,8 @@ export async function searchContentBySingleQuery(
               : ''
           }
           ${classificationClause.sql}
-          ${orgScope.sql}${entityTypesClause.sql}`;
+          ${orgScopeSql}${entityTypesClause.sql}`;
+  const standardFiltersSQL = standardFiltersFor(orgScope.sql);
 
   const textDocumentExpr = buildSearchDocumentExpr('f');
   const resultDocumentExpr = buildSearchDocumentExpr('fi');
@@ -302,8 +303,8 @@ export async function searchContentBySingleQuery(
   // query has no embedding (text-only search).
   const bestSimSelect = hasEmbedding ? `${bestChunkSimExpr('f')}` : 'NULL';
 
-  const searchWhereSQL = `${matchCondition}
-          AND ${standardFiltersSQL}`;
+  const searchWhereFor = (orgScopeSql: string) => `${matchCondition}
+          AND ${standardFiltersFor(orgScopeSql)}`;
 
   const textRankExpr = `
     (CASE WHEN LENGTH($1) > 0 AND fi.payload_text ILIKE '%' || $1 || '%' THEN 1.0 ELSE 0.0 END)
@@ -396,7 +397,7 @@ export async function searchContentBySingleQuery(
   const validatedLimit = validateNumericId(limit, 'limit');
 
   // ── Recall-only index-driven candidate path ──────────────────────────────
-  // Exact org-wide search keeps using `searchWhereSQL` so title-only matches,
+  // Exact org-wide search keeps using `exactFilteredIdsBody` so title-only matches,
   // filtered result sets, totals, and offsets retain their historical semantics.
   // The bounded candidate path is opt-in for recall/search_memory snippets: the
   // caller ignores exact totals/pagination and only needs a small set of highly
@@ -473,16 +474,30 @@ export async function searchContentBySingleQuery(
       `;
   }
 
-  const nonDateFilteredIdsCteSql = `filtered_ids AS (
-        SELECT f.id, f.score, f.occurred_at, f.created_at, f.title, f.payload_text, ${bestSimSelect} AS best_sim, f.search_tsv
+  const filteredIdsSelect = (whereSql: string, candidateJoin = '') => `SELECT f.id, f.score, f.occurred_at, f.created_at, f.title, f.payload_text, ${bestSimSelect} AS best_sim, f.search_tsv
         FROM current_event_records f
-        ${useCandidatePath ? 'JOIN search_candidates sc ON sc.id = f.id' : ''}
+        ${candidateJoin}
         LEFT JOIN connections c ON c.id = f.connection_id
         LEFT JOIN automation_run_events iwf
           ON iwf.event_id = f.id
           AND ($6::int IS NOT NULL)
           AND iwf.run_id = $6::int
-        WHERE ${useCandidatePath ? standardFiltersSQL : searchWhereSQL}
+        WHERE ${whereSql}`;
+  // Disjoint org-scope arms preserve exact totals without deduplication and let
+  // the planner use the direct-org and linked-org indexes independently.
+  // Entity-scoped reads keep one predicate.
+  const exactBranches = entityId == null ? orgScope.branches : null;
+  const exactFilteredIdsBody = exactBranches
+    ? `(${filteredIdsSelect(searchWhereFor(`AND ${exactBranches.direct}`))})
+        UNION ALL
+        (${filteredIdsSelect(searchWhereFor(`AND ${exactBranches.linked}`))})`
+    : filteredIdsSelect(searchWhereFor(orgScope.sql));
+  const nonDateFilteredIdsCteSql = `filtered_ids AS (
+        ${
+          useCandidatePath
+            ? filteredIdsSelect(standardFiltersSQL, 'JOIN search_candidates sc ON sc.id = f.id')
+            : exactFilteredIdsBody
+        }
       )`;
 
   // An opted-out caller skips the exact count; the column stays (NULL) so the
@@ -543,14 +558,7 @@ export async function searchContentBySingleQuery(
   const querySQL = useDateFeed
     ? `
       WITH RECURSIVE filtered_ids AS (
-        SELECT f.id, f.score, f.occurred_at, f.created_at, f.title, f.payload_text, ${bestSimSelect} AS best_sim, f.search_tsv
-        FROM current_event_records f
-        LEFT JOIN connections c ON c.id = f.connection_id
-        LEFT JOIN automation_run_events iwf
-          ON iwf.event_id = f.id
-          AND ($6::int IS NOT NULL)
-          AND iwf.run_id = $6::int
-        WHERE ${searchWhereSQL}
+        ${exactFilteredIdsBody}
       ),
       ${fullCountCteSql},
       candidate_set AS (

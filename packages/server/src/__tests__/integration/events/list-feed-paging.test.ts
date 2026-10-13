@@ -271,6 +271,55 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
     expect(seen).toEqual(expectedAsc);
   });
 
+  it.each([true, false])('paginates text search across both org arms with cursors and include_total=%s', async (includeTotal) => {
+    const options = {
+      organization_id: feedOrg.id,
+      sort_by: 'date' as const,
+      limit: 4,
+      include_total: includeTotal,
+    };
+    const seen: number[] = [];
+    let page = await searchContentByText('searchable-marker', options);
+    // Bound the walk so a repeated cursor fails without hanging the suite.
+    for (let offset = 0; offset < expectedDesc.length; offset += options.limit) {
+      expect(page.content.map((row) => row.id)).toEqual(expectedDesc.slice(offset, offset + options.limit));
+      expect(page.total).toBe(includeTotal ? expectedDesc.length : null);
+      expect(page.page.has_more).toBe(offset + options.limit < expectedDesc.length);
+      seen.push(...page.content.map((row) => row.id));
+      if (!page.page.has_more) break;
+      const cursor = cursorOf(page.content[page.content.length - 1]);
+      page = await searchContentByText('searchable-marker', {
+        ...options,
+        before_occurred_at: cursor.occurred_at,
+        before_id: cursor.id,
+      });
+    }
+    expect(seen).toEqual(expectedDesc);
+
+    const cursor = cursorOf(page.content[0]);
+    const newer = await searchContentByText('searchable-marker', {
+      ...options,
+      after_occurred_at: cursor.occurred_at,
+      after_id: cursor.id,
+    });
+    const anchorIndex = expectedDesc.indexOf(cursor.id);
+    expect(newer.content.map((row) => row.id)).toEqual(expectedDesc.slice(anchorIndex - options.limit, anchorIndex));
+    expect(newer.total).toBe(includeTotal ? expectedDesc.length : null);
+    expect(newer.page.has_newer).toBe(true);
+  });
+
+  it('keeps the exact search total across both org arms on an empty offset page', async () => {
+    const page = await searchContentByText('searchable-marker', {
+      organization_id: feedOrg.id,
+      sort_by: 'score',
+      limit: 4,
+      offset: expectedDesc.length + 1,
+    });
+    expect(page.content).toHaveLength(0);
+    expect(page.total).toBe(expectedDesc.length);
+    expect(page.page.has_more).toBe(false);
+  });
+
   it('read_knowledge: include_total=false surfaces total null; omitted stays exact', async () => {
     const ctx: ToolContext = {
       organizationId: feedOrg.id,
