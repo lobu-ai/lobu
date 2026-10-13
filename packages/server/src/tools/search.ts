@@ -329,8 +329,10 @@ function withRecall<T extends UnifiedSearchResult>(
   recall: Partial<UnifiedSearchResult>
 ): T {
   Object.assign(result, recall);
-  if (recall.coverage?.status === 'partial' && !hasSearchHits(result)) {
-    result.discovery_status = 'discovering';
+  if (recall.coverage?.status === 'partial') {
+    result.suggestion =
+      'Search returned partial results. Some memory sources could not be searched or discovered. Retry the search.';
+    if (!hasSearchHits(result)) result.discovery_status = 'discovering';
   }
   return result;
 }
@@ -1303,10 +1305,6 @@ export async function gatherLocalRecall(
     sourceFeedsResult,
     localRecallFailed
   );
-  if (localRecallFailed) {
-    result.suggestion =
-      'Search returned partial results; one or more local memory sources was temporarily unavailable. Retry the search.';
-  }
   return result;
 }
 
@@ -1721,7 +1719,7 @@ async function searchWorkspaceImpl(
 
   if (hasRecallHits) {
     logger.info(`[search] Recalled memory hits for "${query}" with no entity match`);
-  } else {
+  } else if (recall.coverage?.status !== 'partial') {
     logger.info(`[search] No matches found for "${query}" in existing database`);
   }
 
