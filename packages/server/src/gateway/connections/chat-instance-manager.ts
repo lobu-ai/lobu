@@ -2844,6 +2844,7 @@ function storedToPlatform(stored: StoredConnection): PlatformConnection {
   };
   if (stored.agentId) out.agentId = stored.agentId;
   if (stored.organizationId) out.organizationId = stored.organizationId;
+  if (stored.createdBy) out.createdBy = stored.createdBy;
   if (stored.errorMessage) out.errorMessage = stored.errorMessage;
   return out;
 }

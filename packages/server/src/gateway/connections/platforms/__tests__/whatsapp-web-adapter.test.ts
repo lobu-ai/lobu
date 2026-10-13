@@ -9,7 +9,7 @@ import { Chat, NotImplementedError } from "chat";
 import * as operations from "../../../../tools/admin/manage_operations/handlers/execute.js";
 import { ChatInstanceManager } from "../../chat-instance-manager.js";
 import { ChatResponseBridge } from "../../chat-response-bridge.js";
-import { connectionOperationsExecutor } from "../whatsapp-web.js";
+import { connectionOperationsExecutor, whatsappWebPlatform } from "../whatsapp-web.js";
 import {
   WhatsAppWebAdapter,
   type WhatsAppWebMessageRow,
@@ -446,6 +446,33 @@ describe("WhatsApp Web gateway delivery", () => {
     expect(calls).toHaveLength(0);
     await bridge.handleCompletion({ ...payload, finalText: "replacement" }, "s");
     expect(calls[0]?.input.text).toBe("replacement");
+  });
+
+  test("a stored connection hydrates through the manager with its owner", async () => {
+    const stored = {
+      id: "101",
+      platform: "whatsapp.web",
+      config: {},
+      settings: {},
+      metadata: {},
+      status: "active",
+      organizationId: "org-synthetic",
+      createdBy: "user-owner",
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const started: unknown[] = [];
+    const manager = Object.assign(Object.create(ChatInstanceManager.prototype), {
+      instances: new Map(),
+      stopInstance: async () => {},
+      resolveStored: async () => stored,
+      startInstance: async function (this: any, connection: any) {
+        started.push(await whatsappWebPlatform.createAdapter({} as any, { connection }));
+        this.instances.set(connection.id, { connection });
+      },
+    });
+    await (manager as any).hydrateFromRow(stored);
+    expect(started).toHaveLength(1);
   });
 
   test("an ownerless connection cannot dispatch as a system principal", () => {
