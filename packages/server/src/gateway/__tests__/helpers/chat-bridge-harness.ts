@@ -11,7 +11,7 @@
 import type { Chat, StateAdapter } from "chat";
 import { AutomationSubscriptionService } from "../../channels/automation-subscription-service.js";
 import { ConversationStateStore } from "../../connections/conversation-state-store.js";
-import { registerMessageHandlers } from "../../connections/message-handler-bridge.js";
+import { type MessageHandlerBridge, registerMessageHandlers } from "../../connections/message-handler-bridge.js";
 import type { PlatformConnection } from "../../connections/types.js";
 import { QueueProducer } from "../../infrastructure/queue/queue-producer.js";
 import { RunsQueue } from "../../infrastructure/queue/runs-queue.js";
@@ -39,6 +39,8 @@ interface ChatBridgeInstance {
   connection: PlatformConnection;
   conversationState: ConversationStateStore;
   chat: Chat;
+  /** The registered bridge; interaction clicks enter through it. */
+  messageBridge?: MessageHandlerBridge;
 }
 
 export interface AssembledChatBridge {
@@ -99,13 +101,14 @@ export async function startAssembledChatBridge(
     nextState: StateAdapter,
     nextConnection: PlatformConnection,
   ) => {
-    instances.set(nextConnection.id, {
+    const instance: ChatBridgeInstance = {
       connection: nextConnection,
       conversationState: new ConversationStateStore(nextState),
       chat: nextChat,
-    });
+    };
+    instances.set(nextConnection.id, instance);
     chats.push(nextChat);
-    registerMessageHandlers(
+    instance.messageBridge = registerMessageHandlers(
       nextChat,
       nextConnection,
       services as never,

@@ -1278,7 +1278,13 @@ export class MessageHandlerBridge {
       }
     );
 
-    const isDirect = source === "interaction" ? undefined : !isGroup;
+    // DM-ness for typed messages and clicks alike comes from ONE structured
+    // source: the Chat SDK thread's `isDM`, which the adapter derives from the
+    // thread id (`adapter.isDM`) — the same verdict that routes a typed message
+    // to `onDirectMessage`. A click carries the SDK thread it happened in.
+    // Absent (no SDK thread) is unknown, which fails closed downstream.
+    const isDirect: boolean | undefined =
+      typeof thread?.isDM === "boolean" ? thread.isDM : undefined;
     for (const target of directTargets) {
       // Provider-authoritative same-tenant evidence, from the platform's own
       // descriptor. Only meaningful for the connection's own organization: a

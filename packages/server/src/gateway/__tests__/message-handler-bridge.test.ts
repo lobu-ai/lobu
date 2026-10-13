@@ -1174,27 +1174,44 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     });
   });
 
-  test("stamps authoritative directness on messages but not interaction clicks", async () => {
+  test("stamps directness from the SDK thread's isDM on messages and clicks alike", async () => {
     const { bridge, enqueueMessage } = makePreviewHarness({
       linkedAutomation: { agentId: "linked-agent" },
     });
-    const thread = makeThread(undefined);
+    const dmThread = { ...makeThread(undefined), isDM: true };
 
     // A reply inside a DM thread has conversationId !== channelId. Directness
-    // comes from the inbound event type, not that threading relationship.
-    await bridge.handleMessage(thread, makeMessage(), "dm");
-    const dmPayload = enqueueMessage.mock.calls[0]?.[0] as any;
-    expect(dmPayload.platformMetadata.isDirect).toBe(true);
+    // comes from the adapter's structured verdict, not that threading relationship.
+    await bridge.handleMessage(dmThread, makeMessage(), "dm");
+    expect((enqueueMessage.mock.calls[0]?.[0] as any).platformMetadata.isDirect).toBe(true);
 
     await bridge.ingestClick({
       userId: "U_USER",
       channelId: CHANNEL_ID,
       conversationId: THREAD_ID,
       value: "Continue",
-      thread,
+      thread: dmThread,
     });
-    const clickPayload = enqueueMessage.mock.calls[1]?.[0] as any;
-    expect(clickPayload.platformMetadata.isDirect).toBeUndefined();
+    expect((enqueueMessage.mock.calls[1]?.[0] as any).platformMetadata.isDirect).toBe(true);
+
+    await bridge.ingestClick({
+      userId: "U_USER",
+      channelId: CHANNEL_ID,
+      conversationId: THREAD_ID,
+      value: "Continue",
+      thread: { ...makeThread(undefined), isDM: false },
+    });
+    expect((enqueueMessage.mock.calls[2]?.[0] as any).platformMetadata.isDirect).toBe(false);
+
+    // No SDK verdict is unknown, never assumed direct.
+    await bridge.ingestClick({
+      userId: "U_USER",
+      channelId: CHANNEL_ID,
+      conversationId: THREAD_ID,
+      value: "Continue",
+      thread: makeThread(undefined),
+    });
+    expect((enqueueMessage.mock.calls[3]?.[0] as any).platformMetadata.isDirect).toBeUndefined();
   });
 
   test("fails closed when an interaction has no routing context", async () => {

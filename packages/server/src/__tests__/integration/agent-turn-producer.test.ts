@@ -4497,6 +4497,84 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
     expect(posts).not.toHaveBeenCalled();
   });
 
+  /** Mint the queued chat message through the real producer and list its MCP connections. */
+  async function mintAndListConnections(orgSlug: string, message: MessagePayload) {
+    await getTestDb()`DELETE FROM runs`;
+    await enqueueMessage(
+      { ...message, agentOptions: { model: 'claude/claude-opus-4-8' } },
+      { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL },
+    );
+    const [run] = await agentTurnRuns();
+    const credential = (run.action_input as { credential: string }).credential;
+    const gatewayToken = mintGatewayMcpToken(credential);
+    if (!gatewayToken) throw new Error('turn credential did not narrow');
+    const headers = { 'X-Lobu-Memory-Direct-Auth': '1' };
+    const init = await post(`/mcp/${orgSlug}`, {
+      body: { jsonrpc: '2.0', method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'replay', version: '1' } }, id: 0 },
+      token: gatewayToken,
+      headers,
+    });
+    expect(init.status).toBe(200);
+    const sessionId = init.headers.get('mcp-session-id') as string;
+    await post(`/mcp/${orgSlug}`, { body: { jsonrpc: '2.0', method: 'notifications/initialized' }, token: gatewayToken, headers: { ...headers, 'mcp-session-id': sessionId } });
+    const listed = await post(`/mcp/${orgSlug}`, {
+      body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'manage_connections', arguments: { action: 'list' } } },
+      token: gatewayToken,
+      headers: { ...headers, 'mcp-session-id': sessionId },
+    });
+    expect(listed.status).toBe(200);
+    return { claims: verifyWorkerToken(credential), listed: JSON.stringify(await listed.json()) };
+  }
+
+  it("a linked member's click keeps the DM evidence of the thread it was clicked in", async () => {
+    const { org } = await startTeamBot();
+    await seedSystemEntityTypes();
+    const member = await createTestUser({ email: 'team-bot-member@example.test' });
+    await addUserToOrganization(member.id, org.id, 'member');
+    await linkChatIdentityInGraph({ organizationId: org.id, userId: member.id, platform: 'slack', teamId: TEAM, platformUserId: 'U0LINKEDMEMBER' });
+    await createTestConnection({
+      organization_id: org.id, connector_key: 'github', display_name: 'Member private conn', visibility: 'private', created_by: member.id,
+    });
+    const DM = 'D0SYNTHDM';
+    const [row] = await getTestDb()<{ id: number }>`
+      SELECT id FROM connections WHERE organization_id = ${org.id} AND connector_key = 'slack'
+    `;
+    await createTestAutomationSubscription({
+      organizationId: org.id, agentId: AGENT_ID, connectionId: Number(row.id), platform: 'slack', channelId: DM, teamId: TEAM,
+    });
+    const messageBridge = bridge?.manager.getInstance(CONNECTION_ID)?.messageBridge;
+    if (!messageBridge) throw new Error('bridge not registered');
+
+    // The click carries the SDK thread it happened in; its `isDM` is the
+    // adapter's structured verdict, the same one a typed message gets.
+    const click = async (channel: string, isDM: boolean) => {
+      await getTestDb()`DELETE FROM runs`;
+      await messageBridge.ingestClick({
+        userId: 'U0LINKEDMEMBER',
+        channelId: `slack:${channel}`,
+        conversationId: `slack:${channel}:1787292000.000500`,
+        teamId: TEAM,
+        value: 'Continue',
+        thread: { id: `slack:${channel}:1787292000.000500`, channelId: `slack:${channel}`, isDM, post: async () => ({}), startTyping: async () => undefined },
+      });
+      let message: MessagePayload | undefined;
+      await waitFor(async () => {
+        [message] = await queuedChatMessages();
+        expect(message).toBeDefined();
+      });
+      return message as MessagePayload;
+    };
+
+    const dm = await mintAndListConnections(org.slug, await click(DM, true));
+    expect(dm.claims).toMatchObject({ actorUserId: member.id, chatAccess: 'member' });
+    expect(dm.listed).toContain('Member private conn');
+
+    const channel = await mintAndListConnections(org.slug, await click(CHANNEL, false));
+    expect(channel.claims).toMatchObject({ actorUserId: member.id, chatAccess: 'org_shared' });
+    expect(channel.listed).toContain('Team shared conn');
+    expect(channel.listed).not.toContain('Member private conn');
+  });
+
   it('a Slack Connect sender from another team is not vouched: reply-only and one notice', async () => {
     const { deliver, posts } = await startTeamBot();
     expect(await deliver(channelMessage('Ev0REPLAY2', '1787292000.000202', 'U0EXTERNAL', { user_team: 'T0OTHERTEAM', source_team: 'T0OTHERTEAM' }))).toBe(200);
