@@ -4,6 +4,7 @@
  */
 
 import { parsePgTextArray } from '../../db/client';
+import { automationNameColumn, automationNameJoin } from '../automation-attribution-sql';
 import type { ContentSearchResult } from './types';
 import {
   boundedAttachmentsSql,
@@ -62,6 +63,7 @@ const FINAL_JOINS_SQL = `
       LEFT JOIN connections c ON c.id = f.connection_id
       LEFT JOIN feeds fd ON fd.id = f.feed_id
       LEFT JOIN automation_versions wv ON wv.id = f.automation_version_id
+      ${automationNameJoin('f')}
       LEFT JOIN thread_meta tm ON tm.content_id = f.id`;
 
 const FINAL_JOINS_WITH_CLASSIFICATIONS_SQL = `${FINAL_JOINS_SQL}
@@ -90,7 +92,7 @@ const PARENT_ROOT_JOINS_SQL = `
         LIMIT 1
       ) root ON true`;
 
-const BASE_COLUMNS_SQL = `f.id, f.entity_ids, f.connection_id, f.feed_id, f.feed_key, f.automation_id, fd.display_name as feed_name, COALESCE(wv.name, 'Automation #' || f.automation_id) as automation_name, ${boundedPayloadTextSql('f')}, f.title, f.author_name, f.source_url, f.occurred_at, f.semantic_type,
+const BASE_COLUMNS_SQL = `f.id, f.entity_ids, f.connection_id, f.feed_id, f.feed_key, f.automation_id, fd.display_name as feed_name, ${automationNameColumn('f')} as automation_name, ${boundedPayloadTextSql('f')}, f.title, f.author_name, f.source_url, f.occurred_at, f.semantic_type,
           f.connector_key as platform, f.origin_id, f.origin_parent_id, f.score, f.metadata, f.payload_type, ${boundedJsonSql('f', 'payload_data')}, ${boundedJsonSql('f', 'payload_template')}, ${boundedAttachmentsSql('f')}, f.origin_type,
           f.interaction_type, f.interaction_status, f.interaction_input_schema, f.interaction_input, f.interaction_output, f.interaction_error, f.supersedes_event_id, f.run_id`;
 

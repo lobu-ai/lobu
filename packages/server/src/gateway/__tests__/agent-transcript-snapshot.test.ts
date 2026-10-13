@@ -655,6 +655,79 @@ describe("agent_transcript_snapshot — snapshot route", () => {
   });
 });
 
+describe("automation-run-thread — tool result pairing", () => {
+  test("tool_result rows pair onto their tool_use call with the persisted ids", async () => {
+    const agentId = "agent-pairing";
+    const orgId = await seedAgentRow(agentId, {
+      organizationId: "org_pairing",
+    });
+    const sql = getDb();
+    const userId = "pairing-owner";
+    await sql`
+      INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+      VALUES (${userId}, 'Pairing owner', 'pairing@example.test',
+              false, now(), now())
+      ON CONFLICT (id) DO NOTHING
+    `;
+    const [automation] = await sql<{ id: number }>`
+      WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
+      INSERT INTO automations (
+        id, automation_group_id, organization_id, managed_agent_id, created_by, name, slug
+      )
+      SELECT id, id, ${orgId}, ${agentId}, ${userId}, 'Pairing Automation', 'pair-' || id
+      FROM next_id
+      RETURNING id
+    `;
+    const automationId = Number(automation.id);
+    const [run] = await sql<{ id: number }>`
+      INSERT INTO runs (
+        organization_id, run_type, automation_id, status, action_input,
+        queue_name, run_at, created_at, completed_at
+      ) VALUES (
+        ${orgId}, 'automation', ${automationId}, 'completed', NULL,
+        'automation', now(), now(), now()
+      )
+      RETURNING id
+    `;
+    const runId = Number(run.id);
+    const conversationId = `${agentId}_automation_${automationId}_run_${runId}`;
+    const completion = {
+      action: "complete_window",
+      automation_id: String(automationId),
+      run_id: runId,
+      completed_now: true,
+      events_persisted: [{ id: 4242, semantic_type: "summary", change: "inserted" }],
+    };
+    const jsonl =
+      `${JSON.stringify({ type: "session", version: 3, id: "p", timestamp: new Date().toISOString(), cwd: "/w" })}\n` +
+      `${JSON.stringify({ type: "message", id: "m1", parentId: null, timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "tool_use", id: "tu2", name: "manage_automations", input: { action: "complete_window" } }] } })}\n` +
+      `${JSON.stringify({ type: "message", id: "m2", parentId: "m1", timestamp: new Date().toISOString(), message: { role: "toolResult", content: [{ type: "tool_result", tool_use_id: "tu2", content: JSON.stringify(completion) }] } })}\n`;
+    await sql`
+      INSERT INTO public.agent_transcript_snapshot
+        (organization_id, agent_id, conversation_id, run_id,
+         snapshot_jsonl, byte_size, terminal_status)
+      VALUES
+        (${orgId}, ${agentId}, ${conversationId}, ${runId},
+         ${jsonl}, ${Buffer.byteLength(jsonl, "utf-8")}, 'completed')
+    `;
+
+    const recent = await readAutomationRunThreads({
+      agentId,
+      automationId,
+      organizationId: orgId,
+      limit: 10,
+    });
+    expect(recent.runs).toHaveLength(1);
+    // The paired result rides on the call row (as stored — a JSON string),
+    // so thread views can unfold complete_window into the cards it wrote
+    // without a second fetch. The client parses the string when resolving ids.
+    const dumped = JSON.stringify(recent.runs[0]?.messages);
+    expect(dumped).toContain('"name":"manage_automations"');
+    expect(dumped).toContain("events_persisted");
+    expect(dumped).toContain("4242");
+  });
+});
+
 describe("agent_transcript_snapshot — history fallback", () => {
   test("dead-worker-fallback-from-db: readSnapshotJsonl returns the latest completed snapshot's bytes", async () => {
     const orgId = await seedAgentRow("agent-hist", {

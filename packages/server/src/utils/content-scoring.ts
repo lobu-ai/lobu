@@ -1,4 +1,5 @@
 import { getDb, pgTextArray } from '../db/client';
+import { automationNameColumn, automationNameJoin } from './automation-attribution-sql';
 import {
   buildFeedFilter,
   buildRunFilter,
@@ -451,7 +452,7 @@ export async function getNormalizedScoreContent(
         f.feed_key,
         f.automation_id,
         fd.display_name as feed_name,
-        COALESCE(wv.name, 'Automation #' || f.automation_id) as automation_name,
+        ${automationNameColumn('f')} as automation_name,
         f.origin_id,
         f.title,
         f.payload_text,
@@ -484,6 +485,7 @@ export async function getNormalizedScoreContent(
       LEFT JOIN connections s ON f.connection_id = s.id
       LEFT JOIN feeds fd ON fd.id = f.feed_id
       LEFT JOIN automation_versions wv ON wv.id = f.automation_version_id
+      ${automationNameJoin('f')}
       ${joinClause}
       WHERE ${whereClause}
     ), ranked_content AS (

@@ -27,6 +27,7 @@ import { resolveChatUserIdForUser } from "../lobu/stores/chat-identity.js";
 import { runtimeConnectionIdToSlug } from "../lobu/stores/connections-projection.js";
 import { getPlatformDescriptor } from "../gateway/connections/platforms/index.js";
 import { insertEvent } from "../utils/insert-event";
+import { automationNameColumn, automationNameJoin } from "../utils/automation-attribution-sql";
 import {
 	buildResourcePermalink,
 	getOrganizationSlug,
@@ -1700,7 +1701,7 @@ export async function listNotifications(opts: {
       e.feed_key,
       fd.display_name AS feed_name,
       e.automation_id,
-      COALESCE(wv.name, 'Automation #' || e.automation_id) AS automation_name,
+      ${sql.unsafe(automationNameColumn('e'))} AS automation_name,
       COALESCE(
         NULLIF(e.metadata->>'agent_id', ''),
         NULLIF(source_run.approved_input->>'agent_id', '')
@@ -1742,6 +1743,7 @@ export async function listNotifications(opts: {
     ${authorization.join}
     LEFT JOIN feeds fd ON fd.id = e.feed_id
     LEFT JOIN automation_versions wv ON wv.id = e.automation_version_id
+    ${sql.unsafe(automationNameJoin('e'))}
     LEFT JOIN connections source_connection
       ON source_connection.id = e.connection_id
      AND source_connection.organization_id = e.organization_id

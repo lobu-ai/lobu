@@ -5,6 +5,7 @@
  */
 
 import { type DbClient, pgBigintArray, pgTextArray } from '../../db/client';
+import { automationNameColumn, automationNameJoin } from '../../utils/automation-attribution-sql';
 import {
   buildConnectionVisibilityClause,
   buildEntityLinkUnion,
@@ -137,7 +138,7 @@ function buildContentQuery(opts: {
       ${a}.feed_key,
       ${a}.automation_id,
       fd.display_name AS feed_name,
-      COALESCE(wv.name, 'Automation #' || ${a}.automation_id) AS automation_name,
+      ${automationNameColumn(a)} AS automation_name,
       oc.client_name,
       -- Per-event classifications keyed by classifier attribute, matching the
       -- list/search path shape so exact reads (content_ids / include_superseded)
@@ -180,6 +181,7 @@ function buildContentQuery(opts: {
     LEFT JOIN oauth_clients oc ON oc.id = ${a}.client_id
     LEFT JOIN feeds fd ON fd.id = ${a}.feed_id
     LEFT JOIN automation_versions wv ON wv.id = ${a}.automation_version_id
+    ${automationNameJoin(a)}
     WHERE ${sourceWhere}
     ORDER BY ${orderBy}
     ${sourceLimit}

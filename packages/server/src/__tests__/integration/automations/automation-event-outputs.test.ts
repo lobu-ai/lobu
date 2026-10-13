@@ -266,12 +266,14 @@ describe('Automation event outputs', () => {
       ],
     };
 
-    await api.automations.completeWindow({
+    const completion = (await api.automations.completeWindow({
       automation_id: String(automationId),
       window_token: knowledge.window_token,
       extracted_data: extracted,
       run_id: queued.runId,
-    });
+    })) as unknown as {
+      events_persisted?: Array<{ id: number; semantic_type: string; change: string }>;
+    };
 
     const rows = await sql<{
       id: number;
@@ -300,6 +302,17 @@ describe('Automation event outputs', () => {
       origin_parent_id: source.origin_id,
     });
     expect(observations.map((row) => Number(row.metadata.rank))).toEqual([1, 2]);
+
+    // The completion names the events it persisted, so conversation views can
+    // unfold the call into its cards without re-querying.
+    const persistedIds = (completion.events_persisted ?? []).map((e) => Number(e.id)).sort((a, b) => a - b);
+    expect(persistedIds).toEqual(rows.map((row) => Number(row.id)).sort((a, b) => a - b));
+    expect(completion.events_persisted?.map((e) => e.semantic_type).sort()).toEqual([
+      'draft_reply',
+      'observation',
+      'observation',
+    ]);
+    expect(completion.events_persisted?.every((e) => e.change === 'inserted')).toBe(true);
 
     const activationTasks = await sql<{
       status: string;

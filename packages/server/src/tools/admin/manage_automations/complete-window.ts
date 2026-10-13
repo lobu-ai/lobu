@@ -169,6 +169,13 @@ export async function handleCompleteWindow(
   content_linked: number;
   /** Internal reaction gate; false on idempotent replays. */
   completed_now: boolean;
+  /**
+   * Events this completion persisted (declared event outputs + the run-level
+   * change set), in output order. Lets conversation views unfold a
+   * complete_window call into the cards it wrote. Absent on capture and
+   * already-completed replays; empty when there are no event outputs or changes.
+   */
+  events_persisted?: Array<{ id: number; semantic_type: string; change: string }>;
   /** `queued` = the reaction handoff committed with the window and the
    *  scheduler owns it from here; `skipped` = this Automation has no compiled
    *  reaction script, or the completion was an idempotent replay / capture. The
@@ -751,6 +758,7 @@ export async function handleCompleteWindow(
       tx
     );
     const workspaceEventActivations: WorkspaceEventActivationTaskPayload[] = [];
+    const eventsPersisted: Array<{ id: number; semantic_type: string; change: string }> = [];
     for (const [outputName, output] of Object.entries(outputs ?? {})) {
       if ('entity' in output) {
         const promote = await promoteAutomationEntityOutput({
@@ -784,6 +792,11 @@ export async function handleCompleteWindow(
           createdBy: automationCreatedBy,
         });
         for (const event of persistedEvents) {
+          eventsPersisted.push({
+            id: Number(event.id),
+            semantic_type: event.semantic_type,
+            change: event.change,
+          });
           if (
             event.change === 'unchanged' ||
             event.change === 'state_updated' ||
@@ -825,9 +838,10 @@ export async function handleCompleteWindow(
           AND metadata->>'_lobu_idempotency_key' = ${changeSetIdempotencyKey}
         LIMIT 1
       `;
-      if ((await findChangeSet()).length === 0) {
+      const existingChangeSet = await findChangeSet();
+      if (existingChangeSet.length === 0) {
         try {
-          await tx.savepoint((sp) =>
+          const changeSet = await tx.savepoint((sp) =>
             insertEvent(
               {
                 // A denial can carry no entity (a refused CREATE never got an
@@ -857,13 +871,32 @@ export async function handleCompleteWindow(
               { sql: sp }
             )
           );
+          eventsPersisted.push({
+            id: Number(changeSet.id),
+            semantic_type: 'change_set',
+            change: changeSet.change,
+          });
         } catch (error) {
           if (!isUniqueViolation(error, 'idx_events_org_idempotency_key')) throw error;
           // The failed INSERT was savepoint-isolated, so the outer completion
           // transaction is still usable. Confirm the concurrent winner before
           // treating this replay as complete.
-          if ((await findChangeSet()).length === 0) throw error;
+          const [winner] = await findChangeSet();
+          if (!winner) throw error;
+          eventsPersisted.push({
+            id: Number(winner.id),
+            semantic_type: 'change_set',
+            change: 'unchanged',
+          });
         }
+      } else {
+        // Idempotent replay: adopt the existing head so the result still names
+        // what this window stands behind.
+        eventsPersisted.push({
+          id: Number(existingChangeSet[0].id),
+          semantic_type: 'change_set',
+          change: 'unchanged',
+        });
       }
     }
 
@@ -985,6 +1018,7 @@ export async function handleCompleteWindow(
       window_end,
       content_linked: batchContentIds.length,
       completed_now: true,
+      events_persisted: eventsPersisted,
       queues_reaction: queuesReaction,
       reaction_task_run_id: reactionTaskRunId,
     };

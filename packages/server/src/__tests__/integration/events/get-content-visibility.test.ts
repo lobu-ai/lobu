@@ -1236,8 +1236,9 @@ describe('getContent > source attribution fields across query branches', () => {
     const item = result.content.find((c) => c.id === ev.id);
     expect(item, 'versionless event should surface').toBeTruthy();
     expect(item!.automation_id).toBe(900001);
-    // User-facing fallback label, never the internal `automation` term.
-    expect(item!.automation_name).toBe('Automation #900001');
+    // No producing version to name it — fall back to the automation's own
+    // name, never a bare id label.
+    expect(item!.automation_name).toBe('Attribution Automation');
     expect(item!.automation_name).not.toContain('automation');
   });
 });
