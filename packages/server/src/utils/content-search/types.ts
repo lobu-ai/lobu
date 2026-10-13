@@ -370,7 +370,7 @@ export function buildPageInfo(params: {
   };
 }
 
-/** Empty `{content, total: 0, page}` response — copy-pasted 3× in the old `listContentInternal`. */
+/** Empty page preserving the caller's total-count preference. */
 export function emptyListResponse(args: {
   limit: number;
   effectiveOffset: number;

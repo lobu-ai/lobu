@@ -128,8 +128,8 @@ export function buildOrgScopeWhere(options: {
       params: [options.organization_id],
       // The same predicate as two DISJOINT arms. Their union is exactly `sql`;
       // `IS DISTINCT FROM` keeps a row that matches both arms in one of them.
-      // The OR above hides `organization_id` from the index, so a top-N read
-      // runs one ordered, index-bounded scan per arm and merges them instead.
+      // Splitting the OR lets the direct arm use the ordered organization
+      // index; linked matches use their own scan before the top-N merge.
       branches: {
         direct,
         linked: `f.linked_org_ids @> ARRAY[${p}]::text[] AND f.organization_id IS DISTINCT FROM ${p}`,

@@ -24,7 +24,8 @@ export type { ContentItem };
 export const GetContentResultSchema = Type.Object({
   content: Type.Array(Type.Unknown()),
   /**
-   * Exact match count. null only when the caller passed `include_total: false`
+   * Reported match count (account activity reports page size; query rewrites
+   * report the fetched candidate pool). null when `include_total: false`
    * on a read that honors it (date/score listings and search); `page.has_more`
    * is then computed without counting.
    */

@@ -72,6 +72,21 @@ describe('actor-owned MCP audit reads', () => {
     }
   });
 
+  it('honors the count opt-out for activity pages but preserves exact-ID counts', async () => {
+    const args = { mcp_activity_id: activityId, client_ids: [clientId], limit: 1 };
+    const counted = await read(args);
+    const uncounted = await read({ ...args, include_total: false });
+    expect(counted.total).toBe(1);
+    expect(uncounted.total).toBeNull();
+    expect(uncounted.content).toEqual(counted.content);
+    expect(uncounted.page.has_more).toBe(true);
+
+    const exact = await read({ content_ids: ids, include_total: false });
+    expect(exact.total).toBe(ids.length);
+    const empty = await read({ content_ids: [ordinaryEventId], include_total: false });
+    expect(empty.total).toBe(0);
+  });
+
   it('includes transport-only activity', async () => {
     const result = await read({ mcp_activity_id: 'fixture-session-only', client_ids: [clientId] });
     expect(result.content).toHaveLength(1);

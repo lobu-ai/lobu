@@ -351,7 +351,7 @@ export async function searchContentBySingleQuery(
       ? buildOrderByClause('date', options.sort_order, 'rs', 'final_select')
       : `rs.combined_score DESC, ${outerScoreTiebreaker}`;
     resultSetOrderBy = preferChronologicalOrdering
-      ? buildOrderByClause('date', options.sort_order, 'filtered_ids', 'result_set')
+      ? buildOrderByClause('date', options.sort_order, 'fi', 'result_set')
       : `${combinedScoreExpr} DESC, ${innerScoreTiebreaker}`;
   } else {
     similarityExpr = 'NULL';
@@ -362,7 +362,7 @@ export async function searchContentBySingleQuery(
       ? buildOrderByClause('date', options.sort_order, 'rs', 'final_select')
       : `rs.combined_score DESC, ${outerScoreTiebreaker}`;
     resultSetOrderBy = preferChronologicalOrdering
-      ? buildOrderByClause('date', options.sort_order, 'filtered_ids', 'result_set')
+      ? buildOrderByClause('date', options.sort_order, 'fi', 'result_set')
       : `${textRankExpr} DESC, ${innerScoreTiebreaker}`;
   }
 

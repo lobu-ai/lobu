@@ -537,9 +537,8 @@ async function getContentImpl(
     // 2. If no query + sort_by=score -> use getNormalizedScoreContent
     // 3. If no query + sort_by=date -> use searchContentByText with date sorting
     let rawContent: ContentRow[];
-    // null only when the caller opted out with include_total: false. Exact-id
-    // and include_superseded reads are bounded by their ids / one entity's
-    // history and always count; automation mode is a separate branch.
+    // Exact-id and include_superseded reads always count; automation mode
+    // handles its totals separately.
     let total: number | null;
     const includeTotal = args.include_total !== false;
     // Distinct-lineage count from the content_ids branch (one requested id can

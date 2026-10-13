@@ -120,11 +120,9 @@ async function readAccountContent(
   });
   return {
     content,
-    // Like the chronological workspace reader, avoid counting growing history:
-    // this reader never counts, so `total` is the page size. Accepting the
-    // shared include_total opt-out keeps one caller shape across both readers,
-    // and an opted-out caller reads null as everywhere else.
-    total: args.include_total === false ? null : content.length,
+    // Account activity reports page size by default; exact-ID reads retain
+    // that count even when the caller opts out, as the shared schema promises.
+    total: !exact && args.include_total === false ? null : content.length,
     page: { limit, offset: 0, has_more: hasMore,
       has_older: after ? true : hasMore,
       has_newer: after ? hasMore : before },

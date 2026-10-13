@@ -63,9 +63,9 @@ import {
  * `candidate_set/result_set` vs `result_set` CTE pair, param indexing, dedup,
  * and the response shape — is identical, so it lives here.
  *
- * `orgScope` stays structured rather than pre-spliced into `whereExpr`: an
- * org-wide date feed under the linked-org bridge reads its two disjoint arms as
- * separate ordered, index-bounded scans (see `buildDateCandidateSetSql`).
+ * `orgScope` stays structured rather than pre-spliced into `whereExpr`:
+ * org-wide date feeds merge separately limited direct and linked candidates
+ * (see `buildDateCandidateSetSql`). Only the direct arm has an ordered index.
  */
 async function executeListQuery(args: {
   sql: DbClient;
@@ -271,8 +271,8 @@ async function executeListQuery(args: {
  * same row set as one scan over their OR — the arms are disjoint and each
  * keeps its own top-N, so the global top-N is inside their union — but the
  * direct arm now carries `f.organization_id = $org` as an index condition on
- * idx_events_live_org_effective_date, which also matches the ORDER BY, so a
- * page reads ~limit rows instead of every match in the org.
+ * idx_events_live_org_effective_date, which also matches the ORDER BY. The
+ * direct scan can stop after enough rows pass the remaining filters.
  */
 export function buildDateCandidateSetSql(args: {
   joinSql: string;
@@ -284,10 +284,8 @@ export function buildDateCandidateSetSql(args: {
   /**
    * Bounds implied by the filters/cursor, restated on the indexed recency key.
    * Only the direct arm gets them: there they become an index condition after
-   * `organization_id`. On the linked arm (cross-org rows reached through the
-   * GIN index) they matched no index prefix, and the planner chose a skip
-   * scan of the whole (org, time) index — ~1.1M index rows for 2k linked rows
-   * in the plan proof — so it is left with the plain filters.
+   * `organization_id`. Linked rows span organizations, so these bounds can
+   * instead encourage a skip scan across the entire (org, time) index.
    */
   directArmRangeSql: string;
   cursor: ReturnType<typeof resolveDateCursor>;
@@ -308,11 +306,9 @@ export function buildDateCandidateSetSql(args: {
   const branches = args.orgScope?.branches;
   if (!branches) return arm(args.orgScope?.sql ?? '');
 
-  // The linked arm reads its rows through the GIN index on linked_org_ids and
-  // orders them in memory. `OFFSET 0` fences the subquery so the cursor's
-  // keyset predicate is not pushed into that scan: pushed down, the planner
-  // ANDed the GIN bitmap with a skip scan of the whole (org, time) index on the
-  // cursor bound (~1.1M index rows for 2k linked rows in the plan proof).
+  // Keep cursor bounds above the linked-row scan with an OFFSET 0 fence.
+  // Otherwise the planner can combine the linked_org_ids GIN bitmap with
+  // a skip scan of the whole (org, time) index. Linked matches still need sorting.
   const linkedArm = `SELECT l.id, l.occurred_at, l.created_at
         FROM (
           SELECT

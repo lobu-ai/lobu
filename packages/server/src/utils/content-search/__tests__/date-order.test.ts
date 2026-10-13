@@ -11,7 +11,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import type { DbClient } from '../../../db/client';
 import { buildDateCandidateSetSql } from '../list-path';
+import { searchContentBySingleQuery } from '../search-path';
 import { buildDateCandidateOrderBy, buildDateCursorClause } from '../types';
 
 describe('buildDateCandidateOrderBy', () => {
@@ -132,5 +134,35 @@ describe('buildDateCandidateSetSql', () => {
     expect(sql).not.toContain('UNION ALL');
     expect(sql).toContain(linkedScope.sql);
     expect(sql).not.toContain('DIRECT_ONLY_BOUND');
+  });
+});
+
+// The offset search selects FROM filtered_ids fi; using the hidden CTE name
+// in ORDER BY fails in Postgres before either counted or uncounted pages return.
+describe('chronological search SQL', () => {
+  it.each([
+    { includeTotal: true, embedding: false },
+    { includeTotal: false, embedding: false },
+    { includeTotal: true, embedding: true },
+    { includeTotal: false, embedding: true },
+  ])('uses the selected alias for $includeTotal totals / $embedding embeddings', async ({ includeTotal, embedding }) => {
+    const queries: string[] = [];
+    const sql = {
+      unsafe: async (query: string) => {
+        queries.push(query);
+        return [];
+      },
+    } as unknown as DbClient;
+    await searchContentBySingleQuery(sql, 'fixture marker', {
+      organization_id: 'fixture-org',
+      sort_by: 'date',
+      sort_order: 'asc',
+      include_total: includeTotal,
+      query_embedding: embedding ? [1, 0, 0] : undefined,
+    });
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('ORDER BY COALESCE(fi.occurred_at, fi.created_at) ASC, fi.id ASC');
+    expect(queries[0]).not.toContain('filtered_ids.occurred_at');
+    if (!includeTotal) expect(queries[0]).not.toContain('COUNT(*) as total_count FROM filtered_ids');
   });
 });

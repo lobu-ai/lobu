@@ -228,6 +228,26 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
     expect(counted.total).toBe(expectedDesc.length);
   });
 
+  it.each([true, false])('paginates oldest-first text search with include_total=%s', async (includeTotal) => {
+    const expectedAsc = [...expectedDesc].reverse();
+    const seen: number[] = [];
+    for (let offset = 0; offset < expectedAsc.length + 4; offset += 4) {
+      const page = await searchContentByText('searchable-marker', {
+        organization_id: feedOrg.id,
+        sort_by: 'date',
+        sort_order: 'asc',
+        limit: 4,
+        offset,
+        include_total: includeTotal,
+      });
+      expect(page.content.map((row) => row.id)).toEqual(expectedAsc.slice(offset, offset + 4));
+      expect(page.total).toBe(includeTotal ? expectedAsc.length : null);
+      expect(page.page.has_more).toBe(offset + 4 < expectedAsc.length);
+      seen.push(...page.content.map((row) => row.id));
+    }
+    expect(seen).toEqual(expectedAsc);
+  });
+
   it('read_knowledge: include_total=false surfaces total null; omitted stays exact', async () => {
     const ctx: ToolContext = {
       organizationId: feedOrg.id,
