@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { BaseFormatConverter, parseMarkdown, toPlainText } from "chat";
 import {
   type MatchingAutomationActivation,
   planAutomationActivations,
@@ -40,6 +41,15 @@ const automationCooldown = {
     return true;
   },
 };
+
+class PlainTextConverter extends BaseFormatConverter {
+  fromAst(ast: Parameters<typeof toPlainText>[0]): string {
+    return toPlainText(ast);
+  }
+  toAst(platformText: string) {
+    return parseMarkdown(platformText);
+  }
+}
 
 describe("buildAttachmentTranscriptText", () => {
   const file = (id: string, name: string, mimetype: string) => ({
@@ -1047,7 +1057,13 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(
       await conversationState.getEntries(CONN_ID, CHANNEL_ID, THREAD_ID),
     ).toEqual([]);
-    expect(thread.post).toHaveBeenCalledWith({ text: "Chat history cleared." });
+    // Render the posted value through the SDK's real converter: an object
+    // shape the SDK doesn't accept (e.g. `{ text }`) throws here, as it does
+    // in every production adapter.
+    const posted = thread.post.mock.calls[0]?.[0];
+    expect(new PlainTextConverter().renderPostable(posted)).toBe(
+      "Chat history cleared.",
+    );
     expect(enqueueMessage).not.toHaveBeenCalled();
   });
 

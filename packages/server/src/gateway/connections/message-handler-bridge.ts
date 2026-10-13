@@ -1017,7 +1017,7 @@ export class MessageHandlerBridge {
         channelId,
         conversationId
       );
-      await thread.post({ text: "Chat history cleared." });
+      await thread.post("Chat history cleared.");
       return;
     }
 
