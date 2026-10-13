@@ -174,19 +174,49 @@ export async function getDeviceManifestSourcesForUser(params: {
   connectorKey?: string;
   /** Include every retained exact artifact instead of only one winner per key. */
   includeRetainedVersions?: boolean;
+  /**
+   * Scope to one device HOME workspace (`device_workers.organization_id`; a
+   * NULL home counts as the owner's personal workspace). A workspace holds ONE
+   * definition per connector key, so the winner is chosen across every fresh
+   * device homed there whose owner is still a member — otherwise two members on
+   * different extension versions would rewrite the shared definition on every
+   * poll. Advertiser lists stay this user's own devices, because they drive
+   * this user's connection pin and claim authorization. Omitted, the scope is
+   * the user's whole fleet, whatever its homes.
+   */
+  home?: { organizationId: string; personal: boolean };
 }): Promise<DeviceConnectorSource[]> {
+  const home = params.home;
   const rows = (await params.sql`
-    SELECT id, platform, capabilities, connector_manifests,
-           last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS}) AS online
-    FROM device_workers
-    WHERE user_id = ${params.userId}
-      AND last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
+    SELECT dw.id, dw.user_id, dw.platform, dw.capabilities, dw.connector_manifests,
+           dw.last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS}) AS online
+    FROM device_workers dw
+    WHERE dw.last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
       AND (
         ${params.connectorKey == null}
-        OR connector_manifests ? ${params.connectorKey ?? ''}
+        OR dw.connector_manifests ? ${params.connectorKey ?? ''}
       )
+      AND ${
+        // The personal workspace is its owner's alone (whatever its member
+        // rows say), and a NULL home counts as personal.
+        home?.personal
+          ? params.sql`(
+              dw.user_id = ${params.userId}
+              AND (dw.organization_id = ${home.organizationId} OR dw.organization_id IS NULL)
+            )`
+          : home
+            ? params.sql`(
+                dw.organization_id = ${home.organizationId}
+                AND EXISTS (
+                  SELECT 1 FROM "member" m
+                  WHERE m."organizationId" = ${home.organizationId} AND m."userId" = dw.user_id
+                )
+              )`
+            : params.sql`dw.user_id = ${params.userId}`
+      }
   `) as unknown as Array<{
     id: string;
+    user_id: string;
     platform: string | null;
     capabilities: unknown;
     connector_manifests: unknown;
@@ -196,6 +226,7 @@ export async function getDeviceManifestSourcesForUser(params: {
   type ManifestCandidate = {
     stored: StoredDeviceManifest;
     deviceId: string;
+    ownDevice: boolean;
     platform: string | null;
     online: boolean;
   };
@@ -210,7 +241,13 @@ export async function getDeviceManifestSourcesForUser(params: {
     for (const value of Object.values(map)) {
       const stored = parseStoredManifest(value);
       if (!stored) continue;
-      candidates.push({ stored, deviceId: row.id, platform: row.platform, online: row.online });
+      candidates.push({
+        stored,
+        deviceId: row.id,
+        ownDevice: row.user_id === params.userId,
+        platform: row.platform,
+        online: row.online,
+      });
     }
   }
 
@@ -258,11 +295,12 @@ export async function getDeviceManifestSourcesForUser(params: {
         candidate.stored.manifest.version === stored.manifest.version &&
         candidate.stored.manifest_hash === stored.manifest_hash
     );
-    const advertiserCandidates = exactCandidates.filter(
+    const ownExactCandidates = exactCandidates.filter((candidate) => candidate.ownDevice);
+    const advertiserCandidates = ownExactCandidates.filter(
       (candidate) =>
         liveCapabilities.get(candidate.deviceId)?.has(stored.manifest.required_capability) === true
     );
-    const onlineManifestCandidates = exactCandidates.filter((candidate) => candidate.online);
+    const onlineManifestCandidates = ownExactCandidates.filter((candidate) => candidate.online);
     const onlineAdvertiserCandidates = advertiserCandidates.filter((candidate) => candidate.online);
     // Provenance must describe the platform that actually validated and
     // advertised this manifest. `runtime.platforms` is a compatibility set, not

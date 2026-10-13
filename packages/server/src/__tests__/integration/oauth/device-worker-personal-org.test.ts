@@ -1,16 +1,16 @@
 /**
  * Device clients (Owletto Mac app, Chrome extension, local `lobu run` worker)
- * ALWAYS bind to the user's personal org — never the active/selected org and
- * never the `resource` slug the client passes. Personal device data belongs in
- * the private workspace; team orgs reach a device by pinning an automation /
- * connection to it (resolveDeviceClaimableOrgs), not by re-binding the token.
+ * bind to the HOME workspace the approving user picks on
+ * `/oauth/device/approve` (`organization_id`), and to the user's personal org
+ * when they pick none — never the active/selected org and never the `resource`
+ * slug the client passes.
  *
- * These tests pin that invariant on the two server surfaces a device client
+ * These tests pin that rule on the two server surfaces a device client
  * touches:
  *   - the device-code grant (`/oauth/device/approve` + `/oauth/token`): the
- *     resulting access token's `organization_id` MUST be the personal org,
- *     even when the client requested a team-org `resource` and the user is a
- *     multi-org member.
+ *     resulting access token's `organization_id` is the chosen home (a
+ *     workspace the user belongs to), else the personal org, even when the
+ *     client requested a team-org `resource`.
  *   - `/oauth/userinfo`: exposes `personal_org_slug` and marks the personal
  *     org with `personal: true`, so the Owletto menu bar can target it
  *     directly.
@@ -103,7 +103,7 @@ afterAll(async () => {
   // nothing to tear down — app is in-process
 });
 
-describe('device-worker grant always binds to the personal org', () => {
+describe('device-worker grant binds to the chosen home, personal by default', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
   });
@@ -449,5 +449,147 @@ describe('device-worker grant always binds to the personal org', () => {
     });
     // No personal org to bind to → the device can't be paired.
     expect(approve.status).toBe(403);
+  });
+
+  async function startDeviceGrant(app: Hono<{ Bindings: Env }>, cookie: string) {
+    const reg = await call(app, 'POST', '/oauth/register', {
+      body: {
+        client_name: 'Owletto home picker',
+        grant_types: ['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'],
+        token_endpoint_auth_method: 'none',
+      },
+    });
+    const client = (await reg.json()) as { client_id: string };
+    const deviceAuth = await call(app, 'POST', '/oauth/device_authorization', {
+      body: { client_id: client.client_id, scope: 'device_worker:run mcp:read profile:read' },
+    });
+    const da = (await deviceAuth.json()) as { device_code: string; user_code: string };
+    await verifyDeviceCode(app, da.user_code, cookie);
+    return { clientId: client.client_id, ...da };
+  }
+
+  async function exchange(
+    app: Hono<{ Bindings: Env }>,
+    grant: { clientId: string; device_code: string }
+  ) {
+    const tokenRes = await call(app, 'POST', '/oauth/token', {
+      body: {
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        device_code: grant.device_code,
+        client_id: grant.clientId,
+      },
+    });
+    expect(tokenRes.status).toBe(200);
+    const tokens = (await tokenRes.json()) as { access_token: string };
+    const rows = await getTestDb()`
+      SELECT organization_id, granted_organization_ids FROM oauth_tokens
+      WHERE token_hash = ${hashToken(tokens.access_token)} AND token_type = 'access'
+      LIMIT 1
+    `;
+    return rows[0] as { organization_id: string | null; granted_organization_ids: string | null };
+  }
+
+  it('binds the device token to a team workspace the approver chose and belongs to', async () => {
+    const app = buildApp();
+    const personalOrg = await createTestOrganization({ name: 'Home Personal' });
+    const teamOrg = await createTestOrganization({ name: 'Home Team' });
+    const user = await createTestUser({ name: 'Home Picker' });
+    await markPersonalOrg(personalOrg.id, user.id);
+    await addUserToOrganization(user.id, personalOrg.id, 'owner');
+    await addUserToOrganization(user.id, teamOrg.id, 'member');
+    const session = await createTestSession(user.id);
+
+    const grant = await startDeviceGrant(app, session.cookieHeader);
+    const approve = await call(app, 'POST', '/oauth/device/approve', {
+      body: { user_code: grant.user_code, approved: true, organization_id: teamOrg.id },
+      headers: { Cookie: session.cookieHeader },
+    });
+    expect(approve.status).toBe(200);
+    const token = await exchange(app, grant);
+    expect(token.organization_id).toBe(teamOrg.id);
+    expect(parsePgTextArray(token.granted_organization_ids)).toEqual([teamOrg.id]);
+  });
+
+  it('refuses a home workspace the approver is not a member of', async () => {
+    const app = buildApp();
+    const personalOrg = await createTestOrganization({ name: 'Outsider Personal' });
+    const foreignOrg = await createTestOrganization({ name: 'Foreign Team' });
+    const user = await createTestUser({ name: 'Outsider' });
+    await markPersonalOrg(personalOrg.id, user.id);
+    await addUserToOrganization(user.id, personalOrg.id, 'owner');
+    const session = await createTestSession(user.id);
+
+    const grant = await startDeviceGrant(app, session.cookieHeader);
+    for (const organizationId of [foreignOrg.id, 'org_does_not_exist']) {
+      const approve = await call(app, 'POST', '/oauth/device/approve', {
+        body: { user_code: grant.user_code, approved: true, organization_id: organizationId },
+        headers: { Cookie: session.cookieHeader },
+      });
+      expect(approve.status).toBe(403);
+      expect(await approve.json()).toMatchObject({
+        error: 'access_denied',
+        error_description: 'The workspace selection is no longer available',
+      });
+    }
+    const pending = await getTestDb()`
+      SELECT status FROM oauth_device_codes WHERE device_code = ${grant.device_code}
+    `;
+    expect(pending[0]?.status).not.toBe('approved');
+  });
+
+  it('defaults the device home to the personal workspace when none is chosen', async () => {
+    const app = buildApp();
+    const personalOrg = await createTestOrganization({ name: 'Default Personal' });
+    const teamOrg = await createTestOrganization({ name: 'Default Team' });
+    const user = await createTestUser({ name: 'Default Picker' });
+    await markPersonalOrg(personalOrg.id, user.id);
+    await addUserToOrganization(user.id, personalOrg.id, 'owner');
+    await addUserToOrganization(user.id, teamOrg.id, 'owner');
+    const session = await createTestSession(user.id);
+
+    const grant = await startDeviceGrant(app, session.cookieHeader);
+    const approve = await call(app, 'POST', '/oauth/device/approve', {
+      body: { user_code: grant.user_code, approved: true },
+      headers: { Cookie: session.cookieHeader },
+    });
+    expect(approve.status).toBe(200);
+    expect((await exchange(app, grant)).organization_id).toBe(personalOrg.id);
+  });
+
+  it('requires an MCP workspace grant to include the chosen home', async () => {
+    const app = buildApp();
+    const personalOrg = await createTestOrganization({ name: 'Grant Personal' });
+    const teamOrg = await createTestOrganization({ name: 'Grant Team' });
+    const user = await createTestUser({ name: 'Grant Picker' });
+    await markPersonalOrg(personalOrg.id, user.id);
+    await addUserToOrganization(user.id, personalOrg.id, 'owner');
+    await addUserToOrganization(user.id, teamOrg.id, 'member');
+    const session = await createTestSession(user.id);
+
+    const grant = await startDeviceGrant(app, session.cookieHeader);
+    const outside = await call(app, 'POST', '/oauth/device/approve', {
+      body: {
+        user_code: grant.user_code,
+        approved: true,
+        organization_id: teamOrg.id,
+        organization_ids: [personalOrg.id],
+        workspace_access: 'selected',
+      },
+      headers: { Cookie: session.cookieHeader },
+    });
+    expect(outside.status).toBe(403);
+
+    const inside = await call(app, 'POST', '/oauth/device/approve', {
+      body: {
+        user_code: grant.user_code,
+        approved: true,
+        organization_id: teamOrg.id,
+        organization_ids: [teamOrg.id],
+        workspace_access: 'selected',
+      },
+      headers: { Cookie: session.cookieHeader },
+    });
+    expect(inside.status).toBe(200);
+    expect((await exchange(app, grant)).organization_id).toBe(teamOrg.id);
   });
 });

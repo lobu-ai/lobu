@@ -3,10 +3,12 @@
  *
  * Extracted verbatim from `worker-api.ts`. On every user-scoped worker poll we
  * reconcile the user's device connectors against what their device fleet can
- * actually serve (capabilities advertised by devices seen recently). Wire /
- * re-activate connectors whose capability is served; pause the auto-wired feeds
- * of connectors whose capability has dropped out so `materializeDueFeeds` stops
- * creating runs nothing can claim.
+ * actually serve (capabilities advertised by devices seen recently), in each
+ * device's HOME workspace — the one chosen when it was paired (personal by
+ * default) or moved to on the Devices page. Wire / re-activate connectors whose
+ * capability is served there (a private connection owned by the device's
+ * owner); pause the auto-wired feeds of connectors whose capability has dropped
+ * out so `materializeDueFeeds` stops creating runs nothing can claim.
  */
 
 import { parseJsonObject } from '@lobu/core';
@@ -54,7 +56,38 @@ interface ManifestFeed {
 }
 
 /**
- * Install + wire a bundled device connector into the user's personal org:
+ * A device's HOME workspace: `device_workers.organization_id` (chosen when the
+ * device was paired, or by a Devices-page move), with a NULL home counted as
+ * the owner's personal workspace. Device connectors auto-wire here.
+ */
+interface DeviceHome {
+  organizationId: string;
+  personal: boolean;
+}
+
+/**
+ * The connection rows auto-wire treats as THIS user's device connection in a
+ * home workspace, for the `connections` row aliased `c`. A team workspace can
+ * hold several members' device connections for one connector key, each private
+ * to its creator, so a member must never adopt (and re-pin) a colleague's row.
+ * Ownerless rows may be adopted only in the personal workspace. Adopting one
+ * in a team workspace could attach a member's device to an org-visible row
+ * without that member choosing to share it.
+ */
+function ownDeviceConnectionPredicate(
+  db: ReturnType<typeof getDb>,
+  home: DeviceHome,
+  userId: string,
+  alias: 'c' | 'connections' | 'live' = 'c'
+) {
+  const column = db.unsafe(`${alias}.created_by`);
+  return home.personal
+    ? db`TRUE`
+    : db`${column} = ${userId}`;
+}
+
+/**
+ * Install + wire a bundled device connector into the device home workspace:
  * connector definition (idempotent), a no-auth connection, the first feed, and
  * re-activate the feed if a previous "capability went away" pass had paused it.
  * New connections are seeded with the org definition's `default_connection_config`
@@ -75,7 +108,7 @@ interface ManifestFeed {
  */
 async function ensureDeviceConnectorWired(
   userId: string,
-  organizationId: string,
+  home: DeviceHome,
   connectorKey: string,
   declaredFeedKeys: string[],
   matchingDeviceIds: string[],
@@ -83,6 +116,7 @@ async function ensureDeviceConnectorWired(
   pollingDeviceId?: string | null
 ): Promise<ManifestClaimAuthorization | null> {
   const sql = getDb();
+  const organizationId = home.organizationId;
 
   const initializePin = async (
     db: typeof sql,
@@ -116,7 +150,7 @@ async function ensureDeviceConnectorWired(
   const lockedManifestWinner = async (db: typeof sql): Promise<DeviceConnectorSource | null> => {
     if (!source) return null;
     const current = (
-      await getDeviceManifestSourcesForUser({ sql: db, userId, connectorKey })
+      await getDeviceManifestSourcesForUser({ sql: db, userId, connectorKey, home })
     ).find((candidate) => candidate.key === connectorKey);
     if (
       !current ||
@@ -240,6 +274,7 @@ async function ensureDeviceConnectorWired(
        -- unpinned connections, so that breaks a connection this pass never made.
        AND c.app_auth_profile_id IS NULL
        AND c.deleted_at IS NULL
+       AND ${ownDeviceConnectionPredicate(sql, home, userId)}
       LEFT JOIN feeds f
         ON f.connection_id = c.id
        AND f.status = 'active'
@@ -413,8 +448,9 @@ async function ensureDeviceConnectorWired(
 
       // An explicit user delete is durable opt-out for this device connector.
       // The marker is reserved at every public config-write path and delete
-      // writes it only after proving the connection belongs to this personal
-      // org's active device-connector definition. A device pin is deliberately
+      // writes it only after proving the connection is a credential-free row of
+      // this org's active device-connector definition. In a team workspace the
+      // opt-out is per member (the row's creator), like the connection itself. A device pin is deliberately
       // not required: multi-device auto-wiring leaves the connection unpinned.
       // The live-row anti-join makes an explicit reconnect the sole way to
       // clear the opt-out without mutating the tombstone during heartbeat
@@ -429,6 +465,7 @@ async function ensureDeviceConnectorWired(
           AND app_auth_profile_id IS NULL
           AND deleted_at IS NOT NULL
           AND config->>${DEVICE_AUTOWIRE_SUPPRESSION_KEY} = 'true'
+          AND ${ownDeviceConnectionPredicate(tx, home, userId, 'connections')}
           AND NOT EXISTS (
             SELECT 1
             FROM connections live
@@ -437,6 +474,7 @@ async function ensureDeviceConnectorWired(
               AND live.auth_profile_id IS NULL
               AND live.app_auth_profile_id IS NULL
               AND live.deleted_at IS NULL
+              AND ${ownDeviceConnectionPredicate(tx, home, userId, 'live')}
           )
         LIMIT 1
       `) as unknown as Array<{ '?column?': number }>;
@@ -528,9 +566,11 @@ async function ensureDeviceConnectorWired(
 
       // 3. Reuse or create the connection (no-auth, active, private). Match on
       //    (org, connector, no auth_profile) — the device-connector identity —
-      //    rather than created_by, so orphan rows (created_by IS NULL, or
-      //    created by a different user/token) get adopted and self-healed
-      //    instead of stranded behind a slug-collision insert.
+      //    so personal-workspace orphan rows get adopted and self-healed
+      //    instead of stranded behind a slug-collision insert. In a team
+      //    workspace the identity also includes the member
+      //    (`ownDeviceConnectionPredicate`): a colleague's private device
+      //    connection is never adopted.
       const existingConn = (await tx`
         SELECT id, created_by FROM connections
         WHERE organization_id = ${organizationId}
@@ -538,6 +578,7 @@ async function ensureDeviceConnectorWired(
           AND auth_profile_id IS NULL
           AND app_auth_profile_id IS NULL
           AND deleted_at IS NULL
+          AND ${ownDeviceConnectionPredicate(tx, home, userId, 'connections')}
         ORDER BY id ASC
         LIMIT 1
       `) as unknown as Array<{ id: number; created_by: string | null }>;
@@ -730,11 +771,11 @@ async function ensureDeviceConnectorWired(
 }
 
 /**
- * Pause the auto-wired feeds of `connectorKey` in the user's personal org —
- * called when no recently-seen device of the user still advertises the
- * connector's `requiredCapability`, so a `materializeDueFeeds` pass stops
+ * Pause the auto-wired feeds of `connectorKey` in one device home workspace —
+ * called when no recently-seen device of the user HOMED THERE still advertises
+ * the connector's `requiredCapability`, so a `materializeDueFeeds` pass stops
  * creating runs nothing can claim. Limited to no-auth, user-owned connections
- * in the personal org (exactly what {@link ensureDeviceConnectorWired} creates);
+ * in that workspace (exactly what {@link ensureDeviceConnectorWired} creates);
  * that function re-activates them if the capability comes back. Best-effort.
  */
 async function pauseStaleDeviceFeeds(userId: string, organizationId: string, connectorKey: string) {
@@ -764,11 +805,12 @@ async function pauseStaleDeviceFeeds(userId: string, organizationId: string, con
 
 /**
  * Keep a manifest-backed device connector's definition current in every org the
- * device may ALREADY claim runs in, not just its owner's personal org.
+ * device may ALREADY claim runs in, not just the workspaces its owner's devices
+ * are homed in.
  *
  * A team org reaches a device by pinning a connection to it, and that pin is
  * the consent (`resolveDeviceClaimableOrgs`). Claim scope follows the pin, but
- * the definition refresh above does not: it targets `personalOrgId` only, so a
+ * the definition refresh above does not: it targets the device homes only, so a
  * pinned org kept whatever `connector_definitions` row it happened to be
  * created with while the fleet moved on. Readiness compares the org's selected
  * artifact against the exact version/hash the device advertises
@@ -782,9 +824,12 @@ async function pauseStaleDeviceFeeds(userId: string, organizationId: string, con
  * connector keys the org already pins, and only where the org's active
  * definition is ALREADY a device connector (`IS_DEVICE_CONNECTOR_SQL`). It
  * never creates a connection, feed or pin, and never archives — auto-wire and
- * `archiveVanishedDeviceConnectorDefinitions` stay personal-org-only, so a team
- * connector a user assembled by hand is still never created or removed for
- * them. `sources` is the manifest inventory, so a connector the catalog ships
+ * `archiveVanishedDeviceConnectorDefinitions` stay scoped to device homes, so a
+ * pin-only workspace's connector a user assembled by hand is still never
+ * created or removed for them. Keys advertised in a home workspace follow that
+ * home's winner; refreshing them to the fleet-wide winner would fight the wire
+ * path. A workspace visited only to clean up old connections still needs its
+ * explicit pins refreshed. `sources` is the manifest inventory, so a connector the catalog ships
  * but no device advertises is absent and is never touched; a key that is both
  * (`os.shell`) is repaired on its manifest identity, which is what readiness
  * compares, and the write is org-scoped — the shared version row a bundled
@@ -796,7 +841,7 @@ async function pauseStaleDeviceFeeds(userId: string, organizationId: string, con
  */
 async function refreshPinnedOrgDeviceConnectorDefinitions(
   userId: string,
-  personalOrgId: string,
+  homeSources: ReadonlyMap<string, readonly DeviceConnectorSource[]>,
   sources: readonly DeviceConnectorSource[]
 ): Promise<void> {
   if (sources.length === 0) return;
@@ -835,7 +880,6 @@ async function refreshPinnedOrgDeviceConnectorDefinitions(
       ) cv ON TRUE
       WHERE dw.user_id = ${userId}
         AND c.deleted_at IS NULL
-        AND c.organization_id <> ${personalOrgId}
         AND c.connector_key = ANY(${pgTextArray([...sourceByKey.keys()])}::text[])
         -- Repair only what device reconciliation itself installs. A manifest
         -- key the product also lets an org install with its own code (os.shell,
@@ -854,6 +898,7 @@ async function refreshPinnedOrgDeviceConnectorDefinitions(
   // Write only where the org is actually behind what the fleet advertises, so a
   // converged fleet costs one indexed read per poll and opens no transaction.
   const stale = pinned.flatMap((row) => {
+    if (homeSources.get(row.organization_id)?.some((source) => source.key === row.connector_key)) return [];
     const source = sourceByKey.get(row.connector_key);
     if (!source) return [];
     const behind =
@@ -910,14 +955,19 @@ async function refreshPinnedOrgDeviceConnectorDefinitions(
  * its definition: connection fields do not record whether reconcile or a user
  * created the row, so deleting based on a guessed "auto-wire shape" would risk
  * deleting user configuration. The wire and archive paths share a per-key lock
- * and re-check stored manifests so concurrent polls converge. Best-effort.
+ * and re-check stored manifests so concurrent polls converge. Scoped to one
+ * device home: a key is "still served" only by a fresh device homed in that
+ * workspace (any member's, since the definition is the workspace's), so a
+ * device moving from A to B never keeps A's definitions alive nor archives B's.
+ * Best-effort.
  */
 async function archiveVanishedDeviceConnectorDefinitions(
   userId: string,
-  organizationId: string,
+  home: DeviceHome,
   liveKeys: string[]
 ): Promise<void> {
   const sql = getDb();
+  const organizationId = home.organizationId;
   try {
     const archived = await sql.begin(async (tx) => {
       const candidates = (await tx`
@@ -953,9 +1003,22 @@ async function archiveVanishedDeviceConnectorDefinitions(
           AND NOT EXISTS (
             SELECT 1
             FROM device_workers dw
-            WHERE dw.user_id = ${userId}
-              AND dw.last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
+            WHERE dw.last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
               AND dw.connector_manifests -> cd.key IS NOT NULL
+              AND ${
+                home.personal
+                  ? tx`(
+                      dw.user_id = ${userId}
+                      AND (dw.organization_id = ${organizationId} OR dw.organization_id IS NULL)
+                    )`
+                  : tx`(
+                      dw.organization_id = ${organizationId}
+                      AND EXISTS (
+                        SELECT 1 FROM "member" m
+                        WHERE m."organizationId" = ${organizationId} AND m."userId" = dw.user_id
+                      )
+                    )`
+              }
           )
           AND NOT EXISTS (
             SELECT 1 FROM connections c
@@ -984,14 +1047,20 @@ async function archiveVanishedDeviceConnectorDefinitions(
 
 /**
  * Reconcile a user's device connectors against what their device fleet can
- * actually serve. The set of device connectors comes from the catalog (any
- * bundled connector with a `runtime` block + a `requiredCapability`); the set of
- * served capabilities is the union over the user's devices seen within
- * `DEVICE_WORKER_FRESH_INTERVAL`. Manifest sources additionally carry the exact
- * devices advertising the winning version/hash/metadata. For each device
- * connector: if a matching implementation is served, wire / re-activate it;
- * otherwise pause its auto-wired feeds so `materializeDueFeeds` stops creating
- * runs nothing can claim.
+ * actually serve, per device HOME workspace. The set of device connectors comes
+ * from the catalog (any bundled connector with a `runtime` block + a
+ * `requiredCapability`) plus the manifests devices advertise. Each fresh device
+ * (seen within `DEVICE_WORKER_FRESH_INTERVAL`) serves the workspace it is homed
+ * in — chosen at pairing, or by a Devices-page move — and only while its owner
+ * is still a member. For each home workspace and device connector: if a device
+ * homed there serves a matching implementation, wire / re-activate this user's
+ * private connection there; otherwise pause its auto-wired feeds so
+ * `materializeDueFeeds` stops creating runs nothing can claim.
+ *
+ * The workspaces visited are the homes of the user's fresh devices, the user's
+ * personal workspace, and any workspace still holding this user's auto-wired
+ * device connections — the last two so a workspace every device moved out of
+ * still gets its stale feeds paused and its vanished definitions archived.
  *
  * Best-effort; runs on every user-scoped poll. Nothing connector-specific is
  * hardcoded — adding a new device connector is just a new file in the catalog.
@@ -1021,37 +1090,39 @@ export async function reconcileDeviceCapabilities(
     sourcesReadable = false;
   }
 
-  // Device data ALWAYS lands in the user's personal org — device tokens are
-  // force-bound there (see oauth/device/approve + mint-child-token), and a
-  // team org reaches a device by pinning an automation/connection to it
-  // (resolveDeviceClaimableOrgs), not by re-binding the device. So auto-wire
-  // targets the personal org regardless of where a legacy device_workers row
-  // is still homed (older pairings may still carry a team org_id; they
-  // converge here on the next poll).
-  const personalOrg = await findExistingPersonalOrg(userId, sql);
-  if (!personalOrg) {
-    // No personal org → nothing to auto-wire. Don't touch team-org connectors
-    // a user may have created manually; those survive on their own pins.
-    return [];
-  }
-  const personalOrgId = personalOrg.id;
+  const personalOrgId = (await findExistingPersonalOrg(userId, sql))?.id ?? null;
 
-  // deviceId → capabilities it advertises (fresh devices only). We no longer
-  // partition by the device's stored org_id: under the personal-org
-  // invariant every device serves the personal workspace, so the fleet's
-  // combined capabilities decide what gets wired, irrespective of legacy
-  // per-device home rows.
+  // deviceId → capabilities it advertises, and deviceId → its home workspace
+  // (fresh devices only). A NULL home is the personal workspace; a home the
+  // owner is no longer a member of serves nothing.
   const deviceCaps = new Map<string, Set<string>>();
+  const deviceHomes = new Map<string, string>();
   try {
     const rows = (await sql`
-      SELECT id, capabilities
-      FROM device_workers
-      WHERE user_id = ${userId}
-        AND last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
-    `) as unknown as Array<{ id: string; capabilities: unknown }>;
+      SELECT dw.id, dw.capabilities, h.home_org_id,
+             -- The personal workspace is always its owner's, member row or not
+             -- (legacy rows can lack one; auto-wire never required it there).
+             h.home_org_id = ${personalOrgId}::text
+               OR EXISTS (
+                 SELECT 1 FROM "member" m
+                 WHERE m."organizationId" = h.home_org_id AND m."userId" = ${userId}
+               ) AS home_member
+      FROM device_workers dw
+      CROSS JOIN LATERAL (
+        SELECT COALESCE(dw.organization_id, ${personalOrgId}::text) AS home_org_id
+      ) h
+      WHERE dw.user_id = ${userId}
+        AND dw.last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
+    `) as unknown as Array<{
+      id: string;
+      capabilities: unknown;
+      home_org_id: string | null;
+      home_member: boolean;
+    }>;
     for (const r of rows) {
       const caps = Array.isArray(r.capabilities) ? (r.capabilities as string[]) : [];
       deviceCaps.set(r.id, new Set(caps));
+      if (r.home_org_id && r.home_member) deviceHomes.set(r.id, r.home_org_id);
     }
   } catch (err) {
     logger.warn(
@@ -1061,10 +1132,37 @@ export async function reconcileDeviceCapabilities(
     return [];
   }
   if (deviceCaps.size === 0) return [];
-  const devicesWithCapability = (capability: string): string[] =>
-    [...deviceCaps.entries()].
-      filter(([, caps]) => caps.has(capability))
-      .map(([id]) => id);
+
+  const homeOrgIds = new Set(deviceHomes.values());
+  if (personalOrgId) homeOrgIds.add(personalOrgId);
+  try {
+    // Workspaces that still hold this user's auto-wired device connections but
+    // may no longer home any of their devices (every device moved away).
+    // `connections` is a bounded config table.
+    const rows = (await sql`
+      SELECT DISTINCT c.organization_id
+      FROM connections c
+      JOIN "member" m
+        ON m."organizationId" = c.organization_id AND m."userId" = ${userId}
+      WHERE c.created_by = ${userId}
+        AND c.auth_profile_id IS NULL
+        AND c.app_auth_profile_id IS NULL
+        AND c.deleted_at IS NULL
+        AND ${sql.unsafe(IS_DEVICE_CONNECTOR_SQL)}
+    `) as unknown as Array<{ organization_id: string }>;
+    for (const r of rows) homeOrgIds.add(r.organization_id);
+  } catch (err) {
+    logger.warn(
+      { userId, err: errorMessage(err) },
+      '[device-connectors] Failed to read device connector workspaces'
+    );
+  }
+  if (homeOrgIds.size === 0) return [];
+  const homes: DeviceHome[] = [...homeOrgIds].map((organizationId) => ({
+    organizationId,
+    personal: organizationId === personalOrgId,
+  }));
+  const pollingHomeOrgId = pollingDeviceId ? (deviceHomes.get(pollingDeviceId) ?? null) : null;
 
   let pollingDeviceAuthorizations: Awaited<
     ReturnType<typeof getDeviceManifestClaimAuthorizationsForDevice>
@@ -1074,17 +1172,19 @@ export async function reconcileDeviceCapabilities(
     try {
       // Attest retained hashless rows before reconciliation's selected-artifact
       // check. The attestation is still bounded to this validated device's
-      // exact manifest identity and org-scoped artifact row.
+      // exact manifest identity and its home's org-scoped artifact row.
       pollingDeviceAuthorizations = await getDeviceManifestClaimAuthorizationsForDevice({
         sql,
         userId,
         deviceId: pollingDeviceId,
       });
-      await attestDeviceManifestArtifacts({
-        sql,
-        organizationId: personalOrgId,
-        authorizations: pollingDeviceAuthorizations,
-      });
+      if (pollingHomeOrgId) {
+        await attestDeviceManifestArtifacts({
+          sql,
+          organizationId: pollingHomeOrgId,
+          authorizations: pollingDeviceAuthorizations,
+        });
+      }
     } catch (err) {
       pollingManifestClaimsReadable = false;
       logger.warn(
@@ -1094,12 +1194,18 @@ export async function reconcileDeviceCapabilities(
     }
   }
 
-  let manifestSources: DeviceConnectorSource[] = [];
+  // The user's fleet-wide winners feed only the pinned-org refresh below; each
+  // home reads its own winners.
+  let fleetManifestSources: DeviceConnectorSource[] = [];
+  const homeManifestSources = new Map<string, DeviceConnectorSource[]>();
   try {
-    manifestSources = await getDeviceManifestSourcesForUser({
-      sql,
-      userId,
-    });
+    fleetManifestSources = await getDeviceManifestSourcesForUser({ sql, userId });
+    for (const home of homes) {
+      homeManifestSources.set(
+        home.organizationId,
+        await getDeviceManifestSourcesForUser({ sql, userId, home })
+      );
+    }
   } catch (err) {
     logger.warn(
       { userId, err: errorMessage(err) },
@@ -1108,51 +1214,59 @@ export async function reconcileDeviceCapabilities(
     sourcesReadable = false;
   }
 
-  const byKey = new Map<
-    string,
-    | (BundledDeviceConnector & { source?: undefined })
-    | (DeviceConnectorSource & { source: 'device-manifest' })
-  >();
-  for (const dc of bundledDeviceConnectors) byKey.set(dc.key, dc);
-  for (const src of manifestSources) byKey.set(src.key, { ...src, source: 'device-manifest' });
-
-  // Runs BEFORE the early return: a fleet that advertises nothing is precisely
-  // the case where every device definition in the org has gone stale, so
-  // bailing on an empty `byKey` would skip the one pass that can clean it up.
-  // Gated on `sourcesReadable` rather than on `byKey.size` — a transient read
-  // failure must never be read as "the fleet serves nothing" and archive a
-  // user's whole working set.
   if (sourcesReadable) {
-    await archiveVanishedDeviceConnectorDefinitions(userId, personalOrgId, [...byKey.keys()]);
-    // Team orgs never auto-wire, but one that already pins a device must not be
-    // left running a definition the fleet has moved past — see the function's
-    // comment. Keyed off manifestSources, not byKey: only a manifest identity
-    // is what readiness compares, and only those get an org-scoped version row.
-    await refreshPinnedOrgDeviceConnectorDefinitions(userId, personalOrgId, manifestSources);
+    // Pin-only workspaces must not be left running a definition the fleet has
+    // moved past — see the function's comment. Keyed off manifest sources: only
+    // a manifest identity is what readiness compares.
+    await refreshPinnedOrgDeviceConnectorDefinitions(userId, homeManifestSources, fleetManifestSources);
   }
-  if (byKey.size === 0) return [];
 
-  const reconciliationResults = await Promise.allSettled(
-    [...byKey.values()].map((dc) => {
-      const matchingDeviceIds =
-        'source' in dc && dc.source === 'device-manifest'
-          ? dc.advertiserDeviceIds
-          : devicesWithCapability(dc.requiredCapability);
-      return matchingDeviceIds.length > 0
-        ? ensureDeviceConnectorWired(
-            userId,
-            personalOrgId,
-            dc.key,
-            dc.feedKeys,
-            matchingDeviceIds,
-            'source' in dc && dc.source === 'device-manifest'
-              ? dc
-              : undefined,
-            pollingDeviceId
-          )
-        : pauseStaleDeviceFeeds(userId, personalOrgId, dc.key);
-    })
-  );
+  const reconciliationResults = (
+    await Promise.all(
+      homes.map(async (home) => {
+        const manifestSources = homeManifestSources.get(home.organizationId) ?? [];
+        const byKey = new Map<
+          string,
+          | (BundledDeviceConnector & { source?: undefined })
+          | (DeviceConnectorSource & { source: 'device-manifest' })
+        >();
+        for (const dc of bundledDeviceConnectors) byKey.set(dc.key, dc);
+        for (const src of manifestSources) byKey.set(src.key, { ...src, source: 'device-manifest' });
+
+        // Runs BEFORE the empty check: a home whose devices advertise nothing
+        // is precisely where every device definition has gone stale. Gated on
+        // `sourcesReadable` — a transient read failure must never be read as
+        // "the fleet serves nothing" and archive a working set.
+        if (sourcesReadable) {
+          await archiveVanishedDeviceConnectorDefinitions(userId, home, [...byKey.keys()]);
+        }
+        if (byKey.size === 0) return [];
+
+        const homeDeviceIds = [...deviceHomes.entries()]
+          .filter(([, orgId]) => orgId === home.organizationId)
+          .map(([id]) => id);
+        return Promise.allSettled(
+          [...byKey.values()].map((dc) => {
+            const matchingDeviceIds =
+              'source' in dc && dc.source === 'device-manifest'
+                ? dc.advertiserDeviceIds
+                : homeDeviceIds.filter((id) => deviceCaps.get(id)?.has(dc.requiredCapability));
+            return matchingDeviceIds.length > 0
+              ? ensureDeviceConnectorWired(
+                  userId,
+                  home,
+                  dc.key,
+                  dc.feedKeys,
+                  matchingDeviceIds,
+                  'source' in dc && dc.source === 'device-manifest' ? dc : undefined,
+                  pollingDeviceId
+                )
+              : pauseStaleDeviceFeeds(userId, home.organizationId, dc.key);
+          })
+        );
+      })
+    )
+  ).flat();
 
   const reconciledAuthorizations = reconciliationResults.flatMap((result) =>
     result.status === 'fulfilled' && result.value ? [result.value] : []
@@ -1160,12 +1274,12 @@ export async function reconcileDeviceCapabilities(
   if (!pollingDeviceId) return reconciledAuthorizations;
   if (!pollingManifestClaimsReadable || !sourcesReadable) return [];
 
-  // If the polling device is the current winner for a manifest key, a failed
-  // wire/reconciliation must fail closed for that key. Historical claims are
-  // allowed only for keys where this device advertises a retained version and
-  // winner reconciliation belongs to another device.
+  // If the polling device is the current winner for a manifest key in its
+  // home, a failed wire/reconciliation must fail closed for that key.
+  // Historical claims are allowed only for keys where this device advertises a
+  // retained version and winner reconciliation belongs to another device.
   const currentWinnerKeysForPoller = new Set(
-    manifestSources
+    (pollingHomeOrgId ? (homeManifestSources.get(pollingHomeOrgId) ?? []) : [])
       .filter((source) => source.advertiserDeviceIds.includes(pollingDeviceId))
       .map((source) => source.key)
   );

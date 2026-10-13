@@ -744,7 +744,7 @@ export function personalConnectionScopeWarning(params: {
  * into a clean tool error. Kept in sync with the migration
  * `20260703200000_connection_personal_cred_private_guard.sql`. */
 export const PERSONAL_CRED_ORG_VISIBILITY_ERROR =
-  'A personal-credential (oauth_account) connection cannot be org-visible — set its visibility to private.';
+  'A personal-credential connection (your own OAuth login or browser session) cannot be org-visible — keep its visibility private.';
 
 /** Does this DB error come from the personal-credential visibility guard trigger?
  * The trigger raises the distinctive substring under the check_violation SQLSTATE

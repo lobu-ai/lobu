@@ -543,14 +543,24 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // connection is pinned to it (connections.device_worker_id) is claimable
   // regardless of the connector's required_capability — that's how an
   // otherwise-embedded connector (Reddit, …) ends up running on a chosen device.
-  // Device home org: the workspace the device's token was issued for (or, for a
-  // re-anchored local device, the org it already lives in). The upsert COALESCEs
-  // to the owner's personal org when null, and sets the home only on first
-  // registration; moving an existing device is the Devices-page action.
+  // Device home org: the workspace the device's token was issued for — the home
+  // the user chose when approving the pairing (`/oauth/device/approve`), or the
+  // one mint-child-token bound the child credential to — or, for a re-anchored
+  // local device, the org it already lives in. The upsert COALESCEs to the
+  // owner's personal org when null, and chooses the home on first
+  // registration. Legacy NULL-home rows remain personal. An existing row keeps
+  // its home, because the token is
+  // re-presented on every poll and would otherwise undo a Devices-page move
+  // (`PATCH /api/me/devices/:id`, the one move path). Device connectors
+  // auto-wire in this home (`reconcileDeviceCapabilities`).
   const registrationUserId = effectiveWorkerUserId;
   const registrationOrgId = effectiveTokenOrgId;
 
   let deviceWorkerId: string | null = null;
+  // The device's stored home, which a Devices-page move can make differ from
+  // the token's org. Its device connectors auto-wire there, so it joins the
+  // base (unpinned) claim scope below once membership is confirmed.
+  let deviceHomeOrgId: string | null = null;
   let manifestClaimAuthorizations: ManifestClaimAuthorization[] = [];
   if (registrationUserId) {
     try {
@@ -604,7 +614,10 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           -- the user afterwards (PATCH /api/me/devices/:id). A heartbeat that
           -- wrote it back would clobber a Devices-page rename on the next poll,
           -- since a headless daemon self-reports its hostname every time.
-          organization_id = COALESCE(device_workers.organization_id, EXCLUDED.organization_id),
+          organization_id = COALESCE(
+            device_workers.organization_id,
+            (SELECT id FROM organization WHERE (metadata::jsonb)->>'personal_org_for_user_id' = ${registrationUserId} LIMIT 1)
+          ),
           -- Large inventories are stored out of line, so writing
           -- an unchanged copy back costs a fresh out-of-line copy per heartbeat.
           -- Keep the stored value unless an advertised manifest hash differs.
@@ -634,6 +647,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         inserted: boolean;
       }>;
       deviceWorkerId = upserted[0]?.id ?? null;
+      deviceHomeOrgId = upserted[0]?.organization_id ?? null;
       if (upserted[0]?.inserted && upserted[0]?.organization_id) {
         recordLifecycleEvent({
           organizationId: upserted[0].organization_id,
@@ -687,9 +701,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   }
 
   // User-scoped workers (e.g. Lobu for Mac) can only claim runs in the
-  // org their token is bound to, plus the user's personal org (where device
-  // connectors auto-wire) — the set is computed in the /api/workers/* auth
-  // middleware. Trusted workers (matched WORKER_API_TOKEN) and anonymous
+  // org their token is bound to (the device home chosen at pairing, where its
+  // device connectors auto-wire), plus the user's personal org — the set is
+  // computed in the /api/workers/* auth middleware. Trusted workers (matched WORKER_API_TOKEN) and anonymous
   // local-dev requests see all pending runs — preserving the existing
   // server-side worker fleet semantics.
   //
@@ -730,14 +744,19 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   //
   // Two scopes: `orgScopeIds` (widened with cross-org pins) gates the
   // explicitly-PINNED claim branches — the pin is the owner's consent.
-  // `baseOrgScopeIds` (token's bound + personal org only) gates the UNPINNED
-  // capability-matched branch, so a single pin in org B does NOT also let the
-  // device claim unrelated unpinned device-connector runs in org B.
+  // `baseOrgScopeIds` (token's bound + personal org + the device's own home)
+  // gates the UNPINNED capability-matched branch, so a single pin in org B does
+  // NOT also let the device claim unrelated unpinned device-connector runs in
+  // org B. The home counts only when `resolveDeviceClaimableOrgs` kept it, i.e.
+  // the owner is still a member there.
   const orgScopeIds = orgScopeActive && claimableOrgIds ? claimableOrgIds : [''];
-  const baseOrgScopeIds =
-    orgScopeActive && effectiveWorkerOrgIds && effectiveWorkerOrgIds.length > 0
-      ? effectiveWorkerOrgIds
-      : [''];
+  const baseOrgIds = Array.from(
+    new Set([
+      ...(effectiveWorkerOrgIds ?? []),
+      ...(deviceHomeOrgId && claimableOrgIds?.includes(deviceHomeOrgId) ? [deviceHomeOrgId] : []),
+    ])
+  );
+  const baseOrgScopeIds = orgScopeActive && baseOrgIds.length > 0 ? baseOrgIds : [''];
   const connectorClaimContext: ConnectorClaimContext = {
     isUserScopedWorker,
     deviceWorkerId,

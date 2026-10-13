@@ -261,6 +261,12 @@ export const UpdateAction = Type.Object({
         "When true and `config` is provided, replace the stored connection config with exactly that object (declarative apply); when false/omitted, merge into the existing config (default).",
     })
   ),
+  visibility: Type.Optional(
+    Type.Union([Type.Literal("org"), Type.Literal("private")], {
+      description:
+        "Who can read through this connection: 'org' shares it with every workspace member, 'private' limits it to its creator. Only the connection's creator may change it, and a personal-credential connection (a user's own OAuth login or browser session) cannot be shared.",
+    })
+  ),
 });
 
 export const ApplyChatConnectionAction = Type.Object({

@@ -78,16 +78,22 @@ Implications, by design:
   the gateway's allowlist/blocklist/egress-judge — those govern locally-spawned workers, not a
   remote device. Treat a device-pinned cloud connector as running on that machine's network.
 - **A device has one home workspace.** Each device row is owned by one user and attached to one
-  workspace (`device_workers.organization_id`). Pairing attaches it to the owner's personal
-  workspace; picking other workspaces on the approval screen grants MCP access only, never
-  placement. The owner moves a device with `PATCH /api/me/devices/:id`, which requires membership
-  of the destination, un-pins every connection pinned to the device, and pauses those connections
-  and their active feeds. There is no per-workspace grant table.
+  workspace (`device_workers.organization_id`). The approver picks that home when pairing
+  (`organization_id` on `POST /oauth/device/approve`, which must be a workspace they belong to);
+  omitted, it is the owner's personal workspace. The device token, any child token minted from it
+  for a new device, and the device row all carry that home. Picking additional workspaces on the
+  approval screen grants MCP access only, never placement. An existing device keeps its home on
+  re-pairing, poll, and credential rotation; the owner moves it only with
+  `PATCH /api/me/devices/:id`, which requires membership of the destination, un-pins every
+  connection pinned to the device, and pauses those connections and their active feeds. There is
+  no per-workspace grant table.
 - **Connection pins are authorized at bind time.** The requester must own the device, the device
   must be attached to the connection's workspace, and it must have the connector's required
   capability and be recently seen. Automatic wiring of advertised capabilities happens only in
-  the owner's personal workspace; a team workspace gets a device connection only when someone
-  connects it explicitly.
+  each device's home workspace (requiring current membership for a team workspace), and creates a
+  `private` connection owned by the device's owner (one per member and connector in a team
+  workspace). Only that owner can share it with the workspace (`manage_connections` `update`
+  with `visibility: 'org'`); a personal-credential connection can never be widened.
 - **Automation pins follow a separate rule.** The device owner may pin an Automation to their
   device in any workspace; a workspace owner/admin may pin one to a device attached to that
   workspace; authenticated internal callers (apply, Automation runs) are not re-checked.

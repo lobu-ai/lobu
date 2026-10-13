@@ -2,9 +2,12 @@
  * Resolve which orgs a user-scoped device worker may claim runs in.
  *
  * Base scope (computed in the /api/workers/* auth middleware) is the token's
- * bound org plus the user's personal org. On top of that, a device may claim
- * runs in any org where it has a pinned automation/connection AND its owner is
- * still a member of that org.
+ * bound org — the device's home workspace, chosen when the device was paired
+ * (`/oauth/device/approve`, personal by default) — plus the user's personal
+ * org. Device connectors auto-wire in the device's home. On top of that, a
+ * device may claim runs in its current home (which can differ from its token
+ * after a move), or any org where it has a pinned automation/connection, while
+ * its owner is still a member of that org.
  *
  * The pin IS the consent. A connection pin requires the device's owner and a
  * device attached to that org (`device-binding.ts`); an Automation pin
@@ -27,6 +30,9 @@ export async function resolveDeviceClaimableOrgs(
   const rows = (await sql`
     SELECT DISTINCT src.organization_id
     FROM (
+      SELECT organization_id FROM device_workers
+        WHERE id = ${params.deviceWorkerId} AND user_id = ${params.ownerUserId}
+      UNION
       SELECT organization_id FROM automations
         WHERE device_worker_id = ${params.deviceWorkerId} AND status = 'active'
       UNION
@@ -38,11 +44,11 @@ export async function resolveDeviceClaimableOrgs(
     WHERE src.organization_id IS NOT NULL
   `) as unknown as Array<{ organization_id: string }>;
 
-  const pinnedOrgIds = rows
+  const deviceOrgIds = rows
     .map((r) => r.organization_id)
     .filter((id): id is string => typeof id === 'string' && id.length > 0);
 
-  return Array.from(new Set([...params.baseOrgIds, ...pinnedOrgIds]));
+  return Array.from(new Set([...params.baseOrgIds, ...deviceOrgIds]));
 }
 
 /**

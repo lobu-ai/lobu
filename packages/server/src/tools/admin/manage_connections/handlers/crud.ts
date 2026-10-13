@@ -1612,6 +1612,29 @@ export async function handleUpdate(
     }
   }
 
+	// Sharing is the creator's decision alone — not an admin's: a private
+	// connection reads through ITS CREATOR's access (a device connection runs on
+	// their machine), so nobody else may widen it to the workspace, and narrowing
+	// someone else's shared connection would silently cut colleagues off.
+	const hasVisibilityArg = args.visibility !== undefined;
+	if (hasVisibilityArg) {
+		if (args.visibility !== "org" && args.visibility !== "private") {
+			return { error: "visibility must be 'org' or 'private'." };
+		}
+		if (!ctx.userId || existing.created_by !== ctx.userId) {
+			return {
+				error:
+					"Only the connection's creator can change who it is shared with.",
+			};
+		}
+		if (existing.credential_mode !== null) {
+			return {
+				error:
+					"visibility applies to data connections; chat connections are not shared per member.",
+			};
+		}
+	}
+
 	// Setting/clearing the fallback agent is the same class of authority as an
 	// Automation subscription (manage_automations owns the authorization policy),
 	// auth/tool-access.ts): it decides which agent an unbound DM/mention runs.
@@ -1908,6 +1931,21 @@ export async function handleUpdate(
   const rebindToPersonalCred =
 		(hasAuthProfileArg || provisionedLiveBrowser) &&
 		isPersonalCredentialKind(authSelection.pendingLiveBrowser ? 'browser_session' : authSelection.authProfile?.profile_kind);
+	// Never widen a personal-credential connection (a user's own login reads
+	// their private account for everyone). The DB trigger is the hard backstop
+	// for oauth_account; this check covers every personal kind and answers with
+	// a readable error instead of a constraint violation.
+	if (
+		args.visibility === "org" &&
+		(rebindToPersonalCred ||
+			isPersonalCredentialKind(
+				hasAuthProfileArg || provisionedLiveBrowser
+					? (authSelection.pendingLiveBrowser ? "browser_session" : authSelection.authProfile?.profile_kind)
+					: currentAuthProfile?.profile_kind,
+			))
+	) {
+		return { error: PERSONAL_CRED_ORG_VISIBILITY_ERROR };
+	}
   const nextAppAuthProfileId = hasAppAuthProfileArg
     ? (authSelection.appAuthProfile?.id ?? null)
     : existing.app_auth_profile_id;
@@ -2160,7 +2198,7 @@ export async function handleUpdate(
             error_message = CASE WHEN ${explicitlyNoAuth}
               AND (status = 'pending_auth' OR (status = 'revoked' AND error_message = ${CONNECT_TOKEN_EXPIRED_ERROR}))
               THEN NULL ELSE error_message END,
-            visibility = CASE WHEN ${rebindToPersonalCred} THEN 'private' ELSE visibility END,
+            visibility = CASE WHEN ${rebindToPersonalCred} THEN 'private' ELSE COALESCE(${args.visibility ?? null}, visibility) END,
             entity_ids = COALESCE(${entityIdsValue}::bigint[], entity_ids),
             config = ${
               replaceConfig
@@ -2346,6 +2384,7 @@ export async function handleUpdate(
     ...(clearedDeviceTombstone ? ["error_message"] : []),
     ...(args.entity_ids !== undefined ? ["entity_ids"] : []),
     ...(args.config !== undefined ? ["config"] : []),
+    ...(args.visibility !== undefined ? ["visibility"] : []),
   ];
   recordToolConfigChange(ctx, {
     resourceKind: "connection",
@@ -2396,7 +2435,10 @@ export async function handleDelete(
   const { organizationId } = ctx;
 	const targets = await sql`
 		SELECT c.credential_mode, c.connector_key, c.auth_profile_id, c.app_auth_profile_id,
-			NULLIF((o.metadata::jsonb)->>'personal_org_for_user_id', '') AS autowire_user_id,
+			-- The member whose auto-wire owns this row: the personal workspace's
+			-- owner there (unchanged), else the row's creator — device connectors
+			-- auto-wire per member in a team workspace (device-reconcile.ts).
+			COALESCE(NULLIF((o.metadata::jsonb)->>'personal_org_for_user_id', ''), c.created_by) AS autowire_user_id,
 			${sql.unsafe(IS_DEVICE_CONNECTOR_SQL)} AS is_device_connector
 		FROM connections c
 		JOIN "organization" o ON o.id = c.organization_id

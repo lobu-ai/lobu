@@ -885,9 +885,10 @@ app.use("/api/workers/*", async (c, next) => {
 			}
 			const userId = c.var.user.id;
 			// A device worker is scoped to the org its token is bound to (if any —
-			// mcpAuth verified membership) plus the user's personal org, the
-			// auto-wire target. Device-code tokens (Lobu for Mac/iPhone) often aren't
-			// bound to any org, so the personal org alone is a valid scope.
+			// mcpAuth verified membership) — the device home chosen at pairing,
+			// where its device connectors auto-wire — plus the user's personal org.
+			// Legacy device-code tokens may not be bound to any org, so the
+			// personal org alone is a valid scope.
 			const boundOrgId = c.var.organizationId;
 			const personalOrg = await findExistingPersonalOrg(userId, getDb());
 			const orgIds = Array.from(
