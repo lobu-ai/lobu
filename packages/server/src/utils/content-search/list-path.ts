@@ -92,10 +92,18 @@ async function executeListQuery(args: {
   const { sql, joinSql, countParams, includeTotal } = args;
   const whereExpr = `${args.whereExpr} ${args.orgScope.sql}`;
 
-  const countSql = `SELECT COUNT(*) as total FROM current_event_records f
+  const countFrom = (scopeSql: string) => `FROM current_event_records f
       LEFT JOIN connections c ON c.id = f.connection_id
       ${joinSql}
-      WHERE ${whereExpr}`;
+      WHERE ${args.whereExpr} ${scopeSql}`;
+  // Sum the same disjoint arms as buildDateCandidateSetSql so the planner can
+  // use each arm's index. Entity-scoped reads keep their single predicate.
+  const countBranches = args.entityId == null ? args.orgScope.branches : null;
+  const countSql = countBranches
+    ? `SELECT
+        (SELECT COUNT(*) ${countFrom(`AND ${countBranches.direct} ${args.directArmRangeSql}`)})
+        + (SELECT COUNT(*) ${countFrom(`AND ${countBranches.linked}`)}) AS total`
+    : `SELECT COUNT(*) as total ${countFrom(args.orgScope.sql)}`;
 
   const cursorClause = buildDateCursorClause(
     args.cursor,
@@ -217,11 +225,10 @@ async function executeListQuery(args: {
     rawRows = (await args.sql.unsafe(querySQL, queryParams)) as any[];
     if (rawRows.length === 0) return emptyResponse();
   } else if (args.entityId == null) {
-    // Org-wide listing (the activity feed). The COUNT is one of the two
-    // expensive scans here — it re-evaluates the full visibility predicate
-    // across every live event — so run count + list in parallel instead of
-    // serializing two full scans. The total stays exact on every page
-    // (cursor pages included): ContentSearchResponse.total is part of the
+    // Org-wide listing (the activity feed). The exact count still evaluates
+    // visibility for all matching events, so run count + list in parallel.
+    // The total stays exact on every page (cursor pages included):
+    // ContentSearchResponse.total is part of the
     // read_knowledge contract and callers rely on it unless they opt out.
     const [countResult, rows] = await Promise.all([
       sql.unsafe<{ total: number | string }>(countSql, countParams),

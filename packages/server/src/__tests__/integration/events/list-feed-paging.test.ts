@@ -137,6 +137,29 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
     expect(seen).toEqual(expectedDesc);
   });
 
+  it('a since window counts both arms exactly once', async () => {
+    const sql = getDb();
+    const [{ min }] = await sql`
+      SELECT MIN(occurred_at) AS min FROM events WHERE id = ANY(${`{${expectedDesc.join(',')}}`}::bigint[])
+    `;
+    const since = new Date(new Date(min).getTime() + 6.5 * HOUR).toISOString();
+    const rows = await sql`
+      SELECT id FROM current_event_records f
+      WHERE (f.organization_id = ${feedOrg.id} OR f.linked_org_ids @> ARRAY[${feedOrg.id}]::text[])
+        AND f.occurred_at <= now() AND f.occurred_at >= ${since}::timestamptz
+      ORDER BY COALESCE(f.occurred_at, f.created_at) DESC, f.id DESC
+    `;
+    const windowed = rows.map((r) => Number(r.id));
+    // Keep matches from both arms while excluding part of the history.
+    expect(windowed.some((id) => linkedIds.includes(id))).toBe(true);
+    expect(windowed.some((id) => !linkedIds.includes(id))).toBe(true);
+    expect(windowed.length).toBeLessThan(expectedDesc.length);
+
+    const page = await feed({ since, limit: 50 });
+    expect(page.total).toBe(windowed.length);
+    expect(page.content.map((c) => c.id)).toEqual(windowed);
+  });
+
   it('an after cursor returns the next-newer rows, presented newest-first', async () => {
     const anchorIndex = 9;
     const anchor = (await feed({ limit: 50 })).content[anchorIndex];
