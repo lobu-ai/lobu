@@ -171,6 +171,14 @@ describe("WhatsApp source-owned history reads", () => {
     expect(page.requested).toEqual([["false_15550000000@c.us_synthetic-1"]]);
   });
 
+  it("finds an exact message id beyond the first storage page", async () => {
+    const page = install([sourceRow(1), sourceRow(2), sourceRow(3)]);
+    const result = await page.read({ query: "id:synthetic-1", limit: 1 });
+    expect(result).toMatchObject({ ok: true, hasMore: false, results: [{ id: "synthetic-1" }] });
+    expect(result.nextCursor).toBeUndefined();
+    expect(page.requested).toEqual([["false_15550000000@c.us_synthetic-1"]]);
+  });
+
   it("rejects a cursor reused with a different query or scope", async () => {
     const page = install([sourceRow(1), sourceRow(2)]);
     const first = await page.read({ limit: 1, query: "hello" });

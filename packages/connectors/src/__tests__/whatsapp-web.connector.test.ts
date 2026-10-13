@@ -204,6 +204,34 @@ describe("WhatsApp live source reads", () => {
     expect(columns).toEqual(expect.arrayContaining(["push_name", "sender_phone", "is_group"]));
   });
 
+  it("classifies each live row's content structurally", async () => {
+    const page = makeDispatcher({
+      probe: READY,
+      read_messages: { ok: true, results: [
+        message("text"),
+        message("captioned", { body: "", caption: "look", media_kind: "image" }),
+        message("image", { body: "", media_kind: "image" }),
+        message("revoked", { revoked: true }),
+        message("system", { body: "", is_system_event: true }),
+      ], hasMore: false },
+    });
+    const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null, browser: page.dispatcher });
+    expect(result.rows.map((row) => [row.id, row.content_kind, row.text])).toEqual([
+      ["text", "text", "hello"],
+      ["captioned", "text", "look"],
+      ["image", "media", "[image]"],
+      ["revoked", "revoked", "[revoked message]"],
+      ["system", "system", "[system event]"],
+    ]);
+    expect(result.columns?.map((column) => column.name)).toContain("content_kind");
+  });
+
+  it("declares that a new message can be answered where it came from", () => {
+    expect(connector.definition.automationEvents).toEqual([
+      expect.objectContaining({ key: "message.created", capabilities: { replyToSource: true } }),
+    ]);
+  });
+
   it("preserves the continuation of an empty filtered page", async () => {
     const page = makeDispatcher({ probe: READY,
       read_messages: { ok: true, results: [], nextCursor: "next-page", hasMore: true },
@@ -947,8 +975,8 @@ describe("sync over the generic chrome bridge", () => {
     );
   });
 
-  it("bumps the WhatsApp connector version for live sender fields", () => {
-    expect(connector.definition.version).toBe("1.0.8");
+  it("bumps the WhatsApp connector version for reply-to-source messages", () => {
+    expect(connector.definition.version).toBe("1.0.9");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {

@@ -36,6 +36,7 @@ import {
   type MediaStatus,
   mergeBrowserCheckpoint,
   mergeCollectedMessages,
+  messageContentKind,
   messagePayloadText,
   messageRevision,
   messageTitle,
@@ -579,6 +580,7 @@ function normalizedSearchResults(
       chat_name: message.chat_name ?? null,
       title: messageTitle(message),
       text: messagePayloadText(message),
+      content_kind: messageContentKind(message),
       occurred_at: message.occurred_at,
       from_me: message.from_me,
       sender_jid: message.sender_jid ?? null,
@@ -611,7 +613,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.8",
+    version: "1.0.9",
     faviconDomain: "whatsapp.com",
     authSchema: { methods: [{ type: "browser", mode: "live" }] },
     browser: {
@@ -631,7 +633,18 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     },
     automationEvents: [{
       key: "message.created", label: "New message", resourceType: "message",
-      description: "A new message reference from WhatsApp Web. The Automation can read its content from the live messages feed.",
+      description: "A new message reference from WhatsApp Web. The Automation can read its content from the live messages feed, or reply in the chat it came from.",
+      filterSchema: {
+        type: "object",
+        properties: {
+          channel_id: {
+            type: "string",
+            title: "Chat",
+            description: "WhatsApp chat ID. Replies into a group need this set to that group.",
+          },
+        },
+      },
+      capabilities: { replyToSource: true },
     }],
     feeds: {
       live_messages: {
@@ -1256,6 +1269,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         { name: "chat_name", type: "string" },
         { name: "title", type: "string" },
         { name: "text", type: "string" },
+        { name: "content_kind", type: "string" },
         { name: "occurred_at", type: "string" },
         { name: "from_me", type: "boolean" },
         { name: "sender_jid", type: "string" },

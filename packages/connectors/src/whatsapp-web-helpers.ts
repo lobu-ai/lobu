@@ -15,7 +15,7 @@
 
 import type { EventEnvelope } from "@lobu/connector-sdk";
 
-export const WHATSAPP_ADAPTER_VERSION = 21;
+export const WHATSAPP_ADAPTER_VERSION = 22;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 const WHATSAPP_SOURCE = "whatsapp_web";
 const RECENT_OVERLAP_SECONDS = 15 * 60;
@@ -481,28 +481,59 @@ function isInlineThumbnail(body: string): boolean {
   );
 }
 
-export function messagePayloadText(message: WhatsAppMessage): string {
+const MEDIA_PLACEHOLDERS: Record<string, string> = {
+  ptt: "[voice note]",
+  audio: "[voice note]",
+  image: "[image]",
+  video: "[video]",
+  document: "[document]",
+  sticker: "[sticker]",
+};
+
+function messageBodyText(message: WhatsAppMessage): string {
   const body =
     typeof message.body === "string" &&
     message.body.length > 0 &&
     !isInlineThumbnail(message.body)
       ? message.body
       : "";
-  const text =
+  return (
     body ||
     (typeof message.caption === "string" && message.caption.length > 0
       ? message.caption
-      : "");
-  if (message.revoked) return "[revoked message]";
-  if (text) return text;
-  if (message.is_system_event) return "[system event]";
-  const kind = message.media_kind ?? message.media_type ?? message.message_type;
-  if (kind === "ptt" || kind === "audio") return "[voice note]";
-  if (kind === "image") return "[image]";
-  if (kind === "video") return "[video]";
-  if (kind === "document") return "[document]";
-  if (kind === "sticker") return "[sticker]";
-  return "[system event]";
+      : "")
+  );
+}
+
+function mediaKind(message: WhatsAppMessage): string {
+  return String(message.media_kind ?? message.media_type ?? message.message_type ?? "");
+}
+
+/**
+ * What a message carries, decided from its fields rather than from the
+ * placeholder text `messagePayloadText` renders for it: readers that must
+ * not answer a revocation or a bare image key on this.
+ */
+export type MessageContentKind = "text" | "media" | "revoked" | "system";
+
+export function messageContentKind(message: WhatsAppMessage): MessageContentKind {
+  if (message.revoked) return "revoked";
+  if (messageBodyText(message)) return "text";
+  if (message.is_system_event) return "system";
+  return Object.hasOwn(MEDIA_PLACEHOLDERS, mediaKind(message)) ? "media" : "system";
+}
+
+export function messagePayloadText(message: WhatsAppMessage): string {
+  switch (messageContentKind(message)) {
+    case "revoked":
+      return "[revoked message]";
+    case "text":
+      return messageBodyText(message);
+    case "media":
+      return MEDIA_PLACEHOLDERS[mediaKind(message)];
+    default:
+      return "[system event]";
+  }
 }
 
 export function messageTitle(message: WhatsAppMessage): string {

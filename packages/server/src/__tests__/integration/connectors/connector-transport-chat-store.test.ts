@@ -4,9 +4,9 @@
  * A connector connection joins the chat connection store only when BOTH
  * declarations hold: the gateway declares its platform a connector transport,
  * and the connector's active definition declares a message event that can reply
- * to its source. The shipped `whatsapp.web` definition declares no such event
- * yet, so its connections must stay out of the chat engine — that is the
- * "inbound WhatsApp still takes today's path" guarantee.
+ * to its source. The shipped `whatsapp.web` definition declares one; a
+ * definition that does not (an older active version) keeps its connections out
+ * of the chat engine.
  */
 
 import WhatsAppWebConnector from "@lobu/connectors/whatsapp_web";
@@ -18,11 +18,8 @@ import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgre
 import { cleanupTestDatabase } from "../../setup/test-db";
 import { createTestConnection, createTestOrganization, createTestUser } from "../../setup/test-fixtures";
 
-const SHIPPED_EVENTS = new WhatsAppWebConnector().definition.automationEvents ?? [];
-const REPLYABLE_EVENTS = SHIPPED_EVENTS.map((event) => ({
-  ...event,
-  capabilities: { ...event.capabilities, replyToSource: true },
-}));
+const REPLYABLE_EVENTS = new WhatsAppWebConnector().definition.automationEvents ?? [];
+const REFERENCE_ONLY_EVENTS = REPLYABLE_EVENTS.map(({ capabilities: _capabilities, ...event }) => event);
 
 const store = createPostgresAgentConnectionStore({
   connectorTransportPlatforms: connectorTransportPlatforms(),
@@ -61,8 +58,8 @@ describe("connector-transport chat store eligibility", () => {
   });
 
   it("keeps a whatsapp.web connection out while its connector declares no reply-to-source event", async () => {
-    expect(SHIPPED_EVENTS.some((event) => event.capabilities?.replyToSource)).toBe(false);
-    await defineConnector("whatsapp.web", SHIPPED_EVENTS);
+    expect(REPLYABLE_EVENTS.some((event) => event.capabilities?.replyToSource)).toBe(true);
+    await defineConnector("whatsapp.web", REFERENCE_ONLY_EVENTS);
     const id = await connection("whatsapp.web");
 
     expect(await inOrg(() => store.getConnection(id))).toBeNull();

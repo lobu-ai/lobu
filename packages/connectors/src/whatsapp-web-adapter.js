@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 21;
+  const ADAPTER_VERSION = 22;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const MAX_RECORD_BYTES = 128 * 1024;
   const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -1234,7 +1234,9 @@ export function whatsAppWebAdapterProgram() {
    * Enumerate WhatsApp's own local history, not just the models loaded in the
    * page. Opaque message bodies stay with WhatsApp: its native loader hydrates
    * the selected keys. Each read scans at most one source page, so callers must
-   * follow cursors even when filtering leaves an empty page.
+   * follow cursors even when filtering leaves an empty page. An exact
+   * `id:<message ID>` read is the exception: ids are unique, so it walks
+   * history until that message and answers in one read.
    */
   async function readMessages(input = {}) {
     const query = String(input.query ?? "").trim();
@@ -1249,6 +1251,8 @@ export function whatsAppWebAdapterProgram() {
       }
       before = cursor.before;
     }
+    const keyModule = requireFirst(["WAWebMsgKey"]);
+    const exactId = query.startsWith("id:") ? query.slice(3) : null;
     const database = await new Promise((resolve, reject) => {
       const request = indexedDB.open("model-storage");
       // Never create an empty replacement database when WhatsApp changes its
@@ -1278,6 +1282,11 @@ export function whatsAppWebAdapterProgram() {
             reject(new Error("WhatsApp source history has an unsupported key layout"));
             return;
           }
+          if (exactId !== null) {
+            if (keyModule.fromString(cursor.value.id).id !== exactId) { cursor.continue(); return; }
+            resolve([{ position: cursor.key, id: cursor.value.id }]);
+            return;
+          }
           rows.push({ position: cursor.key, id: cursor.value.id });
           if (rows.length > limit) resolve(rows);
           else cursor.continue();
@@ -1288,9 +1297,7 @@ export function whatsAppWebAdapterProgram() {
     }
     const hasMore = sourceRows.length > limit;
     const page = sourceRows.slice(0, limit);
-    const keyModule = requireFirst(["WAWebMsgKey"]);
     const collections = requireFirst(["WAWebCollections"]);
-    const exactId = query.startsWith("id:") ? query.slice(3) : null;
     const selected = page.filter((row) => {
       const key = keyModule.fromString(row.id);
       if (exactId !== null && key.id !== exactId) return false;
