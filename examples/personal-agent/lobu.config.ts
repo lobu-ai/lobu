@@ -7,7 +7,6 @@ import {
   defineConfig,
   defineConnection,
   defineEntityType,
-  rulesFromFile,
   defineRelationshipType,
   defineSkill,
   every,
@@ -32,7 +31,6 @@ import type SpotifyConnector from "./spotify.connector.ts";
 import { takeoutConfig } from "./takeout-dirs.ts";
 import { taskBuilderPrompt } from "./task-builder.prompt.ts";
 import type TaskBuilderReaction from "./task-builder.reaction.ts";
-import type TaskRules from "./task.rules.ts";
 import {
   tiktokResearchExecution,
   tiktokResearchPrompt,
@@ -239,111 +237,6 @@ const person = defineEntityType({
     chat: {
       expr: "metadata->>'chat_jid'",
       description: "WhatsApp chat the message belongs to.",
-    },
-  },
-});
-
-// Collaborative actions for Burak + personal-agent. Identity comes from the
-// stable source plus a per-source task key, never editable display wording.
-// Schema is owned here — the Automation does not declare an extraction schema.
-const task = defineEntityType({
-  key: "task",
-  name: "Task",
-  description:
-    "An actionable item collaboratively managed by Burak and his personal agent.",
-  metadata: { icon: "check-square", color: "#10B981" },
-  rules: rulesFromFile<typeof TaskRules>("./task.rules.ts"),
-  properties: {
-    action: field("Action", {
-      minLength: 1,
-      description: "Concrete action to perform",
-    }),
-    status: field("Status", {
-      enum: ["backlog", "active", "done", "dismissed"],
-      description: "Collaborative task state",
-    }),
-    owner: field("Owner", {
-      description: "Person or agent responsible",
-      optional: true,
-    }),
-    priority: field("Priority", {
-      enum: ["high", "medium", "low"],
-      description: "Execution priority",
-      optional: true,
-    }),
-    due_date: field("Due", {
-      format: "date-time",
-      description: "Due time when known",
-      optional: true,
-    }),
-    source: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        description: "Where this task came from",
-      })
-    ),
-    rationale: Type.Optional(
-      Type.Unsafe({
-        type: "string",
-        description: "Why this task is worth doing",
-      })
-    ),
-    agent_help: Type.Optional(
-      Type.Union(
-        [
-          Type.Object(
-            {
-              summary: Type.String({ minLength: 1, maxLength: 600 }),
-              prompt: Type.String({ minLength: 1, maxLength: 6000 }),
-            },
-            { additionalProperties: false }
-          ),
-          Type.Null(),
-        ],
-        {
-          description:
-            "Proposed agent work for the user to review and start; null when no longer applicable.",
-        }
-      )
-    ),
-    source_event_id: Type.Optional(
-      Type.Unsafe({
-        type: "integer",
-        description: "Originating Lobu event id (provenance, not identity)",
-      })
-    ),
-    reminder: Type.Optional(
-      Type.Object(
-        {
-          run_id: Type.Optional(Type.Integer()),
-          origin_id: Type.Optional(Type.String({ minLength: 1 })),
-          create_failed: Type.Optional(Type.Boolean()),
-          complete_run_id: Type.Optional(Type.Integer()),
-          complete_settled: Type.Optional(Type.Boolean()),
-        },
-        {
-          additionalProperties: false,
-          description:
-            "Link to the Apple Reminder mirroring this task, owned by the completion reaction",
-        }
-      )
-    ),
-    source_scope: {
-      type: "string",
-      minLength: 1,
-      description:
-        "Stable source namespace copied from the source row (connection, connector, or local event)",
-    },
-    source_origin_id: {
-      type: "string",
-      minLength: 1,
-      description: "Stable source event identity copied from the source row",
-    },
-    task_key: {
-      type: "string",
-      minLength: 1,
-      description:
-        "Stable machine key for one distinct action within the source event",
     },
   },
 });
@@ -697,13 +590,8 @@ const hourlyTaskCollaborator = defineAutomation({
   // Omitted model preserves the Automation's existing execution setting on apply.
   triggers: [every("*/15 * * * *", { timezone: "Europe/London" })],
   minCooldownSeconds: 300,
-  outputs: {
-    tasks: {
-      entity: task,
-      key: ["source_scope", "source_origin_id", "task_key"],
-      name: ["action"],
-    },
-  },
+  // No outputs: Apple Reminders is the task list. The reaction applies the
+  // run's reminder changes through the paired Mac; nothing is stored here.
   sources: {
     // SQL frames summarize the run-bound arrival range. The agent queries each
     // cohort using its window token; no raw-body or arbitrary task-count cap.
@@ -853,7 +741,7 @@ export default defineConfig({
   orgDescription:
     "Personal agent tracking people, collaborative tasks, and financial context.",
   agents: [personalAgent, tiktokResearchAgent],
-  entities: [person, task],
+  entities: [person],
   relationships: [worksAt, mentions, connectedWith, founderOf, sameAs],
   automations: [
     hourlyTaskCollaborator,

@@ -1,375 +1,230 @@
 import { describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
-import notifyTasks from "../task-builder.reaction";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+import applyReminderChanges, { input, marker } from "../task-builder.reaction";
 
-const help = {
-  summary: "Audit the requested OAuth data-use details and draft a reply.",
-  prompt:
-    "Read the latest verification request, check the provider configuration and prepare a reply for review. Do not send it.",
-};
-const candidate = {
-  action: "Respond to the OAuth verification request",
-  status: "backlog",
-  source_scope: "connection:101",
-  source_origin_id: "synthetic-oauth-thread",
-  task_key: "reply-verification",
-  agent_help: help,
-};
-type DueTask = {
-  id: number;
-  name: string;
-  due_date: string;
-  priority: string | null;
-};
-const context = (tasks: unknown[]): ReactionContext => ({
-  extracted_data: { tasks },
-  entities: [],
-  window: {
-    run_id: 901,
-    automation_id: 71,
-    window_start: "2026-09-10T10:00:00Z",
-    window_end: "2026-09-10T12:00:00Z",
-    content_analyzed: 1,
-  },
-  automation: {
-    id: 71,
-    slug: "hourly-task-collaborator",
-    name: "Task Builder",
-    version: 1,
-  },
-  organization_id: "synthetic-org",
-  organization_slug: "example",
-});
+type Execute = Parameters<ReactionClient["operations"]["execute"]>[0];
+type ListRuns = Parameters<ReactionClient["operations"]["listRuns"]>[0];
+
+const context = (changes: unknown[]): ReactionContext =>
+  ({
+    extracted_data: { changes },
+    entities: [],
+    window: {
+      run_id: 901,
+      automation_id: 71,
+      window_start: "2026-09-10T10:00:00Z",
+      window_end: "2026-09-10T12:00:00Z",
+      content_analyzed: 1,
+    },
+    automation: {
+      id: 71,
+      slug: "hourly-task-collaborator",
+      name: "Task Collaborator",
+      version: 1,
+    },
+    organization_id: "synthetic-org",
+    organization_slug: "example",
+  }) as unknown as ReactionContext;
+
 function harness(
-  metadata: Record<string, unknown> | null = candidate,
-  changeKind: "created" | "updated" | "denied" | null = "created",
-  dueTasks: DueTask[] = [],
-  applied: Record<string, { old: unknown; new: unknown }> = {
-    agent_help: { old: null, new: metadata?.agent_help },
-  }
+  options: {
+    connections?: Array<{ id: number }>;
+    recentCreates?: Array<Record<string, unknown>>;
+  } = {}
 ) {
-  const sends: Parameters<ReactionClient["notifications"]["send"]>[0][] = [];
-  const queries: string[] = [];
-  let fail = false;
+  const executed: Execute[] = [];
+  const listed: ListRuns[] = [];
   const client = {
     query: async (sql: string) => {
-      queries.push(sql);
-      if (sql.startsWith("SELECT md5('")) {
-        const signature = sql.slice(
-          "SELECT md5('".length,
-          -"') AS digest".length
-        );
-        return [{ digest: createHash("md5").update(signature).digest("hex") }];
-      }
-      if (sql.includes("semantic_type = 'change_set'")) {
-        return changeKind
-          ? [
-              {
-                metadata: {
-                  changes: [{ entityId: 42, kind: changeKind, applied }],
-                },
-              },
-            ]
-          : [];
-      }
-      if (sql.includes("AS due_date")) return dueTasks;
-      if (sql.includes("connector_key = 'apple.reminders'")) return [];
-      return metadata
-        ? [
-            {
-              id: 42,
-              name: "OAuth verification",
-              slug: "oauth-verification",
-              metadata,
-            },
-          ]
-        : [];
+      if (sql.includes("connector_key = 'apple.reminders'"))
+        return options.connections ?? [{ id: 7 }];
+      throw new Error(`unexpected query: ${sql}`);
     },
-    notifications: {
-      send: async (input: (typeof sends)[number]) => {
-        if (fail) throw new Error("notification unavailable");
-        sends.push(input);
-        return { success: true };
+    operations: {
+      listRuns: async (input: ListRuns) => {
+        listed.push(input);
+        return { runs: options.recentCreates ?? [] };
+      },
+      execute: async (input: Execute) => {
+        executed.push(input);
+        return { status: "in_progress", run_id: 500 + executed.length };
       },
     },
     log: () => undefined,
   } as unknown as ReactionClient;
-  return {
-    client,
-    sends,
-    queries,
-    fail: () => {
-      fail = true;
-    },
-  };
+  return { client, executed, listed };
 }
-describe("Task Builder completion reaction", () => {
-  test("an actionable service email without a deadline offers reviewable agent work", async () => {
-    const h = harness();
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(1);
-    expect(h.sends[0]?.title).toContain("Agent help available");
-    const url = new URL(h.sends[0]!.resource_url!, "https://example.test");
-    expect(url.pathname).toBe("/example/chat/personal-agent");
-    expect(url.searchParams.get("new")).toBe("1");
-    expect(url.searchParams.get("prompt")).toContain("Read its current status");
-    expect(h.sends[0]?.idempotency_key).toBe(
-      "task-builder:task:42:notice:v2:created"
-    );
+
+const key = {
+  source_scope: "connection:3",
+  source_origin_id: "thread-1",
+  task_key: "reply",
+};
+const create = {
+  action: "create",
+  key,
+  title: "  Reply to  Ana ",
+  notes: "Gmail: Ana asked for the contract",
+  due: "2026-10-20T09:00:00Z",
+};
+const source = { automation_id: 71, run_id: 901 };
+
+describe("Task Collaborator reminder changes", () => {
+  test("no changes touch nothing", async () => {
+    const h = harness({ connections: [] });
+    await applyReminderChanges(context([]), h.client);
+    expect(h.executed).toHaveLength(0);
   });
-  test("a creation retry reuses its notification after display wording changes", async () => {
-    const first = harness();
-    await notifyTasks(context([candidate]), first.client);
-    const reworded = { ...candidate, action: "Handle the OAuth review" };
-    const second = harness(reworded);
-    await notifyTasks(context([candidate]), second.client);
-    expect(first.sends[0]?.title).not.toBe(second.sends[0]?.title);
-    expect(first.sends[0]?.idempotency_key).toBe(
-      second.sends[0]?.idempotency_key
-    );
-  });
-  test.each([
-    { priority: "high" },
-    { due_date: "2026-09-13T12:00:00Z" },
-    {
-      agent_help: {
-        summary: "Restore monitoring after the quota was exhausted.",
-        prompt: help.prompt,
-      },
-    },
-    {
-      agent_help: {
-        summary: help.summary,
-        prompt:
-          "Investigate dropped spans and prepare a recovery plan for review.",
-      },
-    },
-  ])("alerts again when the saved work changes: %p", async (change) => {
-    const first = harness();
-    await notifyTasks(context([candidate]), first.client);
-    const updated = { ...candidate, ...change };
-    const applied = Object.fromEntries(
-      Object.entries(change).map(([key, value]) => [
-        key,
-        { old: (candidate as Record<string, unknown>)[key], new: value },
-      ])
-    );
-    const second = harness(updated, "updated", [], applied);
-    await notifyTasks(context([updated]), second.client);
-    expect(second.sends).toHaveLength(1);
-    expect(second.sends[0]?.idempotency_key).not.toBe(
-      first.sends[0]?.idempotency_key
-    );
-    if ("priority" in change)
-      expect(second.sends[0]?.body).toContain("Priority: high");
-    if ("due_date" in change)
-      expect(second.sends[0]?.body).toContain("Due: 2026-09-13T12:00:00.000Z");
-    if ("agent_help" in change)
-      expect(second.sends[0]?.body).toContain(change.agent_help.summary);
-    const replay = harness(updated, "updated", [], applied);
-    await notifyTasks(context([updated]), replay.client);
-    expect(replay.sends[0]?.idempotency_key).toBe(
-      second.sends[0]?.idempotency_key
-    );
-  });
-  test.each([
-    { field: "priority", a: "low", b: "high" },
-    { field: "due_date", a: "2026-09-13T12:00:00Z", b: "2026-09-14T12:00:00Z" },
-    {
-      field: "agent_help",
-      a: help,
-      b: { ...help, summary: "Investigate the new request." },
-    },
-  ])("a reverted $field change alerts again but its retry deduplicates", async ({
-    field,
-    a,
-    b,
-  }) => {
-    const keys = [];
-    for (const [index, value] of [a, b, a].entries()) {
-      const task = { ...candidate, [field]: value };
-      const applied = {
-        [field]: { old: index === 0 ? null : index === 1 ? a : b, new: value },
-      };
-      const run = {
-        ...context([task]),
-        window: { ...context([]).window, run_id: 901 + index },
-      };
-      const h = harness(task, "updated", [], applied);
-      await notifyTasks(run, h.client);
-      expect(h.sends).toHaveLength(1);
-      const key = h.sends[0]?.idempotency_key;
-      expect(key).toBe(`task-builder:task:42:notice:v2:run:${901 + index}`);
-      keys.push(key);
-      const retry = harness(task, "updated", [], applied);
-      await notifyTasks(run, retry.client);
-      expect(retry.sends[0]?.idempotency_key).toBe(keys[index]);
+
+  test("refuses to guess between zero or several Reminders connections", async () => {
+    for (const connections of [[], [{ id: 7 }, { id: 8 }]]) {
+      const h = harness({ connections });
+      await expect(
+        applyReminderChanges(context([create]), h.client)
+      ).rejects.toThrow("Expected one Apple Reminders connection");
+      expect(h.executed).toHaveLength(0);
     }
-    expect(new Set(keys).size).toBe(3);
   });
-  test("equivalent deadline formats and unrelated edits send no new offer", async () => {
-    const original = { ...candidate, due_date: "2026-09-13T12:00:00Z" };
-    const first = harness(original);
-    await notifyTasks(context([original]), first.client);
-    const updated = {
-      ...original,
-      due_date: "2026-09-13T13:00:00+01:00",
-      status: "active",
-      rationale: "Investigation started; proposal and deadline are unchanged.",
-    };
-    const second = harness(updated, "updated", [], {
-      due_date: { old: original.due_date, new: updated.due_date },
-      status: { old: original.status, new: updated.status },
-      rationale: { old: null, new: updated.rationale },
-    });
-    await notifyTasks(context([updated]), second.client);
-    expect(second.sends).toHaveLength(0);
-  });
-  test.each([
-    { priority: { old: "low", new: "high" } },
-    { due_date: { old: null, new: "2026-09-13T12:00:00Z" } },
-  ])("does not alert for superseded urgency: %p", async (applied) => {
-    const h = harness(candidate, "updated", [], applied);
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("unchanged saved help and display-only edits send no new offer", async () => {
-    const h = harness(candidate, "updated", [], {
-      action: { old: "Old display title", new: candidate.action },
-      agent_help: { old: { ...help, summary: ` ${help.summary} ` }, new: help },
-    });
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test.each([
-    "done",
-    "dismissed",
-  ])("does not notify a task closed as %s after extraction", async (status) => {
-    const h = harness({ ...candidate, status });
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("does not notify when clearing agent help was denied", async () => {
-    const h = harness(candidate, "updated");
-    await notifyTasks(context([{ ...candidate, agent_help: null }]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("does not notify an output whose write did not persist", async () => {
-    const h = harness(null);
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("does not notify a denied task change", async () => {
-    const h = harness(candidate, "denied");
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test.each([
-    null,
-    { summary: "Human's plan", prompt: "A different plan" },
-  ])("does not notify a denied or superseded proposal: %p", async (agent_help) => {
-    const h = harness({ ...candidate, agent_help });
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("ordinary tasks still notify without claiming agent capabilities", async () => {
-    const task = { ...candidate, agent_help: null };
-    const h = harness(task);
-    await notifyTasks(context([task]), h.client);
-    expect(h.sends[0]?.title).toStartWith("Task:");
-    expect(h.sends[0]?.resource_url).toBe("/example/task/oauth-verification");
-  });
-  test("resolves committed task IDs even when older tasks lack output metadata", async () => {
+
+  test("creates a reminder in the Lobu list with its source line", async () => {
     const h = harness();
-    await notifyTasks(context([candidate]), h.client);
-    const entityQuery = h.queries.find((sql) => sql.includes("FROM entities"));
-    expect(entityQuery).toContain("id IN (42)");
-    expect(entityQuery).not.toContain("metadata->>'automation_output'");
-  });
-  test("an ordinary task notice does not suppress its later first agent offer", async () => {
-    const plain = { ...candidate, agent_help: null };
-    const first = harness(plain);
-    await notifyTasks(context([plain]), first.client);
-    const later = harness(candidate, "updated");
-    await notifyTasks(context([candidate]), later.client);
-    expect(first.sends[0]?.idempotency_key).not.toBe(
-      later.sends[0]?.idempotency_key
-    );
-    expect(later.sends[0]?.title).toStartWith("Agent help available:");
-  });
-  test("withdrawing an offer does not send an ordinary task notice", async () => {
-    const plain = { ...candidate, agent_help: null };
-    const h = harness(plain, "updated");
-    await notifyTasks(context([plain]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("uses saved human wording in the notification", async () => {
-    const h = harness({ ...candidate, action: "My reviewed action" });
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends[0]?.title).toEndWith("My reviewed action");
-  });
-  test("escapes source identity and rejects incomplete output", async () => {
-    const h = harness(null);
-    await notifyTasks(
-      context([{ ...candidate, source_origin_id: "sender's-thread" }]),
-      h.client
-    );
-    expect(h.queries.find((sql) => sql.includes("FROM entities"))).toContain(
-      "sender''s-thread"
-    );
-    await expect(
-      notifyTasks(context([{ action: "missing identity" }]), h.client)
-    ).rejects.toThrow("stable identity");
-  });
-  test("propagates a send failure to the existing reaction retry queue", async () => {
-    const h = harness();
-    h.fail();
-    await expect(notifyTasks(context([candidate]), h.client)).rejects.toThrow(
-      "notification unavailable"
-    );
-  });
-  test("an empty completed extraction sends no new task notification", async () => {
-    const h = harness();
-    await notifyTasks(context([]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("an empty extraction still sends the established due-task digest", async () => {
-    const dueDate = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const h = harness(null, null, [
+    await applyReminderChanges(context([create]), h.client);
+    expect(h.executed).toEqual([
       {
-        id: 7,
-        name: "Review the synthetic deadline",
-        due_date: dueDate,
-        priority: "high",
+        connection_id: 7,
+        operation_key: "create_reminder",
+        input: {
+          title: "Reply to Ana",
+          notes:
+            "Gmail: Ana asked for the contract\n\nlobu:connection:3|thread-1|reply",
+          list: "Lobu",
+          due: "2026-10-20T09:00:00Z",
+        },
+        idempotency_key: "task-reminders:901:0",
+        automation_source: source,
+        background: true,
       },
     ]);
-    await notifyTasks(context([]), h.client);
-    expect(h.sends).toHaveLength(1);
-    expect(h.sends[0]?.title).toBe("Task reminder — 1 overdue");
-    expect(h.sends[0]?.body).toContain("OVERDUE");
-    expect(h.sends[0]?.idempotency_key).toMatch(
-      /^task-due-digest:\d{4}-\d{2}-\d{2}:[a-f0-9]{32}$/
+    expect(h.listed[0]).toMatchObject({
+      connection_id: 7,
+      operation_key: "create_reminder",
+    });
+  });
+
+  test("a create without notes or due carries only the source line", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([{ action: "create", key, title: "Call" }]),
+      h.client
+    );
+    expect(h.executed[0]?.input).toEqual({
+      title: "Call",
+      notes: marker(key),
+      list: "Lobu",
+    });
+  });
+
+  test("skips a create already queued or done by an earlier run", async () => {
+    for (const status of ["pending", "in_progress", "completed"]) {
+      const h = harness({
+        recentCreates: [{ status, input: { notes: `x\n\n${marker(key)}` } }],
+      });
+      await applyReminderChanges(context([create]), h.client);
+      expect(h.executed).toHaveLength(0);
+    }
+  });
+
+  test("a failed or rejected earlier create does not block a new one", async () => {
+    for (const status of ["failed", "timeout", "cancelled"]) {
+      const h = harness({
+        recentCreates: [{ status, input: { notes: marker(key) } }],
+      });
+      await applyReminderChanges(context([create]), h.client);
+      expect(h.executed).toHaveLength(1);
+    }
+  });
+
+  test("the same action proposed twice in one run is created once", async () => {
+    const h = harness();
+    await applyReminderChanges(context([create, create]), h.client);
+    expect(h.executed).toHaveLength(1);
+  });
+
+  test("completes and updates by reminder identity, keyed to this run", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([
+        { action: "complete", origin_id: "reminder:a" },
+        {
+          action: "update",
+          origin_id: "reminder:b",
+          due: "2026-10-21T09:00:00Z",
+        },
+      ]),
+      h.client
+    );
+    expect(h.listed).toHaveLength(0);
+    expect(
+      h.executed.map(({ operation_key, input, idempotency_key }) => ({
+        operation_key,
+        input,
+        idempotency_key,
+      }))
+    ).toEqual([
+      {
+        operation_key: "complete_reminder",
+        input: { origin_id: "reminder:a" },
+        idempotency_key: "task-reminders:901:0",
+      },
+      {
+        operation_key: "update_reminder",
+        input: { origin_id: "reminder:b", due: "2026-10-21T09:00:00Z" },
+        idempotency_key: "task-reminders:901:1",
+      },
+    ]);
+  });
+
+  test("never deletes", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([create, { action: "complete", origin_id: "reminder:a" }]),
+      h.client
+    );
+    expect(h.executed.map((call) => call.operation_key)).not.toContain(
+      "delete_reminder"
     );
   });
-  test("a full due digest keeps its notification key within the API limit", async () => {
-    const dueTasks = Array.from({ length: 25 }, (_, i) => ({
-      id: 100000 + i,
-      name: `Synthetic deadline ${i}`,
-      due_date: new Date(Date.now() - 3600000).toISOString(),
-      priority: "high",
-    }));
-    const h = harness(null, null, dueTasks);
-    await notifyTasks(context([]), h.client);
-    expect(h.sends).toHaveLength(1);
-    expect(h.sends[0]!.idempotency_key!.length).toBeLessThanOrEqual(300);
-    const replay = harness(null, null, dueTasks);
-    await notifyTasks(context([]), replay.client);
-    expect(replay.sends[0]!.idempotency_key).toBe(h.sends[0]!.idempotency_key);
-    const changed = harness(null, null, dueTasks.slice(1));
-    await notifyTasks(context([]), changed.client);
-    expect(changed.sends[0]!.idempotency_key).not.toBe(
-      h.sends[0]!.idempotency_key
-    );
+
+  // Same options as the host's window completion (complete-window.ts).
+  const ajv = new Ajv({
+    allErrors: true,
+    strict: false,
+    removeAdditional: true,
+  });
+  addFormats(ajv);
+  const validate = ajv.compile(input);
+
+  test("the host's validator keeps every field of every change", () => {
+    const changes = [
+      create,
+      { action: "complete", origin_id: "reminder:a" },
+      { action: "update", origin_id: "reminder:b", title: "New" },
+    ];
+    const data = structuredClone({ changes });
+    expect(validate(data)).toBe(true);
+    expect(data).toEqual({ changes });
+  });
+
+  test("the host's validator rejects deletes and incomplete changes", () => {
+    for (const change of [
+      { action: "delete", origin_id: "reminder:a" },
+      { action: "create", key },
+      { action: "complete" },
+      { action: "create", key, title: "x", due: "tomorrow" },
+    ]) {
+      expect(validate({ changes: [change] })).toBe(false);
+    }
   });
 });

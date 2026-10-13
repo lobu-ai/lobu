@@ -38,11 +38,8 @@ describe("consolidated net-worth configuration", () => {
     ).toBe(false);
   });
 
-  test("keeps the personal entity model limited to people and collaborative tasks", () => {
-    expect(config.entities?.map((entity) => entity.key).sort()).toEqual([
-      "person",
-      "task",
-    ]);
+  test("keeps the personal entity model limited to people", () => {
+    expect(config.entities?.map((entity) => entity.key)).toEqual(["person"]);
   });
 
   test("declares a same-org catalog quote handle without shipping duplicate source", () => {

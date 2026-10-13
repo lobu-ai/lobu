@@ -1,35 +1,35 @@
 import { describe, expect, test } from "bun:test";
 import config from "../lobu.config";
 
-describe("Task Builder notification contract", () => {
+describe("Task Collaborator keeps tasks in Apple Reminders", () => {
   const automation = config.automations?.find(
     (item) => item.slug === "hourly-task-collaborator"
   );
 
-  test("queues a reaction for tasks without deadlines", () => {
+  test("stores no tasks in Lobu", () => {
+    expect(config.entities?.some((item) => item.key === "task")).toBe(false);
+    expect(automation?.outputs).toBeUndefined();
+  });
+
+  test("applies reminder changes in its reaction", () => {
     expect(automation?.reaction).toMatchObject({
       path: "./task-builder.reaction.ts",
     });
-  });
-
-  test("uses the Gmail feed's supported stable key", () => {
-    expect(automation?.sources?.mail).toBe("@feed:threads");
   });
 
   test("runs every 15 minutes under its durable slug", () => {
     expect(automation?.triggers?.[0]).toMatchObject({ cron: "*/15 * * * *" });
   });
 
-  test("reads Apple Reminders explicitly outside windowed sources", () => {
+  test("reads Apple Reminders live instead of declaring a stored source", () => {
     expect(Object.values(automation?.sources ?? {})).not.toContain(
       "@feed:reminders"
     );
     expect(automation?.prompt).toContain("client.feeds.readMany");
   });
 
-  test("persists optional proposed agent work with the task", () => {
-    const task = config.entities?.find((item) => item.key === "task");
-    expect(task?.properties).toHaveProperty("agent_help");
+  test("uses the Gmail feed's supported stable key", () => {
+    expect(automation?.sources?.mail).toBe("@feed:threads");
   });
 
   test("direct Gmail includes actionable service notices without scheduling mail copies", () => {
