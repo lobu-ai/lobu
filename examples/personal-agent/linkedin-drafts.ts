@@ -3,6 +3,7 @@ import {
   type ActionContext,
   type ActionResult,
 } from "@lobu/connector-sdk";
+import { linkedInScriptArgument } from "./linkedin-browser-script";
 
 export function linkedInDraftUrl(
   kind: string,
@@ -154,7 +155,7 @@ export async function prepareLinkedInDraft(
     }>("evaluate", {
       tab_id: nav.tab_id,
       await_promise: true,
-      expression: `(${fillLinkedInDraft.toString()})(${JSON.stringify({ kind: ctx.actionKey, url, body })})`,
+      expression: `(${fillLinkedInDraft.toString()})(${linkedInScriptArgument({ kind: ctx.actionKey, url, body })})`,
     });
     if (
       result.exception ||

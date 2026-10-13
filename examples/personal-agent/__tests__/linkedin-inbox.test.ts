@@ -55,6 +55,29 @@ function flight(text = "Alex reacted to your post", age = "12h") {
 }
 
 describe("LinkedIn source adapter", () => {
+  test.each([
+    "</script >",
+    "</script\n>",
+    "</script data-ignored>",
+  ])("reads inert notification data with a valid HTML closing tag %s", async (closingTag) => {
+    const { dom, api } = adapter(async () => ({
+      ok: true,
+      json: async () => ({
+        miniProfile: { entityUrn: "urn:li:fs_miniProfile:synthetic-self" },
+      }),
+      text: async () =>
+        `<script>globalThis.unexpectedExecution = true;</script><script data-note="a>b">\n window.__como_rehydration__ = ${JSON.stringify([flight()])};${closingTag}`,
+    }));
+    try {
+      const result = await api.read({ feed: "notifications", limit: 10 });
+      expect(result.rows).toHaveLength(1);
+      expect(result.rows[0].text).toBe("Alex reacted to your post");
+      expect((dom.window as any).unexpectedExecution).toBeUndefined();
+    } finally {
+      dom.window.close();
+    }
+  });
+
   test("decodes Flight byte-length text and stable notification identities, without executing HTML", async () => {
     const { dom, api } = adapter(async () => {
       throw new Error("unexpected fetch");

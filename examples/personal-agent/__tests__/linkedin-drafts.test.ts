@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { JSDOM } from "jsdom";
 import { connectorSdkMock } from "./connector-sdk.mock";
+import { linkedInScriptArgument } from "../linkedin-browser-script";
 
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 const { fillLinkedInDraft, linkedInDraftUrl, prepareLinkedInDraft } =
@@ -29,7 +30,7 @@ function draftPage(html: string, url = threadUrl) {
     clicks,
     fill: (kind: string, body: string) =>
       dom.window.eval(
-        `(${fillLinkedInDraft.toString()})(${JSON.stringify({ kind, url, body })})`
+        `(${fillLinkedInDraft.toString()})(${linkedInScriptArgument({ kind, url, body })})`
       ),
   };
 }
@@ -38,6 +39,26 @@ const composer =
   '<div class="msg-conversation-listitem--active"><a href="/messaging/thread/synthetic-thread/">Alex Example</a></div><div class="msg-thread"><form class="msg-form"><div tabindex="0" role="textbox" contenteditable="true"></div><button>Send</button></form></div>';
 
 describe("LinkedIn human-submitted drafts", () => {
+  test("browser arguments round-trip as data without escaping a script context", () => {
+    const value = JSON.parse('{"__proto__":{"injected":true}}');
+    value.body =
+      '</script ><script>globalThis.injected = true</script >\u2028\u2029`"\\';
+    const dom = new JSDOM(
+      `<script>globalThis.input = ${linkedInScriptArgument(value)};</script>`,
+      { runScripts: "outside-only" }
+    );
+    try {
+      expect(dom.window.document.scripts).toHaveLength(1);
+      dom.window.eval(dom.window.document.scripts[0].textContent ?? "");
+      expect(dom.window.input.body).toBe(value.body);
+      expect(Object.hasOwn(dom.window.input, "__proto__")).toBe(true);
+      expect(dom.window.input.injected).toBeUndefined();
+      expect(dom.window.injected).toBeUndefined();
+    } finally {
+      dom.window.close();
+    }
+  });
+
   test("fills an empty exact conversation without clicking Send", async () => {
     const { dom, fill, clicks } = draftPage(composer);
     try {

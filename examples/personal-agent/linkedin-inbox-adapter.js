@@ -279,10 +279,15 @@ export function linkedInInboxProgram() {
       ).text();
     } else {
       const html = await (await request("/notifications/")).text();
+      // Extract JSON as text; the live page strips scripts during DOM parsing.
+      // This is not an HTML sanitizer: nothing is rendered or
+      // executed. Honor quoted attributes and whitespace on closing tags.
       const assignment = [
-        ...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi),
+        ...html.matchAll(
+          /<script\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/script\b[^>]*>/gi
+        ),
       ]
-        .map((match) => match[1])
+        .map((match) => match[1].trimStart())
         .find((value) => value.startsWith("window.__como_rehydration__"));
       if (!assignment)
         fail("Notification source is unavailable; check sign-in");
@@ -314,6 +319,12 @@ export function linkedInInboxProgram() {
       !conversation.startsWith(`urn:li:msg_conversation:(${mailbox},`)
     )
       fail("Invalid conversation identity");
+    const thread = conversation.slice(
+      `urn:li:msg_conversation:(${mailbox},`.length,
+      -1
+    );
+    if (!/^[A-Za-z0-9_-]+=*$/.test(thread))
+      fail("Unsupported conversation URL identity");
     const result = await graph(
       "messengerMessages.5846eeb71c981f11e0134cb6626cc314",
       `conversationUrn:${encode(conversation)}`,
@@ -327,12 +338,6 @@ export function linkedInInboxProgram() {
         )
           fail("Message identity or timestamp is unavailable");
         const member = message.sender?.participantType?.member;
-        const thread = conversation.slice(
-          `urn:li:msg_conversation:(${mailbox},`.length,
-          -1
-        );
-        if (!/^[A-Za-z0-9_-]+=*$/.test(thread))
-          fail("Unsupported conversation URL identity");
         return {
           id: message.entityUrn,
           conversation_id: conversation,

@@ -7,6 +7,7 @@ import {
   type ChromeActionDispatcher,
 } from "@lobu/connector-sdk";
 import { linkedInInboxProgram } from "./linkedin-inbox-adapter.js";
+import { linkedInScriptArgument } from "./linkedin-browser-script";
 
 export interface LinkedInInboxCheckpoint {
   linkedin_inbox?: Record<string, unknown>;
@@ -35,7 +36,7 @@ async function invoke<T>(
     "evaluate",
     {
       tab_id: tabId,
-      expression: `(() => { (${linkedInInboxProgram.toString()})(); return globalThis.__lobuLinkedInInboxV1.${op}(${JSON.stringify(input)}); })()`,
+      expression: `(() => { (${linkedInInboxProgram.toString()})(); return globalThis.__lobuLinkedInInboxV1.${op}(${linkedInScriptArgument(input)}); })()`,
       await_promise: true,
     }
   );
