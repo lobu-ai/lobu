@@ -83,6 +83,33 @@ export function buildAutomationTurnContext(
   ].join("\n");
 }
 
+/** A trigger whose turn answers in the conversation its message came from. */
+function repliesToSource(trigger: AutomationEventTrigger): boolean {
+  return resolvedEventExecution(trigger) === "turn" &&
+    (trigger.output ?? "silent") === "reply_to_source";
+}
+
+/**
+ * Whether an Automation could answer a reference-only signal once its content
+ * is read: some reply trigger matches everything but its `match` filters,
+ * which name content (chat, mention) the reference does not carry. The
+ * hydrated message is matched again in full before anything replies.
+ */
+export function mayReplyToSource(
+  triggers: AutomationTrigger[],
+  signal: ConnectorTriggerSignal,
+): boolean {
+  const replyTriggers = triggers.filter(
+    (trigger): trigger is AutomationEventTrigger =>
+      trigger.kind === "event" && trigger.source !== "workspace" &&
+      repliesToSource(trigger),
+  );
+  return matchingAutomationTriggers(
+    replyTriggers.map((trigger) => ({ ...trigger, match: undefined })),
+    signal,
+  ).length > 0;
+}
+
 /**
  * Split matching Automations once, at the connector-neutral activation seam.
  * Reply targets stay with the chat transport so they retain thread history,
@@ -107,12 +134,7 @@ export function planAutomationActivations(
       (match.agentKind != null &&
         buildAutomationTurnContext(match).length <=
           DEVICE_CHAT_MAX_CONTEXT_LENGTH);
-    if (
-      match.agentId != null &&
-      canUseDeviceChat &&
-      resolvedEventExecution(match.trigger) === "turn" &&
-      (match.trigger.output ?? "silent") === "reply_to_source"
-    ) {
+    if (match.agentId != null && canUseDeviceChat && repliesToSource(match.trigger)) {
       replyTargets.push({ ...match, agentId: match.agentId });
     } else {
       backgroundTargets.push(match);

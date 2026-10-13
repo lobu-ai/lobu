@@ -27,6 +27,12 @@ import {
 } from "../utils/public-origin";
 import { ChatInstanceManager } from "../gateway/connections/chat-instance-manager";
 import { ChatResponseBridge } from "../gateway/connections/chat-response-bridge";
+import { handleChatSourceIngress } from "../gateway/connections/chat-source-ingress";
+import type { QueueJob } from "../gateway/infrastructure/queue/types";
+import {
+	CHAT_SOURCE_INGRESS_QUEUE,
+	type ChatSourceIngressJob,
+} from "../runs/chat-ingress-jobs";
 import { connectorTransportPlatforms } from "../gateway/connections/platforms/index";
 import { Gateway } from "../gateway/gateway-main";
 import type { AgentTurnDeps } from "../gateway/orchestration/agent-turn-producer";
@@ -481,6 +487,12 @@ export async function initLobuGateway(): Promise<Hono | null> {
 					(connectionId: string) => manager.has(connectionId),
 				);
 			}
+			const ingressManager = chatInstanceManager;
+			await coreServices
+				.getQueue()
+				.work(CHAT_SOURCE_INGRESS_QUEUE, (job: QueueJob<ChatSourceIngressJob>) =>
+					handleChatSourceIngress(ingressManager, job),
+				);
 		} catch (error) {
 			logger.warn(
 				{ error: String(error) },

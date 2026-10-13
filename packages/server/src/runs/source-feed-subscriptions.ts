@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { AutomationTrigger } from '@lobu/core/contracts/tools/manage-automations';
 import { compileConnectionColumnVisibility } from '../authz/connection-visibility';
 import { listEntityApprovalPolicies, resolveActingPrincipal } from '../authz/entity-policy';
 import { evaluateConnectorPolicy } from '../authz/connector-policy';
@@ -16,6 +17,7 @@ export interface SourceFeedSubscription {
   automationId: number;
   principal: string | null;
   agentId: string | null;
+  triggers: AutomationTrigger[];
 }
 
 /** Resolve subscriptions through the persisted owner and canonical connection visibility. */
@@ -27,7 +29,7 @@ export async function sourceFeedSubscriptions(
 ): Promise<SourceFeedSubscription[]> {
   // Resource-ref match predicates are evaluated per change by the normal activation path.
   const rows = await sql`
-    SELECT a.id, a.created_by, a.managed_agent_id, c.id AS connection_id, c.connector_key
+    SELECT a.id, a.created_by, a.managed_agent_id, a.triggers, c.id AS connection_id, c.connector_key
     FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
     JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
     JOIN automations a ON a.organization_id = f.organization_id
@@ -82,6 +84,7 @@ export async function sourceFeedSubscriptions(
       automationId: subscriptionId,
       principal,
       agentId: row.managed_agent_id ?? null,
+      triggers: Array.isArray(row.triggers) ? row.triggers : [],
     });
   }
   return subscriptions;

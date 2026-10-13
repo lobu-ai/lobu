@@ -8,9 +8,10 @@ import { feedDefinitionSelection } from '../connectors/feed-definition-selection
 import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { notifyWorkerWork } from './worker-wakeup';
 import { enqueueSourceFeedListener, recordSourceFeedFailure } from './source-feed-listener';
-import { sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
+import { type SourceFeedSubscription, sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
+import { enqueueChatSourceIngress } from './chat-ingress-jobs';
 import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, SOURCE_FEED_SCOPE_METADATA_KEY } from '../lib/device-feed-read-protocol';
-import { findMatchingAutomationActivations, queueAutomationActivations, dispatchAutomationRunsBestEffort } from '../automations/activation';
+import { findMatchingAutomationActivations, mayReplyToSource, planAutomationActivations, queueAutomationActivations, dispatchAutomationRunsBestEffort } from '../automations/activation';
 import logger from '../utils/logger';
 
 type ReceivedNotification = {
@@ -40,7 +41,7 @@ async function receiveSourceReferenceDelivery(
   notice: FeedNotification,
   feed: NotificationFeed,
   config: unknown,
-  allowed: Set<number>,
+  subscriptions: SourceFeedSubscription[],
 ): Promise<ReceivedNotification> {
   const delivery = notice.subscription;
   if (!delivery || delivery.scope_key !== sourceFeedScopeKey(config, feed.version)) return { active: false };
@@ -65,6 +66,7 @@ async function receiveSourceReferenceDelivery(
   await tx`UPDATE feeds SET next_run_at = NULL, consecutive_failures = 0
     WHERE id = ${notice.feed_id} AND organization_id = ${feed.organization_id}
       AND last_error IS NULL AND next_run_at > now()`;
+  const allowed = new Set(subscriptions.map(subscription => subscription.automationId));
   const queued: Array<{ runId: number; status: string }> = [];
   for (const { payload } of delivery.records) {
     for (const event of payload.events) {
@@ -83,11 +85,24 @@ async function receiveSourceReferenceDelivery(
         input_text: `Source change ${event.event_type}: ${JSON.stringify(event.resource_ref)}. Read its content from the source when needed.`,
       };
       const matches = await findMatchingAutomationActivations(feed.organization_id, signal, tx);
-      queued.push(...await queueAutomationActivations({
+      const { backgroundTargets } = planAutomationActivations(
+        signal, matches.filter(match => allowed.has(match.automationId)));
+      queued.push(...await queueAutomationActivations({ signal, matches: backgroundTargets, db: tx }));
+      // Reply Automations answer in the source conversation instead, once the
+      // message is read; their channel filters need that content, so the job
+      // carries every subscription that might reply and the worker re-matches.
+      const background = new Set(backgroundTargets.map(target => target.automationId));
+      const automationIds = subscriptions
+        .filter(subscription => !background.has(subscription.automationId)
+          && mayReplyToSource(subscription.triggers, signal))
+        .map(subscription => subscription.automationId);
+      if (automationIds.length) await enqueueChatSourceIngress(tx, {
+        organizationId: feed.organization_id,
+        connectionId: notice.connection_id,
+        feedId: notice.feed_id,
         signal,
-        matches: matches.filter(match => allowed.has(match.automationId)),
-        db: tx,
-      }));
+        automationIds,
+      });
     }
     // A lost receipt may replay an older page. Delivering it is harmless;
     // its cursor may advance only from the position it actually read.
@@ -177,7 +192,7 @@ export async function receiveFeedNotifications(
           notice,
           feed,
           locked.config,
-          new Set(subscriptions.map(subscription => subscription.automationId)),
+          subscriptions,
         );
       }
       if (notice.changed) {

@@ -630,11 +630,33 @@ export class MessageHandlerBridge {
     return true;
   }
 
+  /**
+   * Queue-owned entry for a source message whose reply Automations the source
+   * ingress already admitted (`chat-source-ingress.ts`). It is the normal reply
+   * path — sender tiers, rate limit, notices, commands, turn dispatch — for
+   * exactly `plan.replyTargets`. Background activation already ran on the
+   * source signal at delivery, so it is never planned again here.
+   */
+  async handleAdmittedSourceMessage(
+    thread: any,
+    message: any,
+    plan: AutomationActivationPlan
+  ): Promise<void> {
+    await this.handleMessage(
+      thread,
+      message,
+      thread.isDM === true ? "dm" : "subscribed",
+      undefined,
+      plan
+    );
+  }
+
   async handleMessage(
     thread: any,
     message: any,
     source: MessageSource,
-    routing?: MessageRouting
+    routing?: MessageRouting,
+    admitted?: AutomationActivationPlan
   ): Promise<void> {
     const { connection } = this;
 
@@ -746,7 +768,7 @@ export class MessageHandlerBridge {
         ...(conversationId !== channelId ? { thread_id: conversationId } : {}),
       },
     };
-    const automationPlan = this.connection.organizationId
+    const automationPlan = admitted ?? (this.connection.organizationId
       ? await this.automationPlanner({
           connectionOrganizationId: this.connection.organizationId,
           runtimeConnectionId: this.connection.id,
@@ -757,9 +779,12 @@ export class MessageHandlerBridge {
           signal: automationSignal,
           replyTargets: [],
           backgroundTargets: [],
-        };
+        });
     const replyAutomations = automationPlan.replyTargets;
     const backgroundAutomations = automationPlan.backgroundTargets;
+    // An admitted message answers only through its admitted Automations: no
+    // owner-agent fallback, unrouted commands, or unlinked notice.
+    if (admitted && replyAutomations.length === 0) return;
     const automation = replyAutomations[0] ?? backgroundAutomations[0];
     // The planner above is the only Automation routing decision because it
     // evaluates the complete trigger predicate. A channel-only subscription
@@ -1349,7 +1374,7 @@ export class MessageHandlerBridge {
           ...("automationId" in target
             ? {
                 automationId: target.automationId,
-                automationDeliveryId: automationSignal.delivery_id,
+                automationDeliveryId: automationPlan.signal.delivery_id,
                 automationActiveRunPolicy: target.activeRun,
               }
             : {}),

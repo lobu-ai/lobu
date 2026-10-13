@@ -116,6 +116,113 @@ export function backoffSeconds(attempt: number): number {
   return Math.min(seconds, MAX_BACKOFF_SECONDS);
 }
 
+/**
+ * Insert one lobu-queue job inside the caller's transaction, so the job and
+ * the caller's own writes commit (and its wakeup NOTIFY fires) together.
+ * `RunsQueue.send` is this in a transaction of its own. `connectionId` stamps
+ * `runs.connection_id` for jobs that belong to one connection.
+ */
+export async function insertQueueJob<T>(
+  tx: DbClient,
+  queueName: string,
+  data: T,
+  options?: QueueOptions & { connectionId?: number },
+): Promise<string> {
+  const runType = classifyQueue(queueName);
+  const idempotencyKey = options?.singletonKey ?? null;
+  const maxAttempts = options?.retryLimit ?? 3;
+  const delayMs = options?.delayMs ?? 0;
+  const priority = options?.priority ?? 0;
+  const retryDelaySeconds = options?.retryDelay ?? null;
+  const expireInSeconds = options?.expireInSeconds;
+  const actionKey = options?.actionKey ?? null;
+  // runAt/expires_at are interpolated as raw SQL fragments because
+  // postgres-js can't parameterize an `interval` argument that is itself a JS
+  // number-of-ms — we just compose the SQL.
+  const runAtSql = delayMs > 0
+    ? `now() + ${Number(delayMs) / 1000}::float * interval '1 second'`
+    : "now()";
+  const expiresAtSql = expireInSeconds && expireInSeconds > 0
+    ? `now() + ${Number(expireInSeconds)}::int * interval '1 second'`
+    : "NULL";
+
+  // Pass the payload object through postgres-js's `sql.json()` helper so the
+  // driver sends it as a single-encoded JSONB value. A `JSON.stringify(data)`
+  // bound to a `$4::jsonb` parameter via `tx.unsafe()` round-trips as a JSONB
+  // *string* (jsonb_typeof = 'string'), which breaks every downstream reader
+  // using `action_input ->> 'field'`.
+  const actionInput = tx.json(data ?? {});
+
+  // runs.organization_id comes from the payload: the snapshot verifier checks
+  // it via `WHERE organization_id = $X` in isRunOwnedByJwtScope.
+  const organizationIdFromPayload =
+    typeof (data as { organizationId?: unknown })?.organizationId ===
+      "string" &&
+    ((data as { organizationId?: string }).organizationId as string).length >
+      0
+      ? (data as { organizationId: string }).organizationId
+      : null;
+
+  // ON CONFLICT must match the index predicate exactly. The
+  // `runs_idempotency_key_uniq` index is partial:
+  //   WHERE idempotency_key IS NOT NULL
+  //     AND status IN ('pending', 'claimed', 'running')
+  // Rows whose status has already moved to a terminal value drop out of
+  // the index, so a later enqueue with the same singleton key inserts a
+  // fresh row instead of being silently swallowed.
+  const result = await tx.unsafe<{ id: number | string }>(
+    `INSERT INTO public.runs (
+      run_type,
+      queue_name,
+      action_key,
+      action_input,
+      idempotency_key,
+      max_attempts,
+      attempts,
+      status,
+      run_at,
+      priority,
+      expires_at,
+      retry_delay_seconds,
+      organization_id,
+      connection_id
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, 0, 'pending', ${runAtSql}, $7, ${expiresAtSql}, $8, $9, $10
+    )
+    ON CONFLICT (idempotency_key)
+      WHERE idempotency_key IS NOT NULL
+        AND status IN ('pending', 'claimed', 'running')
+    DO NOTHING
+    RETURNING id`,
+    [
+      runType,
+      queueName,
+      actionKey,
+      actionInput,
+      idempotencyKey,
+      maxAttempts,
+      priority,
+      retryDelaySeconds,
+      organizationIdFromPayload,
+      options?.connectionId ?? null,
+    ],
+  );
+
+  const id = result.length === 0 && idempotencyKey
+    ? (await tx<{ id: number | string }>`
+        SELECT id FROM public.runs
+        WHERE idempotency_key = ${idempotencyKey}
+          AND status IN ('pending', 'claimed', 'running')
+        ORDER BY id DESC
+        LIMIT 1
+      `)[0]?.id
+    : result[0]?.id;
+  // A NOTIFY issued inside a transaction is delivered at commit, so listeners
+  // never wake before the row is visible.
+  await tx`SELECT pg_notify(${notifyChannelFor(queueName)}, ${queueName})`;
+  return String(id ?? "");
+}
+
 export class RunsQueue implements IMessageQueue {
   private staleSweepTimer: ReturnType<typeof setInterval> | null = null;
   private isConnected = false;
@@ -291,130 +398,16 @@ export class RunsQueue implements IMessageQueue {
     if (this.shuttingDown) {
       throw new Error("RunsQueue is shutting down; refusing new work");
     }
-    const runType = classifyQueue(queueName);
-    const idempotencyKey = options?.singletonKey ?? null;
-    const maxAttempts = options?.retryLimit ?? 3;
-    const delayMs = options?.delayMs ?? 0;
-    const priority = options?.priority ?? 0;
-    const retryDelaySeconds = options?.retryDelay ?? null;
-    const expireInSeconds = options?.expireInSeconds;
-    const actionKey = options?.actionKey ?? null;
-    const runAtSql = delayMs > 0
-      ? `now() + ${Number(delayMs) / 1000}::float * interval '1 second'`
-      : "now()";
-    const expiresAtSql = expireInSeconds && expireInSeconds > 0
-      ? `now() + ${Number(expireInSeconds)}::int * interval '1 second'`
-      : "NULL";
-
-    const sql = getDb();
-    // Pass the payload object through postgres-js's `sql.json()` helper so
-    // the driver sends it as a single-encoded JSONB value. The previous
-    // shape — `JSON.stringify(data)` bound to a `$4::jsonb` parameter via
-    // `tx.unsafe()` — round-tripped through Postgres as a JSONB *string*
-    // (jsonb_typeof = 'string'), not a JSONB object. That broke every
-    // downstream reader using `action_input ->> 'field'`, including the
-    // snapshot-route ownership verifier in transcript-routes.ts.
-    const actionInput = sql.json(data ?? {});
-
-    // Populate runs.organization_id from the payload. This column is
-    // preexisting (NOT from PR #870's denormalization — that one removed
-    // agent_id+conversation_id only) and is the column the snapshot
-    // verifier checks via `WHERE organization_id = $X` in
-    // isRunOwnedByJwtScope. PR #873's denormalize revert accidentally
-    // dropped organization_id from the INSERT alongside agent_id/
-    // conversation_id, leaving the column NULL on every new chat_message
-    // row. Result: verifier returned false for every snapshot POST,
-    // workers rejected with 403 the moment Phase 5 flipped snapshot
-    // mode to default. Re-add organization_id only.
-    const organizationIdFromPayload =
-      typeof (data as { organizationId?: unknown })?.organizationId ===
-        "string" &&
-      ((data as { organizationId?: string }).organizationId as string).length >
-        0
-        ? (data as { organizationId: string }).organizationId
-        : null;
-
-    // Insert + ON-CONFLICT-fallback inside a single transaction so a race
-    // between two enqueues with the same idempotency key resolves cleanly.
-    // pg_notify happens AFTER commit (otherwise listeners may wake before
-    // the row is visible).
-    //
-    // runAt/expires_at are interpolated as raw SQL fragments via two helpers
-    // because postgres-js can't parameterize an `interval` argument that is
-    // itself a JS number-of-ms — we just compose the SQL.
-    const id = await sql.begin(async (tx: DbClient) => {
-      // ON CONFLICT must match the index predicate exactly. The
-      // `runs_idempotency_key_uniq` index is partial:
-      //   WHERE idempotency_key IS NOT NULL
-      //     AND status IN ('pending', 'claimed', 'running')
-      // Rows whose status has already moved to a terminal value drop out of
-      // the index, so a later enqueue with the same singleton key inserts a
-      // fresh row instead of being silently swallowed.
-      const result = await tx.unsafe<{ id: number | string }>(
-        `INSERT INTO public.runs (
-          run_type,
-          queue_name,
-          action_key,
-          action_input,
-          idempotency_key,
-          max_attempts,
-          attempts,
-          status,
-          run_at,
-          priority,
-          expires_at,
-          retry_delay_seconds,
-          organization_id
-        ) VALUES (
-          $1, $2, $3, $4, $5, $6, 0, 'pending', ${runAtSql}, $7, ${expiresAtSql}, $8, $9
-        )
-        ON CONFLICT (idempotency_key)
-          WHERE idempotency_key IS NOT NULL
-            AND status IN ('pending', 'claimed', 'running')
-        DO NOTHING
-        RETURNING id`,
-        [
-          runType,
-          queueName,
-          actionKey,
-          actionInput,
-          idempotencyKey,
-          maxAttempts,
-          priority,
-          retryDelaySeconds,
-          organizationIdFromPayload,
-        ],
-      );
-
-      if (result.length === 0 && idempotencyKey) {
-        const existing = await tx<{ id: number | string }>`
-          SELECT id FROM public.runs
-          WHERE idempotency_key = ${idempotencyKey}
-            AND status IN ('pending', 'claimed', 'running')
-          ORDER BY id DESC
-          LIMIT 1
-        `;
-        return String(existing[0]?.id ?? "");
-      }
-      return String(result[0]?.id ?? "");
-    });
-
-    // Wake listeners post-commit. Failure here is non-fatal; pollers catch
-    // it on the next tick.
-    try {
-      await sql`SELECT pg_notify(${notifyChannelFor(queueName)}, ${queueName})`;
-    } catch (err) {
-      logger.warn(
-        `pg_notify failed for ${queueName}: ${(err as Error).message}`,
-      );
-    }
+    const id = await getDb().begin((tx: DbClient) =>
+      insertQueueJob(tx, queueName, data, options),
+    );
 
     logQueueTransition("enqueue", `Enqueued run ${id}`, {
       runId: id,
       queueName,
-      runType,
-      priority,
-      idempotencyKey,
+      runType: classifyQueue(queueName),
+      priority: options?.priority ?? 0,
+      idempotencyKey: options?.singletonKey ?? null,
     });
 
     return id;

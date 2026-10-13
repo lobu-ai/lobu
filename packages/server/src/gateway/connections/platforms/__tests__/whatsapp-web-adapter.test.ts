@@ -265,62 +265,46 @@ function sharedState() {
   };
 }
 
-describe("WhatsApp Web inbound dedupe", () => {
-  // Every WhatsApp Web connection registers an adapter under the same name and
-  // the SDK dedupes on name + message id in shared (Postgres) state.
-  async function connectionChat(
-    connectionId: string,
-    state: ReturnType<typeof sharedState>,
-    handled: Promise<void> = Promise.resolve(),
-  ) {
-    const { adapter } = harness([], connectionId);
-    const chat = new Chat({
-      userName: "bot",
-      adapters: { "whatsapp.web": adapter },
-      state: state as any,
-      logger: "error",
-    });
-    const seen: string[] = [];
-    chat.onDirectMessage(async (_thread: unknown, message: { id: string }) => {
-      seen.push(message.id);
-      await handled;
-    });
-    await chat.initialize();
-    const deliver = (raw: WhatsAppWebMessageRow) =>
-      chat.processMessage(adapter, adapter.encodeThreadId(raw.chat_jid), adapter.parseMessage(raw));
-    return { deliver, seen };
-  }
-
-  test("a redelivered message runs once; the same raw id on another connection still runs", async () => {
-    const state = sharedState();
-    const first = await connectionChat("101", state);
-    const second = await connectionChat("202", state);
-
-    await first.deliver(row());
-    await first.deliver(row());
-    await second.deliver(row());
-
-    expect(first.seen).toEqual(["101:RAWIN1"]);
-    expect(second.seen).toEqual(["202:RAWIN1"]);
+describe("WhatsApp Web source rows", () => {
+  const source = (overrides: Record<string, unknown> = {}) => ({
+    ...row(),
+    content_kind: "text",
+    ...overrides,
   });
 
-  test("two connections handle the same person's messages concurrently", async () => {
-    const state = sharedState();
-    let finish!: () => void;
-    const busy = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    const first = await connectionChat("101", state, busy);
-    const second = await connectionChat("202", state);
+  test("an inbound text row is a connection-scoped message on its chat", () => {
+    const { adapter } = harness([]);
+    const parsed = adapter.parseSourceRow(source());
+    expect(parsed?.channelId).toBe(DM_JID);
+    expect(parsed?.message.id).toBe("101:RAWIN1");
+    expect(parsed?.message.threadId).toBe(`whatsapp.web:101:${DM_JID}`);
+    expect(parsed?.message.author.userId).toBe(DM_JID);
+    expect(parsed?.message.text).toBe("hello");
+  });
 
-    const inFlight = first.deliver(row());
-    await waitUntil(() => first.seen.length === 1);
-    await second.deliver(row());
-    finish();
-    await inFlight;
+  test("a group row carries its sender and the group as its channel", () => {
+    const { adapter } = harness([]);
+    const parsed = adapter.parseSourceRow(source({ chat_jid: GROUP_JID, is_group: true }));
+    expect(parsed?.channelId).toBe(GROUP_JID);
+    expect(parsed?.message.author.userId).toBe(DM_JID);
+  });
 
-    expect(first.seen).toEqual(["101:RAWIN1"]);
-    expect(second.seen).toEqual(["202:RAWIN1"]);
+  test("nothing answers our own, unverified, revoked, system, media-only or broadcast rows", () => {
+    const { adapter } = harness([]);
+    for (const overrides of [
+      { from_me: true },
+      { from_me: undefined },
+      { content_kind: "revoked", text: "[revoked message]" },
+      { content_kind: "system", text: "[system event]" },
+      { content_kind: "media", text: "[image]" },
+      { content_kind: undefined },
+      { text: "   " },
+      { chat_jid: "status@broadcast" },
+      { chat_jid: "120363000000000002@newsletter" },
+      { chat_jid: GROUP_JID, is_group: true, sender_jid: null },
+    ]) {
+      expect(adapter.parseSourceRow(source(overrides))).toBeNull();
+    }
   });
 });
 

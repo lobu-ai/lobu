@@ -61,6 +61,8 @@ export interface WhatsAppWebMessageRow {
   sender_jid?: string | null;
   push_name?: string | null;
   is_group?: boolean;
+  /** `text`, `media`, `revoked` or `system`, as the connector classifies it. */
+  content_kind?: string;
 }
 
 export interface WhatsAppWebOperationRequest {
@@ -216,6 +218,34 @@ export class WhatsAppWebAdapter implements Adapter<string, WhatsAppWebMessageRow
       },
       attachments: [],
     });
+  }
+
+  /**
+   * The inbound chat message a live source row is, or null when nothing should
+   * answer it: our own message, a revocation, a system event, a media-only
+   * message (attachments are not carried), or a chat that is neither a person
+   * nor a group (status, broadcast, newsletter). `channelId` is the chat JID,
+   * the value an Automation's `channel_id` filter names.
+   */
+  parseSourceRow(
+    row: Record<string, unknown>,
+  ): { message: Message<WhatsAppWebMessageRow>; channelId: string } | null {
+    const chatJid = row.chat_jid;
+    if (
+      typeof row.id !== "string" || !row.id ||
+      typeof chatJid !== "string" || !chatJid || chatJid.includes(":") ||
+      row.from_me !== false || row.content_kind !== "text" ||
+      typeof row.text !== "string" || !row.text.trim()
+    ) {
+      return null;
+    }
+    const isGroup = chatJid.endsWith(GROUP_SUFFIX);
+    if (!isGroup && !DM_SUFFIXES.some((suffix) => chatJid.endsWith(suffix))) return null;
+    if (isGroup && (typeof row.sender_jid !== "string" || !row.sender_jid)) return null;
+    return {
+      message: this.parseMessage(row as unknown as WhatsAppWebMessageRow),
+      channelId: chatJid,
+    };
   }
 
   renderFormatted(content: FormattedContent): string {
