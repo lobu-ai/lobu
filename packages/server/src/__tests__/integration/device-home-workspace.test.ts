@@ -378,191 +378,219 @@ describe('device home workspace chosen at pairing', () => {
     );
   });
 
-  it('pauses a member on an older device manifest until their device runs the workspace version', async () => {
-    const sql = getTestDb();
-    const alice = await seedUser('Older Extension');
-    const bob = await seedUser('Newer Extension');
-    const teamOrgId = await seedTeamOrg();
-    await addMember(teamOrgId, alice.userId, 'member');
-    await addMember(teamOrgId, bob.userId, 'member');
-    const workspaceVersion = String(OS_SHELL_MANIFEST.version);
-    const olderManifest = { ...OS_SHELL_MANIFEST, version: '0.0.1' };
-    const aliceToken = await workerPat(alice.userId, teamOrgId, 'older-box');
-    const bobToken = await workerPat(bob.userId, teamOrgId, 'newer-box');
-    const seedFeed = async (connectionId: number) => {
-      await sql`
-        INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
-        VALUES (${teamOrgId}, ${connectionId}, 'items', 'active', '* * * * *', NOW())
-      `;
-    };
-    const definitionVersion = async () =>
-      ((await sql`
-        SELECT version FROM connector_definitions
-        WHERE organization_id = ${teamOrgId} AND key = 'os.shell' AND status = 'active'
-      `) as unknown as Array<{ version: string }>)[0]?.version;
-    const connectionOf = async (userId: string) => {
-      const [row] = (await sql`
-        SELECT c.id, c.status, c.error_message, c.device_worker_id::text AS device_worker_id,
-               (SELECT COUNT(*)::int FROM feeds f
-                 WHERE f.connection_id = c.id AND f.status = 'active' AND f.deleted_at IS NULL) AS active_feeds
-        FROM connections c
-        WHERE c.organization_id = ${teamOrgId} AND c.connector_key = 'os.shell'
-          AND c.created_by = ${userId} AND c.deleted_at IS NULL
-      `) as unknown as Array<{ id: number; status: string; error_message: string | null; active_feeds: number }>;
-      return row;
-    };
-
-    // Alice is wired while the workspace runs her version, then Bob's newer
-    // extension moves the workspace's one definition forward.
-    await pollShell(aliceToken, 'older-box', olderManifest);
-    await seedFeed((await connectionOf(alice.userId)).id);
-    await pollShell(bobToken, 'newer-box');
-    await seedFeed((await connectionOf(bob.userId)).id);
-    await pollShell(aliceToken, 'older-box', olderManifest);
-
-    expect(await definitionVersion()).toBe(workspaceVersion);
-    const aliceDevice = await deviceRow(alice.userId, 'older-box');
+  describe('team version decision, one case per teamDeviceAction row', () => {
+    const NEW = String(OS_SHELL_MANIFEST.version);
+    const OLD = '0.0.1';
     const reason =
       `Update Lobu on this device to use ${String(OS_SHELL_MANIFEST.name)} in Team: ` +
-      `this workspace runs version ${workspaceVersion}, your device has 0.0.1.`;
-    expect(await connectionOf(alice.userId)).toMatchObject({
-      status: 'paused',
-      error_message: reason,
-      active_feeds: 0,
-      device_worker_id: aliceDevice.id,
+      `this workspace runs version ${NEW}, your device has ${OLD}.`;
+
+    /** Alice runs the OLDER extension and Bob the NEWER, both homed in Team. */
+    async function teamOfTwo() {
+      const sql = getTestDb();
+      const alice = await seedUser('Older Extension');
+      const bob = await seedUser('Newer Extension');
+      const teamOrgId = await seedTeamOrg();
+      await addMember(teamOrgId, alice.userId, 'member');
+      await addMember(teamOrgId, bob.userId, 'member');
+      const aliceToken = await workerPat(alice.userId, teamOrgId, 'old-box');
+      const bobToken = await workerPat(bob.userId, teamOrgId, 'new-box');
+      const ctx = {
+        sql,
+        alice,
+        bob,
+        teamOrgId,
+        aliceOld: () => pollShell(aliceToken, 'old-box', { ...OS_SHELL_MANIFEST, version: OLD }),
+        aliceNew: () => pollShell(aliceToken, 'old-box'),
+        aliceNone: async () => {
+          const res = await post('/api/workers/poll', {
+            token: aliceToken,
+            body: {
+              worker_id: 'old-box', platform: 'headless', app_version: '9.9.0', label: 'Build box',
+              capabilities: {}, connector_manifests: [], capacity_available: 0,
+            },
+          });
+          expect(res.status).toBe(200);
+        },
+        bobNew: () => pollShell(bobToken, 'new-box'),
+        bobLastSeen: (interval: string) => sql`
+          UPDATE device_workers SET last_seen_at = NOW() - ${interval}::interval
+          WHERE user_id = ${bob.userId} AND worker_id = 'new-box'
+        `,
+        installed: async () =>
+          ((await sql`
+            SELECT version FROM connector_definitions
+            WHERE organization_id = ${teamOrgId} AND key = 'os.shell' AND status = 'active'
+          `) as unknown as Array<{ version: string }>)[0]?.version ?? null,
+        seedFeed: async (userId: string) => {
+          await sql`
+            INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
+            VALUES (${teamOrgId}, ${(await ctx.connectionsOf(userId))[0].id}, 'items', 'active', '* * * * *', NOW())
+          `;
+        },
+        connectionsOf: async (userId: string) =>
+          (await sql`
+            SELECT c.id, c.status, c.error_message, c.visibility,
+                   c.device_worker_id::text AS device_worker_id,
+                   (SELECT COUNT(*)::int FROM feeds f
+                     WHERE f.connection_id = c.id AND f.status = 'active' AND f.deleted_at IS NULL) AS active_feeds
+            FROM connections c
+            WHERE c.organization_id = ${teamOrgId} AND c.connector_key = 'os.shell'
+              AND c.created_by = ${userId} AND c.deleted_at IS NULL
+          `) as unknown as Array<{
+            id: number;
+            status: string;
+            error_message: string | null;
+            visibility: string;
+            device_worker_id: string | null;
+            active_feeds: number;
+          }>,
+        /** Claim authorizations Alice's device gets for the workspace's version. */
+        aliceClaimsOnNew: async () => {
+          const device = await deviceRow(alice.userId, 'old-box');
+          return (await reconcileDeviceCapabilities(alice.userId, device.id)).filter(
+            (auth) => auth.connectorKey === 'os.shell' && auth.connectorVersion === NEW
+          );
+        },
+      };
+      return ctx;
+    }
+    type Team = Awaited<ReturnType<typeof teamOfTwo>>;
+
+    /** Row 4: Alice's one connection is pinned, paused with the reason, unclaimable. */
+    async function expectAliceUpgradePaused(team: Team) {
+      const device = await deviceRow(team.alice.userId, 'old-box');
+      expect(await team.connectionsOf(team.alice.userId)).toEqual([
+        expect.objectContaining({
+          status: 'paused',
+          error_message: reason,
+          visibility: 'private',
+          device_worker_id: device.id,
+          active_feeds: 0,
+        }),
+      ]);
+      expect(await team.installed()).toBe(NEW);
+      expect(await team.aliceClaimsOnNew()).toEqual([]);
+    }
+
+    const cases: Array<[string, (team: Team) => Promise<void>]> = [
+      [
+        'row 1 — no installed definition: the first pairing installs its version, wired active',
+        async (team) => {
+          await team.aliceOld();
+          expect(await team.installed()).toBe(OLD);
+          expect(await team.connectionsOf(team.alice.userId)).toEqual([
+            expect.objectContaining({ status: 'active', error_message: null, visibility: 'private' }),
+          ]);
+        },
+      ],
+      [
+        'row 2 then 4 — older first: a newer device advances it; the older member pauses on her own reconcile',
+        async (team) => {
+          await team.aliceOld();
+          await team.seedFeed(team.alice.userId);
+          await team.bobNew();
+          expect(await team.installed()).toBe(NEW);
+          expect(await team.connectionsOf(team.bob.userId)).toEqual([
+            expect.objectContaining({ status: 'active', error_message: null }),
+          ]);
+          // Bob's reconcile never touches Alice's row.
+          expect(await team.connectionsOf(team.alice.userId)).toEqual([
+            expect.objectContaining({ status: 'active', error_message: null, active_feeds: 1 }),
+          ]);
+          await team.aliceOld();
+          await expectAliceUpgradePaused(team);
+        },
+      ],
+      [
+        'row 3 — the device reaches the installed version: the same connection resumes, reason cleared',
+        async (team) => {
+          await team.aliceOld();
+          await team.seedFeed(team.alice.userId);
+          await team.bobNew();
+          await team.aliceOld();
+          const [paused] = await team.connectionsOf(team.alice.userId);
+          await team.aliceNew();
+          expect(await team.connectionsOf(team.alice.userId)).toEqual([
+            expect.objectContaining({ id: paused.id, status: 'active', error_message: null, active_feeds: 1 }),
+          ]);
+          expect(await team.installed()).toBe(NEW);
+        },
+      ],
+      [
+        'row 4 — newer first: an older device pairs into an upgrade-pending connection, never duplicated',
+        async (team) => {
+          await team.bobNew();
+          await team.aliceOld();
+          await expectAliceUpgradePaused(team);
+          const before = await team.connectionsOf(team.alice.userId);
+          await team.aliceOld();
+          expect(await team.connectionsOf(team.alice.userId)).toEqual(before);
+        },
+      ],
+      [
+        'row 4 — the newer device was removed before the older one pairs',
+        async (team) => {
+          await team.bobNew();
+          await team.sql`DELETE FROM device_workers WHERE user_id = ${team.bob.userId}`;
+          await team.aliceOld();
+          await expectAliceUpgradePaused(team);
+        },
+      ],
+      [
+        'row 4 — the newer device moved out before the older one pairs',
+        async (team) => {
+          await team.bobNew();
+          const bobDevice = await deviceRow(team.bob.userId, 'new-box');
+          await moveDevice(team.bob.userId, bobDevice.id, team.bob.personalOrgId);
+          await team.aliceOld();
+          await expectAliceUpgradePaused(team);
+        },
+      ],
+      [
+        'row 4 — the newer device went stale (8 days) before the older one pairs',
+        async (team) => {
+          await team.bobNew();
+          await team.bobLastSeen('8 days');
+          await team.aliceOld();
+          await expectAliceUpgradePaused(team);
+        },
+      ],
+      [
+        'row 5 + 7 — the device stops advertising: feeds pause, the definition is neither changed nor archived',
+        async (team) => {
+          await team.aliceOld();
+          await team.seedFeed(team.alice.userId);
+          await team.aliceNone();
+          expect(await team.connectionsOf(team.alice.userId)).toEqual([
+            expect.objectContaining({ error_message: null, active_feeds: 0 }),
+          ]);
+          expect(await team.installed()).toBe(OLD);
+        },
+      ],
+      [
+        'row 6 — the newer device goes offline then stale: nothing downgrades or resumes',
+        async (team) => {
+          await team.bobNew();
+          await team.aliceOld();
+          await team.bobLastSeen('10 minutes');
+          await team.aliceOld();
+          await expectAliceUpgradePaused(team);
+          await team.bobLastSeen('8 days');
+          await team.aliceOld();
+          await expectAliceUpgradePaused(team);
+          // Bob's device returning changes nothing either.
+          await team.bobNew();
+          await expectAliceUpgradePaused(team);
+          expect(await team.connectionsOf(team.bob.userId)).toEqual([
+            expect.objectContaining({ status: 'active', error_message: null }),
+          ]);
+        },
+      ],
+    ];
+    it.each(cases)('%s', async (_name, run) => {
+      await run(await teamOfTwo());
     });
-    expect(await connectionOf(bob.userId)).toMatchObject({
-      status: 'active',
-      error_message: null,
-      active_feeds: 1,
-    });
-
-    // Her older device is never authorized for the workspace's artifact.
-    const authorizations = await reconcileDeviceCapabilities(alice.userId, aliceDevice.id);
-    expect(
-      authorizations.filter((auth) => auth.connectorKey === 'os.shell' && auth.connectorVersion === workspaceVersion)
-    ).toEqual([]);
-
-    // Self-healing: once her device runs the workspace's version, the next
-    // poll resumes her connection and feeds and clears the reason.
-    await pollShell(aliceToken, 'older-box');
-    expect(await connectionOf(alice.userId)).toMatchObject({
-      status: 'active',
-      error_message: null,
-      active_feeds: 1,
-    });
-    expect(await connectionOf(bob.userId)).toMatchObject({ status: 'active', active_feeds: 1 });
-    expect(await definitionVersion()).toBe(workspaceVersion);
-  });
-
-  it('creates a newly paired older device its connection paused with the upgrade reason', async () => {
-    const sql = getTestDb();
-    const alice = await seedUser('Late Older Extension');
-    const bob = await seedUser('Early Newer Extension');
-    const teamOrgId = await seedTeamOrg();
-    await addMember(teamOrgId, alice.userId, 'member');
-    await addMember(teamOrgId, bob.userId, 'member');
-    const workspaceVersion = String(OS_SHELL_MANIFEST.version);
-    const olderManifest = { ...OS_SHELL_MANIFEST, version: '0.0.1' };
-    const aliceToken = await workerPat(alice.userId, teamOrgId, 'late-box');
-
-    // Bob's newer device sets the workspace definition before Alice pairs.
-    await pollShell(await workerPat(bob.userId, teamOrgId, 'early-box'), 'early-box');
-    await pollShell(aliceToken, 'late-box', olderManifest);
-
-    const aliceDevice = await deviceRow(alice.userId, 'late-box');
-    const aliceRows = () =>
-      sql`
-        SELECT c.id, c.status, c.error_message, c.visibility, c.device_worker_id::text AS device_worker_id,
-               (SELECT COUNT(*)::int FROM feeds f
-                 WHERE f.connection_id = c.id AND f.status = 'active' AND f.deleted_at IS NULL) AS active_feeds
-        FROM connections c
-        WHERE c.organization_id = ${teamOrgId} AND c.connector_key = 'os.shell'
-          AND c.created_by = ${alice.userId} AND c.deleted_at IS NULL
-      ` as unknown as Promise<
-        Array<{ id: number; status: string; error_message: string | null; visibility: string; device_worker_id: string; active_feeds: number }>
-      >;
-    const [pending] = await aliceRows();
-    expect(pending).toMatchObject({
-      status: 'paused',
-      visibility: 'private',
-      device_worker_id: aliceDevice.id,
-      active_feeds: 0,
-      error_message:
-        `Update Lobu on this device to use ${String(OS_SHELL_MANIFEST.name)} in Team: ` +
-        `this workspace runs version ${workspaceVersion}, your device has 0.0.1.`,
-    });
-    const [definition] = await sql`
-      SELECT version FROM connector_definitions
-      WHERE organization_id = ${teamOrgId} AND key = 'os.shell' AND status = 'active'
-    `;
-    expect(definition.version).toBe(workspaceVersion);
-    expect(
-      (await reconcileDeviceCapabilities(alice.userId, aliceDevice.id)).filter(
-        (auth) => auth.connectorKey === 'os.shell' && auth.connectorVersion === workspaceVersion
-      )
-    ).toEqual([]);
-    // Re-polling on the older version neither duplicates nor resumes it.
-    await pollShell(aliceToken, 'late-box', olderManifest);
-    expect(await aliceRows()).toEqual([pending]);
-
-    // After the device upgrades, the SAME connection resumes.
-    await pollShell(aliceToken, 'late-box');
-    expect(await aliceRows()).toEqual([
-      expect.objectContaining({ id: pending.id, status: 'active', error_message: null }),
-    ]);
-  });
-
-  it('never downgrades a team workspace version when its newer device goes offline', async () => {
-    const sql = getTestDb();
-    const alice = await seedUser('Stays Older');
-    const bob = await seedUser('Goes Offline');
-    const teamOrgId = await seedTeamOrg();
-    await addMember(teamOrgId, alice.userId, 'member');
-    await addMember(teamOrgId, bob.userId, 'member');
-    const workspaceVersion = String(OS_SHELL_MANIFEST.version);
-    const olderManifest = { ...OS_SHELL_MANIFEST, version: '0.0.1' };
-    const aliceToken = await workerPat(alice.userId, teamOrgId, 'steady-old-box');
-    const bobToken = await workerPat(bob.userId, teamOrgId, 'sleepy-new-box');
-    const reason =
-      `Update Lobu on this device to use ${String(OS_SHELL_MANIFEST.name)} in Team: ` +
-      `this workspace runs version ${workspaceVersion}, your device has 0.0.1.`;
-    const definitionVersion = async () =>
-      ((await sql`
-        SELECT version FROM connector_definitions
-        WHERE organization_id = ${teamOrgId} AND key = 'os.shell' AND status = 'active'
-      `) as unknown as Array<{ version: string }>)[0]?.version;
-    const connectionOf = async (userId: string) =>
-      ((await sql`
-        SELECT status, error_message FROM connections
-        WHERE organization_id = ${teamOrgId} AND connector_key = 'os.shell'
-          AND created_by = ${userId} AND deleted_at IS NULL
-      `) as unknown as Array<{ status: string; error_message: string | null }>)[0];
-
-    await pollShell(bobToken, 'sleepy-new-box');
-    await pollShell(aliceToken, 'steady-old-box', olderManifest);
-    expect(await connectionOf(alice.userId)).toEqual({ status: 'paused', error_message: reason });
-
-    // Bob's newer device stops polling: past the online window, still fresh.
-    await sql`
-      UPDATE device_workers SET last_seen_at = NOW() - INTERVAL '10 minutes'
-      WHERE user_id = ${bob.userId} AND worker_id = 'sleepy-new-box'
-    `;
-    await pollShell(aliceToken, 'steady-old-box', olderManifest);
-    expect(await definitionVersion()).toBe(workspaceVersion);
-    expect(await connectionOf(alice.userId)).toEqual({ status: 'paused', error_message: reason });
-    const aliceDevice = await deviceRow(alice.userId, 'steady-old-box');
-    expect(
-      (await reconcileDeviceCapabilities(alice.userId, aliceDevice.id)).filter(
-        (auth) => auth.connectorKey === 'os.shell' && auth.connectorVersion === workspaceVersion
-      )
-    ).toEqual([]);
-
-    // Bob's device returning changes nothing.
-    await pollShell(bobToken, 'sleepy-new-box');
-    expect(await definitionVersion()).toBe(workspaceVersion);
-    expect(await connectionOf(alice.userId)).toEqual({ status: 'paused', error_message: reason });
-    expect(await connectionOf(bob.userId)).toEqual({ status: 'active', error_message: null });
   });
 
   it('does not attach a member device to an ownerless shared team connection', async () => {

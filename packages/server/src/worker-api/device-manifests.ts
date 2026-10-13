@@ -177,50 +177,38 @@ export async function getDeviceManifestSourcesForUser(params: {
   /**
    * Scope to one workspace's devices. `personal`: the user's personal fleet —
    * every device of theirs NOT homed in a team workspace they belong to. A team
-   * workspace: every member's device homed there, because the workspace holds
-   * ONE definition per key and the winner must not flap between members on
-   * different extension versions; advertiser lists stay this user's own
-   * devices, which each get their own pinned connection. Omitted, the scope is
-   * the user's whole fleet, whatever its homes.
+   * workspace: the user's devices homed there. Omitted, the scope is the user's
+   * whole fleet, whatever its homes.
    */
   home?: { organizationId: string; personal: boolean };
 }): Promise<DeviceConnectorSource[]> {
   const home = params.home;
   const rows = (await params.sql`
-    SELECT dw.id, dw.user_id, dw.platform, dw.capabilities, dw.connector_manifests,
+    SELECT dw.id, dw.platform, dw.capabilities, dw.connector_manifests,
            dw.last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS}) AS online
     FROM device_workers dw
-    WHERE dw.last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
+    WHERE dw.user_id = ${params.userId}
+      AND dw.last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
       AND (
         ${params.connectorKey == null}
         OR dw.connector_manifests ? ${params.connectorKey ?? ''}
       )
       AND ${
         home?.personal
-          ? params.sql`(
-              dw.user_id = ${params.userId}
-              AND NOT (
-                dw.organization_id IS NOT NULL
-                AND dw.organization_id <> ${home.organizationId}
-                AND EXISTS (
-                  SELECT 1 FROM "member" m
-                  WHERE m."organizationId" = dw.organization_id AND m."userId" = dw.user_id
-                )
+          ? params.sql`NOT (
+              dw.organization_id IS NOT NULL
+              AND dw.organization_id <> ${home.organizationId}
+              AND EXISTS (
+                SELECT 1 FROM "member" m
+                WHERE m."organizationId" = dw.organization_id AND m."userId" = dw.user_id
               )
             )`
           : home
-            ? params.sql`(
-                dw.organization_id = ${home.organizationId}
-                AND EXISTS (
-                  SELECT 1 FROM "member" m
-                  WHERE m."organizationId" = ${home.organizationId} AND m."userId" = dw.user_id
-                )
-              )`
-            : params.sql`dw.user_id = ${params.userId}`
+            ? params.sql`dw.organization_id = ${home.organizationId}`
+            : params.sql`TRUE`
       }
   `) as unknown as Array<{
     id: string;
-    user_id: string;
     platform: string | null;
     capabilities: unknown;
     connector_manifests: unknown;
@@ -230,7 +218,6 @@ export async function getDeviceManifestSourcesForUser(params: {
   type ManifestCandidate = {
     stored: StoredDeviceManifest;
     deviceId: string;
-    ownDevice: boolean;
     platform: string | null;
     online: boolean;
   };
@@ -245,13 +232,7 @@ export async function getDeviceManifestSourcesForUser(params: {
     for (const value of Object.values(map)) {
       const stored = parseStoredManifest(value);
       if (!stored) continue;
-      candidates.push({
-        stored,
-        deviceId: row.id,
-        ownDevice: row.user_id === params.userId,
-        platform: row.platform,
-        online: row.online,
-      });
+      candidates.push({ stored, deviceId: row.id, platform: row.platform, online: row.online });
     }
   }
 
@@ -260,19 +241,6 @@ export async function getDeviceManifestSourcesForUser(params: {
   // shadow an older capable advertiser and pause a working feed. When no
   // capable version exists, keep the newest inventory manifest so readiness
   // can still surface setup_required instead of making the connector vanish.
-  //
-  // A TEAM workspace's version only moves forward: a version older than the
-  // workspace's active definition never wins, so a newer member device going
-  // offline cannot downgrade the shared definition (or look like an upgrade to
-  // an older device). The personal workspace keeps online-preferred selection.
-  const versionFloor = new Map<string, string>();
-  if (home && !home.personal) {
-    const definitions = (await params.sql`
-      SELECT key, version FROM connector_definitions
-      WHERE organization_id = ${home.organizationId} AND status = 'active'
-    `) as unknown as Array<{ key: string; version: string }>;
-    for (const definition of definitions) versionFloor.set(definition.key, definition.version);
-  }
   const retainedManifests = new Map<string, StoredDeviceManifest>();
   const inventoryWinners = new Map<string, StoredDeviceManifest>();
   const capableWinners = new Map<string, StoredDeviceManifest>();
@@ -282,8 +250,6 @@ export async function getDeviceManifestSourcesForUser(params: {
       `${stored.manifest.key}\u0000${stored.manifest.version}\u0000${stored.manifest_hash}`,
       stored
     );
-    const floor = versionFloor.get(stored.manifest.key);
-    if (floor && compareSemverish(stored.manifest.version, floor) < 0) continue;
     const inventoryWinner = inventoryWinners.get(stored.manifest.key);
     if (!inventoryWinner || compareManifestWinner(stored, inventoryWinner) > 0) {
       inventoryWinners.set(stored.manifest.key, stored);
@@ -314,12 +280,11 @@ export async function getDeviceManifestSourcesForUser(params: {
         candidate.stored.manifest.version === stored.manifest.version &&
         candidate.stored.manifest_hash === stored.manifest_hash
     );
-    const ownExactCandidates = exactCandidates.filter((candidate) => candidate.ownDevice);
-    const advertiserCandidates = ownExactCandidates.filter(
+    const advertiserCandidates = exactCandidates.filter(
       (candidate) =>
         liveCapabilities.get(candidate.deviceId)?.has(stored.manifest.required_capability) === true
     );
-    const onlineManifestCandidates = ownExactCandidates.filter((candidate) => candidate.online);
+    const onlineManifestCandidates = exactCandidates.filter((candidate) => candidate.online);
     const onlineAdvertiserCandidates = advertiserCandidates.filter((candidate) => candidate.online);
     // Provenance must describe the platform that actually validated and
     // advertised this manifest. `runtime.platforms` is a compatibility set, not

@@ -36,6 +36,7 @@ import {
   ORG_INSTALLED_CONNECTOR_ARTIFACT_SQL,
 } from '../utils/device-autowire-suppression';
 import { DEVICE_WORKER_FRESH_INTERVAL } from '../utils/device-liveness';
+import { teamDeviceAction } from './team-device-action';
 import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
 import { feedBackoff } from '../connectors/feed-backoff';
@@ -147,18 +148,31 @@ async function ensureDeviceConnectorWired(
       matchingDeviceIds: currentMatchingDeviceIds,
     });
   };
+  // A team wire re-checks, under its lock, that the device still advertises
+  // this exact artifact and that it does not move the installed definition
+  // backwards (`teamDeviceAction`); the personal fleet re-derives its winner.
   const lockedManifestWinner = async (db: typeof sql): Promise<DeviceConnectorSource | null> => {
     if (!source) return null;
     const current = (
-      await getDeviceManifestSourcesForUser({ sql: db, userId, connectorKey, home })
-    ).find((candidate) => candidate.key === connectorKey);
-    if (
-      !current ||
-      (teamPin && !current.advertiserDeviceIds.includes(teamPin)) ||
-      current.metadata.version !== source.metadata.version ||
-      current.manifestHash !== source.manifestHash
-    ) {
-      return null;
+      await getDeviceManifestSourcesForUser({
+        sql: db, userId, connectorKey, home, includeRetainedVersions: Boolean(teamPin),
+      })
+    ).find(
+      (candidate) =>
+        candidate.key === connectorKey &&
+        candidate.metadata.version === source.metadata.version &&
+        candidate.manifestHash === source.manifestHash &&
+        (!teamPin || candidate.advertiserDeviceIds.includes(teamPin))
+    );
+    if (!current) return null;
+    if (teamPin) {
+      const [installed] = (await db`
+        SELECT version FROM connector_definitions
+        WHERE organization_id = ${organizationId} AND key = ${connectorKey} AND status = 'active'
+      `) as unknown as Array<{ version: string }>;
+      if (teamDeviceAction(installed?.version, current.metadata.version) === 'upgrade_paused') {
+        return null;
+      }
     }
     return current;
   };
@@ -1041,27 +1055,27 @@ async function archiveVanishedDeviceConnectorDefinitions(
 
 /**
  * Reconcile one TEAM workspace that homes devices of `userId`. Each of the
- * user's devices homed there that advertises the workspace's winning artifact
- * (chosen across every member's devices homed there) gets its own connection,
- * pinned to it and private to its owner. A pinned connection whose device no
- * longer advertises that artifact has its feeds paused; when the device
- * advertises an OLDER version, the connection itself is paused too, with an
- * upgrade reason that `ensureDeviceConnectorWired` clears once the device
- * catches up. Unpinned rows are never adopted here.
+ * member's devices homed there gets its own private connection pinned to it,
+ * decided per device by {@link teamDeviceAction} against the workspace's
+ * INSTALLED definition — never against which devices happen to be online.
+ * A pinned connection whose device no longer advertises the key has its feeds
+ * paused. Unpinned rows are never adopted, and the shared definition is never
+ * archived from here (that stays a personal-workspace pass).
  */
 async function reconcileTeamHome(
   userId: string,
   organizationId: string,
-  deviceCaps: ReadonlyMap<string, ReadonlySet<string>>,
   pollingDeviceId: string | null
 ): Promise<ManifestClaimAuthorization[]> {
   const sql = getDb();
-  const home = { organizationId, personal: false };
   let pollingDeviceAuthorizations: Awaited<
     ReturnType<typeof getDeviceManifestClaimAuthorizationsForDevice>
   > = [];
-  if (pollingDeviceId) {
-    try {
+  let artifacts: DeviceConnectorSource[];
+  let installed: Map<string, { version: string; name: string }>;
+  let pinned: Array<{ id: number; connector_key: string; device_id: string }>;
+  try {
+    if (pollingDeviceId) {
       pollingDeviceAuthorizations = await getDeviceManifestClaimAuthorizationsForDevice({
         sql,
         userId,
@@ -1072,38 +1086,22 @@ async function reconcileTeamHome(
         organizationId,
         authorizations: pollingDeviceAuthorizations,
       });
-    } catch (err) {
-      logger.warn(
-        { userId, pollingDeviceId, err: errorMessage(err) },
-        '[device-connectors] Failed to read polling device manifest claims'
-      );
-      return [];
     }
-  }
-
-  let bundled: BundledDeviceConnector[];
-  let sources: DeviceConnectorSource[];
-  // deviceId → connector key → newest version that device advertises.
-  const deviceVersions = new Map<string, Map<string, string>>();
-  let pinned: Array<{ id: number; connector_key: string; device_id: string }>;
-  try {
-    bundled = await getBundledDeviceConnectors();
-    sources = await getDeviceManifestSourcesForUser({ sql, userId, home });
-    for (const retained of await getDeviceManifestSourcesForUser({
+    // Every exact artifact this member's fresh devices homed here advertise.
+    artifacts = await getDeviceManifestSourcesForUser({
       sql,
       userId,
-      home,
+      home: { organizationId, personal: false },
       includeRetainedVersions: true,
-    })) {
-      for (const deviceId of retained.advertiserDeviceIds) {
-        const versions = deviceVersions.get(deviceId) ?? new Map<string, string>();
-        const current = versions.get(retained.key);
-        if (!current || compareSemverish(retained.metadata.version, current) > 0) {
-          versions.set(retained.key, retained.metadata.version);
-        }
-        deviceVersions.set(deviceId, versions);
-      }
-    }
+    });
+    installed = new Map(
+      (
+        (await sql`
+          SELECT key, version, name FROM connector_definitions
+          WHERE organization_id = ${organizationId} AND status = 'active'
+        `) as unknown as Array<{ key: string; version: string; name: string }>
+      ).map((row) => [row.key, row])
+    );
     pinned = (await sql`
       SELECT c.id, c.connector_key, c.device_worker_id::text AS device_id
       FROM connections c
@@ -1111,86 +1109,96 @@ async function reconcileTeamHome(
         ON dw.id = c.device_worker_id
        AND dw.user_id = ${userId}
        AND dw.organization_id = c.organization_id
+      JOIN connector_definitions cd
+        ON cd.organization_id = c.organization_id
+       AND cd.key = c.connector_key
+       AND cd.status = 'active'
       WHERE c.organization_id = ${organizationId}
         AND c.created_by = ${userId}
         AND c.auth_profile_id IS NULL
         AND c.app_auth_profile_id IS NULL
         AND c.deleted_at IS NULL
+        AND ${sql.unsafe(IS_DEVICE_CONNECTOR_SQL)}
     `) as unknown as typeof pinned;
   } catch (err) {
     // A failed read must never be taken as "nothing is served" and pause.
     logger.warn(
       { userId, organizationId, err: errorMessage(err) },
-      '[device-connectors] Failed to read team device connector sources'
+      '[device-connectors] Failed to read team device connector state'
     );
     return [];
   }
 
-  const tasks: Array<Promise<ManifestClaimAuthorization | null | void>> = [];
-  const knownKeys = new Set<string>();
-  const wired = new Set<string>();
-  const wire = (
-    key: string,
-    feedKeys: string[],
-    deviceId: string,
-    source?: DeviceConnectorSource
-  ) => {
-    wired.add(`${key}\u0000${deviceId}`);
-    tasks.push(
-      ensureDeviceConnectorWired(
-        userId, organizationId, key, feedKeys, [deviceId], source, pollingDeviceId, deviceId
-      )
-    );
-  };
-  for (const source of sources) {
-    knownKeys.add(source.key);
-    for (const deviceId of source.advertiserDeviceIds) {
-      if (deviceCaps.has(deviceId)) wire(source.key, source.feedKeys, deviceId, source);
-    }
-  }
-  for (const dc of bundled) {
-    if (knownKeys.has(dc.key)) continue;
-    knownKeys.add(dc.key);
-    for (const [deviceId, caps] of deviceCaps) {
-      if (caps.has(dc.requiredCapability)) wire(dc.key, dc.feedKeys, deviceId);
-    }
-  }
-  const pinnedKeys = new Set(pinned.map((row) => `${row.connector_key}\u0000${row.device_id}`));
-  // A device that only runs an OLDER version of a key the workspace already
-  // runs newer gets its pinned connection created paused, carrying the upgrade
-  // reason, so pairing it never silently omits the connector.
-  for (const source of sources) {
-    for (const deviceId of deviceCaps.keys()) {
-      const identity = `${source.key}\u0000${deviceId}`;
-      if (wired.has(identity) || pinnedKeys.has(identity)) continue;
-      const deviceVersion = deviceVersions.get(deviceId)?.get(source.key);
-      if (deviceVersion && compareSemverish(deviceVersion, source.metadata.version) < 0) {
-        tasks.push(createUpgradePendingConnection(userId, organizationId, source, deviceId, deviceVersion));
+  // `${key}\0${deviceId}` → the newest artifact that device advertises (V).
+  const newest = new Map<string, DeviceConnectorSource>();
+  for (const artifact of artifacts) {
+    for (const deviceId of artifact.advertiserDeviceIds) {
+      const identity = `${artifact.key}\u0000${deviceId}`;
+      const current = newest.get(identity);
+      if (!current || compareSemverish(artifact.metadata.version, current.metadata.version) >= 0) {
+        newest.set(identity, artifact);
       }
     }
   }
-  for (const row of pinned) {
-    if (!knownKeys.has(row.connector_key)) continue;
-    if (wired.has(`${row.connector_key}\u0000${row.device_id}`)) continue;
-    const winner = sources.find((source) => source.key === row.connector_key);
-    const deviceVersion = deviceVersions.get(row.device_id)?.get(row.connector_key);
-    tasks.push(
-      pauseTeamDeviceConnection(
-        userId,
-        organizationId,
-        row.id,
-        winner && deviceVersion && compareSemverish(deviceVersion, winner.metadata.version) < 0
-          ? { source: winner, deviceVersion }
-          : null
-      )
+  // key → the version this workspace runs after this member's reconcile: the
+  // installed D, or the member's newest V when that installs or advances it.
+  const target = new Map<string, string>();
+  for (const artifact of newest.values()) {
+    const current = target.get(artifact.key) ?? installed.get(artifact.key)?.version;
+    const action = teamDeviceAction(current, artifact.metadata.version);
+    target.set(
+      artifact.key,
+      action === 'install' || action === 'advance' ? artifact.metadata.version : (current as string)
     );
   }
 
-  const reconciled = (await Promise.allSettled(tasks)).flatMap((result) =>
+  const pinnedRows = new Map(pinned.map((row) => [`${row.connector_key}\u0000${row.device_id}`, row.id]));
+  const activeKeysForPoller = new Set<string>();
+  const wires: Array<Promise<ManifestClaimAuthorization | null>> = [];
+  const upgrades: Array<() => Promise<void>> = [];
+  for (const [identity, artifact] of newest) {
+    const deviceId = identity.slice(artifact.key.length + 1);
+    const workspaceVersion = target.get(artifact.key) as string;
+    if (teamDeviceAction(workspaceVersion, artifact.metadata.version) === 'active') {
+      if (deviceId === pollingDeviceId) activeKeysForPoller.add(artifact.key);
+      wires.push(
+        ensureDeviceConnectorWired(
+          userId, organizationId, artifact.key, artifact.feedKeys, [deviceId], artifact,
+          pollingDeviceId, deviceId
+        )
+      );
+      continue;
+    }
+    const upgrade = {
+      connectorName: installed.get(artifact.key)?.name ?? artifact.metadata.name,
+      workspaceVersion,
+      deviceVersion: artifact.metadata.version,
+    };
+    const connectionId = pinnedRows.get(identity);
+    upgrades.push(() =>
+      connectionId
+        ? pauseTeamDeviceConnection(userId, organizationId, connectionId, upgrade)
+        : createUpgradePendingConnection(userId, organizationId, artifact.key, deviceId, upgrade)
+    );
+  }
+  const reconciled = (await Promise.allSettled(wires)).flatMap((result) =>
     result.status === 'fulfilled' && result.value ? [result.value] : []
   );
+  // After the wires, so an installed or advanced definition exists to pause against.
+  await Promise.allSettled([
+    ...upgrades.map((run) => run()),
+    ...pinned
+      .filter((row) => !newest.has(`${row.connector_key}\u0000${row.device_id}`))
+      .map((row) => pauseTeamDeviceConnection(userId, organizationId, row.id, null)),
+  ]);
   if (!pollingDeviceId) return reconciled;
-  return pollerClaimAuthorizations(reconciled, pollingDeviceAuthorizations, sources, pollingDeviceId);
+  return pollerClaimAuthorizations(reconciled, pollingDeviceAuthorizations, activeKeysForPoller);
+}
+
+interface DeviceUpgrade {
+  connectorName: string;
+  workspaceVersion: string;
+  deviceVersion: string;
 }
 
 /**
@@ -1202,12 +1210,12 @@ async function pauseTeamDeviceConnection(
   userId: string,
   organizationId: string,
   connectionId: number,
-  upgrade: { source: DeviceConnectorSource; deviceVersion: string } | null
+  upgrade: DeviceUpgrade | null
 ): Promise<void> {
   const sql = getDb();
   try {
     if (upgrade) {
-      const reason = await upgradeReason(organizationId, upgrade.source, upgrade.deviceVersion);
+      const reason = await upgradeReason(organizationId, upgrade);
       await sql`
         UPDATE connections
         SET status = CASE WHEN status = 'active' THEN 'paused' ELSE status END,
@@ -1229,46 +1237,38 @@ async function pauseTeamDeviceConnection(
   }
 }
 
-async function upgradeReason(
-  organizationId: string,
-  source: DeviceConnectorSource,
-  deviceVersion: string
-): Promise<string> {
+async function upgradeReason(organizationId: string, upgrade: DeviceUpgrade): Promise<string> {
   const [org] = (await getDb()`
     SELECT name FROM "organization" WHERE id = ${organizationId}
   `) as unknown as Array<{ name: string | null }>;
-  return deviceUpgradeRequiredMessage({
-    connectorName: source.metadata.name,
-    workspaceName: org?.name || 'this workspace',
-    workspaceVersion: source.metadata.version,
-    deviceVersion,
-  });
+  return deviceUpgradeRequiredMessage({ ...upgrade, workspaceName: org?.name || 'this workspace' });
 }
 
 /**
  * Create a team device's pinned private connection already PAUSED with the
- * upgrade reason, for a device whose only advertised version is older than the
- * workspace definition. No feeds and no definition write: the definition is
- * never downgraded, and the connection stays unclaimable until the device
- * advertises the workspace's version, when `ensureDeviceConnectorWired` adopts
- * this same row, creates its feeds and clears the reason. Skipped when the
- * device already has a live row for the key or its owner deleted one (the
- * auto-wire opt-out), or when the device has moved away. Best-effort.
+ * upgrade reason (row 4 of {@link teamDeviceAction}). No feeds and no
+ * definition write: the installed definition is the source of truth, whether
+ * or not any device still advertises it, and the connection stays unclaimable
+ * until the device advertises the workspace's version, when
+ * `ensureDeviceConnectorWired` adopts this same row, creates its feeds and
+ * clears the reason. Skipped when the device already has a live row for the key
+ * or its owner deleted one (the auto-wire opt-out), or when it moved away.
+ * Best-effort.
  */
 async function createUpgradePendingConnection(
   userId: string,
   organizationId: string,
-  source: DeviceConnectorSource,
+  connectorKey: string,
   deviceId: string,
-  deviceVersion: string
+  upgrade: DeviceUpgrade
 ): Promise<void> {
   const sql = getDb();
   try {
-    const reason = await upgradeReason(organizationId, source, deviceVersion);
+    const reason = await upgradeReason(organizationId, upgrade);
     await sql.begin(async (tx) => {
       // The same lock order as a team wire.
-      await tx`SELECT pg_advisory_xact_lock(hashtext('lobu:autowire'), hashtext(${`org:${organizationId}:${source.key}`}))`;
-      await tx`SELECT pg_advisory_xact_lock(hashtext('lobu:autowire'), hashtext(${`${userId}:${source.key}`}))`;
+      await tx`SELECT pg_advisory_xact_lock(hashtext('lobu:autowire'), hashtext(${`org:${organizationId}:${connectorKey}`}))`;
+      await tx`SELECT pg_advisory_xact_lock(hashtext('lobu:autowire'), hashtext(${`${userId}:${connectorKey}`}))`;
       const [blocked] = await tx`
         SELECT 1
         WHERE NOT EXISTS (
@@ -1278,12 +1278,12 @@ async function createUpgradePendingConnection(
           )
           OR NOT EXISTS (
             SELECT 1 FROM connector_definitions
-            WHERE organization_id = ${organizationId} AND key = ${source.key} AND status = 'active'
+            WHERE organization_id = ${organizationId} AND key = ${connectorKey} AND status = 'active'
           )
           OR EXISTS (
             SELECT 1 FROM connections c
             WHERE c.organization_id = ${organizationId}
-              AND c.connector_key = ${source.key}
+              AND c.connector_key = ${connectorKey}
               AND c.device_worker_id = ${deviceId}::uuid
               AND (
                 c.deleted_at IS NULL
@@ -1294,8 +1294,8 @@ async function createUpgradePendingConnection(
       if (blocked) return;
       const slug = await ensureUniqueConnectionSlug({
         organizationId,
-        connectorKey: source.key,
-        displayName: source.metadata.name,
+        connectorKey,
+        displayName: upgrade.connectorName,
         db: tx,
       });
       await tx`
@@ -1303,14 +1303,14 @@ async function createUpgradePendingConnection(
           organization_id, connector_key, slug, display_name, status, error_message,
           auth_profile_id, app_auth_profile_id, config, created_by, visibility, device_worker_id
         ) VALUES (
-          ${organizationId}, ${source.key}, ${slug}, ${source.metadata.name}, 'paused', ${reason},
+          ${organizationId}, ${connectorKey}, ${slug}, ${upgrade.connectorName}, 'paused', ${reason},
           NULL, NULL, NULL, ${userId}, 'private', ${deviceId}::uuid
         )
       `;
     });
   } catch (err) {
     logger.warn(
-      { userId, connectorKey: source.key, err: errorMessage(err) },
+      { userId, connectorKey, err: errorMessage(err) },
       '[device-connectors] Failed to create an upgrade-pending team device connection'
     );
   }
@@ -1325,14 +1325,8 @@ async function createUpgradePendingConnection(
 function pollerClaimAuthorizations(
   reconciledAuthorizations: ManifestClaimAuthorization[],
   pollingDeviceAuthorizations: ManifestClaimAuthorization[],
-  manifestSources: readonly DeviceConnectorSource[],
-  pollingDeviceId: string
+  currentWinnerKeysForPoller: ReadonlySet<string>
 ): ManifestClaimAuthorization[] {
-  const currentWinnerKeysForPoller = new Set(
-    manifestSources
-      .filter((source) => source.advertiserDeviceIds.includes(pollingDeviceId))
-      .map((source) => source.key)
-  );
   const failedCurrentWinnerKeys = new Set(
     [...currentWinnerKeysForPoller].filter(
       (key) => !reconciledAuthorizations.some((authorization) => authorization.connectorKey === key)
@@ -1364,15 +1358,12 @@ export async function reconcileDeviceCapabilities(
   pollingDeviceId?: string | null
 ): Promise<ManifestClaimAuthorization[]> {
   const sql = getDb();
-  // deviceId → team home, and team home → its fresh devices' capabilities. A
-  // team home with only stale devices is still visited while it holds their
-  // connections, so those feeds get paused.
+  // deviceId → team home. A team home with only stale devices is still visited
+  // while it holds their connections, so those feeds get paused.
   const teamHomes = new Map<string, string>();
-  const teamDeviceCaps = new Map<string, Map<string, Set<string>>>();
   try {
     const rows = (await sql`
-      SELECT dw.id, dw.organization_id, dw.capabilities,
-             dw.last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval AS fresh
+      SELECT dw.id, dw.organization_id
       FROM device_workers dw
       JOIN "member" m ON m."organizationId" = dw.organization_id AND m."userId" = dw.user_id
       JOIN "organization" o ON o.id = dw.organization_id
@@ -1387,20 +1378,8 @@ export async function reconcileDeviceCapabilities(
               AND c.deleted_at IS NULL
           )
         )
-    `) as unknown as Array<{
-      id: string;
-      organization_id: string;
-      capabilities: unknown;
-      fresh: boolean;
-    }>;
-    for (const row of rows) {
-      teamHomes.set(row.id, row.organization_id);
-      const caps = teamDeviceCaps.get(row.organization_id) ?? new Map<string, Set<string>>();
-      if (row.fresh) {
-        caps.set(row.id, new Set(Array.isArray(row.capabilities) ? (row.capabilities as string[]) : []));
-      }
-      teamDeviceCaps.set(row.organization_id, caps);
-    }
+    `) as unknown as Array<{ id: string; organization_id: string }>;
+    for (const row of rows) teamHomes.set(row.id, row.organization_id);
   } catch (err) {
     logger.warn(
       { userId, err: errorMessage(err) },
@@ -1411,11 +1390,10 @@ export async function reconcileDeviceCapabilities(
   const pollingTeamOrgId = pollingDeviceId ? (teamHomes.get(pollingDeviceId) ?? null) : null;
   const [personal, ...team] = await Promise.all([
     reconcilePersonalFleet(userId, pollingTeamOrgId ? null : (pollingDeviceId ?? null), teamHomes),
-    ...[...teamDeviceCaps].map(([organizationId, caps]) =>
+    ...[...new Set(teamHomes.values())].map((organizationId) =>
       reconcileTeamHome(
         userId,
         organizationId,
-        caps,
         organizationId === pollingTeamOrgId ? (pollingDeviceId ?? null) : null
       ).then((authorizations) => ({ organizationId, authorizations }))
     ),
@@ -1601,7 +1579,10 @@ async function reconcilePersonalFleet(
   return pollerClaimAuthorizations(
     reconciledAuthorizations,
     pollingDeviceAuthorizations,
-    manifestSources,
-    pollingDeviceId
+    new Set(
+      manifestSources
+        .filter((source) => source.advertiserDeviceIds.includes(pollingDeviceId))
+        .map((source) => source.key)
+    )
   );
 }
