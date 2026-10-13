@@ -159,6 +159,24 @@ describe("serialized TikTok page adapter", () => {
 });
 
 describe("TikTok source reads", () => {
+	test("focuses each scratch snapshot before waiting for lazy-loaded content", async () => {
+		for (const feedKey of ["for_you", "following", "search"]) {
+			let focused = false;
+			const { dispatcher, calls } = browser(action => {
+				if (action === "navigate") return { tab_id: 7 };
+				if (action === "focus_tab") focused = true;
+				if (action === "wait_for_selector" && !focused) throw new Error("Background snapshot did not load");
+				if (action === "network_intercept_start") return { session_id: "synthetic-session" };
+				if (action === "network_intercept_drain") return { responses: [{ status: 200, body: JSON.stringify({ status_code: 0, itemList: [post] }) }] };
+				if (action === "evaluate") return { value: { items: [post], rows: [{ url: `https://www.tiktok.com/@example_creator/video/${post.id}`, text: post.desc }] } };
+				return {};
+			});
+			const result = await new TikTokConnector().read(context(dispatcher, { feedKey, ...(feedKey === "search" ? { query: "agent memory" } : {}) }));
+			expect(result.rows).toHaveLength(1);
+			expect(calls.find(call => call.action === "focus_tab")?.input).toMatchObject({ tab_id: 7, draw_attention: false });
+			expect(calls.at(-1)?.action).toBe("close_tab");
+		}
+	});
 	test("uses source reads without sync or embedded Automation decisions", () => {
 		const definition = new TikTokConnector().definition;
 		expect(definition.key).toBe("tiktok.web");

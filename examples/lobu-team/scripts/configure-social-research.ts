@@ -1,5 +1,6 @@
 import type { ClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
 import { socialResearchPrompt } from "../social-research.prompt";
+import { expandXTimelineReader } from "../x-timeline-adapter";
 
 /** Reuse the current X Automation and retain its source reader and checkpoint.
  * Keep cadence disabled until a real managed run and its reaction are verified.
@@ -43,6 +44,7 @@ export async function configureSocialResearch(
     !receiptReader.includes("return {read_run_id,account:")
   )
     throw new Error("X reader shape changed; inspect it before updating");
+  const expandedReader = expandXTimelineReader(receiptReader);
   const check = (value: unknown) => {
     if ((value as { status?: string })?.status === "pending_approval")
       throw new Error("Social configuration is awaiting policy approval");
@@ -75,7 +77,7 @@ export async function configureSocialResearch(
       description:
         "Read social inboxes and LinkedIn, X and TikTok posts individually, verify source evidence, and prepare replies for human submission.",
       prompt: socialResearchPrompt(
-        `Existing X read script (run unchanged, retain read_run_id):\n\n\`\`\`typescript\n${receiptReader}\n\`\`\``
+        `Existing X read script (run unchanged, retain read_run_id):\n\n\`\`\`typescript\n${expandedReader}\n\`\`\``
       ),
       sources: [
         {
@@ -86,7 +88,7 @@ export async function configureSocialResearch(
       ],
       outputs: null,
       change_notes:
-        "Include LinkedIn and TikTok inboxes in the same social run, with source-verified private cards and human-activated message drafts. Cadence stays disabled during live verification.",
+        "Target 50 unique posts per platform with bounded scrolling and distinct TikTok snapshots; retain selective cards and human-activated drafts. Cadence stays disabled during live verification.",
       set_as_current: true,
     })
   );

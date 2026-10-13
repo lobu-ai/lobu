@@ -119,7 +119,8 @@ async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedReadResult>
 				if (typeof start.session_id !== "string") throw new Error("TikTok feed capture did not start");
 				sessionId = start.session_id;
 			}
-			await navigate(browser, tabId, url);
+			// Snapshot/search results also lazy-load only in a visible tab.
+			await navigate(browser, tabId, url, true);
 			let rows: RecordValue[] = [];
 			if (ctx.feedKey === "following") {
 				await browser.dispatch("wait_for_selector", { tab_id: tabId, selector: '[data-e2e="recommend-list-item-container"]', timeout_ms: 15000, allowed_origins: ORIGINS });
@@ -174,7 +175,7 @@ async function readTikTokInbox(ctx: FeedReadContext): Promise<FeedReadResult> {
 
 export default class TikTokConnector extends ConnectorRuntime {
 	readonly definition: RuntimeConnectorDefinition = {
-		key: "tiktok.web", name: "TikTok", version: "1.1.1", faviconDomain: "tiktok.com",
+		key: "tiktok.web", name: "TikTok", version: "1.1.2", faviconDomain: "tiktok.com",
 		description: "Read TikTok through your signed-in paired browser, inspect post visuals, set likes, and prepare comments for human submission. Automations decide what to read and act on.",
 		browser: { origins: ORIGINS, authMethods: ["browser"], accountProbe: { url: ORIGIN, expression: expression("identity") } },
 		authSchema: { methods: [{ type: "browser", mode: "live" }] },
