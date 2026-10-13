@@ -179,7 +179,7 @@ export default class TikTokConnector extends ConnectorRuntime {
 		browser: { origins: ORIGINS, authMethods: ["browser"], accountProbe: { url: ORIGIN, expression: expression("identity") } },
 		authSchema: { methods: [{ type: "browser", mode: "live" }] },
 		feeds: {
-			messages: { key: "messages", name: "Messages", description: "Read messages in the signed-in browser's conversations, including sender, direction, source IDs and timestamps. Follow the returned cursor through messages and conversations. Unsupported message media is identified, not transcribed. No message is sent.", read: readTikTokInbox },
+			messages: { key: "messages", name: "Messages", description: "Read a recent page per conversation before older history, with sender, direction, source IDs, evidence revisions and timestamps. Cursors cover the initial conversation set; a changed set reports incomplete coverage and needs a fresh scan. Unsupported media is identified, not transcribed. No message is sent.", read: readTikTokInbox },
 			activity: { key: "activity", name: "Activity", description: "Read loaded TikTok activity including likes, comments, mentions and followers, with source IDs and links. Follow the returned cursor for older entries. Opening the activity panel may clear its unread badge.", read: readTikTokInbox },
 			for_you: { key: "for_you", name: "For You", description: "Initial personalized timeline snapshot. No history coverage or continuation; repeat reads can overlap.", read: readTikTokSnapshot },
 			following: { key: "following", name: "Following", description: "Initial browser Following snapshot. No history coverage or continuation; repeat reads can overlap.", read: readTikTokSnapshot },

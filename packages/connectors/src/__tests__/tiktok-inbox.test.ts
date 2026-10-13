@@ -13,6 +13,7 @@ function fixture(options: { activity?: boolean; incomplete?: boolean } = {}) {
 	let owner = accountId;
 	let tick = 0;
 	let loads = 0;
+	let afterDigest = () => {};
 	const newer = message("102", "New message");
 	const older = message("101", "Older message");
 	const loaded = [newer];
@@ -53,13 +54,38 @@ function fixture(options: { activity?: boolean; incomplete?: boolean } = {}) {
 		querySelectorAll: (selector: string) => selector === '[data-e2e="inbox-list"]' ? [panel] : [button],
 	};
 	class Clock extends Date { static now() { return tick; } }
-	const run = new Function("document", "location", "Date", "setTimeout", "input", `return (${tiktokInboxPage.toString()})(input)`);
+	const pageCrypto = { subtle: { digest: async (...args: Parameters<typeof crypto.subtle.digest>) => {
+		const digest = await crypto.subtle.digest(...args);
+		afterDigest();
+		return digest;
+	} } };
+	const run = new Function("document", "location", "Date", "setTimeout", "crypto", "input", `return (${tiktokInboxPage.toString()})(input)`);
 	return {
-		read: (input: Record<string, unknown> = {}) => run(document, { origin: "https://www.tiktok.com" }, Clock, (callback: () => void) => { tick += 100; callback(); }, { feed: options.activity ? "activity" : "messages", ...input }),
+		read: (input: Record<string, unknown> = {}) => run(document, { origin: "https://www.tiktok.com" }, Clock, (callback: () => void) => { tick += 100; callback(); }, pageCrypto, { feed: options.activity ? "activity" : "messages", ...input }),
 		setOwner: (value: string) => { owner = value; },
+		afterDigest: (callback: () => void) => { afterDigest = callback; },
 		loads: () => loads,
+		api,
+		activity,
 		thread,
 		threads,
+		loaded,
+		immutableActivity: (reuseHost = false) => {
+			const stale = panel.__reactFiber$test as any;
+			const component = reuseHost ? { memoizedProps: activity, child: stale, return: null as any } : stale;
+			if (reuseHost) { stale.memoizedProps = {}; stale.return = component; }
+			const root = { stateNode: { current: null as any }, child: component };
+			component.return = root;
+			root.stateNode.current = root;
+			activity.onHitBottom = async () => {
+				const current = { memoizedProps: { ...activity, item: { ...activity.item, notice_list: [notice], has_more: 0 } }, return: null as any };
+				const committed = { stateNode: root.stateNode, child: current };
+				current.return = committed;
+				if (reuseHost) Object.assign(current, { child: stale });
+				else stale.alternate = current;
+				root.stateNode.current = committed;
+			};
+		},
 	};
 }
 
@@ -96,6 +122,15 @@ test("message continuation loads older records without duplicating the first pag
 	expect(JSON.stringify([first, second])).not.toContain("must-not-leak");
 });
 
+test("message cursors resume after the connector creates a fresh scratch page", async () => {
+	const first = await fixture().read({ limit: 1 });
+	const fresh = fixture();
+	const second = await fresh.read({ cursor: first.nextCursor, limit: 1 });
+	expect(second.rows.map((row: { id: string }) => row.id)).toEqual(["101"]);
+	expect(second.hasMore).toBe(false);
+	expect(fresh.loads()).toBe(1);
+});
+
 test("cursors cannot cross accounts or feeds", async () => {
 	const f = fixture();
 	const first = await f.read({ limit: 1 });
@@ -123,7 +158,6 @@ test("unsupported read bounds fail before loading source data", async () => {
 	expect(f.loads()).toBe(0);
 });
 
-
 test("conversation continuation survives inbox recency reordering", async () => {
 	const f = fixture();
 	f.thread.hasMoreMessages = false;
@@ -134,4 +168,126 @@ test("conversation continuation survives inbox recency reordering", async () => 
 	const second = await f.read({ cursor: first.nextCursor });
 	expect(second.rows.map((row: { id: string }) => row.id)).toEqual(["201"]);
 	expect(second.hasMore).toBe(false);
+});
+
+test("activity follows the committed React tree after immutable updates", async () => {
+	const f = fixture({ activity: true });
+	f.immutableActivity();
+	expect((await f.read()).rows[0].id).toBe("900");
+});
+
+test("activity uses committed ancestor paths when React reuses a host fiber", async () => {
+	const f = fixture({ activity: true });
+	f.immutableActivity(true);
+	expect((await f.read()).rows[0].id).toBe("900");
+});
+
+test("recent conversations are read before the first thread's history", async () => {
+	const f = fixture();
+	f.threads.push({ ...f.thread, id: "300", hasMoreMessages: false, getMessageList: () => [{ ...message("301", "Recent question"), conversationId: "300" }] });
+	const first = await f.read({ limit: 1 });
+	const second = await f.read({ cursor: first.nextCursor, limit: 1 });
+	expect(second.rows.map((row: { id: string }) => row.id)).toEqual(["301"]);
+	expect(f.loads()).toBe(0);
+	expect(second.hasMore).toBe(true);
+	const third = await f.read({ cursor: second.nextCursor, limit: 1 });
+	expect(third.rows[0].id).toBe("101");
+	expect(third.hasMore).toBe(false);
+});
+
+test.each(["050", "200", "400"])("a new conversation %s invalidates the scan boundary", async (id) => {
+	const f = fixture();
+	f.thread.hasMoreMessages = false;
+	f.threads.push({ ...f.thread, id: "300", getMessageList: () => [{ ...message("301", "Other thread"), conversationId: "300" }] });
+	const first = await f.read();
+	f.threads.push({ ...f.thread, id, getMessageList: () => [] });
+	await expect(f.read({ cursor: first.nextCursor })).rejects.toThrow("Conversation set changed");
+});
+
+test("unknown content on text-type messages remains uninspected", async () => {
+	const f = fixture();
+	f.thread.hasMoreMessages = false;
+	f.loaded[0].content = JSON.stringify({ attachment: "image" });
+	expect((await f.read()).rows[0]).toMatchObject({ text: "", has_uninspected_content: true });
+});
+
+test("an unknown cursor conversation fails instead of claiming scan completion", async () => {
+	const f = fixture();
+	const first = await f.read({ limit: 1 });
+	const cursor = { ...JSON.parse(first.nextCursor), thread: "999" };
+	await expect(f.read({ cursor: JSON.stringify(cursor) })).rejects.toThrow("Invalid conversation scan cursor");
+});
+
+test("history cursors require an anchor instead of repeating the recent page", async () => {
+	const f = fixture();
+	const first = await f.read({ limit: 1 });
+	const cursor = JSON.parse(first.nextCursor);
+	delete cursor.after;
+	await expect(f.read({ cursor: JSON.stringify(cursor) })).rejects.toThrow("Invalid conversation scan cursor");
+});
+
+test.each([false, true])("account changes during revision hashing reject the page (activity=%s)", async (activity) => {
+	const f = fixture({ activity });
+	f.afterDigest(() => f.setOwner("7000000000000000099"));
+	await expect(f.read()).rejects.toThrow("Account changed during the read");
+});
+
+test("source revisions stay stable across fresh reads and change with message content", async () => {
+	const first = await fixture().read();
+	const f = fixture();
+	const second = await f.read();
+	expect(second.rows[0].source_revision).toMatch(/^[a-f0-9]{64}$/);
+	expect(second.rows[0].source_revision).toBe(first.rows[0].source_revision);
+	f.loaded[0].content = JSON.stringify({ text: "Edited message" });
+	const edited = await f.read();
+	expect(edited.rows[0].origin_id).toBe(first.rows[0].origin_id);
+	expect(edited.rows[0].source_revision).not.toBe(first.rows[0].source_revision);
+});
+
+test.each([false, true])("source loaders must settle within the page deadline (activity=%s)", async (activity) => {
+	const f = fixture({ activity });
+	if (activity) f.activity.onHitBottom = () => new Promise(() => {});
+	else {
+		f.loaded.length = 0;
+		f.api.instance.getMessagesByConversation = () => new Promise(() => {});
+	}
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const watchdog = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Source loader outlived the page deadline")), 100); });
+		await expect(Promise.race([f.read(), watchdog])).rejects.toThrow("did not finish loading");
+	} finally {
+		clearTimeout(timer);
+	}
+});
+
+test.each([false, true])("source loader rejections retain their error (activity=%s)", async (activity) => {
+	const f = fixture({ activity });
+	const failure = new Error("Synthetic source failure");
+	if (activity) f.activity.onHitBottom = async () => { throw failure; };
+	else {
+		f.loaded.length = 0;
+		f.api.instance.getMessagesByConversation = async () => { throw failure; };
+	}
+	await expect(f.read()).rejects.toBe(failure);
+});
+
+test.each([false, true])("completed empty inboxes remain valid (activity=%s)", async (activity) => {
+	const f = fixture({ activity });
+	if (activity) f.activity.item.has_more = 0;
+	else f.threads.length = 0;
+	expect(await f.read()).toEqual({ rows: [], hasMore: false });
+	expect(f.loads()).toBe(0);
+});
+
+test("message client account changes during hashing reject the page even with stale hydration data", async () => {
+	const f = fixture();
+	f.afterDigest(() => { f.api.instance.ctx.option.userId = "7000000000000000099"; });
+	await expect(f.read()).rejects.toThrow("Message client changed accounts");
+});
+
+test("conversation changes during hashing cannot claim a complete scan", async () => {
+	const f = fixture();
+	f.thread.hasMoreMessages = false;
+	f.afterDigest(() => { f.threads.push({ ...f.thread, id: "300" }); });
+	await expect(f.read()).rejects.toThrow("Conversation set changed");
 });

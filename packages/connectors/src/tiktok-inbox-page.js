@@ -23,26 +23,59 @@ export async function tiktokInboxPage(input) {
 		}
 		fail("Inbox did not finish loading; restart this page read");
 	};
+	const readWithinDeadline = async read => {
+		let outcome;
+		Promise.resolve().then(read).then(value => { outcome = { value }; }, error => { outcome = { error }; });
+		const settled = await wait(() => outcome);
+		if ("error" in settled) throw settled.error;
+		return settled.value;
+	};
 	const feed = input.feed;
 	if (!["messages", "activity"].includes(feed)) fail("Unsupported feed");
 	const limit = input.limit ?? 20;
 	if (!Number.isInteger(limit) || limit < 1 || limit > 100) fail("limit must be between 1 and 100");
 	let cursor = {};
 	if (input.cursor !== undefined) {
-		if (typeof input.cursor !== "string" || input.cursor.length > 2000) fail("Invalid cursor");
+		if (typeof input.cursor !== "string" || input.cursor.length > 100000) fail("Invalid cursor");
 		try { cursor = JSON.parse(input.cursor); } catch { fail("Invalid cursor"); }
-		if (!cursor || cursor.v !== 1 || cursor.feed !== feed || cursor.account !== owner) fail("Cursor belongs to a different source or account");
+		if (!cursor || cursor.v !== (feed === "messages" ? 2 : 1) || cursor.feed !== feed || cursor.account !== owner) fail("Cursor belongs to a different source or account");
 		if (cursor.after !== undefined && (typeof cursor.after !== "string" || !/^\d+$/.test(cursor.after))) fail("Invalid message or activity cursor");
 		if (feed === "messages" && (typeof cursor.thread !== "string" || !/^[0-9:]{1,150}$/.test(cursor.thread))) fail("Invalid conversation cursor");
 	}
-	const result = (rows, next) => {
+	const result = async (rows, next) => {
+		const revised = await Promise.all(rows.map(async row => {
+			const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(row)));
+			return { ...row, source_revision: [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, "0")).join("") };
+		}));
 		if (account() !== owner) fail("Account changed during the read");
-		return { rows, hasMore: !!next, ...(next ? { nextCursor: JSON.stringify({ v: 1, feed, account: owner, ...next }) } : {}) };
+		return { rows: revised, hasMore: !!next, ...(next ? { nextCursor: JSON.stringify({ v: feed === "messages" ? 2 : 1, feed, account: owner, ...next }) } : {}) };
 	};
 	// React attaches the source record and loading state to these exact inbox
 	// components. Match their shape, not minified component names or hook indexes.
 	function* fibers(element) {
 		let fiber = element?.[Object.keys(element).find(key => key.startsWith("__reactFiber$"))];
+		// DOM references can retain the alternate after an immutable React commit.
+		// Resolve membership in the committed tree, never prefer an alternate blindly.
+		let root = fiber;
+		for (let i = 0; root?.return && i < 100; i++) root = root.return;
+		const current = root?.stateNode?.current;
+		if (current) {
+			const pending = [{ node: current, parent: null }];
+			let found;
+			for (let i = 0; pending.length && i < 50000; i++) {
+				const entry = pending.pop();
+				const node = entry.node;
+				if (node === fiber || node === fiber?.alternate) { found = entry; break; }
+				if (node.sibling) pending.push({ node: node.sibling, parent: entry.parent });
+				if (node.child) pending.push({ node: node.child, parent: entry });
+			}
+			if (!found) fail("Inbox component is no longer mounted");
+			// A reused child can still point back to an old ancestor via `return`.
+			// Keep the ancestor path discovered in the committed tree itself.
+			for (let i = 0; found && i < 16; i++, found = found.parent) yield found.node;
+			return;
+		}
+		if (fiber?.alternate) fail("Committed inbox component is unavailable");
 		for (let i = 0; fiber && i < 16; i++, fiber = fiber.return) yield fiber;
 	}
 	const props = (element, predicate) => {
@@ -69,7 +102,7 @@ export async function tiktokInboxPage(input) {
 			await wait(() => !current().item.loading);
 			const before = current().item;
 			const stamp = JSON.stringify([before.min_time, before.max_time, before.notice_list.map(n => n.nid_str)]);
-			await current().onHitBottom();
+			await readWithinDeadline(() => current().onHitBottom());
 			await wait(() => {
 				const next = current().item;
 				return !next.loading && (!next.has_more || JSON.stringify([next.min_time, next.max_time, next.notice_list.map(n => n.nid_str)]) !== stamp);
@@ -134,21 +167,37 @@ export async function tiktokInboxPage(input) {
 	const sourceThreads = api.instance.getConversationList();
 	if (!Array.isArray(sourceThreads)) fail("Conversation list is unavailable");
 	if (sourceThreads.some(thread => typeof thread.id !== "string" || !/^[0-9:]{1,150}$/.test(thread.id))) fail("Conversation source identity is unavailable");
-	// Inbox recency order changes when a message arrives. Stable source-ID order
-	// keeps existing conversations from jumping past a continuation cursor.
-	const threads = [...sourceThreads].sort((a, b) => a.id.localeCompare(b.id));
-	const index = cursor.thread ? threads.findIndex(thread => thread.id === cursor.thread) : 0;
-	if (index < 0) fail("Conversation cursor expired; restart the read");
-	const thread = threads[index];
-	if (!thread) return result([], null);
-	if (typeof thread.id !== "string" || !/^[0-9:]{1,150}$/.test(thread.id) || typeof thread.getMessageList !== "function" || typeof thread.hasMoreMessages !== "boolean") fail("Conversation source identity or loading state is unavailable");
+	if (sourceThreads.length > 200) fail("Conversation list exceeds this scan's budget; coverage is incomplete");
+	const ids = sourceThreads.map(thread => thread.id);
+	const snapshot = [...ids].sort();
+	const finish = async (rows, next) => {
+		const output = await result(rows, next);
+		if (api.instance.ctx?.option?.userId !== owner) fail("Message client changed accounts during the read");
+		const latest = api.instance.getConversationList();
+		if (!Array.isArray(latest) || JSON.stringify(latest.map(thread => thread.id).sort()) !== JSON.stringify(snapshot)) fail("Conversation set changed; restart the read, previous coverage is incomplete");
+		return output;
+	};
+	const validIds = values => Array.isArray(values) && values.length <= 200 && values.every(id => typeof id === "string" && ids.includes(id));
+	if (input.cursor !== undefined) {
+		if (!Array.isArray(cursor.snapshot) || JSON.stringify(cursor.snapshot) !== JSON.stringify(snapshot)) fail("Conversation set changed; restart the read, previous coverage is incomplete");
+		if (!ids.includes(cursor.thread) || !["recent", "history"].includes(cursor.phase) || (cursor.phase === "history" ? cursor.after === undefined : cursor.after !== undefined) || !validIds(cursor.remaining) || !Array.isArray(cursor.history) || cursor.history.length > 200 || cursor.history.some(item => !ids.includes(item?.thread) || typeof item.after !== "string" || !/^\d+$/.test(item.after))) fail("Invalid conversation scan cursor");
+	}
+	// Take one recent page per conversation before draining old history. Preserve
+	// the initial order across recency changes; set changes require a fresh scan.
+	const phase = cursor.phase ?? "recent";
+	const remaining = cursor.remaining ?? ids.slice(1);
+	const history = cursor.history ?? [];
+	const thread = sourceThreads.find(thread => thread.id === (cursor.thread ?? ids[0]));
+	if (!thread) return finish([], null);
+	if (typeof thread.getMessageList !== "function" || typeof thread.hasMoreMessages !== "boolean") fail("Conversation loading state is unavailable");
 	const project = message => {
 		if (typeof message.serverId !== "string" || !/^\d+$/.test(message.serverId) || message.conversationId !== thread.id) fail("Message source identity is unavailable");
 		let content;
 		try { content = typeof message.content === "string" ? JSON.parse(message.content) : message.content; } catch { fail("Message content is unavailable"); }
 		const timestamp = message.createdAt?.getTime?.();
 		if (!Number.isFinite(timestamp) || typeof message.isFromMe !== "boolean") fail("Message timestamp or direction is unavailable");
-		return { id: message.serverId, origin_id: message.serverId, conversation_id: thread.id, conversation_name: thread.isGroupChat ? thread.coreInfo?.name ?? null : null, source_url: location.origin, text: message.isRecalled ? "" : typeof content?.text === "string" ? content.text : typeof content?.tips === "string" ? content.tips : "", type: message.type, sender_id: typeof message.sender === "string" ? message.sender : null, from_me: message.isFromMe, occurred_at: new Date(timestamp).toISOString(), recalled: message.isRecalled === true, has_uninspected_content: message.type !== 7 };
+		const plainText = message.type === 7 && typeof content?.text === "string" && Object.keys(content).every(key => key === "text");
+		return { id: message.serverId, origin_id: message.serverId, conversation_id: thread.id, conversation_name: thread.isGroupChat ? thread.coreInfo?.name ?? null : null, source_url: location.origin, text: message.isRecalled ? "" : typeof content?.text === "string" ? content.text : typeof content?.tips === "string" ? content.tips : "", type: message.type, sender_id: typeof message.sender === "string" ? message.sender : null, from_me: message.isFromMe, occurred_at: new Date(timestamp).toISOString(), recalled: message.isRecalled === true, has_uninspected_content: !plainText };
 	};
 	for (let page = 0; page < 20; page++) {
 		await wait(() => !thread.isPullingMessages);
@@ -157,15 +206,22 @@ export async function tiktokInboxPage(input) {
 		const start = cursor.after ? messages.findIndex(message => message.id === cursor.after) + 1 : 0;
 		if ((cursor.after && !start) || start === messages.length && thread.hasMoreMessages) {
 			if (!thread.hasMoreMessages) fail("Message cursor expired; restart the read");
-			const response = await api.instance.getMessagesByConversation({ conversation: thread, limit: 50 });
+			const response = await readWithinDeadline(() => api.instance.getMessagesByConversation({ conversation: thread, limit: 50 }));
 			if (typeof response?.hasMore !== "boolean" || !Array.isArray(response.messages)) fail("Message history returned no completion state");
 			if (response.hasMore && !response.messages.length) fail("Message history did not advance");
 			continue;
 		}
 		const rows = messages.slice(start, start + limit);
 		const more = start + rows.length < messages.length || thread.hasMoreMessages;
-		const next = more ? { thread: thread.id, after: rows.at(-1).id } : threads[index + 1] ? { thread: threads[index + 1].id } : null;
-		return result(rows, next);
+		const queued = [...history];
+		if (more && phase === "recent") queued.push({ thread: thread.id, after: rows.at(-1).id });
+		const base = { snapshot, remaining, history: queued };
+		const next = phase === "recent" && remaining.length
+			? { ...base, phase: "recent", thread: remaining[0], remaining: remaining.slice(1) }
+			: more && phase === "history"
+				? { ...base, phase, thread: thread.id, after: rows.at(-1).id }
+				: queued.length ? { ...base, phase: "history", ...queued[0], history: queued.slice(1) } : null;
+		return finish(rows, next);
 	}
 	fail("Message cursor exceeds this read's page budget; restart the read");
 }
