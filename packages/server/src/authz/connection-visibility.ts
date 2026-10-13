@@ -16,13 +16,11 @@
  *
  * Rule: a connection is visible when `visibility = 'org'` OR it is the
  * principal's own private connection (`created_by = principal`). A `null`
- * principal (headless / service) — or a scope that hides private connections
- * (`orgConnectionsOnly`, e.g. a chat turn in a group conversation) — sees
- * only org-visible connections. The FK
+ * principal (headless / service) sees only org-visible connections. The FK
  * form also excludes soft-deleted connections, matching the recall/content
  * seams' two-step flow.
  */
-import { type AuthzScope, connectionPrincipal } from './scope';
+import type { AuthzScope } from './scope';
 import { aclConnectionIdSql } from './acl-observability';
 
 /**
@@ -73,7 +71,7 @@ export function compileConnectionFkVisibility(
         AND vc.deleted_at IS NULL
         AND ${connectionVisibilityPredicate('vc', userParam)}
     ))`,
-    params: [scope.organizationId, connectionPrincipal(scope)],
+    params: [scope.organizationId, scope.principal],
   };
 }
 
@@ -86,6 +84,5 @@ export function compileConnectionFkVisibility(
  * `sql.unsafe(fragment)` — no per-caller param-index bookkeeping to drift.
  */
 export function compileConnectionRowVisibility(scope: AuthzScope, tableAlias: string): string {
-  const principal = connectionPrincipal(scope);
-  return `AND ${connectionVisibilityPredicate(tableAlias, principal == null ? null : sqlLiteral(principal))}`;
+  return `AND ${connectionVisibilityPredicate(tableAlias, scope.principal == null ? null : sqlLiteral(scope.principal))}`;
 }

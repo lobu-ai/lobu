@@ -209,8 +209,9 @@ export interface DeviceAuthorizationResponse {
  */
 export interface AuthInfo {
   /**
-   * Null only on the worker direct-auth lane for a chat turn whose sender is
-   * vouched for but unlinked: it acts with no user (workspace/multi-tenant.ts).
+   * Null only on the worker direct-auth lane for an `org_shared` chat turn
+   * (a vouched unlinked sender, or a linked member in a group conversation):
+   * it acts with no user (workspace/multi-tenant.ts).
    */
   userId: string | null;
   organizationId: string | null;
@@ -231,6 +232,8 @@ export interface AuthInfo {
     teamId?: string;
     connectionId?: string;
     userId?: string;
+    /** The linked member behind a userless chat turn: attribution only. */
+    memberUserId?: string;
     source?: string;
   } | null;
   resource?: string;
@@ -258,13 +261,6 @@ export interface AuthInfo {
   executionMode?: 'live' | 'capture' | null;
   /** Verified capture owner; never taken from tool arguments. */
   captureIdentity?: CaptureIdentity | null;
-  /**
-   * Hide the caller's PRIVATE connections, keeping org-shared ones: a chat
-   * turn whose sender's private connections must not reach the conversation
-   * (gateway/orchestration/chat-turn-actor.ts). Identity and role are
-   * unaffected.
-   */
-  orgConnectionsOnly?: boolean;
 }
 
 // ============================================

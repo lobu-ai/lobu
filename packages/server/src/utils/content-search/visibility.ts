@@ -170,8 +170,6 @@ export function buildConnectionVisibilityClause(
   options: {
     organizationId?: string;
     userId?: string | null;
-    /** Hide the user's PRIVATE connections (AuthzScope.orgConnectionsOnly). */
-    orgConnectionsOnly?: boolean;
     baseParamIndex: number;
   },
   tableAlias: string = 'f'
@@ -181,7 +179,6 @@ export function buildConnectionVisibilityClause(
   const scope: AuthzScope = {
     organizationId: options.organizationId,
     principal: options.userId ?? null,
-    orgConnectionsOnly: options.orgConnectionsOnly === true,
   };
   // Compose the two read gates: per-connection visibility AND per-resource
   // membership (the latter only constrains ACL-enforced connections). Resource

@@ -53,7 +53,6 @@ import {
   CHAT_ACCESS_NOTICE_WINDOW_SECONDS,
   CHAT_TURN_EVIDENCE_KEYS,
   chatAccessNotice,
-  isUnlinkedChatAccess,
   resolveChatTurnActor,
   UNLINKED_SENDER_TURNS_PER_HOUR,
 } from "../orchestration/chat-turn-actor.js";
@@ -1386,7 +1385,9 @@ export class MessageHandlerBridge {
       claims: { platform, teamId: args.teamId },
       evidence: { isDirectMessage: args.isDirect, senderVouched: args.senderVouched },
     });
-    if (!actor || !isUnlinkedChatAccess(actor.access)) return true;
+    // Keyed on the sender being unlinked, not on the tier: a linked member in
+    // a group conversation is `org_shared` too, and is never limited.
+    if (!actor || actor.actorUserId) return true;
 
     const senderKey = `${args.organizationId ?? ""}:${platform}:${args.userId}`;
     const limiter = getRateLimiter();

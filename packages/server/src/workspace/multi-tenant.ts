@@ -395,9 +395,11 @@ export class MultiTenantProvider implements WorkspaceProvider {
         }
         return setContextAndContinue({ organizationId: requestedOrgId, memberRole: null });
       }
-      // A vouched unlinked sender has no user: the no-user principal sees
+      // An `org_shared` turn (a vouched unlinked sender, or a linked member in
+      // a group conversation) has no user: the no-user principal sees
       // org-shared connections only, and writes run with an ordinary member's
-      // role — never owner/admin.
+      // role — never owner/admin. A linked member's id on such a token is
+      // attribution only (`sourceContext.memberUserId` → run initiator_ref).
       const userless = chatAccess === 'org_shared';
       const directAuthUserId = userless
         ? null
@@ -405,18 +407,21 @@ export class MultiTenantProvider implements WorkspaceProvider {
           ? (tokenData.actorUserId as string)
           : ((agentRows[0]?.owner_user_id as string | undefined) ?? tokenData.userId);
       // Re-read on every request, so a member removed after the token was
-      // minted loses access at once rather than when the token expires.
-      const directAuthRole = directAuthUserId
+      // minted loses access at once rather than when the token expires. That
+      // includes the member behind a group-conversation `org_shared` turn.
+      const membershipUserId = directAuthUserId ?? (userless ? tokenData.actorUserId : undefined);
+      const membershipRole = membershipUserId
         ? ((
             await sql`
               SELECT role
               FROM "member"
               WHERE "organizationId" = ${requestedOrgId}
-                AND "userId" = ${directAuthUserId}
+                AND "userId" = ${membershipUserId}
               LIMIT 1
             `
           )[0]?.role as string | undefined)
-        : 'member';
+        : undefined;
+      const directAuthRole = userless ? (membershipUserId && !membershipRole ? undefined : 'member') : membershipRole;
       if (chatAccess) {
         // A chat sender acts with their OWN role; an ordinary member is
         // admitted and the tool layer caps them at member access.
@@ -449,11 +454,9 @@ export class MultiTenantProvider implements WorkspaceProvider {
             teamId: tokenData.teamId || undefined,
             connectionId: tokenData.connectionId || undefined,
             userId: tokenData.userId || undefined,
+            ...(userless && tokenData.actorUserId ? { memberUserId: tokenData.actorUserId } : {}),
             source: tokenData.source || undefined,
           },
-          // A linked member in a group conversation, and a vouched sender, see
-          // org-shared connections only (authz/connection-visibility.ts).
-          orgConnectionsOnly: chatAccess === 'member_shared' || userless,
           // Admin-tools allowlist rides the per-run worker token. Carried
           // through so the execute gate lets an admin-tools turn call its
           // allowlisted internal tools.

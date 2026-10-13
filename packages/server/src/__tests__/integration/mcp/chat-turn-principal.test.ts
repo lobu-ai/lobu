@@ -10,9 +10,10 @@
  * embedded multi-tenant middleware then acts as that member, re-checking the
  * membership on every request.
  *
- * A linked member acts as themselves; in a group conversation their PRIVATE
- * connections are hidden. An unlinked sender the platform vouches for acts
- * with no user and an ordinary-member role (org-shared connections only). Any
+ * A linked member acts as themselves in a direct message. In a group
+ * conversation, a linked member and an unlinked sender the platform vouches
+ * for both act with no user and an ordinary-member role (org-shared
+ * connections only); the member is recorded as run attribution. Any
  * other unlinked sender is an anonymous public visitor of a public org, or
  * reply-only in a private org, refused outright. The agent owner is never
  * substituted for a chat sender.
@@ -151,7 +152,8 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
     const dm = verifyWorkerToken(await mintTurnToken(slackChatMessage(org.id, SENDER_PLATFORM_ID, { isDirect: true }), 1));
     expect(dm).toMatchObject({ userId: SENDER_PLATFORM_ID, actorUserId: linkedMember.id, chatAccess: 'member' });
     const channel = verifyWorkerToken(await mintTurnToken(slackChatMessage(org.id, SENDER_PLATFORM_ID, { isDirect: false }), 1));
-    expect(channel).toMatchObject({ actorUserId: linkedMember.id, chatAccess: 'member_shared' });
+    // In a group conversation the member's id rides along as attribution only.
+    expect(channel).toMatchObject({ actorUserId: linkedMember.id, chatAccess: 'org_shared' });
   });
 
   it('writes memory as the linked member, admitted on an ordinary member role', async () => {
@@ -205,7 +207,7 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
     expect(text).not.toContain('Owner private conn');
   });
 
-  it("in a group conversation hides the member's private connections but keeps their identity", async () => {
+  it("in a group conversation acts with no user (org-shared only) and records the member as attribution", async () => {
     await seedConnections();
     const token = await chatTurnGatewayMcpToken(org.id, SENDER_PLATFORM_ID, { isDirect: false });
     const text = await listedConnections(token);
@@ -213,16 +215,25 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
     expect(text).not.toContain('Member private conn');
     expect(text).not.toContain('Owner private conn');
 
-    // Identity is unchanged: a write is still attributed to the member.
+    // No user principal: the member rides the token as attribution only, which
+    // the lane copies into sourceContext.memberUserId → run initiator_ref
+    // (unit: __tests__/unit/run-initiator.test.ts).
+    const claims = verifyWorkerToken(await mintTurnToken(slackChatMessage(org.id, SENDER_PLATFORM_ID, { isDirect: false }), 1));
+    expect(claims).toMatchObject({ userId: SENDER_PLATFORM_ID, actorUserId: linkedMember.id, chatAccess: 'org_shared' });
+
+    // Never owner/admin, even for a member whose own role would allow more.
     const session = await openSession(org.slug, token);
-    const saved = await callTool(org.slug, token, session.sessionId as string, 'save_memory', {
-      content: 'Group-conversation note.', semantic_type: 'note', title: 'group member note', metadata: {},
+    const admin = await callTool(org.slug, token, session.sessionId as string, 'manage_entity_schema', {
+      action: 'create', slug: 'group_probe', name: 'Group probe',
     });
-    expect(((await saved.json()) as { result?: { isError?: boolean } }).result?.isError).not.toBe(true);
-    const rows = await getTestDb()<{ created_by: string | null }>`
-      SELECT created_by FROM events WHERE organization_id = ${org.id} AND title = 'group member note'
-    `;
-    expect(rows).toEqual([{ created_by: linkedMember.id }]);
+    expect(JSON.stringify(await admin.json())).toContain('requires admin or owner access');
+  });
+
+  it('refuses a group-conversation turn once the member behind it is removed', async () => {
+    const token = await chatTurnGatewayMcpToken(org.id, SENDER_PLATFORM_ID, { isDirect: false });
+    await getTestDb()`DELETE FROM "member" WHERE "organizationId" = ${org.id} AND "userId" = ${linkedMember.id}`;
+    const session = await openSession(org.slug, token);
+    expect(session.status).toBe(403);
   });
 
   it('serves a vouched unlinked sender org-shared connections only, with an ordinary-member role', async () => {

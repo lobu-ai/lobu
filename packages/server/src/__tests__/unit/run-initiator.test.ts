@@ -54,6 +54,27 @@ describe("resolveRunInitiator", () => {
 		});
 	});
 
+	it("records the linked member behind a userless group-conversation chat turn", () => {
+		expect(
+			resolveRunInitiator({
+				userId: null,
+				agentId: "team-bot",
+				clientId: "lobu-worker",
+				sourceContext: {
+					platform: "slack",
+					conversationId: "slack:C0SYNTH:2.0",
+					userId: "U0SYNTHMEMBER",
+					teamId: "T0SYNTH",
+					memberUserId: "user-synthetic-member",
+				},
+			}).initiatorRef,
+		).toMatchObject({
+			user_id: null,
+			platform_user_id: "U0SYNTHMEMBER",
+			member_user_id: "user-synthetic-member",
+		});
+	});
+
 	it("classifies a reaction as its automation, not its owning agent", () => {
 		expect(
 			resolveRunInitiator({

@@ -32,7 +32,7 @@ export interface ContentSearchOptions {
    * Authenticated callers pass their user id; unauth callers pass null.
    * Events with `connection_id IS NULL` are always visible.
    */
-  visibility_scope?: { organizationId: string; userId: string | null; orgConnectionsOnly?: boolean };
+  visibility_scope?: { organizationId: string; userId: string | null };
   /**
    * Exclude workspace-identity audit events (`metadata.category='workspace'`).
    * These carry member emails / invitation details and are emitted for

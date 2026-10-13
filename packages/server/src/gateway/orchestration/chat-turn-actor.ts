@@ -9,12 +9,13 @@
  * {@link chatTurnAccessOf}, so the mint, the direct MCP lane, the internal
  * worker routes, and the device poll can never disagree:
  *
- * 1. A sender linked to a member acts as that member with their own role.
- *    In a group conversation (`member_shared`) the member's PRIVATE
- *    connections are hidden; they are reachable only in a direct message.
- * 2. An unlinked sender the platform vouches for as same-tenant
- *    (`org_shared`) acts with no user and an ordinary-member role, so it sees
- *    org-shared connections only, never anyone's private ones.
+ * 1. A sender linked to a member, in a direct message (`member`), acts as
+ *    that member with their own role and private connections.
+ * 2. A linked member in a group conversation, and an unlinked sender the
+ *    platform vouches for as same-tenant, are `org_shared`: no user and an
+ *    ordinary-member role, so the turn sees org-shared connections only and
+ *    never anyone's private ones. A linked member's user id still rides the
+ *    token as attribution (`actorUserId`), recorded in run `initiator_ref`.
  * 3. Any other unlinked sender is a `public_visitor` of a public organization
  *    (the anonymous public-read path) or, in a private organization,
  *    `reply_only`: no workspace tools at all, refused server-side.
@@ -31,8 +32,9 @@ export const CHAT_SENDER_NOT_LINKED =
   "Chat sender is not a linked member of this organization";
 
 /**
- * Turns per hour one unlinked sender (tiers 2 and 3) may start per
- * organization and platform. Over it, the message gets no agent turn.
+ * Turns per hour one unlinked sender may start per organization and
+ * platform. Over it, the message gets no agent turn. A linked member is never
+ * limited, whatever their tier.
  */
 export const UNLINKED_SENDER_TURNS_PER_HOUR = 30;
 
@@ -85,7 +87,11 @@ export function isChatSenderTurn(claims: {
 
 export interface ChatTurnActor {
   access: ChatTurnAccess;
-  /** Set exactly for the member tiers. */
+  /**
+   * The verified member behind the turn, set exactly when the sender is
+   * linked. The turn acts as them only on the `member` tier; on `org_shared`
+   * it is attribution only.
+   */
   actorUserId?: string;
 }
 
@@ -108,7 +114,7 @@ export async function resolveChatTurnActor(args: {
   const member = await resolveChatSenderMember(platform, teamId, args.senderId, args.organizationId);
   if (member) {
     return {
-      access: args.evidence.isDirectMessage ? "member" : "member_shared",
+      access: args.evidence.isDirectMessage ? "member" : "org_shared",
       actorUserId: member.userId,
     };
   }
@@ -132,7 +138,7 @@ export function chatTurnAccessOf(claims: {
 }): ChatTurnAccess | null {
   if (!isChatSenderTurn(claims)) return null;
   const access = claims.chatAccess ?? "reply_only";
-  if ((access === "member" || access === "member_shared") && !claims.actorUserId) {
+  if (access === "member" && !claims.actorUserId) {
     return "reply_only";
   }
   return access;
@@ -145,11 +151,6 @@ export function chatTurnAccessOf(claims: {
 export function isConfinedChatTurn(claims: Parameters<typeof chatTurnAccessOf>[0]): boolean {
   const access = chatTurnAccessOf(claims);
   return access === "reply_only" || access === "public_visitor";
-}
-
-/** Whether a tier is one of the unlinked-sender tiers the bridge rate-limits. */
-export function isUnlinkedChatAccess(access: ChatTurnAccess): boolean {
-  return access === "org_shared" || access === "public_visitor" || access === "reply_only";
 }
 
 /**

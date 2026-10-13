@@ -387,7 +387,12 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(0);
     expect(created).toEqual([]);
 
-    // A linked member in the same space is not limited by the stranger's budget.
+    // A linked member is never limited: in a space their turn is org_shared,
+    // like a vouched stranger's, but the limit is keyed on being unlinked.
+    const memberKey = `chat-unlinked-turn:${ORG_ID}:gchat:${sender.name}`;
+    for (let i = 0; i < UNLINKED_SENDER_TURNS_PER_HOUR; i += 1) {
+      limiter.checkLimit(memberKey, { limit: UNLINKED_SENDER_TURNS_PER_HOUR, windowSeconds: 3600 });
+    }
     expect(await deliver(spaceMention("member-ok", "status?"))).toBe(200);
     await waitFor(async () => {
       expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(1);

@@ -20,12 +20,6 @@ export interface AuthzScope {
   agentId?: string | null;
   /** Policy snapshot the read is compiled against. Reserved for M2+/M6. */
   policyVersion?: number | null;
-  /**
-   * Hide the principal's PRIVATE connections while keeping `principal` for
-   * everything else (resource membership, attribution). Connection visibility
-   * then compiles as if headless: org-visible connections only.
-   */
-  orgConnectionsOnly?: boolean;
 }
 
 /**
@@ -37,22 +31,12 @@ export function authzScopeFromToolContext(ctx: {
   organizationId: string;
   userId: string | null;
   agentId?: string | null;
-  orgConnectionsOnly?: boolean;
 }): AuthzScope {
   return {
     organizationId: ctx.organizationId,
     principal: ctx.userId,
     agentId: ctx.agentId ?? null,
-    orgConnectionsOnly: ctx.orgConnectionsOnly === true,
   };
-}
-
-/**
- * The principal whose PRIVATE connections a scope may see: none when the
- * scope is headless or hides private connections.
- */
-export function connectionPrincipal(scope: Pick<AuthzScope, 'principal' | 'orgConnectionsOnly'>): string | null {
-  return scope.orgConnectionsOnly ? null : scope.principal;
 }
 
 /**

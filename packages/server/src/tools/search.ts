@@ -907,7 +907,6 @@ async function fetchContentSnippets(
       visibility_scope: {
         organizationId: gate.organizationId,
         userId: gate.principal,
-        orgConnectionsOnly: gate.orgConnectionsOnly,
       },
       limit: contentLimit,
       // The caller's `min_similarity` is the advertised recall floor (schema:
@@ -1054,7 +1053,6 @@ async function fetchConversationSnippets(
     organizationId: gate.organizationId,
     userId: gate.principal,
     rows: boundChannels,
-    orgConnectionsOnly: gate.orgConnectionsOnly,
   });
   if (channels.length === 0) return [];
 
@@ -1376,7 +1374,6 @@ async function searchImpl(
           authzScopeFromToolContext({
             organizationId: targets[0].id,
             userId: ctx.userId,
-            orgConnectionsOnly: ctx.orgConnectionsOnly,
           })
         )
       : null;
@@ -1510,7 +1507,6 @@ async function searchWorkspaceImpl(
     organizationId: ctx.organizationId,
     userId: ctx.userId,
     agentId: ctx.agentId,
-    orgConnectionsOnly: ctx.orgConnectionsOnly,
   });
 
   // Preserve compatibility with reviewer prompts and user language such as
@@ -1970,7 +1966,7 @@ async function queryEntities(
   }
 
   const visibility = buildConnectionVisibilityClause({
-    organizationId: scope.organizationId, userId: scope.principal, orgConnectionsOnly: scope.orgConnectionsOnly, baseParamIndex: params.length + 1,
+    organizationId: scope.organizationId, userId: scope.principal, baseParamIndex: params.length + 1,
   }, 'ev');
   params.push(...visibility.params);
   const parentReadPredicate = entityReadPolicySql(readRestrictions, 'pe', params);
@@ -2015,7 +2011,7 @@ async function fetchEntityById(
   // Operational counts are gated on caller org; connection counts also use
   // the caller's row-visibility predicate.
   const visibility = buildConnectionVisibilityClause({
-    organizationId: scope.organizationId, userId: scope.principal, orgConnectionsOnly: scope.orgConnectionsOnly, baseParamIndex: 4,
+    organizationId: scope.organizationId, userId: scope.principal, baseParamIndex: 4,
   }, 'ev');
   const params: unknown[] = [entityId, scope.organizationId, includePublic, ...visibility.params];
   const readPredicate = entityReadPolicySql(readRestrictions, 'e', params);
@@ -2042,7 +2038,7 @@ async function fetchPublicEntityById(
   scope: AuthzScope
 ): Promise<EntityQueryRow | null> {
   const visibility = buildConnectionVisibilityClause({
-    organizationId: scope.organizationId, userId: scope.principal, orgConnectionsOnly: scope.orgConnectionsOnly, baseParamIndex: 3,
+    organizationId: scope.organizationId, userId: scope.principal, baseParamIndex: 3,
   }, 'ev');
   const result = await getDb().unsafe<EntityQueryRow>(
     `SELECT ${entitySelectColumns(1, scope, visibility.sql)}
@@ -2167,7 +2163,7 @@ async function formatEntityResult(
   let children: UnifiedSearchResult['children'];
   if (isRootEntity) {
     const childVisibility = buildConnectionVisibilityClause({
-      organizationId: connectionScope.organizationId, userId: connectionScope.principal, orgConnectionsOnly: connectionScope.orgConnectionsOnly, baseParamIndex: 4,
+      organizationId: connectionScope.organizationId, userId: connectionScope.principal, baseParamIndex: 4,
     }, 'ev');
     const childParams: unknown[] = [primaryIsCallerOrg, primaryEntity.id, primaryRow.organization_id, ...childVisibility.params];
     const childReadPredicate = entityReadPolicySql(readRestrictions, 'e', childParams);

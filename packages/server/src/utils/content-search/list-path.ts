@@ -576,7 +576,6 @@ export async function listContentInternal(
     const visibilityClause = buildConnectionVisibilityClause({
       organizationId: options.visibility_scope?.organizationId,
       userId: options.visibility_scope?.userId ?? null,
-      orgConnectionsOnly: options.visibility_scope?.orgConnectionsOnly,
       baseParamIndex: filterParamsBeforeVisibility.length + 1,
     });
     const filterParamsBeforeEntityTypes = [
@@ -681,7 +680,6 @@ export async function listContentInternal(
   const visibilityClause = buildConnectionVisibilityClause({
     organizationId: options.visibility_scope?.organizationId,
     userId: options.visibility_scope?.userId ?? null,
-    orgConnectionsOnly: options.visibility_scope?.orgConnectionsOnly,
     baseParamIndex: paramsBeforeVisibility.length + 1,
   });
   const paramsBeforeEntityTypes = [...paramsBeforeVisibility, ...visibilityClause.params];

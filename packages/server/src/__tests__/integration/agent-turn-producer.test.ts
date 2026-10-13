@@ -1256,7 +1256,7 @@ describe('agent turn producer', () => {
     expect(envelope.turn.tools?.gateway).not.toContain('send_message');
   });
 
-  it('signs a linked chat sender as the actor and discovers tools as that member', async () => {
+  it('signs a linked channel sender as org_shared with the member as attribution, and discovers tools', async () => {
     await seedSystemEntityTypes();
     const org = await createTestOrganization();
     const member = await createTestUser({ email: 'turn-linked-member@example.test' });
@@ -1281,7 +1281,8 @@ describe('agent turn producer', () => {
 
     const [run] = await agentTurnRuns();
     const envelope = run.action_input as { turn: { system_prompt: string }; credential: string };
-    expect(verifyWorkerToken(envelope.credential)).toMatchObject({ userId: 'U0LINKED', actorUserId: member.id, chatAccess: 'member_shared' });
+    // A channel turn: the member is attribution only; the turn is org_shared.
+    expect(verifyWorkerToken(envelope.credential)).toMatchObject({ userId: 'U0LINKED', actorUserId: member.id, chatAccess: 'org_shared' });
     expect(fixture.listed).toEqual([{ mcpId: 'lobu-memory', agentId: AGENT_ID, token: envelope.credential }]);
     expect(envelope.turn.system_prompt).not.toContain('## Workspace access');
   });

@@ -1504,7 +1504,7 @@ export async function getEntity(
   //   1. caller's own org (always readable)
   //   2. public-catalog entity (anyone reads, except `$member`)
   const visibility = buildConnectionVisibilityClause({
-    organizationId: ctx.organizationId, userId: ctx.userId, orgConnectionsOnly: ctx.orgConnectionsOnly, baseParamIndex: 3,
+    organizationId: ctx.organizationId, userId: ctx.userId, baseParamIndex: 3,
   }, 'ev');
   const params: unknown[] = [ctx.organizationId, entityId, ...visibility.params];
   const restrictions = opts?.readRestrictions ?? [];
@@ -2037,7 +2037,6 @@ async function batchTotalContentCounts(
 	opts: {
 		organizationId: string;
 		userId: string | null;
-		orgConnectionsOnly?: boolean;
 		entityIds: number[];
 	},
 ): Promise<Map<number, number>> {
@@ -2085,7 +2084,7 @@ async function batchTotalContentCounts(
 	const params: unknown[] = [opts.organizationId];
 	const orgParam = "$1::text";
 	const visibility = buildConnectionVisibilityClause({
-		organizationId: opts.organizationId, userId: opts.userId, orgConnectionsOnly: opts.orgConnectionsOnly, baseParamIndex: params.length + 1,
+		organizationId: opts.organizationId, userId: opts.userId, baseParamIndex: params.length + 1,
 	}, 'e2');
 	params.push(...visibility.params);
 	const arms: string[] = [];
@@ -2282,7 +2281,7 @@ export async function listEntities(
 	const enrichParamCount = params.length;
 
   const visibility = buildConnectionVisibilityClause({
-    organizationId: ctx.organizationId, userId: ctx.userId, orgConnectionsOnly: ctx.orgConnectionsOnly, baseParamIndex: params.length + 1,
+    organizationId: ctx.organizationId, userId: ctx.userId, baseParamIndex: params.length + 1,
   }, 'ev');
   params.push(...visibility.params);
 
@@ -2361,7 +2360,6 @@ export async function listEntities(
       batchTotalContentCounts(db, {
         organizationId: ctx.organizationId,
         userId: ctx.userId ?? null,
-        orgConnectionsOnly: ctx.orgConnectionsOnly,
         entityIds: ids,
       }),
     ]);
@@ -2440,7 +2438,6 @@ function compileEntitySegmentFilter(
 			ctx.organizationId,
 			{
 				userId: ctx.userId ?? null,
-				orgConnectionsOnly: ctx.orgConnectionsOnly,
 				// Match metric SQL: the outer type gate does not authorize nested
 				// predicates to read protected member metadata.
 				excludeMemberEntities: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),

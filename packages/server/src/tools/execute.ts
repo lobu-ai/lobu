@@ -107,8 +107,6 @@ export interface AuthContext {
   executionMode?: 'live' | 'capture' | null;
   /** Verified capture owner; never taken from tool arguments. */
   captureIdentity?: CaptureIdentity | null;
-  /** See AuthInfo.orgConnectionsOnly. */
-  orgConnectionsOnly?: boolean;
 }
 
 /**
@@ -192,7 +190,6 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     adminTools: mcpAuthInfo?.adminTools ?? null,
     executionMode: mcpAuthInfo?.executionMode ?? null,
     captureIdentity: mcpAuthInfo?.captureIdentity ?? null,
-    orgConnectionsOnly: mcpAuthInfo?.orgConnectionsOnly === true,
   };
 }
 
@@ -528,6 +525,5 @@ export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
     mcpConversationId: authCtx.mcpConversationId ?? null,
     executionMode: authCtx.executionMode ?? null,
     captureIdentity: authCtx.captureIdentity ?? null,
-    orgConnectionsOnly: authCtx.orgConnectionsOnly === true,
   };
 }

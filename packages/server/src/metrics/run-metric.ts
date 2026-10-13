@@ -42,8 +42,6 @@ interface RunMetricInput {
    * jobs) — yields org-visible-only, fail-closed for private-connection data.
    */
   userId?: string | null;
-  /** Hide the user's PRIVATE connections (AuthzScope.orgConnectionsOnly). */
-  orgConnectionsOnly?: boolean;
   /**
    * Exclude workspace-identity audit events from the events CTE. Owner/admin
    * and trusted system callers leave this false; ordinary members / public
@@ -113,7 +111,6 @@ export async function runMetric(input: RunMetricInput): Promise<Record<string, u
   const scoped = validateAndScopeQuery(rawSql, input.organizationId, {
     safeColumns: usesDerivedMetric ? SAFE_COLUMN_DEFS : METRIC_SAFE_COLUMNS,
     userId: input.userId ?? null,
-    orgConnectionsOnly: input.orgConnectionsOnly,
     excludeWorkspaceAudit: input.excludeWorkspaceAudit,
     excludeMemberEntities: input.excludeMemberEntities,
   });
@@ -155,7 +152,6 @@ async function runPushdownMetric(
       scope: authzScopeFromToolContext({
         organizationId: input.organizationId,
         userId: input.userId ?? null,
-        orgConnectionsOnly: input.orgConnectionsOnly,
       }),
       isAdmin: input.isAdmin ?? false,
       connectionSlug: backingSource,

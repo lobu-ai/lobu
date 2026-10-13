@@ -22,8 +22,10 @@ const sameTenant = (metadata: Record<string, unknown>, raw: unknown) =>
 describe("Slack senderIsSameTenant", () => {
   test("vouches for a sender whose home team is the install team", () => {
     expect(sameTenant({ teamId: "T0HOME" }, { team: "T0HOME", user: "U0A" })).toBe(true);
-    // An interaction replay carries the original turn's team_id.
-    expect(sameTenant({ teamId: "T0HOME" }, { team_id: "T0HOME", user: "U0A" })).toBe(true);
+  });
+
+  test("does not treat a replay routing team as proof of sender membership", () => {
+    expect(sameTenant({ teamId: "T0HOME" }, { team_id: "T0HOME", user: "U0EXTERNAL" })).toBe(false);
   });
 
   test("does not vouch for a Slack Connect sender from another team", () => {

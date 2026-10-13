@@ -218,23 +218,20 @@ export async function filterChannelsForRequester<T extends GatedChannelRow>(
     organizationId: string;
     userId: string | null;
     rows: T[];
-    /** Hide the requester's own chat connections (AuthzScope.orgConnectionsOnly). */
-    orgConnectionsOnly?: boolean;
   },
 ): Promise<T[]> {
   const { organizationId, userId, rows } = params;
   if (rows.length === 0) return rows;
-  const ownerUserId = params.orgConnectionsOnly ? null : userId;
 
   const states = await getConnectionEnforcement(
     sql,
     organizationId,
     rows.map((r) => r.id),
   );
-  const ownedRows = ownerUserId && rows.some((r) => !states.has(r.id))
+  const ownedRows = userId && rows.some((r) => !states.has(r.id))
     ? await sql.unsafe<{ connection_id: string }>(
       ownedChatConnectionsSelectSql('$1::text', '$2::text'),
-      [organizationId, ownerUserId],
+      [organizationId, userId],
     )
     : [];
   const ownedConnections = new Set(ownedRows.map((r) => r.connection_id));

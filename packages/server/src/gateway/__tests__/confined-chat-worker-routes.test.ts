@@ -140,9 +140,9 @@ describe("confined chat turns on internal worker routes", () => {
     });
   }
 
-  test.each(DENIED)("allows %s %s for a member, a vouched org-shared sender, and a headless turn", async (method, path) => {
+  test.each(DENIED)("allows %s %s for a member, an org-shared turn (vouched or group member), and a headless turn", async (method, path) => {
     expect((await call(method, path, token({ platform: "slack", chatAccess: "member", actorUserId: "member-test" }))).status).toBe(200);
-    expect((await call(method, path, token({ platform: "slack", chatAccess: "member_shared", actorUserId: "member-test" }))).status).toBe(200);
+    expect((await call(method, path, token({ platform: "slack", chatAccess: "org_shared", actorUserId: "member-test" }))).status).toBe(200);
     expect((await call(method, path, token({ platform: "slack", chatAccess: "org_shared" }))).status).toBe(200);
     expect((await call(method, path, token({ platform: "api" }))).status).toBe(200);
   });

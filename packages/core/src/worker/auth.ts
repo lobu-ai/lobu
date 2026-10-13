@@ -22,7 +22,6 @@ export function looksLikeWorkerToken(token: string): boolean {
 /** See {@link WorkerTokenData.chatAccess}. */
 export const CHAT_TURN_ACCESS = [
   "member",
-  "member_shared",
   "org_shared",
   "public_visitor",
   "reply_only",
@@ -126,7 +125,9 @@ export interface WorkerTokenData {
    * turns keep the platform principal in `userId`, so direct MCP auth must
    * never reinterpret a Slack/Telegram id as a `member.userId`; it reads this
    * claim instead and re-checks the membership on every request. Required
-   * whenever {@link adminTools} is present.
+   * whenever {@link adminTools} is present. On an `org_shared` chat turn (a
+   * linked member in a group conversation) it is attribution only: the turn
+   * acts with no user.
    */
   actorUserId?: string;
   /**
@@ -134,10 +135,9 @@ export interface WorkerTokenData {
    * verified state (`gateway/orchestration/chat-turn-actor.ts` in the server):
    * - `member`: a linked member in a direct message; acts as
    *   {@link actorUserId} with their own role and private connections.
-   * - `member_shared`: a linked member in a group conversation; acts as
-   *   {@link actorUserId}, but sees org-shared connections only.
-   * - `org_shared`: an unlinked sender the platform vouches for as same-tenant;
-   *   no user, ordinary-member role, org-shared connections only.
+   * - `org_shared`: a linked member in a group conversation, or an unlinked
+   *   sender the platform vouches for as same-tenant; no user,
+   *   ordinary-member role, org-shared connections only.
    * - `public_visitor`: an unvouched sender of a public organization; the
    *   anonymous public-read path.
    * - `reply_only`: an unvouched sender of a private organization; no
@@ -500,7 +500,7 @@ function verifyToken(
       return null;
     }
     // `chatAccess` decides what a chat sender may reach, so an unknown value
-    // is rejected rather than defaulted, and a member tier must name its
+    // is rejected rather than defaulted, and the member tier must name its
     // member: the claim alone never grants a user identity.
     if (
       data.chatAccess !== undefined &&
@@ -509,10 +509,7 @@ function verifyToken(
       logger.error("Worker token rejected: unknown chatAccess");
       return null;
     }
-    if (
-      (data.chatAccess === "member" || data.chatAccess === "member_shared") &&
-      data.actorUserId === undefined
-    ) {
+    if (data.chatAccess === "member" && data.actorUserId === undefined) {
       logger.error(
         "Worker token rejected: a member chatAccess requires actorUserId"
       );

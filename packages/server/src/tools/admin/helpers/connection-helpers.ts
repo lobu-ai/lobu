@@ -712,11 +712,11 @@ export function isPersonalCredentialKind(profileKind?: string | null): boolean {
  * Explain who can reach a personal connection from an agent run.
  *
  * A private connection is visible only via `created_by = principal`
- * (`authz/connection-visibility.ts`). A chat turn's principal is the member
- * its sender is linked to (`gateway/orchestration/chat-turn-actor.ts`), so the
- * creator's own linked direct messages reach it; group conversations cannot.
- * A headless Automation run still
- * acts as the AGENT OWNER (`workspace/multi-tenant.ts`), so only Automations
+ * (`authz/connection-visibility.ts`). In a direct message, a chat turn's
+ * principal is the member its sender is linked to, so the creator's own linked
+ * DMs reach it; a group-conversation turn acts with no user and sees org-shared
+ * connections only (`gateway/orchestration/chat-turn-actor.ts`). A headless
+ * Automation run still acts as the AGENT OWNER (`workspace/multi-tenant.ts`), so only Automations
  * on agents the creator owns do. Runs acting as another member return
  * ZERO ROWS — not an error — and the agent behaves as if the connection does
  * not exist.

@@ -4,8 +4,6 @@ interface AutomationConnectionVisibilityContext {
   organizationId: string;
   userId: string | null;
   actingAutomationId?: number | null;
-  /** Hide the user's PRIVATE connections (AuthzScope.orgConnectionsOnly). */
-  orgConnectionsOnly?: boolean;
 }
 
 /**
@@ -22,9 +20,6 @@ export async function resolveAutomationConnectionVisibilityUserId(
   ctx: AutomationConnectionVisibilityContext,
   sql: DbClient
 ): Promise<string | null> {
-  // A chat turn that must not reach private connections has no visibility
-  // principal: org-visible connections only, and no user-owned page activation.
-  if (ctx.orgConnectionsOnly) return null;
   if (ctx.userId !== null || ctx.actingAutomationId == null) {
     return ctx.userId;
   }

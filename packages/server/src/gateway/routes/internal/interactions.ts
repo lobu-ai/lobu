@@ -13,6 +13,7 @@ import { Hono } from "hono";
 import { getDb } from "../../../db/client.js";
 import type { InteractionService } from "../../interactions.js";
 import { persistSuggestion } from "../../suggestions/persist-suggestion.js";
+import { CHAT_SENDER_NOT_LINKED, isConfinedChatTurn } from "../../orchestration/chat-turn-actor.js";
 import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
@@ -57,6 +58,12 @@ export function createInteractionRoutes(
           typeof body?.interactionType === "string"
             ? body.interactionType
             : "question";
+
+        // Approval cards address workspace runs and update their events; only
+        // ordinary questions/links are confined to the signed source thread.
+        if (interactionType === "tool_approval" && isConfinedChatTurn(worker)) {
+          return errorResponse(c, CHAT_SENDER_NOT_LINKED, 403);
+        }
 
         logger.info(
           `Posting ${interactionType} for conversation ${conversationId}`

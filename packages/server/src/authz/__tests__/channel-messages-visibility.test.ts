@@ -33,12 +33,10 @@ const discordIdentity: ChannelReadIdentity = {
 };
 
 describe('compileChannelMessagesVisibility', () => {
-  it('binds org + principal + connection-principal params from baseParamIndex, in order', () => {
+  it('binds org + principal params from baseParamIndex, in order', () => {
     const { sql, params } = compileChannelMessagesVisibility(scope, 1, 'cm');
-    expect(params).toEqual(['org_test', 'user_test', 'user_test']);
-    expect(compileChannelMessagesVisibility({ ...scope, orgConnectionsOnly: true }, 1, 'cm').params)
-      .toEqual(['org_test', 'user_test', null]);
-    // baseParamIndex=1 → $1 org, $2 principal, $3 connection principal.
+    expect(params).toEqual(['org_test', 'user_test']);
+    // baseParamIndex=1 → $1 org, $2 principal.
     expect(sql).toContain('$1::text');
     expect(sql).toContain('$2::text');
   });
@@ -46,7 +44,7 @@ describe('compileChannelMessagesVisibility', () => {
   it('requires ownership without a graph and membership with a fresh graph', () => {
     const { sql } = compileChannelMessagesVisibility(scope, 1, 'cm');
     // No state requires ownership, not just workspace visibility.
-    expect(sql).toContain('c.created_by = $3::text');
+    expect(sql).toContain('c.created_by = $2::text');
     expect(sql).toContain('c.deleted_at IS NULL');
     expect(sql).toContain('NOT EXISTS');
     expect(sql).toContain('public.authz_source_acl_state');
@@ -132,7 +130,7 @@ describe('compileChannelMessagesVisibility', () => {
       // so an enforced connection matches neither branch and its rows are dropped.
       expect(sql).toContain('FALSE');
       expect(sql).not.toContain("cm.platform = '");
-      expect(sql).toContain('c.created_by = $3::text');
+      expect(sql).toContain('c.created_by = $2::text');
       expect(sql).toContain('NOT EXISTS');
     });
   });
