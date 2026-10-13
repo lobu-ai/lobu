@@ -99,7 +99,7 @@ export function linkedInInboxProgram() {
     }
     return records;
   }
-  function parseNotifications(stream) {
+  function parseNotifications(stream, continuation = false) {
     const records = decodeFlight(stream);
     let visits = 0;
     function resolve(value, depth = 0) {
@@ -202,9 +202,46 @@ export function linkedInInboxProgram() {
         revision: headline,
       });
     }
-    // A changed layout must not become a successful empty inbox. LinkedIn's
-    // known empty-state component is the only permitted zero-card response.
-    if (!recognized && !stream.includes("notifications-empty-state"))
+    // A continuation can end with the provider's empty partial-page envelope,
+    // without the full page's empty-state component. Accept that exact shape
+    // only after pagination; unknown content must still fail closed.
+    const root = records.get("0");
+    const shell = root?.[0]?.[0];
+    const emptyContinuation =
+      continuation &&
+      Array.isArray(root) &&
+      root.length === 10 &&
+      Array.isArray(root[0]) &&
+      root[0].length === 2 &&
+      root[0][1] === "$undefined" &&
+      Array.isArray(shell) &&
+      shell.length === 4 &&
+      shell[0] === "$" &&
+      typeof shell[1] === "string" &&
+      /^\$L[0-9a-f]+$/.test(shell[1]) &&
+      shell[2] === null &&
+      shell[3]?.isPartialPage === true &&
+      Object.keys(shell[3]).length === 2 &&
+      Array.isArray(shell[3].modelStates) &&
+      shell[3].modelStates.length === 0 &&
+      JSON.stringify(root.slice(1, 7)) ===
+        JSON.stringify([
+          "$undefined",
+          [],
+          "$undefined",
+          "$undefined",
+          "$0:0:0:props:modelStates",
+          null,
+        ]) &&
+      typeof root[7] === "string" &&
+      root[8] === "$undefined" &&
+      root[9]?.version === root[7] &&
+      Object.keys(root[9]).length === 1;
+    if (
+      !recognized &&
+      !emptyContinuation &&
+      !stream.includes("notifications-empty-state")
+    )
       fail("Notification source format changed");
     return { rows: [...rows.values()], next };
   }
@@ -306,7 +343,7 @@ export function linkedInInboxProgram() {
         fail("Invalid notification stream");
       stream = chunks.join("");
     }
-    return parseNotifications(stream);
+    return parseNotifications(stream, !!payload);
   }
   async function conversationsPage(mailbox, cursor) {
     return graph(
