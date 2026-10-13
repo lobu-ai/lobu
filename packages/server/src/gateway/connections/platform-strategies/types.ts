@@ -102,4 +102,16 @@ export interface PlatformResponseStrategy {
    * duplicate — and a row with no local stream is simply nothing left to do.
    */
   readonly deliversAtCompletion: boolean;
+
+  /**
+   * Deliver one bridge-originated post for this payload (error, guardrail
+   * notice, ephemeral). Optional: without it the bridge posts through the
+   * resolved Chat SDK target. A transport whose send is not idempotent
+   * implements it so a redelivered payload adopts the first send.
+   */
+  post?(args: {
+    ctx: StrategyContext;
+    payload: ThreadResponsePayload;
+    content: unknown;
+  }): Promise<void>;
 }

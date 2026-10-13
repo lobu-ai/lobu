@@ -54,6 +54,12 @@ export interface WebhookSecretDeps {
 
 /** Manager-owned values that are known only once a connection is hydrated. */
 export interface AdapterCreationContext {
+  /**
+   * The connection being started. Read by platforms whose transport is the
+   * connection's own connector operations (`connectorTransport`), which need
+   * its id, org and owner rather than a credential in `config`.
+   */
+  connection?: PlatformConnection;
   /** Canonical public URL that receives this connection's webhooks. */
   webhookUrl?: string;
   /** Called by the adapter after provider verification, before dispatching chat events. */
@@ -119,6 +125,16 @@ export interface NoticeChannelContext {
  * the manager treats an absent hook as "platform doesn't support this".
  */
 export interface ChatPlatformDescriptor {
+  /**
+   * True when this platform's transport is a CONNECTOR connection — a data
+   * row (`credential_mode` NULL) owned by its connector, e.g. a device-paired
+   * browser — rather than a credentialed chat row the gateway creates. Such a
+   * row joins the chat connection store only once its connector declares an
+   * Automation event that can reply to its source (`replyToSource`); its
+   * runtime id is the numeric `connections.id`, and the chat path never writes
+   * it (create, save and delete stay with the connector).
+   */
+  connectorTransport?: boolean;
   /** Lazily construct the `@chat-adapter/*` adapter for a resolved config. */
   createAdapter(config: any, context?: AdapterCreationContext): Promise<any>;
   /** Resolve provider-owned installed scopes without copying their credentials. */

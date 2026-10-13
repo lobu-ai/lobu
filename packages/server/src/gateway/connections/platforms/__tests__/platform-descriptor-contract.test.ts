@@ -52,6 +52,8 @@ describe("chat platform descriptor contract", () => {
         ["credentials", "useApplicationDefaultCredentials"],
         "googleChatProjectNumber",
       ],
+      // Its transport is the connector connection: no chat credential at all.
+      "whatsapp.web": [],
     });
   });
 

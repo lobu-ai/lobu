@@ -174,6 +174,32 @@ describe("resolveChatUserIdentity across platforms", () => {
 		).toBe(userId);
 	});
 
+	it("resolves a WhatsApp sender by exactly the JID that was linked", async () => {
+		const { orgId, userId, memberEntityId } = await seedMember("alice@acme.test");
+		const PHONE_JID = "15550000001@s.whatsapp.net";
+		const LID = "90000000000001@lid";
+		await stamp(orgId, memberEntityId, "whatsapp_user_jid", PHONE_JID);
+
+		expect(await resolveChatUserIdentity("whatsapp.web", undefined, PHONE_JID)).toBe(userId);
+		// The web client's `@c.us` and a device suffix name the same phone JID.
+		expect(
+			await resolveChatUserIdentity("whatsapp.web", undefined, "15550000001:7@c.us"),
+		).toBe(userId);
+		// A LID is never inferred from the phone JID, however plausible.
+		expect(await resolveChatUserIdentity("whatsapp.web", undefined, LID)).toBeNull();
+		expect(
+			await resolveChatUserIdentity("whatsapp.web", undefined, "15550000001@lid"),
+		).toBeNull();
+		// A group is a conversation, never a sender.
+		expect(
+			await resolveChatUserIdentity("whatsapp.web", undefined, "120363000000000001@g.us"),
+		).toBeNull();
+
+		// Linking the LID too makes both forms resolve, each on its own key.
+		await stamp(orgId, memberEntityId, "whatsapp_user_jid", LID);
+		expect(await resolveChatUserIdentity("whatsapp.web", undefined, LID)).toBe(userId);
+	});
+
 	it("fails closed when two distinct users are reachable from one sender id", async () => {
 		const a = await seedMember("alice@acme.test");
 		const b = await seedMember("bob@acme.test");
@@ -205,7 +231,11 @@ describe("chat user key scope contract", () => {
 		);
 		// Golden pin: a platform silently flipping to `global` would widen its
 		// reverse lookup across tenants, which no outcome-level test would catch.
-		expect(declared).toEqual({ slack: "team-prefix", gchat: "global" });
+		expect(declared).toEqual({
+			slack: "team-prefix",
+			gchat: "global",
+			"whatsapp.web": "global",
+		});
 	});
 
 	// A representative sender id per platform, in the form that platform
@@ -216,6 +246,7 @@ describe("chat user key scope contract", () => {
 	const SAMPLE_USER_ID: Record<string, string> = {
 		slack: "U12345",
 		gchat: "users/110000000000000000001",
+		"whatsapp.web": "15550000001@s.whatsapp.net",
 	};
 
 	it("every registered platform has a sample id for the invariant below", () => {

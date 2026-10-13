@@ -862,7 +862,7 @@ export class ChatResponseBridge implements ResponseRenderer {
                 ),
               ],
             });
-            await target.post({
+            await this.postContent(ctx, payload, target, {
               card,
               fallbackText: `${processedContent}\n\n${linkButtons.map((button) => `${button.text}: ${button.url}`).join("\n")}`,
             });
@@ -873,12 +873,12 @@ export class ChatResponseBridge implements ResponseRenderer {
               "Failed to render ephemeral settings button"
             );
             const fallbackText = `${processedContent}\n\n${linkButtons.map((button) => `${button.text}: ${button.url}`).join("\n")}`;
-            await target.post(fallbackText.trim());
+            await this.postContent(ctx, payload, target, fallbackText.trim());
             return;
           }
         }
 
-        await target.post(processedContent);
+        await this.postContent(ctx, payload, target, processedContent);
       }
     } catch (error) {
       logger.error(
@@ -921,10 +921,22 @@ export class ChatResponseBridge implements ResponseRenderer {
   ): Promise<void> {
     try {
       const target = await this.resolveTargetForPayload(ctx, payload);
-      if (target) await target.post(content);
+      if (target) await this.postContent(ctx, payload, target, content);
     } catch (err) {
       logger.error({ connectionId: ctx.connectionId, err: String(err) }, logMessage);
     }
+  }
+
+  /** Post through the strategy when it owns delivery, else the SDK target. */
+  private postContent(
+    ctx: ResponseContext,
+    payload: ThreadResponsePayload,
+    target: any,
+    content: unknown
+  ): Promise<unknown> {
+    return ctx.strategy.post
+      ? ctx.strategy.post({ ctx, payload, content })
+      : target.post(content);
   }
 
   /**

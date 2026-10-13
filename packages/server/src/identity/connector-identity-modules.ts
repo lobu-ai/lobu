@@ -23,6 +23,7 @@ import { githubIdentityModule } from '@lobu/connectors/github-identity';
 import { googleIdentityModule } from '@lobu/connectors/google-identity';
 import { linkedInIdentityModule } from '@lobu/connectors/linkedin-identity';
 import { slackIdentityModule } from '@lobu/connectors/slack-identity';
+import { whatsAppWebIdentityModule } from '@lobu/connectors/whatsapp-web-identity';
 import { xIdentityModule } from '@lobu/connectors/x-identity';
 
 /** Every connector identity module the server wires in. */
@@ -31,6 +32,7 @@ export const CONNECTOR_IDENTITY_MODULES: readonly ConnectorIdentityModule[] = [
   googleIdentityModule,
   linkedInIdentityModule,
   slackIdentityModule,
+  whatsAppWebIdentityModule,
   xIdentityModule,
 ];
 

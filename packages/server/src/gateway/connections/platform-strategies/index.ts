@@ -21,6 +21,7 @@ import { createLogger } from "@lobu/core";
 import type { ThreadResponsePayload } from "../../infrastructure/queue/index.js";
 import { AsyncPushIterator } from "./async-push-iterator.js";
 import { SlackResponseStrategy } from "./slack.js";
+import { whatsappWebResponseStrategy } from "./whatsapp-web.js";
 import type {
   PlatformResponseStrategy,
   ResolveTarget,
@@ -165,6 +166,8 @@ export function getResponseStrategy(
   switch (platform) {
     case "slack":
       return slackStrategy;
+    case "whatsapp.web":
+      return whatsappWebResponseStrategy;
     default:
       return defaultStrategy;
   }

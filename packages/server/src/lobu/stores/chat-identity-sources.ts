@@ -15,11 +15,13 @@
 import type { ChatUserIdentity } from "@lobu/connectors/chat-user-identity";
 import { gchatChatUserIdentity } from "@lobu/connectors/google-identity";
 import { slackChatUserIdentity } from "@lobu/connectors/slack-identity";
+import { whatsAppWebChatUserIdentity } from "@lobu/connectors/whatsapp-web-identity";
 
 /** Every chat platform whose senders can be resolved to a Lobu user. */
 export const CHAT_USER_IDENTITIES: readonly ChatUserIdentity[] = [
 	slackChatUserIdentity,
 	gchatChatUserIdentity,
+	whatsAppWebChatUserIdentity,
 ];
 
 const BY_PLATFORM = new Map<string, ChatUserIdentity>(

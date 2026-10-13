@@ -27,6 +27,7 @@ import {
 } from "../utils/public-origin";
 import { ChatInstanceManager } from "../gateway/connections/chat-instance-manager";
 import { ChatResponseBridge } from "../gateway/connections/chat-response-bridge";
+import { connectorTransportPlatforms } from "../gateway/connections/platforms/index";
 import { Gateway } from "../gateway/gateway-main";
 import type { AgentTurnDeps } from "../gateway/orchestration/agent-turn-producer";
 import { Orchestrator } from "../gateway/orchestration/index";
@@ -377,7 +378,9 @@ export async function initLobuGateway(): Promise<Hono | null> {
 
 		// Create PostgreSQL-backed stores
 		const configStore = createPostgresAgentConfigStore();
-		const connectionStore = createPostgresAgentConnectionStore();
+		const connectionStore = createPostgresAgentConnectionStore({
+			connectorTransportPlatforms: connectorTransportPlatforms(),
+		});
 		const postgresSecretStore = new PostgresSecretStore();
 		const secretStore = new SecretStoreRegistry(postgresSecretStore, {
 			secret: postgresSecretStore,
