@@ -48,6 +48,11 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * Events are append-only, so (2) is how connector-driven auto-linking is
  * surfaced at read time — `entity_ids` is never mutated post-insert.
  *
+ * Identity branches only match events owned by the entity's organization. An
+ * identifier is a bare value any organization can claim on its own entity, so
+ * matching on it alone would recall another organization's events. Direct
+ * `entity_ids` attribution is the explicit cross-org bridge and stays as is.
+ *
  * The shared `identity_members` CTE resolves the component once for all
  * attribution branches. `entity_link_ids` materializes their candidate-id union.
  * Each standard namespace gets its own UNION branch with a literal
@@ -73,6 +78,7 @@ export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
        AND ei.deleted_at IS NULL
       WHERE e2.metadata ? '${ns}'
         AND e2.metadata->>'${ns}' = ei.identifier
+        AND e2.organization_id = (SELECT organization_id FROM identity_members LIMIT 1)
         AND COALESCE((e2.metadata->'${IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY}')->>'${ns}', '${ORGANIZATION_SCOPE_PROJECTION}') = COALESCE(ei.scope_key, '${ORGANIZATION_SCOPE_PROJECTION}')`
   );
 
@@ -199,12 +205,15 @@ export function buildEntityLinkBranches(opts: {
   // already filters to the standard list, but we double-check here so a
   // future caller that builds scopes manually can't blow up the scan.
   const indexed = new Set<string>(STANDARD_IDENTITY_NAMESPACES);
+  // Identity probes stay inside the entity's organization (see
+  // entityLinkMatchSql), derived from the entity rather than the caller.
+  const entityOrgSql = `(SELECT organization_id FROM entities WHERE id = ${opts.entityIdLiteral}::bigint)`;
   const scopeBranches: string[] = [];
   for (const scope of opts.scopes) {
     if (!indexed.has(scope.namespace)) continue;
     params.push(scope.identifier, scope.scopeKey ?? ORGANIZATION_SCOPE_PROJECTION);
     scopeBranches.push(
-      `SELECT e2.id FROM events e2 WHERE e2.metadata ? '${scope.namespace}' AND e2.metadata->>'${scope.namespace}' = $${paramIndex} AND COALESCE((e2.metadata->'${IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY}')->>'${scope.namespace}', '${ORGANIZATION_SCOPE_PROJECTION}') = $${paramIndex + 1}`
+      `SELECT e2.id FROM events e2 WHERE e2.metadata ? '${scope.namespace}' AND e2.metadata->>'${scope.namespace}' = $${paramIndex} AND e2.organization_id = ${entityOrgSql} AND COALESCE((e2.metadata->'${IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY}')->>'${scope.namespace}', '${ORGANIZATION_SCOPE_PROJECTION}') = $${paramIndex + 1}`
     );
     paramIndex += 2;
   }
