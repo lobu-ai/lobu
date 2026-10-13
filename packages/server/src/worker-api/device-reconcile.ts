@@ -405,10 +405,7 @@ async function ensureDeviceConnectorWired(
             currentSource.advertiserDeviceIds
           );
           if (teamPin) {
-            await clearDeviceUpgradeRequired(tx, {
-              connectionId: readyConnectionId,
-              feedPauseThreshold: feedBackoff.pauseThreshold,
-            });
+            await clearDeviceUpgradeRequired(tx, { connectionId: readyConnectionId });
           }
           return claimAuthorization(currentSource);
         });
@@ -747,10 +744,7 @@ async function ensureDeviceConnectorWired(
         currentSource?.advertiserDeviceIds ?? matchingDeviceIds
       );
       if (teamPin) {
-        await clearDeviceUpgradeRequired(tx, {
-          connectionId,
-          feedPauseThreshold: feedBackoff.pauseThreshold,
-        });
+        await clearDeviceUpgradeRequired(tx, { connectionId });
       }
       if (currentSource && !(await selectedArtifactMatches(tx, currentSource))) return null;
       return claimAuthorization(currentSource);
@@ -1202,9 +1196,14 @@ interface DeviceUpgrade {
 }
 
 /**
- * Pause one team device connection's feeds. With `upgrade`, the connection is
- * paused as well and says which version the device must run; the stamp never
- * overwrites another error. Best-effort.
+ * Pause one team device connection. With `upgrade`, only the CONNECTION is
+ * paused and stamped with the version its device must run — the scheduler skips
+ * every feed of a paused connection, so feed states are left exactly as the
+ * user set them. Only an active, unstamped connection (or one already stamped)
+ * is taken over: a connection the user paused is never stamped, so clearing the
+ * stamp after the upgrade can never resume something the user turned off.
+ * Without `upgrade` (the device stopped advertising the key), its active feeds
+ * are paused instead. Best-effort.
  */
 async function pauseTeamDeviceConnection(
   userId: string,
@@ -1218,12 +1217,14 @@ async function pauseTeamDeviceConnection(
       const reason = await upgradeReason(organizationId, upgrade);
       await sql`
         UPDATE connections
-        SET status = CASE WHEN status = 'active' THEN 'paused' ELSE status END,
-            error_message = ${reason},
-            updated_at = NOW()
+        SET status = 'paused', error_message = ${reason}, updated_at = NOW()
         WHERE id = ${connectionId}
-          AND (error_message IS NULL OR starts_with(error_message, ${DEVICE_UPGRADE_REQUIRED_PREFIX}))
+          AND (
+            (status = 'active' AND error_message IS NULL)
+            OR starts_with(error_message, ${DEVICE_UPGRADE_REQUIRED_PREFIX})
+          )
       `;
+      return;
     }
     await sql`
       UPDATE feeds SET status = 'paused', updated_at = current_timestamp

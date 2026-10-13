@@ -457,7 +457,11 @@ describe('device home workspace chosen at pairing', () => {
     }
     type Team = Awaited<ReturnType<typeof teamOfTwo>>;
 
-    /** Row 4: Alice's one connection is pinned, paused with the reason, unclaimable. */
+    /**
+     * Row 4: Alice's one connection is pinned, paused with the reason, unclaimable.
+     * Only the connection is paused (the scheduler skips a paused connection's
+     * feeds), so feed states stay as the user left them.
+     */
     async function expectAliceUpgradePaused(team: Team) {
       const device = await deviceRow(team.alice.userId, 'old-box');
       expect(await team.connectionsOf(team.alice.userId)).toEqual([
@@ -466,7 +470,6 @@ describe('device home workspace chosen at pairing', () => {
           error_message: reason,
           visibility: 'private',
           device_worker_id: device.id,
-          active_feeds: 0,
         }),
       ]);
       expect(await team.installed()).toBe(NEW);
@@ -515,6 +518,38 @@ describe('device home workspace chosen at pairing', () => {
             expect.objectContaining({ id: paused.id, status: 'active', error_message: null, active_feeds: 1 }),
           ]);
           expect(await team.installed()).toBe(NEW);
+        },
+      ],
+      [
+        'row 4 then 3 — a manual pause survives the upgrade: nothing the user turned off is resumed',
+        async (team) => {
+          await team.aliceOld();
+          await team.seedFeed(team.alice.userId);
+          await team.seedFeed(team.alice.userId);
+          const [own] = await team.connectionsOf(team.alice.userId);
+          // Alice turned one feed off herself while the connection was active.
+          await team.sql`
+            UPDATE feeds SET status = 'paused'
+            WHERE id = (SELECT MIN(id) FROM feeds WHERE connection_id = ${own.id})
+          `;
+          await team.bobNew();
+          await team.aliceOld();
+          await expectAliceUpgradePaused(team);
+          await team.aliceNew();
+          expect(await team.connectionsOf(team.alice.userId)).toEqual([
+            expect.objectContaining({ id: own.id, status: 'active', error_message: null, active_feeds: 1 }),
+          ]);
+
+          // A connection Alice paused herself is never stamped, so the upgrade leaves it off.
+          await team.sql`UPDATE connections SET status = 'paused' WHERE id = ${own.id}`;
+          await team.aliceOld();
+          expect(await team.connectionsOf(team.alice.userId)).toEqual([
+            expect.objectContaining({ id: own.id, status: 'paused', error_message: null }),
+          ]);
+          await team.aliceNew();
+          expect(await team.connectionsOf(team.alice.userId)).toEqual([
+            expect.objectContaining({ id: own.id, status: 'paused', error_message: null }),
+          ]);
         },
       ],
       [
