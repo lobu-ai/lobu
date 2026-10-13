@@ -32,6 +32,7 @@ function harness(
   options: {
     connections?: Array<{ id: number }>;
     recentCreates?: Array<Record<string, unknown>>;
+    pageSize?: number;
   } = {}
 ) {
   const executed: Execute[] = [];
@@ -45,7 +46,13 @@ function harness(
     operations: {
       listRuns: async (input: ListRuns) => {
         listed.push(input);
-        return { runs: options.recentCreates ?? [] };
+        const runs = options.recentCreates ?? [];
+        const { offset = 0 } = input as { offset?: number };
+        const size = options.pageSize ?? runs.length;
+        return {
+          runs: runs.slice(offset, offset + size),
+          has_more: offset + size < runs.length,
+        };
       },
       execute: async (input: Execute) => {
         executed.push(input);
@@ -134,6 +141,21 @@ describe("Task Collaborator reminder changes", () => {
       await applyReminderChanges(context([create]), h.client);
       expect(h.executed).toHaveLength(0);
     }
+  });
+
+  test("reads every page of earlier creates", async () => {
+    const other = { status: "completed", input: { notes: "lobu:other|x|y" } };
+    const h = harness({
+      pageSize: 2,
+      recentCreates: [
+        other,
+        other,
+        { status: "pending", input: { notes: marker(key) } },
+      ],
+    });
+    await applyReminderChanges(context([create]), h.client);
+    expect(h.executed).toHaveLength(0);
+    expect(h.listed.map((page) => page.offset)).toEqual([0, 2]);
   });
 
   test("a failed or rejected earlier create does not block a new one", async () => {

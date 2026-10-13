@@ -508,7 +508,7 @@ const gmailConnection = defineConnection({
 const remindersDeviceWorkerId = process.env.REMINDERS_DEVICE_WORKER_ID;
 const remindersConnection = remindersDeviceWorkerId
   ? defineConnection({
-      slug: "apple-reminders",
+      slug: "reminders",
       connector: "apple.reminders",
       name: "Apple Reminders",
       deviceWorkerId: remindersDeviceWorkerId,

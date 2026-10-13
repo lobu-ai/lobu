@@ -94,20 +94,26 @@ export default async function applyReminderChanges(
 
   const queued = new Set<string>();
   if (changes.some((change) => change.action === "create")) {
-    const { runs } = await client.operations.listRuns({
-      connection_id: connectionId,
-      operation_key: "create_reminder",
-      created_after: new Date(Date.now() - RECENT_CREATE_MS).toISOString(),
-      limit: 200,
-    } as Parameters<ReactionClient["operations"]["listRuns"]>[0]);
-    for (const run of runs) {
-      // A failed or rejected create made nothing, so it does not block a retry.
-      if (["failed", "timeout", "cancelled"].includes(String(run.status)))
-        continue;
-      const notes = (run.input as { notes?: unknown } | null)?.notes;
-      const line =
-        typeof notes === "string" ? notes.split("\n").at(-1) : undefined;
-      if (line?.startsWith("lobu:")) queued.add(line);
+    const createdAfter = new Date(Date.now() - RECENT_CREATE_MS).toISOString();
+    for (let offset = 0; ; ) {
+      const page = await client.operations.listRuns({
+        connection_id: connectionId,
+        operation_key: "create_reminder",
+        created_after: createdAfter,
+        limit: 200,
+        offset,
+      } as Parameters<ReactionClient["operations"]["listRuns"]>[0]);
+      for (const run of page.runs) {
+        // A failed or rejected create made nothing, so it does not block a retry.
+        if (["failed", "timeout", "cancelled"].includes(String(run.status)))
+          continue;
+        const notes = (run.input as { notes?: unknown } | null)?.notes;
+        const line =
+          typeof notes === "string" ? notes.split("\n").at(-1) : undefined;
+        if (line?.startsWith("lobu:")) queued.add(line);
+      }
+      if (!page.has_more || page.runs.length === 0) break;
+      offset += page.runs.length;
     }
   }
 

@@ -64,7 +64,7 @@ describe("Task Collaborator keeps tasks in Apple Reminders", () => {
       deviceWorkerId
         ? {
             kind: "connection",
-            slug: "apple-reminders",
+            slug: "reminders",
             connector: "apple.reminders",
             name: "Apple Reminders",
             deviceWorkerId,
