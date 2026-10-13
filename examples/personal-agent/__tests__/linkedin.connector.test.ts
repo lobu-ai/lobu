@@ -3420,7 +3420,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.18.7");
+    expect(c.definition.version).toBe("3.18.8");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );

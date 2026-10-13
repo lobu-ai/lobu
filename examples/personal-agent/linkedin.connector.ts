@@ -3003,7 +3003,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes and prepare message, post, or comment drafts for human submission. Also supports local LinkedIn Data Export CSV files.",
-    version: "3.18.7",
+    version: "3.18.8",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
     browser: {

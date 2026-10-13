@@ -61,6 +61,137 @@ function flight(text = "Alex reacted to your post", age = "12h") {
 }
 
 describe("LinkedIn source adapter", () => {
+  test("a structured empty notification continuation exhausts the source", async () => {
+    const empty = `1:"synthetic-module"\n2:I["$1",[],"default"]\n0:${JSON.stringify(
+      [
+        [
+          ["$", "$L2", null, { modelStates: [], isPartialPage: true }],
+          "$undefined",
+        ],
+        "$undefined",
+        [],
+        "$undefined",
+        "$undefined",
+        "$0:0:0:props:modelStates",
+        null,
+        "synthetic-version",
+        "$undefined",
+        { version: "synthetic-version" },
+      ]
+    )}\n`;
+    const payload = {
+      startIndex: 20,
+      filterPillType: "All",
+      trackingIdsToDrop: [],
+    };
+    const firstPage = `${flight()}4:${JSON.stringify([
+      "$",
+      "div",
+      null,
+      {
+        nextPageRequest: {
+          pagerId: "com.linkedin.sdui.pagers.notificationsList",
+          requestedArguments: { payload },
+        },
+      },
+    ])}\n`;
+    let initialStream = firstPage;
+    let stream = empty;
+    const { dom, api } = adapter(async (url, init) =>
+      url === "/voyager/api/me"
+        ? {
+            ok: true,
+            json: async () => ({
+              miniProfile: {
+                entityUrn: "urn:li:fs_miniProfile:synthetic-self",
+              },
+            }),
+          }
+        : {
+            ok: true,
+            text: async () =>
+              init?.body
+                ? stream
+                : `<script>window.__como_rehydration__ = ${JSON.stringify([initialStream])};</script>`,
+          }
+    );
+    let cursor: string;
+    const readNext = () =>
+      api.read({
+        feed: "notifications",
+        cursor,
+      });
+    const sent: any[] = [];
+    dom.window.postMessage = (message: unknown) => {
+      sent.push(message);
+    };
+    try {
+      const first = await api.read({ feed: "notifications" });
+      expect(first.hasMore).toBe(true);
+      expect(first.rows).toHaveLength(1);
+      cursor = first.nextCursor;
+      expect(JSON.parse(cursor).page).toEqual(payload);
+      await expect(readNext()).resolves.toEqual({ rows: [], hasMore: false });
+      await api.listen({
+        feed: "notifications",
+        bridge_id: "synthetic-bridge",
+        token: "synthetic-token",
+        checkpoint: {
+          linkedin_inbox: {
+            feed: "notifications",
+            account: "urn:li:fsd_profile:synthetic-self",
+            seen: {},
+          },
+        },
+      });
+      expect(sent).toHaveLength(1);
+      expect(sent[0].record.events).toEqual([
+        expect.objectContaining({
+          event_type: "notification.changed",
+          resource_ref: first.rows[0].id,
+        }),
+      ]);
+      expect(sent[0].record.more).toBe(false);
+      expect(sent[0].record.source_error).toBeUndefined();
+      expect(
+        Object.keys(sent[0].record.checkpoint.next.linkedin_inbox.seen)
+      ).toHaveLength(1);
+      const checkpoint = sent[0].record.checkpoint.next;
+      sent.length = 0;
+      await api.listen({
+        feed: "notifications",
+        bridge_id: "synthetic-bridge",
+        token: "synthetic-token",
+        checkpoint,
+      });
+      expect(sent[0].record.events).toEqual([]);
+      initialStream = empty;
+      await expect(api.read({ feed: "notifications" })).rejects.toThrow(
+        "Notification source format changed"
+      );
+      for (const changed of [
+        empty.replace(
+          '"modelStates":[]',
+          '"modelStates":[{"unrecognized":"content"}]'
+        ),
+        empty.replace(
+          '"isPartialPage":true',
+          '"isPartialPage":true,"children":["new card format"]'
+        ),
+        empty.replace('"isPartialPage":true', '"isPartialPage":false'),
+        '0:{"unrecognized":"notification response"}\n',
+      ]) {
+        stream = changed;
+        await expect(readNext()).rejects.toThrow(
+          "Notification source format changed"
+        );
+      }
+    } finally {
+      api.detach();
+      dom.window.close();
+    }
+  });
+
   test("read and observe preserve a warm page's existing subscription", async () => {
     const settledUrl = "https://www.linkedin.com/feed/foryou/";
     expect(new LinkedInConnector().definition.browser?.accountProbe?.url).toBe(
