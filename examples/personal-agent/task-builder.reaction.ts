@@ -1,4 +1,5 @@
 import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
+import { syncTaskReminders } from "./task-reminders";
 
 type Proposal = { summary: string; prompt: string };
 type Task = {
@@ -164,6 +165,7 @@ export default async function notifyTaskChanges(
   }
   // Check deadlines even when this run did not create or update a task.
   await remindDueTasks(client);
+  await syncTaskReminders(ctx, client);
 }
 
 async function remindDueTasks(client: ReactionClient): Promise<void> {

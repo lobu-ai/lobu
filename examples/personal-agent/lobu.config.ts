@@ -312,6 +312,20 @@ const task = defineEntityType({
         description: "Originating Lobu event id (provenance, not identity)",
       })
     ),
+    reminder: Type.Optional(
+      Type.Object(
+        {
+          run_id: Type.Optional(Type.Integer()),
+          origin_id: Type.Optional(Type.String({ minLength: 1 })),
+          completed_run_id: Type.Optional(Type.Integer()),
+        },
+        {
+          additionalProperties: false,
+          description:
+            "Link to the Apple Reminder mirroring this task, owned by the completion reaction",
+        }
+      )
+    ),
     source_scope: {
       type: "string",
       minLength: 1,

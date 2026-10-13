@@ -74,6 +74,7 @@ function harness(
           : [];
       }
       if (sql.includes("AS due_date")) return dueTasks;
+      if (sql.includes("connector_key = 'apple.reminders'")) return [];
       return metadata
         ? [
             {
