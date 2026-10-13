@@ -29,7 +29,7 @@ import {
 } from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
 import { getRateLimiter, resetRateLimiterForTests } from "../../utils/rate-limiter.js";
-import { UNLINKED_SENDER_TURNS_PER_HOUR } from "../orchestration/chat-turn-actor.js";
+import { chatSenderLimitKey, UNLINKED_SENDER_TURNS_PER_HOUR } from "../orchestration/chat-turn-actor.js";
 import { ChatResponseBridge } from "../connections/chat-response-bridge.js";
 import { gchatPlatform } from "../connections/platforms/gchat.js";
 import { createConnectedGatewayStateAdapter } from "../connections/state-adapter.js";
@@ -383,7 +383,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
       channelId: SPACE,
     });
     const limiter = getRateLimiter();
-    const key = `chat-unlinked-turn:${ORG_ID}:gchat:${stranger.name}`;
+    const key = chatSenderLimitKey("turns", { organizationId: ORG_ID, platform: "gchat", teamId: undefined, senderId: stranger.name });
     for (let i = 0; i < UNLINKED_SENDER_TURNS_PER_HOUR; i += 1) {
       expect(limiter.checkLimit(key, { limit: UNLINKED_SENDER_TURNS_PER_HOUR, windowSeconds: 3600 }).allowed).toBe(true);
     }
@@ -403,7 +403,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
 
     // A linked member is never limited: in a space their turn is org_shared,
     // like a vouched stranger's, but the limit is keyed on being unlinked.
-    const memberKey = `chat-unlinked-turn:${ORG_ID}:gchat:${sender.name}`;
+    const memberKey = chatSenderLimitKey("turns", { organizationId: ORG_ID, platform: "gchat", teamId: undefined, senderId: sender.name });
     for (let i = 0; i < UNLINKED_SENDER_TURNS_PER_HOUR; i += 1) {
       getRateLimiter().checkLimit(memberKey, { limit: UNLINKED_SENDER_TURNS_PER_HOUR, windowSeconds: 3600 });
     }

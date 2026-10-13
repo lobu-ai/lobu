@@ -53,6 +53,7 @@ import {
   CHAT_ACCESS_NOTICE_WINDOW_SECONDS,
   CHAT_TURN_EVIDENCE_KEYS,
   chatAccessNotice,
+  chatSenderLimitKey,
   resolveChatTurnActor,
   UNLINKED_SENDER_TURNS_PER_HOUR,
 } from "../orchestration/chat-turn-actor.js";
@@ -1396,11 +1397,16 @@ export class MessageHandlerBridge {
     // a group conversation is `org_shared` too, and is never limited.
     if (!actor || actor.actorUserId) return true;
 
-    const senderKey = `${args.organizationId ?? ""}:${platform}:${args.userId}`;
+    const sender = {
+      organizationId: args.organizationId,
+      platform,
+      teamId: args.teamId,
+      senderId: args.userId,
+    };
     const limiter = getRateLimiter();
     // Awaited against the shared counter: admission is already async, and a
     // replica's empty cache must not admit turns another replica spent.
-    const turns = await limiter.consume(`chat-unlinked-turn:${senderKey}`, {
+    const turns = await limiter.consume(chatSenderLimitKey("turns", sender), {
       limit: UNLINKED_SENDER_TURNS_PER_HOUR,
       windowSeconds: 60 * 60,
     });
@@ -1413,7 +1419,7 @@ export class MessageHandlerBridge {
     }
 
     if (actor.access === "reply_only" || actor.access === "public_visitor") {
-      const notice = await limiter.consume(`chat-access-notice:${senderKey}`, {
+      const notice = await limiter.consume(chatSenderLimitKey("notice", sender), {
         limit: 1,
         windowSeconds: CHAT_ACCESS_NOTICE_WINDOW_SECONDS,
       });

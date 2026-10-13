@@ -38,6 +38,20 @@ export const CHAT_SENDER_NOT_LINKED =
  */
 export const UNLINKED_SENDER_TURNS_PER_HOUR = 30;
 
+/**
+ * The shared rate-limit key for one unlinked chat sender. A platform user id
+ * is only unique inside its tenant (Slack ids are per workspace), so the
+ * native team is part of the identity. The bridge and every test derive the
+ * key here, never by formatting it themselves.
+ */
+export function chatSenderLimitKey(
+  counter: "turns" | "notice",
+  sender: { organizationId: string | undefined; platform: string; teamId: string | undefined; senderId: string },
+): string {
+  const prefix = counter === "turns" ? "chat-unlinked-turn" : "chat-access-notice";
+  return `${prefix}:${JSON.stringify([sender.organizationId ?? null, sender.platform, sender.teamId ?? null, sender.senderId])}`;
+}
+
 /** How often one sender may be shown the access notice. */
 export const CHAT_ACCESS_NOTICE_WINDOW_SECONDS = 24 * 60 * 60;
 
