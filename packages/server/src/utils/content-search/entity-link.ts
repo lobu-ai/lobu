@@ -48,10 +48,12 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * Events are append-only, so (2) is how connector-driven auto-linking is
  * surfaced at read time — `entity_ids` is never mutated post-insert.
  *
- * Identity branches only match events owned by the entity's organization. An
- * identifier is a bare value any organization can claim on its own entity, so
- * matching on it alone would recall another organization's events. Direct
- * `entity_ids` attribution is the explicit cross-org bridge and stays as is.
+ * Identity branches only match events visible to the entity's organization
+ * (owned by it or bridged into it through `linked_org_ids`, as in
+ * `visibility.ts`). An identifier is a bare value any organization can claim
+ * on its own entity, so matching on it alone would recall another
+ * organization's events. Direct `entity_ids` attribution is the explicit
+ * cross-org link and stays as is.
  *
  * The shared `identity_members` CTE resolves the component once for all
  * attribution branches. `entity_link_ids` materializes their candidate-id union.
@@ -66,6 +68,11 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * MATERIALIZED keeps the candidate-id union separate from the outer event
  * scan so the branches can use their attribution indexes.
  */
+/** Event `e2` is owned by, or bridged into, the organization `orgSql`. */
+function visibleToOrgSql(orgSql: string): string {
+  return `(e2.organization_id = ${orgSql} OR e2.linked_org_ids @> ARRAY[${orgSql}]::text[])`;
+}
+
 export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
   const directBranch = `SELECT e2.id FROM events e2
     WHERE e2.entity_ids && ARRAY(SELECT id FROM identity_members)`;
@@ -78,7 +85,7 @@ export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
        AND ei.deleted_at IS NULL
       WHERE e2.metadata ? '${ns}'
         AND e2.metadata->>'${ns}' = ei.identifier
-        AND e2.organization_id = (SELECT organization_id FROM identity_members LIMIT 1)
+        AND ${visibleToOrgSql('(SELECT organization_id FROM identity_members LIMIT 1)')}
         AND COALESCE((e2.metadata->'${IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY}')->>'${ns}', '${ORGANIZATION_SCOPE_PROJECTION}') = COALESCE(ei.scope_key, '${ORGANIZATION_SCOPE_PROJECTION}')`
   );
 
@@ -213,7 +220,7 @@ export function buildEntityLinkBranches(opts: {
     if (!indexed.has(scope.namespace)) continue;
     params.push(scope.identifier, scope.scopeKey ?? ORGANIZATION_SCOPE_PROJECTION);
     scopeBranches.push(
-      `SELECT e2.id FROM events e2 WHERE e2.metadata ? '${scope.namespace}' AND e2.metadata->>'${scope.namespace}' = $${paramIndex} AND e2.organization_id = ${entityOrgSql} AND COALESCE((e2.metadata->'${IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY}')->>'${scope.namespace}', '${ORGANIZATION_SCOPE_PROJECTION}') = $${paramIndex + 1}`
+      `SELECT e2.id FROM events e2 WHERE e2.metadata ? '${scope.namespace}' AND e2.metadata->>'${scope.namespace}' = $${paramIndex} AND ${visibleToOrgSql(entityOrgSql)} AND COALESCE((e2.metadata->'${IDENTITY_SCOPE_BY_NAMESPACE_METADATA_KEY}')->>'${scope.namespace}', '${ORGANIZATION_SCOPE_PROJECTION}') = $${paramIndex + 1}`
     );
     paramIndex += 2;
   }
