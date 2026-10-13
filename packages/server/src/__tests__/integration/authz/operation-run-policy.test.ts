@@ -379,6 +379,9 @@ describe('operation policy at durable dispatch', () => {
     const workerId = 'policy-activation-owner';
     await sql`INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id, app_version)
       VALUES (${user.id}, ${workerId}, 'chrome-extension', '[]'::jsonb, ${organizationId}, '0.6.1')`;
+    // Activation follows the device's placement, which needs its owner's membership.
+    await sql`INSERT INTO member (id, "organizationId", "userId", role, "createdAt")
+      VALUES (${`member-${user.id}`}, ${organizationId}, ${user.id}, 'member', NOW())`;
     const queued = await createConnectorOperationRun({
       organizationId, connectionId, connectorKey, operationKey: 'perform', operationInput: {},
       approvalMode: 'queued', policyPrincipalKind: 'user', createdByUserId: user.id,

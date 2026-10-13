@@ -78,7 +78,8 @@ import { sourceFeedContextForRun, receiveFeedNotifications } from '../runs/feed-
 import { reconcileSourceFeedListeners } from '../runs/source-feed-listener';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import { resolveConnectorCode } from '../utils/ensure-connector-installed';
-import { resolveDeviceClaimableOrgs } from '../utils/device-claimable-orgs';
+import { resolveDeviceActivationOrgs, resolveDeviceClaimableOrgs } from '../utils/device-claimable-orgs';
+import { DEVICE_MOVED_TOMBSTONE } from '../utils/device-pin-tombstones';
 import { errorMessage } from '../utils/errors';
 import { resolveAuthCredentials } from '../utils/auth-credential-secrets';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
@@ -543,24 +544,14 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // connection is pinned to it (connections.device_worker_id) is claimable
   // regardless of the connector's required_capability — that's how an
   // otherwise-embedded connector (Reddit, …) ends up running on a chosen device.
-  // Device home org: the workspace the device's token was issued for — the home
-  // the user chose when approving the pairing (`/oauth/device/approve`), or the
-  // one mint-child-token bound the child credential to — or, for a re-anchored
-  // local device, the org it already lives in. The upsert COALESCEs to the
-  // owner's personal org when null, and chooses the home on first
-  // registration. Legacy NULL-home rows remain personal. An existing row keeps
-  // its home, because the token is
-  // re-presented on every poll and would otherwise undo a Devices-page move
-  // (`PATCH /api/me/devices/:id`, the one move path). Device connectors
-  // auto-wire in this home (`reconcileDeviceCapabilities`).
+  // Device home org: the workspace the device's token was issued for (or, for a
+  // re-anchored local device, the org it already lives in). The upsert COALESCEs
+  // to the owner's personal org when null, and sets the home only on first
+  // registration; moving an existing device is the Devices-page action.
   const registrationUserId = effectiveWorkerUserId;
   const registrationOrgId = effectiveTokenOrgId;
 
   let deviceWorkerId: string | null = null;
-  // The device's stored home, which a Devices-page move can make differ from
-  // the token's org. Its device connectors auto-wire there, so it joins the
-  // base (unpinned) claim scope below once membership is confirmed.
-  let deviceHomeOrgId: string | null = null;
   let manifestClaimAuthorizations: ManifestClaimAuthorization[] = [];
   if (registrationUserId) {
     try {
@@ -614,9 +605,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           -- the user afterwards (PATCH /api/me/devices/:id). A heartbeat that
           -- wrote it back would clobber a Devices-page rename on the next poll,
           -- since a headless daemon self-reports its hostname every time.
+          -- A legacy NULL home is the personal workspace, even when a re-pair
+          -- presents a credential bound to a team workspace.
           organization_id = COALESCE(
             device_workers.organization_id,
-            (SELECT id FROM organization WHERE (metadata::jsonb)->>'personal_org_for_user_id' = ${registrationUserId} LIMIT 1)
+            (SELECT id FROM organization WHERE (metadata::jsonb)->>'personal_org_for_user_id' = ${registrationUserId} LIMIT 1),
+            EXCLUDED.organization_id
           ),
           -- Large inventories are stored out of line, so writing
           -- an unchanged copy back costs a fresh out-of-line copy per heartbeat.
@@ -647,7 +641,6 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         inserted: boolean;
       }>;
       deviceWorkerId = upserted[0]?.id ?? null;
-      deviceHomeOrgId = upserted[0]?.organization_id ?? null;
       if (upserted[0]?.inserted && upserted[0]?.organization_id) {
         recordLifecycleEvent({
           organizationId: upserted[0].organization_id,
@@ -701,9 +694,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   }
 
   // User-scoped workers (e.g. Lobu for Mac) can only claim runs in the
-  // org their token is bound to (the device home chosen at pairing, where its
-  // device connectors auto-wire), plus the user's personal org — the set is
-  // computed in the /api/workers/* auth middleware. Trusted workers (matched WORKER_API_TOKEN) and anonymous
+  // org their token is bound to, plus the user's personal org — the set is
+  // computed in the /api/workers/* auth
+  // middleware. Trusted workers (matched WORKER_API_TOKEN) and anonymous
   // local-dev requests see all pending runs — preserving the existing
   // server-side worker fleet semantics.
   //
@@ -744,23 +737,19 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   //
   // Two scopes: `orgScopeIds` (widened with cross-org pins) gates the
   // explicitly-PINNED claim branches — the pin is the owner's consent.
-  // `baseOrgScopeIds` (token's bound + personal org + the device's own home)
-  // gates the UNPINNED capability-matched branch, so a single pin in org B does
-  // NOT also let the device claim unrelated unpinned device-connector runs in
-  // org B. The home counts only when `resolveDeviceClaimableOrgs` kept it, i.e.
-  // the owner is still a member there.
+  // `baseOrgScopeIds` (token's bound + personal org only) gates the UNPINNED
+  // capability-matched branch, so a single pin in org B does NOT also let the
+  // device claim unrelated unpinned device-connector runs in org B. That
+  // branch further admits personal workspaces only (connector-claim-lanes.ts):
+  // team device connections are pinned per device.
   const orgScopeIds = orgScopeActive && claimableOrgIds ? claimableOrgIds : [''];
-  const baseOrgIds = Array.from(
-    new Set([
-      ...(effectiveWorkerOrgIds ?? []),
-      ...(deviceHomeOrgId && claimableOrgIds?.includes(deviceHomeOrgId) ? [deviceHomeOrgId] : []),
-    ])
-  );
-  const baseOrgScopeIds = orgScopeActive && baseOrgIds.length > 0 ? baseOrgIds : [''];
+  const baseOrgScopeIds =
+    orgScopeActive && effectiveWorkerOrgIds && effectiveWorkerOrgIds.length > 0
+      ? effectiveWorkerOrgIds
+      : [''];
   const connectorClaimContext: ConnectorClaimContext = {
     isUserScopedWorker,
     deviceWorkerId,
-    workerUserId: effectiveWorkerUserId ?? null,
     workerPlatform: effectivePlatform,
     authorizedCapabilities,
     capabilityMatchSet,
@@ -838,7 +827,19 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             await sql<{ run_id: number; urls: string | string[] }>`
             SELECT id AS run_id, activation_target_urls AS urls
             FROM runs
-            WHERE organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
+            WHERE organization_id = ANY(${pgTextArray(
+              deviceWorkerId && effectiveWorkerUserId
+                ? await resolveDeviceActivationOrgs(sql, {
+                    deviceWorkerId,
+                    ownerUserId: effectiveWorkerUserId,
+                  })
+                : orgScopeIds
+            )}::text[])
+              AND NOT EXISTS (
+                SELECT 1 FROM connections moved
+                WHERE moved.id = runs.connection_id
+                  AND moved.error_message = ${DEVICE_MOVED_TOMBSTONE}
+              )
               AND created_by_user_id = ${effectiveWorkerUserId}
               AND run_type = 'action'
               AND status = 'pending'
@@ -955,7 +956,6 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
                 activationKind: tx`r.activation_kind`,
                 activatedAt: tx`r.activated_at`,
                 connectionDeviceWorkerId: tx`con.device_worker_id`,
-                connectionCreatedBy: tx`con.created_by`,
                 runTargetDeviceWorkerId: tx`r.target_device_worker_id`,
                 pinPlatform: tx`pin_dw.platform`,
                 runRequiredCapability: tx`cd.run_required_capability`,

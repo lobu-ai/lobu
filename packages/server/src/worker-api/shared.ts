@@ -12,7 +12,7 @@
 import type { Context } from 'hono';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
-import { resolveDeviceClaimableOrgs, runInWorkerScope } from '../utils/device-claimable-orgs';
+import { runInWorkerScope } from '../utils/device-claimable-orgs';
 
 const WORKER_CAPABILITY_NAME_RE = /^[a-z][a-z0-9_.:-]{0,63}$/;
 
@@ -94,15 +94,12 @@ export async function authorizeRunForWorker(
   const rows = (await sql`
     SELECT r.status, r.claimed_by, r.organization_id,
            dw.user_id AS device_owner,
-           wdw.user_id AS automation_device_owner,
-           claimant.id AS claimant_device_id
+           wdw.user_id AS automation_device_owner
     FROM runs r
     LEFT JOIN connections con ON con.id = r.connection_id
     LEFT JOIN device_workers dw ON dw.id = con.device_worker_id
     LEFT JOIN automations w ON w.id = r.automation_id
     LEFT JOIN device_workers wdw ON wdw.id = w.device_worker_id
-    LEFT JOIN device_workers claimant
-      ON claimant.worker_id = r.claimed_by AND claimant.user_id = ${workerUserId ?? null}
     WHERE r.id = ${runId}
     LIMIT 1
   `) as unknown as Array<{
@@ -111,7 +108,6 @@ export async function authorizeRunForWorker(
     organization_id: string;
     device_owner: string | null;
     automation_device_owner: string | null;
-    claimant_device_id: string | null;
   }>;
   if (rows.length === 0) {
     return c.json({ error: 'Run not found' }, 404);
@@ -120,21 +116,7 @@ export async function authorizeRunForWorker(
   // Automation runs pinned to a device the worker owns are in scope too (the pin
   // is the owner's consent), so a device can FINISH a cross-org run it claimed —
   // not just claim it. Without this the poll widening would 403 on completion.
-  const boundWorkerId = c.var.mcpAuthInfo?.workerId;
-  let inScope = runInWorkerScope(run, { workerUserId, orgIds });
-  if (
-    !inScope && workerUserId && run.claimant_device_id &&
-    (!boundWorkerId || boundWorkerId === expectedWorkerId)
-  ) {
-    // A move can leave the credential bound to the old home. Use the same
-    // membership-checked scope as poll, including for an unpinned connection.
-    const deviceOrgIds = await resolveDeviceClaimableOrgs(sql, {
-      deviceWorkerId: run.claimant_device_id,
-      ownerUserId: workerUserId,
-      baseOrgIds: orgIds,
-    });
-    inScope = deviceOrgIds.includes(run.organization_id);
-  }
+  const inScope = runInWorkerScope(run, { workerUserId, orgIds });
   if (!inScope) {
     return c.json({ error: 'Forbidden' }, 403);
   }

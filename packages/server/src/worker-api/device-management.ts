@@ -344,23 +344,23 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
     // parent grant is presented again on every routine rotation, so treating a
     // mismatch as a move would silently undo a Devices-page move
     // (`PATCH /api/me/devices/:id`, the one move path) on the next rotation.
-    // Refuse rotation if the stored home is no longer available; binding the
-    // token elsewhere would leave it disagreeing with the unchanged device row.
+    // A stored home the owner no longer belongs to (or a legacy NULL home)
+    // serves the personal workspace, exactly as device reconciliation treats
+    // it, so the credential binds there.
     const resolveHome = async (
       db: typeof sql,
       existingOrgId: string | null
     ): Promise<string | null> => {
-      const homeOrgId = existingOrgId ?? (await findExistingPersonalOrg(userId, db))?.id ?? null;
-      if (!homeOrgId) return null;
-      if (homeOrgId !== parentHomeOrgId) {
+      if (existingOrgId && existingOrgId === parentHomeOrgId) return existingOrgId;
+      if (existingOrgId) {
         const [member] = (await db`
           SELECT 1 FROM "member"
-          WHERE "organizationId" = ${homeOrgId} AND "userId" = ${userId}
+          WHERE "organizationId" = ${existingOrgId} AND "userId" = ${userId}
           LIMIT 1
         `) as unknown as Array<unknown>;
-        if (!member) return null;
+        if (member) return existingOrgId;
       }
-      return homeOrgId;
+      return (await findExistingPersonalOrg(userId, db))?.id ?? null;
     };
     let organizationId: string = parentHomeOrgId;
 
@@ -520,7 +520,7 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
       if (homeUnavailable) {
         return c.json({
           error: 'device_home_unavailable',
-          error_description: 'Move this device to a workspace you belong to before rotating its credential.',
+          error_description: 'No personal workspace is provisioned for this account; move this device to a workspace you belong to.',
         }, 403);
       }
       return c.json(CHILD_SELF_MINT_ONLY, 403);

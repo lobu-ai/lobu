@@ -211,6 +211,12 @@ describe("page-activated operation runs", () => {
 		if (scenario === "expired") await sql`UPDATE runs SET expires_at = NOW() - interval '1 second' WHERE id = ${seeded.run.id}`;
 		if (scenario === "unmarked") await sql`UPDATE runs SET run_metadata = NULL WHERE id = ${seeded.run.id}`;
 		if (scenario === "old-extension") await sql`UPDATE device_workers SET app_version = '0.6.0' WHERE id = ${seeded.workers[0].id}`;
+		// Scope is the device's placement (home, pins), not the token's org: a run
+		// in a workspace the device is neither homed nor pinned in stays closed.
+		if (scenario === "wrong-org") {
+			const other = await createTestOrganization({ name: "Elsewhere" });
+			await sql`UPDATE runs SET organization_id = ${other.id} WHERE id = ${seeded.run.id}`;
+		}
 		const response = await request(appFor(seeded.user.id, scenario === "wrong-org" ? "synthetic-other-org" : seeded.org.id, scenario === "wrong-device" ? "synthetic-other-device" : undefined), "chrome-mini", seeded.run.id, scenario === "invalid-url" ? "file:///tmp/example" : "https://x.com/ada/status/123");
 		expect(await response.json()).not.toEqual({ status: "activated" });
 		const [row] = await sql`SELECT activated_at FROM runs WHERE id = ${seeded.run.id}`;

@@ -175,13 +175,12 @@ export async function getDeviceManifestSourcesForUser(params: {
   /** Include every retained exact artifact instead of only one winner per key. */
   includeRetainedVersions?: boolean;
   /**
-   * Scope to one device HOME workspace (`device_workers.organization_id`; a
-   * NULL home counts as the owner's personal workspace). A workspace holds ONE
-   * definition per connector key, so the winner is chosen across every fresh
-   * device homed there whose owner is still a member — otherwise two members on
-   * different extension versions would rewrite the shared definition on every
-   * poll. Advertiser lists stay this user's own devices, because they drive
-   * this user's connection pin and claim authorization. Omitted, the scope is
+   * Scope to one workspace's devices. `personal`: the user's personal fleet —
+   * every device of theirs NOT homed in a team workspace they belong to. A team
+   * workspace: every member's device homed there, because the workspace holds
+   * ONE definition per key and the winner must not flap between members on
+   * different extension versions; advertiser lists stay this user's own
+   * devices, which each get their own pinned connection. Omitted, the scope is
    * the user's whole fleet, whatever its homes.
    */
   home?: { organizationId: string; personal: boolean };
@@ -197,12 +196,17 @@ export async function getDeviceManifestSourcesForUser(params: {
         OR dw.connector_manifests ? ${params.connectorKey ?? ''}
       )
       AND ${
-        // The personal workspace is its owner's alone (whatever its member
-        // rows say), and a NULL home counts as personal.
         home?.personal
           ? params.sql`(
               dw.user_id = ${params.userId}
-              AND (dw.organization_id = ${home.organizationId} OR dw.organization_id IS NULL)
+              AND NOT (
+                dw.organization_id IS NOT NULL
+                AND dw.organization_id <> ${home.organizationId}
+                AND EXISTS (
+                  SELECT 1 FROM "member" m
+                  WHERE m."organizationId" = dw.organization_id AND m."userId" = dw.user_id
+                )
+              )
             )`
           : home
             ? params.sql`(

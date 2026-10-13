@@ -154,6 +154,8 @@ describe("connection-to-device operation routing lifecycle", () => {
 		const { org, user, ctx } = await seedOwnerContext({
 			orgName: "Operation Device Routing Org",
 		});
+		// The unpinned device lane serves personal workspaces only.
+		await getTestDb()`UPDATE "organization" SET metadata = ${JSON.stringify({ personal_org_for_user_id: user.id })} WHERE id = ${org.id}`;
 		ctx.baseUrl = "https://gateway.test/lobu";
 		await createTestConnectorDefinition({
 			key: CONNECTOR_KEY,

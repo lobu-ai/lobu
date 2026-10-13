@@ -28,14 +28,6 @@ export const DB_EGRESS_HARDENED_CONNECTOR_KEYS: ReadonlySet<string> = new Set([
 export interface ConnectorClaimContext {
   isUserScopedWorker: boolean;
   deviceWorkerId: string | null;
-  /**
-   * The device owner. An UNPINNED device run is claimable only from the
-   * connection owner's own devices (or anywhere in their personal workspace):
-   * team workspaces hold one private device connection per member, and a
-   * colleague's run must never execute on — or hand its inputs to — this
-   * member's machine.
-   */
-  workerUserId: string | null;
   workerPlatform: string | null;
   authorizedCapabilities: string[];
   capabilityMatchSet: string[];
@@ -71,7 +63,6 @@ interface ConnectorClaimLaneRefs {
   activationKind: SqlFragment;
   activatedAt: SqlFragment;
   connectionDeviceWorkerId: SqlFragment;
-  connectionCreatedBy: SqlFragment;
   runTargetDeviceWorkerId?: SqlFragment;
   pinPlatform: SqlFragment;
   runRequiredCapability: SqlFragment;
@@ -209,6 +200,9 @@ export function connectorClaimLaneSql(
         )
         -- User-scoped worker claiming an unpinned capability connector in its
         -- base org scope. Page-activated work is handled by the fleet parent.
+        -- PERSONAL workspaces only: a team workspace's device connections are
+        -- each pinned to one device and run through the exact-pin lane below,
+        -- so a team-bound token never claims a colleague's unpinned work.
         OR (
           ${context.isUserScopedWorker}
           -- Browser-local ids cannot move between eligible profiles. Existing
@@ -231,13 +225,10 @@ export function connectorClaimLaneSql(
           )
           AND NOT COALESCE(${pageActivated}, false)
           AND ${refs.organizationId} = ANY(${pgTextArray(context.baseOrgScopeIds)}::text[])
-          AND (
-            ${refs.connectionCreatedBy} = ${context.workerUserId}::text
-            OR EXISTS (
-              SELECT 1 FROM "organization" claim_owner_org
-              WHERE claim_owner_org.id = ${refs.organizationId}
-                AND (claim_owner_org.metadata::jsonb)->>'personal_org_for_user_id' = ${context.workerUserId}::text
-            )
+          AND EXISTS (
+            SELECT 1 FROM "organization" unpinned_org
+            WHERE unpinned_org.id = ${refs.organizationId}
+              AND (unpinned_org.metadata::jsonb)->>'personal_org_for_user_id' IS NOT NULL
           )
         )
         -- Exact execution pin. A chrome-extension pin on a connector that does

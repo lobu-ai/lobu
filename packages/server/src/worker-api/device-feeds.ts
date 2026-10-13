@@ -62,11 +62,11 @@ async function resolveDeviceConnection(
   const { device, error } = await resolveDeviceWorkerForRequest(c, workerId);
   if (error || !device) return { device: null, connection: null, error };
   const sql = getDb();
-  // The user-scoped device worker auto-wires a single connection for the
-  // connector in its home org (see device-reconcile.ts). Match on
-  // (user, connector, org) — user_id link via device_workers.created_by — to
-  // find that row. Either pinned to this device or unpinned with no other
-  // pin owner.
+  // The user-scoped device worker auto-wires a connection for the connector in
+  // its home org (see device-reconcile.ts). Match on (user, connector, org) —
+  // user_id link via device_workers.created_by — to find that row: pinned to
+  // this device, or, in a personal workspace only, unpinned (the personal
+  // fleet's shared row). A team workspace holds one pinned row per device.
   const rows = (await sql`
     SELECT c.id
     FROM connections c
@@ -75,7 +75,17 @@ async function resolveDeviceConnection(
       AND c.connector_key = ${connectorKey}
       AND c.organization_id = ${device.organization_id}
       AND c.deleted_at IS NULL
-      AND (c.device_worker_id IS NULL OR c.device_worker_id = ${device.id}::uuid)
+      AND (
+        c.device_worker_id = ${device.id}::uuid
+        OR (
+          c.device_worker_id IS NULL
+          AND EXISTS (
+            SELECT 1 FROM "organization" o
+            WHERE o.id = c.organization_id
+              AND (o.metadata::jsonb)->>'personal_org_for_user_id' = dw.user_id
+          )
+        )
+      )
     ORDER BY c.created_at ASC
     LIMIT 1
   `) as unknown as Array<{ id: number }>;

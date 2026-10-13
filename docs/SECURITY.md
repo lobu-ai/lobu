@@ -90,10 +90,18 @@ Implications, by design:
 - **Connection pins are authorized at bind time.** The requester must own the device, the device
   must be attached to the connection's workspace, and it must have the connector's required
   capability and be recently seen. Automatic wiring of advertised capabilities happens only in
-  each device's home workspace (requiring current membership for a team workspace), and creates a
-  `private` connection owned by the device's owner (one per member and connector in a team
-  workspace). Only that owner can share it with the workspace (`manage_connections` `update`
-  with `visibility: 'org'`); a personal-credential connection can never be widened.
+  each device's home workspace (requiring current membership for a team workspace) and creates
+  `private` connections owned by the device's owner. In the personal workspace the owner's devices
+  share one connection, unpinned when several serve it. In a team workspace every device gets its
+  own connection, pinned to it: the pin decides where work runs, `created_by` and `visibility`
+  decide who sees and uses it, and an unpinned team device connection is never claimed by a device.
+  A team device whose version is behind the workspace's definition has its connection paused with
+  an "Update Lobu on this device" reason until it catches up. Only a connection's creator can share
+  it with the workspace (`manage_connections` `update` with `visibility: 'org'`), which never
+  changes where it runs; a personal-credential connection can never be widened.
+- **Page-visit drafts follow current placement.** A Chrome device sees and activates drafts in its
+  owner's personal workspace, its current home, and workspaces where it is pinned, never through a
+  connection a Devices-page move invalidated.
 - **Automation pins follow a separate rule.** The device owner may pin an Automation to their
   device in any workspace; a workspace owner/admin may pin one to a device attached to that
   workspace; authenticated internal callers (apply, Automation runs) are not re-checked.

@@ -105,7 +105,8 @@ export type DeviceAutowireIdentityRow = {
 	app_auth_profile_id: number | string | null;
 	/**
 	 * The member whose device auto-wire owns this row: the personal org's owner
-	 * there, else the row's creator (team workspaces wire per member).
+	 * there, else the row's creator (a team workspace wires one private
+	 * connection per device, created by the device's owner).
 	 */
 	autowire_user_id: string | null;
 	is_device_connector: boolean;
@@ -115,8 +116,9 @@ export type DeviceAutowireIdentityRow = {
  * True when the row is exactly what `ensureDeviceConnectorWired` auto-creates:
  * a credential-free connection to an active device connector, owned by the
  * member whose device home is that workspace. A device pin is deliberately NOT
- * required — multi-device
- * auto-wiring leaves the connection unpinned.
+ * required — in a personal workspace multi-device auto-wiring leaves the
+ * connection unpinned. In a team workspace the row is pinned to one device, and
+ * the opt-out marker it carries suppresses only that device's connection.
  */
 export function isDeviceAutowireIdentity(
 	row: DeviceAutowireIdentityRow,

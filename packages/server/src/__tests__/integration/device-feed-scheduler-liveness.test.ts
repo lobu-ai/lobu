@@ -297,6 +297,8 @@ describe('scheduled feed device liveness', () => {
     const { org, user } = await seedOwnerContext({
       orgName: 'Poll Scoped Feed Scheduler Org',
     });
+    // The unpinned device lane serves personal workspaces only.
+    await getTestDb()`UPDATE "organization" SET metadata = ${JSON.stringify({ personal_org_for_user_id: user.id })} WHERE id = ${org.id}`;
 
     async function createDevice(
       workerId: string,
@@ -403,7 +405,6 @@ describe('scheduled feed device liveness', () => {
     const fleetContext: DueFeedClaimContext = {
       isUserScopedWorker: false,
       deviceWorkerId: null,
-      workerUserId: null,
       workerPlatform: null,
       authorizedCapabilities: [],
       capabilityMatchSet: [''],
@@ -418,7 +419,6 @@ describe('scheduled feed device liveness', () => {
     const macContext: DueFeedClaimContext = {
       isUserScopedWorker: true,
       deviceWorkerId: macDeviceId,
-      workerUserId: user.id,
       workerPlatform: 'macos',
       authorizedCapabilities: ['os.shell'],
       capabilityMatchSet: ['os.shell'],
@@ -440,7 +440,6 @@ describe('scheduled feed device liveness', () => {
     const chromeContext: DueFeedClaimContext = {
       isUserScopedWorker: true,
       deviceWorkerId: chromeDeviceId,
-      workerUserId: user.id,
       workerPlatform: 'chrome-extension',
       authorizedCapabilities: ['browser.history'],
       capabilityMatchSet: ['browser.history'],

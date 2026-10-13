@@ -1,17 +1,17 @@
 /**
  * A device's HOME workspace is chosen when it is paired (personal by default)
- * and its device connectors auto-wire there — not always in the personal
- * workspace. These cases pin the flow end to end on the server surfaces a
- * device touches after approval:
+ * and its device connectors auto-wire there. The personal workspace keeps its
+ * fleet model; a TEAM workspace gets one private connection per device, pinned
+ * to it. These cases pin the flow end to end on the server surfaces a device
+ * touches after approval:
  *   - mint-child-token: a new device inherits the parent grant's home; an
  *     existing device keeps its own (a rotation never moves it).
  *   - poll: a new device registers in its token's home, and auto-wire creates
- *     a PRIVATE connection there, owned by the device's owner, and none in the
- *     personal workspace.
- *   - a Devices-page move (`PATCH /api/me/devices/:id`) re-homes the wiring on
- *     the next poll and leaves the old home's connection paused.
- *   - in a shared team workspace each member gets their own device connection;
- *     nobody adopts a colleague's private one.
+ *     a PRIVATE connection there, pinned to the device and owned by its owner.
+ *   - a Devices-page move (`PATCH /api/me/devices/:id`) invalidates the old pin
+ *     and the next poll wires the new home; page activation follows the move.
+ *   - team work runs only on the device a connection is pinned to, and a
+ *     device behind the workspace's version is paused until it catches up.
  */
 
 import { Hono } from 'hono';
@@ -20,10 +20,9 @@ import { DEVICE_MANIFESTS_BY_PLATFORM } from '@lobu/connector-worker/daemon/devi
 import type { AuthInfo } from '../../auth/oauth/types';
 import { generateSecureToken, hashToken } from '../../auth/oauth/utils';
 import type { Env } from '../../index';
-import { resolveDeviceClaimableOrgs } from '../../utils/device-claimable-orgs';
 import { mintDeviceChildToken, updateDeviceWorkerOrg } from '../../worker-api/device-management';
 import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
-import { authorizeRunForWorker } from '../../worker-api/shared';
+import { activatePageRun } from '../../worker-api/page-activation';
 import { materializeDueFeeds, type DueFeedClaimContext } from '../../scheduled/check-due-feeds';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import { createTestConnection, createTestConnectorDefinition } from '../setup/test-fixtures';
@@ -236,7 +235,7 @@ describe('device home workspace chosen at pairing', () => {
     expect(await res.json()).toMatchObject({ error: 'device_home_unavailable' });
   });
 
-  it('preserves a legacy personal home and refuses rotation after leaving an existing home', async () => {
+  it('rotates a legacy NULL home and a departed home into the personal workspace', async () => {
     const sql = getTestDb();
     const { userId, personalOrgId } = await seedUser('Rotation Owner');
     const teamOrgId = await seedTeamOrg();
@@ -255,9 +254,15 @@ describe('device home workspace chosen at pairing', () => {
 
     await mint(userId, teamOrgId, 'departed-home');
     await sql`DELETE FROM member WHERE "organizationId" = ${teamOrgId} AND "userId" = ${userId}`;
-    const denied = await mint(userId, personalOrgId, 'departed-home');
-    expect(denied.status).toBe(403);
-    expect(await denied.json()).toMatchObject({ error: 'device_home_unavailable' });
+    // A home the owner left serves the personal fleet (as reconciliation treats
+    // it), so its rotated credential binds there; the row itself is unchanged.
+    const departed = await mint(userId, personalOrgId, 'departed-home');
+    expect(departed.status).toBe(200);
+    const departedBody = (await departed.json()) as { access_token: string };
+    const [departedPat] = await sql`
+      SELECT organization_id FROM personal_access_tokens WHERE token_hash = ${hashToken(departedBody.access_token)}
+    `;
+    expect(departedPat.organization_id).toBe(personalOrgId);
     expect((await deviceRow(userId, 'departed-home')).organization_id).toBe(teamOrgId);
   });
 
@@ -297,7 +302,7 @@ describe('device home workspace chosen at pairing', () => {
     expect(await shellConnections(personalOrgId)).toHaveLength(1);
   });
 
-  it('re-homes auto-wiring after a Devices-page move and leaves the old home paused', async () => {
+  it('invalidates the old pin on a Devices-page move and wires the new home pinned', async () => {
     const { userId, personalOrgId } = await seedUser('Mover');
     const teamOrgId = await seedTeamOrg();
     await addMember(teamOrgId, userId, 'admin');
@@ -354,6 +359,25 @@ describe('device home workspace chosen at pairing', () => {
     );
   });
 
+  it('gives one member two pinned connections for two devices in a team workspace', async () => {
+    const { userId } = await seedUser('Two Boxes');
+    const teamOrgId = await seedTeamOrg();
+    await addMember(teamOrgId, userId, 'member');
+    await pollShell(await workerPat(userId, teamOrgId, 'box-one'), 'box-one');
+    await pollShell(await workerPat(userId, teamOrgId, 'box-two'), 'box-two');
+    await pollShell(await workerPat(userId, teamOrgId, 'box-one'), 'box-one');
+
+    const one = await deviceRow(userId, 'box-one');
+    const two = await deviceRow(userId, 'box-two');
+    const team = await shellConnections(teamOrgId);
+    expect(team.map((row) => [row.device_worker_id, row.created_by, row.visibility, row.status]).sort()).toEqual(
+      [
+        [one.id, userId, 'private', 'active'],
+        [two.id, userId, 'private', 'active'],
+      ].sort()
+    );
+  });
+
   it('pauses a member on an older device manifest until their device runs the workspace version', async () => {
     const sql = getTestDb();
     const alice = await seedUser('Older Extension');
@@ -378,7 +402,7 @@ describe('device home workspace chosen at pairing', () => {
       `) as unknown as Array<{ version: string }>)[0]?.version;
     const connectionOf = async (userId: string) => {
       const [row] = (await sql`
-        SELECT c.id, c.status, c.error_message,
+        SELECT c.id, c.status, c.error_message, c.device_worker_id::text AS device_worker_id,
                (SELECT COUNT(*)::int FROM feeds f
                  WHERE f.connection_id = c.id AND f.status = 'active' AND f.deleted_at IS NULL) AS active_feeds
         FROM connections c
@@ -397,6 +421,7 @@ describe('device home workspace chosen at pairing', () => {
     await pollShell(aliceToken, 'older-box', olderManifest);
 
     expect(await definitionVersion()).toBe(workspaceVersion);
+    const aliceDevice = await deviceRow(alice.userId, 'older-box');
     const reason =
       `Update Lobu on this device to use ${String(OS_SHELL_MANIFEST.name)} in Team: ` +
       `this workspace runs version ${workspaceVersion}, your device has 0.0.1.`;
@@ -404,6 +429,7 @@ describe('device home workspace chosen at pairing', () => {
       status: 'paused',
       error_message: reason,
       active_feeds: 0,
+      device_worker_id: aliceDevice.id,
     });
     expect(await connectionOf(bob.userId)).toMatchObject({
       status: 'active',
@@ -412,7 +438,6 @@ describe('device home workspace chosen at pairing', () => {
     });
 
     // Her older device is never authorized for the workspace's artifact.
-    const aliceDevice = await deviceRow(alice.userId, 'older-box');
     const authorizations = await reconcileDeviceCapabilities(alice.userId, aliceDevice.id);
     expect(
       authorizations.filter((auth) => auth.connectorKey === 'os.shell' && auth.connectorVersion === workspaceVersion)
@@ -455,54 +480,22 @@ describe('device home workspace chosen at pairing', () => {
     });
   });
 
-  it('authorizes an unpinned run in a moved device home while membership remains valid', async () => {
-    const sql = getTestDb();
-    const { userId, personalOrgId } = await seedUser('Moved Worker');
-    const teamOrgId = await seedTeamOrg();
-    await addMember(teamOrgId, userId, 'member');
-    const workerId = 'scope-moving-box';
-    const token = await workerPat(userId, personalOrgId, workerId);
-    await pollShell(token, workerId);
-    const device = await deviceRow(userId, workerId);
-    await moveDevice(userId, device.id, teamOrgId);
-    await pollShell(token, workerId);
-    const [connection] = await shellConnections(teamOrgId);
-    // Several eligible devices leave the connection unpinned. Scope must not
-    // rely on a connection pin to discover the device's current home.
-    await sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${connection.id}`;
-    const scope = () => resolveDeviceClaimableOrgs(sql, {
-      deviceWorkerId: device.id, ownerUserId: userId, baseOrgIds: [personalOrgId],
-    });
-    expect(await scope()).toContain(teamOrgId);
-    const [run] = await sql`
-      INSERT INTO runs (organization_id, run_type, connection_id, connector_key,
-                        action_key, status, approval_status, claimed_by)
-      VALUES (${teamOrgId}, 'action', ${connection.id}, 'os.shell',
-              'test-action', 'running', 'auto', ${workerId})
-      RETURNING id
-    `;
-    const app = new Hono<{ Bindings: Env }>();
-    app.get('/authorize', async (c) => {
-      c.set('workerAuthMode', 'user');
-      c.set('workerUserId', userId);
-      c.set('workerOrgIds', [personalOrgId]);
-      const denial = await authorizeRunForWorker(c, Number(run.id), workerId);
-      return denial ?? c.json({ ok: true });
-    });
-    expect((await app.request('/authorize', {}, TEST_ENV)).status).toBe(200);
-
-    await sql`DELETE FROM member WHERE "organizationId" = ${teamOrgId} AND "userId" = ${userId}`;
-    expect(await scope()).not.toContain(teamOrgId);
-    expect((await app.request('/authorize', {}, TEST_ENV)).status).toBe(403);
-  });
-
-  it("never lets a member's device claim a colleague's unpinned device connection", async () => {
+  it('runs team work only on the device a connection is pinned to', async () => {
     const sql = getTestDb();
     const alice = await seedUser('Claim Alice');
     const bob = await seedUser('Claim Bob');
     const teamOrgId = await seedTeamOrg();
     await addMember(teamOrgId, alice.userId, 'owner');
     await addMember(teamOrgId, bob.userId, 'member');
+    const devices = (await sql`
+      INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id, last_seen_at)
+      VALUES
+        (${alice.userId}, 'claim-alice', 'headless', ${sql.json(['os.shell'])}, ${teamOrgId}, NOW()),
+        (${bob.userId}, 'claim-bob', 'headless', ${sql.json(['os.shell'])}, ${teamOrgId}, NOW())
+      RETURNING id, user_id
+    `) as unknown as Array<{ id: string; user_id: string }>;
+    const aliceDevice = devices.find((row) => row.user_id === alice.userId)!.id;
+    const bobDevice = devices.find((row) => row.user_id === bob.userId)!.id;
     await createTestConnectorDefinition({
       key: 'test.home-claim',
       name: 'Home Claim',
@@ -519,14 +512,18 @@ describe('device home workspace chosen at pairing', () => {
       created_by: bob.userId,
       createDefaultFeed: false,
     });
-    await sql`
-      INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
-      VALUES (${teamOrgId}, ${bobConnection.id}, 'items', 'active', '* * * * *', NOW() - INTERVAL '5 minutes')
-    `;
-    const deviceContext = (userId: string): DueFeedClaimContext => ({
+    await sql`UPDATE connections SET device_worker_id = ${bobDevice}::uuid WHERE id = ${bobConnection.id}`;
+    const dueFeed = async () => {
+      await sql`DELETE FROM runs WHERE connection_id = ${bobConnection.id}`;
+      await sql`DELETE FROM feeds WHERE connection_id = ${bobConnection.id}`;
+      await sql`
+        INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
+        VALUES (${teamOrgId}, ${bobConnection.id}, 'items', 'active', '* * * * *', NOW() - INTERVAL '5 minutes')
+      `;
+    };
+    const deviceContext = (deviceWorkerId: string): DueFeedClaimContext => ({
       isUserScopedWorker: true,
-      deviceWorkerId: null,
-      workerUserId: userId,
+      deviceWorkerId,
       workerPlatform: 'headless',
       authorizedCapabilities: ['os.shell'],
       capabilityMatchSet: ['os.shell'],
@@ -538,49 +535,85 @@ describe('device home workspace chosen at pairing', () => {
       workerSupportsHttpAuth: false,
       backendCapacity: { compiled_connector: 1 },
     });
+    const runsFor = async (deviceWorkerId: string) =>
+      (await materializeDueFeeds({} as Env, sql, { claimContext: deviceContext(deviceWorkerId) })).runsCreated;
 
-    // Alice's device lives in the same team workspace and serves os.shell, but
-    // the unpinned connection is Bob's private one: it must not run on Alice's
-    // machine.
-    expect(
-      (await materializeDueFeeds({} as Env, sql, { claimContext: deviceContext(alice.userId) }))
-        .runsCreated
-    ).toBe(0);
-    expect(
-      (await materializeDueFeeds({} as Env, sql, { claimContext: deviceContext(bob.userId) }))
-        .runsCreated
-    ).toBe(1);
+    // Bob's connection is pinned to his device: Alice's device in the same
+    // workspace, serving the same capability, never claims it.
+    await dueFeed();
+    expect(await runsFor(aliceDevice)).toBe(0);
+    expect(await runsFor(bobDevice)).toBe(1);
+
+    // Unpinned, a team device connection is claimable by no device at all:
+    // the unpinned capability lane is personal-only.
+    await sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${bobConnection.id}`;
+    await dueFeed();
+    expect(await runsFor(bobDevice)).toBe(0);
+    expect(await runsFor(aliceDevice)).toBe(0);
   });
 
-  it('pauses an unpinned old-home connection once no device homed there serves it', async () => {
+  it('activates page drafts by current placement after a move, never through the old pin', async () => {
     const sql = getTestDb();
-    const { userId, personalOrgId } = await seedUser('Fleet Mover');
+    const { userId, personalOrgId } = await seedUser('Chrome Mover');
     const teamOrgId = await seedTeamOrg();
-    await addMember(teamOrgId, userId, 'admin');
-    const tokenA = await workerPat(userId, personalOrgId, 'fleet-box-a');
-    const tokenB = await workerPat(userId, personalOrgId, 'fleet-box-b');
-    await pollShell(tokenA, 'fleet-box-a');
-    await pollShell(tokenB, 'fleet-box-b');
-    // The first poll pinned the connection to its sole advertiser; a fleet of
-    // several eligible devices can leave it unpinned, which is the shape the
-    // Devices-page move cannot reach. os.shell declares no feeds, so seed one.
-    const [pinned] = await shellConnections(personalOrgId);
-    await sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${pinned.id}`;
-    await sql`
-      INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
-      VALUES (${personalOrgId}, ${pinned.id}, 'items', 'active', '* * * * *', NOW())
-    `;
-    const [personal] = await shellConnections(personalOrgId);
-    expect(personal).toMatchObject({ device_worker_id: null, active_feeds: 1 });
+    await addMember(teamOrgId, userId, 'member');
+    const [chrome] = (await sql`
+      INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id, last_seen_at, app_version)
+      VALUES (${userId}, 'moving-chrome', 'chrome-extension', ${sql.json(['browser.debugger'])}, ${personalOrgId}, NOW(), '0.6.1')
+      RETURNING id
+    `) as unknown as Array<{ id: string }>;
+    for (const orgId of [personalOrgId, teamOrgId]) {
+      await createTestConnectorDefinition({ key: 'test.page-draft', name: 'Page Draft', organization_id: orgId });
+    }
+    const draft = async (organizationId: string, slug: string) => {
+      const connection = await createTestConnection({
+        organization_id: organizationId,
+        connector_key: 'test.page-draft',
+        created_by: userId,
+        createDefaultFeed: false,
+      });
+      await sql`UPDATE connections SET device_worker_id = ${chrome.id}::uuid, slug = ${slug} WHERE id = ${connection.id}`;
+      const [run] = (await sql`
+        INSERT INTO runs (
+          organization_id, run_type, connection_id, connector_key, action_key,
+          approval_status, status, expires_at, activation_kind, activation_target_urls,
+          created_by_user_id, run_metadata
+        ) VALUES (
+          ${organizationId}, 'action', ${connection.id}, 'test.page-draft', 'prepare_reply',
+          'auto', 'pending', NOW() + interval '1 day', 'page_visit',
+          ARRAY['https://example.test/draft']::text[], ${userId}, ${sql.json({ page_activation_identity: 'exact' })}
+        )
+        RETURNING id
+      `) as unknown as Array<{ id: number }>;
+      return run.id;
+    };
+    const personalRun = await draft(personalOrgId, 'page-draft-personal');
+    await moveDevice(userId, chrome.id, teamOrgId);
+    const teamRun = await draft(teamOrgId, 'page-draft-team');
 
-    await moveDevice(userId, (await deviceRow(userId, 'fleet-box-a')).id, teamOrgId);
-    await moveDevice(userId, (await deviceRow(userId, 'fleet-box-b')).id, teamOrgId);
-    await pollShell(tokenA, 'fleet-box-a');
+    // The credential is still bound to the personal workspace the device left.
+    const app = new Hono<{ Bindings: Env }>();
+    app.use('*', async (c, next) => {
+      c.set('workerAuthMode', 'user');
+      c.set('workerUserId', userId);
+      c.set('workerOrgIds', [personalOrgId]);
+      await next();
+    });
+    app.post('/activate', activatePageRun);
+    const activate = async (runId: number) =>
+      (await (
+        await app.request(
+          '/activate',
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ worker_id: 'moving-chrome', run_id: runId, tab_id: 3, url: 'https://example.test/draft' }),
+          },
+          TEST_ENV
+        )
+      ).json()) as { status: string };
 
-    // The unpinned connection survived both moves (the move only pauses pins),
-    // so reconciliation must pause its feeds in the now device-less home.
-    const [after] = await shellConnections(personalOrgId);
-    expect(after).toMatchObject({ id: personal.id, active_feeds: 0 });
-    expect(await shellConnections(teamOrgId)).toHaveLength(1);
+    expect(await activate(personalRun)).toEqual({ status: 'unavailable' });
+    expect(await activate(teamRun)).toEqual({ status: 'activated' });
   });
 });
