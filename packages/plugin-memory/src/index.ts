@@ -44,7 +44,7 @@ function recallQuery(prompt: string, messages: readonly unknown[]): string {
   // search. Only short deictic followups borrow the latest supplied exchange.
   if (
     prompt.length > 200 ||
-    !/^(?:(?:what|how) about (?:it|its|that|this|them|their|those|these)\b|(?:why|how|when|where) (?:is|was|does|did|will|would|can|should) (?:it|that|this|they|those|these)\b|(?:can you |please )?(?:explain|expand on|summarize) (?:that|this|it)[?.!]*$|(?:what did we decide|go on|continue)[?.!]*$)/i.test(
+    !/^(?:(?:what|how) about (?:it|its|that|this|them|their|those|these)\b|(?:why|how|when|where) (?:is|was|does|did|will|would|can|should) (?:it|that|this|they|those|these)\b|(?:can you |please )?(?:explain|expand on|summarize) (?:that|this|it)[?.!]*$|(?:can you |please )?(?:draft|write|prepare|revise|update|fix) (?:it|that|this|them)(?:[?.!]*$| (?:using|with|based on|again|now|up)\b)|(?:what did we decide|go on|continue)[?.!]*$)/i.test(
       prompt
     )
   )

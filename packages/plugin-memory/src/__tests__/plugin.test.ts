@@ -77,9 +77,27 @@ describe("memory recall", () => {
     expect(query.length).toBeLessThanOrEqual(2000);
   });
   test.each([
+    "Draft it using the terms we agreed.",
+    "Please revise that with the new deadline.",
+    "Can you write it up?",
+  ])("resolves an imperative followup from the recent exchange: %s", async (prompt) => {
+    const h = harness();
+    await h.recall(prompt, [
+      user("Prepare the Acme renewal proposal."),
+      assistant("Use an annual contract."),
+    ]);
+    const query = String(h.invoke.mock.calls[0]![3].query);
+    expect(query).toContain("Acme renewal proposal");
+    expect(query).toContain(prompt);
+    expect(query.length).toBeLessThanOrEqual(2000);
+    expect(h.invoke).toHaveBeenCalledTimes(1);
+  });
+  test.each([
     "What is the release date for Borealis?",
     "Switch topics. What about its heartbeat protocol?",
     "Tell me about Berlin.",
+    "Draft an Acme proposal.",
+    "Draft this contract for Borealis.",
   ])("leaves standalone/topic-switch queries unchanged: %s", async (prompt) => {
     const h = harness();
     await h.recall(prompt, [
