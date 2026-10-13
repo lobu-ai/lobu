@@ -654,6 +654,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
             },
             due: {
               type: ["string", "null"],
+              format: "date-time",
               description: "ISO 8601 due date. Null clears the due date.",
             },
             list: {

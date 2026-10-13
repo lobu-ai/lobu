@@ -33,7 +33,7 @@ const pinnedManifestHashes: Record<string, string> = {
   "apple.reminders@0.2.0":
     "ccaf18f1c403ce2ae125388a7d5a720f33a0ef656c69a2a4bde45d7b364c5de1",
   "apple.reminders@0.3.0":
-    "993dd3d1d6a8e66c914432470be311aea4eb0d500ab883d6efd4191a5086ec26",
+    "6be1b863073a0417d2c3fa5d5a14f5b1103b95543e3c53aa2619f34347e9efc3",
   "apple.screen_time@0.2.0":
     "882dc20d30bfa79387b6fc88dfa0a97719823bf29ea9dacb6e53fd881198e084",
   "apple.system_audio@0.2.0":
