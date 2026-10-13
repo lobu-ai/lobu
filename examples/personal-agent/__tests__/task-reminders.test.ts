@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
-import { syncTaskReminders } from "../task-reminders";
+import { syncTaskReminders } from "../task-builder.reaction";
 
 type Row = { id: number; name: string; metadata: Record<string, unknown> };
 type Execute = Parameters<ReactionClient["operations"]["execute"]>[0];
