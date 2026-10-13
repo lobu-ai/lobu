@@ -13,16 +13,22 @@
  *   4. the message is read through the live feed read as one of them, so the
  *      source-read authorization, device dispatch and scrubbing all apply;
  *   5. the platform turns the row into a chat message or refuses it;
- *   6. the hydrated message is matched again per Automation, and a group reply
- *      needs an Automation scoped to that exact group;
- *   7. the bridge runs its normal reply path for exactly those Automations.
+ *   6. the hydrated message is matched again per Automation (its first
+ *      matching trigger wins); background targets are queued on the source
+ *      signal, and a group reply needs an Automation scoped to that group;
+ *   7. the bridge runs its normal reply path for exactly the reply targets.
  *
  * It never goes through `chat.processMessage`: the Chat SDK writes its dedupe
  * marker before handling, so a failed attempt's retry would be dropped.
  */
 
 import { createLogger } from "@lobu/core";
-import { findMatchingAutomationActivations, planAutomationActivations } from "../../automations/activation.js";
+import {
+  dispatchAutomationRunsBestEffort,
+  findMatchingAutomationActivations,
+  planAutomationActivations,
+  queueAutomationActivations,
+} from "../../automations/activation.js";
 import { getDb } from "../../db/client.js";
 import { readSourceFeed } from "../../lib/connector-pushdown.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
@@ -86,6 +92,20 @@ export async function handleChatSourceIngress(
 
     const adapter = instance.chat.getAdapter(instance.connection.platform);
     const parsed = descriptor.parseSourceMessage(adapter, row);
+    // A refused message (own, system, revoked, broadcast) still activates
+    // background triggers, matched on the source signal alone.
+    const hydrated = parsed
+      ? { ...signal, attributes: { channel_id: parsed.channelId, user_id: parsed.message.author.userId } }
+      : signal;
+    const plan = planAutomationActivations(
+      hydrated,
+      (await findMatchingAutomationActivations(organizationId, hydrated, sql))
+        .filter((match) => candidates.includes(match.automationId)),
+    );
+    // Queued once per delivery id, so a retried job does not queue again.
+    await dispatchAutomationRunsBestEffort(
+      await queueAutomationActivations({ signal, matches: plan.backgroundTargets, db: sql }),
+    );
     if (!parsed) return;
     const thread = await resolveChatTarget(instance.chat, instance.connection.platform, {
       channelId: parsed.message.threadId,
@@ -94,16 +114,7 @@ export async function handleChatSourceIngress(
     });
     if (!thread) throw new Error(`Could not open chat thread ${parsed.message.threadId}`);
 
-    const hydrated = {
-      ...signal,
-      attributes: { channel_id: parsed.channelId, user_id: parsed.message.author.userId },
-    };
-    const plan = planAutomationActivations(
-      hydrated,
-      await findMatchingAutomationActivations(organizationId, hydrated, sql),
-    );
     const replyTargets = plan.replyTargets.filter((target) =>
-      candidates.includes(target.automationId) &&
       (thread.isDM === true || target.trigger.match?.channel_id === parsed.channelId));
     if (replyTargets.length === 0) return;
     await instance.messageBridge.handleAdmittedSourceMessage(thread, parsed.message, {

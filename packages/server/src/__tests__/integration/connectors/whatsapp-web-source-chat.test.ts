@@ -94,13 +94,13 @@ function fakeWhatsAppTab(params: { actionKey: string; actionInput: Record<string
   return done({ value: { ok: true, results, hasMore: false } });
 }
 
-async function insertAutomation(slug: string, trigger: Record<string, unknown>): Promise<number> {
+async function insertAutomation(slug: string, ...triggers: Array<Record<string, unknown>>): Promise<number> {
   const [{ id }] = await sql`SELECT nextval('automations_id_seq') AS id`;
   const automationId = Number(id);
   await sql`INSERT INTO automations (id, organization_id, slug, name, status, created_by, automation_group_id, managed_agent_id, triggers)
     VALUES (${automationId}, ${orgId}, ${slug}, ${slug}, 'active', ${ownerId}, ${automationId}, ${agentId},
-      ${sql.json([{ kind: "event", connector_key: "whatsapp.web", connection_id: connectionId,
-        event_types: ["message.created"], execution: "turn", active_run: "queue", ...trigger }])})`;
+      ${sql.json(triggers.map((trigger) => ({ kind: "event", connector_key: "whatsapp.web", connection_id: connectionId,
+        event_types: ["message.created"], execution: "turn", active_run: "queue", ...trigger })))})`;
   const [row] = await sql`INSERT INTO automation_versions (automation_id, version, name, prompt, created_by)
     VALUES (${automationId}, 1, ${slug}, 'Answer the sender.', ${ownerId}) RETURNING id`;
   await sql`UPDATE automations SET current_version_id = ${row.id} WHERE id = ${automationId}`;
@@ -375,6 +375,24 @@ describe("WhatsApp Web source chat", () => {
     expect(enqueued).toHaveLength(1);
     await completeTurns();
     expect(sends).toHaveLength(1);
+  }, 60_000);
+
+  it.each([
+    ["the scoped chat", DM_JID, { replies: 1, background: 0 }],
+    ["any other chat", OTHER_DM_JID, { replies: 0, background: 1 }],
+  ] as const)("routes a scoped reply trigger before its silent fallback in %s", async (_, chatJid, expected) => {
+    // An Automation's first matching trigger wins, and the chat is known only
+    // once the message is read.
+    await insertAutomation("scoped-reply-or-archive", replyTo({ channel_id: DM_JID }), { output: "silent" });
+    deviceMessages.push({ id: "SYNTHDM10", chat_jid: chatJid, body: "route me" });
+
+    await deliver("SYNTHDM10");
+    await drain();
+    expect(enqueued).toHaveLength(expected.replies);
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND run_type = 'automation'`)
+      .toHaveLength(expected.background);
+    await completeTurns();
+    expect(sends).toHaveLength(expected.replies);
   }, 60_000);
 
   it("resolves the connection's numeric runtime id for chat routing", async () => {

@@ -84,18 +84,16 @@ async function receiveSourceReferenceDelivery(
         label: `Source ${event.event_type}`,
         input_text: `Source change ${event.event_type}: ${JSON.stringify(event.resource_ref)}. Read its content from the source when needed.`,
       };
-      const matches = await findMatchingAutomationActivations(feed.organization_id, signal, tx);
-      const { backgroundTargets } = planAutomationActivations(
-        signal, matches.filter(match => allowed.has(match.automationId)));
-      queued.push(...await queueAutomationActivations({ signal, matches: backgroundTargets, db: tx }));
-      // Reply Automations answer in the source conversation instead, once the
-      // message is read; their channel filters need that content, so the job
-      // carries every subscription that might reply and the worker re-matches.
-      const background = new Set(backgroundTargets.map(target => target.automationId));
+      // An Automation's first matching trigger wins, and a reply trigger's
+      // chat filter needs the message, which only the ingress worker reads.
+      // So an Automation that might reply is routed there, all triggers at once.
       const automationIds = subscriptions
-        .filter(subscription => !background.has(subscription.automationId)
-          && mayReplyToSource(subscription.triggers, signal))
+        .filter(subscription => mayReplyToSource(subscription.triggers, signal))
         .map(subscription => subscription.automationId);
+      const matches = await findMatchingAutomationActivations(feed.organization_id, signal, tx);
+      const { backgroundTargets } = planAutomationActivations(signal, matches.filter(match =>
+        allowed.has(match.automationId) && !automationIds.includes(match.automationId)));
+      queued.push(...await queueAutomationActivations({ signal, matches: backgroundTargets, db: tx }));
       if (automationIds.length) await enqueueChatSourceIngress(tx, {
         organizationId: feed.organization_id,
         connectionId: notice.connection_id,
