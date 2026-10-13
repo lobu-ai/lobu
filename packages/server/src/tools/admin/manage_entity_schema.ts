@@ -25,6 +25,7 @@ import {
 } from '@lobu/core/contracts/tools/manage-entity-schema';
 import { Value } from '@sinclair/typebox/value';
 import { COLLECTION_PRESENTATION_KEY, parseCollectionPresentation } from '@lobu/core/contracts/tools/collection-presentation';
+import { isTemplateSdkInteractionDefinition } from '@lobu/core/json-template';
 import { validateEntityMetrics } from '@lobu/connector-sdk';
 import { isPlatformEventType, platformEventKinds } from '../../automations/platform-event-catalog';
 import { compileEntityRule } from '../../authz/entity-rule-executor';
@@ -1013,6 +1014,12 @@ function assertValidEventKindInteractions(
       if (!declaredHandlers.has(action)) {
         throw invalidSchema(
           `event_kinds.${kind}.interactions.${action} has no portable @${action} button/select handler in jsonTemplate`
+        );
+      }
+      if (isTemplateSdkInteractionDefinition(rawInteraction)) continue;
+      if (rawInteraction && typeof rawInteraction === 'object' && Object.hasOwn(rawInteraction, 'sdk')) {
+        throw invalidSchema(
+          `event_kinds.${kind}.interactions.${action}.sdk must declare a bounded script and read/full mode without emits`
         );
       }
       const emits =

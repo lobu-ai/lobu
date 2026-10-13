@@ -23,6 +23,7 @@ import { fixedActionArgs } from "./http/rest-tool-routes";
 import type { Env } from "./index";
 import { invokeTemplateEventAction } from "./interactions/template-event-actions";
 import { invokeViewAction } from "./interactions/template-event-actions";
+import { resolveWebTemplateSdkAction } from "./interactions/template-sdk-actions";
 import { resolveRestToolAuthContext } from "./mcp-handler";
 import { getView, isValidViewKey, renderViewShell } from "./views/views";
 import { getOperationsSummary } from "./operations/connector-operations";
@@ -356,7 +357,8 @@ export async function restToolProxy(
  */
 export async function restInvokeEventAction(c: Context<{ Bindings: Env }>) {
 	try {
-		const ctx = toToolContext(extractAuthContext(c));
+		const auth = extractAuthContext(c);
+		const ctx = toToolContext(auth);
 		if (!ctx.isAuthenticated || !ctx.userId) {
 			throw new ToolUserError(
 				"A signed-in Lobu user is required for this interaction.",
@@ -385,7 +387,7 @@ export async function restInvokeEventAction(c: Context<{ Bindings: Env }>) {
 		if (typeof body.interaction_id !== "string") {
 			throw new ToolUserError("interaction_id is required", 400);
 		}
-		const result = await invokeTemplateEventAction({
+		const invocation = {
 			organizationId: ctx.organizationId,
 			sourceEventId: eventId,
 			action,
@@ -398,7 +400,18 @@ export async function restInvokeEventAction(c: Context<{ Bindings: Env }>) {
 				userId: ctx.userId,
 			},
 			source: { clientId: ctx.clientId ?? null },
-		});
+		};
+		const sdk = await resolveWebTemplateSdkAction(invocation, ctx);
+		if (sdk) {
+			const result = await executeTool(sdk.tool, sdk.args, c.env, auth);
+			return c.json(
+				toJsonSafe({
+					kind: "sdk",
+					result: toRestPublicToolResult(sdk.tool, result),
+				}),
+			);
+		}
+		const result = await invokeTemplateEventAction(invocation);
 		return c.json(
 			toJsonSafe({
 				created: result.created,
