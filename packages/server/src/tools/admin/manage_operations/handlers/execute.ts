@@ -561,7 +561,7 @@ async function replayExistingOperationRun(
 			action: "execute",
 			run_id: claim.runId,
 			status: "in_progress",
-			message: `Operation run ${claim.runId} is in progress. Read operations.getRun(${claim.runId}) for its result.`,
+			message: `Operation run ${claim.runId} is ${claim.status === "pending" ? "queued and waiting for execution" : "in progress"}. Read operations.getRun(${claim.runId}) for its result.`,
 		};
 	}
 	return {
@@ -779,6 +779,9 @@ export async function handleExecute(
 	if (args.background && !executesOnDevice) {
 		throw new ToolUserError("Background execution requires a device operation.", 422);
 	}
+	// Persist only validated device intent, including while waiting for approval.
+	// The idempotency conflict path retains the original run's metadata and expiry.
+	if (args.background) runMetadata = { ...runMetadata, background: true };
 
 	const approvalMode: "inline" | "queued" | "device" = shouldQueue
 		? "queued"
@@ -1057,7 +1060,14 @@ export async function handleExecute(
 	if (approvalMode === "device") {
 		if (args.background) {
 			await trackOperationReaction(runId);
-			return replayExistingOperationRun(claim, operation.name, ctx);
+			return claim.status === "pending"
+				? {
+						action: "execute",
+						run_id: runId,
+						status: "in_progress",
+						message: `Operation run ${runId} is queued and waiting for ${connection.device_worker_id ? "the selected device" : "an eligible device"}. Read operations.getRun(${runId}) for its result.`,
+					}
+				: replayExistingOperationRun(claim, operation.name, ctx);
 		}
 		const result = await waitForDeviceActionRun(
 			runId,

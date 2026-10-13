@@ -55,7 +55,8 @@ interface StaleRunSweepSpec {
 	/**
 	 * Include never-claimed pending rows. Auto-approved rows are judged on
 	 * `created_at`; human-approved rows are judged on the `run_at` stamped when
-	 * approval made them claimable.
+	 * approval made them claimable. An action's explicit expires_at overrides
+	 * this coarse age limit. Page activation retains its activation clock.
 	 *
 	 * Only rows a worker is actually allowed to claim are reaped: a run with
 	 * `approval_status = 'pending'` is parked waiting for a HUMAN to approve it —
@@ -163,6 +164,7 @@ export function buildStaleRunWhereSql(spec: StaleRunSweepSpec): string {
            -- run_at; judging it on queue-time created_at would time out any
            -- run whose review outlasted the interval before a worker polled.
            (activation_kind IS NULL
+            AND (run_type <> 'action' OR expires_at IS NULL)
             AND CASE WHEN approval_status = 'approved' THEN run_at ELSE created_at END
                 < current_timestamp - ${intervalSql(spec.coarseStaleInterval)})
            OR (activation_kind = 'page_visit'

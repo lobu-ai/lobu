@@ -12,6 +12,7 @@ import {
 import type { Static } from "@sinclair/typebox";
 import { resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { EntityRowValidationError } from "../../../../authz/entity-row-validation";
+import { DEVICE_ACTION_QUEUE_BUDGET_MS, DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS } from "../../../../config/intervals";
 import { type DbClient, getDb, parsePgNumberArray, pgTextArray } from "../../../../db/client";
 import type { Env } from "../../../../index";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
@@ -52,7 +53,7 @@ import {
 	type StoredManageEntitySchemaProposal,
 } from "../../manage_entity_schema";
 import { deviceManifestAdmissionError } from "../../../../runs/queue-service";
-import { selectedConnectorVersionArtifactSql } from "../../../../utils/connector-execution-placement";
+import { isDelegatedBrowserAffinityConnector, selectedConnectorVersionArtifactSql } from "../../../../utils/connector-execution-placement";
 import { runLeaseFence } from "../../../../runs/run-lease";
 import { executeOperationInline } from "./execute";
 /**
@@ -1287,6 +1288,7 @@ export async function handleApprove(
 	const pendingRows = await sql`
     SELECT id, connection_id, action_key, action_input,
            connector_key, connector_version, connector_artifact_hash, target_device_worker_id,
+           (SELECT platform FROM device_workers WHERE id = runs.target_device_worker_id) AS target_device_platform,
            policy_principal_kind, policy_principal_id,
            cv.artifact_hash AS pinned_artifact_hash
     FROM runs
@@ -1316,6 +1318,7 @@ export async function handleApprove(
 		connector_artifact_hash: string | null;
 		pinned_artifact_hash: string | null;
 		target_device_worker_id: string | null;
+		target_device_platform: string | null;
 		action_key: string;
 		action_input: Record<string, unknown> | null;
 		policy_principal_kind: string | null;
@@ -1421,6 +1424,9 @@ export async function handleApprove(
 	// same transaction as the claim + confirmed card — there is no separate
 	// post-claim status write to race with the card.
 	const setRunning = resolved.operation.backend !== "local_action";
+	const executesOnDevice =
+		!isDelegatedBrowserAffinityConnector(pendingRun.target_device_platform, pendingRun.connector_key) &&
+		(pendingRun.target_device_worker_id != null || resolved.connection.connector_runtime != null);
 	// Minted unconditionally so the fence value is never nullable. Only a run
 	// that actually flips to `running` records it as its owner; a `local_action`
 	// run stays unclaimed and returns before any fenced write.
@@ -1435,7 +1441,13 @@ export async function handleApprove(
 		// before any worker can poll it.
 		const runningSet = setRunning
 			? tx`, status = 'running', claimed_by = ${inlineOwner}, claimed_at = current_timestamp, last_heartbeat_at = current_timestamp`
-			: tx`, run_at = current_timestamp`;
+			: tx`, run_at = current_timestamp,
+				expires_at = CASE WHEN ${executesOnDevice} AND activation_kind IS NULL
+					THEN COALESCE(expires_at, current_timestamp +
+						(CASE WHEN run_metadata->'background' = 'true'::jsonb
+							THEN ${DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS}
+							ELSE ${DEVICE_ACTION_QUEUE_BUDGET_MS} END)::int * interval '1 millisecond')
+					ELSE expires_at END`;
 		const rows = await tx`
 			UPDATE runs
 			SET approval_status = 'approved'
@@ -1481,7 +1493,7 @@ export async function handleApprove(
 			approved: true,
 			run_id: args.run_id,
 			event_id: eventId,
-			message: "Operation approved. The worker will execute it shortly.",
+			message: "Operation approved and queued, waiting for execution.",
 		};
 	}
 
