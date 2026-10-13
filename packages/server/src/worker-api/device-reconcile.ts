@@ -1155,6 +1155,20 @@ async function reconcileTeamHome(
       if (caps.has(dc.requiredCapability)) wire(dc.key, dc.feedKeys, deviceId);
     }
   }
+  const pinnedKeys = new Set(pinned.map((row) => `${row.connector_key}\u0000${row.device_id}`));
+  // A device that only runs an OLDER version of a key the workspace already
+  // runs newer gets its pinned connection created paused, carrying the upgrade
+  // reason, so pairing it never silently omits the connector.
+  for (const source of sources) {
+    for (const deviceId of deviceCaps.keys()) {
+      const identity = `${source.key}\u0000${deviceId}`;
+      if (wired.has(identity) || pinnedKeys.has(identity)) continue;
+      const deviceVersion = deviceVersions.get(deviceId)?.get(source.key);
+      if (deviceVersion && compareSemverish(deviceVersion, source.metadata.version) < 0) {
+        tasks.push(createUpgradePendingConnection(userId, organizationId, source, deviceId, deviceVersion));
+      }
+    }
+  }
   for (const row of pinned) {
     if (!knownKeys.has(row.connector_key)) continue;
     if (wired.has(`${row.connector_key}\u0000${row.device_id}`)) continue;
@@ -1193,15 +1207,7 @@ async function pauseTeamDeviceConnection(
   const sql = getDb();
   try {
     if (upgrade) {
-      const [org] = (await sql`
-        SELECT name FROM "organization" WHERE id = ${organizationId}
-      `) as unknown as Array<{ name: string | null }>;
-      const reason = deviceUpgradeRequiredMessage({
-        connectorName: upgrade.source.metadata.name,
-        workspaceName: org?.name || 'this workspace',
-        workspaceVersion: upgrade.source.metadata.version,
-        deviceVersion: upgrade.deviceVersion,
-      });
+      const reason = await upgradeReason(organizationId, upgrade.source, upgrade.deviceVersion);
       await sql`
         UPDATE connections
         SET status = CASE WHEN status = 'active' THEN 'paused' ELSE status END,
@@ -1219,6 +1225,93 @@ async function pauseTeamDeviceConnection(
     logger.warn(
       { userId, connectionId, err: errorMessage(err) },
       '[device-connectors] Failed to pause a team device connection'
+    );
+  }
+}
+
+async function upgradeReason(
+  organizationId: string,
+  source: DeviceConnectorSource,
+  deviceVersion: string
+): Promise<string> {
+  const [org] = (await getDb()`
+    SELECT name FROM "organization" WHERE id = ${organizationId}
+  `) as unknown as Array<{ name: string | null }>;
+  return deviceUpgradeRequiredMessage({
+    connectorName: source.metadata.name,
+    workspaceName: org?.name || 'this workspace',
+    workspaceVersion: source.metadata.version,
+    deviceVersion,
+  });
+}
+
+/**
+ * Create a team device's pinned private connection already PAUSED with the
+ * upgrade reason, for a device whose only advertised version is older than the
+ * workspace definition. No feeds and no definition write: the definition is
+ * never downgraded, and the connection stays unclaimable until the device
+ * advertises the workspace's version, when `ensureDeviceConnectorWired` adopts
+ * this same row, creates its feeds and clears the reason. Skipped when the
+ * device already has a live row for the key or its owner deleted one (the
+ * auto-wire opt-out), or when the device has moved away. Best-effort.
+ */
+async function createUpgradePendingConnection(
+  userId: string,
+  organizationId: string,
+  source: DeviceConnectorSource,
+  deviceId: string,
+  deviceVersion: string
+): Promise<void> {
+  const sql = getDb();
+  try {
+    const reason = await upgradeReason(organizationId, source, deviceVersion);
+    await sql.begin(async (tx) => {
+      // The same lock order as a team wire.
+      await tx`SELECT pg_advisory_xact_lock(hashtext('lobu:autowire'), hashtext(${`org:${organizationId}:${source.key}`}))`;
+      await tx`SELECT pg_advisory_xact_lock(hashtext('lobu:autowire'), hashtext(${`${userId}:${source.key}`}))`;
+      const [blocked] = await tx`
+        SELECT 1
+        WHERE NOT EXISTS (
+            SELECT 1 FROM device_workers
+            WHERE id = ${deviceId}::uuid AND user_id = ${userId} AND organization_id = ${organizationId}
+            FOR SHARE
+          )
+          OR NOT EXISTS (
+            SELECT 1 FROM connector_definitions
+            WHERE organization_id = ${organizationId} AND key = ${source.key} AND status = 'active'
+          )
+          OR EXISTS (
+            SELECT 1 FROM connections c
+            WHERE c.organization_id = ${organizationId}
+              AND c.connector_key = ${source.key}
+              AND c.device_worker_id = ${deviceId}::uuid
+              AND (
+                c.deleted_at IS NULL
+                OR c.config->>${DEVICE_AUTOWIRE_SUPPRESSION_KEY} = 'true'
+              )
+          )
+      `;
+      if (blocked) return;
+      const slug = await ensureUniqueConnectionSlug({
+        organizationId,
+        connectorKey: source.key,
+        displayName: source.metadata.name,
+        db: tx,
+      });
+      await tx`
+        INSERT INTO connections (
+          organization_id, connector_key, slug, display_name, status, error_message,
+          auth_profile_id, app_auth_profile_id, config, created_by, visibility, device_worker_id
+        ) VALUES (
+          ${organizationId}, ${source.key}, ${slug}, ${source.metadata.name}, 'paused', ${reason},
+          NULL, NULL, NULL, ${userId}, 'private', ${deviceId}::uuid
+        )
+      `;
+    });
+  } catch (err) {
+    logger.warn(
+      { userId, connectorKey: source.key, err: errorMessage(err) },
+      '[device-connectors] Failed to create an upgrade-pending team device connection'
     );
   }
 }

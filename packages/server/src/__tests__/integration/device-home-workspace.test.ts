@@ -455,6 +455,64 @@ describe('device home workspace chosen at pairing', () => {
     expect(await definitionVersion()).toBe(workspaceVersion);
   });
 
+  it('creates a newly paired older device its connection paused with the upgrade reason', async () => {
+    const sql = getTestDb();
+    const alice = await seedUser('Late Older Extension');
+    const bob = await seedUser('Early Newer Extension');
+    const teamOrgId = await seedTeamOrg();
+    await addMember(teamOrgId, alice.userId, 'member');
+    await addMember(teamOrgId, bob.userId, 'member');
+    const workspaceVersion = String(OS_SHELL_MANIFEST.version);
+    const olderManifest = { ...OS_SHELL_MANIFEST, version: '0.0.1' };
+    const aliceToken = await workerPat(alice.userId, teamOrgId, 'late-box');
+
+    // Bob's newer device sets the workspace definition before Alice pairs.
+    await pollShell(await workerPat(bob.userId, teamOrgId, 'early-box'), 'early-box');
+    await pollShell(aliceToken, 'late-box', olderManifest);
+
+    const aliceDevice = await deviceRow(alice.userId, 'late-box');
+    const aliceRows = () =>
+      sql`
+        SELECT c.id, c.status, c.error_message, c.visibility, c.device_worker_id::text AS device_worker_id,
+               (SELECT COUNT(*)::int FROM feeds f
+                 WHERE f.connection_id = c.id AND f.status = 'active' AND f.deleted_at IS NULL) AS active_feeds
+        FROM connections c
+        WHERE c.organization_id = ${teamOrgId} AND c.connector_key = 'os.shell'
+          AND c.created_by = ${alice.userId} AND c.deleted_at IS NULL
+      ` as unknown as Promise<
+        Array<{ id: number; status: string; error_message: string | null; visibility: string; device_worker_id: string; active_feeds: number }>
+      >;
+    const [pending] = await aliceRows();
+    expect(pending).toMatchObject({
+      status: 'paused',
+      visibility: 'private',
+      device_worker_id: aliceDevice.id,
+      active_feeds: 0,
+      error_message:
+        `Update Lobu on this device to use ${String(OS_SHELL_MANIFEST.name)} in Team: ` +
+        `this workspace runs version ${workspaceVersion}, your device has 0.0.1.`,
+    });
+    const [definition] = await sql`
+      SELECT version FROM connector_definitions
+      WHERE organization_id = ${teamOrgId} AND key = 'os.shell' AND status = 'active'
+    `;
+    expect(definition.version).toBe(workspaceVersion);
+    expect(
+      (await reconcileDeviceCapabilities(alice.userId, aliceDevice.id)).filter(
+        (auth) => auth.connectorKey === 'os.shell' && auth.connectorVersion === workspaceVersion
+      )
+    ).toEqual([]);
+    // Re-polling on the older version neither duplicates nor resumes it.
+    await pollShell(aliceToken, 'late-box', olderManifest);
+    expect(await aliceRows()).toEqual([pending]);
+
+    // After the device upgrades, the SAME connection resumes.
+    await pollShell(aliceToken, 'late-box');
+    expect(await aliceRows()).toEqual([
+      expect.objectContaining({ id: pending.id, status: 'active', error_message: null }),
+    ]);
+  });
+
   it('does not attach a member device to an ownerless shared team connection', async () => {
     const sql = getTestDb();
     const alice = await seedUser('Orphan Owner');
