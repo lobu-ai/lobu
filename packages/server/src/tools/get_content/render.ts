@@ -16,7 +16,7 @@ import { resolveEventKindData, resolveEventKindDefinition } from '../../utils/ev
 import { buildResourcePermalink } from '../../utils/url-builder';
 import { AUDIT_SEMANTIC_TYPE } from '../constants';
 import type { ContentRow } from './types';
-import { parseRecordArray, toNumberOrUndefined } from './types';
+import { parseRecordArray, toNullableScore, toNumberOrUndefined } from './types';
 
 /**
  * True when `url` is this deployment's own download link for `artifactId`.
@@ -280,7 +280,7 @@ export async function buildContentItems(opts: {
       text_content: text.length > 200 ? `${text.slice(0, 200)}…` : text,
       occurred_at: String(row.occurred_at ?? ''),
       source_url: String(row.source_url ?? ''),
-      score: Number(row.score) || 0,
+      score: toNullableScore(row.score),
     });
   }
 
@@ -341,7 +341,7 @@ export async function buildContentItems(opts: {
       text_content: f.payload_text ?? '',
       rating: (metadata.rating as string) || null,
       source_url: f.source_url ?? null,
-      score: Number(f.score) || 0,
+      score: toNullableScore(f.score),
       metadata,
       classifications,
       created_at: f.created_at,

@@ -1374,7 +1374,8 @@ export interface ContentItem {
   attachments_bytes?: number;
   rating: string | null;
   source_url: string | null;
-  score: number;
+  /** Score returned by the read path; null when no score is available. */
+  score: number | null;
   normalized_score?: number;
   metadata: Record<string, unknown>;
   classifications: Record<string, unknown>;
@@ -1448,7 +1449,7 @@ export interface ContentItem {
     text_content: string;
     occurred_at: string;
     source_url: string;
-    score: number;
+    score: number | null;
   } | null;
   /** Only if root not in results AND depth > 0 */
   root_context?: {
@@ -1456,7 +1457,7 @@ export interface ContentItem {
     title: string;
     occurred_at: string;
     source_url: string;
-    score: number;
+    score: number | null;
   } | null;
   /** Permalink URL for this specific knowledge item */
   permalink?: string | null;
