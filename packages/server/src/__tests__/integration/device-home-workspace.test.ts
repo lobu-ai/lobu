@@ -20,6 +20,9 @@ import { DEVICE_MANIFESTS_BY_PLATFORM } from '@lobu/connector-worker/daemon/devi
 import type { AuthInfo } from '../../auth/oauth/types';
 import { generateSecureToken, hashToken } from '../../auth/oauth/utils';
 import type { Env } from '../../index';
+import { manageConnections } from '../../tools/admin/manage_connections';
+import type { ToolContext } from '../../tools/registry';
+import { initWorkspaceProvider } from '../../workspace';
 import { mintDeviceChildToken, updateDeviceWorkerOrg } from '../../worker-api/device-management';
 import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
 import { activatePageRun } from '../../worker-api/page-activation';
@@ -559,6 +562,37 @@ describe('device home workspace chosen at pairing', () => {
             expect.objectContaining({ id: own.id, status: 'paused', error_message: null }),
           ]);
           expect(await feedStatus()).toBe('paused');
+        },
+      ],
+      [
+        'row 4 — a pause made while upgrade-paused survives the upgrade; a resume is re-paused until it',
+        async (team) => {
+          await initWorkspaceProvider();
+          const memberCtx = {
+            organizationId: team.teamOrgId, userId: team.alice.userId, memberRole: 'member',
+            agentId: null, isAuthenticated: true, clientId: null,
+            scopes: ['mcp:read', 'mcp:write'], tokenType: 'oauth', scopedToOrg: true, allowCrossOrg: false,
+          } as ToolContext;
+          const setStatus = async (connectionId: number, status: 'active' | 'paused') => {
+            const res = await manageConnections(
+              { action: 'update', connection_id: connectionId, status }, {} as Env, memberCtx
+            );
+            expect(res).not.toHaveProperty('error');
+          };
+          await team.bobNew();
+          await team.aliceOld();
+          await expectAliceUpgradePaused(team);
+          const [own] = await team.connectionsOf(team.alice.userId);
+
+          await setStatus(own.id, 'active');
+          await team.aliceOld();
+          await expectAliceUpgradePaused(team);
+
+          await setStatus(own.id, 'paused');
+          await team.aliceNew();
+          expect(await team.connectionsOf(team.alice.userId)).toEqual([
+            expect.objectContaining({ id: own.id, status: 'paused', error_message: null }),
+          ]);
         },
       ],
       [

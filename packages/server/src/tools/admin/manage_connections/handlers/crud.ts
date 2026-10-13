@@ -62,6 +62,7 @@ import { DEVICE_ONLINE_WINDOW_SECONDS } from "../../../../utils/device-liveness"
 import {
 	DEVICE_PIN_TOMBSTONE_MESSAGES,
 	effectiveConnectionErrorMessage,
+	isDeviceAutoPauseSql,
 	isDevicePinTombstone,
 } from "../../../../utils/device-pin-tombstones";
 import { deleteConnectionAclRow } from "../../../../authz/acl-observability";
@@ -2197,6 +2198,10 @@ export async function handleUpdate(
             account_id = CASE WHEN ${explicitlyNoAuth} THEN NULL ELSE account_id END,
             error_message = CASE WHEN ${explicitlyNoAuth}
               AND (status = 'pending_auth' OR (status = 'revoked' AND error_message = ${CONNECT_TOKEN_EXPIRED_ERROR}))
+              THEN NULL
+              -- An explicit pause/resume is the user's own decision: drop a device
+              -- auto-pause stamp so recovery never overrides it.
+              WHEN ${args.status !== undefined} AND ${isDeviceAutoPauseSql(tx, 'error_message')}
               THEN NULL ELSE error_message END,
             visibility = CASE WHEN ${rebindToPersonalCred} THEN 'private' ELSE COALESCE(${args.visibility ?? null}, visibility) END,
             entity_ids = COALESCE(${entityIdsValue}::bigint[], entity_ids),
