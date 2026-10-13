@@ -147,10 +147,12 @@ describe('RateLimiter (Postgres-backed fixed window)', () => {
     const db = getTestDb();
     const staleKey = uniqueKey('stale');
     const freshKey = uniqueKey('fresh');
+    const otherPodDailyKey = uniqueKey('other-pod-daily');
 
     await db`
       INSERT INTO rate_limit_counters (key, window_start, count)
-      VALUES (${staleKey}, NOW() - INTERVAL '3 hours', 5)
+      VALUES (${staleKey}, NOW() - INTERVAL '3 days', 5),
+             (${otherPodDailyKey}, NOW() - INTERVAL '12 hours', 1)
     `;
     limiter.checkLimit(freshKey, WIDE);
     await limiter.flushPendingWrites();
@@ -162,6 +164,7 @@ describe('RateLimiter (Postgres-backed fixed window)', () => {
     const names = keys.map((r) => r.key);
     expect(names).not.toContain(staleKey);
     expect(names).toContain(freshKey);
+    expect(names).toContain(otherPodDailyKey);
   });
 });
 

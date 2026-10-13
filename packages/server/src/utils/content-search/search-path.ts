@@ -161,6 +161,7 @@ export async function searchContentBySingleQuery(
   const visibilityClause = buildConnectionVisibilityClause({
     organizationId: options.visibility_scope?.organizationId,
     userId: options.visibility_scope?.userId ?? null,
+    orgConnectionsOnly: options.visibility_scope?.orgConnectionsOnly,
     baseParamIndex: visibilityParamIdx,
   });
   const entityTypesParamIdx = visibilityParamIdx + visibilityClause.params.length;

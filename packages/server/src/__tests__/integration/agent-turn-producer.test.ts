@@ -6,9 +6,12 @@
  * the turn runs, this proves a real message reaches it and comes back.
  */
 import { getModel } from '@mariozechner/pi-ai';
+import { createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { serve } from '@hono/node-server';
+import { createSlackAdapter } from '@chat-adapter/slack';
+import { Chat } from 'chat';
 import { executeRun, WorkerClient } from '@lobu/connector-worker/daemon';
 import type { SyncExecutor } from '@lobu/connector-worker/executor/interface';
 import { IsolateExecutor } from '@lobu/connector-worker/executor/isolate';
@@ -16,7 +19,7 @@ import {
   AgentTurnPollPayloadSchema,
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
-import { AGENT_ERRORS, AgentErrorCode, parseSessionEntries, type MessagePayload, type ThreadResponsePayload, renderBaselineAgentPolicy, verifyWorkerToken } from '@lobu/core';
+import { AGENT_ERRORS, AgentErrorCode, mintGatewayMcpToken, parseSessionEntries, type MessagePayload, type ThreadResponsePayload, renderBaselineAgentPolicy, verifyWorkerToken } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
@@ -24,6 +27,11 @@ import { ApiKeyProviderModule } from '../../gateway/auth/api-key-provider-module
 import type { AuthProfilesManager } from '../../gateway/auth/settings/auth-profiles-manager';
 import { ChatGPTOAuthModule } from '../../gateway/auth/chatgpt/chatgpt-oauth-module';
 import { ChatResponseBridge } from '../../gateway/connections/chat-response-bridge';
+import { createConnectedGatewayStateAdapter } from '../../gateway/connections/state-adapter';
+import type { PlatformConnection } from '../../gateway/connections/types';
+import { type AssembledChatBridge, startAssembledChatBridge, waitFor } from '../../gateway/__tests__/helpers/chat-bridge-harness';
+import { resetRateLimiterForTests } from '../../utils/rate-limiter';
+import { createTestAutomationSubscription } from '../setup/automation-subscriptions';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
 import { enqueueAgentTurn,
   cancelAgentTurn,
@@ -40,9 +48,12 @@ import type { ModelProviderModule } from '../../gateway/modules/module-system';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
   addUserToOrganization,
+  createTestAgent,
+  createTestConnection,
   createTestOrganization,
   createTestPAT,
   createTestUser,
+  insertChatConnectionRow,
   linkChatIdentityInGraph,
   seedSystemEntityTypes,
 } from '../setup/test-fixtures';
@@ -1184,7 +1195,65 @@ describe('agent turn producer', () => {
     expect(envelope.turn.tools?.definitions).toEqual([]);
     expect(envelope.turn.memory).toBeUndefined();
     expect(envelope.turn.system_prompt).toContain('## Workspace access');
-    expect(envelope.turn.system_prompt).toContain('sign in to Lobu with their Slack account');
+    expect(envelope.turn.system_prompt).toContain('ask an admin of this workspace to invite them');
+    expect(verifyWorkerToken(envelope.credential)?.chatAccess).toBe('reply_only');
+  });
+
+  it('runs a vouched unlinked sender with org-shared tools and no reply-only section', async () => {
+    const org = await createTestOrganization();
+    const fixture = mcpFixture();
+    await enqueueMessage({
+      ...messageFor(org.id),
+      userId: 'U0TEAMMATE',
+      platform: 'slack',
+      teamId: 'slack:T0TEAMBOT',
+      platformMetadata: { connectionId: 'conn-slack-1', teamId: 'T0TEAMBOT', isDirect: false, senderVouched: true },
+    }, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: fixture.mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const envelope = run.action_input as {
+      turn: { system_prompt: string; tools?: { gateway?: string[]; media?: string[] } };
+      credential: string;
+    };
+    const claims = verifyWorkerToken(envelope.credential);
+    expect(claims).toMatchObject({ userId: 'U0TEAMMATE', chatAccess: 'org_shared' });
+    expect(claims?.actorUserId).toBeUndefined();
+    expect(fixture.listed).toEqual([{ mcpId: 'lobu-memory', agentId: AGENT_ID, token: envelope.credential }]);
+    expect(envelope.turn.system_prompt).not.toContain('## Workspace access');
+    // Unchanged gateway surface: the relay tools a team bot uses stay offered.
+    expect(envelope.turn.tools?.gateway).toEqual(expect.arrayContaining(['list_conversations', 'read_conversation', 'send_message']));
+  });
+
+  it('confines a public-org stranger to its own thread: no conversation, media, or memory hooks', async () => {
+    const org = await createTestOrganization({ visibility: 'public' });
+    const fixture = mcpFixture();
+    await enqueueMessage({
+      ...messageFor(org.id),
+      userId: 'U0VISITOR',
+      platform: 'slack',
+      platformMetadata: { connectionId: 'conn-slack-1', teamId: 'T0OTHER', isDirect: true },
+    }, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: fixture.mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const envelope = run.action_input as {
+      turn: { system_prompt: string; memory?: unknown; tools?: { gateway?: string[]; media?: string[] } };
+      credential: string;
+    };
+    expect(verifyWorkerToken(envelope.credential)?.chatAccess).toBe('public_visitor');
+    expect(envelope.turn.memory).toBeUndefined();
+    expect(envelope.turn.tools?.media).toEqual([]);
+    expect(envelope.turn.tools?.gateway).not.toContain('read_conversation');
+    expect(envelope.turn.tools?.gateway).not.toContain('send_message');
   });
 
   it('signs a linked chat sender as the actor and discovers tools as that member', async () => {
@@ -1212,7 +1281,7 @@ describe('agent turn producer', () => {
 
     const [run] = await agentTurnRuns();
     const envelope = run.action_input as { turn: { system_prompt: string }; credential: string };
-    expect(verifyWorkerToken(envelope.credential)).toMatchObject({ userId: 'U0LINKED', actorUserId: member.id });
+    expect(verifyWorkerToken(envelope.credential)).toMatchObject({ userId: 'U0LINKED', actorUserId: member.id, chatAccess: 'member_shared' });
     expect(fixture.listed).toEqual([{ mcpId: 'lobu-memory', agentId: AGENT_ID, token: envelope.credential }]);
     expect(envelope.turn.system_prompt).not.toContain('## Workspace access');
   });
@@ -4259,5 +4328,184 @@ describe('agent turn reaper', () => {
     const replies = await threadResponses();
     expect(replies).toHaveLength(1);
     expect(replies[0].action_input).toMatchObject({ finalText: 'made it just in time' });
+  });
+});
+
+/**
+ * The existing team bot, replayed with synthetic ids: a single-workspace Slack
+ * install whose channel members talk to the agent without ever linking a Lobu
+ * account. The real Chat SDK bridge ingests the event, the real producer mints
+ * the turn, and the minted credential calls Lobu's own MCP. Nothing about the
+ * bot's conduct should change for a same-team sender: a turn, no extra
+ * Slack post, no reply-only prompt, org-shared connections, and never the
+ * owner's private ones.
+ */
+describe('existing team bot replay (single-workspace Slack, unlinked channel sender)', () => {
+  const SIGNING_SECRET = 'team-bot-replay-signing-secret';
+  const TEAM = 'T0SYNTHTEAM';
+  const BOT_USER = 'U0SYNTHBOT';
+  const CHANNEL = 'C0SYNTHCHAN';
+  const CONNECTION_ID = 'slackinst-team-bot-replay';
+  let bridge: AssembledChatBridge | undefined;
+
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+    resetRateLimiterForTests();
+  });
+
+  afterEach(async () => {
+    await bridge?.stop();
+    bridge = undefined;
+  });
+
+  function signed(payload: Record<string, unknown>): Request {
+    const body = JSON.stringify(payload);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = `v0=${createHmac('sha256', SIGNING_SECRET).update(`v0:${timestamp}:${body}`).digest('hex')}`;
+    return new Request('https://gateway.example.test/slack/events', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-slack-request-timestamp': timestamp, 'x-slack-signature': signature },
+      body,
+    });
+  }
+
+  function channelMessage(eventId: string, ts: string, user: string, extra: Record<string, unknown> = {}) {
+    return {
+      token: 'legacy-verification-token',
+      type: 'event_callback',
+      api_app_id: 'A0SYNTH',
+      event_id: eventId,
+      event_time: Math.floor(Number(ts)),
+      team_id: TEAM,
+      event: {
+        type: 'app_mention',
+        team: TEAM,
+        channel: CHANNEL,
+        channel_type: 'channel',
+        ts,
+        text: `<@${BOT_USER}> what is on the roadmap?`,
+        user,
+        ...extra,
+      },
+    };
+  }
+
+  async function startTeamBot() {
+    const org = await createTestOrganization();
+    const owner = await createTestUser({ email: 'team-bot-owner@example.test' });
+    await addUserToOrganization(owner.id, org.id, 'owner');
+    await createTestAgent({ organizationId: org.id, agentId: AGENT_ID, ownerUserId: owner.id });
+    const metadata = { teamId: TEAM, botUserId: BOT_USER };
+    await insertChatConnectionRow({ id: CONNECTION_ID, organizationId: org.id, platform: 'slack', settings: { allowGroups: true }, metadata });
+    const [row] = await getTestDb()<{ id: number }>`
+      SELECT id FROM connections WHERE organization_id = ${org.id} AND connector_key = 'slack'
+    `;
+    await createTestAutomationSubscription({
+      organizationId: org.id, agentId: AGENT_ID, connectionId: Number(row.id), platform: 'slack', channelId: CHANNEL, teamId: TEAM,
+    });
+    await createTestConnection({
+      organization_id: org.id, connector_key: 'github', display_name: 'Team shared conn', visibility: 'org', created_by: owner.id,
+    });
+    await createTestConnection({
+      organization_id: org.id, connector_key: 'github', display_name: 'Owner private conn', visibility: 'private', created_by: owner.id,
+    });
+
+    const adapter = createSlackAdapter({ signingSecret: SIGNING_SECRET, botToken: 'xoxb-synthetic', botUserId: BOT_USER, userName: 'lobu' });
+    const posts = vi.fn(async () => ({ ts: '1787292000.999999' }));
+    (adapter as any).fetchMessages = async () => ({ messages: [] });
+    (adapter as any).startTyping = async () => undefined;
+    (adapter as any).postMessage = posts;
+    const state = await createConnectedGatewayStateAdapter();
+    const chat = new Chat({ userName: 'lobu', adapters: { slack: adapter }, state, logger: 'silent' });
+    const connection: PlatformConnection = {
+      id: CONNECTION_ID,
+      platform: 'slack',
+      organizationId: org.id,
+      config: { platform: 'slack', signingSecret: SIGNING_SECRET, botToken: 'xoxb-synthetic', botUserId: BOT_USER },
+      settings: { allowGroups: true },
+      metadata,
+      status: 'active',
+      createdAt: 1,
+      updatedAt: 1,
+    } as PlatformConnection;
+    bridge = await startAssembledChatBridge(chat, state, connection);
+    const deliver = async (payload: Record<string, unknown>) => {
+      const tasks: Promise<unknown>[] = [];
+      const response = await chat.webhooks.slack(signed(payload), { waitUntil: (task) => tasks.push(task) });
+      await Promise.all(tasks);
+      return response.status;
+    };
+    return { org, deliver, posts };
+  }
+
+  async function queuedChatMessages(): Promise<MessagePayload[]> {
+    const rows = await getTestDb()<{ action_input: MessagePayload }>`
+      SELECT action_input FROM runs WHERE run_type = 'chat_message' ORDER BY id
+    `;
+    return rows.map((r) => r.action_input);
+  }
+
+  it('a same-team unlinked sender gets a turn with org-shared tools, no extra post, no reply-only prompt', async () => {
+    const { org, deliver, posts } = await startTeamBot();
+    expect(await deliver(channelMessage('Ev0REPLAY1', '1787292000.000101', 'U0TEAMMATE'))).toBe(200);
+    let message: MessagePayload | undefined;
+    await waitFor(async () => {
+      [message] = await queuedChatMessages();
+      expect(message).toBeDefined();
+    });
+    expect(message?.platformMetadata).toMatchObject({ senderVouched: true });
+    expect(message?.platformMetadata?.isDirect).not.toBe(true);
+    expect(posts).not.toHaveBeenCalled();
+
+    // The real producer, fed exactly what the bridge queued.
+    await getTestDb()`DELETE FROM runs WHERE run_type = 'chat_message'`;
+    const fixture = mcpFixture();
+    await enqueueMessage(
+      { ...(message as MessagePayload), agentOptions: { model: 'claude/claude-opus-4-8' } },
+      { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), mcp: fixture.mcp, gatewayUrl: GATEWAY_URL },
+    );
+    const [run] = await agentTurnRuns();
+    const envelope = run.action_input as { turn: { system_prompt: string; tools?: { gateway?: string[] } }; credential: string };
+    const claims = verifyWorkerToken(envelope.credential);
+    expect(claims).toMatchObject({ userId: 'U0TEAMMATE', chatAccess: 'org_shared' });
+    expect(claims?.actorUserId).toBeUndefined();
+    expect(envelope.turn.system_prompt).not.toContain('## Workspace access');
+    expect(envelope.turn.tools?.gateway).toEqual(expect.arrayContaining(['list_conversations', 'read_conversation', 'send_message']));
+
+    // The minted credential on Lobu's own MCP: org-shared visible, owner-private not.
+    const gatewayToken = mintGatewayMcpToken(envelope.credential);
+    if (!gatewayToken) throw new Error('turn credential did not narrow');
+    const headers = { 'X-Lobu-Memory-Direct-Auth': '1' };
+    const init = await post(`/mcp/${org.slug}`, {
+      body: { jsonrpc: '2.0', method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'replay', version: '1' } }, id: 0 },
+      token: gatewayToken,
+      headers,
+    });
+    expect(init.status).toBe(200);
+    const sessionId = init.headers.get('mcp-session-id') as string;
+    await post(`/mcp/${org.slug}`, { body: { jsonrpc: '2.0', method: 'notifications/initialized' }, token: gatewayToken, headers: { ...headers, 'mcp-session-id': sessionId } });
+    const listed = await post(`/mcp/${org.slug}`, {
+      body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'manage_connections', arguments: { action: 'list' } } },
+      token: gatewayToken,
+      headers: { ...headers, 'mcp-session-id': sessionId },
+    });
+    expect(listed.status).toBe(200);
+    const text = JSON.stringify(await listed.json());
+    expect(text).toContain('Team shared conn');
+    expect(text).not.toContain('Owner private conn');
+    expect(posts).not.toHaveBeenCalled();
+  });
+
+  it('a Slack Connect sender from another team is not vouched: reply-only and one notice', async () => {
+    const { deliver, posts } = await startTeamBot();
+    expect(await deliver(channelMessage('Ev0REPLAY2', '1787292000.000202', 'U0EXTERNAL', { user_team: 'T0OTHERTEAM', source_team: 'T0OTHERTEAM' }))).toBe(200);
+    let message: MessagePayload | undefined;
+    await waitFor(async () => {
+      [message] = await queuedChatMessages();
+      expect(message).toBeDefined();
+    });
+    expect(message?.platformMetadata?.senderVouched).toBeUndefined();
+    await waitFor(() => expect(posts).toHaveBeenCalledTimes(1));
+    expect(String(posts.mock.calls[0]?.[1])).toContain('Ask an admin of this workspace to invite you');
   });
 });

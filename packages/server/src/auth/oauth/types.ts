@@ -208,7 +208,11 @@ export interface DeviceAuthorizationResponse {
  * Authentication info extracted from token
  */
 export interface AuthInfo {
-  userId: string;
+  /**
+   * Null only on the worker direct-auth lane for a chat turn whose sender is
+   * vouched for but unlinked: it acts with no user (workspace/multi-tenant.ts).
+   */
+  userId: string | null;
   organizationId: string | null;
   /** Immutable workspace snapshot authorized at consent time. */
   grantedOrganizationIds: string[] | null;
@@ -254,6 +258,13 @@ export interface AuthInfo {
   executionMode?: 'live' | 'capture' | null;
   /** Verified capture owner; never taken from tool arguments. */
   captureIdentity?: CaptureIdentity | null;
+  /**
+   * Hide the caller's PRIVATE connections, keeping org-shared ones: a chat
+   * turn whose sender's private connections must not reach the conversation
+   * (gateway/orchestration/chat-turn-actor.ts). Identity and role are
+   * unaffected.
+   */
+  orgConnectionsOnly?: boolean;
 }
 
 // ============================================

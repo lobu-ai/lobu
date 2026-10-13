@@ -28,6 +28,7 @@ import type { ClassificationStatsRow, ContentRow, GetContentResult } from './typ
 interface VisibilityScope {
   organizationId: string;
   userId: string | null;
+  orgConnectionsOnly?: boolean;
 }
 
 /** Shared shape returned by the direct list branches. */
@@ -302,6 +303,7 @@ export async function fetchByContentIds(opts: {
   const visibility = buildConnectionVisibilityClause({
     organizationId: visibilityScope.organizationId,
     userId: visibilityScope.userId,
+    orgConnectionsOnly: visibilityScope.orgConnectionsOnly,
     baseParamIndex: queryParams.length + 1,
   });
   queryParams.push(...visibility.params);
@@ -546,6 +548,7 @@ export async function fetchIncludeSuperseded(opts: {
     {
       organizationId: visibilityScope.organizationId,
       userId: visibilityScope.userId,
+      orgConnectionsOnly: visibilityScope.orgConnectionsOnly,
       baseParamIndex: paramIndex,
     },
     'e'
@@ -734,6 +737,7 @@ export async function fetchClassificationStats(opts: {
   const statsVisibility = buildConnectionVisibilityClause({
     organizationId: visibilityScope.organizationId,
     userId: visibilityScope.userId,
+    orgConnectionsOnly: visibilityScope.orgConnectionsOnly,
     baseParamIndex: paramIndex,
   });
   if (statsVisibility.sql) {

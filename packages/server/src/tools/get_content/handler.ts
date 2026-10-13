@@ -470,7 +470,11 @@ async function getContentImpl(
     // connections, then find visible connections" round-trip is gone; events
     // with `connection_id IS NULL` (system events) stay visible to authed and
     // unauthed callers alike.
-    const visibilityScope = { organizationId: ctx.organizationId, userId: ctx.userId };
+    const visibilityScope = {
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      orgConnectionsOnly: ctx.orgConnectionsOnly,
+    };
 
     // Log incoming classification filters for debugging
     if (args.classification_filters) {

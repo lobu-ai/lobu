@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { createLogger } from "@lobu/core";
 import { Hono, type Context } from "hono";
+import { getDb } from "../../../db/client.js";
+import { CHAT_SENDER_NOT_LINKED, isConfinedChatTurn } from "../../orchestration/chat-turn-actor.js";
 import {
   resolveAddressableTargets,
   resolveAuthorizedTarget,
@@ -561,6 +563,31 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
             threadId: asChannel.channelKey,
             messageId: message,
           };
+        }
+        if (isConfinedChatTurn(worker)) {
+          const source = parseConversationRef(worker.responseThreadId ?? worker.conversationId);
+          if (!source || target.connectionId !== worker.connectionId ||
+              !conversationRefsMatch(parseConversationRef(target.threadId), source)) {
+            return errorResponse(c, CHAT_SENDER_NOT_LINKED, 403);
+          }
+          // Handles authorize a channel, and message IDs can name any message
+          // in it. Verify the message too, or a forged ID can mutate a sibling
+          // thread even when the handle points to the signed source thread.
+          if (message !== worker.messageId) {
+            const [row] = await getDb()<{ thread_id: string | null }>`
+              SELECT thread_id FROM channel_messages
+              WHERE organization_id = ${worker.organizationId}
+                AND connection_id = ${worker.connectionId}
+                AND channel_id = ${stripPlatformPrefix(worker.platform ?? "", worker.channelId)}
+                AND platform_message_id = ${message}
+              LIMIT 1
+            `;
+            if (!row || !conversationRefsMatch(
+              parseConversationRef(row.thread_id ?? source.channelKey), source
+            )) {
+              return errorResponse(c, CHAT_SENDER_NOT_LINKED, 403);
+            }
+          }
         }
         const captured = await captureSideEffect(c, `conversations.${label}`, body);
         if (captured) return captured;

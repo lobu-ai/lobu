@@ -25,6 +25,8 @@ describe('personalConnectionScopeWarning', () => {
     // Must name the actual MECHANISM, not just say "private" — the whole point
     // is that the user cannot otherwise tell why the agent ignored it.
     expect(warning).toContain('chat account linked to your membership');
+    expect(warning).toContain('direct message');
+    expect(warning).toContain('Group conversations');
     expect(warning).toContain('AGENT OWNER');
     expect(warning).toContain('does not exist');
   });

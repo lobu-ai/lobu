@@ -55,6 +55,7 @@ describe("durable replay preserves every signed claim", () => {
     messageId: "m1",
     adminTools: ["manage_agents"],
     actorUserId: "auth-user-1",
+    chatAccess: "member_shared" as const,
     runtimeProviderId: "vercel",
     sandboxId: "sb1",
     allowedDomains: ["api.github.com"],

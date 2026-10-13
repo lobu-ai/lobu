@@ -34,13 +34,19 @@ import { CHANNEL_READ_IDENTITIES } from './sources.js';
 import { enforcedConnectionsSelectSql } from './acl-state.js';
 import { ownedChatConnectionsSelectSql } from './connection-visibility.js';
 import type { ChannelReadIdentity } from '@lobu/connector-sdk';
-import type { AuthzScope } from './scope.js';
+import { type AuthzScope, connectionPrincipal } from './scope.js';
 
 /**
  * Predicate for a `channel_messages` table (alias has `connection_id` [text
- * runtime id], `channel_id` [bare], `organization_id`). Binds two params from
- * `baseParamIndex`: the org id and the principal. Returns an `AND (...)` fragment
+ * runtime id], `channel_id` [bare], `organization_id`). Binds three params from
+ * `baseParamIndex`: the org id, the principal, and the connection principal
+ * (see below). Returns an `AND (...)` fragment
  * (no leading space).
+ *
+ * A third param carries the principal whose OWN chat connections may admit an
+ * ungraphed row: null when the scope hides private connections
+ * (`orgConnectionsOnly`), so channel membership still applies but ownership
+ * does not.
  *
  * `channel_messages.connection_id` and `authz_source_acl_state.connection_id` are
  * BOTH the runtime connection id (see `slack-acl-sync`/`persistChannelMessage`),
@@ -60,6 +66,7 @@ export function compileChannelMessagesVisibility(
 ): { sql: string; params: Array<string | null> } {
   const orgParam = `$${baseParamIndex}::text`;
   const userParam = `$${baseParamIndex + 1}::text`;
+  const ownerParam = `$${baseParamIndex + 2}::text`;
 
   // The requester's `$member` entity, resolved on the auth-signup claim only
   // (same guard as compileResourceVisibility — server-written, unforgeable).
@@ -137,7 +144,7 @@ export function compileChannelMessagesVisibility(
   // everyone. Workspace membership alone never grants channel access.
   const sql = `AND (
       (
-        ${tableAlias}.connection_id IN (${ownedChatConnectionsSelectSql(orgParam, userParam)})
+        ${tableAlias}.connection_id IN (${ownedChatConnectionsSelectSql(orgParam, ownerParam)})
         AND NOT EXISTS (
           SELECT 1 FROM public.authz_source_acl_state a
           WHERE a.organization_id = ${orgParam}
@@ -151,5 +158,5 @@ export function compileChannelMessagesVisibility(
         )
       )
     )`;
-  return { sql, params: [scope.organizationId, scope.principal] };
+  return { sql, params: [scope.organizationId, scope.principal, connectionPrincipal(scope)] };
 }

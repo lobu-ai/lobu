@@ -168,6 +168,13 @@ export interface ToolContext {
   executionMode?: 'live' | 'capture' | null;
   /** Verified capture owner; never taken from tool arguments. */
   captureIdentity?: CaptureIdentity | null;
+  /**
+   * Hide the caller's PRIVATE connections from every connection-visibility
+   * read, keeping org-shared ones and the caller's identity and role (see
+   * authz/connection-visibility.ts). Set for a chat turn in a group
+   * conversation and for a vouched unlinked sender.
+   */
+  orgConnectionsOnly?: boolean;
   /** Whether request was authenticated */
   isAuthenticated: boolean;
   /** OAuth client ID that created this request (null for session/anonymous) */

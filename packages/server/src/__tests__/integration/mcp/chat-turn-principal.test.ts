@@ -1,5 +1,5 @@
 /**
- * The Lobu principal a chat turn's tool calls run as.
+ * The Lobu principal a chat turn's tool calls run as — the access matrix.
  *
  * A chat turn's worker token keeps the PLATFORM sender in `userId`. The
  * producer (`agent-turn-producer.ts` `mintTurnToken`) resolves that sender
@@ -10,15 +10,18 @@
  * embedded multi-tenant middleware then acts as that member, re-checking the
  * membership on every request.
  *
- * A sender who is not a linked member of the org gets a reply-only turn: the
- * token carries no actor and the MCP lane refuses it outright. The agent owner
- * is never substituted for a chat sender.
+ * A linked member acts as themselves; in a group conversation their PRIVATE
+ * connections are hidden. An unlinked sender the platform vouches for acts
+ * with no user and an ordinary-member role (org-shared connections only). Any
+ * other unlinked sender is an anonymous public visitor of a public org, or
+ * reply-only in a private org, refused outright. The agent owner is never
+ * substituted for a chat sender.
  *
  * Tokens are minted through the production mint, so the claim the middleware
  * reads is the claim the producer writes.
  */
 
-import { mintGatewayMcpToken, verifyWorkerToken, type MessagePayload } from '@lobu/core';
+import { generateWorkerToken, mintGatewayMcpToken, verifyWorkerToken, type MessagePayload } from '@lobu/core';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mintTurnToken } from '../../../gateway/orchestration/agent-turn-producer';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -50,8 +53,15 @@ const INITIALIZE_BODY = {
   id: 0,
 };
 
+interface Evidence {
+  /** Structured DM flag the bridge stamps (`platformMetadata.isDirect`). */
+  isDirect?: boolean;
+  /** The platform's same-tenant verdict (`platformMetadata.senderVouched`). */
+  senderVouched?: boolean;
+}
+
 /** A Slack chat message exactly as the Chat SDK bridge enqueues it. */
-function slackChatMessage(organizationId: string, senderPlatformId: string): MessagePayload {
+function slackChatMessage(organizationId: string, senderPlatformId: string, evidence: Evidence = {}): MessagePayload {
   return {
     userId: senderPlatformId,
     conversationId: `slack:C0PRINCIPAL:${MESSAGE_ID}`,
@@ -70,14 +80,20 @@ function slackChatMessage(organizationId: string, senderPlatformId: string): Mes
       teamId: TEAM_ID,
       senderId: senderPlatformId,
       responseThreadId: `slack:C0PRINCIPAL:${MESSAGE_ID}`,
+      ...(evidence.isDirect !== undefined ? { isDirect: evidence.isDirect } : {}),
+      ...(evidence.senderVouched ? { senderVouched: true } : {}),
     },
     agentOptions: {},
   } as MessagePayload;
 }
 
 /** The production turn mint, then the internal MCP hop the gateway forwards. */
-async function chatTurnGatewayMcpToken(organizationId: string, senderPlatformId = SENDER_PLATFORM_ID): Promise<string> {
-  const turnToken = await mintTurnToken(slackChatMessage(organizationId, senderPlatformId), 1);
+async function chatTurnGatewayMcpToken(
+  organizationId: string,
+  senderPlatformId = SENDER_PLATFORM_ID,
+  evidence: Evidence = { isDirect: true },
+): Promise<string> {
+  const turnToken = await mintTurnToken(slackChatMessage(organizationId, senderPlatformId, evidence), 1);
   const gatewayToken = mintGatewayMcpToken(turnToken);
   if (!gatewayToken) throw new Error('chat turn token did not verify');
   return gatewayToken;
@@ -132,8 +148,10 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
   });
 
   it('signs the linked member as the actor and keeps the platform sender as userId', async () => {
-    const claims = verifyWorkerToken(await mintTurnToken(slackChatMessage(org.id, SENDER_PLATFORM_ID), 1));
-    expect(claims).toMatchObject({ userId: SENDER_PLATFORM_ID, actorUserId: linkedMember.id });
+    const dm = verifyWorkerToken(await mintTurnToken(slackChatMessage(org.id, SENDER_PLATFORM_ID, { isDirect: true }), 1));
+    expect(dm).toMatchObject({ userId: SENDER_PLATFORM_ID, actorUserId: linkedMember.id, chatAccess: 'member' });
+    const channel = verifyWorkerToken(await mintTurnToken(slackChatMessage(org.id, SENDER_PLATFORM_ID, { isDirect: false }), 1));
+    expect(channel).toMatchObject({ actorUserId: linkedMember.id, chatAccess: 'member_shared' });
   });
 
   it('writes memory as the linked member, admitted on an ordinary member role', async () => {
@@ -159,7 +177,7 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
     expect(rows).toEqual([{ created_by: linkedMember.id }]);
   });
 
-  it("sees org-shared and the member's own private connections, not the owner's", async () => {
+  async function seedConnections() {
     await createTestConnection({
       organization_id: org.id, connector_key: 'github', display_name: 'Shared conn', visibility: 'org', created_by: owner.id,
     });
@@ -169,16 +187,94 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
     await createTestConnection({
       organization_id: org.id, connector_key: 'github', display_name: 'Owner private conn', visibility: 'private', created_by: owner.id,
     });
-    const token = await chatTurnGatewayMcpToken(org.id);
+  }
+
+  async function listedConnections(token: string): Promise<string> {
     const session = await openSession(org.slug, token);
     expect(session.status).toBe(200);
-
     const response = await callTool(org.slug, token, session.sessionId as string, 'manage_connections', { action: 'list' });
     expect(response.status).toBe(200);
-    const text = JSON.stringify(await response.json());
+    return JSON.stringify(await response.json());
+  }
+
+  it("in a DM sees org-shared and the member's own private connections, not the owner's", async () => {
+    await seedConnections();
+    const text = await listedConnections(await chatTurnGatewayMcpToken(org.id, SENDER_PLATFORM_ID, { isDirect: true }));
     expect(text).toContain('Shared conn');
     expect(text).toContain('Member private conn');
     expect(text).not.toContain('Owner private conn');
+  });
+
+  it("in a group conversation hides the member's private connections but keeps their identity", async () => {
+    await seedConnections();
+    const token = await chatTurnGatewayMcpToken(org.id, SENDER_PLATFORM_ID, { isDirect: false });
+    const text = await listedConnections(token);
+    expect(text).toContain('Shared conn');
+    expect(text).not.toContain('Member private conn');
+    expect(text).not.toContain('Owner private conn');
+
+    // Identity is unchanged: a write is still attributed to the member.
+    const session = await openSession(org.slug, token);
+    const saved = await callTool(org.slug, token, session.sessionId as string, 'save_memory', {
+      content: 'Group-conversation note.', semantic_type: 'note', title: 'group member note', metadata: {},
+    });
+    expect(((await saved.json()) as { result?: { isError?: boolean } }).result?.isError).not.toBe(true);
+    const rows = await getTestDb()<{ created_by: string | null }>`
+      SELECT created_by FROM events WHERE organization_id = ${org.id} AND title = 'group member note'
+    `;
+    expect(rows).toEqual([{ created_by: linkedMember.id }]);
+  });
+
+  it('serves a vouched unlinked sender org-shared connections only, with an ordinary-member role', async () => {
+    await seedConnections();
+    const token = await chatTurnGatewayMcpToken(org.id, STRANGER_PLATFORM_ID, { isDirect: false, senderVouched: true });
+    const claims = verifyWorkerToken(await mintTurnToken(
+      slackChatMessage(org.id, STRANGER_PLATFORM_ID, { isDirect: false, senderVouched: true }), 1,
+    ));
+    expect(claims).toMatchObject({ userId: STRANGER_PLATFORM_ID, chatAccess: 'org_shared' });
+    expect(claims?.actorUserId).toBeUndefined();
+
+    const text = await listedConnections(token);
+    expect(text).toContain('Shared conn');
+    expect(text).not.toContain('Member private conn');
+    expect(text).not.toContain('Owner private conn');
+
+    // Never owner/admin: an admin-tier action is refused.
+    const session = await openSession(org.slug, token);
+    const admin = await callTool(org.slug, token, session.sessionId as string, 'manage_entity_schema', {
+      action: 'create', slug: 'vouched_probe', name: 'Vouched probe',
+    });
+    expect(JSON.stringify(await admin.json())).toContain('requires admin or owner access');
+  });
+
+  it('serves a public-org stranger exactly the anonymous public-read path', async () => {
+    const publicOrg = await createTestOrganization({ name: 'Public Principal Org', visibility: 'public' });
+    await createTestAgent({ organizationId: publicOrg.id, agentId: AGENT_ID, ownerUserId: owner.id });
+    const claims = verifyWorkerToken(await mintTurnToken(slackChatMessage(publicOrg.id, STRANGER_PLATFORM_ID), 1));
+    expect(claims?.chatAccess).toBe('public_visitor');
+
+    const token = await chatTurnGatewayMcpToken(publicOrg.id, STRANGER_PLATFORM_ID, {});
+    const session = await openSession(publicOrg.slug, token);
+    expect(session.status).toBe(200);
+    const write = await callTool(publicOrg.slug, token, session.sessionId as string, 'save_memory', {
+      content: 'Stranger note.', semantic_type: 'note', title: 'stranger note', metadata: {},
+    });
+    // The same refusal any anonymous public-workspace visitor gets for a write.
+    expect(JSON.stringify(await write.json())).toContain('Authentication required');
+    const read = await callTool(publicOrg.slug, token, session.sessionId as string, 'search_memory', { query: 'anything' });
+    expect(read.status).toBe(200);
+    expect(((await read.json()) as { result?: { isError?: boolean } }).result?.isError).not.toBe(true);
+    const rows = await getTestDb()`SELECT 1 FROM events WHERE organization_id = ${publicOrg.id} AND title = 'stranger note'`;
+    expect(rows).toHaveLength(0);
+  });
+
+  it('fails closed on a chat token minted without an access tier', async () => {
+    const legacy = generateWorkerToken(SENDER_PLATFORM_ID, 'conv-legacy', 'agent-turn:legacy', {
+      channelId: 'slack:C0PRINCIPAL', platform: 'slack', agentId: AGENT_ID, organizationId: org.id,
+      actorUserId: linkedMember.id,
+    });
+    const refused = await openSession(org.slug, mintGatewayMcpToken(legacy) as string);
+    expect(refused.status).toBe(403);
   });
 
   it("is admitted or refused on the sender's membership, never the owner's role", async () => {
@@ -188,10 +284,11 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
     expect(admitted.status).toBe(200);
   });
 
-  it('refuses an unlinked sender with a typed error instead of borrowing the owner', async () => {
+  it('refuses an unvouched stranger of a private org with a typed error instead of borrowing the owner', async () => {
     const claims = verifyWorkerToken(await mintTurnToken(slackChatMessage(org.id, STRANGER_PLATFORM_ID), 1));
     expect(claims?.userId).toBe(STRANGER_PLATFORM_ID);
     expect(claims?.actorUserId).toBeUndefined();
+    expect(claims?.chatAccess).toBe('reply_only');
 
     const refused = await openSession(org.slug, await chatTurnGatewayMcpToken(org.id, STRANGER_PLATFORM_ID));
     expect(refused.status).toBe(403);

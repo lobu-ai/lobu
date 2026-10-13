@@ -51,6 +51,11 @@ export interface DataSourceContext {
    * data — matching what search_memory/get_content already enforce.
    */
   userId?: string | null;
+  /**
+   * Hide the requesting user's PRIVATE connections (and devices), keeping
+   * `userId` for resource membership. See AuthzScope.orgConnectionsOnly.
+   */
+  orgConnectionsOnly?: boolean;
   /** When set, events CTE filters to events belonging to any of these entities */
   entityIds?: number[];
   query?: Record<string, string>;
@@ -413,6 +418,8 @@ export function validateAndScopeQuery(
      * yields org-visible-only (fail-closed for private data).
      */
     userId?: string | null;
+    /** See DataSourceContext.orgConnectionsOnly. */
+    orgConnectionsOnly?: boolean;
     /**
      * Exclude workspace-identity audit events (metadata.category='workspace')
      * from the events and event_classifications CTEs. These rows record
@@ -483,7 +490,12 @@ export function validateAndScopeQuery(
     ...buildScopedQuery(
       trimmed,
       tableRefs,
-      { ...options?.window, organizationId, userId: options?.userId ?? null },
+      {
+        ...options?.window,
+        organizationId,
+        userId: options?.userId ?? null,
+        orgConnectionsOnly: options?.orgConnectionsOnly === true,
+      },
       options
     ),
     tableRefs,
@@ -537,7 +549,7 @@ export function buildScopedQuery(
   const bindPrincipal = (): string => {
     if (!principalP) {
       idx++;
-      params.push(context.userId ?? null);
+      params.push(context.orgConnectionsOnly ? null : (context.userId ?? null));
       principalP = `$${idx}::text`;
     }
     return principalP;
@@ -591,6 +603,7 @@ export function buildScopedQuery(
   const scope: AuthzScope = {
     organizationId: context.organizationId,
     principal: context.userId ?? null,
+    orgConnectionsOnly: context.orgConnectionsOnly === true,
   };
 
   // For a table holding events (alias has a `connection_id` col): restrict to

@@ -1666,6 +1666,9 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       // auth context current before tools read ToolContext.sourceContext.
       session.authCtx.sourceContext = freshCtx.sourceContext ?? null;
       session.authCtx.adminTools = freshCtx.adminTools ?? null;
+      // Per request too: one sender's session serves their DMs and their group
+      // conversations alike, and only a DM may reach private connections.
+      session.authCtx.orgConnectionsOnly = freshCtx.orgConnectionsOnly === true;
 
       if (freshCtx.agentId && freshCtx.agentId !== session.authCtx.agentId) {
         clearSession();

@@ -288,6 +288,7 @@ export function buildClientSDK(
 			const scoped = validateAndScopeQuery(querySql, workspaceCtx.organizationId, {
 				window,
 				userId: workspaceCtx.userId,
+				orgConnectionsOnly: workspaceCtx.orgConnectionsOnly,
 				safeColumns: isSystemContext(workspaceCtx) ? undefined : SAFE_COLUMN_DEFS,
 				restrictedTables:
 					isSystemContext(workspaceCtx) || isAdmin

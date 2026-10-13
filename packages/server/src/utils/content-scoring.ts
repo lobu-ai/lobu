@@ -66,7 +66,7 @@ interface NormalizedScoreFilters {
    * results. Mirrors the clause used by `listContentInternal` and the
    * `content_ids` / `include_superseded` branches in `get_content.ts`.
    */
-  visibility_scope?: { organizationId: string; userId: string | null };
+  visibility_scope?: { organizationId: string; userId: string | null; orgConnectionsOnly?: boolean };
 }
 
 /**
@@ -314,6 +314,7 @@ async function buildFilterConditionsAndJoins(
       {
         organizationId: filters.visibility_scope.organizationId,
         userId: filters.visibility_scope.userId,
+        orgConnectionsOnly: filters.visibility_scope.orgConnectionsOnly,
         baseParamIndex: paramIndex,
       },
       'f'
@@ -377,6 +378,7 @@ export async function getNormalizedScoreContent(
       {
         organizationId: filters.visibility_scope.organizationId,
         userId: filters.visibility_scope.userId,
+        orgConnectionsOnly: filters.visibility_scope.orgConnectionsOnly,
         baseParamIndex: paramIndex,
       },
       'f'

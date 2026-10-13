@@ -44,6 +44,15 @@ export function resolveRunInitiator(ctx: InitiatorSource): RunInitiatorColumns {
 				client_id: ctx.clientId ?? null,
 				conversation_id: ctx.sourceContext?.conversationId ?? null,
 				platform: ctx.sourceContext?.platform ?? null,
+				// WHO sent the chat message, from the signed worker token. An
+				// unlinked sender's turn runs with no user principal, so this is
+				// the only record of the person behind the run.
+				...(ctx.sourceContext?.userId
+					? {
+							platform_user_id: ctx.sourceContext.userId,
+							platform_team_id: ctx.sourceContext.teamId ?? null,
+						}
+					: {}),
 			},
 			createdByUserId: ctx.userId ?? null,
 		};

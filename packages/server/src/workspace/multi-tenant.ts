@@ -18,7 +18,7 @@ import { getDb } from '../db/client';
 import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import { getRevokedTokenStore } from '../gateway/auth/revoked-token-store';
 import { DEVICE_CHAT_RUN_SOURCE } from '../gateway/services/run-worker-access';
-import { CHAT_SENDER_NOT_LINKED, isChatSenderTurn } from '../gateway/orchestration/chat-turn-actor';
+import { CHAT_SENDER_NOT_LINKED, chatTurnAccessOf } from '../gateway/orchestration/chat-turn-actor';
 import { resolveRestToolGetRoute } from '../http/rest-tool-routes';
 import type { Env } from '../index';
 import { checkApplyPause } from '../utils/deployment-pause';
@@ -358,14 +358,14 @@ export class MultiTenantProvider implements WorkspaceProvider {
           403
         );
       }
-      // Who the call acts as. `actorUserId` is the verified Lobu auth subject
-      // the server signed at mint, carried separately from the platform-scoped
-      // `userId`: the member a chat turn's sender is linked to, or the actor
-      // behind an admin-tools allowlist. A chat turn WITHOUT one is reply-only
-      // and refused here — never the agent owner, whose admin identity and
-      // private connections a stranger would otherwise borrow (see
-      // gateway/orchestration/chat-turn-actor.ts). Only headless turns, which
-      // have no sender, keep the agent-owner attribution.
+      // Who the call acts as. A chat turn's authority is the `chatAccess` the
+      // server signed at mint (gateway/orchestration/chat-turn-actor.ts),
+      // never the agent owner, whose admin identity and private connections a
+      // sender would otherwise borrow. A token with no tier fails closed as
+      // reply-only. `actorUserId` is the verified Lobu auth subject, carried
+      // separately from the platform-scoped `userId`: a linked member, or the
+      // actor behind an admin-tools allowlist. Only headless turns, which have
+      // no sender, keep the agent-owner attribution.
       const isAdminToolsTurn = !!tokenData.adminTools?.length;
       if (isAdminToolsTurn && !tokenData.actorUserId) {
         return c.json(
@@ -376,28 +376,48 @@ export class MultiTenantProvider implements WorkspaceProvider {
           }
         );
       }
-      const chatSenderTurn = isChatSenderTurn(tokenData);
-      if (chatSenderTurn && !tokenData.actorUserId) {
+      const chatAccess = isAdminToolsTurn ? null : chatTurnAccessOf(tokenData);
+      if (chatAccess === 'reply_only') {
         return c.json(
           { error: 'insufficient_scope', error_description: CHAT_SENDER_NOT_LINKED },
           403
         );
       }
-      const directAuthUserId =
-        tokenData.actorUserId ??
-        (agentRows[0]?.owner_user_id as string | undefined) ??
-        tokenData.userId;
+      if (chatAccess === 'public_visitor') {
+        // Exactly the anonymous public-workspace path at the end of this
+        // middleware: no identity, public-readable tools only. Re-checked per
+        // request, so an organization made private stops serving at once.
+        if (!allowAnonymousPublicOrgMcp) {
+          return c.json(
+            { error: 'insufficient_scope', error_description: CHAT_SENDER_NOT_LINKED },
+            403
+          );
+        }
+        return setContextAndContinue({ organizationId: requestedOrgId, memberRole: null });
+      }
+      // A vouched unlinked sender has no user: the no-user principal sees
+      // org-shared connections only, and writes run with an ordinary member's
+      // role — never owner/admin.
+      const userless = chatAccess === 'org_shared';
+      const directAuthUserId = userless
+        ? null
+        : chatAccess || isAdminToolsTurn
+          ? (tokenData.actorUserId as string)
+          : ((agentRows[0]?.owner_user_id as string | undefined) ?? tokenData.userId);
       // Re-read on every request, so a member removed after the token was
       // minted loses access at once rather than when the token expires.
-      const roleRows = await sql`
-        SELECT role
-        FROM "member"
-        WHERE "organizationId" = ${requestedOrgId}
-          AND "userId" = ${directAuthUserId}
-        LIMIT 1
-      `;
-      const directAuthRole = roleRows[0]?.role as string | undefined;
-      if (chatSenderTurn && !isAdminToolsTurn) {
+      const directAuthRole = directAuthUserId
+        ? ((
+            await sql`
+              SELECT role
+              FROM "member"
+              WHERE "organizationId" = ${requestedOrgId}
+                AND "userId" = ${directAuthUserId}
+              LIMIT 1
+            `
+          )[0]?.role as string | undefined)
+        : 'member';
+      if (chatAccess) {
         // A chat sender acts with their OWN role; an ordinary member is
         // admitted and the tool layer caps them at member access.
         if (!directAuthRole) {
@@ -431,6 +451,9 @@ export class MultiTenantProvider implements WorkspaceProvider {
             userId: tokenData.userId || undefined,
             source: tokenData.source || undefined,
           },
+          // A linked member in a group conversation, and a vouched sender, see
+          // org-shared connections only (authz/connection-visibility.ts).
+          orgConnectionsOnly: chatAccess === 'member_shared' || userless,
           // Admin-tools allowlist rides the per-run worker token. Carried
           // through so the execute gate lets an admin-tools turn call its
           // allowlisted internal tools.

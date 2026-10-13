@@ -26,6 +26,34 @@ describe("resolveRunInitiator", () => {
 		});
 	});
 
+	it("records the platform sender of an unlinked chat turn, which has no user", () => {
+		expect(
+			resolveRunInitiator({
+				userId: null,
+				agentId: "team-bot",
+				clientId: "lobu-worker",
+				sourceContext: {
+					platform: "slack",
+					conversationId: "slack:C0SYNTH:1.0",
+					userId: "U0SYNTHSENDER",
+					teamId: "T0SYNTH",
+				},
+			}),
+		).toEqual({
+			initiatorKind: "agent_session",
+			initiatorRef: {
+				agent_id: "team-bot",
+				user_id: null,
+				client_id: "lobu-worker",
+				conversation_id: "slack:C0SYNTH:1.0",
+				platform: "slack",
+				platform_user_id: "U0SYNTHSENDER",
+				platform_team_id: "T0SYNTH",
+			},
+			createdByUserId: null,
+		});
+	});
+
 	it("classifies a reaction as its automation, not its owning agent", () => {
 		expect(
 			resolveRunInitiator({

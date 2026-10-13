@@ -19,6 +19,16 @@ export function looksLikeWorkerToken(token: string): boolean {
  * Token format: encrypted(JSON payload of thread metadata).
  */
 
+/** See {@link WorkerTokenData.chatAccess}. */
+export const CHAT_TURN_ACCESS = [
+  "member",
+  "member_shared",
+  "org_shared",
+  "public_visitor",
+  "reply_only",
+] as const;
+export type ChatTurnAccess = (typeof CHAT_TURN_ACCESS)[number];
+
 export interface WorkerTokenData {
   /**
    * Separates worker-facing bearers, credentials exposed to agent subprocesses
@@ -120,6 +130,23 @@ export interface WorkerTokenData {
    */
   actorUserId?: string;
   /**
+   * The authority a CHAT turn runs with, decided server-side at mint from
+   * verified state (`gateway/orchestration/chat-turn-actor.ts` in the server):
+   * - `member`: a linked member in a direct message; acts as
+   *   {@link actorUserId} with their own role and private connections.
+   * - `member_shared`: a linked member in a group conversation; acts as
+   *   {@link actorUserId}, but sees org-shared connections only.
+   * - `org_shared`: an unlinked sender the platform vouches for as same-tenant;
+   *   no user, ordinary-member role, org-shared connections only.
+   * - `public_visitor`: an unvouched sender of a public organization; the
+   *   anonymous public-read path.
+   * - `reply_only`: an unvouched sender of a private organization; no
+   *   workspace tools at all.
+   * Absent on a chat turn means reply-only (fail closed). Ignored on headless
+   * turns, which have no chat sender.
+   */
+  chatAccess?: ChatTurnAccess;
+  /**
    * Selected runtime-provider id (e.g. "vercel"), resolved from the agent's
    * environment at token-mint time. The generic `/internal/runtime/exec` route
    * trusts THIS signed claim to pick the gateway-side provider — the worker
@@ -200,6 +227,8 @@ export interface WorkerTokenOptions {
   adminTools?: string[];
   /** Lobu auth user the turn acts as. See WorkerTokenData.actorUserId. */
   actorUserId?: string;
+  /** Chat turn authority. See WorkerTokenData.chatAccess. */
+  chatAccess?: ChatTurnAccess;
   /** Selected runtime provider id. See WorkerTokenData.runtimeProviderId. */
   runtimeProviderId?: string;
   /** Selected sandbox id backing the runtime credential. See WorkerTokenData.sandboxId. */
@@ -247,6 +276,7 @@ function generateToken(
     messageId: options.messageId,
     adminTools: options.adminTools,
     actorUserId: options.actorUserId,
+    chatAccess: options.chatAccess,
     runtimeProviderId: options.runtimeProviderId,
     sandboxId: options.sandboxId,
     allowedDomains: options.allowedDomains,
@@ -466,6 +496,25 @@ function verifyToken(
     ) {
       logger.error(
         "Worker token rejected: actorUserId must be a non-empty string"
+      );
+      return null;
+    }
+    // `chatAccess` decides what a chat sender may reach, so an unknown value
+    // is rejected rather than defaulted, and a member tier must name its
+    // member: the claim alone never grants a user identity.
+    if (
+      data.chatAccess !== undefined &&
+      !(CHAT_TURN_ACCESS as readonly unknown[]).includes(data.chatAccess)
+    ) {
+      logger.error("Worker token rejected: unknown chatAccess");
+      return null;
+    }
+    if (
+      (data.chatAccess === "member" || data.chatAccess === "member_shared") &&
+      data.actorUserId === undefined
+    ) {
+      logger.error(
+        "Worker token rejected: a member chatAccess requires actorUserId"
       );
       return null;
     }

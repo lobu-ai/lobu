@@ -90,7 +90,9 @@ export class RateLimiter {
   /** In-flight background UPSERTs — awaitable for deterministic tests. */
   private pendingWrites = new Set<Promise<void>>();
   /** Largest window seen so far; bounds the DB cleanup horizon. */
-  private maxWindowSeconds = 3600;
+  // Another pod may use the daily chat-notice window without this process
+  // ever seeing it. Cleanup must retain that shared window too.
+  private maxWindowSeconds = 86400;
   private dbBackoffUntilMs = 0;
   private lastDbWarnAtMs = 0;
   private warnedTableMissing = false;

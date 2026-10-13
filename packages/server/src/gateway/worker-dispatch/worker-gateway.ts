@@ -728,6 +728,7 @@ export class WorkerGateway {
         // long admin-granted turn loses its allowlist when the token rotates.
         adminTools: tokenData.adminTools,
         actorUserId: tokenData.actorUserId,
+        chatAccess: tokenData.chatAccess,
         // Preserve the runtime selection — otherwise a remote-runtime worker's
         // bash starts failing (the generic route 404s with no provider claim)
         // after the token rotates mid-turn.

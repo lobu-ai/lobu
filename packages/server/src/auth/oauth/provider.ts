@@ -575,14 +575,16 @@ export class OAuthProvider {
     }[];
   } | null> {
     const authInfo = await this.verifyAccessToken(token);
-    if (!authInfo) return null;
+    // An access token always names its user; only the worker lane is userless.
+    if (!authInfo?.userId) return null;
+    const userId = authInfo.userId;
 
     if (!authInfo.scopes.includes('profile:read')) {
       return null;
     }
 
     const result = await this.sql`
-      SELECT id, email, name, image FROM "user" WHERE id = ${authInfo.userId}
+      SELECT id, email, name, image FROM "user" WHERE id = ${userId}
     `;
 
     if (result.length === 0) return null;
@@ -595,7 +597,7 @@ export class OAuthProvider {
     //   - `personal_org_slug` is exposed so device clients (Owletto Mac +
     //     Chrome) can target the personal workspace directly, independent of
     //     whatever org the token is bound to or the CLI has selected as active.
-    const personalOrg = await findExistingPersonalOrg(authInfo.userId, this.sql);
+    const personalOrg = await findExistingPersonalOrg(userId, this.sql);
 
     // Return the token-bound org (if any). For tokens with no org binding, fall
     // back to the personal org.
@@ -621,7 +623,7 @@ export class OAuthProvider {
     const grantedOrgs = restrictOrganizationInventory
       ? await listLiveGrantedMemberWorkspaces({
           sql: this.sql,
-          userId: authInfo.userId,
+          userId,
           grantedOrganizationIds: authInfo.grantedOrganizationIds ?? [],
         })
       : null;
@@ -629,7 +631,7 @@ export class OAuthProvider {
       SELECT o.id, o.slug, o.name
       FROM "member" m
       JOIN "organization" o ON o.id = m."organizationId"
-      WHERE m."userId" = ${authInfo.userId}
+      WHERE m."userId" = ${userId}
       ORDER BY o.name ASC
     `;
 

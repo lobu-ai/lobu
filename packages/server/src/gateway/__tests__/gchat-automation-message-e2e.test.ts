@@ -21,8 +21,15 @@ import {
 } from "bun:test";
 import { Chat, type StateAdapter } from "chat";
 import { createTestAutomationSubscription } from "../../__tests__/setup/automation-subscriptions.js";
-import { insertChatConnectionRow } from "../../__tests__/setup/test-fixtures.js";
+import {
+  addUserToOrganization,
+  createTestUser,
+  insertChatConnectionRow,
+  linkChatIdentityInGraph,
+} from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
+import { getRateLimiter, resetRateLimiterForTests } from "../../utils/rate-limiter.js";
+import { UNLINKED_SENDER_TURNS_PER_HOUR } from "../orchestration/chat-turn-actor.js";
 import { ChatResponseBridge } from "../connections/chat-response-bridge.js";
 import { gchatPlatform } from "../connections/platforms/gchat.js";
 import { createConnectedGatewayStateAdapter } from "../connections/state-adapter.js";
@@ -55,25 +62,37 @@ const credentials = JSON.stringify({
 });
 
 const sender = {
-  name: "users/sender-e2e",
+  // Google account ids are numeric; a non-numeric one can never be linked.
+  name: "users/100000000000000000001",
   displayName: "Space Sender",
   email: "space.sender@example.test",
   type: "HUMAN",
 };
 
-function spaceMention(messageId: string, text: string): Record<string, unknown> {
+const stranger = {
+  name: "users/100000000000000000002",
+  displayName: "Space Stranger",
+  email: "space.stranger@example.test",
+  type: "HUMAN",
+};
+
+function spaceMention(
+  messageId: string,
+  text: string,
+  from: typeof sender = sender,
+): Record<string, unknown> {
   const space = { name: SPACE, type: "ROOM", spaceType: "SPACE" };
   return {
     type: "MESSAGE",
     eventTime: "2026-10-12T12:00:00Z",
     space,
-    user: sender,
+    user: from,
     message: {
       name: `${SPACE}/messages/${messageId}`,
       createTime: "2026-10-12T12:00:00Z",
       text: `@Lobu ${text}`,
       argumentText: ` ${text}`,
-      sender,
+      sender: from,
       space,
       thread: { name: THREAD },
       annotations: [
@@ -156,6 +175,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     });
     created = [];
     updated = [];
+    resetRateLimiterForTests();
     adapter.chatApi.spaces.messages.create = mock(async (request: Record<string, any>) => {
       created.push(request);
       return { data: { name: `${request.parent}/messages/bot-${created.length}` } };
@@ -229,6 +249,17 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     await resetTestDatabase();
     await seedAgentRow(AGENT_ID, { organizationId: ORG_ID });
     await seedAgentRow(OWNING_AGENT_ID, { organizationId: ORG_ID });
+    // The suite's sender is a linked member, so these tests characterize
+    // ingress and delivery, not sender authority. An unlinked sender in this
+    // private org is reply-only and gets the access notice (tested below).
+    const member = await createTestUser({});
+    await addUserToOrganization(member.id, ORG_ID, "member");
+    await linkChatIdentityInGraph({
+      organizationId: ORG_ID,
+      userId: member.id,
+      platform: "gchat",
+      platformUserId: sender.name,
+    });
   });
 
   afterEach(async () => {
@@ -296,6 +327,71 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     expect(await sql`SELECT id FROM channel_messages WHERE connection_id = ${RUNTIME_CONNECTION_ID}`).toHaveLength(1);
     // Nothing was posted back to Google during ingress.
     expect(created).toEqual([]);
+  });
+
+  // Google Chat installs carry no authoritative domain, so the platform vouches
+  // for no unlinked sender: in a private org the stranger is reply-only.
+  test("an unlinked stranger in a private org gets one access notice per window and a reply-only turn", async () => {
+    await start(null);
+    await createTestAutomationSubscription({
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      connectionId: connectionDbId,
+      platform: "gchat",
+      channelId: SPACE,
+    });
+
+    expect(await deliver(spaceMention("stranger-1", "who are you?", stranger))).toBe(200);
+    const sql = getDb();
+    await waitFor(async () => {
+      expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(1);
+    });
+    expect(created).toHaveLength(1);
+    expect(created[0]?.parent).toBe(SPACE);
+    expect(String(created[0]?.requestBody?.text)).toContain("Ask an admin of this workspace to invite you");
+    const [run] = await sql<{ action_input: Record<string, any> }[]>`
+      SELECT action_input FROM runs WHERE run_type = 'chat_message'
+    `;
+    // Google Chat supplies no same-tenant evidence, so none is stamped.
+    expect(run?.action_input.platformMetadata.senderVouched).toBeUndefined();
+
+    // A second message inside the notice window gets a turn but no second notice.
+    expect(await deliver(spaceMention("stranger-2", "still there?", stranger))).toBe(200);
+    await waitFor(async () => {
+      expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(2);
+    });
+    expect(created).toHaveLength(1);
+  });
+
+  test("an unlinked sender over the hourly turn limit gets no turn", async () => {
+    await start(null);
+    await createTestAutomationSubscription({
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      connectionId: connectionDbId,
+      platform: "gchat",
+      channelId: SPACE,
+    });
+    const limiter = getRateLimiter();
+    const key = `chat-unlinked-turn:${ORG_ID}:gchat:${stranger.name}`;
+    for (let i = 0; i < UNLINKED_SENDER_TURNS_PER_HOUR; i += 1) {
+      expect(limiter.checkLimit(key, { limit: UNLINKED_SENDER_TURNS_PER_HOUR, windowSeconds: 3600 }).allowed).toBe(true);
+    }
+
+    expect(await deliver(spaceMention("stranger-over", "one more", stranger))).toBe(200);
+    const sql = getDb();
+    // The ingress transcript row lands before the gate, so wait on it.
+    await waitFor(async () => {
+      expect(await sql`SELECT id FROM channel_messages WHERE connection_id = ${RUNTIME_CONNECTION_ID}`).toHaveLength(1);
+    });
+    expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(0);
+    expect(created).toEqual([]);
+
+    // A linked member in the same space is not limited by the stranger's budget.
+    expect(await deliver(spaceMention("member-ok", "status?"))).toBe(200);
+    await waitFor(async () => {
+      expect(await sql`SELECT id FROM runs WHERE run_type = 'chat_message'`).toHaveLength(1);
+    });
   });
 
   test("an unlinked DM on an agentless connection posts the link notice and queues nothing", async () => {
