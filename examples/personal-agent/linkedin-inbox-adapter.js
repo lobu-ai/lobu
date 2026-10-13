@@ -371,54 +371,60 @@ export function linkedInInboxProgram() {
       fail("Cursor belongs to a different source or account");
     return cursor;
   }
+  // Resumes a source page after the cursor's last returned row.
+  function resume(rows, cursor, limit, source) {
+    const start = cursor.after
+      ? rows.findIndex((row) => row.id === cursor.after) + 1
+      : 0;
+    if (cursor.after && !start)
+      fail(`${source} cursor expired; restart the read`);
+    const page = rows.slice(start, start + limit);
+    return { rows: page, more: start + limit < rows.length };
+  }
+  async function readNotifications(cursor, limit) {
+    const source = await notificationsPage(cursor.page);
+    const { rows, more } = resume(source.rows, cursor, limit, "Notification");
+    const continuation = more
+      ? { page: cursor.page, after: rows.at(-1).id }
+      : source.next
+        ? { page: pagePayload(source.next) }
+        : null;
+    return { rows, continuation };
+  }
+  // Pages conversations, then each conversation's recent message page.
+  async function readMessages(cursor, limit, mailbox) {
+    let threads = cursor.threads;
+    let next = cursor.next;
+    if (!threads) {
+      const source = await conversationsPage(mailbox, cursor.page);
+      threads = source.elements.map((thread) => thread.entityUrn);
+      next = source.metadata?.nextCursor;
+    }
+    if (!Array.isArray(threads) || threads.length > 20)
+      fail("Invalid message cursor");
+    const messages = threads.length
+      ? await messagesPage(threads[0], mailbox)
+      : [];
+    const { rows, more } = resume(messages, cursor, limit, "Message");
+    const continuation = more
+      ? { threads, next, after: rows.at(-1).id }
+      : threads.length > 1
+        ? { threads: threads.slice(1), next }
+        : next
+          ? { page: next }
+          : null;
+    return { rows, continuation };
+  }
   async function read(input) {
     const mailbox = await account();
     const cursor = cursorOf(input.cursor, input.feed, mailbox);
     const limit = Math.max(1, Math.min(100, input.limit ?? 20));
-    let rows;
-    let continuation;
-    if (input.feed === "notifications") {
-      const page = await notificationsPage(cursor.page);
-      const after = cursor.after
-        ? page.rows.findIndex((row) => row.id === cursor.after) + 1
-        : 0;
-      if (cursor.after && !after)
-        fail("Notification cursor expired; restart the read");
-      rows = page.rows.slice(after, after + limit);
-      continuation =
-        after + limit < page.rows.length
-          ? { page: cursor.page, after: rows.at(-1).id }
-          : page.next
-            ? { page: pagePayload(page.next) }
-            : null;
-    } else if (input.feed === "live_messages") {
-      let threads = cursor.threads;
-      let next = cursor.next;
-      if (!threads) {
-        const page = await conversationsPage(mailbox, cursor.page);
-        threads = page.elements.map((thread) => thread.entityUrn);
-        next = page.metadata?.nextCursor;
-      }
-      if (!Array.isArray(threads) || threads.length > 20)
-        fail("Invalid message cursor");
-      const messages = threads.length
-        ? await messagesPage(threads[0], mailbox)
-        : [];
-      const after = cursor.after
-        ? messages.findIndex((row) => row.id === cursor.after) + 1
-        : 0;
-      if (cursor.after && !after)
-        fail("Message cursor expired; restart the read");
-      rows = messages.slice(after, after + limit);
-      continuation =
-        after + limit < messages.length
-          ? { threads, next, after: rows.at(-1).id }
-          : threads.length > 1
-            ? { threads: threads.slice(1), next }
-            : next
-              ? { page: next }
-              : null;
-    } else fail("Unknown source feed");
+    const { rows, continuation } =
+      input.feed === "notifications"
+        ? await readNotifications(cursor, limit)
+        : input.feed === "live_messages"
+          ? await readMessages(cursor, limit, mailbox)
+          : fail("Unknown source feed");
     if ((await account()) !== mailbox)
       fail("LinkedIn account changed during the read");
     return {
@@ -453,6 +459,114 @@ export function linkedInInboxProgram() {
   const SEEN_LIMIT = 256;
   const BATCH_EVENTS = 500;
   const BATCH_BYTES = 128 * 1024;
+  // Each observer returns its checkpoint position, plus `more` when the round
+  // continues on the next pass.
+  async function observeNotifications({ previous, observedAt, observe, gap }) {
+    let payload;
+    for (let page = 1; ; page++) {
+      const { rows, next } = await notificationsPage(payload);
+      let anchored = false;
+      for (const row of rows) {
+        if (
+          await observe(
+            row,
+            "notification.changed",
+            "notification",
+            row.revision
+          )
+        )
+          anchored = true;
+      }
+      if (!previous || anchored || !next) break;
+      if (page === NOTIFICATION_PAGES_PER_PASS) {
+        await gap(
+          "notification",
+          "https://www.linkedin.com/notifications/",
+          rows.at(-1)?.id ?? page
+        );
+        break;
+      }
+      payload = next;
+    }
+    return { after: observedAt };
+  }
+  async function catchUpConversation(
+    { previous, observe, gap },
+    thread,
+    round,
+    mailbox
+  ) {
+    const messages = await messagesPage(thread.entityUrn, mailbox);
+    let reachedSeen = false;
+    for (const row of messages) {
+      if (Date.parse(row.occurred_at) < round.floor) continue;
+      if (await observe(row, "message.created", "message")) reachedSeen = true;
+    }
+    const oldest = messages.at(-1);
+    // A full recent page that neither reaches the floor nor a message already
+    // observed may hide older arrivals. LinkedIn offers no further page here,
+    // so report the gap and continue.
+    if (
+      previous &&
+      messages.length >= RECENT_MESSAGE_PAGE &&
+      !reachedSeen &&
+      Date.parse(oldest.occurred_at) >= round.floor
+    ) {
+      await gap(
+        "conversation",
+        thread.entityUrn,
+        oldest.id,
+        oldest.occurred_at
+      );
+    }
+  }
+  async function catchUpMessages(pass, mailbox) {
+    const { previous, observedAt, startedAt } = pass;
+    // A round reads threads active since `since` and their messages since
+    // `floor`. A round that spans passes keeps its lower bounds, and the next
+    // round keeps its floor: a thread that moved above the resume cursor is
+    // then read again from the top with the earlier floor.
+    const round = previous?.round ?? {
+      since: previous
+        ? Math.max(startedAt, previous.after - 60000)
+        : observedAt,
+      until: observedAt,
+      floor: previous?.floor ?? observedAt,
+      cursor: null,
+    };
+    round.floor = Math.min(round.floor, round.since);
+    let cursor = round.cursor;
+    for (let page = 1; ; page++) {
+      const result = await conversationsPage(mailbox, cursor);
+      const active = result.elements.filter((thread) => {
+        if (!Number.isFinite(thread.lastActivityAt))
+          fail("Conversation activity is unavailable");
+        return thread.lastActivityAt >= round.since;
+      });
+      for (const thread of active)
+        await catchUpConversation(pass, thread, round, mailbox);
+      const next =
+        active.length === result.elements.length
+          ? (result.metadata?.nextCursor ?? null)
+          : null;
+      if (next !== null && (typeof next !== "string" || next.length > 4096))
+        fail("Invalid conversation cursor");
+      if (!previous || next === null) break;
+      cursor = next;
+      if (page === CONVERSATION_PAGES_PER_PASS) {
+        return {
+          after: previous.after,
+          floor: previous.floor,
+          round: { ...round, cursor },
+          more: true,
+        };
+      }
+    }
+    return {
+      after: round.until,
+      floor: previous?.round ? round.floor : round.since,
+    };
+  }
   async function snapshot(feed, previous, mailbox) {
     const observedAt = Date.now();
     const startedAt = previous?.started_at ?? observedAt;
@@ -487,118 +601,28 @@ export function linkedInInboxProgram() {
         occurred_at: occurredAt ?? new Date(observedAt).toISOString(),
       });
     }
-    const checkpoint = { feed, account: mailbox, started_at: startedAt };
-    let more = false;
-    if (feed === "notifications") {
-      let payload;
-      for (let page = 1; ; page++) {
-        const { rows, next } = await notificationsPage(payload);
-        let anchored = false;
-        for (const row of rows) {
-          if (
-            await observe(
-              row,
-              "notification.changed",
-              "notification",
-              row.revision
-            )
-          )
-            anchored = true;
-        }
-        if (!previous || anchored || !next) break;
-        if (page === NOTIFICATION_PAGES_PER_PASS) {
-          await gap(
-            "notification",
-            "https://www.linkedin.com/notifications/",
-            rows.at(-1)?.id ?? page
-          );
-          break;
-        }
-        payload = next;
-      }
-      checkpoint.after = observedAt;
-    } else {
-      // A round reads threads active since `since` and their messages since
-      // `floor`. A round that spans passes keeps its lower bounds, and the next
-      // round keeps its floor: a thread that moved above the resume cursor is
-      // then read again from the top with the earlier floor.
-      const round = previous?.round ?? {
-        since: previous
-          ? Math.max(startedAt, previous.after - 60000)
-          : observedAt,
-        until: observedAt,
-        floor: previous?.floor ?? observedAt,
-        cursor: null,
-      };
-      round.floor = Math.min(round.floor, round.since);
-      let cursor = round.cursor;
-      for (let page = 1; ; page++) {
-        const result = await conversationsPage(mailbox, cursor);
-        const active = result.elements.filter((thread) => {
-          if (!Number.isFinite(thread.lastActivityAt))
-            fail("Conversation activity is unavailable");
-          return thread.lastActivityAt >= round.since;
-        });
-        for (const thread of active) {
-          const messages = await messagesPage(thread.entityUrn, mailbox);
-          let reachedSeen = false;
-          for (const row of messages) {
-            if (Date.parse(row.occurred_at) < round.floor) continue;
-            if (await observe(row, "message.created", "message"))
-              reachedSeen = true;
-          }
-          const oldest = messages.at(-1);
-          // A full recent page that neither reaches the floor nor a message
-          // already observed may hide older arrivals. LinkedIn offers no
-          // further page here, so report the gap and continue.
-          if (
-            previous &&
-            messages.length >= RECENT_MESSAGE_PAGE &&
-            !reachedSeen &&
-            Date.parse(oldest.occurred_at) >= round.floor
-          ) {
-            await gap(
-              "conversation",
-              thread.entityUrn,
-              oldest.id,
-              oldest.occurred_at
-            );
-          }
-        }
-        const next =
-          active.length === result.elements.length
-            ? (result.metadata?.nextCursor ?? null)
-            : null;
-        if (next !== null && (typeof next !== "string" || next.length > 4096))
-          fail("Invalid conversation cursor");
-        if (!previous || next === null) break;
-        if (page === CONVERSATION_PAGES_PER_PASS) {
-          more = true;
-          cursor = next;
-          break;
-        }
-        cursor = next;
-      }
-      if (more) {
-        checkpoint.after = previous.after;
-        checkpoint.floor = previous.floor;
-        checkpoint.round = { ...round, cursor };
-      } else {
-        checkpoint.after = round.until;
-        checkpoint.floor = previous?.round ? round.floor : round.since;
-      }
-    }
+    const pass = { previous, observedAt, startedAt, observe, gap };
+    const { more = false, ...position } =
+      feed === "notifications"
+        ? await observeNotifications(pass)
+        : await catchUpMessages(pass, mailbox);
     if ((await account()) !== mailbox)
       fail("LinkedIn account changed during observation");
-    // Keep this pass's identities first, in source order, then older ones.
-    checkpoint.seen = Object.fromEntries(
-      [
-        ...observed,
-        ...Object.entries(previous?.seen ?? {}).filter(
-          ([identity]) => !observed.has(identity)
-        ),
-      ].slice(0, SEEN_LIMIT)
-    );
+    const checkpoint = {
+      feed,
+      account: mailbox,
+      started_at: startedAt,
+      ...position,
+      // Keep this pass's identities first, in source order, then older ones.
+      seen: Object.fromEntries(
+        [
+          ...observed,
+          ...Object.entries(previous?.seen ?? {}).filter(
+            ([identity]) => !observed.has(identity)
+          ),
+        ].slice(0, SEEN_LIMIT)
+      ),
+    };
     return { checkpoint, events, more };
   }
   // Ordered batches of at most 500 references and 128 KiB. Only the final
