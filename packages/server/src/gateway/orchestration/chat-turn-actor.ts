@@ -85,6 +85,20 @@ export function isChatSenderTurn(claims: {
   return claims.source === undefined || claims.source === DEVICE_CHAT_RUN_SOURCE;
 }
 
+/**
+ * The chat sender's platform id on a verified token. A device-placed chat
+ * turn's token names the agent as `userId` and carries the sender as
+ * `sessionKey` (gateway/services/run-worker-access.ts); every other chat token
+ * carries the sender as `userId`. Attribution reads it only through here.
+ */
+export function chatSenderIdOf(claims: {
+  userId?: string;
+  source?: string;
+  sessionKey?: string;
+}): string | undefined {
+  return claims.source === DEVICE_CHAT_RUN_SOURCE ? claims.sessionKey : claims.userId;
+}
+
 export interface ChatTurnActor {
   access: ChatTurnAccess;
   /**

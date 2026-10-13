@@ -18,7 +18,7 @@ import { getDb } from '../db/client';
 import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import { getRevokedTokenStore } from '../gateway/auth/revoked-token-store';
 import { DEVICE_CHAT_RUN_SOURCE } from '../gateway/services/run-worker-access';
-import { CHAT_SENDER_NOT_LINKED, chatTurnAccessOf } from '../gateway/orchestration/chat-turn-actor';
+import { CHAT_SENDER_NOT_LINKED, chatSenderIdOf, chatTurnAccessOf } from '../gateway/orchestration/chat-turn-actor';
 import { resolveRestToolGetRoute } from '../http/rest-tool-routes';
 import type { Env } from '../index';
 import { checkApplyPause } from '../utils/deployment-pause';
@@ -453,7 +453,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
             channelId: tokenData.channelId || undefined,
             teamId: tokenData.teamId || undefined,
             connectionId: tokenData.connectionId || undefined,
-            userId: tokenData.userId || undefined,
+            userId: chatSenderIdOf(tokenData) || undefined,
             ...(userless && tokenData.actorUserId ? { memberUserId: tokenData.actorUserId } : {}),
             source: tokenData.source || undefined,
           },
