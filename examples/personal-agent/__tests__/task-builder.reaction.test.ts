@@ -33,6 +33,7 @@ function harness(
     connections?: Array<{ id: number }>;
     recentCreates?: Array<Record<string, unknown>>;
     pageSize?: number;
+    execute?: (input: Execute) => Promise<Record<string, unknown>>;
   } = {}
 ) {
   const executed: Execute[] = [];
@@ -46,7 +47,22 @@ function harness(
     operations: {
       listRuns: async (input: ListRuns) => {
         listed.push(input);
-        const runs = options.recentCreates ?? [];
+        const runs = (options.recentCreates ?? []).filter((run) => {
+          if (input.status && run.status !== input.status) return false;
+          if (
+            input.created_after &&
+            run.created_at &&
+            String(run.created_at) < input.created_after
+          )
+            return false;
+          if (
+            input.created_before &&
+            String(run.created_at ?? new Date().toISOString()) >=
+              input.created_before
+          )
+            return false;
+          return true;
+        });
         const { offset = 0 } = input as { offset?: number };
         const size = options.pageSize ?? runs.length;
         return {
@@ -56,6 +72,7 @@ function harness(
       },
       execute: async (input: Execute) => {
         executed.push(input);
+        if (options.execute) return options.execute(input);
         return { status: "in_progress", run_id: 500 + executed.length };
       },
     },
@@ -155,7 +172,9 @@ describe("Task Collaborator reminder changes", () => {
     });
     await applyReminderChanges(context([create]), h.client);
     expect(h.executed).toHaveLength(0);
-    expect(h.listed.map((page) => page.offset)).toEqual([0, 2]);
+    expect(
+      h.listed.filter((page) => page.created_after).map((page) => page.offset)
+    ).toEqual([0, 2]);
   });
 
   test("a failed or rejected earlier create does not block a new one", async () => {
@@ -166,6 +185,101 @@ describe("Task Collaborator reminder changes", () => {
       await applyReminderChanges(context([create]), h.client);
       expect(h.executed).toHaveLength(1);
     }
+  });
+
+  test("keeps old pending and running creates deduplicated until they settle", async () => {
+    for (const status of ["pending", "running", "claimed"]) {
+      const h = harness({
+        pageSize: 1,
+        recentCreates: [
+          {
+            status,
+            created_at: new Date(
+              Date.now() - 3 * 24 * 60 * 60 * 1000
+            ).toISOString(),
+            input: { notes: "lobu:other|x|y" },
+          },
+          {
+            status,
+            created_at: new Date(
+              Date.now() - 4 * 24 * 60 * 60 * 1000
+            ).toISOString(),
+            input: { notes: marker(key) },
+          },
+        ],
+      });
+      await applyReminderChanges(context([create]), h.client);
+      expect(h.executed).toHaveLength(0);
+    }
+  });
+
+  test("preserves the source marker within the connector's notes limit", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([{ ...create, notes: "x".repeat(4000) }]),
+      h.client
+    );
+    const notes = h.executed[0]?.input?.notes as string;
+    expect(notes.length).toBeLessThanOrEqual(4000);
+    expect(notes.endsWith(marker(key))).toBe(true);
+  });
+
+  test("reports failed dispatches after attempting the remaining changes", async () => {
+    for (const failure of ["failed", "timeout", "throw"]) {
+      const h = harness({
+        execute: async ({ operation_key }) => {
+          if (operation_key === "complete_reminder") {
+            if (failure === "throw")
+              throw new Error("synthetic dispatch failure");
+            return {
+              status: failure,
+              error_message: "synthetic dispatch failure",
+            };
+          }
+          return { status: "in_progress", run_id: 999 };
+        },
+      });
+      await expect(
+        applyReminderChanges(
+          context([
+            { action: "complete", origin_id: "reminder:a" },
+            { action: "update", origin_id: "reminder:b", title: "Reply" },
+          ]),
+          h.client
+        )
+      ).rejects.toThrow("synthetic dispatch failure");
+      expect(h.executed).toHaveLength(2);
+    }
+  });
+
+  test("refuses a blank title or a key that would break the marker line", async () => {
+    const bad = [
+      { ...create, title: "   " },
+      ...Object.keys(key).flatMap((field) =>
+        ["bad|key", "bad\nkey"].map((value) => ({
+          ...create,
+          key: { ...key, [field]: value },
+        }))
+      ),
+    ];
+    const h = harness();
+    await expect(
+      applyReminderChanges(
+        context([...bad, { action: "complete", origin_id: "reminder:a" }]),
+        h.client
+      )
+    ).rejects.toThrow("marker separator");
+    expect(h.executed.map((input) => input.operation_key)).toEqual([
+      "complete_reminder",
+    ]);
+  });
+
+  test("checks unsettled creates of any age", async () => {
+    const h = harness();
+    await applyReminderChanges(context([create]), h.client);
+    expect(
+      h.listed.filter((page) => page.status).map((page) => page.status)
+    ).toEqual(["pending", "running", "claimed"]);
   });
 
   test("the same action proposed twice in one run is created once", async () => {
@@ -245,6 +359,7 @@ describe("Task Collaborator reminder changes", () => {
       { action: "create", key },
       { action: "complete" },
       { action: "create", key, title: "x", due: "tomorrow" },
+      { action: "update", origin_id: "reminder:a", title: "x".repeat(501) },
     ]) {
       expect(validate({ changes: [change] })).toBe(false);
     }

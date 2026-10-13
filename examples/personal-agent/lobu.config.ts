@@ -591,7 +591,7 @@ const hourlyTaskCollaborator = defineAutomation({
   triggers: [every("*/15 * * * *", { timezone: "Europe/London" })],
   minCooldownSeconds: 300,
   // No outputs: Apple Reminders is the task list. The reaction applies the
-  // run's reminder changes through the paired Mac; nothing is stored here.
+  // run's reminder changes through the paired Mac; Lobu retains run history.
   sources: {
     // SQL frames summarize the run-bound arrival range. The agent queries each
     // cohort using its window token; no raw-body or arbitrary task-count cap.

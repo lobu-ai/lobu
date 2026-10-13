@@ -2,7 +2,8 @@ import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 
 // Applies the Task Collaborator's reminder changes through the paired Mac's
 // apple.reminders operations. Apple Reminders is the task list: the Automation
-// reads it live and this reaction writes it, so nothing is stored in Lobu.
+// reads it live and this reaction writes it. Lobu retains run and operation
+// history, but does not maintain task entities or sync the reminder feed.
 //
 // A create carries its source identity as the last line of its notes
 // ("lobu:<scope>|<origin>|<key>"), which is how later runs recognise it. A run
@@ -33,7 +34,7 @@ export const input = {
             additionalProperties: false,
           },
           origin_id: { type: "string", minLength: 1 },
-          title: { type: "string", minLength: 1 },
+          title: { type: "string", minLength: 1, maxLength: 500 },
           notes: { type: "string" },
           due: { type: "string", format: "date-time" },
         },
@@ -62,8 +63,8 @@ type Change =
   | { action: "update"; origin_id: string; title?: string; due?: string };
 
 const LIST = "Lobu";
-// A create still waiting for approval or the Mac is invisible to the live read
-// for at most this long; an approval left unanswered longer expires anyway.
+// Recent successful creates can land after the agent's live read. Unsettled
+// creates are checked separately regardless of age or approval expiry policy.
 const RECENT_CREATE_MS = 2 * 24 * 60 * 60 * 1000;
 
 export function marker(key: Key): string {
@@ -95,70 +96,105 @@ export default async function applyReminderChanges(
   const queued = new Set<string>();
   if (changes.some((change) => change.action === "create")) {
     const createdAfter = new Date(Date.now() - RECENT_CREATE_MS).toISOString();
-    for (let offset = 0; ; ) {
-      const page = await client.operations.listRuns({
-        connection_id: connectionId,
-        operation_key: "create_reminder",
-        created_after: createdAfter,
-        limit: 200,
-        offset,
-      } as Parameters<ReactionClient["operations"]["listRuns"]>[0]);
-      for (const run of page.runs) {
-        // A failed or rejected create made nothing, so it does not block a retry.
-        if (["failed", "timeout", "cancelled"].includes(String(run.status)))
-          continue;
-        const notes = (run.input as { notes?: unknown } | null)?.notes;
-        const line =
-          typeof notes === "string" ? notes.split("\n").at(-1) : undefined;
-        if (line?.startsWith("lobu:")) queued.add(line);
+    const filters = [
+      { created_after: createdAfter },
+      { status: "pending", created_before: createdAfter },
+      { status: "running", created_before: createdAfter },
+      { status: "claimed", created_before: createdAfter },
+    ];
+    for (const filter of filters) {
+      for (let offset = 0; ; ) {
+        const page = await client.operations.listRuns({
+          connection_id: connectionId,
+          operation_key: "create_reminder",
+          ...filter,
+          limit: 200,
+          offset,
+        });
+        for (const run of page.runs) {
+          // Terminal failures do not reserve the action for a future run.
+          if (["failed", "timeout", "cancelled"].includes(String(run.status)))
+            continue;
+          const notes = (run.input as { notes?: unknown } | null)?.notes;
+          const line =
+            typeof notes === "string" ? notes.split("\n").at(-1) : undefined;
+          if (line?.startsWith("lobu:")) queued.add(line);
+        }
+        if (!page.has_more || page.runs.length === 0) break;
+        offset += page.runs.length;
       }
-      if (!page.has_more || page.runs.length === 0) break;
-      offset += page.runs.length;
     }
   }
 
+  const failures: string[] = [];
   for (const [index, change] of changes.entries()) {
-    let operation: string;
-    let input: Record<string, unknown>;
-    if (change.action === "create") {
-      const line = marker(change.key);
-      if (queued.has(line)) {
-        client.log(`Skipped a reminder already being created: ${line}`);
-        continue;
+    try {
+      let operation: string;
+      let input: Record<string, unknown>;
+      if (change.action === "create") {
+        // The marker is one notes line split on "|", so a key part holding
+        // either would be misread by later runs.
+        if (
+          Object.values(change.key).some((part) =>
+            ["|", "\n", "\r"].some((separator) => part.includes(separator))
+          )
+        )
+          throw new Error("Reminder source key contains a marker separator");
+        if (!change.title.trim()) throw new Error("Reminder title is blank");
+        const line = marker(change.key);
+        if (queued.has(line)) {
+          client.log(`Skipped a reminder already being created: ${line}`);
+          continue;
+        }
+        queued.add(line);
+        if (line.length > 4000)
+          throw new Error("Reminder source marker exceeds the notes limit");
+        const notes = change.notes
+          ?.trim()
+          .slice(0, Math.max(0, 4000 - line.length - 2));
+        operation = "create_reminder";
+        input = {
+          title: change.title.replace(/\s+/g, " ").trim().slice(0, 500),
+          notes: [notes, line].filter(Boolean).join("\n\n"),
+          list: LIST,
+          ...(change.due ? { due: change.due } : {}),
+        };
+      } else if (change.action === "complete") {
+        operation = "complete_reminder";
+        input = { origin_id: change.origin_id };
+      } else {
+        operation = "update_reminder";
+        input = {
+          origin_id: change.origin_id,
+          ...(change.title ? { title: change.title } : {}),
+          ...(change.due ? { due: change.due } : {}),
+        };
       }
-      queued.add(line);
-      operation = "create_reminder";
-      input = {
-        title: change.title.replace(/\s+/g, " ").trim().slice(0, 500),
-        notes: [change.notes?.trim(), line].filter(Boolean).join("\n\n"),
-        list: LIST,
-        ...(change.due ? { due: change.due } : {}),
-      };
-    } else if (change.action === "complete") {
-      operation = "complete_reminder";
-      input = { origin_id: change.origin_id };
-    } else {
-      operation = "update_reminder";
-      input = {
-        origin_id: change.origin_id,
-        ...(change.title ? { title: change.title } : {}),
-        ...(change.due ? { due: change.due } : {}),
-      };
+      // Queued, not awaited: the Mac and any approval finish after this reaction.
+      // The key is bound to this run, so a retried reaction replays its own
+      // writes instead of repeating them.
+      const result = await client.operations.execute({
+        connection_id: connectionId,
+        operation_key: operation,
+        input,
+        idempotency_key: `task-reminders:${source.run_id}:${index}`,
+        automation_source: source,
+        background: true,
+      });
+      if (result.status === "failed" || result.status === "timeout") {
+        throw new Error(
+          result.error_message ?? `${operation} ${result.status}`
+        );
+      }
+      client.log(`Queued ${operation}`, {
+        run_id: result.run_id,
+        status: result.status,
+      });
+    } catch (error) {
+      failures.push(
+        `Change ${index}: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
-    // Queued, not awaited: the Mac and any approval finish after this reaction.
-    // The key is bound to this run, so a retried reaction replays its own
-    // writes instead of repeating them.
-    const result = await client.operations.execute({
-      connection_id: connectionId,
-      operation_key: operation,
-      input,
-      idempotency_key: `task-reminders:${source.run_id}:${index}`,
-      automation_source: source,
-      background: true,
-    });
-    client.log(`Queued ${operation}`, {
-      run_id: result.run_id,
-      status: result.status,
-    });
   }
+  if (failures.length) throw new Error(failures.join("\n"));
 }
