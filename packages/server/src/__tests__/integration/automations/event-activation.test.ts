@@ -36,6 +36,8 @@ describe("Automation connector-event activation", () => {
 			slug: "agentconn-runtime-test",
 			created_by: user.id,
 		});
+		// A chat runtime id names a credentialed chat connection.
+		await getTestDb()`UPDATE connections SET credential_mode = 'byo' WHERE id = ${connection.id}`;
 		const trigger = {
 			kind: "event" as const,
 			source: "connector" as const,
