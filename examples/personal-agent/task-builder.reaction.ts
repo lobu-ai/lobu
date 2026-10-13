@@ -237,19 +237,27 @@ async function remindDueTasks(client: ReactionClient): Promise<void> {
 // only thing kept here is the link on the task (`reminder`), never a copy.
 //
 // An action idempotency key is bound to the run that first used it, so a later
-// run cannot replay it. Cross-run dedupe is therefore the task's own state:
-// `reminder.run_id` is written as soon as a create is queued, and later runs
-// read that run back instead of creating again.
+// run cannot replay it. Cross-run dedupe is therefore the task's own state: each
+// operation's run id is written as soon as it is queued, and later reactions
+// read that run back until it settles.
+//
+// A create that did not succeed is never retried: a timed-out create may still
+// have made the reminder, and a rejection is the user's answer. A completion
+// that failed is retried, because completing a reminder twice is harmless.
 
 type Reminder = {
   run_id?: number;
   origin_id?: string;
-  completed_run_id?: number;
+  create_failed?: boolean;
+  complete_run_id?: number;
+  complete_settled?: boolean;
 };
 type TaskRow = { id: number; name: string; metadata: Record<string, unknown> };
+type Run = Record<string, unknown>;
 
 const LIST = "Lobu";
 const BATCH = 25;
+const FAILED = ["failed", "timeout", "cancelled"];
 
 function reminderOf(metadata: Record<string, unknown>): Reminder {
   const value = metadata.reminder;
@@ -277,39 +285,69 @@ export async function syncTaskReminders(
     automation_id: Number(ctx.window.automation_id),
     run_id: Number(ctx.window.run_id),
   };
-
+  const tasks = async (where: string) =>
+    (await client.query(
+      `SELECT id, name, metadata FROM entities WHERE entity_type = 'task' AND deleted_at IS NULL AND ${where} ORDER BY id LIMIT ${BATCH}`
+    )) as TaskRow[];
   const save = (task: TaskRow, reminder: Reminder) =>
     client.entities.update({
       entity_id: task.id,
       metadata: { reminder },
     } as Parameters<ReactionClient["entities"]["update"]>[0]);
+  const queued = (
+    task: TaskRow,
+    action: string,
+    result: { status?: string; run_id?: number; error_message?: string }
+  ) => {
+    if (typeof result.run_id === "number") return true;
+    client.log(`Reminder ${action} for task ${task.id} was not queued`, {
+      status: result.status,
+      error: result.error_message,
+    });
+    return false;
+  };
 
-  // 1. Link reminders whose create was queued by an earlier run.
-  const pending = (await client.query(
-    `SELECT id, name, metadata FROM entities WHERE entity_type = 'task' AND deleted_at IS NULL AND metadata->'reminder'->>'run_id' IS NOT NULL AND metadata->'reminder'->>'origin_id' IS NULL ORDER BY id LIMIT ${BATCH}`
-  )) as TaskRow[];
-  for (const task of pending) {
+  // 1. Settle creates queued by an earlier reaction.
+  for (const task of await tasks(
+    "metadata->'reminder'->>'run_id' IS NOT NULL AND metadata->'reminder'->>'origin_id' IS NULL AND metadata->'reminder'->>'create_failed' IS NULL"
+  )) {
     const reminder = reminderOf(task.metadata);
     const { run } = await client.operations.getRun(Number(reminder.run_id));
-    const originId = (run.output as Record<string, unknown> | null)?.origin_id;
+    const originId = (run.output as Run | null)?.origin_id;
     if (run.status === "completed" && typeof originId === "string") {
       await save(task, { ...reminder, origin_id: originId });
-    } else if (run.status === "failed" || run.approval_status === "rejected") {
-      // Not retried: a rejection is the user's answer, and a failure needs a look.
+    } else if (FAILED.includes(String(run.status))) {
       client.log(`Reminder for task ${task.id} was not created`, {
         run_id: reminder.run_id,
         status: run.status,
         approval_status: run.approval_status,
       });
+      await save(task, { ...reminder, create_failed: true });
     }
   }
 
-  // 2. Create a reminder for each open, dated task that has none and did not
+  // 2. Settle completions queued by an earlier reaction. A failure clears the
+  //    run so step 4 tries again.
+  for (const task of await tasks(
+    "metadata->'reminder'->>'complete_run_id' IS NOT NULL AND metadata->'reminder'->>'complete_settled' IS NULL"
+  )) {
+    const reminder = reminderOf(task.metadata);
+    const { run } = await client.operations.getRun(
+      Number(reminder.complete_run_id)
+    );
+    if (run.status === "completed" || run.approval_status === "rejected") {
+      await save(task, { ...reminder, complete_settled: true });
+    } else if (FAILED.includes(String(run.status))) {
+      const { complete_run_id: _, ...rest } = reminder;
+      await save(task, rest);
+    }
+  }
+
+  // 3. Create a reminder for each open, dated task that has none and did not
   //    come from Reminders.
-  const unlinked = (await client.query(
-    `SELECT id, name, metadata FROM entities WHERE entity_type = 'task' AND deleted_at IS NULL AND COALESCE(metadata->>'status', 'backlog') NOT IN ('done', 'dismissed') AND metadata->>'due_date' IS NOT NULL AND metadata->'reminder' IS NULL AND metadata->>'source_scope' IS DISTINCT FROM '${ownScope}' ORDER BY id LIMIT ${BATCH}`
-  )) as TaskRow[];
-  for (const task of unlinked) {
+  for (const task of await tasks(
+    `COALESCE(metadata->>'status', 'backlog') NOT IN ('done', 'dismissed') AND metadata->>'due_date' IS NOT NULL AND metadata->'reminder' IS NULL AND metadata->>'source_scope' IS DISTINCT FROM '${ownScope}'`
+  )) {
     const title = String(task.metadata.action || task.name)
       .replace(/\s+/g, " ")
       .trim()
@@ -325,13 +363,7 @@ export async function syncTaskReminders(
       idempotency_key: `task-reminder:create:${task.id}:${source.run_id}`,
       automation_source: source,
     });
-    if (typeof result.run_id !== "number") {
-      client.log(`Reminder create for task ${task.id} was not queued`, {
-        status: result.status,
-        error: result.error_message,
-      });
-      continue;
-    }
+    if (!queued(task, "create", result)) continue;
     const originId = result.output?.origin_id;
     await save(task, {
       run_id: result.run_id,
@@ -341,11 +373,10 @@ export async function syncTaskReminders(
     });
   }
 
-  // 3. Complete the reminder behind each closed task, once.
-  const closed = (await client.query(
-    `SELECT id, name, metadata FROM entities WHERE entity_type = 'task' AND deleted_at IS NULL AND metadata->>'status' IN ('done', 'dismissed') AND metadata->'reminder'->>'completed_run_id' IS NULL AND (metadata->'reminder'->>'origin_id' IS NOT NULL OR metadata->>'source_scope' = '${ownScope}') ORDER BY id LIMIT ${BATCH}`
-  )) as TaskRow[];
-  for (const task of closed) {
+  // 4. Complete the reminder behind each closed task until that settles.
+  for (const task of await tasks(
+    `metadata->>'status' IN ('done', 'dismissed') AND metadata->'reminder'->>'complete_run_id' IS NULL AND metadata->'reminder'->>'complete_settled' IS NULL AND (metadata->'reminder'->>'origin_id' IS NOT NULL OR metadata->>'source_scope' = '${ownScope}')`
+  )) {
     const reminder = reminderOf(task.metadata);
     const originId =
       reminder.origin_id ??
@@ -360,17 +391,13 @@ export async function syncTaskReminders(
       idempotency_key: `task-reminder:complete:${task.id}:${source.run_id}`,
       automation_source: source,
     });
-    if (typeof result.run_id !== "number") {
-      client.log(`Reminder complete for task ${task.id} was not queued`, {
-        status: result.status,
-        error: result.error_message,
-      });
-      continue;
-    }
+    if (!queued(task, "complete", result)) continue;
     await save(task, {
       ...reminder,
       origin_id: originId,
-      completed_run_id: result.run_id,
+      ...(result.status === "completed"
+        ? { complete_settled: true }
+        : { complete_run_id: result.run_id }),
     });
   }
 }

@@ -317,7 +317,9 @@ const task = defineEntityType({
         {
           run_id: Type.Optional(Type.Integer()),
           origin_id: Type.Optional(Type.String({ minLength: 1 })),
-          completed_run_id: Type.Optional(Type.Integer()),
+          create_failed: Type.Optional(Type.Boolean()),
+          complete_run_id: Type.Optional(Type.Integer()),
+          complete_settled: Type.Optional(Type.Boolean()),
         },
         {
           additionalProperties: false,
