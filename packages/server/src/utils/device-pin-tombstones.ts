@@ -103,3 +103,56 @@ export async function clearDevicePinTombstoneIfPinned(
   `;
 }
 
+
+/**
+ * `connections.error_message` prefix stamped when a team-workspace member's
+ * devices homed there advertise only an OLDER version of the connector than
+ * the one the workspace runs. Their connection and its feeds are paused until
+ * a device of theirs advertises the workspace's version; device
+ * reconciliation then clears this stamp (`clearDeviceUpgradeRequired`).
+ */
+export const DEVICE_UPGRADE_REQUIRED_PREFIX = 'Update Lobu on this device to use ';
+
+export function deviceUpgradeRequiredMessage(params: {
+	connectorName: string;
+	workspaceName: string;
+	workspaceVersion: string;
+	deviceVersion: string;
+}): string {
+	return `${DEVICE_UPGRADE_REQUIRED_PREFIX}${params.connectorName} in ${params.workspaceName}: this workspace runs version ${params.workspaceVersion}, your device has ${params.deviceVersion}.`;
+}
+
+/**
+ * Clear an upgrade-required stamp once the connection's owner has a device
+ * advertising the workspace's version: re-activate the connection and resume
+ * the feeds that pause stopped. A feed the failure policy hard-paused
+ * (`consecutive_failures` at the pause threshold) stays paused, as on every
+ * device re-arm path. Safe no-op for any other error message.
+ */
+export async function clearDeviceUpgradeRequired(
+	db: DbClient,
+	params: { connectionId: number; feedPauseThreshold: number },
+): Promise<void> {
+	await db`
+    WITH cleared AS (
+      UPDATE connections
+      SET error_message = NULL,
+          status = CASE WHEN status = 'paused' THEN 'active' ELSE status END,
+          updated_at = NOW()
+      WHERE id = ${params.connectionId}
+        AND starts_with(error_message, ${DEVICE_UPGRADE_REQUIRED_PREFIX})
+        AND deleted_at IS NULL
+      RETURNING id
+    )
+    UPDATE feeds f
+    SET status = 'active',
+        next_run_at = CASE WHEN f.schedule IS NULL THEN f.next_run_at
+                           ELSE COALESCE(f.next_run_at, NOW()) END,
+        updated_at = current_timestamp
+    FROM cleared
+    WHERE f.connection_id = cleared.id
+      AND f.status = 'paused'
+      AND f.deleted_at IS NULL
+      AND f.consecutive_failures < ${params.feedPauseThreshold}
+  `;
+}

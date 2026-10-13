@@ -25,7 +25,12 @@ import {
 import { extractConnectorMetadata, type ConnectorMetadata } from '../utils/connector-compiler';
 import { upsertConnectorDefinitionRecords } from '../utils/connector-definition-install';
 import { ensureUniqueConnectionSlug, isConnectionSlugUniqueViolation } from '../utils/connections';
-import { clearDevicePinTombstoneIfPinned } from '../utils/device-pin-tombstones';
+import {
+  clearDevicePinTombstoneIfPinned,
+  clearDeviceUpgradeRequired,
+  DEVICE_UPGRADE_REQUIRED_PREFIX,
+  deviceUpgradeRequiredMessage,
+} from '../utils/device-pin-tombstones';
 import {
   DEVICE_AUTOWIRE_SUPPRESSION_KEY,
   DEVICE_CONNECTOR_ARTIFACT_SQL,
@@ -38,6 +43,7 @@ import logger from '../utils/logger';
 import { feedBackoff } from '../connectors/feed-backoff';
 import {
   attestDeviceManifestArtifacts,
+  compareSemverish,
   getDeviceManifestClaimAuthorizationsForDevice,
   getDeviceManifestSourcesForUser,
   sortJson,
@@ -389,6 +395,10 @@ async function ensureDeviceConnectorWired(
             readyConnectionId,
             currentSource.advertiserDeviceIds
           );
+          await clearDeviceUpgradeRequired(tx, {
+            connectionId: readyConnectionId,
+            feedPauseThreshold: feedBackoff.pauseThreshold,
+          });
           return claimAuthorization(currentSource);
         });
       } else {
@@ -728,6 +738,10 @@ async function ensureDeviceConnectorWired(
         connectionId,
         currentSource?.advertiserDeviceIds ?? matchingDeviceIds
       );
+      await clearDeviceUpgradeRequired(tx, {
+        connectionId,
+        feedPauseThreshold: feedBackoff.pauseThreshold,
+      });
       if (currentSource && !(await selectedArtifactMatches(tx, currentSource))) return null;
       return claimAuthorization(currentSource);
     });
@@ -807,6 +821,73 @@ async function pauseStaleDeviceFeeds(
     logger.warn(
       { userId, connectorKey, err: errorMessage(err) },
       '[device-connectors] Failed to pause stale device feeds'
+    );
+  }
+}
+
+/**
+ * Pause this member's device connection for `connectorKey` in a TEAM workspace
+ * whose one definition runs a newer version than any of the member's devices
+ * homed there advertise. The connection can't serve that definition, so it is
+ * paused (not left active and unusable) and its `error_message` says to update
+ * Lobu on the device. Covers unpinned rows and rows pinned to a device homed
+ * in this workspace; a pin to a device homed elsewhere is a deliberate
+ * placement and is left alone. Never overwrites a different error. The stamp is
+ * cleared by {@link ensureDeviceConnectorWired} once a device of the member
+ * advertises the workspace's version. Best-effort.
+ */
+async function pauseForDeviceUpgrade(
+  userId: string,
+  organizationId: string,
+  source: DeviceConnectorSource,
+  deviceVersion: string
+) {
+  const sql = getDb();
+  try {
+    const [org] = (await sql`
+      SELECT name FROM "organization" WHERE id = ${organizationId}
+    `) as unknown as Array<{ name: string | null }>;
+    const reason = deviceUpgradeRequiredMessage({
+      connectorName: source.metadata.name,
+      workspaceName: org?.name || 'this workspace',
+      workspaceVersion: source.metadata.version,
+      deviceVersion,
+    });
+    await sql`
+      WITH paused AS (
+        UPDATE connections c
+        SET status = CASE WHEN c.status = 'active' THEN 'paused' ELSE c.status END,
+            error_message = ${reason},
+            updated_at = NOW()
+        WHERE c.organization_id = ${organizationId}
+          AND c.connector_key = ${source.key}
+          AND c.created_by = ${userId}
+          AND c.auth_profile_id IS NULL
+          AND c.app_auth_profile_id IS NULL
+          AND c.deleted_at IS NULL
+          AND (c.error_message IS NULL OR starts_with(c.error_message, ${DEVICE_UPGRADE_REQUIRED_PREFIX}))
+          AND (
+            c.device_worker_id IS NULL
+            OR EXISTS (
+              SELECT 1 FROM device_workers dw
+              WHERE dw.id = c.device_worker_id
+                AND dw.user_id = ${userId}
+                AND dw.organization_id = ${organizationId}
+            )
+          )
+        RETURNING c.id
+      )
+      UPDATE feeds f
+      SET status = 'paused', updated_at = current_timestamp
+      FROM paused
+      WHERE f.connection_id = paused.id
+        AND f.status = 'active'
+        AND f.deleted_at IS NULL
+    `;
+  } catch (err) {
+    logger.warn(
+      { userId, connectorKey: source.key, err: errorMessage(err) },
+      '[device-connectors] Failed to pause a device connection pending a device update'
     );
   }
 }
@@ -1219,15 +1300,13 @@ export async function reconcileDeviceCapabilities(
   // home reads its own winners.
   let fleetManifestSources: DeviceConnectorSource[] = [];
   const homeManifestSources = new Map<string, DeviceConnectorSource[]>();
-  // organization → connector key → this user's devices homed there that
-  // advertise ANY retained version of the key. A shared workspace selects one
-  // definition across every member, so a member whose devices all run an
-  // older version advertises none of the winner. Their connection's wiring and
-  // feed liveness follow these devices instead, exactly as one user's older
-  // device keeps its retained version beside a newer one of their own: the
-  // definition is not downgraded, and claims stay exact-artifact (the older
-  // device is authorized only for the version it advertises).
-  const homeRetainedAdvertisers = new Map<string, Map<string, string[]>>();
+  // TEAM workspace → connector key → the newest version this user's own
+  // devices homed there advertise. A team workspace runs ONE definition chosen
+  // across every member, so a member whose devices all advertise an older
+  // version can't serve it: their connection is paused with an
+  // upgrade-required reason instead of being wired. Personal workspaces hold
+  // only their owner's devices, so the winner is always theirs.
+  const homeOwnNewestVersions = new Map<string, Map<string, string>>();
   try {
     fleetManifestSources = await getDeviceManifestSourcesForUser({ sql, userId });
     for (const home of homes) {
@@ -1235,20 +1314,21 @@ export async function reconcileDeviceCapabilities(
         home.organizationId,
         await getDeviceManifestSourcesForUser({ sql, userId, home })
       );
-      const retained = new Map<string, string[]>();
-      if (!home.personal) {
-        for (const source of await getDeviceManifestSourcesForUser({
-          sql,
-          userId,
-          home,
-          includeRetainedVersions: true,
-        })) {
-          retained.set(source.key, [
-            ...new Set([...(retained.get(source.key) ?? []), ...source.advertiserDeviceIds]),
-          ]);
+      if (home.personal) continue;
+      const newest = new Map<string, string>();
+      for (const source of await getDeviceManifestSourcesForUser({
+        sql,
+        userId,
+        home,
+        includeRetainedVersions: true,
+      })) {
+        if (source.advertiserDeviceIds.length === 0) continue;
+        const current = newest.get(source.key);
+        if (!current || compareSemverish(source.metadata.version, current) > 0) {
+          newest.set(source.key, source.metadata.version);
         }
       }
-      homeRetainedAdvertisers.set(home.organizationId, retained);
+      homeOwnNewestVersions.set(home.organizationId, newest);
     }
   } catch (err) {
     logger.warn(
@@ -1307,10 +1387,18 @@ export async function reconcileDeviceCapabilities(
           [...byKey.values()].map((dc) => {
             const matchingDeviceIds =
               'source' in dc && dc.source === 'device-manifest'
-                ? dc.advertiserDeviceIds.length > 0
-                  ? dc.advertiserDeviceIds
-                  : (homeRetainedAdvertisers.get(home.organizationId)?.get(dc.key) ?? [])
+                ? dc.advertiserDeviceIds
                 : homeDeviceIds.filter((id) => deviceCaps.get(id)?.has(dc.requiredCapability));
+            if (
+              matchingDeviceIds.length === 0 &&
+              'source' in dc &&
+              dc.source === 'device-manifest'
+            ) {
+              const ownVersion = homeOwnNewestVersions.get(home.organizationId)?.get(dc.key);
+              if (ownVersion && compareSemverish(ownVersion, dc.metadata.version) < 0) {
+                return pauseForDeviceUpgrade(userId, home.organizationId, dc, ownVersion);
+              }
+            }
             return matchingDeviceIds.length > 0
               ? ensureDeviceConnectorWired(
                   userId,

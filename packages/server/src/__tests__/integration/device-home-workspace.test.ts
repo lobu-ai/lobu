@@ -22,6 +22,7 @@ import { generateSecureToken, hashToken } from '../../auth/oauth/utils';
 import type { Env } from '../../index';
 import { resolveDeviceClaimableOrgs } from '../../utils/device-claimable-orgs';
 import { mintDeviceChildToken, updateDeviceWorkerOrg } from '../../worker-api/device-management';
+import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
 import { authorizeRunForWorker } from '../../worker-api/shared';
 import { materializeDueFeeds, type DueFeedClaimContext } from '../../scheduled/check-due-feeds';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
@@ -353,54 +354,80 @@ describe('device home workspace chosen at pairing', () => {
     );
   });
 
-  it('keeps a member on an older device manifest wired while a colleague runs a newer one', async () => {
+  it('pauses a member on an older device manifest until their device runs the workspace version', async () => {
     const sql = getTestDb();
     const alice = await seedUser('Older Extension');
     const bob = await seedUser('Newer Extension');
     const teamOrgId = await seedTeamOrg();
     await addMember(teamOrgId, alice.userId, 'member');
     await addMember(teamOrgId, bob.userId, 'member');
+    const workspaceVersion = String(OS_SHELL_MANIFEST.version);
     const olderManifest = { ...OS_SHELL_MANIFEST, version: '0.0.1' };
     const aliceToken = await workerPat(alice.userId, teamOrgId, 'older-box');
     const bobToken = await workerPat(bob.userId, teamOrgId, 'newer-box');
-
-    // Bob's newer manifest selects the workspace's one definition first.
-    await pollShell(bobToken, 'newer-box');
-    await pollShell(aliceToken, 'older-box', olderManifest);
+    const seedFeed = async (connectionId: number) => {
+      await sql`
+        INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
+        VALUES (${teamOrgId}, ${connectionId}, 'items', 'active', '* * * * *', NOW())
+      `;
+    };
     const definitionVersion = async () =>
       ((await sql`
         SELECT version FROM connector_definitions
         WHERE organization_id = ${teamOrgId} AND key = 'os.shell' AND status = 'active'
       `) as unknown as Array<{ version: string }>)[0]?.version;
-    expect(await definitionVersion()).toBe(OS_SHELL_MANIFEST.version);
+    const connectionOf = async (userId: string) => {
+      const [row] = (await sql`
+        SELECT c.id, c.status, c.error_message,
+               (SELECT COUNT(*)::int FROM feeds f
+                 WHERE f.connection_id = c.id AND f.status = 'active' AND f.deleted_at IS NULL) AS active_feeds
+        FROM connections c
+        WHERE c.organization_id = ${teamOrgId} AND c.connector_key = 'os.shell'
+          AND c.created_by = ${userId} AND c.deleted_at IS NULL
+      `) as unknown as Array<{ id: number; status: string; error_message: string | null; active_feeds: number }>;
+      return row;
+    };
 
-    const connections = await shellConnections(teamOrgId);
-    expect(connections.map((row) => [row.created_by, row.status]).sort()).toEqual(
-      [
-        [alice.userId, 'active'],
-        [bob.userId, 'active'],
-      ].sort()
-    );
-    // os.shell declares no feeds; seed one on each member's connection.
-    for (const row of connections) {
-      await sql`
-        INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
-        VALUES (${teamOrgId}, ${row.id}, 'items', 'active', '* * * * *', NOW())
-      `;
-    }
-
+    // Alice is wired while the workspace runs her version, then Bob's newer
+    // extension moves the workspace's one definition forward.
     await pollShell(aliceToken, 'older-box', olderManifest);
+    await seedFeed((await connectionOf(alice.userId)).id);
     await pollShell(bobToken, 'newer-box');
+    await seedFeed((await connectionOf(bob.userId)).id);
+    await pollShell(aliceToken, 'older-box', olderManifest);
 
-    expect(await definitionVersion()).toBe(OS_SHELL_MANIFEST.version);
+    expect(await definitionVersion()).toBe(workspaceVersion);
+    const reason =
+      `Update Lobu on this device to use ${String(OS_SHELL_MANIFEST.name)} in Team: ` +
+      `this workspace runs version ${workspaceVersion}, your device has 0.0.1.`;
+    expect(await connectionOf(alice.userId)).toMatchObject({
+      status: 'paused',
+      error_message: reason,
+      active_feeds: 0,
+    });
+    expect(await connectionOf(bob.userId)).toMatchObject({
+      status: 'active',
+      error_message: null,
+      active_feeds: 1,
+    });
+
+    // Her older device is never authorized for the workspace's artifact.
+    const aliceDevice = await deviceRow(alice.userId, 'older-box');
+    const authorizations = await reconcileDeviceCapabilities(alice.userId, aliceDevice.id);
     expect(
-      (await shellConnections(teamOrgId)).map((row) => [row.created_by, row.status, row.active_feeds]).sort()
-    ).toEqual(
-      [
-        [alice.userId, 'active', 1],
-        [bob.userId, 'active', 1],
-      ].sort()
-    );
+      authorizations.filter((auth) => auth.connectorKey === 'os.shell' && auth.connectorVersion === workspaceVersion)
+    ).toEqual([]);
+
+    // Self-healing: once her device runs the workspace's version, the next
+    // poll resumes her connection and feeds and clears the reason.
+    await pollShell(aliceToken, 'older-box');
+    expect(await connectionOf(alice.userId)).toMatchObject({
+      status: 'active',
+      error_message: null,
+      active_feeds: 1,
+    });
+    expect(await connectionOf(bob.userId)).toMatchObject({ status: 'active', active_feeds: 1 });
+    expect(await definitionVersion()).toBe(workspaceVersion);
   });
 
   it('does not attach a member device to an ownerless shared team connection', async () => {
