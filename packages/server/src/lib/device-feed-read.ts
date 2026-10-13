@@ -36,6 +36,7 @@
  */
 
 import { ToolError } from '@lobu/core';
+import { resolveActingPrincipal } from '../authz/entity-policy';
 import { getDb } from '../db/client';
 import { createConnectorOperationRun } from '../runs/queue-service';
 import { waitForDeviceActionRun } from '../tools/admin/device-action-wait';
@@ -48,7 +49,7 @@ import {
   findDeviceConnectorReadiness,
   loadDeviceConnectorReadiness,
 } from '../worker-api/device-connector-readiness';
-import { DEVICE_FEED_READ_ACTION_KEY } from './device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY } from './device-feed-read-protocol';
 import { scrubSourceReadRun } from './source-read-run';
 
 /**
@@ -93,6 +94,8 @@ export const DEVICE_FEED_READ_MAX_OFFSET = 10_000;
 
 export interface DeviceFeedReadParams {
   organizationId: string;
+  automationId?: number | null;
+  visibilityUserId?: string | null;
   /** feeds.id — already resolved + visibility-fenced by the caller. */
   feedId: number;
   feedKey: string;
@@ -419,15 +422,30 @@ export async function readDeviceFeed(
     sort: p.sort ?? null,
   };
 
-  const run = await createConnectorOperationRun({
-    organizationId: p.organizationId,
-    connectionId: p.connectionId,
-    connectorKey: p.connectorKey,
-    operationKey: DEVICE_FEED_READ_ACTION_KEY,
-    operationInput: request as unknown as Record<string, unknown>,
-    approvalMode: 'device',
-    // Metadata-only device connectors have no compiled bundle by construction.
-    requireCompiledCode: false,
+  const sql = getDb();
+  const actor = p.automationId == null ? null : await resolveActingPrincipal(sql, {
+    organizationId: p.organizationId, sessionAutomationId: p.automationId,
+  });
+  // Publish the queue row and its feed identity together, before a device can claim it.
+  const run = await sql.begin(async (tx) => {
+    const created = await createConnectorOperationRun({
+      organizationId: p.organizationId,
+      connectionId: p.connectionId,
+      connectorKey: p.connectorKey,
+      operationKey: DEVICE_FEED_READ_ACTION_KEY,
+      operationInput: request as unknown as Record<string, unknown>,
+      approvalMode: 'device',
+      automationId: p.automationId,
+      policyPrincipalKind: actor?.kind,
+      policyPrincipalId: actor?.id,
+      createdByUserId: actor ? p.visibilityUserId : undefined,
+      runMetadata: actor ? { [SOURCE_FEED_READ_METADATA_KEY]: true } : undefined,
+      db: tx,
+      // Metadata-only device connectors have no compiled bundle by construction.
+      requireCompiledCode: false,
+    });
+    await tx`UPDATE runs SET feed_id = ${p.feedId} WHERE id = ${created.runId} AND organization_id = ${p.organizationId}`;
+    return created;
   });
 
   // The run row is the TRANSPORT, not a record. `complete-action` persists the

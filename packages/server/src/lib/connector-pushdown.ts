@@ -474,6 +474,8 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     remainingReadMs(p);
     return readDeviceFeed({
       organizationId: p.scope.organizationId,
+      automationId: p.automationId,
+      visibilityUserId: p.scope.principal,
       feedId: Number(feed.id),
       feedKey: feed.feed_key,
       // Same precedence as the compiled path below: connection config first,
