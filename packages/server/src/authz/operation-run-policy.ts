@@ -1,4 +1,5 @@
 import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
+import { resolveAutomationConnectionVisibilityUserId } from './automation-connection-visibility';
 import { connectionBrowserGrant } from '../connectors/browser-resource';
 import { type DbClient, getDb } from '../db/client';
 import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, isSourceFeedRead } from '../lib/device-feed-read-protocol';
@@ -87,7 +88,7 @@ export async function resolveRunConnectorPolicy(params: {
   const run = await loadPolicyRun(sql, params.organizationId, params.runId);
   if (!run) return unavailable();
   if (run.action_key === DEVICE_FEED_READ_ACTION_KEY && isSourceFeedRead(run.run_metadata)) {
-    if (run.run_type !== 'action' || run.parent_run_id !== null || run.status !== 'running'
+    if (run.run_type !== 'action' || run.parent_run_id !== null || !['pending', 'running'].includes(run.status)
       || !['auto', 'approved'].includes(run.approval_status)
       || !run.expires_at || new Date(run.expires_at).getTime() <= Date.now()) return unavailable();
     const actor = await resolveStoredActingPrincipal(sql, params.organizationId, run.policy_principal_kind, run.policy_principal_id);
@@ -95,6 +96,15 @@ export async function resolveRunConnectorPolicy(params: {
     if (run.run_metadata?.[SOURCE_FEED_SUBSCRIPTION_METADATA_KEY] === true) {
       const subscriptions = run.feed_id == null ? [] : await sourceFeedSubscriptions(sql, params.organizationId, Number(run.feed_id), Number(run.automation_id));
       if (subscriptions[0]?.principal !== run.created_by_user_id) return unavailable();
+    }
+    if (actor.kind === 'automation') {
+      const visibilityUserId = await resolveAutomationConnectionVisibilityUserId({ organizationId: params.organizationId, userId: null, actingAutomationId: run.automation_id }, sql);
+      if (visibilityUserId !== run.created_by_user_id || !visibilityUserId) return unavailable();
+      const policy = await resolveConnectorPolicy({ organizationId: params.organizationId, connectionId: Number(run.connection_id), actor,
+        operation: { connector_key: run.connector_key ?? '', operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
+      // Source reads require current Auto authority and have no approval flow.
+      // Return a veto so browser implementation steps cannot inherit an Ask.
+      if (policy.effect !== 'auto') return { ...policy, effect: 'deny' };
     }
     return await isSourceReadFeedStillReadable(sql, params.organizationId, run)
       ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();

@@ -347,34 +347,37 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
             const rows = await tx.unsafe<{
               organization_id: string;
               action_key: string | null;
+              error_message: string;
             }>(
               `UPDATE public.runs
                SET status = 'timeout',
                    outcome = $2,
                    completed_at = current_timestamp,
-                   error_message = $3
+                   error_message = CASE WHEN status = 'pending' THEN $4 ELSE $3 END
                WHERE id = $1
                  AND run_type = 'action'
                  AND approval_status = 'approved'
                  AND ${staleWhereSql}
-               RETURNING organization_id, action_key`,
+               RETURNING organization_id, action_key, error_message`,
               [
                 runId,
                 classifyRunOutcome({ status: 'timeout' }),
                 heartbeatErrorMessage,
+                claimErrorMessage,
               ]
             );
             if (rows.length === 0) return false;
 
             const actionKey = rows[0].action_key ?? 'Action';
+            const errorMessage = rows[0].error_message;
             const eventId = await supersedeActionEvent(
               runId,
               rows[0].organization_id,
               'failed',
               `${actionKey} — timed out`,
-              `Action timed out: ${actionKey} — ${heartbeatErrorMessage}`,
+              `Action timed out: ${actionKey} — ${errorMessage}`,
               {
-                error_message: heartbeatErrorMessage,
+                error_message: errorMessage,
                 run_status: 'timeout',
               },
               null,

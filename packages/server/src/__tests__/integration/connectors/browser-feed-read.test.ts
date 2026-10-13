@@ -173,6 +173,29 @@ describe('compiled browser source reads', () => {
   afterAll(cleanupTestDatabase);
   afterEach(() => vi.restoreAllMocks());
 
+  it.each(['auto', 'approval', 'deny', 'archived', 'creator', 'ownership'])('rechecks scheduled source authority before any browser claim: %s', async (change) => {
+    const sql = getTestDb();
+    const [automation] = await sql`WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
+      INSERT INTO automations (id, automation_group_id, organization_id, created_by, name, slug, triggers)
+      SELECT id, id, ${orgId}, ${userId}, 'Scheduled source fixture', 'scheduled-source-fixture', '[]'::jsonb FROM next_id RETURNING id`;
+    const reading = read({ ...context(), userId: null, memberRole: null, actingAutomationId: Number(automation.id) });
+    const child = await waitForChild();
+    const revoked = change !== 'auto';
+    if (change === 'approval' || change === 'deny') await upsertEntityApprovalPolicy(orgId, { resourceClass: 'connector_action', connectorKey: SOURCE_KEY, operationCategory: 'read', effects: { execute: change } });
+    if (change === 'archived') await sql`UPDATE automations SET status = 'archived' WHERE id = ${automation.id}`;
+    if (change === 'creator' || change === 'ownership') {
+      const other = await createTestUser({ email: 'new-source-owner@example.test' });
+      await addUserToOrganization(other.id, orgId, 'owner');
+      if (change === 'creator') await sql`UPDATE automations SET created_by = ${other.id} WHERE id = ${automation.id}`;
+      else await sql`UPDATE connections SET created_by = ${other.id} WHERE id = ${connectionId}`;
+    }
+    const executed = await answerBrowser(reading);
+    if (revoked) expect(executed).toBeUndefined();
+    expect((await reading).results[0].ok).toBe(!revoked);
+    if (revoked) expect((await sql`SELECT status FROM runs WHERE id = ${child.id}`)[0].status).toBe('cancelled');
+    await expectScrubbed();
+  });
+
   it('publishes only read capability while preserving listener setup', async () => {
     expect((await extractConnectorMetadata(compiled.compiledCode)).feeds).toMatchObject({
       items: { operations: ['read'], webhook: { mode: 'trigger', events: ['message.created'] } },

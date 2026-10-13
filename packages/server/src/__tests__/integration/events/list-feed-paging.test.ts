@@ -137,6 +137,29 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
     expect(seen).toEqual(expectedDesc);
   });
 
+  it('a since window counts both arms exactly once', async () => {
+    const sql = getDb();
+    const [{ min }] = await sql`
+      SELECT MIN(occurred_at) AS min FROM events WHERE id = ANY(${`{${expectedDesc.join(',')}}`}::bigint[])
+    `;
+    const since = new Date(new Date(min).getTime() + 6.5 * HOUR).toISOString();
+    const rows = await sql`
+      SELECT id FROM current_event_records f
+      WHERE (f.organization_id = ${feedOrg.id} OR f.linked_org_ids @> ARRAY[${feedOrg.id}]::text[])
+        AND f.occurred_at <= now() AND f.occurred_at >= ${since}::timestamptz
+      ORDER BY COALESCE(f.occurred_at, f.created_at) DESC, f.id DESC
+    `;
+    const windowed = rows.map((r) => Number(r.id));
+    // Keep matches from both arms while excluding part of the history.
+    expect(windowed.some((id) => linkedIds.includes(id))).toBe(true);
+    expect(windowed.some((id) => !linkedIds.includes(id))).toBe(true);
+    expect(windowed.length).toBeLessThan(expectedDesc.length);
+
+    const page = await feed({ since, limit: 50 });
+    expect(page.total).toBe(windowed.length);
+    expect(page.content.map((c) => c.id)).toEqual(windowed);
+  });
+
   it('an after cursor returns the next-newer rows, presented newest-first', async () => {
     const anchorIndex = 9;
     const anchor = (await feed({ limit: 50 })).content[anchorIndex];
@@ -246,6 +269,55 @@ describe('org-wide feed paging (disjoint org-scope arms + include_total)', () =>
       seen.push(...page.content.map((row) => row.id));
     }
     expect(seen).toEqual(expectedAsc);
+  });
+
+  it.each([true, false])('paginates text search across both org arms with cursors and include_total=%s', async (includeTotal) => {
+    const options = {
+      organization_id: feedOrg.id,
+      sort_by: 'date' as const,
+      limit: 4,
+      include_total: includeTotal,
+    };
+    const seen: number[] = [];
+    let page = await searchContentByText('searchable-marker', options);
+    // Bound the walk so a repeated cursor fails without hanging the suite.
+    for (let offset = 0; offset < expectedDesc.length; offset += options.limit) {
+      expect(page.content.map((row) => row.id)).toEqual(expectedDesc.slice(offset, offset + options.limit));
+      expect(page.total).toBe(includeTotal ? expectedDesc.length : null);
+      expect(page.page.has_more).toBe(offset + options.limit < expectedDesc.length);
+      seen.push(...page.content.map((row) => row.id));
+      if (!page.page.has_more) break;
+      const cursor = cursorOf(page.content[page.content.length - 1]);
+      page = await searchContentByText('searchable-marker', {
+        ...options,
+        before_occurred_at: cursor.occurred_at,
+        before_id: cursor.id,
+      });
+    }
+    expect(seen).toEqual(expectedDesc);
+
+    const cursor = cursorOf(page.content[0]);
+    const newer = await searchContentByText('searchable-marker', {
+      ...options,
+      after_occurred_at: cursor.occurred_at,
+      after_id: cursor.id,
+    });
+    const anchorIndex = expectedDesc.indexOf(cursor.id);
+    expect(newer.content.map((row) => row.id)).toEqual(expectedDesc.slice(anchorIndex - options.limit, anchorIndex));
+    expect(newer.total).toBe(includeTotal ? expectedDesc.length : null);
+    expect(newer.page.has_newer).toBe(true);
+  });
+
+  it('keeps the exact search total across both org arms on an empty offset page', async () => {
+    const page = await searchContentByText('searchable-marker', {
+      organization_id: feedOrg.id,
+      sort_by: 'score',
+      limit: 4,
+      offset: expectedDesc.length + 1,
+    });
+    expect(page.content).toHaveLength(0);
+    expect(page.total).toBe(expectedDesc.length);
+    expect(page.page.has_more).toBe(false);
   });
 
   it('read_knowledge: include_total=false surfaces total null; omitted stays exact', async () => {

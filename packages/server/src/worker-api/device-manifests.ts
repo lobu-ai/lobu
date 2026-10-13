@@ -174,17 +174,39 @@ export async function getDeviceManifestSourcesForUser(params: {
   connectorKey?: string;
   /** Include every retained exact artifact instead of only one winner per key. */
   includeRetainedVersions?: boolean;
+  /**
+   * Scope to one workspace's devices. `personal`: the user's personal fleet —
+   * every device of theirs NOT homed in a team workspace they belong to. A team
+   * workspace: the user's devices homed there. Omitted, the scope is the user's
+   * whole fleet, whatever its homes.
+   */
+  home?: { organizationId: string; personal: boolean };
 }): Promise<DeviceConnectorSource[]> {
+  const home = params.home;
   const rows = (await params.sql`
-    SELECT id, platform, capabilities, connector_manifests,
-           last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS}) AS online
-    FROM device_workers
-    WHERE user_id = ${params.userId}
-      AND last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
+    SELECT dw.id, dw.platform, dw.capabilities, dw.connector_manifests,
+           dw.last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS}) AS online
+    FROM device_workers dw
+    WHERE dw.user_id = ${params.userId}
+      AND dw.last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
       AND (
         ${params.connectorKey == null}
-        OR connector_manifests ? ${params.connectorKey ?? ''}
+        OR dw.connector_manifests ? ${params.connectorKey ?? ''}
       )
+      AND ${
+        home?.personal
+          ? params.sql`NOT (
+              dw.organization_id IS NOT NULL
+              AND dw.organization_id <> ${home.organizationId}
+              AND EXISTS (
+                SELECT 1 FROM "member" m
+                WHERE m."organizationId" = dw.organization_id AND m."userId" = dw.user_id
+              )
+            )`
+          : home
+            ? params.sql`dw.organization_id = ${home.organizationId}`
+            : params.sql`TRUE`
+      }
   `) as unknown as Array<{
     id: string;
     platform: string | null;

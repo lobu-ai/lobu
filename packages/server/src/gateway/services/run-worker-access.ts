@@ -1,4 +1,4 @@
-import { generateWorkerToken } from "@lobu/core";
+import { type ChatTurnAccess, generateWorkerToken } from "@lobu/core";
 import { AUTOMATION_RUN_SOURCE } from "../automation-run-session.js";
 import {
 	buildWorkerTokenClaims,
@@ -29,6 +29,10 @@ function buildRunWorkerAccess(args: {
 	/** Worker routing key; the native team is lifted off `platformMetadata`. */
 	teamId?: string;
 	platformMetadata?: WorkerTokenClaimsArgs["platformMetadata"];
+	/** Verified member the turn acts as. See WorkerTokenData.actorUserId. */
+	actorUserId?: string;
+	/** Chat turn authority. See WorkerTokenData.chatAccess. */
+	chatAccess?: ChatTurnAccess;
 }): RunWorkerAccess {
 	const issuedAt = Date.now();
 	return {
@@ -55,6 +59,8 @@ function buildRunWorkerAccess(args: {
 				runId: args.runId,
 				source: args.source,
 				sessionKey: args.userId,
+				...(args.actorUserId ? { actorUserId: args.actorUserId } : {}),
+				...(args.chatAccess ? { chatAccess: args.chatAccess } : {}),
 			},
 		),
 	};
@@ -107,6 +113,9 @@ export const DEVICE_CHAT_RUN_SOURCE = "device-chat";
  * Without them the mint falls back to `platform: "api"` with no connection or
  * thread, and a card the local CLI posts back is routed as an API interaction
  * instead of reaching the chat thread the turn came from.
+ *
+ * `actorUserId` and `chatAccess` are the chat sender's authority, resolved by
+ * the caller through `resolveChatTurnActor`, exactly like a cloud chat turn.
  */
 export function buildDeviceChatRunWorkerAccess(args: {
 	agentId: string;
@@ -118,6 +127,8 @@ export function buildDeviceChatRunWorkerAccess(args: {
 	platform?: string;
 	teamId?: string;
 	platformMetadata?: WorkerTokenClaimsArgs["platformMetadata"];
+	actorUserId?: string;
+	chatAccess?: ChatTurnAccess;
 }): RunWorkerAccess {
 	return buildRunWorkerAccess({ ...args, source: DEVICE_CHAT_RUN_SOURCE });
 }

@@ -772,10 +772,10 @@ export default async (_ctx, client) => {
 	},
 	"connections.update": {
 		summary:
-			"Update a connection's config, auth profile, status, slug, or device binding. The label field is `display_name` (not `name`). `config` merges into the stored config by default; pass `replace_config: true` alongside it to store exactly the object you send. `device_worker_id` reassigns which device runs this connection; null moves it back to the server (serverless), which the connector must not require a capability for.",
+			"Update a connection's config, auth profile, status, slug, or device binding. The label field is `display_name` (not `name`). `config` merges into the stored config by default; pass `replace_config: true` alongside it to store exactly the object you send. `device_worker_id` reassigns which device runs this connection; null moves it back to the server (serverless), which the connector must not require a capability for. `visibility` ('org' | 'private') shares the connection with the workspace or makes it creator-only; only the connection's creator may change it, and personal-credential connections cannot be shared.",
 		access: "write",
 		signature:
-			"connections.update(input: { connection_id: number; display_name?: string; slug?: string; status?: string; agent_id?: string | null; auth_profile_slug?: string | null; app_auth_profile_slug?: string | null; config?: object; entity_ids?: number[]; device_worker_id?: string | null; replace_config?: boolean }): Promise<unknown>",
+			"connections.update(input: { connection_id: number; display_name?: string; slug?: string; status?: string; agent_id?: string | null; auth_profile_slug?: string | null; app_auth_profile_slug?: string | null; config?: object; entity_ids?: number[]; device_worker_id?: string | null; replace_config?: boolean; visibility?: 'org' | 'private' }): Promise<unknown>",
 		example:
 			"await client.connections.update({ connection_id: 42, display_name: 'Team calendar' });",
 	},

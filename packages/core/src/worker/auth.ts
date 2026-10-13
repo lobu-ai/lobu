@@ -19,6 +19,15 @@ export function looksLikeWorkerToken(token: string): boolean {
  * Token format: encrypted(JSON payload of thread metadata).
  */
 
+/** See {@link WorkerTokenData.chatAccess}. */
+export const CHAT_TURN_ACCESS = [
+  "member",
+  "org_shared",
+  "public_visitor",
+  "reply_only",
+] as const;
+export type ChatTurnAccess = (typeof CHAT_TURN_ACCESS)[number];
+
 export interface WorkerTokenData {
   /**
    * Separates worker-facing bearers, credentials exposed to agent subprocesses
@@ -110,11 +119,33 @@ export interface WorkerTokenData {
    */
   adminTools?: string[];
   /**
-   * Lobu auth user authorized for {@link adminTools}. Chat turns keep the
-   * platform principal in `userId`, so direct MCP auth must not reinterpret a
-   * Slack/Telegram id as a `member.userId`. Present iff `adminTools` is present.
+   * The Lobu auth user (`member.userId`) this turn acts as on the direct MCP
+   * lane, resolved SERVER-SIDE at mint from verified state — for a chat turn,
+   * the member the platform sender is linked to in this organization. Chat
+   * turns keep the platform principal in `userId`, so direct MCP auth must
+   * never reinterpret a Slack/Telegram id as a `member.userId`; it reads this
+   * claim instead and re-checks the membership on every request. Required
+   * whenever {@link adminTools} is present. On an `org_shared` chat turn (a
+   * linked member in a group conversation) it is attribution only: the turn
+   * acts with no user.
    */
-  adminActorUserId?: string;
+  actorUserId?: string;
+  /**
+   * The authority a CHAT turn runs with, decided server-side at mint from
+   * verified state (`gateway/orchestration/chat-turn-actor.ts` in the server):
+   * - `member`: a linked member in a direct message; acts as
+   *   {@link actorUserId} with their own role and private connections.
+   * - `org_shared`: a linked member in a group conversation, or an unlinked
+   *   sender the platform vouches for as same-tenant; no user,
+   *   ordinary-member role, org-shared connections only.
+   * - `public_visitor`: an unvouched sender of a public organization; the
+   *   anonymous public-read path.
+   * - `reply_only`: an unvouched sender of a private organization; no
+   *   workspace tools at all.
+   * Absent on a chat turn means reply-only (fail closed). Ignored on headless
+   * turns, which have no chat sender.
+   */
+  chatAccess?: ChatTurnAccess;
   /**
    * Selected runtime-provider id (e.g. "vercel"), resolved from the agent's
    * environment at token-mint time. The generic `/internal/runtime/exec` route
@@ -194,8 +225,10 @@ export interface WorkerTokenOptions {
    * Admin-tool allowlist for this turn. See WorkerTokenData.adminTools.
    */
   adminTools?: string[];
-  /** Lobu auth user bound to the admin-tools allowlist. */
-  adminActorUserId?: string;
+  /** Lobu auth user the turn acts as. See WorkerTokenData.actorUserId. */
+  actorUserId?: string;
+  /** Chat turn authority. See WorkerTokenData.chatAccess. */
+  chatAccess?: ChatTurnAccess;
   /** Selected runtime provider id. See WorkerTokenData.runtimeProviderId. */
   runtimeProviderId?: string;
   /** Selected sandbox id backing the runtime credential. See WorkerTokenData.sandboxId. */
@@ -242,7 +275,8 @@ function generateToken(
     runId: options.runId,
     messageId: options.messageId,
     adminTools: options.adminTools,
-    adminActorUserId: options.adminActorUserId,
+    actorUserId: options.actorUserId,
+    chatAccess: options.chatAccess,
     runtimeProviderId: options.runtimeProviderId,
     sandboxId: options.sandboxId,
     allowedDomains: options.allowedDomains,
@@ -447,25 +481,37 @@ function verifyToken(
         return null;
       }
     }
-    // The admin-tools pair is inseparable: the allowlist limits WHAT may
-    // run and the resolved auth subject says WHO authorized it. Accepting one
-    // without the other either makes the allowlist unusable or tempts callers
-    // to reinterpret the platform-scoped `userId` as an auth user again.
-    if (
-      (data.adminTools === undefined) !==
-      (data.adminActorUserId === undefined)
-    ) {
-      logger.error(
-        "Worker token rejected: adminTools and adminActorUserId must be set together"
-      );
+    // The allowlist limits WHAT may run; the resolved auth subject says WHO
+    // authorized it. An allowlist without its actor would tempt callers to
+    // reinterpret the platform-scoped `userId` as an auth user again. The
+    // reverse is valid: an ordinary chat turn acts as its sender with no
+    // admin allowlist at all.
+    if (data.adminTools !== undefined && data.actorUserId === undefined) {
+      logger.error("Worker token rejected: adminTools requires actorUserId");
       return null;
     }
     if (
-      data.adminActorUserId !== undefined &&
-      (typeof data.adminActorUserId !== "string" || !data.adminActorUserId)
+      data.actorUserId !== undefined &&
+      (typeof data.actorUserId !== "string" || !data.actorUserId)
     ) {
       logger.error(
-        "Worker token rejected: adminActorUserId must be a non-empty string"
+        "Worker token rejected: actorUserId must be a non-empty string"
+      );
+      return null;
+    }
+    // `chatAccess` decides what a chat sender may reach, so an unknown value
+    // is rejected rather than defaulted, and the member tier must name its
+    // member: the claim alone never grants a user identity.
+    if (
+      data.chatAccess !== undefined &&
+      !(CHAT_TURN_ACCESS as readonly unknown[]).includes(data.chatAccess)
+    ) {
+      logger.error("Worker token rejected: unknown chatAccess");
+      return null;
+    }
+    if (data.chatAccess === "member" && data.actorUserId === undefined) {
+      logger.error(
+        "Worker token rejected: a member chatAccess requires actorUserId"
       );
       return null;
     }

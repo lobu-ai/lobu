@@ -38,6 +38,7 @@ describe("Automation run WorkerToken parity", () => {
     expect(claims).not.toBeNull();
     if (!claims) throw new Error("worker token did not verify");
     expect(claims.agentId).toBe("developer");
+    expect(claims.userId).toBe("developer");
     expect(claims.organizationId).toBe("org-team");
     expect(claims.conversationId).toBe(access.conversationId);
     expect(claims.runId).toBe(456);
@@ -58,13 +59,14 @@ describe("Automation run WorkerToken parity", () => {
     ).toThrow(/Automation conversation mismatch/);
   });
 
-  test("device chat retains signed native conversation routing", () => {
+  test.each([undefined, "member-test"])("device chat retains native routing and carries the resolved actor %s", (actorUserId) => {
     const access = buildDeviceChatRunWorkerAccess({
       agentId: "agent-test",
       conversationId: "conversation-test",
       runId: 789,
       organizationId: "org-test",
       userId: "user-test",
+      actorUserId,
       channelId: "channel-test",
       platform: "slack",
       teamId: "routing-team",
@@ -87,6 +89,7 @@ describe("Automation run WorkerToken parity", () => {
       source: "device-chat",
       runId: 789,
     });
+    expect(claims.actorUserId).toBe(actorUserId);
     // `deploymentName` keys per-turn liveness markers and secret mappings, so
     // it must stay agent-scoped: a platform team id here would give every
     // agent in that workspace one shared identity.

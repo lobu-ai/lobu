@@ -302,16 +302,16 @@ describe("personal-agent example: mixed live/takeout connector", () => {
 (function () {
   var Connector = module.exports.default;
   var def = new Connector().definition;
-  return JSON.stringify({ key: def.key, feeds: Object.keys(def.feeds).sort(), actions: Object.keys(def.actions || {}).sort() });
+  return JSON.stringify({ key: def.key, feeds: Object.keys(def.feeds).sort(), actions: Object.keys(def.actions || {}).sort(),
+    sources: ['notifications', 'live_messages'].map(key => ({ key, read: typeof def.feeds[key].read, observe: typeof def.feeds[key].observe, sync: typeof def.feeds[key].sync })) });
 })()`;
 			const script = await isolate.compileScript(`${GUEST_PREAMBLE}\n${report.code}\n${runner}`);
 			const out = JSON.parse(
 				(await script.run(context, { timeout: 10_000, copy: true })) as string,
-			) as { key: string; feeds: string[]; actions: string[] };
+			) as { key: string; feeds: string[]; actions: string[]; sources: Array<{ key: string; read: string; observe: string; sync: string }> };
 
 			expect(out.key).toBe("linkedin");
-			// The three live browser feeds — the ones the isolate rejection was
-			// blocking — plus the ten takeout feeds, pinned by key because a feed
+			// The five live browser feeds plus the ten takeout feeds, pinned by key because a feed
 			// key is the persisted identity a feed row and its checkpoint key on.
 			// The split moved the takeout readers into another module, so this is
 			// what catches a feed dropped or renamed on the way out.
@@ -326,11 +326,20 @@ describe("personal-agent example: mixed live/takeout connector", () => {
 				"invitations",
 				"jobs",
 				"learning",
+				"live_messages",
 				"media",
 				"messages",
+				"notifications",
 				"profile",
 			]);
 			expect(out.actions).toContain("prepare_comment");
+			expect(out.actions).toContain("prepare_message");
+			expect(out.actions).toContain("prepare_post");
+			expect(out.actions).not.toContain("send_message");
+			expect(out.sources).toEqual([
+				{ key: "notifications", read: "function", observe: "function", sync: "undefined" },
+				{ key: "live_messages", read: "function", observe: "function", sync: "undefined" },
+			]);
 		} finally {
 			isolate.dispose();
 		}

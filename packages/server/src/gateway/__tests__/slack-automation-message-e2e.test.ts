@@ -27,6 +27,7 @@ import { registerBuiltInCommands } from "../commands/built-in-commands.js";
 import { CommandDispatcher } from "../commands/command-dispatcher.js";
 import { createTestAutomationSubscription } from "../../__tests__/setup/automation-subscriptions.js";
 import { getDb } from "../../db/client.js";
+import { resetRateLimiterForTests } from "../../utils/rate-limiter.js";
 import { AutomationSubscriptionService } from "../channels/automation-subscription-service.js";
 import { getResponseStrategy } from "../connections/platform-strategies/index.js";
 import { createConnectedGatewayStateAdapter } from "../connections/state-adapter.js";
@@ -135,6 +136,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
 
   beforeEach(async () => {
     await resetTestDatabase();
+    resetRateLimiterForTests();
 
     const organizationId = "org-slack-grid-e2e";
     const agentId = "agent-slack-grid-e2e";

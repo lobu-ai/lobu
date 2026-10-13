@@ -1,5 +1,6 @@
 import { createLogger, verifyWorkerToken } from "@lobu/core";
 import { getLobuMemoryUpstreamOrigin } from "../../config/index.js";
+import { chatTurnAccessOf } from "../../orchestration/chat-turn-actor.js";
 import { getRevokedTokenStore } from "../revoked-token-store.js";
 
 const logger = createLogger("mcp-config-service");
@@ -79,6 +80,10 @@ export class McpConfigService {
       logger.warn("Rejected revoked worker token while building MCP config");
       return workerConfig;
     }
+
+    // A reply-only chat turn has no workspace tools; the MCP lane would refuse
+    // it anyway (workspace/multi-tenant.ts), so it is offered no server.
+    if (chatTurnAccessOf(tokenData) === "reply_only") return workerConfig;
 
     const { userId, agentId } = tokenData;
     const effectiveAgentId = agentId || userId;

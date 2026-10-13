@@ -94,6 +94,8 @@ export interface ToolSourceContext {
   teamId?: string;
   connectionId?: string;
   userId?: string;
+  /** The linked member behind a userless chat turn: attribution only. */
+  memberUserId?: string;
   source?: string;
 }
 

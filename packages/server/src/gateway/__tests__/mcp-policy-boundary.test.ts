@@ -12,7 +12,7 @@ describe("internal MCP policy boundary", () => {
 		await seedAgentRow("policy-agent");
 		token = generateWorkerToken("policy-user", "policy-conversation", "policy-deployment", {
 			organizationId: "test-org", agentId: "policy-agent", channelId: "policy-channel",
-			adminTools: ["manage_operations"], adminActorUserId: "policy-user",
+			adminTools: ["manage_operations"], actorUserId: "policy-user",
 		});
 	});
 	afterEach(() => { globalThis.fetch = originalFetch; });
@@ -52,7 +52,7 @@ describe("internal MCP policy boundary", () => {
 				const dispatched = calls.find((call) => call.method === "tools/call")!;
 				expect(verifyGatewayMcpToken(dispatched.token)).toMatchObject({
 					organizationId: "test-org", agentId: "policy-agent", conversationId: "policy-conversation",
-					adminTools: ["manage_operations"], adminActorUserId: "policy-user",
+					adminTools: ["manage_operations"], actorUserId: "policy-user",
 				});
 			});
 		}

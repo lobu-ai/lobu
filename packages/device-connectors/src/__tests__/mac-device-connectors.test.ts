@@ -32,6 +32,8 @@ const pinnedManifestHashes: Record<string, string> = {
     "0e140bd9a6d8f88fd1a750033a54b3157961c2046d0d18de08e16a9a566718e5",
   "apple.reminders@0.2.0":
     "ccaf18f1c403ce2ae125388a7d5a720f33a0ef656c69a2a4bde45d7b364c5de1",
+  "apple.reminders@0.3.0":
+    "6be1b863073a0417d2c3fa5d5a14f5b1103b95543e3c53aa2619f34347e9efc3",
   "apple.screen_time@0.2.0":
     "882dc20d30bfa79387b6fc88dfa0a97719823bf29ea9dacb6e53fd881198e084",
   "apple.system_audio@0.2.0":
@@ -173,6 +175,33 @@ describe("Mac device connector registry", () => {
     }
 
     expect(photos?.runtime.scopes).toEqual(["date", "location", "albums"]);
+  });
+
+  test("apple.reminders@0.3.0 exposes write actions for agent-created reminders", () => {
+    const reminders = macDeviceConnectorManifests.find(
+      (manifest) =>
+        manifest.key === "apple.reminders" && manifest.version === "0.3.0"
+    );
+    expect(reminders).toBeDefined();
+    // Sync feed is unchanged — the write lane is additive.
+    expect(reminders?.feeds_schema.reminders.operations).toEqual([
+      "sync",
+      "read",
+    ]);
+    const actions = reminders?.actions_schema ?? {};
+    for (const key of [
+      "create_reminder",
+      "update_reminder",
+      "complete_reminder",
+      "delete_reminder",
+    ]) {
+      expect(actions[key]?.kind).toBe("write");
+      expect(actions[key]?.inputSchema).toBeDefined();
+    }
+    expect(actions.create_reminder?.inputSchema?.required).toEqual(["title"]);
+    expect(actions.delete_reminder?.inputSchema?.required).toEqual([
+      "origin_id",
+    ]);
   });
 
   test("every generated manifest is accepted by the server validator", () => {

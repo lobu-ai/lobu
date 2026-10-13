@@ -33,7 +33,7 @@ import {
   type WorkspaceEventTriggerSignal,
 } from '../automations/workspace-event-contract';
 import { getDb } from '../db/client';
-import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../config/intervals';
+import { DEVICE_ACTION_QUEUE_BUDGET_MS, DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS } from '../config/intervals';
 import type { Env } from '../index';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import {
@@ -1393,17 +1393,19 @@ export async function createConnectorOperationRun(params: {
   // a `device` run waits for a device worker to claim it via /poll, and an
   // unclaimed one must not sit pending forever — nor must a stale run be
   // claimable by a device that polls back after the operator already gave up.
-  // The horizon matches the gateway's pre-claim wait budget: polling stops
-  // claiming the run when the caller gives up, and the reaper terminalizes it
-  // on its next tick. Durable human-gated runs (`queued`) get NO expiry here —
-  // the long-horizon approval reaper owns their lifecycle. `inline` runs
+  // Foreground matches the gateway's pre-claim wait budget; explicit background
+  // work has a longer, bounded queue horizon independent of the caller's wait.
+  // Human-gated runs (`queued`) get NO claim expiry here — approval starts that
+  // clock, while the long-horizon approval reaper owns the human wait. `inline` runs
   // execute immediately on the gateway and are already claimed. A run of
   // either mode that carries an activation parks pending until the user visits
   // a matching page; the caller's activation deadline is then the claim horizon.
   const expiresAtSeconds = params.activation
     ? params.activation.expiresInSeconds
     : params.approvalMode === 'device'
-      ? DEVICE_ACTION_QUEUE_BUDGET_MS / 1000
+      ? (params.runMetadata?.background === true
+          ? DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS
+          : DEVICE_ACTION_QUEUE_BUDGET_MS) / 1000
       : null;
 
   // Freeze the run's execution target BEFORE choosing its artifact: an exact

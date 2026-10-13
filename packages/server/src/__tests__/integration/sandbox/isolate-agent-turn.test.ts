@@ -232,6 +232,10 @@ let internalReply: { status: number; body: unknown } = { status: 200, body: { id
  * `@lobu/plugin-mcp`.
  */
 const MEMORY_MCP_ID = "lobu";
+const MEMORY_SAVE_RECEIPT = {
+	content: [{ type: "text", text: JSON.stringify({ id: 42, durable_at: "2026-01-01T00:00:00Z" }) }],
+	structuredContent: { id: 42, durable_at: "2026-01-01T00:00:00Z" },
+};
 let memoryReplies: Record<string, { status: number; body: unknown }> = {};
 /** Every memory tool call the guest made, in order, with its parsed body. */
 let memoryCalls: Array<{ tool: string; body: Record<string, unknown> }> = [];
@@ -1798,7 +1802,7 @@ describe("agent turn on the isolate lane", () => {
 		memoryCalls = [];
 		memoryReplies = {
 			search_memory: { status: 200, body: { content: [] } },
-			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+			save_memory: { status: 200, body: MEMORY_SAVE_RECEIPT },
 		};
 		toolScript = [];
 		// No first-delta gate here: the flush's reply is deliberately never
@@ -1845,7 +1849,7 @@ describe("agent turn on the isolate lane", () => {
 		sawFirstDelta = Promise.resolve();
 		memoryReplies = {
 			search_memory: { status: 200, body: { content: [] } },
-			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+			save_memory: { status: 200, body: MEMORY_SAVE_RECEIPT },
 		};
 		const seed = await runTurn(turnJob({ userMessage: "earlier context ".repeat(100) }));
 		const run = await runTurn(turnJob({
@@ -1858,7 +1862,11 @@ describe("agent turn on the isolate lane", () => {
 		expect(sessionEntries(run.output).some(entry => entry.type === "compaction")).toBe(true);
 		const captures = memoryCalls.filter((call) => call.tool === "save_memory");
 		expect(captures).toHaveLength(1);
-		expect(captures[0]?.body.content).toBe("User: Remember this original user request\nAssistant: Hello from the isolate");
+		expect(captures[0]?.body.content).toBe([
+			"Conversation excerpts, not a full transcript. Use the original conversation transcript as primary evidence.",
+			'User (verbatim excerpt): "Remember this original user request"',
+			'Assistant (generated response, not user assertions): "Hello from the isolate"',
+		].join("\n"));
 	}, 120_000);
 
 	it("skips the flush when this compaction cycle already flushed", async () => {
@@ -1885,7 +1893,7 @@ describe("agent turn on the isolate lane", () => {
 		memoryCalls = [];
 		memoryReplies = {
 			search_memory: { status: 200, body: { content: [{ type: "text", text: "We settled on usage-based pricing." }] } },
-			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+			save_memory: { status: 200, body: MEMORY_SAVE_RECEIPT },
 		};
 		toolScript = [];
 		armFirstDeltaGate();
@@ -1927,11 +1935,11 @@ describe("agent turn on the isolate lane", () => {
 		memoryCalls = [];
 		memoryReplies = {
 			search_memory: { status: 200, body: { content: [{ type: "text", text: "prior context" }] } },
-			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+			save_memory: { status: 200, body: MEMORY_SAVE_RECEIPT },
 		};
 		toolScript = [];
 		armFirstDeltaGate();
-		await runTurn(memoryJob());
+		const run = await runTurn(memoryJob());
 
 		const save = memoryCalls.find((c) => c.tool === "save_memory");
 		expect(save).toBeDefined();
@@ -1942,8 +1950,8 @@ describe("agent turn on the isolate lane", () => {
 		expect(save?.body).toMatchObject({ semantic_type: "observation" });
 		expect((save?.body as { metadata?: unknown }).metadata).toBeUndefined();
 		const content = String(save?.body.content);
-		expect(content).toContain("User: what did we decide about pricing?");
-		expect(content).toContain("Assistant: Hello from the isolate");
+		expect(content).toContain('User (verbatim excerpt): "what did we decide about pricing?"');
+		expect(content).toContain('Assistant (generated response, not user assertions): "Hello from the isolate"');
 		// The recall block the hook injected must NOT be saved back: the plugin
 		// strips its own envelope so memory does not eat its own output.
 		expect(content).not.toContain("<lobu-memory>");
@@ -1951,6 +1959,8 @@ describe("agent turn on the isolate lane", () => {
 
 		// Capture happens after the answer, so the save is the LAST memory call.
 		expect(memoryCalls.map((c) => c.tool)).toEqual(["search_memory", "save_memory"]);
+		expect(hits.find((hit) => hit.url.endsWith("/tools/save_memory"))?.mcpFormat).toBe("json");
+		expect(run.logs.some((log) => log.line.includes("Captured conversation observation"))).toBe(true);
 	}, 120_000);
 
 	it("still answers when memory is down, and says so in the run log rather than failing the turn", async () => {
@@ -2187,7 +2197,7 @@ describe("agent turn on the isolate lane", () => {
 		memoryCalls = [];
 		memoryReplies = {
 			search_memory: { status: 200, body: { content: [{ type: "text", text: "recalled" }] } },
-			save_memory: { status: 200, body: { content: [{ type: "text", text: "saved" }] } },
+			save_memory: { status: 200, body: MEMORY_SAVE_RECEIPT },
 		};
 		uploadReply = { status: 200, body: { fileId: "f1", name: "note.txt", permalink: "p" } };
 		toolScript = [

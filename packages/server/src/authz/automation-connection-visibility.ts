@@ -29,6 +29,7 @@ export async function resolveAutomationConnectionVisibilityUserId(
     FROM automations
     WHERE id = ${ctx.actingAutomationId}
       AND organization_id = ${ctx.organizationId}
+      AND status = 'active'
     LIMIT 1
   `;
   return rows[0]?.created_by ?? null;

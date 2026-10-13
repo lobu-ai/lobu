@@ -315,10 +315,9 @@ export class MessageConsumer {
               })
             : null;
         // The inbound delivery is the common authoritative source for DM-ness:
-        // the message bridge derives `isDirect` from its delivery source and
-        // carries it on platformMetadata. Interaction clicks omit the hint
-        // because their conversationId/channelId relationship describes
-        // threading, not the original surface. Anything absent or non-boolean
+        // the message bridge stamps `isDirect` from the Chat SDK thread's
+        // structured `isDM` (typed messages and clicks alike) and carries it on
+        // platformMetadata. Anything absent or non-boolean
         // stores null, which the read gate treats as unknown and keeps
         // fail-closed. Owned (web) rows are not channels at all, so they stay
         // null.

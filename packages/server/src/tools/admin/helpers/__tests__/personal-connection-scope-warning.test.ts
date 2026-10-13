@@ -1,13 +1,14 @@
 /**
  * Gap 2: a personal OAuth connection is created successfully and is then
- * SILENTLY unreachable to agents owned by someone else.
+ * SILENTLY unreachable to runs that act as someone else.
  *
- * Chat runs resolve connections as the AGENT OWNER
- * (`workspace/multi-tenant.ts` → `owner_user_id FROM agents`), while a private
- * connection is visible only via `created_by = principal`
- * (`authz/connection-visibility.ts`). A personal credential is FORCED private,
- * so a DM user's own Gmail yields a healthy-looking row whose runtime lookup
- * returns ZERO ROWS rather than an error.
+ * A direct-message chat turn acts as the member its sender is linked to;
+ * group conversations act with no user and see org-shared connections. A headless
+ * Automation run acts as the AGENT OWNER (`workspace/multi-tenant.ts`). A
+ * private connection is visible only via `created_by = principal`
+ * (`authz/connection-visibility.ts`), and a personal credential is FORCED
+ * private, so any other principal gets a healthy-looking row whose runtime
+ * lookup returns ZERO ROWS rather than an error.
  *
  * Forcing `private` is correct and unchanged; this only makes it legible.
  */
@@ -24,8 +25,10 @@ describe('personalConnectionScopeWarning', () => {
 
     // Must name the actual MECHANISM, not just say "private" — the whole point
     // is that the user cannot otherwise tell why the agent ignored it.
+    expect(warning).toContain('chat account linked to your membership');
+    expect(warning).toContain('direct message');
+    expect(warning).toContain('Group conversations');
     expect(warning).toContain('AGENT OWNER');
-    expect(warning).toContain('not the person who sent the message');
     expect(warning).toContain('does not exist');
   });
 

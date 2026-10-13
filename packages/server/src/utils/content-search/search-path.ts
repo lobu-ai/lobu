@@ -236,7 +236,7 @@ export async function searchContentBySingleQuery(
   const entityFilterSQL = entityId != null
     ? `${searchEntityLinkSql} AND ($2::bigint IS NOT NULL)`
     : `($2::bigint IS NULL OR ${searchEntityLinkSql})`;
-  const standardFiltersSQL = `${entityFilterSQL}
+  const standardFiltersFor = (orgScopeSql: string) => `${entityFilterSQL}
           AND ${connectionCondition}
           AND ${feedCondition}
           AND ${runCondition}
@@ -265,7 +265,8 @@ export async function searchContentBySingleQuery(
               : ''
           }
           ${classificationClause.sql}
-          ${orgScope.sql}${entityTypesClause.sql}`;
+          ${orgScopeSql}${entityTypesClause.sql}`;
+  const standardFiltersSQL = standardFiltersFor(orgScope.sql);
 
   const textDocumentExpr = buildSearchDocumentExpr('f');
   const resultDocumentExpr = buildSearchDocumentExpr('fi');
@@ -302,8 +303,8 @@ export async function searchContentBySingleQuery(
   // query has no embedding (text-only search).
   const bestSimSelect = hasEmbedding ? `${bestChunkSimExpr('f')}` : 'NULL';
 
-  const searchWhereSQL = `${matchCondition}
-          AND ${standardFiltersSQL}`;
+  const searchWhereFor = (orgScopeSql: string) => `${matchCondition}
+          AND ${standardFiltersFor(orgScopeSql)}`;
 
   const textRankExpr = `
     (CASE WHEN LENGTH($1) > 0 AND fi.payload_text ILIKE '%' || $1 || '%' THEN 1.0 ELSE 0.0 END)
@@ -396,7 +397,7 @@ export async function searchContentBySingleQuery(
   const validatedLimit = validateNumericId(limit, 'limit');
 
   // ── Recall-only index-driven candidate path ──────────────────────────────
-  // Exact org-wide search keeps using `searchWhereSQL` so title-only matches,
+  // Exact org-wide search keeps using `exactFilteredIdsBody` so title-only matches,
   // filtered result sets, totals, and offsets retain their historical semantics.
   // The bounded candidate path is opt-in for recall/search_memory snippets: the
   // caller ignores exact totals/pagination and only needs a small set of highly
@@ -442,27 +443,38 @@ export async function searchContentBySingleQuery(
           ORDER BY MIN(dist)
           LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
     if (hasTextCandidates) {
+      // Keep direct and linked scope separately indexable, as on the exact
+      // path. Capping each disjoint arm then capping their union preserves the
+      // original global top-N while avoiding a global history scan for a term
+      // that is common elsewhere but rare in this organization.
+      const textScopeFilters = orgScope.branches
+        ? [orgScope.branches.direct, orgScope.branches.linked]
+          .map((scope) => standardFiltersFor(`AND ${scope}`))
+        : [standardFiltersSQL];
+      const textCandidates = (matchSql: string, rankSql: string) => `SELECT id FROM (
+          ${textScopeFilters.map((filters) => `(SELECT ce.id AS id, ${rankSql} AS rank
+            FROM events ce
+            JOIN current_event_records f ON f.id = ce.id
+            ${candidateFilterJoins}
+            WHERE ${matchSql}
+              AND ${filters}
+            ORDER BY ${rankSql} DESC, ce.id + 0 DESC
+            LIMIT ${CANDIDATE_VECTOR_LIMIT})`).join('\n          UNION ALL\n          ')}
+        ) text_candidates
+        ORDER BY rank DESC, id DESC
+        LIMIT ${CANDIDATE_VECTOR_LIMIT}`;
       // fulltext GIN — `@@` is index-served. Rank the STORED search_tsv before
       // the cap so the strongest matches survive CANDIDATE_VECTOR_LIMIT; this
       // costs a top-N sort over FTS-matching rows in the organization.
-      branches.push(`SELECT ce.id AS id
-          FROM events ce
-          JOIN current_event_records f ON f.id = ce.id
-          ${candidateFilterJoins}
-          WHERE ce.search_tsv @@ to_tsquery('english', $${tsqueryParamIdx})
-            AND ${standardFiltersSQL}
-          ORDER BY ts_rank_cd(ce.search_tsv, to_tsquery('english', $${tsqueryParamIdx})) DESC,
-                   ce.id DESC
-          LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
+      branches.push(textCandidates(
+        `ce.search_tsv @@ to_tsquery('english', $${tsqueryParamIdx})`,
+        `ts_rank_cd(ce.search_tsv, to_tsquery('english', $${tsqueryParamIdx}))`
+      ));
       // trigram GIN — preserves the payload substring match (exact strings, ids).
-      branches.push(`SELECT ce.id AS id
-          FROM events ce
-          JOIN current_event_records f ON f.id = ce.id
-          ${candidateFilterJoins}
-          WHERE ce.payload_text ILIKE '%' || $1 || '%'
-            AND ${standardFiltersSQL}
-          ORDER BY ce.id DESC
-          LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
+      // Sort the equivalent id expression so LIMIT cannot favor a backwards
+      // primary-key scan through unrelated history. The explicit sort permits
+      // filtered bitmap/index access before the same newest-id candidate cap.
+      branches.push(textCandidates(`ce.payload_text ILIKE '%' || $1 || '%'`, 'ce.id + 0'));
     }
     // Each branch has its own ORDER BY/LIMIT and must therefore be
     // parenthesized for the UNION to parse. `UNION` (not UNION ALL) dedupes
@@ -473,16 +485,30 @@ export async function searchContentBySingleQuery(
       `;
   }
 
-  const nonDateFilteredIdsCteSql = `filtered_ids AS (
-        SELECT f.id, f.score, f.occurred_at, f.created_at, f.title, f.payload_text, ${bestSimSelect} AS best_sim, f.search_tsv
+  const filteredIdsSelect = (whereSql: string, candidateJoin = '') => `SELECT f.id, f.score, f.occurred_at, f.created_at, f.title, f.payload_text, ${bestSimSelect} AS best_sim, f.search_tsv
         FROM current_event_records f
-        ${useCandidatePath ? 'JOIN search_candidates sc ON sc.id = f.id' : ''}
+        ${candidateJoin}
         LEFT JOIN connections c ON c.id = f.connection_id
         LEFT JOIN automation_run_events iwf
           ON iwf.event_id = f.id
           AND ($6::int IS NOT NULL)
           AND iwf.run_id = $6::int
-        WHERE ${useCandidatePath ? standardFiltersSQL : searchWhereSQL}
+        WHERE ${whereSql}`;
+  // Disjoint org-scope arms preserve exact totals without deduplication and let
+  // the planner use the direct-org and linked-org indexes independently.
+  // Entity-scoped reads keep one predicate.
+  const exactBranches = entityId == null ? orgScope.branches : null;
+  const exactFilteredIdsBody = exactBranches
+    ? `(${filteredIdsSelect(searchWhereFor(`AND ${exactBranches.direct}`))})
+        UNION ALL
+        (${filteredIdsSelect(searchWhereFor(`AND ${exactBranches.linked}`))})`
+    : filteredIdsSelect(searchWhereFor(orgScope.sql));
+  const nonDateFilteredIdsCteSql = `filtered_ids AS (
+        ${
+          useCandidatePath
+            ? filteredIdsSelect(standardFiltersSQL, 'JOIN search_candidates sc ON sc.id = f.id')
+            : exactFilteredIdsBody
+        }
       )`;
 
   // An opted-out caller skips the exact count; the column stays (NULL) so the
@@ -543,14 +569,7 @@ export async function searchContentBySingleQuery(
   const querySQL = useDateFeed
     ? `
       WITH RECURSIVE filtered_ids AS (
-        SELECT f.id, f.score, f.occurred_at, f.created_at, f.title, f.payload_text, ${bestSimSelect} AS best_sim, f.search_tsv
-        FROM current_event_records f
-        LEFT JOIN connections c ON c.id = f.connection_id
-        LEFT JOIN automation_run_events iwf
-          ON iwf.event_id = f.id
-          AND ($6::int IS NOT NULL)
-          AND iwf.run_id = $6::int
-        WHERE ${searchWhereSQL}
+        ${exactFilteredIdsBody}
       ),
       ${fullCountCteSql},
       candidate_set AS (
@@ -636,20 +655,12 @@ export async function searchContentBySingleQuery(
 
   let rawRows: any[];
   if (useCandidatePath) {
-    // Backstop: a pathological candidate scan degrades to "no content" (every
-    // caller tolerates an empty list) rather than hanging the request.
-    try {
-      rawRows = (await sql.begin(async (tx: DbClient) => {
-        await tx.unsafe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
-        return await tx.unsafe(querySQL, queryParams);
-      })) as any[];
-    } catch (err) {
-      logger.warn(
-        { err: getErrorMessage(err) },
-        '[content-search] candidate query failed; returning empty content'
-      );
-      rawRows = [];
-    }
+    // Preserve database failures (including their SQLSTATE) so recall can
+    // report partial coverage instead of claiming a successful empty search.
+    rawRows = (await sql.begin(async (tx: DbClient) => {
+      await tx.unsafe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
+      return await tx.unsafe(querySQL, queryParams);
+    })) as any[];
   } else {
     rawRows = (await sql.unsafe(querySQL, queryParams)) as any[];
   }

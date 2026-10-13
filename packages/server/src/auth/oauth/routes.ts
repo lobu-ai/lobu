@@ -807,7 +807,7 @@ oauthRoutes.post('/oauth/authorize/consent', requireAuth, async (c) => {
   // Keep the remaining client-requested public scopes after the device-only
   // values above are stripped. Unknown values are filtered later via
   // parseScopes / AVAILABLE_SCOPES at token use. Device-specific automation
-  // (personal-org force-bind, mint-child-token) stays gated on the device flow
+  // (device home binding, mint-child-token) stays gated on the device flow
   // and resource binding, not solely on the scope string.
   const consentHasMcpScopes = hasMcpScopes(body.scope);
   if (consentHasMcpScopes) {
@@ -971,11 +971,12 @@ oauthRoutes.post('/oauth/device_authorization', async (c) => {
   const isDeviceWorkerGrant = deviceScopes.includes('device_worker:run');
   const deviceHasMcpScopes = deviceScopes.some((scope) => scope.startsWith('mcp:'));
   if (isDeviceWorkerGrant) {
-    // Device-worker pairing selects and force-binds the personal org at
-    // human approval time. Keeping an earlier caller-supplied team resource
-    // would create a token whose OAuth audience disagrees with its org claim.
-    // Leave this compatibility grant unbound; normal MCP device grants may
-    // still opt into an exact RFC 8707 resource below.
+    // Device-worker pairing binds the device's home workspace at human
+    // approval time (the approver's `organization_id`, else personal). Keeping
+    // an earlier caller-supplied resource would create a token whose OAuth
+    // audience disagrees with its org claim. Leave this compatibility grant
+    // unbound; normal MCP device grants may still opt into an exact RFC 8707
+    // resource below.
     body.resource = undefined;
   } else if (deviceHasMcpScopes && !body.resource) {
     return c.json(
@@ -1243,13 +1244,15 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
   }
   const deviceHasMcpScopes = hasMcpScopes(approvedScope);
   const requestedScopes = getRequestedScopes(approvedScope);
-  // `device_worker:run` tokens drive personal devices — the Owletto Mac app,
-  // the Chrome extension, and the local `lobu run` worker. Device data
-  // (WhatsApp, Photos, browser context, …) always belongs in the user's
-  // personal org; team orgs reach a device by pinning an automation/connection
-  // (see resolveDeviceClaimableOrgs), not by re-binding the device token.
-  // So a device-worker grant is FORCE-bound to the personal org, ignoring
-  // the resource slug, the active org, and the consent picker.
+  // `device_worker:run` tokens drive devices — the Owletto Mac app, the Chrome
+  // extension, and the local `lobu run` / `lobu daemon` worker. The approving
+  // user picks the device's HOME workspace here: `organization_id`, when sent,
+  // must be a workspace the user belongs to (any role); omitted, the home is
+  // the user's personal workspace. The token is bound to that home, which is
+  // where the device registers (poll / mint-child-token) and where its device
+  // connectors auto-wire. The resource slug and the active org never choose it.
+  // `organization_ids` / `workspace_access` stay an MCP read grant only, and
+  // must include the chosen home.
   const isDeviceWorkerGrant = requestedScopes.includes('device_worker:run');
   if (
     deviceHasMcpScopes &&
@@ -1272,33 +1275,45 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
 
   if (isDeviceWorkerGrant) {
     const sql = createDbClientFromEnv(c.env);
-    const personalOrg = await findExistingPersonalOrg(user.id, sql);
-    if (!personalOrg) {
-      return c.json(
-        createOAuthError(
-          'access_denied',
-          'No personal organization is provisioned for this account; cannot bind a device token.'
-        ),
-        403
-      );
+    let homeOrgId: string;
+    if (body.organization_id !== undefined) {
+      if (typeof body.organization_id !== 'string' || body.organization_id.trim().length === 0) {
+        return c.json(
+          createOAuthError('invalid_request', 'organization_id must be a workspace ID'),
+          400
+        );
+      }
+      homeOrgId = body.organization_id;
+    } else {
+      const personalOrg = await findExistingPersonalOrg(user.id, sql);
+      if (!personalOrg) {
+        return c.json(
+          createOAuthError(
+            'access_denied',
+            'No personal organization is provisioned for this account; choose a workspace for this device.'
+          ),
+          403
+        );
+      }
+      homeOrgId = personalOrg.id;
     }
     const memberRow = (await sql`
       SELECT role FROM "member"
-      WHERE "organizationId" = ${personalOrg.id} AND "userId" = ${user.id}
+      WHERE "organizationId" = ${homeOrgId} AND "userId" = ${user.id}
       LIMIT 1
     `) as unknown as Array<{ role: string | null }>;
     if (memberRow.length === 0) {
-      // The personal-org marker exists but the user isn't a member (legacy /
-      // partially-migrated data). Never bind a token to an org the user can't act
-      // on.
+      // Never bind a device to a workspace the user can't act on. Unknown and
+      // non-member workspaces collapse to one answer (same as the MCP picker),
+      // so approval cannot be used as an organization oracle.
       return c.json(
-        createOAuthError('access_denied', 'Not a member of the personal organization'),
+        createOAuthError('access_denied', 'The workspace selection is no longer available'),
         403
       );
     }
     const memberRole = memberRow[0]?.role ?? null;
-    organizationId = personalOrg.id;
-    grantedOrganizationIds = [personalOrg.id];
+    organizationId = homeOrgId;
+    grantedOrganizationIds = [homeOrgId];
     let submittedGrantWorkspaces: GrantedMemberWorkspace[] | null = null;
     if (
       deviceHasMcpScopes &&
@@ -1315,17 +1330,14 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
       if ('error' in submittedGrant) {
         return c.json(submittedGrant.error, submittedGrant.status as 400);
       }
-      if (
-        (body.organization_id !== undefined && body.organization_id !== personalOrg.id) ||
-        !submittedGrant.grantedOrganizationIds.includes(personalOrg.id)
-      ) {
+      if (!submittedGrant.grantedOrganizationIds.includes(homeOrgId)) {
         return c.json(
           createOAuthError('access_denied', 'The workspace selection is no longer available'),
           403
         );
       }
-      // Device placement remains anchored to personal. The additional IDs are
-      // an explicit bare-MCP read grant, not a device-data destination.
+      // The device home stays the single chosen workspace. The additional IDs
+      // are an explicit bare-MCP read grant, not a device-data destination.
       grantedOrganizationIds = submittedGrant.grantedOrganizationIds;
       submittedGrantWorkspaces = submittedGrant.liveGrantedWorkspaces;
     }

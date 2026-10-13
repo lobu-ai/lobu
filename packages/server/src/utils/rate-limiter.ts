@@ -23,6 +23,11 @@
  * Cross-pod counts therefore apply with ~one DB round-trip of lag; within a
  * single pod enforcement is exact and immediate (matching the old semantics).
  *
+ * `consume` is the awaited variant for callers that are already async and
+ * cannot tolerate that lag (e.g. a once-per-day notice, where a fresh replica's
+ * empty cache would otherwise admit a duplicate): it awaits the same atomic
+ * UPSERT and decides from the cluster-wide count it returns.
+ *
  * Failure policy: FAIL OPEN on any Postgres error (same philosophy as
  * guardrails). A DB outage degrades to the old per-pod in-memory enforcement
  * — it never blocks a request and never takes down the auth routes. A missing
@@ -82,15 +87,35 @@ const PG_UNDEFINED_TABLE = '42P01';
 const MAX_PENDING_WRITES = 500;
 
 /**
- * Postgres-backed fixed-window rate limiter with a synchronous local facade.
+ * The one atomic cluster-wide increment: bump this key's counter for the
+ * window and return the committed count (null if the row came back empty).
  */
+async function upsertSharedCount(
+  db: DbClient,
+  key: string,
+  windowStartSec: number
+): Promise<number | null> {
+  const rows = await db<{ count: number }>`
+    INSERT INTO rate_limit_counters (key, window_start, count)
+    VALUES (${key}, ${new Date(windowStartSec * 1000)}, 1)
+    ON CONFLICT (key, window_start)
+    DO UPDATE SET count = rate_limit_counters.count + 1
+    RETURNING count
+  `;
+  const count = rows[0]?.count;
+  return typeof count === 'number' ? count : null;
+}
+
+/** Postgres-backed fixed-window limiter with synchronous and awaited admission. */
 export class RateLimiter {
   private windows = new Map<string, WindowState>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** In-flight background UPSERTs — awaitable for deterministic tests. */
   private pendingWrites = new Set<Promise<void>>();
   /** Largest window seen so far; bounds the DB cleanup horizon. */
-  private maxWindowSeconds = 3600;
+  // Another pod may use the daily chat-notice window without this process
+  // ever seeing it. Cleanup must retain that shared window too.
+  private maxWindowSeconds = 86400;
   private dbBackoffUntilMs = 0;
   private lastDbWarnAtMs = 0;
   private warnedTableMissing = false;
@@ -116,6 +141,43 @@ export class RateLimiter {
    * known value.
    */
   checkLimit(key: string, config: RateLimitConfig): RateLimitResult {
+    const { state, now } = this.countLocally(key, config);
+
+    // Cluster-wide UPSERT, fire-and-forget. The shared count it returns is
+    // applied to the *next* decision; this one uses the cached value.
+    this.persistIncrement(key, state.windowStart);
+
+    // `sharedCount` is the cluster-wide count as of our last committed
+    // increment (it already includes this pod's prior requests, and was read
+    // before this request's UPSERT fired) — so `sharedCount + 1` counts all
+    // known prior requests plus this one, with no double-counting. `localCount`
+    // covers the burst case where our own increments are still in flight.
+    // Either term can only *under*-count by the in-flight round-trip.
+    return this.result(Math.max(state.localCount, state.sharedCount + 1), config, now, state.windowStart);
+  }
+
+  /**
+   * Awaited, cluster-exact variant of {@link checkLimit}: awaits the same
+   * atomic UPSERT and decides from the cluster-wide count it returns, so a
+   * replica with an empty cache cannot admit a request another replica already
+   * spent. FAILS OPEN like the rest of the module: when Postgres is
+   * unavailable (error, backoff, missing table) the decision falls back to
+   * this request's cached count instead of rejecting solely for the DB error.
+   */
+  async consume(key: string, config: RateLimitConfig): Promise<RateLimitResult> {
+    const { state, now } = this.countLocally(key, config);
+    // Other requests can increment this window while the DB write is pending.
+    const fallbackCount = Math.max(state.localCount, state.sharedCount + 1);
+    const shared = await this.incrementShared(key, state.windowStart);
+    if (shared === null) {
+      return this.result(fallbackCount, config, now, state.windowStart);
+    }
+    if (shared > state.sharedCount) state.sharedCount = shared;
+    return this.result(shared, config, now, state.windowStart);
+  }
+
+  /** Count this request in the pod-local window, rolling it over when due. */
+  private countLocally(key: string, config: RateLimitConfig): { state: WindowState; now: number } {
     const now = Math.floor(Date.now() / 1000);
     const windowStart = now - (now % config.windowSeconds);
 
@@ -131,22 +193,17 @@ export class RateLimiter {
     }
 
     state.localCount++;
+    return { state, now };
+  }
 
-    // Cluster-wide UPSERT, fire-and-forget. The shared count it returns is
-    // applied to the *next* decision; this one uses the cached value.
-    this.persistIncrement(key, state.windowStart);
-
-    // `sharedCount` is the cluster-wide count as of our last committed
-    // increment (it already includes this pod's prior requests, and was read
-    // before this request's UPSERT fired) — so `sharedCount + 1` counts all
-    // known prior requests plus this one, with no double-counting. `localCount`
-    // covers the burst case where our own increments are still in flight.
-    // Either term can only *under*-count by the in-flight round-trip.
-    const effectiveCount = Math.max(state.localCount, state.sharedCount + 1);
-
+  private result(
+    effectiveCount: number,
+    config: RateLimitConfig,
+    now: number,
+    windowStart: number
+  ): RateLimitResult {
     const allowed = effectiveCount <= config.limit;
-    const resetInSeconds = Math.max(0, config.windowSeconds - (now - state.windowStart));
-
+    const resetInSeconds = Math.max(0, config.windowSeconds - (now - windowStart));
     return {
       allowed,
       count: effectiveCount,
@@ -156,6 +213,20 @@ export class RateLimiter {
         ? undefined
         : config.errorMessage || `Rate limit exceeded. Try again in ${resetInSeconds} seconds.`,
     };
+  }
+
+  /**
+   * Awaited cluster-wide increment for {@link consume}. Returns the committed
+   * count, or null when Postgres is unavailable (the caller fails open).
+   */
+  private async incrementShared(key: string, windowStartSec: number): Promise<number | null> {
+    if (Date.now() < this.dbBackoffUntilMs) return null;
+    try {
+      return await upsertSharedCount(getDb(), key, windowStartSec);
+    } catch (err) {
+      this.noteDbFailure(err);
+      return null;
+    }
   }
 
   /**
@@ -186,17 +257,9 @@ export class RateLimiter {
       return;
     }
 
-    const windowStart = new Date(windowStartSec * 1000);
-    const write: Promise<void> = db<{ count: number }>`
-      INSERT INTO rate_limit_counters (key, window_start, count)
-      VALUES (${key}, ${windowStart}, 1)
-      ON CONFLICT (key, window_start)
-      DO UPDATE SET count = rate_limit_counters.count + 1
-      RETURNING count
-    `
-      .then((rows) => {
-        const sharedCount = rows[0]?.count;
-        if (typeof sharedCount !== 'number') return;
+    const write: Promise<void> = upsertSharedCount(db, key, windowStartSec)
+      .then((sharedCount) => {
+        if (sharedCount === null) return;
         const state = this.windows.get(key);
         // Only fold back into the same window; a rolled-over window starts fresh.
         if (state && state.windowStart === windowStartSec && sharedCount > state.sharedCount) {

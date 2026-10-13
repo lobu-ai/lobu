@@ -34,7 +34,14 @@ import {
 import {
   buildAutomationRunWorkerAccess,
   buildDeviceChatRunWorkerAccess,
+  DEVICE_CHAT_RUN_SOURCE,
 } from '../gateway/services/run-worker-access';
+import {
+  CHAT_SENDER_NOT_LINKED,
+  chatTurnEvidenceFrom,
+  resolveChatTurnActor,
+} from '../gateway/orchestration/chat-turn-actor';
+import { buildWorkerTokenClaims } from '../gateway/orchestration/worker-token-claims';
 import {
   readSnapshotJsonl,
   transcriptText,
@@ -71,7 +78,8 @@ import { sourceFeedContextForRun, receiveFeedNotifications } from '../runs/feed-
 import { reconcileSourceFeedListeners } from '../runs/source-feed-listener';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
 import { resolveConnectorCode } from '../utils/ensure-connector-installed';
-import { resolveDeviceClaimableOrgs } from '../utils/device-claimable-orgs';
+import { resolveDeviceActivationOrgs, resolveDeviceClaimableOrgs } from '../utils/device-claimable-orgs';
+import { DEVICE_MOVED_TOMBSTONE } from '../utils/device-pin-tombstones';
 import { errorMessage } from '../utils/errors';
 import { resolveAuthCredentials } from '../utils/auth-credential-secrets';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
@@ -597,7 +605,13 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           -- the user afterwards (PATCH /api/me/devices/:id). A heartbeat that
           -- wrote it back would clobber a Devices-page rename on the next poll,
           -- since a headless daemon self-reports its hostname every time.
-          organization_id = COALESCE(device_workers.organization_id, EXCLUDED.organization_id),
+          -- A legacy NULL home is the personal workspace, even when a re-pair
+          -- presents a credential bound to a team workspace.
+          organization_id = COALESCE(
+            device_workers.organization_id,
+            (SELECT id FROM organization WHERE (metadata::jsonb)->>'personal_org_for_user_id' = ${registrationUserId} LIMIT 1),
+            EXCLUDED.organization_id
+          ),
           -- Large inventories are stored out of line, so writing
           -- an unchanged copy back costs a fresh out-of-line copy per heartbeat.
           -- Keep the stored value unless an advertised manifest hash differs.
@@ -680,8 +694,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   }
 
   // User-scoped workers (e.g. Lobu for Mac) can only claim runs in the
-  // org their token is bound to, plus the user's personal org (where device
-  // connectors auto-wire) — the set is computed in the /api/workers/* auth
+  // org their token is bound to, plus the user's personal org — the set is
+  // computed in the /api/workers/* auth
   // middleware. Trusted workers (matched WORKER_API_TOKEN) and anonymous
   // local-dev requests see all pending runs — preserving the existing
   // server-side worker fleet semantics.
@@ -725,7 +739,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // explicitly-PINNED claim branches — the pin is the owner's consent.
   // `baseOrgScopeIds` (token's bound + personal org only) gates the UNPINNED
   // capability-matched branch, so a single pin in org B does NOT also let the
-  // device claim unrelated unpinned device-connector runs in org B.
+  // device claim unrelated unpinned device-connector runs in org B. That
+  // branch further admits personal workspaces only (connector-claim-lanes.ts):
+  // team device connections are pinned per device.
   const orgScopeIds = orgScopeActive && claimableOrgIds ? claimableOrgIds : [''];
   const baseOrgScopeIds =
     orgScopeActive && effectiveWorkerOrgIds && effectiveWorkerOrgIds.length > 0
@@ -811,7 +827,19 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             await sql<{ run_id: number; urls: string | string[] }>`
             SELECT id AS run_id, activation_target_urls AS urls
             FROM runs
-            WHERE organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
+            WHERE organization_id = ANY(${pgTextArray(
+              deviceWorkerId && effectiveWorkerUserId
+                ? await resolveDeviceActivationOrgs(sql, {
+                    deviceWorkerId,
+                    ownerUserId: effectiveWorkerUserId,
+                  })
+                : orgScopeIds
+            )}::text[])
+              AND NOT EXISTS (
+                SELECT 1 FROM connections moved
+                WHERE moved.id = runs.connection_id
+                  AND moved.error_message = ${DEVICE_MOVED_TOMBSTONE}
+              )
               AND created_by_user_id = ${effectiveWorkerUserId}
               AND run_type = 'action'
               AND status = 'pending'
@@ -1588,7 +1616,26 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       token: string;
       expires_at: number;
     };
+    let confined = false;
     try {
+      const platform =
+        typeof message?.platform === 'string' ? message.platform : undefined;
+      const teamId =
+        typeof message?.teamId === 'string' ? message.teamId : undefined;
+      // The device turn's chat sender decides its authority, exactly as for a
+      // cloud chat turn. A local CLI cannot be confined to its own thread, so a
+      // sender without workspace access is refused a device session outright.
+      const actor = await resolveChatTurnActor({
+        organizationId: row.organization_id,
+        senderId: userId,
+        claims: {
+          ...buildWorkerTokenClaims({ channelId, platform, teamId, platformMetadata }),
+          source: DEVICE_CHAT_RUN_SOURCE,
+        },
+        evidence: chatTurnEvidenceFrom(platformMetadata),
+      });
+      confined = actor?.access === 'reply_only' || actor?.access === 'public_visitor';
+      if (confined) throw new Error(CHAT_SENDER_NOT_LINKED);
       const access = buildDeviceChatRunWorkerAccess({
         agentId: row.chat_agent_id,
         conversationId,
@@ -1596,11 +1643,11 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         organizationId: row.organization_id,
         userId,
         channelId,
-        platform:
-          typeof message?.platform === 'string' ? message.platform : undefined,
-        teamId:
-          typeof message?.teamId === 'string' ? message.teamId : undefined,
+        platform,
+        teamId,
         platformMetadata,
+        actorUserId: actor?.actorUserId,
+        chatAccess: actor?.access,
       });
       agentSession = {
         conversation_id: access.conversationId,
@@ -1609,7 +1656,9 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         expires_at: access.expiresAt,
       };
     } catch (err) {
-      const failure = 'failed to mint the required device chat run session';
+      const failure = confined
+        ? `device chat refused: ${CHAT_SENDER_NOT_LINKED}`
+        : 'failed to mint the required device chat run session';
       await failClaimedDeviceChatRun({
         runId: row.run_id,
         workerId: worker_id,

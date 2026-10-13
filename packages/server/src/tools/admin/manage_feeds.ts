@@ -42,6 +42,7 @@ import {
 import { compileConnectionRowVisibility } from '../../authz/connection-visibility';
 import { readSourceFeedPage, SourceCursorError } from '../../lib/source-feed-page';
 import { authzScopeFromToolContext } from '../../authz/scope';
+import { resolveAutomationConnectionVisibilityUserId } from '../../authz/automation-connection-visibility';
 import { reconcileAtlassianMcpJiraSite } from '../../connect/atlassian-mcp-site';
 import { deriveFeedHealthSemantics, feedTriggerEligibilitySql, feedWebhookDrivenSql } from '../../connectors/feed-health-semantics';
 import { feedDefinitionSelection } from '../../connectors/feed-definition-selection';
@@ -517,7 +518,7 @@ async function handleReadFeed(
   // (anonymous → org-only).
   const visibilityFilter = (await callerIsAdmin(sql, ctx))
     ? sql``
-    : sql`${sql.unsafe(compileConnectionRowVisibility(authzScopeFromToolContext(ctx), 'c'))}`;
+    : sql`${sql.unsafe(compileConnectionRowVisibility({ ...authzScopeFromToolContext(ctx), principal: await resolveAutomationConnectionVisibilityUserId(ctx, sql) }, 'c'))}`;
 
   const rows = (await sql`
     SELECT ${sql.unsafe(publicFeedColumnList('f'))},
@@ -588,11 +589,14 @@ async function handleReadFeeds(
         Math.min(MAX_BATCH_READ_TIMEOUT_MS, Math.trunc(rawTimeoutMs)),
       )
     : DEFAULT_BATCH_READ_TIMEOUT_MS;
+  // Reuse the operation bridge's durable-owner visibility rule. Keep the
+  // Automation identity on the context for policy and dispatch provenance.
+  const scope = { ...authzScopeFromToolContext(ctx), principal: await resolveAutomationConnectionVisibilityUserId(ctx, getDb()) };
   const results = await Promise.all(
     args.reads.slice(0, 10).map(async (read) => {
       try {
         const { window: _window, sourceRevision: _revision, row_cursors: _rowCursors, ...result } =
-          await readSourceFeedPage(read, timeoutMs, authzScopeFromToolContext(ctx), ctx.abortSignal, ctx.actingAutomationId);
+          await readSourceFeedPage(read, timeoutMs, scope, ctx.abortSignal, ctx.actingAutomationId);
         return result;
       } catch (err) {
         const error_code = sourceErrorCode(err);

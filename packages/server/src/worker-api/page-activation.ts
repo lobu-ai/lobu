@@ -6,6 +6,8 @@ import type { Context } from "hono";
 import { getDb, pgTextArray } from "../db/client";
 import type { Env } from "../index";
 import { normalizePageActivationUrl, supportsExactPageActivation } from "../runs/page-activation";
+import { resolveDeviceActivationOrgs } from "../utils/device-claimable-orgs";
+import { DEVICE_MOVED_TOMBSTONE } from "../utils/device-pin-tombstones";
 
 export async function activatePageRun(
 	c: Context<{ Bindings: Env }>,
@@ -57,7 +59,12 @@ export async function activatePageRun(
 		return c.json({ error: "Update the Chrome extension to activate this draft" }, 409);
 	}
 
-	const orgIds = c.var.workerOrgIds ?? [];
+	// The device's current placement, not its credential's org: a Devices-page
+	// move leaves the token bound to the workspace the device left.
+	const orgIds = await resolveDeviceActivationOrgs(sql, {
+		deviceWorkerId: deviceId,
+		ownerUserId: c.var.workerUserId,
+	});
 	if (orgIds.length === 0) {
 		return c.json<ActivatePageResponse>({ status: "unavailable" });
 	}
@@ -79,6 +86,12 @@ export async function activatePageRun(
 		  AND activated_at IS NULL
 		  AND expires_at > current_timestamp
 		  AND ${normalizedUrl} = ANY(activation_target_urls)
+		  -- A move unpinned and paused this device's connections there.
+		  AND NOT EXISTS (
+		    SELECT 1 FROM connections moved
+		    WHERE moved.id = runs.connection_id
+		      AND moved.error_message = ${DEVICE_MOVED_TOMBSTONE}
+		  )
 		RETURNING id
 	`;
 	return c.json<ActivatePageResponse>({

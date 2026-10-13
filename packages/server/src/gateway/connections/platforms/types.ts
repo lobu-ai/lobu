@@ -310,6 +310,17 @@ export interface ChatPlatformDescriptor {
   assertCredentialsUsable?(config: Record<string, unknown>): void;
 
   /**
+   * Provider-authoritative evidence that an inbound message's sender belongs
+   * to the same tenant (workspace/domain) as this installation, read from the
+   * authenticated inbound event (`message.raw`) and the connection's stored
+   * tenant. It vouches for an UNLINKED sender, whose chat turn then sees the
+   * organization's shared connections (gateway/orchestration/chat-turn-actor.ts).
+   * Must never consult message text. A platform with no hook — or no
+   * authoritative signal — vouches for nobody (fail closed).
+   */
+  senderIsSameTenant?(connection: PlatformConnection, rawMessage: unknown): boolean;
+
+  /**
    * Decide whether an unlinked chat should get a "link me to an agent" notice,
    * and enrich the deep link that notice carries. Returning `null` SUPPRESSES
    * the notice — a Slack workspace install with no known workspace is in a

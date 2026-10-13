@@ -153,6 +153,26 @@ async function resolveSlackNoticeChannelScope(
   return { teamId, channelName };
 }
 
+/**
+ * Slack vouches for a sender whose HOME workspace is the installation's
+ * workspace. Shared-channel (Slack Connect) events carry the sender's own team
+ * as `user_team` (and the originating team as `source_team`); an ordinary event
+ * carries `team`. An interaction replay's `team_id` is only a routing target,
+ * not evidence of the sender's home workspace.
+ * The installation's workspace is the connection's stored tenant, never the
+ * event's: a Grid org-wide install (enterprise `E…`) vouches for nobody here.
+ */
+function slackSenderIsSameTenant(connection: PlatformConnection, rawMessage: unknown): boolean {
+  const installTeam = connection.metadata?.teamId;
+  // A workspace id starts with `T`; a Grid enterprise id (`E…`) never does.
+  if (typeof installTeam !== "string" || !installTeam.startsWith("T")) return false;
+  const raw = rawMessage as Record<string, unknown> | null | undefined;
+  if (!raw || typeof raw !== "object") return false;
+  const senderTeam = raw.user_team ?? raw.team;
+  if (typeof senderTeam !== "string" || senderTeam !== installTeam) return false;
+  return raw.source_team === undefined || raw.source_team === installTeam;
+}
+
 export const slackPlatform: ChatPlatformDescriptor = {
   revokeManagedConnection: (connection, deps, opts) => deleteSlackInstall(
     deps.getAppInstallationStore(), deps.getSecretStore(), connection.id,
@@ -196,6 +216,8 @@ export const slackPlatform: ChatPlatformDescriptor = {
   channelMessagesMintFreshThreadIds: true,
 
   resolveNoticeChannelScope: resolveSlackNoticeChannelScope,
+
+  senderIsSameTenant: slackSenderIsSameTenant,
 
   createFileHandler: createSlackFileHandler,
 

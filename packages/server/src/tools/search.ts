@@ -328,9 +328,13 @@ function withRecall<T extends UnifiedSearchResult>(
   result: T,
   recall: Partial<UnifiedSearchResult>
 ): T {
-  // Each recall source already omits its facet when empty, so a plain merge is
-  // enough — no per-facet guards, no type-switch.
-  return Object.assign(result, recall);
+  Object.assign(result, recall);
+  if (recall.coverage?.status === 'partial') {
+    result.suggestion =
+      'Search returned partial results. Some memory sources could not be searched or discovered. Retry the search.';
+    if (!hasSearchHits(result)) result.discovery_status = 'discovering';
+  }
+  return result;
 }
 
 interface WorkspaceSearchExecution {
@@ -1715,7 +1719,7 @@ async function searchWorkspaceImpl(
 
   if (hasRecallHits) {
     logger.info(`[search] Recalled memory hits for "${query}" with no entity match`);
-  } else {
+  } else if (recall.coverage?.status !== 'partial') {
     logger.info(`[search] No matches found for "${query}" in existing database`);
   }
 

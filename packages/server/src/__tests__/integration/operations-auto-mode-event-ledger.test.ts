@@ -532,12 +532,13 @@ describe("operation ledger under Auto policy", () => {
 		expect(beforeReap[0].interaction_status).toBe("approved");
 		expect(beforeReap[0].superseded_by).toBeNull();
 
-		// Age the run past the reaper threshold. `approval_status` stays 'auto',
+		// Expire the run's authoritative claim horizon. `approval_status` stays 'auto',
 		// which is what keeps it inside the bulk sweep — the approval lane is
 		// excluded from it by predicate.
 		await sql`
 			UPDATE runs
 			SET created_at = NOW() - INTERVAL '2 hours',
+			    expires_at = NOW() - INTERVAL '1 second',
 			    claimed_at = NULL,
 			    last_heartbeat_at = NULL
 			WHERE id = ${runId}

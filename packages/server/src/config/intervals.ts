@@ -52,6 +52,12 @@ function parseEnvInterval(name: string, fallback: string): string {
 /** How long an unclaimed device action remains eligible for worker pickup. */
 export const DEVICE_ACTION_QUEUE_BUDGET_MS = 60_000;
 
+/** Explicit background device operations may wait ten minutes for pickup.
+ *  This bounds only the unclaimed queue, starting when approval permits a
+ *  claim. Execution still uses worker heartbeats; source reads and page
+ *  activation keep their own deadlines. Internal policy, not caller tunable. */
+export const DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS = 10 * 60_000;
+
 export const intervals = {
   /** Stale threshold (seconds) for the connector-lane run reaper.
    *  120s leaves room for the 30s worker heartbeat to miss ~3 ticks before

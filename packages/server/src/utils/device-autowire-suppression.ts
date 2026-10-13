@@ -103,16 +103,22 @@ export const IS_DEVICE_CONNECTOR_SQL = /* sql */ `COALESCE((
 export type DeviceAutowireIdentityRow = {
 	auth_profile_id: number | string | null;
 	app_auth_profile_id: number | string | null;
-	/** Owner of the personal org this connection lives in, or null for a shared org. */
+	/**
+	 * The member whose device auto-wire owns this row: the personal org's owner
+	 * there, else the row's creator (a team workspace wires one private
+	 * connection per device, created by the device's owner).
+	 */
 	autowire_user_id: string | null;
 	is_device_connector: boolean;
 };
 
 /**
  * True when the row is exactly what `ensureDeviceConnectorWired` auto-creates:
- * a credential-free connection to an active device connector inside its owner's
- * personal org. A device pin is deliberately NOT required — multi-device
- * auto-wiring leaves the connection unpinned.
+ * a credential-free connection to an active device connector, owned by the
+ * member whose device home is that workspace. A device pin is deliberately NOT
+ * required — in a personal workspace multi-device auto-wiring leaves the
+ * connection unpinned. In a team workspace the row is pinned to one device, and
+ * the opt-out marker it carries suppresses only that device's connection.
  */
 export function isDeviceAutowireIdentity(
 	row: DeviceAutowireIdentityRow,

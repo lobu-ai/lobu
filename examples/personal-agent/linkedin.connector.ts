@@ -51,6 +51,7 @@ import {
   normalizeLinkedInMemberId,
   normalizeLinkedInSlug,
 } from "./linkedin-identity.ts";
+import { setLinkedInLike } from "./linkedin-like.ts";
 import {
   readCompanyFollows,
   readConnections,
@@ -70,6 +71,13 @@ import {
   maxEventCursor,
   takeBatch,
 } from "./takeout-utils.ts";
+import {
+  observeLinkedInInbox,
+  readLinkedInInbox,
+  type LinkedInInboxCheckpoint,
+} from "./linkedin-inbox.ts";
+import { prepareLinkedInDraft } from "./linkedin-drafts.ts";
+import { LINKEDIN_HOME_URL } from "./linkedin-browser-script.ts";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -81,7 +89,7 @@ import {
  * checkpoints on last_job_id/last_timestamp). No production checkpoint exists,
  * so the rename is safe.
  */
-interface LinkedInCheckpoint {
+interface LinkedInCheckpoint extends LinkedInInboxCheckpoint {
   // Live feed cursors.
   last_post_id?: string;
   last_job_id?: string;
@@ -532,7 +540,8 @@ const HOME_FEED_SCRAPE_DEADLINE_MS = 25_000;
  * token (NOT numeric). These selectors live here, not in the extension.
  */
 const HOME_FEED_SCRAPE_CONFIG = {
-  scroll: { max: 8, stall: 3, waitMs: 1500 },
+  // Current LinkedIn pages scroll inside <main>, not document/window.
+  scroll: { max: 8, stall: 3, waitMs: 1500, deep: true },
   loggedOutWhen: {
     pathRegex: "/(login|authwall|uas/login|checkpoint|signup)\\b",
   },
@@ -824,7 +833,7 @@ async function readMyLinkedInActivity(
     parseRows: (rows) => rows,
     allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
     // One action run reads several pages; a run-scoped scratch tab is released
-    // after each scrape, so reuse LinkedIn's anchor tab like home_feed does.
+    // after each scrape, so reuse LinkedIn's anchor tab across these reads.
     persistent: true,
   });
   if (!profile.loggedIn) {
@@ -909,12 +918,17 @@ async function readHomeFeed(ctx: ActionContext): Promise<ActionResult> {
     ? Math.min(10, Math.max(1, Math.trunc(rawScrolls)))
     : 6;
   const dispatcher = requireBrowser(ctx);
+  // Timeline reads prioritize more posts. Expanding a busy comment thread
+  // spends the shared expansion deadline before the scraper can paginate.
+  // Already-rendered comments remain readable through the same row selector.
+  const { expandRows: _expandRows, ...timelineConfig } =
+    HOME_FEED_SCRAPE_CONFIG;
   const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
     dispatcher,
-    url: "https://www.linkedin.com/feed/",
+    url: LINKEDIN_HOME_URL,
     config: {
-      ...HOME_FEED_SCRAPE_CONFIG,
-      scroll: { ...HOME_FEED_SCRAPE_CONFIG.scroll, max: maxScrolls },
+      ...timelineConfig,
+      scroll: { ...timelineConfig.scroll, max: maxScrolls },
     },
     parseRows: (raw) =>
       (raw as HomeFeedRow[]).map((row) => ({
@@ -922,7 +936,9 @@ async function readHomeFeed(ctx: ActionContext): Promise<ActionResult> {
         post_identity: decodeHomeFeedPostIdentity(row.post_identity),
       })),
     allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
-    persistent: true,
+    // A hidden warm tab can retain only the initial batch. The default scrape
+    // window gives LinkedIn a fresh rendering surface and closes after reading.
+    persistent: false,
   });
   if (!loggedIn) {
     return {
@@ -1685,27 +1701,12 @@ export function buildHomeFeedEvents(
 
 // ── prepare_comment handoff (browser stage, human submits) ───────────
 
-/** Interactive a11y node from chrome `get_accessibility_tree`. */
-type A11yNode = {
-  ref_id: number;
-  role?: string;
-  name?: string;
-  tag?: string;
-  href?: string;
-};
-
-type ElementRef = {
-  document_epoch: number;
-  ref_id: number;
-};
-
 type PrepareCommentResult = {
   prepared: boolean;
   tab_id: number;
   post_url: string;
   body: string;
-  /** How the composer was filled: evaluate or the a11y type_ref fallback. */
-  method: "type_ref" | "evaluate";
+  method: "evaluate";
   /** Whether the in-page handoff banner was injected. */
   banner_shown?: boolean;
   /** Truncated reason shown on the banner (if any). */
@@ -1871,130 +1872,8 @@ export function isLinkedInAuthWall(url: string | null | undefined): boolean {
   );
 }
 
-function nameMatches(name: string | undefined, patterns: RegExp[]): boolean {
-  if (!name) return false;
-  const n = name.trim();
-  return patterns.some((re) => re.test(n));
-}
-
-/**
- * Labels that would *submit* a comment/post. prepare_comment must never click
- * these — only the human hits Post.
- */
-export function isCommentSubmitLabel(name: string | undefined | null): boolean {
-  if (!name) return false;
-  const n = name.replace(/\s+/g, " ").trim();
-  if (/^(post|submit|send|publish|share)$/i.test(n)) return true;
-  if (/^(post|submit|send)\s+(comment|reply)$/i.test(n)) return true;
-  return false;
-}
-
-/** Labels that open the composer (not submit). */
-export function isCommentOpenLabel(name: string | undefined | null): boolean {
-  if (!name) return false;
-  if (isCommentSubmitLabel(name)) return false;
-  const n = name.replace(/\s+/g, " ").trim();
-  return (
-    /^comment$/i.test(n) ||
-    /^comments$/i.test(n) ||
-    /^comment on /i.test(n) ||
-    /^leave a comment/i.test(n) ||
-    /^post a comment/i.test(n)
-  );
-}
-
-/**
- * Prefer the social-action "Comment" control (not "Add a comment…" textbox,
- * not "Post" submit). Names vary by locale; this path is English-first.
- */
-export function pickCommentButtonRef(
-  tree: A11yNode[],
-  documentEpoch: number
-): ElementRef | null {
-  // Prefer explicit buttons over links/generics.
-  const ranked = [...tree].sort((a, b) => {
-    const score = (n: A11yNode) =>
-      n.role === "button" || n.tag === "button" ? 0 : 1;
-    return score(a) - score(b);
-  });
-  for (const node of ranked) {
-    if (!isCommentOpenLabel(node.name)) continue;
-    // Skip textboxes that happen to have "comment" in the name.
-    if (node.role === "textbox" || node.tag === "textarea") continue;
-    return { document_epoch: documentEpoch, ref_id: node.ref_id };
-  }
-  return null;
-}
-
-/**
- * Find the comment composer textbox. LinkedIn uses contenteditable/Quill
- * editors that surface as role=textbox with names like "Add a comment…".
- */
-export function pickCommentTextboxRef(
-  tree: A11yNode[],
-  documentEpoch: number
-): ElementRef | null {
-  const goodName = [
-    /add a comment/i,
-    /write a comment/i,
-    /leave a comment/i,
-    /^comment$/i,
-    /text editor/i,
-  ];
-  const candidates = tree.filter((n) => n.role === "textbox");
-  for (const node of candidates) {
-    if (nameMatches(node.name, goodName)) {
-      return { document_epoch: documentEpoch, ref_id: node.ref_id };
-    }
-  }
-  // Any textbox whose name mentions comment.
-  for (const node of candidates) {
-    if (node.name && /comment/i.test(node.name)) {
-      return { document_epoch: documentEpoch, ref_id: node.ref_id };
-    }
-  }
-  // Last resort: empty-named textboxes are common once the composer is open.
-  const emptyTextboxes = candidates.filter((n) => !n.name?.trim());
-  if (emptyTextboxes.length === 1) {
-    return {
-      document_epoch: documentEpoch,
-      ref_id: emptyTextboxes[0]!.ref_id,
-    };
-  }
-  return null;
-}
-
 function chromeOriginsInput(): { allowed_origins: string[] } {
   return { allowed_origins: LINKEDIN_ALLOWED_ORIGINS };
-}
-
-type TreeSnapshot = {
-  document_epoch: number;
-  tree: A11yNode[];
-  current_url?: string;
-};
-
-async function snapshotTree(
-  dispatcher: ChromeActionDispatcher,
-  tabId: number
-): Promise<TreeSnapshot> {
-  const out = await dispatcher.dispatch<TreeSnapshot & Record<string, unknown>>(
-    "get_accessibility_tree",
-    {
-      tab_id: tabId,
-      filter: "interactive",
-      ...chromeOriginsInput(),
-    }
-  );
-  const tree = Array.isArray(out.tree) ? (out.tree as A11yNode[]) : [];
-  const document_epoch =
-    typeof out.document_epoch === "number" ? out.document_epoch : 0;
-  return {
-    document_epoch,
-    tree,
-    current_url:
-      typeof out.current_url === "string" ? out.current_url : undefined,
-  };
 }
 
 /** Cap the explanation shown in the in-page banner. */
@@ -2237,6 +2116,13 @@ export function buildFillCommentExpression(body: string): string {
     return { ok: false, reason: 'composer_not_found' };
   }
 
+  const existing = (composer.innerText || composer.textContent || '').trim();
+  if (existing && existing !== text.trim()) {
+    return { ok: false, reason: 'existing_draft', submitted: false };
+  }
+  if (existing === text.trim()) {
+    return { ok: true, reason: 'already_prepared', preview: existing.slice(0, 120), submitted: false };
+  }
   composer.focus();
   try {
     document.execCommand('selectAll', false, undefined);
@@ -2298,23 +2184,7 @@ export async function prepareLinkedInComment(
   const banner = opts.banner !== false;
   const reasonPreview = truncateHandoffReason(opts.reason);
 
-  // Refuse accidental submit clicks through the chrome dispatcher.
-  const safeDispatch: ChromeActionDispatcher = {
-    dispatch: async (action_key, action_input) => {
-      if (action_key === "click_ref") {
-        if (action_input.allowed_click !== "comment_open") {
-          throw new Error(
-            "prepare_comment: blocked click_ref — only comment-open is allowed (never Post/submit)"
-          );
-        }
-      }
-      const input = { ...action_input };
-      delete input.allowed_click;
-      return dispatcher.dispatch(action_key, input);
-    },
-  };
-
-  const nav = await safeDispatch.dispatch<{
+  const nav = await dispatcher.dispatch<{
     tab_id?: number;
     current_url?: string;
     title?: string;
@@ -2338,7 +2208,7 @@ export async function prepareLinkedInComment(
 
   // Give the post chrome a beat to hydrate the social-action bar.
   try {
-    await safeDispatch.dispatch("wait_for_selector", {
+    await dispatcher.dispatch("wait_for_selector", {
       tab_id: tabId,
       selector:
         'button, [role="button"], .feed-shared-social-action-bar, .comments-comment-box',
@@ -2346,30 +2216,14 @@ export async function prepareLinkedInComment(
       ...chromeOriginsInput(),
     });
   } catch {
-    // Non-fatal — page may still be usable; fall through to a11y/evaluate.
+    // Non-fatal — the DOM fill below still checks the composer.
   }
 
-  let method: "type_ref" | "evaluate" = "evaluate";
-  let typed = false;
-
-  // LinkedIn's current feed/post UI rarely exposes the
-  // Quill composer as an a11y textbox after clicking Comment, so evaluate
-  // (contenteditable/ql-editor selectors + insertText) is the primary path.
-  // type_ref remains a secondary attempt when the tree does surface a textbox.
-  {
-    let evalOut:
-      | {
-          value?: {
-            ok?: boolean;
-            reason?: string;
-            preview?: string;
-            submitted?: boolean;
-          };
-          exception?: string;
-        }
-      | undefined;
-    try {
-      evalOut = await safeDispatch.dispatch<{
+  // Fill only through the DOM, which can read the composer before writing. An
+  // accessibility textbox does not expose an existing draft, so there is no
+  // type_ref fallback.
+  let evalOut:
+    | {
         value?: {
           ok?: boolean;
           reason?: string;
@@ -2377,85 +2231,42 @@ export async function prepareLinkedInComment(
           submitted?: boolean;
         };
         exception?: string;
-      }>("evaluate", {
+      }
+    | undefined;
+  try {
+    evalOut = await dispatcher.dispatch<NonNullable<typeof evalOut>>(
+      "evaluate",
+      {
         tab_id: tabId,
         expression: buildFillCommentExpression(body),
         await_promise: true,
         ...chromeOriginsInput(),
-      });
-    } catch {
-      // The a11y path below can still stage the draft when evaluate is blocked.
-    }
-    const value = evalOut?.value;
-    if (value?.submitted === true) {
-      throw new Error(
-        "prepare_comment: fill expression reported submitted=true — aborting (must never auto-post)"
-      );
-    }
-    if (!evalOut?.exception && value?.ok) {
-      method = "evaluate";
-      typed = true;
-    }
+      }
+    );
+  } catch {
+    // Failure is reported below; never fill an editor whose contents cannot be checked.
   }
-
-  // Path B: a11y type_ref when evaluate missed the composer.
-  // Only click "Comment" open controls; never Post/submit.
-  if (!typed) {
-    try {
-      let snap = await snapshotTree(safeDispatch, tabId);
-      if (isLinkedInAuthWall(snap.current_url)) {
-        throw new Error(
-          `Not logged into LinkedIn (landed on ${snap.current_url}). Sign in in the paired Chrome profile, then retry.`
-        );
-      }
-
-      let textbox = pickCommentTextboxRef(snap.tree, snap.document_epoch);
-      if (!textbox) {
-        const commentBtn = pickCommentButtonRef(snap.tree, snap.document_epoch);
-        if (commentBtn) {
-          await safeDispatch.dispatch("click_ref", {
-            tab_id: tabId,
-            ref: commentBtn,
-            allowed_click: "comment_open",
-            ...chromeOriginsInput(),
-          });
-          snap = await snapshotTree(safeDispatch, tabId);
-          textbox = pickCommentTextboxRef(snap.tree, snap.document_epoch);
-        }
-      }
-
-      if (textbox) {
-        await safeDispatch.dispatch("type_ref", {
-          tab_id: tabId,
-          ref: textbox,
-          text: body,
-          clear_first: true,
-          ...chromeOriginsInput(),
-        });
-        method = "type_ref";
-        typed = true;
-      }
-    } catch (err) {
-      if (
-        err instanceof Error &&
-        (err.message.includes("Not logged into LinkedIn") ||
-          err.message.includes("blocked click_ref"))
-      ) {
-        throw err;
-      }
-    }
-  }
-
-  if (!typed) {
+  const value = evalOut?.value;
+  if (value?.reason === "existing_draft") {
     throw new Error(
-      "prepare_comment: could not fill comment composer (evaluate + a11y both missed it). Is the post still available and commentable?"
+      "prepare_comment: preserving your existing draft; clear it before preparing another comment"
+    );
+  }
+  if (value?.submitted === true) {
+    throw new Error(
+      "prepare_comment: fill expression reported submitted=true — aborting (must never auto-post)"
+    );
+  }
+  if (evalOut?.exception || !value?.ok) {
+    throw new Error(
+      "prepare_comment: could not fill comment composer (the DOM draft could not be verified). Is the post still available and commentable?"
     );
   }
 
   let bannerShown = false;
   if (banner) {
     try {
-      const bannerOut = await safeDispatch.dispatch<{
+      const bannerOut = await dispatcher.dispatch<{
         value?: { ok?: boolean; anchored?: boolean };
         exception?: string;
       }>("evaluate", {
@@ -2477,7 +2288,7 @@ export async function prepareLinkedInComment(
     tab_id: tabId,
     post_url: postUrl,
     body,
-    method,
+    method: "evaluate",
     banner_shown: bannerShown,
     reason_preview: reasonPreview,
     message:
@@ -3122,7 +2933,7 @@ function notActionableMissingPostId(postUrlRaw: string): ActionResult {
 const LINKEDIN_TAKEOUT_FEEDS: Record<
   string,
   {
-    cursor: keyof LinkedInCheckpoint;
+    cursor: Exclude<keyof LinkedInCheckpoint, "linkedin_inbox">;
     read: (readCsv: TakeoutCsvReader) => EventEnvelope[];
   }
 > = {
@@ -3191,15 +3002,15 @@ export default class LinkedInConnector extends ConnectorRuntime<
     key: "linkedin",
     name: "LinkedIn",
     description:
-      "Scrapes LinkedIn (home feed, company pages, hiring signals) via the paired Owletto Chrome extension, and ingests local LinkedIn Data Export CSV files. prepare_comment stages a draft for the human to Post; verify_staged_comment checks whether that draft appeared as a comment.",
-    version: "3.15.0",
+      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes and prepare message, post, or comment drafts for human submission. Also supports local LinkedIn Data Export CSV files.",
+    version: "3.18.8",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
     browser: {
       authMethods: ["browser"],
       origins: ["https://www.linkedin.com"],
       accountProbe: {
-        url: "https://www.linkedin.com/feed/",
+        url: LINKEDIN_HOME_URL,
         // Only the self-profile endpoint; vanity profile URLs can be renamed.
         expression: `(async () => {
           const raw = document.cookie.split('; ').find(cookie => cookie.startsWith('JSESSIONID='));
@@ -3245,8 +3056,74 @@ export default class LinkedInConnector extends ConnectorRuntime<
         },
       ],
     },
+    // Source subscriptions deliver only declared keys. Declaring any replaces the
+    // eventKinds-derived catalog, so every feed kind is listed here.
+    automationEvents: [
+      {
+        key: "notification.changed",
+        label: "Notification Changed",
+        resourceType: "notification",
+        description:
+          "A new or changed notification reference. Read its content from the notifications feed.",
+      },
+      {
+        key: "message.created",
+        label: "Message Created",
+        resourceType: "message",
+        description:
+          "A new inbox message reference. Read its content from the live messages feed.",
+      },
+      {
+        key: "source.gap",
+        label: "Source Gap",
+        description:
+          "Catch-up reached the end of what LinkedIn exposes, so earlier changes at this conversation or notification position may be missing.",
+      },
+      { key: "post", label: "Post" },
+      { key: "comment", label: "Comment" },
+      { key: "job_posting", label: "Job Posting" },
+      { key: "message", label: "Message" },
+      { key: "connection", label: "Connection" },
+    ],
     feeds: {
       // ── Live (Chrome-extension) feeds ──────────────────────────
+      notifications: {
+        key: "notifications",
+        name: "Notifications",
+        description:
+          "Read notification content and links without marking them seen. Subscriptions check once per minute while the paired browser is online; grouped notification content changes activate Automations, and catch-up beyond the scan budget reports a source gap. Exact source timestamps are unavailable.",
+        read: (ctx) => readLinkedInInbox(ctx),
+        observe: (ctx) => observeLinkedInInbox(ctx),
+        webhook: {
+          mode: "trigger",
+          events: ["notification.changed", "source.gap"],
+        },
+        eventKinds: {
+          "notification.changed": {
+            description: "A new or meaningfully changed LinkedIn notification",
+          },
+          "source.gap": {
+            description:
+              "Catch-up scanned its page budget without reaching a known notification",
+          },
+        },
+      },
+      live_messages: {
+        key: "live_messages",
+        name: "Live Messages",
+        description:
+          "Read recent messages from inbox conversations without marking them seen. The cursor pages conversations and their recent message pages, not a full history export. Subscriptions check once per minute while the browser is online and report catch-up gaps.",
+        read: (ctx) => readLinkedInInbox(ctx),
+        observe: (ctx) => observeLinkedInInbox(ctx),
+        webhook: { mode: "trigger", events: ["message.created", "source.gap"] },
+        eventKinds: {
+          "message.created": { description: "A new LinkedIn inbox message" },
+          "source.gap": {
+            description:
+              "A conversation's recent message page may hide older catch-up messages",
+          },
+        },
+      },
       home_feed: {
         sync: (ctx) => this.syncFeed(ctx),
         key: "home_feed",
@@ -3452,14 +3329,75 @@ export default class LinkedInConnector extends ConnectorRuntime<
       },
     },
     actions: {
+      set_like: {
+        key: "set_like",
+        name: "Set like",
+        kind: "write",
+        description:
+          "Set the Like reaction on one exact LinkedIn post and verify it after reload. Already-matching posts are unchanged. Preserves other reaction types. Never comments or posts; selection and budgets belong to the Automation.",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["post_url", "liked"],
+          properties: {
+            post_url: { type: "string", format: "uri" },
+            liked: { type: "boolean" },
+          },
+          additionalProperties: false,
+        },
+      },
+      prepare_message: {
+        key: "prepare_message",
+        name: "Prepare message",
+        kind: "write",
+        description:
+          "Prepare a text reply in an exact existing conversation. Execute with activation: { kind: 'page_visit', urls: [conversation_url] }. When the user visits that URL, fill its empty composer. The user clicks Send. Never sends or overwrites a draft.",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["conversation_url", "body"],
+          additionalProperties: false,
+          properties: {
+            conversation_url: { type: "string", format: "uri" },
+            body: { type: "string", minLength: 1, maxLength: 3000 },
+          },
+        },
+      },
+      prepare_post: {
+        key: "prepare_post",
+        name: "Prepare personal post",
+        kind: "write",
+        description: `Prepare a text post for the signed-in member. Execute with activation: { kind: 'page_visit', urls: ['${LINKEDIN_HOME_URL}'] }. When the user visits that page, open its personal post composer and fill an empty draft. The user clicks Post. Never publishes or overwrites a draft.`,
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: false,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["body"],
+          additionalProperties: false,
+          properties: {
+            body: { type: "string", minLength: 1, maxLength: 3000 },
+          },
+        },
+      },
       prepare_comment: {
         key: "prepare_comment",
         name: "Prepare comment",
         description:
           "Stage a comment draft after the user opens the exact LinkedIn post (fill composer, banner). The page-activation target is the post page URL with a trailing slash (https://www.linkedin.com/feed/update/urn:li:activity:<id>/), the form LinkedIn settles on. NEVER opens a tab or submits — the human must click Post.",
         // Page activation is separate from org policy approval. This action only
-        // fills the composer; the human performs the irreversible Post click,
-        // which safeDispatch structurally refuses above.
+        // fills the composer; the human performs the irreversible Post click.
+        // The fill expression skips submit-labelled controls and never presses Enter.
         kind: "write",
         annotations: {
           openWorldHint: true,
@@ -3662,6 +3600,34 @@ export default class LinkedInConnector extends ConnectorRuntime<
 
   async execute(ctx: ActionContext): Promise<ActionResult> {
     try {
+      if (ctx.actionKey === "set_like") {
+        if (typeof ctx.input.liked !== "boolean") {
+          return { success: false, error: "liked must be a boolean" };
+        }
+        const url =
+          typeof ctx.input.post_url === "string"
+            ? normalizeLinkedInPostUrl(ctx.input.post_url)
+            : null;
+        if (!url)
+          return {
+            success: false,
+            error: "post_url must identify an exact LinkedIn post",
+          };
+        return {
+          success: true,
+          output: await setLinkedInLike(
+            requireBrowser(ctx),
+            `${url}/`,
+            ctx.input.liked
+          ),
+        };
+      }
+      if (
+        ctx.actionKey === "prepare_message" ||
+        ctx.actionKey === "prepare_post"
+      ) {
+        return await prepareLinkedInDraft(ctx);
+      }
       if (ctx.actionKey === "read_my_activity") {
         return await readMyLinkedInActivity(ctx);
       }
@@ -3809,7 +3775,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
 
     // home_feed is the one feed that needs a content-script scrape (the CDP
     // debugger stops the personalized feed from rendering) and takes no
-    // company_url — it always reads linkedin.com/feed/.
+    // company_url — it always reads LINKEDIN_HOME_URL.
     if (feedKey === "home_feed") {
       const homeScrolls = readHomeScrollBudget(config);
       return this.syncHomeFeed(homeScrolls, checkpoint, requireBrowser(ctx));
@@ -3837,10 +3803,9 @@ export default class LinkedInConnector extends ConnectorRuntime<
   /**
    * Personalized home feed via the extension's content-script scrape. Network
    * capture can't read it (the CDP debugger stops the feed rendering), so we
-   * dispatch a `cs_scrape` against linkedin.com/feed/ with the home-feed
-   * selectors. Prefer an already-loaded feed tab in the paired Chrome profile;
-   * otherwise reuse a site-persistent tab so a slow first hydration is still
-   * available to the next scheduled retry.
+   * dispatch a `cs_scrape` against LINKEDIN_HOME_URL with the home-feed
+   * selectors. Use the same fresh scrape window as timeline reads: a hidden
+   * persistent tab can leave LinkedIn's lazy-loaded feed on its initial batch.
    */
   private async syncHomeFeed(
     maxScrolls: number,
@@ -3849,7 +3814,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
   ): Promise<LinkedInSyncPage> {
     const { items: rows, loggedIn } = await extensionDomScrape<HomeFeedRow>({
       dispatcher,
-      url: "https://www.linkedin.com/feed/",
+      url: LINKEDIN_HOME_URL,
       config: {
         ...HOME_FEED_SCRAPE_CONFIG,
         scroll: { ...HOME_FEED_SCRAPE_CONFIG.scroll, max: maxScrolls },
@@ -3860,7 +3825,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
           post_identity: decodeHomeFeedPostIdentity(row.post_identity),
         })),
       allowedOrigins: LINKEDIN_ALLOWED_ORIGINS,
-      persistent: true,
+      persistent: false,
     });
 
     if (!loggedIn) {
@@ -4067,7 +4032,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
 
   private result(
     ctx: SyncContext<LinkedInCheckpoint, LinkedInConfig>,
-    key: keyof LinkedInCheckpoint,
+    key: Exclude<keyof LinkedInCheckpoint, "linkedin_inbox">,
     allEvents: EventEnvelope[],
     max: number
   ): LinkedInSyncPage {

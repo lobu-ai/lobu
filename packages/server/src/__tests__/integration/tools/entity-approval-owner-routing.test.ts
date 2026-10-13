@@ -212,7 +212,7 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 		});
 
 		expect(
-			await resolveChatUserIdForUser(twin.id, "slack", "TDUPTEAM"),
+			await resolveChatUserIdForUser(twin.id, "slack", "TDUPTEAM", orgId),
 		).toBeNull();
 	});
 
@@ -304,7 +304,7 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 
 		// The identity resolves — this is NOT a linkage failure.
 		expect(
-			await resolveChatUserIdForUser(noDmOwner.id, "gchat", null),
+			await resolveChatUserIdForUser(noDmOwner.id, "gchat", null, noDmOrg.id),
 		).toBe("users/110000000000000000005");
 		// but the connection cannot originate the DM, so no owner DM is pinned.
 		expect(await resolveOwnerDmTarget(noDmOrg.id, noDmOwner.id)).toBeNull();
@@ -486,7 +486,7 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			platform: "gchat",
 			platformUserId: "users/110000000000000000002",
 		});
-		expect(await resolveChatUserIdForUser(gOwner.id, "gchat", null)).toBe(
+		expect(await resolveChatUserIdForUser(gOwner.id, "gchat", null, orgId)).toBe(
 			"users/110000000000000000002",
 		);
 	});
@@ -504,11 +504,11 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			teamId: "TNOWIDEN",
 			platformUserId: "U-SCOPED",
 		});
-		expect(await resolveChatUserIdForUser(scoped.id, "slack", "TNOWIDEN")).toBe(
+		expect(await resolveChatUserIdForUser(scoped.id, "slack", "TNOWIDEN", orgId)).toBe(
 			"U-SCOPED",
 		);
-		expect(await resolveChatUserIdForUser(scoped.id, "slack", null)).toBeNull();
-		expect(await resolveChatUserIdForUser(scoped.id, "slack", "  ")).toBeNull();
+		expect(await resolveChatUserIdForUser(scoped.id, "slack", null, orgId)).toBeNull();
+		expect(await resolveChatUserIdForUser(scoped.id, "slack", "  ", orgId)).toBeNull();
 	});
 
 	it("matches the team prefix literally — `_` in a team id is not a LIKE wildcard", async () => {
@@ -525,10 +525,10 @@ describe("owner-routed approvals — DM delivery tier selection", () => {
 			platformUserId: "U-ROAMER",
 		});
 		expect(
-			await resolveChatUserIdForUser(roamer.id, "slack", "TXDMOWNER"),
+			await resolveChatUserIdForUser(roamer.id, "slack", "TXDMOWNER", orgId),
 		).toBe("U-ROAMER");
 		expect(
-			await resolveChatUserIdForUser(roamer.id, "slack", "T_DMOWNER"),
+			await resolveChatUserIdForUser(roamer.id, "slack", "T_DMOWNER", orgId),
 		).toBeNull();
 	});
 });

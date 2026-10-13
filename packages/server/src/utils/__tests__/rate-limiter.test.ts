@@ -106,6 +106,57 @@ describe('RateLimiter (Postgres-backed fixed window)', () => {
     }
   });
 
+  it('consume decides from the committed cluster count, so a fresh replica cannot repeat a once-per-window action', async () => {
+    const key = uniqueKey('consume-once');
+    const once = { limit: 1, windowSeconds: 86400 };
+    const podA = new RateLimiter();
+    const podB = new RateLimiter();
+    try {
+      expect((await podA.consume(key, once)).allowed).toBe(true);
+      // Pod B has never seen this key; checkLimit's cache would admit it.
+      const second = await podB.consume(key, once);
+      expect(second.allowed).toBe(false);
+      expect(second.count).toBe(2);
+      // And a sync check on yet another empty cache shows the lag consume avoids.
+      const podC = new RateLimiter();
+      try {
+        expect(podC.checkLimit(key, once).allowed).toBe(true);
+        await podC.flushPendingWrites();
+      } finally {
+        podC.destroy();
+      }
+    } finally {
+      podA.destroy();
+      podB.destroy();
+    }
+  });
+
+  it('consume fails open to per-pod enforcement when the counters table is missing', async () => {
+    const db = getTestDb();
+    await db`ALTER TABLE rate_limit_counters RENAME TO rate_limit_counters_hidden`;
+    try {
+      const key = uniqueKey('consume-fail-open');
+      const config = { limit: 2, windowSeconds: 3600 };
+      expect((await limiter.consume(key, config)).allowed).toBe(true);
+      expect((await limiter.consume(key, config)).allowed).toBe(true);
+      // Local enforcement still applies, never a hard refusal before the limit.
+      expect((await limiter.consume(key, config)).allowed).toBe(false);
+
+      // Concurrent calls during the DB backoff must retain their own counts.
+      const concurrentKey = uniqueKey('consume-concurrent-fail-open');
+      const results = await Promise.all(
+        Array.from({ length: 3 }, () => limiter.consume(concurrentKey, config)),
+      );
+      expect(results.map(({ allowed, count }) => ({ allowed, count }))).toEqual([
+        { allowed: true, count: 1 },
+        { allowed: true, count: 2 },
+        { allowed: false, count: 3 },
+      ]);
+    } finally {
+      await db`ALTER TABLE rate_limit_counters_hidden RENAME TO rate_limit_counters`;
+    }
+  });
+
   it('resets the count when the fixed window rolls over', async () => {
     const key = uniqueKey('window-roll');
     const config = { limit: 1, windowSeconds: 1 };
@@ -147,10 +198,12 @@ describe('RateLimiter (Postgres-backed fixed window)', () => {
     const db = getTestDb();
     const staleKey = uniqueKey('stale');
     const freshKey = uniqueKey('fresh');
+    const otherPodDailyKey = uniqueKey('other-pod-daily');
 
     await db`
       INSERT INTO rate_limit_counters (key, window_start, count)
-      VALUES (${staleKey}, NOW() - INTERVAL '3 hours', 5)
+      VALUES (${staleKey}, NOW() - INTERVAL '3 days', 5),
+             (${otherPodDailyKey}, NOW() - INTERVAL '12 hours', 1)
     `;
     limiter.checkLimit(freshKey, WIDE);
     await limiter.flushPendingWrites();
@@ -162,6 +215,7 @@ describe('RateLimiter (Postgres-backed fixed window)', () => {
     const names = keys.map((r) => r.key);
     expect(names).not.toContain(staleKey);
     expect(names).toContain(freshKey);
+    expect(names).toContain(otherPodDailyKey);
   });
 });
 

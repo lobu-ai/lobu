@@ -59,6 +59,13 @@ import {
   resolveTurnAttachments,
 } from "./agent-turn-attachments.js";
 import { notifyThreadResponse, type TurnFailure } from "./turn-liveness.js";
+import {
+  chatTurnAccessOf,
+  chatTurnEvidenceFrom,
+  isConfinedChatTurn,
+  replyOnlyTurnInstructions,
+  resolveChatTurnActor,
+} from "./chat-turn-actor.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
 
 const logger = createLogger("agent-turn-producer");
@@ -172,6 +179,19 @@ const GATEWAY_TOOLS = [
   "ask_user",
   "suggest_actions",
 ] as const;
+
+/**
+ * The gateway tools a confined chat turn keeps: acting on its own thread. The
+ * routes behind every other gateway and media tool refuse its token
+ * (routes/internal/middleware.ts), so they are not offered.
+ */
+const CONFINED_GATEWAY_TOOLS: ReadonlySet<string> = new Set([
+  "react",
+  "edit_message",
+  "delete_message",
+  "ask_user",
+  "suggest_actions",
+]);
 
 /**
  * The workspace tools the guest can run, in the order the model is offered
@@ -528,28 +548,43 @@ function resolveModelMetadata(
  * organization, conversation, run and optional runtime sandbox. The secret
  * proxy accepts it as the provider credential and binds it to the agent in the
  * URL; the MCP and runtime routes authenticate the same token.
+ *
+ * A chat turn's token also carries the authority its sender gets in this
+ * organization as `chatAccess`, plus `actorUserId` for a linked member (see
+ * chat-turn-actor.ts). Both are resolved here, server-side, from verified
+ * state and the bridge's structured evidence — never taken from the worker or
+ * the message text.
  */
-function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRuntimeSelection): string {
+export async function mintTurnToken(data: MessagePayload, runId: number, runtime?: AgentRuntimeSelection): Promise<string> {
+  const claims = buildWorkerTokenClaims({
+    channelId: data.channelId,
+    teamId: data.teamId,
+    agentId: data.agentId,
+    organizationId: data.organizationId,
+    platform: data.platform,
+    platformMetadata: data.platformMetadata,
+    // The remote runtime reads all of these off the SIGNED token, never a
+    // body: which sandbox, and the egress and package sets the org set.
+    runtimeProviderId: runtime?.runtimeProviderId,
+    sandboxId: runtime?.sandboxId,
+    allowedDomains: data.networkConfig?.allowedDomains,
+    deniedDomains: data.networkConfig?.deniedDomains,
+    nixPackages: data.nixConfig?.packages,
+  });
+  const actor = await resolveChatTurnActor({
+    organizationId: data.organizationId,
+    senderId: data.userId,
+    claims,
+    evidence: chatTurnEvidenceFrom(data.platformMetadata),
+  });
   return generateWorkerToken(
     data.userId,
     data.conversationId,
     `agent-turn:${data.messageId}`,
     {
-      ...buildWorkerTokenClaims({
-        channelId: data.channelId,
-        teamId: data.teamId,
-        agentId: data.agentId,
-        organizationId: data.organizationId,
-        platform: data.platform,
-        platformMetadata: data.platformMetadata,
-        // The remote runtime reads all of these off the SIGNED token, never a
-        // body: which sandbox, and the egress and package sets the org set.
-        runtimeProviderId: runtime?.runtimeProviderId,
-        sandboxId: runtime?.sandboxId,
-        allowedDomains: data.networkConfig?.allowedDomains,
-        deniedDomains: data.networkConfig?.deniedDomains,
-        nixPackages: data.nixConfig?.packages,
-      }),
+      ...claims,
+      ...(actor?.actorUserId ? { actorUserId: actor.actorUserId } : {}),
+      ...(actor ? { chatAccess: actor.access } : {}),
       messageId: data.messageId,
       // No `executionMode`/`automationRunId` override here ON PURPOSE.
       // `buildWorkerTokenClaims` above already derives both from
@@ -945,7 +980,15 @@ export async function enqueueAgentTurn(
       SELECT nextval(pg_get_serial_sequence('runs', 'id')) AS id
     `;
     const runId = allocated!.id;
-    const workerToken = mintTurnToken(data, runId, deps.runtime);
+    const workerToken = await mintTurnToken(data, runId, deps.runtime);
+    const turnClaims = verifyWorkerToken(workerToken);
+    if (!turnClaims) throw new Error("the turn's own worker token does not verify");
+    // Read off the signed claims, exactly as the MCP lane and the internal
+    // routes will (chat-turn-actor.ts).
+    const replyOnly = chatTurnAccessOf(turnClaims) === "reply_only";
+    // A confined turn answers in its own thread only: the server refuses its
+    // other conversations, media and remote execution, so they are not offered.
+    const confined = isConfinedChatTurn(turnClaims);
     const provider = await resolveTurnProvider(module, {
       agentId: data.agentId,
       organizationId: data.organizationId,
@@ -980,7 +1023,15 @@ export async function enqueueAgentTurn(
         })
       : null;
     let failedServers: string[] = [];
-    if (!deps.mcp) {
+    if (replyOnly) {
+      // No Lobu tools and no memory hooks: the MCP lane refuses this token, so
+      // discovering against it would only log a failure on every turn.
+      mcpInstructions = [replyOnlyTurnInstructions()];
+      logger.info(
+        { agentId: data.agentId, messageId: data.messageId, platform: data.platform },
+        "Agent turn is reply-only: the chat sender is not a linked member of this organization"
+      );
+    } else if (!deps.mcp) {
       logger.info(
         { agentId: data.agentId },
         "Agent turn: the MCP surface is not wired, so the turn has only standard tools"
@@ -994,7 +1045,8 @@ export async function enqueueAgentTurn(
       });
       tools = resolved.tools;
       mcpInstructions = resolved.instructions;
-      hasMemoryServer = resolved.hasMemoryServer;
+      // A public visitor reads anonymously; the memory hooks would write.
+      hasMemoryServer = resolved.hasMemoryServer && !confined;
       failedServers = resolved.failedServers;
     }
 
@@ -1013,13 +1065,15 @@ export async function enqueueAgentTurn(
     // Standard tools are available to every turn. Each external action still
     // authorizes its principal and target at the gateway execution boundary.
     const builtin = [...WORKSPACE_TOOLS];
-    const gateway = [...GATEWAY_TOOLS];
-    const media = [...MEDIA_TOOLS];
+    const gateway = confined
+      ? GATEWAY_TOOLS.filter((name) => CONFINED_GATEWAY_TOOLS.has(name))
+      : [...GATEWAY_TOOLS];
+    const media = confined ? [] : [...MEDIA_TOOLS];
     tools = {
       gateway_url: gatewayUrl,
       definitions: tools?.definitions ?? [],
       builtin,
-      ...(deps.runtime?.runtimeProviderId
+      ...(deps.runtime?.runtimeProviderId && !confined
         ? { remote_runtime: { provider_id: deps.runtime.runtimeProviderId } }
         : {}),
       gateway,

@@ -77,7 +77,7 @@ export function compileResourceVisibility(
   const userParam = `$${baseParamIndex + 1}::text`;
 
   // The caller's verified `$member` entity — the `from` side of every
-  // membership edge below. Resolved once per query, not once per row.
+  // membership edge below.
   const memberSubquery = `(
             SELECT mei.entity_id
             FROM public.entity_identities mei
@@ -98,22 +98,25 @@ export function compileResourceVisibility(
             LIMIT 1
           )`;
 
-  // The access resources linked to this event: live `$resource` entities in
-  // `entity_ids`. Scoped so the coarse person→`company` (org) `member_of` edge
-  // never counts — org membership must NOT grant resource-level read. A
-  // missing, deleted, or non-resource link contributes no requirement.
-  const linkedResources = `SELECT re.id AS resource_id
-      FROM unnest(COALESCE(${tableAlias}.entity_ids, '{}'::bigint[])) AS linked_id
-      JOIN public.entities re
-        ON re.id = linked_id
-        AND re.organization_id = ${orgParam}
-        AND re.deleted_at IS NULL
+  // Keep these sets independent of the event row so the planner can reuse
+  // them across candidates. The chosen plan still depends on how each set
+  // is consumed and on its estimated size.
+
+  // The org's access resources: live `$resource` entities. Scoped so the
+  // coarse person→`company` (org) `member_of` edge never counts — org
+  // membership must NOT grant resource-level read. A missing, deleted, or
+  // non-resource link in `entity_ids` is not in this set, so it contributes no
+  // requirement.
+  const resourceIds = `SELECT re.id
+      FROM public.entities re
       JOIN public.entity_types ret
         ON ret.id = re.entity_type_id
         AND ret.organization_id = re.organization_id
-        AND ret.slug = ${RESOURCE_TYPE_SQL}`;
+        AND ret.slug = ${RESOURCE_TYPE_SQL}
+      WHERE re.organization_id = ${orgParam}
+        AND re.deleted_at IS NULL`;
 
-  // One linked resource is satisfied when a live `member_of` edge from the
+  // The resources the caller satisfies: a live `member_of` edge from the
   // caller's `$member` carries `manual` ownership, or ownership by a
   // connection whose ACL graph is currently enforced. `left(ck, 11)` avoids a
   // LIKE pattern (identifiers may contain `_`/`%`); the connection id is the
@@ -127,8 +130,7 @@ export function compileResourceVisibility(
   // `aclConnectionIdSql` expression the sync stamps. Comparing the raw
   // segment would never match a chat runtime id and would fail closed for
   // channel members on their own channel-stamped saves.
-  const resourceSatisfied = `EXISTS (
-        SELECT 1
+  const satisfiedResourceIds = `SELECT rr.to_entity_id
         FROM public.entity_relationships rr
         JOIN public.entity_relationship_types rt
           ON rt.id = rr.relationship_type_id
@@ -136,7 +138,6 @@ export function compileResourceVisibility(
           AND rt.slug = 'member_of'
         WHERE rr.organization_id = ${orgParam}
           AND rr.deleted_at IS NULL
-          AND rr.to_entity_id = lr.resource_id
           AND rr.from_entity_id = ${memberSubquery}
           AND (
             (rr.metadata -> '${RELATIONSHIP_CLAIMS_METADATA_KEY}') ? '${MANUAL_RELATIONSHIP_CLAIM_KEY}'
@@ -153,26 +154,22 @@ export function compileResourceVisibility(
                     AND ${aclConnectionIdSql('c')} IN (${enforcedConnectionsSelectSql(orgParam)})
                 )
             )
-          )
-      )`;
+          )`;
 
-  // `events.connection_id` is the bigint `connections.id`, but
-  // `authz_source_acl_state.connection_id` is the RUNTIME id
-  // (`connections.id::text` for data connectors, the `slackinst-…` /
-  // `agentconn-…` slug for chat) — so the "was this connection ever graphed?"
-  // check resolves through the `connections` row with the same
+  // Connections whose unstamped rows are visible: never graphed. `events.connection_id`
+  // is the bigint `connections.id`, but `authz_source_acl_state.connection_id`
+  // is the RUNTIME id (`connections.id::text` for data connectors, the
+  // `slackinst-…` / `agentconn-…` slug for chat) — so the "was this connection
+  // ever graphed?" check resolves through the `connections` row with the same
   // `aclConnectionIdSql` expression the sync stamps. An unstamped NULL-connection
   // row (a server-authored save) is ordinary workspace content. An ungraphed chat
   // connection additionally requires its recorded owner, matching transcript
   // reads; a Slack data connector (no `credential_mode`) keeps connection
   // visibility.
-  const unstampedSourceVisible = `(${tableAlias}.connection_id IS NULL
-        OR EXISTS (
-          SELECT 1
+  const unstampedVisibleConnectionIds = `SELECT c.id
           FROM public.connections c
           WHERE c.organization_id = ${orgParam}
             AND c.deleted_at IS NULL
-            AND c.id = ${tableAlias}.connection_id
             AND (c.credential_mode IS NULL
               OR c.connector_key NOT IN (${CHAT_PLATFORMS_SQL})
               OR c.created_by = ${userParam})
@@ -181,12 +178,14 @@ export function compileResourceVisibility(
               FROM public.authz_source_acl_state s
               WHERE s.organization_id = ${orgParam}
                 AND s.connection_id = ${aclConnectionIdSql('c')}
-            )
-        ))`;
+            )`;
+
+  const linkedIds = `unnest(COALESCE(${tableAlias}.entity_ids, '{}'::bigint[])) AS linked(id)`;
 
   // Unstamped content follows its source visibility; stamped content faces the
-  // all-required envelope. One `EXISTS` over the linked set decides which arm
-  // applies, so the unnest runs once per row.
+  // all-required envelope: no linked resource may be missing from the
+  // satisfied set. ARRAY lets the stamped test build its resource set in an
+  // InitPlan, independently of the per-row unnest used by the all-required test.
   //
   // `compileConnectionFkVisibility` is also composed at every read seam to
   // enforce connection visibility on stamped content and interaction events.
@@ -198,13 +197,14 @@ export function compileResourceVisibility(
         WHERE om."organizationId" = ${orgParam}
           AND om."userId" = ${userParam}
       ))
-      OR (CASE WHEN EXISTS (${linkedResources})
-        THEN (NOT EXISTS (
-          SELECT 1
-          FROM (${linkedResources}) AS lr
-          WHERE NOT (${resourceSatisfied})
-        ))
-        ELSE ${unstampedSourceVisible}
+      OR (CASE WHEN COALESCE(${tableAlias}.entity_ids, '{}'::bigint[]) && ARRAY(${resourceIds})
+        THEN NOT EXISTS (
+          SELECT 1 FROM ${linkedIds}
+          WHERE linked.id IN (${resourceIds})
+            AND NOT (linked.id IN (${satisfiedResourceIds}))
+        )
+        ELSE (${tableAlias}.connection_id IS NULL
+          OR ${tableAlias}.connection_id IN (${unstampedVisibleConnectionIds}))
       END)
     )`;
   return { sql, params: [scope.organizationId, scope.principal] };

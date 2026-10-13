@@ -208,7 +208,12 @@ export interface DeviceAuthorizationResponse {
  * Authentication info extracted from token
  */
 export interface AuthInfo {
-  userId: string;
+  /**
+   * Null only on the worker direct-auth lane for an `org_shared` chat turn
+   * (a vouched unlinked sender, or a linked member in a group conversation):
+   * it acts with no user (workspace/multi-tenant.ts).
+   */
+  userId: string | null;
   organizationId: string | null;
   /** Immutable workspace snapshot authorized at consent time. */
   grantedOrganizationIds: string[] | null;
@@ -227,6 +232,8 @@ export interface AuthInfo {
     teamId?: string;
     connectionId?: string;
     userId?: string;
+    /** The linked member behind a userless chat turn: attribution only. */
+    memberUserId?: string;
     source?: string;
   } | null;
   resource?: string;

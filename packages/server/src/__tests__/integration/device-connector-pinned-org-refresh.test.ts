@@ -216,6 +216,24 @@ describe('pinned-org device connector definition refresh', () => {
     expect((await readDefinition(teamOrgId))?.version).toBe(STALE_VERSION);
   });
 
+  it('refreshes an owned pin even when old connections make its workspace a cleanup target', async () => {
+    const sql = getTestDb();
+    const { userId, personalOrgId } = await seedUserWithPersonalOrg();
+    const teamOrgId = await seedTeamOrg(userId);
+    const { deviceId, manifestHash } = await seedAdvertisingDevice(userId, personalOrgId);
+    await seedStaleTeamConnector(teamOrgId, deviceId);
+    await sql`
+      UPDATE connections SET created_by = ${userId}
+      WHERE organization_id = ${teamOrgId} AND connector_key = ${CONNECTOR_KEY}
+    `;
+
+    await reconcileDeviceCapabilities(userId, deviceId);
+
+    expect(await readDefinition(teamOrgId)).toMatchObject({
+      version: ADVERTISED_VERSION, artifact_hash: manifestHash,
+    });
+  });
+
   it('never invents a connector in an org that has no connection for it', async () => {
     const { userId, personalOrgId } = await seedUserWithPersonalOrg();
     const teamOrgId = await seedTeamOrg(userId);

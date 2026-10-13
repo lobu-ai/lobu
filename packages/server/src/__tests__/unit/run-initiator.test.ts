@@ -26,6 +26,55 @@ describe("resolveRunInitiator", () => {
 		});
 	});
 
+	it("records the platform sender of an unlinked chat turn, which has no user", () => {
+		expect(
+			resolveRunInitiator({
+				userId: null,
+				agentId: "team-bot",
+				clientId: "lobu-worker",
+				sourceContext: {
+					platform: "slack",
+					conversationId: "slack:C0SYNTH:1.0",
+					userId: "U0SYNTHSENDER",
+					teamId: "T0SYNTH",
+				},
+			}),
+		).toEqual({
+			initiatorKind: "agent_session",
+			initiatorRef: {
+				agent_id: "team-bot",
+				user_id: null,
+				client_id: "lobu-worker",
+				conversation_id: "slack:C0SYNTH:1.0",
+				platform: "slack",
+				platform_user_id: "U0SYNTHSENDER",
+				platform_team_id: "T0SYNTH",
+			},
+			createdByUserId: null,
+		});
+	});
+
+	it("records the linked member behind a userless group-conversation chat turn", () => {
+		expect(
+			resolveRunInitiator({
+				userId: null,
+				agentId: "team-bot",
+				clientId: "lobu-worker",
+				sourceContext: {
+					platform: "slack",
+					conversationId: "slack:C0SYNTH:2.0",
+					userId: "U0SYNTHMEMBER",
+					teamId: "T0SYNTH",
+					memberUserId: "user-synthetic-member",
+				},
+			}).initiatorRef,
+		).toMatchObject({
+			user_id: null,
+			platform_user_id: "U0SYNTHMEMBER",
+			member_user_id: "user-synthetic-member",
+		});
+	});
+
 	it("classifies a reaction as its automation, not its owning agent", () => {
 		expect(
 			resolveRunInitiator({

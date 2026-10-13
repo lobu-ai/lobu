@@ -18,6 +18,7 @@ import { getDb } from '../db/client';
 import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import { getRevokedTokenStore } from '../gateway/auth/revoked-token-store';
 import { DEVICE_CHAT_RUN_SOURCE } from '../gateway/services/run-worker-access';
+import { CHAT_SENDER_NOT_LINKED, chatSenderIdOf, chatTurnAccessOf } from '../gateway/orchestration/chat-turn-actor';
 import { resolveRestToolGetRoute } from '../http/rest-tool-routes';
 import type { Env } from '../index';
 import { checkApplyPause } from '../utils/deployment-pause';
@@ -357,13 +358,16 @@ export class MultiTenantProvider implements WorkspaceProvider {
           403
         );
       }
-      // For an admin-tools turn (per-run token carries `adminTools`), attribute
-      // the call to the verified Lobu auth subject (`adminActorUserId`, carried
-      // separately from the platform-scoped `userId`) rather than the agent's
-      // provisioning owner — so the role check and audit reflect the actual
-      // actor. Non-admin-tools worker direct-auth keeps the agent-owner attribution.
+      // Who the call acts as. A chat turn's authority is the `chatAccess` the
+      // server signed at mint (gateway/orchestration/chat-turn-actor.ts),
+      // never the agent owner, whose admin identity and private connections a
+      // sender would otherwise borrow. A token with no tier fails closed as
+      // reply-only. `actorUserId` is the verified Lobu auth subject, carried
+      // separately from the platform-scoped `userId`: a linked member, or the
+      // actor behind an admin-tools allowlist. Only headless turns, which have
+      // no sender, keep the agent-owner attribution.
       const isAdminToolsTurn = !!tokenData.adminTools?.length;
-      if (isAdminToolsTurn && !tokenData.adminActorUserId) {
+      if (isAdminToolsTurn && !tokenData.actorUserId) {
         return c.json(
           { error: 'invalid_token', error_description: 'Worker token missing admin-tools actor' },
           401,
@@ -372,19 +376,62 @@ export class MultiTenantProvider implements WorkspaceProvider {
           }
         );
       }
-      const directAuthUserId =
-        tokenData.adminActorUserId ??
-        (agentRows[0]?.owner_user_id as string | undefined) ??
-        tokenData.userId;
-      const roleRows = await sql`
-        SELECT role
-        FROM "member"
-        WHERE "organizationId" = ${requestedOrgId}
-          AND "userId" = ${directAuthUserId}
-        LIMIT 1
-      `;
-      const directAuthRole = roleRows[0]?.role as string | undefined;
-      if (!directAuthRole || !['owner', 'admin'].includes(directAuthRole)) {
+      const chatAccess = isAdminToolsTurn ? null : chatTurnAccessOf(tokenData);
+      if (chatAccess === 'reply_only') {
+        return c.json(
+          { error: 'insufficient_scope', error_description: CHAT_SENDER_NOT_LINKED },
+          403
+        );
+      }
+      if (chatAccess === 'public_visitor') {
+        // Exactly the anonymous public-workspace path at the end of this
+        // middleware: no identity, public-readable tools only. Re-checked per
+        // request, so an organization made private stops serving at once.
+        if (!allowAnonymousPublicOrgMcp) {
+          return c.json(
+            { error: 'insufficient_scope', error_description: CHAT_SENDER_NOT_LINKED },
+            403
+          );
+        }
+        return setContextAndContinue({ organizationId: requestedOrgId, memberRole: null });
+      }
+      // An `org_shared` turn (a vouched unlinked sender, or a linked member in
+      // a group conversation) has no user: the no-user principal sees
+      // org-shared connections only, and writes run with an ordinary member's
+      // role — never owner/admin. A linked member's id on such a token is
+      // attribution only (`sourceContext.memberUserId` → run initiator_ref).
+      const userless = chatAccess === 'org_shared';
+      const directAuthUserId = userless
+        ? null
+        : chatAccess || isAdminToolsTurn
+          ? (tokenData.actorUserId as string)
+          : ((agentRows[0]?.owner_user_id as string | undefined) ?? tokenData.userId);
+      // Re-read on every request, so a member removed after the token was
+      // minted loses access at once rather than when the token expires. That
+      // includes the member behind a group-conversation `org_shared` turn.
+      const membershipUserId = directAuthUserId ?? (userless ? tokenData.actorUserId : undefined);
+      const membershipRole = membershipUserId
+        ? ((
+            await sql`
+              SELECT role
+              FROM "member"
+              WHERE "organizationId" = ${requestedOrgId}
+                AND "userId" = ${membershipUserId}
+              LIMIT 1
+            `
+          )[0]?.role as string | undefined)
+        : undefined;
+      const directAuthRole = userless ? (membershipUserId && !membershipRole ? undefined : 'member') : membershipRole;
+      if (chatAccess) {
+        // A chat sender acts with their OWN role; an ordinary member is
+        // admitted and the tool layer caps them at member access.
+        if (!directAuthRole) {
+          return c.json(
+            { error: 'insufficient_scope', error_description: CHAT_SENDER_NOT_LINKED },
+            403
+          );
+        }
+      } else if (!directAuthRole || !['owner', 'admin'].includes(directAuthRole)) {
         return c.json(
           { error: 'insufficient_scope', error_description: 'Agent owner is not an organization admin' },
           403
@@ -406,7 +453,8 @@ export class MultiTenantProvider implements WorkspaceProvider {
             channelId: tokenData.channelId || undefined,
             teamId: tokenData.teamId || undefined,
             connectionId: tokenData.connectionId || undefined,
-            userId: tokenData.userId || undefined,
+            userId: chatSenderIdOf(tokenData) || undefined,
+            ...(userless && tokenData.actorUserId ? { memberUserId: tokenData.actorUserId } : {}),
             source: tokenData.source || undefined,
           },
           // Admin-tools allowlist rides the per-run worker token. Carried

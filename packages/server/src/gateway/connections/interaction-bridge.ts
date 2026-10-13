@@ -37,7 +37,7 @@ import {
 } from "./pending-interaction-store.js";
 import { resolveChatTarget } from "./platforms/shared.js";
 import type { PlatformConnection } from "./types.js";
-import { resolveChatUserIdentity } from "../../lobu/stores/chat-identity.js";
+import { resolveChatSenderMember } from "../../lobu/stores/chat-identity.js";
 import {
 	invokeTemplateEventAction,
 	parseTemplateEventActionId,
@@ -134,7 +134,7 @@ function actionEventTeamId(
  * (`ownerUserId`). A non-admin member who is not the owner resolves null, same
  * as an unverified account.
  *
- * Platform-generic by dispatch, not by branch. `resolveChatUserIdentity` already
+ * Platform-generic by dispatch, not by branch. `resolveChatSenderMember` already
  * takes the platform and looks up that connector's `ChatUserIdentity`, whose
  * `buildUserKey` owns the scoping rule: Slack's needs a team id because two
  * workspaces can both contain `U12345`, Google's ignores one because Chat events
@@ -151,22 +151,14 @@ async function resolveActionReviewer(params: {
 }): Promise<{ userId: string; role: string } | null> {
 	const { connection, platformUserId, teamId, ownerUserId } = params;
 	if (!connection.organizationId || !platformUserId) return null;
-	const userId = await resolveChatUserIdentity(
+	const member = await resolveChatSenderMember(
 		connection.platform,
 		teamId ?? undefined,
 		platformUserId,
+		connection.organizationId,
 	);
-	if (!userId) return null;
-	const sql = getDb();
-	const rows = await sql<{ role: string }>`
-    SELECT m.role
-    FROM "member" m
-    WHERE m."userId" = ${userId}
-      AND m."organizationId" = ${connection.organizationId}
-    LIMIT 2
-  `;
-	if (rows.length !== 1) return null;
-	const { role } = rows[0];
+	if (!member) return null;
+	const { userId, role } = member;
 	const isAdmin = role === "admin" || role === "owner";
 	const isOwner = ownerUserId != null && userId === ownerUserId;
 	if (!isAdmin && !isOwner) return null;

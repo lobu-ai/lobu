@@ -67,3 +67,29 @@ export function runInWorkerScope(
     run.device_owner === ctx.workerUserId || run.automation_device_owner === ctx.workerUserId
   );
 }
+
+/**
+ * Orgs where a Chrome device may see and activate page-visit drafts: the
+ * owner's personal workspace, the device's CURRENT home (a Devices-page move
+ * can leave its credential bound to the old one), and its pin orgs, each while
+ * the owner is a member. Deliberately not the token's bound org, so a moved
+ * device stops serving the workspace it left. Poll's activation hints and the
+ * activation endpoint share it, so a hint is never one activation refuses.
+ */
+export async function resolveDeviceActivationOrgs(
+  sql: DbClient,
+  params: { deviceWorkerId: string; ownerUserId: string }
+): Promise<string[]> {
+  const rows = (await sql`
+    SELECT o.id FROM "organization" o
+      WHERE (o.metadata::jsonb)->>'personal_org_for_user_id' = ${params.ownerUserId}
+    UNION
+    SELECT dw.organization_id FROM device_workers dw
+      JOIN "member" m ON m."organizationId" = dw.organization_id AND m."userId" = dw.user_id
+      WHERE dw.id = ${params.deviceWorkerId} AND dw.user_id = ${params.ownerUserId}
+  `) as unknown as Array<{ id: string | null }>;
+  return resolveDeviceClaimableOrgs(sql, {
+    ...params,
+    baseOrgIds: rows.flatMap((row) => (row.id ? [row.id] : [])),
+  });
+}

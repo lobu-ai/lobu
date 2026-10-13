@@ -55,7 +55,8 @@ const ALL_CLAIMS: Required<WorkerTokenOptions> = {
   runId: 4321,
   messageId: "msg-all",
   adminTools: ["manage_automations"],
-  adminActorUserId: "user-admin",
+  actorUserId: "user-admin",
+  chatAccess: "member",
   runtimeProviderId: "provider-all",
   sandboxId: "sandbox-all",
   allowedDomains: ["allowed.example"],
@@ -288,19 +289,32 @@ describe("worker auth token", () => {
       channelId: "C1",
       platform: "slack",
       adminTools: ["manage_agents"],
-      adminActorUserId: "auth-user-1",
+      actorUserId: "auth-user-1",
     });
     const d = verifyWorkerToken(token) as WorkerTokenData;
     expect(d.userId).toBe("U_SLACK");
     expect(d.adminTools).toEqual(["manage_agents"]);
-    expect(d.adminActorUserId).toBe("auth-user-1");
+    expect(d.actorUserId).toBe("auth-user-1");
   });
 
-  test("rejects a partial admin-tools allowlist", () => {
+  test("round-trips a chat actor with no admin-tools allowlist", () => {
+    const token = generateWorkerToken("U_SLACK", "conv", "deploy", {
+      channelId: "C1",
+      platform: "slack",
+      actorUserId: "auth-user-1",
+    });
+    const d = verifyWorkerToken(token) as WorkerTokenData;
+    expect(d.userId).toBe("U_SLACK");
+    expect(d.adminTools).toBeUndefined();
+    expect(d.actorUserId).toBe("auth-user-1");
+  });
+
+  test("rejects an admin-tools allowlist without its actor, or a malformed actor", () => {
     for (const partial of [
       { adminTools: ["manage_agents"] },
-      { adminActorUserId: "auth-user-1" },
-      { adminTools: [], adminActorUserId: "auth-user-1" },
+      { adminTools: [], actorUserId: "auth-user-1" },
+      { actorUserId: "" },
+      { actorUserId: 42 },
     ]) {
       const token = encrypt(
         JSON.stringify({
@@ -314,6 +328,32 @@ describe("worker auth token", () => {
       );
       expect(verifyWorkerToken(token)).toBeNull();
     }
+  });
+
+  test("rejects an unknown chat access tier, or a member tier without its member", () => {
+    for (const partial of [
+      { chatAccess: "owner" },
+      { chatAccess: "member" },
+      { chatAccess: "member_shared" },
+    ]) {
+      const token = encrypt(
+        JSON.stringify({
+          userId: "U_SLACK",
+          conversationId: "conv",
+          channelId: "C1",
+          deploymentName: "deploy",
+          timestamp: Date.now(),
+          ...partial,
+        })
+      );
+      expect(verifyWorkerToken(token)).toBeNull();
+    }
+    const unlinked = generateWorkerToken("U_SLACK", "conv", "deploy", {
+      channelId: "C1",
+      platform: "slack",
+      chatAccess: "org_shared",
+    });
+    expect(verifyWorkerToken(unlinked)?.chatAccess).toBe("org_shared");
   });
 
   test("two tokens generated for the same input differ (random IV)", () => {

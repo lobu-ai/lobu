@@ -201,9 +201,11 @@ const CHILD_SELF_MINT_ONLY = {
  * second OAuth dance. It supports a Mac app authorizing a packaged daemon, a
  * Mac bridge pairing an Owletto Chrome sibling, or `lobu daemon` authorizing
  * this host from its stored login. The caller's bearer authenticates the user;
- * we mint a PAT in that user's personal org bound to a worker_id — the one the
- * caller asked for, else a fresh uuid — and return both for the device to use
- * as if it had completed device-authorization on its own.
+ * we mint a PAT bound to a worker_id — the one the caller asked for, else a
+ * fresh uuid — in the device's home workspace (a new device inherits the home
+ * its parent grant was approved for; an existing device keeps its own), and
+ * return both for the device to use as if it had completed
+ * device-authorization on its own.
  *
  * The child token carries the same `device_worker:run` scope the regular Mac
  * OAuth flow ends up with. Its stored worker_id binding stops the mint chain at
@@ -305,22 +307,62 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
 
   try {
     const sql = getDb();
-    // Device clients (Owletto Chrome extension via the Mac bridge) ALWAYS bind
-    // to the user's personal org — never the calling token's org. Personal
-    // device data (browser context, captured pages, …) belongs in the user's
-    // private workspace; a team org reaches the device by pinning an automation /
-    // connection to it (see resolveDeviceClaimableOrgs), not by re-binding the
-    // device token. Ignoring `c.var.organizationId` here is what makes a Mac
-    // app whose own token is bound to a team org still land Chrome's data in
-    // the personal org.
-    const personalOrg = await findExistingPersonalOrg(userId, sql);
-    const organizationId: string | null = personalOrg?.id ?? null;
-    if (!organizationId) {
+    // Device home: a NEW device lands in the workspace its parent grant was
+    // approved for (`/oauth/device/approve` binds the token to the home the
+    // user chose at pairing; personal when they chose nothing). An EXISTING
+    // device keeps the home it already has — see `resolveHome` below. The
+    // parent token's org is re-verified against current membership so a user
+    // who left that workspace cannot keep minting devices into it. Tokens with
+    // no org binding (legacy grants) fall back to the personal workspace.
+    const parentOrgId = c.var.mcpAuthInfo?.organizationId ?? null;
+    let parentHomeLookup: string | null;
+    if (parentOrgId) {
+      if (!(await getWorkspaceRole(sql, parentOrgId, userId))) {
+        return c.json(
+          {
+            error: 'device_home_unavailable',
+            error_description:
+              'This device was paired to a workspace you no longer belong to. Pair it again.',
+          },
+          403
+        );
+      }
+      parentHomeLookup = parentOrgId;
+    } else {
+      parentHomeLookup = (await findExistingPersonalOrg(userId, sql))?.id ?? null;
+    }
+    if (!parentHomeLookup) {
       return c.json(
         { error: 'personal_org_missing', error_description: 'User has no personal org to bind the device to.' },
         403
       );
     }
+    const parentHomeOrgId: string = parentHomeLookup;
+    // The home a minted credential is bound to. Re-minting an EXISTING device
+    // (a daemon rotating its child PAT, a Mac bridge re-pairing Chrome) keeps
+    // the device's current home rather than re-applying the parent's: the
+    // parent grant is presented again on every routine rotation, so treating a
+    // mismatch as a move would silently undo a Devices-page move
+    // (`PATCH /api/me/devices/:id`, the one move path) on the next rotation.
+    // A stored home the owner no longer belongs to (or a legacy NULL home)
+    // serves the personal workspace, exactly as device reconciliation treats
+    // it, so the credential binds there.
+    const resolveHome = async (
+      db: typeof sql,
+      existingOrgId: string | null
+    ): Promise<string | null> => {
+      if (existingOrgId && existingOrgId === parentHomeOrgId) return existingOrgId;
+      if (existingOrgId) {
+        const [member] = (await db`
+          SELECT 1 FROM "member"
+          WHERE "organizationId" = ${existingOrgId} AND "userId" = ${userId}
+          LIMIT 1
+        `) as unknown as Array<unknown>;
+        if (member) return existingOrgId;
+      }
+      return (await findExistingPersonalOrg(userId, db))?.id ?? null;
+    };
+    let organizationId: string = parentHomeOrgId;
 
     // Identity reuse/creation: an unbound first-party device grant may create
     // the exact requested id (the CLI wizard/session identity) or re-mint it
@@ -384,6 +426,7 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
 
     type Minted = { id: number; name: string; token: string; expires_at: Date | null };
     let created: Minted | null;
+    let homeUnavailable = false;
     let device: { id: string; inserted: boolean } | undefined;
     let revoked: AuditedAccessToken[] = [];
     // Any exact requested identity — fresh or reused — takes the same advisory
@@ -395,11 +438,20 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
       created = await sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock(hashtext('lobu:mint-child'), hashtext(${workerId}))`;
         const current = (await tx`
-          SELECT platform FROM device_workers
+          SELECT platform, organization_id FROM device_workers
           WHERE user_id = ${userId} AND worker_id = ${workerId}
           LIMIT 1
-        `) as unknown as Array<{ platform: string | null }>;
+          FOR UPDATE
+        `) as unknown as Array<{ platform: string | null; organization_id: string | null }>;
         reused = current[0]?.platform === platform;
+        if (reused) {
+          const existingHome = await resolveHome(tx, current[0].organization_id);
+          if (!existingHome) {
+            homeUnavailable = true;
+            return null;
+          }
+          organizationId = existingHome;
+        }
         // Re-check the depth-1 boundary after acquiring the identity lock. A
         // device row can be deleted between the optimistic lookup above and
         // this transaction; a child whose own row disappeared must not recreate
@@ -465,6 +517,12 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
       [device] = await upsertDeviceWorker(sql);
     }
     if (!created) {
+      if (homeUnavailable) {
+        return c.json({
+          error: 'device_home_unavailable',
+          error_description: 'No personal workspace is provisioned for this account; move this device to a workspace you belong to.',
+        }, 403);
+      }
       return c.json(CHILD_SELF_MINT_ONLY, 403);
     }
     // Poll only records a device it inserts itself, so a device paired here is

@@ -297,6 +297,8 @@ describe('scheduled feed device liveness', () => {
     const { org, user } = await seedOwnerContext({
       orgName: 'Poll Scoped Feed Scheduler Org',
     });
+    // The unpinned device lane serves personal workspaces only.
+    await getTestDb()`UPDATE "organization" SET metadata = ${JSON.stringify({ personal_org_for_user_id: user.id })} WHERE id = ${org.id}`;
 
     async function createDevice(
       workerId: string,

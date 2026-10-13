@@ -13,6 +13,10 @@ import {
 import { fetchUserInfoWithRaw } from "../connect/oauth-providers";
 import { getDb } from "../db/client";
 import {
+	CHAT_LINK_IDENTITY_SOURCE,
+	chatIdentityTrustedIn,
+} from "../lobu/stores/chat-identity";
+import {
 	type ResolvedTenantMember,
 	resolveMemberOrgsForUser,
 } from "../identity/member-orgs";
@@ -78,6 +82,60 @@ async function writeIdentities(
 }
 
 /**
+ * Serialize every trusted writer for a chat identity across organizations.
+ * The identity index is only org-unique, while sender resolution is global.
+ */
+export async function withChatIdentityLock<T>(
+	namespace: string,
+	identifier: string,
+	write: (sql: Sql) => Promise<T>,
+): Promise<T> {
+	return getDb().begin(async (tx) => {
+		await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(["chat-identity", namespace, identifier])}, 0))`;
+		return write(tx);
+	});
+}
+
+/**
+ * Whether a DIFFERENT Lobu user already holds this chat identity in any org.
+ * The sender lookup fails closed when two users are reachable from one chat
+ * identity, so linking a second user would silently unlink both.
+ */
+async function heldByAnotherUser(
+	sql: Sql,
+	key: { namespace: string; identityKey: string },
+	userId: string,
+	/** The org a link-proven write lands in; null for a provider-proven write. */
+	linkOrganizationId: string | null,
+): Promise<boolean> {
+	const rows = await sql`
+    SELECT 1
+    FROM entity_identities chat_ei
+    JOIN entities e
+      ON e.id = chat_ei.entity_id
+     AND e.organization_id = chat_ei.organization_id
+     AND e.deleted_at IS NULL
+    JOIN entity_identities auth_ei
+      ON auth_ei.organization_id = chat_ei.organization_id
+     AND auth_ei.entity_id = chat_ei.entity_id
+     AND auth_ei.namespace = 'auth_user_id'
+     AND auth_ei.scope_key IS NULL
+     AND auth_ei.source_connector = 'auth:signup'
+     AND auth_ei.deleted_at IS NULL
+    WHERE chat_ei.namespace = ${key.namespace}
+      AND chat_ei.identifier = ${key.identityKey}
+      AND chat_ei.scope_key IS NULL
+      AND chat_ei.deleted_at IS NULL
+      AND auth_ei.identifier <> ${userId}
+      -- Only rows the resulting lookup would see: provider-proven rows
+      -- anywhere, link-proven rows only in the org this link writes into.
+      AND ${chatIdentityTrustedIn(sql, linkOrganizationId)}
+    LIMIT 1
+  `;
+	return rows.length > 0;
+}
+
+/**
  * Point a workspace-scoped chat identity at the user's `$member`, taking it over
  * from a `person` entity when one already owns it.
  *
@@ -98,9 +156,12 @@ async function writeIdentities(
  * sync tick, so the edges follow the claim. Writing edges here by hand would be
  * undone by that same reconcile.
  *
- * SAFETY: only ever called with an identity proven by the provider's own OIDC
- * token for THIS user, and only for an org the user is already a better-auth
- * member of. It never grants org membership, and it never matches on a
+ * SAFETY: a persistence helper, not an authorization check. Callers must
+ * already have proven the identity belongs to THIS user — the provider's own
+ * OIDC token at sign-in, or a redeemed chat identity link
+ * (connect/chat-identity-routes.ts) delivered into the sender's own DM — and
+ * call it only for an org the user is already a better-auth member of, inside
+ * withChatIdentityLock. It never grants org membership or matches on a
  * user-editable field such as a Slack profile email — a workspace admin can set
  * those, which would let an attacker attach their `U…` to a victim's `$member`.
  *
@@ -111,18 +172,32 @@ async function writeIdentities(
  * `namespace` comes from the platform's connector-owned descriptor, so this
  * helper serves every chat platform without naming one.
  */
-async function adoptChatIdentityOntoMember(
+export async function adoptChatIdentityOntoMember(
 	sql: Sql,
 	organizationId: string,
 	memberEntityId: number,
 	namespace: string,
 	identifier: string,
+	userId: string,
+	/** How the caller proved the identity: provider sign-in, or a redeemed DM link. */
+	proof: "provider" | "link",
 ): Promise<"created" | "adopted" | "already-owned" | "conflict"> {
+	const source = proof === "link" ? CHAT_LINK_IDENTITY_SOURCE : "auth:signup";
+	if (
+		await heldByAnotherUser(
+			sql,
+			{ namespace, identityKey: identifier },
+			userId,
+			proof === "link" ? organizationId : null,
+		)
+	) {
+		return "conflict";
+	}
 	const inserted = await sql<{ id: number }>`
     INSERT INTO entity_identities (
       organization_id, entity_id, namespace, identifier, source_connector, scope_key
     ) VALUES (
-      ${organizationId}, ${memberEntityId}, ${namespace}, ${identifier}, 'auth:signup', NULL
+      ${organizationId}, ${memberEntityId}, ${namespace}, ${identifier}, ${source}, NULL
     )
     ON CONFLICT (organization_id, namespace, identifier, COALESCE(scope_key, '')) WHERE deleted_at IS NULL
     DO NOTHING
@@ -135,7 +210,7 @@ async function adoptChatIdentityOntoMember(
 	const adopted = await sql<{ id: number }>`
     UPDATE entity_identities ei
     SET entity_id = ${memberEntityId},
-        source_connector = 'auth:signup',
+        source_connector = ${source},
         -- Preserve the first recorded owner when adopting this identity;
         -- repeated adoption must not replace it with an intermediate owner.
         merged_from_entity_id = COALESCE(ei.merged_from_entity_id, ei.entity_id),
@@ -156,15 +231,19 @@ async function adoptChatIdentityOntoMember(
   `;
 	if (adopted.length > 0) return "adopted";
 
+	// Already this member's: a provider sign-in upgrades a link-proven row to
+	// provider-proven (global); a link never downgrades a sign-in row.
 	const mine = await sql<{ id: number }>`
-    SELECT id FROM entity_identities
+    UPDATE entity_identities
+    SET source_connector = CASE WHEN ${proof} = 'provider' THEN 'auth:signup' ELSE source_connector END,
+        updated_at = current_timestamp
     WHERE organization_id = ${organizationId}
       AND namespace = ${namespace}
       AND identifier = ${identifier}
       AND scope_key IS NULL
       AND entity_id = ${memberEntityId}
       AND deleted_at IS NULL
-    LIMIT 1
+    RETURNING id
   `;
 	return mine.length > 0 ? "already-owned" : "conflict";
 }
@@ -318,17 +397,20 @@ export async function persistLoginChatIdentity(
 			return;
 		}
 
-		const sql = getDb();
 		for (const org of memberOrgs) {
-			const outcome = await adoptChatIdentityOntoMember(
-				sql,
-				org.tenantOrganizationId,
-				org.memberEntityId,
-				identity.namespace,
-				combined,
+			const outcome = await withChatIdentityLock(identity.namespace, combined, (tx) =>
+				adoptChatIdentityOntoMember(
+					tx,
+					org.tenantOrganizationId,
+					org.memberEntityId,
+					identity.namespace,
+					combined,
+					account.userId,
+					"provider",
+				),
 			);
 			if (outcome === "conflict") {
-				// Another `$member` in this org already holds this platform id. Two
+				// Another `$member` already holds this platform id. Two
 				// humans cannot share one account, so this is a data problem a person
 				// must look at — never silently reassign.
 				log.warn(
@@ -396,17 +478,20 @@ export async function stampSlackIdentityForUser(
 		);
 		return;
 	}
-	const sql = getDb();
 	for (const org of memberOrgs) {
-		const outcome = await adoptChatIdentityOntoMember(
-			sql,
-			org.tenantOrganizationId,
-			org.memberEntityId,
-			slackChatUserIdentity.namespace,
-			combined,
+		const outcome = await withChatIdentityLock(slackChatUserIdentity.namespace, combined, (tx) =>
+			adoptChatIdentityOntoMember(
+				tx,
+				org.tenantOrganizationId,
+				org.memberEntityId,
+				slackChatUserIdentity.namespace,
+				combined,
+				userId,
+				"provider",
+			),
 		);
 		if (outcome === "conflict") {
-			// A different `$member` in this org already holds this Slack id. Two
+			// A different `$member` already holds this Slack id. Two
 			// humans cannot share one workspace account — never silently reassign.
 			log.warn(
 				{
