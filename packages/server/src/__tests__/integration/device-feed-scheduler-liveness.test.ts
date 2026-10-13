@@ -403,6 +403,7 @@ describe('scheduled feed device liveness', () => {
     const fleetContext: DueFeedClaimContext = {
       isUserScopedWorker: false,
       deviceWorkerId: null,
+      workerUserId: null,
       workerPlatform: null,
       authorizedCapabilities: [],
       capabilityMatchSet: [''],
@@ -417,6 +418,7 @@ describe('scheduled feed device liveness', () => {
     const macContext: DueFeedClaimContext = {
       isUserScopedWorker: true,
       deviceWorkerId: macDeviceId,
+      workerUserId: user.id,
       workerPlatform: 'macos',
       authorizedCapabilities: ['os.shell'],
       capabilityMatchSet: ['os.shell'],
@@ -438,6 +440,7 @@ describe('scheduled feed device liveness', () => {
     const chromeContext: DueFeedClaimContext = {
       isUserScopedWorker: true,
       deviceWorkerId: chromeDeviceId,
+      workerUserId: user.id,
       workerPlatform: 'chrome-extension',
       authorizedCapabilities: ['browser.history'],
       capabilityMatchSet: ['browser.history'],

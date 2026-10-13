@@ -60,7 +60,7 @@ function poll(supportsHttpAuth: boolean) {
 
 function fleetContext(supportsHttpAuth: boolean): DueFeedClaimContext {
   return {
-    isUserScopedWorker: false, deviceWorkerId: null, workerPlatform: null,
+    isUserScopedWorker: false, deviceWorkerId: null, workerUserId: null, workerPlatform: null,
     authorizedCapabilities: [], capabilityMatchSet: [''],
     manifestClaimAuthorizations: [], allowLegacyManifestCapabilityClaims: false,
     orgScopeIds: [''], baseOrgScopeIds: [''], workerHardensDbEgress: true,

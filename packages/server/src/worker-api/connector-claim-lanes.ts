@@ -28,6 +28,14 @@ export const DB_EGRESS_HARDENED_CONNECTOR_KEYS: ReadonlySet<string> = new Set([
 export interface ConnectorClaimContext {
   isUserScopedWorker: boolean;
   deviceWorkerId: string | null;
+  /**
+   * The device owner. An UNPINNED device run is claimable only from the
+   * connection owner's own devices (or anywhere in their personal workspace):
+   * team workspaces hold one private device connection per member, and a
+   * colleague's run must never execute on — or hand its inputs to — this
+   * member's machine.
+   */
+  workerUserId: string | null;
   workerPlatform: string | null;
   authorizedCapabilities: string[];
   capabilityMatchSet: string[];
@@ -63,6 +71,7 @@ interface ConnectorClaimLaneRefs {
   activationKind: SqlFragment;
   activatedAt: SqlFragment;
   connectionDeviceWorkerId: SqlFragment;
+  connectionCreatedBy: SqlFragment;
   runTargetDeviceWorkerId?: SqlFragment;
   pinPlatform: SqlFragment;
   runRequiredCapability: SqlFragment;
@@ -222,6 +231,14 @@ export function connectorClaimLaneSql(
           )
           AND NOT COALESCE(${pageActivated}, false)
           AND ${refs.organizationId} = ANY(${pgTextArray(context.baseOrgScopeIds)}::text[])
+          AND (
+            ${refs.connectionCreatedBy} = ${context.workerUserId}::text
+            OR EXISTS (
+              SELECT 1 FROM "organization" claim_owner_org
+              WHERE claim_owner_org.id = ${refs.organizationId}
+                AND (claim_owner_org.metadata::jsonb)->>'personal_org_for_user_id' = ${context.workerUserId}::text
+            )
+          )
         )
         -- Exact execution pin. A chrome-extension pin on a connector that does
         -- not execute natively in the extension is delegated browser affinity,

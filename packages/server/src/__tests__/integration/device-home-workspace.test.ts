@@ -23,7 +23,9 @@ import type { Env } from '../../index';
 import { resolveDeviceClaimableOrgs } from '../../utils/device-claimable-orgs';
 import { mintDeviceChildToken, updateDeviceWorkerOrg } from '../../worker-api/device-management';
 import { authorizeRunForWorker } from '../../worker-api/shared';
+import { materializeDueFeeds, type DueFeedClaimContext } from '../../scheduled/check-due-feeds';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
+import { createTestConnection, createTestConnectorDefinition } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
 
 const OS_SHELL_MANIFEST = (DEVICE_MANIFESTS_BY_PLATFORM.headless ?? []).find(
@@ -415,5 +417,93 @@ describe('device home workspace chosen at pairing', () => {
     await sql`DELETE FROM member WHERE "organizationId" = ${teamOrgId} AND "userId" = ${userId}`;
     expect(await scope()).not.toContain(teamOrgId);
     expect((await app.request('/authorize', {}, TEST_ENV)).status).toBe(403);
+  });
+
+  it("never lets a member's device claim a colleague's unpinned device connection", async () => {
+    const sql = getTestDb();
+    const alice = await seedUser('Claim Alice');
+    const bob = await seedUser('Claim Bob');
+    const teamOrgId = await seedTeamOrg();
+    await addMember(teamOrgId, alice.userId, 'owner');
+    await addMember(teamOrgId, bob.userId, 'member');
+    await createTestConnectorDefinition({
+      key: 'test.home-claim',
+      name: 'Home Claim',
+      feeds_schema: { items: { description: 'Items', operations: ['sync'] } },
+      organization_id: teamOrgId,
+    });
+    await sql`
+      UPDATE connector_definitions SET required_capability = 'os.shell'
+      WHERE key = 'test.home-claim' AND organization_id = ${teamOrgId}
+    `;
+    const bobConnection = await createTestConnection({
+      organization_id: teamOrgId,
+      connector_key: 'test.home-claim',
+      created_by: bob.userId,
+      createDefaultFeed: false,
+    });
+    await sql`
+      INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
+      VALUES (${teamOrgId}, ${bobConnection.id}, 'items', 'active', '* * * * *', NOW() - INTERVAL '5 minutes')
+    `;
+    const deviceContext = (userId: string): DueFeedClaimContext => ({
+      isUserScopedWorker: true,
+      deviceWorkerId: null,
+      workerUserId: userId,
+      workerPlatform: 'headless',
+      authorizedCapabilities: ['os.shell'],
+      capabilityMatchSet: ['os.shell'],
+      manifestClaimAuthorizations: [],
+      allowLegacyManifestCapabilityClaims: false,
+      orgScopeIds: [teamOrgId],
+      baseOrgScopeIds: [teamOrgId],
+      workerHardensDbEgress: false,
+      workerSupportsHttpAuth: false,
+      backendCapacity: { compiled_connector: 1 },
+    });
+
+    // Alice's device lives in the same team workspace and serves os.shell, but
+    // the unpinned connection is Bob's private one: it must not run on Alice's
+    // machine.
+    expect(
+      (await materializeDueFeeds({} as Env, sql, { claimContext: deviceContext(alice.userId) }))
+        .runsCreated
+    ).toBe(0);
+    expect(
+      (await materializeDueFeeds({} as Env, sql, { claimContext: deviceContext(bob.userId) }))
+        .runsCreated
+    ).toBe(1);
+  });
+
+  it('pauses an unpinned old-home connection once no device homed there serves it', async () => {
+    const sql = getTestDb();
+    const { userId, personalOrgId } = await seedUser('Fleet Mover');
+    const teamOrgId = await seedTeamOrg();
+    await addMember(teamOrgId, userId, 'admin');
+    const tokenA = await workerPat(userId, personalOrgId, 'fleet-box-a');
+    const tokenB = await workerPat(userId, personalOrgId, 'fleet-box-b');
+    await pollShell(tokenA, 'fleet-box-a');
+    await pollShell(tokenB, 'fleet-box-b');
+    // The first poll pinned the connection to its sole advertiser; a fleet of
+    // several eligible devices can leave it unpinned, which is the shape the
+    // Devices-page move cannot reach. os.shell declares no feeds, so seed one.
+    const [pinned] = await shellConnections(personalOrgId);
+    await sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${pinned.id}`;
+    await sql`
+      INSERT INTO feeds (organization_id, connection_id, feed_key, status, schedule, next_run_at)
+      VALUES (${personalOrgId}, ${pinned.id}, 'items', 'active', '* * * * *', NOW())
+    `;
+    const [personal] = await shellConnections(personalOrgId);
+    expect(personal).toMatchObject({ device_worker_id: null, active_feeds: 1 });
+
+    await moveDevice(userId, (await deviceRow(userId, 'fleet-box-a')).id, teamOrgId);
+    await moveDevice(userId, (await deviceRow(userId, 'fleet-box-b')).id, teamOrgId);
+    await pollShell(tokenA, 'fleet-box-a');
+
+    // The unpinned connection survived both moves (the move only pauses pins),
+    // so reconciliation must pause its feeds in the now device-less home.
+    const [after] = await shellConnections(personalOrgId);
+    expect(after).toMatchObject({ id: personal.id, active_feeds: 0 });
+    expect(await shellConnections(teamOrgId)).toHaveLength(1);
   });
 });

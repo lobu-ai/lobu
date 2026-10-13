@@ -760,6 +760,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const connectorClaimContext: ConnectorClaimContext = {
     isUserScopedWorker,
     deviceWorkerId,
+    workerUserId: effectiveWorkerUserId ?? null,
     workerPlatform: effectivePlatform,
     authorizedCapabilities,
     capabilityMatchSet,
@@ -954,6 +955,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
                 activationKind: tx`r.activation_kind`,
                 activatedAt: tx`r.activated_at`,
                 connectionDeviceWorkerId: tx`con.device_worker_id`,
+                connectionCreatedBy: tx`con.created_by`,
                 runTargetDeviceWorkerId: tx`r.target_device_worker_id`,
                 pinPlatform: tx`pin_dw.platform`,
                 runRequiredCapability: tx`cd.run_required_capability`,

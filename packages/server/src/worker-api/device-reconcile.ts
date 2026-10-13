@@ -776,9 +776,16 @@ async function ensureDeviceConnectorWired(
  * the connector's `requiredCapability`, so a `materializeDueFeeds` pass stops
  * creating runs nothing can claim. Limited to no-auth, user-owned connections
  * in that workspace (exactly what {@link ensureDeviceConnectorWired} creates);
- * that function re-activates them if the capability comes back. Best-effort.
+ * that function re-activates them if the capability comes back. With
+ * `unpinnedOnly` (a workspace no device of the user is homed in any more) it
+ * touches only unpinned `private` rows, the shape auto-wire creates. Best-effort.
  */
-async function pauseStaleDeviceFeeds(userId: string, organizationId: string, connectorKey: string) {
+async function pauseStaleDeviceFeeds(
+  userId: string,
+  organizationId: string,
+  connectorKey: string,
+  { unpinnedOnly = false }: { unpinnedOnly?: boolean } = {}
+) {
   const sql = getDb();
   try {
     await sql`
@@ -792,6 +799,7 @@ async function pauseStaleDeviceFeeds(userId: string, organizationId: string, con
         AND c.auth_profile_id IS NULL
         AND c.app_auth_profile_id IS NULL
         AND c.deleted_at IS NULL
+        AND (${!unpinnedOnly} OR (c.device_worker_id IS NULL AND c.visibility = 'private'))
         AND f.status = 'active'
         AND f.deleted_at IS NULL
     `;
@@ -1135,22 +1143,35 @@ export async function reconcileDeviceCapabilities(
 
   const homeOrgIds = new Set(deviceHomes.values());
   if (personalOrgId) homeOrgIds.add(personalOrgId);
+  // organization → connector keys of this user's live auto-wired device
+  // connections there, so a key no device homed there serves any more still
+  // gets its unpinned feeds paused (below), even with no device left in that
+  // workspace at all.
+  const ownedConnectionKeys = new Map<string, Set<string>>();
   try {
     // Workspaces that still hold this user's auto-wired device connections but
     // may no longer home any of their devices (every device moved away).
+    // Auto-wire creates `private` rows; a connection someone created or shared
+    // as org-visible is theirs to manage and is never paused from here.
     // `connections` is a bounded config table.
     const rows = (await sql`
-      SELECT DISTINCT c.organization_id
+      SELECT DISTINCT c.organization_id, c.connector_key
       FROM connections c
       JOIN "member" m
         ON m."organizationId" = c.organization_id AND m."userId" = ${userId}
       WHERE c.created_by = ${userId}
+        AND c.visibility = 'private'
         AND c.auth_profile_id IS NULL
         AND c.app_auth_profile_id IS NULL
         AND c.deleted_at IS NULL
         AND ${sql.unsafe(IS_DEVICE_CONNECTOR_SQL)}
-    `) as unknown as Array<{ organization_id: string }>;
-    for (const r of rows) homeOrgIds.add(r.organization_id);
+    `) as unknown as Array<{ organization_id: string; connector_key: string }>;
+    for (const r of rows) {
+      homeOrgIds.add(r.organization_id);
+      const keys = ownedConnectionKeys.get(r.organization_id) ?? new Set<string>();
+      keys.add(r.connector_key);
+      ownedConnectionKeys.set(r.organization_id, keys);
+    }
   } catch (err) {
     logger.warn(
       { userId, err: errorMessage(err) },
@@ -1239,6 +1260,20 @@ export async function reconcileDeviceCapabilities(
         // "the fleet serves nothing" and archive a working set.
         if (sourcesReadable) {
           await archiveVanishedDeviceConnectorDefinitions(userId, home, [...byKey.keys()]);
+          // A key this user still holds a connection for but no device homed
+          // here advertises (every serving device moved away or stopped
+          // advertising it): pause its unpinned feeds so nothing keeps
+          // materializing runs no device can claim. Pinned connections are left
+          // alone — a pin to a device homed elsewhere is a deliberate
+          // cross-workspace placement, and a Devices-page move already paused
+          // the pins it broke.
+          await Promise.all(
+            [...(ownedConnectionKeys.get(home.organizationId) ?? [])]
+              .filter((key) => !byKey.has(key))
+              .map((key) =>
+                pauseStaleDeviceFeeds(userId, home.organizationId, key, { unpinnedOnly: true })
+              )
+          );
         }
         if (byKey.size === 0) return [];
 
