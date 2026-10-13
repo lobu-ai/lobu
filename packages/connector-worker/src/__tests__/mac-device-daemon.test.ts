@@ -78,12 +78,18 @@ describe('Mac device daemon options', () => {
     expect(() => selectMacDeviceDaemonAgentKind(['codex'], 'pi')).toThrow('not runnable');
   });
 
-  test('supports explicit supervised stdio without making it the default', () => {
+  test('defaults to four runs, preserves overrides, and keeps supervised stdio opt-in', () => {
     const base = {
       version: '15.8.0',
       apiUrl: 'https://example.test',
       workerApiToken: 'owl_pat_12345678901234567890123456789012',
     };
+    expect(validateMacDeviceDaemonOptions(base).maxConcurrentJobs).toBe(4);
+    for (const maxConcurrentJobs of [1, 2, 8]) {
+      expect(
+        validateMacDeviceDaemonOptions({ ...base, maxConcurrentJobs }).maxConcurrentJobs
+      ).toBe(maxConcurrentJobs);
+    }
     expect(validateMacDeviceDaemonOptions({ ...base }).supervisedStdio).toBeUndefined();
     expect(validateMacDeviceDaemonOptions({ ...base, supervisedStdio: true }).supervisedStdio).toBe(
       true

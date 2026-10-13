@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { WORKER_POLL_MAX_WAIT_SECONDS } from "@lobu/core/contracts/worker/protocol";
 import { WorkerHttpError } from "../daemon/client";
 import { WorkerPollLoop } from "../daemon/poll-loop";
+import { DEFAULT_MAC_DEVICE_MAX_CONCURRENT_JOBS } from "../daemon/mac-device-daemon";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -111,6 +112,61 @@ describe("worker daemon capacity polling", () => {
       finish.resolve();
       await running;
       await loop.waitForActiveJobs(1000, 1);
+    }
+  });
+
+  test("four Mac slots run independently and the fifth waits for actual capacity", async () => {
+    const finishes = Array.from({ length: 5 }, () => deferred());
+    const saturated = deferred();
+    const fifthStarted = deferred();
+    const capacities: number[] = [];
+    const executed: number[] = [];
+    let claimed = 0;
+    let active = 0;
+    let peak = 0;
+    const loop = new WorkerPollLoop({
+      client: {
+        healthCheck: async () => true,
+        poll: async (capacity: number) => {
+          capacities.push(capacity);
+          if (capacity === 0) saturated.resolve();
+          return capacity > 0 && claimed < 5
+            ? { run_id: ++claimed, run_type: "action" }
+            : { next_poll_seconds: 1 };
+        },
+      } as never,
+      maxConcurrentJobs: DEFAULT_MAC_DEVICE_MAX_CONCURRENT_JOBS,
+      pollIntervalMs: 5,
+      execute: async (job) => {
+        const id = job.run_id!;
+        executed.push(id);
+        peak = Math.max(peak, ++active);
+        if (id === 5) fifthStarted.resolve();
+        try {
+          await finishes[id - 1].promise;
+        } finally {
+          active--;
+        }
+      },
+    });
+    const running = loop.start();
+    try {
+      await saturated.promise;
+      expect(executed).toEqual([1, 2, 3, 4]);
+      expect(capacities.slice(0, 5)).toEqual([4, 3, 2, 1, 0]);
+      expect(active).toBe(4);
+      // A short job finishes while the first, long-running command stays busy.
+      finishes[1].resolve();
+      await fifthStarted.promise;
+      expect(executed).toEqual([1, 2, 3, 4, 5]);
+      expect(active).toBe(4);
+      expect(peak).toBe(4);
+      expect(capacities.at(-1)).toBe(1);
+    } finally {
+      loop.stop();
+      for (const finish of finishes) finish.resolve();
+      await running;
+      expect(await loop.waitForActiveJobs(1000, 1)).toBe(true);
     }
   });
 

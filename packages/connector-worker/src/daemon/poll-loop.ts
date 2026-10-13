@@ -77,7 +77,7 @@ export class WorkerPollLoop {
     }
     if (!this.admittingJobs) return;
 
-    log.info('[daemon] Starting worker daemon...');
+    log.info(`[daemon] Starting worker daemon (max concurrent jobs: ${this.maxConcurrentJobs})...`);
     this.running = true;
     while (this.running) {
       if (this.activeJobs === 0) await this.beforeIdlePoll?.();

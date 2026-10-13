@@ -32,7 +32,10 @@ const DEFAULT_POLL_INTERVAL_MS = 10000;
 // Mac daemon's claim latency well below that even when the server returns its
 // normal ten-second idle hint.
 const SOURCE_READ_IDLE_DELAY_CEILING_MS = 1000;
-const DEFAULT_MAX_CONCURRENT_JOBS = 1;
+// One bounded pool covers native actions, syncs, and local agent runs. A long
+// shell command must not monopolize an otherwise healthy device. Explicit
+// --max-concurrent-jobs / WORKER_MAX_CONCURRENT_JOBS settings still take priority.
+export const DEFAULT_MAC_DEVICE_MAX_CONCURRENT_JOBS = 4;
 const NATIVE_BRIDGE_SHUTDOWN_TIMEOUT_MS = 5000;
 export const INTERNAL_ACP_ADAPTER_ARG = '--internal-acp-adapter';
 
@@ -220,7 +223,7 @@ export function validateMacDeviceDaemonOptions(
     workerId,
     workerApiToken,
     pollIntervalMs: pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
-    maxConcurrentJobs: maxConcurrentJobs ?? DEFAULT_MAX_CONCURRENT_JOBS,
+    maxConcurrentJobs: maxConcurrentJobs ?? DEFAULT_MAC_DEVICE_MAX_CONCURRENT_JOBS,
     ...(defaultAgentKind ? { defaultAgentKind } : {}),
   };
 }
