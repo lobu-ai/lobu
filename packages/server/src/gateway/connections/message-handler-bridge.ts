@@ -50,6 +50,11 @@ import {
 } from "../../utils/url-builder.js";
 import { getRateLimiter } from "../../utils/rate-limiter.js";
 import {
+  CHAT_IDENTITY_LINK_TTL_SECONDS,
+  chatIdentityLinkKey,
+  mintChatIdentityLink,
+} from "../../lobu/stores/chat-identity-link.js";
+import {
   CHAT_ACCESS_NOTICE_WINDOW_SECONDS,
   CHAT_TURN_EVIDENCE_KEYS,
   chatAccessNotice,
@@ -1303,6 +1308,7 @@ export class MessageHandlerBridge {
           teamId,
           isDirect: isDirect === true,
           senderVouched,
+          senderDisplayName: message.author?.fullName,
           thread,
         }))
       ) {
@@ -1384,6 +1390,7 @@ export class MessageHandlerBridge {
     teamId: string | undefined;
     isDirect: boolean;
     senderVouched: boolean;
+    senderDisplayName?: string;
     thread: any;
   }): Promise<boolean> {
     const platform = this.connection.platform;
@@ -1419,20 +1426,46 @@ export class MessageHandlerBridge {
     }
 
     if (actor.access === "reply_only" || actor.access === "public_visitor") {
-      const notice = await limiter.consume(chatSenderLimitKey("notice", sender), {
+      const canLink = args.isDirect && !!args.organizationId &&
+        chatIdentityLinkKey(platform, args.teamId, args.userId) !== null;
+      // A group notice must not suppress the private link, and an expired
+      // link must be replaceable on the sender's next DM.
+      const notice = await limiter.consume(chatSenderLimitKey(canLink ? "link" : "notice", sender), {
         limit: 1,
-        windowSeconds: CHAT_ACCESS_NOTICE_WINDOW_SECONDS,
+        windowSeconds: canLink ? CHAT_IDENTITY_LINK_TTL_SECONDS : CHAT_ACCESS_NOTICE_WINDOW_SECONDS,
       });
       if (notice.allowed) {
         const slug =
           actor.access === "public_visitor"
             ? await getOrganizationSlug(args.organizationId).catch(() => null)
             : null;
-        const joinUrl = slug
-          ? `${webOriginFromGateway(this.publicGatewayUrl)}/${encodeURIComponent(slug)}`
+        const webOrigin = webOriginFromGateway(this.publicGatewayUrl);
+        const joinUrl = slug ? `${webOrigin}/${encodeURIComponent(slug)}` : null;
+        // The one-click link goes to a direct message only: in a group anyone
+        // reading the thread could redeem it as their own. It is minted inside
+        // this once-per-window notice, so it adds no messages of its own.
+        const linkToken =
+          canLink && args.organizationId
+            ? await mintChatIdentityLink({
+                organizationId: args.organizationId,
+                connectionId: this.connection.id,
+                platform,
+                teamId: args.teamId,
+                senderId: args.userId,
+                senderDisplayName: args.senderDisplayName,
+              }).catch((error) => {
+                logger.warn(
+                  { platform, connectionId: this.connection.id, error: String(error) },
+                  "Failed to mint a chat identity link; posting the notice without one"
+                );
+                return null;
+              })
+            : null;
+        const linkUrl = linkToken
+          ? `${webOrigin}/connect/chat-identity?token=${encodeURIComponent(linkToken)}`
           : null;
         try {
-          await args.thread.post(chatAccessNotice(actor.access, joinUrl));
+          await args.thread.post(chatAccessNotice(actor.access, joinUrl, linkUrl));
           logger.info(
             { platform, organizationId: args.organizationId, connectionId: this.connection.id, access: actor.access },
             "Posted the chat access notice to an unlinked sender"

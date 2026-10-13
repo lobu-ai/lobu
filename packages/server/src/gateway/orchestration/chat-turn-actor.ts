@@ -25,6 +25,7 @@
 import type { ChatTurnAccess } from "@lobu/core";
 import { getDb } from "../../db/client.js";
 import { resolveChatSenderMember } from "../../lobu/stores/chat-identity.js";
+import { CHAT_IDENTITY_LINK_TTL_SECONDS } from "../../lobu/stores/chat-identity-link.js";
 import { DEVICE_CHAT_RUN_SOURCE } from "../services/run-worker-access.js";
 
 /** The server's refusal for a chat turn that may not use workspace tools. */
@@ -45,10 +46,14 @@ export const UNLINKED_SENDER_TURNS_PER_HOUR = 30;
  * key here, never by formatting it themselves.
  */
 export function chatSenderLimitKey(
-  counter: "turns" | "notice",
+  counter: "turns" | "notice" | "link",
   sender: { organizationId: string | undefined; platform: string; teamId: string | undefined; senderId: string },
 ): string {
-  const prefix = counter === "turns" ? "chat-unlinked-turn" : "chat-access-notice";
+  const prefix = {
+    turns: "chat-unlinked-turn",
+    notice: "chat-access-notice",
+    link: "chat-identity-link-notice",
+  }[counter];
   return `${prefix}:${JSON.stringify([sender.organizationId ?? null, sender.platform, sender.teamId ?? null, sender.senderId])}`;
 }
 
@@ -196,18 +201,26 @@ export function replyOnlyTurnInstructions(): string {
 }
 
 /**
- * The fixed notice the chat bridge posts (at most once per sender per
- * {@link CHAT_ACCESS_NOTICE_WINDOW_SECONDS}) to a sender whose turns cannot
- * use the workspace. A public organization's stranger also gets a link to its
- * public page, where the existing join flow lives.
+ * The notice the chat bridge posts to a sender whose turns cannot use the
+ * workspace. DM links can be offered again after their expiry window; other
+ * notices use {@link CHAT_ACCESS_NOTICE_WINDOW_SECONDS}.
+ * A public organization's stranger also gets a link to its
+ * public page, where the existing join flow lives. In a direct message only,
+ * `linkUrl` is a single-use link a member signs in through to link this chat
+ * account (connect/chat-identity-routes.ts); a group conversation never gets
+ * one.
  */
 export function chatAccessNotice(
   access: "reply_only" | "public_visitor",
   joinUrl: string | null,
+  linkUrl: string | null,
 ): string {
+  const link = linkUrl
+    ? ` Already a member? Link this chat account to your Lobu account (expires in ${CHAT_IDENTITY_LINK_TTL_SECONDS / 60} minutes): ${linkUrl}`
+    : "";
   if (access === "public_visitor") {
     const join = joinUrl ? ` To do more, join the workspace: ${joinUrl}` : "";
-    return `I can answer here, but for you I can only read this workspace's public knowledge.${join}`;
+    return `I can answer here, but for you I can only read this workspace's public knowledge.${join}${link}`;
   }
-  return "I can answer here, but I can't use this workspace's tools for you until you're a member. Ask an admin of this workspace to invite you.";
+  return `I can answer here, but I can't use this workspace's tools for you until you're a member. Ask an admin of this workspace to invite you.${link}`;
 }
