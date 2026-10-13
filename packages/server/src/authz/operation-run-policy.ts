@@ -1,3 +1,4 @@
+import { resolveAutomationConnectionVisibilityUserId } from './automation-connection-visibility';
 import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
 import { connectionBrowserGrant } from '../connectors/browser-resource';
 import { type DbClient, getDb } from '../db/client';
@@ -95,6 +96,13 @@ export async function resolveRunConnectorPolicy(params: {
     if (run.run_metadata?.[SOURCE_FEED_SUBSCRIPTION_METADATA_KEY] === true) {
       const subscriptions = run.feed_id == null ? [] : await sourceFeedSubscriptions(sql, params.organizationId, Number(run.feed_id), Number(run.automation_id));
       if (subscriptions[0]?.principal !== run.created_by_user_id) return unavailable();
+    }
+    if (actor.kind === 'automation') {
+      const visibilityUserId = await resolveAutomationConnectionVisibilityUserId({ organizationId: params.organizationId, userId: null, actingAutomationId: run.automation_id }, sql);
+      if (visibilityUserId !== run.created_by_user_id || !visibilityUserId) return unavailable();
+      const policy = await resolveConnectorPolicy({ organizationId: params.organizationId, connectionId: Number(run.connection_id), actor,
+        operation: { connector_key: run.connector_key ?? '', operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
+      if (policy.effect !== 'auto') return policy;
     }
     return await isSourceReadFeedStillReadable(sql, params.organizationId, run)
       ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();

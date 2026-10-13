@@ -5,6 +5,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import type { AuthzScope } from '../../../authz/scope';
 import type { Env } from '../../../index';
 import { manageFeeds } from '../../../tools/admin/manage_feeds';
@@ -297,4 +298,37 @@ describe('explicit feed source reads', () => {
     expect(result.results[0].ok).toBe(true);
     expect(result.results[1]).toMatchObject({ ok: false, error_code: 'NOT_FOUND' });
   }, 60_000);
+  it('headless Automation reads use only its durable creators private sources', async () => {
+    const db = getTestDb();
+    const [{ id }] = await db`SELECT nextval('automations_id_seq') AS id`;
+    const automationId = Number(id);
+    await db`INSERT INTO automations (id, organization_id, slug, name, status, created_by, automation_group_id)
+      VALUES (${automationId}, ${orgId}, 'source-read-owner', 'Source read owner', 'active', ${ownerId}, ${automationId})`;
+    const reactionCtx: ToolContext = { ...ownerCtx, userId: null, memberRole: null, actingAutomationId: automationId };
+    const read = async (ctx: ToolContext) => {
+      const result = await manageFeeds({ action: 'read_feeds', reads: [{ feed_id: privateFeedId, limit: 1 }] }, {}, ctx);
+      if (result.action !== 'read_feeds') throw new Error('expected read_feeds');
+      return result.results[0];
+    };
+    expect(await read(reactionCtx)).toMatchObject({ ok: true, rows: [{ name: 'apple' }] });
+    for (const effect of ['deny', 'approval'] as const) {
+      await upsertEntityApprovalPolicy(orgId, { resourceClass: 'connector_action', connectorKey: 'postgres', operationCategory: 'read', effects: { execute: effect } });
+      expect(await read(reactionCtx)).toMatchObject({ ok: false, error_code: 'PERMISSION' });
+    }
+    await upsertEntityApprovalPolicy(orgId, { resourceClass: 'connector_action', connectorKey: 'postgres', operationCategory: 'read', effects: { execute: 'auto' } });
+    // A caller with a real identity cannot adopt the Automation creator's access.
+    expect(await read({ ...memberCtx(), actingAutomationId: automationId })).toMatchObject({ ok: false, error_code: 'NOT_FOUND' });
+    expect(await read({ ...reactionCtx, actingAutomationId: undefined })).toMatchObject({ ok: false, error_code: 'NOT_FOUND' });
+    await db`UPDATE automations SET status = 'archived' WHERE id = ${automationId}`;
+    expect(await read(reactionCtx)).toMatchObject({ ok: false, error_code: 'NOT_FOUND' });
+    await db`UPDATE automations SET status = 'active' WHERE id = ${automationId}`;
+    const other = await createTestUser({ email: 'other-source-owner@test.com' });
+    await db`UPDATE automations SET created_by = ${other.id} WHERE id = ${automationId}`;
+    expect(await read(reactionCtx)).toMatchObject({ ok: false, error_code: 'NOT_FOUND' });
+    const foreign = await createTestOrganization({ name: 'Other source workspace' });
+    expect(await read({ ...reactionCtx, organizationId: foreign.id })).toMatchObject({ ok: false, error_code: 'NOT_FOUND' });
+    await db`DELETE FROM automations WHERE id = ${automationId}`;
+    expect(await read(reactionCtx)).toMatchObject({ ok: false, error_code: 'NOT_FOUND' });
+  }, 60_000);
+
 });

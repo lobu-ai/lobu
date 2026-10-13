@@ -20,6 +20,8 @@ import {
   type ToolErrorCode,
 } from '@lobu/core';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
+import { resolveActingPrincipal, resolveConnectorPolicy } from '../authz/entity-policy';
+import { DEVICE_FEED_READ_ACTION_KEY } from './device-feed-read-protocol';
 import type { AuthzScope } from '../authz/scope';
 import { getDb } from '../db/client';
 import { dbEgressConfig } from '../utils/cloud-mode';
@@ -393,6 +395,12 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     );
   }
   const feed = feedRows[0];
+  if (p.automationId != null) {
+    const actor = await resolveActingPrincipal(sql, { organizationId: p.scope.organizationId, sessionAutomationId: p.automationId });
+    const policy = await resolveConnectorPolicy({ organizationId: p.scope.organizationId, connectionId: Number(feed.connection_id), actor,
+      operation: { connector_key: feed.connector_key, operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
+    if (policy.effect !== 'auto') throw new ToolError('PERMISSION', 'Automation source read requires an Auto connector policy.');
+  }
   const feedOperations = Array.isArray(feed.feed_operations) ? feed.feed_operations : [];
   const readWindowAxis = feed.read_window_axis?.trim() || undefined;
   const sourceRevision = createHash('sha256').update(stableJson({

@@ -173,6 +173,20 @@ describe('compiled browser source reads', () => {
   afterAll(cleanupTestDatabase);
   afterEach(() => vi.restoreAllMocks());
 
+  it.each([false, true])('reads a private source for a scheduled Automation and rechecks policy at claim: revoked=%s', async (revoked) => {
+    const sql = getTestDb();
+    const [automation] = await sql`WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
+      INSERT INTO automations (id, automation_group_id, organization_id, created_by, name, slug, triggers)
+      SELECT id, id, ${orgId}, ${userId}, 'Scheduled source fixture', 'scheduled-source-fixture', '[]'::jsonb FROM next_id RETURNING id`;
+    const reading = read({ ...context(), userId: null, memberRole: null, actingAutomationId: Number(automation.id) });
+    const child = await waitForChild();
+    if (revoked) await upsertEntityApprovalPolicy(orgId, { resourceClass: 'connector_action', connectorKey: SOURCE_KEY, operationCategory: 'read', effects: { execute: 'deny' } });
+    await answerBrowser(reading);
+    expect((await reading).results[0].ok).toBe(!revoked);
+    if (revoked) expect((await sql`SELECT status FROM runs WHERE id = ${child.id}`)[0].status).toBe('cancelled');
+    await expectScrubbed();
+  });
+
   it('publishes only read capability while preserving listener setup', async () => {
     expect((await extractConnectorMetadata(compiled.compiledCode)).feeds).toMatchObject({
       items: { operations: ['read'], webhook: { mode: 'trigger', events: ['message.created'] } },
