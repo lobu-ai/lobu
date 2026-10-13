@@ -443,27 +443,38 @@ export async function searchContentBySingleQuery(
           ORDER BY MIN(dist)
           LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
     if (hasTextCandidates) {
+      // Keep direct and linked scope separately indexable, as on the exact
+      // path. Capping each disjoint arm then capping their union preserves the
+      // original global top-N while avoiding a global history scan for a term
+      // that is common elsewhere but rare in this organization.
+      const textScopeFilters = orgScope.branches
+        ? [orgScope.branches.direct, orgScope.branches.linked]
+          .map((scope) => standardFiltersFor(`AND ${scope}`))
+        : [standardFiltersSQL];
+      const textCandidates = (matchSql: string, rankSql: string) => `SELECT id FROM (
+          ${textScopeFilters.map((filters) => `(SELECT ce.id AS id, ${rankSql} AS rank
+            FROM events ce
+            JOIN current_event_records f ON f.id = ce.id
+            ${candidateFilterJoins}
+            WHERE ${matchSql}
+              AND ${filters}
+            ORDER BY ${rankSql} DESC, ce.id + 0 DESC
+            LIMIT ${CANDIDATE_VECTOR_LIMIT})`).join('\n          UNION ALL\n          ')}
+        ) text_candidates
+        ORDER BY rank DESC, id DESC
+        LIMIT ${CANDIDATE_VECTOR_LIMIT}`;
       // fulltext GIN — `@@` is index-served. Rank the STORED search_tsv before
       // the cap so the strongest matches survive CANDIDATE_VECTOR_LIMIT; this
       // costs a top-N sort over FTS-matching rows in the organization.
-      branches.push(`SELECT ce.id AS id
-          FROM events ce
-          JOIN current_event_records f ON f.id = ce.id
-          ${candidateFilterJoins}
-          WHERE ce.search_tsv @@ to_tsquery('english', $${tsqueryParamIdx})
-            AND ${standardFiltersSQL}
-          ORDER BY ts_rank_cd(ce.search_tsv, to_tsquery('english', $${tsqueryParamIdx})) DESC,
-                   ce.id DESC
-          LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
+      branches.push(textCandidates(
+        `ce.search_tsv @@ to_tsquery('english', $${tsqueryParamIdx})`,
+        `ts_rank_cd(ce.search_tsv, to_tsquery('english', $${tsqueryParamIdx}))`
+      ));
       // trigram GIN — preserves the payload substring match (exact strings, ids).
-      branches.push(`SELECT ce.id AS id
-          FROM events ce
-          JOIN current_event_records f ON f.id = ce.id
-          ${candidateFilterJoins}
-          WHERE ce.payload_text ILIKE '%' || $1 || '%'
-            AND ${standardFiltersSQL}
-          ORDER BY ce.id DESC
-          LIMIT ${CANDIDATE_VECTOR_LIMIT}`);
+      // Sort the equivalent id expression so LIMIT cannot favor a backwards
+      // primary-key scan through unrelated history. The explicit sort permits
+      // filtered bitmap/index access before the same newest-id candidate cap.
+      branches.push(textCandidates(`ce.payload_text ILIKE '%' || $1 || '%'`, 'ce.id + 0'));
     }
     // Each branch has its own ORDER BY/LIMIT and must therefore be
     // parenthesized for the UNION to parse. `UNION` (not UNION ALL) dedupes
