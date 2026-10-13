@@ -56,13 +56,16 @@ export async function tiktokInboxPage(input) {
 		let fiber = element?.[Object.keys(element).find(key => key.startsWith("__reactFiber$"))];
 		// DOM references can retain the alternate after an immutable React commit.
 		// Resolve membership in the committed tree, never prefer an alternate blindly.
+		const nodeBudget = 50000;
 		let root = fiber;
-		for (let i = 0; root?.return && i < 100; i++) root = root.return;
+		// TikTok's inbox can sit more than 100 ancestors below its host root.
+		for (let i = 0; root?.return && i < nodeBudget; i++) root = root.return;
+		if (root?.return) fail("Inbox component root exceeds this read's node budget");
 		const current = root?.stateNode?.current;
 		if (current) {
 			const pending = [{ node: current, parent: null }];
 			let found;
-			for (let i = 0; pending.length && i < 50000; i++) {
+			for (let i = 0; pending.length && i < nodeBudget; i++) {
 				const entry = pending.pop();
 				const node = entry.node;
 				if (node === fiber || node === fiber?.alternate) { found = entry; break; }

@@ -70,6 +70,19 @@ function fixture(options: { activity?: boolean; incomplete?: boolean } = {}) {
 		thread,
 		threads,
 		loaded,
+		deepRoot: (depth: number, cycle = false) => {
+			const fiber = (options.activity ? panel : list).__reactFiber$test as any;
+			fiber.alternate = {};
+			let child = fiber;
+			for (let index = 0; index < depth; index++) {
+				const parent = { child, return: null as any };
+				child.return = parent;
+				child = parent;
+			}
+			const root = { stateNode: { current: null as any }, child };
+			child.return = cycle ? fiber : root;
+			root.stateNode.current = root;
+		},
 		immutableActivity: (reuseHost = false) => {
 			const stale = panel.__reactFiber$test as any;
 			const component = reuseHost ? { memoizedProps: activity, child: stale, return: null as any } : stale;
@@ -174,6 +187,18 @@ test("activity follows the committed React tree after immutable updates", async 
 	const f = fixture({ activity: true });
 	f.immutableActivity();
 	expect((await f.read()).rows[0].id).toBe("900");
+});
+
+test.each([false, true])("deep committed roots remain readable (activity=%s)", async (activity) => {
+	const f = fixture({ activity });
+	f.deepRoot(150);
+	expect((await f.read()).rows[0].id).toBe(activity ? "900" : "102");
+});
+
+test("cyclic component ancestry stops within the traversal budget", async () => {
+	const f = fixture();
+	f.deepRoot(2, true);
+	await expect(f.read()).rejects.toThrow("node budget");
 });
 
 test("activity uses committed ancestor paths when React reuses a host fiber", async () => {
