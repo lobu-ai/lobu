@@ -412,6 +412,39 @@ describe("WhatsApp Web source chat", () => {
     expect(sends).toHaveLength(expected.replies);
   }, 60_000);
 
+  it("queues a cooldown-limited background run once even when the first insert fails", async () => {
+    const automationId = await insertAutomation(
+      "scoped-reply-or-archive", replyTo({ channel_id: DM_JID }), { output: "silent" });
+    await sql`UPDATE automations SET min_cooldown_seconds = 3600 WHERE id = ${automationId}`;
+    // A sequence is not rolled back, so exactly the first insert fails.
+    await sql.unsafe(`
+      CREATE SEQUENCE synthetic_fail_once;
+      CREATE FUNCTION synthetic_fail_first_automation_run() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.run_type = 'automation' AND nextval('synthetic_fail_once') = 1 THEN
+          RAISE EXCEPTION 'synthetic run insert failure';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql;
+      CREATE TRIGGER synthetic_fail_first_automation_run BEFORE INSERT ON runs
+        FOR EACH ROW EXECUTE FUNCTION synthetic_fail_first_automation_run();
+    `);
+    try {
+      deviceMessages.push({ id: "SYNTHDM12", chat_jid: OTHER_DM_JID, body: "archive me" });
+      await deliver("SYNTHDM12");
+      await drain();
+    } finally {
+      await sql.unsafe(`
+        DROP TRIGGER synthetic_fail_first_automation_run ON runs;
+        DROP FUNCTION synthetic_fail_first_automation_run();
+        DROP SEQUENCE synthetic_fail_once;
+      `);
+    }
+    expect(await ingressJobs()).toEqual([expect.objectContaining({ status: "completed", attempts: 1 })]);
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND run_type = 'automation'`)
+      .toHaveLength(1);
+  }, 60_000);
+
   it("resolves the connection's numeric runtime id for chat routing", async () => {
     const replyId = await insertAutomation("one-chat-reply", replyTo({ channel_id: DM_JID }));
     const runtimeId = String(connectionId);

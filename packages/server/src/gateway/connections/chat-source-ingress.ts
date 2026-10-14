@@ -106,9 +106,10 @@ export async function handleChatSourceIngress(
       (await findMatchingAutomationActivations(organizationId, hydrated, sql))
         .filter((match) => candidates.includes(match.automationId)),
     );
-    // Queued once per delivery id, so a retried job does not queue again.
+    // Each activation commits in its own transaction (lock, cooldown, run),
+    // and is queued once per delivery id, so a retried job does not queue again.
     await dispatchAutomationRunsBestEffort(
-      await queueAutomationActivations({ signal, matches: plan.backgroundTargets, db: sql }),
+      await queueAutomationActivations({ signal, matches: plan.backgroundTargets }),
     );
     if (!parsed) return;
     const thread = await resolveChatTarget(instance.chat, instance.connection.platform, {

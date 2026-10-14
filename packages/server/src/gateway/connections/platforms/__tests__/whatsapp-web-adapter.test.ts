@@ -44,13 +44,6 @@ function harness(
   return { adapter, calls };
 }
 
-async function waitUntil(condition: () => boolean): Promise<void> {
-  for (let i = 0; i < 100 && !condition(); i++) {
-    await new Promise((resolve) => setTimeout(resolve, 1));
-  }
-  expect(condition()).toBe(true);
-}
-
 function row(overrides: Partial<WhatsAppWebMessageRow> = {}): WhatsAppWebMessageRow {
   return {
     id: "RAWIN1",
