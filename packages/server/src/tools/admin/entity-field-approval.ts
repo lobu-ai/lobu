@@ -61,14 +61,7 @@ import {
 import { resolveRunInitiator, runPermalinkResource } from "../initiator";
 import type { ToolContext } from "../registry";
 import { getOrgUrlContext } from "../view-urls";
-
-/** Synthetic runs.action_key tagging an automation field-change held for approval. */
-export const ENTITY_FIELD_CHANGE_ACTION_KEY = "entity_field_change";
-export const ENTITY_CHANGE_ACTION_KEY = "entity_change";
-export const ENTITY_CHANGE_ACTION_KEYS = [
-	ENTITY_FIELD_CHANGE_ACTION_KEY,
-	ENTITY_CHANGE_ACTION_KEY,
-] as const;
+import { ENTITY_CHANGE_ACTION_KEY, ENTITY_FIELD_CHANGE_ACTION_KEY } from "./run-decider";
 
 /**
  * Internal signal: an escalated (atomic) card had at least one stale field, so

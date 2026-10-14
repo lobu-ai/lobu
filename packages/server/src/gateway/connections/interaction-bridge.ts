@@ -11,7 +11,7 @@ import {
 import { SCOPE_CHECK_NOT_APPLICABLE } from "../../auth/tool-access.js";
 import { getDb, pgTextArray } from "../../db/client.js";
 import type { Env } from "../../index.js";
-import { ENTITY_CHANGE_ACTION_KEYS } from "../../tools/admin/entity-field-approval.js";
+import { ENTITY_CHANGE_ACTION_KEYS, runDeciderUserIdSql } from "../../tools/admin/run-decider.js";
 import { manageOperations } from "../../tools/admin/manage_operations.js";
 import type { ToolContext } from "../../tools/registry.js";
 import {
@@ -130,8 +130,8 @@ function actionEventTeamId(
 /**
  * Map the clicking chat user to a Lobu member allowed to decide this run:
  * exactly ONE identity for (team, platform user) that joins to an org member,
- * AND that member is an admin/owner OR the run's recorded field owner
- * (`ownerUserId`). A non-admin member who is not the owner resolves null, same
+ * AND that member is an admin/owner OR the run's current decider
+ * (`ownerUserId`). A non-admin member who is not the decider resolves null, same
  * as an unverified account.
  *
  * Platform-generic by dispatch, not by branch. `resolveChatSenderMember` already
@@ -176,8 +176,8 @@ async function resolveActionReviewer(params: {
  *    operation, connection and input, so the decision is informed — which is
  *    what previously made deciding from chat unsafe, not the execution path:
  *    the click already runs through `manage_operations approve|reject` with a
- *    Slack identity verified against an org admin/owner and real `process.env`,
- *    exactly as the web approval does.
+ *    chat identity verified against an org admin/owner or the run's decider,
+ *    using real `process.env`, exactly as the web approval does.
  *
  * A run outside both families reports `not_found`, so its card falls back to
  * the "Review in Lobu" link rather than acting on something unrecognised.
@@ -192,23 +192,21 @@ export async function resolveEntityApprovalRun(
 ): Promise<{
 	state: "pending" | "approved" | "rejected" | "not_found";
 	/**
-	 * action_input.owner_user_id — the field owner allowed to decide an entity
-	 * change. Always null for a connector operation: there `action_input` is the
-	 * agent-authored operation input, so reading an owner out of it would let
-	 * the agent nominate its own approver.
+	 * The non-admin member allowed to decide this run (`runDeciderUserIdSql`):
+	 * an entity change's field owner, or the owner of the device behind a
+	 * private connection they created. Never read from a connector operation's
+	 * agent-authored `action_input`.
 	 */
 	ownerUserId: string | null;
 }> {
 	const actionKeys = pgTextArray([...ENTITY_CHANGE_ACTION_KEYS]);
-	const rows = await getDb()<{
+	const sql = getDb();
+	const rows = await sql<{
 		id: number;
 		approval_status: string | null;
 		owner_user_id: string | null;
 	}>`
-    SELECT id, approval_status,
-      CASE WHEN run_type = 'internal'
-        THEN action_input->>'owner_user_id'
-      END AS owner_user_id
+    SELECT id, approval_status, ${runDeciderUserIdSql(sql)} AS owner_user_id
     FROM runs
     WHERE id = ${runId}
       AND organization_id = ${organizationId}

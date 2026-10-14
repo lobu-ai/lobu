@@ -13,6 +13,7 @@ import { buildResourcePermalink } from "../utils/url-builder";
 import { resolveAskAffordance } from "./ask-schema";
 import type { ActionOrigin } from "./action-card-state";
 import { createNotificationForUsers, getOrgSlug } from "./service";
+import { resolveRunDeciderUserId } from "../tools/admin/run-decider";
 
 /** Notification content minus the org id (the dispatch helpers stamp it). */
 type OrgNotification = Omit<
@@ -387,20 +388,22 @@ async function sendNotification(
 }
 
 /**
- * Admin-recipient triggers: resolve the org's admins/owners (no-op when there
- * are none — the slug isn't fetched either), then build the notification with
- * the org slug available for resource URLs.
+ * Admin-recipient triggers: resolve the org's admins/owners plus an optional
+ * extra member (no-op when there is nobody — the slug isn't fetched either),
+ * then build the notification with the org slug available for resource URLs.
  */
 async function notifyOrgAdmins(
 	orgId: string,
 	build: (orgSlug: string | null) => OrgNotification,
 	transaction?: DbClient,
+	alsoNotifyUserId?: string | null,
 ): Promise<void> {
-	const adminIds = await getOrgAdminUserIds(orgId, transaction);
-	if (adminIds.length === 0) return;
+	const recipients = new Set(await getOrgAdminUserIds(orgId, transaction));
+	if (alsoNotifyUserId) recipients.add(alsoNotifyUserId);
+	if (recipients.size === 0) return;
 
 	const orgSlug = await getOrgSlug(orgId, transaction);
-	await sendNotification(orgId, adminIds, build(orgSlug), transaction);
+	await sendNotification(orgId, [...recipients], build(orgSlug), transaction);
 }
 
 /**
@@ -472,6 +475,13 @@ export async function notifyActionApprovalNeeded(params: {
 	const entityChange = params.details
 		? (buildApprovalRenderModel(params.details) as unknown as Record<string, unknown>)
 		: null;
+	// Everyone who can decide the run hears about it: the admins, plus the
+	// member the run names as its decider (their own device, or a field they own).
+	const deciderUserId = await resolveRunDeciderUserId(
+		transaction ?? getDb(),
+		params.runId,
+		params.orgId,
+	);
 	await notifyOrgAdmins(params.orgId, (orgSlug) => {
 		// Run-scoped, via the shared permalink resolver — same reasoning as the
 		// approval_url: the pending event is superseded on approve→complete, but the
@@ -518,7 +528,7 @@ export async function notifyActionApprovalNeeded(params: {
 			mcpActivity: params.mcpActivity,
 			actionOrigin: params.actionOrigin,
 		};
-	}, transaction);
+	}, transaction, deciderUserId);
 }
 
 /** Deep-link into a single connection (settings / re-auth), not the connectors list. */

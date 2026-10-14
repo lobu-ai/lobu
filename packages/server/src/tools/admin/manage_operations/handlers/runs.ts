@@ -16,7 +16,7 @@ import { describeNonDeviceWorkerId } from "../../../../utils/device-worker-id";
 import { ToolUserError } from "../../../../utils/errors";
 import type { ToolContext } from "../../../registry";
 import { listOrgActivity } from "../activity-feed";
-import { ENTITY_CHANGE_ACTION_KEYS } from "../../entity-field-approval";
+import { ENTITY_CHANGE_ACTION_KEYS } from "../../run-decider";
 export async function handleListActivity(
 	args: Static<typeof ListActivityAction>,
 	ctx: ToolContext,

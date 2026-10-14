@@ -21,7 +21,11 @@ import { DEVICE_MANIFESTS_BY_PLATFORM } from '@lobu/connector-worker/daemon/devi
 import type { AuthInfo } from '../../auth/oauth/types';
 import { generateSecureToken, hashToken } from '../../auth/oauth/utils';
 import type { Env } from '../../index';
-import { mintDeviceChildToken, updateDeviceWorkerOrg } from '../../worker-api/device-management';
+import {
+  mintDeviceChildToken,
+  queryDeviceWorkers,
+  updateDeviceWorkerOrg,
+} from '../../worker-api/device-management';
 import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
 import { activatePageRun } from '../../worker-api/page-activation';
 import { materializeDueFeeds, type DueFeedClaimContext } from '../../scheduled/check-due-feeds';
@@ -474,6 +478,10 @@ describe('device home workspace chosen at pairing', () => {
           };
           return (await materializeDueFeeds({} as Env, sql, { claimContext })).runsCreated;
         },
+        /** What the Devices page lists as needing a Lobu update on Alice's device. */
+        aliceUpdateRequired: async () =>
+          (await queryDeviceWorkers(alice.userId)).find((d) => d.worker_id === 'old-box')
+            ?.update_required,
         /** Claim authorizations Alice's device gets for the workspace's version. */
         aliceClaimsOnNew: async () => {
           const device = await deviceRow(alice.userId, 'old-box');
@@ -508,6 +516,10 @@ describe('device home workspace chosen at pairing', () => {
       );
       expect(await team.installed()).toBe(NEW);
       expect(await team.aliceClaimsOnNew()).toEqual([]);
+      // ...and her Devices page says why, instead of offering a Connect that cannot work.
+      expect(await team.aliceUpdateRequired()).toEqual([
+        { connector_key: 'os.shell', display_name: expect.any(String), device_version: OLD, workspace_version: NEW },
+      ]);
     }
 
     const cases: Array<[string, (team: Team) => Promise<void>]> = [
@@ -519,6 +531,7 @@ describe('device home workspace chosen at pairing', () => {
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
             expect.objectContaining({ status: 'active', error_message: null, visibility: 'private' }),
           ]);
+          expect(await team.aliceUpdateRequired()).toEqual([]);
         },
       ],
       [
@@ -593,6 +606,7 @@ describe('device home workspace chosen at pairing', () => {
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
             expect.objectContaining({ status: 'active', error_message: null, visibility: 'private' }),
           ]);
+          expect(await team.aliceUpdateRequired()).toEqual([]);
         },
       ],
       [

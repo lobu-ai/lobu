@@ -10,7 +10,7 @@
 
 import { afterAll, describe, expect, it } from "vitest";
 import { resolveEntityApprovalRun } from "../../../gateway/connections/interaction-bridge";
-import { ENTITY_CHANGE_ACTION_KEYS } from "../../../tools/admin/entity-field-approval";
+import { ENTITY_CHANGE_ACTION_KEYS } from "../../../tools/admin/run-decider";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { createTestOrganization } from "../../setup/test-fixtures";
 

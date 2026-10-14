@@ -21,6 +21,7 @@ import { insertEvent } from "../../../../utils/insert-event";
 import { recordEntityWriteDenial } from "../../../../utils/entity-write-denial-audit";
 import logger from "../../../../utils/logger";
 import { isAdminOrOwnerRole } from "../../../access-control";
+import { ENTITY_CHANGE_ACTION_KEYS, runDeciderUserIdSql } from "../../run-decider";
 import type { ToolContext } from "../../../registry";
 import {
 	type ApprovalReviewer,
@@ -31,7 +32,6 @@ import {
 import {
 	applyEntityChangeProposal,
 	entityChangeOperation,
-	ENTITY_CHANGE_ACTION_KEYS,
 	type EntityChangeProposal,
 } from "../../entity-field-approval";
 import { AGENT_ASK_ACTION_KEY, isAgentAskProposal } from "../../../../notifications/ask";
@@ -877,26 +877,24 @@ function describeEntityChange(proposal: EntityChangeProposal): string {
 }
 
 /**
- * Non-admin authority: a member may decide a run ONLY when it is a pending
- * entity-change proposal that records them as the field owner
- * (action_input.owner_user_id, resolved at propose time from field_controls).
+ * Non-admin authority: a member may decide a pending run ONLY when
+ * {@link runDeciderUserIdSql} names them — the field owner of an entity-change
+ * proposal, or the owner of the device behind a private connection they created.
  * Checked BEFORE any claim so an unauthorized call can never flip run state.
  */
-async function isPendingEntityRunOwner(
+async function isPendingRunDecider(
 	runId: number,
 	organizationId: string,
 	userId: string | null,
 ): Promise<boolean> {
 	if (!userId) return false;
-	const actionKeys = pgTextArray([...ENTITY_CHANGE_ACTION_KEYS]);
-	const rows = await getDb()`
+	const sql = getDb();
+	const rows = await sql`
     SELECT 1 FROM runs
     WHERE id = ${runId}
       AND organization_id = ${organizationId}
-      AND run_type = 'internal'
-      AND action_key = ANY(${actionKeys}::text[])
       AND approval_status = 'pending'
-      AND action_input->>'owner_user_id' = ${userId}
+      AND ${runDeciderUserIdSql(sql)} = ${userId}
     LIMIT 1
   `;
 	return rows.length > 0;
@@ -937,9 +935,9 @@ function requireHumanApprovalContext(
  * The admin-or-run-owner gate shared by approve/reject, layered ON TOP of
  * {@link requireHumanApprovalContext} (which every caller runs first, so a
  * verified human identity is already guaranteed here). The tool-access tier
- * admits write-tier members so a recorded field owner can decide their own
- * run; everyone else non-admin gets the same admin-access denial the action
- * tier used to throw. No system-context bypass — a run decision is always human.
+ * admits write-tier members so a run's current decider can decide it;
+ * everyone else non-admin gets the same admin-access denial the action tier
+ * used to throw. No system-context bypass — a run decision is always human.
  */
 async function requireApprovalAuthority(
 	action: "approve" | "reject",
@@ -947,7 +945,7 @@ async function requireApprovalAuthority(
 	ctx: ToolContext,
 ): Promise<void> {
 	if (isAdminOrOwnerRole(ctx.memberRole)) return;
-	if (await isPendingEntityRunOwner(runId, ctx.organizationId, ctx.userId)) {
+	if (await isPendingRunDecider(runId, ctx.organizationId, ctx.userId)) {
 		return;
 	}
 	throw new Error(
