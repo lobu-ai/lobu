@@ -43,6 +43,8 @@ function harness(
     pageSize?: number;
     beforePage?: (page: number) => void;
     execute?: (input: Execute) => Promise<Record<string, unknown>>;
+    // Refuses a dispatch before the server records any run.
+    refuse?: (input: Execute) => boolean;
   } = {}
 ) {
   const executed: Execute[] = [];
@@ -102,6 +104,8 @@ function harness(
       },
       execute: async (input: Execute) => {
         executed.push(input);
+        if (options.refuse?.(input))
+          throw new Error("synthetic dispatch refusal");
         const prior = runs.find((run) => run.key === input.idempotency_key);
         if (prior) {
           if (prior.parent_run_id !== input.automation_source?.run_id)
@@ -209,7 +213,7 @@ describe("Task Collaborator reminder changes", () => {
   });
 
   test("skips a create already queued or done by an earlier run", async () => {
-    for (const status of ["pending", "in_progress", "completed"]) {
+    for (const status of ["pending", "claimed", "running", "completed"]) {
       const h = harness({
         recentCreates: [{ status, input: { notes: `x\n\n${marker(key)}` } }],
       });
@@ -582,6 +586,40 @@ describe("Task Collaborator reminder changes", () => {
     expect(h.runs.map((run) => run.status)).toEqual(["failed", "pending"]);
   });
 
+  test("later windows do not duplicate an identical unsettled write", async () => {
+    for (const status of ["pending", "claimed", "running"]) {
+      for (const change of [
+        { action: "complete", origin_id: "reminder:a" },
+        { action: "update", origin_id: "reminder:a", title: "New" },
+      ]) {
+        const h = harness();
+        await applyReminderChanges(atRun(901, [change]), h.client);
+        h.runs[0].status = status;
+        await applyReminderChanges(atRun(902, [change]), h.client);
+        expect(h.runs).toHaveLength(1);
+        // Once settled, new live evidence may require the same correction again.
+        h.runs[0].status = "completed";
+        await applyReminderChanges(atRun(903, [change]), h.client);
+        expect(h.runs).toHaveLength(2);
+      }
+    }
+  });
+
+  test("an intervening different write allows a fresh correction", async () => {
+    const h = harness();
+    for (const [index, title] of ["Old", "New", "Old"].entries()) {
+      await applyReminderChanges(
+        atRun(901 + index, [
+          { action: "update", origin_id: "reminder:a", title },
+        ]),
+        h.client
+      );
+    }
+    expect(h.runs.map((run) => (run.input as { title: string }).title)).toEqual(
+      ["Old", "New", "Old"]
+    );
+  });
+
   test("repeated asynchronous failures across windows stop after three attempts", async () => {
     for (const change of [
       create,
@@ -596,6 +634,24 @@ describe("Task Collaborator reminder changes", () => {
       await applyReminderChanges(atRun(905, [change]), h.client);
       expect(h.runs).toHaveLength(3);
     }
+  });
+
+  test("an older proposal whose dispatch never reached the ledger cannot overwrite a newer window", async () => {
+    let refuse = true;
+    const h = harness({ refuse: () => refuse });
+    const runA = [{ action: "update", origin_id: "reminder:b", title: "Old" }];
+    await expect(
+      applyReminderChanges(atRun(901, runA), h.client)
+    ).rejects.toThrow("synthetic dispatch refusal");
+    refuse = false;
+    await applyReminderChanges(
+      atRun(902, [{ action: "update", origin_id: "reminder:b", title: "New" }]),
+      h.client
+    );
+    await applyReminderChanges(atRun(901, runA), h.client);
+    expect(h.runs.map((run) => (run.input as { title: string }).title)).toEqual(
+      ["New"]
+    );
   });
 
   test("a retried reaction replays its earlier writes instead of overwriting a newer change", async () => {
@@ -681,6 +737,26 @@ describe("Task Collaborator reminder changes", () => {
         h.client
       )
     ).rejects.toThrow("synthetic dispatch failure");
+  });
+
+  test("another Automation's matching success cannot hide a dispatch failure", async () => {
+    const h = harness({
+      recentCreates: [
+        {
+          automation_id: 72,
+          status: "completed",
+          operation_key: "update_reminder",
+          input: { origin_id: "reminder:a", title: "New" },
+        },
+      ],
+      refuse: () => true,
+    });
+    await expect(
+      applyReminderChanges(
+        context([{ action: "update", origin_id: "reminder:a", title: "New" }]),
+        h.client
+      )
+    ).rejects.toThrow("synthetic dispatch refusal");
   });
 
   test("newer cancellations supersede failures even at the same timestamp", async () => {

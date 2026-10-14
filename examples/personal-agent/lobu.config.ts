@@ -633,8 +633,7 @@ const duplicateEntityResolution = defineAutomation({
   ),
 });
 
-// The LinkedIn assistant runs on the same device and CLI as the hourly task
-// collaborator; the paired Chrome reads LinkedIn through the extension.
+// The LinkedIn assistant reads through the paired Chrome extension.
 const linkedInAssistantDevice = {
   deviceWorkerId: "66af4f1d-13c5-4d2d-b848-5b6b5dde7b63",
   agentKind: "claude-code",

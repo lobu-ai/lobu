@@ -82,7 +82,7 @@ export function marker(key: Key): string {
   return `lobu:${key.source_scope}|${key.source_origin_id}|${key.task_key}`;
 }
 
-// A short stable digest (cyrb53) so a marker of any length fits the 256
+// A short stable digest so a marker of any length fits the 256
 // character idempotency key.
 function digest(text: string): string {
   let h1 = 0xdeadbeef;
@@ -157,6 +157,8 @@ type History = {
   writes: Map<string, Attempts>;
   // The newest attempt on each reminder, including cancellations.
   touched: Map<string, string>;
+  // The newest window run that proposed any write to each reminder.
+  proposedBy: Map<string, number>;
 };
 
 async function readHistory(
@@ -173,6 +175,7 @@ async function readHistory(
   ];
   const writes = new Map<string, Attempts>();
   const touched = new Map<string, string>();
+  const proposedBy = new Map<string, number>();
   const failures = new Map<string, number>();
   // A run can match two filters, and runs created mid-scan must not shift
   // pages, so pages follow the (created_at, id) keyset and each run counts once.
@@ -233,6 +236,11 @@ async function readHistory(
           position > (touched.get(origin) ?? "")
         )
           touched.set(origin, position);
+        if (
+          typeof origin === "string" &&
+          write.parentRunId > (proposedBy.get(origin) ?? 0)
+        )
+          proposedBy.set(origin, write.parentRunId);
       }
       const last = page.runs.at(-1);
       if (!page.has_more || !last) break;
@@ -250,7 +258,7 @@ async function readHistory(
         `${attempts.automationId}|${retryIdentity(attempts.write)}`
       ) ?? 0;
   }
-  return { writes, touched };
+  return { writes, touched, proposedBy };
 }
 
 function writeOf(change: Change, parentRunId: number): Write {
@@ -406,10 +414,22 @@ export default async function applyReminderChanges(
         continue;
       }
     }
-    if (attempts) {
-      const origin = write.input.origin_id;
+    const origin = write.input.origin_id;
+    if (typeof origin === "string") {
+      // The live read can still show the old value while an identical write
+      // waits for approval or the Mac. Reuse that outstanding intent.
       if (
-        typeof origin === "string" &&
+        retryState &&
+        ACTIVE.includes(retryState.lastStatus) &&
+        history.touched.get(origin) === retryState.lastPosition
+      )
+        continue;
+      // A newer window's write to the same reminder wins, even when this
+      // proposal's own dispatch never reached the ledger. A retry is stamped
+      // with the window that dispatched it, so the order errs toward skipping.
+      if ((history.proposedBy.get(origin) ?? 0) > write.parentRunId) continue;
+      if (
+        attempts &&
         (history.touched.get(origin) ?? "") > attempts.lastPosition
       )
         continue;
@@ -439,7 +459,8 @@ export default async function applyReminderChanges(
             retryIdentity(entry.write) === retryIdentity(write) &&
             entry.settled &&
             (createLine ||
-              entry.lastPosition > (retryState?.lastPosition ?? ""))
+              (entry.automationId === automationId &&
+                entry.lastPosition > (retryState?.lastPosition ?? "")))
         );
         if (admitted) {
           client.log(
