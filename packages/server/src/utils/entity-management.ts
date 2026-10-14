@@ -8,7 +8,7 @@
 
 import { deriveToolActorSource } from './apply-context';
 import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
-import { attachEntityIdentities, identityMemberIdsSql, identityRootSql } from './entity-identity';
+import { attachEntityIdentities, identityMemberExistsSql, identityMemberIdsSql, identityRootSql } from './entity-identity';
 import { type EntityReadRestrictions, entityReadPolicySql, entityReadRestrictions, filterEntityReadRows } from '../authz/entity-read-policy';
 import type { EntityMetrics } from "@lobu/connector-sdk";
 import { classifyToolError, getErrorMessage, slugify } from "@lobu/core";
@@ -2045,25 +2045,37 @@ async function batchTotalContentCounts(
 	if (entityIds.length === 0) return counts;
 
 	// Conservative edge check: an entity with no live relationship at all is
-	// its own whole identity group. Anything with an edge keeps the full
-	// members CTE so ordinary relationships cannot group unrelated records.
+	// its own whole identity group. Anything with an edge walks the identity
+	// graph so ordinary relationships cannot group unrelated records.
 	const edgedRows = await db.unsafe<{ id: number | string }>(
 		`SELECT v.id FROM (VALUES ${entityIds.map((eid) => `(${eid})`).join(',')}) v(id)
      WHERE EXISTS (SELECT 1 FROM entity_relationships ir WHERE ir.from_entity_id = v.id AND ir.deleted_at IS NULL)
         OR EXISTS (SELECT 1 FROM entity_relationships ir WHERE ir.to_entity_id = v.id AND ir.deleted_at IS NULL)`,
 	);
-	const edged = new Set(edgedRows.map((row) => Number(row.id)));
+	// Resolve each edged entity's group once and reuse it for claims and events.
+	// A literal member array exposes its values to the planner; ARRAY(<walk>)
+	// can instead lead to an org-wide bitmap alongside the entity GIN probe.
+	const edgedIds = edgedRows.map((row) => Number(row.id));
+	const membersByEntity = new Map<number, number[]>(entityIds.map((eid) => [eid, [eid]]));
+	for (const eid of edgedIds) membersByEntity.set(eid, []);
+	if (edgedIds.length > 0) {
+		const memberRows = await db.unsafe<{ eid: number | string; member_id: number | string }>(
+			edgedIds
+				.map((eid) => `SELECT ${eid}::bigint AS eid, members.id AS member_id FROM (${identityMemberIdsSql(`${eid}::bigint`)}) members`)
+				.join('\nUNION ALL\n'),
+		);
+		for (const row of memberRows) membersByEntity.get(Number(row.eid))?.push(Number(row.member_id));
+	}
+	const membersSql = (eid: number) => `'${pgBigintArray(membersByEntity.get(eid) ?? [eid])}'::bigint[]`;
 
-	// Claims live on any group member, not just the listed root — expand
-	// through the identity graph exactly like the `ei.entity_id IN (...)`
-	// side of the legacy predicate, attributing member claims to the root.
-	// Edgeless entities probe their own id directly (same result, no CTE).
+	// Claims live on any group member, not just the listed root, attributed
+	// to the root.
 	const scopeRows = await db.unsafe<{ eid: number | string; namespace: unknown; identifier: unknown; scope_key: unknown }>(
 		entityIds
 			.map(
 				(eid) => `SELECT ${eid}::bigint AS eid, identity.namespace, identity.identifier, identity.scope_key
      FROM entity_identities identity
-     WHERE ${edged.has(eid) ? `identity.entity_id IN (${identityMemberIdsSql(`${eid}::bigint`)})` : `identity.entity_id = ${eid}`}
+     WHERE identity.entity_id = ANY(${membersSql(eid)})
        AND identity.deleted_at IS NULL
        AND identity.namespace = ANY('${pgTextArray([...STANDARD_IDENTITY_NAMESPACES])}'::text[])`,
 			)
@@ -2093,7 +2105,7 @@ async function batchTotalContentCounts(
 			entityIdLiteral: eid,
 			scopes: scopesByEntity.get(eid) ?? [],
 			baseParamIndex: params.length + 1,
-			directMembersSql: edged.has(eid) ? undefined : `ARRAY[${eid}::bigint]`,
+			directMembersSql: membersSql(eid),
 		});
 		params.push(...branchParams);
 		const probed = branches
@@ -2247,10 +2259,8 @@ export async function listEntities(
 			)
 			// Every predicate must hold on one member, including the authored segment.
 			// Append authored SQL after alias substitution so literal text is untouched.
-			.concat(memberConditions.length || segmentFilter ? [`EXISTS (
-        SELECT 1 FROM entities member WHERE member.id IN (${identityMemberIdsSql(`${eAlias}.id`)})
-          AND ${[...memberConditions, ...(segmentFilter ? [`member.id IN (${segmentFilter.sql})`] : [])].join(' AND ')}
-      )`] : [])
+			.concat(memberConditions.length || segmentFilter ? [identityMemberExistsSql(`${eAlias}.id`, 'member',
+				[...memberConditions, ...(segmentFilter ? [`member.id IN (${segmentFilter.sql})`] : [])].join(' AND '))] : [])
 			.join(" AND ");
 
 	const whereClause = renderWhere("e", "et");

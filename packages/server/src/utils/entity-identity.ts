@@ -2,18 +2,24 @@ import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
 import { type DbClient, pgBigintArray } from '../db/client';
 import { ToolUserError } from './errors';
 
-/** One edge predicate for every identity read; ordinary and ACL edges never group records. */
-function identityEdgesSql(entityAlias: string): string {
+/**
+ * One edge predicate for every identity read; ordinary and ACL edges never group records.
+ * Callers must pin an endpoint to `entityAlias.id`, so endpoint-to-endpoint
+ * organization/type equality also enforces equality with that entity.
+ * Keeping these predicates independent of the recursive member avoids giving
+ * the planner a correlated same-type scan as an alternative to endpoint probes.
+ */
+function identityEdgesSql(entityAlias: string, edgeSource = 'entity_relationships'): string {
   return `SELECT ir.from_entity_id, ir.to_entity_id
-    FROM entity_relationships ir
+    FROM ${edgeSource} ir
     JOIN entity_relationship_types it ON it.id = ir.relationship_type_id
     JOIN entities source ON source.id = ir.from_entity_id
     JOIN entities target ON target.id = ir.to_entity_id
     WHERE ir.organization_id = ${entityAlias}.organization_id AND ir.deleted_at IS NULL
-      AND it.organization_id = ${entityAlias}.organization_id AND it.purpose = 'identity'
+      AND it.organization_id = ir.organization_id AND it.purpose = 'identity'
       AND it.deleted_at IS NULL AND it.status = 'active'
-      AND source.organization_id = ${entityAlias}.organization_id AND target.organization_id = ${entityAlias}.organization_id
-      AND source.entity_type_id = ${entityAlias}.entity_type_id AND target.entity_type_id = ${entityAlias}.entity_type_id
+      AND source.organization_id = target.organization_id
+      AND source.entity_type_id = target.entity_type_id
       AND source.deleted_at IS NULL AND target.deleted_at IS NULL`;
 }
 
@@ -39,15 +45,36 @@ export function identityMembersCteBody(seedRef: string): string {
     UNION
     SELECT next.id, next.organization_id, next.entity_type_id
     FROM identity_members member
-    JOIN LATERAL (${identityEdgesSql('member')}) edge
-      ON member.id IN (edge.from_entity_id, edge.to_entity_id)
+    JOIN LATERAL (${identityEdgesSql('member', `(${incidentEdgesSql('member.id')})`)}) edge ON true
     JOIN entities next ON next.id = CASE WHEN edge.from_entity_id = member.id
       THEN edge.to_entity_id ELSE edge.from_entity_id END`;
 }
 
+/** Endpoint-indexable candidates; identityEdgesSql applies liveness and identity checks. */
+function incidentEdgesSql(memberId: string): string {
+  const columns = 'incident.organization_id, incident.relationship_type_id, incident.from_entity_id, incident.to_entity_id, incident.deleted_at';
+  return `SELECT ${columns} FROM entity_relationships incident WHERE incident.from_entity_id = ${memberId}
+      UNION ALL
+      SELECT ${columns} FROM entity_relationships incident WHERE incident.to_entity_id = ${memberId}`;
+}
+
+/**
+ * Correlated "any member of `entityRef`'s identity group satisfies
+ * `memberPredicate`" test, with `memberAlias` bound to each member row.
+ * The members CTE drives a primary-key probe per member; an
+ * `entities.id IN (<members>)` spelling lets the planner flatten it into a
+ * semi join against every entity row, re-running the CTE per pair.
+ */
+export function identityMemberExistsSql(entityRef: string, memberAlias: string, memberPredicate: string): string {
+  return `EXISTS (SELECT 1 FROM (${identityMemberIdsSql(entityRef)}) identity_member
+    JOIN entities ${memberAlias} ON ${memberAlias}.id = identity_member.id
+    WHERE ${memberPredicate})`;
+}
+
 export function identityRootIdSql(entityRef: string): string {
-  return `(SELECT root.id FROM entities root
-    WHERE root.id IN (${identityMemberIdsSql(entityRef)}) AND ${identityRootSql('root')})`;
+  return `(SELECT root.id FROM (${identityMemberIdsSql(entityRef)}) identity_member
+    JOIN entities root ON root.id = identity_member.id
+    WHERE ${identityRootSql('root')})`;
 }
 
 /** Enrich read candidates; callers retain their existing entity read-policy checks. */
