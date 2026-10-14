@@ -1320,7 +1320,9 @@ describe('device action queued behind a busy device', () => {
     expect(out.error_message).not.toContain('is busy');
   });
 
-  it('a caller whose wait ends first leaves the run queued behind a busy device', async () => {
+  it('a caller whose wait ends behind a busy device finalizes the run and names the blocker', async () => {
+    // The caller (run_sdk's wall clock, a reaction budget) can no longer
+    // receive a run id, so the run must not stay claimable and execute later.
     const busyRunId = await occupySlot(30);
     const queuedRunId = await queue();
     expect(await poll(0)).not.toHaveProperty('run_id');
@@ -1330,15 +1332,17 @@ describe('device action queued behind a busy device', () => {
     const out = await waitForDeviceActionRunWithOptions(queuedRunId, organizationId, {
       ...FAST_BUDGETS,
       abortSignal: controller.signal,
-      leaveQueuedBehindBusyDevice: true,
     });
 
-    expect(out).toMatchObject({ status: 'queued' });
-    expect(out.error_message).toContain(`run ${busyRunId} has been running for`);
-    expect((await runRow(queuedRunId)).status).toBe('pending');
+    expect(out.status).toBe('timeout');
+    expect(out.error_message).toContain('before any device claimed the run');
+    expect(out.error_message).toContain(`device "Busy Mac" is busy: run ${busyRunId} has been running for`);
+    expect((await runRow(queuedRunId)).status).toBe('timeout');
+    await getTestDb()`UPDATE runs SET status = 'completed' WHERE id = ${busyRunId}`;
+    expect(await poll(1)).not.toHaveProperty('run_id', queuedRunId);
   });
 
-  it('an execute call whose wait ends first returns the queued run id behind a busy device', async () => {
+  it('an execute call whose wait ends behind a busy device returns a timeout, never a later execution', async () => {
     const busyRunId = await occupySlot(30);
     const controller = new AbortController();
     controller.abort();
@@ -1347,15 +1351,14 @@ describe('device action queued behind a busy device', () => {
       { action: 'execute', connection_id: connectionId, operation_key: 'echo', input: {} },
       {} as Env,
       { ...toolCtx, abortSignal: controller.signal }
-    )) as { run_id: number; status: string; message?: string };
+    )) as { run_id: number; status: string; error_message?: string };
 
-    expect(out.status).toBe('in_progress');
-    expect(out.message).toContain(`device "Busy Mac" is busy: run ${busyRunId}`);
-    expect(out.message).toContain(`operations.getRun(${out.run_id})`);
-    expect((await runRow(out.run_id)).status).toBe('pending');
+    expect(out.status).toBe('timeout');
+    expect(out.error_message).toContain(`run ${busyRunId} has been running for`);
+    expect((await runRow(out.run_id)).status).toBe('timeout');
   });
 
-  it('a caller whose wait ends first still finalizes a run for an idle device', async () => {
+  it('a caller whose wait ends for an idle device keeps the plain abort message', async () => {
     const queuedRunId = await queue();
     const controller = new AbortController();
     controller.abort();
@@ -1363,11 +1366,11 @@ describe('device action queued behind a busy device', () => {
     const out = await waitForDeviceActionRunWithOptions(queuedRunId, organizationId, {
       ...FAST_BUDGETS,
       abortSignal: controller.signal,
-      leaveQueuedBehindBusyDevice: true,
     });
 
     expect(out.status).toBe('timeout');
-    expect(out.error_message).toContain('before any device claimed the run');
+    expect(out.error_message).toMatch(/before any device claimed the run\.$/);
+    expect(out.error_message).not.toContain('is busy');
     expect((await runRow(queuedRunId)).status).toBe('timeout');
   });
 });

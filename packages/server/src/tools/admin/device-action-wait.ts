@@ -224,16 +224,6 @@ interface DeviceActionRunOutcome {
   error_message?: string;
 }
 
-/**
- * The caller's wait ended before any device claimed the run, but its target
- * device is busy executing other work: the run stays queued and remains
- * eligible for pickup within its claim horizon.
- */
-interface QueuedBehindBusyDevice {
-  status: 'queued';
-  error_message: string;
-}
-
 interface WaitForDeviceActionRunOptions {
   queueMs: number;
   /**
@@ -250,13 +240,6 @@ interface WaitForDeviceActionRunOptions {
    */
   sleep?: (ms: number) => Promise<void>;
   abortSignal?: AbortSignal;
-  /**
-   * When the caller's wait ends before any claim and the target device is
-   * busy, leave the run queued and return {@link QueuedBehindBusyDevice}
-   * instead of finalizing it. Only for callers that can hand the run id back
-   * for a later read; source reads and delegated browser steps cannot.
-   */
-  leaveQueuedBehindBusyDevice?: boolean;
 }
 
 export function waitForDeviceActionRun(
@@ -278,45 +261,17 @@ export function waitForDeviceActionRun(
 }
 
 /**
- * {@link waitForDeviceActionRun} for a caller that returns the run id when its
- * own wait ends first: a run queued behind a busy device stays queued.
- */
-export function waitForDeviceActionRunOrQueued(
-  runId: number,
-  organizationId: string,
-  abortSignal?: AbortSignal
-): Promise<DeviceActionRunOutcome | QueuedBehindBusyDevice> {
-  return waitForDeviceActionRunWithOptions(runId, organizationId, {
-    queueMs: DEVICE_ACTION_QUEUE_BUDGET_MS,
-    postClaimMs: POST_CLAIM_BUDGET_MS,
-    pollMs: POLL_MS,
-    abortSignal,
-    leaveQueuedBehindBusyDevice: true,
-  });
-}
-
-/**
  * The waiter itself, with its budgets and timing boundary supplied by the
  * caller. Tests use it to shrink the budgets — and, for the phase switch, to
  * drive the clock — while running the same database reads and timeout
  * finalization as production. Runtime callers should use
  * {@link waitForDeviceActionRun}, which supplies the production budgets.
  */
-export function waitForDeviceActionRunWithOptions(
-  runId: number,
-  organizationId: string,
-  options: WaitForDeviceActionRunOptions & { leaveQueuedBehindBusyDevice: true }
-): Promise<DeviceActionRunOutcome | QueuedBehindBusyDevice>;
-export function waitForDeviceActionRunWithOptions(
-  runId: number,
-  organizationId: string,
-  options: WaitForDeviceActionRunOptions
-): Promise<DeviceActionRunOutcome>;
 export async function waitForDeviceActionRunWithOptions(
   runId: number,
   organizationId: string,
   options: WaitForDeviceActionRunOptions
-): Promise<DeviceActionRunOutcome | QueuedBehindBusyDevice> {
+): Promise<DeviceActionRunOutcome> {
   const sql = getDb();
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => sleepUnlessAborted(ms, options.abortSignal));
@@ -377,26 +332,20 @@ export async function waitForDeviceActionRunWithOptions(
     }
     // Caller aborted (e.g. reaction timeout) — stop polling and let the
     // timeout finalization below mark the run, so we don't leak this loop.
+    // The run is still finalized: a caller whose wait ended (run_sdk's wall
+    // clock, a reaction budget) can no longer receive a run id, so leaving the
+    // run claimable would let a cancelled operation execute unobserved. When a
+    // busy device is why nothing claimed it, the message names the blocking run.
     if (options.abortSignal?.aborted) {
-      if (
-        options.leaveQueuedBehindBusyDevice &&
-        claimedAtMs == null &&
-        row.claim_horizon_open
-      ) {
-        const device = await describeRunDevice(runId, organizationId);
-        if (device.busy) {
-          return {
-            status: 'queued',
-            error_message: `Run ${runId} is still queued: ${device.text}.`,
-          };
-        }
-      }
       const phase =
         claimedAtMs == null
           ? 'before any device claimed the run'
           : 'while the device was executing';
       const waitedMs = Math.max(0, now() - waitStartedAtMs);
-      callerAbortMessage = `Run ${runId}: caller cancelled the wait or reached its deadline after ${waitedMs}ms, ${phase}.`;
+      const device =
+        claimedAtMs == null ? await describeRunDevice(runId, organizationId) : null;
+      const blocker = device?.busy ? ` (${device.text})` : '';
+      callerAbortMessage = `Run ${runId}: caller cancelled the wait or reached its deadline after ${waitedMs}ms, ${phase}${blocker}.`;
       break;
     }
     const currentTimeMs = now();

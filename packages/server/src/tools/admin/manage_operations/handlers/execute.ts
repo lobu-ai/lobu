@@ -66,7 +66,7 @@ import { requestSourceAttribution } from "../../../../worker-api/device-source-a
 import { resolveRunInitiator } from "../../../initiator";
 import type { ToolContext } from "../../../registry";
 import { getOrgUrlContext } from "../../../view-urls";
-import { waitForDeviceActionRunOrQueued } from "../../device-action-wait";
+import { waitForDeviceActionRun } from "../../device-action-wait";
 import {
 	type ConnectionRow,
 	type InlineExecutionResult,
@@ -1069,22 +1069,12 @@ export async function handleExecute(
 					}
 				: replayExistingOperationRun(claim, operation.name, ctx);
 		}
-		const result = await waitForDeviceActionRunOrQueued(
+		const result = await waitForDeviceActionRun(
 			runId,
 			ctx.organizationId,
 			ctx.abortSignal,
 		);
 		await trackOperationReaction(runId);
-		if (result.status === "queued") {
-			// This caller's wait ended while the selected device was busy with
-			// other work; the run stays queued for its next free slot.
-			return {
-				action: "execute",
-				run_id: runId,
-				status: "in_progress",
-				message: `${result.error_message} Read operations.getRun(${runId}) for its result.`,
-			};
-		}
 		if (result.status === "completed") {
 			return {
 				action: "execute",
