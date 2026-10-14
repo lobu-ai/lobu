@@ -95,8 +95,8 @@ Implications, by design:
   share one connection, unpinned when several serve it. In a team workspace every device gets its
   own connection, pinned to it: the pin decides where work runs, `created_by` and `visibility`
   decide who sees and uses it, and an unpinned team device connection is never claimed by a device.
-  A team device whose version is behind the workspace's definition has its connection paused with
-  an "Update Lobu on this device" reason until it catches up. Only a connection's creator can share
+  A team device whose version is behind the workspace's definition cannot claim that version's
+  work until it catches up; connection and feed status are never changed for it. Only a connection's creator can share
   it with the workspace (`manage_connections` `update` with `visibility: 'org'`), which never
   changes where it runs; a personal-credential connection can never be widened.
 - **Page-visit drafts follow current placement.** A Chrome device sees and activates drafts in its

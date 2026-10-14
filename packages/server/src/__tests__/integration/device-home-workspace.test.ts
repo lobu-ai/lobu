@@ -11,7 +11,8 @@
  *   - a Devices-page move (`PATCH /api/me/devices/:id`) invalidates the old pin
  *     and the next poll wires the new home; page activation follows the move.
  *   - team work runs only on the device a connection is pinned to, and a
- *     device behind the workspace's version is paused until it catches up.
+ *     device behind the workspace's version gets none of that version's work
+ *     until it catches up; nothing is paused for it.
  */
 
 import { Hono } from 'hono';
@@ -20,9 +21,6 @@ import { DEVICE_MANIFESTS_BY_PLATFORM } from '@lobu/connector-worker/daemon/devi
 import type { AuthInfo } from '../../auth/oauth/types';
 import { generateSecureToken, hashToken } from '../../auth/oauth/utils';
 import type { Env } from '../../index';
-import { manageConnections } from '../../tools/admin/manage_connections';
-import type { ToolContext } from '../../tools/registry';
-import { initWorkspaceProvider } from '../../workspace';
 import { mintDeviceChildToken, updateDeviceWorkerOrg } from '../../worker-api/device-management';
 import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
 import { activatePageRun } from '../../worker-api/page-activation';
@@ -385,9 +383,6 @@ describe('device home workspace chosen at pairing', () => {
     const NEW = String(OS_SHELL_MANIFEST.version);
     const DECLARED_FEED = { feeds_schema: { items: { name: 'Items', operations: ['sync'] } } };
     const OLD = '0.0.1';
-    const reason =
-      `Update Lobu on this device to use ${String(OS_SHELL_MANIFEST.name)} in Team: ` +
-      `this workspace runs version ${NEW}, your device has ${OLD}.`;
 
     /** Alice runs the OLDER extension and Bob the NEWER, both homed in Team. */
     async function teamOfTwo() {
@@ -454,6 +449,31 @@ describe('device home workspace chosen at pairing', () => {
             device_worker_id: string | null;
             active_feeds: number;
           }>,
+        /** Runs the scheduler creates for Alice's due feed when her device polls. */
+        aliceScheduledRuns: async () => {
+          const device = await deviceRow(alice.userId, 'old-box');
+          const [own] = await ctx.connectionsOf(alice.userId);
+          await sql`
+            UPDATE feeds SET next_run_at = NOW() - INTERVAL '5 minutes'
+            WHERE connection_id = ${own.id} AND deleted_at IS NULL
+          `;
+          await sql`DELETE FROM runs WHERE connection_id = ${own.id}`;
+          const claimContext: DueFeedClaimContext = {
+            isUserScopedWorker: true,
+            deviceWorkerId: device.id,
+            workerPlatform: 'headless',
+            authorizedCapabilities: ['os.shell'],
+            capabilityMatchSet: ['os.shell'],
+            manifestClaimAuthorizations: await reconcileDeviceCapabilities(alice.userId, device.id),
+            allowLegacyManifestCapabilityClaims: false,
+            orgScopeIds: [teamOrgId],
+            baseOrgScopeIds: [teamOrgId],
+            workerHardensDbEgress: false,
+            workerSupportsHttpAuth: false,
+            backendCapacity: { compiled_connector: 1 },
+          };
+          return (await materializeDueFeeds({} as Env, sql, { claimContext })).runsCreated;
+        },
         /** Claim authorizations Alice's device gets for the workspace's version. */
         aliceClaimsOnNew: async () => {
           const device = await deviceRow(alice.userId, 'old-box');
@@ -467,20 +487,25 @@ describe('device home workspace chosen at pairing', () => {
     type Team = Awaited<ReturnType<typeof teamOfTwo>>;
 
     /**
-     * Row 4: Alice's one connection is pinned, paused with the reason, unclaimable.
-     * Only the connection is paused (the scheduler skips a paused connection's
-     * feeds), so feed states stay as the user left them.
+     * Row 4: nothing about the version gap is written. An existing connection
+     * keeps its pin and `status`; a device that never had one gets none until
+     * it catches up. Either way her device gets no claim for the workspace's
+     * version.
      */
-    async function expectAliceUpgradePaused(team: Team) {
+    async function expectAliceBehind(team: Team, status: 'active' | 'paused' | 'none' = 'active') {
       const device = await deviceRow(team.alice.userId, 'old-box');
-      expect(await team.connectionsOf(team.alice.userId)).toEqual([
-        expect.objectContaining({
-          status: 'paused',
-          error_message: reason,
-          visibility: 'private',
-          device_worker_id: device.id,
-        }),
-      ]);
+      expect(await team.connectionsOf(team.alice.userId)).toEqual(
+        status === 'none'
+          ? []
+          : [
+              expect.objectContaining({
+                status,
+                error_message: null,
+                visibility: 'private',
+                device_worker_id: device.id,
+              }),
+            ]
+      );
       expect(await team.installed()).toBe(NEW);
       expect(await team.aliceClaimsOnNew()).toEqual([]);
     }
@@ -497,40 +522,41 @@ describe('device home workspace chosen at pairing', () => {
         },
       ],
       [
-        'row 2 then 4 — older first: a newer device advances it; the older member pauses on her own reconcile',
+        'row 2 then 4 — older first: a newer device advances it; the older device keeps its connection but its scheduled work waits',
         async (team) => {
-          await team.aliceOld();
-          await team.seedFeed(team.alice.userId);
-          await team.bobNew();
+          await team.aliceOldFeed();
+          expect(await team.aliceScheduledRuns()).toBe(1);
+          await team.bobNewFeed();
           expect(await team.installed()).toBe(NEW);
           expect(await team.connectionsOf(team.bob.userId)).toEqual([
             expect.objectContaining({ status: 'active', error_message: null }),
           ]);
-          // Bob's reconcile never touches Alice's row.
+          await team.aliceOldFeed();
+          await expectAliceBehind(team);
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
-            expect.objectContaining({ status: 'active', error_message: null, active_feeds: 1 }),
+            expect.objectContaining({ active_feeds: 1 }),
           ]);
-          await team.aliceOld();
-          await expectAliceUpgradePaused(team);
+          expect(await team.aliceScheduledRuns()).toBe(0);
         },
       ],
       [
-        'row 3 — the device reaches the installed version: the same connection resumes, reason cleared',
+        'row 3 — the device reaches the installed version: the same connection runs again, nothing to clear',
         async (team) => {
-          await team.aliceOld();
-          await team.seedFeed(team.alice.userId);
-          await team.bobNew();
-          await team.aliceOld();
-          const [paused] = await team.connectionsOf(team.alice.userId);
-          await team.aliceNew();
+          await team.aliceOldFeed();
+          await team.bobNewFeed();
+          await team.aliceOldFeed();
+          const [behind] = await team.connectionsOf(team.alice.userId);
+          expect(await team.aliceScheduledRuns()).toBe(0);
+          await team.aliceNewFeed();
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
-            expect.objectContaining({ id: paused.id, status: 'active', error_message: null, active_feeds: 1 }),
+            expect.objectContaining({ id: behind.id, status: 'active', error_message: null, active_feeds: 1 }),
           ]);
           expect(await team.installed()).toBe(NEW);
+          expect(await team.aliceScheduledRuns()).toBe(1);
         },
       ],
       [
-        'row 4 then 3 — a manual pause survives the upgrade: nothing the user turned off is resumed',
+        "row 4 then 3 — the user's own pauses survive being behind and the upgrade",
         async (team) => {
           await team.aliceOldFeed();
           const [own] = await team.connectionsOf(team.alice.userId);
@@ -538,8 +564,8 @@ describe('device home workspace chosen at pairing', () => {
             SELECT id, status FROM feeds WHERE connection_id = ${own.id} AND feed_key = 'items' AND deleted_at IS NULL
           `) as unknown as Array<{ id: number; status: string }>;
           expect(declared).toEqual([expect.objectContaining({ status: 'active' })]);
-          // Alice turned the declared feed off herself while the connection was active.
           await team.sql`UPDATE feeds SET status = 'paused' WHERE id = ${declared[0].id}`;
+          await team.sql`UPDATE connections SET status = 'paused' WHERE id = ${own.id}`;
           const feedStatus = async () =>
             ((await team.sql`SELECT status FROM feeds WHERE id = ${declared[0].id}`) as unknown as Array<{
               status: string;
@@ -547,16 +573,7 @@ describe('device home workspace chosen at pairing', () => {
 
           await team.bobNewFeed();
           await team.aliceOldFeed();
-          await expectAliceUpgradePaused(team);
-          await team.aliceNewFeed();
-          expect(await team.connectionsOf(team.alice.userId)).toEqual([
-            expect.objectContaining({ id: own.id, status: 'active', error_message: null }),
-          ]);
-          expect(await feedStatus()).toBe('paused');
-
-          // A connection Alice paused herself is never stamped, so the device check leaves it off.
-          await team.sql`UPDATE connections SET status = 'paused' WHERE id = ${own.id}`;
-          await team.aliceOldFeed();
+          await expectAliceBehind(team, 'paused');
           await team.aliceNewFeed();
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
             expect.objectContaining({ id: own.id, status: 'paused', error_message: null }),
@@ -565,45 +582,17 @@ describe('device home workspace chosen at pairing', () => {
         },
       ],
       [
-        'row 4 — a pause made while upgrade-paused survives the upgrade; a resume is re-paused until it',
+        'row 4 then 3 — newer first: an older device gets no connection until it catches up, then one',
         async (team) => {
-          await initWorkspaceProvider();
-          const memberCtx = {
-            organizationId: team.teamOrgId, userId: team.alice.userId, memberRole: 'member',
-            agentId: null, isAuthenticated: true, clientId: null,
-            scopes: ['mcp:read', 'mcp:write'], tokenType: 'oauth', scopedToOrg: true, allowCrossOrg: false,
-          } as ToolContext;
-          const setStatus = async (connectionId: number, status: 'active' | 'paused') => {
-            const res = await manageConnections(
-              { action: 'update', connection_id: connectionId, status }, {} as Env, memberCtx
-            );
-            expect(res).not.toHaveProperty('error');
-          };
           await team.bobNew();
           await team.aliceOld();
-          await expectAliceUpgradePaused(team);
-          const [own] = await team.connectionsOf(team.alice.userId);
-
-          await setStatus(own.id, 'active');
+          await expectAliceBehind(team, 'none');
           await team.aliceOld();
-          await expectAliceUpgradePaused(team);
-
-          await setStatus(own.id, 'paused');
+          await expectAliceBehind(team, 'none');
           await team.aliceNew();
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
-            expect.objectContaining({ id: own.id, status: 'paused', error_message: null }),
+            expect.objectContaining({ status: 'active', error_message: null, visibility: 'private' }),
           ]);
-        },
-      ],
-      [
-        'row 4 — newer first: an older device pairs into an upgrade-pending connection, never duplicated',
-        async (team) => {
-          await team.bobNew();
-          await team.aliceOld();
-          await expectAliceUpgradePaused(team);
-          const before = await team.connectionsOf(team.alice.userId);
-          await team.aliceOld();
-          expect(await team.connectionsOf(team.alice.userId)).toEqual(before);
         },
       ],
       [
@@ -612,7 +601,7 @@ describe('device home workspace chosen at pairing', () => {
           await team.bobNew();
           await team.sql`DELETE FROM device_workers WHERE user_id = ${team.bob.userId}`;
           await team.aliceOld();
-          await expectAliceUpgradePaused(team);
+          await expectAliceBehind(team, 'none');
         },
       ],
       [
@@ -622,7 +611,7 @@ describe('device home workspace chosen at pairing', () => {
           const bobDevice = await deviceRow(team.bob.userId, 'new-box');
           await moveDevice(team.bob.userId, bobDevice.id, team.bob.personalOrgId);
           await team.aliceOld();
-          await expectAliceUpgradePaused(team);
+          await expectAliceBehind(team, 'none');
         },
       ],
       [
@@ -631,24 +620,20 @@ describe('device home workspace chosen at pairing', () => {
           await team.bobNew();
           await team.bobLastSeen('8 days');
           await team.aliceOld();
-          await expectAliceUpgradePaused(team);
+          await expectAliceBehind(team, 'none');
         },
       ],
       [
-        'row 5 + 7 — the device stops advertising: the connection pauses (feeds untouched) and resumes; the definition is neither changed nor archived',
+        'row 5 + 7 — the device stops advertising: connection and feeds unchanged, nothing scheduled; the definition is neither changed nor archived',
         async (team) => {
           await team.aliceOld();
           await team.seedFeed(team.alice.userId);
           await team.aliceNone();
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
-            expect.objectContaining({
-              status: 'paused',
-              error_message: `${String(OS_SHELL_MANIFEST.name)} is no longer offered by this device.`,
-              active_feeds: 1,
-            }),
+            expect.objectContaining({ status: 'active', error_message: null, active_feeds: 1 }),
           ]);
           expect(await team.installed()).toBe(OLD);
-          // Offering it again resumes the same connection.
+          // Offering it again changes nothing either.
           await team.aliceOld();
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
             expect.objectContaining({ status: 'active', error_message: null, active_feeds: 1 }),
@@ -656,19 +641,19 @@ describe('device home workspace chosen at pairing', () => {
         },
       ],
       [
-        'row 6 — the newer device goes offline then stale: nothing downgrades or resumes',
+        'row 6 — the newer device goes offline then stale: nothing downgrades',
         async (team) => {
           await team.bobNew();
           await team.aliceOld();
           await team.bobLastSeen('10 minutes');
           await team.aliceOld();
-          await expectAliceUpgradePaused(team);
+          await expectAliceBehind(team, 'none');
           await team.bobLastSeen('8 days');
           await team.aliceOld();
-          await expectAliceUpgradePaused(team);
+          await expectAliceBehind(team, 'none');
           // Bob's device returning changes nothing either.
           await team.bobNew();
-          await expectAliceUpgradePaused(team);
+          await expectAliceBehind(team, 'none');
           expect(await team.connectionsOf(team.bob.userId)).toEqual([
             expect.objectContaining({ status: 'active', error_message: null }),
           ]);
