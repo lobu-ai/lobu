@@ -69,10 +69,14 @@ type Change =
     };
 
 const LIST = "Lobu";
-// Recent creates of any status, plus unsettled creates and failures of any
-// age. A completed create older than this is already in the agent's live read.
-const RECENT_CREATE_MS = 2 * 24 * 60 * 60 * 1000;
+// Recent writes of any status, plus unsettled writes and failures of any age.
+// Older runs retain admission and failure accounting, but cannot trigger retries.
+const RECENT_MS = 2 * 24 * 60 * 60 * 1000;
+const ACTIVE = ["pending", "running", "claimed"];
 const TERMINAL = ["failed", "timeout", "cancelled"];
+// A write is retried until it has failed this many times.
+const MAX_ATTEMPTS = 3;
+const OPERATIONS = ["create_reminder", "complete_reminder", "update_reminder"];
 
 export function marker(key: Key): string {
   return `lobu:${key.source_scope}|${key.source_origin_id}|${key.task_key}`;
@@ -98,21 +102,78 @@ function digest(text: string): string {
   );
 }
 
-type CreateHistory = Map<string, { active: boolean; failed: number }>;
+// Stored inputs come back as jsonb, which does not keep key order.
+function canonical(input: Record<string, unknown>): string {
+  return JSON.stringify(
+    Object.keys(input)
+      .sort()
+      .map((key) => [key, input[key]])
+  );
+}
 
-async function readCreateHistory(
+type Write = {
+  operation: string;
+  input: Record<string, unknown>;
+  // The window run that proposed the write.
+  parentRunId: number;
+};
+
+function markerOf(write: Write): string | undefined {
+  if (write.operation !== "create_reminder") return undefined;
+  const notes = write.input.notes;
+  const line = typeof notes === "string" ? notes.split("\n").at(-1) : undefined;
+  return line?.startsWith("lobu:") ? line : undefined;
+}
+
+// Retries retain the same desired input even when a new window dispatches them.
+function retryIdentity(write: Write): string {
+  return markerOf(write) ?? `${write.operation}|${canonical(write.input)}`;
+}
+
+// Creates share admission across windows; other writes belong to their window.
+function identity(write: Write): string {
+  return markerOf(write) ?? `${write.parentRunId}|${retryIdentity(write)}`;
+}
+
+// Each terminal failure moves a write to a fresh key so it can be retried.
+function idempotencyKey(connectionId: number, write: Write, failed: number) {
+  const createLine = markerOf(write);
+  return createLine
+    ? `task-reminders:create:${connectionId}:${digest(createLine)}:${failed}`
+    : `task-reminders:${write.operation}:${connectionId}:${write.parentRunId}:${digest(identity(write))}:${failed}`;
+}
+
+type Attempts = {
+  write: Write;
+  automationId: number | null;
+  // A run is pending, running, claimed or completed.
+  settled: boolean;
+  failed: number;
+  lastStatus: string;
+  lastPosition: string;
+};
+
+type History = {
+  writes: Map<string, Attempts>;
+  // The newest attempt on each reminder, including cancellations.
+  touched: Map<string, string>;
+};
+
+async function readHistory(
   client: ReactionClient,
   connectionId: number
-): Promise<CreateHistory> {
-  const createdAfter = new Date(Date.now() - RECENT_CREATE_MS).toISOString();
+): Promise<History> {
+  const createdAfter = new Date(Date.now() - RECENT_MS).toISOString();
   const filters = [
     { created_after: createdAfter },
-    ...["pending", "running", "claimed", ...TERMINAL].map((status) => ({
+    ...[...ACTIVE, ...TERMINAL].map((status) => ({
       status,
       created_before: createdAfter,
     })),
   ];
-  const history: CreateHistory = new Map();
+  const writes = new Map<string, Attempts>();
+  const touched = new Map<string, string>();
+  const failures = new Map<string, number>();
   // A run can match two filters, and runs created mid-scan must not shift
   // pages, so pages follow the (created_at, id) keyset and each run counts once.
   const seen = new Set<string>();
@@ -121,23 +182,57 @@ async function readCreateHistory(
     for (;;) {
       const page = await client.operations.listRuns({
         connection_id: connectionId,
-        operation_key: "create_reminder",
         ...filter,
         ...cursor,
         limit: 200,
       });
       for (const run of page.runs) {
         const id = String(run.id);
-        if (seen.has(id)) continue;
+        const operation = String(run.operation_key);
+        if (seen.has(id) || !OPERATIONS.includes(operation)) continue;
         seen.add(id);
-        const notes = (run.input as { notes?: unknown } | null)?.notes;
-        const line =
-          typeof notes === "string" ? notes.split("\n").at(-1) : undefined;
-        if (!line?.startsWith("lobu:")) continue;
-        const entry = history.get(line) ?? { active: false, failed: 0 };
-        if (TERMINAL.includes(String(run.status))) entry.failed++;
-        else entry.active = true;
-        history.set(line, entry);
+        const input = run.input as Record<string, unknown> | null;
+        if (!input) continue;
+        const write: Write = {
+          operation,
+          input,
+          parentRunId: Number(run.parent_run_id ?? 0),
+        };
+        // A create is identified by its marker; any other write by the window
+        // run that proposed it.
+        if (
+          operation === "create_reminder"
+            ? !markerOf(write)
+            : !write.parentRunId
+        )
+          continue;
+        const status = String(run.status);
+        const position = `${run.created_at}|${id.padStart(20, "0")}`;
+        const key = identity(write);
+        const entry = writes.get(key) ?? {
+          write,
+          automationId:
+            run.automation_id == null ? null : Number(run.automation_id),
+          settled: false,
+          failed: 0,
+          lastStatus: status,
+          lastPosition: position,
+        };
+        if (TERMINAL.includes(status)) {
+          const retryKey = `${run.automation_id ?? null}|${retryIdentity(write)}`;
+          failures.set(retryKey, (failures.get(retryKey) ?? 0) + 1);
+        } else entry.settled = true;
+        if (position > entry.lastPosition) {
+          entry.lastPosition = position;
+          entry.lastStatus = status;
+        }
+        writes.set(key, entry);
+        const origin = input.origin_id;
+        if (
+          typeof origin === "string" &&
+          position > (touched.get(origin) ?? "")
+        )
+          touched.set(origin, position);
       }
       const last = page.runs.at(-1);
       if (!page.has_more || !last) break;
@@ -147,7 +242,60 @@ async function readCreateHistory(
       };
     }
   }
-  return history;
+  // A retry is server-attributed to its current window, not to the hint in
+  // automation_source. Count identical inputs across those window parents.
+  for (const attempts of writes.values()) {
+    attempts.failed =
+      failures.get(
+        `${attempts.automationId}|${retryIdentity(attempts.write)}`
+      ) ?? 0;
+  }
+  return { writes, touched };
+}
+
+function writeOf(change: Change, parentRunId: number): Write {
+  if (change.action === "create") {
+    // The marker is one notes line split on "|", so a key part holding
+    // either would be misread by later runs.
+    if (
+      Object.values(change.key).some((part) =>
+        ["|", "\n", "\r"].some((separator) => part.includes(separator))
+      )
+    )
+      throw new Error("Reminder source key contains a marker separator");
+    if (!change.title.trim()) throw new Error("Reminder title is blank");
+    const line = marker(change.key);
+    if (line.length > 4000)
+      throw new Error("Reminder source marker exceeds the notes limit");
+    const notes = change.notes
+      ?.trim()
+      .slice(0, Math.max(0, 4000 - line.length - 2));
+    return {
+      operation: "create_reminder",
+      parentRunId,
+      input: {
+        title: change.title.replace(/\s+/g, " ").trim().slice(0, 500),
+        notes: [notes, line].filter(Boolean).join("\n\n"),
+        list: LIST,
+        ...(change.due ? { due: change.due } : {}),
+      },
+    };
+  }
+  if (change.action === "complete")
+    return {
+      operation: "complete_reminder",
+      parentRunId,
+      input: { origin_id: change.origin_id },
+    };
+  return {
+    operation: "update_reminder",
+    parentRunId,
+    input: {
+      origin_id: change.origin_id,
+      ...(change.title ? { title: change.title } : {}),
+      ...(change.due !== undefined ? { due: change.due } : {}),
+    },
+  };
 }
 
 export default async function applyReminderChanges(
@@ -156,8 +304,6 @@ export default async function applyReminderChanges(
 ): Promise<void> {
   const changes = (ctx.extracted_data as unknown as { changes: Change[] })
     .changes;
-  if (changes.length === 0) return;
-
   const connections = (await client.query(
     "SELECT id FROM connections WHERE connector_key = 'apple.reminders' AND deleted_at IS NULL ORDER BY id LIMIT 2"
   )) as Array<{ id: number }>;
@@ -167,91 +313,119 @@ export default async function applyReminderChanges(
     );
   }
   const connectionId = Number(connections[0].id);
+  const automationId = Number(ctx.window.automation_id);
   const source = {
-    automation_id: Number(ctx.window.automation_id),
+    automation_id: automationId,
     run_id: Number(ctx.window.run_id),
   };
+  const history = await readHistory(client, connectionId);
 
-  const history = changes.some((change) => change.action === "create")
-    ? await readCreateHistory(client, connectionId)
-    : new Map();
-  const queued = new Set<string>();
+  // Writes are queued, and the Mac and any approval finish after the reaction
+  // that queued them. Each reaction, including one with no changes, retries
+  // this Automation's recent writes that have since failed. Cancellations and
+  // superseded writes must not be retried.
+  const writes: Write[] = [];
+  const retryAfter = new Date(Date.now() - RECENT_MS).toISOString();
+  for (const attempts of history.writes.values()) {
+    if (
+      attempts.automationId !== automationId ||
+      attempts.settled ||
+      attempts.lastStatus === "cancelled" ||
+      // Older completions are outside the read horizon, so an older failure
+      // cannot safely be retried: a later successful write may supersede it.
+      attempts.lastPosition < retryAfter ||
+      changes.some(
+        (change) =>
+          change.action !== "create" &&
+          change.origin_id === attempts.write.input.origin_id
+      )
+    )
+      continue;
+    writes.push(attempts.write);
+  }
 
   const failures: string[] = [];
   for (const [index, change] of changes.entries()) {
     try {
-      let operation: string;
-      let input: Record<string, unknown>;
-      let createLine: string | undefined;
-      if (change.action === "create") {
-        // The marker is one notes line split on "|", so a key part holding
-        // either would be misread by later runs.
-        if (
-          Object.values(change.key).some((part) =>
-            ["|", "\n", "\r"].some((separator) => part.includes(separator))
-          )
-        )
-          throw new Error("Reminder source key contains a marker separator");
-        if (!change.title.trim()) throw new Error("Reminder title is blank");
-        const line = marker(change.key);
-        if (queued.has(line) || history.get(line)?.active) {
-          client.log(`Skipped a reminder already being created: ${line}`);
-          continue;
-        }
-        queued.add(line);
-        createLine = line;
-        if (line.length > 4000)
-          throw new Error("Reminder source marker exceeds the notes limit");
-        const notes = change.notes
-          ?.trim()
-          .slice(0, Math.max(0, 4000 - line.length - 2));
-        operation = "create_reminder";
-        input = {
-          title: change.title.replace(/\s+/g, " ").trim().slice(0, 500),
-          notes: [notes, line].filter(Boolean).join("\n\n"),
-          list: LIST,
-          ...(change.due ? { due: change.due } : {}),
-        };
-      } else if (change.action === "complete") {
-        operation = "complete_reminder";
-        input = { origin_id: change.origin_id };
-      } else {
-        operation = "update_reminder";
-        input = {
-          origin_id: change.origin_id,
-          ...(change.title ? { title: change.title } : {}),
-          ...(change.due !== undefined ? { due: change.due } : {}),
-        };
+      writes.push(writeOf(change, source.run_id));
+    } catch (error) {
+      failures.push(
+        `Change ${index}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  const queued = new Set<string>();
+  for (const write of writes) {
+    const key = identity(write);
+    const attempts = history.writes.get(key);
+    const createLine = markerOf(write);
+    const retryKey = retryIdentity(write);
+    const related = [...history.writes.values()].filter(
+      (entry) =>
+        entry.automationId === automationId &&
+        retryIdentity(entry.write) === retryKey
+    );
+    const retryState = related.reduce<Attempts | undefined>(
+      (latest, entry) =>
+        !latest || entry.lastPosition > latest.lastPosition ? entry : latest,
+      undefined
+    );
+    if (queued.has(retryKey) || (createLine && attempts?.settled)) {
+      if (createLine)
+        client.log(`Skipped a reminder already being created: ${createLine}`);
+      continue;
+    }
+    if (retryState) {
+      if (retryState.lastStatus === "cancelled") continue;
+      if (retryState.failed >= MAX_ATTEMPTS) {
+        client.log(
+          `Gave up on ${write.operation} after ${retryState.failed} failures`,
+          {
+            parent_run_id: write.parentRunId,
+          }
+        );
+        continue;
       }
-      // Queued, not awaited: the Mac and any approval finish after this reaction.
-      // A create's key is shared by every run proposing the same source, so the
-      // server admits one of any concurrent creates; each terminal failure moves
-      // it to a fresh key so the action can be retried. Completing or updating
-      // to the same values twice changes nothing, so those writes carry no key
-      // and a retried reaction simply sends them again.
-      const idempotencyKey = createLine
-        ? `task-reminders:create:${connectionId}:${digest(createLine)}:${history.get(createLine)?.failed ?? 0}`
-        : undefined;
+    }
+    if (attempts) {
+      const origin = write.input.origin_id;
+      if (
+        typeof origin === "string" &&
+        (history.touched.get(origin) ?? "") > attempts.lastPosition
+      )
+        continue;
+    }
+    queued.add(retryKey);
+    try {
       let result: Awaited<ReturnType<ReactionClient["operations"]["execute"]>>;
       try {
         result = await client.operations.execute({
           connection_id: connectionId,
-          operation_key: operation,
-          input,
-          ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+          operation_key: write.operation,
+          input: write.input,
+          idempotency_key: idempotencyKey(
+            connectionId,
+            write,
+            retryState?.failed ?? 0
+          ),
           automation_source: source,
           background: true,
         });
       } catch (error) {
-        // Another run holding the same create key is refused here. Its create
-        // is then in the history, which is the record of what already exists.
-        if (
-          createLine &&
-          (await readCreateHistory(client, connectionId)).get(createLine)
-            ?.active
-        ) {
+        // Admission may race another window. A matching newer queued write
+        // satisfies this retry even though its trusted parent differs.
+        const latest = await readHistory(client, connectionId);
+        const admitted = [...latest.writes.values()].some(
+          (entry) =>
+            retryIdentity(entry.write) === retryIdentity(write) &&
+            entry.settled &&
+            (createLine ||
+              entry.lastPosition > (retryState?.lastPosition ?? ""))
+        );
+        if (admitted) {
           client.log(
-            `Skipped a reminder another run is creating: ${createLine}`
+            `Skipped ${write.operation} already admitted by another run`
           );
           continue;
         }
@@ -259,16 +433,16 @@ export default async function applyReminderChanges(
       }
       if (result.status === "failed" || result.status === "timeout") {
         throw new Error(
-          result.error_message ?? `${operation} ${result.status}`
+          result.error_message ?? `${write.operation} ${result.status}`
         );
       }
-      client.log(`Queued ${operation}`, {
+      client.log(`Queued ${write.operation}`, {
         run_id: result.run_id,
         status: result.status,
       });
     } catch (error) {
       failures.push(
-        `Change ${index}: ${error instanceof Error ? error.message : String(error)}`
+        `${write.operation}: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }

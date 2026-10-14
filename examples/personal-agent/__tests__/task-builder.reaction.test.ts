@@ -28,6 +28,14 @@ const context = (changes: unknown[]): ReactionContext =>
     organization_slug: "example",
   }) as unknown as ReactionContext;
 
+type Run = Record<string, unknown> & {
+  id: number;
+  created_at: string;
+  status: string;
+};
+
+// The server's run ledger: runs listed newest first by (created_at, id) with a
+// keyset, and an idempotency key replays its first run.
 function harness(
   options: {
     connections?: Array<{ id: number }>;
@@ -39,6 +47,16 @@ function harness(
 ) {
   const executed: Execute[] = [];
   const listed: ListRuns[] = [];
+  const runs: Run[] = (options.recentCreates ?? []).map((run, index) => ({
+    id: index + 1,
+    created_at: new Date(Date.now() - (index + 10) * 1000).toISOString(),
+    operation_key: "create_reminder",
+    parent_run_id: 800,
+    automation_id: 71,
+    status: "pending",
+    ...run,
+  }));
+  let clock = Date.now();
   const client = {
     query: async (sql: string) => {
       if (sql.includes("connector_key = 'apple.reminders'"))
@@ -49,52 +67,69 @@ function harness(
       listRuns: async (input: ListRuns) => {
         listed.push(input);
         options.beforePage?.(listed.length);
-        // The server's order: newest first by (created_at, id), with a keyset.
-        const runs = (options.recentCreates ?? [])
-          .map((run, index) => ({
-            id: index + 1,
-            created_at: new Date(Date.now() - index * 1000).toISOString(),
-            ...run,
-          }))
+        const page = runs
           .filter((run) => {
             if (input.status && run.status !== input.status) return false;
-            if (
-              input.created_after &&
-              String(run.created_at) < input.created_after
-            )
+            if (input.created_after && run.created_at < input.created_after)
               return false;
-            if (
-              input.created_before &&
-              String(run.created_at) >= input.created_before
-            )
+            if (input.created_before && run.created_at >= input.created_before)
               return false;
             if (
               input.before_created_at &&
-              (String(run.created_at) > input.before_created_at ||
-                (String(run.created_at) === input.before_created_at &&
-                  Number(run.id) >= Number(input.before_id)))
+              (run.created_at > input.before_created_at ||
+                (run.created_at === input.before_created_at &&
+                  run.id >= Number(input.before_id)))
             )
               return false;
             return true;
           })
           .sort(
-            (a, b) =>
-              String(b.created_at).localeCompare(String(a.created_at)) ||
-              Number(b.id) - Number(a.id)
+            (a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id
           );
-        const size = options.pageSize ?? runs.length;
-        return { runs: runs.slice(0, size), has_more: size < runs.length };
+        const size = options.pageSize ?? page.length;
+        return { runs: page.slice(0, size), has_more: size < page.length };
       },
       execute: async (input: Execute) => {
         executed.push(input);
-        if (options.execute) return options.execute(input);
-        return { status: "in_progress", run_id: 500 + executed.length };
+        const prior = runs.find((run) => run.key === input.idempotency_key);
+        if (prior) {
+          if (prior.parent_run_id !== input.automation_source?.run_id)
+            throw new Error("synthetic key conflict");
+          return { status: prior.status, run_id: prior.id };
+        }
+        clock += 1000;
+        const run: Run = {
+          id: 1000 + runs.length,
+          created_at: new Date(clock).toISOString(),
+          key: input.idempotency_key,
+          operation_key: input.operation_key,
+          input: input.input,
+          parent_run_id: input.automation_source?.run_id,
+          automation_id: input.automation_source?.automation_id,
+          status: "pending",
+        };
+        if (options.execute) {
+          const result = await options.execute(input);
+          run.status = String(
+            result.status === "in_progress" ? "pending" : result.status
+          );
+          runs.push(run);
+          return { ...result, run_id: run.id };
+        }
+        runs.push(run);
+        return { status: "in_progress", run_id: run.id };
       },
     },
     log: () => undefined,
   } as unknown as ReactionClient;
-  return { client, executed, listed };
+  return { client, executed, listed, runs };
 }
+
+const atRun = (runId: number, changes: unknown[]) =>
+  ({
+    ...context(changes),
+    window: { ...context([]).window, run_id: runId },
+  }) as ReactionContext;
 
 const key = {
   source_scope: "connection:3",
@@ -111,8 +146,8 @@ const create = {
 const source = { automation_id: 71, run_id: 901 };
 
 describe("Task Collaborator reminder changes", () => {
-  test("no changes touch nothing", async () => {
-    const h = harness({ connections: [] });
+  test("no changes and nothing to retry touch nothing", async () => {
+    const h = harness();
     await applyReminderChanges(context([]), h.client);
     expect(h.executed).toHaveLength(0);
   });
@@ -146,10 +181,7 @@ describe("Task Collaborator reminder changes", () => {
         background: true,
       },
     ]);
-    expect(h.listed[0]).toMatchObject({
-      connection_id: 7,
-      operation_key: "create_reminder",
-    });
+    expect(h.listed[0]).toMatchObject({ connection_id: 7 });
   });
 
   test("a create without notes or due carries only the source line", async () => {
@@ -192,14 +224,54 @@ describe("Task Collaborator reminder changes", () => {
     expect(recentPages[1]?.before_id).toBe(2);
   });
 
-  test("a failed or rejected earlier create does not block a new one", async () => {
-    for (const status of ["failed", "timeout", "cancelled"]) {
+  test("a failed earlier create can be retried", async () => {
+    for (const status of ["failed", "timeout"]) {
       const h = harness({
         recentCreates: [{ status, input: { notes: marker(key) } }],
       });
       await applyReminderChanges(context([create]), h.client);
       expect(h.executed).toHaveLength(1);
     }
+  });
+
+  test("fresh proposals cannot bypass cancellation or the attempt limit", async () => {
+    for (const statuses of [["cancelled"], ["failed", "failed", "failed"]]) {
+      for (const change of [
+        create,
+        { action: "complete", origin_id: "reminder:a" },
+      ]) {
+        const h = harness({
+          recentCreates: statuses.map((status) => ({
+            status,
+            parent_run_id: 901,
+            operation_key:
+              change.action === "create"
+                ? "create_reminder"
+                : "complete_reminder",
+            input:
+              change.action === "create"
+                ? { notes: marker(key) }
+                : { origin_id: "reminder:a" },
+          })),
+        });
+        await applyReminderChanges(context([change]), h.client);
+        await applyReminderChanges(atRun(902, [change]), h.client);
+        expect(h.executed).toHaveLength(0);
+      }
+    }
+  });
+
+  test("retrying the original reaction cannot resend a superseded failed update", async () => {
+    const h = harness();
+    const old = [{ action: "update", origin_id: "reminder:b", title: "Old" }];
+    await applyReminderChanges(atRun(901, old), h.client);
+    await applyReminderChanges(
+      atRun(902, [{ action: "update", origin_id: "reminder:b", title: "New" }]),
+      h.client
+    );
+    h.runs[0].status = "failed";
+    await applyReminderChanges(atRun(901, old), h.client);
+    expect(h.executed).toHaveLength(2);
   });
 
   test("keeps old pending and running creates deduplicated until they settle", async () => {
@@ -343,10 +415,11 @@ describe("Task Collaborator reminder changes", () => {
       recentCreates,
       beforePage: (page) => {
         if (page === 2)
-          recentCreates.unshift({
+          h.runs.unshift({
             id: 99,
             created_at: new Date(Date.now() + 1000).toISOString(),
             status: "completed",
+            operation_key: "create_reminder",
             input: { notes: "lobu:new|x|y" },
           });
       },
@@ -374,7 +447,13 @@ describe("Task Collaborator reminder changes", () => {
         query: async () => [{ id: 7 }],
         operations: {
           listRuns: async () => {
-            const runs = ledger.map(({ status, input }) => ({ status, input }));
+            const runs = ledger.map(({ status, input, parent }) => ({
+              status,
+              input,
+              operation_key: "create_reminder",
+              parent_run_id: parent,
+              automation_id: 71,
+            }));
             // Both runs read history before either one creates.
             reads++;
             if (reads <= 2) {
@@ -437,7 +516,7 @@ describe("Task Collaborator reminder changes", () => {
     expect(h.executed).toHaveLength(1);
   });
 
-  test("completes and updates by reminder identity without a key", async () => {
+  test("completes and updates under a key of the window run that proposed them", async () => {
     const h = harness();
     await applyReminderChanges(
       context([
@@ -450,44 +529,219 @@ describe("Task Collaborator reminder changes", () => {
       ]),
       h.client
     );
-    expect(h.listed).toHaveLength(0);
     expect(
-      h.executed.map(({ operation_key, input, idempotency_key }) => ({
-        operation_key,
-        input,
-        idempotency_key,
-      }))
+      h.executed.map(({ operation_key, input }) => ({ operation_key, input }))
     ).toEqual([
       {
         operation_key: "complete_reminder",
         input: { origin_id: "reminder:a" },
-        idempotency_key: undefined,
       },
       {
         operation_key: "update_reminder",
         input: { origin_id: "reminder:b", due: "2026-10-21T09:00:00Z" },
-        idempotency_key: undefined,
       },
+    ]);
+    expect(
+      h.executed.map((call) =>
+        String(call.idempotency_key).split(":").slice(0, 4)
+      )
+    ).toEqual([
+      ["task-reminders", "complete_reminder", "7", "901"],
+      ["task-reminders", "update_reminder", "7", "901"],
     ]);
   });
 
-  test("a retried reaction sends a failed completion again", async () => {
-    let attempts = 0;
+  test("a write that fails after its reaction is retried by a later reaction with no changes", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([{ action: "complete", origin_id: "reminder:a" }]),
+      h.client
+    );
+    // The Mac fails the queued write after the reaction finished.
+    h.runs[0].status = "failed";
+    await applyReminderChanges(atRun(902, []), h.client);
+    expect(h.executed).toHaveLength(2);
+    expect(h.executed[1]?.input).toEqual({ origin_id: "reminder:a" });
+    const [first, retry] = h.executed.map((call) =>
+      String(call.idempotency_key)
+    );
+    expect(retry).toBe(first.replace(/:0$/, ":1"));
+    expect(h.runs.map((run) => run.status)).toEqual(["failed", "pending"]);
+  });
+
+  test("repeated asynchronous failures across windows stop after three attempts", async () => {
+    for (const change of [
+      create,
+      { action: "complete", origin_id: "reminder:a" },
+    ]) {
+      const h = harness();
+      await applyReminderChanges(atRun(901, [change]), h.client);
+      for (const runId of [902, 903, 904]) {
+        h.runs.at(-1)!.status = "failed";
+        await applyReminderChanges(atRun(runId, []), h.client);
+      }
+      await applyReminderChanges(atRun(905, [change]), h.client);
+      expect(h.runs).toHaveLength(3);
+    }
+  });
+
+  test("a retried reaction replays its earlier writes instead of overwriting a newer change", async () => {
+    let failComplete = true;
     const h = harness({
-      execute: async () => {
-        attempts++;
-        return attempts === 1
-          ? { status: "failed", error_message: "synthetic Mac failure" }
-          : { status: "in_progress", run_id: 600 + attempts };
+      execute: async ({ operation_key }) => {
+        if (operation_key === "complete_reminder" && failComplete)
+          throw new Error("synthetic dispatch failure");
+        return { status: "in_progress" };
       },
     });
-    const change = { action: "complete", origin_id: "reminder:a" };
+    const runA = [
+      { action: "update", origin_id: "reminder:b", title: "Old" },
+      { action: "complete", origin_id: "reminder:a" },
+    ];
     await expect(
-      applyReminderChanges(context([change]), h.client)
-    ).rejects.toThrow("synthetic Mac failure");
-    await applyReminderChanges(context([change]), h.client);
+      applyReminderChanges(atRun(901, runA), h.client)
+    ).rejects.toThrow("synthetic dispatch failure");
+    await applyReminderChanges(
+      atRun(902, [{ action: "update", origin_id: "reminder:b", title: "New" }]),
+      h.client
+    );
+    failComplete = false;
+    await applyReminderChanges(atRun(901, runA), h.client);
+    const updates = h.runs.filter(
+      (run) => run.operation_key === "update_reminder"
+    );
+    expect(
+      updates.map((run) => (run.input as { title: string }).title)
+    ).toEqual(["Old", "New"]);
+    expect(
+      h.runs.filter((run) => run.operation_key === "complete_reminder")
+    ).toHaveLength(1);
+  });
+
+  test("a failed write superseded by a newer change to the same reminder is not retried", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      atRun(901, [{ action: "update", origin_id: "reminder:b", title: "Old" }]),
+      h.client
+    );
+    await applyReminderChanges(
+      atRun(902, [{ action: "update", origin_id: "reminder:b", title: "New" }]),
+      h.client
+    );
+    h.runs[0].status = "failed";
+    await applyReminderChanges(atRun(903, []), h.client);
     expect(h.executed).toHaveLength(2);
-    expect(h.executed.every((input) => !input.idempotency_key)).toBe(true);
+  });
+
+  test("a new proposal replaces a failed update without queuing both versions", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      atRun(901, [{ action: "update", origin_id: "reminder:a", title: "Old" }]),
+      h.client
+    );
+    h.runs[0].status = "failed";
+    await applyReminderChanges(
+      atRun(902, [{ action: "update", origin_id: "reminder:a", title: "New" }]),
+      h.client
+    );
+    expect(h.runs.map((run) => (run.input as { title: string }).title)).toEqual(
+      ["Old", "New"]
+    );
+  });
+
+  test("a historical matching success cannot hide a fresh dispatch failure", async () => {
+    const h = harness({
+      recentCreates: [
+        {
+          status: "completed",
+          operation_key: "update_reminder",
+          input: { origin_id: "reminder:a", title: "Old" },
+        },
+      ],
+      execute: async () => {
+        throw new Error("synthetic dispatch failure");
+      },
+    });
+    await expect(
+      applyReminderChanges(
+        context([{ action: "update", origin_id: "reminder:a", title: "Old" }]),
+        h.client
+      )
+    ).rejects.toThrow("synthetic dispatch failure");
+  });
+
+  test("newer cancellations supersede failures even at the same timestamp", async () => {
+    const created_at = new Date().toISOString();
+    const h = harness({
+      recentCreates: [
+        {
+          id: 1,
+          created_at,
+          status: "failed",
+          operation_key: "update_reminder",
+          input: { origin_id: "reminder:a", title: "Old" },
+        },
+        {
+          id: 2,
+          created_at,
+          status: "cancelled",
+          operation_key: "update_reminder",
+          input: { origin_id: "reminder:a", title: "New" },
+        },
+      ],
+    });
+    await applyReminderChanges(context([]), h.client);
+    expect(h.executed).toHaveLength(0);
+  });
+
+  test("does not resurrect a failure after its successful retry leaves the history horizon", async () => {
+    const h = harness({
+      recentCreates: [
+        {
+          status: "failed",
+          created_at: new Date(Date.now() - 4 * 86400000).toISOString(),
+          operation_key: "complete_reminder",
+          input: { origin_id: "reminder:a" },
+        },
+        {
+          status: "completed",
+          created_at: new Date(Date.now() - 3 * 86400000).toISOString(),
+          operation_key: "complete_reminder",
+          input: { origin_id: "reminder:a" },
+        },
+      ],
+    });
+    await applyReminderChanges(context([]), h.client);
+    expect(h.executed).toHaveLength(0);
+  });
+
+  test("a cancelled write or one out of attempts is not retried", async () => {
+    for (const statuses of [["cancelled"], ["failed", "failed", "failed"]]) {
+      const h = harness({
+        recentCreates: statuses.map((status) => ({
+          status,
+          operation_key: "complete_reminder",
+          input: { origin_id: "reminder:a" },
+        })),
+      });
+      await applyReminderChanges(atRun(902, []), h.client);
+      expect(h.executed).toHaveLength(0);
+    }
+  });
+
+  test("another Automation's failed writes are left alone", async () => {
+    const h = harness({
+      recentCreates: [
+        {
+          status: "failed",
+          automation_id: 72,
+          operation_key: "complete_reminder",
+          input: { origin_id: "reminder:a" },
+        },
+      ],
+    });
+    await applyReminderChanges(atRun(902, []), h.client);
+    expect(h.executed).toHaveLength(0);
   });
 
   test("never deletes", async () => {
