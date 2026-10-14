@@ -36,7 +36,8 @@ export const input = {
           origin_id: { type: "string", minLength: 1 },
           title: { type: "string", minLength: 1, maxLength: 500 },
           notes: { type: "string" },
-          due: { type: "string", format: "date-time" },
+          // null clears an update's due date; a create ignores it.
+          due: { type: ["string", "null"], format: "date-time" },
         },
         required: ["action"],
         additionalProperties: false,
@@ -60,15 +61,82 @@ type Key = { source_scope: string; source_origin_id: string; task_key: string };
 type Change =
   | { action: "create"; key: Key; title: string; notes?: string; due?: string }
   | { action: "complete"; origin_id: string }
-  | { action: "update"; origin_id: string; title?: string; due?: string };
+  | {
+      action: "update";
+      origin_id: string;
+      title?: string;
+      due?: string | null;
+    };
 
 const LIST = "Lobu";
-// Recent successful creates can land after the agent's live read. Unsettled
-// creates are checked separately regardless of age or approval expiry policy.
+// Recent creates of any status, plus unsettled creates and failures of any
+// age. A completed create older than this is already in the agent's live read.
 const RECENT_CREATE_MS = 2 * 24 * 60 * 60 * 1000;
+const TERMINAL = ["failed", "timeout", "cancelled"];
 
 export function marker(key: Key): string {
   return `lobu:${key.source_scope}|${key.source_origin_id}|${key.task_key}`;
+}
+
+// A short stable digest (cyrb53) so a marker of any length fits the 256
+// character idempotency key.
+function digest(text: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
+  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
+  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (
+    (h2 >>> 0).toString(16).padStart(8, "0") +
+    (h1 >>> 0).toString(16).padStart(8, "0")
+  );
+}
+
+type CreateHistory = Map<string, { active: boolean; failed: number }>;
+
+async function readCreateHistory(
+  client: ReactionClient,
+  connectionId: number
+): Promise<CreateHistory> {
+  const createdAfter = new Date(Date.now() - RECENT_CREATE_MS).toISOString();
+  const filters = [
+    { created_after: createdAfter },
+    ...["pending", "running", "claimed", ...TERMINAL].map((status) => ({
+      status,
+      created_before: createdAfter,
+    })),
+  ];
+  const history: CreateHistory = new Map();
+  for (const filter of filters) {
+    for (let offset = 0; ; ) {
+      const page = await client.operations.listRuns({
+        connection_id: connectionId,
+        operation_key: "create_reminder",
+        ...filter,
+        limit: 200,
+        offset,
+      });
+      for (const run of page.runs) {
+        const notes = (run.input as { notes?: unknown } | null)?.notes;
+        const line =
+          typeof notes === "string" ? notes.split("\n").at(-1) : undefined;
+        if (!line?.startsWith("lobu:")) continue;
+        const entry = history.get(line) ?? { active: false, failed: 0 };
+        if (TERMINAL.includes(String(run.status))) entry.failed++;
+        else entry.active = true;
+        history.set(line, entry);
+      }
+      if (!page.has_more || page.runs.length === 0) break;
+      offset += page.runs.length;
+    }
+  }
+  return history;
 }
 
 export default async function applyReminderChanges(
@@ -93,44 +161,17 @@ export default async function applyReminderChanges(
     run_id: Number(ctx.window.run_id),
   };
 
+  const history = changes.some((change) => change.action === "create")
+    ? await readCreateHistory(client, connectionId)
+    : new Map();
   const queued = new Set<string>();
-  if (changes.some((change) => change.action === "create")) {
-    const createdAfter = new Date(Date.now() - RECENT_CREATE_MS).toISOString();
-    const filters = [
-      { created_after: createdAfter },
-      { status: "pending", created_before: createdAfter },
-      { status: "running", created_before: createdAfter },
-      { status: "claimed", created_before: createdAfter },
-    ];
-    for (const filter of filters) {
-      for (let offset = 0; ; ) {
-        const page = await client.operations.listRuns({
-          connection_id: connectionId,
-          operation_key: "create_reminder",
-          ...filter,
-          limit: 200,
-          offset,
-        });
-        for (const run of page.runs) {
-          // Terminal failures do not reserve the action for a future run.
-          if (["failed", "timeout", "cancelled"].includes(String(run.status)))
-            continue;
-          const notes = (run.input as { notes?: unknown } | null)?.notes;
-          const line =
-            typeof notes === "string" ? notes.split("\n").at(-1) : undefined;
-          if (line?.startsWith("lobu:")) queued.add(line);
-        }
-        if (!page.has_more || page.runs.length === 0) break;
-        offset += page.runs.length;
-      }
-    }
-  }
 
   const failures: string[] = [];
   for (const [index, change] of changes.entries()) {
     try {
       let operation: string;
       let input: Record<string, unknown>;
+      let createLine: string | undefined;
       if (change.action === "create") {
         // The marker is one notes line split on "|", so a key part holding
         // either would be misread by later runs.
@@ -142,11 +183,12 @@ export default async function applyReminderChanges(
           throw new Error("Reminder source key contains a marker separator");
         if (!change.title.trim()) throw new Error("Reminder title is blank");
         const line = marker(change.key);
-        if (queued.has(line)) {
+        if (queued.has(line) || history.get(line)?.active) {
           client.log(`Skipped a reminder already being created: ${line}`);
           continue;
         }
         queued.add(line);
+        createLine = line;
         if (line.length > 4000)
           throw new Error("Reminder source marker exceeds the notes limit");
         const notes = change.notes
@@ -167,20 +209,42 @@ export default async function applyReminderChanges(
         input = {
           origin_id: change.origin_id,
           ...(change.title ? { title: change.title } : {}),
-          ...(change.due ? { due: change.due } : {}),
+          ...(change.due !== undefined ? { due: change.due } : {}),
         };
       }
       // Queued, not awaited: the Mac and any approval finish after this reaction.
-      // The key is bound to this run, so a retried reaction replays its own
-      // writes instead of repeating them.
-      const result = await client.operations.execute({
-        connection_id: connectionId,
-        operation_key: operation,
-        input,
-        idempotency_key: `task-reminders:${source.run_id}:${index}`,
-        automation_source: source,
-        background: true,
-      });
+      // A create's key is shared by every run proposing the same source, so the
+      // server admits one of any concurrent creates; each terminal failure moves
+      // it to a fresh key so the action can be retried. Other writes key on this
+      // run, so a retried reaction replays them instead of repeating them.
+      const idempotencyKey = createLine
+        ? `task-reminders:create:${connectionId}:${digest(createLine)}:${history.get(createLine)?.failed ?? 0}`
+        : `task-reminders:${source.run_id}:${index}`;
+      let result: Awaited<ReturnType<ReactionClient["operations"]["execute"]>>;
+      try {
+        result = await client.operations.execute({
+          connection_id: connectionId,
+          operation_key: operation,
+          input,
+          idempotency_key: idempotencyKey,
+          automation_source: source,
+          background: true,
+        });
+      } catch (error) {
+        // Another run holding the same create key is refused here. Its create
+        // is then in the history, which is the record of what already exists.
+        if (
+          createLine &&
+          (await readCreateHistory(client, connectionId)).get(createLine)
+            ?.active
+        ) {
+          client.log(
+            `Skipped a reminder another run is creating: ${createLine}`
+          );
+          continue;
+        }
+        throw error;
+      }
       if (result.status === "failed" || result.status === "timeout") {
         throw new Error(
           result.error_message ?? `${operation} ${result.status}`

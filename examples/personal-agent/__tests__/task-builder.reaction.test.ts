@@ -126,7 +126,7 @@ describe("Task Collaborator reminder changes", () => {
           list: "Lobu",
           due: "2026-10-20T09:00:00Z",
         },
-        idempotency_key: "task-reminders:901:0",
+        idempotency_key: expect.any(String),
         automation_source: source,
         background: true,
       },
@@ -279,7 +279,118 @@ describe("Task Collaborator reminder changes", () => {
     await applyReminderChanges(context([create]), h.client);
     expect(
       h.listed.filter((page) => page.status).map((page) => page.status)
-    ).toEqual(["pending", "running", "claimed"]);
+    ).toEqual([
+      "pending",
+      "running",
+      "claimed",
+      "failed",
+      "timeout",
+      "cancelled",
+    ]);
+  });
+
+  test("a create's key is shared across runs and fits the key limit", async () => {
+    const keys: string[] = [];
+    for (const runId of [901, 902]) {
+      const h = harness();
+      await applyReminderChanges(
+        {
+          ...context([{ ...create, notes: "x".repeat(3000) }]),
+          window: { ...context([]).window, run_id: runId },
+        } as ReactionContext,
+        h.client
+      );
+      keys.push(String(h.executed[0]?.idempotency_key));
+    }
+    expect(keys[0]).toBe(keys[1]);
+    expect(keys[0].startsWith("task-reminders:create:7:")).toBe(true);
+    expect(keys[0].endsWith(":0")).toBe(true);
+    expect(keys[0].length).toBeLessThanOrEqual(256);
+  });
+
+  test("each earlier failure moves a retried create to a fresh key", async () => {
+    const failed = { status: "failed", input: { notes: marker(key) } };
+    const h = harness({
+      recentCreates: [failed, { ...failed, status: "timeout" }],
+    });
+    await applyReminderChanges(context([create]), h.client);
+    expect(String(h.executed[0]?.idempotency_key).endsWith(":2")).toBe(true);
+  });
+
+  test("concurrent runs create a source's reminder once", async () => {
+    // Shared operation state: the server admits one run per idempotency key and
+    // refuses the same key from a different parent run.
+    let reads = 0;
+    let release: () => void = () => undefined;
+    const bothRead = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ledger: Array<{
+      key: string;
+      parent: number;
+      status: string;
+      input: unknown;
+    }> = [];
+    const client = (runId: number) =>
+      ({
+        query: async () => [{ id: 7 }],
+        operations: {
+          listRuns: async () => {
+            const runs = ledger.map(({ status, input }) => ({ status, input }));
+            // Both runs read history before either one creates.
+            reads++;
+            if (reads <= 2) {
+              if (reads === 2) release();
+              await bothRead;
+            }
+            return { runs, has_more: false };
+          },
+          execute: async (input: Execute) => {
+            await Promise.resolve();
+            const prior = ledger.find(
+              (run) => run.key === input.idempotency_key
+            );
+            if (prior && prior.parent !== runId)
+              throw new Error("synthetic key conflict");
+            if (!prior)
+              ledger.push({
+                key: String(input.idempotency_key),
+                parent: runId,
+                status: "pending",
+                input: input.input,
+              });
+            return { status: "in_progress", run_id: ledger.length };
+          },
+        },
+        log: () => undefined,
+      }) as unknown as ReactionClient;
+    const run = (runId: number) =>
+      applyReminderChanges(
+        {
+          ...context([create]),
+          window: { ...context([]).window, run_id: runId },
+        } as ReactionContext,
+        client(runId)
+      );
+    await Promise.all([run(901), run(902)]);
+    expect(ledger).toHaveLength(1);
+  });
+
+  test("an update can clear a due date", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([{ action: "update", origin_id: "reminder:b", due: null }]),
+      h.client
+    );
+    expect(h.executed[0]?.input).toEqual({
+      origin_id: "reminder:b",
+      due: null,
+    });
+    expect(
+      validate({
+        changes: [{ action: "update", origin_id: "reminder:b", due: null }],
+      })
+    ).toBe(true);
   });
 
   test("the same action proposed twice in one run is created once", async () => {
