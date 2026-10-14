@@ -16,6 +16,7 @@ import { VIEW_PATH_MARKER } from "@lobu/core/contracts/tools/view-path";
 import type { AttributeFilter } from "@lobu/core/contracts/tools/collection-selection";
 import { attributeFilterSql, validateAttributeFilters } from "./attribute-filters";
 import { feedLinkedToBusinessEntitySql } from "../authz/channel-about";
+import { authzScopeFromToolContext } from "../authz/scope";
 import type {
 	ValidatedEntityRowInsert,
 	ValidatedEntityRowPatch,
@@ -2447,7 +2448,7 @@ function compileEntitySegmentFilter(
 			`SELECT seg.id FROM entities seg WHERE ${entitySegmentPredicate("seg.id", entityTypeId, segment.where)}`,
 			ctx.organizationId,
 			{
-				userId: ctx.userId ?? null,
+				userId: authzScopeFromToolContext(ctx).principal,
 				// Match metric SQL: the outer type gate does not authorize nested
 				// predicates to read protected member metadata.
 				excludeMemberEntities: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),

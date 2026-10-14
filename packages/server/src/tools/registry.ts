@@ -125,6 +125,13 @@ export interface ToolContext {
   actingAutomationId?: number | null;
   /** Durable automation run driving this reaction and its child work. */
   actingRunId?: number | null;
+  /**
+   * Read principal for a headless Automation script: the Automation's durable
+   * creator (see resolveAutomationConnectionVisibilityUserId). Applies only when
+   * `userId` is null, so SQL and search see the same private connections the
+   * operation path already does. Never a write-policy or approval identity.
+   */
+  automationReadPrincipalId?: string | null;
   /** Verified source conversation for worker-originated tool calls, when any. */
   sourceContext?: ToolSourceContext | null;
   /** `x-lobu-apply-id` when this call belongs to a `lobu apply` run (REST proxy only). */

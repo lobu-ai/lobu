@@ -30,6 +30,7 @@ import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table
 import { ToolUserError } from '../../utils/errors';
 import logger from '../../utils/logger';
 import type { ToolContext } from '../registry';
+import { authzScopeFromToolContext } from '../../authz/scope';
 import { withValidatedArgs } from '../validate-args';
 import { isAdminOrOwnerRole, isInProcessSystemCall } from '../access-control';
 
@@ -176,7 +177,7 @@ async function metricSeriesImpl(
     restrictedTables: isAdmin ? undefined : ADMIN_ONLY_QUERYABLE_TABLES,
     // Charts are filtered to the requesting user's connection visibility, so a
     // member can't sparkline another user's private-connection events.
-    userId: ctx.userId,
+    userId: authzScopeFromToolContext(ctx).principal,
     // Workspace-identity audit rows are owner/admin/system-only; ordinary
     // members must not chart member/invitation lifecycle data via raw SQL.
     excludeWorkspaceAudit: !isInProcessSystemCall(ctx) && !isAdmin,

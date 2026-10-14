@@ -4,7 +4,11 @@ import {
   createAutomationEventRun,
 } from '../../../runs/queue-service';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { createTestAgent } from '../../setup/test-fixtures';
+import {
+  createTestAgent,
+  createTestConnection,
+  createTestEvent,
+} from '../../setup/test-fixtures';
 import { TestWorkspace } from '../../setup/test-mcp-client';
 import { dispatchPendingAutomationRuns } from '../../../automations/automation';
 import { runAutomationScriptTask } from '../../../automations/script-task';
@@ -355,6 +359,54 @@ describe('Automation script executor', () => {
     const [again] =
       await sql`SELECT action_output FROM runs WHERE id = ${runId}`;
     expect(again!.action_output).toEqual(run!.action_output);
+  });
+
+  it('reads its author\'s private connections through client.query, but not another user\'s', async () => {
+    const { sql, workspace, runId, taskRunId, payload } = await dispatchedScript(
+      `export default async (_ctx, client) => {
+        const rows = await client.query("SELECT payload_text FROM events WHERE payload_text LIKE 'visibility-probe:%' ORDER BY payload_text");
+        return { seen: rows.map((r) => r.payload_text) };
+      };`
+    );
+    const authorPrivate = await createTestConnection({
+      organization_id: workspace.org.id,
+      connector_key: 'github',
+      created_by: workspace.users.owner.id,
+      visibility: 'private',
+    });
+    const otherPrivate = await createTestConnection({
+      organization_id: workspace.org.id,
+      connector_key: 'github',
+      created_by: workspace.users.admin.id,
+      visibility: 'private',
+    });
+    const shared = await createTestConnection({
+      organization_id: workspace.org.id,
+      connector_key: 'github',
+      visibility: 'org',
+    });
+    for (const [connection, label] of [
+      [authorPrivate, 'author-private'],
+      [otherPrivate, 'other-private'],
+      [shared, 'org-visible'],
+    ] as const) {
+      await createTestEvent({
+        organization_id: workspace.org.id,
+        connection_id: connection.id,
+        connector_key: 'github',
+        content: `visibility-probe:${label}`,
+      });
+    }
+
+    await runAutomationScriptTask(payload, TEST_ENV, taskRunId);
+
+    const [run] = await sql`SELECT status, action_output FROM runs WHERE id = ${runId}`;
+    expect(run).toMatchObject({
+      status: 'completed',
+      action_output: {
+        seen: ['visibility-probe:author-private', 'visibility-probe:org-visible'],
+      },
+    });
   });
 
   it.each([

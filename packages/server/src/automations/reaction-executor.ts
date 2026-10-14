@@ -11,6 +11,8 @@
 
 import type { ReactionContext, AutomationScriptContext } from '@lobu/connector-sdk';
 import { SCOPE_CHECK_NOT_APPLICABLE } from '../auth/tool-access';
+import { resolveAutomationConnectionVisibilityUserId } from '../authz/automation-connection-visibility';
+import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { buildClientSDK } from '../sandbox/client-sdk';
 import { runScript } from '../sandbox/run-script';
@@ -83,6 +85,16 @@ export async function executeAutomationScript(options: ExecuteAutomationScriptOp
     // autonomous even for surfaces that read only sourceContext.
     actingAutomationId: context.window.automation_id,
     actingRunId: context.window.run_id,
+    // Reads see the private connections of the Automation's creator, as its
+    // operations already do; approvals and policy keep the autonomous identity.
+    automationReadPrincipalId: await resolveAutomationConnectionVisibilityUserId(
+      {
+        organizationId: context.organization_id,
+        userId: null,
+        actingAutomationId: context.window.automation_id,
+      },
+      getDb()
+    ),
     sourceContext: { source: 'automation-run' as const },
   };
 

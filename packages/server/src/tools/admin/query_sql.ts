@@ -411,7 +411,11 @@ export async function querySqlImpl(
     const { limit, offset } = bounds;
     try {
       const r = await runConnectorQuery({
-        scope: authzScopeFromToolContext({ organizationId: targetOrgId, userId: ctx.userId }),
+        scope: authzScopeFromToolContext({
+          organizationId: targetOrgId,
+          userId: ctx.userId,
+          automationReadPrincipalId: ctx.automationReadPrincipalId,
+        }),
         isAdmin: callerIsAdmin,
         connectionSlug: args.connection,
         query: baseSql,
@@ -473,7 +477,7 @@ export async function querySqlImpl(
       // Per-user connection visibility: even an admin sees another user's
       // PRIVATE-connection events only when org-visible. Cross-org reuses the
       // same global user id, re-validated against the target org above.
-      userId: ctx.userId,
+      userId: authzScopeFromToolContext(ctx).principal,
       // Workspace-identity audit rows are owner/admin/system-only; ordinary
       // members must not select their member/invitation lifecycle data via raw SQL.
       excludeWorkspaceAudit: !isInProcessSystemCall(ctx) && !callerIsAdmin,

@@ -77,6 +77,49 @@ describe('connection-visibility compiler (M1 one-compiler)', () => {
     });
   });
 
+  it('uses the Automation creator for reads without changing the execution identity', () => {
+    const ctx = Object.freeze({
+      organizationId: 'org_test',
+      userId: null,
+      agentId: 'agent_test',
+      actingAutomationId: 42,
+      automationReadPrincipalId: 'user_creator',
+    });
+    const readScope = authzScopeFromToolContext(ctx);
+    expect(readScope).toEqual({
+      organizationId: 'org_test',
+      principal: 'user_creator',
+      agentId: 'agent_test',
+    });
+    expect(compileConnectionFkVisibility(readScope, 1, 'ev').params).toEqual([
+      'org_test', 'user_creator',
+    ]);
+    expect(ctx.userId).toBeNull();
+    expect(ctx.actingAutomationId).toBe(42);
+  });
+
+  it('keeps the authenticated caller ahead of the Automation creator', () => {
+    const readScope = authzScopeFromToolContext({
+      organizationId: 'org_test',
+      userId: 'user_caller',
+      automationReadPrincipalId: 'user_creator',
+    });
+    expect(compileConnectionFkVisibility(readScope, 1, 'ev').params).toEqual([
+      'org_test', 'user_caller',
+    ]);
+  });
+
+  it('fails closed when a headless Automation has no resolved creator', () => {
+    const readScope = authzScopeFromToolContext({
+      organizationId: 'org_test',
+      userId: null,
+      automationReadPrincipalId: null,
+    });
+    expect(compileConnectionRowVisibility(readScope, 'cn')).toBe(
+      "AND (cn.visibility = 'org')"
+    );
+  });
+
   it('the recall/content adapter composes the connection-visibility compiler verbatim, then the resource gate', () => {
     const viaAdapter = buildConnectionVisibilityClause(
       { organizationId: 'org_test', userId: 'user_a', baseParamIndex: 7 },
