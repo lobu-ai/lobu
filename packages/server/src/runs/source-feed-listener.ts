@@ -6,7 +6,7 @@ import { SOURCE_FEED_LISTENER_TASK } from '../scheduled/task-definitions';
 import { dbEgressConfig } from '../utils/cloud-mode';
 import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
-import { feedBackoff } from '../connectors/feed-backoff';
+import { feedBackoff, feedRetryAtSql } from '../connectors/feed-backoff';
 import { connectionBrowserGrant } from '../connectors/browser-resource';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
@@ -28,8 +28,7 @@ export async function recordSourceFeedFailure(
 ): Promise<void> {
   await sql`UPDATE feeds SET consecutive_failures = consecutive_failures + 1,
     last_error = ${message},
-    next_run_at = now() + (LEAST(${feedBackoff.maxMs}::bigint,
-      ${feedBackoff.baseMs}::bigint * (2 ^ LEAST(consecutive_failures, 30))::bigint) || ' milliseconds')::interval
+    next_run_at = ${feedRetryAtSql(sql, sql`consecutive_failures`)}
     WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
       AND status = 'active' AND deleted_at IS NULL
       ${config === undefined ? sql`` : sql`AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb`}`;

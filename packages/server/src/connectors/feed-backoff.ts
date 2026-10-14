@@ -100,7 +100,9 @@ interface SqlTag<TFragment> {
  * `current_timestamp` plus the backoff for a feed that has already failed
  * `failures` times — the SQL twin of `feedBackoffDelayMs(failures + 1)`.
  *
- * The retry clock for a feed with no cron. The failure lane passes the count
+ * The only SQL copy of the feed backoff; every lane that arms a failure retry
+ * goes through it. It is the whole retry clock for a feed with no cron. The
+ * failure lane passes the count
  * BEFORE its increment, so the delay grows with the budget it charges and the
  * hard pause still bounds it. Lanes that deliberately do not charge the budget
  * (an unavailable execution dependency, a failed admission) pass the current
