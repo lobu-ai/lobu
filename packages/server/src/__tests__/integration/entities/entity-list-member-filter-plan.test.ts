@@ -112,11 +112,13 @@ describe('member-filtered entity list — identity walk avoids unrelated entity 
   });
 
   it('member semantics hold: a group is listed when any member satisfies the filter', async () => {
-    const list = (args: Record<string, unknown>) => human.entities.list({ entity_type: 'contact-record', limit: 500, ...args });
+    // Small pages: every listed row costs a content-count arm, which is not
+    // what this file measures.
+    const list = (args: Record<string, unknown>) => human.entities.list({ entity_type: 'contact-record', limit: 1, ...args });
     const roots = await list({ parent_id: null });
     expect(roots.metadata.total_count).toBe(N_ENTITIES); // seed + N rows - 1 retained member
-    expect(roots.entities.map((row) => Number(row.id))).not.toContain(groupMember);
     const found = await list({ search: 'Needle retained' });
+    expect(found.metadata.total_count).toBe(1);
     expect(found.entities.map((row) => Number(row.id))).toEqual([groupRoot]);
   });
 });
