@@ -58,12 +58,23 @@ function harness(
   }));
   let clock = Date.now();
   const client = {
-    query: async (sql: string) => {
-      if (sql.includes("connector_key = 'apple.reminders'"))
-        return options.connections ?? [{ id: 7 }];
-      throw new Error(`unexpected query: ${sql}`);
-    },
     operations: {
+      listAvailable: async (input: Record<string, unknown>) => {
+        expect(input).toMatchObject({
+          connector_key: "apple.reminders",
+          include_disconnected: false,
+        });
+        return {
+          operations: ["create_reminder", "complete_reminder"].map(
+            (operation_key) => ({
+              operation_key,
+              execution_targets: (options.connections ?? [{ id: 7 }]).map(
+                ({ id }) => ({ connection_id: id })
+              ),
+            })
+          ),
+        };
+      },
       listRuns: async (input: ListRuns) => {
         listed.push(input);
         options.beforePage?.(listed.length);
@@ -444,8 +455,10 @@ describe("Task Collaborator reminder changes", () => {
     }> = [];
     const client = (runId: number) =>
       ({
-        query: async () => [{ id: 7 }],
         operations: {
+          listAvailable: async () => ({
+            operations: [{ execution_targets: [{ connection_id: 7 }] }],
+          }),
           listRuns: async () => {
             const runs = ledger.map(({ status, input, parent }) => ({
               status,

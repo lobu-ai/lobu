@@ -304,15 +304,33 @@ export default async function applyReminderChanges(
 ): Promise<void> {
   const changes = (ctx.extracted_data as unknown as { changes: Change[] })
     .changes;
-  const connections = (await client.query(
-    "SELECT id FROM connections WHERE connector_key = 'apple.reminders' AND deleted_at IS NULL ORDER BY id LIMIT 2"
-  )) as Array<{ id: number }>;
+  // The connection is the Automation author's private device connection. A
+  // reaction has no user of its own; operation discovery resolves visibility
+  // through the Automation's author, while SQL would not see the connection.
+  const available = (await client.operations.listAvailable({
+    connector_key: "apple.reminders",
+    include_disconnected: false,
+    include_input_schema: false,
+  })) as {
+    operations?: Array<{
+      execution_targets?: Array<{ connection_id: number }>;
+    }>;
+  };
+  const connections = [
+    ...new Set(
+      (available.operations ?? []).flatMap((operation) =>
+        (operation.execution_targets ?? []).map((target) =>
+          Number(target.connection_id)
+        )
+      )
+    ),
+  ];
   if (connections.length !== 1) {
     throw new Error(
       `Expected one Apple Reminders connection, found ${connections.length}`
     );
   }
-  const connectionId = Number(connections[0].id);
+  const connectionId = connections[0];
   const automationId = Number(ctx.window.automation_id);
   const source = {
     automation_id: automationId,
