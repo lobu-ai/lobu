@@ -215,18 +215,19 @@ export default async function applyReminderChanges(
       // Queued, not awaited: the Mac and any approval finish after this reaction.
       // A create's key is shared by every run proposing the same source, so the
       // server admits one of any concurrent creates; each terminal failure moves
-      // it to a fresh key so the action can be retried. Other writes key on this
-      // run, so a retried reaction replays them instead of repeating them.
+      // it to a fresh key so the action can be retried. Completing or updating
+      // to the same values twice changes nothing, so those writes carry no key
+      // and a retried reaction simply sends them again.
       const idempotencyKey = createLine
         ? `task-reminders:create:${connectionId}:${digest(createLine)}:${history.get(createLine)?.failed ?? 0}`
-        : `task-reminders:${source.run_id}:${index}`;
+        : undefined;
       let result: Awaited<ReturnType<ReactionClient["operations"]["execute"]>>;
       try {
         result = await client.operations.execute({
           connection_id: connectionId,
           operation_key: operation,
           input,
-          idempotency_key: idempotencyKey,
+          ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
           automation_source: source,
           background: true,
         });

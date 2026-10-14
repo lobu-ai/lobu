@@ -399,7 +399,7 @@ describe("Task Collaborator reminder changes", () => {
     expect(h.executed).toHaveLength(1);
   });
 
-  test("completes and updates by reminder identity, keyed to this run", async () => {
+  test("completes and updates by reminder identity without a key", async () => {
     const h = harness();
     await applyReminderChanges(
       context([
@@ -423,14 +423,33 @@ describe("Task Collaborator reminder changes", () => {
       {
         operation_key: "complete_reminder",
         input: { origin_id: "reminder:a" },
-        idempotency_key: "task-reminders:901:0",
+        idempotency_key: undefined,
       },
       {
         operation_key: "update_reminder",
         input: { origin_id: "reminder:b", due: "2026-10-21T09:00:00Z" },
-        idempotency_key: "task-reminders:901:1",
+        idempotency_key: undefined,
       },
     ]);
+  });
+
+  test("a retried reaction sends a failed completion again", async () => {
+    let attempts = 0;
+    const h = harness({
+      execute: async () => {
+        attempts++;
+        return attempts === 1
+          ? { status: "failed", error_message: "synthetic Mac failure" }
+          : { status: "in_progress", run_id: 600 + attempts };
+      },
+    });
+    const change = { action: "complete", origin_id: "reminder:a" };
+    await expect(
+      applyReminderChanges(context([change]), h.client)
+    ).rejects.toThrow("synthetic Mac failure");
+    await applyReminderChanges(context([change]), h.client);
+    expect(h.executed).toHaveLength(2);
+    expect(h.executed.every((input) => !input.idempotency_key)).toBe(true);
   });
 
   test("never deletes", async () => {

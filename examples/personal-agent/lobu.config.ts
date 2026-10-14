@@ -582,6 +582,9 @@ const midasNetWorth = defineAutomation({
 
 const taskCollaborator = defineAutomation({
   agent: personalAgent,
+  // Renamed from hourly-task-collaborator so it starts on a fresh arrival
+  // window instead of the old Automation's backlog. Archive the old one when
+  // adopting this config; apply reports it as drift and never deletes it.
   slug: "task-collaborator",
   name: "Task Collaborator",
   // Omitted model preserves the Automation's existing execution setting on apply.
