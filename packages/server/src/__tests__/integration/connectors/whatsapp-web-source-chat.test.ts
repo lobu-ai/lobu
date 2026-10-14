@@ -110,8 +110,8 @@ async function insertAutomation(slug: string, ...triggers: Array<Record<string, 
 const replyTo = (match?: Record<string, unknown>) =>
   ({ output: "reply_to_source", ...(match ? { match } : {}) });
 
-/** The device's reference delivery for new messages, in source order. */
-async function deliver(messageIds: string | string[], notificationId = "n-1") {
+/** The device's reference delivery for messages, in source order; new unless `occurredAt` says otherwise. */
+async function deliver(messageIds: string | string[], notificationId = "n-1", occurredAt = new Date()) {
   const ids = typeof messageIds === "string" ? [messageIds] : messageIds;
   const [receipt] = await receiveFeedNotifications(sql, [{
     feed_id: feedId, connection_id: connectionId, feed_key: "live_messages",
@@ -121,7 +121,7 @@ async function deliver(messageIds: string | string[], notificationId = "n-1") {
       epoch: "synthetic-epoch", needs_rebind: false,
       records: [{ revision: 1, payload: { id: `batch-${ids.join("-")}`, events: ids.map((id) => ({
         id, event_type: "message.created", resource_type: "message",
-        resource_ref: id, occurred_at: new Date(BASE_TIME * 1000).toISOString(),
+        resource_ref: id, occurred_at: occurredAt.toISOString(),
       })) } }],
     },
   } as any], deviceId, [orgId]);
@@ -474,6 +474,20 @@ describe("WhatsApp Web source chat", () => {
     expect(enqueued[0].messageId).toContain(`:automation:${firstId}`);
     await completeTurns();
     expect(sends).toHaveLength(1);
+  }, 60_000);
+
+  it("does not answer a replayed message older than its reply Automation", async () => {
+    await insertAutomation("dm-reply", replyTo());
+    const archiveId = await insertAutomation("archive", { output: "silent" });
+    deviceMessages.push({ id: "SYNTHDM15", chat_jid: DM_JID, body: "sent two days ago" });
+
+    await deliver("SYNTHDM15", "replayed", new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
+    await drain();
+    expect(enqueued).toHaveLength(0);
+    expect(sends).toHaveLength(0);
+    // Background Automations still see the replayed message.
+    const runs = await sql`SELECT automation_id FROM runs WHERE organization_id = ${orgId} AND run_type = 'automation'`;
+    expect(runs.map((run) => Number(run.automation_id))).toEqual([archiveId]);
   }, 60_000);
 
   it("resolves the connection's numeric runtime id for chat routing", async () => {

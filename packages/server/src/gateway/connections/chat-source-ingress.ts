@@ -17,7 +17,10 @@
  *   6. the hydrated message is matched again per Automation (its first
  *      matching trigger wins); background targets are queued on the source
  *      signal, and a group reply needs an Automation scoped to that group;
- *   7. the bridge runs its normal reply path for the one reply Automation
+ *   7. a message sent before a reply Automation was last turned on or edited
+ *      gets no reply from it (a device replays older references when a feed
+ *      is subscribed again);
+ *   8. the bridge runs its normal reply path for the one reply Automation
  *      that answers it (the oldest that matches),
  *      and every post it makes for the message (a command's confirmation, a
  *      notice) goes through the platform's keyed send, so a retried job
@@ -34,7 +37,7 @@ import {
   planAutomationActivations,
   queueAutomationActivations,
 } from "../../automations/activation.js";
-import { getDb } from "../../db/client.js";
+import { getDb, pgBigintArray } from "../../db/client.js";
 import { readSourceFeed } from "../../lib/connector-pushdown.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { CHAT_SOURCE_INGRESS_QUEUE, type ChatSourceIngressJob } from "../../runs/chat-ingress-jobs.js";
@@ -127,11 +130,20 @@ export async function handleChatSourceIngress(
     });
     if (!thread) throw new Error(`Could not open chat thread ${message.threadId}`);
 
+    const eligible = plan.replyTargets.filter((target) =>
+      thread.isDM === true || target.trigger.match?.channel_id === parsed.channelId);
+    if (eligible.length === 0 || !signal.occurred_at) return;
+    const current = new Set(
+      (await sql<{ id: number | string }>`
+        SELECT id FROM automations
+        WHERE id = ANY(${pgBigintArray(eligible.map((target) => target.automationId))}::bigint[])
+          AND updated_at <= ${signal.occurred_at}::timestamptz
+      `).map((row) => Number(row.id)),
+    );
     // One reply Automation answers a message: the oldest that matches. A
     // retry then re-admits that one target and nothing else.
-    const [replyTarget] = plan.replyTargets
-      .filter((target) =>
-        thread.isDM === true || target.trigger.match?.channel_id === parsed.channelId)
+    const [replyTarget] = eligible
+      .filter((target) => current.has(target.automationId))
       .sort((a, b) => a.automationId - b.automationId);
     if (!replyTarget) return;
     const post = getResponseStrategy(instance.connection.platform).post;
