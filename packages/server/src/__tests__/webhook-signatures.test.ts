@@ -135,7 +135,6 @@ describe("slack app-webhook provider route", () => {
   function makeRouter(handleChatAppWebhook: (req: Request) => Promise<Response>) {
     return createAppWebhookRoutes({
       installationStore: {} as never,
-      secretStore: { get: async () => null },
       providers: [
         createDeclaredAppWebhookProvider({
           provider: "slack",
@@ -176,7 +175,6 @@ describe("slack app-webhook provider route", () => {
     const warn = vi.fn();
     const router = createAppWebhookRoutes({
       installationStore: {} as never,
-      secretStore: { get: async () => null },
       providers: [
         createDeclaredAppWebhookProvider({
           provider: "slack",

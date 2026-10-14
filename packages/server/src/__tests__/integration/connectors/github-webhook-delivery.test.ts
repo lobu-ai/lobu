@@ -82,7 +82,6 @@ afterAll(async () => {
 
 const router = () => createAppWebhookRoutes({
   installationStore: createPostgresAppInstallationStore(),
-  secretStore: { get: async () => null },
   providers: [createDeclaredAppWebhookProvider({
     provider: 'github', appId: APP_ID, webhookSchema: WEBHOOK_SCHEMA,
     onDelivery: createDataWebhookDelivery({ connectorKey: 'github', webhookSchema: WEBHOOK_SCHEMA }, connectorRecordEnqueuer(queue)),

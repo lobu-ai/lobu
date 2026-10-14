@@ -57,7 +57,7 @@ export const ATLASSIAN_MCP_FEEDS = {
 		key: ATLASSIAN_JIRA_ISSUES_FEED_KEY,
 		name: "Issues",
 		description:
-			"Live Jira issues via JQL. Reads call Rovo searchJiraIssuesUsingJql; signed Jira issue/comment webhooks are copied into events.",
+			"Live Jira issues via JQL. Reads call Rovo searchJiraIssuesUsingJql.",
 		operations: ["read"],
 		readWindowAxis: "updated_at",
 		configSchema: {
@@ -192,7 +192,7 @@ function namedField(value: unknown): string | undefined {
 	return asString((value as Record<string, unknown>).name);
 }
 
-export function atlassianDocumentToText(value: unknown): string {
+function atlassianDocumentToText(value: unknown): string {
 	if (typeof value === "string") return value;
 	if (!value || typeof value !== "object") return "";
 	const node = value as { type?: string; text?: string; content?: unknown[] };
@@ -312,7 +312,7 @@ function issueUrl(
 	return asString(issue.self) ?? asString(fields.url) ?? asString(issue.url);
 }
 
-export function mapAtlassianIssueToRow(
+function mapAtlassianIssueToRow(
 	raw: unknown,
 	config: Record<string, unknown> = {},
 ): Record<string, unknown> | null {

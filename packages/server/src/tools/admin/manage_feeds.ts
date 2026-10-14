@@ -694,7 +694,7 @@ async function handleCreateFeed(
 
   // Resolve the concrete Atlassian site through the authenticated MCP
   // connection at this write-time chokepoint. Persisting site identity makes
-  // future live reads and Jira app webhook routing exact and replica-safe.
+  // future live reads exact and replica-safe.
   let effectiveFeedConfig: Record<string, unknown> = { ...(args.config ?? {}) };
   const mcpConfig = isAtlassianMcpConfig(conn.mcp_config)
     ? normalizeMcpProxyConfig(conn.mcp_config)

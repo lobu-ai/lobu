@@ -40,7 +40,6 @@ const ORG = "org-webhook";
 const AGENT = "agent-webhook";
 const TOKEN = "whk-test-token-0123456789abcdef";
 const SIG_SECRET = "whk-sig-secret-0123456789abcdef";
-const JIRA_CLIENT_SECRET = "jira-client-secret";
 
 /** Compute a provider HMAC signature header value over the exact raw bytes. */
 function sign(
@@ -61,20 +60,6 @@ const githubSigConfig = {
 	signaturePrefix: "sha256=",
 	signatureSecret: SIG_SECRET,
 };
-
-function signAtlassianWebhookJwt(secret = JIRA_CLIENT_SECRET): string {
-	const encodedHeader = Buffer.from(
-		JSON.stringify({ alg: "HS256", typ: "JWT" }),
-	).toString("base64url");
-	const encodedPayload = Buffer.from(
-		JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 60 }),
-	).toString("base64url");
-	const signingInput = `${encodedHeader}.${encodedPayload}`;
-	const signature = createHmac("sha256", secret)
-		.update(signingInput)
-		.digest("base64url");
-	return `${signingInput}.${signature}`;
-}
 
 beforeAll(async () => {
 	await ensureDbForGatewayTests();
@@ -1441,12 +1426,13 @@ describe("connector-connection webhook bridge (connections table)", () => {
 		return id;
 	}
 
-	async function seedRegisteredAtlassianConnection(): Promise<{ id: string }> {
+	/**
+	 * An Atlassian MCP connection left over from the retired Jira dynamic
+	 * webhooks: it still carries the state that module stamped (subscription id,
+	 * callback-token ref, expiry/status), but no signing secret.
+	 */
+	async function seedRetiredAtlassianConnection(): Promise<{ id: string }> {
 		const { getDb } = await import("../../db/client.js");
-		const { createAuthProfile } = await import("../../utils/auth-profiles.js");
-		const { persistAuthCredentials } = await import(
-			"../../utils/auth-credential-secrets.js"
-		);
 		const sql = getDb();
 		const connectorKey = "mcp.mcp-atlassian-com";
 		await sql`
@@ -1458,24 +1444,6 @@ describe("connector-connection webhook bridge (connections table)", () => {
 				${sql.json({ issues: { key: "issues", operations: ["read"] } })}
 			)
 		`;
-		const appProfile = await createAuthProfile({
-			organizationId: ORG,
-			connectorKey: "jira",
-			displayName: "Jira Webhook App",
-			slug: "jira-webhook-app",
-			profileKind: "oauth_app",
-			status: "active",
-			provider: "jira",
-			createdBy: AGENT,
-		});
-		await persistAuthCredentials({
-			organizationId: ORG,
-			authProfileId: appProfile.id,
-			credentials: {
-				JIRA_CLIENT_ID: "jira-client-id",
-				JIRA_CLIENT_SECRET,
-			},
-		});
 		const [connection] = await sql`
 			INSERT INTO connections (
 				organization_id, connector_key, slug, display_name, status, config, visibility
@@ -1483,30 +1451,16 @@ describe("connector-connection webhook bridge (connections table)", () => {
 				${ORG}, ${connectorKey}, 'atlassian-rovo', 'Atlassian', 'active',
 				${sql.json({
 					cloud_id: "cloud-1",
-					site_cloud_id: "cloud-1",
-					site_url: "https://acme.atlassian.net",
-					jira_webhook_app_profile_slug: appProfile.slug,
+					webhook_external_id: "jira-hook-123",
+					webhook_callback_token: "secret://webhook/retired/callback-token",
+					webhook_expires_at: "2026-11-01T00:00:00.000Z",
+					webhook_status: "active",
 				})},
 				'org'
 			)
 			RETURNING id
 		`;
-		const id = String(connection.id);
-		await sql`
-			INSERT INTO feeds (
-				organization_id, connection_id, feed_key, display_name, status, config
-			) VALUES (
-				${ORG}, ${id}, 'issues', 'Issues', 'active', '{}'::jsonb
-			)
-		`;
-		await sql`
-			UPDATE connections
-			SET config = config || ${sql.json({
-				webhook_external_id: "jira-hook-123",
-			})}::jsonb
-			WHERE id = ${id}
-		`;
-		return { id };
+		return { id: String(connection.id) };
 	}
 
 	test("a GitHub connection registered before the event-type stamp dispatches after the backfill", async () => {
@@ -1966,108 +1920,69 @@ describe("connector-connection webhook bridge (connections table)", () => {
 		expect(rows[0].connection_id).toBe(Number(projected.id));
 	});
 
-	test("an authenticated Jira delivery lands as a structured event on the Atlassian Rovo feed", async () => {
+	test("a bearer delivery to a retired Atlassian MCP webhook is rejected and stores nothing", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
 		const { manager } = await buildManager();
 		const { createConnectionWebhookRoutes } = await import(
 			"../routes/public/connections.js"
 		);
 		const { getDb } = await import("../../db/client.js");
-		const { id } = await seedRegisteredAtlassianConnection();
+		const { id } = await seedRetiredAtlassianConnection();
 		const app = createConnectionWebhookRoutes(manager);
-		const raw = JSON.stringify({
-			webhookEvent: "jira:issue_updated",
-			issue: {
-				id: "10000",
-				key: "KAN-1",
-				self: "https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/issue/10000",
-				fields: {
-					summary: "Webhook bridge works",
-					status: { name: "To Do" },
-					created: "2026-08-13T10:00:00.000Z",
-					updated: "2026-08-13T10:01:00.000Z",
-				},
-			},
-		});
 		const res = await app.fetch(
 			new Request(`http://gateway.test/api/v1/webhooks/${id}`, {
 				method: "POST",
-				body: raw,
+				body: JSON.stringify({
+					webhookEvent: "jira:issue_updated",
+					issue: { id: "10000", key: "KAN-1" },
+				}),
 				headers: {
 					"content-type": "application/json",
-					authorization: `Bearer ${signAtlassianWebhookJwt()}`,
+					authorization: "Bearer header.payload.signature",
 				},
 			}),
 		);
-		expect(res.status).toBe(202);
-		const rows = await getDb()`
-			SELECT connector_key, connection_id, feed_key, origin_id, semantic_type
-			FROM events
-			WHERE connection_id = ${id}
-			ORDER BY id
+		expect(res.status).toBe(401);
+		const [{ n }] = await getDb()`
+			SELECT count(*)::int AS n FROM events WHERE organization_id = ${ORG}
 		`;
-		expect(rows).toEqual([
-			{
-				connector_key: "mcp.mcp-atlassian-com",
-				connection_id: Number(id),
-				feed_key: "issues",
-				origin_id: "jira_issue_10000",
-				semantic_type: "issue",
-			},
-		]);
+		expect(n).toBe(0);
+	});
 
-		const commentRaw = JSON.stringify({
-			webhookEvent: "comment_created",
-			issue: { id: "10000", key: "KAN-1", fields: {} },
-			comment: {
-				id: "20000",
-				body: {
-					type: "doc",
-					content: [
-						{
-							type: "paragraph",
-							content: [{ type: "text", text: "Webhook comment" }],
-						},
-					],
-				},
-				author: { displayName: "Jira User" },
-				created: "2026-08-13T10:02:00.000Z",
-			},
-		});
-		const commentRes = await app.fetch(
-			new Request(`http://gateway.test/api/v1/webhooks/${id}`, {
-				method: "POST",
-				body: commentRaw,
-				headers: {
-					"content-type": "application/json",
-					authorization: `Bearer ${signAtlassianWebhookJwt()}`,
-				},
-			}),
+	test("the retirement migration clears retired Atlassian state so the connection can be deleted", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const { secretStore } = await buildManager();
+		const { getDb } = await import("../../db/client.js");
+		const { unregisterConnectorWebhook } = await import(
+			"../../connect/webhook-registration.js"
 		);
-		expect(commentRes.status).toBe(202);
-		const [comment] = await getDb()`
-			SELECT origin_id, origin_parent_id, semantic_type, payload_text
-			FROM events
-			WHERE connection_id = ${id} AND origin_id = 'jira_comment_20000'
-		`;
-		expect(comment).toMatchObject({
-			origin_id: "jira_comment_20000",
-			origin_parent_id: "jira_issue_10000",
-			semantic_type: "comment",
-			payload_text: "Webhook comment",
-		});
+		const sql = getDb();
+		const { id } = await seedRetiredAtlassianConnection();
+		const githubId = await seedRegisteredConnectorConnection(secretStore);
+		const [githubBefore] = await sql`SELECT config FROM connections WHERE id = ${githubId}`;
 
-		const forged = await app.fetch(
-			new Request(`http://gateway.test/api/v1/webhooks/${id}`, {
-				method: "POST",
-				body: commentRaw,
-				headers: {
-					"content-type": "application/json",
-					authorization: `Bearer ${signAtlassianWebhookJwt("forged-secret")}`,
-				},
-			}),
-		);
-		expect(forged.status).toBe(401);
+		// Before: teardown reads the stale subscription id as code-registered and
+		// fails loading code for an MCP connector, which blocks deletion.
+		await expect(
+			unregisterConnectorWebhook({ organizationId: ORG, connectionId: Number(id), throwOnError: true }),
+		).rejects.toThrow();
+
+		const migration = (
+			await Bun.file(
+				new URL(
+					"../../../../../db/migrations/20261014170000_retire_atlassian_mcp_webhook_refresh.sql",
+					import.meta.url,
+				),
+			).text()
+		).split("-- migrate:down")[0];
+		await sql.unsafe(migration);
+
+		const [retired] = await sql`SELECT config FROM connections WHERE id = ${id}`;
+		expect(retired.config).toEqual({ cloud_id: "cloud-1" });
+		// A code-registered GitHub subscription is left alone.
+		expect((await sql`SELECT config FROM connections WHERE id = ${githubId}`)[0].config)
+			.toEqual(githubBefore.config);
+		await unregisterConnectorWebhook({ organizationId: ORG, connectionId: Number(id), throwOnError: true });
 	});
 
 	test("a forged signature to a connector connection is rejected with 401", async () => {

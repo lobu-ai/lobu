@@ -12,11 +12,10 @@
  *   2. extracts the provider tenant tuple (provider_instance, provider_app_id,
  *      external_tenant_id) from the body/headers (provider plugin), then
  *   3. resolves the active `app_installations` row for that tuple → owning org,
- *      then dispatches through the connector's declared data hook (feeds that
- *      declare the delivery's event type), or else lands the raw delivery
- *      through the SAME event-log path as the per-connection ingest
- *      (`connector_key='webhook:<id>'`, reusing the dedupe index, size cap, and
- *      rate limit).
+ *      then dispatches through the connector's declared data hook: the feeds
+ *      that declare the delivery's event type are marked due or recorded. A
+ *      delivery no feed declares is acked with nothing triggered; nothing is
+ *      ever stored raw.
  *
  * Verification + tenant extraction are GENERIC, derived entirely from the
  * connector's `ConnectorWebhookSchema`: {@link verifyDeclaredWebhook} computes
@@ -33,14 +32,13 @@
  * install reconciles on the callback and subsequent deliveries land. (§4.3.4)
  *
  * Multi-replica: stateless by construction — verify is pure, tenant resolution
- * and the landing insert read/write Postgres only; nothing is memoized per pod.
+ * and the feed dispatch read/write Postgres only; nothing is memoized per pod.
  * Any replica can serve any delivery.
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { createLogger } from "@lobu/core";
-import type { StoredConnection } from "@lobu/core";
 import type { ConnectorWebhookSchema } from "@lobu/connector-sdk";
 import { type DbClient, getDb } from "../../../db/client.js";
 import {
@@ -50,13 +48,11 @@ import {
 	readDeliveryPath,
 } from "../../../connectors/webhook-delivery.js";
 import {
-	handleWebhookIngest,
 	readBodyWithCap,
 	WEBHOOK_INGEST_MAX_BODY_BYTES,
 } from "../../connections/webhook-ingest.js";
 import type { SecretStore } from "../../secrets/index.js";
 import type { AppInstallationStore } from "../../../lobu/stores/app-installation-store.js";
-import { createJiraWebhookDelivery } from "./jira-mcp-webhook-delivery.js";
 
 const logger = createLogger("app-webhook-routes");
 
@@ -71,16 +67,6 @@ export interface AppWebhookTenant {
 }
 
 /**
- * `events.title` / `events.source_url` for the landed row. Extracted per
- * provider, not via a config JSON pointer: a comment's title lives on its parent
- * subject, so where the title/url live varies by event type.
- */
-export interface AppWebhookContent {
-	title?: string;
-	sourceUrl?: string;
-}
-
-/**
  * A registered provider: verifier + tenant extractor + optional per-KIND
  * delivery hooks. Every integration provider is built by the SINGLE generic
  * {@link createDeclaredAppWebhookProvider} from its declared
@@ -89,19 +75,6 @@ export interface AppWebhookContent {
  */
 export interface AppWebhookProvider {
 	provider: string;
-	/**
-	 * The provider's raw-body HMAC scheme, used by the router to synthesize the
-	 * ingest connection config so `handleWebhookIngest` re-verifies against the
-	 * SAME header/algorithm/prefix the provider just verified — not a hardcoded
-	 * GitHub scheme. `dedupeHeader` is the provider's per-delivery id header
-	 * (when one exists); absent → ingest dedupes on a body hash.
-	 */
-	webhookScheme: {
-		signatureHeader: string;
-		algorithm: "sha256" | "sha1";
-		signaturePrefix?: string;
-		dedupeHeader?: string;
-	};
 	/**
 	 * Verify the delivery against the APP-LEVEL webhook secret. Pure over
 	 * (rawBody, headers, secret) — no I/O — so it's trivially multi-replica
@@ -115,31 +88,15 @@ export interface AppWebhookProvider {
 	/**
 	 * Pull the provider tenant tuple from the body/headers. Returns null when
 	 * the delivery carries no resolvable tenant (e.g. a ping with no
-	 * installation), in which case the router acks 200 without landing.
+	 * installation), in which case the router acks 200 without dispatching.
 	 */
 	extractTenant(rawBody: Uint8Array, headers: Headers): AppWebhookTenant | null;
-	/** Optional title/source_url for the landed row; omitted → empty fields. */
-	extractContent?(rawBody: Uint8Array, headers: Headers): AppWebhookContent;
 	/**
-	 * Optional: resolve the delivery's authoring actor to a tenant-scoped
-	 * `person` → entity ids + identifier metadata slots for the landed row. The
-	 * org is the caller's resolved install, so resolution never crosses orgs.
-	 * Invoked lazily by handleWebhookIngest on the winning insert only; `sql` is
-	 * that insert's transaction, so the graph writes commit atomically with it.
-	 */
-	resolveActor?(params: {
-		organizationId: string;
-		rawBody: Uint8Array;
-		headers: Headers;
-		sql: DbClient;
-	}): Promise<{ entityIds: number[]; metadata: Record<string, string> } | null>;
-	/**
-	 * Optional: handle the delivery itself instead of storing a raw event —
-	 * the declared feed dispatch (see {@link createDataWebhookDelivery}) or the
-	 * Jira → Rovo hook. `triggered` reports whether a feed was marked due or a
-	 * record committed (telemetry only — the router acks 200 either way; an
-	 * unconfigured feed is a no-op, not an error). `handled: false` falls
-	 * through to the raw ingest path.
+	 * Optional: the declared feed dispatch (see
+	 * {@link createDataWebhookDelivery}). `triggered` reports whether a feed was
+	 * marked due or a record job queued (telemetry only — the router acks 200
+	 * either way; an unconfigured feed is a no-op, not an error). A provider
+	 * without it acks every delivery with nothing triggered.
 	 */
 	onDelivery?(params: {
 		rawBody: Uint8Array;
@@ -150,11 +107,11 @@ export interface AppWebhookProvider {
 			externalTenantId: string;
 		};
 		sql: DbClient;
-	}): Promise<{ triggered: boolean; handled?: boolean }>;
+	}): Promise<{ triggered: boolean }>;
 	/**
 	 * Optional: take over the ENTIRE delivery after `verify`, bypassing the
 	 * router's `extractTenant` → `resolveActiveByTenant` (`app_installations`) →
-	 * ingest pipeline. A provider that defines this owns its own routing AND its
+	 * feed dispatch. A provider that defines this owns its own routing AND its
 	 * own HTTP response; the router returns the Response verbatim.
 	 *
 	 * This exists for Slack, whose live messaging path does NOT fit the
@@ -168,7 +125,7 @@ export interface AppWebhookProvider {
 	 *    to a running chat adapter (url_verification challenges, replies) live in
 	 *    {@link SlackConnectionCoordinator.handleAppWebhook} and must be preserved
 	 *    exactly.
-	 *  - A delivery is forwarded to a running adapter, not stored as a raw event.
+	 *  - A delivery is forwarded to a running adapter, not dispatched to feeds.
 	 *
 	 * `verify` still runs first (fail-closed signing check at the edge); only the
 	 * post-verify routing is delegated. `rawBody` is the already-read body; the
@@ -263,7 +220,7 @@ export function verifyDeclaredWebhook(
  * the schema's ordered `routingKeyPaths` (or single `routingKeyPath`), first
  * non-empty match wins, then applies the declared `routingKeyTransform`
  * (`url-host` → the value's URL host, for Jira's `self` URLs). Returns null when
- * no path resolves (e.g. an app-level ping) → the router acks without landing.
+ * no path resolves (e.g. an app-level ping) → the router acks without dispatching.
  */
 export function extractTenantFromSchema(
 	rawBody: Uint8Array,
@@ -317,10 +274,6 @@ export function createDeclaredAppWebhookProvider(options: {
 	webhookSchema: ConnectorWebhookSchema;
 	/** Provider instance (default `'cloud'`). */
 	providerInstance?: string;
-	/** Optional title/source_url projector for the landed row. */
-	extractContent?: AppWebhookProvider["extractContent"];
-	/** Optional actor → person resolver (see {@link AppWebhookProvider.resolveActor}). */
-	resolveActor?: AppWebhookProvider["resolveActor"];
 	/** Optional per-KIND trigger handler (see {@link AppWebhookProvider.onDelivery}). */
 	onDelivery?: AppWebhookProvider["onDelivery"];
 	/** Optional per-KIND full-delivery takeover (chat adapters; {@link AppWebhookProvider.handleDelivery}). */
@@ -334,18 +287,8 @@ export function createDeclaredAppWebhookProvider(options: {
 				`(a non-signing provider can't be verified — fail closed).`,
 		);
 	}
-	const algorithm = webhookSchema.algorithm ?? "sha256";
-	const signaturePrefix = webhookSchema.signaturePrefix;
 	return {
 		provider,
-		webhookScheme: {
-			signatureHeader,
-			algorithm,
-			...(signaturePrefix ? { signaturePrefix } : {}),
-			...(webhookSchema.dedupeHeader
-				? { dedupeHeader: webhookSchema.dedupeHeader }
-				: {}),
-		},
 		verify(rawBody, headers, appWebhookSecret) {
 			return verifyDeclaredWebhook(rawBody, headers, appWebhookSecret, webhookSchema);
 		},
@@ -357,8 +300,6 @@ export function createDeclaredAppWebhookProvider(options: {
 				providerInstance,
 			);
 		},
-		...(options.extractContent ? { extractContent: options.extractContent } : {}),
-		...(options.resolveActor ? { resolveActor: options.resolveActor } : {}),
 		...(options.onDelivery ? { onDelivery: options.onDelivery } : {}),
 		...(options.handleDelivery ? { handleDelivery: options.handleDelivery } : {}),
 	};
@@ -369,9 +310,8 @@ export function createDeclaredAppWebhookProvider(options: {
  * DECLARES — never a provider-name branch in the gateway wiring. A connector
  * whose webhook schema names an `eventType` dispatches generically to the
  * installation's feeds that declare the event (invalidate, or record through
- * the feed's `normalize`). Jira routes matching sites to Atlassian Rovo issue
- * feeds and explicitly falls through while no Rovo feed exists. Everything
- * else has no hook, so the router falls through to the raw event-ingest path.
+ * the feed's `normalize`). A connector that names no event type has no hook:
+ * its deliveries are verified, routed and acked with nothing triggered.
  */
 export function createDataWebhookDelivery(
 	integration: { connectorKey: string; webhookSchema: ConnectorWebhookSchema },
@@ -379,21 +319,18 @@ export function createDataWebhookDelivery(
 ): AppWebhookProvider["onDelivery"] | undefined {
 	const { connectorKey, webhookSchema } = integration;
 	const eventType = webhookSchema.eventType;
-	if (eventType) {
-		return ({ rawBody, headers, install, sql }) =>
-			deliverConnectorWebhook({
-				sql,
-				rawBody,
-				headers,
-				eventType,
-				organizationId: install.organizationId,
-				connectorKey,
-				scope: { installationRef: String(install.id) },
-				enqueueRecord,
-			});
-	}
-	if (connectorKey === "jira") return createJiraWebhookDelivery();
-	return undefined;
+	if (!eventType) return undefined;
+	return ({ rawBody, headers, install, sql }) =>
+		deliverConnectorWebhook({
+			sql,
+			rawBody,
+			headers,
+			eventType,
+			organizationId: install.organizationId,
+			connectorKey,
+			scope: { installationRef: String(install.id) },
+			enqueueRecord,
+		});
 }
 
 /**
@@ -435,7 +372,6 @@ export function createChatWebhookDelivery(options: {
 /** Dependencies the router needs, injected at registration (testable). */
 export interface AppWebhookRouterDeps {
 	installationStore: AppInstallationStore;
-	secretStore: SecretStore;
 	/** Optional logger override for route-level verification tests. */
 	logger?: Pick<typeof logger, "info" | "warn" | "error">;
 	/** Provider plugins keyed by `provider` (the `:provider` path param). */
@@ -480,9 +416,7 @@ function json(status: number, body: Record<string, unknown>): Response {
 /**
  * Build the public app-webhook router.
  *
- * Registered like the other public routes (`app.route("", ...)`), so it shares
- * the global `peerRemoteAddress` middleware var used for per-source rate
- * limiting in the landing path.
+ * Registered like the other public routes (`app.route("", ...)`).
  */
 export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 	const router = new Hono();
@@ -530,7 +464,7 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 		//     (slug `agentconn-…`) that has no install row, so the generic
 		//     resolveActiveByTenant would 200-ack the live bot's traffic into
 		//     oblivion. They run their own precedence chain and return their own
-		//     Response; the generic install/ingest pipeline below is skipped entirely.
+		//     Response; the generic install/dispatch pipeline below is skipped entirely.
 		if (provider.handleDelivery) {
 			try {
 				return await provider.handleDelivery({
@@ -582,110 +516,27 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 			return json(200, { ok: true, landed: false });
 		}
 
-		// 4. Data hooks handle the delivery without a raw event: the declared
-		//    feed dispatch (feeds marked due or recorded; the poll stays the
-		//    canonical record and resolves identity) or Jira → Rovo issues. A
-		//    handler may return handled:false when its target is not configured
-		//    yet; that falls through to the raw store below, as do providers
-		//    without onDelivery.
-		if (provider.onDelivery) {
-			try {
-				const { triggered, handled } = await provider.onDelivery({
-					rawBody,
-					headers: c.req.raw.headers,
-					install,
-					sql: getDb(),
-				});
-				if (handled !== false) {
-					return json(200, { ok: true, triggered });
-				}
-			} catch (error) {
-				routeLogger.error(
-					{ provider: providerName, installationId: install.id, error: String(error) },
-					"[app-webhook] onDelivery trigger failed",
-				);
-				return json(500, { error: "Failed to handle delivery" });
-			}
+		// 4. Dispatch to the feeds that declare the delivery's event (marked due
+		//    or recorded; the poll stays the canonical record and resolves
+		//    identity). A connector with no data hook, or a delivery no feed
+		//    declares, is acked with nothing triggered — nothing is stored raw.
+		if (!provider.onDelivery) {
+			return json(200, { ok: true, triggered: false });
 		}
-
-		// 5. Land the RAW delivery through the same event-log path as connection
-		//    ingest. We synthesize a StoredConnection scoped to the install's org
-		//    and keyed on the install id, replaying the PROVIDER's signature scheme
-		//    (from `provider.webhookScheme`, not a hardcoded GitHub one) with the
-		//    app secret as a plaintext config value so handleWebhookIngest
-		//    re-verifies and lands under connector_key='webhook:app_install:<id>'
-		//    (matches the `webhook:%` dedupe index + size cap + rate limit). A
-		//    fresh Request carries the same raw bytes + headers; the original body
-		//    stream was already consumed above.
-		const scheme = provider.webhookScheme;
-		const synthesized: StoredConnection = {
-			id: `app_install:${install.id}`,
-			platform: "webhook",
-			organizationId: install.organizationId,
-			config: {
-				platform: "webhook",
-				// Replay the provider's HMAC scheme so the ingest handler's own verify
-				// passes against the app secret (plaintext passes resolveSecretValue
-				// through untouched). Providers without a per-delivery id header
-				// (Jira/Linear) omit dedupeHeader → ingest dedupes on a body hash.
-				signatureHeader: scheme.signatureHeader,
-				algorithm: scheme.algorithm,
-				...(scheme.signaturePrefix
-					? { signaturePrefix: scheme.signaturePrefix }
-					: {}),
-				signatureSecret: appSecret,
-				...(scheme.dedupeHeader ? { dedupeHeader: scheme.dedupeHeader } : {}),
-				semanticType: "content",
-			},
-			settings: {},
-			metadata: {},
-			status: "active",
-			createdAt: install.createdAt,
-			updatedAt: install.updatedAt,
-		};
-
-		const ingestRequest = new Request(c.req.raw.url, {
-			method: "POST",
-			headers: c.req.raw.headers,
-			body: rawBody,
-		});
-
-		// Title/source_url for the landed row; a miss leaves them empty.
-		const content = provider.extractContent?.(rawBody, c.req.raw.headers);
-
-		// Resolution runs lazily inside handleWebhookIngest on the winning insert
-		// only — resolving here would mutate the graph for deduped redeliveries.
-		// `sql` is the persist transaction, threaded so the actor writes are atomic.
-		const resolveActor = provider.resolveActor
-			? (sql: DbClient) =>
-					provider.resolveActor!({
-						organizationId: install.organizationId,
-						rawBody,
-						headers: c.req.raw.headers,
-						sql,
-					})
-			: undefined;
-
 		try {
-			return await handleWebhookIngest(
-				synthesized,
-				ingestRequest,
-				deps.secretStore,
-				c.var.peerRemoteAddress,
-				content || resolveActor
-					? {
-							title: content?.title,
-							sourceUrl: content?.sourceUrl,
-							resolveActor,
-						}
-					: undefined,
-			);
+			const { triggered } = await provider.onDelivery({
+				rawBody,
+				headers: c.req.raw.headers,
+				install,
+				sql: getDb(),
+			});
+			return json(200, { ok: true, triggered });
 		} catch (error) {
 			routeLogger.error(
 				{ provider: providerName, installationId: install.id, error: String(error) },
-				"[app-webhook] failed to land delivery",
+				"[app-webhook] onDelivery trigger failed",
 			);
-			return json(500, { error: "Failed to land delivery" });
+			return json(500, { error: "Failed to handle delivery" });
 		}
 	});
 

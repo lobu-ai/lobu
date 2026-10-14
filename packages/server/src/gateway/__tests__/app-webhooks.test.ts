@@ -21,6 +21,9 @@
  *     never marks the stargazers poll due.
  *  5. Forged/wrong-secret/tampered → 401; unknown tenant / no install → 200 ack.
  *
+ * Jira declares no webhook event type: its verified deliveries are acked with
+ * nothing triggered or stored.
+ *
  * The record job's normalize → attributed event → Automation chain needs the
  * isolate executor, so it runs in the vitest integration suite
  * (`__tests__/integration/connectors/github-webhook-delivery.test.ts`).
@@ -30,6 +33,7 @@ import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { ConnectorWebhookSchema } from "@lobu/connector-sdk";
 import GitHubConnector from "@lobu/connectors/github";
+import JiraConnector from "@lobu/connectors/jira";
 import LinearConnector from "@lobu/connectors/linear";
 import { connectorRecordEnqueuer } from "../../connectors/webhook-delivery.js";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
@@ -41,7 +45,6 @@ import {
 	extractTenantFromSchema,
 	verifyDeclaredWebhook,
 } from "../routes/public/app-webhooks.js";
-import { createJiraWebhookDelivery } from "../routes/public/jira-mcp-webhook-delivery.js";
 
 // The connectors' DECLARED webhook schemas, read off the real definitions so
 // the generic engine is driven exactly as the bundled declaration drives it.
@@ -49,14 +52,8 @@ const GITHUB_WEBHOOK_SCHEMA = new GitHubConnector().definition
 	.webhook as ConnectorWebhookSchema;
 const LINEAR_WEBHOOK_SCHEMA = new LinearConnector().definition
 	.webhook as ConnectorWebhookSchema;
-const JIRA_WEBHOOK_SCHEMA: ConnectorWebhookSchema = {
-	signatureHeader: "x-hub-signature",
-	algorithm: "sha256",
-	signaturePrefix: "sha256=",
-	delivery: "app_installation",
-	routingKeyPaths: ["self", "issue.self", "comment.self"],
-	routingKeyTransform: "url-host",
-};
+const JIRA_WEBHOOK_SCHEMA = new JiraConnector().definition
+	.webhook as ConnectorWebhookSchema;
 
 let queue: RunsQueue;
 
@@ -97,14 +94,10 @@ function ghSign(rawBody: string, secret = APP_SECRET): string {
 	return `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
 }
 
-/** A plaintext-only fake; the app secret is provided via the resolver. */
-const fakeSecretStore = { get: async () => null };
-
 /** Build the router with the GitHub plugin and a fixed app-secret resolver. */
 function buildApp() {
 	return createAppWebhookRoutes({
 		installationStore: createPostgresAppInstallationStore(),
-		secretStore: fakeSecretStore,
 		providers: [declaredProvider("github", APP_ID, GITHUB_WEBHOOK_SCHEMA)],
 		resolveAppWebhookSecret: async () => APP_SECRET,
 	});
@@ -154,11 +147,11 @@ async function eventRows(connectorKey: string): Promise<any[]> {
   `;
 }
 
-/** Count every raw app-install event regardless of which install key it landed under. */
-async function appInstallEventCount(): Promise<number> {
+/** Count every event in the org: a webhook delivery never stores one itself. */
+async function orgEventCount(): Promise<number> {
 	const { getDb } = await import("../../db/client.js");
 	const [row] = await getDb()`
-    SELECT count(*)::int AS n FROM events WHERE connector_key LIKE 'webhook:app_install:%'
+    SELECT count(*)::int AS n FROM events WHERE organization_id = ${ORG}
   `;
 	return row.n;
 }
@@ -304,7 +297,7 @@ describe("app-webhook router (GitHub)", () => {
 		expect((await res.json()).triggered).toBe(true);
 
 		// The poll is the canonical record, so the webhook stores no raw event…
-		expect(await appInstallEventCount()).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 		// …it marks the issues feed due (NULL → now()) and leaves commits untouched.
 		expect(await feedNextRunAt(issuesFeed)).not.toBeNull();
 		expect(await feedNextRunAt(commitsFeed)).toBeNull();
@@ -417,7 +410,7 @@ describe("app-webhook router (GitHub)", () => {
 		expect(res.status).toBe(200);
 		// No matching feed for acme/api → triggered:false, a no-op (not an error).
 		expect((await res.json()).triggered).toBe(false);
-		expect(await appInstallEventCount()).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 		// The unrelated repo's feed was left untouched.
 		expect(await feedNextRunAt(otherFeedId)).toBeNull();
 	});
@@ -533,7 +526,7 @@ describe("app-webhook router (GitHub)", () => {
 
 	test("a forged signature is rejected with 401 and lands nothing", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		const installId = await seedActiveInstall();
+		await seedActiveInstall();
 		const app = buildApp();
 
 		const raw = JSON.stringify({
@@ -545,12 +538,12 @@ describe("app-webhook router (GitHub)", () => {
 			ghDelivery(raw, { signature: "sha256=forged" }),
 		);
 		expect(res.status).toBe(401);
-		expect((await eventRows(`webhook:app_install:${installId}`)).length).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 
 	test("a delivery signed with the wrong secret is rejected with 401", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		const installId = await seedActiveInstall();
+		await seedActiveInstall();
 		const app = buildApp();
 
 		const raw = JSON.stringify({
@@ -561,12 +554,12 @@ describe("app-webhook router (GitHub)", () => {
 			ghDelivery(raw, { signature: ghSign(raw, "the-wrong-secret") }),
 		);
 		expect(res.status).toBe(401);
-		expect((await eventRows(`webhook:app_install:${installId}`)).length).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 
 	test("a tampered body (signature over different bytes) is rejected", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		const installId = await seedActiveInstall();
+		await seedActiveInstall();
 		const app = buildApp();
 
 		const signedOver = JSON.stringify({
@@ -581,7 +574,7 @@ describe("app-webhook router (GitHub)", () => {
 			ghDelivery(tampered, { signature: ghSign(signedOver) }),
 		);
 		expect(res.status).toBe(401);
-		expect((await eventRows(`webhook:app_install:${installId}`)).length).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 
 	test("an unknown tenant (no active install) acks 200 without landing", async () => {
@@ -598,7 +591,7 @@ describe("app-webhook router (GitHub)", () => {
 		// Ack, NOT 500 — the provider must not retry-storm; reconcile on callback.
 		expect(res.status).toBe(200);
 		expect((await res.json()).landed).toBe(false);
-		expect(await appInstallEventCount()).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 
 	test("a suspended install does not route (transfer demoted it) → 200 ack", async () => {
@@ -623,7 +616,7 @@ describe("app-webhook router (GitHub)", () => {
 		});
 		const res = await app.fetch(ghDelivery(raw));
 		expect(res.status).toBe(200);
-		expect((await eventRows(`webhook:app_install:${row.id}`)).length).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 
 	test("a delivery with no installation in the body acks 200 (no tenant)", async () => {
@@ -659,7 +652,7 @@ describe("app-webhook router (GitHub)", () => {
 		// Re-stamping next_run_at is idempotent; the poll (not the webhook) dedupes
 		// the actual content by stable origin_id, so still nothing landed raw.
 		expect(await feedNextRunAt(feedId)).not.toBeNull();
-		expect(await appInstallEventCount()).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 
 	test("a star delivery commits a record job before the ack, without triggering a poll", async () => {
@@ -780,7 +773,7 @@ describe("app-webhook router (GitHub)", () => {
 		expect(await feedNextRunAt(commitsFeed)).not.toBeNull();
 		expect(await feedNextRunAt(issuesFeed)).toBeNull();
 		expect(await recordJobs()).toHaveLength(0);
-		expect(await appInstallEventCount()).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 
 	test("an unknown provider path returns 404", async () => {
@@ -797,10 +790,9 @@ describe("app-webhook router (GitHub)", () => {
 
 	test("fails closed with 401 when no app webhook secret is configured", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		const installId = await seedActiveInstall();
+		await seedActiveInstall();
 		const app = createAppWebhookRoutes({
 			installationStore: createPostgresAppInstallationStore(),
-			secretStore: fakeSecretStore,
 			providers: [declaredProvider("github", APP_ID, GITHUB_WEBHOOK_SCHEMA)],
 			resolveAppWebhookSecret: async () => undefined,
 		});
@@ -811,12 +803,14 @@ describe("app-webhook router (GitHub)", () => {
 		});
 		const res = await app.fetch(ghDelivery(raw));
 		expect(res.status).toBe(401);
-		expect((await eventRows(`webhook:app_install:${installId}`)).length).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 });
 
 // ---------------------------------------------------------------------------
-// Jira — schema-driven verify (`x-hub-signature: sha256=<hex>`), site-host tenant
+// Jira — schema-driven verify (`x-hub-signature: sha256=<hex>`), site-host
+// tenant. The connector declares no webhook event type, so it has no data hook:
+// a verified, routed delivery is acked with nothing triggered or stored.
 // ---------------------------------------------------------------------------
 
 const JIRA_APP_ID = "jira-client-id";
@@ -831,15 +825,7 @@ function jiraSign(rawBody: string, secret = JIRA_SECRET): string {
 function buildJiraApp() {
 	return createAppWebhookRoutes({
 		installationStore: createPostgresAppInstallationStore(),
-		secretStore: fakeSecretStore,
-		providers: [
-			createDeclaredAppWebhookProvider({
-				provider: "jira",
-				appId: JIRA_APP_ID,
-				webhookSchema: JIRA_WEBHOOK_SCHEMA,
-				onDelivery: createJiraWebhookDelivery(),
-			}),
-		],
+		providers: [declaredProvider("jira", JIRA_APP_ID, JIRA_WEBHOOK_SCHEMA)],
 		resolveAppWebhookSecret: async () => JIRA_SECRET,
 	});
 }
@@ -857,50 +843,26 @@ async function seedJiraInstall(): Promise<number> {
 	return row.id;
 }
 
-async function seedAtlassianMcpIssuesFeed(): Promise<{
-	connectionId: number;
-	feedId: number;
-	connectorKey: string;
-}> {
+/** An install-bound Jira connection with an active issues feed. */
+async function seedJiraIssuesFeed(installId: number): Promise<number> {
 	const { getDb } = await import("../../db/client.js");
 	const sql = getDb();
-	const connectorKey = "mcp.mcp-atlassian-com";
 	await sql`
-    INSERT INTO connector_definitions (
-      organization_id, key, name, version, status, mcp_config, feeds_schema
-    ) VALUES (
-      ${ORG}, ${connectorKey}, 'Atlassian', '1.0.0', 'active',
-      ${sql.json({ upstream_url: "https://mcp.atlassian.com/v1/mcp" })},
-      ${sql.json({ issues: { key: "issues", operations: ["read"] } })}
-    )
+    INSERT INTO connector_definitions (organization_id, key, name, version, feeds_schema, status)
+    VALUES (${ORG}, 'jira', 'Jira', '1.0.0',
+      ${sql.json(declaredFeedsSchema(new JiraConnector().definition))}, 'active')
   `;
-	const [connection] = await sql`
-    INSERT INTO connections (
-      organization_id, connector_key, slug, display_name, status, config, visibility
-    ) VALUES (
-      ${ORG}, ${connectorKey}, 'atlassian-rovo', 'Atlassian', 'active',
-      ${sql.json({
-			cloud_id: "cloud-1",
-			site_cloud_id: "cloud-1",
-			site_url: `https://${JIRA_SITE}`,
-		})},
-      'org'
-    )
+	const [conn] = await sql`
+    INSERT INTO connections (organization_id, connector_key, slug, display_name, status, config, visibility)
+    VALUES (${ORG}, 'jira', 'jira', 'Jira', 'active', ${sql.json({ installation_ref: installId })}, 'org')
     RETURNING id
   `;
 	const [feed] = await sql`
-    INSERT INTO feeds (
-      organization_id, connection_id, feed_key, display_name, status, config
-    ) VALUES (
-      ${ORG}, ${connection.id}, 'issues', 'Issues', 'active', '{}'::jsonb
-    )
+    INSERT INTO feeds (organization_id, connection_id, feed_key, display_name, status, config, next_run_at)
+    VALUES (${ORG}, ${conn.id}, 'issues', 'Issues', 'active', '{}'::jsonb, NULL)
     RETURNING id
   `;
-	return {
-		connectionId: Number(connection.id),
-		feedId: Number(feed.id),
-		connectorKey,
-	};
+	return Number(feed.id);
 }
 
 function jiraDelivery(
@@ -918,85 +880,10 @@ function jiraDelivery(
 }
 
 describe("app-webhook router (Jira)", () => {
-	test("a signed issue delivery lands as a structured event on the matching Atlassian MCP feed", async () => {
-		await seedAgentRow(AGENT, { organizationId: ORG });
-		await seedJiraInstall();
-		const target = await seedAtlassianMcpIssuesFeed();
-		const app = buildJiraApp();
-
-		const raw = JSON.stringify({
-			webhookEvent: "jira:issue_updated",
-			issue: {
-				id: "10000",
-				key: "ACME-1",
-				self: `https://${JIRA_SITE}/rest/api/2/issue/10000`,
-				fields: {
-					summary: "Rovo webhook",
-					description: "Arrived through the Jira app",
-					status: { name: "In Progress" },
-					reporter: { displayName: "Ada" },
-					created: "2026-08-13T10:00:00.000Z",
-					updated: "2026-08-13T11:00:00.000Z",
-				},
-			},
-		});
-		const res = await app.fetch(jiraDelivery(raw));
-		expect(res.status).toBe(200);
-		expect(await res.json()).toMatchObject({ ok: true, triggered: true });
-
-		const rows = await eventRows(target.connectorKey);
-		expect(rows).toHaveLength(1);
-		expect(rows[0]).toMatchObject({
-			connection_id: target.connectionId,
-			feed_id: target.feedId,
-			feed_key: "issues",
-			origin_id: "jira_issue_10000",
-			origin_type: "issue",
-			title: "Rovo webhook",
-			author_name: "Ada",
-		});
-		expect(await appInstallEventCount()).toBe(0);
-	});
-
-	test("a signed comment delivery lands under the issue as a structured comment event", async () => {
-		await seedAgentRow(AGENT, { organizationId: ORG });
-		await seedJiraInstall();
-		const target = await seedAtlassianMcpIssuesFeed();
-		const app = buildJiraApp();
-
-		const raw = JSON.stringify({
-			webhookEvent: "comment_created",
-			issue: {
-				id: "10000",
-				key: "ACME-1",
-				self: `https://${JIRA_SITE}/rest/api/2/issue/10000`,
-				fields: { summary: "Rovo webhook" },
-			},
-			comment: {
-				id: "20000",
-				self: `https://${JIRA_SITE}/rest/api/2/issue/10000/comment/20000`,
-				body: "Looks good",
-				author: { displayName: "Grace" },
-				created: "2026-08-13T11:05:00.000Z",
-			},
-		});
-		const res = await app.fetch(jiraDelivery(raw));
-		expect(res.status).toBe(200);
-
-		const rows = await eventRows(target.connectorKey);
-		expect(rows).toHaveLength(1);
-		expect(rows[0]).toMatchObject({
-			origin_id: "jira_comment_20000",
-			origin_parent_id: "jira_issue_10000",
-			origin_type: "comment",
-			author_name: "Grace",
-			payload_text: "Looks good",
-		});
-	});
-
-	test("a signed issue delivery routes to the owning org via its site host", async () => {
+	test("a signed delivery for a connector with no matching feed is acked and stores nothing", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
 		const installId = await seedJiraInstall();
+		const feedId = await seedJiraIssuesFeed(installId);
 		const app = buildJiraApp();
 
 		const raw = JSON.stringify({
@@ -1005,21 +892,21 @@ describe("app-webhook router (Jira)", () => {
 				id: "10000",
 				key: "ACME-1",
 				self: `https://${JIRA_SITE}/rest/api/2/issue/10000`,
+				fields: { summary: "Routed, not stored" },
 			},
 		});
 		const res = await app.fetch(jiraDelivery(raw));
-		expect(res.status).toBe(202);
-
-		const rows = await eventRows(`webhook:app_install:${installId}`);
-		expect(rows.length).toBe(1);
-		expect(rows[0].organization_id).toBe(ORG);
-		// No delivery-id header → dedupe falls back to a body hash origin_id.
-		expect(typeof rows[0].origin_id).toBe("string");
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ ok: true, triggered: false });
+		// Nothing is stored raw, no feed is woken and no record job is queued.
+		expect(await orgEventCount()).toBe(0);
+		expect(await feedNextRunAt(feedId)).toBeNull();
+		expect(await recordJobs()).toHaveLength(0);
 	});
 
 	test("a forged signature is rejected with 401 and lands nothing", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		const installId = await seedJiraInstall();
+		await seedJiraInstall();
 		const app = buildJiraApp();
 
 		const raw = JSON.stringify({
@@ -1028,7 +915,7 @@ describe("app-webhook router (Jira)", () => {
 		});
 		const res = await app.fetch(jiraDelivery(raw, { signature: "sha256=forged" }));
 		expect(res.status).toBe(401);
-		expect((await eventRows(`webhook:app_install:${installId}`)).length).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 
 	test("a delivery with no self URL has no tenant → 200 ack, nothing landed", async () => {
@@ -1060,7 +947,6 @@ function linearSign(rawBody: string, secret = LINEAR_SECRET): string {
 function buildLinearApp() {
 	return createAppWebhookRoutes({
 		installationStore: createPostgresAppInstallationStore(),
-		secretStore: fakeSecretStore,
 		providers: [declaredProvider("linear", LINEAR_APP_ID, LINEAR_WEBHOOK_SCHEMA)],
 		resolveAppWebhookSecret: async () => LINEAR_SECRET,
 	});
@@ -1142,12 +1028,12 @@ describe("app-webhook router (Linear)", () => {
 		expect(issue.status).toBe(200);
 		expect((await issue.json()).triggered).toBe(true);
 		expect(await feedNextRunAt(feedId)).not.toBeNull();
-		expect(await eventRows(`webhook:app_install:${installId}`)).toHaveLength(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 
 	test("a bare-hex signature with a `sha256=` prefix is rejected (no prefix expected)", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		const installId = await seedLinearInstall();
+		await seedLinearInstall();
 		const app = buildLinearApp();
 
 		const raw = JSON.stringify({ organizationId: LINEAR_ORG_ID, action: "create" });
@@ -1156,7 +1042,7 @@ describe("app-webhook router (Linear)", () => {
 			linearDelivery(raw, { signature: `sha256=${linearSign(raw)}` }),
 		);
 		expect(res.status).toBe(401);
-		expect((await eventRows(`webhook:app_install:${installId}`)).length).toBe(0);
+		expect(await orgEventCount()).toBe(0);
 	});
 
 	test("a delivery with no organizationId has no tenant → 200 ack", async () => {

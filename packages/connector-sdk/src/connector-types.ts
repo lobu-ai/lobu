@@ -56,13 +56,16 @@ export interface ConnectorDefinition {
   automationEvents?: ConnectorAutomationEvent[];
   /**
    * Declarative inbound-webhook config. Presence means this connector receives
-   * real-time provider deliveries at `POST /api/v1/webhooks/:connectionId`,
-   * which are landed RAW into `events` (extract-load — the agent/downstream
-   * stages interpret them; no transform on the ingest hot path). The gateway
-   * verifies the signature IN-PROCESS using this schema + the secret stored on
-   * the connection, so the hot path never loads connector code. Pair with
-   * {@link ConnectorRuntime.registerWebhook}, which subscribes with the provider
-   * at connect time and stamps the signing secret onto the connection.
+   * real-time provider deliveries at `POST /api/v1/webhooks/:connectionId` (or
+   * the shared app-webhook endpoint for `delivery: 'app_installation'`). With an
+   * {@link ConnectorWebhookSchema.eventType} they are dispatched to the feeds
+   * that declare the event; without one, per-connection deliveries are stored
+   * raw under `webhook:<connectionId>` and app-installation deliveries are
+   * acked with nothing triggered. The gateway verifies the signature in process
+   * using this schema and the connection or app webhook secret, so verification
+   * never loads connector code. Per-connection subscriptions use
+   * {@link ConnectorRuntime.registerWebhook} at connect time and store the
+   * signing secret on the connection.
    */
   webhook?: ConnectorWebhookSchema;
   /** Global connector options schema (JSON Schema) */
@@ -255,14 +258,16 @@ export interface ConnectorWebhookSchema {
    * Where a delivery names its event type: a request header (GitHub
    * `x-github-event`) or a dotted body path. The platform matches it against
    * each feed's `webhook.events` to dispatch a verified data delivery to the
-   * feeds it updates. A data connector without it keeps raw delivery storage.
+   * feeds it updates. Without it, per-connection deliveries are stored raw and
+   * app-installation deliveries trigger nothing.
    */
   eventType?: { header: string } | { path: string };
   /**
    * `app_installation` mode only: how a VERIFIED delivery is dispatched once the
    * generic engine has checked its signature.
    * - `'data'` (default, absent) — dispatch to the feeds whose `webhook.events`
-   *   name the delivery's {@link eventType}, else the raw event-ingest path.
+   *   name the delivery's {@link eventType}; a delivery no feed declares (or a
+   *   connector with no `eventType`) is acked with nothing triggered.
    * - `'chat'` — forward to the chat adapter for the connector's provider (Slack;
    *   reusable by any future chat platform), bypassing the data-ingest pipeline.
    * The engine dispatches on THIS, never on a provider name.

@@ -566,9 +566,9 @@ export function createGatewayApp(
     // iterate the bundled integration connectors discovered + primed at boot
     // (those declaring `webhook.delivery: 'app_installation'`) and register ONE
     // GENERIC provider per declaration — verify + tenant + registration carry no
-    // provider name. The only per-KIND piece is the delivery hook (github's
-    // poll-canonical trigger/store, slack's chat-adapter forward), keyed off the
-    // connector, not branched on a provider literal in the engine. A provider is
+    // provider name. The only per-KIND piece is the delivery hook (the declared
+    // feed dispatch, slack's chat-adapter forward), keyed off the connector, not
+    // branched on a provider literal in the engine. A provider is
     // registered only when its Lobu App id is configured (the declared env var is
     // set); otherwise the route reports the provider unknown (404).
     const appWebhookSecretStore = coreServices.getSecretStore();
@@ -583,10 +583,9 @@ export function createGatewayApp(
 
       // Per-KIND delivery, dispatched off the DECLARED `deliveryKind` — never a
       // provider name. A `chat` connector forwards verified deliveries to the
-      // chat adapter for its provider (Slack today); a `data` connector lands
-      // them through the data path: the feeds that declare the delivery's
-      // event type when its schema names an `eventType`, Jira → Rovo issue
-      // events, else the raw event-ingest fallback.
+      // chat adapter for its provider (Slack today); a `data` connector
+      // dispatches them to the feeds that declare the delivery's event type
+      // when its schema names an `eventType`, else acks with nothing triggered.
       const deliveryKind = integration.webhookSchema.deliveryKind ?? "data";
       const deliveryHooks: Pick<
         AppWebhookProvider,
@@ -620,7 +619,6 @@ export function createGatewayApp(
       "",
       createAppWebhookRoutes({
         installationStore: createPostgresAppInstallationStore(),
-        secretStore: appWebhookSecretStore,
         providers: appWebhookProviders,
         resolveAppWebhookSecret: createDefaultAppWebhookSecretResolver(
           appWebhookSecretStore,

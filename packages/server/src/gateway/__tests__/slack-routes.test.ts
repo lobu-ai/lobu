@@ -459,7 +459,6 @@ describe("slack app-webhook route", () => {
     });
     app = createAppWebhookRoutes({
       installationStore: createPostgresAppInstallationStore(),
-      secretStore: { get: async () => null },
       providers: [slackProvider(handleSlackAppWebhook)],
       resolveAppWebhookSecret: async () => SLACK_SIGNING_SECRET,
     });
@@ -488,7 +487,6 @@ describe("slack app-webhook route", () => {
     });
     app = createAppWebhookRoutes({
       installationStore: createPostgresAppInstallationStore(),
-      secretStore: { get: async () => null },
       providers: [slackProvider(handleSlackAppWebhook)],
       resolveAppWebhookSecret: async () => SLACK_SIGNING_SECRET,
     });
@@ -521,7 +519,6 @@ describe("slack app-webhook route", () => {
     });
     app = createAppWebhookRoutes({
       installationStore: createPostgresAppInstallationStore(),
-      secretStore: { get: async () => null },
       providers: [slackProvider(handleSlackAppWebhook)],
       resolveAppWebhookSecret: async () => SLACK_SIGNING_SECRET,
     });
@@ -532,7 +529,6 @@ describe("slack app-webhook route", () => {
   test("fails closed 401 when the signing secret is unconfigured", async () => {
     app = createAppWebhookRoutes({
       installationStore: createPostgresAppInstallationStore(),
-      secretStore: { get: async () => null },
       providers: [slackProvider(handleSlackAppWebhook)],
       resolveAppWebhookSecret: async () => undefined,
     });

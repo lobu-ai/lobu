@@ -89,13 +89,10 @@ function ghSign(rawBody: string, secret = APP_SECRET): string {
 	return `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
 }
 
-const fakeSecretStore = { get: async () => null };
-
 /** The router as wired in prod: GitHub plugin + fixed app-secret resolver. */
 function buildRouter() {
 	return createAppWebhookRoutes({
 		installationStore: createPostgresAppInstallationStore(),
-		secretStore: fakeSecretStore,
 		providers: [createGithubAppWebhookProvider({ appId: APP_ID })],
 		resolveAppWebhookSecret: async () => APP_SECRET,
 	});
@@ -132,11 +129,10 @@ function issuesBody(tenant = TENANT, extra: Record<string, unknown> = {}) {
 	};
 }
 
-async function allInstallEventCount(): Promise<number> {
+/** Every stored event, across orgs: a webhook delivery never stores one itself. */
+async function allEventCount(): Promise<number> {
 	const { getDb } = await import("../../db/client.js");
-	const rows = await getDb()`
-    SELECT count(*)::int AS n FROM events WHERE connector_key LIKE 'webhook:app_install:%'
-  `;
+	const rows = await getDb()`SELECT count(*)::int AS n FROM events`;
 	return rows[0].n as number;
 }
 
@@ -321,7 +317,7 @@ describe("app-installation e2e: install → webhook → trigger (happy path)", (
 		expect((await res.json()).triggered).toBe(true);
 
 		// github is a poll-canonical connector: the webhook stores no raw event…
-		expect(await allInstallEventCount()).toBe(0);
+		expect(await allEventCount()).toBe(0);
 		// …it just marks the affected feed due, in the install's owning org.
 		expect(await feedNextRunAt(feedId)).not.toBeNull();
 
@@ -333,7 +329,7 @@ describe("app-installation e2e: install → webhook → trigger (happy path)", (
 		expect(redelivery.status).toBe(200);
 		expect((await redelivery.json()).triggered).toBe(true);
 		expect(await feedNextRunAt(feedId)).not.toBeNull();
-		expect(await allInstallEventCount()).toBe(0);
+		expect(await allEventCount()).toBe(0);
 	});
 });
 
@@ -369,7 +365,7 @@ describe("app-installation e2e: star delivery recorded (event-complete)", () => 
 		// Record, not trigger: no feed is marked due and no raw event lands.
 		expect(await feedNextRunAt(stargazersFeed)).toBeNull();
 		expect(await feedNextRunAt(issuesFeed)).toBeNull();
-		expect(await allInstallEventCount()).toBe(0);
+		expect(await allEventCount()).toBe(0);
 	});
 });
 
@@ -434,7 +430,7 @@ describe("app-installation e2e: reject / transfer ownership", () => {
 		// Org A's feed was left untouched — routing follows the active install.
 		expect(await feedNextRunAt(feedA)).toBeNull();
 		// No raw events on either side throughout the transfer.
-		expect(await allInstallEventCount()).toBe(0);
+		expect(await allEventCount()).toBe(0);
 	});
 
 	test("a 2nd concurrent active insert for the same tenant is rejected by the unique index", async () => {
@@ -673,7 +669,6 @@ describe("app-installation e2e: multi-replica safety", () => {
 		// serve any delivery.
 		const coldRouter = createAppWebhookRoutes({
 			installationStore: createPostgresAppInstallationStore(),
-			secretStore: { get: async () => null },
 			providers: [createGithubAppWebhookProvider({ appId: APP_ID })],
 			resolveAppWebhookSecret: async () => APP_SECRET,
 		});
@@ -684,7 +679,7 @@ describe("app-installation e2e: multi-replica safety", () => {
 		expect(res.status).toBe(200);
 		expect((await res.json()).triggered).toBe(true);
 		expect(await feedNextRunAt(feedId)).not.toBeNull();
-		expect(await allInstallEventCount()).toBe(0);
+		expect(await allEventCount()).toBe(0);
 	});
 
 	test("concurrent install upserts for one tenant converge to exactly one active row", async () => {
@@ -743,6 +738,6 @@ describe("app-installation e2e: unknown install (delivery before callback)", () 
 		);
 		expect(res.status).toBe(200);
 		expect((await res.json()).landed).toBe(false);
-		expect(await allInstallEventCount()).toBe(0);
+		expect(await allEventCount()).toBe(0);
 	});
 });

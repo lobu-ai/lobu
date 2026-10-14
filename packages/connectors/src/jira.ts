@@ -1,9 +1,9 @@
 /**
  * Jira Connector (V1 runtime)
  *
- * Reads Jira Cloud issues via JQL and can sync them into events. Real-time
- * issue/comment deliveries can arrive through the app-level webhook path; raw
- * deliveries land downstream (extract-load).
+ * Reads Jira Cloud issues via JQL and can sync them into events. App-level
+ * webhook deliveries are verified and routed to the owning install, but the
+ * connector declares no webhook event type, so they trigger nothing yet.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -304,8 +304,8 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
     key: 'jira',
     name: 'Jira',
     description:
-      'Syncs and live-reads Jira Cloud issues via JQL, and receives real-time issue/comment webhooks.',
-    version: '1.1.4',
+      'Syncs and live-reads Jira Cloud issues via JQL.',
+    version: '1.1.5',
     faviconDomain: 'atlassian.com',
     webhook: {
       // Jira Connect app webhooks HMAC-sign the raw body with the installation
@@ -612,7 +612,7 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
   }
 
   // -------------------------------------------------------------------------
-  // Webhooks (subscription lifecycle — raw deliveries land downstream)
+  // Webhooks (subscription lifecycle — per-connection deliveries are stored raw)
   // -------------------------------------------------------------------------
 
   async registerWebhook(

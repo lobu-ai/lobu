@@ -16,7 +16,6 @@ import { randomUUID } from "node:crypto";
 import type { AgentConnectionStore, StoredConnection } from "@lobu/core";
 import { createLogger, getErrorMessage, isSecretRef } from "@lobu/core";
 import { type Adapter, type AdapterPostableMessage, Chat } from "chat";
-import { verifyAtlassianWebhookAuthorization } from "../../connect/atlassian-webhook-auth.js";
 import {
   type ConnectionWebhookState,
   resolveConnectionWebhookConfig,
@@ -66,8 +65,6 @@ import {
   connectorRecordEnqueuer,
   deliverConnectorWebhook,
 } from "../../connectors/webhook-delivery.js";
-import { deliverJiraMcpConnectionWebhook } from "../routes/public/jira-mcp-webhook-delivery.js";
-import { isAtlassianMcpConfig } from "../../operations/atlassian-mcp-feed.js";
 import {
 	handleWebhookIngest,
 	prepareWebhookIngestConfig,
@@ -312,7 +309,6 @@ export function isAdapterlessPlatform(platform: string): boolean {
 interface BridgedWebhookConnection {
   stored: StoredConnection;
   connectorKey: string;
-  structuredWebhook: "jira_mcp" | null;
   connectionConfig: Record<string, unknown>;
 }
 
@@ -1422,38 +1418,6 @@ export class ChatInstanceManager {
         },
       };
     }
-    if (bridged.structuredWebhook === "jira_mcp") {
-      return {
-        verifyBearerToken: (token: string) =>
-          verifyAtlassianWebhookAuthorization({
-            organizationId: bridged.stored.organizationId!,
-            connectionConfig: bridged.connectionConfig,
-            token,
-          }),
-        handleInsteadOfPersist: async ({
-          rawBody,
-          organizationId,
-          connectionId: connId,
-        }) => {
-          const result = await deliverJiraMcpConnectionWebhook({
-            sql: getDb(),
-            connectionId: Number(connId),
-            organizationId,
-            rawBody,
-          });
-          return new Response(
-            JSON.stringify({
-              ok: result.handled,
-              triggered: result.triggered,
-            }),
-            {
-              status: result.handled ? 202 : 400,
-              headers: { "content-type": "application/json" },
-            },
-          );
-        },
-      };
-    }
     if (bridged.connectorKey === "webhook") {
       // Generic inbound webhook: persist AND activate. stored.id is the
       // numeric connections.id, passed explicitly so ingest never infers it.
@@ -1487,18 +1451,8 @@ export class ChatInstanceManager {
     // Connector connection ids are bigints; a non-numeric id can't match.
     if (!/^\d+$/.test(connectionId)) return null;
     const rows = await getDb()`
-      SELECT c.id, c.organization_id, c.connector_key, c.config, c.status,
-             cd.mcp_config
+      SELECT c.id, c.organization_id, c.connector_key, c.config, c.status
       FROM connections c
-      LEFT JOIN LATERAL (
-        SELECT mcp_config
-        FROM connector_definitions
-        WHERE organization_id = c.organization_id
-          AND key = c.connector_key
-          AND status = 'active'
-        ORDER BY updated_at DESC
-        LIMIT 1
-      ) cd ON TRUE
       WHERE c.id = ${connectionId}
         AND c.deleted_at IS NULL
       LIMIT 1
@@ -1510,7 +1464,6 @@ export class ChatInstanceManager {
           connector_key: string;
           config: Record<string, unknown> | null;
           status: string;
-          mcp_config: Record<string, unknown> | null;
         }
       | undefined;
     if (!row || !row.organization_id) return null;
@@ -1538,9 +1491,6 @@ export class ChatInstanceManager {
         updatedAt: Date.now(),
       },
       connectorKey: String(row.connector_key),
-      structuredWebhook: isAtlassianMcpConfig(row.mcp_config)
-        ? "jira_mcp"
-        : null,
       connectionConfig: row.config ?? {},
     };
   }

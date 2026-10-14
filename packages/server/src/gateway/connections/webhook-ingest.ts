@@ -40,8 +40,7 @@ import {
 	type AutomationActivationResult,
 	dispatchAutomationRunsBestEffort,
 } from "../../automations/activation.js";
-import { type DbClient, getDb } from "../../db/client.js";
-import { notifyEventContentChanged } from "../../events/emitter.js";
+import { getDb } from "../../db/client.js";
 import { runtimeConnectionIdToSlug } from "../../lobu/stores/connections-projection.js";
 import { constantTimeEqual } from "../../utils/constant-time-equal.js";
 import { insertEvent } from "../../utils/insert-event.js";
@@ -419,27 +418,7 @@ async function findExistingDeliveryId(
 	return (rows[0] as { id: number } | undefined)?.id;
 }
 
-/**
- * Caller-supplied projections for `events.title` / `events.source_url`.
- *
- * Connection ingest reads `events.title` from a static `config.titlePath` JSON
- * pointer and never sets a source url. App-webhook deliveries (GitHub App) carry
- * provider-specific shapes a single pointer can't express — a comment's title
- * lives on its parent issue, the url is `html_url` on a different object per
- * event type. The app-webhook router therefore extracts these per provider and
- * passes them here; when set they take precedence over `config.titlePath`.
- */
-/** Entity attribution for the landed row, produced by {@link WebhookIngestOverrides.resolveActor}. */
-export interface WebhookActorAttribution {
-	/** Entity ids → events.entity_ids (the webhook path has no feed, so read-time JOINs need this). */
-	entityIds?: number[];
-	/** Canonical identifier namespace slots (e.g. github_login) merged onto the row for read-time JOINs. */
-	metadata?: Record<string, unknown>;
-}
-
 export interface WebhookIngestOverrides {
-	title?: string | null;
-	sourceUrl?: string | null;
 	/**
 	 * The caller verified this is a real generic `webhook` connection, rather
 	 * than a synthetic webhook envelope for a connector/app installation.
@@ -456,21 +435,12 @@ export interface WebhookIngestOverrides {
 	 * delivery at `WHERE id = N` instead of the `agentconn-N` projection.
 	 */
 	automationConnectionId?: number;
-	/** Provider-specific bearer verification (Atlassian OAuth webhook JWTs). */
-	verifyBearerToken?: (token: string) => Promise<boolean>;
-	/**
-	 * Resolve the authoring actor → a person. Invoked only on the WINNING insert,
-	 * inside the persist transaction (the `sql` handle IS that tx), so the actor
-	 * graph writes commit atomically with the event and a deduped/lost-race
-	 * delivery never mutates the graph. A null/throw lands the row unattributed.
-	 */
-	resolveActor?: (sql: DbClient) => Promise<WebhookActorAttribution | null>;
 	/**
 	 * After auth + size/rate limits, handle the delivery instead of persisting a
-	 * raw `webhook:<id>` event. Used by poll-canonical connectors (GitHub) so
-	 * OAuth/PAT webhooks mark the matching feed due (or store event-complete
-	 * signals) the same way app-webhooks do — Automation signals then ride the
-	 * poll path with full envelopes. Returning a Response short-circuits insert.
+	 * raw `webhook:<id>` event. Used by connectors that declare a webhook event
+	 * type (GitHub/Linear OAuth/PAT webhooks) so deliveries mark the matching
+	 * feed due (or record event-complete payloads) the same way app-webhooks
+	 * do. Returning a Response short-circuits insert.
 	 */
 	handleInsteadOfPersist?: (ctx: {
 		rawBody: Uint8Array;
@@ -532,10 +502,9 @@ export async function handleWebhookIngest(
 		});
 	}
 
-	// 3. Auth. A delivery authenticates by a matching bearer token, a verified
-	//    provider HMAC signature (connector webhooks: GitHub/Linear sign), or a
-	//    provider-verified bearer JWT (Atlassian OAuth-app webhooks). Fail closed
-	//    when no method is configured.
+	// 3. Auth. A delivery authenticates by a matching bearer token or a verified
+	//    provider HMAC signature (connector webhooks: GitHub/Linear sign). Fail
+	//    closed when no method is configured.
 	// Resolve both candidate secrets concurrently — either (or both) may gate
 	// this delivery, so we need them before deciding auth.
 	const [configuredToken, signatureSecret] = await Promise.all([
@@ -548,7 +517,7 @@ export async function handleWebhookIngest(
 			typeof config.signatureSecret === "string" ? config.signatureSecret : undefined,
 		),
 	]);
-	if (!configuredToken && !signatureSecret && !overrides?.verifyBearerToken) {
+	if (!configuredToken && !signatureSecret) {
 		logger.warn(
 			{ connectionId: stored.id },
 			"[webhook-ingest] no resolvable token or signature secret — rejecting delivery",
@@ -564,13 +533,6 @@ export async function handleWebhookIngest(
 		!!configuredToken &&
 		!!presentedToken &&
 		tokensMatch(presentedToken, configuredToken);
-	if (
-		!authenticated &&
-		presentedToken &&
-		overrides?.verifyBearerToken
-	) {
-		authenticated = await overrides.verifyBearerToken(presentedToken);
-	}
 	if (!authenticated && !signatureSecret) {
 		return json(401, { error: "Unauthorized" });
 	}
@@ -624,9 +586,9 @@ export async function handleWebhookIngest(
 		return json(400, { error: "Request body must be valid JSON" });
 	}
 
-	// Poll-canonical connectors (GitHub OAuth/PAT) replace raw webhook:<id>
-	// storage with feed-due / structured-store handling so Automation activations
-	// share the same envelope path as scheduled polls. Auth above is identical.
+	// Connectors that declare a webhook event type replace raw webhook:<id>
+	// storage with the declared feed dispatch so Automation activations share
+	// the same envelope path as scheduled polls. Auth above is identical.
 	if (overrides?.handleInsteadOfPersist) {
 		return overrides.handleInsteadOfPersist({
 			rawBody,
@@ -668,8 +630,7 @@ export async function handleWebhookIngest(
 			? config.semanticType
 			: "content";
 
-	// 6. Persist, then ack. Actor resolution is tied to the winning insert (see
-	//    the transaction below). Fast-path a sequential duplicate first.
+	// 6. Persist, then ack. Fast-path a sequential duplicate first.
 	const existingId = await findExistingDeliveryId(
 		organizationId,
 		connectorKey,
@@ -683,10 +644,7 @@ export async function handleWebhookIngest(
 		webhook_connection_id: stored.id,
 		dedupe_source: dedupeSource,
 	};
-	const eventTitle =
-		overrides?.title != null && overrides.title.length > 0
-			? overrides.title.slice(0, 500)
-			: extractTitle(parsed, config.titlePath);
+	const eventTitle = extractTitle(parsed, config.titlePath);
 	const eventContent = isSearchableEnabled(config) ? renderPayloadText(parsed) : null;
 
 	try {
@@ -728,9 +686,9 @@ export async function handleWebhookIngest(
 				automationConnectionId = Number(automationConnection.id);
 			}
 
-			// Insert FIRST (empty entity_ids). A concurrent duplicate trips the
-			// delivery-unique index → 23505 → this tx rolls back, so the loser never
-			// reaches actor resolution. Only the winner continues.
+			// A concurrent duplicate trips the delivery-unique index → 23505 →
+			// this tx rolls back, so the loser never activates. Only the winner
+			// continues.
 			const occurredAt = new Date();
 			const inserted = await insertEvent(
 				{
@@ -746,62 +704,11 @@ export async function handleWebhookIngest(
 					payloadData,
 					content: eventContent,
 					title: eventTitle,
-					sourceUrl: overrides?.sourceUrl ?? null,
 					occurredAt,
 					metadata: eventMetadata,
 				},
 				{ sql: tx as unknown as ReturnType<typeof getDb> },
 			);
-
-			// Winner-only resolution in the same tx: exactly one resolveActor per
-			// landed event, and no window where the row is visible with empty
-			// entity_ids. Best-effort — a miss/throw leaves the row unattributed.
-			let attribution: WebhookActorAttribution | null = null;
-			if (overrides?.resolveActor) {
-				try {
-					attribution = await overrides.resolveActor(
-						tx as unknown as DbClient,
-					);
-				} catch (error) {
-					logger.warn(
-						{ connectionId: stored.id, error: String(error) },
-						"[webhook-ingest] actor resolution failed — landing delivery unattributed",
-					);
-				}
-			}
-			if (
-				attribution &&
-				((attribution.entityIds && attribution.entityIds.length > 0) ||
-					(attribution.metadata && Object.keys(attribution.metadata).length > 0))
-			) {
-				const entityIdsValue =
-					attribution.entityIds && attribution.entityIds.length > 0
-						? `{${attribution.entityIds.join(",")}}`
-						: null;
-				await tx`
-					UPDATE events
-					SET entity_ids = COALESCE(${entityIdsValue}::bigint[], entity_ids),
-					    metadata = metadata || ${tx.json(attribution.metadata ?? {})},
-					    linked_org_ids = (
-					      SELECT COALESCE(array_agg(DISTINCT x.o), '{}'::text[])
-					      FROM (
-					        SELECT ent.organization_id AS o
-					        FROM public.entities ent
-					        WHERE ent.id = ANY(COALESCE(${entityIdsValue}::bigint[], events.entity_ids))
-					        UNION ALL
-					        SELECT c.organization_id AS o
-					        FROM public.connections c
-					        WHERE c.id = events.connection_id
-					      ) x
-					      WHERE x.o IS NOT NULL
-					        AND (x.o <> events.organization_id OR events.organization_id IS NULL)
-					    )
-					WHERE id = ${inserted.id}
-				`;
-				// insertEvent notified the orgs linked at insert time; attribution
-				// can link more. Same tx, so the owner's repeat payload collapses.
-				await notifyEventContentChanged(tx as unknown as DbClient, inserted.id);
-			}
 
 			// Persisted event + matching Automation runs commit together. Connector
 			// scheduling stays independent: this is the same durable event seam used
@@ -838,7 +745,6 @@ export async function handleWebhookIngest(
 	} catch (error) {
 		if (isUniqueViolation(error)) {
 			// Lost the concurrent race: the winner's row exists; ack as a duplicate.
-			// The rolled-back tx means we never resolved the actor here.
 			const racedId = await findExistingDeliveryId(
 				organizationId,
 				connectorKey,

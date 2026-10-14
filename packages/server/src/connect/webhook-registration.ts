@@ -3,9 +3,8 @@
  *
  * When a connector connection becomes active and its connector declares a
  * `webhook` block AND a feed target is configured, we subscribe with the
- * provider once (extract-load: deliveries then POST to
- * `/api/v1/webhooks/:connectionId`). The minted secret + the connector's
- * declarative verification scheme are stamped onto the connection `config` so
+ * provider once (deliveries then POST to `/api/v1/webhooks/:connectionId`).
+ * The minted secret + the connector's declarative verification scheme are stamped onto the connection `config` so
  * the gateway ingest hot path can verify provider HMACs without running any
  * connector code per delivery (see gateway/connections/webhook-ingest.ts +
  * the two-table bridge in chat-instance-manager.handleIngestWebhook).
@@ -29,10 +28,6 @@ import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed'
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
 import logger from '../utils/logger';
 import { getErrorMessage } from "@lobu/core";
-import {
-  ensureAtlassianMcpJiraWebhook,
-  unregisterAtlassianMcpJiraWebhook,
-} from './atlassian-mcp-webhook';
 
 interface ConnectorConnectionRow {
   id: number;
@@ -50,8 +45,6 @@ interface ConnectorConnectionRow {
 export interface ConnectionWebhookState {
   /** Provider subscription id, for teardown. */
   webhook_external_id?: string;
-  /** `secret://` ref to the unguessable token embedded in a callback URL. */
-  webhook_callback_token?: string;
   /** `secret://` ref to the signing secret the provider HMACs deliveries with. */
   webhook_signature_secret?: string;
   /** The connector's declarative verification scheme, stamped at register time. */
@@ -61,9 +54,6 @@ export interface ConnectionWebhookState {
   webhook_dedupe_header?: string;
   /** Where deliveries name their event type; present = dispatch to the declaring feeds. */
   webhook_event_type?: ConnectorWebhookSchema['eventType'];
-  webhook_expires_at?: string;
-  webhook_status?: 'active' | 'error';
-  webhook_error?: string | null;
 }
 
 function toNumberOrNull(value: number | string | null): number | null {
@@ -142,21 +132,9 @@ export async function registerConnectorWebhook(params: {
   connectionId: number;
   /** When this connector doesn't declare a webhook block, callers can skip. */
   request?: Request | null;
-  /** Explicit public gateway origin for request-less admin/scheduled callers. */
-  baseUrl?: string;
-  /** Config mutations that disable durable delivery must fail closed. */
-  throwOnError?: boolean;
 }): Promise<void> {
   const { organizationId, connectionId } = params;
   try {
-    const atlassian = await ensureAtlassianMcpJiraWebhook({
-      organizationId,
-      connectionId,
-      baseUrl:
-        params.baseUrl ??
-        resolveBaseUrl({ request: params.request ?? null }).replace(/\/+$/, ''),
-    });
-    if (atlassian.handled) return;
     await orgContext.run({ organizationId }, async () => {
       const connection = await loadConnection(organizationId, connectionId);
       if (!connection) return;
@@ -254,7 +232,6 @@ export async function registerConnectorWebhook(params: {
       },
       'Connector webhook registration failed (connection stays active)'
     );
-    if (params.throwOnError) throw error;
   }
 }
 
@@ -269,17 +246,9 @@ export async function unregisterConnectorWebhook(params: {
   connectionId: number;
   /** Deletion must fail closed when external teardown fails. */
   throwOnError?: boolean;
-  /** Explicit public gateway origin used to reconcile ambiguous provider state. */
-  baseUrl?: string;
 }): Promise<void> {
   const { organizationId, connectionId } = params;
   try {
-    const atlassian = await unregisterAtlassianMcpJiraWebhook({
-      organizationId,
-      connectionId,
-      baseUrl: params.baseUrl,
-    });
-    if (atlassian.handled) return;
     await orgContext.run({ organizationId }, async () => {
       const connection = await loadConnection(organizationId, connectionId);
       if (!connection) return;
@@ -381,10 +350,8 @@ export async function resolveConnectionWebhookConfig(
   // `connectorKey` is required (no permissive default) so a future caller
   // cannot omit it and silently widen the fallback.
   const documentedKeys = connectorKey === 'webhook';
-  const registeredToken = c.webhook_callback_token;
-  const documentedToken =
+  const token =
     documentedKeys && typeof c.token === 'string' ? c.token : undefined;
-  const token = registeredToken ?? documentedToken;
   const dedupeHeader =
     c.webhook_dedupe_header ?? (documentedKeys && typeof c.dedupeHeader === 'string' ? c.dedupeHeader : undefined);
   if (!c.webhook_signature_secret && !token && !c.webhook_external_id) {
@@ -392,14 +359,12 @@ export async function resolveConnectionWebhookConfig(
   }
   return {
     platform: 'webhook',
-    // Provider-registered webhooks always allow query auth (pre-existing).
     // Documented-schema tokens carry only the connection's own opt-in —
-    // forcing true would authenticate `?token=` URLs the owner never opted
-    // into (tokens leak via proxy logs and browser history).
-    ...(registeredToken ? { token: registeredToken, allowQueryAuth: true } : {}),
-    ...(!registeredToken && documentedToken
+    // forcing query auth would authenticate `?token=` URLs the owner never
+    // opted into (tokens leak via proxy logs and browser history).
+    ...(token
       ? {
-          token: documentedToken,
+          token,
           allowQueryAuth:
             c.allowQueryAuth === true || c.allowQueryAuth === 'true',
         }

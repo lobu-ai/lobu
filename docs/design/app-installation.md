@@ -109,8 +109,9 @@ interface InstallationTokenProvider {
 2. **Provider tenant extractor** (plugin): pull `(provider_instance, provider_app_id, external_tenant_id)`
    from body/headers/site-URL (GitHub: `installation.id` + headers; Slack: `team_id`/`enterprise_id`, possibly
    form-encoded under `payload`; Jira: cloudId/clientKey).
-3. Resolve `app_installations` (active) → `organization_id` → linked `connection` → land raw event
-   (`connector_key='webhook:<connectionId>'`, reuses dedupe index). Multi-replica safe (stateless; Postgres-mediated).
+3. Resolve `app_installations` (active) → `organization_id` → dispatch to the install's feeds that declare
+   the delivery's event type (marked due, or recorded through the feed's `normalize`). A delivery no feed
+   declares is acked with nothing triggered; nothing is stored raw. Multi-replica safe (stateless; Postgres-mediated).
 4. **Unknown tenant before callback:** buffer/ack-and-drop with a log (don't 500); reconcile on install callback.
 
 ### 4.4 Install/connect flow

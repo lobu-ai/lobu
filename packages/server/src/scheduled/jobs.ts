@@ -66,7 +66,6 @@ import {
 } from '../gateway/services/agent-threads';
 import { buildMessagePayload } from '../gateway/services/platform-helpers';
 import { migrateLegacyPlaintextAuthData } from '../utils/auth-credential-secrets';
-import { refreshDueAtlassianMcpJiraWebhooks } from '../connect/atlassian-mcp-webhook';
 
 function asDeliveryContext(value: unknown): ScheduledDeliveryContext | null {
   if (!value || typeof value !== 'object') return null;
@@ -177,19 +176,6 @@ function registerMaintenanceTasks(
       }
     },
     { cron: '23 */6 * * *' },
-  );
-
-  // Jira dynamic webhooks expire after 30 days. Refresh each separately
-  // authorized Atlassian MCP subscription before its provider expiry.
-  scheduler.register(
-    'atlassian-mcp-webhook-refresh',
-    async () => {
-      const result = await refreshDueAtlassianMcpJiraWebhooks();
-      if (result.refreshed > 0 || result.errors > 0) {
-        logger.info({ ...result }, '[task] Atlassian MCP webhook refresh swept');
-      }
-    },
-    { cron: '17 */6 * * *' },
   );
 
   // Hygiene sweep — drops expired rows from oauth_states, rate_limits,
