@@ -76,10 +76,10 @@ describe('Automation response byte budget', () => {
     const result = await wire.runSdk<{
       success: boolean;
       error?: unknown;
-      return_value?: { ids: number[]; pages: number; firstCount: number; partialError: string; completed: { run_id: number; content_linked: number } };
+      return_value?: { ids: number[]; pages: number; firstCount: number; completed: { run_id: number; content_linked: number } };
     }>(`export default async (_ctx, client) => {
       const tokens = [], ids = [];
-      let runId, cursor = {}, pages = 0, firstCount, partialError = '';
+      let runId, cursor = {}, pages = 0, firstCount;
       while (pages < 100) {
         const claim = await client.automations.claimNextWindow({
           automation_id: '${created.automation_id}', limit: 500, lease_seconds: 900,
@@ -94,13 +94,7 @@ describe('Automation response byte budget', () => {
         tokens.push(r.window_token);
         ids.push(...r.content.map(row => Number(row.id)));
         pages++;
-        if (pages === 1) {
-          firstCount = r.content.length;
-          try {
-            await client.automations.completeWindow({ automation_id: '${created.automation_id}', run_id: runId,
-              window_tokens: tokens, extracted_data: { signals: [] } });
-          } catch (error) { partialError = error.message; }
-        }
+        if (pages === 1) firstCount = r.content.length;
         if (!r.page.has_more) break;
         if (!r.page.next_cursor || !r.content.length) throw new Error('page cannot advance');
         const last = r.sources.content[r.sources.content.length - 1];
@@ -110,14 +104,13 @@ describe('Automation response byte budget', () => {
       const completed = await client.automations.completeWindow({
         automation_id: '${created.automation_id}', run_id: runId, window_tokens: tokens, extracted_data: { signals: [] },
       });
-      return { ids, pages, firstCount, partialError, completed };
+      return { ids, pages, firstCount, completed };
     }`);
     expect(result.success, JSON.stringify(result.error)).toBe(true);
     const value = result.return_value!;
     expect(value.pages).toBeGreaterThan(1);
     expect(value.firstCount).toBeGreaterThan(0);
     expect(value.firstCount).toBeLessThan(ROW_COUNT);
-    expect(value.partialError).toMatch(/More Automation source pages remain/);
     expect(value.ids.sort((a, b) => a - b)).toEqual(expectedIds);
     expect(new Set(value.ids).size).toBe(ROW_COUNT);
     expect(value.completed.content_linked).toBe(ROW_COUNT);

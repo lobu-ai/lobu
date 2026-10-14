@@ -7,7 +7,7 @@
  */
 
 import Ajv from 'ajv';
-import { assertCompleteSourceWindowPages } from '../../../automations/source-window-pages';
+import { summarizeSourceWindowPages } from '../../../automations/source-window-pages';
 import { normalizeAutomationSources } from '../../../automations/source-refs';
 import addFormats from 'ajv-formats';
 import {
@@ -59,70 +59,6 @@ import {
  *  be read, and an unbounded id list on a wide window is neither useful nor
  *  cheap to store. Mirrors the capping rationale in worker-api/run-lifecycle. */
 const CAPTURE_PREVIEW_CONTENT_CAP = 200;
-
-function assertCompleteWindowPageChain(
-  tokens: Array<{
-    run_id?: number;
-    lease_expires_at?: string;
-    page_before_occurred_at?: string;
-    page_before_id?: number;
-    page_next_occurred_at?: string;
-    page_next_id?: number;
-    page_has_more?: boolean;
-    truncated_source_names?: string[];
-  }>
-): (typeof tokens)[number] | undefined {
-  const truncated = [
-    ...new Set(tokens.flatMap((token) => token.truncated_source_names ?? [])),
-  ];
-  if (truncated.length > 0) {
-    throw new ToolUserError(
-      `Automation sources ${truncated.join(', ')} exceed the bounded page and cannot be completed safely. ` +
-        'Narrow those source queries or run the Automation more often, then retry the claim.',
-      409
-    );
-  }
-  const paged = tokens.filter((token) => token.page_has_more !== undefined);
-  if (paged.length === 0) return undefined;
-  const roots = paged.filter(
-    (token) => token.page_before_occurred_at == null && token.page_before_id == null
-  );
-  if (roots.length !== 1) {
-    throw new ToolUserError('window_tokens must contain exactly one first source page.', 409);
-  }
-  const visited = new Set<(typeof paged)[number]>();
-  let current = roots[0];
-  while (true) {
-    if (visited.has(current)) {
-      throw new ToolUserError('window_tokens contain a cyclic page chain.', 409);
-    }
-    visited.add(current);
-    if (!current.page_has_more) break;
-    if (!current.page_next_occurred_at || current.page_next_id == null) {
-      throw new ToolUserError('A truncated Automation source page has no continuation cursor.', 409);
-    }
-    const next = paged.find(
-      (token) =>
-        token.page_before_occurred_at === current.page_next_occurred_at &&
-        token.page_before_id === current.page_next_id
-    );
-    if (!next) {
-      const continuationGuidance = tokens.some((token) => token.lease_expires_at != null)
-        ? 'Call automations.claimNextWindow with the same run_id and context.page.next_cursor'
-        : 'Call read_knowledge again with before_occurred_at and before_id from page.next_cursor';
-      throw new ToolUserError(
-        `More Automation source pages remain. ${continuationGuidance}, then pass every returned ` +
-          'window_token to completeWindow.',
-        409
-      );
-    }
-    current = next;
-  }
-  if (visited.size !== paged.length) {
-    throw new ToolUserError('window_tokens contain disconnected or duplicate source pages.', 409);
-  }
-  return current;
-}
 
 // Initialize AJV for JSON Schema validation
 // removeAdditional: true strips fields like 'embedding' that workers add but aren't in the schema
@@ -278,7 +214,6 @@ export async function handleCompleteWindow(
       throw new ToolUserError('All window_tokens must belong to the same Automation run/window.', 400);
     }
   }
-  assertCompleteWindowPageChain(tokenPayloads);
 
   const pgSql = createDbClientFromEnv(env);
   await requireAutomationAccess(pgSql, [String(automationId)], ctx, 'write');
@@ -396,9 +331,10 @@ export async function handleCompleteWindow(
     );
   }
 
-  // New completions must cover the pinned version's live sources, even if a
-  // caller submits a legacy token without a roster. A completed run already
-  // holds its durable coverage; replay must not depend on a feed still existing.
+  // Completing means the agent processed the window, not that it read every
+  // row: it may answer with analytical queries instead. Record how far each
+  // pinned live source was read. A completed run already holds its durable
+  // coverage; replay must not depend on a feed still existing.
   const versionSources = parseJson(automationRows[0].version_sources) || [];
   const sources = versionSources.length > 0 ? versionSources : parseJson(automationRows[0].sources) || [];
   const requiredSources = runRows[0].status === 'completed'
@@ -409,7 +345,7 @@ export async function handleCompleteWindow(
   if (requiredSources.length && tokenRunId !== runId) {
     throw new ToolUserError('Live source completion requires run-bound window tokens.', 409);
   }
-  const sourceCoverage = assertCompleteSourceWindowPages(tokenPayloads, requiredSources);
+  const sourceCoverage = summarizeSourceWindowPages(tokenPayloads, requiredSources);
   delete provenanceMetadata.source_coverage;
   if (sourceCoverage.length) provenanceMetadata.source_coverage = sourceCoverage;
 

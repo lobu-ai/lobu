@@ -6,18 +6,22 @@ interface SourceProof {
   source_pages?: SourceWindowPage[];
 }
 
-/** Same completion proof as event pages, independently for every declared live source. */
-export function assertCompleteSourceWindowPages(
+/**
+ * How far a completion read each pinned live source. Reading is the agent's
+ * call, so a short or broken page chain is recorded rather than refused; only
+ * receipts that do not belong to this Automation's pinned sources fail.
+ */
+export function summarizeSourceWindowPages(
   tokens: SourceProof[],
   required: Array<{ name: string; feed_id: number }>,
-): Array<{ name: string; feed_id: number; axis: string; rows: number }> {
+): Array<{ name: string; feed_id: number; axis: string | null; rows: number; complete: boolean }> {
   const roster = (sources: typeof required) => JSON.stringify(
     [...sources].sort((a, b) => a.name.localeCompare(b.name)),
   );
   const expected = roster(required);
   const pages = tokens.flatMap((token) => token.source_pages ?? []);
   const fail = (message: string): never => {
-    throw new ToolUserError(`Incomplete Automation source window: ${message}`, 409);
+    throw new ToolUserError(`Invalid Automation source window: ${message}`, 409);
   };
   if (tokens.some((token) => roster(token.required_sources ?? []) !== expected)) {
     fail('source receipts do not match the pinned Automation sources.');
@@ -27,25 +31,20 @@ export function assertCompleteSourceWindowPages(
   }
   return required.map((source) => {
     const chain = pages.filter((page) => page.name === source.name);
-    const roots = chain.filter((page) => page.before_cursor == null);
-    if (roots.length !== 1) fail(`${source.name} requires exactly one first page.`);
-    const root = roots[0];
-    if (chain.some((page) => page.feed_id !== root.feed_id || page.axis !== root.axis || page.revision !== root.revision)) {
-      fail(`${source.name} changed its source request during pagination.`);
-    }
+    const root = chain.find((page) => page.before_cursor == null);
     const visited = new Set<SourceWindowPage>();
-    let current = root;
     let rows = 0;
-    while (true) {
-      if (visited.has(current)) fail(`${source.name} has a cyclic page chain.`);
+    let complete = false;
+    for (let current = root; current && !visited.has(current); ) {
       visited.add(current);
       rows += current.returned;
-      if (current.next_cursor == null) break;
-      const next = chain.filter((page) => page.before_cursor === current.next_cursor);
-      if (next.length !== 1) fail(`${source.name} has missing or duplicate pages. Continue its sources_page cursor and retain every window_token.`);
-      current = next[0];
+      if (current.next_cursor == null) {
+        complete = true;
+        break;
+      }
+      const cursor = current.next_cursor;
+      current = chain.find((page) => page.before_cursor === cursor);
     }
-    if (visited.size !== chain.length) fail(`${source.name} has disconnected or duplicate pages.`);
-    return { ...source, axis: root.axis, rows };
+    return { ...source, axis: root?.axis ?? null, rows, complete };
   });
 }

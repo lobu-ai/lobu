@@ -144,10 +144,6 @@ describe('SQL frame Automation coverage', () => {
     }) as WindowRead;
     expect(read.content).toHaveLength(1000);
     expect(read.page.has_more).toBe(true);
-    await expect(api.automations.completeWindow({
-      automation_id: created.automation_id, run_id: claimed.run_id,
-      window_token: read.window_token, extracted_data: { signals: [] },
-    })).rejects.toThrow(/More Automation source pages remain/);
     const cursor = read.page.next_cursor!;
     const continuation = await api.knowledge.read({
       automation_id: Number(created.automation_id), run_id: claimed.run_id, limit: 1000,
