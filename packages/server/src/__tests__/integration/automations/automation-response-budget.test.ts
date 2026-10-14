@@ -70,7 +70,7 @@ describe('Automation response byte budget', () => {
     }) as { automation_id: string };
   }
 
-  it.each(['ref', 'sql'] as const)('reads every %s page through the real bridge and requires the full token chain', async (kind) => {
+  it.each(['ref', 'sql'] as const)('reads every %s page through the real bridge and links the submitted token chain', async (kind) => {
     const created = await automation(`response-budget-wire-${kind}`, 100_000,
       kind === 'ref' ? `@feed:${feedId}` : `SELECT * FROM events WHERE feed_id = ${feedId} ORDER BY occurred_at DESC`);
     const result = await wire.runSdk<{

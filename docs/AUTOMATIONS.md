@@ -131,9 +131,9 @@ Each Automation therefore carries one durable arrival mark,
 mark advances only when a window completes, including a legitimate zero-source
 result; failed, timed-out, abandoned, and lease-expired attempts leave it where
 it is, so the same arrivals stay claimable. There is no backlog of calendar
-periods to walk: one window spans the uncompleted arrival range. Completing it
-still requires reading its governed inputs within the source and execution
-limits described below.
+periods to walk: one window spans the uncompleted arrival range. The processor
+decides how much governed input it needs to fulfill the Automation instructions;
+completion advances the mark even if it did not read every row.
 
 The cadence still decides WHEN a run fires; it no longer shapes what the run
 covers. `settle` is `AUTOMATION_ARRIVAL_SETTLE_MS` (default 60s): `created_at` is
@@ -217,9 +217,10 @@ nothing worth acting on.** The arrival mark advances only inside the completion
 transaction, so a claim that is simply abandoned lets the lease expire, marks the
 run `timeout`, leaves the mark where it was, and serves the same arrivals again on
 the next claim — indefinitely. Submit the completion with whatever the extraction
-contract allows for an empty result rather than dropping the lease; nothing is
-lost by completing an empty window, because the mark only ever moves forward over
-arrivals the run was actually shown.
+contract allows for an empty result rather than dropping the lease. Completion
+advances over the entire assigned arrival range, including unread rows. A partial
+read is sufficient only when it fulfills the Automation instructions; an empty
+page with a continuation does not prove an empty window.
 
 A feed with `readWindowAxis` uses its live reader for `@feed` sources. Other
 sync-capable feeds retain their stored-arrival read. Read-only feeds must support
@@ -231,19 +232,21 @@ arrival time: for example, Gmail uses message receipt time and Drive uses file
 modification time. It does not promise deletion history or delayed-import
 coverage. Readers needing those guarantees must use provider change tracking.
 
-Each live source has an independent cursor chain. All required chains must be
-complete before checkpoint advancement, even when a page is empty. The chain
-also binds the feed configuration and connector version; changes mid-read fail
-instead of combining different queries. SQL summaries remain ordinary context
-sources. A processor can reduce pages in code and return only a summary to the
-model. Automatic unchanged-source skipping is disabled for live sources because
-an unqueried or partial source cannot prove an unchanged window.
+Each live source has an independent cursor chain. Completion records each pinned
+live source's contiguous page coverage in `run_metadata.source_coverage`, including
+whether its chain is complete; a partial chain does not block checkpoint advancement.
+The read cursor binds the feed configuration and connector version; changes
+mid-read fail instead of combining different queries. SQL summaries remain
+ordinary context sources. A processor can reduce pages in code and return only
+a summary to the model. Automatic unchanged-source skipping is disabled for live
+sources because an unqueried or partial source cannot prove an unchanged window.
 
 The database serializes claims per Automation. The signed tokens bind the exact
 window, run attempt, lease, source IDs, and page chain. A stale attempt cannot
 complete after a newer claim, while retrying an already committed completion is
-idempotent even after its lease expires. If a non-pageable source exceeds its
-bound, completion fails closed and the Automation source must be narrowed. An
+idempotent even after its lease expires. A non-pageable source exceeding its
+bound is reported as truncated but does not block completion. The processor
+must decide whether the returned context is sufficient or needs a SQL drill-down. An
 assigned `managed_agent_id` does not by itself exclude external claiming;
 ordinary internal dispatch through that agent continues to use the same run
 lifecycle. A script executor is different: its runs are pinned to the sandbox
@@ -276,7 +279,8 @@ The `query_sql` tool accepts the same `window_token` argument. Both paths reuse
 the source query compiler's arrival bounds, entity scope, self-output exclusion,
 and event-version selection. Apply any additional authored source filters in
 the drill-down query. Retain every analyzed page token for `completeWindow`;
-SQL does not itself add event citations or discharge source pagination.
+SQL does not itself add event citations or live-source page receipts. Completion
+links only the stored event IDs in the submitted page tokens.
 
 Only run-bound tokens are accepted. The signature, owning workspace, queued
 bounds, run state and lease are validated. External claim continuations renew

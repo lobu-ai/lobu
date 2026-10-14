@@ -93,13 +93,15 @@ describe("automation dispatch message", () => {
 			'client.knowledge.read({ automation_id: 13, run_id: 647146, limit: 25 })',
 		);
 		expect(message).toContain(
-			"While page.has_more is true, call knowledge.read again with the same automation_id and run_id plus page.next_cursor as before_occurred_at/before_id.",
+			"If more event rows are needed and page.has_more is true, call knowledge.read again with the same automation_id and run_id plus page.next_cursor as before_occurred_at/before_id.",
 		);
 		expect(message).toContain(
 			"Keep the returned window_token from every page you actually analyze.",
 		);
 		expect(message).toContain("source_name and source_cursor");
 		expect(message).toContain("empty pages with a continuation");
+		expect(message).toContain("Completing the window advances the arrival mark even over unread rows");
+		expect(message).toContain("report any remaining evidence gap");
 		expect(message).toContain("pass the latest returned window_token to query_sql or client.query(sql, { window_token })");
 		expect(message).toContain("Add the source's own filters to your SQL");
 		expect(message).toContain(

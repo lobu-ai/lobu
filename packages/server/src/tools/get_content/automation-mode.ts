@@ -921,25 +921,8 @@ export async function handleAutomationMode(
               : {}),
           }
         : {}),
-      ...(args.before_occurred_at
-        ? { page_before_occurred_at: new Date(args.before_occurred_at).toISOString() }
-        : {}),
-      ...(args.before_id ? { page_before_id: args.before_id } : {}),
-      ...(contentPage?.next_cursor
-        ? {
-            page_next_occurred_at: contentPage.next_cursor.occurred_at,
-            page_next_id: contentPage.next_cursor.id,
-          }
-        : {}),
-      ...(!sourceContinuation ? { page_has_more: contentPage?.has_more ?? false } : {}),
       required_sources: contentData.requiredSources,
       source_pages: contentData.sourcePages,
-      truncated_source_names: Object.entries(sourcesPage)
-        .filter(
-          ([sourceName, page]) =>
-            page.has_more && !contentData.requiredSources.some((source) => source.name === sourceName) && (sourceName !== 'content' || !contentPage)
-        )
-        .map(([sourceName]) => sourceName),
     },
     env
   );

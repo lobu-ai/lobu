@@ -19,6 +19,11 @@ describe('source window coverage', () => {
     ['missing source', [a, aEnd], { alpha: [2, true], beta: [0, false] }],
     ['missing page', [a, b], { alpha: [0, false], beta: [1, true] }],
     ['missing root', [aEnd, b], { alpha: [0, false], beta: [1, true] }],
+    ['duplicate root', [a, { ...a }, aEnd, b], { alpha: [0, false], beta: [1, true] }],
+    ['duplicate continuation', [a, aEnd, { ...aEnd }, b], { alpha: [0, false], beta: [1, true] }],
+    ['disconnected page', [a, aEnd, b, { ...aEnd, before_cursor: 'unseen' }], { alpha: [2, false], beta: [1, true] }],
+    ['changed configuration', [a, { ...aEnd, revision: 'changed' }, b], { alpha: [0, false], beta: [1, true] }],
+    ['changed time axis', [a, { ...aEnd, axis: 'created_at' }, b], { alpha: [0, false], beta: [1, true] }],
     ['cycle', [a, { ...aEnd, next_cursor: 'a-next' }, b], { alpha: [2, false], beta: [1, true] }],
   ] as const)('records a partial read instead of refusing it: %s', (_name, pages, expected) => {
     const coverage = summarizeSourceWindowPages(proof([...pages]), required);

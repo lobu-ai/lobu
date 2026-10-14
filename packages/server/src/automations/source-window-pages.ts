@@ -7,9 +7,9 @@ interface SourceProof {
 }
 
 /**
- * How far a completion read each pinned live source. Reading is the agent's
- * call, so a short or broken page chain is recorded rather than refused; only
- * receipts that do not belong to this Automation's pinned sources fail.
+ * The unambiguous, contiguous prefix read from each pinned live source.
+ * Reading is the agent's call, so short or broken chains are recorded rather
+ * than refused. Receipts must still match this Automation's pinned sources.
  */
 export function summarizeSourceWindowPages(
   tokens: SourceProof[],
@@ -31,19 +31,22 @@ export function summarizeSourceWindowPages(
   }
   return required.map((source) => {
     const chain = pages.filter((page) => page.name === source.name);
-    const root = chain.find((page) => page.before_cursor == null);
+    const roots = chain.filter((page) => page.before_cursor == null);
+    const root = roots.length === 1 ? roots[0] : undefined;
     const visited = new Set<SourceWindowPage>();
     let rows = 0;
     let complete = false;
     for (let current = root; current && !visited.has(current); ) {
+      if (current.axis !== root?.axis || current.revision !== root?.revision) break;
       visited.add(current);
       rows += current.returned;
       if (current.next_cursor == null) {
-        complete = true;
+        complete = visited.size === chain.length;
         break;
       }
       const cursor = current.next_cursor;
-      current = chain.find((page) => page.before_cursor === cursor);
+      const next = chain.filter((page) => page.before_cursor === cursor);
+      current = next.length === 1 ? next[0] : undefined;
     }
     return { ...source, axis: root?.axis ?? null, rows, complete };
   });

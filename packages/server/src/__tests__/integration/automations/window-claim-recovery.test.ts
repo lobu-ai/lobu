@@ -231,6 +231,24 @@ describe('Automation window claim and recovery', () => {
     expect(persisted.n).toBe(0);
   }, 30_000);
 
+  it('records partial live-source coverage when advancing the window', async () => {
+    const feeds = await addLiveSources();
+    const first = await claim({ limit: 2 });
+    expect(first.context.sources_page?.alpha.has_more).toBe(true);
+    expect(first.context.sources_page?.['İşler 🌍'].has_more).toBe(true);
+    await expect(api.automations.completeWindow({
+      automation_id: String(automationId), run_id: first.run_id,
+      window_token: first.context.window_token, extracted_data: { signals: [] },
+    })).resolves.toMatchObject({ completed_now: true, content_linked: 0 });
+    const [row] = await sql`SELECT a.next_window_start, r.run_metadata FROM automations a
+      JOIN runs r ON r.id = ${first.run_id} WHERE a.id = ${automationId}`;
+    expect(new Date(row.next_window_start).toISOString()).toBe(first.context.window_end);
+    expect(row.run_metadata.source_coverage).toEqual([
+      { name: 'alpha', feed_id: feeds[0], axis: 'source_at', rows: 2, complete: false },
+      { name: 'İşler 🌍', feed_id: feeds[1], axis: 'source_at', rows: 2, complete: false },
+    ]);
+  });
+
   async function queuedLiveRun() {
     await addLiveSources();
     const pending = await computePendingWindow(sql, automationId);
@@ -260,9 +278,9 @@ describe('Automation window claim and recovery', () => {
   it('rejects a legacy unbound receipt that omits a queued run live sources', async () => {
     const run = await queuedLiveRun();
     // A valid receipt from an earlier, event-only read of the same range must
-    // not substitute for the current run's required live source traversal.
+    // not substitute for the current run's pinned live source roster.
     const token = await generateWindowToken({ automation_id: automationId, window_start: run.windowStart,
-      window_end: run.windowEnd, content_count: 0, content_ids: [], page_has_more: false }, ENV);
+      window_end: run.windowEnd, content_count: 0, content_ids: [] }, ENV);
     await expect(api.automations.completeWindow({ automation_id: String(automationId), run_id: run.runId,
       window_token: token, extracted_data: { signals: [] } })).rejects.toThrow(/run-bound|source/i);
     const [after] = await sql`SELECT next_window_start FROM automations WHERE id = ${automationId}`;
@@ -745,7 +763,7 @@ describe('Automation window claim and recovery', () => {
     expect(afterPartialRead.status).toBe('completed');
   });
 
-  it('fences each source page to the current lease', async () => {
+  it('requires the latest lease token alongside earlier source pages', async () => {
     const start = dayStart(1);
     for (let index = 0; index < 3; index++) {
       await createTestEvent({

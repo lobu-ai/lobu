@@ -431,10 +431,6 @@ describe('external manual Automation execution', () => {
     if (secondTokenPayload.run_id == null) {
       throw new Error('second run returned an unbound window token');
     }
-    const pageCursor = {
-      occurred_at: queuedWindowStart,
-      id: 1,
-    };
     const boundRootToken = await generateWindowToken(
       {
         automation_id: secondTokenPayload.automation_id,
@@ -443,9 +439,6 @@ describe('external manual Automation execution', () => {
         window_end: secondTokenPayload.window_end,
         content_count: 0,
         content_ids: [],
-        page_next_occurred_at: pageCursor.occurred_at,
-        page_next_id: pageCursor.id,
-        page_has_more: true,
       },
       TEST_ENV
     );
@@ -456,9 +449,6 @@ describe('external manual Automation execution', () => {
         window_end: secondTokenPayload.window_end,
         content_count: 0,
         content_ids: [],
-        page_before_occurred_at: pageCursor.occurred_at,
-        page_before_id: pageCursor.id,
-        page_has_more: false,
       },
       TEST_ENV
     );
