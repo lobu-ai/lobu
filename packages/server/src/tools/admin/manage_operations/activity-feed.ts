@@ -12,7 +12,7 @@ import { listNotifications } from "../../../notifications/service";
 import { buildResourcePermalink } from "../../../utils/url-builder";
 import { AGENT_ASK_ACTION_KEY } from "../../../notifications/ask";
 import { resolveAskAffordance } from "../../../notifications/ask-schema";
-import { ENTITY_CHANGE_ACTION_KEYS } from "../entity-field-approval";
+import { ENTITY_CHANGE_ACTION_KEYS } from "../run-decider";
 import { listExternalAutomationWork, type ExternalActivityCaller } from '../../../automations/external-activity';
 
 /**
@@ -25,12 +25,7 @@ import { listExternalAutomationWork, type ExternalActivityCaller } from '../../.
  * agent definition write does NOT: approving it from a row would commit a
  * config change the reviewer never looked at.
  *
- * Lazy, NOT a top-level const: reading `ENTITY_CHANGE_ACTION_KEYS` during module
- * init hits the temporal dead zone under the circular graph
- * activity-feed → entity-field-approval → … → manage_operations → activity-feed,
- * and the server dies at boot with "Cannot access … before initialization".
- * Same trap and same fix as `getBuilderApprovalHandlers`. Typecheck and the
- * integration suite both stayed green through it — only booting caught it.
+ * Read at use time to avoid depending on notification module initialization order.
  */
 let inlineDecidableActionKeys: readonly string[] | null = null;
 function getInlineDecidableActionKeys(): readonly string[] {

@@ -537,6 +537,23 @@ function parseStoredManifest(raw: unknown): StoredDeviceManifest | null {
   }
 }
 
+/**
+ * The newest version of each connector key one device advertises — the
+ * `advertised` (V) that `teamDeviceAction` compares against the workspace.
+ */
+export function newestAdvertisedVersions(connectorManifests: unknown): Map<string, string> {
+  const newest = new Map<string, string>();
+  const map = isRecord(connectorManifests) ? connectorManifests : {};
+  for (const value of Object.values(map)) {
+    const stored = parseStoredManifest(value);
+    if (!stored) continue;
+    const { key, version } = stored.manifest;
+    const current = newest.get(key);
+    if (!current || compareSemverish(version, current) > 0) newest.set(key, version);
+  }
+  return newest;
+}
+
 function manifestFeedsForMetadata(manifest: DeviceConnectorManifest): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(manifest.feeds_schema ?? {}).map(([feedKey, feedDefinition]) => {

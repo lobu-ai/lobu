@@ -32,6 +32,8 @@ import {
   DEVICE_REMOVED_TOMBSTONE,
 } from '../utils/device-pin-tombstones';
 import { getWorkspaceRole } from '../utils/organization-access';
+import { newestAdvertisedVersions } from './device-manifests';
+import { teamDeviceAction } from './team-device-action';
 import { parseJsonBody } from '../gateway/routes/shared/helpers';
 import { resolvePublicOrigin } from '../utils/public-origin';
 import { buildAutomationUrl, getPublicWebUrl } from '../utils/url-builder';
@@ -61,6 +63,18 @@ export interface DeviceWorkerSummary {
     display_name: string;
     status: string;
     organization_slug: string | null;
+  }>;
+  /**
+   * Connectors this device runs at an older version than its team workspace
+   * has installed. It cannot take that version's work, and a missing
+   * connection is not created for it, until Lobu on the device is updated.
+   * Always empty for a device homed in a personal workspace.
+   */
+  update_required: Array<{
+    connector_key: string;
+    display_name: string;
+    device_version: string;
+    workspace_version: string;
   }>;
 }
 
@@ -124,16 +138,37 @@ export async function queryDeviceWorkers(
           ORDER BY updated_at DESC LIMIT 1
         ) cd ON TRUE
         WHERE cn.device_worker_id = dw.id AND cn.deleted_at IS NULL
-      ) AS connectors
+      ) AS connectors,
+      dw.connector_manifests,
+      -- Same team-home test the reconcile applies: a workspace the owner is a
+      -- member of that is not their personal one.
+      (
+        o.id IS NOT NULL
+        AND (o.metadata::jsonb)->>'personal_org_for_user_id' IS DISTINCT FROM dw.user_id
+        AND EXISTS (
+          SELECT 1 FROM "member" m
+          WHERE m."organizationId" = o.id AND m."userId" = dw.user_id
+        )
+      ) AS team_home,
+      (
+        SELECT coalesce(json_agg(json_build_object('key', cd.key, 'version', cd.version, 'name', cd.name)), '[]'::json)
+        FROM connector_definitions cd
+        WHERE cd.organization_id = dw.organization_id AND cd.status = 'active'
+      ) AS home_definitions
     FROM device_workers dw
     LEFT JOIN organization o ON o.id = dw.organization_id
     WHERE dw.user_id = ${userId}
     ORDER BY dw.last_seen_at DESC
   `) as unknown as Array<
-    Omit<DeviceWorkerSummary, 'agent_kinds'> & { agent_kinds: string | string[] | null }
+    Omit<DeviceWorkerSummary, 'agent_kinds' | 'update_required'> & {
+      agent_kinds: string | string[] | null;
+      connector_manifests: unknown;
+      team_home: boolean;
+      home_definitions: Array<{ key: string; version: string; name: string | null }> | null;
+    }
   >;
 
-  return rows.map((r) => ({
+  return rows.map(({ connector_manifests, team_home, home_definitions, ...r }) => ({
     ...r,
     capabilities: Array.isArray(r.capabilities) ? r.capabilities : [],
     // null (never advertised) is distinct from [] (advertised none): the
@@ -145,7 +180,30 @@ export async function queryDeviceWorkers(
     connector_count: r.connector_count ?? 0,
     connector_error_count: r.connector_error_count ?? 0,
     connectors: Array.isArray(r.connectors) ? r.connectors : [],
+    update_required: team_home ? updateRequired(connector_manifests, home_definitions ?? []) : [],
   }));
+}
+
+/** The team-home connectors `teamDeviceAction` holds back as `behind`. */
+function updateRequired(
+  connectorManifests: unknown,
+  installed: Array<{ key: string; version: string; name: string | null }>
+): DeviceWorkerSummary['update_required'] {
+  const advertised = newestAdvertisedVersions(connectorManifests);
+  return installed.flatMap((definition) => {
+    const deviceVersion = advertised.get(definition.key);
+    if (!deviceVersion || teamDeviceAction(definition.version, deviceVersion) !== 'behind') {
+      return [];
+    }
+    return [
+      {
+        connector_key: definition.key,
+        display_name: definition.name ?? definition.key,
+        device_version: deviceVersion,
+        workspace_version: definition.version,
+      },
+    ];
+  });
 }
 
 /**

@@ -96,9 +96,12 @@ Implications, by design:
   own connection, pinned to it: the pin decides where work runs, `created_by` and `visibility`
   decide who sees and uses it, and an unpinned team device connection is never claimed by a device.
   A team device whose version is behind the workspace's definition cannot claim that version's
-  work until it catches up; connection and feed status are never changed for it. Only a connection's creator can share
+  work until it catches up; connection and feed status are never changed for it, and the owner's
+  Devices page lists it under `update_required`. Only a connection's creator can share
   it with the workspace (`manage_connections` `update` with `visibility: 'org'`), which never
-  changes where it runs; a personal-credential connection can never be widened.
+  changes where it runs; a personal-credential connection can never be widened. A run on a
+  `private` connection pinned to the creator's own device can be approved by that creator, not
+  only by an owner/admin (`runDeciderUserIdSql`); once shared, it is admin-decided again.
 - **Page-visit drafts follow current placement.** A Chrome device sees and activates drafts in its
   owner's personal workspace, its current home, and workspaces where it is pinned, never through a
   connection a Devices-page move invalidated.
