@@ -9,19 +9,19 @@
  * and running it on the daemon's own supervisor lets a device whose connector
  * compiler is broken still be recovered.
  *
- * Keep the CONTRACT — the argv, the timeout bounds, the 1MB output cap and the
- * returned shape — in step with the generated manifests in
- * `../device-manifests.ts`, which is what the gateway and the agent see. A
- * headless host runs `bash --noprofile --norc -c` in a REPLACED minimal
- * environment, because an inherited one would hand the command the daemon's
+ * Keep the argv, timeout bounds and returned shape in step with the shared
+ * contract in `packages/device-connectors/src/os-shell.ts`. Output is capped
+ * at 1MB per stream. A headless host runs `bash --noprofile --norc -c` in a
+ * minimal replacement environment so commands do not inherit daemon
  * credentials. A Mac runs the signed-in user's `zsh -l -c` with the user's
  * environment minus the daemon's credentials; the Mac app starts this daemon
  * as its own child.
  *
  * LIFETIME: a run owns a process group for the duration of the call and no
  * longer. Everything still in that group when the command returns is killed,
- * which is what keeps a daemon from leaking processes, and it means `&`,
- * `nohup` and `setsid` do not buy a caller a surviving daemon. That cleanup is
+ * which is what keeps a daemon from leaking processes: `&` and `nohup` alone
+ * do not leave that group. A process that explicitly creates a new session
+ * leaves the daemon's group ownership and is outside this cleanup. Cleanup is
  * deliberate; what was a bug (#3629) is doing it QUIETLY -- a run used to
  * report exit 0 while the poller it had just launched was being killed, so the
  * loss surfaced as an unrelated failure much later. A run that leaves
