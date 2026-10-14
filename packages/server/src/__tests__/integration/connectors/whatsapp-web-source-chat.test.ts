@@ -463,6 +463,19 @@ describe("WhatsApp Web source chat", () => {
     expect(sends).toHaveLength(0);
   }, 60_000);
 
+  it("answers a message with one reply Automation, the oldest that matches", async () => {
+    const firstId = await insertAutomation("first-reply", replyTo());
+    await insertAutomation("second-reply", replyTo());
+    deviceMessages.push({ id: "SYNTHDM14", chat_jid: DM_JID, body: "who answers?" });
+
+    await deliver("SYNTHDM14");
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0].messageId).toContain(`:automation:${firstId}`);
+    await completeTurns();
+    expect(sends).toHaveLength(1);
+  }, 60_000);
+
   it("resolves the connection's numeric runtime id for chat routing", async () => {
     const replyId = await insertAutomation("one-chat-reply", replyTo({ channel_id: DM_JID }));
     const runtimeId = String(connectionId);

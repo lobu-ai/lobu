@@ -17,7 +17,8 @@
  *   6. the hydrated message is matched again per Automation (its first
  *      matching trigger wins); background targets are queued on the source
  *      signal, and a group reply needs an Automation scoped to that group;
- *   7. the bridge runs its normal reply path for exactly the reply targets,
+ *   7. the bridge runs its normal reply path for the one reply Automation
+ *      that answers it (the oldest that matches),
  *      and every post it makes for the message (a command's confirmation, a
  *      notice) goes through the platform's keyed send, so a retried job
  *      adopts the first send instead of dispatching another.
@@ -126,9 +127,13 @@ export async function handleChatSourceIngress(
     });
     if (!thread) throw new Error(`Could not open chat thread ${message.threadId}`);
 
-    const replyTargets = plan.replyTargets.filter((target) =>
-      (thread.isDM === true || target.trigger.match?.channel_id === parsed.channelId));
-    if (replyTargets.length === 0) return;
+    // One reply Automation answers a message: the oldest that matches. A
+    // retry then re-admits that one target and nothing else.
+    const [replyTarget] = plan.replyTargets
+      .filter((target) =>
+        thread.isDM === true || target.trigger.match?.channel_id === parsed.channelId)
+      .sort((a, b) => a.automationId - b.automationId);
+    if (!replyTarget) return;
     const post = getResponseStrategy(instance.connection.platform).post;
     const ctx = {
       connectionId: runtimeId,
@@ -150,7 +155,7 @@ export async function handleChatSourceIngress(
       : thread;
     await instance.messageBridge.handleAdmittedSourceMessage(keyedThread, message, {
       signal: hydrated,
-      replyTargets,
+      replyTargets: [replyTarget],
       backgroundTargets: [],
     });
   });
