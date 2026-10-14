@@ -52,6 +52,15 @@ function parseEnvInterval(name: string, fallback: string): string {
 /** How long an unclaimed device action remains eligible for worker pickup. */
 export const DEVICE_ACTION_QUEUE_BUDGET_MS = 60_000;
 
+/** Ceiling on how long a foreground device action may stay queued behind its
+ *  BUSY target device, measured from when it became claimable. A device whose
+ *  slots are full keeps polling with zero capacity; each such poll renews the
+ *  claim horizon of the runs pinned to it (runs/device-claim-horizon.ts), but
+ *  never past this. Four minutes allows for one maximum awaited action
+ *  (`MAX_POST_CLAIM_BUDGET_MS`, 180s) plus the ordinary queue budget. It does
+ *  not guarantee a slot when multiple actions are ahead of the run. */
+export const DEVICE_BUSY_ACTION_QUEUE_CEILING_MS = 4 * 60_000;
+
 /** Explicit background device operations may wait ten minutes for pickup.
  *  This bounds only the unclaimed queue, starting when approval permits a
  *  claim. Execution still uses worker heartbeats; source reads and page

@@ -49,6 +49,7 @@ import {
 import { resolvePublicOrigin } from '../utils/public-origin';
 import { buildResourcePermalink } from '../utils/url-builder';
 import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
+import { renewBusyDeviceClaimHorizons } from '../runs/device-claim-horizon';
 import {
   announceFeedAutoPause,
   applyFeedSyncFailure,
@@ -798,6 +799,18 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     logger.warn({ deviceWorkerId, err: errorMessage(error) }, 'Source feed activity reconciliation failed');
   }
   if (capacityAvailable === 0) {
+    // Keep authorized work pinned to a full device claimable while it polls.
+    // On failure they lapse on schedule, exactly as before this renewal.
+    if (isUserScopedWorker && deviceWorkerId) {
+      try {
+        await renewBusyDeviceClaimHorizons(sql, deviceWorkerId, orgScopeIds);
+      } catch (err) {
+        logger.warn(
+          { deviceWorkerId, err: errorMessage(err) },
+          '[pollWorkerJob] busy-device claim horizon renewal failed'
+        );
+      }
+    }
     return c.json({
       next_poll_seconds: 10,
       ...feedReceiptMetadata,

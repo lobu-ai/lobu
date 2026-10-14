@@ -32,16 +32,31 @@
  * consulted — not how long the host and Postgres happened to take.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../../config/intervals';
 import { createConnectorOperationRun } from '../../runs/queue-service';
+import type { Env } from '../../index';
+import {
+  DEVICE_FEED_READ_ACTION_KEY,
+  SOURCE_FEED_READ_METADATA_KEY,
+} from '../../lib/device-feed-read-protocol';
+import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
+import { manageOperations } from '../../tools/admin/manage_operations';
+import type { ToolContext } from '../../tools/registry';
 import {
   waitForDeviceActionRun,
   waitForDeviceActionRunWithOptions,
 } from '../../tools/admin/device-action-wait';
 import { insertEvent } from '../../utils/insert-event';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
-import { createTestOrganization, seedOwnerContext } from '../setup/test-fixtures';
+import {
+  createTestConnection,
+  createTestConnectorDefinition,
+  createTestOrganization,
+  seedOwnerContext,
+} from '../setup/test-fixtures';
+import { post } from '../setup/test-helpers';
 
 async function insertChromeConnector(
   organizationId: string,
@@ -673,16 +688,18 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
     // one action while another direct action is queued for the same pin. The
     // due-feed pull path cannot defer this row because actions are created by
     // their caller, not by the scheduled-feed materializer.
-    await sql`
+    const [busy] = await sql`
       INSERT INTO runs (
         organization_id, run_type, connection_id, connector_key,
         connector_version, action_key, action_input, approval_status, status,
-        claimed_at, last_heartbeat_at, claimed_by, created_at
+        claimed_at, last_heartbeat_at, claimed_by, executed_by_device_worker_id,
+        created_at
       ) VALUES (
         ${org.id}, 'action', ${connId}, 'chrome', '0.2.0', 'busy_action',
-        ${sql.json({})}, 'auto', 'running', current_timestamp,
-        current_timestamp, ${workerId}, current_timestamp
+        ${sql.json({})}, 'auto', 'running', current_timestamp - interval '70 seconds',
+        current_timestamp, ${workerId}, ${device.id}::uuid, current_timestamp
       )
+      RETURNING id
     `;
     const createdBefore = Date.now();
     const queued = await createConnectorOperationRun({
@@ -701,6 +718,8 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
     expect(expiresInMs).toBeGreaterThan(DEVICE_ACTION_QUEUE_BUDGET_MS - 5_000);
     expect(expiresInMs).toBeLessThan(DEVICE_ACTION_QUEUE_BUDGET_MS + 5_000);
 
+    // No zero-capacity poll extended the horizon, so it lapses on schedule.
+    await sql`UPDATE runs SET expires_at = now() - interval '1 second' WHERE id = ${queued.runId}`;
     const out = await waitForDeviceActionRunWithOptions(
       queued.runId,
       org.id,
@@ -708,7 +727,9 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
     );
     expect(out.status).toBe('timeout');
     expect(out.error_message).toContain('was never claimed');
-    expect(out.error_message).toContain('Busy Chrome');
+    expect(out.error_message).toMatch(
+      new RegExp(`device "Busy Chrome" is busy: run ${busy.id} has been running for 7\\ds`)
+    );
 
     const queuedRows = await sql`
       SELECT status, error_message
@@ -720,7 +741,7 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
     expect(queuedRows).toHaveLength(1);
     expect(queuedRows[0].status).toBe('timeout');
     expect(String(queuedRows[0].error_message)).toContain('no device claimed the run');
-    expect(String(queuedRows[0].error_message)).toContain('Busy Chrome');
+    expect(String(queuedRows[0].error_message)).toContain(`device "Busy Chrome" is busy: run ${busy.id}`);
   });
 
   it('queued (durable human-decision) runs get NO expires_at', async () => {
@@ -992,5 +1013,361 @@ describe('createConnectorOperationRun — ephemeral expires_at semantics', () =>
         AND action_idempotency_key = ${key}
     `;
     expect([contextA, contextB]).toContainEqual(row.run_metadata.browser_context);
+  });
+});
+
+/**
+ * A device whose slots are full keeps polling with `capacity_available: 0`.
+ * That poll is the busy signal: a pinned run queued behind work the device is
+ * actively executing must not expire at the 60s queue budget, while a device
+ * that is offline, or alive with a free slot and still not claiming, fails as
+ * before. Driven through the real poll, reaper, and completion routes.
+ */
+describe('device action queued behind a busy device', () => {
+  const CONNECTOR = 'demo.device.busy';
+  const DEVICE_WORKER = 'synthetic-busy-device';
+  const savedEnv = new Map<string, string | undefined>();
+  let organizationId: string;
+  let userId: string;
+  let toolCtx: ToolContext;
+  let deviceId: string;
+  let connectionId: number;
+
+  beforeAll(() => {
+    for (const key of ['RUNS_REAPER_STALE_AFTER_SECONDS', 'WORKER_API_TOKEN', 'LOBU_CLOUD_MODE']) {
+      savedEnv.set(key, process.env[key]);
+      delete process.env[key];
+    }
+    process.env.RUNS_REAPER_STALE_AFTER_SECONDS = '120';
+  });
+
+  afterAll(async () => {
+    await cleanupTestDatabase();
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+    const seeded = await seedOwnerContext({ orgName: 'Busy Device Fixture' });
+    organizationId = seeded.ctx.organizationId;
+    userId = seeded.user.id;
+    toolCtx = { ...seeded.ctx, baseUrl: 'https://gateway.test/lobu' };
+    const sql = getTestDb();
+    await createTestConnectorDefinition({
+      key: CONNECTOR,
+      name: 'Busy device fixture',
+      organization_id: organizationId,
+      auth_schema: { methods: [{ type: 'none' }] },
+    });
+    await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({
+      echo: { name: 'Echo', kind: 'write', input_schema: { type: 'object' } },
+    })}, supports_execute = true WHERE organization_id = ${organizationId} AND key = ${CONNECTOR}`;
+    const [device] = await sql`
+      INSERT INTO device_workers (user_id, worker_id, platform, app_version, capabilities, label, organization_id, last_seen_at)
+      VALUES (${seeded.user.id}, ${DEVICE_WORKER}, 'macos', '0.1.0', '[]'::jsonb, 'Busy Mac', ${organizationId}, NOW())
+      RETURNING id
+    `;
+    deviceId = String(device.id);
+    const connection = await createTestConnection({
+      organization_id: organizationId,
+      connector_key: CONNECTOR,
+      created_by: seeded.user.id,
+      visibility: 'private',
+    });
+    connectionId = connection.id;
+    await sql`UPDATE connections SET device_worker_id = ${deviceId}::uuid WHERE id = ${connectionId}`;
+    await upsertEntityApprovalPolicy(organizationId, {
+      resourceClass: 'connector_action',
+      connectionId,
+      effects: { execute: 'auto' },
+    });
+  });
+
+  async function poll(capacity: number) {
+    const response = await post('/api/workers/poll', {
+      body: {
+        worker_id: DEVICE_WORKER,
+        platform: 'macos',
+        app_version: '0.1.0',
+        label: DEVICE_WORKER,
+        capabilities: {},
+        capacity_available: capacity,
+      },
+    });
+    expect(response.status).toBe(200);
+    return response.json() as Promise<{ run_id?: number }>;
+  }
+
+  /** The device's only slot, held by an action it claimed `runningForSeconds` ago. */
+  async function occupySlot(runningForSeconds: number): Promise<number> {
+    const sql = getTestDb();
+    const [busy] = await sql`
+      INSERT INTO runs (
+        organization_id, run_type, connection_id, connector_key, action_key,
+        action_input, approval_status, status, claimed_at, last_heartbeat_at,
+        claimed_by, executed_by_device_worker_id, target_device_worker_id, created_at
+      ) VALUES (
+        ${organizationId}, 'action', ${connectionId}, ${CONNECTOR}, 'echo',
+        ${sql.json({})}, 'auto', 'running',
+        now() - make_interval(secs => ${runningForSeconds}), now(),
+        ${DEVICE_WORKER}, ${deviceId}::uuid, ${deviceId}::uuid,
+        now() - make_interval(secs => ${runningForSeconds})
+      )
+      RETURNING id
+    `;
+    return Number(busy.id);
+  }
+
+  async function queue(): Promise<number> {
+    const run = await createConnectorOperationRun({
+      organizationId,
+      connectionId,
+      connectorKey: CONNECTOR,
+      operationKey: 'echo',
+      operationInput: { n: 2 },
+      approvalMode: 'device',
+      requireCompiledCode: true,
+      policyPrincipalKind: 'user',
+      policyPrincipalId: userId,
+      createdByUserId: userId,
+    });
+    expect(run.status).toBe('pending');
+    return run.runId;
+  }
+
+  async function runRow(runId: number) {
+    const [row] = await getTestDb()`
+      SELECT status, error_message,
+        EXTRACT(EPOCH FROM (expires_at - now()))::float AS horizon_seconds
+      FROM runs WHERE id = ${runId}
+    `;
+    return row as { status: string; error_message: string | null; horizon_seconds: number | null };
+  }
+
+  /** Steps the device and the clock once per waiter poll gap, in order. */
+  function script(steps: Array<() => Promise<void>>): () => Promise<void> {
+    let index = 0;
+    return async () => {
+      const step = steps[index++];
+      if (!step) throw new Error(`waiter kept polling after the scripted steps (sleep ${index})`);
+      await step();
+    };
+  }
+
+  it('a run queued behind a busy slot for longer than the queue budget is claimed and completes', async () => {
+    const busyRunId = await occupySlot(80);
+    const queuedRunId = await queue();
+    const sql = getTestDb();
+    let syntheticNow = Date.now();
+
+    const out = await waitForDeviceActionRunWithOptions(queuedRunId, organizationId, {
+      queueMs: DEVICE_ACTION_QUEUE_BUDGET_MS,
+      postClaimMs: 95_000,
+      pollMs: 500,
+      now: () => syntheticNow,
+      sleep: script([
+        async () => {
+          // The original horizon is about to lapse while the slot is still busy.
+          await sql`UPDATE runs SET expires_at = now() + interval '10 seconds' WHERE id = ${queuedRunId}`;
+          expect(await poll(0)).not.toHaveProperty('run_id');
+          expect((await runRow(queuedRunId)).horizon_seconds).toBeGreaterThan(50);
+          await reapStaleRuns();
+          expect((await runRow(queuedRunId)).status).toBe('pending');
+          syntheticNow += 40_000;
+        },
+        async () => {
+          // Past the 60s queue budget: the device is still busy and polling.
+          syntheticNow += 40_000;
+          expect(await poll(0)).not.toHaveProperty('run_id');
+          await reapStaleRuns();
+          expect((await runRow(queuedRunId)).status).toBe('pending');
+        },
+        async () => {
+          // The busy run finishes; the freed slot claims the queued run.
+          await sql`UPDATE runs SET status = 'completed', completed_at = now() WHERE id = ${busyRunId}`;
+          expect(await poll(1)).toMatchObject({ run_id: queuedRunId });
+          const completed = await post('/api/workers/complete-action', {
+            body: { run_id: queuedRunId, worker_id: DEVICE_WORKER, status: 'success', action_output: { done: true } },
+          });
+          expect(completed.status).toBe(200);
+          syntheticNow += 5_000;
+        },
+      ]),
+    });
+
+    expect(out).toEqual({ status: 'completed', output: { done: true } });
+    expect((await runRow(queuedRunId)).status).toBe('completed');
+  });
+
+  it('a busy device cannot hold a queued run past its horizon; the failure names the blocking run', async () => {
+    const busyRunId = await occupySlot(70);
+    const queuedRunId = await queue();
+    // The busy-extension ceiling was reached: the horizon lapsed with the slot still held.
+    await getTestDb()`UPDATE runs SET expires_at = now() - interval '1 second' WHERE id = ${queuedRunId}`;
+
+    const out = await waitForDeviceActionRunWithOptions(queuedRunId, organizationId, FAST_BUDGETS);
+
+    expect(out.status).toBe('timeout');
+    expect(out.error_message).toMatch(
+      new RegExp(`device "Busy Mac" is busy: run ${busyRunId} has been running for 7\\ds`)
+    );
+    expect(out.error_message).not.toContain('last polled');
+    expect(out.error_message).not.toContain('all slots in use');
+    const row = await runRow(queuedRunId);
+    expect(row.status).toBe('timeout');
+    expect(row.error_message).toContain(`run ${busyRunId} has been running for`);
+  });
+
+  it.each(['auto', 'approved'] as const)('caps renewal from when an %s run became claimable', async (approvalStatus) => {
+    await occupySlot(30);
+    const queuedRunId = await queue();
+    const sql = getTestDb();
+    await sql`
+      UPDATE runs SET approval_status = ${approvalStatus},
+        created_at = now() - ${approvalStatus === 'approved' ? 3600 : 180}::int * interval '1 second',
+        run_at = now() - interval '180 seconds',
+        expires_at = now() + interval '30 seconds'
+      WHERE id = ${queuedRunId}
+    `;
+
+    await poll(0);
+
+    const [row] = await sql`
+      SELECT EXTRACT(EPOCH FROM (expires_at -
+        CASE WHEN approval_status = 'approved' THEN run_at ELSE created_at END))::float AS total_seconds
+      FROM runs WHERE id = ${queuedRunId}
+    `;
+    expect(row.total_seconds).toBe(240);
+  });
+
+  it.each(['expired', 'background', 'native_source_read', 'compiled_source_read'] as const)(
+    'does not renew a %s horizon', async (scenario) => {
+      await occupySlot(30);
+      const queuedRunId = await queue();
+      const sql = getTestDb();
+      const seconds = scenario === 'expired' ? -1 : scenario === 'background' ? 600 : 10;
+      const [before] = await sql`
+        UPDATE runs SET expires_at = now() + ${seconds}::int * interval '1 second',
+          action_key = ${scenario === 'native_source_read' ? DEVICE_FEED_READ_ACTION_KEY : 'echo'},
+          run_metadata = ${sql.json(scenario === 'compiled_source_read'
+            ? { [SOURCE_FEED_READ_METADATA_KEY]: true }
+            : scenario === 'background' ? { background: true } : {})}
+        WHERE id = ${queuedRunId} RETURNING expires_at
+      `;
+
+      await poll(0);
+
+      const [after] = await sql`SELECT expires_at FROM runs WHERE id = ${queuedRunId}`;
+      expect(after.expires_at).toEqual(before.expires_at);
+    }
+  );
+
+  it('does not renew a stale pin in a workspace the device cannot claim from', async () => {
+    await occupySlot(30);
+    const queuedRunId = await queue();
+    const foreignOrg = await createTestOrganization({ name: 'Former Device Workspace' });
+    const foreignConnection = await createTestConnection({
+      organization_id: foreignOrg.id,
+      connector_key: CONNECTOR,
+      created_by: userId,
+      createDefaultFeed: false,
+    });
+    const sql = getTestDb();
+    // The pin survives the owner's departure; no membership grants claim access.
+    await sql`UPDATE connections SET device_worker_id = ${deviceId}::uuid WHERE id = ${foreignConnection.id}`;
+    const [before] = await sql`
+      UPDATE runs SET organization_id = ${foreignOrg.id}, connection_id = ${foreignConnection.id},
+        expires_at = now() + interval '30 seconds'
+      WHERE id = ${queuedRunId} RETURNING expires_at
+    `;
+
+    await poll(0);
+
+    const [after] = await sql`SELECT expires_at FROM runs WHERE id = ${queuedRunId}`;
+    expect(after.expires_at).toEqual(before.expires_at);
+  });
+
+  it('an offline device still fails, even with a stale running row', async () => {
+    await occupySlot(600);
+    await getTestDb()`UPDATE device_workers SET last_seen_at = now() - interval '10 minutes' WHERE id = ${deviceId}::uuid`;
+    const queuedRunId = await queue();
+
+    // No poll extends an offline device's horizon, so it lapses on schedule.
+    await getTestDb()`UPDATE runs SET expires_at = now() - interval '1 second' WHERE id = ${queuedRunId}`;
+
+    const out = await waitForDeviceActionRunWithOptions(queuedRunId, organizationId, FAST_BUDGETS);
+
+    expect(out.status).toBe('timeout');
+    expect(out.error_message).toContain('was never claimed');
+    expect(out.error_message).toContain('device "Busy Mac" last polled 10m ago');
+    expect(out.error_message).not.toContain('is busy');
+  });
+
+  it('a device alive with free capacity that never claims still fails with the last-polled text', async () => {
+    const queuedRunId = await queue();
+    // Reporting zero capacity with nothing running is not "busy": no extension.
+    expect(await poll(0)).not.toHaveProperty('run_id');
+    expect((await runRow(queuedRunId)).horizon_seconds).toBeLessThan(61);
+    await getTestDb()`UPDATE runs SET expires_at = now() - interval '1 second' WHERE id = ${queuedRunId}`;
+
+    const out = await waitForDeviceActionRunWithOptions(queuedRunId, organizationId, FAST_BUDGETS);
+
+    expect(out.status).toBe('timeout');
+    expect(out.error_message).toMatch(/was never claimed within 400ms — device "Busy Mac" last polled \d+s ago\./);
+    expect(out.error_message).not.toContain('is busy');
+  });
+
+  it('a caller whose wait ends first leaves the run queued behind a busy device', async () => {
+    const busyRunId = await occupySlot(30);
+    const queuedRunId = await queue();
+    expect(await poll(0)).not.toHaveProperty('run_id');
+    const controller = new AbortController();
+    controller.abort();
+
+    const out = await waitForDeviceActionRunWithOptions(queuedRunId, organizationId, {
+      ...FAST_BUDGETS,
+      abortSignal: controller.signal,
+      leaveQueuedBehindBusyDevice: true,
+    });
+
+    expect(out).toMatchObject({ status: 'queued' });
+    expect(out.error_message).toContain(`run ${busyRunId} has been running for`);
+    expect((await runRow(queuedRunId)).status).toBe('pending');
+  });
+
+  it('an execute call whose wait ends first returns the queued run id behind a busy device', async () => {
+    const busyRunId = await occupySlot(30);
+    const controller = new AbortController();
+    controller.abort();
+
+    const out = (await manageOperations(
+      { action: 'execute', connection_id: connectionId, operation_key: 'echo', input: {} },
+      {} as Env,
+      { ...toolCtx, abortSignal: controller.signal }
+    )) as { run_id: number; status: string; message?: string };
+
+    expect(out.status).toBe('in_progress');
+    expect(out.message).toContain(`device "Busy Mac" is busy: run ${busyRunId}`);
+    expect(out.message).toContain(`operations.getRun(${out.run_id})`);
+    expect((await runRow(out.run_id)).status).toBe('pending');
+  });
+
+  it('a caller whose wait ends first still finalizes a run for an idle device', async () => {
+    const queuedRunId = await queue();
+    const controller = new AbortController();
+    controller.abort();
+
+    const out = await waitForDeviceActionRunWithOptions(queuedRunId, organizationId, {
+      ...FAST_BUDGETS,
+      abortSignal: controller.signal,
+      leaveQueuedBehindBusyDevice: true,
+    });
+
+    expect(out.status).toBe('timeout');
+    expect(out.error_message).toContain('before any device claimed the run');
+    expect((await runRow(queuedRunId)).status).toBe('timeout');
   });
 });

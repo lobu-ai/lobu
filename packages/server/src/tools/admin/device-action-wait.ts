@@ -12,33 +12,77 @@ import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../../config/intervals';
 import { type DbClient, getDb } from '../../db/client';
 import { classifyRunOutcome } from '../../runs/run-outcome';
 import { supersedeActionEvent } from './approval-events';
-import { describeDeviceLastSeen } from '../../utils/device-liveness';
+import {
+  DEVICE_ONLINE_WINDOW_SECONDS,
+  describeDeviceLastSeen,
+} from '../../utils/device-liveness';
+
+interface RunDeviceDiagnostic {
+  /**
+   * The target device is online and executing other work. This alone does
+   * not establish that every slot is occupied.
+   */
+  busy: boolean;
+  text: string;
+}
 
 /**
- * How long the device pinned to this run's connection has been silent.
- * Runs only on the pre-claim timeout path, so the extra round-trip costs
- * nothing on the happy path. Never throws: a diagnostic that can fail the
- * operation it is diagnosing is worse than no diagnostic.
+ * Why the device this run is pinned to has not claimed it, derived from rows:
+ * when the device polled recently and is executing another run, it is busy and
+ * the blocking run is named; otherwise, how long it has been silent. Runs only
+ * off the happy path (a pre-claim deadline or a caller abort). Never throws: a
+ * diagnostic that can fail the operation it is diagnosing is worse than none.
+ *
+ * The blocking-run lookup reads the in-flight set only (`status` is indexed),
+ * never history. A blocking run in another workspace is not named, only timed.
  */
-export async function describeRunDeviceLastSeen(
+export async function describeRunDevice(
   runId: number,
   organizationId: string
-): Promise<string> {
+): Promise<RunDeviceDiagnostic> {
   try {
     const rows = (await getDb()`
-      SELECT dw.label, dw.last_seen_at
+      SELECT dw.label, dw.last_seen_at,
+        dw.last_seen_at > now() - ${DEVICE_ONLINE_WINDOW_SECONDS}::int * interval '1 second' AS online,
+        blocking.id AS blocking_run_id,
+        blocking.organization_id = r.organization_id AS blocking_same_org,
+        EXTRACT(EPOCH FROM (now() - blocking.claimed_at))::float AS blocking_seconds
       FROM runs r
-      JOIN connections c ON c.id = r.connection_id
-      JOIN device_workers dw ON dw.id = c.device_worker_id
+      LEFT JOIN connections c ON c.id = r.connection_id
+      JOIN device_workers dw ON dw.id = COALESCE(r.target_device_worker_id, c.device_worker_id)
+      LEFT JOIN LATERAL (
+        SELECT b.id, b.organization_id, b.claimed_at
+        FROM runs b
+        WHERE b.executed_by_device_worker_id = dw.id
+          AND b.status IN ('claimed', 'running')
+          AND b.id <> r.id
+        ORDER BY b.claimed_at ASC NULLS LAST, b.id
+        LIMIT 1
+      ) blocking ON true
       WHERE r.id = ${runId} AND r.organization_id = ${organizationId}
       LIMIT 1
-    `) as Array<{ label: string | null; last_seen_at: Date | string | null }>;
+    `) as Array<{
+      label: string | null;
+      last_seen_at: Date | string | null;
+      online: boolean | null;
+      blocking_run_id: number | string | null;
+      blocking_same_org: boolean | null;
+      blocking_seconds: number | null;
+    }>;
     const row = rows[0];
-    if (!row) return 'run has no paired device';
-    const age = describeDeviceLastSeen(row.last_seen_at);
-    return row.label ? `device "${row.label}" ${age}` : `device ${age}`;
+    if (!row) return { busy: false, text: 'run has no paired device' };
+    const device = row.label ? `device "${row.label}"` : 'device';
+    if (row.online && row.blocking_run_id != null) {
+      const blocking = row.blocking_same_org ? `run ${row.blocking_run_id}` : 'another run';
+      const seconds = Math.max(0, Math.round(row.blocking_seconds ?? 0));
+      return {
+        busy: true,
+        text: `${device} is busy: ${blocking} has been running for ${seconds}s`,
+      };
+    }
+    return { busy: false, text: `${device} ${describeDeviceLastSeen(row.last_seen_at)}` };
   } catch {
-    return 'device liveness unavailable';
+    return { busy: false, text: 'device liveness unavailable' };
   }
 }
 
@@ -76,7 +120,8 @@ async function sleepUnlessAborted(ms: number, abortSignal?: AbortSignal): Promis
 //
 //   - PRE-CLAIM (status='pending'): how long the device has to even
 //     pick the run up. The chrome extension polls /poll every 5s; we
-//     allow up to the shared device-action queue budget for it to arrive.
+//     allow up to the shared device-action queue budget for it to arrive,
+//     and longer while a busy device keeps the run's claim horizon renewed.
 //
 //   - POST-CLAIM (status='running'): how long the device has to
 //     execute, after it claimed the run. The default matches the chrome
@@ -179,6 +224,16 @@ interface DeviceActionRunOutcome {
   error_message?: string;
 }
 
+/**
+ * The caller's wait ended before any device claimed the run, but its target
+ * device is busy executing other work: the run stays queued and remains
+ * eligible for pickup within its claim horizon.
+ */
+interface QueuedBehindBusyDevice {
+  status: 'queued';
+  error_message: string;
+}
+
 interface WaitForDeviceActionRunOptions {
   queueMs: number;
   /**
@@ -195,6 +250,13 @@ interface WaitForDeviceActionRunOptions {
    */
   sleep?: (ms: number) => Promise<void>;
   abortSignal?: AbortSignal;
+  /**
+   * When the caller's wait ends before any claim and the target device is
+   * busy, leave the run queued and return {@link QueuedBehindBusyDevice}
+   * instead of finalizing it. Only for callers that can hand the run id back
+   * for a later read; source reads and delegated browser steps cannot.
+   */
+  leaveQueuedBehindBusyDevice?: boolean;
 }
 
 export function waitForDeviceActionRun(
@@ -216,17 +278,45 @@ export function waitForDeviceActionRun(
 }
 
 /**
+ * {@link waitForDeviceActionRun} for a caller that returns the run id when its
+ * own wait ends first: a run queued behind a busy device stays queued.
+ */
+export function waitForDeviceActionRunOrQueued(
+  runId: number,
+  organizationId: string,
+  abortSignal?: AbortSignal
+): Promise<DeviceActionRunOutcome | QueuedBehindBusyDevice> {
+  return waitForDeviceActionRunWithOptions(runId, organizationId, {
+    queueMs: DEVICE_ACTION_QUEUE_BUDGET_MS,
+    postClaimMs: POST_CLAIM_BUDGET_MS,
+    pollMs: POLL_MS,
+    abortSignal,
+    leaveQueuedBehindBusyDevice: true,
+  });
+}
+
+/**
  * The waiter itself, with its budgets and timing boundary supplied by the
  * caller. Tests use it to shrink the budgets — and, for the phase switch, to
  * drive the clock — while running the same database reads and timeout
  * finalization as production. Runtime callers should use
  * {@link waitForDeviceActionRun}, which supplies the production budgets.
  */
+export function waitForDeviceActionRunWithOptions(
+  runId: number,
+  organizationId: string,
+  options: WaitForDeviceActionRunOptions & { leaveQueuedBehindBusyDevice: true }
+): Promise<DeviceActionRunOutcome | QueuedBehindBusyDevice>;
+export function waitForDeviceActionRunWithOptions(
+  runId: number,
+  organizationId: string,
+  options: WaitForDeviceActionRunOptions
+): Promise<DeviceActionRunOutcome>;
 export async function waitForDeviceActionRunWithOptions(
   runId: number,
   organizationId: string,
   options: WaitForDeviceActionRunOptions
-): Promise<DeviceActionRunOutcome> {
+): Promise<DeviceActionRunOutcome | QueuedBehindBusyDevice> {
   const sql = getDb();
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => sleepUnlessAborted(ms, options.abortSignal));
@@ -243,7 +333,8 @@ export async function waitForDeviceActionRunWithOptions(
 
   while (true) {
     const rows = (await sql`
-      SELECT status, approval_status, action_output, error_message, claimed_at
+      SELECT status, approval_status, action_output, error_message, claimed_at,
+        COALESCE(expires_at > now(), false) AS claim_horizon_open
       FROM runs
       WHERE id = ${runId} AND organization_id = ${organizationId}
       LIMIT 1
@@ -253,6 +344,7 @@ export async function waitForDeviceActionRunWithOptions(
       action_output: unknown;
       error_message: string | null;
       claimed_at: Date | string | null;
+      claim_horizon_open: boolean;
     }>;
     const row = rows[0];
     if (!row) {
@@ -286,6 +378,19 @@ export async function waitForDeviceActionRunWithOptions(
     // Caller aborted (e.g. reaction timeout) — stop polling and let the
     // timeout finalization below mark the run, so we don't leak this loop.
     if (options.abortSignal?.aborted) {
+      if (
+        options.leaveQueuedBehindBusyDevice &&
+        claimedAtMs == null &&
+        row.claim_horizon_open
+      ) {
+        const device = await describeRunDevice(runId, organizationId);
+        if (device.busy) {
+          return {
+            status: 'queued',
+            error_message: `Run ${runId} is still queued: ${device.text}.`,
+          };
+        }
+      }
       const phase =
         claimedAtMs == null
           ? 'before any device claimed the run'
@@ -297,8 +402,12 @@ export async function waitForDeviceActionRunWithOptions(
     const currentTimeMs = now();
     if (claimedAtMs != null) {
       if (currentTimeMs - claimedAtMs >= postClaimMs) break;
-    } else {
-      if (currentTimeMs >= queueDeadline) break;
+    } else if (currentTimeMs >= queueDeadline && !row.claim_horizon_open) {
+      // The queue budget is a floor. A device that polls while its slots are
+      // full renews the run's claim horizon (runs/device-claim-horizon.ts), up
+      // to a ceiling, so a run queued behind work the device is executing is
+      // waited for until that horizon lapses, not cut off at the budget.
+      break;
     }
     await sleep(options.pollMs);
   }
@@ -317,13 +426,18 @@ export async function waitForDeviceActionRunWithOptions(
   const deviceDiagnostic =
     callerAbortMessage != null || claimedAtMs != null
       ? null
-      : await describeRunDeviceLastSeen(runId, organizationId);
+      : (await describeRunDevice(runId, organizationId)).text;
+  // A busy device can carry the wait past the queue budget; quote what it was.
+  const claimWaitMs = Math.max(
+    options.queueMs,
+    Math.round((now() - waitStartedAtMs) / 1000) * 1000
+  );
   const timeoutMessage =
     callerAbortMessage ??
     (deviceDiagnostic == null
       ? 'waitForDeviceActionRun: device claimed the run but did not complete in time'
       : `waitForDeviceActionRun: no device claimed the run within ${Math.round(
-          options.queueMs / 1000
+          claimWaitMs / 1000
         )}s (${deviceDiagnostic})`);
 
   // Atomic timeout finalization, with the operation card supersede in the SAME
@@ -401,6 +515,6 @@ export async function waitForDeviceActionRunWithOptions(
       callerAbortMessage ??
       (deviceDiagnostic == null
         ? `Run ${runId} claimed but the device worker didn't finish within ${postClaimMs}ms.`
-        : `Run ${runId} was never claimed within ${options.queueMs}ms — ${deviceDiagnostic}.`),
+        : `Run ${runId} was never claimed within ${claimWaitMs}ms — ${deviceDiagnostic}.`),
   };
 }

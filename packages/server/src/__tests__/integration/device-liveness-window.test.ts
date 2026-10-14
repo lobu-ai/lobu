@@ -16,7 +16,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../index";
 import { manageConnections } from "../../tools/admin/manage_connections";
-import { describeRunDeviceLastSeen } from "../../tools/admin/device-action-wait";
+import { describeRunDevice } from "../../tools/admin/device-action-wait";
 import type { ToolContext } from "../../tools/registry";
 import { DEVICE_ONLINE_WINDOW_SECONDS } from "../../utils/device-liveness";
 import { initWorkspaceProvider } from "../../workspace";
@@ -132,7 +132,7 @@ describe("device liveness window", () => {
 			RETURNING id
 		`) as unknown as Array<{ id: number }>;
 
-		const described = await describeRunDeviceLastSeen(Number(run.id), orgId);
+		const described = (await describeRunDevice(Number(run.id), orgId)).text;
 		// The exact sentence an operator reads when a dispatch times out. It has
 		// to name the device and the age — "may be offline" is what sent a whole
 		// session chasing a server-side fault that did not exist.
@@ -154,7 +154,7 @@ describe("device liveness window", () => {
 			VALUES (${orgId}, ${conn.id}, 'action', 'pending', ${CONNECTOR_KEY})
 			RETURNING id
 		`) as unknown as Array<{ id: number }>;
-		expect(await describeRunDeviceLastSeen(Number(run.id), orgId)).toBe(
+		expect((await describeRunDevice(Number(run.id), orgId)).text).toBe(
 			"run has no paired device",
 		);
 	});
