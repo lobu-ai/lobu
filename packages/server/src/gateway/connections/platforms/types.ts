@@ -168,6 +168,11 @@ export interface ChatPlatformDescriptor {
     deps: ChatRuntimeDeps,
     opts?: { skipTombstone?: boolean },
   ): Promise<void>;
+  /** Release what other rows still anchor to a BYO connection being deleted. */
+  releaseDeletedConnection?(
+    connection: { id: string; organizationId: string },
+    deps: ChatRuntimeDeps,
+  ): Promise<void>;
 
   /**
    * Parse platform-specific routing fields out of a messaging-API request
