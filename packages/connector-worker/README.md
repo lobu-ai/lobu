@@ -16,11 +16,14 @@ the canonical device Automation arm. Native bridge runs are framed over the
 bounded little-endian stdio protocol; Automation runs remain on the daemon's
 separate local execution arm.
 
-The macOS daemon admits **four active runs by default**, shared across shell
-actions, native connector work, and local agent runs. Set
-`--max-concurrent-jobs <n>` or `WORKER_MAX_CONCURRENT_JOBS` to override it; the
-CLI flag takes precedence. This is a per-device limit, not a setting for each
-connection, and does not change device pinning. A busy device still polls with
+Device daemons (the macOS daemon and every `lobu daemon` with a platform,
+including headless and interactive-session devices) admit **half the host's
+threads, clamped to 2-8, active runs by default**, shared across shell actions,
+native connector work, and local agent runs. Set `--max-concurrent-jobs <n>`
+(macOS daemon) or `WORKER_MAX_CONCURRENT_JOBS` to override it; the CLI flag
+takes precedence. Fleet workers without a platform default to one active run.
+This is a per-device limit, not a setting for each connection, and does not
+change device pinning. A busy device still polls with
 zero available capacity; being online is not a promise that a slot is free.
 Long coding sessions should use the device Automation/session lifecycle rather
 than hold a short-deadline shell action open. Concurrency is not isolation:
@@ -41,7 +44,7 @@ API_URL=http://localhost:8787 bun run daemon
 | `API_URL` | Backend API URL | Yes |
 | `WORKER_ID` | Worker identifier (auto-generated if unset) | No |
 | `WORKER_API_TOKEN` | Bearer token for backend auth | No |
-| `WORKER_MAX_CONCURRENT_JOBS` | Maximum active runs (macOS default: 4); overridden by `--max-concurrent-jobs` | No |
+| `WORKER_MAX_CONCURRENT_JOBS` | Maximum active runs (device default: half the host threads, 2-8; fleet default: 1); overridden by `--max-concurrent-jobs` | No |
 | `EMBEDDINGS_MODEL` | Override local embedding model | No |
 | `EMBEDDINGS_SERVICE_URL` | Use a remote embedding service instead of local | No |
 | `GITHUB_TOKEN` | GitHub API token | No |

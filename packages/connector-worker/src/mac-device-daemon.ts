@@ -7,7 +7,6 @@ import {
   runPackagedCliSupervisor,
 } from './daemon/automation-process.js';
 import {
-  DEFAULT_MAC_DEVICE_MAX_CONCURRENT_JOBS,
   INTERNAL_ACP_ADAPTER_ARG,
   macDeviceDaemonMetadata,
   packagedDaemonArgs,
@@ -33,7 +32,8 @@ Options:
   --api-url <url>             Worker API origin (or API_URL)
   --worker-id <id>            Device identity (default: macos:<hostname>)
   --poll-interval-ms <ms>     Poll interval (default: 10000)
-  --max-concurrent-jobs <n>   Maximum active runs (default: ${DEFAULT_MAC_DEVICE_MAX_CONCURRENT_JOBS})
+  --max-concurrent-jobs <n>   Maximum active runs (default: half the host's
+                              threads, clamped to 2-8)
   --default-agent-kind <kind> Agent fallback for Automations without a kind
   --supervised-stdio         Treat stdin EOF as a supervised-parent shutdown
   --no-poll                   Validate the executable without contacting a server

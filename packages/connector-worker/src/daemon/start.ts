@@ -15,6 +15,7 @@ import {
 import { assertExternalDepsResolvable } from '../compile/index.js';
 import { buildConnectorWorkerEnv } from '../env.js';
 import { assertConnectorRuntimeLoadable } from '../self-check/index.js';
+import { defaultDeviceMaxConcurrentJobs } from './device-concurrency.js';
 import { DEVICE_MANIFESTS_BY_PLATFORM } from './device-manifests.js';
 import { startDaemon, type WorkerDaemon } from './index.js';
 import { log, setDebug } from './log.js';
@@ -99,6 +100,18 @@ export function resolveDaemonLaunchContext(
     platform: detected ? 'headless' : (opts.platform ?? opts.defaultPlatform),
     interactiveSession: detected,
   };
+}
+
+export function resolveDaemonMaxConcurrentJobs(
+  platform: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  hostThreads?: number
+): number | undefined {
+  const configured = env.WORKER_MAX_CONCURRENT_JOBS
+    ? Math.max(1, Number.parseInt(env.WORKER_MAX_CONCURRENT_JOBS, 10))
+    : undefined;
+  if (configured !== undefined && Number.isFinite(configured)) return configured;
+  return platform ? defaultDeviceMaxConcurrentJobs(hostThreads) : undefined;
 }
 
 /**
@@ -201,12 +214,10 @@ export async function startDaemonCommand(
   };
   log.info(`[cli] Starting worker daemon (ID: ${workerId}, API: ${opts.apiUrl})`);
   const env = buildConnectorWorkerEnv();
-  const maxConcurrentJobs = process.env.WORKER_MAX_CONCURRENT_JOBS
-    ? Math.max(1, Number.parseInt(process.env.WORKER_MAX_CONCURRENT_JOBS, 10))
-    : undefined;
+  const maxConcurrentJobs = resolveDaemonMaxConcurrentJobs(platform);
   if (platform) {
     log.info(
-      `[cli] device mode: platform=${platform} capabilities=${capabilities.join(',') || '(none)'}`
+      `[cli] device mode: platform=${platform} capabilities=${capabilities.join(',') || '(none)'} max_concurrent_jobs=${maxConcurrentJobs}`
     );
     if (opts.activeOrg) {
       const deviceUrl = `${opts.apiUrl.replace(/\/+$/, '')}/${encodeURIComponent(opts.activeOrg)}/connectors/device/${encodeURIComponent(workerId)}`;
@@ -230,7 +241,7 @@ export async function startDaemonCommand(
     ...(platform ? { platform } : {}),
     ...(label ? { label } : {}),
     ...(platform ? { manifests: DEVICE_MANIFESTS_BY_PLATFORM[platform] ?? [] } : {}),
-    ...(Number.isFinite(maxConcurrentJobs) ? { maxConcurrentJobs } : {}),
+    ...(maxConcurrentJobs ? { maxConcurrentJobs } : {}),
     backendCapacity,
     ...(opts.workerCredentialMaintenance
       ? { workerCredentialMaintenance: opts.workerCredentialMaintenance }

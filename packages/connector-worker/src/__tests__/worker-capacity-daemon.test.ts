@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { WORKER_POLL_MAX_WAIT_SECONDS } from "@lobu/core/contracts/worker/protocol";
 import { WorkerHttpError } from "../daemon/client";
 import { WorkerPollLoop } from "../daemon/poll-loop";
-import { DEFAULT_MAC_DEVICE_MAX_CONCURRENT_JOBS } from "../daemon/mac-device-daemon";
+import { defaultDeviceMaxConcurrentJobs } from "../daemon/device-concurrency";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -115,7 +115,7 @@ describe("worker daemon capacity polling", () => {
     }
   });
 
-  test("four Mac slots run independently and the fifth waits for actual capacity", async () => {
+  test("four device slots (eight host threads) run independently and the fifth waits for actual capacity", async () => {
     const finishes = Array.from({ length: 5 }, () => deferred());
     const saturated = deferred();
     const fifthStarted = deferred();
@@ -135,7 +135,7 @@ describe("worker daemon capacity polling", () => {
             : { next_poll_seconds: 1 };
         },
       } as never,
-      maxConcurrentJobs: DEFAULT_MAC_DEVICE_MAX_CONCURRENT_JOBS,
+      maxConcurrentJobs: defaultDeviceMaxConcurrentJobs(8),
       pollIntervalMs: 5,
       execute: async (job) => {
         const id = job.run_id!;
