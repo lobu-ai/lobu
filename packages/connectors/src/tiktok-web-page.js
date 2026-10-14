@@ -2,9 +2,12 @@
 // keep every dependency inside this function, as in the WhatsApp page adapter.
 export async function tiktokPage(command, args = {}) {
 	const visible = (e) => !!e && e.getClientRects().length > 0;
-	if (visible(document.querySelector("#captcha-verify-container-main-page"))) {
-		throw new Error("TikTok verification required; complete the challenge in the connected browser");
-	}
+	const assertNoChallenge = () => {
+		if (visible(document.querySelector("#captcha-verify-container-main-page"))) {
+			throw new Error("TikTok verification required; complete the challenge in the connected browser");
+		}
+	};
+	assertNoChallenge();
 	const scope = () => {
 		const script = document.querySelector("#__UNIVERSAL_DATA_FOR_REHYDRATION__");
 		return script ? JSON.parse(script.textContent).__DEFAULT_SCOPE__ || {} : {};
@@ -26,6 +29,27 @@ export async function tiktokPage(command, args = {}) {
 		try { return await wait(identity); } catch { return null; }
 	}
 	if (!identity()) throw new Error("TikTok sign-in is required");
+	if (command === "following_status" || command === "following_scroll") {
+		const assertFollowing = () => {
+			if (location.origin !== "https://www.tiktok.com" || location.pathname !== "/following") throw new Error("TikTok Following page changed");
+			assertNoChallenge();
+			if (!identity()) throw new Error("TikTok sign-in is required");
+		};
+		assertFollowing();
+		if (command === "following_scroll") {
+			const cards = [...document.querySelectorAll('[data-e2e="recommend-list-item-container"]')].filter(visible);
+			if (!cards.length) throw new Error("TikTok Following has no rendered posts to scroll");
+			document.querySelectorAll("video,audio").forEach(media => { media.muted = true; });
+			cards[cards.length - 1].scrollIntoView({ block: "end", behavior: "instant" });
+			// Allow the page's own lazy-load request to complete before capture is
+			// drained. Recheck the page during the wait, including late challenges.
+			for (let i = 0; i < 4; i++) {
+				await new Promise(resolve => setTimeout(resolve, 250));
+				assertFollowing();
+			}
+		}
+		return { ready: true };
+	}
 	const project = (item) => ({
 		id: item.id, desc: item.desc, createTime: item.createTime,
 		author: item.author && { id: item.author.id, uniqueId: item.author.uniqueId, nickname: item.author.nickname },
@@ -42,9 +66,7 @@ export async function tiktokPage(command, args = {}) {
 		// Hidden preload links appear before search results render. Their presence
 		// satisfies wait_for_selector but cannot establish readable coverage.
 		const links = await wait(() => {
-			if (visible(document.querySelector("#captcha-verify-container-main-page"))) {
-				throw new Error("TikTok verification required; complete the challenge in the connected browser");
-			}
+			assertNoChallenge();
 			const rendered = [...document.querySelectorAll('a[href*="/video/"],a[href*="/photo/"]')].filter(visible);
 			return rendered.length ? rendered : null;
 		});
