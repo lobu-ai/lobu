@@ -771,7 +771,7 @@ export const metricSeries = <ThrowOnError extends boolean = false>(
 /**
  * Resolve a namespace-based URL path like /acme/entity-type/entity-slug into namespace and entity details
  *
- * Resolve a namespace-based URL path like /acme/entity-type/entity-slug into namespace and entity details. Returns template_data with executed data source query results when templates define data_sources.
+ * Resolve a namespace-based URL path like /acme/entity-type/entity-slug into namespace and entity details.
  */
 export const resolvePath = <ThrowOnError extends boolean = false>(
   options: Options<ResolvePathData, ThrowOnError>,

@@ -564,7 +564,7 @@ const INTERNAL_DISPATCH_TOOLS: ToolDefinition[] = [
     name: 'resolve_path',
     scope: 'account',
     description:
-      'Resolve a namespace-based URL path like /acme/entity-type/entity-slug into namespace and entity details. Returns template_data with executed data source query results when templates define data_sources.',
+      'Resolve a namespace-based URL path like /acme/entity-type/entity-slug into namespace and entity details.',
     inputSchema: ResolvePathSchema,
     outputSchema: ResolvePathResultSchema,
     annotations: { ...READ_ONLY, title: 'Resolve path' },
