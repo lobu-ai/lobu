@@ -176,6 +176,8 @@ type History = {
   touched: Map<string, string>;
   // The newest attempt on each reminder field, and the window that proposed it.
   fields: Map<string, { position: string; parentRunId: number }>;
+  // Reminder fields with a write still awaiting approval.
+  awaitingApproval: Set<string>;
   // Names the ordering base of a reminder with no write in the read horizon.
   horizon: string;
 };
@@ -209,6 +211,7 @@ async function readHistory(
   const writes = new Map<string, Attempts>();
   const touched = new Map<string, string>();
   const fields = new Map<string, { position: string; parentRunId: number }>();
+  const awaitingApproval = new Set<string>();
   const failures = new Map<string, number>();
   // A run can match two filters, and runs created mid-scan must not shift
   // pages, so pages follow the (created_at, id) keyset and each run counts once.
@@ -274,6 +277,8 @@ async function readHistory(
             const key = `${origin}|${field}`;
             if (position > (fields.get(key)?.position ?? ""))
               fields.set(key, { position, parentRunId: write.parentRunId });
+            if (ACTIVE.includes(status) && run.approval_status === "pending")
+              awaitingApproval.add(key);
           }
       }
       const last = page.runs.at(-1);
@@ -296,6 +301,7 @@ async function readHistory(
     writes,
     touched,
     fields,
+    awaitingApproval,
     horizon: `h${createdAfter.slice(0, 10)}`,
   };
 }
@@ -511,6 +517,19 @@ export default async function applyReminderChanges(
     }
     queued.add(retryKey);
     try {
+      // The Mac runs admitted writes oldest first, but approvals can be granted
+      // in any order. While an older write to a field awaits approval, a newer
+      // one is not queued behind it; the reaction retries, and a change still
+      // waiting after its retries fails visibly for the next window to propose.
+      if (
+        typeof origin === "string" &&
+        fieldsOf(write).some((field) =>
+          history.awaitingApproval.has(`${origin}|${field}`)
+        )
+      )
+        throw new Error(
+          `Waiting for approval of an earlier write to ${origin}`
+        );
       let result: Awaited<ReturnType<ReactionClient["operations"]["execute"]>>;
       try {
         result = await client.operations.execute({
@@ -563,6 +582,9 @@ export default async function applyReminderChanges(
       }
       if (typeof origin === "string" && result.run_id != null)
         bases.set(origin, String(result.run_id).padStart(20, "0"));
+      if (typeof origin === "string" && result.status === "pending_approval")
+        for (const field of fieldsOf(write))
+          history.awaitingApproval.add(`${origin}|${field}`);
       client.log(`Queued ${write.operation}`, {
         run_id: result.run_id,
         status: result.status,

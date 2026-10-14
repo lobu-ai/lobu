@@ -136,6 +136,8 @@ function harness(
               ? "pending"
               : result.status
           );
+          if (result.status === "pending_approval")
+            run.approval_status = "pending";
           runs.push(run);
           return { ...result, run_id: run.id };
         }
@@ -632,6 +634,71 @@ describe("Task Collaborator reminder changes", () => {
         expect(h.runs).toHaveLength(2);
       }
     }
+  });
+
+  test("a newer write to a field waits while an older one awaits approval", async () => {
+    const h = harness({
+      execute: async () => ({ status: "pending_approval" }),
+    });
+    await applyReminderChanges(
+      atRun(901, [{ action: "update", origin_id: "reminder:a", title: "Old" }]),
+      h.client
+    );
+    const newer = atRun(902, [
+      { action: "update", origin_id: "reminder:a", title: "New" },
+      {
+        action: "update",
+        origin_id: "reminder:a",
+        due: "2026-10-21T09:00:00Z",
+      },
+      { action: "complete", origin_id: "reminder:b" },
+    ]);
+    await expect(applyReminderChanges(newer, h.client)).rejects.toThrow(
+      "Waiting for approval of an earlier write to reminder:a"
+    );
+    // Other fields and other reminders are not held.
+    expect(h.runs.map((run) => run.input)).toEqual([
+      { origin_id: "reminder:a", title: "Old" },
+      { origin_id: "reminder:a", due: "2026-10-21T09:00:00Z" },
+      { origin_id: "reminder:b" },
+    ]);
+    // Approved and applied, the older write no longer holds the newer one.
+    h.runs[0].status = "completed";
+    h.runs[0].approval_status = "approved";
+    await applyReminderChanges(newer, h.client);
+    expect(h.runs.at(-1)?.input).toEqual({
+      origin_id: "reminder:a",
+      title: "New",
+    });
+  });
+
+  test("a reaction holds its own second write while the first awaits approval", async () => {
+    const h = harness({
+      execute: async () => ({ status: "pending_approval" }),
+    });
+    await expect(
+      applyReminderChanges(
+        context([
+          { action: "update", origin_id: "reminder:a", title: "First" },
+          { action: "update", origin_id: "reminder:a", title: "Last" },
+        ]),
+        h.client
+      )
+    ).rejects.toThrow("Waiting for approval");
+    expect(h.runs).toHaveLength(1);
+  });
+
+  test("a write waiting only for the Mac does not hold a newer one", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      atRun(901, [{ action: "update", origin_id: "reminder:a", title: "Old" }]),
+      h.client
+    );
+    await applyReminderChanges(
+      atRun(902, [{ action: "update", origin_id: "reminder:a", title: "New" }]),
+      h.client
+    );
+    expect(h.runs.map((run) => run.status)).toEqual(["pending", "pending"]);
   });
 
   test("an intervening different write allows a fresh correction", async () => {
