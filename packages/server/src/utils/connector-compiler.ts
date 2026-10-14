@@ -150,6 +150,18 @@ async function main() {
               ' cannot implement both sync and observe; they would share one feed checkpoint.'
             );
           }
+          // A record feed's normalizer stays in the compiled runtime; only the
+          // declaration persists.
+          if (serializable.webhook && typeof serializable.webhook === 'object') {
+            const { normalize, ...webhook } = serializable.webhook;
+            if ((webhook.kind === 'record') !== (typeof normalize === 'function') || (webhook.kind === 'record' && typeof sync !== 'function')) {
+              throw new Error(
+                'Connector feed ' + JSON.stringify(feedKey) +
+                ' must declare webhook.kind "record" exactly when it implements webhook.normalize and sync.'
+              );
+            }
+            serializable.webhook = webhook;
+          }
           return [feedKey, { ...serializable, operations }];
         }));
 

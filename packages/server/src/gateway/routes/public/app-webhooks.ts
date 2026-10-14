@@ -12,9 +12,11 @@
  *   2. extracts the provider tenant tuple (provider_instance, provider_app_id,
  *      external_tenant_id) from the body/headers (provider plugin), then
  *   3. resolves the active `app_installations` row for that tuple → owning org,
- *      and lands the raw delivery through the SAME event-log path as the
- *      per-connection ingest (`connector_key='webhook:<id>'`, reusing the
- *      dedupe index, size cap, and rate limit).
+ *      then dispatches through the connector's declared data hook (feeds that
+ *      declare the delivery's event type), or else lands the raw delivery
+ *      through the SAME event-log path as the per-connection ingest
+ *      (`connector_key='webhook:<id>'`, reusing the dedupe index, size cap, and
+ *      rate limit).
  *
  * Verification + tenant extraction are GENERIC, derived entirely from the
  * connector's `ConnectorWebhookSchema`: {@link verifyDeclaredWebhook} computes
@@ -41,7 +43,12 @@ import { createLogger } from "@lobu/core";
 import type { StoredConnection } from "@lobu/core";
 import type { ConnectorWebhookSchema } from "@lobu/connector-sdk";
 import { type DbClient, getDb } from "../../../db/client.js";
-import { requestFeedSync } from "../../../runs/feed-notifications.js";
+import {
+	type ConnectorRecordJob,
+	deliverConnectorWebhook,
+	deliveryScalar,
+	readDeliveryPath,
+} from "../../../connectors/webhook-delivery.js";
 import {
 	handleWebhookIngest,
 	readBodyWithCap,
@@ -49,12 +56,6 @@ import {
 } from "../../connections/webhook-ingest.js";
 import type { SecretStore } from "../../secrets/index.js";
 import type { AppInstallationStore } from "../../../lobu/stores/app-installation-store.js";
-import { insertEvent } from "../../../utils/insert-event.js";
-import {
-	githubKeyForOriginId,
-	githubUserIdentityKey,
-} from "@lobu/connectors/github-identity";
-import { extractGithubActor, resolveGithubWebhookActor } from "./github-webhook-actor.js";
 import { createJiraWebhookDelivery } from "./jira-mcp-webhook-delivery.js";
 
 const logger = createLogger("app-webhook-routes");
@@ -133,20 +134,12 @@ export interface AppWebhookProvider {
 		sql: DbClient;
 	}): Promise<{ entityIds: number[]; metadata: Record<string, string> } | null>;
 	/**
-	 * Optional: handle the delivery itself instead of storing a raw event. For
-	 * connectors with a sync mapping (github) the canonical record is the poll, so
-	 * the provider decides per event type (see the github plugin):
-	 *  - TRIGGER (most events) — request the affected feed's next sync, respecting
-	 *    source failure backoff, and let the poll fetch the complete record
-	 *    (dedupes/supersedes by stable origin_id). No identity resolution here —
-	 *    the poll resolves it once.
-	 *  - STORE (event-complete signals, e.g. stars) — resolve the actor and insert
-	 *    the structured event directly, keyed on the same origin_id the poll uses.
-	 * No raw blob is stored either way. Providers that define this NEVER fall
-	 * through to the raw ingest path; providers without it keep raw store
-	 * (jira/linear). `triggered` reports whether a feed sync was requested OR an
-	 * event stored (telemetry only — the router acks 200 either way; an unconfigured
-	 * repo/feed is a no-op, not an error).
+	 * Optional: handle the delivery itself instead of storing a raw event —
+	 * the declared feed dispatch (see {@link createDataWebhookDelivery}) or the
+	 * Jira → Rovo hook. `triggered` reports whether a feed was marked due or a
+	 * record committed (telemetry only — the router acks 200 either way; an
+	 * unconfigured feed is a no-op, not an error). `handled: false` falls
+	 * through to the raw ingest path.
 	 */
 	onDelivery?(params: {
 		rawBody: Uint8Array;
@@ -196,29 +189,6 @@ function parseJson(rawBody: Uint8Array): unknown {
 	} catch {
 		return undefined;
 	}
-}
-
-/** Narrow an unknown JSON node to a string field, or undefined. */
-function strField(node: unknown, key: string): string | undefined {
-	if (node === null || typeof node !== "object") return undefined;
-	const value = (node as Record<string, unknown>)[key];
-	return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-/**
- * Follow a dotted JSON path (`a.b.c`) into a parsed body and return the leaf as
- * a non-empty string, or undefined. Numbers are stringified (GitHub installation
- * ids are integers). Used by the generic tenant extractor — no provider literal.
- */
-function readPath(body: unknown, path: string): string | undefined {
-	let node: unknown = body;
-	for (const segment of path.split(".")) {
-		if (node === null || typeof node !== "object") return undefined;
-		node = (node as Record<string, unknown>)[segment];
-	}
-	if (typeof node === "string") return node.length > 0 ? node : undefined;
-	if (typeof node === "number" && Number.isFinite(node)) return String(node);
-	return undefined;
 }
 
 /**
@@ -307,7 +277,8 @@ export function extractTenantFromSchema(
 	if (paths.length === 0) return null;
 	const body = parseJson(rawBody);
 	for (const path of paths) {
-		const raw = readPath(body, path);
+		// Numbers are stringified (GitHub installation ids are integers).
+		const raw = deliveryScalar(readDeliveryPath(body, path));
 		if (!raw) continue;
 		let externalTenantId = raw;
 		if (schema.routingKeyTransform === "url-host") {
@@ -393,550 +364,36 @@ export function createDeclaredAppWebhookProvider(options: {
 	};
 }
 
-/** Webhook routing for one feed: which feed a delivery updates, and how. */
-interface WebhookRoute {
-	feedKey: string;
-	mode: "trigger" | "store";
-}
-
 /**
- * Build the github event → feed routing from the org's connector definition
- * feeds_schema, where each feed declares `webhook: { events, mode }`. Read from
- * the DB — the same persisted surface the poll path reads its entity-link rules
- * from — so the server hardcodes NO provider event types or feed names. A
- * per-delivery query (webhooks are low-frequency); an org with no active github
- * definition yields an empty map → deliveries ack as no-ops.
- *
- * Routing strategies (declared by the connector per feed):
- *  - TRIGGER — the poll brings strictly more than the webhook (an `issues`
- *    payload omits computed counts; a `push` lacks the immutable github user id
- *    `/commits` returns), so the delivery requests THAT feed's next sync and
- *    the poll fetches the complete record.
- *  - STORE — the payload is event-complete (a `star` carries actor + starred_at)
- *    and re-polling the whole list is waste, so the event is stored directly.
- */
-async function loadGithubWebhookRoutes(
-	organizationId: string,
-	connectorKey: string,
-): Promise<Map<string, WebhookRoute>> {
-	const rows = await getDb()`
-		SELECT feeds_schema FROM connector_definitions
-		WHERE key = ${connectorKey} AND organization_id = ${organizationId} AND status = 'active'
-		ORDER BY updated_at DESC
-		LIMIT 1
-	`;
-	const routes = new Map<string, WebhookRoute>();
-	const feedsSchema = rows[0]?.feeds_schema as
-		| Record<string, { webhook?: { events?: unknown; mode?: unknown } }>
-		| null
-		| undefined;
-	if (!feedsSchema) return routes;
-	for (const [feedKey, feed] of Object.entries(feedsSchema)) {
-		const events = feed?.webhook?.events;
-		if (!Array.isArray(events)) continue;
-		const mode = feed.webhook?.mode === "store" ? "store" : "trigger";
-		for (const event of events) {
-			if (typeof event === "string" && event) routes.set(event, { feedKey, mode });
-		}
-	}
-	return routes;
-}
-
-/**
- * GitHub's per-KIND delivery hook (poll-canonical trigger/store), built
- * separately from the generic provider so it can be injected via
- * {@link createDeclaredAppWebhookProvider}'s `onDelivery`. This is the only
- * GitHub-specific code left in this file; relocating it out of the gateway core
- * is the Phase-D per-kind delivery work. Verify + tenant + registration are
- * fully generic (no GitHub branch).
- *
- * Routing comes from {@link loadGithubWebhookRoutes} (the connector's
- * feeds_schema), not a hardcoded map. Most events TRIGGER the affected feed's
- * poll; event-complete signals (stars) are STORED directly, consolidating with
- * the poll on origin_id.
- */
-export function createGithubWebhookDelivery(options: {
-	/**
-	 * The connector key whose feeds/connections this delivery routes to and
-	 * whose value is stamped on any stored event — threaded from the delivery
-	 * context (BundledIntegrationConnector.connectorKey), never a literal.
-	 */
-	connectorKey: string;
-	/**
-	 * Land event-complete deliveries (stars) directly instead of re-polling.
-	 * Default true. Set false to make every delivery a trigger (the scheduled
-	 * poll then captures stars on its next backstop run).
-	 */
-	storeWebhookEvents?: boolean;
-}): NonNullable<AppWebhookProvider["onDelivery"]> {
-	const { connectorKey } = options;
-	const storeWebhookEvents = options.storeWebhookEvents ?? true;
-	return async ({ rawBody, headers, install, sql }) => {
-		const event = headers.get("x-github-event");
-		if (!event) return { triggered: false };
-		// Routing is declared by the connector (feeds_schema), read from the DB.
-		const route = (
-			await loadGithubWebhookRoutes(install.organizationId, connectorKey)
-		).get(event);
-		if (!route) return { triggered: false };
-		const payload = parseJson(rawBody);
-		const repo = extractGithubRepo(payload);
-		if (!repo) return { triggered: false };
-
-		// STORE (event-complete signals, e.g. stars): land the structured event
-		// directly, consolidating with the poll on origin_id — no wasteful
-		// re-poll. Resolution happens here because the poll won't run for this
-		// feed on the webhook's account. Gated by storeWebhookEvents; when off,
-		// fall through to a trigger so the scheduled poll picks it up.
-		if (route.mode === "store" && storeWebhookEvents) {
-			const stored = await storeGithubWebhookEvent({
-				sql,
-				connectorKey,
-				install,
-				repo,
-				event,
-				feedKey: route.feedKey,
-				payload,
-			});
-			return { triggered: stored };
-		}
-
-		// TRIGGER: the poll brings more, so request THAT feed's next sync and let it
-		// fetch the complete record (dedupes/supersedes by origin_id) and resolve
-		// the person once — no webhook-side resolution (avoids double work).
-		const triggered = await requestGithubFeedSync({
-			sql,
-			connectorKey,
-			install,
-			repo,
-			feedKey: route.feedKey,
-		});
-		return { triggered };
-	};
-}
-
-/**
- * Resolve the DATA-kind delivery hook for a connector, selected by its KIND of
- * data delivery — NOT by a provider-name branch in the gateway wiring. A data
- * integration whose deliveries are POLL-CANONICAL (GitHub: trigger the affected
- * feed / store event-complete signals) ships a hook here; data integrations that
- * RAW-STORE their deliveries (Linear) ship none, so the router falls through to
- * the raw event-ingest path. Jira routes matching sites to Atlassian Rovo
- * issue feeds and explicitly falls through while no Rovo feed exists. This
- * lookup lives in the data-delivery module, so the gateway selects `data` vs
- * `chat` by deliveryKind and delegates the per-connector data hook to this —
- * gateway core stays free of provider literals. A new hook-shipping data
- * integration adds its hook here; everything else needs no change.
+ * Resolve the DATA-kind delivery hook for a connector, selected by what it
+ * DECLARES — never a provider-name branch in the gateway wiring. A connector
+ * whose webhook schema names an `eventType` dispatches generically to the
+ * installation's feeds that declare the event (invalidate, or record through
+ * the feed's `normalize`). Jira routes matching sites to Atlassian Rovo issue
+ * feeds and explicitly falls through while no Rovo feed exists. Everything
+ * else has no hook, so the router falls through to the raw event-ingest path.
  */
 export function createDataWebhookDelivery(
-	connectorKey: string,
+	integration: { connectorKey: string; webhookSchema: ConnectorWebhookSchema },
+	enqueueRecord: (job: ConnectorRecordJob) => Promise<unknown>,
 ): AppWebhookProvider["onDelivery"] | undefined {
-	if (connectorKey === "github") {
-		return createGithubWebhookDelivery({
-			connectorKey,
-			storeWebhookEvents: process.env.GITHUB_WEBHOOK_STORE_EVENTS !== "false",
-		});
+	const { connectorKey, webhookSchema } = integration;
+	const eventType = webhookSchema.eventType;
+	if (eventType) {
+		return ({ rawBody, headers, install, sql }) =>
+			deliverConnectorWebhook({
+				sql,
+				rawBody,
+				headers,
+				eventType,
+				organizationId: install.organizationId,
+				connectorKey,
+				scope: { installationRef: String(install.id) },
+				enqueueRecord,
+			});
 	}
 	if (connectorKey === "jira") return createJiraWebhookDelivery();
 	return undefined;
-}
-
-/** Extract the {owner, name} of the repo a GitHub delivery is about, or null. */
-function extractGithubRepo(
-	body: unknown,
-): { owner: string; name: string } | null {
-	if (body === null || typeof body !== "object") return null;
-	const repository = (body as Record<string, unknown>).repository;
-	if (repository === null || typeof repository !== "object") return null;
-	const repo = repository as Record<string, unknown>;
-	const name = typeof repo.name === "string" ? repo.name : undefined;
-	const owner = strField(repo.owner, "login");
-	if (owner && name) return { owner, name };
-	// Fall back to full_name ("owner/name") when the split fields are absent.
-	const fullName = typeof repo.full_name === "string" ? repo.full_name : undefined;
-	if (fullName?.includes("/")) {
-		const [o, n] = fullName.split("/", 2);
-		if (o && n) return { owner: o, name: n };
-	}
-	return null;
-}
-
-/**
- * Request the active github feed sync for (install, repo, feedKey). A healthy
- * feed becomes due now; a failing feed retains its backoff. The schedule stays
- * the self-covering backstop. Scoped to the one feed the event belongs to, so
- * unrelated feeds are not re-polled. Returns whether the feed matched
- * (telemetry only — an unconfigured repo/feed is a no-op, not an error).
- */
-async function requestGithubFeedSync(params: {
-	sql: DbClient;
-	connectorKey: string;
-	install: { id: number | string; organizationId: string };
-	repo: { owner: string; name: string };
-	feedKey: string;
-}): Promise<boolean> {
-	const { sql, connectorKey, install, repo, feedKey } = params;
-	const rows = await requestFeedSync(sql, sql`
-		SELECT f.id FROM feeds f, connections c
-		WHERE f.connection_id = c.id
-		  AND c.organization_id = ${install.organizationId}
-		  AND c.connector_key = ${connectorKey}
-		  AND c.status = 'active'
-		  AND c.deleted_at IS NULL
-		  AND (c.config->>'installation_ref') = ${String(install.id)}
-		  AND f.feed_key = ${feedKey}
-		  AND lower(f.config->>'repo_owner') = lower(${repo.owner})
-		  AND lower(f.config->>'repo_name') = lower(${repo.name})
-		  AND f.status = 'active'
-		  AND f.deleted_at IS NULL
-	`);
-	return rows.length > 0;
-}
-
-/**
- * OAuth/PAT GitHub connection path: request the single connection's matching
- * feed sync. Same poll-canonical contract as {@link requestGithubFeedSync}, but
- * keyed by connection id rather than app installation_ref.
- */
-async function requestGithubFeedSyncForConnection(params: {
-	sql: DbClient;
-	connectorKey: string;
-	connectionId: number;
-	organizationId: string;
-	repo: { owner: string; name: string };
-	feedKey: string;
-}): Promise<boolean> {
-	const { sql, connectorKey, connectionId, organizationId, repo, feedKey } =
-		params;
-	const rows = await requestFeedSync(sql, sql`
-		SELECT f.id FROM feeds f, connections c
-		WHERE f.connection_id = c.id
-		  AND c.id = ${connectionId}
-		  AND c.organization_id = ${organizationId}
-		  AND c.connector_key = ${connectorKey}
-		  AND c.status = 'active'
-		  AND c.deleted_at IS NULL
-		  AND f.feed_key = ${feedKey}
-		  AND lower(f.config->>'repo_owner') = lower(${repo.owner})
-		  AND lower(f.config->>'repo_name') = lower(${repo.name})
-		  AND f.status = 'active'
-		  AND f.deleted_at IS NULL
-	`);
-	return rows.length > 0;
-}
-
-/**
- * Poll-canonical handling for a GitHub connector connection webhook
- * (`POST /api/v1/webhooks/:connectionId` after the OAuth/PAT bridge).
- * TRIGGER events request the feed's next sync so a CheckDueFeeds tick runs the
- * poll after any failure backoff and attaches automation_signals; STORE events
- * land structured rows under the real github connector_key. Never raw-stores
- * under webhook:<id>.
- */
-export async function deliverGithubConnectorConnectionWebhook(params: {
-	sql: DbClient;
-	connectionId: number;
-	organizationId: string;
-	connectorKey: string;
-	rawBody: Uint8Array;
-	headers: Headers;
-	storeWebhookEvents?: boolean;
-}): Promise<{ triggered: boolean }> {
-	const {
-		sql,
-		connectionId,
-		organizationId,
-		connectorKey,
-		rawBody,
-		headers,
-	} = params;
-	const storeWebhookEvents = params.storeWebhookEvents ?? true;
-	const event = headers.get("x-github-event");
-	if (!event) return { triggered: false };
-	const route = (await loadGithubWebhookRoutes(organizationId, connectorKey)).get(
-		event,
-	);
-	if (!route) return { triggered: false };
-	const payload = parseJson(rawBody);
-	const repo = extractGithubRepo(payload);
-	if (!repo) return { triggered: false };
-
-	if (route.mode === "store" && storeWebhookEvents) {
-		// Reuse the install-shaped store path by resolving the feed on this
-		// connection only (installation_ref match is bypassed via a synthetic
-		// install id that won't match — call connection-scoped store).
-		const stored = await storeGithubWebhookEventForConnection({
-			sql,
-			connectorKey,
-			connectionId,
-			organizationId,
-			repo,
-			event,
-			feedKey: route.feedKey,
-			payload,
-		});
-		return { triggered: stored };
-	}
-
-	const triggered = await requestGithubFeedSyncForConnection({
-		sql,
-		connectorKey,
-		connectionId,
-		organizationId,
-		repo,
-		feedKey: route.feedKey,
-	});
-	return { triggered };
-}
-
-/**
- * The active github feed matching (install, repo, feedKey) and its connection.
- * The store path is gated on this exactly like the trigger path
- * ({@link requestGithubFeedSync}) — a repo with no such feed configured is a no-op,
- * not an unconfigured event. The connection id is the feed's own, so the stored
- * event shares the poll's (connection_id, origin_id) and consolidates.
- */
-async function resolveGithubFeedTarget(params: {
-	sql: DbClient;
-	connectorKey: string;
-	install: { id: number | string; organizationId: string };
-	repo: { owner: string; name: string };
-	feedKey: string;
-}): Promise<{
-	connectionId: number;
-	feedId: number;
-	owner: string;
-	name: string;
-} | null> {
-	const { sql, connectorKey, install, repo, feedKey } = params;
-	// GitHub owner/repo are case-insensitive; match accordingly and return the
-	// feed config's canonical casing so the store builds the SAME origin_id the
-	// poll does (the connector keys origin_id off the feed config, not the
-	// webhook payload's display casing) — otherwise consolidation would break.
-	const [row] = await sql`
-		SELECT f.id AS feed_id, f.connection_id,
-		       f.config->>'repo_owner' AS repo_owner, f.config->>'repo_name' AS repo_name
-		FROM feeds f
-		JOIN connections c ON c.id = f.connection_id
-		WHERE c.organization_id = ${install.organizationId}
-		  AND c.connector_key = ${connectorKey}
-		  AND c.status = 'active'
-		  AND c.deleted_at IS NULL
-		  AND (c.config->>'installation_ref') = ${String(install.id)}
-		  AND f.feed_key = ${feedKey}
-		  AND lower(f.config->>'repo_owner') = lower(${repo.owner})
-		  AND lower(f.config->>'repo_name') = lower(${repo.name})
-		  AND f.status = 'active'
-		  AND f.deleted_at IS NULL
-		LIMIT 1
-	`;
-	return row
-		? {
-				connectionId: Number(row.connection_id),
-				feedId: Number(row.feed_id),
-				owner: String(row.repo_owner),
-				name: String(row.repo_name),
-			}
-		: null;
-}
-
-/**
- * Land an event-complete github delivery (star/watch) as a structured event
- * instead of re-polling. The origin_id mirrors the github connector's stargazer
- * scheme (`stargazer_<owner>_<repo>_<github_user_id:ID | github_login:login>`,
- * non-alnum → `_`) and the event is stored under the install's github
- * connection, so the scheduled `/stargazers` poll supersedes/dedupes it on the
- * SAME (connection_id, origin_id). The actor is resolved to a person here (the
- * poll won't run on the webhook's account). Unstars are transient — not tracked
- * (the user opted out of delete signals). Returns false (no-op) when no active
- * matching feed is configured for the repo or the delivery isn't a new star.
- */
-async function storeGithubWebhookEvent(params: {
-	sql: DbClient;
-	connectorKey: string;
-	install: { id: number | string; organizationId: string };
-	repo: { owner: string; name: string };
-	event: string;
-	feedKey: string;
-	payload: unknown;
-}): Promise<boolean> {
-	const target = await resolveGithubFeedTarget({
-		sql: params.sql,
-		connectorKey: params.connectorKey,
-		install: params.install,
-		repo: params.repo,
-		feedKey: params.feedKey,
-	});
-	if (!target) return false;
-	return landGithubStarEvent({
-		...params,
-		organizationId: params.install.organizationId,
-		target,
-	});
-}
-
-/** Connection-scoped store for OAuth/PAT GitHub star webhooks. */
-async function storeGithubWebhookEventForConnection(params: {
-	sql: DbClient;
-	connectorKey: string;
-	connectionId: number;
-	organizationId: string;
-	repo: { owner: string; name: string };
-	event: string;
-	feedKey: string;
-	payload: unknown;
-}): Promise<boolean> {
-	const target = await resolveGithubFeedTargetForConnection(params);
-	if (!target) return false;
-	return landGithubStarEvent({
-		sql: params.sql,
-		connectorKey: params.connectorKey,
-		organizationId: params.organizationId,
-		repo: params.repo,
-		event: params.event,
-		feedKey: params.feedKey,
-		payload: params.payload,
-		target,
-	});
-}
-
-async function resolveGithubFeedTargetForConnection(params: {
-	sql: DbClient;
-	connectorKey: string;
-	connectionId: number;
-	organizationId: string;
-	repo: { owner: string; name: string };
-	feedKey: string;
-}): Promise<{
-	connectionId: number;
-	feedId: number;
-	owner: string;
-	name: string;
-} | null> {
-	const { sql, connectorKey, connectionId, organizationId, repo, feedKey } =
-		params;
-	const [row] = await sql`
-		SELECT f.id AS feed_id, f.connection_id,
-		       f.config->>'repo_owner' AS repo_owner, f.config->>'repo_name' AS repo_name
-		FROM feeds f
-		JOIN connections c ON c.id = f.connection_id
-		WHERE c.id = ${connectionId}
-		  AND c.organization_id = ${organizationId}
-		  AND c.connector_key = ${connectorKey}
-		  AND c.status = 'active'
-		  AND c.deleted_at IS NULL
-		  AND f.feed_key = ${feedKey}
-		  AND lower(f.config->>'repo_owner') = lower(${repo.owner})
-		  AND lower(f.config->>'repo_name') = lower(${repo.name})
-		  AND f.status = 'active'
-		  AND f.deleted_at IS NULL
-		LIMIT 1
-	`;
-	return row
-		? {
-				connectionId: Number(row.connection_id),
-				feedId: Number(row.feed_id),
-				owner: String(row.repo_owner),
-				name: String(row.repo_name),
-			}
-		: null;
-}
-
-async function landGithubStarEvent(params: {
-	sql: DbClient;
-	connectorKey: string;
-	organizationId: string;
-	repo: { owner: string; name: string };
-	event: string;
-	feedKey: string;
-	payload: unknown;
-	target: {
-		connectionId: number;
-		feedId: number;
-		owner: string;
-		name: string;
-	};
-}): Promise<boolean> {
-	const {
-		sql,
-		connectorKey,
-		organizationId,
-		event,
-		feedKey,
-		payload,
-		target,
-	} = params;
-	const root =
-		payload && typeof payload === "object"
-			? (payload as Record<string, unknown>)
-			: null;
-	if (!root) return false;
-	// `star` → action created/deleted; `watch` → action started. Only a NEW star
-	// is landed; unstars/transient states are intentionally ignored.
-	const action = strField(root, "action");
-	if (event === "star" && action !== "created") return false;
-	if (event === "watch" && action !== "started") return false;
-
-	const actor = extractGithubActor(payload);
-	if (!actor) return false;
-	const { owner, name } = target;
-
-	// origin_id mirrors the connector poll path (githubUserIdentityKey + sanitizer).
-	const key = githubUserIdentityKey({
-		userId: actor.author_id,
-		login: actor.author_login,
-	});
-	const originId = `stargazer_${owner}_${name}_${githubKeyForOriginId(key)}`;
-	const starredAt = strField(root, "starred_at") ?? new Date().toISOString();
-	const profileUrl =
-		strField(root.sender, "html_url") ??
-		`https://github.com/${actor.author_login}`;
-
-	// Resolve the actor → person so the star is attributed exactly like the poll.
-	// Best-effort by design: a failure leaves the event unattributed (the poll
-	// backstop re-resolves on its next run), but we log it so it isn't invisible.
-	const resolution = await resolveGithubWebhookActor({
-		organizationId,
-		connectionId: target.connectionId,
-		githubEvent: event,
-		payload,
-		sql,
-	}).catch((error) => {
-		logger.warn(
-			{ event, originId, error: String(error) },
-			"[app-webhook] github star actor resolution failed; storing unattributed",
-		);
-		return null;
-	});
-
-	await insertEvent(
-		{
-			organizationId,
-			connectorKey,
-			connectionId: target.connectionId,
-			feedKey,
-			feedId: target.feedId,
-			originId,
-			originType: "stargazer",
-			semanticType: "content",
-			title: `${actor.author_login} starred ${owner}/${name}`,
-			authorName: actor.author_login,
-			sourceUrl: profileUrl,
-			occurredAt: starredAt,
-			score: 1,
-			entityIds: resolution?.entityIds ?? [],
-			metadata: {
-				action: "starred",
-				starred_at: starredAt,
-				source: "github_star_webhook",
-				author_login: actor.author_login,
-				...(actor.author_id ? { author_id: actor.author_id } : {}),
-				...(resolution?.metadata ?? {}),
-			},
-		},
-		{ onConflictUpdate: true },
-	);
-	return true;
 }
 
 /**
@@ -1125,15 +582,12 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 			return json(200, { ok: true, landed: false });
 		}
 
-		// 4. Structured-delivery providers handle the delivery as a sync signal
-		//    (GitHub: request the affected repo feed, no raw event — the poll resolves
-		//    identity and stays the canonical record, so push and backfill are one
-		//    consolidated dataset) or as a structured connector event (Jira →
-		//    Rovo issues feed). A handler may return handled:false when its target
-		//    is not configured yet; that falls through to the raw store below,
-		//    preserving the staged migration (Atlassian Rovo before the legacy Jira
-		//    connector is removed). Providers without onDelivery (linear) fall
-		//    through the same way.
+		// 4. Data hooks handle the delivery without a raw event: the declared
+		//    feed dispatch (feeds marked due or recorded; the poll stays the
+		//    canonical record and resolves identity) or Jira → Rovo issues. A
+		//    handler may return handled:false when its target is not configured
+		//    yet; that falls through to the raw store below, as do providers
+		//    without onDelivery.
 		if (provider.onDelivery) {
 			try {
 				const { triggered, handled } = await provider.onDelivery({

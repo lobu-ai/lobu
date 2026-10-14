@@ -326,9 +326,8 @@ describe("list_feeds health filter and true total", () => {
 	});
 
 	it("only a dispatchable webhook route counts as a dispatch path", async () => {
-		// loadGithubWebhookRoutes (gateway/routes/public/app-webhooks.ts) routes
-		// a delivery only when `webhook.events` is an array holding at least one
-		// non-empty string.
+		// deliverConnectorWebhook (connectors/webhook-delivery.ts) routes a
+		// delivery only to a feed whose `webhook.events` array holds its event.
 		// Anything looser declares nothing the router will ever dispatch, so it
 		// must NOT suppress `no_trigger` — otherwise a malformed declaration
 		// hides the feed this classification exists to surface. Note `null`:

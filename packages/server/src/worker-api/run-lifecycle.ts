@@ -437,6 +437,594 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
  */
 export const MAX_ORIGIN_ID_BYTES = 2048;
 
+/** Where one connector page lands: a sync run's feed, or a live provider record. */
+interface ConnectorIngestTarget {
+	/** The sync run that produced the page (lease fence, `events.run_id`); null for a live record. */
+	runId: number | null;
+	workerId: string | null;
+	organizationId: string;
+	connectionId: number | null;
+	connectorKey: string;
+	feedId: number | null;
+	feedKey: string | null;
+	entityIds: number[];
+	dryRun: boolean;
+	/** Verified delivery's feed snapshot: fenced at commit; activation skips the prior-poll gate. */
+	liveRecord?: { feedKey: string; config: Record<string, unknown> | null };
+	browserRun?: boolean;
+	browserSourceOriginIds?: WeakMap<object, string>;
+}
+
+type ConnectorIngestOutcome =
+	| { status: "rejected"; rejectedItems: Array<{ id: string; semantic_type?: string; errors: string[] }> }
+	| { status: "unavailable" }
+	| { status: "committed"; totalItems: number; dryPreview: Array<Record<string, unknown>> };
+
+/**
+ * Validate, attribute, store and activate one connector page in the feed-page
+ * transaction. Shared by worker-streamed sync pages and live `record` webhook
+ * deliveries, so both land through the same attribution and activation path.
+ */
+export async function ingestConnectorItems(
+	sql: DbClient,
+	target: ConnectorIngestTarget,
+	items: StreamBatch["items"],
+	checkpoint: Record<string, unknown> | null,
+): Promise<ConnectorIngestOutcome> {
+	// Only a sync run owns a checkpoint. A live record never moves the feed's
+	// poll state, so a page without a run cannot carry one.
+	if (checkpoint !== null && (target.runId === null || target.liveRecord !== undefined)) {
+		throw new Error("A connector page without a sync run cannot carry a checkpoint");
+	}
+	const entityIds = target.entityIds;
+	// A dry run executes the connector for real — same code, same credentials,
+	// same validation, the same INSERTs — and then throws the writes away by
+	// rolling back. Read from the run row rather than the request so a worker
+	// cannot elect to skip writes, and so any replica handling this callback
+	// reaches the same decision.
+	//
+	// Why rollback rather than a guard on each write. The set of things a dry
+	// run must NOT do is open-ended — it grows every time anyone adds a write
+	// to this path, and nothing makes them notice. The set it must KEEP is
+	// closed: the preview, and that's it. So the code enumerates the closed
+	// set and lets the transaction cover the open one. A write added below
+	// tomorrow is rolled back without anyone remembering this feature exists.
+	//
+	// The bonus is the point of the feature: because the real INSERTs actually
+	// run, a dry run answers "would this sync work?" honestly. A constraint
+	// violation, a bad enum or a NOT NULL surfaces exactly as it would on the
+	// real path. Skipping the insert would have reported success on data that
+	// could never land.
+	//
+	// What rollback does NOT cover is anything that leaves Postgres, and those
+	// are guarded individually below (marked ESCAPES THE TX). That is a
+	// mechanically checkable category — "does this call escape the tx?" — not
+	// a list someone has to keep in their head.
+	const isDry = target.dryRun;
+	const dryPreview: Array<Record<string, unknown>> = [];
+
+	// Validate the connector-authored payload before attribution adds any
+	// server-owned identity projection keys. Besides making strict
+	// additionalProperties:false schemas compatible with tenant scope, this
+	// keeps a rejected event from creating or accreting an entity that will
+	// never have a corresponding durable event.
+	const rejectedItems: Array<{
+		id: string;
+		semantic_type?: string;
+		errors: string[];
+	}> = [];
+	for (const item of items) {
+		const originIdBytes = Buffer.byteLength(item.id, "utf8");
+		if (originIdBytes > MAX_ORIGIN_ID_BYTES) {
+			rejectedItems.push({
+				id: item.id,
+				errors: [
+					`origin_id is ${originIdBytes} bytes, which exceeds ${MAX_ORIGIN_ID_BYTES} bytes; the connector must emit a bounded source id (e.g. a digest of a long URL).`,
+				],
+			});
+			continue;
+		}
+		const itemOriginType = item.origin_type ?? null;
+		const itemSemanticType = item.semantic_type ?? itemOriginType ?? "content";
+		const validationType = itemOriginType ?? itemSemanticType;
+		if (validationType && target.feedKey) {
+			const kindResult = await validateConnectorEventSemanticType(
+				validationType,
+				item.metadata as Record<string, unknown> | undefined,
+				target.connectorKey,
+				target.feedKey,
+				target.organizationId
+			);
+			if (!kindResult.valid) {
+				logger.warn(
+					{
+						run_id: target.runId,
+						item_id: target.browserRun ? "[browser-item]" : item.id,
+						semantic_type: validationType,
+						errors: kindResult.errors,
+					},
+					"Connector event semantic type validation failed — rejecting event"
+				);
+				rejectedItems.push({
+					id: item.id,
+					semantic_type: validationType,
+					errors: kindResult.errors,
+				});
+			}
+		}
+	}
+
+	// Any rejection fails the WHOLE batch before a single event write or
+	// checkpoint advance. Splitting the batch (ingest the valid items,
+	// report the rejected ones) looks friendlier but is the silent
+	// data-loss path: the cursor the worker commits next describes the
+	// page as consumed, so the rejected items are never offered again
+	// even after the connector is fixed. A failed batch advances nothing;
+	// the run fails loudly with rejected_items on the response, the
+	// author fixes the reported validation errors, and the next sync
+	// re-collects the page in full.
+	if (rejectedItems.length > 0) return { status: "rejected", rejectedItems };
+
+	// ESCAPES THE TX: inline attachments are published to the artifact store
+	// before the page transaction opens, because nothing that leaves Postgres
+	// may run inside it (see connectors/feed-page-commit.ts). Each item keeps
+	// the ids it published so the ones no stored row references are reclaimed
+	// below — all of them if the page does not commit.
+	const stagedItems: Array<{
+		item: (typeof items)[number];
+		sourceOriginId: string | undefined;
+		pendingTranscriptions: Awaited<
+			ReturnType<typeof materializeInlineAttachments>
+		>["pendingTranscriptions"];
+		publishedArtifactIds: string[];
+	}> = [];
+	try {
+		for (const acceptedItem of items) {
+			const sourceOriginId = target.browserSourceOriginIds?.get(acceptedItem);
+			if (isDry) {
+				stagedItems.push({
+					item: acceptedItem,
+					sourceOriginId,
+					pendingTranscriptions: [],
+					publishedArtifactIds: [],
+				});
+				continue;
+			}
+			const materialized = await materializeInlineAttachments(
+				[acceptedItem],
+				() =>
+					eventArtifactBinding({
+						organizationId: target.organizationId,
+						connectionId: target.connectionId,
+						feedId: target.feedId,
+						originId: acceptedItem.id,
+					})
+			);
+			stagedItems.push({
+				item: materialized.items[0] as typeof acceptedItem,
+				sourceOriginId,
+				pendingTranscriptions: materialized.pendingTranscriptions,
+				publishedArtifactIds: materialized.publishedArtifactIds,
+			});
+		}
+	} catch (err) {
+		await deleteMaterializedArtifacts(
+			stagedItems.flatMap((staged) => staged.publishedArtifactIds)
+		);
+		throw err;
+	}
+
+	// The page: every event, its attribution and Automation activation rows,
+	// and the checkpoint, written in the one transaction that also holds the
+	// run's lease (feed-page-commit.ts). State is local to one call because a
+	// deadlock victim runs it again from the start.
+	const writePage = async (db: DbClient) => {
+		let totalItems = 0;
+		const activations: AutomationActivationResult[] = [];
+		const pendingTranscriptions: Parameters<
+			typeof triggerAudioTranscriptions
+		>[1] = [];
+		const autoLinks: Array<Parameters<typeof autoLinkEvent>[0]> = [];
+		const referencedArtifactIds = new Set<string>();
+
+		// Resolve or create entities declared via eventKinds[kind].attributions
+		// before inserting events. One query per (entityType, matchField) per
+		// batch — cheap compared to the per-event inserts that follow.
+		//
+		// Runs on a dry run too, against `db`: it creates entity rows, and those
+		// roll back with everything else. Running it is what makes the inserts
+		// below realistic — events carry the entity ids it resolves.
+		const appliedAttributions = await applyEventAttributions(
+			{
+				connectorKey: target.connectorKey,
+				connectionId: target.connectionId,
+				feedKey: target.feedKey,
+				orgId: target.organizationId,
+				items: stagedItems.map((staged) => staged.item),
+			},
+			db
+		);
+
+		// Platform-derived Automation activation: loaded once per batch, shared
+		// by every item. A connector that still attaches `automation_signals`
+		// (legacy) wins for those items. Loading is part of durable delivery:
+		// failure aborts the batch so a retry cannot persist an event without
+		// its matching Automation run.
+		let deriveContext: ConnectorDeriveFeedContext | null = null;
+		if (
+			target.feedId != null &&
+			target.feedKey &&
+			stagedItems.some(
+				(staged) => (staged.item.automation_signals?.length ?? 0) === 0
+			)
+		) {
+			deriveContext = await loadConnectorDeriveFeedContext(
+				{
+					organizationId: target.organizationId,
+					connectorKey: target.connectorKey,
+					feedKey: target.feedKey,
+					feedId: target.feedId,
+					liveRecord: target.liveRecord !== undefined,
+				},
+				db
+			);
+		}
+
+		for (const [itemIndex, staged] of stagedItems.entries()) {
+			const { item, sourceOriginId } = staged;
+			try {
+				const itemOriginType = item.origin_type ?? null;
+				const itemSemanticType =
+					item.semantic_type ?? itemOriginType ?? "content";
+
+				// An item with neither text nor a title is still a source record —
+				// its content can live wholly in payload_data. It is stored like
+				// any other: skipping it while the page's checkpoint advanced past
+				// it lost it for good.
+				const inserted = await insertEvent(
+					{
+						entityIds: [...new Set([
+							...entityIds,
+							...(appliedAttributions.entityIdsByItem.get(itemIndex) ?? []),
+						])],
+						organizationId: target.organizationId,
+						originId: item.id,
+						title: item.title,
+						payloadType: item.payload_type,
+						content: item.payload_text,
+						payloadData: item.payload_data,
+						attachments: item.attachments,
+						authorName: item.author_name,
+						sourceUrl: item.source_url,
+						occurredAt: item.occurred_at,
+						score: item.score,
+						embedding: item.embedding,
+						embeddingModel: item.embedding_model,
+						metadata: item.metadata as Record<string, unknown> | undefined,
+						semanticType: itemSemanticType,
+						originType: itemOriginType,
+						connectorKey: target.connectorKey,
+						connectionId: target.connectionId,
+						feedKey: target.feedKey,
+						feedId: target.feedId,
+						runId: target.runId,
+						parentOriginId: item.origin_parent_id,
+					},
+					{
+						onConflictUpdate: true,
+						// applyEventAttributions scrubbed connector input and rebuilt
+						// these reserved fields from identities in the transaction above.
+						trustedIdentityScopeProjections: true,
+						sourceOriginId,
+						// The page transaction. insertEvent takes the item's dedup lock
+						// inside it (already held — lockFeedPage took every identity
+						// in key order), so concurrent ingests of the same
+						// (connection_id, origin_id) still serialize across replicas.
+						sql: db,
+						afterPersist: async (persisted, tx) => {
+							// Keyed by `origin_type`, like attribution rules. A declaration
+							// naming an endpoint the item never mentioned is omitted below,
+							// and an empty desired set means this source no longer asserts
+							// the edge. An endpoint the item DID mention but that failed to
+							// resolve is handled separately — see below.
+							const relationshipDeclarations = itemOriginType
+								? (appliedAttributions.relationshipsByKind[itemOriginType] ??
+									[])
+								: [];
+							if (
+								relationshipDeclarations.length > 0 &&
+								target.connectionId == null
+							) {
+								throw new Error(
+									"Connector-declared relationships require a source connection"
+								);
+							}
+							if (target.connectionId != null) {
+								const named =
+									appliedAttributions.namedEntityIdsByItem.get(itemIndex) ??
+									new Map<string, number>();
+								const unresolved =
+									appliedAttributions.unresolvedNamedAttributionsByItem.get(
+										itemIndex
+									) ?? new Set<string>();
+								const hasUnresolvedRelationshipEndpoint =
+									relationshipDeclarations.some(
+										(declaration) =>
+											unresolved.has(declaration.from) ||
+											unresolved.has(declaration.to)
+									);
+								// A named endpoint that the item asserted but that resolved to
+								// nothing (ambiguous merge candidate, create declined) is a
+								// transient read failure, not a withdrawal. Reconciliation is
+								// all-or-nothing per source item because the claim key covers the
+								// item's whole edge set: partially reconciling would retract the
+								// unreadable edge. Hold every edge until the next sync reads the
+								// item completely.
+								if (hasUnresolvedRelationshipEndpoint) {
+									logger.warn(
+										{
+											organizationId: target.organizationId,
+											connectionId: target.connectionId,
+											originId: persisted.origin_id,
+											unresolvedAttributions: [...unresolved],
+										},
+										"Connector relationship reconciliation skipped because an endpoint attribution did not resolve"
+									);
+								} else {
+									await reconcileConnectorRelationshipClaims(tx, {
+										organizationId: target.organizationId,
+										connectionId: target.connectionId,
+										originId: persisted.origin_id,
+										desired: relationshipDeclarations.flatMap((declaration) => {
+											const fromEntityId = named.get(declaration.from);
+											const toEntityId = named.get(declaration.to);
+											return fromEntityId === undefined ||
+												toEntityId === undefined
+												? []
+												: [{ declaration, fromEntityId, toEntityId }];
+										}),
+									});
+								}
+							}
+							const drafts = item.automation_signals ?? [];
+							if (drafts.length > 0) {
+								for (const [draftIndex, draft] of drafts.entries()) {
+									const signal = materializeConnectorAutomationSignal({
+										draft,
+										change: persisted.change,
+										connectorKey: target.connectorKey,
+										connectionId: target.connectionId,
+										deliveryId: `${target.runId === null ? "record" : `sync:${target.runId}`}:event:${persisted.id}:${draftIndex}`,
+									});
+									if (!signal) continue;
+									activations.push(
+										...(await activateAutomationSignal({
+											organizationId: target.organizationId,
+											signal,
+											db: tx,
+										}))
+									);
+								}
+							} else if (deriveContext) {
+								const derived = deriveConnectorActivationSignals(
+									deriveContext,
+									{
+										connectionId: target.connectionId,
+										originId: item.id,
+										kind: itemOriginType ?? itemSemanticType,
+										title: item.title ?? null,
+										payloadText: item.payload_text ?? null,
+										sourceUrl: item.source_url ?? null,
+										occurredAt: item.occurred_at ?? new Date(),
+										metadata: item.metadata as
+											| Record<string, unknown>
+											| undefined,
+									},
+									persisted.change,
+									persisted.id
+								);
+								for (const signal of derived) {
+									activations.push(
+										...(await activateAutomationSignal({
+											organizationId: target.organizationId,
+											signal,
+											db: tx,
+										}))
+									);
+								}
+							}
+						},
+					}
+				);
+				// `unchanged` reuses the pre-existing row, which still points at the
+				// artifacts published by an earlier sync — the ones we just published
+				// were never referenced by any row, so they are reclaimed after
+				// commit. `state_updated` reconciles counters on the existing row and
+				// leaves `attachments` untouched, so it reuses the earlier sync's
+				// artifacts exactly as `unchanged` does.
+				if (
+					inserted.change !== "unchanged" &&
+					inserted.change !== "state_updated"
+				) {
+					for (const id of staged.publishedArtifactIds) {
+						referencedArtifactIds.add(id);
+					}
+					const transcriptionConnectionId = target.connectionId;
+					if (transcriptionConnectionId != null) {
+						pendingTranscriptions.push(
+							...staged.pendingTranscriptions.map((job) => ({
+								...job,
+								originId: inserted.origin_id,
+								baseEventId: inserted.id,
+								connectionId: transcriptionConnectionId,
+								title: inserted.title,
+							}))
+						);
+					} else if (staged.pendingTranscriptions.length > 0) {
+						logger.warn(
+							{ run_id: target.runId },
+							"[stream] Audio transcription skipped — source connection missing"
+						);
+					}
+				}
+				totalItems++;
+				if (entityIds.length > 0) {
+					autoLinks.push({
+						eventId: Number(inserted.id),
+						entityIds,
+						content: item.payload_text,
+						title: item.title,
+						organizationId: target.organizationId,
+					});
+				}
+				// Captured after a successful insert, so the preview describes rows
+				// that really did land (and would land again on a real sync) rather
+				// than rows we merely hoped would.
+				if (isDry && dryPreview.length < DRY_RUN_PREVIEW_LIMIT) {
+					dryPreview.push({
+						origin_id: item.id,
+						title: item.title,
+						semantic_type: itemSemanticType,
+						payload_type: item.payload_type,
+						occurred_at: item.occurred_at,
+						author_name: item.author_name,
+						source_url: item.source_url,
+						// Bounded: a preview is for eyeballing shape, and some
+						// connectors emit very large bodies.
+						content_preview:
+							typeof item.payload_text === "string"
+								? item.payload_text.slice(0, DRY_RUN_CONTENT_CHARS)
+								: null,
+						attachment_count: item.attachments?.length ?? 0,
+					});
+				}
+			} catch (err) {
+				logger.error(
+					{
+						run_id: target.runId,
+						origin_id: item.id,
+						sanitized: target.browserRun,
+						err: target.browserRun ? sanitizeBrowserText(errorMessage(err)) : err,
+					},
+					"[stream] Insert failed for item"
+				);
+				throw err;
+			}
+		}
+
+		// Source acknowledgments advance only on successful completion; streaming
+		// checkpoints must preserve the last committed acknowledgment.
+		// Update feed + run checkpoint if provided (so mid-run state like QR
+		// codes surface in UI via recent_runs[0].checkpoint before the run
+		// completes). No dry-run guard: on a dry run these write to the tx and
+		// vanish with it, which is exactly right — advancing the feed checkpoint
+		// would silently change what the NEXT real sync collects, making the
+		// rows this run previewed unreachable.
+		if (checkpoint) {
+			if (target.feedId) {
+				await db`
+      UPDATE feeds
+      SET checkpoint = (${db.json(checkpoint)}::jsonb - 'source_ack') ||
+          CASE WHEN checkpoint ? 'source_ack' THEN jsonb_build_object('source_ack', checkpoint->'source_ack') ELSE '{}'::jsonb END,
+          updated_at = current_timestamp
+      WHERE id = ${target.feedId}
+    `;
+			}
+			await db`
+      UPDATE runs
+      SET checkpoint = ${db.json(checkpoint)}
+      WHERE id = ${target.runId}
+    `;
+		}
+
+		return {
+			totalItems,
+			activations,
+			pendingTranscriptions,
+			autoLinks,
+			referencedArtifactIds,
+		};
+	};
+
+	const page = {
+		runId: target.runId,
+		workerId: target.workerId,
+		organizationId: target.organizationId,
+		connectionId: target.connectionId,
+		feedId: target.feedId,
+		originIds: stagedItems.map((staged) => staged.item.id),
+		liveRecord: target.liveRecord,
+	};
+
+	// The real path commits the page. The dry path runs the same closure
+	// under the same locks and then rolls back unconditionally. postgres.js
+	// rolls back when the `begin` callback throws, so the throw IS the
+	// mechanism — a sentinel, not an error condition. Catching only that exact
+	// object means a genuine failure inside the batch still propagates to the
+	// 500 handler below instead of being swallowed as "rolled back fine".
+	const DRY_RUN_ROLLBACK = Symbol("dry-run-rollback");
+	let outcome: Awaited<ReturnType<typeof writePage>> | null = null;
+	try {
+		if (isDry) {
+			try {
+				await sql.begin(async (tx) => {
+					await lockFeedPage(tx, page);
+					outcome = await writePage(tx);
+					throw DRY_RUN_ROLLBACK;
+				});
+			} catch (err) {
+				if (err !== DRY_RUN_ROLLBACK) throw err;
+			}
+		} else {
+			outcome = await withFeedPageTransaction(sql, page, writePage);
+		}
+	} catch (err) {
+		await deleteMaterializedArtifacts(
+			stagedItems.flatMap((staged) => staged.publishedArtifactIds)
+		);
+		if (err instanceof FeedPageUnavailableError) {
+			// Reaped, cancelled or re-claimed after this request was authorized.
+			// A deleted feed/connection reaches the same fence. Nothing was written.
+			return { status: "unavailable" };
+		}
+		throw err;
+	}
+	// Unreachable: the page either assigns `outcome` or throws (and a throw
+	// that is not the rollback sentinel is rethrown above). Asserted rather
+	// than defaulted to {totalItems: 0} — TypeScript cannot see the assignment
+	// through the transaction closure, and a silent zero here would report
+	// "ingested nothing" for a batch that may well have ingested plenty.
+	if (outcome === null) {
+		throw new Error("[stream] batch completed without an outcome");
+	}
+	const committed = outcome as Awaited<ReturnType<typeof writePage>>;
+	const { totalItems } = committed;
+
+	if (!isDry) {
+		// ESCAPES-THE-TX effects run only after the page is durable, never on a
+		// transaction retry.
+		await deleteMaterializedArtifacts(
+			stagedItems
+				.flatMap((staged) => staged.publishedArtifactIds)
+				.filter((id) => !committed.referencedArtifactIds.has(id))
+		);
+		// Dispatches real Automation runs to the worker fleet; their activation
+		// rows committed with the page.
+		await dispatchAutomationRunsBestEffort(committed.activations);
+		// Detached (`.catch(() => {})`), writing through the getDb() singleton.
+		for (const link of committed.autoLinks) {
+			autoLinkEvent(link).catch(() => {});
+		}
+		// Transcription is an external, paid API call, fired detached.
+		triggerAudioTranscriptions(
+			target.organizationId,
+			committed.pendingTranscriptions
+		);
+	}
+
+	return { status: "committed", totalItems, dryPreview };
+}
+
 /**
  * POST /api/workers/stream
  *
@@ -542,93 +1130,31 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 			};
 		}
 
-		// A dry run executes the connector for real — same code, same credentials,
-		// same validation, the same INSERTs — and then throws the writes away by
-		// rolling back. Read from the run row rather than the request so a worker
-		// cannot elect to skip writes, and so any replica handling this callback
-		// reaches the same decision.
-		//
-		// Why rollback rather than a guard on each write. The set of things a dry
-		// run must NOT do is open-ended — it grows every time anyone adds a write
-		// to this path, and nothing makes them notice. The set it must KEEP is
-		// closed: the preview, and that's it. So the code enumerates the closed
-		// set and lets the transaction cover the open one. A write added below
-		// tomorrow is rolled back without anyone remembering this feature exists.
-		//
-		// The bonus is the point of the feature: because the real INSERTs actually
-		// run, a dry run answers "would this sync work?" honestly. A constraint
-		// violation, a bad enum or a NOT NULL surfaces exactly as it would on the
-		// real path. Skipping the insert would have reported success on data that
-		// could never land.
-		//
-		// What rollback does NOT cover is anything that leaves Postgres, and those
-		// are guarded individually below (marked ESCAPES THE TX). That is a
-		// mechanically checkable category — "does this call escape the tx?" — not
-		// a list someone has to keep in their head.
-		const isDry = run.dry_run === true;
-		const dryPreview: Array<Record<string, unknown>> = [];
-
-		// Validate the connector-authored payload before attribution adds any
-		// server-owned identity projection keys. Besides making strict
-		// additionalProperties:false schemas compatible with tenant scope, this
-		// keeps a rejected event from creating or accreting an entity that will
-		// never have a corresponding durable event.
-		const rejectedItems: Array<{
-			id: string;
-			semantic_type?: string;
-			errors: string[];
-		}> = [];
-		for (const item of batch.items) {
-			const originIdBytes = Buffer.byteLength(item.id, "utf8");
-			if (originIdBytes > MAX_ORIGIN_ID_BYTES) {
-				rejectedItems.push({
-					id: item.id,
-					errors: [
-						`origin_id is ${originIdBytes} bytes, which exceeds ${MAX_ORIGIN_ID_BYTES} bytes; the connector must emit a bounded source id (e.g. a digest of a long URL).`,
-					],
-				});
-				continue;
-			}
-			const itemOriginType = item.origin_type ?? null;
-			const itemSemanticType = item.semantic_type ?? itemOriginType ?? "content";
-			const validationType = itemOriginType ?? itemSemanticType;
-			if (validationType && run.feed_key) {
-				const kindResult = await validateConnectorEventSemanticType(
-					validationType,
-					item.metadata as Record<string, unknown> | undefined,
-					run.connector_key,
-					run.feed_key,
-					run.organization_id
-				);
-				if (!kindResult.valid) {
-					logger.warn(
-						{
-							run_id: batch.run_id,
-							item_id: browserRun ? "[browser-item]" : item.id,
-							semantic_type: validationType,
-							errors: kindResult.errors,
-						},
-						"Connector event semantic type validation failed — rejecting event"
-					);
-					rejectedItems.push({
-						id: item.id,
-						semantic_type: validationType,
-						errors: kindResult.errors,
-					});
-				}
-			}
+		const ingested = await ingestConnectorItems(
+			sql,
+			{
+				runId: batch.run_id,
+				workerId: batch.worker_id || null,
+				organizationId: run.organization_id,
+				connectionId: run.connection_id,
+				connectorKey: run.connector_key,
+				feedId: run.feed_id,
+				feedKey: run.feed_key,
+				entityIds,
+				dryRun: run.dry_run === true,
+				browserRun,
+				browserSourceOriginIds,
+			},
+			batch.items,
+			batch.checkpoint ?? null,
+		);
+		if (ingested.status === "unavailable") {
+			// Same answer the authorization gate gives a run it already lost.
+			return c.json({ error: "Run is not in progress" }, 409);
 		}
-
-		// Any rejection fails the WHOLE batch before a single event write or
-		// checkpoint advance. Splitting the batch (ingest the valid items,
-		// report the rejected ones) looks friendlier but is the silent
-		// data-loss path: the cursor the worker commits next describes the
-		// page as consumed, so the rejected items are never offered again
-		// even after the connector is fixed. A failed batch advances nothing;
-		// the run fails loudly with rejected_items on the response, the
-		// author fixes the reported validation errors, and the next sync
-		// re-collects the page in full.
-		if (rejectedItems.length > 0) {
+		const isDry = run.dry_run === true;
+		if (ingested.status === "rejected") {
+			const { rejectedItems } = ingested;
 			// Workers truncate HTTP bodies (Chrome at 200 characters), before the
 			// rejected_items details. Keep the diagnosis where it is still complete;
 			// failed completion carries this same error into the feed's last_error.
@@ -669,461 +1195,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
 			);
 		}
 
-		// ESCAPES THE TX: inline attachments are published to the artifact store
-		// before the page transaction opens, because nothing that leaves Postgres
-		// may run inside it (see connectors/feed-page-commit.ts). Each item keeps
-		// the ids it published so the ones no stored row references are reclaimed
-		// below — all of them if the page does not commit.
-		const stagedItems: Array<{
-			item: (typeof batch.items)[number];
-			sourceOriginId: string | undefined;
-			pendingTranscriptions: Awaited<
-				ReturnType<typeof materializeInlineAttachments>
-			>["pendingTranscriptions"];
-			publishedArtifactIds: string[];
-		}> = [];
-		try {
-			for (const acceptedItem of batch.items) {
-				const sourceOriginId = browserSourceOriginIds.get(acceptedItem);
-				if (isDry) {
-					stagedItems.push({
-						item: acceptedItem,
-						sourceOriginId,
-						pendingTranscriptions: [],
-						publishedArtifactIds: [],
-					});
-					continue;
-				}
-				const materialized = await materializeInlineAttachments(
-					[acceptedItem],
-					() =>
-						eventArtifactBinding({
-							organizationId: run.organization_id,
-							connectionId: run.connection_id,
-							feedId: run.feed_id,
-							originId: acceptedItem.id,
-						})
-				);
-				stagedItems.push({
-					item: materialized.items[0] as typeof acceptedItem,
-					sourceOriginId,
-					pendingTranscriptions: materialized.pendingTranscriptions,
-					publishedArtifactIds: materialized.publishedArtifactIds,
-				});
-			}
-		} catch (err) {
-			await deleteMaterializedArtifacts(
-				stagedItems.flatMap((staged) => staged.publishedArtifactIds)
-			);
-			throw err;
-		}
-
-		// The page: every event, its attribution and Automation activation rows,
-		// and the checkpoint, written in the one transaction that also holds the
-		// run's lease (feed-page-commit.ts). State is local to one call because a
-		// deadlock victim runs it again from the start.
-		const writePage = async (db: DbClient) => {
-			let totalItems = 0;
-			const activations: AutomationActivationResult[] = [];
-			const pendingTranscriptions: Parameters<
-				typeof triggerAudioTranscriptions
-			>[1] = [];
-			const autoLinks: Array<Parameters<typeof autoLinkEvent>[0]> = [];
-			const referencedArtifactIds = new Set<string>();
-
-			// Resolve or create entities declared via eventKinds[kind].attributions
-			// before inserting events. One query per (entityType, matchField) per
-			// batch — cheap compared to the per-event inserts that follow.
-			//
-			// Runs on a dry run too, against `db`: it creates entity rows, and those
-			// roll back with everything else. Running it is what makes the inserts
-			// below realistic — events carry the entity ids it resolves.
-			const appliedAttributions = await applyEventAttributions(
-				{
-					connectorKey: run.connector_key,
-					connectionId: run.connection_id,
-					feedKey: run.feed_key,
-					orgId: run.organization_id,
-					items: stagedItems.map((staged) => staged.item),
-				},
-				db
-			);
-
-			// Platform-derived Automation activation: loaded once per batch, shared
-			// by every item. A connector that still attaches `automation_signals`
-			// (legacy) wins for those items. Loading is part of durable delivery:
-			// failure aborts the batch so a retry cannot persist an event without
-			// its matching Automation run.
-			let deriveContext: ConnectorDeriveFeedContext | null = null;
-			if (
-				run.feed_id != null &&
-				run.feed_key &&
-				stagedItems.some(
-					(staged) => (staged.item.automation_signals?.length ?? 0) === 0
-				)
-			) {
-				deriveContext = await loadConnectorDeriveFeedContext(
-					{
-						organizationId: run.organization_id,
-						connectorKey: run.connector_key,
-						feedKey: run.feed_key,
-						feedId: run.feed_id,
-					},
-					db
-				);
-			}
-
-			for (const [itemIndex, staged] of stagedItems.entries()) {
-				const { item, sourceOriginId } = staged;
-				try {
-					const itemOriginType = item.origin_type ?? null;
-					const itemSemanticType =
-						item.semantic_type ?? itemOriginType ?? "content";
-
-					// An item with neither text nor a title is still a source record —
-					// its content can live wholly in payload_data. It is stored like
-					// any other: skipping it while the page's checkpoint advanced past
-					// it lost it for good.
-					const inserted = await insertEvent(
-						{
-							entityIds: [...new Set([
-								...entityIds,
-								...(appliedAttributions.entityIdsByItem.get(itemIndex) ?? []),
-							])],
-							organizationId: run.organization_id,
-							originId: item.id,
-							title: item.title,
-							payloadType: item.payload_type,
-							content: item.payload_text,
-							payloadData: item.payload_data,
-							attachments: item.attachments,
-							authorName: item.author_name,
-							sourceUrl: item.source_url,
-							occurredAt: item.occurred_at,
-							score: item.score,
-							embedding: item.embedding,
-							embeddingModel: item.embedding_model,
-							metadata: item.metadata as Record<string, unknown> | undefined,
-							semanticType: itemSemanticType,
-							originType: itemOriginType,
-							connectorKey: run.connector_key,
-							connectionId: run.connection_id,
-							feedKey: run.feed_key,
-							feedId: run.feed_id,
-							runId: batch.run_id,
-							parentOriginId: item.origin_parent_id,
-						},
-						{
-							onConflictUpdate: true,
-							// applyEventAttributions scrubbed connector input and rebuilt
-							// these reserved fields from identities in the transaction above.
-							trustedIdentityScopeProjections: true,
-							sourceOriginId,
-							// The page transaction. insertEvent takes the item's dedup lock
-							// inside it (already held — lockFeedPage took every identity
-							// in key order), so concurrent ingests of the same
-							// (connection_id, origin_id) still serialize across replicas.
-							sql: db,
-							afterPersist: async (persisted, tx) => {
-								// Keyed by `origin_type`, like attribution rules. A declaration
-								// naming an endpoint the item never mentioned is omitted below,
-								// and an empty desired set means this source no longer asserts
-								// the edge. An endpoint the item DID mention but that failed to
-								// resolve is handled separately — see below.
-								const relationshipDeclarations = itemOriginType
-									? (appliedAttributions.relationshipsByKind[itemOriginType] ??
-										[])
-									: [];
-								if (
-									relationshipDeclarations.length > 0 &&
-									run.connection_id == null
-								) {
-									throw new Error(
-										"Connector-declared relationships require a source connection"
-									);
-								}
-								if (run.connection_id != null) {
-									const named =
-										appliedAttributions.namedEntityIdsByItem.get(itemIndex) ??
-										new Map<string, number>();
-									const unresolved =
-										appliedAttributions.unresolvedNamedAttributionsByItem.get(
-											itemIndex
-										) ?? new Set<string>();
-									const hasUnresolvedRelationshipEndpoint =
-										relationshipDeclarations.some(
-											(declaration) =>
-												unresolved.has(declaration.from) ||
-												unresolved.has(declaration.to)
-										);
-									// A named endpoint that the item asserted but that resolved to
-									// nothing (ambiguous merge candidate, create declined) is a
-									// transient read failure, not a withdrawal. Reconciliation is
-									// all-or-nothing per source item because the claim key covers the
-									// item's whole edge set: partially reconciling would retract the
-									// unreadable edge. Hold every edge until the next sync reads the
-									// item completely.
-									if (hasUnresolvedRelationshipEndpoint) {
-										logger.warn(
-											{
-												organizationId: run.organization_id,
-												connectionId: run.connection_id,
-												originId: persisted.origin_id,
-												unresolvedAttributions: [...unresolved],
-											},
-											"Connector relationship reconciliation skipped because an endpoint attribution did not resolve"
-										);
-									} else {
-										await reconcileConnectorRelationshipClaims(tx, {
-											organizationId: run.organization_id,
-											connectionId: run.connection_id,
-											originId: persisted.origin_id,
-											desired: relationshipDeclarations.flatMap((declaration) => {
-												const fromEntityId = named.get(declaration.from);
-												const toEntityId = named.get(declaration.to);
-												return fromEntityId === undefined ||
-													toEntityId === undefined
-													? []
-													: [{ declaration, fromEntityId, toEntityId }];
-											}),
-										});
-									}
-								}
-								const drafts = item.automation_signals ?? [];
-								if (drafts.length > 0) {
-									for (const [draftIndex, draft] of drafts.entries()) {
-										const signal = materializeConnectorAutomationSignal({
-											draft,
-											change: persisted.change,
-											connectorKey: run.connector_key,
-											connectionId: run.connection_id,
-											deliveryId: `sync:${batch.run_id}:event:${persisted.id}:${draftIndex}`,
-										});
-										if (!signal) continue;
-										activations.push(
-											...(await activateAutomationSignal({
-												organizationId: run.organization_id,
-												signal,
-												db: tx,
-											}))
-										);
-									}
-								} else if (deriveContext) {
-									const derived = deriveConnectorActivationSignals(
-										deriveContext,
-										{
-											connectionId: run.connection_id,
-											originId: item.id,
-											kind: itemOriginType ?? itemSemanticType,
-											title: item.title ?? null,
-											payloadText: item.payload_text ?? null,
-											sourceUrl: item.source_url ?? null,
-											occurredAt: item.occurred_at ?? new Date(),
-											metadata: item.metadata as
-												| Record<string, unknown>
-												| undefined,
-										},
-										persisted.change,
-										persisted.id
-									);
-									for (const signal of derived) {
-										activations.push(
-											...(await activateAutomationSignal({
-												organizationId: run.organization_id,
-												signal,
-												db: tx,
-											}))
-										);
-									}
-								}
-							},
-						}
-					);
-					// `unchanged` reuses the pre-existing row, which still points at the
-					// artifacts published by an earlier sync — the ones we just published
-					// were never referenced by any row, so they are reclaimed after
-					// commit. `state_updated` reconciles counters on the existing row and
-					// leaves `attachments` untouched, so it reuses the earlier sync's
-					// artifacts exactly as `unchanged` does.
-					if (
-						inserted.change !== "unchanged" &&
-						inserted.change !== "state_updated"
-					) {
-						for (const id of staged.publishedArtifactIds) {
-							referencedArtifactIds.add(id);
-						}
-						const transcriptionConnectionId = run.connection_id;
-						if (transcriptionConnectionId != null) {
-							pendingTranscriptions.push(
-								...staged.pendingTranscriptions.map((job) => ({
-									...job,
-									originId: inserted.origin_id,
-									baseEventId: inserted.id,
-									connectionId: transcriptionConnectionId,
-									title: inserted.title,
-								}))
-							);
-						} else if (staged.pendingTranscriptions.length > 0) {
-							logger.warn(
-								{ run_id: batch.run_id },
-								"[stream] Audio transcription skipped — source connection missing"
-							);
-						}
-					}
-					totalItems++;
-					if (entityIds.length > 0) {
-						autoLinks.push({
-							eventId: Number(inserted.id),
-							entityIds,
-							content: item.payload_text,
-							title: item.title,
-							organizationId: run.organization_id,
-						});
-					}
-					// Captured after a successful insert, so the preview describes rows
-					// that really did land (and would land again on a real sync) rather
-					// than rows we merely hoped would.
-					if (isDry && dryPreview.length < DRY_RUN_PREVIEW_LIMIT) {
-						dryPreview.push({
-							origin_id: item.id,
-							title: item.title,
-							semantic_type: itemSemanticType,
-							payload_type: item.payload_type,
-							occurred_at: item.occurred_at,
-							author_name: item.author_name,
-							source_url: item.source_url,
-							// Bounded: a preview is for eyeballing shape, and some
-							// connectors emit very large bodies.
-							content_preview:
-								typeof item.payload_text === "string"
-									? item.payload_text.slice(0, DRY_RUN_CONTENT_CHARS)
-									: null,
-							attachment_count: item.attachments?.length ?? 0,
-						});
-					}
-				} catch (err) {
-					logger.error(
-						{
-							run_id: batch.run_id,
-							origin_id: item.id,
-							sanitized: browserRun,
-							err: browserRun ? sanitizeBrowserText(errorMessage(err)) : err,
-						},
-						"[stream] Insert failed for item"
-					);
-					throw err;
-				}
-			}
-
-			// Source acknowledgments advance only on successful completion; streaming
-			// checkpoints must preserve the last committed acknowledgment.
-			// Update feed + run checkpoint if provided (so mid-run state like QR
-			// codes surface in UI via recent_runs[0].checkpoint before the run
-			// completes). No dry-run guard: on a dry run these write to the tx and
-			// vanish with it, which is exactly right — advancing the feed checkpoint
-			// would silently change what the NEXT real sync collects, making the
-			// rows this run previewed unreachable.
-			if (batch.checkpoint) {
-				if (run.feed_id) {
-					await db`
-      UPDATE feeds
-      SET checkpoint = (${db.json(batch.checkpoint)}::jsonb - 'source_ack') ||
-          CASE WHEN checkpoint ? 'source_ack' THEN jsonb_build_object('source_ack', checkpoint->'source_ack') ELSE '{}'::jsonb END,
-          updated_at = current_timestamp
-      WHERE id = ${run.feed_id}
-    `;
-				}
-				await db`
-      UPDATE runs
-      SET checkpoint = ${db.json(batch.checkpoint)}
-      WHERE id = ${batch.run_id}
-    `;
-			}
-
-			return {
-				totalItems,
-				activations,
-				pendingTranscriptions,
-				autoLinks,
-				referencedArtifactIds,
-			};
-		};
-
-		const page = {
-			runId: batch.run_id,
-			workerId: batch.worker_id || null,
-			organizationId: run.organization_id,
-			connectionId: run.connection_id,
-			feedId: run.feed_id,
-			originIds: stagedItems.map((staged) => staged.item.id),
-		};
-
-		// The real path commits the page. The dry path runs the same closure
-		// under the same locks and then rolls back unconditionally. postgres.js
-		// rolls back when the `begin` callback throws, so the throw IS the
-		// mechanism — a sentinel, not an error condition. Catching only that exact
-		// object means a genuine failure inside the batch still propagates to the
-		// 500 handler below instead of being swallowed as "rolled back fine".
-		const DRY_RUN_ROLLBACK = Symbol("dry-run-rollback");
-		let outcome: Awaited<ReturnType<typeof writePage>> | null = null;
-		try {
-			if (isDry) {
-				try {
-					await sql.begin(async (tx) => {
-						await lockFeedPage(tx, page);
-						outcome = await writePage(tx);
-						throw DRY_RUN_ROLLBACK;
-					});
-				} catch (err) {
-					if (err !== DRY_RUN_ROLLBACK) throw err;
-				}
-			} else {
-				outcome = await withFeedPageTransaction(sql, page, writePage);
-			}
-		} catch (err) {
-			await deleteMaterializedArtifacts(
-				stagedItems.flatMap((staged) => staged.publishedArtifactIds)
-			);
-			if (err instanceof FeedPageUnavailableError) {
-				// Reaped, cancelled or re-claimed after this request was authorized.
-				// A deleted feed/connection reaches the same fence. Nothing was written.
-				// Same answer the authorization gate gives a run it already lost.
-				return c.json({ error: "Run is not in progress" }, 409);
-			}
-			throw err;
-		}
-		// Unreachable: the page either assigns `outcome` or throws (and a throw
-		// that is not the rollback sentinel is rethrown above). Asserted rather
-		// than defaulted to {totalItems: 0} — TypeScript cannot see the assignment
-		// through the transaction closure, and a silent zero here would report
-		// "ingested nothing" for a batch that may well have ingested plenty.
-		if (outcome === null) {
-			throw new Error("[stream] batch completed without an outcome");
-		}
-		const committed = outcome as Awaited<ReturnType<typeof writePage>>;
-		const { totalItems } = committed;
-
-		if (!isDry) {
-			// ESCAPES-THE-TX effects run only after the page is durable, never on a
-			// transaction retry.
-			await deleteMaterializedArtifacts(
-				stagedItems
-					.flatMap((staged) => staged.publishedArtifactIds)
-					.filter((id) => !committed.referencedArtifactIds.has(id))
-			);
-			// Dispatches real Automation runs to the worker fleet; their activation
-			// rows committed with the page.
-			await dispatchAutomationRunsBestEffort(committed.activations);
-			// Detached (`.catch(() => {})`), writing through the getDb() singleton.
-			for (const link of committed.autoLinks) {
-				autoLinkEvent(link).catch(() => {});
-			}
-			// Transcription is an external, paid API call, fired detached.
-			triggerAudioTranscriptions(
-				run.organization_id,
-				committed.pendingTranscriptions
-			);
-		}
+		const { totalItems, dryPreview } = ingested;
 
 		if (isDry) {
 			// Written AFTER the rollback, on the singleton — this is the one thing a

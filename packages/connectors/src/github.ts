@@ -1,10 +1,10 @@
 /**
  * GitHub Connector (V1 runtime)
  *
- * Syncs GitHub repository content and executes write actions. Also subscribes
- * to real-time issue/PR/comment deliveries via inbound webhooks (registered at
- * connect time); the raw deliveries are landed downstream (extract-load), so
- * this connector only owns the subscription lifecycle here.
+ * Syncs GitHub repository content and executes write actions. Provider
+ * deliveries (the App webhook, or a per-connection hook for OAuth/PAT) mark the
+ * matching feed due; star deliveries are recorded directly through the
+ * stargazers feed's `normalize`, keyed on the poll's origin_id.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -17,9 +17,11 @@ import {
   createHttpClient,
   type EventAttributionRule,
   type EventEnvelope,
+  type FeedWebhookDeclaration,
   SubscriptionCandidateSchema,
   type SyncContext,
   type SyncResult,
+  type WebhookRecordContext,
   type WebhookRegistration,
   type WebhookRegistrationContext,
 } from '@lobu/connector-sdk';
@@ -378,12 +380,19 @@ const GITHUB_REPO_ATTRIBUTION: EventAttributionRule = {
   },
 };
 
+// A delivery belongs to the repo feeds configured for its repository. GitHub
+// owner/repo names are case-insensitive.
+const GITHUB_REPO_MATCH: FeedWebhookDeclaration['match'] = {
+  fields: { repo_owner: 'repository.owner.login', repo_name: 'repository.name' },
+  caseInsensitive: true,
+};
+
 export default class GitHubConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: 'github',
     name: 'GitHub',
     description: 'Collects GitHub issues/discussions and executes repo actions.',
-    version: '1.4.0',
+    version: '1.5.0',
     automationEvents: GITHUB_AUTOMATION_EVENTS,
     faviconDomain: 'github.com',
     // A GitHub connection gives the agent's sandbox an authenticated `gh`.
@@ -401,6 +410,7 @@ export default class GitHubConnector extends ConnectorRuntime {
       algorithm: 'sha256',
       signaturePrefix: 'sha256=',
       dedupeHeader: 'x-github-delivery',
+      eventType: { header: 'x-github-event' },
       // App-installation delivery: one App-level webhook is configured ONCE on
       // the GitHub App (not per connection), and inbound deliveries route via
       // the shared `/api/v1/app-webhooks/github` endpoint keyed on
@@ -511,7 +521,7 @@ export default class GitHubConnector extends ConnectorRuntime {
         requiredScopes: [],
         description: 'Sync GitHub issues from a repository.',
         displayNameTemplate: '{repo_owner}/{repo_name} issues',
-        webhook: { events: ['issues'] },
+        webhook: { events: ['issues'], match: GITHUB_REPO_MATCH },
         configSchema: {
           type: 'object',
           required: ['repo_owner', 'repo_name'],
@@ -544,7 +554,7 @@ export default class GitHubConnector extends ConnectorRuntime {
         requiredScopes: [],
         description: 'Sync GitHub pull requests from a repository.',
         displayNameTemplate: '{repo_owner}/{repo_name} PRs',
-        webhook: { events: ['pull_request'] },
+        webhook: { events: ['pull_request'], match: GITHUB_REPO_MATCH },
         configSchema: {
           type: 'object',
           required: ['repo_owner', 'repo_name'],
@@ -577,7 +587,7 @@ export default class GitHubConnector extends ConnectorRuntime {
         requiredScopes: [],
         description: 'Sync comments on GitHub issues.',
         displayNameTemplate: '{repo_owner}/{repo_name} issue comments',
-        webhook: { events: ['issue_comment'] },
+        webhook: { events: ['issue_comment'], match: GITHUB_REPO_MATCH },
         configSchema: {
           type: 'object',
           required: ['repo_owner', 'repo_name'],
@@ -606,7 +616,7 @@ export default class GitHubConnector extends ConnectorRuntime {
         requiredScopes: [],
         description: 'Sync comments on GitHub pull requests.',
         displayNameTemplate: '{repo_owner}/{repo_name} PR comments',
-        webhook: { events: ['pull_request_review_comment'] },
+        webhook: { events: ['pull_request_review_comment'], match: GITHUB_REPO_MATCH },
         configSchema: {
           type: 'object',
           required: ['repo_owner', 'repo_name'],
@@ -635,7 +645,7 @@ export default class GitHubConnector extends ConnectorRuntime {
         requiredScopes: [],
         description: 'Sync GitHub discussions from a repository.',
         displayNameTemplate: '{repo_owner}/{repo_name} discussions',
-        webhook: { events: ['discussion'] },
+        webhook: { events: ['discussion'], match: GITHUB_REPO_MATCH },
         configSchema: {
           type: 'object',
           required: ['repo_owner', 'repo_name'],
@@ -667,7 +677,7 @@ export default class GitHubConnector extends ConnectorRuntime {
         requiredScopes: [],
         description: 'Sync comments on GitHub discussions.',
         displayNameTemplate: '{repo_owner}/{repo_name} discussion comments',
-        webhook: { events: ['discussion_comment'] },
+        webhook: { events: ['discussion_comment'], match: GITHUB_REPO_MATCH },
         configSchema: {
           type: 'object',
           required: ['repo_owner', 'repo_name'],
@@ -697,7 +707,7 @@ export default class GitHubConnector extends ConnectorRuntime {
         requiredScopes: [],
         description: 'Sync commits pushed to a repository, attributed to their authors.',
         displayNameTemplate: '{repo_owner}/{repo_name} commits',
-        webhook: { events: ['push'] },
+        webhook: { events: ['push'], match: GITHUB_REPO_MATCH },
         configSchema: {
           type: 'object',
           required: ['repo_owner', 'repo_name'],
@@ -728,7 +738,12 @@ export default class GitHubConnector extends ConnectorRuntime {
         requiredScopes: [],
         description: 'Sync GitHub users who starred a repository.',
         displayNameTemplate: '{repo_owner}/{repo_name} stargazers',
-        webhook: { events: ['star', 'watch'], mode: 'store' },
+        webhook: {
+          events: ['star', 'watch'],
+          kind: 'record',
+          match: GITHUB_REPO_MATCH,
+          normalize: (payload, ctx) => this.normalizeStarDelivery(payload, ctx),
+        },
         configSchema: {
           type: 'object',
           required: ['repo_owner', 'repo_name'],
@@ -996,7 +1011,7 @@ export default class GitHubConnector extends ConnectorRuntime {
   }
 
   // -------------------------------------------------------------------------
-  // Webhooks (subscription lifecycle — raw deliveries land downstream)
+  // Webhooks (subscription lifecycle; the platform dispatches deliveries)
   // -------------------------------------------------------------------------
 
   /**
@@ -1069,10 +1084,9 @@ export default class GitHubConnector extends ConnectorRuntime {
       body: {
         name: 'web',
         active: true,
-        // Subscribe to EVERY event type (extract-load: land it all raw, filter
-        // downstream). Org-wide this captures pushes, PRs, issues, comments,
-        // releases, CI runs, stars, membership changes, etc. across all repos.
-        // Override with config.webhook_events for a narrower subscription.
+        // Subscribe to every event type; the platform dispatches only the
+        // events a feed declares and acks the rest. Override with
+        // config.webhook_events for a narrower subscription.
         events: ctx.config.webhook_events ?? ['*'],
         config: {
           url: ctx.callbackUrl,
@@ -1664,24 +1678,7 @@ export default class GitHubConnector extends ConnectorRuntime {
       });
 
       if (!previousStargazer) {
-        events.push({
-          origin_id: `stargazer_${repo.owner}_${repo.repo}_${githubKeyForOriginId(key)}`,
-          title: `${login} starred ${repo.owner}/${repo.repo}`,
-          payload_text: `${login} starred ${repo.owner}/${repo.repo}.`,
-          author_name: login,
-          source_url: user.html_url ?? `https://github.com/${login}`,
-          occurred_at: starredAt,
-          origin_type: 'stargazer',
-          score: 1,
-          metadata: {
-            actor: this.buildActor(user, login),
-            target,
-            action: 'starred',
-            starred_at: starredAt.toISOString(),
-            source: 'github_stargazers_snapshot',
-            ...this.buildAuthorMetadata({ login, id: user.id }),
-          },
-        });
+        events.push(this.stargazerEvent({ repo, user, login, starredAt, target, source: 'github_stargazers_snapshot' }));
       }
     }
     const current = [...new Map(currentStargazers.map(star => [star.key, star])).values()];
@@ -1715,6 +1712,63 @@ export default class GitHubConnector extends ConnectorRuntime {
     }
 
     return { events, checkpoint: { last_sync_at: scan.started_at, stargazers: current }, status: 'complete' };
+  }
+
+  /** The `stargazer` envelope the poll and a live star delivery share, so both key one origin_id. */
+  private stargazerEvent(params: {
+    repo: RepoRef;
+    user: GitHubStargazerLike['user'] | GitHubStargazerLike;
+    login: string;
+    starredAt: Date;
+    target: ReturnType<GitHubConnector['buildRepoTarget']>;
+    source: string;
+  }): EventEnvelope {
+    const { repo, user, login, starredAt } = params;
+    const key = githubUserIdentityKey({ userId: user?.id, login });
+    return {
+      origin_id: `stargazer_${repo.owner}_${repo.repo}_${githubKeyForOriginId(key)}`,
+      title: `${login} starred ${repo.owner}/${repo.repo}`,
+      payload_text: `${login} starred ${repo.owner}/${repo.repo}.`,
+      author_name: login,
+      source_url: user?.html_url ?? `https://github.com/${login}`,
+      occurred_at: starredAt,
+      origin_type: 'stargazer',
+      score: 1,
+      metadata: {
+        actor: this.buildActor(user, login),
+        target: params.target,
+        action: 'starred',
+        starred_at: starredAt.toISOString(),
+        source: params.source,
+        ...this.buildAuthorMetadata({ login, id: user?.id }),
+      },
+    };
+  }
+
+  /**
+   * Record a live star delivery as the stargazer event the poll emits for the
+   * same user. Only a new star records; an unstar is left to the poll's
+   * snapshot diff. The feed config (not the payload's display casing) names
+   * the repo, so the origin_id matches the poll's.
+   */
+  private normalizeStarDelivery(payload: unknown, ctx: WebhookRecordContext): EventEnvelope | null {
+    const body = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null;
+    const action = asString(body?.action);
+    const starred = ctx.eventType === 'star' ? action === 'created' : ctx.eventType === 'watch' && action === 'started';
+    const sender = body?.sender as GitHubStargazerLike | undefined;
+    const login = asString(sender?.login);
+    if (!body || !starred || !login) return null;
+    const repo = this.resolveRepo(ctx.config as GitHubConfig, {});
+    const event = this.stargazerEvent({
+      repo,
+      user: sender,
+      login,
+      starredAt: new Date(toIsoOrUndefined(body.starred_at) ?? ctx.receivedAt),
+      target: this.buildRepoTarget(repo, (body.repository ?? {}) as GitHubRepositoryLike),
+      source: 'github_star_webhook',
+    });
+    this.stampRepoAttribution([event], repo, { attachAutomationSignals: false });
+    return event;
   }
 
   private shouldRefreshStargazerProfile(

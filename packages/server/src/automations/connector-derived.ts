@@ -24,16 +24,15 @@ import { type DbClient, getDb } from "../db/client";
  * Safety bounds:
  *  - Ingestion only activates once the feed has a prior successful non-dry
  *    sync; a cold-start backfill would flood subscribers with every first-seen
- *    row. (The webhook-STORE path — GitHub star/watch already store events via
- *    app-webhooks.ts — is expected to derive without that gate when it lands; a
- *    live push is definitionally steady-state.)
+ *    row. A live `record` delivery skips only this gate: a verified provider
+ *    push is steady-state by definition, and it never counts as a poll.
  *  - Only kinds the feed declares are activatable, so a trigger a user could
  *    never author (the picker reads the same catalog) can never fire.
  */
 
 export interface ConnectorDeriveFeedContext {
 	connectorKey: string;
-	/** A prior successful, non-dry poll sync exists for this feed. */
+	/** A prior successful, non-dry poll sync exists for this feed, or the page is a live record. */
 	feedPreviouslySynced: boolean;
 	/** Declared eventKinds for this feed, or null when the connector declares none. */
 	eventKinds: Record<string, unknown> | null;
@@ -62,6 +61,8 @@ export async function loadConnectorDeriveFeedContext(
 		connectorKey: string;
 		feedKey: string;
 		feedId: number;
+		/** A verified live provider record, which is never a cold-start backfill. */
+		liveRecord?: boolean;
 	},
 	db?: DbClient,
 ): Promise<ConnectorDeriveFeedContext> {
@@ -119,7 +120,7 @@ export async function loadConnectorDeriveFeedContext(
 			: null;
 	return {
 		connectorKey: args.connectorKey,
-		feedPreviouslySynced: row.feed_previously_synced,
+		feedPreviouslySynced: args.liveRecord === true || row.feed_previously_synced,
 		eventKinds,
 	};
 }

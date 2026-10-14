@@ -11,8 +11,9 @@
  *
  * Chain under test:
  *   1. install (store.upsert) → signed GitHub `issues` delivery → router →
- *      `onDelivery` trigger marks the OWNING org's feeds due (no raw event —
- *      github is poll-canonical); redelivery just re-stamps next_run_at.
+ *      generic data dispatch marks the OWNING org's declared feeds due (no raw
+ *      event — github is poll-canonical); redelivery just re-stamps next_run_at;
+ *      a star commits a durable record job for the stargazers feed.
  *   2. reject/transfer: org A active → transfer to org B (atomic demote+activate)
  *      → delivery now triggers B's feeds, not A's; a 2nd concurrent active insert
  *      for the same tenant is rejected by the partial unique index.
@@ -27,32 +28,34 @@
  */
 
 import { createHmac } from "node:crypto";
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { ConnectorWebhookSchema } from "@lobu/connector-sdk";
+import GitHubConnector from "@lobu/connectors/github";
+import { connectorRecordEnqueuer } from "../../connectors/webhook-delivery.js";
+import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import {
 	createAppWebhookRoutes,
+	createDataWebhookDelivery,
 	createDeclaredAppWebhookProvider,
-	createGithubWebhookDelivery,
 } from "../routes/public/app-webhooks.js";
 import { createPostgresAppInstallationStore } from "../../lobu/stores/app-installation-store.js";
 
-/** GitHub's DECLARED webhook schema (mirror of the github connector's block). */
-const GITHUB_WEBHOOK_SCHEMA: ConnectorWebhookSchema = {
-	signatureHeader: "x-hub-signature-256",
-	algorithm: "sha256",
-	signaturePrefix: "sha256=",
-	dedupeHeader: "x-github-delivery",
-	delivery: "app_installation",
-	routingKeyPath: "installation.id",
-};
+/** GitHub's DECLARED webhook schema, read off the real connector definition. */
+const GITHUB_WEBHOOK_SCHEMA = new GitHubConnector().definition
+	.webhook as ConnectorWebhookSchema;
 
-/** Build a github app-webhook provider from the declared schema + delivery hook. */
+let queue: RunsQueue;
+
+/** Build a github app-webhook provider from the declared schema + generic dispatch. */
 function createGithubAppWebhookProvider(options: { appId: string }) {
 	return createDeclaredAppWebhookProvider({
 		provider: "github",
 		appId: options.appId,
 		webhookSchema: GITHUB_WEBHOOK_SCHEMA,
-		onDelivery: createGithubWebhookDelivery({ connectorKey: "github" }),
+		onDelivery: createDataWebhookDelivery(
+			{ connectorKey: "github", webhookSchema: GITHUB_WEBHOOK_SCHEMA },
+			connectorRecordEnqueuer(queue),
+		),
 	});
 }
 import {
@@ -124,7 +127,7 @@ function issuesBody(tenant = TENANT, extra: Record<string, unknown> = {}) {
 		action: "opened",
 		installation: { id: Number(tenant) },
 		issue: { number: 42, title: "Prod is on fire" },
-		repository: { full_name: "acme/api" },
+		repository: { owner: { login: "acme" }, name: "api", full_name: "acme/api" },
 		...extra,
 	};
 }
@@ -137,12 +140,12 @@ async function allInstallEventCount(): Promise<number> {
 	return rows[0].n as number;
 }
 
-/** Structured github events (connector_key='github') in an org, newest first. */
-async function githubEvents(organizationId: string): Promise<any[]> {
+/** Durable `connector-record` jobs committed by deliveries, oldest first. */
+async function recordJobs(): Promise<any[]> {
 	const { getDb } = await import("../../db/client.js");
 	return getDb()`
-    SELECT origin_id, origin_type, connection_id, metadata FROM events
-    WHERE organization_id = ${organizationId} AND connector_key = 'github'
+    SELECT organization_id, action_input FROM runs
+    WHERE queue_name = 'internal:connector-record'
     ORDER BY id
   `;
 }
@@ -269,7 +272,13 @@ async function seedAppInstallationConnection(
 
 beforeAll(async () => {
 	await ensureDbForGatewayTests();
+	queue = new RunsQueue();
+	await queue.start();
 }, 60_000);
+
+afterAll(async () => {
+	await queue?.stop();
+});
 
 beforeEach(async () => {
 	await resetTestDatabase();
@@ -284,12 +293,8 @@ beforeEach(async () => {
 		"../installation/registry.js"
 	);
 	__resetInstallationTokenRegistryForTests();
-	// Webhook routing + person rule are read from the connector definition; seed
-	// it for both orgs (the transfer case routes to ORG_B).
-	const { clearEntityLinkRulesCache } = await import(
-		"../../utils/entity-link-upsert.js"
-	);
-	clearEntityLinkRulesCache();
+	// Webhook routing is read from the connector definition; seed it for both
+	// orgs (the transfer case routes to ORG_B).
 	await seedGithubConnectorDef(ORG_A);
 	await seedGithubConnectorDef(ORG_B);
 }, 30_000);
@@ -332,12 +337,12 @@ describe("app-installation e2e: install → webhook → trigger (happy path)", (
 	});
 });
 
-describe("app-installation e2e: star delivery stored directly (event-complete)", () => {
-	test("a star lands a stargazer event under the install's github connection, no poll", async () => {
+describe("app-installation e2e: star delivery recorded (event-complete)", () => {
+	test("a star commits a record job for the install's stargazers feed before the ack, no poll", async () => {
 		await seedAgentRow(AGENT_A, { organizationId: ORG_A });
 		const installId = await seedActiveInstall(ORG_A);
-		// The store path is gated on a configured stargazers feed (like the trigger
-		// path). Also seed an issues feed to prove the star store doesn't touch it.
+		// The record path is gated on a configured stargazers feed (like the trigger
+		// path). Also seed an issues feed to prove the star doesn't touch it.
 		const stargazersFeed = await seedGithubFeed(ORG_A, installId, "acme", "api", "stargazers");
 		const issuesFeed = await seedGithubFeed(ORG_A, installId);
 		const router = buildRouter();
@@ -355,15 +360,13 @@ describe("app-installation e2e: star delivery stored directly (event-complete)",
 		expect(res.status).toBe(200);
 		expect((await res.json()).triggered).toBe(true);
 
-		// The structured stargazer event landed under the github connection (so the
-		// scheduled /stargazers poll dedupes it on the same origin_id) — and the
-		// store path did NOT mark the issues feed due (it's a store, not a trigger).
-		const events = await githubEvents(ORG_A);
-		expect(events.length).toBe(1);
-		expect(events[0].origin_type).toBe("stargazer");
-		expect(events[0].origin_id).toBe("stargazer_acme_api_github_user_id_583231");
-		// Store, not trigger: neither the stargazers feed nor the issues feed is
-		// marked due, and no raw app-install event is landed.
+		// The verified payload is a durable job in the owning org by the ack; the
+		// job normalizes it into the stargazer event (vitest integration suite).
+		const jobs = await recordJobs();
+		expect(jobs).toHaveLength(1);
+		expect(jobs[0].organization_id).toBe(ORG_A);
+		expect(jobs[0].action_input).toMatchObject({ feedId: stargazersFeed, eventType: "star", payload: starBody });
+		// Record, not trigger: no feed is marked due and no raw event lands.
 		expect(await feedNextRunAt(stargazersFeed)).toBeNull();
 		expect(await feedNextRunAt(issuesFeed)).toBeNull();
 		expect(await allInstallEventCount()).toBe(0);

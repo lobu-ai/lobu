@@ -31,6 +31,7 @@ import {
 import { startStaleRunReaper } from "./scheduled/check-stalled-executions";
 import { startEmbeddedConnectorWorker } from "./scheduled/embedded-connector-worker";
 import { bootTaskScheduler } from "./scheduled/jobs";
+import { startConnectorRecordWorker } from "./connectors/webhook-delivery";
 import { isErrorReported, markErrorReported } from "./diagnostics";
 import { BootConfigError } from "./utils/errors";
 import logger from "./utils/logger";
@@ -336,6 +337,10 @@ export function createServerLifecycle(
 		// refresh, MCP DB cleanup, automation — runs as a row in
 		// `public.runs` with cron-driven self-rescheduling.
 		const taskScheduler = await bootTaskScheduler(getLobuCoreServices(), env);
+
+		// 4b. Verified `record` webhook deliveries, committed before their ack,
+		// are normalized and stored by whichever replica claims them.
+		await startConnectorRecordWorker(getLobuCoreServices().getQueue());
 
 		// 5. 30s connector-run heartbeat-lost reaper. Cross-pod coordinated
 		// via advisory lock. This is the single reaper cadence — the

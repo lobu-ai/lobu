@@ -124,6 +124,19 @@ export type ExecutorJob = {
       env: Record<string, string | undefined>;
     }
   | {
+      // Map one verified provider delivery through a `record` feed's
+      // `webhook.normalize`. Carries no credentials or session state; callers
+      // run it with no allowed domains, so normalization is a pure mapping.
+      mode: 'webhook_record';
+      feedKey: string;
+      eventType: string;
+      payload: unknown;
+      receivedAt: string;
+      /** The feed instance config only. */
+      config: Record<string, unknown>;
+      env: Record<string, string | undefined>;
+    }
+  | {
       // Tear down the provider subscription created by `webhook_register` when
       // the connection is removed.
       mode: 'webhook_unregister';
@@ -189,6 +202,10 @@ export type ExecutorResult =
   | {
       mode: 'agent_turn';
       turn: AgentTurnOutput;
+    }
+  | {
+      mode: 'webhook_record';
+      event: EventEnvelope | null;
     }
   | {
       mode: 'webhook_unregister';

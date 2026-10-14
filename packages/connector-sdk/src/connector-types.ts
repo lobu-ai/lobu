@@ -252,11 +252,17 @@ export interface ConnectorWebhookSchema {
    */
   delivery?: 'registered' | 'app_installation';
   /**
+   * Where a delivery names its event type: a request header (GitHub
+   * `x-github-event`) or a dotted body path. The platform matches it against
+   * each feed's `webhook.events` to dispatch a verified data delivery to the
+   * feeds it updates. A data connector without it keeps raw delivery storage.
+   */
+  eventType?: { header: string } | { path: string };
+  /**
    * `app_installation` mode only: how a VERIFIED delivery is dispatched once the
    * generic engine has checked its signature.
-   * - `'data'` (default, absent) — land/trigger through the data path: the
-   *   connector's poll-canonical trigger/store hook when it has one (GitHub), else
-   *   the raw event-ingest path (Jira/Linear).
+   * - `'data'` (default, absent) — dispatch to the feeds whose `webhook.events`
+   *   name the delivery's {@link eventType}, else the raw event-ingest path.
    * - `'chat'` — forward to the chat adapter for the connector's provider (Slack;
    *   reusable by any future chat platform), bypassing the data-ingest pipeline.
    * The engine dispatches on THIS, never on a provider name.
@@ -486,6 +492,54 @@ export interface ConnectorInstallationContext {
 // Feed Definition
 // =============================================================================
 
+/** The persisted part of a feed's {@link FeedDefinition.webhook} declaration. */
+export interface FeedWebhookDeclaration {
+  /** Provider event types (values of the connector's `webhook.eventType`) that update this feed. */
+  events: string[];
+  /** Superseded by `kind`; still accepted, and `'store'` keeps a feed off device notifications. */
+  mode?: 'trigger' | 'store';
+  /** How a matching delivery is handled. Default `'invalidate'`. */
+  kind?: 'invalidate' | 'record';
+  /**
+   * Which feed instances a delivery belongs to: every `fields` entry maps a
+   * feed config key to a dotted payload path, and all of them must hold
+   * (AND). Only non-empty scalar values compare; a missing, empty or
+   * non-scalar value never matches. Omitted, a delivery reaches every feed of
+   * this key on the delivering connection.
+   */
+  match?: {
+    fields: Record<string, string>;
+    /** Compare case-insensitively (GitHub owner/repo names). Default exact. */
+    caseInsensitive?: boolean;
+  };
+}
+
+/** Context for a `record` feed's {@link RuntimeFeedWebhook.normalize}. */
+export interface WebhookRecordContext<F = Record<string, unknown>> {
+  feedKey: string;
+  /** The delivery's event type, read through the connector's `webhook.eventType`. */
+  eventType: string;
+  /** The feed instance's config (never credentials or connection secrets). */
+  config: F;
+  /** ISO time the platform verified the delivery. */
+  receivedAt: string;
+}
+
+/**
+ * Map one verified delivery to the envelope the feed's poll emits for the same
+ * source item (same origin_id), or null when the delivery records nothing
+ * (e.g. an unstar). Runs with no credentials, network, browser or operations.
+ */
+export type WebhookRecordNormalizer<F = Record<string, unknown>> = (
+  payload: unknown,
+  ctx: WebhookRecordContext<F>
+) => EventEnvelope | null | Promise<EventEnvelope | null>;
+
+/** Runtime feed webhook: the persisted declaration plus a `record` feed's normalizer. */
+export interface RuntimeFeedWebhook<F = Record<string, unknown>> extends FeedWebhookDeclaration {
+  normalize?: WebhookRecordNormalizer<F>;
+}
+
 export interface FeedDefinition {
   /** Feed key, e.g. 'threads' */
   key: string;
@@ -527,28 +581,23 @@ export interface FeedDefinition {
    */
   matchPaths?: string[];
   /**
-   * Routes inbound app-webhook deliveries to this feed. Lives on the feed (not
+   * Routes inbound provider deliveries to this feed. Lives on the feed (not
    * the connector's webhook schema) because feeds_schema is the persisted,
-   * server-readable surface — the app-webhook router reads this to dispatch a
-   * delivery WITHOUT hardcoding provider event types. The connector owns this
-   * knowledge (which event updates which feed, and whether the payload is
-   * complete enough to store):
-   *  - `mode: 'trigger'` (default) — the poll brings more than the webhook, so
-   *    mark this feed due and let the poll fetch the complete record (deduped by
-   *    origin_id). Use for events whose poll endpoint returns richer data. On a
-   *    read-only feed, these are `automationEvents` keys whose source references
-   *    (from `observe`) activate subscribed Automations without importing content.
-   *  - `mode: 'store'` — the payload is event-complete (e.g. a GitHub `star`
-   *    carries the actor + starred_at) and re-polling the whole list is wasteful,
-   *    so the router stores the structured event directly, consolidating with the
-   *    poll on the same origin_id.
+   * server-readable surface — the platform reads this to dispatch a delivery
+   * WITHOUT hardcoding provider event types. The connector owns this knowledge
+   * (which event updates which feed, and whether the payload is complete
+   * enough to record):
+   *  - `kind: 'invalidate'` (default) — the poll brings more than the webhook,
+   *    so mark this feed due and let the poll fetch the complete record (deduped
+   *    by origin_id). On a read-only feed, these are `automationEvents` keys
+   *    whose source references (from `observe`) activate subscribed Automations
+   *    without importing content.
+   *  - `kind: 'record'` — the payload is event-complete (e.g. a GitHub `star`
+   *    carries the actor + starred_at), so the runtime feed's `normalize` maps it
+   *    to the same envelope (and origin_id) the poll emits, and the platform
+   *    stores it without re-polling.
    */
-  webhook?: {
-    /** Provider webhook event types (e.g. `x-github-event` values) that update this feed. */
-    events: string[];
-    /** How a matching delivery is handled. Default `'trigger'`. */
-    mode?: 'trigger' | 'store';
-  };
+  webhook?: FeedWebhookDeclaration;
   /** Event kinds this feed produces, keyed by kind slug */
   eventKinds?: Record<
     string,
@@ -1098,7 +1147,8 @@ export type FeedReadHandler<F = Record<string, unknown>> = (
 export interface RuntimeFeedDefinition<
   C = Record<string, unknown>,
   F = Record<string, unknown>,
-> extends Omit<FeedDefinition, 'operations'> {
+> extends Omit<FeedDefinition, 'operations' | 'webhook'> {
+  webhook?: RuntimeFeedWebhook<F>;
   sync?: FeedSyncHandler<C, F>;
   read?: FeedReadHandler<F>;
   /** Setup only: emits no result and does not add a feed operation. */

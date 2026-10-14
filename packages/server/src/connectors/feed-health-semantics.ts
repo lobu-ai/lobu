@@ -84,8 +84,7 @@
  * SQL for the `webhook_driven` input below — the single definition of what
  * counts as a dispatchable webhook route.
  *
- * It mirrors `loadGithubWebhookRoutes`
- * (`gateway/routes/public/app-webhooks.ts`), which skips a feed unless
+ * Webhook dispatch (`connectors/webhook-delivery.ts`) skips a feed unless
  * `webhook.events` is an ARRAY holding at least one non-empty string.
  * A bare `IS NOT NULL` on the `webhook` key is NOT equivalent: jsonb null is
  * not SQL NULL, so `{}`, `{mode:'store'}`, `{events: []}`, `{events: ['']}`
@@ -137,6 +136,7 @@ export function feedTriggerEligibilitySql(
   }
   return `(${feedWebhookDrivenSql(definitionAlias, feedAlias)})
     AND COALESCE(${feed} -> 'webhook' ->> 'mode', 'trigger') = 'trigger'
+    AND COALESCE(${feed} -> 'webhook' ->> 'kind', 'invalidate') = 'invalidate'
     AND jsonb_typeof(${operations}) = 'array'
     AND (${capability})`;
 }

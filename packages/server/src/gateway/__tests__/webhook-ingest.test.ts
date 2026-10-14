@@ -17,6 +17,9 @@
  */
 
 import { createHmac } from "node:crypto";
+import GitHubConnector from "@lobu/connectors/github";
+import LinearConnector from "@lobu/connectors/linear";
+import { declaredFeedsSchema } from "../../__tests__/setup/test-fixtures.js";
 import {
 	afterEach,
 	beforeAll,
@@ -1425,6 +1428,10 @@ describe("connector-connection webhook bridge (connections table)", () => {
 			webhook_algorithm: "sha256",
 			webhook_signature_prefix: "sha256=",
 			webhook_dedupe_header: "x-github-delivery",
+			// Registration stamps the connector's declared event-type location.
+			...(connectorKey === "github"
+				? { webhook_event_type: { header: "x-github-event" } }
+				: {}),
 			semanticType: "issue",
 			...(secretRef ? { webhook_signature_secret: secretRef } : {}),
 		};
@@ -1502,6 +1509,80 @@ describe("connector-connection webhook bridge (connections table)", () => {
 		return { id };
 	}
 
+	test("a GitHub connection registered before the event-type stamp dispatches after the backfill", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const { manager, secretStore } = await buildManager();
+		const { createConnectionWebhookRoutes } = await import(
+			"../routes/public/connections.js"
+		);
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const id = await seedRegisteredConnectorConnection(secretStore);
+		// The pre-change registration: the hook exists, no event-type stamp.
+		await sql`UPDATE connections SET config = config - 'webhook_event_type' WHERE id = ${id}`;
+		await sql`
+			INSERT INTO connector_definitions (organization_id, key, name, status, feeds_schema)
+			VALUES (${ORG}, 'github', 'GitHub', 'active',
+				${sql.json(declaredFeedsSchema(new GitHubConnector().definition))})
+		`;
+		const [feed] = await sql`
+			INSERT INTO feeds (organization_id, connection_id, feed_key, status, config, next_run_at)
+			VALUES (${ORG}, ${id}, 'issues', 'active',
+				${sql.json({ repo_owner: "lobu-ai", repo_name: "lobu" })}, now() + interval '1 hour')
+			RETURNING id
+		`;
+
+		const migration = (
+			await Bun.file(
+				new URL(
+					"../../../../../db/migrations/20261014150000_connector_webhook_event_type_backfill.sql",
+					import.meta.url,
+				),
+			).text()
+		).split("-- migrate:down")[0];
+		// Each backfilled value is that connector's own declaration.
+		const declared = Object.fromEntries(
+			[...migration.matchAll(/\('([a-z_.-]+)', '(\{[^']*\})'::jsonb\)/g)].map(
+				([, key, value]) => [key, JSON.parse(value)],
+			),
+		);
+		expect(declared).toEqual({
+			github: new GitHubConnector().definition.webhook?.eventType,
+			linear: new LinearConnector().definition.webhook?.eventType,
+		});
+		// A pre-change Linear registration is stamped too.
+		const linearId = await seedRegisteredConnectorConnection(secretStore, { connectorKey: "linear" });
+		await sql.unsafe(migration);
+		const [first] = await sql`SELECT config, updated_at FROM connections WHERE id = ${id}`;
+		await sql.unsafe(migration);
+		expect((await sql`SELECT config, updated_at FROM connections WHERE id = ${id}`)[0]).toEqual(first);
+		expect((await sql`SELECT config FROM connections WHERE id = ${linearId}`)[0].config.webhook_event_type)
+			.toEqual(new LinearConnector().definition.webhook?.eventType);
+
+		const raw = JSON.stringify({
+			action: "opened",
+			issue: { number: 8 },
+			repository: { name: "lobu", owner: { login: "lobu-ai" } },
+		});
+		const res = await createConnectionWebhookRoutes(manager).fetch(
+			new Request(`http://gateway.test/api/v1/webhooks/${id}`, {
+				method: "POST",
+				body: raw,
+				headers: {
+					"content-type": "application/json",
+					"x-github-event": "issues",
+					"x-github-delivery": "gh-upgraded-1",
+					"x-hub-signature-256": sign(raw, { prefix: "sha256=" }),
+				},
+			}),
+		);
+		expect(res.status).toBe(202);
+		expect(((await res.json()) as { triggered?: boolean }).triggered).toBe(true);
+		expect(await eventRows(id)).toHaveLength(0);
+		const [due] = await sql`SELECT next_run_at <= now() AS due FROM feeds WHERE id = ${feed.id}`;
+		expect(due.due).toBe(true);
+	});
+
 	test("a signed GitHub delivery to a connector connection marks the feed due (poll-canonical)", async () => {
 		// Clean-cut: OAuth/PAT GitHub webhooks do NOT raw-store under webhook:<id>.
 		// They mark the matching feed due so CheckDueFeeds + poll attach
@@ -1520,14 +1601,7 @@ describe("connector-connection webhook bridge (connections table)", () => {
 				organization_id, key, name, status, feeds_schema
 			) VALUES (
 				${ORG}, 'github', 'GitHub', 'active',
-				${getDb().json({
-					issues: {
-						webhook: { events: ["issues"], mode: "trigger" },
-					},
-					pull_requests: {
-						webhook: { events: ["pull_request"], mode: "trigger" },
-					},
-				})}
+				${getDb().json(declaredFeedsSchema(new GitHubConnector().definition))}
 			)
 		`;
 		const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
@@ -2035,9 +2109,7 @@ describe("connector-connection webhook bridge (connections table)", () => {
 				organization_id, key, name, status, feeds_schema
 			) VALUES (
 				${ORG}, 'github', 'GitHub', 'active',
-				${getDb().json({
-					issues: { webhook: { events: ["issues"], mode: "trigger" } },
-				})}
+				${getDb().json(declaredFeedsSchema(new GitHubConnector().definition))}
 			)
 		`;
 		await getDb()`

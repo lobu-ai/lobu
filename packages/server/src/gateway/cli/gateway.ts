@@ -52,6 +52,7 @@ import {
   createDeclaredAppWebhookProvider,
   createDefaultAppWebhookSecretResolver,
 } from "../routes/public/app-webhooks.js";
+import { connectorRecordEnqueuer } from "../../connectors/webhook-delivery.js";
 import { createConnectAuthRoutes } from "../routes/public/connect-auth.js";
 import {
   createConnectionCrudRoutes,
@@ -583,12 +584,9 @@ export function createGatewayApp(
       // Per-KIND delivery, dispatched off the DECLARED `deliveryKind` — never a
       // provider name. A `chat` connector forwards verified deliveries to the
       // chat adapter for its provider (Slack today); a `data` connector lands
-      // them through the data path: its per-connector delivery hook when it
-      // ships one (GitHub sync-now triggers, Jira → Rovo issue events), else the
-      // raw event-ingest fallback (Linear, and Jira until a Rovo feed exists).
-      // Both the chat-forward routing and the data hooks live outside this
-      // wiring, keyed off the connector, so gateway core carries no provider
-      // literal.
+      // them through the data path: the feeds that declare the delivery's
+      // event type when its schema names an `eventType`, Jira → Rovo issue
+      // events, else the raw event-ingest fallback.
       const deliveryKind = integration.webhookSchema.deliveryKind ?? "data";
       const deliveryHooks: Pick<
         AppWebhookProvider,
@@ -601,7 +599,10 @@ export function createGatewayApp(
             chatInstanceManager.handleChatAppWebhook(provider, req),
         });
       } else {
-        const onDelivery = createDataWebhookDelivery(integration.connectorKey);
+        const onDelivery = createDataWebhookDelivery(
+          integration,
+          connectorRecordEnqueuer(coreServices.getQueue()),
+        );
         if (onDelivery) deliveryHooks.onDelivery = onDelivery;
       }
 

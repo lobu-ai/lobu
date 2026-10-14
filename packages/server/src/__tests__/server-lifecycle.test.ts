@@ -47,13 +47,16 @@ const gwAppSlot = vi.hoisted(() => ({ app: null as unknown }));
 vi.mock("../lobu/gateway", () => ({
 	initLobuGateway: vi.fn(async () => gwAppSlot.app),
 	stopLobuGateway: vi.fn(async () => {}),
-	getLobuCoreServices: vi.fn(() => ({})),
+	getLobuCoreServices: vi.fn(() => ({ getQueue: vi.fn(() => ({})) })),
 }));
 vi.mock("../scheduled/check-stalled-executions", () => ({
 	startStaleRunReaper: vi.fn(() => vi.fn()),
 }));
 vi.mock("../scheduled/jobs", () => ({
 	bootTaskScheduler: vi.fn(async () => ({ stop: vi.fn(async () => {}) })),
+}));
+vi.mock("../connectors/webhook-delivery", () => ({
+	startConnectorRecordWorker: vi.fn(async () => {}),
 }));
 vi.mock("../scheduled/embedded-connector-worker", () => ({
 	startEmbeddedConnectorWorker: vi.fn(() => null),

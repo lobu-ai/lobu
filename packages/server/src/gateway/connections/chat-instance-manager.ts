@@ -17,7 +17,10 @@ import type { AgentConnectionStore, StoredConnection } from "@lobu/core";
 import { createLogger, getErrorMessage, isSecretRef } from "@lobu/core";
 import { type Adapter, type AdapterPostableMessage, Chat } from "chat";
 import { verifyAtlassianWebhookAuthorization } from "../../connect/atlassian-webhook-auth.js";
-import { resolveConnectionWebhookConfig } from "../../connect/webhook-registration.js";
+import {
+  type ConnectionWebhookState,
+  resolveConnectionWebhookConfig,
+} from "../../connect/webhook-registration.js";
 import { getDb } from "../../db/client.js";
 import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
 import { slugToRuntimeConnectionId } from "../../lobu/stores/connections-projection.js";
@@ -59,7 +62,10 @@ import {
   type PlatformAdapterConfig,
   type PlatformConnection,
 } from "./types.js";
-import { deliverGithubConnectorConnectionWebhook } from "../routes/public/app-webhooks.js";
+import {
+  connectorRecordEnqueuer,
+  deliverConnectorWebhook,
+} from "../../connectors/webhook-delivery.js";
 import { deliverJiraMcpConnectionWebhook } from "../routes/public/jira-mcp-webhook-delivery.js";
 import { isAtlassianMcpConfig } from "../../operations/atlassian-mcp-feed.js";
 import {
@@ -1384,10 +1390,13 @@ export class ChatInstanceManager {
   private bridgedIngestOverrides(
     bridged: BridgedWebhookConnection,
   ): WebhookIngestOverrides | undefined {
-    if (bridged.connectorKey === "github") {
-      // Poll-canonical: mark the feed due (or store stars) so Automation
-      // signals ride the real github poll path. Do not raw-store under
-      // webhook:<id> — that never activates Automations.
+    const eventType = (
+      bridged.connectionConfig as ConnectionWebhookState
+    ).webhook_event_type;
+    if (eventType) {
+      // The connector declares where deliveries name their event type: mark
+      // the declaring feeds due (or record them) instead of raw-storing under
+      // webhook:<id>, so Automation signals ride the connector's own feeds.
       return {
         handleInsteadOfPersist: async ({
           rawBody,
@@ -1395,15 +1404,16 @@ export class ChatInstanceManager {
           organizationId,
           connectionId: connId,
         }) => {
-          const { triggered } = await deliverGithubConnectorConnectionWebhook({
+          const { triggered } = await deliverConnectorWebhook({
             sql: getDb(),
-            connectionId: Number(connId),
-            organizationId,
-            connectorKey: "github",
             rawBody,
             headers,
-            storeWebhookEvents:
-              process.env.GITHUB_WEBHOOK_STORE_EVENTS !== "false",
+            eventType,
+            organizationId,
+            connectorKey: bridged.connectorKey,
+            scope: { connectionId: Number(connId) },
+            enqueueRecord: (job) =>
+              connectorRecordEnqueuer(this.services.getQueue())(job),
           });
           return new Response(JSON.stringify({ ok: true, triggered }), {
             status: 202,
@@ -1464,10 +1474,10 @@ export class ChatInstanceManager {
    * misses, this resolves the connector row, validates it actually registered a
    * webhook
    * (scheme + secret stamped onto its config), and returns a synthetic
-   * `StoredConnection` shaped for `handleWebhookIngest`. Non-GitHub deliveries
-   * preserve the id so raw events use `connector_key = webhook:<connId>` and the
-   * existing `events_webhook_ingest_dedupe` partial unique index. GitHub takes
-   * the poll-canonical override above instead.
+   * `StoredConnection` shaped for `handleWebhookIngest`. Raw deliveries
+   * preserve the id so events use `connector_key = webhook:<connId>` and the
+   * existing `events_webhook_ingest_dedupe` partial unique index; a connection
+   * stamped with its connector's event type takes the feed dispatch above.
    * Returns null when there is no such connection or it never registered a
    * webhook — the caller then 404s rather than accepting an unsigned delivery.
    */

@@ -2,8 +2,8 @@
  * Linear Connector (V1 runtime)
  *
  * Reads Linear issues via GraphQL and can sync them into events.
- * Real-time Issue/Comment deliveries arrive via app webhooks; raw deliveries
- * land downstream (extract-load).
+ * Real-time Issue/Comment deliveries mark the issues feed due, so the poll
+ * fetches the changed issues.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -152,7 +152,7 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
     name: 'Linear',
     description:
       'Syncs and live-reads Linear issues via GraphQL, and receives real-time issue/comment webhooks.',
-    version: '1.1.1',
+    version: '1.2.0',
     faviconDomain: 'linear.app',
     webhook: {
       signatureHeader: 'linear-signature',
@@ -160,6 +160,7 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
       // Linear signs the raw body with HMAC-SHA256 and sends a bare hex digest
       // (no `sha256=` prefix). It does not send a stable delivery id header, so
       // dedupe falls back to a body hash (no `dedupeHeader`).
+      eventType: { path: 'type' },
       // App-installation delivery: one webhook configured ONCE on the Linear app;
       // every delivery carries the workspace `organizationId` — that's the tenant.
       delivery: 'app_installation',
@@ -193,6 +194,8 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
         sync: (ctx) => this.syncFeed(ctx),
         read: (ctx) => this.readFeed(ctx),
         readWindowAxis: 'updated_at',
+        // A comment also moves its issue's updatedAt, so both wake the poll.
+        webhook: { events: ['Issue', 'Comment'] },
         configSchema: {
           type: 'object',
           properties: {
@@ -397,7 +400,7 @@ export default class LinearConnector extends ConnectorRuntime<LinearCheckpoint, 
   }
 
   // -------------------------------------------------------------------------
-  // Webhooks (subscription lifecycle — raw deliveries land downstream)
+  // Webhooks (subscription lifecycle; the platform dispatches deliveries)
   // -------------------------------------------------------------------------
 
   async registerWebhook(

@@ -59,6 +59,8 @@ export interface ConnectionWebhookState {
   webhook_algorithm?: 'sha256' | 'sha1';
   webhook_signature_prefix?: string;
   webhook_dedupe_header?: string;
+  /** Where deliveries name their event type; present = dispatch to the declaring feeds. */
+  webhook_event_type?: ConnectorWebhookSchema['eventType'];
   webhook_expires_at?: string;
   webhook_status?: 'active' | 'error';
   webhook_error?: string | null;
@@ -224,6 +226,7 @@ export async function registerConnectorWebhook(params: {
         ...(scheme.algorithm ? { webhook_algorithm: scheme.algorithm } : {}),
         ...(scheme.signaturePrefix ? { webhook_signature_prefix: scheme.signaturePrefix } : {}),
         ...(scheme.dedupeHeader ? { webhook_dedupe_header: scheme.dedupeHeader } : {}),
+        ...(scheme.eventType ? { webhook_event_type: scheme.eventType } : {}),
       };
 
       const mergedConfig = { ...(connection.config ?? {}), ...webhookState };
@@ -334,6 +337,7 @@ export async function unregisterConnectorWebhook(params: {
       delete nextConfig.webhook_algorithm;
       delete nextConfig.webhook_signature_prefix;
       delete nextConfig.webhook_dedupe_header;
+      delete nextConfig.webhook_event_type;
       await getDb()`
         UPDATE connections
         SET config = ${getDb().json(nextConfig)}, updated_at = NOW()

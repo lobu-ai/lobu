@@ -7,21 +7,25 @@
  *
  *   1. poll/sync — `applyEventAttributions` reads the connector's `attributions` rules
  *      from `connector_definitions` and resolves/creates the person.
- *   2. live webhook — `resolveGithubWebhookActor` (App-webhook path, no feed)
- *      extracts the actor and resolves the SAME person, returning the entity
- *      ids to stamp onto `events.entity_ids`.
+ *   2. live record — a verified star delivery's `connector-record` job runs
+ *      the connector's own `normalize` in the isolate and ingests the envelope
+ *      through the same page ingest, so the SAME rules resolve the SAME person.
  *
  * Both are org-scoped end to end: entity_identities are UNIQUE per
  * (org, namespace, identifier), so a second org never resolves to another's
  * person even with the same login/id.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import GitHubConnector from '@lobu/connectors/github';
+import { createIsolateConnectorCompiler } from '@lobu/connector-worker/compile';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { processConnectorRecord } from '../../../connectors/webhook-delivery';
+import { ingestConnectorItems } from '../../../worker-api/run-lifecycle';
 import {
   applyEventAttributions,
   clearEntityLinkRulesCache,
 } from '../../../utils/entity-link-upsert';
-import { resolveGithubWebhookActor } from '../../../gateway/routes/public/github-webhook-actor';
 import { entityLinkMatchSql } from '../../../utils/content-search/entity-link';
 import { insertEvent } from '../../../utils/insert-event';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -31,6 +35,7 @@ import {
   createTestConnectorDefinition,
   createTestOrganization,
   createTestUser,
+  declaredFeedsSchema,
 } from '../../setup/test-fixtures';
 
 const connectorKey = 'github';
@@ -354,103 +359,181 @@ describe('github member-identity attribution', () => {
     expect(item2.metadata.github_user_id).toBe('2');
   });
 
-  it('webhook: resolveGithubWebhookActor resolves the actor to a person and returns entity ids + the github_login metadata slot', async () => {
-    const org = await seedOrg('GitHub Webhook Org');
-    const connectionUser = await createTestUser();
-    await addUserToOrganization(connectionUser.id, org.id, 'admin');
-    const connection = await createTestConnection({
-      organization_id: org.id,
-      connector_key: 'github',
-      created_by: connectionUser.id,
-      createDefaultFeed: false,
-    });
-    // The rule is loaded from the connector definition (not mirrored), so the
-    // webhook path needs the github def seeded just like the poll path.
-    await seedGithubConnector(org.id);
-    clearEntityLinkRulesCache();
+  describe('live star record', () => {
+    let compiledGithub: string;
+    beforeAll(async () => {
+      const source = fileURLToPath(new URL('../../../../../connectors/src/github.ts', import.meta.url));
+      compiledGithub = await createIsolateConnectorCompiler().compileConnectorForIsolateFromFile(source);
+    }, 120_000);
 
-    const resolution = await resolveGithubWebhookActor({
-      organizationId: org.id,
-      connectionId: connection.id,
-      githubEvent: 'issue_comment',
+    /** The org's real github declaration + compiled code, one connection, one stargazers feed. */
+    async function seedStargazersFeed(orgId: string) {
+      const sql = getTestDb();
+      await createTestConnectorDefinition({
+        key: connectorKey,
+        name: 'GitHub',
+        organization_id: orgId,
+        feeds_schema: declaredFeedsSchema(new GitHubConnector().definition),
+      });
+      await sql`UPDATE connector_versions SET compiled_code = ${compiledGithub} WHERE connector_key = ${connectorKey}`;
+      const owner = await createTestUser();
+      await addUserToOrganization(owner.id, orgId, 'admin');
+      const connection = await createTestConnection({
+        organization_id: orgId,
+        connector_key: connectorKey,
+        created_by: owner.id,
+        createDefaultFeed: false,
+      });
+      const [feed] = await sql<{ id: number }[]>`
+        INSERT INTO feeds (organization_id, connection_id, feed_key, status, config)
+        VALUES (${orgId}, ${connection.id}, 'stargazers', 'active', ${sql.json({ repo_owner: 'acme', repo_name: 'api' })})
+        RETURNING id
+      `;
+      return { connectionId: connection.id, feedId: Number(feed.id) };
+    }
+
+    const star = (orgId: string, target: { connectionId: number; feedId: number }, action = 'created') => ({
+      organizationId: orgId,
+      connectionId: target.connectionId,
+      feedId: target.feedId,
+      eventType: 'star',
+      receivedAt: '2026-06-20T10:00:05.000Z',
       payload: {
-        action: 'created',
-        comment: { user: { login: 'Hubot', id: 42 }, html_url: 'https://github.com/x/y/issues/1#c1' },
-        issue: { user: { login: 'someone-else', id: 7 }, title: 'Bug' },
-        sender: { login: 'Hubot', id: 42 },
+        action,
+        starred_at: '2026-06-20T10:00:00Z',
+        sender: { login: 'Octocat', id: 583231, html_url: 'https://github.com/Octocat' },
+        repository: { owner: { login: 'ACME' }, name: 'API', html_url: 'https://github.com/ACME/API' },
       },
     });
 
-    expect(resolution).not.toBeNull();
-    expect(resolution?.entityIds).toHaveLength(1);
-    // The COMMENT author (Hubot), not the issue author, is attributed.
-    expect(resolution?.metadata.github_login).toBe('hubot');
-    expect(resolution?.metadata.github_user_id).toBe('42');
+    it('records the stargazer event under the feed and resolves the sender to a person', async () => {
+      const org = await seedOrg('GitHub Star Record Org');
+      const target = await seedStargazersFeed(org.id);
 
-    const people = await members(org.id);
-    expect(people).toHaveLength(1);
-    expect(people[0].id).toBe(resolution?.entityIds[0]);
-    expect(await identitiesFor(people[0].id)).toEqual([
-      'github_login:hubot',
-      'github_user_id:42',
-    ]);
-    const identitySources = await getTestDb()<
-      { connection_id: number | null }[]
-    >`
-      SELECT connection_id
-      FROM entity_identities
-      WHERE entity_id = ${people[0].id}
-        AND deleted_at IS NULL
-    `;
-    expect(identitySources).toHaveLength(2);
-    expect(
-      identitySources.every(
-        (row) => Number(row.connection_id) === connection.id,
-      ),
-    ).toBe(true);
-    // The `last_authored_at` trait populates on the webhook path too (occurred_at
-    // is on the top-level item, where the rule's trait path reads it).
-    expect(people[0].metadata.last_authored_at).toBeTruthy();
-    expect(typeof people[0].metadata.last_authored_at).toBe('string');
-  });
+      expect(await processConnectorRecord(star(org.id, target))).toBe('recorded');
 
-  it('webhook: an unmapped github event (push) resolves no actor', async () => {
-    const org = await seedOrg('GitHub Push Org');
-    const resolution = await resolveGithubWebhookActor({
-      organizationId: org.id,
-      githubEvent: 'push',
-      payload: { pusher: { name: 'someone' }, sender: { login: 'someone', id: 1 } },
-    });
-    expect(resolution).toBeNull();
-    expect(await members(org.id)).toHaveLength(0);
-  });
+      const sql = getTestDb();
+      const events = await sql<{ origin_id: string; origin_type: string; feed_id: number; connection_id: number; run_id: number | null; metadata: Record<string, unknown> }[]>`
+        SELECT origin_id, origin_type, feed_id, connection_id, run_id, metadata FROM events
+        WHERE organization_id = ${org.id} AND superseded_by IS NULL
+      `;
+      expect(events).toHaveLength(1);
+      // The feed config's casing names the repo, so the poll keys the same origin_id.
+      expect(events[0]).toMatchObject({
+        origin_id: 'stargazer_acme_api_github_user_id_583231',
+        origin_type: 'stargazer',
+        run_id: null,
+      });
+      expect(Number(events[0].feed_id)).toBe(target.feedId);
+      expect(Number(events[0].connection_id)).toBe(target.connectionId);
+      expect(events[0].metadata).toMatchObject({ action: 'starred', source: 'github_star_webhook', github_login: 'octocat', github_user_id: '583231' });
 
-  it('tenant-scoped: the same github user in two orgs resolves to two distinct persons', async () => {
-    const orgA = await seedOrg('GitHub Tenant A');
-    const orgB = await seedOrg('GitHub Tenant B');
-    await seedGithubConnector(orgA.id);
-    await seedGithubConnector(orgB.id);
-    clearEntityLinkRulesCache();
+      const people = await members(org.id);
+      expect(people).toHaveLength(1);
+      expect(people[0].name.toLowerCase()).toBe('octocat');
+      expect(await identitiesFor(people[0].id)).toEqual(['github_login:octocat', 'github_user_id:583231']);
+      const sources = await sql<{ connection_id: number | null }[]>`
+        SELECT connection_id FROM entity_identities WHERE entity_id = ${people[0].id} AND deleted_at IS NULL
+      `;
+      expect(sources.map((row) => Number(row.connection_id))).toEqual([target.connectionId, target.connectionId]);
+      // The record never touches the feed's poll state.
+      const [feed] = await sql`SELECT checkpoint, last_sync_at, next_run_at FROM feeds WHERE id = ${target.feedId}`;
+      expect(feed).toMatchObject({ checkpoint: null, last_sync_at: null, next_run_at: null });
+    }, 60_000);
 
-    const a = await resolveGithubWebhookActor({
-      organizationId: orgA.id,
-      githubEvent: 'issues',
-      payload: { action: 'opened', issue: { user: { login: 'Shared', id: 555 }, title: 'A' } },
-    });
-    const b = await resolveGithubWebhookActor({
-      organizationId: orgB.id,
-      githubEvent: 'issues',
-      payload: { action: 'opened', issue: { user: { login: 'Shared', id: 555 }, title: 'B' } },
-    });
+    it('a record never touches feeds.checkpoint or runs.checkpoint, and ingest refuses a run-less checkpoint', async () => {
+      const org = await seedOrg('GitHub Record Checkpoint Org');
+      const target = await seedStargazersFeed(org.id);
+      const sql = getTestDb();
+      const polled = { last_sync_at: '2026-06-01T00:00:00.000Z', stargazers: [] };
+      await sql`UPDATE feeds SET checkpoint = ${sql.json(polled)} WHERE id = ${target.feedId}`;
+      const [run] = await sql<{ id: number }[]>`
+        INSERT INTO runs (organization_id, run_type, feed_id, connection_id, connector_key, status, checkpoint)
+        VALUES (${org.id}, 'sync', ${target.feedId}, ${target.connectionId}, 'github', 'running', ${sql.json({ page: 2 })})
+        RETURNING id
+      `;
 
-    const peopleA = await members(orgA.id);
-    const peopleB = await members(orgB.id);
-    expect(peopleA).toHaveLength(1);
-    expect(peopleB).toHaveLength(1);
-    // Distinct entities despite identical login + id — entity_identities are
-    // UNIQUE per (org, namespace, identifier), never cross-org.
-    expect(peopleA[0].id).not.toBe(peopleB[0].id);
-    expect(a?.entityIds[0]).toBe(peopleA[0].id);
-    expect(b?.entityIds[0]).toBe(peopleB[0].id);
+      expect(await processConnectorRecord(star(org.id, target))).toBe('recorded');
+      expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${target.feedId}`)[0].checkpoint).toEqual(polled);
+      expect((await sql`SELECT checkpoint FROM runs WHERE id = ${run.id}`)[0].checkpoint).toEqual({ page: 2 });
+
+      const live = { runId: null, workerId: null, organizationId: org.id, connectionId: target.connectionId,
+        connectorKey: connectorKey, feedId: target.feedId, feedKey: 'stargazers', entityIds: [], dryRun: false };
+      await expect(ingestConnectorItems(sql, live, [], { cursor: 'x' })).rejects.toThrow(/cannot carry a checkpoint/);
+      await expect(ingestConnectorItems(sql, { ...live, runId: Number(run.id), liveRecord: { feedKey: 'stargazers', config: null } }, [], { cursor: 'x' }))
+        .rejects.toThrow(/cannot carry a checkpoint/);
+      expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${target.feedId}`)[0].checkpoint).toEqual(polled);
+    }, 60_000);
+
+    it('an unstar records nothing and resolves no actor (the poll diff owns removals)', async () => {
+      const org = await seedOrg('GitHub Unstar Org');
+      const target = await seedStargazersFeed(org.id);
+      expect(await processConnectorRecord(star(org.id, target, 'deleted'))).toBe('ignored');
+      expect(await getTestDb()`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(0);
+      expect(await members(org.id)).toHaveLength(0);
+    }, 60_000);
+
+    it('a job whose feed was paused since the delivery records nothing', async () => {
+      const org = await seedOrg('GitHub Paused Record Org');
+      const target = await seedStargazersFeed(org.id);
+      await getTestDb()`UPDATE feeds SET status = 'paused' WHERE id = ${target.feedId}`;
+      expect(await processConnectorRecord(star(org.id, target))).toBe('ignored');
+      expect(await getTestDb()`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(0);
+    }, 60_000);
+
+    it.each(['config', 'events'])('ignores a queued delivery after its %s no longer matches', async (change) => {
+      const org = await seedOrg('GitHub Retargeted Record Org');
+      const target = await seedStargazersFeed(org.id);
+      const sql = getTestDb();
+      if (change === 'config') {
+        await sql`UPDATE feeds SET config = ${sql.json({ repo_owner: 'acme', repo_name: 'other' })} WHERE id = ${target.feedId}`;
+      } else {
+        await sql`UPDATE connector_definitions SET feeds_schema = jsonb_set(feeds_schema,
+          '{stargazers,webhook,events}', '["watch"]'::jsonb) WHERE organization_id = ${org.id}`;
+      }
+      expect(await processConnectorRecord(star(org.id, target))).toBe('ignored');
+      expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(0);
+    }, 60_000);
+
+    it.each(['feed pause', 'connection pause', 'config'])('fences a %s during normalization', async (change) => {
+      const org = await seedOrg('GitHub Record Fence Org');
+      const target = await seedStargazersFeed(org.id);
+      const sql = getTestDb();
+      const connector = new GitHubConnector();
+      const job = star(org.id, target);
+      expect(await processConnectorRecord(job, { executor: { execute: async () => {
+        if (change === 'feed pause') {
+          await sql`UPDATE feeds SET status = 'paused' WHERE id = ${target.feedId}`;
+        } else if (change === 'connection pause') {
+          await sql`UPDATE connections SET status = 'paused' WHERE id = ${target.connectionId}`;
+        } else {
+          await sql`UPDATE feeds SET config = ${sql.json({ repo_owner: 'acme', repo_name: 'other' })} WHERE id = ${target.feedId}`;
+        }
+        return { mode: 'webhook_record', event: await connector.definition.feeds!.stargazers.webhook!.normalize!(job.payload, {
+          feedKey: 'stargazers', eventType: job.eventType, receivedAt: job.receivedAt,
+          config: { repo_owner: 'acme', repo_name: 'api' },
+        }) };
+      } } })).toBe('ignored');
+      expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(0);
+      expect(await members(org.id)).toHaveLength(0);
+    }, 60_000);
+
+    it('tenant-scoped: the same star in two orgs resolves to two distinct persons', async () => {
+      const orgA = await seedOrg('GitHub Tenant A');
+      const orgB = await seedOrg('GitHub Tenant B');
+      const targetA = await seedStargazersFeed(orgA.id);
+      const targetB = await seedStargazersFeed(orgB.id);
+      // A job naming another org's feed is not that org's record.
+      expect(await processConnectorRecord({ ...star(orgA.id, targetB) })).toBe('ignored');
+
+      expect(await processConnectorRecord(star(orgA.id, targetA))).toBe('recorded');
+      expect(await processConnectorRecord(star(orgB.id, targetB))).toBe('recorded');
+      const peopleA = await members(orgA.id);
+      const peopleB = await members(orgB.id);
+      expect(peopleA).toHaveLength(1);
+      expect(peopleB).toHaveLength(1);
+      // entity_identities are UNIQUE per (org, namespace, identifier), never cross-org.
+      expect(peopleA[0].id).not.toBe(peopleB[0].id);
+    }, 60_000);
   });
 });

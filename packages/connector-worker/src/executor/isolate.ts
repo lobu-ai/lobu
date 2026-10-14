@@ -304,6 +304,18 @@ const GUEST_RUNNER = String.raw`
       return { mode: 'webhook_register', registration: registration, webhookScheme: webhookScheme };
     }
 
+    if (job.mode === 'webhook_record') {
+      var recordFeed = instance.definition && instance.definition.feeds && instance.definition.feeds[job.feedKey];
+      var recordWebhook = recordFeed && recordFeed.webhook;
+      if (!recordWebhook || recordWebhook.kind !== 'record' || typeof recordWebhook.normalize !== 'function') {
+        throw new Error("feed '" + job.feedKey + "' does not record webhook deliveries");
+      }
+      var recorded = await recordWebhook.normalize(job.payload, {
+        feedKey: job.feedKey, eventType: job.eventType, config: mergedConfig, receivedAt: job.receivedAt
+      });
+      return { mode: 'webhook_record', event: recorded || null };
+    }
+
     if (job.mode === 'webhook_unregister') {
       await instance.unregisterWebhook({
         config: mergedConfig, credentials: job.credentials, sessionState: job.sessionState, externalId: job.externalId

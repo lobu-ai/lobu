@@ -51,6 +51,15 @@ export const GITHUB_AUTOMATION_EVENTS: ConnectorAutomationEvent[] = [
 		}),
 	),
 	{
+		key: "stargazer",
+		label: "A repository is starred",
+		description:
+			"Runs for each new star on a tracked repository, recorded live from the star webhook or by the stargazers poll, whichever sees it first.",
+		// Derived record signals carry resource_type = the event kind.
+		resourceType: "stargazer",
+		defaults: { execution: "turn", activeRun: "queue", output: "silent" },
+	},
+	{
 		key: "commits.updated",
 		label: "Repository commits change",
 		description: "Runs for newly collected commits in this connection.",

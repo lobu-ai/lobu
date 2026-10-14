@@ -1,51 +1,54 @@
 /**
  * Shared multi-tenant app-webhook router (app-installation design §4.3).
  *
- * Drives the REAL Hono route (`createAppWebhookRoutes`) → provider plugin →
- * real Postgres, the path an actual App delivery exercises (minus the live
- * provider POST). We hold the app webhook secret, so we compute a real HMAC
- * over the raw body.
+ * Drives the REAL Hono route (`createAppWebhookRoutes`) → declared provider →
+ * generic data dispatch → real Postgres, the path an actual App delivery
+ * exercises (minus the live provider POST). We hold the app webhook secret, so
+ * we compute a real HMAC over the raw body.
  *
- * GitHub is poll-canonical: it has a sync mapping, so the canonical record is
- * the poll, not the webhook. Per event type the provider either TRIGGERS (marks
- * the one affected feed due so the poll fetches the complete record — no actor
- * resolution; the poll resolves the person once) or, for event-complete signals
- * (stars), STORES the structured event directly + resolves the actor, keyed on
- * the same origin_id the poll uses. It never stores a raw `events` row. Jira/
- * Linear have no sync mapping, so they still land the raw delivery
- * (connector_key='webhook:app_install:<id>').
+ * Every connector-specific fact comes from the connector's own declaration:
+ * the webhook schema names the event-type header, and each feed declares the
+ * events that update it, the selector that binds a delivery to a feed instance
+ * (`webhook.match`), and whether the payload is recorded (`kind: 'record'`).
+ * The fixtures persist the REAL github/linear declarations, so a drift between
+ * the connector and the dispatcher fails here.
  *
  * Under test (GitHub):
- *  1. A signed delivery for a CONFIGURED repo → 200, feeds marked due, NO raw event.
- *  2. A delivery for an UNCONFIGURED repo → 200 triggered:false, nothing stored.
- *  3. The acting user is resolved into a tenant-scoped person (identity graph).
- *  4. Forged/wrong-secret/tampered → 401; unknown tenant / no install → 200 ack.
+ *  1. A signed delivery marks every matching feed due (fan-out), nothing raw.
+ *  2. Selectors: casing, unconfigured repo, malformed or empty selector.
+ *  3. The feed's selected definition (pinned version first) decides routing.
+ *  4. A star/watch delivery commits a durable record job before the ack and
+ *     never marks the stargazers poll due.
+ *  5. Forged/wrong-secret/tampered → 401; unknown tenant / no install → 200 ack.
+ *
+ * The record job's normalize → attributed event → Automation chain needs the
+ * isolate executor, so it runs in the vitest integration suite
+ * (`__tests__/integration/connectors/github-webhook-delivery.test.ts`).
  */
 
 import { createHmac } from "node:crypto";
-import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { ConnectorWebhookSchema } from "@lobu/connector-sdk";
+import GitHubConnector from "@lobu/connectors/github";
+import LinearConnector from "@lobu/connectors/linear";
+import { connectorRecordEnqueuer } from "../../connectors/webhook-delivery.js";
+import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import {
 	type AppWebhookProvider,
 	createAppWebhookRoutes,
+	createDataWebhookDelivery,
 	createDeclaredAppWebhookProvider,
-	createGithubWebhookDelivery,
 	extractTenantFromSchema,
 	verifyDeclaredWebhook,
 } from "../routes/public/app-webhooks.js";
 import { createJiraWebhookDelivery } from "../routes/public/jira-mcp-webhook-delivery.js";
 
-// The connectors' DECLARED webhook schemas (mirrors of their `webhook` blocks).
-// Drives the generic engine in tests exactly as the bundled declaration does in
-// production — no named per-provider factory.
-const GITHUB_WEBHOOK_SCHEMA: ConnectorWebhookSchema = {
-	signatureHeader: "x-hub-signature-256",
-	algorithm: "sha256",
-	signaturePrefix: "sha256=",
-	dedupeHeader: "x-github-delivery",
-	delivery: "app_installation",
-	routingKeyPath: "installation.id",
-};
+// The connectors' DECLARED webhook schemas, read off the real definitions so
+// the generic engine is driven exactly as the bundled declaration drives it.
+const GITHUB_WEBHOOK_SCHEMA = new GitHubConnector().definition
+	.webhook as ConnectorWebhookSchema;
+const LINEAR_WEBHOOK_SCHEMA = new LinearConnector().definition
+	.webhook as ConnectorWebhookSchema;
 const JIRA_WEBHOOK_SCHEMA: ConnectorWebhookSchema = {
 	signatureHeader: "x-hub-signature",
 	algorithm: "sha256",
@@ -54,29 +57,27 @@ const JIRA_WEBHOOK_SCHEMA: ConnectorWebhookSchema = {
 	routingKeyPaths: ["self", "issue.self", "comment.self"],
 	routingKeyTransform: "url-host",
 };
-const LINEAR_WEBHOOK_SCHEMA: ConnectorWebhookSchema = {
-	signatureHeader: "linear-signature",
-	algorithm: "sha256",
-	delivery: "app_installation",
-	routingKeyPath: "organizationId",
-};
 
-/** Build a github app-webhook provider from the declared schema + delivery hook. */
-function githubProvider(
+let queue: RunsQueue;
+
+/** Build a declared app-webhook provider wired to the generic data dispatch. */
+function declaredProvider(
+	provider: string,
 	appId: string,
-	opts: { storeWebhookEvents?: boolean } = {},
+	webhookSchema: ConnectorWebhookSchema,
 ): AppWebhookProvider {
 	return createDeclaredAppWebhookProvider({
-		provider: "github",
+		provider,
 		appId,
-		webhookSchema: GITHUB_WEBHOOK_SCHEMA,
-		onDelivery: createGithubWebhookDelivery({
-			connectorKey: "github",
-			storeWebhookEvents: opts.storeWebhookEvents,
-		}),
+		webhookSchema,
+		onDelivery: createDataWebhookDelivery(
+			{ connectorKey: provider, webhookSchema },
+			connectorRecordEnqueuer(queue),
+		),
 	});
 }
 import { createPostgresAppInstallationStore } from "../../lobu/stores/app-installation-store.js";
+import { declaredFeedsSchema } from "../../__tests__/setup/test-fixtures.js";
 import {
 	ensureDbForGatewayTests,
 	ensureEncryptionKey,
@@ -104,7 +105,7 @@ function buildApp() {
 	return createAppWebhookRoutes({
 		installationStore: createPostgresAppInstallationStore(),
 		secretStore: fakeSecretStore,
-		providers: [githubProvider(APP_ID)],
+		providers: [declaredProvider("github", APP_ID, GITHUB_WEBHOOK_SCHEMA)],
 		resolveAppWebhookSecret: async () => APP_SECRET,
 	});
 }
@@ -173,12 +174,15 @@ async function seedGithubFeed(opts: {
 	owner: string;
 	name: string;
 	feedKey?: string;
+	/** A second connection on the same install (another user's OAuth grant). */
+	connectionSlug?: string;
+	pinnedVersion?: string;
 }): Promise<number> {
 	const { getDb } = await import("../../db/client.js");
 	const sql = getDb();
 	// One github connection per (install, repo), reused across feed types — so
 	// seeding e.g. both issues + commits feeds doesn't collide on the slug.
-	const slug = `github-${opts.owner}-${opts.name}`;
+	const slug = opts.connectionSlug ?? `github-${opts.owner}-${opts.name}`;
 	let [conn] = await sql`SELECT id FROM connections WHERE organization_id = ${ORG} AND slug = ${slug}`;
 	if (!conn) {
 		[conn] = await sql`
@@ -193,10 +197,10 @@ async function seedGithubFeed(opts: {
 	}
 	const [feed] = await sql`
     INSERT INTO feeds (
-      organization_id, connection_id, feed_key, display_name, status, config, next_run_at
+      organization_id, connection_id, feed_key, display_name, status, config, next_run_at, pinned_version
     ) VALUES (
       ${ORG}, ${conn.id}, ${opts.feedKey ?? "issues"}, 'Issues', 'active',
-      ${sql.json({ repo_owner: opts.owner, repo_name: opts.name })}, NULL
+      ${sql.json({ repo_owner: opts.owner, repo_name: opts.name })}, NULL, ${opts.pinnedVersion ?? null}
     )
     RETURNING id
   `;
@@ -210,56 +214,52 @@ async function feedNextRunAt(feedId: number): Promise<unknown> {
 	return row?.next_run_at ?? null;
 }
 
-/**
- * Seed the prerequisites for actor → person resolution in the routed org: an
- * org member (entities.created_by is NOT NULL — resolveOrgCreator reads it) and
- * the `person` entity type the github actor rule auto-creates into.
- */
-async function seedPersonResolutionPrereqs(orgId: string): Promise<void> {
-	const { getDb } = await import("../../db/client.js");
-	const sql = getDb();
-	const userId = `u-${orgId}`;
-	await sql`
-    INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
-    VALUES (${userId}, 'Owner', ${`${userId}@example.com`}, true, NOW(), NOW())
-    ON CONFLICT (id) DO NOTHING
-  `;
-	await sql`
-    INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
-    VALUES (${`m-${orgId}`}, ${orgId}, ${userId}, 'owner', NOW())
-    ON CONFLICT (id) DO NOTHING
-  `;
-	await sql`
-    INSERT INTO entity_types (organization_id, slug, name, created_at, updated_at)
-    VALUES (${orgId}, 'person', 'Person', NOW(), NOW())
-    ON CONFLICT DO NOTHING
-  `;
-}
-
-async function personRows(orgId: string): Promise<any[]> {
+/** Durable `connector-record` jobs committed by deliveries, oldest first. */
+async function recordJobs(): Promise<any[]> {
 	const { getDb } = await import("../../db/client.js");
 	return getDb()`
-    SELECT e.id, e.name, e.metadata
-    FROM entities e
-    JOIN entity_types et ON et.id = e.entity_type_id
-    WHERE e.organization_id = ${orgId} AND et.slug = 'person' AND e.deleted_at IS NULL
-    ORDER BY e.id
+    SELECT run_type, status, organization_id, action_input FROM runs
+    WHERE queue_name = 'internal:connector-record'
+    ORDER BY id
   `;
 }
 
-async function identitiesFor(entityId: number): Promise<string[]> {
-	const { getDb } = await import("../../db/client.js");
-	const rows = await getDb()`
-    SELECT namespace, identifier FROM entity_identities
-    WHERE entity_id = ${entityId} AND deleted_at IS NULL
-    ORDER BY namespace, identifier
-  `;
-	return rows.map((r: any) => `${r.namespace}:${r.identifier}`);
+/** The persisted github declaration with one feed's `webhook` replaced. */
+function githubSchemaWith(
+	feedKey: string,
+	webhook: Record<string, unknown>,
+): Record<string, Record<string, unknown>> {
+	const schema = declaredFeedsSchema(new GitHubConnector().definition);
+	return { ...schema, [feedKey]: { ...schema[feedKey], webhook } };
 }
+
+async function replaceGithubDefinition(
+	feedsSchema: Record<string, Record<string, unknown>>,
+): Promise<void> {
+	const { getDb } = await import("../../db/client.js");
+	await getDb()`
+    UPDATE connector_definitions SET feeds_schema = ${getDb().json(feedsSchema)}
+    WHERE organization_id = ${ORG} AND key = 'github'
+  `;
+}
+
+const STAR_BODY = {
+	action: "created",
+	starred_at: "2026-06-20T10:00:00Z",
+	installation: { id: Number(INSTALLATION_ID) },
+	sender: { login: "Octocat", id: 583231, html_url: "https://github.com/Octocat" },
+	repository: { owner: { login: "acme" }, name: "api" },
+};
 
 beforeAll(async () => {
 	await ensureDbForGatewayTests();
+	queue = new RunsQueue();
+	await queue.start();
 }, 60_000);
+
+afterAll(async () => {
+	await queue?.stop();
+});
 
 beforeEach(async () => {
 	await resetTestDatabase();
@@ -268,12 +268,8 @@ beforeEach(async () => {
 		"../../utils/rate-limiter.js"
 	);
 	resetRateLimiterForTests();
-	// The github webhook routing + person rule are read from the connector
-	// definition (feeds_schema), so every github delivery test needs it seeded.
-	const { clearEntityLinkRulesCache } = await import(
-		"../../utils/entity-link-upsert.js"
-	);
-	clearEntityLinkRulesCache();
+	// Webhook routing is read from the connector definition (feeds_schema), so
+	// every github delivery test needs it seeded.
 	await seedGithubConnectorDef(ORG);
 }, 30_000);
 
@@ -314,6 +310,92 @@ describe("app-webhook router (GitHub)", () => {
 		expect(await feedNextRunAt(commitsFeed)).toBeNull();
 	});
 
+	test("a delivery wakes EVERY matching feed across the install's connections", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const installId = await seedActiveInstall();
+		// Two connections on one installation each track acme/api issues (two
+		// members' grants), plus an unrelated repo on the first.
+		const first = await seedGithubFeed({ installId, owner: "acme", name: "api" });
+		const second = await seedGithubFeed({
+			installId,
+			owner: "acme",
+			name: "api",
+			connectionSlug: "github-second-grant",
+		});
+		const other = await seedGithubFeed({ installId, owner: "acme", name: "web" });
+		const app = buildApp();
+
+		const raw = JSON.stringify({
+			action: "opened",
+			installation: { id: Number(INSTALLATION_ID) },
+			issue: { number: 3 },
+			repository: { owner: { login: "acme" }, name: "api" },
+		});
+		const res = await app.fetch(ghDelivery(raw, { deliveryId: "gh-fanout" }));
+		expect(res.status).toBe(200);
+		expect((await res.json()).triggered).toBe(true);
+		expect(await feedNextRunAt(first)).not.toBeNull();
+		expect(await feedNextRunAt(second)).not.toBeNull();
+		expect(await feedNextRunAt(other)).toBeNull();
+	});
+
+	test("a delivery wakes every feed key that declares its event", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		await replaceGithubDefinition(githubSchemaWith("commits", { events: ["push", "issues"], match: { fields: { repo_owner: "repository.owner.login", repo_name: "repository.name" } } }));
+		const installId = await seedActiveInstall();
+		const issues = await seedGithubFeed({ installId, owner: "acme", name: "api" });
+		const commits = await seedGithubFeed({ installId, owner: "acme", name: "api", feedKey: "commits" });
+		const app = buildApp();
+
+		const raw = JSON.stringify({
+			action: "opened",
+			installation: { id: Number(INSTALLATION_ID) },
+			repository: { owner: { login: "acme" }, name: "api" },
+		});
+		const res = await app.fetch(ghDelivery(raw, { deliveryId: "gh-two-keys" }));
+		expect((await res.json()).triggered).toBe(true);
+		expect(await feedNextRunAt(issues)).not.toBeNull();
+		expect(await feedNextRunAt(commits)).not.toBeNull();
+	});
+
+	test("a selector without caseInsensitive compares values exactly", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		await replaceGithubDefinition(githubSchemaWith("issues", { events: ["issues"], match: { fields: { repo_owner: "repository.owner.login", repo_name: "repository.name" } } }));
+		const installId = await seedActiveInstall();
+		const feedId = await seedGithubFeed({ installId, owner: "acme", name: "api" });
+		const app = buildApp();
+
+		const delivery = (owner: string, id: string) =>
+			ghDelivery(
+				JSON.stringify({
+					action: "opened",
+					installation: { id: Number(INSTALLATION_ID) },
+					repository: { owner: { login: owner }, name: "api" },
+				}),
+				{ deliveryId: id },
+			);
+		expect((await (await app.fetch(delivery("ACME", "gh-exact-1"))).json()).triggered).toBe(false);
+		expect(await feedNextRunAt(feedId)).toBeNull();
+		expect((await (await app.fetch(delivery("acme", "gh-exact-2"))).json()).triggered).toBe(true);
+	});
+
+	test("a delivery whose repo casing differs from the feed config still matches", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const installId = await seedActiveInstall();
+		const feedId = await seedGithubFeed({ installId, owner: "acme", name: "api" });
+		const app = buildApp();
+
+		const raw = JSON.stringify({
+			action: "opened",
+			installation: { id: Number(INSTALLATION_ID) },
+			issue: { number: 4 },
+			repository: { owner: { login: "ACME" }, name: "Api" },
+		});
+		const res = await app.fetch(ghDelivery(raw, { deliveryId: "gh-casing" }));
+		expect((await res.json()).triggered).toBe(true);
+		expect(await feedNextRunAt(feedId)).not.toBeNull();
+	});
+
 	test("a delivery for an unconfigured repo acks 200 triggered:false and stores nothing", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
 		const installId = await seedActiveInstall();
@@ -338,6 +420,90 @@ describe("app-webhook router (GitHub)", () => {
 		expect(await appInstallEventCount()).toBe(0);
 		// The unrelated repo's feed was left untouched.
 		expect(await feedNextRunAt(otherFeedId)).toBeNull();
+	});
+
+	test("a delivery without the selector's payload fields matches no repo-scoped feed", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const installId = await seedActiveInstall();
+		const feedId = await seedGithubFeed({ installId, owner: "acme", name: "api" });
+		const app = buildApp();
+
+		// Only full_name: the selector reads owner.login + name, and a missing
+		// value never matches (no implicit fallback).
+		for (const repository of [
+			{ full_name: "acme/api" },
+			{ owner: { login: "acme" }, name: "" },
+			{ owner: { login: "acme" }, name: { nested: "api" } },
+		]) {
+			const raw = JSON.stringify({
+				action: "opened",
+				installation: { id: Number(INSTALLATION_ID) },
+				repository,
+			});
+			const res = await app.fetch(ghDelivery(raw, { deliveryId: `gh-missing-${JSON.stringify(repository)}` }));
+			expect((await res.json()).triggered).toBe(false);
+		}
+		expect(await feedNextRunAt(feedId)).toBeNull();
+	});
+
+	test("a malformed declared selector never matches; a feed with no selector matches every instance", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const installId = await seedActiveInstall();
+		const issuesFeed = await seedGithubFeed({ installId, owner: "acme", name: "api" });
+		const commitsFeed = await seedGithubFeed({ installId, owner: "acme", name: "web", feedKey: "commits" });
+		const app = buildApp();
+
+		const delivery = (event: string, id: string) =>
+			ghDelivery(
+				JSON.stringify({
+					installation: { id: Number(INSTALLATION_ID) },
+					repository: { owner: { login: "acme" }, name: "api" },
+				}),
+				{ event, deliveryId: id },
+			);
+
+		for (const match of [{ fields: {} }, { fields: "repo_name" }, { fields: { repo_name: 7 } }, "repo"]) {
+			await replaceGithubDefinition(githubSchemaWith("issues", { events: ["issues"], match }));
+			const res = await app.fetch(delivery("issues", `gh-malformed-${JSON.stringify(match)}`));
+			expect((await res.json()).triggered).toBe(false);
+		}
+		expect(await feedNextRunAt(issuesFeed)).toBeNull();
+
+		// No selector: the commits feed for acme/web is woken by an acme/api push.
+		await replaceGithubDefinition(githubSchemaWith("commits", { events: ["push"] }));
+		const res = await app.fetch(delivery("push", "gh-no-selector"));
+		expect((await res.json()).triggered).toBe(true);
+		expect(await feedNextRunAt(commitsFeed)).not.toBeNull();
+	});
+
+	test("a feed pinned to an older definition routes by its pinned declaration", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		// The pinned 0.9.0 definition predates the issues webhook declaration.
+		const declared = declaredFeedsSchema(new GitHubConnector().definition);
+		await seedGithubConnectorDef(ORG, {
+			version: "0.9.0",
+			status: "archived",
+			feedsSchema: { ...declared, issues: { ...declared.issues, webhook: undefined } },
+		});
+		const installId = await seedActiveInstall();
+		const pinned = await seedGithubFeed({ installId, owner: "acme", name: "api", pinnedVersion: "0.9.0" });
+		const current = await seedGithubFeed({
+			installId,
+			owner: "acme",
+			name: "api",
+			connectionSlug: "github-current",
+		});
+		const app = buildApp();
+
+		const raw = JSON.stringify({
+			action: "opened",
+			installation: { id: Number(INSTALLATION_ID) },
+			repository: { owner: { login: "acme" }, name: "api" },
+		});
+		const res = await app.fetch(ghDelivery(raw, { deliveryId: "gh-pinned" }));
+		expect((await res.json()).triggered).toBe(true);
+		expect(await feedNextRunAt(pinned)).toBeNull();
+		expect(await feedNextRunAt(current)).not.toBeNull();
 	});
 
 	test("a delivery for an active feed on a PAUSED connection is a no-op", async () => {
@@ -432,12 +598,7 @@ describe("app-webhook router (GitHub)", () => {
 		// Ack, NOT 500 — the provider must not retry-storm; reconcile on callback.
 		expect(res.status).toBe(200);
 		expect((await res.json()).landed).toBe(false);
-		// Nothing landed for any install key.
-		const { getDb } = await import("../../db/client.js");
-		const all = await getDb()`
-      SELECT count(*)::int AS n FROM events WHERE connector_key LIKE 'webhook:app_install:%'
-    `;
-		expect(all[0].n).toBe(0);
+		expect(await appInstallEventCount()).toBe(0);
 	});
 
 	test("a suspended install does not route (transfer demoted it) → 200 ack", async () => {
@@ -476,7 +637,7 @@ describe("app-webhook router (GitHub)", () => {
 		expect((await res.json()).landed).toBe(false);
 	});
 
-	test("a redelivery just re-stamps next_run_at — idempotent, still no event", async () => {
+	test("redeliveries and concurrent deliveries just re-stamp next_run_at — still no event", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
 		const installId = await seedActiveInstall();
 		const feedId = await seedGithubFeed({ installId, owner: "acme", name: "api" });
@@ -488,23 +649,24 @@ describe("app-webhook router (GitHub)", () => {
 			issue: { number: 9 },
 			repository: { owner: { login: "acme" }, name: "api" },
 		});
-		const first = await app.fetch(ghDelivery(raw, { deliveryId: "gh-dupe-1" }));
-		const second = await app.fetch(ghDelivery(raw, { deliveryId: "gh-dupe-1" }));
-		expect(first.status).toBe(200);
-		expect(second.status).toBe(200);
-		expect((await second.json()).triggered).toBe(true);
+		const responses = await Promise.all(
+			Array.from({ length: 5 }, () => app.fetch(ghDelivery(raw, { deliveryId: "gh-dupe-1" }))),
+		);
+		for (const res of responses) {
+			expect(res.status).toBe(200);
+			expect((await res.json()).triggered).toBe(true);
+		}
 		// Re-stamping next_run_at is idempotent; the poll (not the webhook) dedupes
 		// the actual content by stable origin_id, so still nothing landed raw.
 		expect(await feedNextRunAt(feedId)).not.toBeNull();
 		expect(await appInstallEventCount()).toBe(0);
 	});
 
-	test("a star delivery stores a stargazer event + resolves the actor, without triggering a poll", async () => {
+	test("a star delivery commits a record job before the ack, without triggering a poll", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		await seedPersonResolutionPrereqs(ORG);
 		const installId = await seedActiveInstall();
-		// The stargazers feed exists as the scheduled backstop; the store path must
-		// NOT mark it due (re-polling the whole list to capture one star is waste).
+		// The stargazers feed is the poll backstop; the record path must NOT mark
+		// it due (re-polling the whole list to capture one star is waste).
 		const stargazersFeed = await seedGithubFeed({
 			installId,
 			owner: "acme",
@@ -513,126 +675,85 @@ describe("app-webhook router (GitHub)", () => {
 		});
 		const app = buildApp();
 
-		const raw = JSON.stringify({
-			action: "created",
-			starred_at: "2026-06-20T10:00:00Z",
-			installation: { id: Number(INSTALLATION_ID) },
-			sender: { login: "Octocat", id: 583231, html_url: "https://github.com/Octocat" },
-			repository: { owner: { login: "acme" }, name: "api" },
-		});
-		const res = await app.fetch(ghDelivery(raw, { deliveryId: "gh-star-1", event: "star" }));
+		const res = await app.fetch(ghDelivery(JSON.stringify(STAR_BODY), { deliveryId: "gh-star-1", event: "star" }));
 		expect(res.status).toBe(200);
 		expect((await res.json()).triggered).toBe(true);
 
-		// A structured stargazer event landed under the github connection, keyed on
-		// the SAME origin_id the poll uses — so the /stargazers backstop dedupes it.
-		const events = await eventRows("github");
-		expect(events.length).toBe(1);
-		expect(events[0].origin_type).toBe("stargazer");
-		expect(events[0].origin_id).toBe("stargazer_acme_api_github_user_id_583231");
-		expect(events[0].metadata.action).toBe("starred");
-
-		// The actor was resolved to a person (the poll won't run for this feed)…
-		const people = await personRows(ORG);
-		expect(people.length).toBe(1);
-		expect(people[0].name).toBe("Octocat");
-		expect(await identitiesFor(Number(people[0].id))).toEqual([
-			"github_login:octocat",
-			"github_user_id:583231",
-		]);
-		// …and the wasteful poll was NOT triggered.
+		// The verified payload is durably queued by the time GitHub sees the ack;
+		// the job (not the request) normalizes and ingests it.
+		const jobs = await recordJobs();
+		expect(jobs).toHaveLength(1);
+		expect(jobs[0].run_type).toBe("internal");
+		expect(jobs[0].organization_id).toBe(ORG);
+		expect(jobs[0].action_input).toMatchObject({
+			organizationId: ORG,
+			feedId: stargazersFeed,
+			eventType: "star",
+			payload: STAR_BODY,
+		});
+		expect(await eventRows("github")).toHaveLength(0);
 		expect(await feedNextRunAt(stargazersFeed)).toBeNull();
 	});
 
-	test("a star for a repo with no stargazers feed configured is a no-op (nothing stored)", async () => {
+	test("a watch delivery records through the same feed; differing repo casing still matches", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		await seedPersonResolutionPrereqs(ORG);
-		// Routing comes from the seeded connector def (star → store), but there is
-		// NO stargazers feed instance for acme/api — so the store path must no-op,
-		// mirroring the trigger path's "unconfigured feed → nothing happens".
-		await seedActiveInstall();
-		const app = buildApp();
-
-		const raw = JSON.stringify({
-			action: "created",
-			starred_at: "2026-06-20T10:00:00Z",
-			installation: { id: Number(INSTALLATION_ID) },
-			sender: { login: "Octocat", id: 583231 },
-			repository: { owner: { login: "acme" }, name: "api" },
-		});
-		const res = await app.fetch(ghDelivery(raw, { deliveryId: "gh-star-nofeed", event: "star" }));
-		expect(res.status).toBe(200);
-		expect((await res.json()).triggered).toBe(false);
-		expect(await eventRows("github")).toHaveLength(0);
-		expect(await personRows(ORG)).toHaveLength(0);
-	});
-
-	test("a star with different repo casing matches the feed and uses the feed's canonical origin_id", async () => {
-		await seedAgentRow(AGENT, { organizationId: ORG });
-		await seedPersonResolutionPrereqs(ORG);
 		const installId = await seedActiveInstall();
-		// Feed config is lowercase acme/api; the delivery uses display casing.
-		await seedGithubFeed({ installId, owner: "acme", name: "api", feedKey: "stargazers" });
+		const stargazersFeed = await seedGithubFeed({ installId, owner: "acme", name: "api", feedKey: "stargazers" });
 		const app = buildApp();
 
 		const raw = JSON.stringify({
-			action: "created",
-			starred_at: "2026-06-20T10:00:00Z",
-			installation: { id: Number(INSTALLATION_ID) },
-			sender: { login: "Octocat", id: 583231 },
+			...STAR_BODY,
+			action: "started",
 			repository: { owner: { login: "ACME" }, name: "API" },
 		});
-		const res = await app.fetch(ghDelivery(raw, { deliveryId: "gh-star-case", event: "star" }));
-		expect(res.status).toBe(200);
+		const res = await app.fetch(ghDelivery(raw, { deliveryId: "gh-watch", event: "watch" }));
 		expect((await res.json()).triggered).toBe(true);
-
-		// Matched case-insensitively, and origin_id uses the feed's casing so it
-		// consolidates with the poll (which keys off the feed config, not the payload).
-		const events = await eventRows("github");
-		expect(events.length).toBe(1);
-		expect(events[0].origin_id).toBe("stargazer_acme_api_github_user_id_583231");
+		const jobs = await recordJobs();
+		expect(jobs.map((job) => [job.action_input.feedId, job.action_input.eventType])).toEqual([
+			[stargazersFeed, "watch"],
+		]);
 	});
 
-	test("with storeWebhookEvents off, a star falls back to a poll trigger (nothing stored)", async () => {
+	test("a star for a repo with no stargazers feed configured is a no-op", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		await seedPersonResolutionPrereqs(ORG);
 		const installId = await seedActiveInstall();
-		const stargazersFeed = await seedGithubFeed({
+		// An issues feed on the same repo does not declare star.
+		await seedGithubFeed({ installId, owner: "acme", name: "api" });
+		const app = buildApp();
+
+		const res = await app.fetch(ghDelivery(JSON.stringify(STAR_BODY), { deliveryId: "gh-star-nofeed", event: "star" }));
+		expect(res.status).toBe(200);
+		expect((await res.json()).triggered).toBe(false);
+		expect(await recordJobs()).toHaveLength(0);
+		expect(await eventRows("github")).toHaveLength(0);
+	});
+
+	test("concurrent star deliveries to two matching stargazers feeds each commit a job per feed", async () => {
+		await seedAgentRow(AGENT, { organizationId: ORG });
+		const installId = await seedActiveInstall();
+		const first = await seedGithubFeed({ installId, owner: "acme", name: "api", feedKey: "stargazers" });
+		const second = await seedGithubFeed({
 			installId,
 			owner: "acme",
 			name: "api",
 			feedKey: "stargazers",
+			connectionSlug: "github-second-grant",
 		});
-		const app = createAppWebhookRoutes({
-			installationStore: createPostgresAppInstallationStore(),
-			secretStore: fakeSecretStore,
-			providers: [
-				githubProvider(APP_ID, { storeWebhookEvents: false }),
-			],
-			resolveAppWebhookSecret: async () => APP_SECRET,
-		});
+		const app = buildApp();
 
-		const raw = JSON.stringify({
-			action: "created",
-			starred_at: "2026-06-20T10:00:00Z",
-			installation: { id: Number(INSTALLATION_ID) },
-			sender: { login: "Octocat", id: 583231 },
-			repository: { owner: { login: "acme" }, name: "api" },
-		});
-		const res = await app.fetch(ghDelivery(raw, { deliveryId: "gh-star-off", event: "star" }));
-		expect(res.status).toBe(200);
-		expect((await res.json()).triggered).toBe(true);
-
-		// Flag off → no direct store; the stargazers feed is marked due for the poll
-		// instead, and no person is resolved on the trigger path.
-		expect(await eventRows("github")).toHaveLength(0);
-		expect(await personRows(ORG)).toHaveLength(0);
-		expect(await feedNextRunAt(stargazersFeed)).not.toBeNull();
+		const raw = JSON.stringify(STAR_BODY);
+		const responses = await Promise.all([
+			app.fetch(ghDelivery(raw, { deliveryId: "gh-star-a", event: "star" })),
+			app.fetch(ghDelivery(raw, { deliveryId: "gh-star-b", event: "star" })),
+		]);
+		for (const res of responses) expect(res.status).toBe(200);
+		// Redeliveries are not deduped at the edge: ingest dedupes on origin_id.
+		const feeds = (await recordJobs()).map((job) => job.action_input.feedId).sort();
+		expect(feeds).toEqual([first, first, second, second].sort());
 	});
 
-	test("a push delivery triggers the COMMITS feed (not issues) and resolves no actor", async () => {
+	test("a push delivery triggers the COMMITS feed (not issues)", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
-		await seedPersonResolutionPrereqs(ORG);
 		const installId = await seedActiveInstall();
 		// push maps to the commits feed; an issues feed on the same repo must stay put.
 		const commitsFeed = await seedGithubFeed({
@@ -655,42 +776,11 @@ describe("app-webhook router (GitHub)", () => {
 			ghDelivery(raw, { deliveryId: "gh-push-1", event: "push" }),
 		);
 		expect(res.status).toBe(200);
-		// push → commits feed marked due; issues feed untouched.
 		expect((await res.json()).triggered).toBe(true);
 		expect(await feedNextRunAt(commitsFeed)).not.toBeNull();
 		expect(await feedNextRunAt(issuesFeed)).toBeNull();
-		// push isn't an authored-content event for the trigger path, and triggers
-		// never resolve actors anyway, so no person is created.
-		expect(await personRows(ORG)).toHaveLength(0);
+		expect(await recordJobs()).toHaveLength(0);
 		expect(await appInstallEventCount()).toBe(0);
-	});
-
-	test("two star deliveries from the same user consolidate to ONE event + ONE person", async () => {
-		await seedAgentRow(AGENT, { organizationId: ORG });
-		await seedPersonResolutionPrereqs(ORG);
-		const installId = await seedActiveInstall();
-		await seedGithubFeed({ installId, owner: "acme", name: "api", feedKey: "stargazers" });
-		const app = buildApp();
-
-		const raw = JSON.stringify({
-			action: "created",
-			starred_at: "2026-06-20T10:00:00Z",
-			installation: { id: Number(INSTALLATION_ID) },
-			sender: { login: "Octocat", id: 583231 },
-			repository: { owner: { login: "acme" }, name: "api" },
-		});
-
-		const first = await app.fetch(ghDelivery(raw, { deliveryId: "gh-star-a", event: "star" }));
-		const second = await app.fetch(ghDelivery(raw, { deliveryId: "gh-star-b", event: "star" }));
-		expect(first.status).toBe(200);
-		expect(second.status).toBe(200);
-
-		// Same actor → same origin_id → the insert upserts: one stargazer event,
-		// and the entity-link upsert keeps it to one person.
-		expect(await eventRows("github")).toHaveLength(1);
-		const people = await personRows(ORG);
-		expect(people.length).toBe(1);
-		expect(people[0].metadata.last_authored_at).toBeTruthy();
 	});
 
 	test("an unknown provider path returns 404", async () => {
@@ -711,7 +801,7 @@ describe("app-webhook router (GitHub)", () => {
 		const app = createAppWebhookRoutes({
 			installationStore: createPostgresAppInstallationStore(),
 			secretStore: fakeSecretStore,
-			providers: [githubProvider(APP_ID)],
+			providers: [declaredProvider("github", APP_ID, GITHUB_WEBHOOK_SCHEMA)],
 			resolveAppWebhookSecret: async () => undefined,
 		});
 
@@ -971,7 +1061,7 @@ function buildLinearApp() {
 	return createAppWebhookRoutes({
 		installationStore: createPostgresAppInstallationStore(),
 		secretStore: fakeSecretStore,
-		providers: [createDeclaredAppWebhookProvider({ provider: "linear", appId: LINEAR_APP_ID, webhookSchema: LINEAR_WEBHOOK_SCHEMA })],
+		providers: [declaredProvider("linear", LINEAR_APP_ID, LINEAR_WEBHOOK_SCHEMA)],
 		resolveAppWebhookSecret: async () => LINEAR_SECRET,
 	});
 }
@@ -1003,24 +1093,56 @@ function linearDelivery(
 	});
 }
 
+/** The org's linear definition (real declaration) + one install-bound issues feed. */
+async function seedLinearIssuesFeed(installId: number): Promise<number> {
+	const { getDb } = await import("../../db/client.js");
+	const sql = getDb();
+	await sql`
+    INSERT INTO connector_definitions (organization_id, key, name, version, feeds_schema, status)
+    VALUES (${ORG}, 'linear', 'Linear', '1.0.0',
+      ${sql.json(declaredFeedsSchema(new LinearConnector().definition))}, 'active')
+  `;
+	const [conn] = await sql`
+    INSERT INTO connections (organization_id, connector_key, slug, display_name, status, config, visibility)
+    VALUES (${ORG}, 'linear', 'linear', 'Linear', 'active', ${sql.json({ installation_ref: installId })}, 'org')
+    RETURNING id
+  `;
+	const [feed] = await sql`
+    INSERT INTO feeds (organization_id, connection_id, feed_key, display_name, status, config, next_run_at)
+    VALUES (${ORG}, ${conn.id}, 'issues', 'Issues', 'active', '{}'::jsonb, NULL)
+    RETURNING id
+  `;
+	return Number(feed.id);
+}
+
 describe("app-webhook router (Linear)", () => {
-	test("a signed issue delivery routes to the owning org via organizationId", async () => {
+	test("a signed Issue delivery routes via organizationId and marks the declared feed due", async () => {
 		await seedAgentRow(AGENT, { organizationId: ORG });
 		const installId = await seedLinearInstall();
+		const feedId = await seedLinearIssuesFeed(installId);
 		const app = buildLinearApp();
 
-		const raw = JSON.stringify({
-			action: "create",
-			type: "Issue",
-			organizationId: LINEAR_ORG_ID,
-			data: { id: "abc", title: "Ship it" },
-		});
-		const res = await app.fetch(linearDelivery(raw));
-		expect(res.status).toBe(202);
+		const delivery = (type: string) =>
+			linearDelivery(
+				JSON.stringify({
+					action: "create",
+					type,
+					organizationId: LINEAR_ORG_ID,
+					data: { id: "abc", title: "Ship it" },
+				}),
+			);
+		// An undeclared event type wakes nothing and lands no raw row.
+		const project = await app.fetch(delivery("Project"));
+		expect(project.status).toBe(200);
+		expect((await project.json()).triggered).toBe(false);
+		expect(await feedNextRunAt(feedId)).toBeNull();
 
-		const rows = await eventRows(`webhook:app_install:${installId}`);
-		expect(rows.length).toBe(1);
-		expect(rows[0].organization_id).toBe(ORG);
+		// The body's `type` is the declared discriminator; Issue is declared.
+		const issue = await app.fetch(delivery("Issue"));
+		expect(issue.status).toBe(200);
+		expect((await issue.json()).triggered).toBe(true);
+		expect(await feedNextRunAt(feedId)).not.toBeNull();
+		expect(await eventRows(`webhook:app_install:${installId}`)).toHaveLength(0);
 	});
 
 	test("a bare-hex signature with a `sha256=` prefix is rejected (no prefix expected)", async () => {

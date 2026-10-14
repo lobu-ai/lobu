@@ -23,6 +23,7 @@ import { log } from './log.js';
 import { reportTerminalFailure } from './terminal-failure.js';
 import { completeActionOnce } from './terminal-delivery.js';
 import type { SyncExecutor, ExecutorResult } from '../executor/interface.js';
+import { envelopeToContentItem } from '../executor/runtime.js';
 import { withoutDeploymentProviderKeys } from '../env.js';
 
 /**
@@ -1049,35 +1050,6 @@ function mergeEnv(
 }
 
 /**
- * Convert a V1 EventEnvelope (the SDK's standard sync output) into the
- * gateway-bound ContentItem shape (without an embedding).
- */
-function toContentItem(event: EventEnvelope): ContentItem {
-  const occurredAtIso =
-    event.occurred_at instanceof Date
-      ? event.occurred_at.toISOString()
-      : (event.occurred_at as unknown as string);
-
-  return {
-    id: event.origin_id,
-    title: event.title,
-    payload_type: event.payload_type,
-    payload_text: event.payload_text,
-    payload_data: event.payload_data,
-    attachments: event.attachments,
-    author_name: event.author_name,
-    occurred_at: occurredAtIso,
-    source_url: event.source_url ?? undefined,
-    score: typeof event.score === 'number' ? event.score : 0,
-    metadata: event.metadata ?? {},
-    origin_parent_id: event.origin_parent_id ?? undefined,
-    origin_type: event.origin_type,
-    semantic_type: event.semantic_type ?? event.origin_type,
-    automation_signals: event.automation_signals,
-  };
-}
-
-/**
  * Convert a chunk of events into ContentItems, generating embeddings for the
  * whole chunk in a single batch call (one HTTP round-trip / vectorized local
  * pass) instead of one per event. Vectors are mapped back to their source
@@ -1089,7 +1061,7 @@ async function processEventChunk(
   events: EventEnvelope[],
   generateEmbeddings: boolean
 ): Promise<ContentItem[]> {
-  const contentItems = events.map(toContentItem);
+  const contentItems = events.map(envelopeToContentItem);
 
   if (!generateEmbeddings || contentItems.length === 0) {
     return contentItems;

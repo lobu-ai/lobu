@@ -5,6 +5,7 @@
  * Each function creates the necessary records and returns the relevant IDs.
  */
 
+import type { RuntimeConnectorDefinition } from '@lobu/connector-sdk';
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import { chatUserIdentityFor } from '../../lobu/stores/chat-identity-sources';
 import { serializeSigned } from 'hono/utils/cookie';
@@ -629,6 +630,26 @@ export async function createTestPAT(
 interface TestConnectorDefinition {
   key: string;
   name: string;
+}
+
+/**
+ * A connector's persisted feed declarations, derived from its real definition
+ * the way the install compiler persists them: handlers and the record
+ * normalizer stay in code, `operations` is derived from them.
+ */
+export function declaredFeedsSchema(
+  definition: RuntimeConnectorDefinition,
+): Record<string, Record<string, unknown>> {
+  const feeds = definition.feeds ?? {};
+  return Object.fromEntries(
+    Object.entries(feeds).map(([feedKey, feed]) => {
+      const operations = [
+        ...(typeof feed.sync === 'function' ? ['sync'] : []),
+        ...(typeof feed.read === 'function' ? ['read'] : []),
+      ];
+      return [feedKey, { ...JSON.parse(JSON.stringify(feed)), operations }];
+    }),
+  );
 }
 
 export async function createTestConnectorDefinition(options: {

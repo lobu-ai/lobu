@@ -46,14 +46,15 @@ const FEED_PAGE_ATTEMPTS = 3;
 
 /** The run lost its lease or its connection/feed was deleted. */
 export class FeedPageUnavailableError extends Error {
-  constructor(runId: number) {
-    super(`Run ${runId} cannot accept another feed page`);
+  constructor(runId: number | null) {
+    super(runId === null ? 'The feed cannot accept a live record' : `Run ${runId} cannot accept another feed page`);
     this.name = 'FeedPageUnavailableError';
   }
 }
 
 interface FeedPage {
-  runId: number;
+  /** The run holding the page's lease; null for a live record, which has no lease to lose. */
+  runId: number | null;
   /**
    * The worker holding the lease. Only a trusted worker may omit it
    * (`authorizeRunForWorker` requires it of a user-scoped one); the page is
@@ -65,6 +66,8 @@ interface FeedPage {
   feedId: number | null;
   /** Source identities the page will write, locked before page data is written. */
   originIds: readonly string[];
+  /** Fence a live record against feed edits made while its normalizer ran. */
+  liveRecord?: { feedKey: string; config: Record<string, unknown> | null };
 }
 
 /** Take the page's locks and check its live source + lease on `tx`. */
@@ -75,23 +78,29 @@ export async function lockFeedPage(tx: DbClient, page: FeedPage): Promise<void> 
     const live = await tx`
       SELECT 1 FROM connections
       WHERE id = ${page.connectionId} AND deleted_at IS NULL
+        ${page.liveRecord ? tx`AND status = 'active'` : tx``}
       FOR SHARE
     `;
     // Deletion cancels the connection's runs in the transaction that
     // tombstoned it, so a page arriving after it has lost its lease too.
     if (live.length === 0) throw new FeedPageUnavailableError(page.runId);
   }
-  const leased = await tx`
-    SELECT 1 FROM runs
-    WHERE id = ${page.runId}
-      ${page.workerId ? runLeaseFence(tx, page.workerId) : tx`AND status = 'running'`}
-    FOR UPDATE
-  `;
-  if (leased.length === 0) throw new FeedPageUnavailableError(page.runId);
+  if (page.runId !== null) {
+    const leased = await tx`
+      SELECT 1 FROM runs
+      WHERE id = ${page.runId}
+        ${page.workerId ? runLeaseFence(tx, page.workerId) : tx`AND status = 'running'`}
+      FOR UPDATE
+    `;
+    if (leased.length === 0) throw new FeedPageUnavailableError(page.runId);
+  }
   if (page.feedId != null) {
     const live = await tx`
       SELECT 1 FROM feeds
       WHERE id = ${page.feedId} AND deleted_at IS NULL
+        ${page.liveRecord ? tx`AND status = 'active'
+          AND feed_key = ${page.liveRecord.feedKey}
+          AND config IS NOT DISTINCT FROM ${page.liveRecord.config === null ? null : tx.json(page.liveRecord.config)}::jsonb` : tx``}
       FOR UPDATE
     `;
     // Feed deletion and run cancellation are not one transaction on every

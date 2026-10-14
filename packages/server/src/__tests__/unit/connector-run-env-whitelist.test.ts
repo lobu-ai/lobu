@@ -10,7 +10,8 @@ import { describe, expect, it } from "bun:test";
  * and never the gateway's own env. Handing over `process.env` (or the server
  * `Env`) would expose ENCRYPTION_KEY, DATABASE_URL and WORKER_API_TOKEN to
  * whatever code the run executes, which under Cloud is an organization's own
- * connector. Enumerating the callers keeps the guard class-wide: a new
+ * connector. A site that needs no env at all (a `record` feed's normalizer)
+ * passes an empty one, which is stricter still. Enumerating the callers keeps the guard class-wide: a new
  * execution site that reaches for `process.env` fails here, not in review.
  */
 const SRC_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -34,6 +35,7 @@ describe("in-gateway connector execution never hands connector code the gateway 
 	it("enumerates the execution sites (the guard is only as wide as this list)", () => {
 		expect(callers.map((path) => relative(SRC_ROOT, path)).sort()).toEqual([
 			"connect/webhook-registration.ts",
+			"connectors/webhook-delivery.ts",
 			"lib/connector-pushdown.ts",
 			"lib/feed-sync.ts",
 			"runs/source-feed-listener.ts",
@@ -42,12 +44,12 @@ describe("in-gateway connector execution never hands connector code the gateway 
 	});
 
 	it.each(callers.map((path) => [relative(SRC_ROOT, path), path]))(
-		"%s sources job.env from the worker whitelist",
+		"%s sources job.env from the worker whitelist or passes none",
 		(_label, path) => {
 			const text = readFileSync(path, "utf8");
 			expect(text).not.toMatch(/Object\.entries\((process\.env|env)\)/);
 			expect(text).not.toMatch(/env:\s*(process\.env|env|envStrings\s*=\s*process\.env)\b/);
-			expect(/connectorRunEnv\(|dbEgressConfig\(\)/.test(text)).toBe(true);
+			expect(/connectorRunEnv\(|dbEgressConfig\(\)|env:\s*\{\s*\}/.test(text)).toBe(true);
 		},
 	);
 });
