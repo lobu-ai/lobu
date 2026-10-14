@@ -25,6 +25,9 @@ import {
   verifyGatewayMcpToken,
   verifyWorkerToken,
 } from "@lobu/core";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { McpProxy } from "../auth/mcp/proxy.js";
 import { buildSessionKey, computeScopeKey } from "../auth/mcp/proxy-shared.js";
@@ -670,5 +673,66 @@ describe("concurrent tool calls", () => {
     expect(r2.status).toBe(200);
     // Both calls hit upstream
     expect(callCount).toBeGreaterThanOrEqual(2);
+  });
+
+  test("concurrent calls on one cached upstream session each get their own result", async () => {
+    // A real SDK upstream, configured like the embedded lobu-memory server: one
+    // session, JSON responses. The transport routes each response back to its
+    // HTTP request by JSON-RPC id, so two in-flight calls must not share one.
+    const upstream = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: () => "real-session",
+      enableJsonResponse: true,
+    });
+    const server = new Server({ name: "echo", version: "1.0.0" }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: [{ name: "echo", inputSchema: { type: "object" } }],
+    }));
+    let releaseCalls!: () => void;
+    const bothCallsStarted = new Promise<void>((resolve) => { releaseCalls = resolve; });
+    let startedCalls = 0;
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      // Hold both responses until the SDK has registered both request IDs.
+      if (++startedCalls === 2) releaseCalls();
+      await bothCallsStarted;
+      return { content: [{ type: "text", text: String(request.params.arguments?.value) }] };
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const previousFetch = globalThis.fetch;
+    try {
+      await server.connect(upstream);
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) =>
+        upstream.handleRequest(new Request(input, init));
+
+      const configSource = createConfigSource({
+        "real-mcp": { id: "real-mcp", upstreamUrl: "http://real.example.com/mcp", internal: true },
+      });
+      const app = new McpProxy(configSource, {}).getApp();
+      const call = async (value: string) => {
+        const response = await app.request("/real-mcp/tools/echo", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${agent1Token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ value }),
+        });
+        expect(response.status).toBe(200);
+        return response.json() as Promise<{ content: Array<{ text: string }> }>;
+      };
+
+      // Discovery opens the session and exercises the generated tools/list request.
+      const discovery = await app.request("/real-mcp/tools", {
+        headers: { Authorization: `Bearer ${agent1Token}` },
+      });
+      expect(discovery.status).toBe(200);
+      expect((await discovery.json()).tools[0]?.name).toBe("echo");
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("a concurrent tool call never got its response")), 2_000);
+      });
+      const [a, b] = await Promise.race([Promise.all([call("a"), call("b")]), deadline]);
+      expect([a.content[0]?.text, b.content[0]?.text]).toEqual(["a", "b"]);
+    } finally {
+      clearTimeout(timer);
+      releaseCalls();
+      globalThis.fetch = previousFetch;
+      await server.close();
+    }
   });
 });
