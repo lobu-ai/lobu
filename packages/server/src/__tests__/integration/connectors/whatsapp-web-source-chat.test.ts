@@ -445,6 +445,24 @@ describe("WhatsApp Web source chat", () => {
       .toHaveLength(1);
   }, 60_000);
 
+  it.each([
+    ["an inbound message in the scoped chat", { chat_jid: DM_JID }, 1],
+    ["the account's own message in the scoped chat", { chat_jid: DM_JID, from_me: true }, 1],
+    ["a message in another chat", { chat_jid: OTHER_DM_JID }, 0],
+  ] as const)("runs a chat-scoped silent Automation for %s", async (_, message, expected) => {
+    await insertAutomation("archive-one-chat", { output: "silent", match: { channel_id: DM_JID } });
+    deviceMessages.push({ id: "SYNTHDM13", body: "keep this", ...message });
+
+    await deliver("SYNTHDM13", "first");
+    await drain();
+    await deliver("SYNTHDM13", "replayed");
+    await drain();
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND run_type = 'automation'`)
+      .toHaveLength(expected);
+    expect(enqueued).toHaveLength(0);
+    expect(sends).toHaveLength(0);
+  }, 60_000);
+
   it("resolves the connection's numeric runtime id for chat routing", async () => {
     const replyId = await insertAutomation("one-chat-reply", replyTo({ channel_id: DM_JID }));
     const runtimeId = String(connectionId);

@@ -269,17 +269,17 @@ describe("WhatsApp Web source rows", () => {
     const { adapter } = harness([]);
     const parsed = adapter.parseSourceRow(source());
     expect(parsed?.channelId).toBe(DM_JID);
-    expect(parsed?.message.id).toBe("101:RAWIN1");
-    expect(parsed?.message.threadId).toBe(`whatsapp.web:101:${DM_JID}`);
-    expect(parsed?.message.author.userId).toBe(DM_JID);
-    expect(parsed?.message.text).toBe("hello");
+    expect(parsed?.message?.id).toBe("101:RAWIN1");
+    expect(parsed?.message?.threadId).toBe(`whatsapp.web:101:${DM_JID}`);
+    expect(parsed?.message?.author.userId).toBe(DM_JID);
+    expect(parsed?.message?.text).toBe("hello");
   });
 
   test("a group row carries its sender and the group as its channel", () => {
     const { adapter } = harness([]);
     const parsed = adapter.parseSourceRow(source({ chat_jid: GROUP_JID, is_group: true }));
     expect(parsed?.channelId).toBe(GROUP_JID);
-    expect(parsed?.message.author.userId).toBe(DM_JID);
+    expect(parsed?.message?.author.userId).toBe(DM_JID);
   });
 
   test("nothing answers our own, unverified, revoked, system, media-only or broadcast rows", () => {
@@ -296,6 +296,16 @@ describe("WhatsApp Web source rows", () => {
       { chat_jid: "120363000000000002@newsletter" },
       { chat_jid: GROUP_JID, is_group: true, sender_jid: null },
     ]) {
+      const parsed = adapter.parseSourceRow(source(overrides));
+      // Its chat is still named, for chat-scoped background Automations.
+      expect(parsed?.channelId).toBe((overrides as { chat_jid?: string }).chat_jid ?? DM_JID);
+      expect(parsed?.message).toBeNull();
+    }
+  });
+
+  test("a row that names no chat is not a source message", () => {
+    const { adapter } = harness([]);
+    for (const overrides of [{ chat_jid: undefined }, { chat_jid: "" }, { id: "" }]) {
       expect(adapter.parseSourceRow(source(overrides))).toBeNull();
     }
   });

@@ -90,22 +90,22 @@ function repliesToSource(trigger: AutomationEventTrigger): boolean {
 }
 
 /**
- * Whether an Automation could answer a reference-only signal once its content
- * is read: some reply trigger matches everything but its `match` filters,
- * which name content (chat, mention) the reference does not carry. The
- * hydrated message is matched again in full before anything replies.
+ * Whether routing an Automation on a reference-only signal needs the message
+ * read first: some trigger matching everything but its `match` filters either
+ * replies to the source or has filters, which name content (chat, mention)
+ * the reference does not carry. The read message is matched again in full.
  */
-export function mayReplyToSource(
+export function needsSourceMessage(
   triggers: AutomationTrigger[],
   signal: ConnectorTriggerSignal,
 ): boolean {
-  const replyTriggers = triggers.filter(
+  const contentTriggers = triggers.filter(
     (trigger): trigger is AutomationEventTrigger =>
       trigger.kind === "event" && trigger.source !== "workspace" &&
-      repliesToSource(trigger),
+      (repliesToSource(trigger) || Object.keys(trigger.match ?? {}).length > 0),
   );
   return matchingAutomationTriggers(
-    replyTriggers.map((trigger) => ({ ...trigger, match: undefined })),
+    contentTriggers.map((trigger) => ({ ...trigger, match: undefined })),
     signal,
   ).length > 0;
 }

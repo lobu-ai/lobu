@@ -136,14 +136,15 @@ export interface ChatPlatformDescriptor {
    */
   connectorTransport?: boolean;
   /**
-   * Connector transports: the inbound message one live source row is, or null
-   * when nothing should answer it. `channelId` is the native chat id an
-   * Automation's `channel_id` filter names. See `chat-source-ingress.ts`.
+   * Connector transports: the chat one live source row belongs to, and the
+   * inbound message it is, or `message: null` when nothing should answer it.
+   * `channelId` is the native chat id an Automation's `channel_id` filter
+   * names. Null when the row names no chat. See `chat-source-ingress.ts`.
    */
   parseSourceMessage?(
     adapter: any,
     row: Record<string, unknown>,
-  ): { message: any; channelId: string } | null;
+  ): { message: any | null; channelId: string } | null;
   /** Lazily construct the `@chat-adapter/*` adapter for a resolved config. */
   createAdapter(config: any, context?: AdapterCreationContext): Promise<any>;
   /** Resolve provider-owned installed scopes without copying their credentials. */

@@ -12,7 +12,8 @@
  *   3. the candidate Automations must still be authorized source subscribers;
  *   4. the message is read through the live feed read as one of them, so the
  *      source-read authorization, device dispatch and scrubbing all apply;
- *   5. the platform turns the row into a chat message or refuses it;
+ *   5. the platform names the row's chat, and turns it into a chat message
+ *      unless nothing should answer it (own, system, revoked, broadcast);
  *   6. the hydrated message is matched again per Automation (its first
  *      matching trigger wins); background targets are queued on the source
  *      signal, and a group reply needs an Automation scoped to that group;
@@ -96,10 +97,16 @@ export async function handleChatSourceIngress(
 
     const adapter = instance.chat.getAdapter(instance.connection.platform);
     const parsed = descriptor.parseSourceMessage(adapter, row);
-    // A refused message (own, system, revoked, broadcast) still activates
-    // background triggers, matched on the source signal alone.
+    const message = parsed?.message ?? null;
+    // A message nothing answers still activates background triggers on its chat.
     const hydrated = parsed
-      ? { ...signal, attributes: { channel_id: parsed.channelId, user_id: parsed.message.author.userId } }
+      ? {
+          ...signal,
+          attributes: {
+            channel_id: parsed.channelId,
+            ...(message ? { user_id: message.author.userId } : {}),
+          },
+        }
       : signal;
     const plan = planAutomationActivations(
       hydrated,
@@ -111,13 +118,13 @@ export async function handleChatSourceIngress(
     await dispatchAutomationRunsBestEffort(
       await queueAutomationActivations({ signal, matches: plan.backgroundTargets }),
     );
-    if (!parsed) return;
+    if (!parsed || !message) return;
     const thread = await resolveChatTarget(instance.chat, instance.connection.platform, {
-      channelId: parsed.message.threadId,
-      responseThreadId: parsed.message.threadId,
-      currentMessage: parsed.message,
+      channelId: message.threadId,
+      responseThreadId: message.threadId,
+      currentMessage: message,
     });
-    if (!thread) throw new Error(`Could not open chat thread ${parsed.message.threadId}`);
+    if (!thread) throw new Error(`Could not open chat thread ${message.threadId}`);
 
     const replyTargets = plan.replyTargets.filter((target) =>
       (thread.isDM === true || target.trigger.match?.channel_id === parsed.channelId));
@@ -134,14 +141,14 @@ export async function handleChatSourceIngress(
           get: (target, prop) => {
             if (prop === "post") {
               return (content: unknown) =>
-                post({ ctx, threadId: target.id, messageId: parsed.message.id, content });
+                post({ ctx, threadId: target.id, messageId: message.id, content });
             }
             const value = Reflect.get(target, prop, target);
             return typeof value === "function" ? value.bind(target) : value;
           },
         })
       : thread;
-    await instance.messageBridge.handleAdmittedSourceMessage(keyedThread, parsed.message, {
+    await instance.messageBridge.handleAdmittedSourceMessage(keyedThread, message, {
       signal: hydrated,
       replyTargets,
       backgroundTargets: [],

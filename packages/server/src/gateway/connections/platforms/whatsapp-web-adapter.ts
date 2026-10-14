@@ -229,21 +229,20 @@ export class WhatsAppWebAdapter implements Adapter<string, WhatsAppWebMessageRow
    */
   parseSourceRow(
     row: Record<string, unknown>,
-  ): { message: Message<WhatsAppWebMessageRow>; channelId: string } | null {
+  ): { message: Message<WhatsAppWebMessageRow> | null; channelId: string } | null {
     const chatJid = row.chat_jid;
-    if (
-      typeof row.id !== "string" || !row.id ||
-      typeof chatJid !== "string" || !chatJid || chatJid.includes(":") ||
-      row.from_me !== false || row.content_kind !== "text" ||
-      typeof row.text !== "string" || !row.text.trim()
-    ) {
+    if (typeof row.id !== "string" || !row.id || typeof chatJid !== "string" || !chatJid || chatJid.includes(":")) {
       return null;
     }
     const isGroup = chatJid.endsWith(GROUP_SUFFIX);
-    if (!isGroup && !DM_SUFFIXES.some((suffix) => chatJid.endsWith(suffix))) return null;
-    if (isGroup && (typeof row.sender_jid !== "string" || !row.sender_jid)) return null;
+    const answerable =
+      row.from_me === false && row.content_kind === "text" &&
+      typeof row.text === "string" && row.text.trim() !== "" &&
+      (isGroup
+        ? typeof row.sender_jid === "string" && row.sender_jid !== ""
+        : DM_SUFFIXES.some((suffix) => chatJid.endsWith(suffix)));
     return {
-      message: this.parseMessage(row as unknown as WhatsAppWebMessageRow),
+      message: answerable ? this.parseMessage(row as unknown as WhatsAppWebMessageRow) : null,
       channelId: chatJid,
     };
   }

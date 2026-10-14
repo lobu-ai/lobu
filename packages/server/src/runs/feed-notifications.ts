@@ -11,7 +11,7 @@ import { enqueueSourceFeedListener, recordSourceFeedFailure } from './source-fee
 import { type SourceFeedSubscription, sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
 import { enqueueChatSourceIngress } from './chat-ingress-jobs';
 import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, SOURCE_FEED_SCOPE_METADATA_KEY } from '../lib/device-feed-read-protocol';
-import { findMatchingAutomationActivations, mayReplyToSource, planAutomationActivations, queueAutomationActivations, dispatchAutomationRunsBestEffort } from '../automations/activation';
+import { findMatchingAutomationActivations, needsSourceMessage, planAutomationActivations, queueAutomationActivations, dispatchAutomationRunsBestEffort } from '../automations/activation';
 import logger from '../utils/logger';
 
 type ReceivedNotification = {
@@ -30,7 +30,7 @@ type NotificationFeed = {
   organization_id: string;
   connector_key: string;
   version: string | null;
-  automation_events: Array<{ key: string }> | null;
+  automation_events: Array<{ key: string; capabilities?: { replyToSource?: boolean } }> | null;
   event_types: string[] | null;
   source_only: boolean;
 };
@@ -67,6 +67,9 @@ async function receiveSourceReferenceDelivery(
     WHERE id = ${notice.feed_id} AND organization_id = ${feed.organization_id}
       AND last_error IS NULL AND next_run_at > now()`;
   const allowed = new Set(subscriptions.map(subscription => subscription.automationId));
+  // Events whose messages the chat ingress can read (`chat-source-ingress.ts`).
+  const readable = new Set((feed.automation_events ?? [])
+    .filter(event => event.capabilities?.replyToSource).map(event => event.key));
   const queued: Array<{ runId: number; status: string }> = [];
   for (const { payload } of delivery.records) {
     for (const event of payload.events) {
@@ -84,12 +87,14 @@ async function receiveSourceReferenceDelivery(
         label: `Source ${event.event_type}`,
         input_text: `Source change ${event.event_type}: ${JSON.stringify(event.resource_ref)}. Read its content from the source when needed.`,
       };
-      // An Automation's first matching trigger wins, and a reply trigger's
-      // chat filter needs the message, which only the ingress worker reads.
-      // So an Automation that might reply is routed there, all triggers at once.
-      const automationIds = subscriptions
-        .filter(subscription => mayReplyToSource(subscription.triggers, signal))
-        .map(subscription => subscription.automationId);
+      // An Automation's first matching trigger wins, and a reply or a chat
+      // filter needs the message, which only the ingress worker reads. So
+      // such an Automation is routed there, all of its triggers at once.
+      const automationIds = readable.has(event.event_type)
+        ? subscriptions
+          .filter(subscription => needsSourceMessage(subscription.triggers, signal))
+          .map(subscription => subscription.automationId)
+        : [];
       const matches = await findMatchingAutomationActivations(feed.organization_id, signal, tx);
       const { backgroundTargets } = planAutomationActivations(signal, matches.filter(match =>
         allowed.has(match.automationId) && !automationIds.includes(match.automationId)));
