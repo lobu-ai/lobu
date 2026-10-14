@@ -52,6 +52,7 @@ interface DeviceMessage {
   id: string;
   chat_jid: string;
   body: string;
+  timestamp?: number;
   from_me?: boolean;
   sender_jid?: string;
 }
@@ -90,15 +91,17 @@ function fakeWhatsAppTab(params: { actionKey: string; actionInput: Record<string
   const id = String(request.input.query).slice("id:".length);
   const results = deviceMessages
     .filter((message) => message.id === id)
-    .map((message, index) => ({ ...message, timestamp: BASE_TIME + index }));
+    .map((message, index) => ({ ...message, timestamp: message.timestamp ?? BASE_TIME + index }));
   return done({ value: { ok: true, results, hasMore: false } });
 }
 
 async function insertAutomation(slug: string, ...triggers: Array<Record<string, unknown>>): Promise<number> {
   const [{ id }] = await sql`SELECT nextval('automations_id_seq') AS id`;
   const automationId = Number(id);
-  await sql`INSERT INTO automations (id, organization_id, slug, name, status, created_by, automation_group_id, managed_agent_id, triggers)
+  const configuredAt = new Date((BASE_TIME - 60) * 1000).toISOString();
+  await sql`INSERT INTO automations (id, organization_id, slug, name, status, created_by, automation_group_id, managed_agent_id, created_at, updated_at, triggers)
     VALUES (${automationId}, ${orgId}, ${slug}, ${slug}, 'active', ${ownerId}, ${automationId}, ${agentId},
+      ${configuredAt}::timestamptz, ${configuredAt}::timestamptz,
       ${sql.json(triggers.map((trigger) => ({ kind: "event", connector_key: "whatsapp.web", connection_id: connectionId,
         event_types: ["message.created"], execution: "turn", active_run: "queue", ...trigger })))})`;
   const [row] = await sql`INSERT INTO automation_versions (automation_id, version, name, prompt, created_by)
@@ -110,8 +113,8 @@ async function insertAutomation(slug: string, ...triggers: Array<Record<string, 
 const replyTo = (match?: Record<string, unknown>) =>
   ({ output: "reply_to_source", ...(match ? { match } : {}) });
 
-/** The device's reference delivery for messages, in source order; new unless `occurredAt` says otherwise. */
-async function deliver(messageIds: string | string[], notificationId = "n-1", occurredAt = new Date()) {
+/** The device's reference delivery for messages, in source order. */
+async function deliver(messageIds: string | string[], notificationId = "n-1", occurredAt: Date | null = new Date(BASE_TIME * 1000)) {
   const ids = typeof messageIds === "string" ? [messageIds] : messageIds;
   const [receipt] = await receiveFeedNotifications(sql, [{
     feed_id: feedId, connection_id: connectionId, feed_key: "live_messages",
@@ -121,7 +124,7 @@ async function deliver(messageIds: string | string[], notificationId = "n-1", oc
       epoch: "synthetic-epoch", needs_rebind: false,
       records: [{ revision: 1, payload: { id: `batch-${ids.join("-")}`, events: ids.map((id) => ({
         id, event_type: "message.created", resource_type: "message",
-        resource_ref: id, occurred_at: occurredAt.toISOString(),
+        resource_ref: id, occurred_at: occurredAt?.toISOString(),
       })) } }],
     },
   } as any], deviceId, [orgId]);
@@ -479,15 +482,46 @@ describe("WhatsApp Web source chat", () => {
   it("does not answer a replayed message older than its reply Automation", async () => {
     await insertAutomation("dm-reply", replyTo());
     const archiveId = await insertAutomation("archive", { output: "silent" });
-    deviceMessages.push({ id: "SYNTHDM15", chat_jid: DM_JID, body: "sent two days ago" });
+    const timestamp = BASE_TIME - 2 * 24 * 60 * 60;
+    deviceMessages.push({ id: "SYNTHDM15", chat_jid: DM_JID, body: "sent two days ago", timestamp });
 
-    await deliver("SYNTHDM15", "replayed", new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
+    await deliver("SYNTHDM15", "replayed", new Date(timestamp * 1000));
     await drain();
     expect(enqueued).toHaveLength(0);
     expect(sends).toHaveLength(0);
     // Background Automations still see the replayed message.
     const runs = await sql`SELECT automation_id FROM runs WHERE organization_id = ${orgId} AND run_type = 'automation'`;
     expect(runs.map((run) => Number(run.automation_id))).toEqual([archiveId]);
+  }, 60_000);
+
+  it("does not answer a reference without a source timestamp", async () => {
+    await insertAutomation("dm-reply", replyTo());
+    deviceMessages.push({ id: "SYNTHDM16", chat_jid: DM_JID, body: "unknown send time" });
+
+    await deliver("SYNTHDM16", "missing-time", null);
+    await drain();
+    expect(await ingressJobs()).toEqual([expect.objectContaining({ status: "completed", attempts: 0 })]);
+    expect(enqueued).toHaveLength(0);
+    expect(sends).toHaveLength(0);
+  }, 60_000);
+
+  it.each([false, true])("rechecks edits before ingress and selects a still-current reply (fallback: %s)", async (withFallback) => {
+    await queue!.stop();
+    queue = null;
+    const editedId = await insertAutomation("edited-reply", replyTo());
+    const fallbackId = withFallback ? await insertAutomation("unchanged-reply", replyTo()) : null;
+    deviceMessages.push({ id: "SYNTHDM17", chat_jid: DM_JID, body: "queued before the edit" });
+    await deliver("SYNTHDM17");
+    await sql`UPDATE automations SET updated_at = ${new Date((BASE_TIME + 1) * 1000).toISOString()}::timestamptz
+      WHERE id = ${editedId}`;
+
+    await startWorker();
+    await drain();
+    expect(await ingressJobs()).toEqual([expect.objectContaining({ status: "completed", attempts: 0 })]);
+    expect(enqueued).toHaveLength(withFallback ? 1 : 0);
+    if (withFallback) expect(enqueued[0].messageId).toContain(`:automation:${fallbackId}`);
+    await completeTurns();
+    expect(sends).toHaveLength(withFallback ? 1 : 0);
   }, 60_000);
 
   it("resolves the connection's numeric runtime id for chat routing", async () => {

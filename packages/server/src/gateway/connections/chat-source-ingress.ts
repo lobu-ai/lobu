@@ -17,7 +17,7 @@
  *   6. the hydrated message is matched again per Automation (its first
  *      matching trigger wins); background targets are queued on the source
  *      signal, and a group reply needs an Automation scoped to that group;
- *   7. a message sent before a reply Automation was last turned on or edited
+ *   7. a message sent before a reply Automation's latest database update
  *      gets no reply from it (a device replays older references when a feed
  *      is subscribed again);
  *   8. the bridge runs its normal reply path for the one reply Automation
