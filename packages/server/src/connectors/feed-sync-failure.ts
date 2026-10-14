@@ -35,7 +35,7 @@ import type { DbClient } from '../db/client';
 import { nextRunAt as nextRunAtFromCron } from '../utils/cron';
 import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
-import { feedBackoff } from './feed-backoff';
+import { feedBackoff, feedRetryAtSql } from './feed-backoff';
 
 interface SqlTag<TFragment> {
   (strings: TemplateStringsArray, ...values: any[]): TFragment;
@@ -44,8 +44,10 @@ interface SqlTag<TFragment> {
 /**
  * The `UPDATE feeds SET` assignments for one charged sync failure: stamp the
  * failed outcome, increment `consecutive_failures`, open the failure episode,
- * back `next_run_at` off beyond the supplied scheduling baseline (NULL keeps a
- * manual feed unscheduled), and hard-pause once the threshold is crossed.
+ * back `next_run_at` off beyond the supplied scheduling baseline, and
+ * hard-pause once the threshold is crossed. A feed with no cron has no
+ * baseline, so its retry is the backoff alone; a scheduled feed with a NULL
+ * baseline stays parked.
  *
  * Exponential backoff on top of the cron cadence so a persistently-failing
  * feed retries progressively less often instead of re-enqueueing every plain
@@ -67,13 +69,11 @@ export function feedSyncFailureAssignments<TFragment>(
     status = CASE WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN 'paused' ELSE status END,
     next_run_at = CASE
           WHEN consecutive_failures + 1 >= ${pauseThreshold} THEN NULL
-          WHEN (${params.nextRun})::timestamptz IS NULL THEN NULL
+          WHEN (${params.nextRun})::timestamptz IS NULL AND schedule IS NOT NULL THEN NULL
+          -- GREATEST ignores a NULL baseline: a feed with no cron gets the backoff.
           ELSE GREATEST(
             (${params.nextRun})::timestamptz,
-            current_timestamp + (LEAST(
-              ${feedBackoff.baseMs}::bigint * (2 ^ LEAST(consecutive_failures, 30))::bigint,
-              ${feedBackoff.maxMs}::bigint
-            ) || ' milliseconds')::interval
+            ${feedRetryAtSql(sql, sql`consecutive_failures`)}
           )
         END,
     updated_at = current_timestamp
@@ -109,7 +109,7 @@ export async function applyFeedSyncFailure(
   `) as unknown as Array<{ schedule: string | null; timezone: string | null }>;
   if (feedRows.length === 0) return null;
 
-  // Manual feeds (no schedule) stay unscheduled after failure.
+  // A feed with no cron passes no baseline; the assignments arm its backoff.
   const schedule = feedRows[0]?.schedule ?? null;
   const nextRun = schedule
     ? nextRunAtFromCron(schedule, new Date(), feedRows[0]?.timezone ?? null)

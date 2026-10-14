@@ -20,6 +20,7 @@ import logger from '../utils/logger';
 import { nextRunAt } from '../utils/cron';
 import { ToolUserError } from '../utils/errors';
 import { createSyncRun } from '../runs/queue-service';
+import { feedRetryAtSql } from '../connectors/feed-backoff';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import {
   type ConnectorClaimContext,
@@ -247,8 +248,9 @@ export async function materializeDueFeeds(
     },
     onError: async (feed, error) => {
       // Admission did not execute the source. Retry at its normal cadence,
-      // without consuming a checkpoint or the connector's failure budget.
-      // One-shot feeds wait for another trigger instead of inventing a cron.
+      // without consuming a checkpoint or the connector's failure budget. A
+      // feed with no cron keeps the due request at its current backoff instead
+      // of clearing it or retrying admission on every poll.
       let retryAt: string | null = null;
       try {
         retryAt = feed.schedule ? nextRunAt(feed.schedule, new Date(), feed.timezone) : null;
@@ -257,10 +259,13 @@ export async function materializeDueFeeds(
         // edit recomputes next_run_at; park this cursor until that correction.
         logger.error({ error: scheduleError, feedId: feed.id }, '[CheckDueFeeds] Invalid feed schedule');
       }
+      let deferredUntil: unknown;
       try {
         // Text binding preserves Postgres microseconds for this compare-and-set.
         const advanced = await sql`
-          UPDATE feeds f SET next_run_at = ${retryAt}, updated_at = current_timestamp
+          UPDATE feeds f SET next_run_at = ${
+            feed.schedule ? retryAt : feedRetryAtSql(sql, sql`f.consecutive_failures`)
+          }, updated_at = current_timestamp
           WHERE f.id = ${feed.id} AND f.organization_id = ${feed.organization_id}
             AND f.next_run_at = ${feed.next_run_at}::text::timestamptz
             AND f.schedule IS NOT DISTINCT FROM ${feed.schedule}
@@ -270,15 +275,16 @@ export async function materializeDueFeeds(
               SELECT 1 FROM runs r WHERE r.feed_id = f.id AND r.run_type = 'sync'
                 AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
             )
-          RETURNING f.id
+          RETURNING f.next_run_at
         `;
         // Another poller already advanced or admitted this exact due cursor.
         if (advanced.length === 0) return;
+        deferredUntil = advanced[0].next_run_at;
       } catch (advanceError) {
         logger.error({ error: advanceError, feedId: feed.id }, '[CheckDueFeeds] Failed to defer feed after admission error');
         return;
       }
-      const details = { error, feedId: feed.id, nextRunAt: retryAt };
+      const details = { error, feedId: feed.id, nextRunAt: deferredUntil };
       if (error instanceof ToolUserError && error.httpStatus < 500) {
         logger.warn(details, '[CheckDueFeeds] Feed admission requires setup');
       } else {

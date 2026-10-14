@@ -14,9 +14,9 @@
  * (automations/platform-events.ts) read the same numbers. It applies ONLY to a
  * run that was claimed for the feed. A never-claimed run is a dispatch failure
  * — the connector never ran — so check-stalled-executions.ts deliberately does
- * not consume this source-health budget. Manual feeds normally stay unscheduled
- * after failure; a retained source wake hint may re-arm one under this same
- * delay.
+ * not consume this source-health budget. Failed syncs without a cron use
+ * {@link feedRetryAtSql} to re-arm the due time consumed by enqueue, until
+ * the feed is paused.
  * Source listener setup failures and rejected source reference deliveries
  * reuse only the base delay and cap. They keep retrying without hard-pausing,
  * so a recovered browser/source can attach again.
@@ -90,4 +90,26 @@ export function feedBackoffDelayMs(consecutiveFailures: number): number {
  */
 export function shouldHardPauseFeed(consecutiveFailures: number): boolean {
   return consecutiveFailures >= feedBackoff.pauseThreshold;
+}
+
+interface SqlTag<TFragment> {
+  (strings: TemplateStringsArray, ...values: any[]): TFragment;
+}
+
+/**
+ * `current_timestamp` plus the backoff for a feed that has already failed
+ * `failures` times — the SQL twin of `feedBackoffDelayMs(failures + 1)`.
+ *
+ * The retry clock for a feed with no cron. The failure lane passes the count
+ * BEFORE its increment, so the delay grows with the budget it charges and the
+ * hard pause still bounds it. Lanes that deliberately do not charge the budget
+ * (an unavailable execution dependency, a failed admission) pass the current
+ * count: they retry at a fixed, capped delay, as a scheduled feed retries at
+ * its fixed cadence.
+ */
+export function feedRetryAtSql<TFragment>(sql: SqlTag<TFragment>, failures: TFragment): TFragment {
+  return sql`current_timestamp + (LEAST(
+    ${feedBackoff.baseMs}::bigint * (2 ^ LEAST(${failures}, 30))::bigint,
+    ${feedBackoff.maxMs}::bigint
+  ) || ' milliseconds')::interval`;
 }

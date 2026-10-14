@@ -181,8 +181,8 @@ export async function receiveFeedNotifications(
         );
       }
       if (notice.changed) {
-        // Never use a live event to defeat failure backoff. A manual feed that
-        // failed has no cron retry, so retain one bounded retry for its buffer.
+        // Never use a live event to defeat failure backoff: a failed feed keeps
+        // the retry its failure armed, and only one with none gets a bounded one.
         await requestFeedSync(tx, tx`
           SELECT id FROM feeds WHERE id = ${notice.feed_id}
         `);

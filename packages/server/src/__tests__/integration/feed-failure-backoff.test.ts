@@ -95,6 +95,7 @@ async function insertFeed(
   organizationId: string,
   connectionId: number,
   consecutiveFailures: number,
+  schedule: string | null = '* * * * *',
 ): Promise<number> {
   const sql = getTestDb();
   const rows = (await sql`
@@ -102,7 +103,7 @@ async function insertFeed(
       (organization_id, connection_id, feed_key, status, schedule,
        consecutive_failures, items_collected, last_sync_status, created_at, updated_at)
     VALUES
-      (${organizationId}, ${connectionId}, 'chrome-feed', 'active', '* * * * *',
+      (${organizationId}, ${connectionId}, 'chrome-feed', 'active', ${schedule},
        ${consecutiveFailures}, 0, 'failed', NOW(), NOW())
     RETURNING id
   `) as Array<{ id: number }>;
@@ -263,6 +264,55 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
     expect(after[0].first_failure_at).toBeNull();
     expect(after[0].last_error).toBe('The selected browser is offline.');
     expect(after[0].next_run_at).not.toBeNull();
+  });
+
+  describe('a feed with no cron (webhook-only or on-demand)', () => {
+    // Enqueue consumed its due time, so the failure lane is the only thing
+    // left that can arm a retry: without one the failed sync waits for a
+    // delivery that may never come.
+    async function failUnscheduled(priorFailures: number, errorMessage = 'boom') {
+      const org = await createTestOrganization();
+      const connId = await insertConnection(org.id);
+      const feedId = await insertFeed(org.id, connId, priorFailures, null);
+      const runId = await insertRunningRun(org.id, connId, feedId);
+      const { ctx, result } = mockWorkerCtx({
+        run_id: runId, worker_id: WORKER_ID, status: 'failed',
+        items_collected: 0, error_message: errorMessage,
+      });
+      await completeWorkerJob(ctx);
+      expect(result().body).toEqual({ success: true });
+      const [feed] = await getTestDb()`
+        SELECT status, schedule, consecutive_failures,
+               EXTRACT(EPOCH FROM (next_run_at - updated_at)) * 1000 AS backoff_ms
+        FROM feeds WHERE id = ${feedId}
+      `;
+      return feed as {
+        status: string; schedule: string | null; consecutive_failures: number;
+        backoff_ms: number | string | null;
+      };
+    }
+
+    it.each([0, 1])('keeps a backed-off retry after a failed sync (%i prior failures)', async (priorFailures) => {
+      const feed = await failUnscheduled(priorFailures);
+      expect(feed).toMatchObject({ status: 'active', schedule: null, consecutive_failures: priorFailures + 1 });
+      // Compare timestamps written together, independent of handler/query latency.
+      expect(Number(feed.backoff_ms)).toBe(BASE_MS * 2 ** priorFailures);
+    });
+
+    it('still hard-pauses with no retry once the failure threshold is crossed', async () => {
+      const feed = await failUnscheduled(PAUSE_THRESHOLD - 1);
+      expect(feed).toMatchObject({ status: 'paused', consecutive_failures: PAUSE_THRESHOLD });
+      expect(feed.backoff_ms).toBeNull();
+    });
+
+    it.each([0, 2])('retries an unavailable execution dependency without charging the budget (%i prior failures)', async (priorFailures) => {
+      const feed = await failUnscheduled(
+        priorFailures,
+        '[lobu:dependency_unavailable:browser_offline] The selected browser is offline.',
+      );
+      expect(feed).toMatchObject({ status: 'active', consecutive_failures: priorFailures });
+      expect(Number(feed.backoff_ms)).toBe(BASE_MS * 2 ** priorFailures);
+    });
   });
 
   it('5a: a failed completion backs off next_run_at beyond the plain cadence', async () => {
@@ -768,7 +818,7 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
    * prod on a connector importing an SDK export that had been removed (14
    * days, 0 recorded failures).
    */
-  async function pollUncompilableFeed(): Promise<{
+  async function pollUncompilableFeed(schedule: string | null = '* * * * *'): Promise<{
     runId: number;
     feedId: number;
     status: number;
@@ -790,8 +840,8 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
         (organization_id, connection_id, feed_key, status, schedule, next_run_at,
          consecutive_failures, items_collected, created_at, updated_at)
       VALUES
-        (${org.id}, ${connRow.id}, 'pages', 'active', '* * * * *',
-         current_timestamp - INTERVAL '5 minutes', 0, 0, NOW(), NOW())
+        (${org.id}, ${connRow.id}, 'pages', 'active', ${schedule},
+         ${schedule ? sql`current_timestamp - INTERVAL '5 minutes'` : null}, 0, 0, NOW(), NOW())
       RETURNING id
     `) as Array<{ id: number }>;
     const [runRow] = (await sql`
@@ -828,9 +878,9 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
     return { runId: runRow.id, feedId: feedRow.id, status: response.status, polled };
   }
 
-  it('charges a gateway-side compile failure to the feed, not just the run', async () => {
+  it.each(['* * * * *', null])('charges and retries a gateway-side compile failure (schedule: %s)', async (schedule) => {
     const sql = getTestDb();
-    const { runId, feedId, status, polled } = await pollUncompilableFeed();
+    const { runId, feedId, status, polled } = await pollUncompilableFeed(schedule);
     expect(status).toBe(200);
     expect(polled?.skipped_run_id).toBe(runId);
 
@@ -842,14 +892,14 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
 
     const [feed] = (await sql`
       SELECT status, last_sync_status, last_error, consecutive_failures,
-             EXTRACT(EPOCH FROM (next_run_at - current_timestamp)) AS seconds_out
+             EXTRACT(EPOCH FROM (next_run_at - updated_at)) * 1000 AS backoff_ms
       FROM feeds WHERE id = ${feedId}
     `) as Array<{
       status: string;
       last_sync_status: string | null;
       last_error: string | null;
       consecutive_failures: number;
-      seconds_out: number | string | null;
+      backoff_ms: number | string | null;
     }>;
 
     // The feed must record the failure the run already recorded...
@@ -857,10 +907,10 @@ describe('feed failure backoff + auto-pause (#2033)', () => {
     expect(feed.last_sync_status).toBe('failed');
     expect(String(feed.last_error)).toContain('test.uncompilable');
     expect(Number(feed.consecutive_failures)).toBe(1);
-    // ...and be re-armed in the future. It was seeded 5 minutes overdue, and
-    // the claim CTE never moves next_run_at, so without the charge it would
-    // still be due and re-fire on the next poll.
-    expect(Number(feed.seconds_out)).toBeGreaterThan(0);
+    // The failed claim must arm a retry even when enqueue consumed the only
+    // due time and there is no cron slot to fall back on.
+    expect(Number(feed.backoff_ms)).toBeGreaterThanOrEqual(BASE_MS);
+    if (schedule === null) expect(Number(feed.backoff_ms)).toBe(BASE_MS);
   });
 
   it('never commits the run failure without the feed charge', async () => {

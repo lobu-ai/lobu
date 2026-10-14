@@ -35,7 +35,7 @@ import {
 	type ConnectorDeriveFeedContext,
 } from "../automations/connector-derived";
 import { materializeConnectorAutomationSignal } from "../automations/connector-signal";
-import { feedBackoff } from "../connectors/feed-backoff";
+import { feedBackoff, feedRetryAtSql } from "../connectors/feed-backoff";
 import {
 	FeedPageUnavailableError,
 	lockFeedPage,
@@ -1343,7 +1343,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 					timezone: string | null;
 				}>;
 
-				// Manual feeds (no schedule) stay unscheduled after completion.
+				// No cron baseline for manual feeds; failures below arm a backoff retry.
 				const schedule = feedRows[0]?.schedule ?? null;
 				const nextRun = schedule
 					? nextRunAtFromCron(schedule, new Date(), feedRows[0]?.timezone ?? null)
@@ -1351,12 +1351,18 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 
 				// A connector that could not reach a required execution dependency never
 				// reached the source. Preserve the last real source-health result, do not
-				// consume the hard-pause budget, and keep the ordinary schedule armed.
+				// consume the hard-pause budget, and keep the ordinary schedule armed. A
+				// feed with no cron has no schedule to re-arm, so it keeps a retry at its
+				// current backoff instead of losing the sync it was asked for.
 				if (dependencyUnavailable) {
 					await tx`
 	          UPDATE feeds
 	          SET last_error = ${recordedError},
-	              next_run_at = ${nextRun},
+	              next_run_at = ${
+									schedule
+										? tx`${nextRun}::timestamptz`
+										: feedRetryAtSql(tx, tx`consecutive_failures`)
+								},
 	              updated_at = current_timestamp
 	          WHERE id = ${feedId}
 	        `;

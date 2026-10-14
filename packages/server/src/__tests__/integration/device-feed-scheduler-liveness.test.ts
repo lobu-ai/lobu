@@ -38,7 +38,7 @@ describe('scheduled feed device liveness', () => {
 
   it.each([
     { schedule: '0 9 * * *', deferred: true, localTime: '09:00' },
-    { schedule: null, deferred: null, localTime: null },
+    { schedule: null, deferred: true, localTime: null },
   ])('backs off failed admission without consuming source health or starving a healthy feed (schedule: $schedule)', async ({ schedule, deferred, localTime }) => {
     const sql = getTestDb();
     const { org, user } = await seedOwnerContext({ orgName: 'Admission Scheduler Org' });
@@ -71,7 +71,8 @@ describe('scheduled feed device liveness', () => {
       const [after] = await sql`SELECT next_run_at > now() AS deferred,
         to_char(next_run_at AT TIME ZONE 'Pacific/Auckland', 'HH24:MI') AS local_time,
         checkpoint, consecutive_failures, last_sync_status FROM feeds WHERE id = ${feedId}`;
-      expect(after).toMatchObject({ deferred, local_time: localTime, checkpoint: { cursor: 'preserved' },
+      // A feed with no cron has no local slot: it keeps the backoff retry instead.
+      expect(after).toMatchObject({ deferred, ...(localTime ? { local_time: localTime } : {}), checkpoint: { cursor: 'preserved' },
         consecutive_failures: 2, last_sync_status: 'failed' });
       expect(warning).toHaveBeenCalledTimes(1);
       expect(error).not.toHaveBeenCalled();

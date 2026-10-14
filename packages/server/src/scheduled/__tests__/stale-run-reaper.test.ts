@@ -1212,17 +1212,23 @@ describe("reapStaleRuns — a lost claimed sync is charged to its feed", () => {
 		}
 	});
 
-	test("a manual feed stays unscheduled", async () => {
+	test("a feed with no cron keeps a backed-off retry", async () => {
+		// Enqueue nulled this feed's due time; without a retry here the lost
+		// sync waits for a webhook delivery that may never come.
 		const feedId = 8484;
 		await seedFeed(feedId);
+		await getDb()`UPDATE feeds SET consecutive_failures = 2 WHERE id = ${feedId}`;
 		await seedLostSync(feedId);
 
-		await reapStaleRuns();
+		const result = await reapStaleRuns();
 
+		expect(result.retriesCreated).toBe(0);
 		expect(await feedHealth(feedId)).toMatchObject({
-			consecutive_failures: 1,
+			consecutive_failures: 3,
 			last_sync_status: "failed",
-			unscheduled: true,
+			status: "active",
+			backed_off: true,
+			unscheduled: false,
 		});
 	});
 });
