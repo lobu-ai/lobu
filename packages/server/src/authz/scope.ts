@@ -1,19 +1,14 @@
 /**
- * AuthzScope — the single value every read seam compiles its scoping predicate
- * from. M1 introduces the type and routes the existing per-user
- * connection-visibility logic through one compiler (see ./connection-visibility);
- * later milestones grow `principal` into a verified `$member` (M3) and put
- * `policyVersion` to work (M2/M6). No runtime change at M1: `principal` is the
- * requesting user id and `null` means a headless/service caller (org-visible
- * rows only, fail-closed for private data).
+ * AuthzScope — the value read seams use to compile visibility predicates.
+ * The read principal is the requesting user or, for a headless Automation
+ * script, its server-resolved creator. A null principal sees only org-visible
+ * connections. Write policy and approvals use the execution context separately.
  */
 export interface AuthzScope {
   /** The tenant. Every read is partitioned by this first. */
   organizationId: string;
   /**
-   * The requesting principal. Today the user id; M3 resolves it to a verified
-   * `$member`. `null` = headless/service caller — private data is excluded
-   * (fail-closed); only org-visible rows are returned.
+   * User id used for read visibility. `null` excludes private connections.
    */
   principal: string | null;
   /** The durable agent identity when the read happens inside an agent run. */
@@ -23,26 +18,26 @@ export interface AuthzScope {
 }
 
 /**
- * Build an AuthzScope from a tool/SDK execution context. The `ToolContext`
- * carries `userId: string | null` (the requesting user, null when anonymous /
- * headless) plus the durable `agentId` — exactly the inputs the scope needs.
+ * Build read scope without replacing the execution identity. An authenticated
+ * user always takes precedence over the Automation's server-resolved creator.
  */
 export function authzScopeFromToolContext(ctx: {
   organizationId: string;
   userId: string | null;
   agentId?: string | null;
+  automationReadPrincipalId?: string | null;
 }): AuthzScope {
   return {
     organizationId: ctx.organizationId,
-    principal: ctx.userId,
+    principal: ctx.userId ?? ctx.automationReadPrincipalId ?? null,
     agentId: ctx.agentId ?? null,
   };
 }
 
 /**
  * A headless/service scope: no principal, so only org-visible rows are returned
- * (fail-closed for private data). Use for automations / scheduled jobs / internal
- * reads that run without a requesting user.
+ * (fail-closed for private data). Use for internal reads without a user or
+ * Automation creator principal.
  */
 export function headlessScope(organizationId: string): AuthzScope {
   return { organizationId, principal: null };

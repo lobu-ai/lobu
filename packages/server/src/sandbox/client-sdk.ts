@@ -72,6 +72,7 @@ import type { OrganizationsNamespace } from "./namespaces/organizations";
 import type { ViewsNamespace } from "./namespaces/views";
 import type { SchedulesNamespace } from "./namespaces/schedules";
 import type { AutomationsNamespace } from "./namespaces/automations";
+import { authzScopeFromToolContext } from "../authz/scope";
 
 export interface ClientSDK {
 	agents: AgentsNamespace;
@@ -287,7 +288,7 @@ export function buildClientSDK(
 				: undefined;
 			const scoped = validateAndScopeQuery(querySql, workspaceCtx.organizationId, {
 				window,
-				userId: workspaceCtx.userId,
+				userId: authzScopeFromToolContext(workspaceCtx).principal,
 				safeColumns: isSystemContext(workspaceCtx) ? undefined : SAFE_COLUMN_DEFS,
 				restrictedTables:
 					isSystemContext(workspaceCtx) || isAdmin

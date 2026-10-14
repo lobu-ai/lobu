@@ -14,6 +14,7 @@ import type { Env } from '../../index';
 import { runMetric } from '../../metrics/run-metric';
 import { isAdminOrOwnerRole, isInProcessSystemCall } from '../access-control';
 import type { ToolContext } from '../registry';
+import { authzScopeFromToolContext } from '../../authz/scope';
 import { withValidatedArgs } from '../validate-args';
 
 export const QueryMetricSchema = Type.Object({
@@ -51,7 +52,7 @@ async function queryMetricImpl(
     by: args.by,
     segment: args.segment,
     entityId: args.entity_id,
-    userId: ctx.userId,
+    userId: authzScopeFromToolContext(ctx).principal,
     // Workspace-identity audit rows are owner/admin/system-only; ordinary
     // members must not move a declared metric by counting lifecycle events.
     excludeWorkspaceAudit: !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(ctx.memberRole),

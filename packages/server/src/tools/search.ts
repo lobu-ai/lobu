@@ -1511,6 +1511,7 @@ async function searchWorkspaceImpl(
     organizationId: ctx.organizationId,
     userId: ctx.userId,
     agentId: ctx.agentId,
+    automationReadPrincipalId: ctx.automationReadPrincipalId,
   });
 
   // Preserve compatibility with reviewer prompts and user language such as
