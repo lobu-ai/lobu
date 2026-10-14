@@ -5,7 +5,9 @@ import addFormats from "ajv-formats";
 import applyReminderChanges, { input, marker } from "../task-builder.reaction";
 
 type Execute = Parameters<ReactionClient["operations"]["execute"]>[0];
-type ListRuns = Parameters<ReactionClient["operations"]["listRuns"]>[0];
+type ListRuns = NonNullable<
+  Parameters<ReactionClient["operations"]["listRuns"]>[0]
+>;
 
 const context = (changes: unknown[]): ReactionContext =>
   ({
@@ -108,7 +110,11 @@ function harness(
           throw new Error("synthetic dispatch refusal");
         const prior = runs.find((run) => run.key === input.idempotency_key);
         if (prior) {
-          if (prior.parent_run_id !== input.automation_source?.run_id)
+          // A reused key replays only the same request; the server 409s otherwise.
+          if (
+            prior.parent_run_id !== input.automation_source?.run_id ||
+            JSON.stringify(prior.input) !== JSON.stringify(input.input)
+          )
             throw new Error("synthetic key conflict");
           return { status: prior.status, run_id: prior.id };
         }
@@ -126,7 +132,9 @@ function harness(
         if (options.execute) {
           const result = await options.execute(input);
           run.status = String(
-            result.status === "in_progress" ? "pending" : result.status
+            ["in_progress", "pending_approval"].includes(String(result.status))
+              ? "pending"
+              : result.status
           );
           runs.push(run);
           return { ...result, run_id: run.id };
@@ -280,11 +288,11 @@ describe("Task Collaborator reminder changes", () => {
     const h = harness();
     const old = [{ action: "update", origin_id: "reminder:b", title: "Old" }];
     await applyReminderChanges(atRun(901, old), h.client);
+    h.runs[0].status = "failed";
     await applyReminderChanges(
       atRun(902, [{ action: "update", origin_id: "reminder:b", title: "New" }]),
       h.client
     );
-    h.runs[0].status = "failed";
     await applyReminderChanges(atRun(901, old), h.client);
     expect(h.executed).toHaveLength(2);
   });
@@ -533,7 +541,7 @@ describe("Task Collaborator reminder changes", () => {
     expect(h.executed).toHaveLength(1);
   });
 
-  test("completes and updates under a key of the window run that proposed them", async () => {
+  test("orders completions and updates per reminder on its newest write", async () => {
     const h = harness();
     await applyReminderChanges(
       context([
@@ -558,14 +566,31 @@ describe("Task Collaborator reminder changes", () => {
         input: { origin_id: "reminder:b", due: "2026-10-21T09:00:00Z" },
       },
     ]);
-    expect(
-      h.executed.map((call) =>
-        String(call.idempotency_key).split(":").slice(0, 4)
-      )
-    ).toEqual([
-      ["task-reminders", "complete_reminder", "7", "901"],
-      ["task-reminders", "update_reminder", "7", "901"],
+    const keys = h.executed.map((call) => String(call.idempotency_key));
+    expect(keys.map((key) => key.split(":").slice(0, 3))).toEqual([
+      ["task-reminders", "write", "7"],
+      ["task-reminders", "write", "7"],
     ]);
+    // Neither reminder had a write yet, so both order on the read horizon.
+    expect(keys.every((key) => /:h\d{4}-\d{2}-\d{2}$/.test(key))).toBe(true);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  test("a reaction's second write to a reminder orders on its first", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([
+        { action: "update", origin_id: "reminder:a", title: "Renamed" },
+        { action: "complete", origin_id: "reminder:a" },
+      ]),
+      h.client
+    );
+    expect(h.runs).toHaveLength(2);
+    expect(
+      String(h.executed[1]?.idempotency_key).endsWith(
+        `:${String(h.runs[0].id).padStart(20, "0")}`
+      )
+    ).toBe(true);
   });
 
   test("a write that fails after its reaction is retried by a later reaction with no changes", async () => {
@@ -582,7 +607,11 @@ describe("Task Collaborator reminder changes", () => {
     const [first, retry] = h.executed.map((call) =>
       String(call.idempotency_key)
     );
-    expect(retry).toBe(first.replace(/:0$/, ":1"));
+    // The retry orders on the failed attempt, so it cannot replay that key.
+    expect(retry).not.toBe(first);
+    expect(retry.endsWith(`:${String(h.runs[0].id).padStart(20, "0")}`)).toBe(
+      true
+    );
     expect(h.runs.map((run) => run.status)).toEqual(["failed", "pending"]);
   });
 
@@ -614,6 +643,7 @@ describe("Task Collaborator reminder changes", () => {
         ]),
         h.client
       );
+      h.runs[index].status = "completed";
     }
     expect(h.runs.map((run) => (run.input as { title: string }).title)).toEqual(
       ["Old", "New", "Old"]
@@ -634,6 +664,144 @@ describe("Task Collaborator reminder changes", () => {
       await applyReminderChanges(atRun(905, [change]), h.client);
       expect(h.runs).toHaveLength(3);
     }
+  });
+
+  test("of two reactions that read the same state, the newer window's update wins in either order", async () => {
+    for (const newerFirst of [true, false]) {
+      const h = harness();
+      const execute = h.client.operations.execute;
+      const update = (runId: number, title: string) =>
+        applyReminderChanges(
+          atRun(runId, [{ action: "update", origin_id: "reminder:b", title }]),
+          h.client
+        );
+      // The other reaction runs to completion after this one read history,
+      // just before this one dispatches.
+      let interleaved = false;
+      h.client.operations.execute = (async (input: Execute) => {
+        const run = input.automation_source?.run_id;
+        if (!interleaved && run === (newerFirst ? 901 : 902)) {
+          interleaved = true;
+          await (newerFirst ? update(902, "New") : update(901, "Old"));
+        }
+        return execute(input);
+      }) as typeof execute;
+      const first = newerFirst ? update(901, "Old") : update(902, "New");
+      if (newerFirst) await first;
+      else {
+        // The older write won the shared key, so the newer one fails and its
+        // reaction retry orders on top of it after it finishes.
+        await expect(first).rejects.toThrow("synthetic key conflict");
+        h.runs[0].status = "completed";
+        await update(902, "New");
+      }
+      expect(
+        h.runs.map((run) => (run.input as { title: string }).title)
+      ).toEqual(newerFirst ? ["New"] : ["Old", "New"]);
+    }
+  });
+
+  test("a newer write to other fields of a reminder does not cancel a failed one", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      atRun(901, [
+        {
+          action: "update",
+          origin_id: "reminder:b",
+          title: "Renamed",
+          due: "2026-10-20T09:00:00Z",
+        },
+      ]),
+      h.client
+    );
+    h.runs[0].status = "failed";
+    await applyReminderChanges(
+      atRun(902, [
+        {
+          action: "update",
+          origin_id: "reminder:b",
+          due: "2026-10-21T09:00:00Z",
+        },
+      ]),
+      h.client
+    );
+    await applyReminderChanges(atRun(903, []), h.client);
+    // The next reaction retries only the title; the due date keeps the newer value.
+    expect(h.runs.map((run) => run.input)).toEqual([
+      {
+        origin_id: "reminder:b",
+        title: "Renamed",
+        due: "2026-10-20T09:00:00Z",
+      },
+      { origin_id: "reminder:b", title: "Renamed" },
+      { origin_id: "reminder:b", due: "2026-10-21T09:00:00Z" },
+    ]);
+  });
+
+  test("trimming superseded fields cannot revive an admitted or cancelled update", async () => {
+    for (const status of [
+      "pending",
+      "claimed",
+      "running",
+      "completed",
+      "cancelled",
+    ]) {
+      const h = harness();
+      const original = {
+        action: "update",
+        origin_id: "reminder:b",
+        title: "Original title",
+        due: "2026-10-20T09:00:00Z",
+      };
+      await applyReminderChanges(atRun(901, [original]), h.client);
+      h.runs[0].status = "completed";
+      await applyReminderChanges(
+        atRun(902, [
+          {
+            action: "update",
+            origin_id: "reminder:b",
+            due: "2026-10-21T09:00:00Z",
+          },
+        ]),
+        h.client
+      );
+      // Also exercise old ledger states admitted before conflicting writes
+      // were made to wait for completion.
+      h.runs[0].status = status;
+      await applyReminderChanges(atRun(901, [original]), h.client);
+      expect(h.runs).toHaveLength(2);
+    }
+  });
+
+  test("trimming superseded fields cannot reset an exhausted update's attempt limit", async () => {
+    const original = {
+      action: "update",
+      origin_id: "reminder:b",
+      title: "Original title",
+      due: "2026-10-20T09:00:00Z",
+    };
+    const h = harness();
+    await applyReminderChanges(atRun(901, [original]), h.client);
+    for (const runId of [902, 903]) {
+      h.runs.at(-1)!.status = "failed";
+      await applyReminderChanges(atRun(runId, []), h.client);
+    }
+    h.runs.at(-1)!.status = "failed";
+    await applyReminderChanges(
+      atRun(904, [
+        {
+          action: "update",
+          origin_id: "reminder:b",
+          due: "2026-10-21T09:00:00Z",
+        },
+      ]),
+      h.client
+    );
+    expect(h.runs).toHaveLength(4);
+    expect(h.runs[3].input).toEqual({
+      origin_id: "reminder:b",
+      due: "2026-10-21T09:00:00Z",
+    });
   });
 
   test("an older proposal whose dispatch never reached the ledger cannot overwrite a newer window", async () => {
@@ -670,6 +838,7 @@ describe("Task Collaborator reminder changes", () => {
     await expect(
       applyReminderChanges(atRun(901, runA), h.client)
     ).rejects.toThrow("synthetic dispatch failure");
+    h.runs[0].status = "completed";
     await applyReminderChanges(
       atRun(902, [{ action: "update", origin_id: "reminder:b", title: "New" }]),
       h.client
@@ -693,11 +862,11 @@ describe("Task Collaborator reminder changes", () => {
       atRun(901, [{ action: "update", origin_id: "reminder:b", title: "Old" }]),
       h.client
     );
+    h.runs[0].status = "failed";
     await applyReminderChanges(
       atRun(902, [{ action: "update", origin_id: "reminder:b", title: "New" }]),
       h.client
     );
-    h.runs[0].status = "failed";
     await applyReminderChanges(atRun(903, []), h.client);
     expect(h.executed).toHaveLength(2);
   });

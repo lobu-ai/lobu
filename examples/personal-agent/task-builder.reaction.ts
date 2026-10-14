@@ -135,12 +135,29 @@ function identity(write: Write): string {
   return markerOf(write) ?? `${write.parentRunId}|${retryIdentity(write)}`;
 }
 
-// Each terminal failure moves a write to a fresh key so it can be retried.
-function idempotencyKey(connectionId: number, write: Write, failed: number) {
+// A create's key moves to a fresh generation after each terminal failure so it
+// can be retried. Completions and updates are ordered per reminder instead: the
+// key names the newest write to that reminder the reaction saw, so of two
+// reactions that read the same state, the server admits one and the other must
+// re-read before writing over it. The Mac claims its queued operations oldest
+// first, one at a time, so admission order is the order they apply in.
+function idempotencyKey(
+  connectionId: number,
+  write: Write,
+  failed: number,
+  base: string
+) {
   const createLine = markerOf(write);
   return createLine
     ? `task-reminders:create:${connectionId}:${digest(createLine)}:${failed}`
-    : `task-reminders:${write.operation}:${connectionId}:${write.parentRunId}:${digest(identity(write))}:${failed}`;
+    : `task-reminders:write:${connectionId}:${digest(String(write.input.origin_id))}:${base}`;
+}
+
+// The reminder fields a write sets.
+function fieldsOf(write: Write): string[] {
+  return write.operation === "complete_reminder"
+    ? ["completed"]
+    : Object.keys(write.input).filter((field) => field !== "origin_id");
 }
 
 type Attempts = {
@@ -157,9 +174,25 @@ type History = {
   writes: Map<string, Attempts>;
   // The newest attempt on each reminder, including cancellations.
   touched: Map<string, string>;
-  // The newest window run that proposed any write to each reminder.
-  proposedBy: Map<string, number>;
+  // The newest attempt on each reminder field, and the window that proposed it.
+  fields: Map<string, { position: string; parentRunId: number }>;
+  // Names the ordering base of a reminder with no write in the read horizon.
+  horizon: string;
 };
+
+function latestAttempt(history: History, write: Write, automationId: number) {
+  const key = retryIdentity(write);
+  let latest: Attempts | undefined;
+  for (const entry of history.writes.values()) {
+    if (
+      entry.automationId === automationId &&
+      retryIdentity(entry.write) === key &&
+      (!latest || entry.lastPosition > latest.lastPosition)
+    )
+      latest = entry;
+  }
+  return latest;
+}
 
 async function readHistory(
   client: ReactionClient,
@@ -175,7 +208,7 @@ async function readHistory(
   ];
   const writes = new Map<string, Attempts>();
   const touched = new Map<string, string>();
-  const proposedBy = new Map<string, number>();
+  const fields = new Map<string, { position: string; parentRunId: number }>();
   const failures = new Map<string, number>();
   // A run can match two filters, and runs created mid-scan must not shift
   // pages, so pages follow the (created_at, id) keyset and each run counts once.
@@ -236,11 +269,12 @@ async function readHistory(
           position > (touched.get(origin) ?? "")
         )
           touched.set(origin, position);
-        if (
-          typeof origin === "string" &&
-          write.parentRunId > (proposedBy.get(origin) ?? 0)
-        )
-          proposedBy.set(origin, write.parentRunId);
+        if (typeof origin === "string")
+          for (const field of fieldsOf(write)) {
+            const key = `${origin}|${field}`;
+            if (position > (fields.get(key)?.position ?? ""))
+              fields.set(key, { position, parentRunId: write.parentRunId });
+          }
       }
       const last = page.runs.at(-1);
       if (!page.has_more || !last) break;
@@ -258,7 +292,45 @@ async function readHistory(
         `${attempts.automationId}|${retryIdentity(attempts.write)}`
       ) ?? 0;
   }
-  return { writes, touched, proposedBy };
+  return {
+    writes,
+    touched,
+    fields,
+    horizon: `h${createdAfter.slice(0, 10)}`,
+  };
+}
+
+// The fields of a completion or update no newer write has set. A write is
+// newer when a later window proposed it, or when it followed this write's own
+// latest attempt; `proposed` adds this reaction's own new changes. An update
+// keeps only its live fields, so it never sets a field back to an older value.
+function unsuperseded(
+  history: History,
+  write: Write,
+  proposed: Map<string, number> = new Map()
+): Write | undefined {
+  const origin = write.input.origin_id;
+  if (typeof origin !== "string") return write;
+  const own = history.writes.get(identity(write))?.lastPosition;
+  const live = fieldsOf(write).filter((field) => {
+    const key = `${origin}|${field}`;
+    const latest = history.fields.get(key);
+    return !(
+      (proposed.get(key) ?? 0) > write.parentRunId ||
+      (latest &&
+        (latest.parentRunId > write.parentRunId ||
+          (own !== undefined && latest.position > own)))
+    );
+  });
+  if (live.length === 0) return undefined;
+  if (live.length === fieldsOf(write).length) return write;
+  return {
+    ...write,
+    input: Object.fromEntries([
+      ["origin_id", origin],
+      ...live.map((field) => [field, write.input[field]]),
+    ]),
+  };
 }
 
 function writeOf(change: Change, parentRunId: number): Write {
@@ -350,6 +422,23 @@ export default async function applyReminderChanges(
   // that queued them. Each reaction, including one with no changes, retries
   // this Automation's recent writes that have since failed. Cancellations and
   // superseded writes must not be retried.
+  const failures: string[] = [];
+  const fresh: Write[] = [];
+  for (const [index, change] of changes.entries()) {
+    try {
+      fresh.push(writeOf(change, source.run_id));
+    } catch (error) {
+      failures.push(
+        `Change ${index}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+  // This window's own changes are the newest proposal for the fields they set.
+  const proposed = new Map<string, number>();
+  for (const write of fresh)
+    for (const field of markerOf(write) ? [] : fieldsOf(write))
+      proposed.set(`${write.input.origin_id}|${field}`, write.parentRunId);
+
   const writes: Write[] = [];
   const retryAfter = new Date(Date.now() - RECENT_MS).toISOString();
   for (const attempts of history.writes.values()) {
@@ -357,47 +446,42 @@ export default async function applyReminderChanges(
       attempts.automationId !== automationId ||
       attempts.settled ||
       attempts.lastStatus === "cancelled" ||
+      attempts.failed >= MAX_ATTEMPTS ||
       // Older completions are outside the read horizon, so an older failure
       // cannot safely be retried: a later successful write may supersede it.
-      attempts.lastPosition < retryAfter ||
-      changes.some(
-        (change) =>
-          change.action !== "create" &&
-          change.origin_id === attempts.write.input.origin_id
-      )
+      attempts.lastPosition < retryAfter
     )
       continue;
-    writes.push(attempts.write);
+    const write = markerOf(attempts.write)
+      ? attempts.write
+      : unsuperseded(history, attempts.write, proposed);
+    if (write) writes.push(write);
+  }
+  for (const write of fresh) {
+    // Trimming changes the input identity. Preserve the original admission,
+    // cancellation and retry limit before considering its remaining fields.
+    const previous = latestAttempt(history, write, automationId);
+    if (
+      history.writes.get(identity(write))?.settled ||
+      previous?.lastStatus === "cancelled" ||
+      (previous && previous.failed >= MAX_ATTEMPTS)
+    )
+      continue;
+    const live = markerOf(write) ? write : unsuperseded(history, write);
+    if (live) writes.push(live);
   }
 
-  const failures: string[] = [];
-  for (const [index, change] of changes.entries()) {
-    try {
-      writes.push(writeOf(change, source.run_id));
-    } catch (error) {
-      failures.push(
-        `Change ${index}: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
+  // The ordering base of each reminder, advanced as this reaction writes it.
+  const bases = new Map<string, string>();
   const queued = new Set<string>();
   for (const write of writes) {
     const key = identity(write);
     const attempts = history.writes.get(key);
     const createLine = markerOf(write);
     const retryKey = retryIdentity(write);
-    const related = [...history.writes.values()].filter(
-      (entry) =>
-        entry.automationId === automationId &&
-        retryIdentity(entry.write) === retryKey
-    );
-    const retryState = related.reduce<Attempts | undefined>(
-      (latest, entry) =>
-        !latest || entry.lastPosition > latest.lastPosition ? entry : latest,
-      undefined
-    );
-    if (queued.has(retryKey) || (createLine && attempts?.settled)) {
+    const retryState = latestAttempt(history, write, automationId);
+    // An earlier attempt of this reaction already admitted the write.
+    if (queued.has(retryKey) || attempts?.settled) {
       if (createLine)
         client.log(`Skipped a reminder already being created: ${createLine}`);
       continue;
@@ -424,15 +508,6 @@ export default async function applyReminderChanges(
         history.touched.get(origin) === retryState.lastPosition
       )
         continue;
-      // A newer window's write to the same reminder wins, even when this
-      // proposal's own dispatch never reached the ledger. A retry is stamped
-      // with the window that dispatched it, so the order errs toward skipping.
-      if ((history.proposedBy.get(origin) ?? 0) > write.parentRunId) continue;
-      if (
-        attempts &&
-        (history.touched.get(origin) ?? "") > attempts.lastPosition
-      )
-        continue;
     }
     queued.add(retryKey);
     try {
@@ -445,7 +520,12 @@ export default async function applyReminderChanges(
           idempotency_key: idempotencyKey(
             connectionId,
             write,
-            retryState?.failed ?? 0
+            retryState?.failed ?? 0,
+            typeof origin === "string"
+              ? (bases.get(origin) ??
+                  history.touched.get(origin)?.split("|")[1] ??
+                  history.horizon)
+              : history.horizon
           ),
           automation_source: source,
           background: true,
@@ -454,6 +534,12 @@ export default async function applyReminderChanges(
         // Admission may race another window. A matching newer queued write
         // satisfies this retry even though its trusted parent differs.
         const latest = await readHistory(client, connectionId);
+        // Another reaction wrote this reminder first. Its write wins when it is
+        // newer; otherwise this write retries on top of it.
+        if (!createLine && !unsuperseded(latest, write)) {
+          client.log(`Skipped ${write.operation} superseded by a newer write`);
+          continue;
+        }
         const admitted = [...latest.writes.values()].some(
           (entry) =>
             retryIdentity(entry.write) === retryIdentity(write) &&
@@ -475,6 +561,8 @@ export default async function applyReminderChanges(
           result.error_message ?? `${write.operation} ${result.status}`
         );
       }
+      if (typeof origin === "string" && result.run_id != null)
+        bases.set(origin, String(result.run_id).padStart(20, "0"));
       client.log(`Queued ${write.operation}`, {
         run_id: result.run_id,
         status: result.status,
