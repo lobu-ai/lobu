@@ -186,18 +186,77 @@ export function isConfinedChatTurn(claims: Parameters<typeof chatTurnAccessOf>[0
   return access === "reply_only" || access === "public_visitor";
 }
 
+const CHAT_TURN_ACCESS_TEXT: Record<ChatTurnAccess, string[]> = {
+  member: [
+    "The person messaging you is a verified member of this workspace who linked this chat account, writing to you directly.",
+    "Your workspace tools act as them, with their access, including their private connections.",
+    "When a request needs workspace knowledge or actions, use the tools available to you (search memory first) rather than saying you cannot.",
+  ],
+  org_shared: [
+    "The person messaging you is part of this organization.",
+    "Your workspace tools see only what the organization shares, never anyone's private connections; use the tools available to you when a request needs workspace knowledge.",
+  ],
+  public_visitor: [
+    "The person messaging you is not linked to a member of this workspace.",
+    "Your tools can read only this workspace's public knowledge; do not claim access to anything else.",
+    "If they need more, tell them they can join the workspace, or link this chat account if they are already a member.",
+  ],
+  reply_only: [
+    "The person messaging you is not linked to a member of this workspace, so this turn has no workspace tools: no memory, connections, or operations.",
+    "Answer from the conversation alone, and do not claim to have looked anything up or changed anything in the workspace.",
+    "If they need workspace data or actions, tell them to ask an admin of this workspace to invite them, or to link this chat account if they are already a member.",
+  ],
+};
+
 /**
- * What a reply-only turn's model is told, so it neither promises workspace
- * work it cannot do nor leaves the sender without a way to fix it.
+ * What a chat turn's model is told about its sender's access, so it uses the
+ * tools it has, neither promises nor refuses what its tier decides, and is not
+ * anchored by earlier replies made under different access (a sender who links
+ * mid-conversation keeps the same history). Sender-independent: one fixed
+ * text per tier, so it never splits the connection's cached prompt prefix.
  */
-export function replyOnlyTurnInstructions(): string {
+export function chatTurnAccessInstructions(access: ChatTurnAccess): string {
   return [
     "## Workspace access",
     "",
-    "The person messaging you is not a member of this workspace, so this turn has no workspace tools: no memory, connections, or operations.",
-    "Answer from the conversation alone, and do not claim to have looked anything up or changed anything in the workspace.",
-    "If they need workspace data or actions, tell them to ask an admin of this workspace to invite them.",
+    ...CHAT_TURN_ACCESS_TEXT[access],
+    "This describes access for the current message. Earlier replies in this conversation may reflect different access at that time; follow this section.",
   ].join("\n");
+}
+
+/**
+ * The per-turn line naming a linked sender. Conversation-scoped, so it rides
+ * the turn's transient context, never the cached system prompt.
+ */
+export function chatTurnSenderContext(name: string): string {
+  // Quoted: the name is user-authored data, never instructions.
+  return `This message is from ${JSON.stringify(name.slice(0, 100))}, a verified member of this workspace.`;
+}
+
+/**
+ * A turn's transient context: the caller's context (an Automation preamble the
+ * planner admitted at full length) exactly as before, then the sender line
+ * when it still fits under `cap`. The name is best-effort; the access section
+ * in the system prompt carries the tier either way.
+ */
+export function chatTurnContext(
+  senderName: string | undefined,
+  context: string | undefined,
+  cap: number,
+): string | undefined {
+  const rest = context?.trim() ? context.slice(0, cap) : "";
+  const sender = senderName ? chatTurnSenderContext(senderName) : "";
+  const withSender = [rest, sender].filter(Boolean).join("\n\n");
+  return (withSender.length <= cap ? withSender : rest) || undefined;
+}
+
+/** The linked sender's Lobu display name, or undefined when there is none. */
+export async function chatTurnSenderName(actorUserId: string | undefined): Promise<string | undefined> {
+  if (!actorUserId) return undefined;
+  const [user] = await getDb()<{ name: string | null }>`
+    SELECT name FROM "user" WHERE id = ${actorUserId} LIMIT 1
+  `;
+  return user?.name?.trim() || undefined;
 }
 
 /**

@@ -62,8 +62,10 @@ import { notifyThreadResponse, type TurnFailure } from "./turn-liveness.js";
 import {
   chatTurnAccessOf,
   chatTurnEvidenceFrom,
+  chatTurnAccessInstructions,
+  chatTurnContext,
+  chatTurnSenderName,
   isConfinedChatTurn,
-  replyOnlyTurnInstructions,
   resolveChatTurnActor,
 } from "./chat-turn-actor.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
@@ -985,7 +987,8 @@ export async function enqueueAgentTurn(
     if (!turnClaims) throw new Error("the turn's own worker token does not verify");
     // Read off the signed claims, exactly as the MCP lane and the internal
     // routes will (chat-turn-actor.ts).
-    const replyOnly = chatTurnAccessOf(turnClaims) === "reply_only";
+    const chatAccess = chatTurnAccessOf(turnClaims);
+    const replyOnly = chatAccess === "reply_only";
     // A confined turn answers in its own thread only: the server refuses its
     // other conversations, media and remote execution, so they are not offered.
     const confined = isConfinedChatTurn(turnClaims);
@@ -1026,7 +1029,6 @@ export async function enqueueAgentTurn(
     if (replyOnly) {
       // No Lobu tools and no memory hooks: the MCP lane refuses this token, so
       // discovering against it would only log a failure on every turn.
-      mcpInstructions = [replyOnlyTurnInstructions()];
       logger.info(
         { agentId: data.agentId, messageId: data.messageId, platform: data.platform },
         "Agent turn is reply-only: the chat sender is not a linked member of this organization"
@@ -1049,6 +1051,8 @@ export async function enqueueAgentTurn(
       hasMemoryServer = resolved.hasMemoryServer && !confined;
       failedServers = resolved.failedServers;
     }
+    // Every chat turn says what its sender may do; non-chat turns have no sender.
+    if (chatAccess) mcpInstructions = [chatTurnAccessInstructions(chatAccess), ...mcpInstructions];
 
     if (automationContext?.requiresWindowCompletion) {
       if (failedServers.includes(AUTOMATION_MEMORY_MCP_ID)) {
@@ -1139,6 +1143,12 @@ export async function enqueueAgentTurn(
       typeof data.agentOptions?.effort === "string"
         ? data.agentOptions.effort.trim()
         : "";
+    // A linked sender is named per turn; the cached prompt stays sender-free.
+    const ephemeralContext = chatTurnContext(
+      chatAccess ? await chatTurnSenderName(turnClaims.actorUserId) : undefined,
+      data.ephemeralContext,
+      2_048,
+    );
     const turn: TurnEnvelope = {
       agent_id: data.agentId,
       conversation_id: data.conversationId,
@@ -1151,9 +1161,7 @@ export async function enqueueAgentTurn(
       // Turn-scoped context both producers already populate and clamp to
       // 2 KiB. It reaches the model through the guest's transient channel, so
       // it is never persisted into the replayed user message.
-      ...(data.ephemeralContext?.trim()
-        ? { ephemeral_context: data.ephemeralContext.slice(0, 2_048) }
-        : {}),
+      ...(ephemeralContext ? { ephemeral_context: ephemeralContext } : {}),
       // Bytes, already read out of the artifact store. An attachment URL never
       // reaches the guest, so a turn cannot be talked into dialling one.
       ...(attachments.images.length > 0 ? { message_images: attachments.images } : {}),

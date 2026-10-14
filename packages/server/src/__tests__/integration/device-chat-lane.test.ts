@@ -4,7 +4,14 @@ import { parseSessionEntries, verifyWorkerToken } from "@lobu/core";
 import { generateSecureToken, hashToken } from "../../auth/oauth/utils";
 import { buildApiConversationId } from "../../gateway/services/api-conversation-id";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
-import { createTestAgent } from "../setup/test-fixtures";
+import {
+	addUserToOrganization,
+	createTestAgent,
+	createTestUser,
+	linkChatIdentityInGraph,
+	seedSystemEntityTypes,
+} from "../setup/test-fixtures";
+import { chatTurnSenderContext } from "../../gateway/orchestration/chat-turn-actor";
 import { post } from "../setup/test-helpers";
 import { TestWorkspace } from "../setup/test-mcp-client";
 import { sweepStaleDeviceChatRuns } from "../../worker-api/device-chat";
@@ -67,6 +74,8 @@ async function enqueueDeviceChat(args: {
 	deviceWorkerId: string;
 	agentKind: string;
 	omitLocalConfig?: boolean;
+	/** A chat-platform sender instead of the direct API. */
+	chat?: { platform: string; teamId: string; platformMetadata: Record<string, unknown> };
 }): Promise<number> {
 	const sql = getTestDb();
 	const [run] = await sql<{ id: number }>`
@@ -78,19 +87,19 @@ async function enqueueDeviceChat(args: {
 				userId: args.userId,
 				conversationId: args.conversationId,
 				messageId: args.messageId,
-				channelId: `api_${args.userId}`,
-				teamId: "api",
+				channelId: args.chat ? `${args.chat.platform}:D0DEVICEDM` : `api_${args.userId}`,
+				teamId: args.chat?.teamId ?? "api",
 				agentId: args.agentId,
 				organizationId: args.organizationId,
 				botId: "lobu-api",
-				platform: "api",
+				platform: args.chat?.platform ?? "api",
 				messageText: args.message,
 				executionTarget: {
 					kind: "device",
 					deviceWorkerId: args.deviceWorkerId,
 					agentKind: args.agentKind,
 				},
-				platformMetadata: {
+				platformMetadata: args.chat?.platformMetadata ?? {
 					agentId: args.agentId,
 					organizationId: args.organizationId,
 					source: "direct-api",
@@ -364,6 +373,46 @@ describe("device chat execution lane", () => {
 				content: "Atlas shipped its device chat milestone.",
 			},
 		]);
+	});
+
+	it("names a linked chat sender in the device turn's context", async () => {
+		await seedSystemEntityTypes();
+		const workspace = await TestWorkspace.create({ name: "Device Sender Org" });
+		const organizationId = workspace.org.id;
+		const agent = await createTestAgent({
+			organizationId,
+			ownerUserId: workspace.users.owner.id,
+			agentId: "device-sender-agent",
+			name: "Device Sender Agent",
+		});
+		const member = await createTestUser({ email: "device-sender@example.test", name: "Synthetic Device Member" });
+		await addUserToOrganization(member.id, organizationId, "member");
+		await linkChatIdentityInGraph({
+			organizationId, userId: member.id, platform: "slack", teamId: "T0DEVICE", platformUserId: "U0DEVICE",
+		});
+		const device = await insertDevice({
+			userId: workspace.users.owner.id, organizationId, workerId: "sender-device", kinds: ["pi"],
+		});
+		await enqueueDeviceChat({
+			organizationId,
+			agentId: agent.agentId,
+			userId: "U0DEVICE",
+			conversationId: "slack:D0DEVICEDM:1787292000.000100",
+			messageId: "message-sender",
+			message: "what do you know about me?",
+			deviceWorkerId: device.id,
+			agentKind: "pi",
+			chat: {
+				platform: "slack",
+				teamId: "slack:T0DEVICE",
+				platformMetadata: { teamId: "T0DEVICE", isDirect: true },
+			},
+		});
+
+		const job = await poll(device.token, "sender-device", ["pi"]);
+		const payload = job.payload as { chat: { ephemeral_context?: string }; context: { agent_session: { token: string } } };
+		expect(verifyWorkerToken(payload.context.agent_session.token)).toMatchObject({ actorUserId: member.id, chatAccess: "member" });
+		expect(payload.chat.ephemeral_context).toBe(chatTurnSenderContext("Synthetic Device Member"));
 	});
 
 	it("turns an unclaimed or heartbeat-lost device turn into a visible terminal reply", async () => {

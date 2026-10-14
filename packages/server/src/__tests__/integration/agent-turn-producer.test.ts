@@ -37,6 +37,7 @@ import { enqueueAgentTurn,
   cancelAgentTurn,
 } from '../../gateway/orchestration/agent-turn-producer';
 import { armTurnTimeout, failTurnIfPending } from '../../gateway/orchestration/turn-liveness';
+import { chatTurnAccessInstructions, chatTurnSenderContext } from '../../gateway/orchestration/chat-turn-actor';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import { failClaimedWorkerRun } from '../../worker-api/poll';
@@ -1194,12 +1195,11 @@ describe('agent turn producer', () => {
     expect(fixture.listed).toEqual([]);
     expect(envelope.turn.tools?.definitions).toEqual([]);
     expect(envelope.turn.memory).toBeUndefined();
-    expect(envelope.turn.system_prompt).toContain('## Workspace access');
-    expect(envelope.turn.system_prompt).toContain('ask an admin of this workspace to invite them');
+    expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('reply_only'));
     expect(verifyWorkerToken(envelope.credential)?.chatAccess).toBe('reply_only');
   });
 
-  it('runs a vouched unlinked sender with org-shared tools and no reply-only section', async () => {
+  it('runs a vouched unlinked sender with org-shared tools and the org-shared access section', async () => {
     const org = await createTestOrganization();
     const fixture = mcpFixture();
     await enqueueMessage({
@@ -1224,7 +1224,7 @@ describe('agent turn producer', () => {
     expect(claims).toMatchObject({ userId: 'U0TEAMMATE', chatAccess: 'org_shared' });
     expect(claims?.actorUserId).toBeUndefined();
     expect(fixture.listed).toEqual([{ mcpId: 'lobu-memory', agentId: AGENT_ID, token: envelope.credential }]);
-    expect(envelope.turn.system_prompt).not.toContain('## Workspace access');
+    expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('org_shared'));
     // Unchanged gateway surface: the relay tools a team bot uses stay offered.
     expect(envelope.turn.tools?.gateway).toEqual(expect.arrayContaining(['list_conversations', 'read_conversation', 'send_message']));
   });
@@ -1250,6 +1250,7 @@ describe('agent turn producer', () => {
       credential: string;
     };
     expect(verifyWorkerToken(envelope.credential)?.chatAccess).toBe('public_visitor');
+    expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('public_visitor'));
     expect(envelope.turn.memory).toBeUndefined();
     expect(envelope.turn.tools?.media).toEqual([]);
     expect(envelope.turn.tools?.gateway).not.toContain('read_conversation');
@@ -1284,7 +1285,94 @@ describe('agent turn producer', () => {
     // A channel turn: the member is attribution only; the turn is org_shared.
     expect(verifyWorkerToken(envelope.credential)).toMatchObject({ userId: 'U0LINKED', actorUserId: member.id, chatAccess: 'org_shared' });
     expect(fixture.listed).toEqual([{ mcpId: 'lobu-memory', agentId: AGENT_ID, token: envelope.credential }]);
-    expect(envelope.turn.system_prompt).not.toContain('## Workspace access');
+    expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('org_shared'));
+  });
+
+  it('tells a linked DM member turn who is speaking and that its tools act as them', async () => {
+    await seedSystemEntityTypes();
+    const org = await createTestOrganization();
+    const member = await createTestUser({ email: 'turn-dm-member@example.test', name: 'Synthetic Member' });
+    await addUserToOrganization(member.id, org.id, 'member');
+    await linkChatIdentityInGraph({
+      organizationId: org.id, userId: member.id, platform: 'slack', teamId: 'T0DMMEMBER', platformUserId: 'U0DMMEMBER',
+    });
+    await enqueueMessage({
+      ...messageFor(org.id),
+      userId: 'U0DMMEMBER',
+      platform: 'slack',
+      teamId: 'slack:T0DMMEMBER',
+      platformMetadata: { connectionId: 'conn-slack-1', teamId: 'T0DMMEMBER', isDirect: true },
+    }, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const envelope = run.action_input as { turn: { system_prompt: string; ephemeral_context?: string }; credential: string };
+    expect(verifyWorkerToken(envelope.credential)).toMatchObject({ actorUserId: member.id, chatAccess: 'member' });
+    expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('member'));
+    // The sender is conversation-scoped, so it rides the per-turn context, never the cached prompt.
+    expect(envelope.turn.system_prompt).not.toContain('Synthetic Member');
+    expect(envelope.turn.ephemeral_context).toBe(chatTurnSenderContext('Synthetic Member'));
+  });
+
+  it('never cuts an admitted Automation preamble to fit the sender line', async () => {
+    await seedSystemEntityTypes();
+    const org = await createTestOrganization();
+    const member = await createTestUser({ email: 'turn-dm-automation@example.test', name: 'Synthetic Member' });
+    await addUserToOrganization(member.id, org.id, 'member');
+    await linkChatIdentityInGraph({
+      organizationId: org.id, userId: member.id, platform: 'slack', teamId: 'T0DMAUTO', platformUserId: 'U0DMAUTO',
+    });
+    const short = 'Automation ID: 1\nFollow these Automation instructions for this turn:\nreply';
+    // The planner admits a preamble up to the full cap; the name must not displace any of it.
+    const full = `Automation ID: 2\n${'x'.repeat(2_048 - 'Automation ID: 2\n'.length)}`;
+    await enqueueMessage({
+      ...messageFor(org.id),
+      userId: 'U0DMAUTO',
+      platform: 'slack',
+      teamId: 'slack:T0DMAUTO',
+      platformMetadata: { connectionId: 'conn-slack-1', teamId: 'T0DMAUTO', isDirect: true },
+      ephemeralContext: short,
+    }, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    await enqueueMessage({
+      ...messageFor(org.id),
+      messageId: 'msg-turn-full',
+      userId: 'U0DMAUTO',
+      platform: 'slack',
+      teamId: 'slack:T0DMAUTO',
+      platformMetadata: { connectionId: 'conn-slack-1', teamId: 'T0DMAUTO', isDirect: true },
+      ephemeralContext: full,
+    }, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const contexts = (await agentTurnRuns()).map((run) =>
+      (run.action_input as { turn: { ephemeral_context?: string } }).turn.ephemeral_context);
+    expect(contexts).toEqual([`${short}\n\n${chatTurnSenderContext('Synthetic Member')}`, full]);
+  });
+
+  it('gives a turn with no chat sender no access section and no sender line', async () => {
+    const org = await createTestOrganization();
+    await enqueueMessage(messageFor(org.id), {
+      agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL,
+    });
+    const [run] = await agentTurnRuns();
+    const turn = (run.action_input as { turn: { system_prompt: string; ephemeral_context?: string } }).turn;
+    expect(turn.system_prompt).not.toContain('## Workspace access');
+    expect(turn.ephemeral_context).toBeUndefined();
   });
 
   it('omits instructions from an MCP server with no tools', async () => {
@@ -4470,7 +4558,7 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
     const claims = verifyWorkerToken(envelope.credential);
     expect(claims).toMatchObject({ userId: 'U0TEAMMATE', chatAccess: 'org_shared' });
     expect(claims?.actorUserId).toBeUndefined();
-    expect(envelope.turn.system_prompt).not.toContain('## Workspace access');
+    expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('org_shared'));
     expect(envelope.turn.tools?.gateway).toEqual(expect.arrayContaining(['list_conversations', 'read_conversation', 'send_message']));
 
     // The minted credential on Lobu's own MCP: org-shared visible, owner-private not.

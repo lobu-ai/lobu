@@ -38,7 +38,9 @@ import {
 } from '../gateway/services/run-worker-access';
 import {
   CHAT_SENDER_NOT_LINKED,
+  chatTurnContext,
   chatTurnEvidenceFrom,
+  chatTurnSenderName,
   resolveChatTurnActor,
 } from '../gateway/orchestration/chat-turn-actor';
 import { buildWorkerTokenClaims } from '../gateway/orchestration/worker-token-claims';
@@ -1630,6 +1632,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       expires_at: number;
     };
     let confined = false;
+    let senderName: string | undefined;
     try {
       const platform =
         typeof message?.platform === 'string' ? message.platform : undefined;
@@ -1649,6 +1652,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       });
       confined = actor?.access === 'reply_only' || actor?.access === 'public_visitor';
       if (confined) throw new Error(CHAT_SENDER_NOT_LINKED);
+      senderName = await chatTurnSenderName(actor?.actorUserId);
       const access = buildDeviceChatRunWorkerAccess({
         agentId: row.chat_agent_id,
         conversationId,
@@ -1716,6 +1720,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           .slice(-12)
       : [];
 
+    // The same per-turn sender line a cloud chat turn carries.
+    const ephemeralContext = chatTurnContext(
+      senderName,
+      typeof message?.ephemeralContext === 'string' ? message.ephemeralContext : undefined,
+      DEVICE_CHAT_MAX_CONTEXT_LENGTH,
+    );
     return c.json({
       ...pollMetadata,
       run_id: row.run_id,
@@ -1728,15 +1738,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             ? { execution_config: executionConfig }
             : {}),
           message: messageText.slice(0, 32_000),
-          ...(typeof message?.ephemeralContext === 'string' &&
-          message.ephemeralContext.length > 0
-            ? {
-                ephemeral_context: message.ephemeralContext.slice(
-                  0,
-                  DEVICE_CHAT_MAX_CONTEXT_LENGTH,
-                ),
-              }
-            : {}),
+          ...(ephemeralContext ? { ephemeral_context: ephemeralContext } : {}),
           history,
           agent: {
             id: row.chat_agent_id,
