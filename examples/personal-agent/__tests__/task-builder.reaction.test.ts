@@ -20,7 +20,7 @@ const context = (changes: unknown[]): ReactionContext =>
     },
     automation: {
       id: 71,
-      slug: "hourly-task-collaborator",
+      slug: "task-collaborator",
       name: "Task Collaborator",
       version: 1,
     },

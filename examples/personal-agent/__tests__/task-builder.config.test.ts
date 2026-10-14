@@ -3,7 +3,7 @@ import config from "../lobu.config";
 
 describe("Task Collaborator keeps tasks in Apple Reminders", () => {
   const automation = config.automations?.find(
-    (item) => item.slug === "hourly-task-collaborator"
+    (item) => item.slug === "task-collaborator"
   );
 
   test("stores no tasks in Lobu", () => {

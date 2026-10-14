@@ -37,8 +37,8 @@ import {
 } from "./tiktok-research.prompt.ts";
 import type TikTokResearchReaction from "./tiktok-research.reaction.ts";
 
-const hourlyTaskCollaboratorSkill = defineSkill({
-  name: "hourly-task-collaborator",
+const taskCollaboratorSkill = defineSkill({
+  name: "task-collaborator",
   content: taskBuilderPrompt,
 });
 
@@ -50,10 +50,7 @@ const duplicateEntityResolutionRealV3FinalSkill = defineSkill({
 
 const personalAgent = defineAgent({
   id: "personal-agent",
-  skills: [
-    hourlyTaskCollaboratorSkill,
-    duplicateEntityResolutionRealV3FinalSkill,
-  ],
+  skills: [taskCollaboratorSkill, duplicateEntityResolutionRealV3FinalSkill],
   dir: ".",
   name: "personal-agent",
   description:
@@ -583,9 +580,9 @@ const midasNetWorth = defineAutomation({
   reaction: null,
 });
 
-const hourlyTaskCollaborator = defineAutomation({
+const taskCollaborator = defineAutomation({
   agent: personalAgent,
-  slug: "hourly-task-collaborator",
+  slug: "task-collaborator",
   name: "Task Collaborator",
   // Omitted model preserves the Automation's existing execution setting on apply.
   triggers: [every("*/15 * * * *", { timezone: "Europe/London" })],
@@ -744,7 +741,7 @@ export default defineConfig({
   entities: [person],
   relationships: [worksAt, mentions, connectedWith, founderOf, sameAs],
   automations: [
-    hourlyTaskCollaborator,
+    taskCollaborator,
     duplicateEntityResolution,
     midasNetWorth,
     linkedInInterestProfile,
