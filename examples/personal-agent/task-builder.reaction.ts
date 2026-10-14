@@ -113,16 +113,23 @@ async function readCreateHistory(
     })),
   ];
   const history: CreateHistory = new Map();
+  // A run can match two filters, and runs created mid-scan must not shift
+  // pages, so pages follow the (created_at, id) keyset and each run counts once.
+  const seen = new Set<string>();
   for (const filter of filters) {
-    for (let offset = 0; ; ) {
+    let cursor: { before_created_at: string; before_id: number } | undefined;
+    for (;;) {
       const page = await client.operations.listRuns({
         connection_id: connectionId,
         operation_key: "create_reminder",
         ...filter,
+        ...cursor,
         limit: 200,
-        offset,
       });
       for (const run of page.runs) {
+        const id = String(run.id);
+        if (seen.has(id)) continue;
+        seen.add(id);
         const notes = (run.input as { notes?: unknown } | null)?.notes;
         const line =
           typeof notes === "string" ? notes.split("\n").at(-1) : undefined;
@@ -132,8 +139,12 @@ async function readCreateHistory(
         else entry.active = true;
         history.set(line, entry);
       }
-      if (!page.has_more || page.runs.length === 0) break;
-      offset += page.runs.length;
+      const last = page.runs.at(-1);
+      if (!page.has_more || !last) break;
+      cursor = {
+        before_created_at: String(last.created_at),
+        before_id: Number(last.id),
+      };
     }
   }
   return history;

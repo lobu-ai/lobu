@@ -33,6 +33,7 @@ function harness(
     connections?: Array<{ id: number }>;
     recentCreates?: Array<Record<string, unknown>>;
     pageSize?: number;
+    beforePage?: (page: number) => void;
     execute?: (input: Execute) => Promise<Record<string, unknown>>;
   } = {}
 ) {
@@ -47,28 +48,42 @@ function harness(
     operations: {
       listRuns: async (input: ListRuns) => {
         listed.push(input);
-        const runs = (options.recentCreates ?? []).filter((run) => {
-          if (input.status && run.status !== input.status) return false;
-          if (
-            input.created_after &&
-            run.created_at &&
-            String(run.created_at) < input.created_after
-          )
-            return false;
-          if (
-            input.created_before &&
-            String(run.created_at ?? new Date().toISOString()) >=
-              input.created_before
-          )
-            return false;
-          return true;
-        });
-        const { offset = 0 } = input as { offset?: number };
+        options.beforePage?.(listed.length);
+        // The server's order: newest first by (created_at, id), with a keyset.
+        const runs = (options.recentCreates ?? [])
+          .map((run, index) => ({
+            id: index + 1,
+            created_at: new Date(Date.now() - index * 1000).toISOString(),
+            ...run,
+          }))
+          .filter((run) => {
+            if (input.status && run.status !== input.status) return false;
+            if (
+              input.created_after &&
+              String(run.created_at) < input.created_after
+            )
+              return false;
+            if (
+              input.created_before &&
+              String(run.created_at) >= input.created_before
+            )
+              return false;
+            if (
+              input.before_created_at &&
+              (String(run.created_at) > input.before_created_at ||
+                (String(run.created_at) === input.before_created_at &&
+                  Number(run.id) >= Number(input.before_id)))
+            )
+              return false;
+            return true;
+          })
+          .sort(
+            (a, b) =>
+              String(b.created_at).localeCompare(String(a.created_at)) ||
+              Number(b.id) - Number(a.id)
+          );
         const size = options.pageSize ?? runs.length;
-        return {
-          runs: runs.slice(offset, offset + size),
-          has_more: offset + size < runs.length,
-        };
+        return { runs: runs.slice(0, size), has_more: size < runs.length };
       },
       execute: async (input: Execute) => {
         executed.push(input);
@@ -172,9 +187,9 @@ describe("Task Collaborator reminder changes", () => {
     });
     await applyReminderChanges(context([create]), h.client);
     expect(h.executed).toHaveLength(0);
-    expect(
-      h.listed.filter((page) => page.created_after).map((page) => page.offset)
-    ).toEqual([0, 2]);
+    const recentPages = h.listed.filter((page) => page.created_after);
+    expect(recentPages).toHaveLength(2);
+    expect(recentPages[1]?.before_id).toBe(2);
   });
 
   test("a failed or rejected earlier create does not block a new one", async () => {
@@ -315,6 +330,29 @@ describe("Task Collaborator reminder changes", () => {
     });
     await applyReminderChanges(context([create]), h.client);
     expect(String(h.executed[0]?.idempotency_key).endsWith(":2")).toBe(true);
+  });
+
+  test("a run created between history pages does not shift a failure into a second count", async () => {
+    const recentCreates: Array<Record<string, unknown>> = [
+      { status: "completed", input: { notes: "lobu:other|x|y" } },
+      { status: "failed", input: { notes: marker(key) } },
+      { status: "completed", input: { notes: "lobu:other|x|z" } },
+    ];
+    const h = harness({
+      pageSize: 1,
+      recentCreates,
+      beforePage: (page) => {
+        if (page === 2)
+          recentCreates.unshift({
+            id: 99,
+            created_at: new Date(Date.now() + 1000).toISOString(),
+            status: "completed",
+            input: { notes: "lobu:new|x|y" },
+          });
+      },
+    });
+    await applyReminderChanges(context([create]), h.client);
+    expect(String(h.executed[0]?.idempotency_key).endsWith(":1")).toBe(true);
   });
 
   test("concurrent runs create a source's reminder once", async () => {
