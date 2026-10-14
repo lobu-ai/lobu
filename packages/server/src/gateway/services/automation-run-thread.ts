@@ -12,6 +12,12 @@ export async function readAutomationRunThreads(args: {
 	automationId: number;
 	organizationId: string;
 	limit: number;
+	/**
+	 * Fetch one specific run regardless of the recency limit. Run links (chips,
+	 * headers) address runs the latest-N window may have aged out; filtering
+	 * that window locally opens an empty conversation despite history existing.
+	 */
+	runId?: number;
 }): Promise<{
 	runs: Array<{
 		runId: number;
@@ -36,7 +42,7 @@ export async function readAutomationRunThreads(args: {
 		}>;
 	}>;
 }> {
-	const { agentId, automationId, organizationId, limit } = args;
+	const { agentId, automationId, organizationId, limit, runId } = args;
 	const sql = getDb();
 	const rows = await sql<{
 		conversation_id: string | null;
@@ -56,6 +62,7 @@ export async function readAutomationRunThreads(args: {
 			  AND r.automation_id = ${automationId}
 			  AND w.managed_agent_id = ${agentId}
 			  AND r.run_type = ANY(${AUTOMATION_RUN_TYPES_PG}::text[])
+			  ${runId != null ? sql`AND r.id = ${runId}` : sql``}
 			ORDER BY COALESCE(r.completed_at, r.created_at) DESC, r.id DESC
 			LIMIT ${limit}
 		)

@@ -870,12 +870,19 @@ export function createAgentHistoryRoutes(deps: {
 			return errorResponse(c, "Invalid automation id", 400);
 		}
 		const limit = Math.min(parseInt(c.req.query("limit") || "20", 10), 50);
+		const runIdRaw = c.req.query("run_id");
+		const runId =
+			runIdRaw != null && runIdRaw !== "" ? Number(runIdRaw) : undefined;
+		if (runId !== undefined && !Number.isSafeInteger(runId)) {
+			return errorResponse(c, "Invalid run id", 400);
+		}
 
 		const data = await readAutomationRunThreads({
 			agentId: scope.agentId,
 			automationId,
 			organizationId: scope.organizationId,
 			limit,
+			...(runId !== undefined ? { runId } : {}),
 		});
 		if (artifactStore && publicGatewayUrl) {
 			for (const run of data.runs) {

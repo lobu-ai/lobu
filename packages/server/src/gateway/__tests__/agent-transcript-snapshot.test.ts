@@ -726,6 +726,65 @@ describe("automation-run-thread — tool result pairing", () => {
     expect(dumped).toContain("events_persisted");
     expect(dumped).toContain("4242");
   });
+
+  test("run_id fetches one run past the recency limit", async () => {
+    const agentId = "agent-per-run";
+    const orgId = await seedAgentRow(agentId, {
+      organizationId: "org_per_run",
+    });
+    const sql = getDb();
+    const userId = "per-run-owner";
+    await sql`
+      INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+      VALUES (${userId}, 'Per-run owner', 'per-run@example.test',
+              false, now(), now())
+      ON CONFLICT (id) DO NOTHING
+    `;
+    const [automation] = await sql<{ id: number }>`
+      WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
+      INSERT INTO automations (
+        id, automation_group_id, organization_id, managed_agent_id, created_by, name, slug
+      )
+      SELECT id, id, ${orgId}, ${agentId}, ${userId}, 'Per-run Automation', 'per-run-' || id
+      FROM next_id
+      RETURNING id
+    `;
+    const automationId = Number(automation.id);
+    const runIds: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const [run] = await sql<{ id: number }>`
+        INSERT INTO runs (
+          organization_id, run_type, automation_id, status, action_input,
+          queue_name, run_at, created_at, completed_at
+        ) VALUES (
+          ${orgId}, 'automation', ${automationId}, 'completed', NULL,
+          'automation', now(), now(), now()
+        )
+        RETURNING id
+      `;
+      runIds.push(Number(run.id));
+    }
+    const oldest = runIds[0]!;
+
+    const latestOnly = await readAutomationRunThreads({
+      agentId,
+      automationId,
+      organizationId: orgId,
+      limit: 1,
+    });
+    expect(latestOnly.runs).toHaveLength(1);
+    expect(latestOnly.runs[0]?.runId).not.toBe(oldest);
+
+    const single = await readAutomationRunThreads({
+      agentId,
+      automationId,
+      organizationId: orgId,
+      limit: 1,
+      runId: oldest,
+    });
+    expect(single.runs).toHaveLength(1);
+    expect(single.runs[0]?.runId).toBe(oldest);
+  });
 });
 
 describe("agent_transcript_snapshot — history fallback", () => {
