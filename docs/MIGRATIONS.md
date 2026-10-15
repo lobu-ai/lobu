@@ -18,14 +18,14 @@ The rules below are what we wish #765 had followed.
 
 ## The deploy window (`-- lobu:no-quiesce` / `-- lobu:quiesce`)
 
-The pre-upgrade hook scales the app **to zero** before migrating, so no old replica can ever observe a new schema. The ingress answers that gap with 503 for the length of a pod restart — measured at 41s in prod on 2026-08-19 and about 70s on 2026-10-15. It fires on every deploy carrying a pending migration that is not marked `-- lobu:no-quiesce`, whether or not that migration needs it.
+Unless every pending migration declares `-- lobu:no-quiesce`, the pre-upgrade hook scales the app and workers **to zero** before migrating. This stops old replicas from accessing the changed schema. The ingress answers with 503 until replacement pods are ready; the window includes migration execution and pod startup.
 
-**Every new migration declares its window**, and `make pre-pr` / CI fail one that doesn't (`scripts/check-migration-quiesce.mjs`). Before the check, 19 of 35 migrations in a month carried no marker, so each of those deploys went down for a minute by omission. Declare exactly one:
+**Every new migration declares its window**, and `make pre-pr` / CI fail one that doesn't (`scripts/check-migration-quiesce.mjs`). The check applies from version `20261015120001`; earlier migrations remain unchanged. Declare exactly one:
 
 - `-- lobu:no-quiesce` — the old replicas keep serving across the migration.
 - `-- lobu:quiesce <reason>` — they must stop first. The reason names what in the running code breaks against the new schema.
 
-Most migrations don't need the window. The expand half of an expand/contract pair — an additive nullable column, a comment, a new index — is one the *old* code already runs against happily. Mark those and the deploy rolls with no downtime:
+The expand half of an expand/contract pair — an additive nullable column, a comment, a new index — can leave the *old* code compatible with the new schema. Mark those to skip the scale-to-zero window; lock contention and other migration costs still need review:
 
 ```sql
 -- migrate:up
@@ -37,9 +37,9 @@ ALTER TABLE public.device_workers
 
 Rules:
 
-- A declaration must be **its own comment line**, in the up section. Prose mentioning it does not arm it.
-- It asserts something about the **application**, not the DDL: that the code running *before* this deploy keeps working against the post-migration schema. Nothing inspects your SQL, because backward compatibility is a property of sequencing rather than of the DDL verbs — a `DROP COLUMN` is safe once nothing reads that column, and a widened `CHECK` constraint is safe because it only ever accepts more. Only you know where the migration sits in that sequence.
-- **Every** pending migration in the deploy must carry it, or the whole batch quiesces. One unmarked migration removes the fast path for all of them.
+- A declaration must be **its own comment line starting at column 0**, before `-- migrate:down`. Prose mentioning it does not arm it.
+- `lobu:no-quiesce` asserts something about the **application**, not the DDL: that the code running *before* this deploy keeps working against the post-migration schema. The declaration checker does not inspect your SQL, because backward compatibility depends on sequencing relative to the running code. For example, a `DROP COLUMN` may be compatible once nothing reads or writes that column. The author must assess the running application's behavior.
+- **Every** pending migration in the deploy must declare exactly one `lobu:no-quiesce`, or the whole batch quiesces. A missing or conflicting declaration removes the fast path for all of them.
 - An unmarked migration quiesces only after validation succeeds. An unreadable migration, failed prerequisite, or crashed pending check aborts deployment before any scaling. A missing pending-check command also aborts.
 
 Declare `-- lobu:quiesce <reason>` when the running code would actually break: a column it still reads is going away, a constraint is being tightened under it, or a new `NOT NULL` column has no `DEFAULT` to fill in for inserts that predate it. That is what the window exists for.

@@ -4,14 +4,10 @@
  * `-- lobu:quiesce <reason>` (see docs/MIGRATIONS.md).
  *
  * Without a declaration the pre-upgrade hook quiesces, scaling prod's app and
- * worker to zero for a pod restart. That default is the safe one, but an
- * omitted marker was choosing it silently: 19 of the 35 migrations in the 30
- * days before this check carried none, so each of those deploys answered 503
- * for about a minute whether or not the migration needed the window. Making
- * the choice explicit keeps the safe default available while ending the
- * accidental one.
+ * worker to zero. Requiring an explicit choice helps authors avoid that
+ * window when the old code can safely run against the new schema.
  *
- * Migrations at or before FIRST_DECLARED_VERSION predate the rule and are
+ * Migrations before FIRST_DECLARED_VERSION predate the rule and are
  * immutable history, so they are not checked.
  *
  * Usage: node scripts/check-migration-quiesce.mjs [migrations-dir]

@@ -16,50 +16,34 @@
  * A declaration is its own comment line starting at column 0. Prose that
  * mentions a marker mid-line does not arm it.
  *
- * There is deliberately no SQL analysis behind this. Backward compatibility is
- * a property of sequencing relative to the running code, not of the DDL verbs:
- * a DROP COLUMN is safe once nothing reads it, and a widened CHECK constraint
- * is safe because it only ever accepts more. The SQL cannot express either, so
- * only the author can make the call -- which is why the check makes them make
- * it explicitly instead of letting a missing marker default to downtime.
+ * Backward compatibility depends on the running code, so the author makes the
+ * declaration; this reader does not infer it from SQL.
  */
 
 export const NO_QUIESCE = "lobu:no-quiesce";
 export const QUIESCE = "lobu:quiesce";
 
 const MIGRATE_DOWN = /^--\s*migrate:down.*$/m;
+const DECLARATION = new RegExp(
+  `^--[ \\t]*(${NO_QUIESCE}|${QUIESCE})\\b(.*)$`,
+  "gm"
+);
 
 /** The up section: everything before the `-- migrate:down` directive. */
 export function migrationUpSection(content) {
   return content.split(MIGRATE_DOWN)[0];
 }
 
-function isWordChar(char) {
-  return char !== undefined && /\w/.test(char);
-}
-
-function declarationOnLine(line) {
-  if (!line.startsWith("--")) return null;
-  const body = line.slice(2).trimStart();
-  for (const marker of [NO_QUIESCE, QUIESCE]) {
-    if (body.startsWith(marker) && !isWordChar(body[marker.length])) {
-      return { marker, reason: body.slice(marker.length).trim() };
-    }
-  }
-  return null;
-}
-
 /** Every declaration in an up section, in file order. */
 export function readQuiesceDeclarations(upSection) {
-  return upSection
-    .split("\n")
-    .map(declarationOnLine)
-    .filter((declaration) => declaration !== null);
+  return Array.from(upSection.matchAll(DECLARATION), ([, marker, reason]) => ({
+    marker,
+    reason: reason.trim(),
+  }));
 }
 
 /** True when the author declared that the old replicas may keep serving. */
 export function declaresNoQuiesce(upSection) {
-  return readQuiesceDeclarations(upSection).some(
-    (declaration) => declaration.marker === NO_QUIESCE
-  );
+  const declarations = readQuiesceDeclarations(upSection);
+  return declarations.length === 1 && declarations[0].marker === NO_QUIESCE;
 }

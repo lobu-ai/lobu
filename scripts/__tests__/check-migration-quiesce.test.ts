@@ -105,6 +105,14 @@ describe("check-migration-quiesce", () => {
     expect(runCheck(dir).exitCode).toBe(0);
   });
 
+  it("checks the first version subject to the rule", () => {
+    writeFileSync(
+      join(dir, "20261015120001_example.sql"),
+      migration("-- adds a column")
+    );
+    expect(runCheck(dir).exitCode).toBe(1);
+  });
+
   it("passes on the repository's migrations", () => {
     const { exitCode, stderr } = runCheck(MIGRATIONS);
     expect(stderr).toBe("");
@@ -132,5 +140,24 @@ describe("declaresNoQuiesce", () => {
 
   it("is not armed by lobu:quiesce", () => {
     expect(declaresNoQuiesce("-- lobu:quiesce drops a column\n")).toBe(false);
+  });
+
+  it.each([
+    "-- lobu:no-quiesce\n-- lobu:quiesce drops a live column",
+    "-- lobu:quiesce drops a live column\n-- lobu:no-quiesce",
+    "-- lobu:no-quiesce\n-- lobu:no-quiesce",
+  ])("fails closed on ambiguous declarations: %s", (up) => {
+    expect(declaresNoQuiesce(up)).toBe(false);
+  });
+
+  it.each([
+    "--\u00a0lobu:no-quiesce",
+    "--\vlobu:no-quiesce",
+    "--\tlobu:no-quiesce",
+    "-- lobu:no-quiesce_extra",
+    "-- migrate:up\r-- lobu:no-quiesce\rSELECT 1;",
+    "-- migrate:up\r\n-- lobu:no-quiesce\r\nSELECT 1;",
+  ])("preserves the existing marker syntax: %s", (up) => {
+    expect(declaresNoQuiesce(up)).toBe(PREVIOUS_MARKER.test(up));
   });
 });
