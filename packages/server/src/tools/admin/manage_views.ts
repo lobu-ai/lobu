@@ -170,6 +170,24 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
         400
       );
     }
+    // A filter option becomes this param's value when picked, so it must
+    // already be a valid value: the guest would coerce a mistyped one away.
+    const seen = new Set<unknown>();
+    for (const option of decl.filter?.options ?? []) {
+      if (typeof option.value !== decl.type) {
+        throw new ToolUserError(
+          `Param '${name}' filter option '${option.label}' must have a ${decl.type} value`,
+          400
+        );
+      }
+      if (seen.has(option.value)) {
+        throw new ToolUserError(
+          `Param '${name}' filter repeats the option value ${JSON.stringify(option.value)}`,
+          400
+        );
+      }
+      seen.add(option.value);
+    }
   }
   for (const [name, decl] of Object.entries(args.actions ?? {})) {
     if (!VIEW_ACTION_NAME_RE.test(name)) {

@@ -421,6 +421,58 @@ mountView(view, V);
 		expect((get as ToolUserError).httpStatus).toBe(404);
 	});
 
+	it("stores filter params and rejects options that are not valid values", async () => {
+		const params = {
+			region: {
+				type: "string",
+				filter: {
+					label: "Region",
+					options: [
+						{ value: "EMEA", label: "Europe" },
+						{ value: "AMER", label: "Americas" },
+					],
+				},
+			},
+			min_amount: { type: "number", filter: { label: "Amount at least" } },
+		};
+		expect((await setView(SIMPLE_SOURCE, { params })).written).toBe(true);
+		const listed = (await executeTool(
+			"manage_views",
+			{ action: "list" },
+			TEST_ENV,
+			ownerCtx
+		)) as { views: Array<{ key: string; params: unknown }> };
+		expect(listed.views.find((view) => view.key === "pipeline")?.params).toEqual(
+			params
+		);
+
+		for (const [bad, message] of [
+			[
+				{ n: { type: "number", filter: { label: "N", options: [{ value: "1", label: "One" }] } } },
+				"must have a number value",
+			],
+			[
+				{
+					by: {
+						type: "string",
+						filter: {
+							label: "By",
+							options: [
+								{ value: "a", label: "A" },
+								{ value: "a", label: "Again" },
+							],
+						},
+					},
+				},
+				"repeats the option value",
+			],
+		] as const) {
+			const err = await setView(SIMPLE_SOURCE, { params: bad }).catch((e) => e);
+			expect(err).toBeInstanceOf(ToolUserError);
+			expect((err as ToolUserError).message).toContain(message);
+		}
+	});
+
 	it("round-trips numeric, false, and empty-string defaults without coercion", async () => {
 		const params = {
 			n: { type: "number", default: 7 },

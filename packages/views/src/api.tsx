@@ -108,6 +108,13 @@ export interface Scope {
 export interface ParamDef {
   type: "string" | "number" | "boolean";
   default?: ParamValue;
+  /** Offer this param in the host's filter bar: a set value shows as a chip
+   *  above the view, and picking one updates the param. Options make it a
+   *  pick list; without them the host asks for a value of the param's type. */
+  filter?: {
+    label: string;
+    options?: Array<{ value: ParamValue; label: string }>;
+  };
 }
 
 /**

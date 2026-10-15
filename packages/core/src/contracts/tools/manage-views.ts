@@ -116,6 +116,34 @@ export const ViewParamDeclSchema = Type.Object({
     Type.Unknown({ description: "Default when the URL omits the param." })
   ),
   description: Type.Optional(Type.String()),
+  filter: Type.Optional(
+    Type.Object(
+      {
+        label: Type.String({ minLength: 1, maxLength: 60 }),
+        options: Type.Optional(
+          Type.Array(
+            Type.Object(
+              {
+                value: Type.Union([
+                  Type.String({ maxLength: 200 }),
+                  Type.Number(),
+                  Type.Boolean(),
+                ]),
+                label: Type.String({ minLength: 1, maxLength: 120 }),
+              },
+              { additionalProperties: false }
+            ),
+            { minItems: 1, maxItems: 100 }
+          )
+        ),
+      },
+      {
+        additionalProperties: false,
+        description:
+          "Offer this param in the host's filter bar: an applied value shows as a chip above the view. Options make it a pick list; without them the host asks for a value of the param's type.",
+      }
+    )
+  ),
 });
 export type ViewParamDecl = Static<typeof ViewParamDeclSchema>;
 

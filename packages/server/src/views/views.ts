@@ -14,7 +14,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
-import type { ViewAttachment } from '@lobu/core/contracts/tools/manage-views';
+import type { ViewAttachment, ViewParamDecl } from '@lobu/core/contracts/tools/manage-views';
 import { COLLECTION_QUERY_KEY } from '@lobu/core/contracts/tools/collection-selection';
 import {
   COLLECTION_PRESET_QUERY_KEY,
@@ -74,12 +74,6 @@ export function viewKeyFromResourceUri(uri: string): string | null {
 
 /** Shared content identity (server and CLI derive the key from one function). */
 export { contentHash, type ViewContentMetadata } from '@lobu/core/contracts/tools/view-content-hash';
-
-export interface ViewParamDecl {
-  type: 'string' | 'number' | 'boolean';
-  default?: unknown;
-  description?: string;
-}
 
 export interface ViewActionDecl {
   emits: string;
