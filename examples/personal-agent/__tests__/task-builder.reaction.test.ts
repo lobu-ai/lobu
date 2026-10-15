@@ -1,374 +1,682 @@
 import { describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
-import notifyTasks from "../task-builder.reaction";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+import applyReminderChanges, { input, marker } from "../task-builder.reaction";
 
-const help = {
-  summary: "Audit the requested OAuth data-use details and draft a reply.",
-  prompt:
-    "Read the latest verification request, check the provider configuration and prepare a reply for review. Do not send it.",
-};
-const candidate = {
-  action: "Respond to the OAuth verification request",
-  status: "backlog",
-  source_scope: "connection:101",
-  source_origin_id: "synthetic-oauth-thread",
-  task_key: "reply-verification",
-  agent_help: help,
-};
-type DueTask = {
-  id: number;
-  name: string;
-  due_date: string;
-  priority: string | null;
-};
-const context = (tasks: unknown[]): ReactionContext => ({
-  extracted_data: { tasks },
-  entities: [],
-  window: {
-    run_id: 901,
-    automation_id: 71,
-    window_start: "2026-09-10T10:00:00Z",
-    window_end: "2026-09-10T12:00:00Z",
-    content_analyzed: 1,
-  },
-  automation: {
-    id: 71,
-    slug: "hourly-task-collaborator",
-    name: "Task Builder",
-    version: 1,
-  },
-  organization_id: "synthetic-org",
-  organization_slug: "example",
-});
-function harness(
-  metadata: Record<string, unknown> | null = candidate,
-  changeKind: "created" | "updated" | "denied" | null = "created",
-  dueTasks: DueTask[] = [],
-  applied: Record<string, { old: unknown; new: unknown }> = {
-    agent_help: { old: null, new: metadata?.agent_help },
-  }
-) {
-  const sends: Parameters<ReactionClient["notifications"]["send"]>[0][] = [];
-  const queries: string[] = [];
-  let fail = false;
-  const client = {
-    query: async (sql: string) => {
-      queries.push(sql);
-      if (sql.startsWith("SELECT md5('")) {
-        const signature = sql.slice(
-          "SELECT md5('".length,
-          -"') AS digest".length
-        );
-        return [{ digest: createHash("md5").update(signature).digest("hex") }];
-      }
-      if (sql.includes("semantic_type = 'change_set'")) {
-        return changeKind
-          ? [
-              {
-                metadata: {
-                  changes: [{ entityId: 42, kind: changeKind, applied }],
-                },
-              },
-            ]
-          : [];
-      }
-      if (sql.includes("AS due_date")) return dueTasks;
-      return metadata
-        ? [
-            {
-              id: 42,
-              name: "OAuth verification",
-              slug: "oauth-verification",
-              metadata,
-            },
-          ]
-        : [];
+type Execute = Parameters<ReactionClient["operations"]["execute"]>[0];
+type ListRuns = NonNullable<
+  Parameters<ReactionClient["operations"]["listRuns"]>[0]
+>;
+
+const context = (changes: unknown[]): ReactionContext =>
+  ({
+    extracted_data: { changes },
+    entities: [],
+    window: {
+      run_id: 901,
+      automation_id: 71,
+      window_start: new Date(Date.now() - 2 * 3600000).toISOString(),
+      window_end: new Date().toISOString(),
+      content_analyzed: 1,
     },
-    notifications: {
-      send: async (input: (typeof sends)[number]) => {
-        if (fail) throw new Error("notification unavailable");
-        sends.push(input);
-        return { success: true };
+    automation: {
+      id: 71,
+      slug: "task-collaborator",
+      name: "Task Collaborator",
+      version: 1,
+    },
+    organization_id: "synthetic-org",
+    organization_slug: "example",
+  }) as unknown as ReactionContext;
+
+type Run = Record<string, unknown> & {
+  id: number;
+  created_at: string;
+  status: string;
+};
+
+// The server's run ledger: runs listed newest first by (created_at, id) with a
+// keyset, and an idempotency key replays its first run.
+function harness(
+  options: {
+    connections?: Array<{ id: number }>;
+    recentCreates?: Array<Record<string, unknown>>;
+    pageSize?: number;
+    beforePage?: (page: number) => void;
+    execute?: (input: Execute) => Promise<Record<string, unknown>>;
+    // Refuses a dispatch before the server records any run.
+    refuse?: (input: Execute) => boolean;
+  } = {}
+) {
+  const executed: Execute[] = [];
+  const listed: ListRuns[] = [];
+  const runs: Run[] = (options.recentCreates ?? []).map((run, index) => ({
+    id: index + 1,
+    created_at: new Date(Date.now() - (index + 10) * 1000).toISOString(),
+    operation_key: "create_reminder",
+    parent_run_id: 800,
+    automation_id: 71,
+    status: "pending",
+    ...run,
+  }));
+  let clock = Date.now();
+  const client = {
+    operations: {
+      listAvailable: async (input: Record<string, unknown>) => {
+        expect(input).toMatchObject({
+          connector_key: "apple.reminders",
+          include_disconnected: false,
+        });
+        return {
+          operations: ["create_reminder", "complete_reminder"].map(
+            (operation_key) => ({
+              operation_key,
+              execution_targets: (options.connections ?? [{ id: 7 }]).map(
+                ({ id }) => ({ connection_id: id })
+              ),
+            })
+          ),
+        };
+      },
+      listRuns: async (input: ListRuns) => {
+        listed.push(input);
+        options.beforePage?.(listed.length);
+        const page = runs
+          .filter((run) => {
+            if (input.status && run.status !== input.status) return false;
+            if (input.created_after && run.created_at < input.created_after)
+              return false;
+            if (input.created_before && run.created_at >= input.created_before)
+              return false;
+            if (
+              input.before_created_at &&
+              (run.created_at > input.before_created_at ||
+                (run.created_at === input.before_created_at &&
+                  run.id >= Number(input.before_id)))
+            )
+              return false;
+            return true;
+          })
+          .sort(
+            (a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id
+          );
+        const size = options.pageSize ?? page.length;
+        return { runs: page.slice(0, size), has_more: size < page.length };
+      },
+      execute: async (input: Execute) => {
+        executed.push(input);
+        if (options.refuse?.(input))
+          throw new Error("synthetic dispatch refusal");
+        const prior = runs.find((run) => run.key === input.idempotency_key);
+        if (prior) {
+          // A reused key replays only the same request; the server 409s otherwise.
+          if (
+            prior.parent_run_id !== input.automation_source?.run_id ||
+            JSON.stringify(prior.input) !== JSON.stringify(input.input)
+          )
+            throw new Error("synthetic key conflict");
+          return { status: prior.status, run_id: prior.id };
+        }
+        clock += 1000;
+        const run: Run = {
+          id: 1000 + runs.length,
+          created_at: new Date(clock).toISOString(),
+          key: input.idempotency_key,
+          operation_key: input.operation_key,
+          input: input.input,
+          parent_run_id: input.automation_source?.run_id,
+          automation_id: input.automation_source?.automation_id,
+          status: "pending",
+        };
+        if (options.execute) {
+          const result = await options.execute(input);
+          run.status = String(
+            ["in_progress", "pending_approval"].includes(String(result.status))
+              ? "pending"
+              : result.status
+          );
+          if (result.status === "pending_approval")
+            run.approval_status = "pending";
+          runs.push(run);
+          return { ...result, run_id: run.id };
+        }
+        runs.push(run);
+        return { status: "in_progress", run_id: run.id };
       },
     },
     log: () => undefined,
   } as unknown as ReactionClient;
-  return {
-    client,
-    sends,
-    queries,
-    fail: () => {
-      fail = true;
-    },
-  };
+  return { client, executed, listed, runs };
 }
-describe("Task Builder completion reaction", () => {
-  test("an actionable service email without a deadline offers reviewable agent work", async () => {
+
+const atRun = (runId: number, changes: unknown[]) =>
+  ({
+    ...context(changes),
+    window: { ...context([]).window, run_id: runId },
+  }) as ReactionContext;
+
+const key = {
+  source_scope: "connection:3",
+  source_origin_id: "thread-1",
+  task_key: "reply",
+};
+const create = {
+  action: "create",
+  key,
+  title: "  Reply to  Ana ",
+  notes: "Gmail: Ana asked for the contract",
+  due: "2026-10-20T09:00:00Z",
+};
+const source = { automation_id: 71, run_id: 901 };
+
+const seen = { title: "Reply to Ana", due: null, completed: false };
+
+describe("Task Collaborator reminder changes", () => {
+  test("no changes touch nothing", async () => {
     const h = harness();
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(1);
-    expect(h.sends[0]?.title).toContain("Agent help available");
-    const url = new URL(h.sends[0]!.resource_url!, "https://example.test");
-    expect(url.pathname).toBe("/example/chat/personal-agent");
-    expect(url.searchParams.get("new")).toBe("1");
-    expect(url.searchParams.get("prompt")).toContain("Read its current status");
-    expect(h.sends[0]?.idempotency_key).toBe(
-      "task-builder:task:42:notice:v2:created"
-    );
+    await applyReminderChanges(context([]), h.client);
+    expect(h.executed).toHaveLength(0);
+    expect(h.listed).toHaveLength(0);
   });
-  test("a creation retry reuses its notification after display wording changes", async () => {
-    const first = harness();
-    await notifyTasks(context([candidate]), first.client);
-    const reworded = { ...candidate, action: "Handle the OAuth review" };
-    const second = harness(reworded);
-    await notifyTasks(context([candidate]), second.client);
-    expect(first.sends[0]?.title).not.toBe(second.sends[0]?.title);
-    expect(first.sends[0]?.idempotency_key).toBe(
-      second.sends[0]?.idempotency_key
-    );
-  });
-  test.each([
-    { priority: "high" },
-    { due_date: "2026-09-13T12:00:00Z" },
-    {
-      agent_help: {
-        summary: "Restore monitoring after the quota was exhausted.",
-        prompt: help.prompt,
-      },
-    },
-    {
-      agent_help: {
-        summary: help.summary,
-        prompt:
-          "Investigate dropped spans and prepare a recovery plan for review.",
-      },
-    },
-  ])("alerts again when the saved work changes: %p", async (change) => {
-    const first = harness();
-    await notifyTasks(context([candidate]), first.client);
-    const updated = { ...candidate, ...change };
-    const applied = Object.fromEntries(
-      Object.entries(change).map(([key, value]) => [
-        key,
-        { old: (candidate as Record<string, unknown>)[key], new: value },
-      ])
-    );
-    const second = harness(updated, "updated", [], applied);
-    await notifyTasks(context([updated]), second.client);
-    expect(second.sends).toHaveLength(1);
-    expect(second.sends[0]?.idempotency_key).not.toBe(
-      first.sends[0]?.idempotency_key
-    );
-    if ("priority" in change)
-      expect(second.sends[0]?.body).toContain("Priority: high");
-    if ("due_date" in change)
-      expect(second.sends[0]?.body).toContain("Due: 2026-09-13T12:00:00.000Z");
-    if ("agent_help" in change)
-      expect(second.sends[0]?.body).toContain(change.agent_help.summary);
-    const replay = harness(updated, "updated", [], applied);
-    await notifyTasks(context([updated]), replay.client);
-    expect(replay.sends[0]?.idempotency_key).toBe(
-      second.sends[0]?.idempotency_key
-    );
-  });
-  test.each([
-    { field: "priority", a: "low", b: "high" },
-    { field: "due_date", a: "2026-09-13T12:00:00Z", b: "2026-09-14T12:00:00Z" },
-    {
-      field: "agent_help",
-      a: help,
-      b: { ...help, summary: "Investigate the new request." },
-    },
-  ])("a reverted $field change alerts again but its retry deduplicates", async ({
-    field,
-    a,
-    b,
-  }) => {
-    const keys = [];
-    for (const [index, value] of [a, b, a].entries()) {
-      const task = { ...candidate, [field]: value };
-      const applied = {
-        [field]: { old: index === 0 ? null : index === 1 ? a : b, new: value },
-      };
-      const run = {
-        ...context([task]),
-        window: { ...context([]).window, run_id: 901 + index },
-      };
-      const h = harness(task, "updated", [], applied);
-      await notifyTasks(run, h.client);
-      expect(h.sends).toHaveLength(1);
-      const key = h.sends[0]?.idempotency_key;
-      expect(key).toBe(`task-builder:task:42:notice:v2:run:${901 + index}`);
-      keys.push(key);
-      const retry = harness(task, "updated", [], applied);
-      await notifyTasks(run, retry.client);
-      expect(retry.sends[0]?.idempotency_key).toBe(keys[index]);
+
+  test("refuses to guess between zero or several Reminders connections", async () => {
+    for (const connections of [[], [{ id: 7 }, { id: 8 }]]) {
+      const h = harness({ connections });
+      await expect(
+        applyReminderChanges(context([create]), h.client)
+      ).rejects.toThrow("Expected one Apple Reminders connection");
+      expect(h.executed).toHaveLength(0);
     }
-    expect(new Set(keys).size).toBe(3);
   });
-  test("equivalent deadline formats and unrelated edits send no new offer", async () => {
-    const original = { ...candidate, due_date: "2026-09-13T12:00:00Z" };
-    const first = harness(original);
-    await notifyTasks(context([original]), first.client);
-    const updated = {
-      ...original,
-      due_date: "2026-09-13T13:00:00+01:00",
-      status: "active",
-      rationale: "Investigation started; proposal and deadline are unchanged.",
-    };
-    const second = harness(updated, "updated", [], {
-      due_date: { old: original.due_date, new: updated.due_date },
-      status: { old: original.status, new: updated.status },
-      rationale: { old: null, new: updated.rationale },
-    });
-    await notifyTasks(context([updated]), second.client);
-    expect(second.sends).toHaveLength(0);
-  });
-  test.each([
-    { priority: { old: "low", new: "high" } },
-    { due_date: { old: null, new: "2026-09-13T12:00:00Z" } },
-  ])("does not alert for superseded urgency: %p", async (applied) => {
-    const h = harness(candidate, "updated", [], applied);
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("unchanged saved help and display-only edits send no new offer", async () => {
-    const h = harness(candidate, "updated", [], {
-      action: { old: "Old display title", new: candidate.action },
-      agent_help: { old: { ...help, summary: ` ${help.summary} ` }, new: help },
-    });
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test.each([
-    "done",
-    "dismissed",
-  ])("does not notify a task closed as %s after extraction", async (status) => {
-    const h = harness({ ...candidate, status });
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("does not notify when clearing agent help was denied", async () => {
-    const h = harness(candidate, "updated");
-    await notifyTasks(context([{ ...candidate, agent_help: null }]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("does not notify an output whose write did not persist", async () => {
-    const h = harness(null);
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("does not notify a denied task change", async () => {
-    const h = harness(candidate, "denied");
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test.each([
-    null,
-    { summary: "Human's plan", prompt: "A different plan" },
-  ])("does not notify a denied or superseded proposal: %p", async (agent_help) => {
-    const h = harness({ ...candidate, agent_help });
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("ordinary tasks still notify without claiming agent capabilities", async () => {
-    const task = { ...candidate, agent_help: null };
-    const h = harness(task);
-    await notifyTasks(context([task]), h.client);
-    expect(h.sends[0]?.title).toStartWith("Task:");
-    expect(h.sends[0]?.resource_url).toBe("/example/task/oauth-verification");
-  });
-  test("resolves committed task IDs even when older tasks lack output metadata", async () => {
+
+  test("requests the Lobu list and includes the reminder's source line", async () => {
     const h = harness();
-    await notifyTasks(context([candidate]), h.client);
-    const entityQuery = h.queries.find((sql) => sql.includes("FROM entities"));
-    expect(entityQuery).toContain("id IN (42)");
-    expect(entityQuery).not.toContain("metadata->>'automation_output'");
-  });
-  test("an ordinary task notice does not suppress its later first agent offer", async () => {
-    const plain = { ...candidate, agent_help: null };
-    const first = harness(plain);
-    await notifyTasks(context([plain]), first.client);
-    const later = harness(candidate, "updated");
-    await notifyTasks(context([candidate]), later.client);
-    expect(first.sends[0]?.idempotency_key).not.toBe(
-      later.sends[0]?.idempotency_key
-    );
-    expect(later.sends[0]?.title).toStartWith("Agent help available:");
-  });
-  test("withdrawing an offer does not send an ordinary task notice", async () => {
-    const plain = { ...candidate, agent_help: null };
-    const h = harness(plain, "updated");
-    await notifyTasks(context([plain]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("uses saved human wording in the notification", async () => {
-    const h = harness({ ...candidate, action: "My reviewed action" });
-    await notifyTasks(context([candidate]), h.client);
-    expect(h.sends[0]?.title).toEndWith("My reviewed action");
-  });
-  test("escapes source identity and rejects incomplete output", async () => {
-    const h = harness(null);
-    await notifyTasks(
-      context([{ ...candidate, source_origin_id: "sender's-thread" }]),
-      h.client
-    );
-    expect(h.queries.find((sql) => sql.includes("FROM entities"))).toContain(
-      "sender''s-thread"
-    );
-    await expect(
-      notifyTasks(context([{ action: "missing identity" }]), h.client)
-    ).rejects.toThrow("stable identity");
-  });
-  test("propagates a send failure to the existing reaction retry queue", async () => {
-    const h = harness();
-    h.fail();
-    await expect(notifyTasks(context([candidate]), h.client)).rejects.toThrow(
-      "notification unavailable"
-    );
-  });
-  test("an empty completed extraction sends no new task notification", async () => {
-    const h = harness();
-    await notifyTasks(context([]), h.client);
-    expect(h.sends).toHaveLength(0);
-  });
-  test("an empty extraction still sends the established due-task digest", async () => {
-    const dueDate = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const h = harness(null, null, [
+    await applyReminderChanges(context([create]), h.client);
+    expect(h.executed).toEqual([
       {
-        id: 7,
-        name: "Review the synthetic deadline",
-        due_date: dueDate,
-        priority: "high",
+        connection_id: 7,
+        operation_key: "create_reminder",
+        input: {
+          title: "Reply to Ana",
+          notes:
+            "Gmail: Ana asked for the contract\n\nlobu:connection:3|thread-1|reply",
+          list: "Lobu",
+          due: "2026-10-20T09:00:00Z",
+        },
+        idempotency_key: expect.any(String),
+        automation_source: source,
+        background: true,
       },
     ]);
-    await notifyTasks(context([]), h.client);
-    expect(h.sends).toHaveLength(1);
-    expect(h.sends[0]?.title).toBe("Task reminder — 1 overdue");
-    expect(h.sends[0]?.body).toContain("OVERDUE");
-    expect(h.sends[0]?.idempotency_key).toMatch(
-      /^task-due-digest:\d{4}-\d{2}-\d{2}:[a-f0-9]{32}$/
+    expect(h.listed[0]).toMatchObject({
+      connection_id: 7,
+      operation_key: "create_reminder",
+    });
+  });
+
+  test("a create without notes carries only the source line and its due time", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([
+        { action: "create", key, title: "Call", due: "2026-10-20T09:00:00Z" },
+      ]),
+      h.client
+    );
+    expect(h.executed[0]?.input).toEqual({
+      title: "Call",
+      notes: marker(key),
+      list: "Lobu",
+      due: "2026-10-20T09:00:00Z",
+    });
+  });
+
+  test("skips a create already queued or done, even reworded by a later window", async () => {
+    for (const status of ["pending", "claimed", "running", "completed"]) {
+      const h = harness({
+        recentCreates: [
+          { status, input: { title: "Old wording", notes: marker(key) } },
+        ],
+      });
+      await applyReminderChanges(atRun(950, [create]), h.client);
+      expect(h.executed).toHaveLength(0);
+    }
+  });
+
+  test("a create after a failed attempt is sent only when it names that attempt", async () => {
+    for (const status of ["failed", "timeout"]) {
+      const h = harness({
+        recentCreates: [{ status, input: { notes: marker(key) } }],
+      });
+      await applyReminderChanges(atRun(950, [create]), h.client);
+      await applyReminderChanges(
+        atRun(951, [{ ...create, retry_of: 99 }]),
+        h.client
+      );
+      expect(h.executed).toHaveLength(0);
+      await applyReminderChanges(
+        atRun(952, [{ ...create, retry_of: h.runs[0].id }]),
+        h.client
+      );
+      expect(h.executed).toHaveLength(1);
+    }
+  });
+
+  test("a rejected create cannot be resubmitted by naming its cancelled run", async () => {
+    const h = harness({
+      recentCreates: [{ status: "cancelled", input: { notes: marker(key) } }],
+    });
+    await applyReminderChanges(
+      context([{ ...create, retry_of: h.runs[0].id }]),
+      h.client
+    );
+    expect(h.executed).toHaveLength(0);
+  });
+
+  test("an unassessed create does not suppress an assessed retry in the same window", async () => {
+    const h = harness({
+      recentCreates: [{ status: "failed", input: { notes: marker(key) } }],
+    });
+    await applyReminderChanges(
+      context([create, { ...create, retry_of: h.runs[0].id }]),
+      h.client
+    );
+    expect(h.executed).toHaveLength(1);
+  });
+
+  test("concurrent windows admit only one create for the same source", async () => {
+    const h = harness();
+    await Promise.allSettled([
+      applyReminderChanges(atRun(901, [create]), h.client),
+      applyReminderChanges(atRun(902, [create]), h.client),
+    ]);
+    expect(h.runs).toHaveLength(1);
+  });
+
+  test("retained creates block duplicates regardless of their creation date", async () => {
+    for (const status of ["pending", "claimed", "running", "completed"]) {
+      const h = harness({
+        recentCreates: [
+          {
+            status,
+            created_at: new Date(Date.now() - 40 * 86400000).toISOString(),
+            input: { notes: marker(key) },
+          },
+        ],
+      });
+      await applyReminderChanges(context([create]), h.client);
+      expect(h.executed).toHaveLength(0);
+    }
+  });
+
+  test("a retried reaction leaves its failed create for the agent to reassess", async () => {
+    const h = harness({ execute: async () => ({ status: "failed" }) });
+    await expect(
+      applyReminderChanges(context([create]), h.client)
+    ).rejects.toThrow();
+    await applyReminderChanges(context([create]), h.client);
+    expect(h.runs).toHaveLength(1);
+  });
+
+  test("a window that decided before an earlier create timed out cannot create it again", async () => {
+    const h = harness();
+    // Windows A and B both read Reminders before A's create landed.
+    await applyReminderChanges(atRun(901, [create]), h.client);
+    // A's create times out; it may still have saved the reminder.
+    h.runs[0].status = "timeout";
+    await applyReminderChanges(atRun(902, [create]), h.client);
+    expect(h.runs).toHaveLength(1);
+    // A later window that checked the timed-out attempt may try again, once.
+    const retry = { ...create, retry_of: h.runs[0].id };
+    await Promise.allSettled([
+      applyReminderChanges(atRun(903, [retry]), h.client),
+      applyReminderChanges(atRun(904, [retry]), h.client),
+    ]);
+    expect(h.runs).toHaveLength(2);
+    expect(h.runs[1].key).not.toBe(h.runs[0].key);
+  });
+
+  test("a status transition while paging does not hide an unsettled create", async () => {
+    const h = harness({
+      pageSize: 1,
+      recentCreates: [
+        { status: "completed", input: { notes: "lobu:other|x|y" } },
+        { status: "claimed", input: { notes: marker(key) } },
+      ],
+      beforePage: (page) => {
+        if (page === 2) h.runs[1].status = "pending";
+      },
+    });
+    await applyReminderChanges(context([create]), h.client);
+    expect(h.executed).toHaveLength(0);
+  });
+
+  test("reads every page of earlier creates", async () => {
+    const other = { status: "completed", input: { notes: "lobu:other|x|y" } };
+    const h = harness({
+      pageSize: 2,
+      recentCreates: [
+        other,
+        other,
+        other,
+        { status: "completed", input: { notes: marker(key) } },
+      ],
+    });
+    await applyReminderChanges(context([create]), h.client);
+    expect(h.executed).toHaveLength(0);
+  });
+
+  test("a retried reaction replays its writes instead of repeating them", async () => {
+    let fail = true;
+    const h = harness({
+      refuse: (call) => call.operation_key === "update_reminder" && fail,
+    });
+    const changes = [
+      create,
+      {
+        action: "complete",
+        origin_id: "reminder:a",
+        expected: { ...seen, title: "A" },
+      },
+      {
+        action: "update",
+        origin_id: "reminder:b",
+        title: "New",
+        expected: { ...seen, title: "B" },
+      },
+    ];
+    await expect(
+      applyReminderChanges(context(changes), h.client)
+    ).rejects.toThrow("synthetic dispatch refusal");
+    fail = false;
+    await applyReminderChanges(context(changes), h.client);
+    // The create is skipped and completion replays; only the update is new.
+    expect(h.runs.map((run) => run.operation_key)).toEqual([
+      "create_reminder",
+      "complete_reminder",
+      "update_reminder",
+    ]);
+  });
+
+  test("updates and completions carry the state they were decided from", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([
+        {
+          action: "update",
+          origin_id: "ABC",
+          title: "Reply to Ana today",
+          due: null,
+          expected: seen,
+        },
+        { action: "complete", origin_id: "reminder:DEF", expected: seen },
+      ]),
+      h.client
+    );
+    expect(h.executed.map((call) => call.input)).toEqual([
+      {
+        origin_id: "reminder:ABC",
+        title: "Reply to Ana today",
+        due: null,
+        expected: seen,
+      },
+      { origin_id: "reminder:DEF", expected: seen },
+    ]);
+    expect(h.listed).toHaveLength(0);
+  });
+
+  // The Mac (apple.reminders@0.4.0) applies a write only while the reminder
+  // still matches its `expected`, and otherwise fails the run.
+  function mac(reminders: Record<string, typeof seen>) {
+    return async (call: Execute) => {
+      const write = call.input as {
+        origin_id: string;
+        title?: string;
+        due?: string | null;
+        expected: typeof seen;
+      };
+      const current = reminders[write.origin_id];
+      if (JSON.stringify(current) !== JSON.stringify(write.expected))
+        return { status: "failed" };
+      reminders[write.origin_id] =
+        call.operation_key === "complete_reminder"
+          ? { ...current, completed: true }
+          : {
+              title: write.title ?? current.title,
+              due: write.due === undefined ? current.due : write.due,
+              completed: current.completed,
+            };
+      return { status: "completed" };
+    };
+  }
+
+  test("separate title and due updates to one reminder both land", async () => {
+    const reminders = { "reminder:ABC": { ...seen } };
+    const h = harness({ execute: mac(reminders) });
+    await applyReminderChanges(
+      context([
+        {
+          action: "update",
+          origin_id: "ABC",
+          title: "Reply to Ana today",
+          expected: seen,
+        },
+        {
+          action: "update",
+          origin_id: "reminder:ABC",
+          due: "2026-10-20T09:00:00Z",
+          expected: seen,
+        },
+      ]),
+      h.client
+    );
+    expect(h.executed).toHaveLength(1);
+    expect(reminders["reminder:ABC"]).toEqual({
+      title: "Reply to Ana today",
+      due: "2026-10-20T09:00:00Z",
+      completed: false,
+    });
+  });
+
+  test("an update and a completion of one reminder complete it", async () => {
+    for (const order of [
+      ["update", "complete"],
+      ["complete", "update"],
+    ]) {
+      const reminders = { "reminder:ABC": { ...seen } };
+      const h = harness({ execute: mac(reminders) });
+      await applyReminderChanges(
+        context(
+          order.map((action) =>
+            action === "update"
+              ? {
+                  action,
+                  origin_id: "ABC",
+                  title: "Reply to Ana today",
+                  expected: seen,
+                }
+              : { action, origin_id: "ABC", expected: seen }
+          )
+        ),
+        h.client
+      );
+      expect(h.executed.map((call) => call.operation_key)).toEqual([
+        "complete_reminder",
+      ]);
+      expect(reminders["reminder:ABC"]).toEqual({ ...seen, completed: true });
+    }
+  });
+
+  test("writes to one reminder decided from different reads are refused", async () => {
+    const reminders = { "reminder:ABC": { ...seen } };
+    const h = harness({ execute: mac(reminders) });
+    await expect(
+      applyReminderChanges(
+        context([
+          { action: "update", origin_id: "ABC", title: "A", expected: seen },
+          {
+            action: "update",
+            origin_id: "ABC",
+            title: "B",
+            expected: { ...seen, title: "Other" },
+          },
+        ]),
+        h.client
+      )
+    ).rejects.toThrow(
+      "Change 1: reminder:ABC was decided from a different read"
+    );
+    expect(reminders["reminder:ABC"]).toEqual({ ...seen, title: "A" });
+  });
+
+  test("a later window uses its own idempotency key for an update", async () => {
+    const h = harness();
+    const update = {
+      action: "update",
+      origin_id: "reminder:a",
+      title: "New",
+      expected: seen,
+    };
+    await applyReminderChanges(atRun(901, [update]), h.client);
+    await applyReminderChanges(atRun(902, [update]), h.client);
+    expect(h.executed).toHaveLength(2);
+    expect(h.executed[0].idempotency_key).not.toBe(
+      h.executed[1].idempotency_key
     );
   });
-  test("a full due digest keeps its notification key within the API limit", async () => {
-    const dueTasks = Array.from({ length: 25 }, (_, i) => ({
-      id: 100000 + i,
-      name: `Synthetic deadline ${i}`,
-      due_date: new Date(Date.now() - 3600000).toISOString(),
-      priority: "high",
-    }));
-    const h = harness(null, null, dueTasks);
-    await notifyTasks(context([]), h.client);
-    expect(h.sends).toHaveLength(1);
-    expect(h.sends[0]!.idempotency_key!.length).toBeLessThanOrEqual(300);
-    const replay = harness(null, null, dueTasks);
-    await notifyTasks(context([]), replay.client);
-    expect(replay.sends[0]!.idempotency_key).toBe(h.sends[0]!.idempotency_key);
-    const changed = harness(null, null, dueTasks.slice(1));
-    await notifyTasks(context([]), changed.client);
-    expect(changed.sends[0]!.idempotency_key).not.toBe(
-      h.sends[0]!.idempotency_key
+
+  test("the same change proposed twice in one window is sent once", async () => {
+    const h = harness();
+    await applyReminderChanges(context([create, create]), h.client);
+    expect(h.executed).toHaveLength(1);
+  });
+
+  test("keys stay within the server's limit", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([
+        {
+          ...create,
+          key: { ...key, source_origin_id: "x".repeat(3000) },
+        },
+      ]),
+      h.client
     );
+    expect(h.executed[0].idempotency_key?.length).toBeLessThanOrEqual(256);
+  });
+
+  test("reports failed dispatches after attempting the remaining changes", async () => {
+    const h = harness({
+      refuse: (call) => call.operation_key === "create_reminder",
+    });
+    await expect(
+      applyReminderChanges(
+        context([
+          create,
+          { action: "complete", origin_id: "reminder:a", expected: seen },
+        ]),
+        h.client
+      )
+    ).rejects.toThrow("Change 0: synthetic dispatch refusal");
+    expect(h.executed.map((call) => call.operation_key)).toEqual([
+      "create_reminder",
+      "complete_reminder",
+    ]);
+  });
+
+  test("reports terminal failure receipts after attempting the rest of the batch", async () => {
+    for (const status of ["failed", "timeout", "cancelled"]) {
+      const h = harness({ execute: async () => ({ status }) });
+      await expect(
+        applyReminderChanges(
+          context([
+            create,
+            { action: "complete", origin_id: "reminder:a", expected: seen },
+          ]),
+          h.client
+        )
+      ).rejects.toThrow(status);
+      expect(h.executed).toHaveLength(2);
+    }
+  });
+
+  test("refuses a blank title or a key that would break the marker line", async () => {
+    for (const change of [
+      { ...create, title: "   " },
+      { ...create, key: { ...key, task_key: "a|b" } },
+      { ...create, key: { ...key, task_key: "a\nb" } },
+    ]) {
+      const h = harness();
+      await expect(
+        applyReminderChanges(context([change]), h.client)
+      ).rejects.toThrow();
+      expect(h.executed).toHaveLength(0);
+    }
+  });
+
+  test("preserves the source marker within the connector's notes limit", async () => {
+    const h = harness();
+    await applyReminderChanges(
+      context([{ ...create, notes: "n".repeat(5000) }]),
+      h.client
+    );
+    const notes = String(h.executed[0]?.input?.notes);
+    expect(notes.length).toBeLessThanOrEqual(4000);
+    expect(notes.endsWith(marker(key))).toBe(true);
+  });
+
+  // Same options as the host's window completion (complete-window.ts).
+  const ajv = new Ajv({
+    allErrors: true,
+    strict: false,
+    removeAdditional: true,
+  });
+  addFormats(ajv);
+  const validate = ajv.compile(input);
+
+  test("the host's validator keeps every field of every change", () => {
+    const changes = [
+      { ...create, retry_of: 12 },
+      { action: "complete", origin_id: "reminder:a", expected: seen },
+      {
+        action: "update",
+        origin_id: "reminder:b",
+        title: "New",
+        due: null,
+        expected: { ...seen, due: "2026-10-20T09:00:00Z" },
+      },
+    ];
+    const data = structuredClone({ changes });
+    expect(validate(data)).toBe(true);
+    expect(data).toEqual({ changes });
+  });
+
+  test("the host's validator rejects deletes, incomplete changes and writes without their read state", () => {
+    for (const change of [
+      { action: "delete", origin_id: "reminder:a" },
+      { action: "create", key },
+      { action: "create", key, title: "x", retry_of: 0 },
+      { action: "complete" },
+      { action: "complete", origin_id: "reminder:a" },
+      { action: "update", origin_id: "reminder:a", title: "x" },
+      {
+        action: "update",
+        origin_id: "reminder:a",
+        title: "x",
+        expected: { title: "y" },
+      },
+      { action: "create", key, title: "x", due: "tomorrow" },
+      // A create always has a due time, so Reminders notifies.
+      { action: "create", key, title: "x" },
+      { action: "create", key, title: "x", due: null },
+      {
+        action: "update",
+        origin_id: "reminder:a",
+        title: "x".repeat(501),
+        expected: seen,
+      },
+    ]) {
+      expect(validate({ changes: [change] })).toBe(false);
+    }
   });
 });
