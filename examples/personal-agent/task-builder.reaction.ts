@@ -238,13 +238,9 @@ async function readHistory(
           parentRunId: Number(run.parent_run_id ?? 0),
         };
         // A create is identified by its marker; any other write by the window
-        // run that proposed it.
-        if (
-          operation === "create_reminder"
-            ? !markerOf(write)
-            : !write.parentRunId
-        )
-          continue;
+        // run that proposed it. A write made outside an Automation (a person's
+        // correction) has no window, but still orders the reminder's fields.
+        if (operation === "create_reminder" && !markerOf(write)) continue;
         const status = String(run.status);
         const position = `${run.created_at}|${id.padStart(20, "0")}`;
         const key = identity(write);
@@ -419,6 +415,16 @@ export default async function applyReminderChanges(
     automation_id: automationId,
     run_id: Number(ctx.window.run_id),
   };
+  // Every write this window proposes follows its end, so a window inside the
+  // read horizon sees all the evidence its changes are checked against. An
+  // older window's replay cannot, so it is refused rather than guessed at.
+  if (
+    changes.length > 0 &&
+    Date.parse(ctx.window.window_end) < Date.now() - RECENT_MS
+  )
+    throw new Error(
+      "This window is older than the reminder history horizon; propose its changes again from a fresh window"
+    );
   const history = await readHistory(client, connectionId);
 
   // Writes are queued, and the Mac and any approval finish after the reaction

@@ -16,8 +16,8 @@ const context = (changes: unknown[]): ReactionContext =>
     window: {
       run_id: 901,
       automation_id: 71,
-      window_start: "2026-09-10T10:00:00Z",
-      window_end: "2026-09-10T12:00:00Z",
+      window_start: new Date(Date.now() - 2 * 3600000).toISOString(),
+      window_end: new Date().toISOString(),
       content_analyzed: 1,
     },
     automation: {
@@ -1080,29 +1080,53 @@ describe("Task Collaborator reminder changes", () => {
         },
       ],
     });
-    await applyReminderChanges(context([]), h.client);
+    // A replay of the failed write's own window must not undo the newer write.
+    await applyReminderChanges(
+      atRun(800, [{ action: "update", origin_id: "reminder:a", title: "Old" }]),
+      h.client
+    );
     expect(h.executed).toHaveLength(0);
   });
 
-  test("does not resurrect a failure after its successful retry leaves the history horizon", async () => {
+  test("refuses a window older than the history horizon instead of replaying it", async () => {
     const h = harness({
       recentCreates: [
         {
-          status: "failed",
-          created_at: new Date(Date.now() - 4 * 86400000).toISOString(),
-          operation_key: "complete_reminder",
-          input: { origin_id: "reminder:a" },
-        },
-        {
           status: "completed",
           created_at: new Date(Date.now() - 3 * 86400000).toISOString(),
-          operation_key: "complete_reminder",
-          input: { origin_id: "reminder:a" },
+          operation_key: "update_reminder",
+          input: { origin_id: "reminder:a", title: "New" },
         },
       ],
     });
-    await applyReminderChanges(context([]), h.client);
+    const old = atRun(800, [
+      { action: "update", origin_id: "reminder:a", title: "Old" },
+      create,
+    ]);
+    old.window.window_end = new Date(Date.now() - 4 * 86400000).toISOString();
+    await expect(applyReminderChanges(old, h.client)).rejects.toThrow(
+      "older than the reminder history horizon"
+    );
     expect(h.executed).toHaveLength(0);
+  });
+
+  test("a person's correction outside any Automation orders the reminder too", async () => {
+    const h = harness();
+    const stale = [{ action: "update", origin_id: "reminder:a", title: "Old" }];
+    await applyReminderChanges(atRun(901, stale), h.client);
+    h.runs[0].status = "failed";
+    h.runs.push({
+      id: 5000,
+      created_at: new Date(Date.now() + 60000).toISOString(),
+      operation_key: "update_reminder",
+      parent_run_id: null,
+      automation_id: null,
+      status: "completed",
+      input: { origin_id: "reminder:a", title: "Corrected" },
+    });
+    // Replaying the failed window cannot undo the correction.
+    await applyReminderChanges(atRun(901, stale), h.client);
+    expect(h.executed).toHaveLength(1);
   });
 
   test("a cancelled write or one out of attempts is not retried", async () => {
