@@ -125,6 +125,26 @@ export const AUTOMATION_CATALOG_TEMPLATES: CatalogEntry[] = [
 		},
 	},
 	{
+		// Distills a local folder into memory instead of mirroring it: one short
+		// memory per file, replaced when the file changes. Agents read the full
+		// file from the device when they need it. Must run on the device that
+		// holds the folder, so the user picks that device in the create form.
+		// skip_if_unchanged is off because the folder, not workspace events,
+		// is what changes between runs.
+		id: "folder-distill",
+		name: "Distill a folder",
+		version: "1.0.0",
+		description:
+			"Keep a short memory of each note or document in a folder on your device, updated when files change. Run it on the device that has the folder and edit the folder path in the prompt.",
+		detail: {
+			slug: "folder-distill",
+			triggers: [{ ...scheduleTrigger("0 7 * * *"), skip_if_unchanged: false }],
+			prompt:
+				'Folder: ~/Notes\n\nYou run on the device that holds this folder. Keep Lobu memory in step with the text files in it (Markdown, plain text, and similar), including subfolders. Ignore the window\'s event sources; the folder is the only input. Always write file paths as absolute paths with the home directory expanded.\n\n1. Load what is already stored with ONE query_sql call: SELECT id, payload_text FROM events WHERE payload_text LIKE \'Source file: <absolute folder path>/%\'. Each row is the current memory for one file; never search memory per file.\n2. List the files. A file with no stored memory: read it and save one memory whose first line is "Source file: <absolute file path>", followed by the facts, decisions, dates, and people worth remembering. Distill; never copy the whole file.\n3. A stored memory that no longer matches its file: save a new one with supersedes_event_id set to that row\'s id.\n4. A stored memory that still matches: leave it.\n5. A stored memory whose file no longer exists: supersede it with a short note saying the file was deleted.\n\nHandle at most 50 new or changed files per run; the next run continues. Finish with one line counting created, updated, unchanged, and deleted.\n',
+			tags: ["files", "device", "memory"],
+		},
+	},
+	{
 		id: "duplicate-identity",
 		name: "Duplicate identity resolution",
 		version: "4.0.0",
