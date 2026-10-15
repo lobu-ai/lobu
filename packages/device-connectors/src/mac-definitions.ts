@@ -4,15 +4,6 @@ import {
   withComputerUseStatus,
 } from "./mac-computer-use.js";
 
-/**
- * Canonical TypeScript source for the Mac-only device connector metadata. The
- * Mac app implements every entry natively; this package contains no executable
- * handlers. Connectors shared with another platform are authored separately
- * (see `os-shell.ts`) so both endpoints serialize the identical contract.
- */
-// The reminder state a write was decided from, as read from the sync feed.
-// The Mac refuses the write when any listed field no longer matches, so a
-// newer edit is never overwritten.
 const expectedReminderState = {
   type: "object",
   description:
@@ -29,6 +20,12 @@ const expectedReminderState = {
   additionalProperties: false,
 };
 
+/**
+ * Canonical TypeScript source for the Mac-only device connector metadata. The
+ * Mac app implements every entry natively; this package contains no executable
+ * handlers. Connectors shared with another platform are authored separately
+ * (see `os-shell.ts`) so both endpoints serialize the identical contract.
+ */
 export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
   {
     key: "apple.screen_time",
