@@ -12,6 +12,7 @@ import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } 
 import { applyRunConnectorPolicyAtClaim } from "../../../../authz/operation-run-policy";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { type DbClient, getDb } from "../../../../db/client";
+import { isChatSenderTurn } from "../../../../gateway/orchestration/chat-turn-actor";
 import type { Env } from "../../../../index";
 import {
 	isDelegatedBrowserAffinityConnector,
@@ -717,6 +718,17 @@ export async function handleExecute(
 	if (policy.effect === "deny") {
 		return { error: `Policy blocks '${operation.operation_key}' for this principal.` };
 	}
+	// A device-pinned connection runs on one member's own machine, and sharing
+	// it with the workspace does not waive that member's consent. A chat turn
+	// runs it unattended only as its owner: the `member` tier (a linked
+	// sender's own direct message) is the one chat turn whose ctx.userId is the
+	// sender (gateway/orchestration/chat-turn-actor.ts). A vouched coworker or a
+	// member in a group conversation (no user), or another member's direct
+	// message, queues for approval instead of Auto. Block above still wins.
+	const chatTurnOnAnotherMembersDevice =
+		connection.device_worker_id !== null &&
+		isChatSenderTurn(ctx.sourceContext ?? {}) &&
+		(!ctx.userId || ctx.userId !== connection.device_owner_user_id);
 	const preparedFiles = await prepareOperationFiles(input, operation.input_schema, ctx);
 	input = preparedFiles.input;
 	if (preparedFiles.claims.length > 0) {
@@ -735,7 +747,7 @@ export async function handleExecute(
 		approval_notification: notificationContext,
 		source_attribution: requestSourceAttribution(ctx),
 	};
-	const shouldQueue = policy.effect === "approval";
+	const shouldQueue = policy.effect === "approval" || chatTurnOnAnotherMembersDevice;
 	const activation = args.activation
 		? {
 				kind: args.activation.kind,
