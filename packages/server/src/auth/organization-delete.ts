@@ -24,7 +24,7 @@ function organizationNotFound(): APIError {
   });
 }
 
-interface RequestSession {
+export interface RequestSession {
   user: { id: string };
   session: { activeOrganizationId?: string | null };
 }
@@ -36,7 +36,7 @@ interface RequestSession {
  * which runs the whole FK cascade at once: a large workspace outlives the
  * statement timeout, and tables with no FK keep orphaned rows. This plugin's
  * before hook short-circuits the endpoint (the same mechanism as
- * `memberRoleAuthHook`) and records a deletion request instead; the
+ * `memberRolePlugin`) and records a deletion request instead; the
  * `workspace-purge` task removes it in the background. The organization
  * plugin sets `disableOrganizationDeletion`, so
  * the synchronous path cannot run even if this hook were bypassed.

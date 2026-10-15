@@ -97,7 +97,7 @@ failure like the 2026-10-15 500 is no longer silent.
 ## Implementation notes
 
 - **Interception.** A Better Auth plugin before hook owns `POST
-  /organization/delete` (the `memberRoleAuthHook` mechanism) and the
+  /organization/delete` (the `memberRolePlugin` mechanism) and the
   organization plugin sets `disableOrganizationDeletion`, so the synchronous
   cascade cannot run. The hook resolves the session through the auth API,
   because sibling before hooks never see the bearer plugin's header rewrite.

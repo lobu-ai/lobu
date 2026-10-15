@@ -587,14 +587,14 @@ describe("workspace purge", () => {
 			adminToken,
 		);
 		expect(invite.status).toBe(404);
-		// Better Auth's member-role endpoint is served by a user hook that runs
-		// before any plugin hook and reads only the cookie session.
-		const roleChange = await call(
-			"/organization/update-member-role",
-			{ memberId: plainMemberId, role: "admin" },
-			{ cookie: adminSignUp.cookie as string },
-		);
-		expect(roleChange.status).toBe(404);
+		for (const credential of [adminToken, { cookie: adminSignUp.cookie as string }]) {
+			const roleChange = await call(
+				"/organization/update-member-role",
+				{ memberId: plainMemberId, role: "admin" },
+				credential,
+			);
+			expect(roleChange.status).toBe(404);
+		}
 		const removal = await call(
 			"/organization/remove-member",
 			{ memberIdOrEmail: plainMemberId, organizationId: target.organizationId },
