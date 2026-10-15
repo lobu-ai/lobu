@@ -286,14 +286,16 @@ async function enqueueAutomationRunForRecord(
 
 	// The arrival window [mark, horizon). It is empty only while the mark is
 	// younger than the settle budget — a just-created Automation, or one whose
-	// mark was seeded at cutover. The scheduled path checks for that before it
+	// mark was seeded at cutover — or while an open transaction holds the
+	// horizon behind it. The scheduled path checks for that before it
 	// gets here and waits a tick; a manual trigger gets a clear answer instead
 	// of a run that reads nothing.
 	const { windowStart, windowEnd } = inspectedWindow ?? await computePendingWindow(sql, automation.id);
 	if (windowEnd <= windowStart) {
 		throw new ToolUserError(
 			`Automation ${automation.id} has nothing new to run yet: rows stored after ` +
-				`${windowStart.toISOString()} become claimable ${automationArrivalSettleMs() / 1000}s after they land.`,
+				`${windowStart.toISOString()} must settle for ${automationArrivalSettleMs() / 1000}s, ` +
+				'and in-flight transactions can delay the window further.',
 			409,
 		);
 	}

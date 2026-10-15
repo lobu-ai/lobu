@@ -175,16 +175,16 @@ export async function handleClaimNextWindow(
         WHERE id = ${runId}
       `;
     } else {
-      // The arrival window [mark, horizon). Empty only while the mark is
-      // younger than the settle budget (a just-created or just-seeded
-      // Automation): nothing stored since it has settled yet.
+      // The arrival window [mark, horizon) stays empty while the settle delay
+      // or an open writer keeps the horizon at or behind the mark.
       const pending = await computePendingWindow(tx, automationId);
       windowStart = pending.windowStart;
       windowEnd = pending.windowEnd;
       if (windowEnd <= windowStart) {
         throw new ToolUserError(
           `Automation ${automationId} has nothing new to claim yet: rows stored after ` +
-            `${windowStart.toISOString()} become claimable ${automationArrivalSettleMs() / 1000}s after they land.`,
+            `${windowStart.toISOString()} must settle for ${automationArrivalSettleMs() / 1000}s, ` +
+            'and in-flight transactions can delay the window further.',
           409
         );
       }

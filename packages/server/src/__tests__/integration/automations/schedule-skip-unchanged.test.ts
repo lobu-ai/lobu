@@ -3,6 +3,7 @@ import type { DbClient } from "../../../db/client";
 import type { Env } from "../../../index";
 import { manageAutomations } from "../../../tools/admin/manage_automations";
 import { materializeDueAutomationRuns } from "../../../automations/automation";
+import { automationArrivalHorizon } from "../../../utils/window-utils";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { createTestAgent, seedOwnerContext } from "../../setup/test-fixtures";
@@ -66,9 +67,12 @@ describe("scheduled Automation unchanged gate", () => {
 			apply(target, self, args) {
 				const query = Reflect.apply(target, self, args);
 				const text = Array.isArray(args[0]) ? args[0].join('') : '';
-				if (!inspectedHorizon && /AS\s+db_now/.test(text) && text.includes('FROM automations')) {
-					return query.then(async (rows: Array<{ db_now: string | Date }>) => {
-						inspectedHorizon = new Date(rows[0].db_now).toISOString();
+				if (!inspectedHorizon && text.includes('last_completed_window_start') && text.includes('FOR UPDATE')) {
+					return query.then(async (rows: Array<{ db_now: string | Date; oldest_open_transaction: string | Date | null }>) => {
+						inspectedHorizon = automationArrivalHorizon(
+							new Date(rows[0].db_now),
+							rows[0].oldest_open_transaction ? new Date(rows[0].oldest_open_transaction) : null,
+						).toISOString();
 						await sql`SELECT pg_sleep(0.02)`;
 						return rows;
 					});

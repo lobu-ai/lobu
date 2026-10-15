@@ -127,7 +127,7 @@ production 56.3% of first-seen rows arrived more than an hour after their
 before its content ever landed and no run saw it.
 
 Each Automation therefore carries one durable arrival mark,
-`automations.next_window_start`, and a run covers `[mark, now - settle)`. The
+`automations.next_window_start`, and a run covers `[mark, horizon)`. The
 mark advances only when a window completes, including a legitimate zero-source
 result; failed, timed-out, abandoned, and lease-expired attempts leave it where
 it is, so the same arrivals stay claimable. There is no backlog of calendar
@@ -136,10 +136,16 @@ decides how much governed input it needs to fulfill the Automation instructions;
 completion advances the mark even if it did not read every row.
 
 The cadence still decides WHEN a run fires; it no longer shapes what the run
-covers. `settle` is `AUTOMATION_ARRIVAL_SETTLE_MS` (default 60s): `created_at` is
-stamped at the writer's transaction start while the row only becomes visible at
-commit, so a window stops one writer-transaction short of the clock. A row stored
-inside the settle window belongs to the next run, never to none.
+covers. The horizon is the earlier of `now - settle` and the start of the oldest
+visible client transaction still open on the database. `created_at` is stamped
+at the writer's transaction start while the row only becomes visible at commit,
+so the second bound keeps a window from closing over a row whose writer has not committed,
+however long that writer stays open; a slow writer delays windows instead of
+losing rows. `settle` is `AUTOMATION_ARRIVAL_SETTLE_MS` (default 60s), a
+freshness budget. A row stored inside it belongs to the next run, never to none.
+This relies on PostgreSQL activity tracking (`track_activities`, on by default)
+and on every event writer running as the application role the reader runs as,
+so its `xact_start` is visible in `pg_stat_activity`.
 
 Repeated execution failures are bounded by a schedule circuit breaker. After
 `AUTOMATION_PAUSE_AFTER_CONSECUTIVE_FAILURES` consecutive scheduled runs fail or
@@ -151,8 +157,8 @@ clears the failure state and resumes the cursor. A scheduled notification sweep
 durably notifies workspace admins and owners once per pause generation.
 
 `pending_analysis.next_window` is the arrival range a claim would hand out, or
-null while the mark is younger than the settle budget (a just-created or
-just-seeded Automation).
+null while the settle delay or an open transaction keeps the horizon at or
+behind the mark.
 `unprocessed_content_count` separately counts source items not linked to a
 completed Automation run. Presentation pagination and date filters affect only
 the returned completed-window list, never these global diagnostics.

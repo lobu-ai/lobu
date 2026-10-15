@@ -298,8 +298,8 @@ describe('feed page commit', () => {
 
   it('commits a maximum-sized worker page within the transaction timeout', async () => {
     // A page's events are stamped `created_at` when its transaction starts and
-    // become visible only at commit, so the whole page transaction is the
-    // exposure Automation windows budget for (events-insert-sites.test.ts).
+    // become visible only at commit, so every Automation window waits on the
+    // whole page transaction (`automationArrivalHorizon`).
     // The isolate streams pages of at most this many events.
     const PAGE_SIZE = 100;
     const { connectionId, runId } = await seed();
