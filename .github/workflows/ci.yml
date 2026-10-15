@@ -1260,6 +1260,16 @@ jobs:
           bun test scripts/__tests__/migrate-up-check-pending.test.ts --timeout 30000
           bun test scripts/__tests__/migrate-up-duplicate-version.test.ts --timeout 30000
 
+      - name: Migration deploy-window declaration
+        # A migration with no -- lobu:no-quiesce marker makes the pre-upgrade
+        # hook scale prod to zero (a ~1 minute 503) whether or not the
+        # migration needs it, and an omitted marker chose that silently. Every
+        # new migration must declare -- lobu:no-quiesce or
+        # -- lobu:quiesce <reason> (docs/MIGRATIONS.md).
+        run: |
+          node scripts/check-migration-quiesce.mjs
+          bun test scripts/__tests__/check-migration-quiesce.test.ts --timeout 30000
+
       - name: Raw-array SQL-param gate
         # packages/server's postgres.js client runs fetch_types:false, where a raw
         # JS array bound as a query param serializes to a malformed array literal

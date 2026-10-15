@@ -234,7 +234,7 @@ RUN node scripts/image-browser-tooling.mjs --check /app
 
 # Database migrations (+ statement-at-a-time runner for transaction:false)
 COPY db/migrations ./db/migrations
-COPY scripts/migrate-up.mjs ./scripts/migrate-up.mjs
+COPY scripts/migrate-up.mjs scripts/migration-quiesce.mjs ./scripts/
 
 # Build metadata + environment defaults
 ARG APP_GIT_SHA=unknown

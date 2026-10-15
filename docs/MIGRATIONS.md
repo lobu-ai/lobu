@@ -16,11 +16,16 @@ The rules below are what we wish #765 had followed.
 
 ---
 
-## The deploy window (`-- lobu:no-quiesce`)
+## The deploy window (`-- lobu:no-quiesce` / `-- lobu:quiesce`)
 
-The pre-upgrade hook scales the app **to zero** before migrating, so no old replica can ever observe a new schema. The ingress answers that gap with 503 for the length of a pod restart — measured at 41s in prod on 2026-08-19. It fires on every deploy carrying a pending migration, whether or not that migration needs it.
+The pre-upgrade hook scales the app **to zero** before migrating, so no old replica can ever observe a new schema. The ingress answers that gap with 503 for the length of a pod restart — measured at 41s in prod on 2026-08-19 and about 70s on 2026-10-15. It fires on every deploy carrying a pending migration that is not marked `-- lobu:no-quiesce`, whether or not that migration needs it.
 
-Most don't. The expand half of an expand/contract pair — an additive nullable column, a comment, a new index — is one the *old* code already runs against happily. Mark those and the deploy rolls with no downtime:
+**Every new migration declares its window**, and `make pre-pr` / CI fail one that doesn't (`scripts/check-migration-quiesce.mjs`). Before the check, 19 of 35 migrations in a month carried no marker, so each of those deploys went down for a minute by omission. Declare exactly one:
+
+- `-- lobu:no-quiesce` — the old replicas keep serving across the migration.
+- `-- lobu:quiesce <reason>` — they must stop first. The reason names what in the running code breaks against the new schema.
+
+Most migrations don't need the window. The expand half of an expand/contract pair — an additive nullable column, a comment, a new index — is one the *old* code already runs against happily. Mark those and the deploy rolls with no downtime:
 
 ```sql
 -- migrate:up
@@ -32,12 +37,12 @@ ALTER TABLE public.device_workers
 
 Rules:
 
-- The marker must be **its own comment line**. Prose mentioning it does not arm it.
+- A declaration must be **its own comment line**, in the up section. Prose mentioning it does not arm it.
 - It asserts something about the **application**, not the DDL: that the code running *before* this deploy keeps working against the post-migration schema. Nothing inspects your SQL, because backward compatibility is a property of sequencing rather than of the DDL verbs — a `DROP COLUMN` is safe once nothing reads that column, and a widened `CHECK` constraint is safe because it only ever accepts more. Only you know where the migration sits in that sequence.
 - **Every** pending migration in the deploy must carry it, or the whole batch quiesces. One unmarked migration removes the fast path for all of them.
 - An unmarked migration quiesces only after validation succeeds. An unreadable migration, failed prerequisite, or crashed pending check aborts deployment before any scaling. A missing pending-check command also aborts.
 
-Leave the marker off when the running code would actually break: a column it still reads is going away, a constraint is being tightened under it, or a new `NOT NULL` column has no `DEFAULT` to fill in for inserts that predate it. That is what the window exists for.
+Declare `-- lobu:quiesce <reason>` when the running code would actually break: a column it still reads is going away, a constraint is being tightened under it, or a new `NOT NULL` column has no `DEFAULT` to fill in for inserts that predate it. That is what the window exists for.
 
 ---
 
