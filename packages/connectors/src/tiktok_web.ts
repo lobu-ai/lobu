@@ -98,6 +98,37 @@ async function sourcePost(browser: ChromeActionDispatcher, tabId: number, url: s
 	}
 }
 
+async function followingPosts(browser: ChromeActionDispatcher, tabId: number, sessionId: string, limit: number): Promise<RecordValue[]> {
+	const unique = new Map<unknown, RecordValue>();
+	// Bound both work and wall time within one source read. TikTok can advertise
+	// hasMore while repeatedly returning the same posts and cursor.
+	const deadline = Date.now() + 12000;
+	let idle = 0;
+	for (let round = 0; round < 7; round++) {
+		await page(browser, tabId, round ? "following_scroll" : "following_status");
+		const data = await browser.dispatch("network_intercept_drain", { session_id: sessionId, allowed_origins: ORIGINS });
+		if (data.missing || !Array.isArray(data.responses)) throw new Error("TikTok Following capture is unavailable");
+		const before = unique.size;
+		let ended = false;
+		for (const response of data.responses) {
+			const r = object(response);
+			if (r.status !== 200 || r.truncated || r.base64_encoded || typeof r.body !== "string") throw new Error("TikTok Following response is unavailable or truncated");
+			const json = object(JSON.parse(r.body));
+			if (json.status_code !== 0 || !Array.isArray(json.itemList)) throw new Error("TikTok did not return a successful Following feed");
+			for (const item of json.itemList) {
+				const row = normalizeTikTokPost(item);
+				unique.set(row.origin_id, row);
+			}
+			ended = json.hasMore === false;
+		}
+		idle = unique.size === before ? idle + 1 : 0;
+		if (unique.size >= limit || ended || idle >= 2 || Date.now() >= deadline) break;
+	}
+	// Do not return a successful partial read when a late challenge appeared.
+	await page(browser, tabId, "following_status");
+	return [...unique.values()];
+}
+
 async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedReadResult> {
 	if (ctx.cursor || ctx.offset || ctx.sort || ctx.window || ctx.match) throw new Error("TikTok snapshot feeds do not support pagination, sorting, time windows, or exact-match filters");
 	if (ctx.query && ctx.feedKey !== "search") throw new Error("Use the TikTok search feed for queries");
@@ -124,14 +155,7 @@ async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedReadResult>
 			let rows: RecordValue[] = [];
 			if (ctx.feedKey === "following") {
 				await browser.dispatch("wait_for_selector", { tab_id: tabId, selector: '[data-e2e="recommend-list-item-container"]', timeout_ms: 15000, allowed_origins: ORIGINS });
-				const data = await browser.dispatch("network_intercept_drain", { session_id: sessionId, allowed_origins: ORIGINS });
-				for (const response of Array.isArray(data.responses) ? data.responses : []) {
-					const r = object(response);
-					if (r.status !== 200 || r.truncated || r.base64_encoded || typeof r.body !== "string") throw new Error("TikTok Following response is unavailable or truncated");
-					const json = object(JSON.parse(r.body));
-					if (json.status_code !== 0 || !Array.isArray(json.itemList)) throw new Error("TikTok did not return a successful Following feed");
-					rows.push(...json.itemList.map(normalizeTikTokPost));
-				}
+				rows = await followingPosts(browser, tabId, sessionId!, limit);
 			} else if (ctx.feedKey === "search") {
 				await browser.dispatch("wait_for_selector", { tab_id: tabId, selector: 'a[href*="/video/"],a[href*="/photo/"]', timeout_ms: 15000, allowed_origins: ORIGINS });
 				const data = await page(browser, tabId, "post_links");
@@ -175,7 +199,7 @@ async function readTikTokInbox(ctx: FeedReadContext): Promise<FeedReadResult> {
 
 export default class TikTokConnector extends ConnectorRuntime {
 	readonly definition: RuntimeConnectorDefinition = {
-		key: "tiktok.web", name: "TikTok", version: "1.1.3", faviconDomain: "tiktok.com",
+		key: "tiktok.web", name: "TikTok", version: "1.1.4", faviconDomain: "tiktok.com",
 		description: "Read TikTok through your signed-in paired browser, inspect post visuals, set likes, and prepare comments for human submission. Automations decide what to read and act on.",
 		browser: { origins: ORIGINS, authMethods: ["browser"], accountProbe: { url: ORIGIN, expression: expression("identity") } },
 		authSchema: { methods: [{ type: "browser", mode: "live" }] },
@@ -183,7 +207,7 @@ export default class TikTokConnector extends ConnectorRuntime {
 			messages: { key: "messages", name: "Messages", description: "Read a recent page per conversation before older history, with sender, direction, source IDs, evidence revisions and timestamps. Cursors cover the initial conversation set; a changed set reports incomplete coverage and needs a fresh scan. Unsupported media is identified, not transcribed. No message is sent.", read: readTikTokInbox },
 			activity: { key: "activity", name: "Activity", description: "Read loaded TikTok activity including likes, comments, mentions and followers, with source IDs and links. Follow the returned cursor for older entries. Opening the activity panel may clear its unread badge.", read: readTikTokInbox },
 			for_you: { key: "for_you", name: "For You", description: "Initial personalized timeline snapshot. No history coverage or continuation; repeat reads can overlap.", read: readTikTokSnapshot },
-			following: { key: "following", name: "Following", description: "Initial browser Following snapshot. No history coverage or continuation; repeat reads can overlap.", read: readTikTokSnapshot },
+			following: { key: "following", name: "Following", description: "Read up to 30 distinct Following posts with bounded scrolling. May return fewer when TikTok stops yielding new posts or the read budget is reached. No history coverage or continuation; repeat reads can overlap.", read: readTikTokSnapshot },
 			search: { key: "search", name: "Search", description: "Browser search results for videos and photo posts. Use query when reading. Initial snapshot without continuation.", read: readTikTokSnapshot, configSchema: { type: "object", properties: { query: { type: "string", maxLength: 200 } }, additionalProperties: false } },
 		},
 		actions: {
