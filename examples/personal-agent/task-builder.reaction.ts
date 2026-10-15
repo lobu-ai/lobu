@@ -2,19 +2,20 @@ import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 
 // Applies the Task Collaborator's reminder changes through the paired Mac's
 // apple.reminders operations. Apple Reminders is the task list: the Automation
-// reads it live and this reaction writes it. Lobu keeps no copy of reminders.
+// reads it live and this reaction writes it. Lobu retains the operation history,
+// not a synced reminder collection.
 //
 // The reaction orders nothing. An update or completion names the reminder
 // state it was decided from, and the Mac (apple.reminders@0.4.0) refuses it if
-// the reminder has changed since, so a stale or repeated decision never
-// overwrites a newer edit. The agent re-reads Reminders and decides again.
+// its title, due date or completion state no longer matches. The agent
+// re-reads Reminders and decides again.
 //
 // A create carries its source identity as the last line of its notes
 // ("lobu:<scope>|<origin>|<key>"), which is how later reads recognise it. A
 // window can read Reminders before an earlier create lands (it may wait for
 // approval or the Mac), so a create is skipped while another with the same
-// marker is queued or done. Concurrent creates share an idempotency key, so
-// the server admits only one. A failed create is the agent's to propose again.
+// marker is queued, done or cancelled. Concurrent creates share an idempotency
+// key, so the server admits only one. A failed create is the agent's to propose again.
 
 // One flat item shape: the host validates with Ajv `removeAdditional`, which
 // strips properties while trying each `oneOf` branch and so would empty every
@@ -153,7 +154,7 @@ function markerOf(input: unknown): string | undefined {
   return line?.startsWith("lobu:") ? line : undefined;
 }
 
-type CreateHistory = Map<string, { live: boolean; retryAfter: number }>;
+type CreateHistory = Map<string, { blocked: boolean; retryAfter: number }>;
 
 // Walk retained runs once, without status filters that a transition could
 // escape between pages. Retention is based on completion, not creation time;
@@ -175,13 +176,15 @@ async function createHistory(
       const line = markerOf(run.input);
       if (!line) continue;
       const entry = history.get(line) ?? {
-        live: false,
+        blocked: false,
         retryAfter: 0,
       };
-      if (FAILED.includes(String(run.status))) {
+      if (run.status === "failed" || run.status === "timeout") {
         entry.retryAfter = Math.max(entry.retryAfter, Number(run.id));
       } else {
-        entry.live = true;
+        // Cancelled creates include rejected approvals, which a new proposal
+        // must not turn into another approval request.
+        entry.blocked = true;
       }
       history.set(line, entry);
     }
@@ -238,6 +241,50 @@ function writeOf(change: Change): Write {
   return { operation, input, identity: `${operation}|${canonical(input)}` };
 }
 
+// Writes to one reminder share the state they were decided from, so the first
+// to land would make the Mac refuse the rest. Fold them into one write per
+// reminder: updates merge, and a completion wins over an update, which the
+// agent can propose again from its next read if it still matters.
+function onePerReminder(
+  changes: Change[],
+  client: ReactionClient,
+  failures: string[]
+): Array<[number, Change]> {
+  const kept: Array<[number, Change]> = [];
+  const slots = new Map<string, number>();
+  for (const [index, change] of changes.entries()) {
+    if (change.action === "create") {
+      kept.push([index, change]);
+      continue;
+    }
+    const origin = reminderOriginId(change.origin_id);
+    const slot = slots.get(origin);
+    if (slot === undefined) {
+      slots.set(origin, kept.length);
+      kept.push([index, change]);
+      continue;
+    }
+    const earlier = kept[slot][1] as Exclude<Change, { action: "create" }>;
+    if (canonical(earlier.expected) !== canonical(change.expected)) {
+      failures.push(
+        `Change ${index}: ${origin} was decided from a different read than change ${kept[slot][0]}; not sent`
+      );
+      continue;
+    }
+    if (earlier.action === "complete" || change.action === "complete") {
+      if (earlier.action !== change.action)
+        client.log(`Dropped an update to ${origin} that is being completed`);
+      kept[slot] = [
+        kept[slot][0],
+        earlier.action === "complete" ? earlier : change,
+      ];
+      continue;
+    }
+    kept[slot] = [kept[slot][0], { ...earlier, ...change }];
+  }
+  return kept;
+}
+
 export default async function applyReminderChanges(
   ctx: ReactionContext,
   client: ReactionClient
@@ -284,7 +331,7 @@ export default async function applyReminderChanges(
     : new Map();
   const failures: string[] = [];
   const queued = new Set<string>();
-  for (const [index, change] of changes.entries()) {
+  for (const [index, change] of onePerReminder(changes, client, failures)) {
     try {
       const write = writeOf(change);
       const prior =
@@ -299,10 +346,9 @@ export default async function applyReminderChanges(
           ? `task-reminders:create:${connectionId}:${digest(write.identity)}:${prior?.retryAfter ?? 0}`
           : `task-reminders:${source.run_id}:${digest(write.identity)}`;
       if (queued.has(key)) continue;
-      queued.add(key);
-      if (prior?.live) {
+      if (prior?.blocked) {
         client.log(
-          `Skipped a reminder already being created: ${write.identity}`
+          `Skipped a queued, completed or cancelled create: ${write.identity}`
         );
         continue;
       }
@@ -319,6 +365,7 @@ export default async function applyReminderChanges(
         );
         continue;
       }
+      queued.add(key);
       const result = await client.operations.execute({
         connection_id: connectionId,
         operation_key: write.operation,

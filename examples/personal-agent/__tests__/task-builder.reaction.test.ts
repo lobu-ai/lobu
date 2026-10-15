@@ -241,7 +241,7 @@ describe("Task Collaborator reminder changes", () => {
   });
 
   test("a create after a failed attempt is sent only when it names that attempt", async () => {
-    for (const status of ["failed", "timeout", "cancelled"]) {
+    for (const status of ["failed", "timeout"]) {
       const h = harness({
         recentCreates: [{ status, input: { notes: marker(key) } }],
       });
@@ -257,6 +257,28 @@ describe("Task Collaborator reminder changes", () => {
       );
       expect(h.executed).toHaveLength(1);
     }
+  });
+
+  test("a rejected create cannot be resubmitted by naming its cancelled run", async () => {
+    const h = harness({
+      recentCreates: [{ status: "cancelled", input: { notes: marker(key) } }],
+    });
+    await applyReminderChanges(
+      context([{ ...create, retry_of: h.runs[0].id }]),
+      h.client
+    );
+    expect(h.executed).toHaveLength(0);
+  });
+
+  test("an unassessed create does not suppress an assessed retry in the same window", async () => {
+    const h = harness({
+      recentCreates: [{ status: "failed", input: { notes: marker(key) } }],
+    });
+    await applyReminderChanges(
+      context([create, { ...create, retry_of: h.runs[0].id }]),
+      h.client
+    );
+    expect(h.executed).toHaveLength(1);
   });
 
   test("concurrent windows admit only one create for the same source", async () => {
@@ -384,7 +406,7 @@ describe("Task Collaborator reminder changes", () => {
           due: null,
           expected: seen,
         },
-        { action: "complete", origin_id: "reminder:ABC", expected: seen },
+        { action: "complete", origin_id: "reminder:DEF", expected: seen },
       ]),
       h.client
     );
@@ -395,9 +417,113 @@ describe("Task Collaborator reminder changes", () => {
         due: null,
         expected: seen,
       },
-      { origin_id: "reminder:ABC", expected: seen },
+      { origin_id: "reminder:DEF", expected: seen },
     ]);
     expect(h.listed).toHaveLength(0);
+  });
+
+  // The Mac (apple.reminders@0.4.0) applies a write only while the reminder
+  // still matches its `expected`, and otherwise fails the run.
+  function mac(reminders: Record<string, typeof seen>) {
+    return async (call: Execute) => {
+      const write = call.input as {
+        origin_id: string;
+        title?: string;
+        due?: string | null;
+        expected: typeof seen;
+      };
+      const current = reminders[write.origin_id];
+      if (JSON.stringify(current) !== JSON.stringify(write.expected))
+        return { status: "failed" };
+      reminders[write.origin_id] =
+        call.operation_key === "complete_reminder"
+          ? { ...current, completed: true }
+          : {
+              title: write.title ?? current.title,
+              due: write.due === undefined ? current.due : write.due,
+              completed: current.completed,
+            };
+      return { status: "completed" };
+    };
+  }
+
+  test("separate title and due updates to one reminder both land", async () => {
+    const reminders = { "reminder:ABC": { ...seen } };
+    const h = harness({ execute: mac(reminders) });
+    await applyReminderChanges(
+      context([
+        {
+          action: "update",
+          origin_id: "ABC",
+          title: "Reply to Ana today",
+          expected: seen,
+        },
+        {
+          action: "update",
+          origin_id: "reminder:ABC",
+          due: "2026-10-20T09:00:00Z",
+          expected: seen,
+        },
+      ]),
+      h.client
+    );
+    expect(h.executed).toHaveLength(1);
+    expect(reminders["reminder:ABC"]).toEqual({
+      title: "Reply to Ana today",
+      due: "2026-10-20T09:00:00Z",
+      completed: false,
+    });
+  });
+
+  test("an update and a completion of one reminder complete it", async () => {
+    for (const order of [
+      ["update", "complete"],
+      ["complete", "update"],
+    ]) {
+      const reminders = { "reminder:ABC": { ...seen } };
+      const h = harness({ execute: mac(reminders) });
+      await applyReminderChanges(
+        context(
+          order.map((action) =>
+            action === "update"
+              ? {
+                  action,
+                  origin_id: "ABC",
+                  title: "Reply to Ana today",
+                  expected: seen,
+                }
+              : { action, origin_id: "ABC", expected: seen }
+          )
+        ),
+        h.client
+      );
+      expect(h.executed.map((call) => call.operation_key)).toEqual([
+        "complete_reminder",
+      ]);
+      expect(reminders["reminder:ABC"]).toEqual({ ...seen, completed: true });
+    }
+  });
+
+  test("writes to one reminder decided from different reads are refused", async () => {
+    const reminders = { "reminder:ABC": { ...seen } };
+    const h = harness({ execute: mac(reminders) });
+    await expect(
+      applyReminderChanges(
+        context([
+          { action: "update", origin_id: "ABC", title: "A", expected: seen },
+          {
+            action: "update",
+            origin_id: "ABC",
+            title: "B",
+            expected: { ...seen, title: "Other" },
+          },
+        ]),
+        h.client
+      )
+    ).rejects.toThrow(
+      "Change 1: reminder:ABC was decided from a different read"
+    );
+    expect(reminders["reminder:ABC"]).toEqual({ ...seen, title: "A" });
   });
 
   test("a later window uses its own idempotency key for an update", async () => {
