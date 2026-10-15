@@ -14,37 +14,77 @@ export const ENTITY_CHANGE_ACTION_KEYS = [
 ] as const;
 
 /**
- * SQL for the one non-admin member allowed to decide the `runs` row in scope,
- * or NULL. Admins and owners decide every run; beyond them:
+ * SQL for the device the `runs` row in scope executes on, or NULL: its explicit
+ * `target_device_worker_id`, else the device its connection is pinned to. The
+ * connection's visibility and creator are deliberately not consulted — a device
+ * pinned into a team workspace still runs on its owner's machine.
+ */
+function runDeviceWorkerIdSql(sql: DbClient) {
+	return sql`COALESCE(runs.target_device_worker_id, (
+		SELECT c.device_worker_id
+		FROM connections c
+		WHERE c.id = runs.connection_id
+		  AND c.organization_id = runs.organization_id
+	))`;
+}
+
+/**
+ * SQL for the member who decides the `runs` row in scope beyond the admins, or
+ * NULL:
  *
+ * - a device-targeted run (see {@link runDeviceWorkerIdSql}) is decided by the
+ *   device's owner (`device_workers.user_id`) — and by nobody else, admins
+ *   included; {@link resolveRunDevice} is what makes that exclusive;
  * - an entity-change proposal is decided by the field owner it records in
- *   `action_input.owner_user_id` (resolved from field_controls at propose time);
- * - a connector operation on a PRIVATE connection pinned to a device is decided
- *   by that device's owner when they also created the connection: it runs on
- *   their own machine, through a connection they own.
+ *   `action_input.owner_user_id` (resolved from field_controls at propose time).
  *
  * An action run's `action_input` is agent-authored and is never read here — that
  * would let the agent nominate its own approver.
  *
- * The web gate (`manage_operations approve|reject`) and the chat card gate both
- * read this one expression, so who may decide a run cannot drift between them.
+ * The web gate (`manage_operations approve|reject`), the chat card gate and the
+ * approval notification all read this one expression, so who may decide a run
+ * cannot drift between them.
  */
 export function runDeciderUserIdSql(sql: DbClient) {
 	const actionKeys = pgTextArray([...ENTITY_CHANGE_ACTION_KEYS]);
 	return sql`CASE
+		WHEN ${runDeviceWorkerIdSql(sql)} IS NOT NULL THEN (
+			SELECT dw.user_id FROM device_workers dw WHERE dw.id = ${runDeviceWorkerIdSql(sql)}
+		)
 		WHEN runs.run_type = 'internal' AND runs.action_key = ANY(${actionKeys}::text[])
 			THEN runs.action_input->>'owner_user_id'
-		WHEN runs.run_type = 'action' THEN (
-			SELECT dw.user_id
-			FROM connections c
-			JOIN device_workers dw ON dw.id = c.device_worker_id
-			WHERE c.id = runs.connection_id
-			  AND c.organization_id = runs.organization_id
-			  AND c.deleted_at IS NULL
-			  AND c.visibility = 'private'
-			  AND c.created_by = dw.user_id
-		)
 	END`;
+}
+
+/** The device a run executes on and the one user who may decide the run. */
+interface RunDevice {
+	/** `device_workers.user_id`; null when the device row is gone (nobody decides). */
+	ownerUserId: string | null;
+	/** The device's label, falling back to worker id then row id, for refusal messages. */
+	label: string;
+}
+
+/**
+ * The device the run executes on, or null for a run that touches no device. A
+ * device-targeted run is decided ONLY by {@link RunDevice.ownerUserId}: an admin
+ * who does not own the machine cannot approve work that runs on it.
+ */
+export async function resolveRunDevice(
+	sql: DbClient,
+	runId: number,
+	organizationId: string,
+): Promise<RunDevice | null> {
+	const [row] = await sql<{ owner_user_id: string | null; label: string }>`
+		SELECT dw.user_id AS owner_user_id,
+		       COALESCE(dw.label, dw.worker_id, d.device_id::text) AS label
+		FROM runs
+		CROSS JOIN LATERAL (SELECT ${runDeviceWorkerIdSql(sql)} AS device_id) d
+		LEFT JOIN device_workers dw ON dw.id = d.device_id
+		WHERE runs.id = ${runId}
+		  AND runs.organization_id = ${organizationId}
+		  AND d.device_id IS NOT NULL
+	`;
+	return row ? { ownerUserId: row.owner_user_id ?? null, label: row.label } : null;
 }
 
 /**

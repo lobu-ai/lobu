@@ -132,7 +132,10 @@ function actionEventTeamId(
  * exactly ONE identity for (team, platform user) that joins to an org member,
  * AND that member is an admin/owner OR the run's current decider
  * (`ownerUserId`). A non-admin member who is not the decider resolves null, same
- * as an unverified account.
+ * as an unverified account. For a run on a device the decider is the device
+ * owner and admins do NOT decide it; the click still reaches
+ * `manage_operations`, whose one gate refuses a non-owner admin by name — this
+ * pre-check only screens out accounts that could decide nothing.
  *
  * Platform-generic by dispatch, not by branch. `resolveChatSenderMember` already
  * takes the platform and looks up that connector's `ChatUserIdentity`, whose
@@ -192,10 +195,10 @@ export async function resolveEntityApprovalRun(
 ): Promise<{
 	state: "pending" | "approved" | "rejected" | "not_found";
 	/**
-	 * The non-admin member allowed to decide this run (`runDeciderUserIdSql`):
-	 * an entity change's field owner, or the owner of the device behind a
-	 * private connection they created. Never read from a connector operation's
-	 * agent-authored `action_input`.
+	 * The member allowed to decide this run beyond the admins
+	 * (`runDeciderUserIdSql`): an entity change's field owner, or — exclusively —
+	 * the owner of the device the run executes on. Never read from a connector
+	 * operation's agent-authored `action_input`.
 	 */
 	ownerUserId: string | null;
 }> {

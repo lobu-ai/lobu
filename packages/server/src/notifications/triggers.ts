@@ -13,7 +13,7 @@ import { buildResourcePermalink } from "../utils/url-builder";
 import { resolveAskAffordance } from "./ask-schema";
 import type { ActionOrigin } from "./action-card-state";
 import { createNotificationForUsers, getOrgSlug } from "./service";
-import { resolveRunDeciderUserId } from "../tools/admin/run-decider";
+import { resolveRunDeciderUserId, resolveRunDevice } from "../tools/admin/run-decider";
 
 /** Notification content minus the org id (the dispatch helpers stamp it). */
 type OrgNotification = Omit<
@@ -475,14 +475,16 @@ export async function notifyActionApprovalNeeded(params: {
 	const entityChange = params.details
 		? (buildApprovalRenderModel(params.details) as unknown as Record<string, unknown>)
 		: null;
-	// Everyone who can decide the run hears about it: the admins, plus the
-	// member the run names as its decider (their own device, or a field they own).
-	const deciderUserId = await resolveRunDeciderUserId(
-		transaction ?? getDb(),
-		params.runId,
-		params.orgId,
-	);
-	await notifyOrgAdmins(params.orgId, (orgSlug) => {
+	// Everyone who can decide the run hears about it. A run on a device is
+	// decided by the device's owner alone, so it goes to them (and to their DM,
+	// through the owner-first routing) and not to admins who cannot act on it.
+	// Any other run reaches the admins plus the member it names as its decider
+	// (a field they own).
+	const db = transaction ?? getDb();
+	const device = await resolveRunDevice(db, params.runId, params.orgId);
+	const deciderUserId = await resolveRunDeciderUserId(db, params.runId, params.orgId);
+	const dmOwnerUserId = device ? deciderUserId : params.ownerUserId;
+	const build = (orgSlug: string | null): OrgNotification => {
 		// Run-scoped, via the shared permalink resolver — same reasoning as the
 		// approval_url: the pending event is superseded on approve→complete, but the
 		// run link stays valid across the chain. (baseUrl omitted → relative link,
@@ -517,18 +519,29 @@ export async function notifyActionApprovalNeeded(params: {
 			resourceType: "event",
 			resourceId: String(params.eventId),
 			resourceUrl,
-			connectionId: params.connectionId,
-			channelId: params.channelId,
-			teamId: params.teamId,
+			// A missing device-owner DM must stay inbox-only, never fall back to
+			// the requester's channel (or every channel on its connection).
+			connectionId: device ? null : params.connectionId,
+			channelId: device ? null : params.channelId,
+			teamId: device ? null : params.teamId,
 			// Never org-wide. An approval with no resolved chat target reaches its
-			// admins through the inbox + approval URL; broadcasting it into every
+			// deciders through the inbox + approval URL; broadcasting it into every
 			// bound channel is noise, not reach. See CreateNotificationParams.
 			deliveryScope: "targeted",
-			ownerUserId: resolveApprovalDmTarget(params),
+			ownerUserId: resolveApprovalDmTarget({ ...params, ownerUserId: dmOwnerUserId }),
 			mcpActivity: params.mcpActivity,
 			actionOrigin: params.actionOrigin,
 		};
-	}, transaction, deciderUserId);
+	};
+	if (device) {
+		// The device owner left the workspace (or the device row is gone): nobody
+		// may decide, so there is nobody to tell.
+		if (!deciderUserId) return;
+		const orgSlug = await getOrgSlug(params.orgId, transaction);
+		await sendNotification(params.orgId, [deciderUserId], build(orgSlug), transaction);
+		return;
+	}
+	await notifyOrgAdmins(params.orgId, build, transaction, deciderUserId);
 }
 
 /** Deep-link into a single connection (settings / re-auth), not the connectors list. */

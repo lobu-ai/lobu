@@ -21,7 +21,11 @@ import { insertEvent } from "../../../../utils/insert-event";
 import { recordEntityWriteDenial } from "../../../../utils/entity-write-denial-audit";
 import logger from "../../../../utils/logger";
 import { isAdminOrOwnerRole } from "../../../access-control";
-import { ENTITY_CHANGE_ACTION_KEYS, runDeciderUserIdSql } from "../../run-decider";
+import {
+	ENTITY_CHANGE_ACTION_KEYS,
+	resolveRunDevice,
+	runDeciderUserIdSql,
+} from "../../run-decider";
 import type { ToolContext } from "../../../registry";
 import {
 	type ApprovalReviewer,
@@ -879,7 +883,8 @@ function describeEntityChange(proposal: EntityChangeProposal): string {
 /**
  * Non-admin authority: a member may decide a pending run ONLY when
  * {@link runDeciderUserIdSql} names them — the field owner of an entity-change
- * proposal, or the owner of the device behind a private connection they created.
+ * proposal. (A device-targeted run never reaches this: its device owner is
+ * checked first, exclusively, by {@link requireApprovalAuthority}.)
  * Checked BEFORE any claim so an unauthorized call can never flip run state.
  */
 async function isPendingRunDecider(
@@ -932,18 +937,29 @@ function requireHumanApprovalContext(
 }
 
 /**
- * The admin-or-run-owner gate shared by approve/reject, layered ON TOP of
- * {@link requireHumanApprovalContext} (which every caller runs first, so a
- * verified human identity is already guaranteed here). The tool-access tier
- * admits write-tier members so a run's current decider can decide it;
- * everyone else non-admin gets the same admin-access denial the action tier
- * used to throw. No system-context bypass — a run decision is always human.
+ * The decision gate shared by approve/reject (single and batch), layered ON TOP
+ * of {@link requireHumanApprovalContext} (which every caller runs first, so a
+ * verified human identity is already guaranteed here).
+ *
+ * A run that executes on a device ({@link resolveRunDevice}) is decided by that
+ * device's owner ONLY — whatever their workspace role, and to the exclusion of
+ * admins who do not own the machine. Every other run keeps the admin-or-decider
+ * rule: the tool-access tier admits write-tier members so a run's current
+ * decider can decide it; everyone else non-admin gets the admin-access denial.
+ * No system-context bypass — a run decision is always human.
  */
 async function requireApprovalAuthority(
 	action: "approve" | "reject",
 	runId: number,
 	ctx: ToolContext,
 ): Promise<void> {
+	const device = await resolveRunDevice(getDb(), runId, ctx.organizationId);
+	if (device) {
+		if (device.ownerUserId != null && device.ownerUserId === ctx.userId) return;
+		throw new Error(
+			`Only the owner of device ${device.label} can decide runs on it.`,
+		);
+	}
 	if (isAdminOrOwnerRole(ctx.memberRole)) return;
 	if (await isPendingRunDecider(runId, ctx.organizationId, ctx.userId)) {
 		return;

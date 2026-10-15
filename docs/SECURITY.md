@@ -99,9 +99,13 @@ Implications, by design:
   work until it catches up; connection and feed status are never changed for it, and the owner's
   Devices page lists it under `update_required`. Only a connection's creator can share
   it with the workspace (`manage_connections` `update` with `visibility: 'org'`), which never
-  changes where it runs; a personal-credential connection can never be widened. A run on a
-  `private` connection pinned to the creator's own device can be approved by that creator, not
-  only by an owner/admin (`runDeciderUserIdSql`); once shared, it is admin-decided again.
+  changes where it runs; a personal-credential connection can never be widened. A run that
+  executes on a device (its `target_device_worker_id`, else its connection's pin) is approved or
+  rejected by that device's owner only, whatever their workspace role and whoever created or shared
+  the connection; an owner/admin who does not own the machine is refused, and the approval
+  notification goes to the device owner (`resolveRunDevice` / `runDeciderUserIdSql`). Unpinning the
+  connection hands runs without an explicit device target back to admins; an explicit target
+  retains its device-owner decision requirement.
 - **Page-visit drafts follow current placement.** A Chrome device sees and activates drafts in its
   owner's personal workspace, its current home, and workspaces where it is pinned, never through a
   connection a Devices-page move invalidated.
