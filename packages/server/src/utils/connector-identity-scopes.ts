@@ -1,4 +1,5 @@
 import type { DbClient } from '../db/client';
+import { CHAT_SENDER_NAMESPACES } from '../lobu/stores/chat-identity-sources';
 
 type ConnectorIdentityScopeShape = {
   scope: 'organization' | 'tenant';
@@ -127,6 +128,18 @@ export async function reconcileConnectorIdentityScopeRegistry(params: {
   metadata: ConnectorIdentityMetadata;
 }): Promise<void> {
   const declarations = connectorIdentityScopeDeclarations(params.metadata);
+  // Connector-declared attribution must not claim the identity slots used by
+  // chat senders. Guard the shared writer so installs and upgrades, including
+  // paths that skip compilation, reject these declarations before activation.
+  for (const declaration of declarations.values()) {
+    if (CHAT_SENDER_NAMESPACES.has(declaration.namespace)) {
+      throw new Error(
+        `Identity namespace '${declaration.namespace}' in ${declaration.declaration} of connector ` +
+          `'${params.metadata.key}' is a chat sender namespace. Connector attribution rules may not ` +
+          'use it; declare a connector-owned namespace for this attribution instead.'
+      );
+    }
+  }
   if (declarations.size === 0) return;
 
   const sortedDeclarations = [...declarations.values()].sort((left, right) =>

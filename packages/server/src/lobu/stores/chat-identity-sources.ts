@@ -25,6 +25,15 @@ export const CHAT_USER_IDENTITIES: readonly ChatUserIdentity[] = [
 	whatsAppWebChatUserIdentity,
 ];
 
+/**
+ * Chat sender namespaces reserved from connector-declared attribution rules.
+ * Platform-owned chat attribution and ACL writers may still use them; the
+ * sender lookup separately requires a sign-in or verified-link source.
+ */
+export const CHAT_SENDER_NAMESPACES: ReadonlySet<string> = new Set(
+	CHAT_USER_IDENTITIES.map((c) => c.namespace),
+);
+
 const BY_PLATFORM = new Map<string, ChatUserIdentity>(
 	CHAT_USER_IDENTITIES.map((c) => [c.platform, c]),
 );
