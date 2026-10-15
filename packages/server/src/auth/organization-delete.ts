@@ -5,7 +5,6 @@ import { getDb, pgTextArray } from '../db/client';
 import { requestWorkspaceDeletion } from '../workspace/deletion';
 import {
   carriesDeletionMarker,
-  isDeletionRequested,
   organizationLiveSql,
 } from '../workspace/deletion-state';
 import { isPersonalOrgDeletionBlocked } from './personal-org-provisioning';
@@ -14,6 +13,7 @@ const ORGANIZATION_DELETE_PATH = '/organization/delete';
 const ORGANIZATION_CREATE_PATH = '/organization/create';
 const ORGANIZATION_UPDATE_PATH = '/organization/update';
 const ORGANIZATION_LIST_PATH = '/organization/list';
+const ORGANIZATION_LIST_USER_INVITATIONS_PATH = '/organization/list-user-invitations';
 const ORGANIZATION_SET_ACTIVE_PATH = '/organization/set-active';
 const ORGANIZATION_PATH_PREFIX = '/organization/';
 
@@ -180,16 +180,33 @@ export function workspaceDeletionPlugin(
     if (deleting.length > 0) throw organizationNotFound();
   });
 
-  // `/organization/list` reads through Better Auth's adapter, not our SQL
-  // predicate, and names no target, so the deleting workspace is filtered from
-  // its response here.
-  const hideFromList = createAuthMiddleware(async (ctx) => {
+  // The two endpoints that list rows across workspaces (the caller's
+  // organizations and the caller's invitations) read through Better Auth's
+  // adapter and name no target, so rows of a deleting workspace are filtered
+  // from their responses here: an organization row by its id, an invitation
+  // row by its organizationId.
+  const hideFromListings = createAuthMiddleware(async (ctx) => {
     const returned = ctx.context.returned;
-    if (!Array.isArray(returned)) return undefined;
-    const visible = returned.filter(
-      (org) => !isDeletionRequested((org as { metadata?: unknown } | null)?.metadata),
+    if (!Array.isArray(returned) || returned.length === 0) return undefined;
+    const workspaceOf = (row: unknown): string | null => {
+      const record = (row ?? {}) as { id?: unknown; organizationId?: unknown };
+      const id = ctx.path === ORGANIZATION_LIST_PATH ? record.id : record.organizationId;
+      return typeof id === 'string' ? id : null;
+    };
+    const ids = [...new Set(returned.map(workspaceOf).filter((id): id is string => id !== null))];
+    if (ids.length === 0) return undefined;
+    const sql = getDb();
+    const deleting = new Set(
+      (
+        await sql<{ id: string }>`
+          SELECT o.id FROM organization o
+          WHERE o.id = ANY(${pgTextArray(ids)}::text[])
+            AND NOT ${sql.unsafe(organizationLiveSql('o'))}
+        `
+      ).map((row) => row.id),
     );
-    return visible.length !== returned.length ? ctx.json(visible) : undefined;
+    if (deleting.size === 0) return undefined;
+    return ctx.json(returned.filter((row) => !deleting.has(workspaceOf(row) ?? '')));
   });
 
   return {
@@ -210,7 +227,13 @@ export function workspaceDeletionPlugin(
           handler: refuseDeletingTarget,
         },
       ],
-      after: [{ matcher: (ctx) => ctx.path === ORGANIZATION_LIST_PATH, handler: hideFromList }],
+      after: [
+        {
+          matcher: (ctx) =>
+            ctx.path === ORGANIZATION_LIST_PATH || ctx.path === ORGANIZATION_LIST_USER_INVITATIONS_PATH,
+          handler: hideFromListings,
+        },
+      ],
     },
   } satisfies BetterAuthPlugin;
 }

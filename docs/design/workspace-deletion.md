@@ -122,7 +122,9 @@ failure like the 2026-10-15 500 is no longer silent.
   `organizationId: null`. The request also clears every session's active
   organization that points at the workspace, in the same transaction, so only
   a session that raced it still holds one and must switch away first.
-  `/organization/list` is also filtered in an after hook. The member-role
+  The two endpoints that list rows across workspaces, `/organization/list`
+  and `/organization/list-user-invitations`, are filtered in an after hook,
+  and the public invitation preview no longer resolves a deleting workspace. The member-role
   endpoint is a user hook that runs before any plugin hook, so
   `lockMemberRoleChanges` refuses a deleting workspace for every membership
   role write. Create and update reject client metadata carrying either

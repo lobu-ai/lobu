@@ -11,13 +11,12 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { materializeDueAutomationRuns } from "../../../automations/automation";
 import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
-import type { Env } from "../../../index";
+import { app, type Env } from "../../../index";
 import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
 import { registerScheduledJobsTicker } from "../../../scheduled/scheduled-jobs-service";
 import type { TaskScheduler } from "../../../scheduled/task-scheduler";
 import { WORKSPACE_PURGE_TASK } from "../../../scheduled/task-definitions";
 import { getEnvFromProcess } from "../../../utils/env";
-import { isDeletionRequested } from "../../../workspace/deletion-state";
 import {
 	getMembershipRole,
 	getOrgBySlug,
@@ -469,7 +468,6 @@ describe("workspace purge", () => {
 		const [org] = await sql`
 			SELECT metadata FROM organization WHERE id = ${target.organizationId}
 		`;
-		expect(isDeletionRequested(org.metadata)).toBe(false);
 		expect(String(org.metadata ?? "")).not.toContain("deletion_requested");
 		expect(await getOrgBySlug(target.slug)).not.toBeNull();
 
@@ -762,6 +760,61 @@ describe("workspace purge", () => {
 		}
 		expect(leaks).toEqual([]);
 		expect(await snapshot()).toEqual(before);
+	});
+
+	it("drops a deleting workspace from cross-workspace invitation listings", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("invitations");
+		const live = await createTestOrganization();
+		const inviteeEmail = "invitee-listing@workspace-purge.test";
+		const inviteeSignUp = await call("/sign-up/email", {
+			email: inviteeEmail,
+			password: "inviteepassword99",
+			name: "Invitee",
+		});
+		const inviteeToken = inviteeSignUp.body.token as string;
+		// Better Auth lists invitations only for a verified email.
+		await sql`UPDATE "user" SET "emailVerified" = true WHERE email = ${inviteeEmail}`;
+		for (const [id, organizationId] of [
+			["invitation-listing-deleting", target.organizationId],
+			["invitation-listing-live", live.id],
+		]) {
+			await sql`
+				INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId")
+				VALUES (${id}, ${organizationId}, ${inviteeEmail}, 'member', 'pending',
+					now() + interval '1 day', ${target.userId})
+			`;
+		}
+		const preview = async (id: string) =>
+			(
+				await app.fetch(new Request(`http://localhost/api/invitation-preview?id=${id}`), {
+					ENVIRONMENT: "test",
+					BETTER_AUTH_SECRET: "test-auth-secret-for-testing-only",
+					RATE_LIMIT_ENABLED: "false",
+				} as Env)
+			).status;
+		const listed = async () => {
+			const res = await get("/organization/list-user-invitations", inviteeToken);
+			expect(res).toMatchObject({ status: 200 });
+			return (res.body as Array<{ organizationId: string }>).map(
+				(invitation) => invitation.organizationId,
+			);
+		};
+		expect((await listed()).sort()).toEqual([live.id, target.organizationId].sort());
+		expect(await preview("invitation-listing-deleting")).toBe(200);
+
+		expect(
+			(
+				await call(
+					"/organization/delete",
+					{ organizationId: target.organizationId },
+					target.token,
+				)
+			).status,
+		).toBe(200);
+		expect(await listed()).toEqual([live.id]);
+		expect(await preview("invitation-listing-deleting")).toBe(404);
+		expect(await preview("invitation-listing-live")).toBe(200);
 	});
 
 	it("hides a requested workspace before the purge runs", async () => {

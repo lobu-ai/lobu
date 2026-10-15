@@ -1019,6 +1019,7 @@ app.get("/api/invitation-preview", async (c) => {
     FROM invitation i
     JOIN "organization" o ON o.id = i."organizationId"
     WHERE i.id = ${invitationId}
+      AND ${sql.unsafe(organizationLiveSql("o"))}
       AND i.status = 'pending'
       AND i."expiresAt" > NOW()
     LIMIT 1
