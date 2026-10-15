@@ -57,6 +57,7 @@ const ALL_CLAIMS: Required<WorkerTokenOptions> = {
   adminTools: ["manage_automations"],
   actorUserId: "user-admin",
   chatAccess: "member",
+  chatSenderWorkspaces: true,
   runtimeProviderId: "provider-all",
   sandboxId: "sandbox-all",
   allowedDomains: ["allowed.example"],
@@ -354,6 +355,42 @@ describe("worker auth token", () => {
       chatAccess: "org_shared",
     });
     expect(verifyWorkerToken(unlinked)?.chatAccess).toBe("org_shared");
+  });
+
+  test("accepts the sender-workspace grant only as true on a member tier", () => {
+    const base = {
+      userId: "U_SLACK",
+      conversationId: "conv",
+      channelId: "C1",
+      deploymentName: "deploy",
+      timestamp: Date.now(),
+    };
+    for (const partial of [
+      { chatSenderWorkspaces: true },
+      { chatSenderWorkspaces: true, chatAccess: "org_shared" },
+      {
+        chatSenderWorkspaces: "yes",
+        chatAccess: "member",
+        actorUserId: "user-1",
+      },
+      {
+        chatSenderWorkspaces: false,
+        chatAccess: "member",
+        actorUserId: "user-1",
+      },
+    ]) {
+      expect(
+        verifyWorkerToken(encrypt(JSON.stringify({ ...base, ...partial })))
+      ).toBeNull();
+    }
+    const member = generateWorkerToken("U_SLACK", "conv", "deploy", {
+      channelId: "C1",
+      platform: "slack",
+      actorUserId: "user-1",
+      chatAccess: "member",
+      chatSenderWorkspaces: true,
+    });
+    expect(verifyWorkerToken(member)?.chatSenderWorkspaces).toBe(true);
   });
 
   test("two tokens generated for the same input differ (random IV)", () => {

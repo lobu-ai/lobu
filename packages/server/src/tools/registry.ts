@@ -24,6 +24,7 @@ import { type Static, Type } from '@sinclair/typebox';
 import { getMcpConnectionScopes } from '../auth/oauth/scopes';
 import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
 import type { CaptureIdentity } from '../gateway/routes/internal/capture-mode';
+import type { ChatSenderReach } from '../auth/oauth/types';
 import type { Env } from '../index';
 import { LOBU_INTERACTION_RESOURCE_URI } from '../mcp-app-resource-uris';
 import { LOBU_VIEWS_RESOURCE_URI } from '../views/views';
@@ -177,6 +178,12 @@ export interface ToolContext {
   executionMode?: 'live' | 'capture' | null;
   /** Verified capture owner; never taken from tool arguments. */
   captureIdentity?: CaptureIdentity | null;
+  /**
+   * A member's direct-message chat turn: `client.org(slug)` and workspace
+   * arguments may select the sender's other workspaces, re-checking the
+   * membership at each selection (sandbox/client-sdk.ts). Null otherwise.
+   */
+  chatSenderReach?: ChatSenderReach | null;
   /** Whether request was authenticated */
   isAuthenticated: boolean;
   /** OAuth client ID that created this request (null for session/anonymous) */

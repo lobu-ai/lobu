@@ -1,7 +1,7 @@
 /**
  * In-process SDK shared by the `query_sdk` / `run_sdk` MCP tools and automation reactions.
  * `mode: "read"` filters namespaces against `METHOD_METADATA[*].access === "read"`;
- * `allowCrossOrg: false` makes `client.org(...)` throw `CrossOrgAccessDenied`.
+ * `client.org(...)` requires an OAuth grant or a verified chat sender grant.
  */
 
 import type { Env } from "../index";
@@ -14,6 +14,7 @@ import {
 	SAFE_COLUMN_DEFS,
 } from "../utils/table-schema";
 import type { AccountToolContext, ToolContext } from "../tools/registry";
+import type { ChatSenderReach } from "../auth/oauth/types";
 import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace, formatUngrantedMemberMessage } from "../auth/oauth/workspace-grants";
 import { raceAbort } from "../utils/race-abort";
 import { METHOD_METADATA } from "./method-metadata";
@@ -119,7 +120,7 @@ export class CrossOrgAccessDenied extends SdkError {
 }
 
 /**
- * Resolve a workspace selected by an unscoped OAuth caller and carry its
+ * Resolve a workspace selected by an OAuth or eligible chat caller and carry its
  * membership into the handler context. The selected workspace, not the
  * account client, is authoritative for every leaf permission
  * check performed with the returned context.
@@ -129,6 +130,9 @@ export async function resolveCrossOrgToolContext(
 	ctx: AccountToolContext,
 	allowCrossOrg: boolean = ctx.allowCrossOrg,
 ): Promise<ToolContext> {
+	if (ctx.chatSenderReach) {
+		return resolveChatSenderWorkspace(slugOrId, ctx, ctx.chatSenderReach);
+	}
 	if (!allowCrossOrg) {
 		throw new CrossOrgAccessDenied(
 			"Cross-org access is not available on this connection. If the same identity already has access to the target workspace, invoke there directly via /mcp/{slug} (CLI: --context <context> --org <slug>) and use client directly. For cross-org calls, use the unscoped /mcp endpoint with an OAuth session authorized for the target workspace."
@@ -179,6 +183,37 @@ export async function resolveCrossOrgToolContext(
 		...ctx,
 		organizationId: member.id,
 		memberRole: member.role,
+	};
+}
+
+/**
+ * A member's direct-message chat turn selecting one of the sender's
+ * workspaces (docs/design/chat-sender-workspace-scope.md). There is no grant
+ * snapshot: the sender's membership is read from `member` rows now, so a
+ * removal applies at once, and an unknown or non-member target gets the same
+ * answer as any other unavailable workspace. The home workspace keeps the
+ * turn's agent. Anywhere else the call acts as the sender alone, so that
+ * workspace's role, connector policy and approvals decide, and an approval
+ * still needs a human web session.
+ */
+async function resolveChatSenderWorkspace(
+	slugOrId: string,
+	ctx: AccountToolContext,
+	reach: ChatSenderReach,
+): Promise<ToolContext> {
+	const member = ctx.userId
+		? await findUngrantedMemberWorkspace({ userId: ctx.userId, slugOrId })
+		: null;
+	if (!member) {
+		throw new CrossOrgAccessDenied(
+			"Workspace is not available for this authorization."
+		);
+	}
+	return {
+		...ctx,
+		organizationId: member.id,
+		memberRole: member.role,
+		agentId: member.id === reach.homeOrganizationId ? reach.homeAgentId : null,
 	};
 }
 

@@ -178,6 +178,33 @@ export function chatTurnAccessOf(claims: {
 }
 
 /**
+ * The sender-workspace grant to sign onto a chat turn's token
+ * (docs/design/chat-sender-workspace-scope.md). Only a linked member writing
+ * in a direct message qualifies: a group conversation's replies are visible
+ * to everyone in it, so another workspace's data must never reach one. The
+ * mint spreads this; {@link chatTurnReachesSenderWorkspaces} reads it back.
+ */
+export function chatSenderWorkspacesClaim(
+  actor: ChatTurnActor | undefined,
+  evidence: ChatTurnEvidence,
+): { chatSenderWorkspaces?: true } {
+  return actor?.access === "member" && actor.actorUserId && evidence.isDirectMessage
+    ? { chatSenderWorkspaces: true }
+    : {};
+}
+
+/**
+ * Whether a verified token's turn may act in the sender's other workspaces.
+ * The token's own organization stays the default; a call naming another
+ * workspace acts there as the member, after a fresh membership read.
+ */
+export function chatTurnReachesSenderWorkspaces(
+  claims: Parameters<typeof chatTurnAccessOf>[0] & { chatSenderWorkspaces?: true },
+): boolean {
+  return claims.chatSenderWorkspaces === true && chatTurnAccessOf(claims) === "member";
+}
+
+/**
  * Whether a turn is confined to answering in its own thread: no other
  * conversations, media, remote execution, or local device CLI.
  */
@@ -212,16 +239,31 @@ const CHAT_TURN_ACCESS_TEXT: Record<ChatTurnAccess, string[]> = {
  * What a chat turn's model is told about its sender's access, so it uses the
  * tools it has, neither promises nor refuses what its tier decides, and is not
  * anchored by earlier replies made under different access (a sender who links
- * mid-conversation keeps the same history). Sender-independent: one fixed
- * text per tier, so it never splits the connection's cached prompt prefix.
+ * mid-conversation keeps the same history). The text depends on the access
+ * tier, sender-workspace grant and home slug, never the sender's identity.
  */
-export function chatTurnAccessInstructions(access: ChatTurnAccess): string {
+export function chatTurnAccessInstructions(
+  access: ChatTurnAccess,
+  senderWorkspaces?: { homeWorkspaceSlug: string },
+): string {
   return [
     "## Workspace access",
     "",
     ...CHAT_TURN_ACCESS_TEXT[access],
+    ...(senderWorkspaces ? chatSenderWorkspacesText(senderWorkspaces.homeWorkspaceSlug) : []),
     "This describes access for the current message. Earlier replies in this conversation may reflect different access at that time; follow this section.",
   ].join("\n");
+}
+
+/**
+ * The sender-workspace lines. Names the home workspace (fixed per agent, so
+ * the cached prefix holds) and keeps the model there unless asked.
+ */
+function chatSenderWorkspacesText(homeWorkspaceSlug: string): string[] {
+  return [
+    `Your tools work in the ${JSON.stringify(homeWorkspaceSlug)} workspace by default.`,
+    "This person's other Lobu workspaces are reachable only when they ask for one: pass its slug as `workspace` to search_memory or `org_slug` to save_memory and query_sql, or use `await client.org(slug)` in query_sdk/run_sdk. Do not look in other workspaces unprompted.",
+  ];
 }
 
 /**
@@ -257,6 +299,13 @@ export async function chatTurnSenderName(actorUserId: string | undefined): Promi
     SELECT name FROM "user" WHERE id = ${actorUserId} LIMIT 1
   `;
   return user?.name?.trim() || undefined;
+}
+
+export async function chatTurnHomeWorkspaceSlug(organizationId: string): Promise<string | undefined> {
+  const [org] = await getDb()<{ slug: string | null }>`
+    SELECT slug FROM "organization" WHERE id = ${organizationId} LIMIT 1
+  `;
+  return org?.slug || undefined;
 }
 
 /**

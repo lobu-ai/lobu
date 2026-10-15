@@ -57,7 +57,7 @@ export function buildOrganizationsNamespace(
 				ctx.userId,
 			);
 			const allowedIds =
-				Array.isArray(ctx.grantedOrganizationIds) && ctx.userId
+				!ctx.chatSenderReach && Array.isArray(ctx.grantedOrganizationIds) && ctx.userId
 					? new Set(
 						(
 							await listLiveGrantedMemberWorkspaces({

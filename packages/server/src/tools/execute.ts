@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { captureEffect, type CaptureIdentity } from '../gateway/routes/internal/capture-mode';
+import type { ChatSenderReach } from '../auth/oauth/types';
 import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from '../sandbox/client-sdk';
 import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
@@ -107,6 +108,8 @@ export interface AuthContext {
   executionMode?: 'live' | 'capture' | null;
   /** Verified capture owner; never taken from tool arguments. */
   captureIdentity?: CaptureIdentity | null;
+  /** Sender-workspace reach of a member's direct-message chat turn. See ChatSenderReach. */
+  chatSenderReach?: ChatSenderReach | null;
 }
 
 /**
@@ -190,6 +193,7 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     adminTools: mcpAuthInfo?.adminTools ?? null,
     executionMode: mcpAuthInfo?.executionMode ?? null,
     captureIdentity: mcpAuthInfo?.captureIdentity ?? null,
+    chatSenderReach: mcpAuthInfo?.chatSenderReach ?? null,
   };
 }
 
@@ -325,7 +329,14 @@ export async function executeTool(
         }
         throw error;
       });
-      authCtx = { ...authCtx, organizationId: workspace.organizationId, memberRole: workspace.memberRole };
+      // The resolved target decides the agent too: a chat turn acting in the
+      // sender's other workspace runs there as the sender, with no agent.
+      authCtx = {
+        ...authCtx,
+        organizationId: workspace.organizationId,
+        memberRole: workspace.memberRole,
+        agentId: workspace.agentId ?? null,
+      };
     }
     const requiredAccess = checkToolAccess(toolName, args, authCtx);
     toolContext = { ...toAccountToolContext(authCtx), workspaceActivity };
@@ -525,5 +536,8 @@ export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
     mcpConversationId: authCtx.mcpConversationId ?? null,
     executionMode: authCtx.executionMode ?? null,
     captureIdentity: authCtx.captureIdentity ?? null,
+    // Agent binding keeps the OAuth grant off above; a chat turn's sender
+    // reach is its own, separately verified, grant (sandbox/client-sdk.ts).
+    chatSenderReach: authCtx.chatSenderReach ?? null,
   };
 }

@@ -18,7 +18,12 @@ import { getDb } from '../db/client';
 import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import { getRevokedTokenStore } from '../gateway/auth/revoked-token-store';
 import { DEVICE_CHAT_RUN_SOURCE } from '../gateway/services/run-worker-access';
-import { CHAT_SENDER_NOT_LINKED, chatSenderIdOf, chatTurnAccessOf } from '../gateway/orchestration/chat-turn-actor';
+import {
+  CHAT_SENDER_NOT_LINKED,
+  chatSenderIdOf,
+  chatTurnAccessOf,
+  chatTurnReachesSenderWorkspaces,
+} from '../gateway/orchestration/chat-turn-actor';
 import { resolveRestToolGetRoute } from '../http/rest-tool-routes';
 import type { Env } from '../index';
 import { checkApplyPause } from '../utils/deployment-pause';
@@ -461,6 +466,14 @@ export class MultiTenantProvider implements WorkspaceProvider {
           // through so the execute gate lets an admin-tools turn call its
           // allowlisted internal tools.
           adminTools: tokenData.adminTools ?? null,
+          // A member's direct-message turn may name the sender's other
+          // workspaces; each such call re-reads the membership there
+          // (sandbox/client-sdk.ts resolveCrossOrgToolContext). The URL
+          // workspace above stays the only one this request authenticates.
+          chatSenderReach:
+            chatAccess === 'member' && tokenData.agentId && chatTurnReachesSenderWorkspaces(tokenData)
+              ? { homeOrganizationId: requestedOrgId, homeAgentId: tokenData.agentId }
+              : null,
           // Signed side-effect mode: 'capture' turns every non-read SDK call
           // into a recorded no-op (see tools/sdk_run.ts).
           executionMode: tokenData.executionMode ?? null,

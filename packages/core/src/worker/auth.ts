@@ -147,6 +147,15 @@ export interface WorkerTokenData {
    */
   chatAccess?: ChatTurnAccess;
   /**
+   * The chat turn's workspace grant beyond its own `organizationId`: set
+   * (always `true`) only on a `member` turn in a direct message. The token's
+   * organization stays the default for every call; a call that names another
+   * workspace acts there as {@link actorUserId} when that user is a member of
+   * it at request time (membership is read then, never embedded here).
+   * Absent means the turn reaches its own organization only.
+   */
+  chatSenderWorkspaces?: true;
+  /**
    * Selected runtime-provider id (e.g. "vercel"), resolved from the agent's
    * environment at token-mint time. The generic `/internal/runtime/exec` route
    * trusts THIS signed claim to pick the gateway-side provider — the worker
@@ -229,6 +238,8 @@ export interface WorkerTokenOptions {
   actorUserId?: string;
   /** Chat turn authority. See WorkerTokenData.chatAccess. */
   chatAccess?: ChatTurnAccess;
+  /** Sender-workspace grant. See WorkerTokenData.chatSenderWorkspaces. */
+  chatSenderWorkspaces?: true;
   /** Selected runtime provider id. See WorkerTokenData.runtimeProviderId. */
   runtimeProviderId?: string;
   /** Selected sandbox id backing the runtime credential. See WorkerTokenData.sandboxId. */
@@ -277,6 +288,7 @@ function generateToken(
     adminTools: options.adminTools,
     actorUserId: options.actorUserId,
     chatAccess: options.chatAccess,
+    chatSenderWorkspaces: options.chatSenderWorkspaces,
     runtimeProviderId: options.runtimeProviderId,
     sandboxId: options.sandboxId,
     allowedDomains: options.allowedDomains,
@@ -512,6 +524,17 @@ function verifyToken(
     if (data.chatAccess === "member" && data.actorUserId === undefined) {
       logger.error(
         "Worker token rejected: a member chatAccess requires actorUserId"
+      );
+      return null;
+    }
+    // The sender-workspace grant widens what a turn reaches, so it exists
+    // only as the literal `true` on a member turn that names its member.
+    if (
+      data.chatSenderWorkspaces !== undefined &&
+      (data.chatSenderWorkspaces !== true || data.chatAccess !== "member")
+    ) {
+      logger.error(
+        "Worker token rejected: chatSenderWorkspaces requires a member chatAccess"
       );
       return null;
     }
