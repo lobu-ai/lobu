@@ -1763,7 +1763,7 @@ jobs:
             echo "mac=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No paths affecting the Mac build changed — skipping mac-build-smoke."
           fi
-          if echo "$changed" | grep -E '^(docker/|packages/connector-worker/|packages/connector-sdk/|packages/connectors/|packages/core/|packages/embeddings/|packages/pgvector-embedded/|packages/cli/|scripts/(runtime-components\.mjs|pack-cli-smoke\.mjs|verify-cli-runtime\.mjs|publish-packages\.mjs|canary-publish\.mjs|published-artifact-smoke\.sh)$|package\.json$|bun\.lock$|\.github/workflows/ci\.yml$|\.github/workflows/build-images\.yml$)' >/dev/null; then
+          if echo "$changed" | grep -E '^(docker/|packages/connector-worker/|packages/connector-sdk/|packages/connectors/|packages/core/|packages/embeddings/|packages/pgvector-embedded/|packages/cli/|scripts/(runtime-components\.mjs|pack-cli-smoke\.mjs|verify-cli-runtime\.mjs|daemon-mcp-smoke\.mjs|publish-packages\.mjs|canary-publish\.mjs|published-artifact-smoke\.sh)$|package\.json$|bun\.lock$|\.github/workflows/ci\.yml$|\.github/workflows/build-images\.yml$)' >/dev/null; then
             echo "connector=true" >> "$GITHUB_OUTPUT"
           else
             echo "connector=false" >> "$GITHUB_OUTPUT"
