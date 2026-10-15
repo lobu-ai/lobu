@@ -15,19 +15,19 @@ const ORGANIZATION_CREATE_PATH = '/organization/create';
 const ORGANIZATION_UPDATE_PATH = '/organization/update';
 const ORGANIZATION_LIST_PATH = '/organization/list';
 const ORGANIZATION_GET_INVITATION_PATH = '/organization/get-invitation';
+const ORGANIZATION_SET_ACTIVE_PATH = '/organization/set-active';
 const ORGANIZATION_PATH_PREFIX = '/organization/';
 
 // Organization endpoints that never fall back to the session's active
 // organization. Some act on no particular workspace: a member whose active
-// workspace is being deleted still lists workspaces, checks slugs and switches
-// (or clears) the active one. The invitation endpoints resolve the workspace
+// workspace is being deleted still lists workspaces and checks slugs; set-active
+// is decided per request below. The invitation endpoints resolve the workspace
 // from the invitation itself, which the guard checks.
 const NO_ACTIVE_ORGANIZATION_FALLBACK_PATHS = new Set([
   ORGANIZATION_LIST_PATH,
   '/organization/check-slug',
   '/organization/list-user-invitations',
   '/organization/list-user-teams',
-  '/organization/set-active',
   '/organization/accept-invitation',
   '/organization/reject-invitation',
   '/organization/cancel-invitation',
@@ -43,7 +43,7 @@ function organizationNotFound(): APIError {
 
 interface RequestSession {
   user: { id: string };
-  session: { token: string; activeOrganizationId?: string | null };
+  session: { activeOrganizationId?: string | null };
 }
 
 /**
@@ -123,12 +123,6 @@ export function workspaceDeletionPlugin(
       requestedBy: session.user.id,
       actorSource: 'ui',
     });
-    if (session.session.activeOrganizationId === org.id) {
-      await ctx.context.internalAdapter.updateSession(session.session.token, {
-        activeOrganizationId: null,
-      });
-    }
-
     const { role: _role, ...deleted } = org;
     return ctx.json(deleted);
   });
@@ -172,7 +166,13 @@ export function workspaceDeletionPlugin(
     // marker). So the active organization is always checked too: a session
     // left on a deleting workspace can only list, switch away and handle
     // invitations until it does.
-    if (!NO_ACTIVE_ORGANIZATION_FALLBACK_PATHS.has(ctx.path ?? '') && ctx.headers) {
+    // set-active falls back only when it neither clears (`organizationId:
+    // null`) nor names a target.
+    const fallsBack =
+      ctx.path === ORGANIZATION_SET_ACTIVE_PATH
+        ? body.organizationId !== null && organizationIds.length + slugs.length === 0
+        : !NO_ACTIVE_ORGANIZATION_FALLBACK_PATHS.has(ctx.path ?? '');
+    if (fallsBack && ctx.headers) {
       const session = await resolveRequestSession(ctx.headers);
       const active = session?.session.activeOrganizationId;
       if (active) organizationIds.push(active);

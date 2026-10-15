@@ -117,8 +117,10 @@ failure like the 2026-10-15 500 is no longer silent.
   when the request targets a deleting workspace: by organization id or slug,
   by invitation or member id, or through the session's active organization,
   which is always checked because an endpoint may ignore the selector it was
-  sent. A session left on a deleting workspace can therefore only list, switch
-  away and handle invitations until it does; `/organization/list` is filtered in an after hook. The
+  sent. The request also clears every session's active organization that
+  points at the workspace, so only a session that raced the request can still
+  hold it, and that session can only list, switch away or clear, and handle
+  invitations; `/organization/list` is filtered in an after hook. The
   member-role endpoint is a user hook that runs before any plugin hook, so
   `lockMemberRoleChanges` refuses a deleting workspace for every membership
   role write. Create and update reject client metadata carrying either

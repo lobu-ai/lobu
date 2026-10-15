@@ -544,6 +544,20 @@ describe("workspace purge", () => {
 			target.token,
 		);
 		expect(deleted.status).toBe(200);
+		// The request moved every session off the workspace, not only the owner's.
+		const activeOrgs = async () =>
+			(
+				await sql<{ activeOrganizationId: string | null }[]>`
+					SELECT "activeOrganizationId" FROM session WHERE "userId" = ${adminId}
+				`
+			).map((row) => row.activeOrganizationId);
+		expect(await activeOrgs()).toEqual([null]);
+		// A session that set the workspace active concurrently with the request
+		// can still point at it; every fallback below must refuse it.
+		await sql`
+			UPDATE session SET "activeOrganizationId" = ${target.organizationId}
+			WHERE "userId" = ${adminId}
+		`;
 
 		const memberRows = async () =>
 			sql<{ userId: string; role: string }[]>`
@@ -640,8 +654,15 @@ describe("workspace purge", () => {
 		`;
 		expect(marker.requested_at).not.toBeNull();
 
-		// Switching away still works; switching back is refused and leaves the
-		// session where it was.
+		// set-active with no target falls back to the deleting workspace too.
+		expect((await call("/organization/set-active", {}, adminToken)).status).toBe(404);
+		expect(await activeOrgs()).toEqual([target.organizationId]);
+
+		// Switching away and clearing still work; switching back is refused and
+		// leaves the session where it was.
+		const cleared = await call("/organization/set-active", { organizationId: null }, adminToken);
+		expect(cleared.status).toBe(200);
+		expect(await activeOrgs()).toEqual([null]);
 		const toLive = await call("/organization/set-active", { organizationId: live.id }, adminToken);
 		expect(toLive.status).toBe(200);
 		const back = await call(
@@ -650,10 +671,7 @@ describe("workspace purge", () => {
 			adminToken,
 		);
 		expect(back.status).toBe(404);
-		const sessions = await sql<{ activeOrganizationId: string | null }[]>`
-			SELECT "activeOrganizationId" FROM session WHERE "userId" = ${adminId}
-		`;
-		expect(sessions.map((row) => row.activeOrganizationId)).toEqual([live.id]);
+		expect(await activeOrgs()).toEqual([live.id]);
 		expect((await get("/organization/list-members", adminToken)).status).toBe(200);
 	});
 

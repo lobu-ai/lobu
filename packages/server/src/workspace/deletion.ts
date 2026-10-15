@@ -99,6 +99,13 @@ export async function requestWorkspaceDeletion(
       WHERE organization_id = ${org.id}
         AND status = 'pending'
     `;
+    // No session stays on the workspace: Better Auth's organization endpoints
+    // fall back to the active organization (there is no session cookie cache,
+    // so the row is authoritative).
+    await tx`
+      UPDATE session SET "activeOrganizationId" = NULL
+      WHERE "activeOrganizationId" = ${org.id}
+    `;
     await enqueueTasksInTransaction<WorkspacePurgeTaskPayload>(tx, [
       {
         name: WORKSPACE_PURGE_TASK,
