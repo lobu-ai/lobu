@@ -22,9 +22,10 @@ import {
 import {
 	adoptChatIdentityOntoMember,
 	provisionMemberAndCoreIdentities,
+	withChatIdentityLock,
 } from "../../../auth/subject-identities";
 import { applyEventAttributions } from "../../../utils/entity-link-upsert";
-import { CHAT_LINK_IDENTITY_SOURCE, resolveChatSenderMember } from "../chat-identity";
+import { resolveChatSenderMember } from "../chat-identity";
 
 const VICTIM_EMAIL = "victim@example.test";
 /** The attacker's own WhatsApp account (synthetic). */
@@ -44,12 +45,12 @@ async function seed() {
 		email: VICTIM_EMAIL,
 		name: "Victim",
 	});
-	const y = await provisionMemberAndCoreIdentities(orgY.id, {
+	await provisionMemberAndCoreIdentities(orgY.id, {
 		userId: victim.id,
 		email: VICTIM_EMAIL,
 		name: "Victim",
 	});
-	return { victim, orgX, orgY, memberX: x.memberEntityId, memberY: y.memberEntityId };
+	return { victim, orgX, orgY, memberX: x.memberEntityId };
 }
 
 /**
@@ -115,24 +116,26 @@ describe("chat sender identity trust", () => {
 		expect(await resolveChatSenderMember(PLATFORM, undefined, ATTACKER_JID, orgX.id)).toBeNull();
 	});
 
-	it("a sign-in row resolves in every organization; a redeemed link only in its own", async () => {
+	it("provider adoption upgrades a redeemed link and later links never downgrade it", async () => {
 		const { victim, orgX, orgY, memberX } = await seed();
-		const sql = getTestDb();
-		await sql`
-      INSERT INTO entity_identities (
-        organization_id, entity_id, namespace, identifier, source_connector, scope_key
-      ) VALUES (${orgX.id}, ${memberX}, 'whatsapp_user_jid', ${ATTACKER_JID}, ${CHAT_LINK_IDENTITY_SOURCE}, NULL)
-    `;
+		const adopt = (proof: "provider" | "link") =>
+			withChatIdentityLock("whatsapp_user_jid", ATTACKER_JID, (tx) =>
+				adoptChatIdentityOntoMember(tx, orgX.id, memberX, "whatsapp_user_jid", ATTACKER_JID, victim.id, proof),
+			);
+		expect(await adopt("link")).toBe("created");
 		expect(await resolveChatSenderMember(PLATFORM, undefined, ATTACKER_JID, orgX.id)).toEqual({
 			userId: victim.id,
 			role: "member",
 		});
 		expect(await resolveChatSenderMember(PLATFORM, undefined, ATTACKER_JID, orgY.id)).toBeNull();
 
-		await sql`
-      UPDATE entity_identities SET source_connector = 'auth:signup'
-      WHERE organization_id = ${orgX.id} AND namespace = 'whatsapp_user_jid'
-    `;
+		expect(await adopt("provider")).toBe("already-owned");
+		expect(await resolveChatSenderMember(PLATFORM, undefined, ATTACKER_JID, orgY.id)).toEqual({
+			userId: victim.id,
+			role: "owner",
+		});
+
+		expect(await adopt("link")).toBe("already-owned");
 		expect(await resolveChatSenderMember(PLATFORM, undefined, ATTACKER_JID, orgY.id)).toEqual({
 			userId: victim.id,
 			role: "owner",
@@ -144,14 +147,8 @@ describe("chat sender identity trust", () => {
 		await attributeAttackerJidInOrgX(orgX.id);
 
 		expect(
-			await adoptChatIdentityOntoMember(
-				getTestDb(),
-				orgX.id,
-				memberX,
-				"whatsapp_user_jid",
-				ATTACKER_JID,
-				victim.id,
-				"link",
+			await withChatIdentityLock("whatsapp_user_jid", ATTACKER_JID, (tx) =>
+				adoptChatIdentityOntoMember(tx, orgX.id, memberX, "whatsapp_user_jid", ATTACKER_JID, victim.id, "link"),
 			),
 		).toBe("already-owned");
 		expect(await resolveChatSenderMember(PLATFORM, undefined, ATTACKER_JID, orgX.id)).toEqual({
