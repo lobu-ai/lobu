@@ -112,6 +112,7 @@ describe("folder distill Automation template", () => {
     expect(prompt).toContain("Source file: <absolute file path>");
     expect(prompt).toContain("never search memory per file");
     expect(prompt).toContain("has_more");
+    expect(prompt).toContain("AND starts_with(payload_text, 'Source file: <absolute folder path>/')");
     expect(prompt).toContain("supersedes_event_id");
     expect(prompt).toContain("file was deleted");
     expect(folder?.detail).not.toHaveProperty("device_worker_id");
