@@ -2407,7 +2407,7 @@ describe('device connector manifests', () => {
 
     expect(await readDefinition(orgId, 'apple.screen_time')).not.toBeNull();
     expect(await readDefinition(orgId, 'apple.computer_use')).not.toBeNull();
-    expect(await readDefinition(orgId, 'local.directory')).not.toBeNull();
+    expect(await readDefinition(orgId, 'local.directory')).toBeNull();
     expect(await readDefinition(orgId, 'os.shell')).not.toBeNull();
     expect(await readDefinition(orgId, 'chrome.history')).toBeNull();
 

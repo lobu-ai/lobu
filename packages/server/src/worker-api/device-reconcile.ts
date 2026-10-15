@@ -383,11 +383,9 @@ async function ensureDeviceConnectorWired(
       existingReady[0]?.version_key != null &&
       definitionMatchesSource(existingReady[0]) &&
       !needsDefaultConfigSeed &&
-      // userManaged-only connectors (e.g. local.directory, browser/*) report
+      // userManaged-only connectors (e.g. browser/*) report
       // declaredFeedKeys=[]. Once the connection + definition are installed,
       // every subsequent poll has nothing to verify — fast-path out.
-      // Composing primitives still hit /api/workers/me/feeds to mint
-      // explicit per-instance rows; that path is unchanged.
       (declaredFeedKeys.length === 0 ||
         declaredFeedKeys.every((feedKey) => activeFeedKeys.has(feedKey)));
     if (ready) {
@@ -437,9 +435,7 @@ async function ensureDeviceConnectorWired(
         { configSchema?: unknown; userManaged?: boolean }
       > | null;
       // Skip feeds the connector marks `userManaged` — they need per-instance
-      // config (e.g. local.directory.files needs a folder_id per folder) that
-      // auto-wire can't supply. The Mac app creates them explicitly via
-      // /api/workers/me/feeds once it has the folder bookmark.
+      // config that auto-wire can't supply.
       feedKeys = feedsSchema
         ? Object.keys(feedsSchema).filter((k) => !feedsSchema[k]?.userManaged)
         : [];
@@ -499,9 +495,9 @@ async function ensureDeviceConnectorWired(
       // authorization, and it belongs to the unattended caller.
       //
       // Only chrome.* is a reserved namespace
-      // (`assertChromeNamespaceInstallIsDeviceManifest`); os.shell, apple.* and
-      // local.directory are all keys a user may legitimately install with their
-      // own source, which is exactly the collision.
+      // (`assertChromeNamespaceInstallIsDeviceManifest`); os.shell and apple.*
+      // are keys a user may legitimately install with their own source, which
+      // is exactly the collision.
       // `refreshPinnedOrgDeviceConnectorDefinitions` reaches the same outcome
       // by a stricter route: it SELECTS only orgs whose definition is already a
       // device connector (`IS_DEVICE_CONNECTOR_SQL`), which excludes an
@@ -898,7 +894,7 @@ async function refreshPinnedOrgDeviceConnectorDefinitions(
         AND c.connector_key = ANY(${pgTextArray([...sourceByKey.keys()])}::text[])
         -- Repair only what device reconciliation itself installs. A manifest
         -- key the product also lets an org install with its own code (os.shell,
-        -- apple.*, local.directory -- only chrome.* is reserved) would otherwise
+        -- apple.* -- only chrome.* is reserved) would otherwise
         -- have those bytes replaced: a device-manifest write replaces the whole
         -- artifact family rather than merging into it.
         AND ${sql.unsafe(IS_DEVICE_CONNECTOR_SQL)}

@@ -47,6 +47,8 @@ export const MAC_DEVICE_CAPABILITIES = [
   // existing instructions-only/legacy session handling.
   "automations.execute",
   "screentime",
+  // Advertised only by Mac builds released before the Local Folder removal.
+  // Drop with the `local.directory` platform allowance in device-manifests.ts.
   "local_directory",
   "healthkit",
   "photos",

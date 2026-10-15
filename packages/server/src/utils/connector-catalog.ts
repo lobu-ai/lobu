@@ -475,8 +475,7 @@ export async function getBundledDeviceConnectors(): Promise<
 			key: d.key,
 			requiredCapability: d.required_capability as string,
 			// Exclude `userManaged` feeds — they require per-instance config the
-			// auto-wire flow can't supply (e.g. local.directory.files needs a
-			// folder_id from the Mac app). The Mac app creates them explicitly.
+			// auto-wire flow can't supply.
 			feedKeys:
 				d.feeds_schema &&
 				typeof d.feeds_schema === "object" &&

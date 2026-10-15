@@ -3,7 +3,6 @@ import {
   macComputerUseActions,
   withComputerUseStatus,
 } from "./mac-computer-use.js";
-import { localDirectoryDeviceConnector } from "./local-directory.js";
 
 /**
  * Canonical TypeScript source for the Mac-only device connector metadata. The
@@ -83,7 +82,6 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
       },
     },
   },
-  localDirectoryDeviceConnector,
   {
     key: "apple.health",
     version: "0.2.0",
