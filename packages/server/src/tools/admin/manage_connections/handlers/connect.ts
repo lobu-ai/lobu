@@ -7,7 +7,6 @@ import { selectedBrowserRequirement } from '../../../../connectors/browser-resou
 import { checkBrowserConnectionSetup } from '../../helpers/browser-connection-setup';
 import { getDb, pgBigintArray, type DbClient } from "../../../../db/client";
 import {
-	collectFeedRequiredScopes,
 	normalizeScopeList,
 	selectReconnectOAuthScopes,
 } from "../../../../auth/oauth/scopes";
@@ -309,7 +308,7 @@ async function handleConnectImpl(
       // Revalidate pending requests as well as grants against the active definition.
       const selection = selectReconnectOAuthScopes({
         method,
-        feedRequiredScopes: collectFeedRequiredScopes(connector.feeds_schema),
+        feedsSchema: connector.feeds_schema,
         historicalScopes: [
           ...(String(oldConfig.provider ?? '').toLowerCase() === provider
             ? normalizeScopeList(oldConfig.requestedScopes ?? oldConfig.scopes) : []),

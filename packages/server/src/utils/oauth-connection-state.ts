@@ -3,6 +3,7 @@ import { oauthAccountOwnershipError } from '../authz/oauth-account-ownership';
 import { getAuthProfileById, updateAuthProfile } from './auth-profiles';
 import { getOAuthAuthMethods, normalizeConnectorAuthSchema } from './connector-auth';
 import {
+  declaredOAuthScopes,
   getFeedRequiredScopes,
   hasAllScopes,
   normalizeScopeList,
@@ -128,21 +129,8 @@ export async function syncOAuthConnectionsForAuthProfile(
     null;
   // Shared social-login accounts need per-connector attribution. Isolated
   // connector accounts keep their own grants, including scopes removed from
-  // the manifest, so reconnect cannot downgrade an existing grant.
-  const declaredFeedScopes =
-    feedsSchema && typeof feedsSchema === 'object' && !Array.isArray(feedsSchema)
-      ? Object.values(feedsSchema as Record<string, unknown>).flatMap((feed) =>
-          normalizeScopeList(
-            (feed as Record<string, unknown> | null | undefined)?.requiredScopes
-          )
-        )
-      : [];
-  const declaredScopes = normalizeScopeList([
-    ...(oauthMethod?.loginScopes ?? []),
-    ...(oauthMethod?.requiredScopes ?? []),
-    ...(oauthMethod?.optionalScopes ?? []),
-    ...declaredFeedScopes,
-  ]);
+  // the manifest. Reconnect separately filters which scopes to request again.
+  const declaredScopes = declaredOAuthScopes(oauthMethod, feedsSchema);
   const isolatedAccount = (accountRow as { accountId?: string } | undefined)?.accountId
     ?.startsWith('lobu-connector:');
   const grantedScopes = isolatedAccount
