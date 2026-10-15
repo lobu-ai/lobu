@@ -12,6 +12,8 @@
 
 import type { AgentModelInfo } from "@lobu/core/contracts/tools/manage-agents";
 import { isUnresolvedModelRef } from "../gateway/auth/model-sentinel";
+import { resolveModelProvider } from "../gateway/auth/model-runnability";
+import type { ProviderCatalogService } from "../gateway/auth/provider-catalog";
 import { resolveEffectiveModelRef } from "../gateway/auth/settings/model-selection";
 import { getModelProviderModules } from "../gateway/modules/module-system";
 import { orgContext } from "./stores/org-context";
@@ -26,8 +28,8 @@ import {
 // are org-scoped by running them inside `orgContext.run(...)` (the store reads
 // the org from that async context), which is exactly how the settings store's
 // own `getSettings` scopes its reads. Used directly rather than via
-// `getLobuCoreServices()` so it works on every path — the core-services
-// singleton isn't populated in all execution contexts (e.g. the tool path).
+// `getLobuCoreServices()` so settings access also works without a booted
+// gateway. Provider preflight separately depends on the supplied catalog.
 const agentConfigStore = createPostgresAgentConfigStore();
 
 /**
@@ -125,28 +127,54 @@ export async function validateModelRefsAgainstOrg(
 }
 
 /**
+ * What the read side needs to ask the run path's routability question. Callers
+ * take these from the booted gateway's core services.
+ */
+interface AgentModelRouting {
+  agentId: string;
+  catalog: ProviderCatalogService | undefined;
+  publicGatewayUrl: string;
+}
+
+/**
  * Resolve an agent's effective model and where it comes from — the read side of
  * #2047's "is this agent actually runnable?" question. Composes the SAME layered
  * fallback the run path uses (`resolveEffectiveModelRef(agent.models) → org
  * default`); nothing new is stored, this only reports what a run would resolve.
+ *
+ * With a gateway catalog, `not_runnable` uses the cloud chat preflight
+ * ({@link resolveModelProvider}) with the agent owner's credentials. A sender
+ * may have additional credentials, and a device turn uses its local CLI's
+ * authentication instead. `effective_model` remains the configured ref even
+ * when preflight finds a runnable listed alternate.
  */
 export async function resolveAgentModelInfo(
   agentModels: string[] | undefined,
   organizationId: string,
+  routing: AgentModelRouting,
 ): Promise<AgentModelInfo> {
   const agentModel = resolveEffectiveModelRef({ models: agentModels });
-  if (agentModel) {
-    return { effective_model: agentModel, source: "agent", not_runnable: false };
+  const orgDefault = agentModel ? null : await getOrgDefaultModel(organizationId);
+  const effectiveModel = agentModel ?? orgDefault;
+  if (!effectiveModel) {
+    return { effective_model: null, source: "none", not_runnable: true };
   }
-  const orgDefault = await getOrgDefaultModel(organizationId);
-  if (orgDefault) {
-    return {
-      effective_model: orgDefault,
-      source: "org_default",
-      not_runnable: false,
-    };
-  }
-  return { effective_model: null, source: "none", not_runnable: true };
+  const metadata = await orgContext.run({ organizationId }, () =>
+    agentConfigStore.getMetadata(routing.agentId),
+  );
+  const resolution = await resolveModelProvider({
+    catalog: routing.catalog,
+    publicGatewayUrl: routing.publicGatewayUrl,
+    agentId: routing.agentId,
+    organizationId,
+    userId: metadata?.owner.userId ?? "",
+    modelRef: effectiveModel,
+  });
+  return {
+    effective_model: effectiveModel,
+    source: agentModel ? "agent" : "org_default",
+    not_runnable: resolution.kind === "error",
+  };
 }
 
 /**

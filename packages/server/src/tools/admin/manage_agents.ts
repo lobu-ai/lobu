@@ -54,6 +54,7 @@ import {
   resolveAgentModelInfo,
   validateModelRefsAgainstOrg,
 } from '../../lobu/model-config';
+import { getLobuCoreServices } from '../../lobu/gateway';
 import { isValidAgentId } from '../../lobu/stores/postgres-stores';
 import { resolveActionOrigin } from '../../notifications/action-origin';
 import { notifyActionApprovalNeeded } from '../../notifications/triggers';
@@ -121,15 +122,20 @@ async function actingPrincipalFor(ctx: ToolContext): Promise<ActingPrincipal> {
  * Compute an agent's effective model + inheritance source (#2047). Reads the
  * agent's `models` list through the shared settings store (org-scoped) and
  * folds in the org default — the SAME layered fallback the run path uses, so a
- * caller can tell a genuinely runnable agent from one that only works because
- * the org has a default. Returns `not_runnable` when nothing resolves.
+ * caller can distinguish a pinned model from an inherited default. With a
+ * gateway catalog, also checks cloud-provider routing as the agent owner.
  */
 async function agentModelInfo(
   ctx: ToolContext,
   agentId: string,
 ): Promise<AgentModelInfo> {
   const models = await readAgentModels(agentId, ctx.organizationId);
-  return resolveAgentModelInfo(models, ctx.organizationId);
+  const coreServices = getLobuCoreServices();
+  return resolveAgentModelInfo(models, ctx.organizationId, {
+    agentId,
+    catalog: coreServices?.getProviderCatalogService?.(),
+    publicGatewayUrl: coreServices?.getPublicGatewayUrl?.() ?? '',
+  });
 }
 
 /**
