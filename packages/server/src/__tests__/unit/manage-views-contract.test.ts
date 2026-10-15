@@ -26,6 +26,21 @@ function messageOf(fn: () => unknown): string {
 }
 
 describe("manage_views union contract", () => {
+	it("accepts a param filter and rejects an unknown filter key", () => {
+		const set = (filter: unknown) =>
+			validate({
+				action: "set",
+				key: "pipeline",
+				source_code: "export default () => null;",
+				params: { region: { type: "string", filter } },
+			});
+		expect(() =>
+			set({ label: "Region", options: [{ value: "EMEA", label: "Europe" }] })
+		).not.toThrow();
+		expect(() => set({ label: "Region", multiple: true })).toThrow(ToolUserError);
+		expect(() => set({ label: "" })).toThrow(ToolUserError);
+	});
+
 	it("requires source_code for set and key for get/remove, at the schema", () => {
 		expect(messageOf(() => validate({ action: "set", key: "pipeline" }))).toMatch(
 			/source_code/
