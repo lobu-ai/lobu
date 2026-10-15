@@ -418,7 +418,10 @@ async function runSandbox(
   env: Env,
   ctx: AccountToolContext,
 ): Promise<unknown> {
-  const allowCrossOrg = ctx.allowCrossOrg;
+  // `client.org` exists for an account OAuth grant and for a chat turn that
+  // reaches its sender's workspaces. Only the former is account-scoped: a chat
+  // turn keeps its current workspace's access ceiling below (fail closed).
+  const allowCrossOrg = ctx.allowCrossOrg || Boolean(ctx.chatSenderReach);
   const agentDryRun = "dry_run" in args ? args.dry_run === true : false;
   const dryRun = resolveSandboxDryRun({
     executionMode: ctx.executionMode,

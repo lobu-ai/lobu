@@ -261,6 +261,26 @@ export interface AuthInfo {
   executionMode?: 'live' | 'capture' | null;
   /** Verified capture owner; never taken from tool arguments. */
   captureIdentity?: CaptureIdentity | null;
+  /**
+   * Set only for a chat turn whose verified worker token carries the
+   * sender-workspace grant (WorkerTokenData.chatSenderWorkspaces). See
+   * {@link ChatSenderReach}.
+   */
+  chatSenderReach?: ChatSenderReach | null;
+}
+
+/**
+ * A member's direct-message chat turn may act in the sender's other
+ * workspaces (docs/design/chat-sender-workspace-scope.md). The home workspace
+ * and its agent stay the default; a call naming another workspace re-reads
+ * the sender's membership there and acts as the sender, with no agent, under
+ * that workspace's own role, policy and approvals.
+ */
+export interface ChatSenderReach {
+  /** The workspace the turn runs in: the Automation's or the bot's. */
+  homeOrganizationId: string;
+  /** The turn's agent, restored only when a call returns to the home workspace. */
+  homeAgentId: string;
 }
 
 // ============================================

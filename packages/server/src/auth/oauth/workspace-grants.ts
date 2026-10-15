@@ -137,8 +137,10 @@ export interface UngrantedMemberWorkspace {
  *
  * Callers use this ONLY after `resolveGrantedWorkspaceTarget` returned null to
  * tell "you're a member but this authorization predates the membership"
- * apart from "unknown or no access". The existence of a private workspace is
- * revealed only to its own members, who can already see it via the session
+ * apart from "unknown or no access", or as the whole grant of a chat turn that
+ * reaches its sender's workspaces (sandbox/client-sdk.ts), which carries no
+ * snapshot. The existence of a private workspace is revealed only to its
+ * own members, who can already see it via the session
  * `/api/organizations` list — never to non-members.
  */
 export async function findUngrantedMemberWorkspace({

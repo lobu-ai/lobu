@@ -1,30 +1,32 @@
 # Chat turns act in the sender's workspaces
 
-Status: accepted design (confirmed 2026-10-15), not yet implemented. It changes
-the chat turn-token contract. It adds no table, no SDK method and no public API.
+Status: accepted design (confirmed 2026-10-15), implemented for gateway chat turns.
+Device-placed turns remain single-workspace. This changes the
+chat turn-token contract (`chatSenderWorkspaces`). It adds no table, no SDK
+method and no public API.
 
 Evidence checked on 2026-10-15 against `origin/main` at
 [`9ac7d26500227d09ec0c52fa5468ba7e2ca78472`](https://github.com/lobu-ai/lobu/tree/9ac7d26500227d09ec0c52fa5468ba7e2ca78472).
-Revalidate this baseline before implementation.
+The table below describes that pre-implementation baseline.
 
 ## Problem
 
-A chat bot connection belongs to one workspace. Every turn it runs can only
-read and act in one workspace: the workspace of the Automation that matched
-the message, or the bot's own workspace when no Automation matched.
+A chat bot connection belongs to one workspace. Before this change, each turn
+could only read and act in one workspace: the workspace of the Automation that
+matched the message, or the bot's own workspace when no Automation matched.
 
-So a linked member who messages the team WhatsApp bot "add this to my calendar"
-cannot reach their personal workspace, even though they are a member there and
-an external MCP client signed in as the same person can. The only ways around
-this today are a second bot per workspace, or a cross-workspace `/lobu link`
-chat-link Automation on a preview bot. Both bind the conversation to one other
-workspace instead of following the person.
+A linked member who messaged the team WhatsApp bot "add this to my calendar"
+could not reach their personal workspace, even though they were a member there
+and an external MCP client signed in as the same person could. The workarounds
+were a second bot per workspace, or a cross-workspace `/lobu link` chat-link
+Automation on a preview bot. Both bound the conversation to one other workspace
+instead of following the person.
 
 Making Automations the routing table for conversations also caused the
 2026-10-15 duplicate replies: two workspaces each linked the same Slack DM, and
 both answered.
 
-## What exists today
+## Pre-implementation baseline
 
 | Piece | Where | What it does |
 | --- | --- | --- |
@@ -49,9 +51,9 @@ conditions: the sender is a linked member, and the conversation is private.
    - The actor is the sender in every workspace, with that sender's own role there.
    - The model, provider and billing remain the home workspace's agent. Only data and actions cross.
 3. **Enforcement reuses the external-MCP path.**
-   - `multi-tenant.ts` accepts any workspace in the token's grant.
-   - The agent-bound restriction allows cross-workspace calls only when the grant lists more than one workspace.
-   - `client.org(slug)` and the `workspace` argument then behave exactly as they do for an OAuth MCP client.
+   - `multi-tenant.ts` authenticates only the token's home workspace and exposes its signed sender-workspace grant to tool execution.
+   - The agent-bound OAuth restriction stays in place. Eligible chat calls select another workspace through their separate sender grant and a live membership lookup.
+   - `client.org(slug)` and tool workspace arguments select the target; its handlers enforce the sender's role and policy there.
 4. **Each target workspace keeps its own rules.**
    - Connector policy (`evaluateConnectorPolicy`), approvals, resource ACLs and audit apply in the workspace where an action runs. Crossing in from chat never bypasses them.
    - Approvals that need a human session stay human-session-only.
@@ -71,14 +73,31 @@ conditions: the sender is a linked member, and the conversation is private.
   point a DM at another workspace. They become optional. Removing them is a
   separate change, after usage is measured.
 
-## Open questions to settle in the implementation PR
+## As built
 
-1. **Per-workspace opt-out.** Can a member keep a workspace out of chat reach?
-   Proposed default: on. An opt-out can reuse the existing policy rows, not a
-   new table.
-2. **Agent instructions.** The turn's system context should name the home
-   workspace and say that others are reachable on request, so the model does
-   not wander across workspaces unprompted.
+- The token claim is `chatSenderWorkspaces: true`, signed only beside
+  `chatAccess: "member"` (which already means a linked member in a direct
+  message) and only when the bridge's structured `isDirect` is true.
+  `chatSenderWorkspacesClaim` mints the grant and
+  `chatTurnReachesSenderWorkspaces` reads it in `chat-turn-actor.ts`.
+  The core token verifier rejects the claim on any other tier.
+- The workspace in the MCP URL stays the token's own. `multi-tenant.ts` turns
+  an eligible token into a `chatSenderReach` (home workspace and agent) on the
+  request's auth info; `resolveCrossOrgToolContext` reads the sender's live
+  `member` row whenever `client.org(slug)`, `org_slug`, `organization` or
+  search's `workspace` names a workspace.
+- In another workspace the call acts as the sender with no agent, the same
+  principal an OAuth MCP client has there. That workspace's role, connector
+  policy and approvals decide; approving still needs a human web session.
+- Device-placed chat turns do not get the claim yet.
+
+## Settled open questions
+
+1. **Per-workspace opt-out.** Not built; reach is on by default. Any opt-out
+   remains a separate design and implementation decision.
+2. **Agent instructions.** A reaching turn's workspace-access section names
+   the home workspace and says the sender's other workspaces are used only
+   when asked for.
 
 ## Verification plan
 

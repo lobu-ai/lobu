@@ -1284,8 +1284,10 @@ describe('agent turn producer', () => {
     const envelope = run.action_input as { turn: { system_prompt: string }; credential: string };
     // A channel turn: the member is attribution only; the turn is org_shared.
     expect(verifyWorkerToken(envelope.credential)).toMatchObject({ userId: 'U0LINKED', actorUserId: member.id, chatAccess: 'org_shared' });
+    expect(verifyWorkerToken(envelope.credential)?.chatSenderWorkspaces).toBeUndefined();
     expect(fixture.listed).toEqual([{ mcpId: 'lobu-memory', agentId: AGENT_ID, token: envelope.credential }]);
     expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('org_shared'));
+    expect(envelope.turn.system_prompt).not.toContain('workspace by default');
   });
 
   it('tells a linked DM member turn who is speaking and that its tools act as them', async () => {
@@ -1311,8 +1313,13 @@ describe('agent turn producer', () => {
 
     const [run] = await agentTurnRuns();
     const envelope = run.action_input as { turn: { system_prompt: string; ephemeral_context?: string }; credential: string };
-    expect(verifyWorkerToken(envelope.credential)).toMatchObject({ actorUserId: member.id, chatAccess: 'member' });
-    expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('member'));
+    expect(verifyWorkerToken(envelope.credential)).toMatchObject({
+      actorUserId: member.id, chatAccess: 'member', chatSenderWorkspaces: true,
+    });
+    // A DM member's turn may reach the sender's other workspaces, so it is
+    // told which workspace is home.
+    expect(envelope.turn.system_prompt).toContain(chatTurnAccessInstructions('member', { homeWorkspaceSlug: org.slug }));
+    expect(envelope.turn.system_prompt).toContain(`work in the ${JSON.stringify(org.slug)} workspace by default`);
     // The sender is conversation-scoped, so it rides the per-turn context, never the cached prompt.
     expect(envelope.turn.system_prompt).not.toContain('Synthetic Member');
     expect(envelope.turn.ephemeral_context).toBe(chatTurnSenderContext('Synthetic Member'));

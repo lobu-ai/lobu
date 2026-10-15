@@ -1666,6 +1666,10 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       // auth context current before tools read ToolContext.sourceContext.
       session.authCtx.sourceContext = freshCtx.sourceContext ?? null;
       session.authCtx.adminTools = freshCtx.adminTools ?? null;
+      // Per request for the same reason: one upstream session can serve the
+      // same sender's direct message and group turns, and only the former's
+      // token carries the sender-workspace grant.
+      session.authCtx.chatSenderReach = freshCtx.chatSenderReach ?? null;
 
       if (freshCtx.agentId && freshCtx.agentId !== session.authCtx.agentId) {
         clearSession();

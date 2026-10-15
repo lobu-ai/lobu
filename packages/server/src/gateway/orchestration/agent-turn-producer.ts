@@ -60,10 +60,13 @@ import {
 } from "./agent-turn-attachments.js";
 import { notifyThreadResponse, type TurnFailure } from "./turn-liveness.js";
 import {
+  chatSenderWorkspacesClaim,
   chatTurnAccessOf,
   chatTurnEvidenceFrom,
   chatTurnAccessInstructions,
   chatTurnContext,
+  chatTurnHomeWorkspaceSlug,
+  chatTurnReachesSenderWorkspaces,
   chatTurnSenderName,
   isConfinedChatTurn,
   resolveChatTurnActor,
@@ -552,8 +555,9 @@ function resolveModelMetadata(
  * URL; the MCP and runtime routes authenticate the same token.
  *
  * A chat turn's token also carries the authority its sender gets in this
- * organization as `chatAccess`, plus `actorUserId` for a linked member (see
- * chat-turn-actor.ts). Both are resolved here, server-side, from verified
+ * organization as `chatAccess`, plus `actorUserId` for a linked member, and,
+ * for a member's direct message only, `chatSenderWorkspaces` (see
+ * chat-turn-actor.ts). These are resolved here, server-side, from verified
  * state and the bridge's structured evidence — never taken from the worker or
  * the message text.
  */
@@ -573,11 +577,12 @@ export async function mintTurnToken(data: MessagePayload, runId: number, runtime
     deniedDomains: data.networkConfig?.deniedDomains,
     nixPackages: data.nixConfig?.packages,
   });
+  const evidence = chatTurnEvidenceFrom(data.platformMetadata);
   const actor = await resolveChatTurnActor({
     organizationId: data.organizationId,
     senderId: data.userId,
     claims,
-    evidence: chatTurnEvidenceFrom(data.platformMetadata),
+    evidence,
   });
   return generateWorkerToken(
     data.userId,
@@ -587,6 +592,7 @@ export async function mintTurnToken(data: MessagePayload, runId: number, runtime
       ...claims,
       ...(actor?.actorUserId ? { actorUserId: actor.actorUserId } : {}),
       ...(actor ? { chatAccess: actor.access } : {}),
+      ...chatSenderWorkspacesClaim(actor, evidence),
       messageId: data.messageId,
       // No `executionMode`/`automationRunId` override here ON PURPOSE.
       // `buildWorkerTokenClaims` above already derives both from
@@ -1052,7 +1058,17 @@ export async function enqueueAgentTurn(
       failedServers = resolved.failedServers;
     }
     // Every chat turn says what its sender may do; non-chat turns have no sender.
-    if (chatAccess) mcpInstructions = [chatTurnAccessInstructions(chatAccess), ...mcpInstructions];
+    if (chatAccess) {
+      // A turn that may reach the sender's other workspaces is told which one
+      // is home, so it stays there unless the sender asks for another.
+      const homeWorkspaceSlug = chatTurnReachesSenderWorkspaces(turnClaims)
+        ? await chatTurnHomeWorkspaceSlug(data.organizationId)
+        : undefined;
+      mcpInstructions = [
+        chatTurnAccessInstructions(chatAccess, homeWorkspaceSlug ? { homeWorkspaceSlug } : undefined),
+        ...mcpInstructions,
+      ];
+    }
 
     if (automationContext?.requiresWindowCompletion) {
       if (failedServers.includes(AUTOMATION_MEMORY_MCP_ID)) {

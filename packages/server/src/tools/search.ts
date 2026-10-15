@@ -49,6 +49,7 @@ import { buildEntityUrl, getPublicWebUrl } from '../utils/url-builder';
 import { getWorkspaceProvider } from '../workspace';
 import { requireWorkspaceContext } from './access-control';
 import { recordWorkspaceActivity } from '../sandbox/workspace-activity';
+import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from '../sandbox/client-sdk';
 import { getContent } from './get_content';
 import type { AccountToolContext, ToolContext } from './registry';
 import { markAcceptedInternalFields, withValidatedArgs } from './validate-args';
@@ -1325,12 +1326,25 @@ async function searchImpl(
     ctx.actingAutomationId ||
     ctx.headlessResult
   ) {
-    const workspaceCtx = requireWorkspaceContext(ctx);
+    // A chat turn that reaches its sender's workspaces may name one; the
+    // selection re-reads the sender's membership there. Unqualified search
+    // stays in the turn's own workspace.
+    const workspaceCtx =
+      ctx.chatSenderReach && args.workspace?.trim()
+        ? await resolveCrossOrgToolContext(args.workspace, ctx).catch((error: unknown) => {
+            if (error instanceof CrossOrgAccessDenied) throw workspaceUnavailable();
+            throw error;
+          })
+        : requireWorkspaceContext(ctx);
     const target = await resolveSingleWorkspace(args, workspaceCtx);
-    return searchWorkspaceImpl(args, env, workspaceCtx, {
+    const result = await searchWorkspaceImpl(args, env, workspaceCtx, {
       workspaceSlug: target.workspaceSlug,
       coverageScope: target.scope,
     });
+    if (workspaceCtx.organizationId !== ctx.organizationId) {
+      recordWorkspaceActivity(ctx, workspaceCtx.organizationId, 'search');
+    }
+    return result;
   }
 
   const targets = await resolveFederatedTargets(args, ctx);

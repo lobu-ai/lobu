@@ -148,6 +148,7 @@ function mintToken(opts: {
           adminTools: ["manage_agents"],
           actorUserId: "auth-user-1",
           chatAccess: "member" as const,
+          chatSenderWorkspaces: true as const,
         }
       : {}),
     allowedDomains: ["api.example.com"],
@@ -205,6 +206,9 @@ describe("POST /worker/token/refresh", () => {
     expect(data!.adminTools).toEqual(["manage_agents"]);
     expect(data!.actorUserId).toBe("auth-user-1");
     expect(data!.chatAccess).toBe("member");
+    // The sender-workspace grant survives too, or a long DM turn would lose
+    // the sender's other workspaces mid-run.
+    expect(data!.chatSenderWorkspaces).toBe(true);
     // Egress claims must BOTH survive refresh — dropping allowedDomains
     // breaks the sandbox network (deny-all), dropping deniedDomains
     // silently re-opens denied hosts on remote runtimes.
