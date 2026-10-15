@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { materializeDueAutomationRuns } from "../../../automations/automation";
 import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
 import { app, type Env } from "../../../index";
+import { resolveDefaultOrgId } from "../../../lobu/gateway";
 import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
 import { buildPublicPageModel, buildSitemapEntries } from "../../../public-pages";
 import { registerScheduledJobsTicker } from "../../../scheduled/scheduled-jobs-service";
@@ -856,6 +857,43 @@ describe("workspace purge", () => {
 		expect(await publicRest()).toBe(404);
 		expect(await publicPage()).toBeNull();
 		expect((await sitemapLocs()).some((loc) => loc.includes(`/${target.slug}`))).toBe(false);
+	});
+
+	it("stops resolving a deleting or left workspace as the default on the very next request", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("default-org");
+		const live = await createTestOrganization();
+		const memberSignUp = await call("/sign-up/email", {
+			email: "member-default-org@workspace-purge.test",
+			password: "memberpassword99",
+			name: "Member",
+		});
+		const memberId = (memberSignUp.body.user as { id: string }).id;
+		// Oldest membership wins: the deleting workspace, then the live one,
+		// then anything the member joined at sign-up.
+		const targetMembership = await addUserToOrganization(memberId, target.organizationId, "member");
+		const liveMembership = await addUserToOrganization(memberId, live.id, "member");
+		await sql`UPDATE member SET "createdAt" = now() - interval '10 years' WHERE id = ${targetMembership}`;
+		await sql`UPDATE member SET "createdAt" = now() - interval '5 years' WHERE id = ${liveMembership}`;
+
+		// Resolved once (a warm cache, if one existed), then deletion requested.
+		expect(await resolveDefaultOrgId(memberId)).toBe(target.organizationId);
+		expect(
+			(
+				await call(
+					"/organization/delete",
+					{ organizationId: target.organizationId },
+					target.token,
+				)
+			).status,
+		).toBe(200);
+		expect(await resolveDefaultOrgId(memberId)).toBe(live.id);
+
+		// Removed from the live workspace: no longer its default either.
+		await sql`DELETE FROM member WHERE id = ${liveMembership}`;
+		const after = await resolveDefaultOrgId(memberId);
+		expect(after).not.toBe(live.id);
+		expect(after).not.toBe(target.organizationId);
 	});
 
 	it("hides a requested workspace before the purge runs", async () => {

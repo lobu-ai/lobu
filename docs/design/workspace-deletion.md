@@ -128,7 +128,10 @@ failure like the 2026-10-15 500 is no longer silent.
   The request also sets `visibility = 'private'`: every anonymous read (public
   REST, public pages, sitemap, cross-workspace schema and search reads)
   filters on `visibility = 'public'`, so that one write hides the workspace
-  from all of them. Deletion is terminal, so nothing restores it. The member-role
+  from all of them. Deletion is terminal, so nothing restores it.
+  The embedded gateway's default-workspace lookup lost its per-replica cache,
+  so the next request after the deletion (or after a member is removed)
+  already resolves elsewhere on every replica. The member-role
   endpoint is a user hook that runs before any plugin hook, so
   `lockMemberRoleChanges` refuses a deleting workspace for every membership
   role write. Create and update reject client metadata carrying either
