@@ -47,12 +47,5 @@ export {
   deleteDeviceWorker,
 } from './worker-api/device-management';
 
-// Device-scoped feed CRUD (/api/workers/me/feeds/*)
-export {
-  listMyDeviceFeeds,
-  createMyDeviceFeed,
-  deleteMyDeviceFeed,
-} from './worker-api/device-feeds';
-
 // Device Automation trigger (/api/workers/me/automations/:id/trigger)
 export { triggerAutomationForDevice } from './worker-api/automation-trigger';

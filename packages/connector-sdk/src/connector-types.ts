@@ -567,7 +567,7 @@ export interface FeedDefinition {
    * this feed — every feed instance is created explicitly by the user (or by
    * the device worker on their behalf). Use this for feeds whose configSchema
    * has required fields that can only be supplied by an external actor, e.g.
-   * `local.directory.files` needs a per-folder `folder_id` from the Mac app.
+   * the postgres `query` feed needs a user-authored SQL query.
    */
   userManaged?: boolean;
   /**

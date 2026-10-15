@@ -748,9 +748,7 @@ import {
 	completeAutomationRun,
 	completeDeviceChatRun,
 	completeWorkerJob,
-	createMyDeviceFeed,
 	deleteDeviceWorker,
-	deleteMyDeviceFeed,
 	emitAuthArtifact,
 	fetchEventsForEmbedding,
 	fetchWorkerHttp,
@@ -758,7 +756,6 @@ import {
 	getAuthRun,
 	heartbeat,
 	listDeviceWorkers,
-	listMyDeviceFeeds,
 	mintDeviceChildToken,
 	pollAuthSignal,
 	pollWorkerJob,
@@ -843,7 +840,6 @@ app.use("/api/workers/*", async (c, next) => {
 				"/api/workers/complete-action",
 			]);
 			const requestPath = new URL(c.req.url).pathname;
-			const isFeedSubpath = requestPath.startsWith("/api/workers/me/feeds");
 			// /api/workers/me/runs/<runId>/complete-automation — device-side Automation
 			// completion endpoint added in #798. The handler does its own
 			// `authorizeRunForWorker` claim-ownership check, so an org-scope
@@ -862,7 +858,6 @@ app.use("/api/workers/*", async (c, next) => {
 				/^\/api\/workers\/me\/automations\/\d+\/trigger$/.test(requestPath);
 			if (
 				!allowedPathsForUserWorker.has(requestPath) &&
-				!isFeedSubpath &&
 				!isAutomationCompleteSubpath &&
 				!isDeviceChatCompleteSubpath &&
 				!isAutomationTriggerSubpath
@@ -967,9 +962,6 @@ app.post("/api/workers/fetch-events", fetchEventsForEmbedding);
 app.post("/api/workers/emit-auth-artifact", emitAuthArtifact);
 app.post("/api/workers/poll-auth-signal", pollAuthSignal);
 app.post("/api/workers/complete-auth", completeAuthRun);
-app.get("/api/workers/me/feeds", listMyDeviceFeeds);
-app.post("/api/workers/me/feeds", createMyDeviceFeed);
-app.delete("/api/workers/me/feeds/:id", deleteMyDeviceFeed);
 // Device worker registry. Authenticated (mcpAuth); returns the calling user's
 // devices. Lives under /api/me/ so the workspace resolver treats it as
 // user-scoped (no org slug in the URL).

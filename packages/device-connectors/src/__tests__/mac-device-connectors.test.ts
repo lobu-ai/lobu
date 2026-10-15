@@ -1,10 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
-import { serializeDeviceConnector } from "@lobu/connector-sdk";
 import { deviceManifestHash } from "@lobu/connector-sdk/device-manifest-hash";
 import { validateDeviceConnectorManifests } from "../../../server/src/worker-api/device-manifests";
 import { headlessDeviceConnectorManifests } from "../headless.js";
-import { localDirectoryDeviceConnector } from "../local-directory.js";
 import {
   macDeviceConnectorDefinitions,
   macDeviceConnectorManifests,
@@ -78,7 +76,6 @@ describe("Mac device connector registry", () => {
       "apple.photos",
       "apple.reminders",
       "apple.screen_time",
-      "local.directory",
       "os.shell",
     ]);
   });
@@ -95,12 +92,6 @@ describe("Mac device connector registry", () => {
         expect(action).not.toHaveProperty("requiresApproval");
       }
     }
-    expect(
-      macDeviceConnectorManifests.find((m) => m.key === "local.directory")
-        ?.feeds_schema.files
-    ).toMatchObject({
-      userManaged: true,
-    });
     expect(
       macDeviceConnectorManifests.find((m) => m.key === "apple.computer_use")
         ?.actions_schema
@@ -130,25 +121,6 @@ describe("Mac device connector registry", () => {
     expect(JSON.stringify(headless)).toBe(JSON.stringify(mac));
     expect(deviceManifestHash(headless!)).toBe(deviceManifestHash(mac!));
     expect(mac?.runtime.platforms).toEqual(["headless", "macos"]);
-  });
-
-  // Extracting the definition must preserve the Mac app's pinned identity.
-  test("the shared local.directory module serializes the pinned Mac manifest", () => {
-    const entries = macDeviceConnectorManifests.filter(
-      (m) => m.key === "local.directory"
-    );
-    expect(entries).toHaveLength(1);
-    const [manifest] = entries;
-    expect(manifest).toEqual(
-      serializeDeviceConnector(localDirectoryDeviceConnector)
-    );
-    expect(deviceManifestHash(manifest)).toBe(
-      pinnedManifestHashes["local.directory@0.2.0"]
-    );
-    expect(manifest.runtime.platforms).toEqual(["macos"]);
-    expect(
-      headlessDeviceConnectorManifests.some((m) => m.key === "local.directory")
-    ).toBe(false);
   });
 
   test("the checked-in headless artifact is generated from the registry", () => {

@@ -609,6 +609,9 @@ function connectorKeyAllowedForPlatform(platform: string, key: string): boolean 
   if (platform === 'macos') {
     return (
       key.startsWith('apple.') ||
+      // Mac builds released before the Local Folder removal still advertise
+      // `local.directory`; one disallowed key rejects the whole manifest
+      // payload. Drop this once MIN_CLIENT_VERSION excludes those builds.
       key === 'local.directory' ||
       key === 'os.shell'
     );

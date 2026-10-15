@@ -94,7 +94,7 @@ Takeout/
 
 Some exports also ship JSON under `history/` instead of HTML. Lobu has no Takeout parser yet — treat the export as a **one-off backfill**:
 
-- Drop `watch-history.html` (or the whole `Takeout/` folder) into a **local folder** feed (`local.directory` on Lobu for Mac) so the file is ingested as a document, **or**
+- Ask an agent with shell access on your device to read `watch-history.html` and `save_memory` the parts worth keeping, **or**
 - Summarise key facts into **learning** entities / `save_memory` after you skim the export.
 
 **Partial live alternative:** `chrome.history` (Owletto Chrome + `history` permission) captures `youtube.com/watch?v=...` visits from the browser (~90-day backfill + live). Good for forward-looking web viewing; not a full account history.
