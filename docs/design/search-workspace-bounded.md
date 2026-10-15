@@ -1,8 +1,8 @@
 # Workspace-bounded search and recall
 
-Status: **design, awaiting approval.** Nothing here is built. Part 1 below is
-query-only; Part 2 adds an extension and two indexes, which is a DB design
-change under the AGENTS.md rules and needs explicit confirmation.
+Status: **Part 1 accepted 2026-10-15; Part 2 pending Part 1 measurements.**
+Part 1 below is query-only; Part 2 adds an extension and two indexes, which is
+a DB design change under the AGENTS.md rules and needs explicit confirmation.
 
 Evidence was measured on 2026-10-15 against production running
 [`9da1deb36`](https://github.com/lobu-ai/lobu/tree/9da1deb36c17a7eff5ce1ad610dfe8af21cdec73)
@@ -409,6 +409,7 @@ Pass criteria:
 1. **Probe budget.** 32 measured as the knee: 25–30/30 recall for up to +1s.
    100 reached 30/30 everywhere but was not timed in the full query. Is
    25/30 acceptable, or should Part 1 measure 64?
+   **Answer:** probes = 32; Part 1 also times 64 and records both.
 2. **Timeout rate.** It is unmeasurable today, because the log keeps about 40
    minutes and `pg_stat_statements` omits cancels. Should Part 1 also count
    candidate-path failures by SQLSTATE in the existing metrics, with no new
@@ -419,3 +420,4 @@ Pass criteria:
 4. **Exact path.** `read_knowledge` scoring still aggregates every in-scope row
    (5–9s). That is a separate design (product/API semantics of totals and
    offsets) and is out of scope here. Confirm it should stay separate.
+   **Answer:** exact path stays a separate design.
