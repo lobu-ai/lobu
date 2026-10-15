@@ -43,6 +43,8 @@ export const input = {
           notes: { type: "string" },
           // null clears an update's due date; a create ignores it.
           due: { type: ["string", "null"], format: "date-time" },
+          // A create proposed again names the failed attempt it reassessed.
+          retry_of: { type: "integer", minimum: 1 },
           // The live state this update or completion was decided from.
           expected: {
             type: "object",
@@ -76,7 +78,14 @@ export const input = {
 type Key = { source_scope: string; source_origin_id: string; task_key: string };
 type Expected = { title: string; due: string | null; completed: boolean };
 type Change =
-  | { action: "create"; key: Key; title: string; notes?: string; due?: string }
+  | {
+      action: "create";
+      key: Key;
+      title: string;
+      notes?: string;
+      due?: string;
+      retry_of?: number;
+    }
   | { action: "complete"; origin_id: string; expected: Expected }
   | {
       action: "update";
@@ -144,18 +153,14 @@ function markerOf(input: unknown): string | undefined {
   return line?.startsWith("lobu:") ? line : undefined;
 }
 
-type CreateHistory = Map<
-  string,
-  { live: boolean; retryAfter: number; failedThisRun: boolean }
->;
+type CreateHistory = Map<string, { live: boolean; retryAfter: number }>;
 
 // Walk retained runs once, without status filters that a transition could
 // escape between pages. Retention is based on completion, not creation time;
 // an old run can still be awaiting approval or have only just completed.
 async function createHistory(
   client: ReactionClient,
-  connectionId: number,
-  runId: number
+  connectionId: number
 ): Promise<CreateHistory> {
   const history: CreateHistory = new Map();
   let cursor: { before_created_at: string; before_id: number } | undefined;
@@ -172,11 +177,9 @@ async function createHistory(
       const entry = history.get(line) ?? {
         live: false,
         retryAfter: 0,
-        failedThisRun: false,
       };
       if (FAILED.includes(String(run.status))) {
         entry.retryAfter = Math.max(entry.retryAfter, Number(run.id));
-        entry.failedThisRun ||= Number(run.parent_run_id) === runId;
       } else {
         entry.live = true;
       }
@@ -277,7 +280,7 @@ export default async function applyReminderChanges(
   const history: CreateHistory = changes.some(
     (change) => change.action === "create"
   )
-    ? await createHistory(client, connectionId, source.run_id)
+    ? await createHistory(client, connectionId)
     : new Map();
   const failures: string[] = [];
   const queued = new Set<string>();
@@ -303,10 +306,18 @@ export default async function applyReminderChanges(
         );
         continue;
       }
-      if (prior?.failedThisRun) {
-        throw new Error(
-          "Reminder create failed; the agent must reassess it against the live read"
+      // A failed or timed-out create may still have saved the reminder, so
+      // only a proposal that names that attempt, after checking it against
+      // the live read, may try again. That includes this reaction's own.
+      if (
+        prior?.retryAfter &&
+        change.action === "create" &&
+        change.retry_of !== prior.retryAfter
+      ) {
+        client.log(
+          `Skipped a create whose failed attempt ${prior.retryAfter} was not reassessed: ${write.identity}`
         );
+        continue;
       }
       const result = await client.operations.execute({
         connection_id: connectionId,

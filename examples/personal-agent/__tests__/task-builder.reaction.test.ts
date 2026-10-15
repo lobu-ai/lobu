@@ -240,12 +240,21 @@ describe("Task Collaborator reminder changes", () => {
     }
   });
 
-  test("a create proposed again after a failed one is queued", async () => {
+  test("a create after a failed attempt is sent only when it names that attempt", async () => {
     for (const status of ["failed", "timeout", "cancelled"]) {
       const h = harness({
         recentCreates: [{ status, input: { notes: marker(key) } }],
       });
       await applyReminderChanges(atRun(950, [create]), h.client);
+      await applyReminderChanges(
+        atRun(951, [{ ...create, retry_of: 99 }]),
+        h.client
+      );
+      expect(h.executed).toHaveLength(0);
+      await applyReminderChanges(
+        atRun(952, [{ ...create, retry_of: h.runs[0].id }]),
+        h.client
+      );
       expect(h.executed).toHaveLength(1);
     }
   });
@@ -280,22 +289,23 @@ describe("Task Collaborator reminder changes", () => {
     await expect(
       applyReminderChanges(context([create]), h.client)
     ).rejects.toThrow();
-    await expect(
-      applyReminderChanges(context([create]), h.client)
-    ).rejects.toThrow();
+    await applyReminderChanges(context([create]), h.client);
     expect(h.runs).toHaveLength(1);
   });
 
-  test("only a new window can retry a create that fails after dispatch", async () => {
+  test("a window that decided before an earlier create timed out cannot create it again", async () => {
     const h = harness();
+    // Windows A and B both read Reminders before A's create landed.
     await applyReminderChanges(atRun(901, [create]), h.client);
-    h.runs[0].status = "failed";
-    await expect(
-      applyReminderChanges(atRun(901, [create]), h.client)
-    ).rejects.toThrow("reassess");
+    // A's create times out; it may still have saved the reminder.
+    h.runs[0].status = "timeout";
+    await applyReminderChanges(atRun(902, [create]), h.client);
+    expect(h.runs).toHaveLength(1);
+    // A later window that checked the timed-out attempt may try again, once.
+    const retry = { ...create, retry_of: h.runs[0].id };
     await Promise.allSettled([
-      applyReminderChanges(atRun(902, [create]), h.client),
-      applyReminderChanges(atRun(903, [create]), h.client),
+      applyReminderChanges(atRun(903, [retry]), h.client),
+      applyReminderChanges(atRun(904, [retry]), h.client),
     ]);
     expect(h.runs).toHaveLength(2);
     expect(h.runs[1].key).not.toBe(h.runs[0].key);
@@ -497,7 +507,7 @@ describe("Task Collaborator reminder changes", () => {
 
   test("the host's validator keeps every field of every change", () => {
     const changes = [
-      create,
+      { ...create, retry_of: 12 },
       { action: "complete", origin_id: "reminder:a", expected: seen },
       {
         action: "update",
@@ -516,6 +526,7 @@ describe("Task Collaborator reminder changes", () => {
     for (const change of [
       { action: "delete", origin_id: "reminder:a" },
       { action: "create", key },
+      { action: "create", key, title: "x", retry_of: 0 },
       { action: "complete" },
       { action: "complete", origin_id: "reminder:a" },
       { action: "update", origin_id: "reminder:a", title: "x" },
