@@ -15,7 +15,7 @@ import { dispatchChromeActionToExtension } from "../../worker-api/dispatch-chrom
 import { requestSourceAttribution } from "../../worker-api/device-source-attribution";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import { createTestConnection, createTestConnectorDefinition, createTestSession, seedOwnerContext } from "../setup/test-fixtures";
-import { post } from "../setup/test-helpers";
+import { post, testRequest } from "../setup/test-helpers";
 
 declare const chrome: {
 	storage: { local: { set(settings: Record<string, string>): Promise<void> } };
@@ -47,23 +47,27 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 	const temporary = await mkdtemp(join(tmpdir(), "lobu-chrome-gateway-test-"));
 	const browsers: BrowserContext[] = [];
 	const transportErrors: string[] = [];
+	// The extension holds no site access to the gateway, so every poll is a
+	// cross-origin request the server's CORS policy must admit on its own.
+	const forwardedHeaders = [
+		"authorization",
+		"content-type",
+		"origin",
+		"access-control-request-method",
+		"access-control-request-headers",
+	];
 	const server = createServer(async (req, res) => {
 		try {
-			if (req.url?.startsWith("/fixture/")) {
-				res.setHeader("Content-Type", "text/html");
-				res.end(
-					'<!doctype html><title>Gateway browser fixture</title><button id="increment" onclick="this.textContent=++window.clicks">Increment</button><script>window.clicks=0</script>',
-				);
-				return;
-			}
 			let raw = "";
 			for await (const chunk of req) raw += chunk;
-			const response = await post(req.url!, {
-				body: raw ? JSON.parse(raw) : undefined,
-				headers:
-					typeof req.headers.authorization === "string"
-						? { Authorization: req.headers.authorization }
-						: {},
+			const response = await testRequest(req.method!, req.url!, {
+				rawBody: raw || undefined,
+				headers: Object.fromEntries(
+					forwardedHeaders.flatMap((name) => {
+						const value = req.headers[name];
+						return typeof value === "string" ? [[name, value]] : [];
+					}),
+				),
 			});
 			res.writeHead(response.status, Object.fromEntries(response.headers));
 			res.end(await response.text());
@@ -78,6 +82,7 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 	if (!address || typeof address === "string")
 		throw new Error("No fixture port");
 	const origin = `http://127.0.0.1:${address.port}`;
+	const fixtureUrl = "https://fixture.example/page";
 	async function until<T>(
 		read: () => Promise<T | undefined>,
 		description: string,
@@ -104,7 +109,10 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 		const manifest = JSON.parse(
 			await readFile(join(extension, "manifest.json"), "utf8"),
 		);
-		manifest.host_permissions = [`${origin}/*`, "https://account.example/*"];
+		manifest.host_permissions = [
+			"https://fixture.example/*",
+			"https://account.example/*",
+		];
 		await writeFile(join(extension, "manifest.json"), JSON.stringify(manifest));
 		await writeFile(
 			join(extension, "probe.html"),
@@ -129,6 +137,12 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 				},
 			);
 			browsers.push(browser);
+			await browser.route("https://fixture.example/**", (route) =>
+				route.fulfill({
+					contentType: "text/html",
+					body: '<!doctype html><title>Gateway browser fixture</title><button id="increment" onclick="this.textContent=++window.clicks">Increment</button><script>window.clicks=0</script>',
+				}),
+			);
 			const worker =
 				browser.serviceWorkers()[0] ??
 				(await browser.waitForEvent("serviceworker"));
@@ -215,7 +229,7 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 			}, `${operationKey} durable completion`);
 		}
 		const unpinned = await action("navigate", {
-			url: `${origin}/fixture/page`,
+			url: fixtureUrl,
 		});
 		expect(unpinned.status).toBe("failed");
 		expect(unpinned.error_message).toMatch(/not paired to a specific device/);
@@ -229,7 +243,7 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 		}, "a connection pinned to the selected browser");
 		connectionId = Number(paired.id);
 		const opened = await action("navigate", {
-			url: `${origin}/fixture/page`,
+			url: fixtureUrl,
 			wait_for_load: true,
 		});
 		expect(opened.status, opened.error_message ?? "navigate failed").toBe(
@@ -267,18 +281,22 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 			await_promise: true,
 			source_attribution: { agent_name: "Impersonated owner" },
 		});
+		const statusLine = panel.locator("#status-label");
 		await until(async () => {
-			const text = await panel.locator("#control-activity").textContent();
+			const text = await statusLine.getAttribute("title");
 			return text?.includes("Managed agent: Research agent") ? text : undefined;
 		}, "authenticated agent visible in the actual extension sidepanel");
-		const activeText = await panel.locator("#control-activity").textContent();
+		expect(await statusLine.textContent()).toContain("Browser in use · evaluate");
+		const activeText = await statusLine.getAttribute("title");
 		expect(activeText).toContain("via Registered MCP client");
 		expect(activeText).toContain("Executing on Selected browser");
 		expect(activeText).not.toContain("Impersonated owner");
 		expect((await inFlight).status).toBe("completed");
 		await until(
 			async () =>
-				(await panel.locator("#control-activity").isHidden()) ? true : undefined,
+				(await statusLine.getAttribute("data-active")) === "false"
+					? true
+					: undefined,
 			"completion clears the control indicator",
 		);
 		sourceAttribution = requestSourceAttribution({
@@ -292,7 +310,7 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 			await_promise: true,
 		});
 		await until(async () => {
-			const text = await panel.locator("#control-activity").textContent();
+			const text = await statusLine.getAttribute("title");
 			return text?.includes("MCP client: Registered MCP client") ? text : undefined;
 		}, "MCP-only requester has its own label");
 		expect((await clientFlight).status).toBe("completed");
@@ -301,7 +319,7 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 		// and a caller cannot launder it through an activation id of its own.
 		const userTab = await selected.control.evaluate(
 			(url) => chrome.tabs.create({ url, active: false }).then((tab) => tab.id),
-			`${origin}/fixture/page`,
+			fixtureUrl,
 		);
 		const denied = await action("evaluate", {
 			tab_id: userTab,
@@ -419,7 +437,7 @@ it("persists pinned browser actions, shares agent tabs, and protects user tabs",
 			await other.control.evaluate(() =>
 				chrome.tabs
 					.query({})
-					.then((tabs) => tabs.some((tab) => tab.url?.includes("/fixture/"))),
+					.then((tabs) => tabs.some((tab) => tab.url?.startsWith("https://fixture.example/"))),
 			),
 		).toBe(false);
 		const closed = await action("close_tab", { tab_id: tabId });

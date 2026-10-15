@@ -56,11 +56,13 @@ interface TestResponse {
 /**
  * Make a request to the Hono app directly (no HTTP server needed)
  */
-async function testRequest(
+export async function testRequest(
   method: string,
   path: string,
   options?: {
     body?: any;
+    /** Sent verbatim instead of JSON-encoding `body`; pass its content-type in `headers`. */
+    rawBody?: string;
     headers?: Record<string, string>;
     token?: string;
     cookie?: string;
@@ -70,7 +72,7 @@ async function testRequest(
   await ensureWorkspaceProvider();
   const url = `http://localhost${path}`;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(options?.rawBody === undefined && { 'Content-Type': 'application/json' }),
     ...options?.headers,
   };
 
@@ -85,7 +87,7 @@ async function testRequest(
   const request = new Request(url, {
     method,
     headers,
-    body: options?.body ? JSON.stringify(options.body) : undefined,
+    body: options?.rawBody ?? (options?.body ? JSON.stringify(options.body) : undefined),
   });
 
   // Merge test env with any overrides
