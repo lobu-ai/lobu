@@ -43,6 +43,10 @@ import {
 	resolveLoginProviderCredentials,
 	resolveRequestOrganizationId,
 } from "./config";
+import {
+	logUnhandledAuthEndpointError,
+	withAuthRequestScope,
+} from "./endpoint-error-log";
 import { memberRoleAuthHook } from "./member-roles";
 import { bindOAuthOrganization } from "./oauth-organization-context";
 import {
@@ -1067,7 +1071,12 @@ export async function createAuth(
 		},
 
 		trustedOrigins: Array.from(trustedOriginSet),
+
+		// Better Auth answers an endpoint's unexpected error with a bare 500 and
+		// only console-prints it; route it to the structured log with its request.
+		onAPIError: { onError: logUnhandledAuthEndpointError },
 	});
+	auth.handler = withAuthRequestScope(auth.handler);
 	// betterAuth's inferred return narrows generics per call site (socialProviders
 	// shape, required-vs-optional database/secret); the cache stores the general
 	// Auth<BetterAuthOptions> shape, so widen via unknown.
