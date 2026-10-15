@@ -116,11 +116,16 @@ export interface AgentRecord {
 export type ModelSource = "agent" | "org_default" | "none";
 
 export interface AgentModelInfo {
-  /** The effective model ref that would be used, or null when none resolves. */
+  /** The configured model ref before provider fallback, or null when none resolves. */
   effective_model: string | null;
   /** Which layer supplied `effective_model`. */
   source: ModelSource;
-  /** True when no model resolves — the agent cannot run until one is set. */
+  /**
+   * True when no model resolves or the cloud provider preflight rejects every
+   * listed candidate using the agent owner's credentials. Provider checks run
+   * when the gateway catalog is available; false does not guarantee a
+   * successful run or describe device-local execution.
+   */
   not_runnable: boolean;
 }
 
@@ -133,8 +138,9 @@ export type ManageAgentsResult =
       created: boolean;
       /**
        * The agent's model after create. `not_runnable: true` is the actionable
-       * signal that no model resolved (no `default_model` given and no org
-       * default) — set one with a `default_model` on create/update.
+       * signal that no runnable model resolved (no `default_model` given and
+       * no org default, or the model's provider is not connected) — set a
+       * routable `default_model` on create/update or connect its provider.
        */
       model: AgentModelInfo;
     }
