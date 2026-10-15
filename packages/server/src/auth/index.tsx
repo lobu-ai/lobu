@@ -47,7 +47,7 @@ import {
 	logUnhandledAuthEndpointError,
 	withAuthRequestScope,
 } from "./endpoint-error-log";
-import { memberRoleAuthHook } from "./member-roles";
+import { memberRolePlugin } from "./member-roles";
 import { bindOAuthOrganization } from "./oauth-organization-context";
 import { workspaceDeletionPlugin } from "./organization-delete";
 import { findExistingPersonalOrg } from "./personal-org-provisioning";
@@ -325,6 +325,11 @@ export async function createAuth(
 			// purge to a background task (`organization-delete.ts`). Better Auth's
 			// own synchronous cascade is disabled so it can never run.
 			workspaceDeletionPlugin((headers) =>
+				sessionApi ? resolveSession(sessionApi, headers) : Promise.resolve(null),
+			),
+			// After the deletion guard, so a deleting workspace refuses role
+			// changes first.
+			memberRolePlugin((headers) =>
 				sessionApi ? resolveSession(sessionApi, headers) : Promise.resolve(null),
 			),
 			// Organization plugin with teams support
@@ -836,8 +841,6 @@ export async function createAuth(
 				origin: null,
 			}),
 		],
-
-		hooks: { before: memberRoleAuthHook },
 
 		databaseHooks: {
 			verification: {
