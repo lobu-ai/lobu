@@ -107,6 +107,7 @@ describe('worker-token MCP auth without the direct-auth header', () => {
       organizationId: org.id,
       userId: 'device-chat-user',
       channelId: 'api_device-chat-user',
+      platform: 'api',
     });
     const response = await post(`/mcp/${org.slug}`, {
       body: INITIALIZE_BODY,

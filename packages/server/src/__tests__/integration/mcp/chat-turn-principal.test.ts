@@ -26,7 +26,7 @@ import { generateWorkerToken, mintGatewayMcpToken, verifyWorkerToken, type Messa
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mintTurnToken } from '../../../gateway/orchestration/agent-turn-producer';
 import { chatSenderIdOf } from '../../../gateway/orchestration/chat-turn-actor';
-import { buildDeviceChatRunWorkerAccess } from '../../../gateway/services/run-worker-access';
+import { buildDeviceChatRunWorkerAccess, DEVICE_CHAT_RUN_SOURCE } from '../../../gateway/services/run-worker-access';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -304,6 +304,16 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
     });
     const refused = await openSession(org.slug, mintGatewayMcpToken(legacy) as string);
     expect(refused.status).toBe(403);
+  });
+
+  it('fails closed on a device chat token with no platform instead of borrowing the owner', async () => {
+    const platformless = generateWorkerToken(AGENT_ID, 'conv-device-platformless', 'api-device', {
+      channelId: 'C-device', agentId: AGENT_ID, organizationId: org.id,
+      source: DEVICE_CHAT_RUN_SOURCE, sessionKey: STRANGER_PLATFORM_ID,
+    });
+    const refused = await openSession(org.slug, platformless);
+    expect(refused.status).toBe(403);
+    expect(refused.body).toMatchObject({ error_description: 'Chat sender is not a linked member of this organization' });
   });
 
   it("is admitted or refused on the sender's membership, never the owner's role", async () => {
