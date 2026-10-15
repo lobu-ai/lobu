@@ -450,6 +450,11 @@ function completeLocalPackageNames(directory) {
   writeJson(path, lock);
 }
 
+// npm 10 can crash resolving peer sets from a bare manifest (npm/cli#9787).
+// Pin release-time resolution independently of the runner's Node bundle;
+// consumer installs in the packed smoke still exercise the npm on PATH.
+const FREEZE_NPM = "npm@11.19.0";
+
 /** Release artifacts carry both managers' frozen dependency trees. */
 export function lockRuntimeComponent(directory) {
   // Resolve in an isolated project: package managers must never discover or
@@ -459,10 +464,12 @@ export function lockRuntimeComponent(directory) {
     copy(join(directory, "package.json"), join(temporary, "package.json"));
     if (existsSync(join(directory, "vendor")))
       copy(join(directory, "vendor"), join(temporary, "vendor"));
-    for (const [command, args] of [
+    for (const [manager, command, args] of [
       [
         "npm",
+        "bunx",
         [
+          FREEZE_NPM,
           "install",
           "--package-lock-only",
           "--ignore-scripts",
@@ -470,7 +477,7 @@ export function lockRuntimeComponent(directory) {
           "--no-fund",
         ],
       ],
-      ["bun", ["install", "--lockfile-only", "--ignore-scripts"]],
+      ["bun", "bun", ["install", "--lockfile-only", "--ignore-scripts"]],
     ]) {
       const result = spawnSync(command, args, {
         cwd: temporary,
@@ -481,7 +488,7 @@ export function lockRuntimeComponent(directory) {
         throw new Error(
           `Failed to freeze runtime dependencies in ${directory}`
         );
-      if (command === "npm") completeLocalPackageNames(temporary);
+      if (manager === "npm") completeLocalPackageNames(temporary);
     }
     copy(
       join(temporary, "package-lock.json"),

@@ -299,8 +299,7 @@ const tags = JSON.parse(fs.readFileSync('${root}/registry.json', 'utf8'));
 const published = JSON.parse(fs.readFileSync('${root}/published.json', 'utf8'));
 const fault = process.env.CANARY_TEST_FAULT;
 if (fault === 'registry') process.exit(1);
-if (args[0] === 'install') fs.writeFileSync('package-lock.json', '{}');
-else if (args[0] === 'view' && args[2] === 'dist-tags') console.log(JSON.stringify(fault === 'older' ? { canary: '19.2.0-canary.124.g${"b".repeat(40)}' } : tags[args[1]]));
+if (args[0] === 'view' && args[2] === 'dist-tags') console.log(JSON.stringify(fault === 'older' ? { canary: '19.2.0-canary.124.g${"b".repeat(40)}' } : tags[args[1]]));
 else if (args[0] === 'view' && args[2] === 'version') {
   const at = args[1].lastIndexOf('@');
   const name = args[1].slice(0, at), requested = args[1].slice(at + 1);
@@ -325,7 +324,16 @@ else if (args[0] === 'publish') {
       `${root}/bin/bun`,
       "#!/usr/bin/env node\nrequire('node:fs').writeFileSync('bun.lock', '{}');\n"
     );
-    for (const bin of ["git", "npm", "bun"])
+    // Fail if freezing falls back to PATH npm, a floating version, or scripts.
+    writeFileSync(
+      `${root}/bin/bunx`,
+      `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.join(' ') === 'npm@11.19.0 install --package-lock-only --ignore-scripts --no-audit --no-fund') require('node:fs').writeFileSync('package-lock.json', '{}');
+else process.exit(1);
+`
+    );
+    for (const bin of ["git", "npm", "bun", "bunx"])
       chmodSync(`${root}/bin/${bin}`, 0o755);
     test(
       root,
