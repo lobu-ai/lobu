@@ -5,15 +5,16 @@ import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
 // reads it live and this reaction writes it. Lobu keeps no copy of reminders.
 //
 // The reaction orders nothing. An update or completion names the reminder
-// state it was decided from, and the Mac refuses it if the reminder has changed
-// since, so a stale or repeated decision never overwrites a newer edit. The
-// agent re-reads Reminders and decides again next window.
+// state it was decided from, and the Mac (apple.reminders@0.4.0) refuses it if
+// the reminder has changed since, so a stale or repeated decision never
+// overwrites a newer edit. The agent re-reads Reminders and decides again.
 //
 // A create carries its source identity as the last line of its notes
 // ("lobu:<scope>|<origin>|<key>"), which is how later reads recognise it. A
 // window can read Reminders before an earlier create lands (it may wait for
 // approval or the Mac), so a create is skipped while another with the same
-// marker is queued or done. A failed create is the agent's to propose again.
+// marker is queued or done. Concurrent creates share an idempotency key, so
+// the server admits only one. A failed create is the agent's to propose again.
 
 // One flat item shape: the host validates with Ajv `removeAdditional`, which
 // strips properties while trying each `oneOf` branch and so would empty every
@@ -86,9 +87,7 @@ type Change =
     };
 
 const LIST = "Lobu";
-// Terminal runs are kept this long, so it bounds the earlier creates to check.
-const RUN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-const UNFAILED = ["pending", "claimed", "running", "completed"];
+const FAILED = ["failed", "timeout", "cancelled"];
 
 export function marker(key: Key): string {
   return `lobu:${key.source_scope}|${key.source_origin_id}|${key.task_key}`;
@@ -145,37 +144,52 @@ function markerOf(input: unknown): string | undefined {
   return line?.startsWith("lobu:") ? line : undefined;
 }
 
-// Markers of creates on this connection that are queued, running or done.
-async function liveCreates(
+type CreateHistory = Map<
+  string,
+  { live: boolean; retryAfter: number; failedThisRun: boolean }
+>;
+
+// Walk retained runs once, without status filters that a transition could
+// escape between pages. Retention is based on completion, not creation time;
+// an old run can still be awaiting approval or have only just completed.
+async function createHistory(
   client: ReactionClient,
-  connectionId: number
-): Promise<Set<string>> {
-  const markers = new Set<string>();
-  const created_after = new Date(Date.now() - RUN_RETENTION_MS).toISOString();
-  for (const status of UNFAILED) {
-    let cursor: { before_created_at: string; before_id: number } | undefined;
-    for (;;) {
-      const page = await client.operations.listRuns({
-        connection_id: connectionId,
-        operation_key: "create_reminder",
-        status,
-        created_after,
-        ...cursor,
-        limit: 200,
-      });
-      for (const run of page.runs) {
-        const line = markerOf(run.input);
-        if (line) markers.add(line);
-      }
-      const last = page.runs.at(-1);
-      if (!page.has_more || !last) break;
-      cursor = {
-        before_created_at: String(last.created_at),
-        before_id: Number(last.id),
+  connectionId: number,
+  runId: number
+): Promise<CreateHistory> {
+  const history: CreateHistory = new Map();
+  let cursor: { before_created_at: string; before_id: number } | undefined;
+  for (;;) {
+    const page = await client.operations.listRuns({
+      connection_id: connectionId,
+      operation_key: "create_reminder",
+      ...cursor,
+      limit: 200,
+    });
+    for (const run of page.runs) {
+      const line = markerOf(run.input);
+      if (!line) continue;
+      const entry = history.get(line) ?? {
+        live: false,
+        retryAfter: 0,
+        failedThisRun: false,
       };
+      if (FAILED.includes(String(run.status))) {
+        entry.retryAfter = Math.max(entry.retryAfter, Number(run.id));
+        entry.failedThisRun ||= Number(run.parent_run_id) === runId;
+      } else {
+        entry.live = true;
+      }
+      history.set(line, entry);
     }
+    const last = page.runs.at(-1);
+    if (!page.has_more || !last) break;
+    cursor = {
+      before_created_at: String(last.created_at),
+      before_id: Number(last.id),
+    };
   }
-  return markers;
+  return history;
 }
 
 function writeOf(change: Change): Write {
@@ -260,26 +274,39 @@ export default async function applyReminderChanges(
     run_id: Number(ctx.window.run_id),
   };
 
-  const created = changes.some((change) => change.action === "create")
-    ? await liveCreates(client, connectionId)
-    : new Set<string>();
+  const history: CreateHistory = changes.some(
+    (change) => change.action === "create"
+  )
+    ? await createHistory(client, connectionId, source.run_id)
+    : new Map();
   const failures: string[] = [];
   const queued = new Set<string>();
   for (const [index, change] of changes.entries()) {
     try {
       const write = writeOf(change);
-      // A key reused by a retry of this reaction replays its earlier run.
-      const key = `task-reminders:${source.run_id}:${digest(write.identity)}`;
+      const prior =
+        write.operation === "create_reminder"
+          ? history.get(write.identity)
+          : undefined;
+      // Creates share admission across windows. A terminal run id lets the
+      // agent propose a new attempt without counting mutable/pruned history.
+      // Other writes replay only within this reaction's run.
+      const key =
+        write.operation === "create_reminder"
+          ? `task-reminders:create:${connectionId}:${digest(write.identity)}:${prior?.retryAfter ?? 0}`
+          : `task-reminders:${source.run_id}:${digest(write.identity)}`;
       if (queued.has(key)) continue;
       queued.add(key);
-      if (
-        write.operation === "create_reminder" &&
-        created.has(write.identity)
-      ) {
+      if (prior?.live) {
         client.log(
           `Skipped a reminder already being created: ${write.identity}`
         );
         continue;
+      }
+      if (prior?.failedThisRun) {
+        throw new Error(
+          "Reminder create failed; the agent must reassess it against the live read"
+        );
       }
       const result = await client.operations.execute({
         connection_id: connectionId,
@@ -289,6 +316,11 @@ export default async function applyReminderChanges(
         automation_source: source,
         background: true,
       });
+      if (FAILED.includes(String(result.status))) {
+        throw new Error(
+          `${write.operation} ${result.status} (run ${result.run_id})`
+        );
+      }
       client.log(`Queued ${write.operation}`, {
         run_id: result.run_id,
         status: result.status,

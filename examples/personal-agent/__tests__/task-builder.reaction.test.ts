@@ -250,6 +250,72 @@ describe("Task Collaborator reminder changes", () => {
     }
   });
 
+  test("concurrent windows admit only one create for the same source", async () => {
+    const h = harness();
+    await Promise.allSettled([
+      applyReminderChanges(atRun(901, [create]), h.client),
+      applyReminderChanges(atRun(902, [create]), h.client),
+    ]);
+    expect(h.runs).toHaveLength(1);
+  });
+
+  test("retained creates block duplicates regardless of their creation date", async () => {
+    for (const status of ["pending", "claimed", "running", "completed"]) {
+      const h = harness({
+        recentCreates: [
+          {
+            status,
+            created_at: new Date(Date.now() - 40 * 86400000).toISOString(),
+            input: { notes: marker(key) },
+          },
+        ],
+      });
+      await applyReminderChanges(context([create]), h.client);
+      expect(h.executed).toHaveLength(0);
+    }
+  });
+
+  test("a retried reaction leaves its failed create for the agent to reassess", async () => {
+    const h = harness({ execute: async () => ({ status: "failed" }) });
+    await expect(
+      applyReminderChanges(context([create]), h.client)
+    ).rejects.toThrow();
+    await expect(
+      applyReminderChanges(context([create]), h.client)
+    ).rejects.toThrow();
+    expect(h.runs).toHaveLength(1);
+  });
+
+  test("only a new window can retry a create that fails after dispatch", async () => {
+    const h = harness();
+    await applyReminderChanges(atRun(901, [create]), h.client);
+    h.runs[0].status = "failed";
+    await expect(
+      applyReminderChanges(atRun(901, [create]), h.client)
+    ).rejects.toThrow("reassess");
+    await Promise.allSettled([
+      applyReminderChanges(atRun(902, [create]), h.client),
+      applyReminderChanges(atRun(903, [create]), h.client),
+    ]);
+    expect(h.runs).toHaveLength(2);
+    expect(h.runs[1].key).not.toBe(h.runs[0].key);
+  });
+
+  test("a status transition while paging does not hide an unsettled create", async () => {
+    const h = harness({
+      pageSize: 1,
+      recentCreates: [
+        { status: "completed", input: { notes: "lobu:other|x|y" } },
+        { status: "claimed", input: { notes: marker(key) } },
+      ],
+      beforePage: (page) => {
+        if (page === 2) h.runs[1].status = "pending";
+      },
+    });
+    await applyReminderChanges(context([create]), h.client);
+    expect(h.executed).toHaveLength(0);
+  });
+
   test("reads every page of earlier creates", async () => {
     const other = { status: "completed", input: { notes: "lobu:other|x|y" } };
     const h = harness({
@@ -289,7 +355,7 @@ describe("Task Collaborator reminder changes", () => {
     ).rejects.toThrow("synthetic dispatch refusal");
     fail = false;
     await applyReminderChanges(context(changes), h.client);
-    // The create and completion replay their runs; only the update is new.
+    // The create is skipped and completion replays; only the update is new.
     expect(h.runs.map((run) => run.operation_key)).toEqual([
       "create_reminder",
       "complete_reminder",
@@ -324,7 +390,7 @@ describe("Task Collaborator reminder changes", () => {
     expect(h.listed).toHaveLength(0);
   });
 
-  test("a later window sends its own write: the Mac refuses whichever is stale", async () => {
+  test("a later window uses its own idempotency key for an update", async () => {
     const h = harness();
     const update = {
       action: "update",
@@ -377,6 +443,22 @@ describe("Task Collaborator reminder changes", () => {
       "create_reminder",
       "complete_reminder",
     ]);
+  });
+
+  test("reports terminal failure receipts after attempting the rest of the batch", async () => {
+    for (const status of ["failed", "timeout", "cancelled"]) {
+      const h = harness({ execute: async () => ({ status }) });
+      await expect(
+        applyReminderChanges(
+          context([
+            create,
+            { action: "complete", origin_id: "reminder:a", expected: seen },
+          ]),
+          h.client
+        )
+      ).rejects.toThrow(status);
+      expect(h.executed).toHaveLength(2);
+    }
   });
 
   test("refuses a blank title or a key that would break the marker line", async () => {
