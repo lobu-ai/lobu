@@ -292,6 +292,35 @@ describe('WorkerPollLoop', () => {
     expect(executions).toBe(1);
   });
 
+  test('reports the active run count as runs start and finish', async () => {
+    let polled = false;
+    let finish!: () => void;
+    const counts: number[] = [];
+    const loop = new WorkerPollLoop({
+      client: {
+        healthCheck: async () => true,
+        poll: async () => {
+          if (polled) return { next_poll_seconds: 1 } as never;
+          polled = true;
+          return { run_id: 1, run_type: 'action' } as never;
+        },
+      } as never,
+      pollIntervalMs: 1,
+      maxConcurrentJobs: 2,
+      execute: () => new Promise<void>((resolve) => { finish = resolve; }),
+      onActiveJobsChange: (activeJobs) => counts.push(activeJobs),
+    });
+
+    const started = loop.start();
+    while (counts.length === 0) await Bun.sleep(1);
+    expect(counts).toEqual([1]);
+    finish();
+    while (counts.length < 2) await Bun.sleep(1);
+    loop.stop();
+    await started;
+    expect(counts).toEqual([1, 0]);
+  });
+
   test('releases the active-job slot when execution throws synchronously', async () => {
     let polled = false;
     const client = {

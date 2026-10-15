@@ -401,6 +401,13 @@ export function createMacDeviceDaemon(
     pollIntervalMs: validated.pollIntervalMs,
     maxIdleDelayMs: SOURCE_READ_IDLE_DELAY_CEILING_MS,
     maxConcurrentJobs: validated.maxConcurrentJobs,
+    ...(nativeBridge
+      ? {
+          onActiveJobsChange: (activeJobs: number) => {
+            nativeBridge.reportActivity(activeJobs).catch(() => {});
+          },
+        }
+      : {}),
     execute: async (job) => {
       if (job.run_type === 'automation') {
         return executeAutomationRun(client, job, automationConfig);
