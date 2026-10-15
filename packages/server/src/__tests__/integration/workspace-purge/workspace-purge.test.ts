@@ -613,14 +613,20 @@ describe("workspace purge", () => {
 		`;
 		expect(inviteeMembership).toHaveLength(0);
 
-		// An unrelated member id does not stand in for the active organization:
-		// the update and the email removal both act on it.
-		const smuggledUpdate = await call(
-			"/organization/update",
-			{ memberId: plainMemberId, data: { metadata: { theme: "dark" } } },
-			adminToken,
-		);
-		expect(smuggledUpdate.status).toBe(404);
+		// A selector the endpoint ignores does not hide the active organization
+		// it acts on: the update and the email removal both act on it.
+		for (const smuggled of [
+			{ path: "/organization/update", body: { memberId: plainMemberId } },
+			{ path: "/organization/update", body: { organizationSlug: live.slug } },
+			{ path: `/organization/update?organizationId=${live.id}`, body: {} },
+		]) {
+			const smuggledUpdate = await call(
+				smuggled.path,
+				{ ...smuggled.body, data: { metadata: { theme: "dark" } } },
+				adminToken,
+			);
+			expect(smuggledUpdate.status).toBe(404);
+		}
 		const removalByEmail = await call(
 			"/organization/remove-member",
 			{ memberIdOrEmail: "plain-scoped@workspace-purge.test" },

@@ -150,8 +150,8 @@ export function workspaceDeletionPlugin(
   // A deleting workspace is gone for every organization endpoint, so this runs
   // BEFORE the endpoint: a member, invitation, role or session change must not
   // be applied and then hidden. The target is every organization the request
-  // names (id, slug, invitation, member) plus, when it names no organization
-  // id or slug, the session's active organization, as Better Auth falls back.
+  // names (id, slug, invitation, member) plus the session's active
+  // organization, which Better Auth falls back to.
   const refuseDeletingTarget = createAuthMiddleware(async (ctx) => {
     const body = (ctx.body ?? {}) as Record<string, unknown>;
     const query = (ctx.query ?? {}) as Record<string, unknown>;
@@ -166,14 +166,13 @@ export function workspaceDeletionPlugin(
     );
     const memberIds = strings(body.memberId, body.memberIdOrEmail);
 
-    // Better Auth uses the active organization whenever the request names no
-    // organization id or slug; a member or invitation id does not replace it
-    // (an update would otherwise slip through by carrying an unrelated one).
-    if (
-      organizationIds.length + slugs.length === 0 &&
-      !NO_ACTIVE_ORGANIZATION_FALLBACK_PATHS.has(ctx.path ?? '') &&
-      ctx.headers
-    ) {
+    // Which selector an endpoint actually consumes varies, and one it ignores
+    // must not hide the active organization it falls back to (an update
+    // carrying an unrelated slug or member id would otherwise clear the
+    // marker). So the active organization is always checked too: a session
+    // left on a deleting workspace can only list, switch away and handle
+    // invitations until it does.
+    if (!NO_ACTIVE_ORGANIZATION_FALLBACK_PATHS.has(ctx.path ?? '') && ctx.headers) {
       const session = await resolveRequestSession(ctx.headers);
       const active = session?.session.activeOrganizationId;
       if (active) organizationIds.push(active);

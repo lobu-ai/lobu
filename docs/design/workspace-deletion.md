@@ -115,9 +115,10 @@ failure like the 2026-10-15 500 is no longer silent.
 - **Better Auth endpoints.** Its organization endpoints read through its own
   adapter, so the same plugin refuses them in a before hook, before they run,
   when the request targets a deleting workspace: by organization id or slug,
-  by invitation or member id, or (naming none) through the session's active
-  organization. Only list, check-slug, the per-user listings and set-active
-  skip that fallback; `/organization/list` is filtered in an after hook. The
+  by invitation or member id, or through the session's active organization,
+  which is always checked because an endpoint may ignore the selector it was
+  sent. A session left on a deleting workspace can therefore only list, switch
+  away and handle invitations until it does; `/organization/list` is filtered in an after hook. The
   member-role endpoint is a user hook that runs before any plugin hook, so
   `lockMemberRoleChanges` refuses a deleting workspace for every membership
   role write. Create and update reject client metadata carrying either
