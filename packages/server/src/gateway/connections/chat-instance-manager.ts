@@ -577,6 +577,13 @@ export class ChatInstanceManager {
     // Cascade cleanups first, then drop the row last so a cleanup failure
     // leaves the row in place for an operator-driven retry rather than
     // orphaning history/secrets with no anchoring connection record.
+    const stored = await this.connectionStore.getConnection(id);
+    if (stored?.organizationId) {
+      await getPlatformDescriptor(stored.platform)?.releaseDeletedConnection?.(
+        { id, organizationId: stored.organizationId },
+        this.runtimeDeps(),
+      );
+    }
     const historyDeleted = await conversationState.clearAllHistory(id);
     const secretsDeleted = await deleteSecretsByPrefix(
       this.services.getSecretStore(),
