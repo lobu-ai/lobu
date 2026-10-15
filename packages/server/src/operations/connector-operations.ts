@@ -747,6 +747,8 @@ export async function getOperationForConnection(
 		display_name: string | null;
 		config: Record<string, unknown> | null;
 		device_worker_id: string | null;
+		/** The member whose own device the pin names; null when unpinned or the device is gone. */
+		device_owner_user_id: string | null;
 		device_platform: string | null;
 		connector_runtime: Record<string, unknown> | null;
 		connector_manifest_backed: boolean;
@@ -767,6 +769,7 @@ export async function getOperationForConnection(
       c.display_name,
       c.config,
       c.device_worker_id,
+      dw.user_id AS device_owner_user_id,
       dw.platform AS device_platform,
       cd.name,
       cd.actions_schema,
@@ -809,6 +812,7 @@ export async function getOperationForConnection(
 		display_name: string | null;
 		config: Record<string, unknown> | null;
 		device_worker_id: string | null;
+		device_owner_user_id: string | null;
 		device_platform: string | null;
 		connector_runtime: Record<string, unknown> | null;
 		connector_manifest_backed: boolean;
@@ -843,6 +847,7 @@ export async function getOperationForConnection(
 			display_name: row.display_name,
 			config: row.config,
 			device_worker_id: row.device_worker_id,
+			device_owner_user_id: row.device_owner_user_id,
 			device_platform: row.device_platform,
 			connector_runtime: row.connector_runtime,
 			connector_manifest_backed: row.connector_manifest_backed,
