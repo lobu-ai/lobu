@@ -74,6 +74,8 @@ async function enqueueDeviceChat(args: {
 	deviceWorkerId: string;
 	agentKind: string;
 	omitLocalConfig?: boolean;
+	/** Enqueue an envelope with no `platform` at all. */
+	omitPlatform?: boolean;
 	/** A chat-platform sender instead of the direct API. */
 	chat?: { platform: string; teamId: string; platformMetadata: Record<string, unknown> };
 }): Promise<number> {
@@ -92,7 +94,7 @@ async function enqueueDeviceChat(args: {
 				agentId: args.agentId,
 				organizationId: args.organizationId,
 				botId: "lobu-api",
-				platform: args.chat?.platform ?? "api",
+				...(args.omitPlatform ? {} : { platform: args.chat?.platform ?? "api" }),
 				messageText: args.message,
 				executionTarget: {
 					kind: "device",
@@ -413,6 +415,35 @@ describe("device chat execution lane", () => {
 		const payload = job.payload as { chat: { ephemeral_context?: string }; context: { agent_session: { token: string } } };
 		expect(verifyWorkerToken(payload.context.agent_session.token)).toMatchObject({ actorUserId: member.id, chatAccess: "member" });
 		expect(payload.chat.ephemeral_context).toBe(chatTurnSenderContext("Synthetic Device Member"));
+	});
+
+	it("refuses a device chat run with no platform instead of running it as the agent owner", async () => {
+		const workspace = await TestWorkspace.create({ name: "Device Platformless Org" });
+		const organizationId = workspace.org.id;
+		const agent = await createTestAgent({
+			organizationId,
+			ownerUserId: workspace.users.owner.id,
+			agentId: "device-platformless-agent",
+			name: "Device Platformless Agent",
+		});
+		const device = await insertDevice({
+			userId: workspace.users.owner.id, organizationId, workerId: "platformless-device", kinds: ["pi"],
+		});
+		const runId = await enqueueDeviceChat({
+			organizationId,
+			agentId: agent.agentId,
+			userId: "U0PLATFORMLESS",
+			conversationId: "platformless-conversation",
+			messageId: "message-platformless",
+			message: "list my private connections",
+			deviceWorkerId: device.id,
+			agentKind: "pi",
+			omitPlatform: true,
+		});
+
+		const job = await poll(device.token, "platformless-device", ["pi"]);
+		expect(job.payload).toBeUndefined();
+		expect(job).toMatchObject({ skipped_run_id: runId, error: "device chat run has an incomplete execution envelope" });
 	});
 
 	it("turns an unclaimed or heartbeat-lost device turn into a visible terminal reply", async () => {

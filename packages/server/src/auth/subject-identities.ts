@@ -231,11 +231,12 @@ export async function adoptChatIdentityOntoMember(
   `;
 	if (adopted.length > 0) return "adopted";
 
-	// Already this member's: a provider sign-in upgrades a link-proven row to
-	// provider-proven (global); a link never downgrades a sign-in row.
+	// Already this member's: a provider sign-in upgrades any row to
+	// provider-proven (global); a link upgrades an unproven row (a connector's
+	// attribution) to link-proven, and never downgrades a sign-in row.
 	const mine = await sql<{ id: number }>`
     UPDATE entity_identities
-    SET source_connector = CASE WHEN ${proof} = 'provider' THEN 'auth:signup' ELSE source_connector END,
+    SET source_connector = CASE WHEN source_connector = 'auth:signup' THEN source_connector ELSE ${source} END,
         updated_at = current_timestamp
     WHERE organization_id = ${organizationId}
       AND namespace = ${namespace}
