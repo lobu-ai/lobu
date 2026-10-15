@@ -10,6 +10,25 @@ import {
  * handlers. Connectors shared with another platform are authored separately
  * (see `os-shell.ts`) so both endpoints serialize the identical contract.
  */
+// The reminder state a write was decided from, as read from the sync feed.
+// The Mac refuses the write when any listed field no longer matches, so a
+// newer edit is never overwritten.
+const expectedReminderState = {
+  type: "object",
+  description:
+    "The reminder state this write was decided from, as read from the sync feed. Any listed field that no longer matches refuses the write without changing anything.",
+  properties: {
+    title: { type: "string" },
+    due: {
+      type: ["string", "null"],
+      format: "date-time",
+      description: "Null expects no due date.",
+    },
+    completed: { type: "boolean" },
+  },
+  additionalProperties: false,
+};
+
 export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
   {
     key: "apple.screen_time",
@@ -428,7 +447,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
   },
   {
     key: "apple.reminders",
-    version: "0.3.0",
+    version: "0.4.0",
     name: "Reminders",
     description:
       "Sync your reminders (titles, notes, due dates, completion) from this Mac via Lobu for Mac. Reminders stay on the device.",
@@ -586,6 +605,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
               minimum: 0,
               maximum: 9,
             },
+            expected: expectedReminderState,
           },
           required: ["origin_id"],
           additionalProperties: false,
@@ -617,6 +637,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
               default: true,
               description: "False reopens a completed reminder.",
             },
+            expected: expectedReminderState,
           },
           required: ["origin_id"],
           additionalProperties: false,
