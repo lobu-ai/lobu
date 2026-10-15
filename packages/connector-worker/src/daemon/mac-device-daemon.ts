@@ -17,6 +17,7 @@ import {
 import {
   MutableWorkerAdvertisementProvider,
   WorkerClient,
+  WorkerHttpError,
   type WorkerCapabilities,
 } from './client.js';
 import { installWorkerPollLoopSignals, WorkerPollLoop } from './poll-loop.js';
@@ -56,6 +57,18 @@ export interface MacDeviceDaemonMetadata {
   protocol: typeof NATIVE_BRIDGE_PROTOCOL;
   platform: typeof MAC_DEVICE_PLATFORM;
   artifact: 'standalone-bun-macho-arm64';
+}
+
+/**
+ * EX_NOPERM: the server rejected the device credential (401/403). The app
+ * must resolve authorization instead of restarting with the same key.
+ */
+export const MAC_DAEMON_CREDENTIAL_REJECTED_EXIT = 77;
+
+export function macDeviceDaemonExitCode(error: unknown): number {
+  return error instanceof WorkerHttpError && (error.status === 401 || error.status === 403)
+    ? MAC_DAEMON_CREDENTIAL_REJECTED_EXIT
+    : 1;
 }
 
 export function macDeviceDaemonMetadata(version: string): MacDeviceDaemonMetadata {
@@ -408,6 +421,7 @@ export function createMacDeviceDaemon(
           },
         }
       : {}),
+    failClosedOnPollAuthError: true,
     execute: async (job) => {
       if (job.run_type === 'automation') {
         return executeAutomationRun(client, job, automationConfig);

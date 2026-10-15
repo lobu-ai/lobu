@@ -2,17 +2,25 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import packageJson from '../../package.json';
 import {
   bridgeImplementsRun,
   createMacDeviceDaemonShutdown,
   executeAdvertisedConnectorRun,
+  MAC_DAEMON_CREDENTIAL_REJECTED_EXIT,
+  macDeviceDaemonExitCode,
   macDeviceDaemonMetadata,
   selectMacDeviceDaemonAgentKind,
   validateMacDeviceDaemonOptions,
 } from '../daemon/mac-device-daemon';
-import { MutableWorkerAdvertisementProvider } from '../daemon/client';
+import { MutableWorkerAdvertisementProvider, WorkerHttpError } from '../daemon/client';
 import { executeAutomationRun } from '../daemon/automation';
-import { NATIVE_BRIDGE_PROTOCOL } from '../daemon/native-bridge/protocol';
+import {
+  encodeNativeBridgeFrame,
+  NATIVE_BRIDGE_PROTOCOL,
+  NATIVE_BRIDGE_PROTOCOL_VERSION,
+} from '../daemon/native-bridge/protocol';
 import {
   createWorkerPollLoopShutdownHandler,
   shouldHandleWorkerPollLoopStdinEof,
@@ -159,6 +167,68 @@ describe('Mac device daemon options', () => {
       'timed out',
     );
     expect(events).toEqual(['stop', 'shutdown', 'close']);
+  });
+});
+
+describe('Mac device daemon credential rejection', () => {
+  for (const status of [401, 403]) {
+    test(`supervised daemon exits on poll ${status} while parent stdin stays open`, async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'mac-daemon-rejection-'));
+      const preload = join(directory, 'fetch.ts');
+      await writeFile(preload, `
+        globalThis.fetch = async (url) => {
+          if (new URL(String(url)).pathname === '/api/workers/poll') {
+            process.stderr.write('rejected-poll\\n');
+            return new Response('{"error":"invalid_token"}', { status: ${status} });
+          }
+          return new Response('ok');
+        };
+      `);
+      const child = Bun.spawn([
+        process.execPath, '--preload', preload,
+        join(import.meta.dir, '../mac-device-daemon.ts'), '--supervised-stdio',
+      ], {
+        env: {
+          ...process.env,
+          API_URL: 'https://example.test',
+          WORKER_ID: 'macos:test-host',
+          WORKER_API_TOKEN: `owl_pat_${'a'.repeat(32)}`,
+        },
+        stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
+      });
+      const stderr = new Response(child.stderr).text();
+      const timeout = setTimeout(() => child.kill('SIGKILL'), 3000);
+      try {
+        child.stdin.write(encodeNativeBridgeFrame({
+          version: NATIVE_BRIDGE_PROTOCOL_VERSION,
+          kind: 'hello',
+          request_id: 'test-hello',
+          payload: {
+            protocol: NATIVE_BRIDGE_PROTOCOL,
+            protocol_version: NATIVE_BRIDGE_PROTOCOL_VERSION,
+            app_build: 'test-app',
+            daemon_build: packageJson.version,
+            worker_id: 'macos:test-host',
+            nonce: 'test-nonce',
+            capabilities: {},
+            connector_manifests: [],
+          },
+        }));
+        await child.stdin.flush();
+        expect(await child.exited).toBe(MAC_DAEMON_CREDENTIAL_REJECTED_EXIT);
+        expect((await stderr).match(/rejected-poll/g)).toHaveLength(1);
+      } finally {
+        clearTimeout(timeout);
+        child.kill('SIGKILL');
+        await child.exited;
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test('keeps the generic failure status for anything else', () => {
+    expect(macDeviceDaemonExitCode(new WorkerHttpError(503, '/api/workers/poll', 'down'))).toBe(1);
+    expect(macDeviceDaemonExitCode(new Error('boom'))).toBe(1);
   });
 });
 
