@@ -38,7 +38,7 @@ ALTER TABLE public.device_workers
 Rules:
 
 - A declaration must be **its own comment line starting at column 0**, before `-- migrate:down`. Prose mentioning it does not arm it.
-- `lobu:no-quiesce` asserts something about the **application**, not the DDL: that the code running *before* this deploy keeps working against the post-migration schema. The declaration checker does not inspect your SQL, because backward compatibility depends on sequencing relative to the running code. For example, a `DROP COLUMN` may be compatible once nothing reads or writes that column. The author must assess the running application's behavior.
+- `lobu:no-quiesce` asserts something about the **application**, not the DDL: that the code running *before* this deploy keeps working against the post-migration schema. The declaration checker does not inspect your SQL, because backward compatibility depends on sequencing relative to the running code. For example, a `DROP COLUMN` may be compatible once nothing reads or writes that column. Only you know whether the running code still depends on what changes.
 - **Every** pending migration in the deploy must declare exactly one `lobu:no-quiesce`, or the whole batch quiesces. A missing or conflicting declaration removes the fast path for all of them.
 - An unmarked migration quiesces only after validation succeeds. An unreadable migration, failed prerequisite, or crashed pending check aborts deployment before any scaling. A missing pending-check command also aborts.
 
