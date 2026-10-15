@@ -4,6 +4,22 @@ import {
   withComputerUseStatus,
 } from "./mac-computer-use.js";
 
+const expectedReminderState = {
+  type: "object",
+  description:
+    "The reminder state this write was decided from, as read from the sync feed. Any listed field that no longer matches refuses the write without changing anything.",
+  properties: {
+    title: { type: "string" },
+    due: {
+      type: ["string", "null"],
+      format: "date-time",
+      description: "Null expects no due date.",
+    },
+    completed: { type: "boolean" },
+  },
+  additionalProperties: false,
+};
+
 /**
  * Canonical TypeScript source for the Mac-only device connector metadata. The
  * Mac app implements every entry natively; this package contains no executable
@@ -428,7 +444,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
   },
   {
     key: "apple.reminders",
-    version: "0.3.0",
+    version: "0.4.0",
     name: "Reminders",
     description:
       "Sync your reminders (titles, notes, due dates, completion) from this Mac via Lobu for Mac. Reminders stay on the device.",
@@ -586,6 +602,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
               minimum: 0,
               maximum: 9,
             },
+            expected: expectedReminderState,
           },
           required: ["origin_id"],
           additionalProperties: false,
@@ -617,6 +634,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
               default: true,
               description: "False reopens a completed reminder.",
             },
+            expected: expectedReminderState,
           },
           required: ["origin_id"],
           additionalProperties: false,
