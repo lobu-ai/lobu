@@ -948,6 +948,7 @@ import { executeWorkerOperation } from "./worker-api/execute-operation";
 import { dispatchChromeAction } from "./worker-api/dispatch-chrome-action";
 import { stampSlackIdentityForUser } from "./auth/subject-identities";
 import { collapseSessionCookies, resolveSession } from './auth/resolve-session';
+import { organizationLiveSql } from './workspace/deletion-state';
 
 app.post("/api/workers/dispatch-chrome-action", dispatchChromeAction);
 app.post("/api/workers/execute-operation", executeWorkerOperation);
@@ -1580,6 +1581,7 @@ function claimEngineDeps(): ClaimEngineDeps {
 						AS "isPersonal"
 				FROM "member" m JOIN "organization" o ON o.id = m."organizationId"
 				WHERE m."userId" = ${userId}
+					AND ${getDb().unsafe(organizationLiveSql("o"))}
 				ORDER BY "isPersonal", o.name
 			`) as ClaimEligibleOrg[],
 		resolveOrgIfMember: async (userId, orgSlugOrId) => {
@@ -1587,7 +1589,8 @@ function claimEngineDeps(): ClaimEngineDeps {
 				SELECT o.id
 				FROM "organization" o
 				JOIN "member" m ON m."organizationId" = o.id AND m."userId" = ${userId}
-				WHERE o.slug = ${orgSlugOrId} OR o.id = ${orgSlugOrId}
+				WHERE (o.slug = ${orgSlugOrId} OR o.id = ${orgSlugOrId})
+					AND ${getDb().unsafe(organizationLiveSql("o"))}
 				LIMIT 1
 			`) as Array<{ id: string }>;
 			return rows[0]?.id ?? null;

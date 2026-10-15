@@ -22,6 +22,7 @@ import { nextRunAt as nextCronTickAt } from '../utils/cron';
 import logger from '../utils/logger';
 import type { TaskScheduler } from './task-scheduler';
 import { errorMessage } from '../utils/errors';
+import { organizationIdLiveSql } from '../workspace/deletion-state';
 
 export interface ScheduledDeliveryContext {
   platform: string;
@@ -338,6 +339,7 @@ export function registerScheduledJobsTicker(scheduler: TaskScheduler): void {
           SELECT *
           FROM scheduled_jobs
           WHERE next_run_at <= now() AND NOT paused
+            AND ${tx.unsafe(organizationIdLiveSql('scheduled_jobs.organization_id'))}
           ORDER BY next_run_at ASC
           FOR UPDATE SKIP LOCKED
           LIMIT 200

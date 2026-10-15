@@ -60,6 +60,7 @@ import {
 } from "./stores/postgres-stores";
 import { getErrorMessage } from "@lobu/core";
 import { resolveSession } from '../auth/resolve-session';
+import { organizationIdLiveSql } from '../workspace/deletion-state';
 
 // Cache of (userId → orgId) lookups. Keyed by userId; users only see their
 // own row swap when they leave/join orgs, which doesn't happen often. The
@@ -82,6 +83,7 @@ export async function resolveDefaultOrgId(
       SELECT m."organizationId" AS organization_id
       FROM "member" m
       WHERE m."userId" = ${userId}
+        AND ${sql.unsafe(organizationIdLiveSql('m."organizationId"'))}
       ORDER BY m."createdAt" ASC
       LIMIT 1
     `;

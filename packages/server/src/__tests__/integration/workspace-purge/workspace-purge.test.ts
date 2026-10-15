@@ -1,0 +1,558 @@
+/**
+ * Workspace deletion as a background purge (docs/design/workspace-deletion.md).
+ *
+ * `POST /api/auth/organization/delete` records a request, hides the workspace
+ * and enqueues one `workspace-purge` task; the task removes every org-scoped
+ * row in lease-fenced batches. These tests drive the real endpoint, then run
+ * the task the way the queue does: claim its `runs` row, then call the handler.
+ */
+
+import { randomUUID } from "node:crypto";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { materializeDueAutomationRuns } from "../../../automations/automation";
+import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
+import type { Env } from "../../../index";
+import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
+import { registerScheduledJobsTicker } from "../../../scheduled/scheduled-jobs-service";
+import type { TaskScheduler } from "../../../scheduled/task-scheduler";
+import { WORKSPACE_PURGE_TASK } from "../../../scheduled/task-definitions";
+import { getEnvFromProcess } from "../../../utils/env";
+import {
+	getMembershipRole,
+	getOrgBySlug,
+	MultiTenantProvider,
+} from "../../../workspace/multi-tenant";
+import {
+	runWorkspacePurgeTask,
+	WORKSPACE_PURGE_BATCH_SIZE,
+	WORKSPACE_PURGE_UNLINKED_TABLES,
+	WorkspacePurgeLeaseLostError,
+} from "../../../workspace/purge";
+import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
+import {
+	addUserToOrganization,
+	createTestAgent,
+	createTestEntity,
+	createTestEvent,
+	createTestOrganization,
+	insertChatConnectionRow,
+} from "../../setup/test-fixtures";
+import { TestApiClient } from "../../setup/test-mcp-client";
+
+const BASE = "http://localhost/api/auth";
+
+async function call(
+	path: string,
+	body: Record<string, unknown>,
+	token?: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+	const auth = await createAuth(getEnvFromProcess());
+	const res = await auth.handler(
+		new Request(`${BASE}${path}`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				...(token ? { authorization: `Bearer ${token}` } : {}),
+			},
+			body: JSON.stringify(body),
+		}),
+	);
+	const parsed = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+	return { status: res.status, body: parsed };
+}
+
+async function get(path: string, token: string): Promise<{ status: number; body: unknown }> {
+	const auth = await createAuth(getEnvFromProcess());
+	const res = await auth.handler(
+		new Request(`${BASE}${path}`, { headers: { authorization: `Bearer ${token}` } }),
+	);
+	return { status: res.status, body: await res.json().catch(() => null) };
+}
+
+async function signUpOwnerWithWorkspace(label: string) {
+	const signUp = await call("/sign-up/email", {
+		email: `owner-${label}@workspace-purge.test`,
+		password: "ownerpassword99",
+		name: `Owner ${label}`,
+	});
+	expect(signUp.status).toBe(200);
+	const token = signUp.body.token as string;
+	const userId = (signUp.body.user as { id: string }).id;
+	const created = await call(
+		"/organization/create",
+		{ name: `Purge ${label}`, slug: `purge-${label}` },
+		token,
+	);
+	expect(created.status).toBe(200);
+	return {
+		token,
+		userId,
+		organizationId: created.body.id as string,
+		slug: created.body.slug as string,
+	};
+}
+
+/** Every base table with an org-scoping column, read from the live schema. */
+async function orgScopedColumns(): Promise<Array<{ table: string; column: string }>> {
+	const sql = getTestDb();
+	const rows = await sql<{ table_name: string; column_name: string }[]>`
+		SELECT c.table_name, c.column_name
+		FROM information_schema.columns c
+		JOIN information_schema.tables t
+		  ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+		WHERE c.table_schema = 'public'
+		  AND t.table_type = 'BASE TABLE'
+		  AND c.column_name IN ('organization_id', 'organizationId')
+		ORDER BY c.table_name
+	`;
+	return rows.map((row) => ({ table: row.table_name, column: row.column_name }));
+}
+
+async function rowCountsFor(organizationId: string): Promise<Record<string, number>> {
+	const sql = getTestDb();
+	const counts: Record<string, number> = {};
+	for (const { table, column } of await orgScopedColumns()) {
+		const [row] = await sql.unsafe(
+			`SELECT count(*)::int AS n FROM "${table}" WHERE "${column}" = $1`,
+			[organizationId],
+		);
+		if (row.n > 0) counts[table] = row.n;
+	}
+	return counts;
+}
+
+/** A synthetic value of the column's type; check-constrained enums get a member. */
+function syntheticValue(table: string, column: string, udt: string): string {
+	if (table === "connect_tokens" && column === "auth_type") return "oauth";
+	if (table === "sandboxes" && column === "provider_kind") return "vercel";
+	if (udt.startsWith("_")) return "{}";
+	switch (udt) {
+		case "int2":
+		case "int4":
+		case "int8":
+			return String(Math.floor(Math.random() * 1_000_000_000));
+		case "bool":
+			return "false";
+		case "json":
+		case "jsonb":
+			return "{}";
+		case "uuid":
+			return randomUUID();
+		case "timestamptz":
+		case "timestamp":
+			return new Date().toISOString();
+		default:
+			return `seed-${randomUUID().slice(0, 8)}`;
+	}
+}
+
+/**
+ * One row in each table the organization FK never reaches, built from the live
+ * column list so the seed follows the schema. Foreign keys are suspended for
+ * the seeding transaction only: the rows exist to prove the purge removes them,
+ * not to model a consistent workspace.
+ */
+async function seedUnlinkedRows(organizationId: string): Promise<void> {
+	const sql = getTestDb();
+	await sql.begin(async (tx) => {
+		await tx`SET LOCAL session_replication_role = replica`;
+		for (const table of WORKSPACE_PURGE_UNLINKED_TABLES) {
+			const columns = await tx<{ column_name: string; udt_name: string }[]>`
+				SELECT column_name, udt_name FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = ${table}
+				  AND is_nullable = 'NO' AND column_default IS NULL
+				  AND is_generated = 'NEVER' AND is_identity = 'NO'
+				  AND column_name <> 'organization_id'
+			`;
+			const names = ["organization_id", ...columns.map((c) => c.column_name)];
+			const types = ["text", ...columns.map((c) => c.udt_name)];
+			const values = [
+				organizationId,
+				...columns.map((c) => syntheticValue(table, c.column_name, c.udt_name)),
+			];
+			await tx.unsafe(
+				`INSERT INTO "${table}" (${names.map((n) => `"${n}"`).join(", ")})
+				 VALUES (${types.map((t, i) => `$${i + 1}::${t}`).join(", ")})`,
+				values,
+			);
+		}
+	});
+}
+
+/** A realistic workspace body: bulk events with embeddings, an entity tree, runs. */
+async function seedWorkspace(organizationId: string, userId: string, events: number) {
+	const sql = getTestDb();
+	await sql`
+		INSERT INTO events (organization_id, title, payload_text, origin_id)
+		SELECT ${organizationId}, 'seed ' || g, 'body ' || g, 'seed-' || g
+		FROM generate_series(1, ${events}::int) g
+	`;
+	const parent = await createTestEntity({
+		name: "Parent",
+		organization_id: organizationId,
+		created_by: userId,
+	});
+	const child = await createTestEntity({
+		name: "Child",
+		organization_id: organizationId,
+		created_by: userId,
+		parent_id: parent.id,
+	});
+	await createTestEntity({
+		name: "Grandchild",
+		organization_id: organizationId,
+		created_by: userId,
+		parent_id: child.id,
+	});
+	// A live identity association and an authorization edge: both are guarded
+	// against ordinary deletes, so the purge has to retire/clear them through
+	// their sanctioned paths. Seeded with triggers suspended, like any fixture
+	// that skips the governed writers.
+	await sql.begin(async (tx) => {
+		await tx`SET LOCAL session_replication_role = replica`;
+		for (const purpose of ["identity", "authorization"]) {
+			const [type] = await tx<{ id: number }[]>`
+				INSERT INTO entity_relationship_types (slug, name, organization_id, purpose)
+				VALUES (${`seed-${purpose}`}, ${purpose}, ${organizationId}, ${purpose})
+				RETURNING id
+			`;
+			await tx`
+				INSERT INTO entity_relationships (organization_id, from_entity_id, to_entity_id, relationship_type_id, metadata)
+				VALUES (${organizationId}, ${parent.id}, ${child.id}, ${type.id},
+				        '{"_lobu_claims": {"manual": {}}, "_lobu_identity_decision": {"outcome": "accepted"}}'::jsonb)
+			`;
+		}
+	});
+	await createTestEvent({
+		organization_id: organizationId,
+		entity_id: child.id,
+		content: "embedded",
+		embedding: Array.from({ length: 768 }, () => 0.1),
+	});
+	await sql`
+		INSERT INTO runs (organization_id, run_type, status)
+		SELECT ${organizationId}, 'sync', 'completed' FROM generate_series(1, 3)
+	`;
+	await seedUnlinkedRows(organizationId);
+}
+
+async function pendingPurgeTask(organizationId: string) {
+	const sql = getTestDb();
+	const rows = await sql<{ id: number; organization_id: string | null }[]>`
+		SELECT id, organization_id FROM runs
+		WHERE run_type = 'task' AND action_key = ${WORKSPACE_PURGE_TASK}
+		  AND action_input->'payload'->>'organizationId' = ${organizationId}
+		  AND status = 'pending'
+	`;
+	return rows;
+}
+
+/** Claim the task row exactly as the runs queue does, as holder `owner`. */
+async function claimPurgeTask(taskRunId: number, owner: string): Promise<void> {
+	const sql = getTestDb();
+	await sql`
+		UPDATE runs SET status = 'claimed', claimed_at = now(), claimed_by = ${owner}
+		WHERE id = ${taskRunId}
+	`;
+}
+
+describe("workspace purge", () => {
+	const originalSecret = process.env.BETTER_AUTH_SECRET;
+
+	beforeEach(async () => {
+		await cleanupTestDatabase();
+		process.env.BETTER_AUTH_SECRET = "c".repeat(64);
+		clearAuthCacheForTests();
+	});
+
+	afterEach(async () => {
+		const sql = getTestDb();
+		await sql`DROP TRIGGER IF EXISTS test_purge_steal_lease ON events`;
+		await sql`DROP FUNCTION IF EXISTS test_purge_steal_lease()`;
+		if (originalSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
+		else process.env.BETTER_AUTH_SECRET = originalSecret;
+		clearAuthCacheForTests();
+	});
+
+	it("removes every org-scoped row and touches no other workspace", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("target");
+		const bystander = await createTestOrganization();
+		await addUserToOrganization(target.userId, bystander.id, "owner");
+		await seedWorkspace(target.organizationId, target.userId, 50);
+		await seedWorkspace(bystander.id, target.userId, 50);
+		const bystanderBefore = await rowCountsFor(bystander.id);
+
+		const deleted = await call(
+			"/organization/delete",
+			{ organizationId: target.organizationId },
+			target.token,
+		);
+		expect(deleted.status).toBe(200);
+		expect(deleted.body.id).toBe(target.organizationId);
+
+		const tasks = await pendingPurgeTask(target.organizationId);
+		expect(tasks).toHaveLength(1);
+		// The task row must outlive the organization it purges.
+		expect(tasks[0].organization_id).toBeNull();
+		const before = await rowCountsFor(target.organizationId);
+		const eventsBefore = before.events;
+		expect(eventsBefore).toBeGreaterThan(50);
+		// The seeded tree (parent → child → grandchild) plus any platform rows.
+		expect(before.entities).toBeGreaterThanOrEqual(3);
+		await claimPurgeTask(tasks[0].id, "test-holder");
+		const counts = await runWorkspacePurgeTask(
+			{ organizationId: target.organizationId },
+			{ taskRunId: tasks[0].id, claimedBy: "test-holder" },
+		);
+		expect(counts?.events).toBe(eventsBefore);
+		expect(counts?.entities).toBe(before.entities);
+
+		expect(await rowCountsFor(target.organizationId)).toEqual({});
+		const [org] = await sql`SELECT 1 FROM organization WHERE id = ${target.organizationId}`;
+		expect(org).toBeUndefined();
+		expect(await rowCountsFor(bystander.id)).toEqual(bystanderBefore);
+
+		const [task] = await sql`SELECT action_output FROM runs WHERE id = ${tasks[0].id}`;
+		expect(task.action_output.removed.events).toBe(eventsBefore);
+	});
+
+	it("resumes after losing its lease mid-batch and completes", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("resume");
+		await seedWorkspace(target.organizationId, target.userId, WORKSPACE_PURGE_BATCH_SIZE + 500);
+
+		const deleted = await call(
+			"/organization/delete",
+			{ organizationId: target.organizationId },
+			target.token,
+		);
+		expect(deleted.status).toBe(200);
+		const [task] = await pendingPurgeTask(target.organizationId);
+
+		// Another holder takes the lease while the first events batch runs: the
+		// batch that observed the steal commits, the next one must not.
+		await sql.unsafe(`
+			CREATE FUNCTION test_purge_steal_lease() RETURNS trigger AS $$
+			BEGIN
+				UPDATE runs SET claimed_by = 'second-holder' WHERE id = ${task.id};
+				RETURN NULL;
+			END;
+			$$ LANGUAGE plpgsql
+		`);
+		await sql.unsafe(`
+			CREATE TRIGGER test_purge_steal_lease AFTER DELETE ON events
+			FOR EACH STATEMENT EXECUTE FUNCTION test_purge_steal_lease()
+		`);
+		await claimPurgeTask(task.id, "first-holder");
+		await expect(
+			runWorkspacePurgeTask({ organizationId: target.organizationId }, { taskRunId: task.id, claimedBy: "first-holder" }),
+		).rejects.toBeInstanceOf(WorkspacePurgeLeaseLostError);
+
+		const [{ remaining }] = await sql`
+			SELECT count(*)::int AS remaining FROM events WHERE organization_id = ${target.organizationId}
+		`;
+		// Exactly one batch committed before the steal was noticed.
+		expect(remaining).toBeGreaterThan(500);
+		expect(remaining).toBeLessThan(WORKSPACE_PURGE_BATCH_SIZE);
+		await sql`DROP TRIGGER test_purge_steal_lease ON events`;
+
+		// The retry claims the same row again and finishes the job.
+		await claimPurgeTask(task.id, "retry-holder");
+		const counts = await runWorkspacePurgeTask(
+			{ organizationId: target.organizationId },
+			{ taskRunId: task.id, claimedBy: "retry-holder" },
+		);
+		expect(counts?.events).toBe(remaining + WORKSPACE_PURGE_BATCH_SIZE);
+		const [progress] = await sql`SELECT action_output FROM runs WHERE id = ${task.id}`;
+		expect(progress.action_output.removed.events).toBe(counts?.events);
+		expect(await rowCountsFor(target.organizationId)).toEqual({});
+
+		// A further retry after the organization row is gone is a clean no-op.
+		await claimPurgeTask(task.id, "late-holder");
+		expect(
+			await runWorkspacePurgeTask({ organizationId: target.organizationId }, { taskRunId: task.id, claimedBy: "late-holder" }),
+		).toEqual(counts);
+	});
+
+	it("refuses to purge a workspace nobody asked to delete", async () => {
+		const sql = getTestDb();
+		const org = await createTestOrganization();
+		const [task] = await sql<{ id: number }[]>`
+			INSERT INTO runs (run_type, queue_name, action_key, status, claimed_by, claimed_at)
+			VALUES ('task', 'task:workspace-purge', ${WORKSPACE_PURGE_TASK}, 'claimed', 'holder', now())
+			RETURNING id
+		`;
+		expect(
+			await runWorkspacePurgeTask({ organizationId: org.id }, { taskRunId: task.id, claimedBy: "holder" }),
+		).toBeNull();
+		const [still] = await sql`SELECT 1 AS ok FROM organization WHERE id = ${org.id}`;
+		expect(still.ok).toBe(1);
+	});
+
+	it("keeps owner-only and personal-workspace refusals", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("refusals");
+		const memberSignUp = await call("/sign-up/email", {
+			email: "member-refusals@workspace-purge.test",
+			password: "memberpassword99",
+			name: "Member",
+		});
+		const memberId = (memberSignUp.body.user as { id: string }).id;
+		await addUserToOrganization(memberId, target.organizationId, "admin");
+
+		const byAdmin = await call(
+			"/organization/delete",
+			{ organizationId: target.organizationId },
+			memberSignUp.body.token as string,
+		);
+		expect(byAdmin.status).toBe(403);
+
+		await sql`
+			UPDATE organization
+			SET metadata = jsonb_build_object('personal_org_for_user_id', ${target.userId}::text)::text
+			WHERE id = ${target.organizationId}
+		`;
+		const personal = await call(
+			"/organization/delete",
+			{ organizationId: target.organizationId },
+			target.token,
+		);
+		expect(personal.status).toBe(403);
+		expect(personal.body.code).toBe("PERSONAL_ORGANIZATION_CANNOT_BE_DELETED");
+		expect(await pendingPurgeTask(target.organizationId)).toHaveLength(0);
+	});
+
+	it("hides a requested workspace before the purge runs", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("hidden");
+		const live = await createTestOrganization();
+		await addUserToOrganization(target.userId, live.id, "owner");
+
+		// A due scheduled Automation, a due scheduled job, a chat connection and
+		// a queued run in each workspace.
+		const seedSchedules = async (organizationId: string) => {
+			const agent = await createTestAgent({ organizationId, ownerUserId: target.userId });
+			const entity = await createTestEntity({
+				name: "Scheduled",
+				organization_id: organizationId,
+				created_by: target.userId,
+			});
+			const client = await TestApiClient.for({
+				organizationId,
+				userId: target.userId,
+				memberRole: "owner",
+				scopes: ["mcp:read", "mcp:write", "mcp:admin"],
+			});
+			const created = (await client.automations.create({
+				entity_id: entity.id,
+				slug: "nightly",
+				name: "Nightly",
+				prompt: "Summarize {{entities}}.",
+				triggers: [{ kind: "schedule", cron: "0 * * * *", execution: "window" }],
+				managed_agent_id: agent.agentId,
+			})) as { automation_id: string };
+			const automation = { id: Number(created.automation_id) };
+			await sql`
+				UPDATE automations SET next_run_at = now() - interval '1 minute' WHERE id = ${automation.id}
+			`;
+			await sql`
+				INSERT INTO scheduled_jobs (organization_id, action_type, action_args, next_run_at, description, created_by_user)
+				VALUES (${organizationId}, 'send_notification', '{}'::jsonb, now() - interval '1 minute', 'due', ${target.userId})
+			`;
+			const connectionId = `chat-${organizationId.slice(-8)}`;
+			await insertChatConnectionRow({
+				id: connectionId,
+				organizationId,
+				agentId: agent.agentId,
+				platform: "telegram",
+			});
+			await sql`
+				INSERT INTO runs (organization_id, run_type, status) VALUES (${organizationId}, 'sync', 'pending')
+			`;
+			return { automationId: Number(automation.id), connectionId };
+		};
+		const hidden = await seedSchedules(target.organizationId);
+		const visible = await seedSchedules(live.id);
+
+		const deleted = await call(
+			"/organization/delete",
+			{ organizationId: target.organizationId },
+			target.token,
+		);
+		expect(deleted.status).toBe(200);
+
+		// Better Auth's own organization endpoints: hidden, and read-only so an
+		// owner's metadata update cannot clear the marker mid-purge.
+		const baList = await get("/organization/list", target.token);
+		expect(baList.status).toBe(200);
+		const baIds = (baList.body as Array<{ id: string }>).map((org) => org.id);
+		expect(baIds).toContain(live.id);
+		expect(baIds).not.toContain(target.organizationId);
+		const full = await get(
+			`/organization/get-full-organization?organizationId=${target.organizationId}`,
+			target.token,
+		);
+		expect(full.status).toBe(404);
+		const update = await call(
+			"/organization/update",
+			{ organizationId: target.organizationId, data: { metadata: {} } },
+			target.token,
+		);
+		expect(update.status).toBe(404);
+		const [marker] = await sql`
+			SELECT (metadata)::jsonb ->> 'deletion_requested_at' AS requested_at
+			FROM organization WHERE id = ${target.organizationId}
+		`;
+		expect(marker.requested_at).not.toBeNull();
+
+		// Listings and access.
+		const listed = await new MultiTenantProvider().listOrganizations(undefined, target.userId);
+		const listedIds = listed.map((org) => org.id);
+		expect(listedIds).toContain(live.id);
+		expect(listedIds).not.toContain(target.organizationId);
+		expect(await getOrgBySlug(target.slug)).toBeNull();
+		expect(await getMembershipRole(target.organizationId, target.userId)).toBeNull();
+		expect(await getMembershipRole(live.id, target.userId)).toBe("owner");
+
+		// Queued work was dropped; nothing new is materialized.
+		const [{ pending }] = await sql`
+			SELECT count(*)::int AS pending FROM runs
+			WHERE organization_id = ${target.organizationId} AND status = 'pending'
+		`;
+		expect(pending).toBe(0);
+		const env = {} as Env;
+		expect((await materializeDueAutomationRuns(env, sql, hidden.automationId)).dueAutomations).toBe(0);
+		expect((await materializeDueAutomationRuns(env, sql, visible.automationId)).dueAutomations).toBe(1);
+
+		const spawned: string[] = [];
+		let tick: (() => Promise<void>) | null = null;
+		const scheduler = {
+			register: (_name: string, handler: () => Promise<void>) => {
+				tick = handler;
+			},
+			spawn: async (_name: string, payload: { organizationId?: string }) => {
+				spawned.push(String(payload.organizationId ?? ""));
+				return "1";
+			},
+		} as unknown as TaskScheduler;
+		registerScheduledJobsTicker(scheduler);
+		await (tick as unknown as () => Promise<void>)();
+		const [{ due }] = await sql`
+			SELECT count(*)::int AS due FROM scheduled_jobs
+			WHERE organization_id = ${target.organizationId} AND last_fired_at IS NULL
+		`;
+		expect(due).toBe(1);
+		const [{ fired }] = await sql`
+			SELECT count(*)::int AS fired FROM scheduled_jobs
+			WHERE organization_id = ${live.id} AND last_fired_at IS NOT NULL
+		`;
+		expect(fired).toBe(1);
+
+		// Chat routing no longer resolves the workspace's connections.
+		const store = createPostgresAgentConnectionStore();
+		const routed = (await store.listConnections()).map((c) => c.id);
+		expect(routed.some((id) => id.includes(hidden.connectionId))).toBe(false);
+		expect(routed.some((id) => id.includes(visible.connectionId))).toBe(true);
+	});
+});

@@ -27,6 +27,7 @@ import {
   connectorClaimLaneSql,
 } from '../worker-api/connector-claim-lanes';
 import { materializeDueItems } from './due-materializer';
+import { organizationIdLiveSql } from '../workspace/deletion-state';
 
 interface CheckDueFeedsResult {
   dueFeeds: number;
@@ -163,6 +164,7 @@ export async function materializeDueFeeds(
         AND c.status = 'active'
         AND c.deleted_at IS NULL
         AND f.deleted_at IS NULL
+        AND ${sql.unsafe(organizationIdLiveSql('f.organization_id'))}
         AND (
           cd.definition_id IS NULL
           OR cd.feed_operations @> '["sync"]'::jsonb

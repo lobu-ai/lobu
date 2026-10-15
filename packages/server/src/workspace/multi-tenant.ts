@@ -33,6 +33,7 @@ import type {
   WorkspaceProvider,
 } from './types';
 import { listManagedAuthConnectorOffers } from './managed-auth-discovery';
+import { organizationIdLiveSql, organizationLiveSql } from './deletion-state';
 import { resolveSession, sessionCookieCandidates } from '../auth/resolve-session';
 
 /**
@@ -52,15 +53,18 @@ const UNSCOPED_PATH_PREFIXES = ['/mcp/', '/api/me/', '/api/workers/'];
  * Authorization decisions must be fresh across replicas. A process-local role
  * cache lets a member removed on pod A keep their prior authority on pod B
  * until the TTL expires, so every authorization boundary reads Postgres.
+ * A workspace with a pending deletion grants no role to anyone.
  */
 export async function getMembershipRole(
   organizationId: string,
   userId: string | null
 ): Promise<string | null> {
   if (!userId) return null;
-  const rows = await getDb()`
-      SELECT role FROM "member"
-      WHERE "organizationId" = ${organizationId} AND "userId" = ${userId}
+  const sql = getDb();
+  const rows = await sql`
+      SELECT m.role FROM "member" m
+      WHERE m."organizationId" = ${organizationId} AND m."userId" = ${userId}
+        AND ${sql.unsafe(organizationIdLiveSql('m."organizationId"'))}
       LIMIT 1
     `;
   return rows.length > 0 ? (rows[0].role as string) : null;
@@ -73,8 +77,11 @@ export async function getMembershipRole(
 export async function getOrgBySlug(
   slug: string
 ): Promise<{ id: string; visibility: string } | null> {
-  const rows = await getDb()`
-      SELECT id, visibility FROM "organization" WHERE slug = ${slug} LIMIT 1
+  const sql = getDb();
+  const rows = await sql`
+      SELECT o.id, o.visibility FROM "organization" o
+      WHERE o.slug = ${slug} AND ${sql.unsafe(organizationLiveSql('o'))}
+      LIMIT 1
     `;
   if (rows.length === 0) return null;
   return {
@@ -148,8 +155,9 @@ export class MultiTenantProvider implements WorkspaceProvider {
     let requestedOrgMissing = false;
     if (requestedOrgSlug) {
       const orgResult = await sql`
-        SELECT id, visibility FROM "organization"
-        WHERE slug = ${requestedOrgSlug}
+        SELECT o.id, o.visibility FROM "organization" o
+        WHERE o.slug = ${requestedOrgSlug}
+          AND ${sql.unsafe(organizationLiveSql('o'))}
         LIMIT 1
       `;
       if (orgResult.length === 0) {
@@ -205,15 +213,6 @@ export class MultiTenantProvider implements WorkspaceProvider {
       requestedOrgVisibility === 'public' && (await canAccessPublicOrgRequest());
 
     const allowAnonymousPublicOrgMcp = isMcpRoute && requestedOrgVisibility === 'public';
-
-    async function loadMembershipRole(orgId: string, userId: string): Promise<string | null> {
-      const result = await sql`
-        SELECT role FROM "member"
-        WHERE "organizationId" = ${orgId} AND "userId" = ${userId}
-        LIMIT 1
-      `;
-      return result.length > 0 ? (result[0].role as string) : null;
-    }
 
     async function setContextAndContinue(
       overrides: Partial<{
@@ -636,7 +635,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
 
       const oauthTargetGranted =
         isPat || (authInfo.grantedOrganizationIds ?? []).includes(effectiveOrgId);
-      const role = await loadMembershipRole(effectiveOrgId, authInfo.userId);
+      const role = await getMembershipRole(effectiveOrgId, authInfo.userId);
       const allowPublicOrgWithoutMembership =
         !role &&
         requestedOrgId === effectiveOrgId &&
@@ -718,7 +717,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
           );
         }
 
-        const role = await loadMembershipRole(requestedOrgId, session.session.userId);
+        const role = await getMembershipRole(requestedOrgId, session.session.userId);
         if (role) {
           return setContextAndContinue({
             mcpIsAuthenticated: true,
@@ -804,7 +803,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
         `SELECT o.id, o.name, o.slug, o.logo, o.description, o."createdAt" as created_at,
                 false as is_member, false as is_personal, o.visibility
          FROM "organization" o
-         WHERE o.visibility = 'public' ${searchClause}
+         WHERE o.visibility = 'public' AND ${organizationLiveSql('o')} ${searchClause}
          ORDER BY o.name ASC`,
         params
       )) as unknown as OrgInfo[];
@@ -819,7 +818,8 @@ export class MultiTenantProvider implements WorkspaceProvider {
                 o.visibility
          FROM "organization" o
          LEFT JOIN "member" m ON o.id = m."organizationId" AND m."userId" = $1
-         WHERE (m."userId" IS NOT NULL OR o.visibility = 'public') ${searchClause}
+         WHERE (m."userId" IS NOT NULL OR o.visibility = 'public')
+           AND ${organizationLiveSql('o')} ${searchClause}
          ORDER BY o.name ASC`,
         params
       )) as unknown as OrgInfo[];

@@ -9,6 +9,7 @@
  */
 
 import { getDb } from "../db/client";
+import { organizationIdLiveSql } from "../workspace/deletion-state";
 
 export interface ResolvedTenantMember {
 	tenantOrganizationId: string;
@@ -44,6 +45,7 @@ export async function resolveMemberOrgsForUser(
      AND et.organization_id = e.organization_id
      AND et.slug = '$member'
     WHERE m."userId" = ${userId}
+      AND ${sql.unsafe(organizationIdLiveSql('m."organizationId"'))}
     ORDER BY m."organizationId" ASC
   `;
 	return rows.map((r) => ({

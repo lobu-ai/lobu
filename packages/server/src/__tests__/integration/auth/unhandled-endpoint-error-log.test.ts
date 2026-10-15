@@ -4,9 +4,9 @@
  * the request path — not only Better Auth's own console line, which never
  * carries the request and is invisible next to the generic HTTP 500 entry.
  *
- * The failure is a real Postgres error raised by a trigger on `organization`,
- * so it travels the same driver → Better Auth → router path a statement
- * timeout during an organization delete does in production.
+ * The failure is a real Postgres error raised by a trigger on `organization`
+ * (the delete request stamps the row), so it travels the same driver → Better
+ * Auth → router path a statement timeout does in production.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -96,7 +96,7 @@ describe("unhandled auth endpoint errors", () => {
 			$$ LANGUAGE plpgsql
 		`);
 		await sql.unsafe(`
-			CREATE TRIGGER test_org_delete_timeout BEFORE DELETE ON organization
+			CREATE TRIGGER test_org_delete_timeout BEFORE UPDATE ON organization
 			FOR EACH ROW EXECUTE FUNCTION test_org_delete_timeout()
 		`);
 
