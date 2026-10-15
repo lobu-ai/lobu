@@ -675,6 +675,95 @@ describe("workspace purge", () => {
 		expect((await get("/organization/list-members", adminToken)).status).toBe(200);
 	});
 
+	it("refuses every Better Auth organization endpoint for a session still on a deleting workspace", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("every-endpoint");
+		const adminSignUp = await call("/sign-up/email", {
+			email: "admin-every-endpoint@workspace-purge.test",
+			password: "adminpassword99",
+			name: "Admin",
+		});
+		const adminToken = adminSignUp.body.token as string;
+		const adminId = (adminSignUp.body.user as { id: string }).id;
+		await addUserToOrganization(adminId, target.organizationId, "admin");
+		expect(
+			(
+				await call(
+					"/organization/delete",
+					{ organizationId: target.organizationId },
+					target.token,
+				)
+			).status,
+		).toBe(200);
+		// A session that set the workspace active concurrently with the request.
+		await sql`
+			UPDATE session SET "activeOrganizationId" = ${target.organizationId}
+			WHERE "userId" = ${adminId}
+		`;
+		const snapshot = async () => ({
+			members: await sql`
+				SELECT id, "userId", role FROM member
+				WHERE "organizationId" = ${target.organizationId} ORDER BY id
+			`,
+			invitations: await sql`
+				SELECT id, status FROM invitation WHERE "organizationId" = ${target.organizationId}
+			`,
+			organization: await sql`
+				SELECT name, slug, metadata FROM organization WHERE id = ${target.organizationId}
+			`,
+			sessions: await sql`
+				SELECT "activeOrganizationId" FROM session WHERE "userId" = ${adminId}
+			`,
+		});
+		const before = await snapshot();
+
+		// Every organization endpoint Better Auth registers, read off the live
+		// auth instance so a new endpoint is covered without editing this test.
+		const auth = await createAuth(getEnvFromProcess());
+		const endpoints = Object.values(auth.api as Record<string, unknown>)
+			.map((endpoint) => endpoint as { path?: unknown; options?: { method?: unknown } })
+			.filter(
+				(endpoint) =>
+					typeof endpoint.path === "string" &&
+					endpoint.path.startsWith("/organization/") &&
+					endpoint.path !== "/organization/delete",
+			);
+		expect(endpoints.map((endpoint) => endpoint.path)).toEqual(
+			expect.arrayContaining([
+				"/organization/set-active",
+				"/organization/update",
+				"/organization/list",
+				"/organization/list-members",
+				"/organization/invite-member",
+				"/organization/accept-invitation",
+				"/organization/update-member-role",
+			]),
+		);
+
+		const leaks: string[] = [];
+		for (const endpoint of endpoints) {
+			const path = endpoint.path as string;
+			const declared = endpoint.options?.method;
+			const method = (Array.isArray(declared) ? declared[0] : declared) === "GET" ? "GET" : "POST";
+			const res = await auth.handler(
+				new Request(`${BASE}${path}`, {
+					method,
+					headers: {
+						authorization: `Bearer ${adminToken}`,
+						...(method === "POST" ? { "content-type": "application/json" } : {}),
+					},
+					...(method === "POST" ? { body: "{}" } : {}),
+				}),
+			);
+			const text = await res.text();
+			if (res.status < 400 || text.includes(target.organizationId)) {
+				leaks.push(`${method} ${path} -> ${res.status}`);
+			}
+		}
+		expect(leaks).toEqual([]);
+		expect(await snapshot()).toEqual(before);
+	});
+
 	it("hides a requested workspace before the purge runs", async () => {
 		const sql = getTestDb();
 		const target = await signUpOwnerWithWorkspace("hidden");

@@ -14,25 +14,8 @@ const ORGANIZATION_DELETE_PATH = '/organization/delete';
 const ORGANIZATION_CREATE_PATH = '/organization/create';
 const ORGANIZATION_UPDATE_PATH = '/organization/update';
 const ORGANIZATION_LIST_PATH = '/organization/list';
-const ORGANIZATION_GET_INVITATION_PATH = '/organization/get-invitation';
 const ORGANIZATION_SET_ACTIVE_PATH = '/organization/set-active';
 const ORGANIZATION_PATH_PREFIX = '/organization/';
-
-// Organization endpoints that never fall back to the session's active
-// organization. Some act on no particular workspace: a member whose active
-// workspace is being deleted still lists workspaces and checks slugs; set-active
-// is decided per request below. The invitation endpoints resolve the workspace
-// from the invitation itself, which the guard checks.
-const NO_ACTIVE_ORGANIZATION_FALLBACK_PATHS = new Set([
-  ORGANIZATION_LIST_PATH,
-  '/organization/check-slug',
-  '/organization/list-user-invitations',
-  '/organization/list-user-teams',
-  '/organization/accept-invitation',
-  '/organization/reject-invitation',
-  '/organization/cancel-invitation',
-  ORGANIZATION_GET_INVITATION_PATH,
-]);
 
 function organizationNotFound(): APIError {
   return new APIError('NOT_FOUND', {
@@ -141,11 +124,18 @@ export function workspaceDeletionPlugin(
     }
   });
 
-  // A deleting workspace is gone for every organization endpoint, so this runs
-  // BEFORE the endpoint: a member, invitation, role or session change must not
-  // be applied and then hidden. The target is every organization the request
-  // names (id, slug, invitation, member) plus the session's active
-  // organization, which Better Auth falls back to.
+  // One guard for every Better Auth organization endpoint, run BEFORE the
+  // endpoint so no member, invitation, role or session change is applied and
+  // then hidden. Which selector an endpoint consumes varies by endpoint (and
+  // one it ignores must not hide the workspace it acts on), so the target is
+  // every organization the request could resolve to: each organization id or
+  // slug, invitation and member it names, plus the session's active
+  // organization that Better Auth falls back to. The one place the fallback
+  // does not apply is Better Auth's own: set-active given an explicit target
+  // or `organizationId: null` acts on that, not on the active organization.
+  // `requestWorkspaceDeletion` clears every session's active organization, so
+  // only a session that raced the request still holds one, and it must switch
+  // away (or clear) before anything else.
   const refuseDeletingTarget = createAuthMiddleware(async (ctx) => {
     const body = (ctx.body ?? {}) as Record<string, unknown>;
     const query = (ctx.query ?? {}) as Record<string, unknown>;
@@ -154,25 +144,13 @@ export function workspaceDeletionPlugin(
 
     const organizationIds = strings(body.organizationId, query.organizationId);
     const slugs = strings(body.organizationSlug, query.organizationSlug);
-    const invitationIds = strings(
-      body.invitationId,
-      ctx.path === ORGANIZATION_GET_INVITATION_PATH ? query.id : undefined,
-    );
+    const invitationIds = strings(body.invitationId, query.invitationId, query.id);
     const memberIds = strings(body.memberId, body.memberIdOrEmail);
 
-    // Which selector an endpoint actually consumes varies, and one it ignores
-    // must not hide the active organization it falls back to (an update
-    // carrying an unrelated slug or member id would otherwise clear the
-    // marker). So the active organization is always checked too: a session
-    // left on a deleting workspace can only list, switch away and handle
-    // invitations until it does.
-    // set-active falls back only when it neither clears (`organizationId:
-    // null`) nor names a target.
-    const fallsBack =
-      ctx.path === ORGANIZATION_SET_ACTIVE_PATH
-        ? body.organizationId !== null && organizationIds.length + slugs.length === 0
-        : !NO_ACTIVE_ORGANIZATION_FALLBACK_PATHS.has(ctx.path ?? '');
-    if (fallsBack && ctx.headers) {
+    const setsActiveExplicitly =
+      ctx.path === ORGANIZATION_SET_ACTIVE_PATH &&
+      (body.organizationId === null || organizationIds.length + slugs.length > 0);
+    if (!setsActiveExplicitly && ctx.headers) {
       const session = await resolveRequestSession(ctx.headers);
       const active = session?.session.activeOrganizationId;
       if (active) organizationIds.push(active);
@@ -224,11 +202,11 @@ export function workspaceDeletionPlugin(
             ctx.path === ORGANIZATION_CREATE_PATH || ctx.path === ORGANIZATION_UPDATE_PATH,
           handler: refuseReservedMetadata,
         },
+        // Delete resolves and checks its own target in `handler`.
         {
           matcher: (ctx) =>
             (ctx.path ?? '').startsWith(ORGANIZATION_PATH_PREFIX) &&
-            ctx.path !== ORGANIZATION_DELETE_PATH &&
-            ctx.path !== ORGANIZATION_CREATE_PATH,
+            ctx.path !== ORGANIZATION_DELETE_PATH,
           handler: refuseDeletingTarget,
         },
       ],

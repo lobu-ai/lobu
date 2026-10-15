@@ -113,20 +113,23 @@ failure like the 2026-10-15 500 is no longer silent.
   materializers, and the chat connection store. The request also cancels the
   workspace's pending runs.
 - **Better Auth endpoints.** Its organization endpoints read through its own
-  adapter, so the same plugin refuses them in a before hook, before they run,
-  when the request targets a deleting workspace: by organization id or slug,
-  by invitation or member id, or through the session's active organization,
-  which is always checked because an endpoint may ignore the selector it was
-  sent. The request also clears every session's active organization that
-  points at the workspace, so only a session that raced the request can still
-  hold it, and that session can only list, switch away or clear, and handle
-  invitations; `/organization/list` is filtered in an after hook. The
-  member-role endpoint is a user hook that runs before any plugin hook, so
+  adapter, so one plugin before hook guards every `/organization/*` endpoint
+  (delete checks its own target), before it runs. The target is every
+  organization the request could resolve to: each organization id or slug,
+  invitation and member it names, plus the session's active organization that
+  Better Auth falls back to. The only place the fallback does not apply is
+  Better Auth's own: set-active given an explicit target or
+  `organizationId: null`. The request also clears every session's active
+  organization that points at the workspace, in the same transaction, so only
+  a session that raced it still holds one and must switch away first.
+  `/organization/list` is also filtered in an after hook. The member-role
+  endpoint is a user hook that runs before any plugin hook, so
   `lockMemberRoleChanges` refuses a deleting workspace for every membership
   role write. Create and update reject client metadata carrying either
-  deletion key, leaving `requestWorkspaceDeletion` its only writer. Residual:
-  a request that passed the check just before the deletion committed can
-  still land after it.
+  deletion key, leaving `requestWorkspaceDeletion` its only writer. A test
+  enumerates every registered organization endpoint off the live auth
+  instance. Residual: a request that passed the check just before the
+  deletion committed can still land after it.
 - **Purge order.** Events, then runs (both unbounded per workspace), then
   identity associations are retired through the governed unlink path (a live
   one blocks both entity and organization deletes), then entities leaf-first
