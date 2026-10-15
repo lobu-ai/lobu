@@ -1,12 +1,13 @@
 import type { ConfigActorSource } from '../utils/apply-context';
 import { ToolUserError } from '../utils/errors';
-import { APIError } from 'better-auth';
-import { createAuthMiddleware, getSessionFromCtx } from 'better-auth/api';
+import { APIError, type BetterAuthPlugin } from 'better-auth';
+import { createAuthMiddleware } from 'better-auth/api';
 import { type DbClient, getDb } from '../db/client';
 import { insertWorkspaceChangeEventInTransaction } from '../utils/insert-event';
 import { updateMemberEntityAccess } from '../utils/member-entity';
 import { withEntityWriteTransaction } from '../utils/entity-management';
 
+import type { RequestSession } from './organization-delete';
 import { assertWorkspaceRetainsOwner, authorizeMemberRole, lockMemberRoleChanges, parseMemberRole, type MemberRole } from './member-role-policy';
 
 export async function changeMemberRoleInTransaction(
@@ -29,14 +30,15 @@ export async function changeMemberRoleInTransaction(
   return { ...member, role: params.role };
 }
 
+const UPDATE_MEMBER_ROLE_PATH = '/organization/update-member-role';
+
 // Preserve Better Auth's existing endpoint and session checks, while routing
 // the write through the same transactional operation as entity hooks. Origin /
 // CSRF validation already ran: Better Auth registers `originCheckMiddleware` as
 // a router middleware on `/**`, which better-call runs before the endpoint this
 // hook short-circuits.
-export const memberRoleAuthHook = createAuthMiddleware(async (ctx) => {
-  if (ctx.path !== '/organization/update-member-role') return;
-  const session = await getSessionFromCtx(ctx);
+const memberRoleHook = (resolveRequestSession: (headers: Headers) => Promise<RequestSession | null>) => createAuthMiddleware(async (ctx) => {
+  const session = ctx.headers ? await resolveRequestSession(ctx.headers) : null;
   if (!session) throw new APIError('UNAUTHORIZED', { message: 'Sign in to change member roles' });
   const body = ctx.body;
   const organizationId = body?.organizationId ?? session.session.activeOrganizationId;
@@ -62,3 +64,15 @@ export const memberRoleAuthHook = createAuthMiddleware(async (ctx) => {
     throw error;
   }
 });
+
+// Sibling before hooks cannot see the bearer plugin's header rewrite, so
+// resolve through the full getSession API even though bearer() runs first.
+// A plugin rather than a top-level hook lets the deletion guard run first.
+export function memberRolePlugin(resolveRequestSession: (headers: Headers) => Promise<RequestSession | null>) {
+  return {
+    id: 'member-roles',
+    hooks: {
+      before: [{ matcher: (ctx) => ctx.path === UPDATE_MEMBER_ROLE_PATH, handler: memberRoleHook(resolveRequestSession) }],
+    },
+  } satisfies BetterAuthPlugin;
+}

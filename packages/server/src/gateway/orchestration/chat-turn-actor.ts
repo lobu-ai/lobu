@@ -94,14 +94,18 @@ export function chatTurnEvidenceFrom(
  * (Automation run, platform CLI, messaging API): those have no chat sender and
  * keep their existing principal. A device-placed chat turn is still a chat
  * turn — its run-scoped token names the device lane as its `source`, but the
- * message it runs came from a chat sender all the same.
+ * message it runs came from a chat sender all the same. Only an explicit
+ * `api` platform exempts one; a device turn with no platform at all is a chat
+ * turn whose sender is unknown, so it fails closed instead of borrowing the
+ * agent owner.
  */
 export function isChatSenderTurn(claims: {
   platform?: string;
   source?: string;
 }): boolean {
-  if (!claims.platform || claims.platform === "api") return false;
-  return claims.source === undefined || claims.source === DEVICE_CHAT_RUN_SOURCE;
+  if (claims.platform === "api") return false;
+  if (claims.source === DEVICE_CHAT_RUN_SOURCE) return true;
+  return !!claims.platform && claims.source === undefined;
 }
 
 /**
@@ -142,8 +146,8 @@ export async function resolveChatTurnActor(args: {
   evidence: ChatTurnEvidence;
 }): Promise<ChatTurnActor | undefined> {
   const { platform, teamId } = args.claims;
-  if (!platform || !isChatSenderTurn(args.claims)) return undefined;
-  if (!args.organizationId) return { access: "reply_only" };
+  if (!isChatSenderTurn(args.claims)) return undefined;
+  if (!platform || !args.organizationId) return { access: "reply_only" };
   const member = await resolveChatSenderMember(platform, teamId, args.senderId, args.organizationId);
   if (member) {
     return {

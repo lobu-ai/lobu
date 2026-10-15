@@ -109,10 +109,10 @@ export const DEVICE_CHAT_RUN_SOURCE = "device-chat";
  * Mint the same run-scoped agent identity for a device-placed chat turn.
  *
  * A device chat turn originates on a chat platform, so it also carries that
- * turn's routing claims (platform, native team, connection, response thread).
- * Without them the mint falls back to `platform: "api"` with no connection or
- * thread, and a card the local CLI posts back is routed as an API interaction
- * instead of reaching the chat thread the turn came from.
+ * turn's routing claims (platform, native team, connection, response thread),
+ * so a card the local CLI posts back reaches the chat thread the turn came
+ * from. The platform is required: defaulted to `api`, a chat turn would act as
+ * the agent owner instead of its sender.
  *
  * `actorUserId` and `chatAccess` are the chat sender's authority, resolved by
  * the caller through `resolveChatTurnActor`, exactly like a cloud chat turn.
@@ -124,7 +124,8 @@ export function buildDeviceChatRunWorkerAccess(args: {
 	organizationId: string;
 	userId: string;
 	channelId: string;
-	platform?: string;
+	/** Required: an `api` turn says so; a missing platform would mint as one. */
+	platform: string;
 	teamId?: string;
 	platformMetadata?: WorkerTokenClaimsArgs["platformMetadata"];
 	actorUserId?: string;

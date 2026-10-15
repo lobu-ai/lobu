@@ -12,7 +12,7 @@ import { post } from '../../setup/test-helpers';
 
 describe('member roles through generic entity edits', () => {
   let org: Awaited<ReturnType<typeof createTestOrganization>>;
-  let owner: { userId: string; memberId: string; entityId: number; cookie: string };
+  let owner: { userId: string; memberId: string; entityId: number; cookie: string; sessionToken: string };
   let member: typeof owner;
   async function person(role: 'owner' | 'admin' | 'member', name: string) {
     const user = await createTestUser({ email: `${name}@roles.example.com` });
@@ -20,7 +20,8 @@ describe('member roles through generic entity edits', () => {
     await ensureMemberEntity({ organizationId: org.id, userId: user.id, name, email: user.email, role, status: 'active' });
     const sql = getTestDb();
     const [entity] = await sql`SELECT entity_id FROM entity_identities WHERE organization_id = ${org.id} AND namespace = 'auth_user_id' AND identifier = ${user.id}`;
-    return { userId: user.id, memberId, entityId: Number(entity.entity_id), cookie: (await createTestSession(user.id)).cookieHeader };
+    const session = await createTestSession(user.id);
+    return { userId: user.id, memberId, entityId: Number(entity.entity_id), cookie: session.cookieHeader, sessionToken: session.token };
   }
   beforeEach(async () => {
     await cleanupTestDatabase();
@@ -123,6 +124,33 @@ describe('member roles through generic entity edits', () => {
     const response = await post('/api/auth/organization/update-member-role', { cookie: owner.cookie, body: { organizationId: org.id, memberId: member.memberId, role: 'admin' } });
     expect(response.status).toBe(200);
     expect(await roles(member)).toMatchObject({ role: 'admin', displayed: 'admin' });
+  });
+  it('changes a role through the auth API with a bearer session token', async () => {
+    const response = await post('/api/auth/organization/update-member-role', { token: owner.sessionToken, body: { organizationId: org.id, memberId: member.memberId, role: 'admin' } });
+    expect(response.status).toBe(200);
+    expect(await roles(member)).toMatchObject({ role: 'admin', displayed: 'admin' });
+  });
+  it('rejects invalid and revoked bearer sessions', async () => {
+    const sql = getTestDb();
+    await sql`DELETE FROM session WHERE token = ${owner.sessionToken}`;
+    for (const token of ['invalid-session-token', owner.sessionToken]) {
+      const response = await post('/api/auth/organization/update-member-role', { token, body: { organizationId: org.id, memberId: member.memberId, role: 'admin' } });
+      expect(response.status).toBe(401);
+      expect(await roles(member)).toMatchObject({ role: 'member', displayed: 'member' });
+    }
+  });
+  it('preserves role restrictions for bearer sessions', async () => {
+    const admin = await person('admin', 'admin');
+    for (const [actor, target, role] of [
+      [member, member, 'admin'],
+      [admin, member, 'owner'],
+      [admin, owner, 'admin'],
+    ] as const) {
+      const response = await post('/api/auth/organization/update-member-role', { token: actor.sessionToken, body: { organizationId: org.id, memberId: target.memberId, role } });
+      expect(response.status).toBe(403);
+    }
+    expect(await roles(member)).toMatchObject({ role: 'member', displayed: 'member' });
+    expect(await roles(owner)).toMatchObject({ role: 'owner', displayed: 'owner' });
   });
   it('enforces ownership restrictions for admins', async () => {
     const admin = await person('admin', 'admin');

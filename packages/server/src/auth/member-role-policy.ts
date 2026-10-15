@@ -16,8 +16,8 @@ export function parseMemberRole(value: unknown): MemberRole {
 // rows. Serialize owner-count checks across replicas, including the auth API.
 // A workspace whose deletion was requested takes no membership change: the
 // lock serializes with `requestWorkspaceDeletion`, which locks the same row.
-// Better Auth's member-role user hook runs before any plugin hook, so this is
-// also what refuses it there.
+// Recheck under the lock even after the auth plugin's deletion guard: a
+// deletion request may have committed since that guard ran.
 export async function lockMemberRoleChanges(sql: DbClient, organizationId: string): Promise<void> {
   const rows = await sql`
     SELECT o.id FROM organization o

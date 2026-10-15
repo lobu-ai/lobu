@@ -1,8 +1,9 @@
 /**
  * The chat-identity registry — the ONE place core code COLLECTS the per-platform
  * sender-identity models. Each descriptor is owned by its connector; this file
- * only gathers them so `resolveChatUserIdentity` and the login writer dispatch
- * without naming a connector.
+ * only gathers them so `resolveChatUserIdentity`, the login writer and the
+ * transcript attribution edge (`gateway/connections/sender-identity.ts`)
+ * dispatch without naming a connector.
  *
  * Adding a platform is one descriptor in its `@lobu/connectors/<key>-identity`
  * module plus one entry here — and, for the write side, one extractor in

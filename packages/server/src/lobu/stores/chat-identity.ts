@@ -11,19 +11,25 @@ import { chatUserIdentityFor } from "./chat-identity-sources.js";
  */
 export const CHAT_LINK_IDENTITY_SOURCE = "chat:link";
 
+/** `entity_identities.source_connector` of a chat identity proven by the provider's own sign-in. */
+const SIGN_IN_IDENTITY_SOURCE = "auth:signup";
+
 /**
  * The one trust rule for a `chat_ei` row read as proof of who a user is:
  * provider-proven rows hold everywhere; a link-proven row holds only in
- * `organizationId`, and nowhere when it is null. Every reader that treats a
- * chat identity as proof must apply this, or a link asserted by one org
- * becomes proof for another.
+ * `organizationId`, and nowhere when it is null. Every other row — a chat id a
+ * connector attributed onto an entity by matching some other identity, for
+ * instance — is data, not proof the member controls that chat account, so it
+ * holds nowhere. Every reader that treats a chat identity as proof must apply
+ * this, or one org's data becomes proof of identity in every org.
  */
 export function chatIdentityTrustedIn(
 	sql: DbClient,
 	organizationId: string | null,
 ) {
-	return sql`(chat_ei.source_connector IS DISTINCT FROM ${CHAT_LINK_IDENTITY_SOURCE}
-        OR chat_ei.organization_id = ${organizationId})`;
+	return sql`(chat_ei.source_connector = ${SIGN_IN_IDENTITY_SOURCE}
+        OR (chat_ei.source_connector = ${CHAT_LINK_IDENTITY_SOURCE}
+            AND chat_ei.organization_id = ${organizationId}))`;
 }
 
 /**

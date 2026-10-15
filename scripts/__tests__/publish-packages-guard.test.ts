@@ -223,7 +223,6 @@ describe("publish loop (subprocess, stub npm)", () => {
         `const log = ${JSON.stringify(logFile)};`,
         // `npm view <pkg>@<ver> version` → nothing is published yet.
         "if (args[0] === 'view') { process.exit(1); }",
-        "if (args[0] === 'install') { fs.writeFileSync('package-lock.json', '{}'); process.exit(0); }",
         "if (args[0] === 'publish') {",
         "  const pkg = JSON.parse(fs.readFileSync('package.json','utf8'));",
         "  fs.appendFileSync(log, pkg.name + '\\n');",
@@ -233,7 +232,19 @@ describe("publish loop (subprocess, stub npm)", () => {
         "  }",
         "  process.exit(0);",
         "}",
-        "process.exit(0);",
+        "process.exit(1);",
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+    // Fail if freezing falls back to PATH npm, a floating version, or scripts.
+    writeFileSync(
+      join(binDir, "bunx"),
+      [
+        "#!/usr/bin/env node",
+        "const fs = require('node:fs');",
+        "const args = process.argv.slice(2);",
+        "if (args.join(' ') === 'npm@11.19.0 install --package-lock-only --ignore-scripts --no-audit --no-fund') { fs.writeFileSync('package-lock.json', '{}'); process.exit(0); }",
+        "process.exit(1);",
       ].join("\n"),
       { mode: 0o755 }
     );

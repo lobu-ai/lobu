@@ -1599,7 +1599,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     const userId = typeof message?.userId === 'string' ? message.userId : '';
     const channelId =
       typeof message?.channelId === 'string' ? message.channelId : '';
+    // Required, not defaulted: a run without one would mint as an `api` turn
+    // and act as the agent owner instead of its chat sender.
+    const platform =
+      typeof message?.platform === 'string' ? message.platform : '';
     if (
+      !platform ||
       !agentKind ||
       !row.chat_agent_id ||
       !conversationId ||
@@ -1634,8 +1639,6 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     let confined = false;
     let senderName: string | undefined;
     try {
-      const platform =
-        typeof message?.platform === 'string' ? message.platform : undefined;
       const teamId =
         typeof message?.teamId === 'string' ? message.teamId : undefined;
       // The device turn's chat sender decides its authority, exactly as for a
