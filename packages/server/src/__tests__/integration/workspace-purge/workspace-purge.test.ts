@@ -13,6 +13,7 @@ import { materializeDueAutomationRuns } from "../../../automations/automation";
 import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
 import { app, type Env } from "../../../index";
 import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
+import { buildPublicPageModel, buildSitemapEntries } from "../../../public-pages";
 import { registerScheduledJobsTicker } from "../../../scheduled/scheduled-jobs-service";
 import type { TaskScheduler } from "../../../scheduled/task-scheduler";
 import { WORKSPACE_PURGE_TASK } from "../../../scheduled/task-definitions";
@@ -815,6 +816,46 @@ describe("workspace purge", () => {
 		expect(await listed()).toEqual([live.id]);
 		expect(await preview("invitation-listing-deleting")).toBe(404);
 		expect(await preview("invitation-listing-live")).toBe(200);
+	});
+
+	it("takes a public workspace off every anonymous surface before the purge runs", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("public");
+		await sql`UPDATE organization SET visibility = 'public' WHERE id = ${target.organizationId}`;
+		const env = {
+			ENVIRONMENT: "test",
+			BETTER_AUTH_SECRET: "test-auth-secret-for-testing-only",
+			RATE_LIMIT_ENABLED: "false",
+		} as Env;
+		const publicRest = async () =>
+			(
+				await app.fetch(
+					new Request(`http://localhost/api/${target.slug}/public/organization`),
+					env,
+				)
+			).status;
+		const publicPage = () =>
+			buildPublicPageModel(`/${target.slug}`, env, `https://example.test/${target.slug}`);
+		const sitemapLocs = async () =>
+			(await buildSitemapEntries("https://example.test")).map((entry) => entry.loc);
+
+		expect(await publicRest()).toBe(200);
+		expect(await publicPage()).not.toBeNull();
+		expect((await sitemapLocs()).some((loc) => loc.includes(`/${target.slug}`))).toBe(true);
+
+		expect(
+			(
+				await call(
+					"/organization/delete",
+					{ organizationId: target.organizationId },
+					target.token,
+				)
+			).status,
+		).toBe(200);
+		expect(await pendingPurgeTask(target.organizationId)).toHaveLength(1);
+		expect(await publicRest()).toBe(404);
+		expect(await publicPage()).toBeNull();
+		expect((await sitemapLocs()).some((loc) => loc.includes(`/${target.slug}`))).toBe(false);
 	});
 
 	it("hides a requested workspace before the purge runs", async () => {

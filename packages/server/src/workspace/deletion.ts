@@ -70,7 +70,12 @@ export async function requestWorkspaceDeletion(
             ${DELETION_REQUESTED_AT_KEY}::text, to_jsonb(now()),
             ${DELETION_REQUESTED_BY_KEY}::text, ${params.requestedBy}::text
           )
-        )::text
+        )::text,
+            -- Every anonymous read of a workspace (public REST, public pages,
+            -- sitemap, cross-workspace schema and search reads) filters on
+            -- visibility = 'public', so this hides it from all of them at
+            -- once. Deletion is terminal: nothing restores it.
+            visibility = 'private'
         WHERE id = ${org.id}
       `;
       await insertWorkspaceChangeEventInTransaction(

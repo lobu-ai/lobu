@@ -124,7 +124,11 @@ failure like the 2026-10-15 500 is no longer silent.
   a session that raced it still holds one and must switch away first.
   The two endpoints that list rows across workspaces, `/organization/list`
   and `/organization/list-user-invitations`, are filtered in an after hook,
-  and the public invitation preview no longer resolves a deleting workspace. The member-role
+  and the public invitation preview no longer resolves a deleting workspace.
+  The request also sets `visibility = 'private'`: every anonymous read (public
+  REST, public pages, sitemap, cross-workspace schema and search reads)
+  filters on `visibility = 'public'`, so that one write hides the workspace
+  from all of them. Deletion is terminal, so nothing restores it. The member-role
   endpoint is a user hook that runs before any plugin hook, so
   `lockMemberRoleChanges` refuses a deleting workspace for every membership
   role write. Create and update reject client metadata carrying either
