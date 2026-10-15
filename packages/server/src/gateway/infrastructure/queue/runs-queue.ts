@@ -660,6 +660,7 @@ export class RunsQueue implements IMessageQueue {
       name: worker.queueName,
       attempt: claimed.attempts,
       maxAttempts: claimed.maxAttempts,
+      claimedBy: this.claimedBy,
     };
     const heartbeat = setInterval(() => {
       void this.heartbeatClaim(claimed.runId);

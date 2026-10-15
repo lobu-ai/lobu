@@ -84,6 +84,7 @@ import { ToolUserError } from './utils/errors';
 import { buildWorkspaceInstructions, DIRECT_MCP_INSTRUCTIONS } from './utils/workspace-instructions';
 import { listLiveGrantedMemberWorkspaces } from './auth/oauth/workspace-grants';
 import logger from './utils/logger';
+import { organizationIdLiveSql } from './workspace/deletion-state';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -965,10 +966,11 @@ async function resolveMembershipRole(
   if (!organizationId || !userId) return null;
   const sql = createDbClientFromEnv(env);
   const rows = await sql`
-    SELECT role
-    FROM "member"
-    WHERE "organizationId" = ${organizationId}
-      AND "userId" = ${userId}
+    SELECT m.role
+    FROM "member" m
+    WHERE m."organizationId" = ${organizationId}
+      AND m."userId" = ${userId}
+      AND ${sql.unsafe(organizationIdLiveSql('m."organizationId"'))}
     LIMIT 1
   `;
   return rows.length > 0 ? ((rows[0].role as string) ?? null) : null;

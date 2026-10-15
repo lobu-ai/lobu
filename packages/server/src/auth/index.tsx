@@ -49,10 +49,9 @@ import {
 } from "./endpoint-error-log";
 import { memberRoleAuthHook } from "./member-roles";
 import { bindOAuthOrganization } from "./oauth-organization-context";
-import {
-	findExistingPersonalOrg,
-	isPersonalOrgDeletionBlocked,
-} from "./personal-org-provisioning";
+import { workspaceDeletionPlugin } from "./organization-delete";
+import { findExistingPersonalOrg } from "./personal-org-provisioning";
+import { resolveSession } from "./resolve-session";
 import { persistLoginChatIdentity } from "./subject-identities";
 
 function gravatarUrl(email: string): string {
@@ -203,6 +202,11 @@ export async function createAuth(
 		trustedOriginSet.add(`https://${normalizedCookieZone}`);
 	}
 
+	// Plugin hooks that need a fully authenticated session call back into this
+	// instance's API (see `workspaceDeletionPlugin`); it is bound once built.
+	let sessionApi: { api: { getSession: (opts: { headers: Headers }) => Promise<any> } } | null =
+		null;
+
 	const auth = betterAuth({
 		...(env.BETTER_AUTH_SECRET ? { secret: env.BETTER_AUTH_SECRET } : {}),
 		database: {
@@ -317,29 +321,18 @@ export async function createAuth(
 			// bearer headers to managing a cookie jar. Cookie auth still works
 			// for browser SPAs unchanged.
 			bearer(),
+			// `POST /organization/delete` records a deletion request and hands the
+			// purge to a background task (`organization-delete.ts`). Better Auth's
+			// own synchronous cascade is disabled so it can never run.
+			workspaceDeletionPlugin((headers) =>
+				sessionApi ? resolveSession(sessionApi, headers) : Promise.resolve(null),
+			),
 			// Organization plugin with teams support
 			organization({
 				allowUserToCreateOrganization: true,
 				creatorRole: "owner",
+				disableOrganizationDeletion: true,
 				organizationHooks: {
-					// A personal org is not user-deletable — see
-					// `isPersonalOrgDeletionBlocked` for why. The marker is read off
-					// the org row the hook already provides, so no second query is
-					// needed. Deleting a team org you own is unaffected.
-					beforeDeleteOrganization: async ({ organization: org, user }) => {
-						if (
-							isPersonalOrgDeletionBlocked(
-								(org as { metadata?: unknown }).metadata,
-								user.id,
-							)
-						) {
-							throw new APIError("FORBIDDEN", {
-								code: "PERSONAL_ORGANIZATION_CANNOT_BE_DELETED",
-								message:
-									"Your personal workspace can't be deleted — devices and personal connections are bound to it.",
-							});
-						}
-					},
 					// If a user manually creates a private org while they have no
 					// personal-org marker yet, tag it as their personal one. Without
 					// this, `personal_org_for_user_id` only gets set by the
@@ -1077,6 +1070,7 @@ export async function createAuth(
 		onAPIError: { onError: logUnhandledAuthEndpointError },
 	});
 	auth.handler = withAuthRequestScope(auth.handler);
+	sessionApi = auth;
 	// betterAuth's inferred return narrows generics per call site (socialProviders
 	// shape, required-vs-optional database/secret); the cache stores the general
 	// Auth<BetterAuthOptions> shape, so widen via unknown.

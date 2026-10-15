@@ -120,6 +120,19 @@ describe("personal org delete guard (e2e)", () => {
 		const result = await deleteOrganization(teamOrgId, cookieHeader);
 
 		expect(result.ok).toBe(true);
-		expect(await orgExists(teamOrgId)).toBe(false);
+		// The delete is a request: the workspace is hidden and a background
+		// purge removes the row (workspace/purge.ts).
+		const sql = getTestDb();
+		const [org] = await sql`
+			SELECT (metadata)::jsonb ->> 'deletion_requested_at' AS requested_at
+			FROM organization WHERE id = ${teamOrgId}
+		`;
+		expect(org.requested_at).not.toBeNull();
+		const tasks = await sql`
+			SELECT id FROM runs
+			WHERE action_key = 'workspace-purge' AND status = 'pending'
+			  AND action_input->'payload'->>'organizationId' = ${teamOrgId}
+		`;
+		expect(tasks).toHaveLength(1);
 	});
 });

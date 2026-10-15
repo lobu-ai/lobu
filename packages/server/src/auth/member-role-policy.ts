@@ -1,5 +1,6 @@
 import { ToolUserError } from '../utils/errors';
 import type { DbClient } from '../db/client';
+import { organizationLiveSql } from '../workspace/deletion-state';
 
 export const MEMBER_ROLES = ['owner', 'admin', 'member'] as const;
 export type MemberRole = typeof MEMBER_ROLES[number];
@@ -13,8 +14,16 @@ export function parseMemberRole(value: unknown): MemberRole {
 
 // Every semantic membership-role write takes this lock BEFORE entity/member
 // rows. Serialize owner-count checks across replicas, including the auth API.
+// A workspace whose deletion was requested takes no membership change: the
+// lock serializes with `requestWorkspaceDeletion`, which locks the same row.
+// Better Auth's member-role user hook runs before any plugin hook, so this is
+// also what refuses it there.
 export async function lockMemberRoleChanges(sql: DbClient, organizationId: string): Promise<void> {
-  const rows = await sql`SELECT id FROM organization WHERE id = ${organizationId} FOR UPDATE`;
+  const rows = await sql`
+    SELECT o.id FROM organization o
+    WHERE o.id = ${organizationId} AND ${sql.unsafe(organizationLiveSql('o'))}
+    FOR UPDATE
+  `;
   if (!rows.length) throw new ToolUserError('Workspace not found', 404);
 }
 

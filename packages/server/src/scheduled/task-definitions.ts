@@ -16,6 +16,8 @@ export const AUTOMATION_REACTION_TASK = 'automation-reaction';
 export const AUTOMATION_DIGEST_TASK = 'automation-digest';
 export const AUTOMATION_SCRIPT_TASK = 'automation-script';
 export const SOURCE_FEED_LISTENER_TASK = 'source-feed-listener';
+export const WORKSPACE_PURGE_TASK = 'workspace-purge';
+const WORKSPACE_PURGE_TASK_QUEUE = `task:${WORKSPACE_PURGE_TASK}`;
 const SOURCE_FEED_LISTENER_TASK_QUEUE = `task:${SOURCE_FEED_LISTENER_TASK}`;
 export const AUTOMATION_REACTION_TASK_QUEUE =
   `task:${AUTOMATION_REACTION_TASK}`;
@@ -43,6 +45,9 @@ export function taskQueueName(name: string): string {
   if (name === AUTOMATION_DIGEST_TASK) {
     return AUTOMATION_DIGEST_TASK_QUEUE;
   }
+  if (name === WORKSPACE_PURGE_TASK) {
+    return WORKSPACE_PURGE_TASK_QUEUE;
+  }
   return name === AUTOMATION_REACTION_TASK
     ? AUTOMATION_REACTION_TASK_QUEUE
     : 'task';
@@ -56,6 +61,7 @@ export function isTransactionalTaskName(name: string): boolean {
     name === AUTOMATION_DIGEST_TASK ||
     name === NOTIFICATION_DELIVERY_TASK ||
     name === AUTOMATION_SCRIPT_TASK ||
-    name === SOURCE_FEED_LISTENER_TASK
+    name === SOURCE_FEED_LISTENER_TASK ||
+    name === WORKSPACE_PURGE_TASK
   );
 }

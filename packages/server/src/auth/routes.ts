@@ -17,6 +17,7 @@ import { resolveBaseUrl } from './base-url';
 import { createAuth } from './index';
 import { mcpAuth, requireAuth } from './middleware';
 import { findExistingPersonalOrg } from './personal-org-provisioning';
+import { organizationIdLiveSql, organizationLiveSql } from '../workspace/deletion-state';
 import { hostOnlyExpiry } from './session-cookie-scope';
 import { OAuthClientsStore } from './oauth/clients';
 import { OAuthProvider } from './oauth/provider';
@@ -85,6 +86,7 @@ credentialRoutes.get('/agents', requireAuth, async (c) => {
       JOIN "organization" o ON o.id = m."organizationId"
       WHERE m."userId" = ${user.id}
         AND o.slug = ${orgSlug}
+        AND ${sql.unsafe(organizationLiveSql('o'))}
       LIMIT 1
     `;
     if (membership.length === 0) {
@@ -97,6 +99,7 @@ credentialRoutes.get('/agents', requireAuth, async (c) => {
       SELECT m."organizationId" as organization_id
       FROM "member" m
       WHERE m."userId" = ${user.id}
+        AND ${sql.unsafe(organizationIdLiveSql('m."organizationId"'))}
       ORDER BY m."createdAt" ASC
       LIMIT 1
     `;

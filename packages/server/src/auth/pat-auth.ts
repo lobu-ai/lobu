@@ -12,6 +12,7 @@
 import type { DbClient } from "../db/client";
 import type { AuthInfo } from "./oauth/types";
 import { PersonalAccessTokenService } from "./tokens";
+import { organizationIdLiveSql } from "../workspace/deletion-state";
 
 const PAT_PREFIX = "owl_pat_";
 
@@ -133,9 +134,10 @@ export async function authenticatePat(
 	// Tenant-membership check — a PAT for org A must still belong to org A.
 	const memberRows = (await sql`
     SELECT 1
-    FROM "member"
-    WHERE "userId" = ${user.id}
-      AND "organizationId" = ${patInfo.organizationId}
+    FROM "member" m
+    WHERE m."userId" = ${user.id}
+      AND m."organizationId" = ${patInfo.organizationId}
+      AND ${sql.unsafe(organizationIdLiveSql('m."organizationId"'))}
     LIMIT 1
   `) as unknown as Array<unknown>;
 	if (memberRows.length === 0) {

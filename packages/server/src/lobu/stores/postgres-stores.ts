@@ -18,6 +18,7 @@ import {
 	upsertChatConnectionProjection,
 } from "./connections-projection";
 import { getOrgId, tryGetOrgId } from "./org-context";
+import { organizationIdLiveSql } from "../../workspace/deletion-state";
 
 const logger = createLogger("postgres-stores");
 
@@ -402,6 +403,7 @@ export function createPostgresAgentConnectionStore(
 					`SELECT c.* FROM connections c
 					 WHERE c.id = $2::bigint AND c.deleted_at IS NULL
 					   AND ($3::text IS NULL OR c.organization_id = $3)
+					   AND ${organizationIdLiveSql("c.organization_id")}
 					   AND ${CONNECTOR_TRANSPORT_ROW_SQL}
 					 LIMIT 1`,
 					[transportArray, connectionId, orgId ?? null],
@@ -416,12 +418,14 @@ export function createPostgresAgentConnectionStore(
             SELECT * FROM connections
             WHERE organization_id = ${orgId} AND slug = ${slug}
               AND credential_mode IS NOT NULL AND deleted_at IS NULL
+              AND ${sql.unsafe(organizationIdLiveSql("connections.organization_id"))}
             LIMIT 1
           `
 				: await sql`
             SELECT * FROM connections
             WHERE slug = ${slug}
               AND credential_mode IS NOT NULL AND deleted_at IS NULL
+              AND ${sql.unsafe(organizationIdLiveSql("connections.organization_id"))}
             LIMIT 1
           `;
 			return projRows.length > 0 ? connectionsRowToStored(projRows[0]) : null;
@@ -453,6 +457,7 @@ export function createPostgresAgentConnectionStore(
 			const projRows = await sql`
         SELECT * FROM connections
         WHERE credential_mode IS NOT NULL AND deleted_at IS NULL
+          AND ${sql.unsafe(organizationIdLiveSql("connections.organization_id"))}
           ${orgId ? sql`AND organization_id = ${orgId}` : sql``}
           ${agentId ? sql`AND agent_id = ${agentId}` : sql``}
           ${platform ? sql`AND connector_key = ${platform}` : sql``}
@@ -467,6 +472,7 @@ export function createPostgresAgentConnectionStore(
 				`SELECT c.* FROM connections c
 				 WHERE c.deleted_at IS NULL
 				   AND ($2::text IS NULL OR c.organization_id = $2)
+				   AND ${organizationIdLiveSql("c.organization_id")}
 				   AND ($3::text IS NULL OR c.connector_key = $3)
 				   AND ${CONNECTOR_TRANSPORT_ROW_SQL}
 				 ORDER BY c.created_at DESC`,

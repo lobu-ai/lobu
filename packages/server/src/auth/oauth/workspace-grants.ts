@@ -5,6 +5,7 @@ import {
 	pgTextArray,
 } from "../../db/client";
 import { findExistingPersonalOrg } from "../personal-org-provisioning";
+import { organizationLiveSql } from "../../workspace/deletion-state";
 
 /** Keep consent payloads and direct-search fan-out bounded. */
 export const MAX_GRANTED_ORGANIZATIONS = 50;
@@ -79,6 +80,7 @@ export async function listLiveGrantedMemberWorkspaces({
       JOIN member m
         ON m."organizationId" = o.id
        AND m."userId" = ${userId}
+      WHERE ${sql.unsafe(organizationLiveSql("o"))}
       ORDER BY grant_row.position ASC
     `,
 		findExistingPersonalOrg(userId, sql),
@@ -160,7 +162,8 @@ export async function findUngrantedMemberWorkspace({
       JOIN member m
         ON m."organizationId" = o.id
        AND m."userId" = ${userId}
-      WHERE o.slug = ${target} OR o.id = ${target}
+      WHERE (o.slug = ${target} OR o.id = ${target})
+        AND ${sql.unsafe(organizationLiveSql("o"))}
       LIMIT 1
     `;
 	if (rows.length === 0) return null;

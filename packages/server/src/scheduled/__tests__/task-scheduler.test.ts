@@ -216,16 +216,18 @@ describe("TaskScheduler.start (cron seeding)", () => {
 });
 
 describe("TaskScheduler.dispatch", () => {
-  test("routes payload, run id, and one-based attempt to the handler", async () => {
+  test("routes payload, run id, claim owner, and one-based attempt to the handler", async () => {
     const queue = new FakeQueue();
     const scheduler = new TaskScheduler(queue);
     let received: unknown = null;
     let receivedRunId: number | null = null;
     let receivedAttempt: number | null = null;
+    let receivedClaimedBy: string | undefined;
     scheduler.register("foo", async (ctx) => {
       received = ctx.payload;
       receivedRunId = ctx.taskRunId;
       receivedAttempt = ctx.attempt;
+      receivedClaimedBy = ctx.claimedBy;
     });
     await scheduler.start();
 
@@ -236,12 +238,14 @@ describe("TaskScheduler.dispatch", () => {
       data: { name: "foo", payload: { x: 1 } },
       name: "task",
       attempt: 1,
+      claimedBy: "queue-owner-fixture",
     };
     await handler(job);
 
     expect(received).toEqual({ x: 1 });
     expect(receivedRunId).toBe(42);
     expect(receivedAttempt).toBe(2);
+    expect(receivedClaimedBy).toBe("queue-owner-fixture");
   });
 
   test("seeds next cron tick BEFORE running the handler", async () => {

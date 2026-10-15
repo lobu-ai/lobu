@@ -47,6 +47,7 @@ import {
 } from './workspace-grants';
 import { getConfiguredPublicOrigin } from '../../utils/public-origin';
 import { resolveSession } from '../resolve-session';
+import { organizationLiveSql } from '../../workspace/deletion-state';
 
 const oauthRoutes = new Hono<{ Bindings: Env }>();
 const INVALID_DEVICE_CODE_MESSAGE = 'Invalid or expired user code';
@@ -257,6 +258,7 @@ async function resolveMcpGrant(params: {
       LEFT JOIN member m
         ON m."organizationId" = o.id AND m."userId" = ${params.userId}
       WHERE o.slug = ${resourceOrgSlug}
+        AND ${params.sql.unsafe(organizationLiveSql('o'))}
       LIMIT 1
     `;
     if (rows.length === 0) {

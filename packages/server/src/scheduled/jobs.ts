@@ -46,6 +46,7 @@ import {
   NOTIFICATION_DELIVERY_TASK,
   INTERACTIVE_EVENT_CARD_REFRESH_TASK,
   WORKSPACE_EVENT_ACTIVATION_TASK,
+  WORKSPACE_PURGE_TASK,
 } from './task-definitions';
 import { triggerEmbedBackfill } from './trigger-embed-backfill';
 import { runMemberClaimDriftCheck } from './member-claim-drift';
@@ -66,6 +67,8 @@ import {
 } from '../gateway/services/agent-threads';
 import { buildMessagePayload } from '../gateway/services/platform-helpers';
 import { migrateLegacyPlaintextAuthData } from '../utils/auth-credential-secrets';
+import type { WorkspacePurgeTaskPayload } from '../workspace/deletion';
+import { runWorkspacePurgeTask } from '../workspace/purge';
 
 function asDeliveryContext(value: unknown): ScheduledDeliveryContext | null {
   if (!value || typeof value !== 'object') return null;
@@ -520,6 +523,14 @@ function registerMaintenanceTasks(
         '[task] automation-digest settled',
       );
     }
+  });
+
+  // Reclaim a requested workspace's rows in lease-fenced, resumable batches.
+  scheduler.register(WORKSPACE_PURGE_TASK, async (ctx) => {
+    await runWorkspacePurgeTask(ctx.payload as WorkspacePurgeTaskPayload, {
+      taskRunId: ctx.taskRunId,
+      claimedBy: ctx.claimedBy,
+    });
   });
 
   // scheduled_jobs ticker: scans the table every minute, spawns due rows

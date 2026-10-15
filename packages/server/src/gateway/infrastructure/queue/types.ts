@@ -23,6 +23,8 @@ export interface QueueJob<T = any> {
    */
   attempt?: number;
   maxAttempts?: number;
+  /** RunsQueue's claim owner; durable handlers must fence against this identity. */
+  claimedBy?: string;
 }
 
 export interface QueueOptions {

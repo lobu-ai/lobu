@@ -63,6 +63,8 @@ interface TaskContext<P = unknown> {
   taskRunId: number;
   /** One-based delivery attempt for this task run. */
   attempt: number;
+  /** Owner captured by the queue at dispatch, never re-read from a later claim. */
+  claimedBy?: string;
 }
 
 type TaskHandler<P = unknown> = (ctx: TaskContext<P>) => Promise<void>;
@@ -370,6 +372,7 @@ export class TaskScheduler {
         payload: data.payload,
         taskRunId: Number(job.id),
         attempt: (job.attempt ?? 0) + 1,
+        claimedBy: job.claimedBy,
       });
       // Label is `task`, NOT `job`: Prometheus reserves `job` for the scrape
       // target and overwrites any same-named metric label, which silently

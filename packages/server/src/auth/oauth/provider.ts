@@ -9,6 +9,7 @@ import { type DbClient, pgTextArray } from '../../db/client';
 import logger from '../../utils/logger';
 import { findExistingPersonalOrg } from '../personal-org-provisioning';
 import { PersonalAccessTokenService } from '../tokens';
+import { organizationLiveSql } from '../../workspace/deletion-state';
 import { OAuthClientsStore } from './clients';
 import {
   DEFAULT_SCOPES_STRING,
@@ -632,6 +633,7 @@ export class OAuthProvider {
       FROM "member" m
       JOIN "organization" o ON o.id = m."organizationId"
       WHERE m."userId" = ${userId}
+        AND ${this.sql.unsafe(organizationLiveSql('o'))}
       ORDER BY o.name ASC
     `;
 

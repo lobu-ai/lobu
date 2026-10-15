@@ -1,8 +1,9 @@
 # Workspace deletion as a background purge
 
-Status: accepted design (confirmed 2026-10-15), not yet implemented. No new
-table and no new public route. The existing delete endpoint changes from
-synchronous to "deleting".
+Status: implemented (`auth/organization-delete.ts`, `workspace/deletion.ts`,
+`workspace/purge.ts`). No new table and no new public route. The existing
+delete endpoint changes from synchronous to "deleting". See "Implementation
+notes" at the end for where the build differs from the plan below.
 
 Evidence checked on 2026-10-15 against `origin/main` at
 [`9ac7d26500227d09ec0c52fa5468ba7e2ca78472`](https://github.com/lobu-ai/lobu/tree/9ac7d26500227d09ec0c52fa5468ba7e2ca78472).
@@ -55,7 +56,7 @@ This design turns those steps into the product's delete.
 ### Flow
 
 1. **Request.**
-   - The delete endpoint, still owner-only and still refusing personal workspaces (`beforeDeleteOrganization`), records the request on `organization.metadata` (`deletion_requested_at`, `deletion_requested_by`). That is an existing JSON column, so there is no schema change.
+   - The delete endpoint, still owner-only and still refusing personal workspaces (`isPersonalOrgDeletionBlocked`), records the request on `organization.metadata` (`deletion_requested_at`, `deletion_requested_by`). That is an existing text column storing JSON, so there is no schema change.
    - It writes the audit row and enqueues one `workspace-purge` task on the existing runs queue.
    - It returns at once. The UI shows the workspace as deleting.
 2. **Hidden immediately.** A workspace with `deletion_requested_at` set is excluded from:
@@ -96,3 +97,65 @@ failure like the 2026-10-15 500 is no longer silent.
 - **Integration test.** Seed a workspace with events, embeddings and a row in every no-FK table. Request the delete, run the task, and assert zero rows remain in every org-scoped table and no other workspace's rows are touched.
 - **Resume test.** Kill the task mid-batch, re-run it, and assert it completes.
 - **Visibility test.** After the request and before the purge finishes, the workspace is absent from listings, refuses access, and runs no schedules.
+
+## Implementation notes
+
+- **Interception.** A Better Auth plugin before hook owns `POST
+  /organization/delete` (the `memberRoleAuthHook` mechanism) and the
+  organization plugin sets `disableOrganizationDeletion`, so the synchronous
+  cascade cannot run. The hook resolves the session through the auth API,
+  because sibling before hooks never see the bearer plugin's header rewrite.
+- **Hidden.** `workspace/deletion-state.ts` is the one predicate. It filters the
+  slug lookup and `getMembershipRole` in `workspace/multi-tenant.ts`, the PAT
+  and MCP membership checks, the
+  workspace listings (`listOrganizations`, OAuth grants, userinfo, consent,
+  chat-claim pickers), the due-Automation, due-feed and `scheduled_jobs`
+  materializers, and the chat connection store. The request also cancels the
+  workspace's pending runs.
+- **Better Auth endpoints.** Its organization endpoints read through its own
+  adapter, so one plugin before hook guards every `/organization/*` endpoint
+  (delete checks its own target), before it runs. The target is every
+  organization the request could resolve to: each organization id or slug,
+  invitation and member it names, plus the session's active organization that
+  Better Auth falls back to. The only place the fallback does not apply is
+  Better Auth's own: set-active given an explicit target or
+  `organizationId: null`. The request also clears every session's active
+  organization that points at the workspace, in the same transaction, so only
+  a session that raced it still holds one and must switch away first.
+  The two endpoints that list rows across workspaces, `/organization/list`
+  and `/organization/list-user-invitations`, are filtered in an after hook,
+  and the public invitation preview no longer resolves a deleting workspace.
+  The request also sets `visibility = 'private'`: every anonymous read (public
+  REST, public pages, sitemap, cross-workspace schema and search reads)
+  filters on `visibility = 'public'`, so that one write hides the workspace
+  from all of them. Deletion is terminal, so nothing restores it.
+  The embedded gateway's default-workspace lookup lost its per-replica cache,
+  so the next request after the deletion (or after a member is removed)
+  already resolves elsewhere on every replica. The member-role
+  endpoint is a user hook that runs before any plugin hook, so
+  `lockMemberRoleChanges` refuses a deleting workspace for every membership
+  role write. Create and update reject client metadata carrying either
+  deletion key, leaving `requestWorkspaceDeletion` its only writer. A test
+  enumerates every registered organization endpoint off the live auth
+  instance. Residual: a request that passed the check just before the
+  deletion committed can still land after it.
+- **Purge order.** Events, then runs (both unbounded per workspace), then
+  identity associations are retired through the governed unlink path (a live
+  one blocks both entity and organization deletes), then entities leaf-first
+  (`parent_id` is `ON DELETE RESTRICT`; authorization edges need the ACL
+  switch), then `organization`, then the explicit no-FK tables.
+  `device_workers` must follow the organization delete because
+  `automations.device_worker_id` references it.
+- **Explicit list.** Re-derived from the schema: the list above plus
+  `agent_users`, `grants`, `automation_reactions` and `sandboxes`.
+- **Durable record.** The task's `runs` row carries no `organization_id`
+  (`runs` cascades from `organization`), so it survives the purge and holds
+  cumulative removed-row counts across retries in `action_output`.
+- **`scheduled_jobs.source_event_id` has no index.** Each deleted event's
+  `ON DELETE SET NULL` check scans `scheduled_jobs`: a 2,000-event batch took
+  26 ms with an empty table, 1.4 s with 20k rows and 6.9 s with 100k rows
+  (local, embedded Postgres). An index is a proposed follow-up migration.
+- **Platform-admin entry point.** Not built: there is no existing platform
+  admin command or route to attach it to (`PLATFORM_ADMIN_USER_IDS` only
+  switches the provider-settings view). `requestWorkspaceDeletion` is the
+  function such an entry point would call.

@@ -44,6 +44,7 @@ import {
 	reconcileAutomationScriptRuns,
 } from "./script-enqueue";
 import { recordScheduledExecutionFailure } from "./scheduled-failure-policy";
+import { organizationIdLiveSql } from "../workspace/deletion-state";
 import {
 	resolveAutomationRunsByMessageIds,
 } from "./run-completion";
@@ -833,6 +834,7 @@ export async function materializeDueAutomationRuns(
           AND w.next_run_at IS NOT NULL
           AND w.next_run_at <= current_timestamp
           ${onlyAutomation}
+          AND ${sql.unsafe(organizationIdLiveSql('w.organization_id'))}
           AND (
             (
               w.device_worker_id IS NOT NULL
@@ -887,6 +889,7 @@ export async function materializeDueAutomationRuns(
           AND w.next_run_at IS NOT NULL
           AND w.next_run_at <= current_timestamp
           ${onlyAutomation}
+          AND ${sql.unsafe(organizationIdLiveSql('w.organization_id'))}
           AND w.device_worker_id IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM agents a

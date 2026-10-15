@@ -60,42 +60,29 @@ import {
 } from "./stores/postgres-stores";
 import { getErrorMessage } from "@lobu/core";
 import { resolveSession } from '../auth/resolve-session';
+import { organizationIdLiveSql } from '../workspace/deletion-state';
 
-// Cache of (userId → orgId) lookups. Keyed by userId; users only see their
-// own row swap when they leave/join orgs, which doesn't happen often. The
-// 60s TTL is deliberately short — first-load cost is one indexed query.
-const DEFAULT_ORG_TTL_MS = 60_000;
-const defaultOrgCache = new Map<
-	string,
-	{ orgId: string | null; expiresAt: number }
->();
-
+// The caller's default workspace: their oldest live membership. Read from
+// Postgres on every call (one indexed lookup on member."userId"); a
+// per-replica cache would keep serving a workspace after its deletion was
+// requested, or after the member was removed, on every other replica.
 export async function resolveDefaultOrgId(
 	userId: string,
 ): Promise<string | null> {
-	const cached = defaultOrgCache.get(userId);
-	if (cached && cached.expiresAt > Date.now()) return cached.orgId;
-
 	try {
 		const sql = getDb();
 		const rows = await sql`
       SELECT m."organizationId" AS organization_id
       FROM "member" m
       WHERE m."userId" = ${userId}
+        AND ${sql.unsafe(organizationIdLiveSql('m."organizationId"'))}
       ORDER BY m."createdAt" ASC
       LIMIT 1
     `;
-		const orgId = (rows[0]?.organization_id as string | undefined) ?? null;
-		if (orgId) {
-			defaultOrgCache.set(userId, {
-				orgId,
-				expiresAt: Date.now() + DEFAULT_ORG_TTL_MS,
-			});
-		}
-		return orgId;
+		return (rows[0]?.organization_id as string | undefined) ?? null;
 	} catch (err) {
-		// The DB may not be reachable yet at request time (e.g. boot races).
-		// Do not cache that transient miss; callers decide how to surface it.
+		// The DB may not be reachable yet at request time (e.g. boot races);
+		// callers decide how to surface it.
 		logger.warn(
 			{ err: getErrorMessage(err) },
 			"[Lobu] resolveDefaultOrgId: lookup failed",
