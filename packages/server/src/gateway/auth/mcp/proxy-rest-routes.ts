@@ -13,6 +13,7 @@ import {
 	getRequestBodyAsText,
 	type JsonRpcResponse,
 	runWithWorkerOrgContext,
+	upstreamJsonRpcRequest,
 } from "./proxy-shared.js";
 import { ssrfBlockResponse } from "./proxy-upstream.js";
 import type { McpTool } from "./tool-cache.js";
@@ -162,11 +163,9 @@ async function handleCallToolAuthenticated(
 			);
 		}
 
-		const jsonRpcBody = JSON.stringify({
-			jsonrpc: "2.0",
-			method: "tools/call",
-			params: { name: toolName, arguments: toolArguments },
-			id: 1,
+		const jsonRpcBody = upstreamJsonRpcRequest("tools/call", {
+			name: toolName,
+			arguments: toolArguments,
 		});
 
 		// Forward the caller's `x-mcp-format` opt-in so internal MCPs (the

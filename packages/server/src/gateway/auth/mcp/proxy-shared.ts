@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
 	MCP_PROTOCOL_VERSION,
 	mintGatewayMcpToken,
@@ -36,6 +37,16 @@ export const INITIALIZE_BODY = JSON.stringify({
 	},
 	id: 0,
 });
+
+/**
+ * A JSON-RPC request the gateway itself sends upstream. Concurrent callers
+ * share one cached upstream session, and an MCP server routes each response
+ * back to its HTTP request by id within that session, so the id must be
+ * unique per request or one of two in-flight calls never gets its response.
+ */
+export function upstreamJsonRpcRequest(method: string, params: unknown): string {
+	return JSON.stringify({ jsonrpc: "2.0", method, params, id: randomUUID() });
+}
 
 /** Standard MCP `notifications/initialized` body. */
 export const INITIALIZED_NOTIFICATION_BODY = JSON.stringify({

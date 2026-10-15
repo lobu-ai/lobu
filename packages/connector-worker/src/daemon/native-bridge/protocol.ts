@@ -23,6 +23,7 @@ export const NATIVE_BRIDGE_KINDS = [
   'failed',
   'capabilities',
   'diagnostic',
+  'activity',
 ] as const;
 
 export type NativeBridgeKind = (typeof NATIVE_BRIDGE_KINDS)[number];

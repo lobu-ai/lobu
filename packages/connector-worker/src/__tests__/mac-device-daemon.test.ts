@@ -1,14 +1,26 @@
 import { describe, expect, test } from 'bun:test';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import packageJson from '../../package.json';
 import {
   bridgeImplementsRun,
   createMacDeviceDaemonShutdown,
+  executeAdvertisedConnectorRun,
+  MAC_DAEMON_CREDENTIAL_REJECTED_EXIT,
+  macDeviceDaemonExitCode,
   macDeviceDaemonMetadata,
   selectMacDeviceDaemonAgentKind,
   validateMacDeviceDaemonOptions,
 } from '../daemon/mac-device-daemon';
-import { MutableWorkerAdvertisementProvider } from '../daemon/client';
+import { MutableWorkerAdvertisementProvider, WorkerHttpError } from '../daemon/client';
 import { executeAutomationRun } from '../daemon/automation';
-import { NATIVE_BRIDGE_PROTOCOL } from '../daemon/native-bridge/protocol';
+import {
+  encodeNativeBridgeFrame,
+  NATIVE_BRIDGE_PROTOCOL,
+  NATIVE_BRIDGE_PROTOCOL_VERSION,
+} from '../daemon/native-bridge/protocol';
 import {
   createWorkerPollLoopShutdownHandler,
   shouldHandleWorkerPollLoopStdinEof,
@@ -158,6 +170,68 @@ describe('Mac device daemon options', () => {
   });
 });
 
+describe('Mac device daemon credential rejection', () => {
+  for (const status of [401, 403]) {
+    test(`supervised daemon exits on poll ${status} while parent stdin stays open`, async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'mac-daemon-rejection-'));
+      const preload = join(directory, 'fetch.ts');
+      await writeFile(preload, `
+        globalThis.fetch = async (url) => {
+          if (new URL(String(url)).pathname === '/api/workers/poll') {
+            process.stderr.write('rejected-poll\\n');
+            return new Response('{"error":"invalid_token"}', { status: ${status} });
+          }
+          return new Response('ok');
+        };
+      `);
+      const child = Bun.spawn([
+        process.execPath, '--preload', preload,
+        join(import.meta.dir, '../mac-device-daemon.ts'), '--supervised-stdio',
+      ], {
+        env: {
+          ...process.env,
+          API_URL: 'https://example.test',
+          WORKER_ID: 'macos:test-host',
+          WORKER_API_TOKEN: `owl_pat_${'a'.repeat(32)}`,
+        },
+        stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
+      });
+      const stderr = new Response(child.stderr).text();
+      const timeout = setTimeout(() => child.kill('SIGKILL'), 3000);
+      try {
+        child.stdin.write(encodeNativeBridgeFrame({
+          version: NATIVE_BRIDGE_PROTOCOL_VERSION,
+          kind: 'hello',
+          request_id: 'test-hello',
+          payload: {
+            protocol: NATIVE_BRIDGE_PROTOCOL,
+            protocol_version: NATIVE_BRIDGE_PROTOCOL_VERSION,
+            app_build: 'test-app',
+            daemon_build: packageJson.version,
+            worker_id: 'macos:test-host',
+            nonce: 'test-nonce',
+            capabilities: {},
+            connector_manifests: [],
+          },
+        }));
+        await child.stdin.flush();
+        expect(await child.exited).toBe(MAC_DAEMON_CREDENTIAL_REJECTED_EXIT);
+        expect((await stderr).match(/rejected-poll/g)).toHaveLength(1);
+      } finally {
+        clearTimeout(timeout);
+        child.kill('SIGKILL');
+        await child.exited;
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test('keeps the generic failure status for anything else', () => {
+    expect(macDeviceDaemonExitCode(new WorkerHttpError(503, '/api/workers/poll', 'down'))).toBe(1);
+    expect(macDeviceDaemonExitCode(new Error('boom'))).toBe(1);
+  });
+});
+
 describe('WorkerPollLoop', () => {
   test('fails closed when a capable daemon receives no run-scoped session', async () => {
     let report: Record<string, unknown> | undefined;
@@ -288,6 +362,35 @@ describe('WorkerPollLoop', () => {
     expect(executions).toBe(1);
   });
 
+  test('reports the active run count as runs start and finish', async () => {
+    let polled = false;
+    let finish!: () => void;
+    const counts: number[] = [];
+    const loop = new WorkerPollLoop({
+      client: {
+        healthCheck: async () => true,
+        poll: async () => {
+          if (polled) return { next_poll_seconds: 1 } as never;
+          polled = true;
+          return { run_id: 1, run_type: 'action' } as never;
+        },
+      } as never,
+      pollIntervalMs: 1,
+      maxConcurrentJobs: 2,
+      execute: () => new Promise<void>((resolve) => { finish = resolve; }),
+      onActiveJobsChange: (activeJobs) => counts.push(activeJobs),
+    });
+
+    const started = loop.start();
+    while (counts.length === 0) await Bun.sleep(1);
+    expect(counts).toEqual([1]);
+    finish();
+    while (counts.length < 2) await Bun.sleep(1);
+    loop.stop();
+    await started;
+    expect(counts).toEqual([1, 0]);
+  });
+
   test('releases the active-job slot when execution throws synchronously', async () => {
     let polled = false;
     const client = {
@@ -392,5 +495,76 @@ describe('bridgeImplementsRun', () => {
         undefined
       )
     ).toBe(false);
+  });
+});
+
+// os.shell runs in the daemon's own builtin; every other advertised connector
+// stays native app work over the bridge.
+describe('executeAdvertisedConnectorRun', () => {
+  function recordingClient() {
+    const completions: Array<Record<string, unknown>> = [];
+    return {
+      completions,
+      client: {
+        id: 'macos:test',
+        async heartbeat() {},
+        async completeAction(input: Record<string, unknown>) {
+          completions.push(input);
+        },
+      },
+    };
+  }
+  const advertising = (key: string) =>
+    new MutableWorkerAdvertisementProvider({ capabilities: {}, manifests: [{ key }], generation: 1 });
+
+  test.skipIf(!existsSync('/bin/zsh'))('runs os.shell through the daemon builtin, not the bridge', async () => {
+    // An empty ZDOTDIR keeps the developer's own zsh profile out of stdout.
+    const profileDir = mkdtempSync(join(tmpdir(), 'lobu-mac-shell-profile-'));
+    const savedZdotdir = process.env.ZDOTDIR;
+    process.env.ZDOTDIR = profileDir;
+    try {
+      const { client, completions } = recordingClient();
+      const bridge = {
+        run() {
+          throw new Error('os.shell must not reach the native bridge');
+        },
+      };
+      await executeAdvertisedConnectorRun(
+        client as never,
+        {
+          run_id: 71,
+          run_type: 'action',
+          connector_key: 'os.shell',
+          action_key: 'run',
+          action_input: { command: '[[ -o login ]] && echo login', cwd: process.cwd() },
+        },
+        { advertisementProvider: advertising('os.shell'), bridge: bridge as never }
+      );
+      expect(completions).toEqual([
+        expect.objectContaining({ run_id: 71, status: 'success', action_output: expect.objectContaining({ stdout: 'login\n' }) }),
+      ]);
+    } finally {
+      if (savedZdotdir === undefined) delete process.env.ZDOTDIR;
+      else process.env.ZDOTDIR = savedZdotdir;
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps other advertised actions on the native bridge', async () => {
+    const { client, completions } = recordingClient();
+    const calls: Array<Record<string, unknown>> = [];
+    const bridge = {
+      async run(input: Record<string, unknown>) {
+        calls.push(input);
+        return { action_output: { native: true } };
+      },
+    };
+    await executeAdvertisedConnectorRun(
+      client as never,
+      { run_id: 73, run_type: 'action', connector_key: 'apple.computer_use', action_key: 'click' },
+      { advertisementProvider: advertising('apple.computer_use'), bridge: bridge as never }
+    );
+    expect(calls).toEqual([expect.objectContaining({ operation: 'action' })]);
+    expect(completions).toEqual([expect.objectContaining({ status: 'success', action_output: { native: true } })]);
   });
 });

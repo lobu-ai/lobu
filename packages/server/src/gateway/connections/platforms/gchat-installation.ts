@@ -178,6 +178,46 @@ export async function routeGoogleChatWebhook(
   return id;
 }
 
+/**
+ * Pause one space's projection, then revoke its install; re-adding the app
+ * claims it again. Revoking last keeps a failed release retryable: the install
+ * stays active, so the next attempt finds it.
+ */
+async function releaseGoogleChatSpace(
+  organizationId: string,
+  project: string,
+  space: string,
+  deps: ChatRuntimeDeps,
+): Promise<void> {
+  const id = googleChatInstallationId(organizationId, project, space);
+  await getDb()`UPDATE connections SET status = 'paused', updated_at = now()
+    WHERE organization_id = ${organizationId} AND slug = ${runtimeConnectionIdToSlug(id)}
+      AND deleted_at IS NULL AND credential_mode = 'managed'`;
+  await revokeGoogleChatSpace({ id, organizationId }, deps);
+}
+
+/**
+ * A deleted bot connection releases the spaces installed through it. Each
+ * space's install names its bot connection, and routing refuses any other, so
+ * a space left active would stay unreachable even after the bot is set up
+ * again; released, re-adding the app runs the normal claim.
+ */
+export async function releaseGoogleChatSource(
+  source: { id: string; organizationId: string },
+  deps: ChatRuntimeDeps,
+): Promise<void> {
+  if (source.id.startsWith(PREFIX)) return;
+  const spaces = await getDb()<{ organization_id: string; provider_app_id: string; external_tenant_id: string }>`
+    SELECT organization_id, provider_app_id, external_tenant_id FROM app_installations
+    WHERE provider = ${PROVIDER} AND provider_instance = 'cloud' AND status = 'active'
+      AND metadata->>'source_connection_id' = ${source.id}
+      AND metadata->>'source_organization_id' = ${source.organizationId}
+  `;
+  for (const space of spaces) {
+    await releaseGoogleChatSpace(space.organization_id, space.provider_app_id, space.external_tenant_id, deps);
+  }
+}
+
 export async function revokeGoogleChatSpace(
   connection: { id: string; organizationId: string },
   deps: ChatRuntimeDeps,
@@ -222,13 +262,7 @@ export async function acceptGoogleChatWebhook(
       WHERE provider = 'gchat' AND provider_instance = 'cloud' AND provider_app_id = ${project}
         AND external_tenant_id = ${space} AND status = 'active'
         AND metadata->>'source_connection_id' = ${sourceId} LIMIT 1`;
-    if (active) {
-      const id = googleChatInstallationId(active.organization_id, project, space);
-      await revokeGoogleChatSpace({ id, organizationId: active.organization_id }, deps);
-      await sql`UPDATE connections SET status = 'paused', updated_at = now()
-        WHERE organization_id = ${active.organization_id} AND slug = ${runtimeConnectionIdToSlug(id)}
-          AND deleted_at IS NULL AND credential_mode = 'managed'`;
-    }
+    if (active) await releaseGoogleChatSpace(active.organization_id, project, space, deps);
     return;
   }
   if (!added && connection.agentId) return;

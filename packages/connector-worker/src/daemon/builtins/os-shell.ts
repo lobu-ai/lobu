@@ -2,27 +2,26 @@
  * os.shell as a daemon builtin — the ONLY implementation.
  *
  * Every endpoint that offers the shared `os.shell` contract implements it
- * locally: this file on a headless server/VM/pod, the Mac app's own bridge on a
- * Mac. Neither implementation is named in the contract — it is hashed, and a
- * contract that carried its implementation could not be offered by both. There
- * is deliberately no gateway-compiled connector either: shell execution needs a
- * real process, which the isolate lane does not have, and running it on the
- * daemon's own supervisor is what lets a device whose connector compiler is
- * broken still be recovered.
+ * locally through this daemon builtin, on both headless hosts and Macs. The
+ * implementation is not named in the hashed contract, so both endpoints can
+ * offer the same contract. There is deliberately no gateway-compiled connector:
+ * shell execution needs a real process, which the isolate lane does not have,
+ * and running it on the daemon's own supervisor lets a device whose connector
+ * compiler is broken still be recovered.
  *
- * Keep the CONTRACT — the argv (`bash --noprofile --norc -c`), the timeout
- * bounds, the 1MB output cap and the returned shape — in step with
- * the generated headless manifest in `../device-manifests.ts`, which is what the
- * gateway and the agent see.
- *
- * This runs in the daemon's own process, so it REPLACES the environment rather
- * than inheriting it: an inherited env would hand the command the daemon's
- * credentials.
+ * Keep the argv, timeout bounds and returned shape in step with the shared
+ * contract in `packages/device-connectors/src/os-shell.ts`. Output is capped
+ * at 1MB per stream. A headless host runs `bash --noprofile --norc -c` in a
+ * minimal replacement environment so commands do not inherit daemon
+ * credentials. A Mac runs the signed-in user's `zsh -l -c` with the user's
+ * environment minus the daemon's credentials; the Mac app starts this daemon
+ * as its own child.
  *
  * LIFETIME: a run owns a process group for the duration of the call and no
  * longer. Everything still in that group when the command returns is killed,
- * which is what keeps a daemon from leaking processes, and it means `&`,
- * `nohup` and `setsid` do not buy a caller a surviving daemon. That cleanup is
+ * which is what keeps a daemon from leaking processes: `&` and `nohup` alone
+ * do not leave that group. A process that explicitly creates a new session
+ * leaves the daemon's group ownership and is outside this cleanup. Cleanup is
  * deliberate; what was a bug (#3629) is doing it QUIETLY -- a run used to
  * report exit 0 while the poller it had just launched was being killed, so the
  * loss surfaced as an unrelated failure much later. A run that leaves
@@ -33,6 +32,7 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute } from 'node:path';
+import { searchDirs } from '../agent-binaries.js';
 import {
   type TargetExit,
   countOwnedGroupSurvivors,
@@ -114,20 +114,38 @@ function readTimeout(value: unknown): number {
   return Number(value);
 }
 
-function shellEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH ?? '/usr/bin:/bin',
-    HOME: process.env.HOME ?? homedir(),
-    TMPDIR: process.env.TMPDIR ?? '/tmp',
-    LANG: 'C',
-    LC_ALL: 'C',
+export type ShellPlatform = 'headless' | 'macos';
+
+function shellInvocation(
+  platform: ShellPlatform,
+  command: string
+): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+  if (platform === 'macos') {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    delete env.WORKER_API_TOKEN;
+    delete env.LOBU_API_TOKEN;
+    delete env.LOBU_MEMORY_URL;
+    // An app-launched process starts with a stripped PATH.
+    env.PATH = [...searchDirs(), env.PATH ?? '/usr/bin:/bin'].join(':');
+    return { file: '/bin/zsh', args: ['-l', '-c', command], env };
+  }
+  return {
+    file: 'bash',
+    args: ['--noprofile', '--norc', '-c', command],
+    env: {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: process.env.HOME ?? homedir(),
+      TMPDIR: process.env.TMPDIR ?? '/tmp',
+      LANG: 'C',
+      LC_ALL: 'C',
+    },
   };
-  return env;
 }
 
 export async function runShellBuiltin(
   input: Record<string, unknown>,
-  shutdownSignal?: AbortSignal
+  shutdownSignal?: AbortSignal,
+  platform: ShellPlatform = 'headless'
 ): Promise<ShellRunOutput> {
   const command = typeof input.command === 'string' ? input.command.trim() : '';
   if (!command) throw new ShellInputError('command is required');
@@ -151,12 +169,8 @@ export async function runShellBuiltin(
   return await new Promise<ShellRunOutput>((resolve) => {
     let supervised: ReturnType<typeof spawnSupervisedCli>;
     try {
-      supervised = spawnSupervisedCli(
-        'bash',
-        ['--noprofile', '--norc', '-c', command],
-        shellEnvironment(),
-        { stdin: 'pipe', cwd }
-      );
+      const shell = shellInvocation(platform, command);
+      supervised = spawnSupervisedCli(shell.file, shell.args, shell.env, { stdin: 'pipe', cwd });
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       resolve({

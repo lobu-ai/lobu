@@ -26,6 +26,7 @@ import {
 	type JsonRpcResponse,
 	type McpConfigSource,
 	runWithOrganizationContext,
+	upstreamJsonRpcRequest,
 } from "./proxy-shared.js";
 import { McpUpstreamClient } from "./proxy-upstream.js";
 import type { CachedMcpServer, McpTool, McpToolCache } from "./tool-cache.js";
@@ -190,12 +191,7 @@ export class McpProxy {
 				agentId,
 				mcpId,
 				"POST",
-				JSON.stringify({
-					jsonrpc: "2.0",
-					method: "tools/list",
-					params: {},
-					id: 1,
-				}),
+				upstreamJsonRpcRequest("tools/list", {}),
 				scopeKey,
 				workerToken,
 				undefined,

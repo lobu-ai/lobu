@@ -936,7 +936,7 @@ credentialRoutes.post('/local-init', async (c) => {
   }
 
   // The session token alone is not enough for native worker callers — the
-  // /api/workers/* middleware checks for `device_worker:run` / `mcp:admin`
+  // /api/workers/* middleware requires `device_worker:run` (no MCP resource)
   // in mcpAuthInfo.scopes, and a Better Auth session carries no scopes.
   // Mint a worker-scoped PAT alongside the session so the menu bar's
   // automation poll loop and the Chrome extension's device-worker poll both

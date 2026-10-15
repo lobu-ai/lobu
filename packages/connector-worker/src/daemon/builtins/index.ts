@@ -1,4 +1,8 @@
-import { ShellInputError, type ShellRunOutput, runShellBuiltin } from './os-shell.js';
+import { monitorActionRun } from '../action-monitor.js';
+import type { ExecutorClient, PollResponse } from '../client.js';
+import { log } from '../log.js';
+import { completeActionOnce } from '../terminal-delivery.js';
+import { ShellInputError, type ShellPlatform, type ShellRunOutput, runShellBuiltin } from './os-shell.js';
 
 export type DaemonBuiltinErrorCode =
   | 'invalid_operation_input'
@@ -56,7 +60,11 @@ function describeShellFailure(output: ShellRunOutput): string {
  */
 const DAEMON_BUILTINS: Record<
   string,
-  (input: Record<string, unknown>, shutdownSignal?: AbortSignal) => Promise<ShellRunOutput>
+  (
+    input: Record<string, unknown>,
+    shutdownSignal: AbortSignal | undefined,
+    platform: ShellPlatform
+  ) => Promise<ShellRunOutput>
 > = {
   'os.shell/run': runShellBuiltin,
 };
@@ -86,6 +94,7 @@ export async function executeDaemonBuiltin(params: {
   actionKey: string;
   input: Record<string, unknown>;
   shutdownSignal?: AbortSignal;
+  platform?: ShellPlatform;
 }): Promise<DaemonBuiltinResult> {
   const builtin = DAEMON_BUILTINS[builtinId(params.connectorKey, params.actionKey)];
   if (!builtin) {
@@ -97,7 +106,7 @@ export async function executeDaemonBuiltin(params: {
   }
 
   try {
-    const output = await builtin(params.input, params.shutdownSignal);
+    const output = await builtin(params.input, params.shutdownSignal, params.platform ?? 'headless');
     if (!output.success) {
       return {
         ok: false,
@@ -117,5 +126,68 @@ export async function executeDaemonBuiltin(params: {
       code: error instanceof ShellInputError ? 'invalid_operation_input' : 'operation_execution_failed',
       error: error instanceof Error ? error.message : String(error),
     };
+  }
+}
+
+/** Run one claimed built-in action and report its single terminal result. */
+export async function executeDaemonBuiltinActionRun(
+  client: ExecutorClient,
+  job: PollResponse,
+  cfg: { heartbeatIntervalMs: number; shutdownSignal?: AbortSignal; platform?: ShellPlatform }
+): Promise<{ itemsCollected: number; error?: string }> {
+  const { run_id, connector_key, action_key, action_input } = job;
+  if (!run_id || !connector_key || !action_key) {
+    throw new Error('Invalid daemon built-in action: missing run_id, connector_key, or action_key');
+  }
+  if (job.compiled_code) {
+    const message =
+      'operation_backend_unavailable: a daemon built-in payload must not contain compiled_code';
+    await completeActionOnce(client, {
+      run_id,
+      worker_id: client.id,
+      status: 'failed',
+      error_message: message,
+    });
+    return { itemsCollected: 0, error: message };
+  }
+
+  const monitor = monitorActionRun(client, run_id, cfg);
+
+  try {
+    const result = await executeDaemonBuiltin({
+      connectorKey: connector_key,
+      actionKey: action_key,
+      input: (action_input ?? {}) as Record<string, unknown>,
+      shutdownSignal: monitor.signal,
+      ...(cfg.platform ? { platform: cfg.platform } : {}),
+    });
+    if (monitor.revoked()) return { itemsCollected: 0 };
+    if (!result.ok) {
+      const message = `${result.code}: ${result.error}`;
+      await completeActionOnce(client, {
+        run_id,
+        worker_id: client.id,
+        status: 'failed',
+        error_message: message,
+        ...(result.output ? { action_output: result.output } : {}),
+      });
+      return { itemsCollected: 0, error: message };
+    }
+
+    await completeActionOnce(client, {
+      run_id,
+      worker_id: client.id,
+      status: 'success',
+      action_output: result.output,
+    });
+    return { itemsCollected: 0 };
+  } catch (error) {
+    // Delivery uncertainty is not an execution failure. The immutable payload
+    // was retried above; never send a contradictory terminal result here.
+    const message = error instanceof Error ? error.message : String(error);
+    log.info(`[executor] Daemon built-in terminal delivery uncertain for ${run_id}:`, message);
+    return { itemsCollected: 0, error: message };
+  } finally {
+    monitor.stop();
   }
 }

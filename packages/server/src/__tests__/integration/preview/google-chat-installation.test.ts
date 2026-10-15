@@ -42,7 +42,7 @@ async function fixture() {
     method: "POST", headers: { authorization: "Bearer not-verified-here" },
     body: JSON.stringify({ type: "MESSAGE", space: { name: spaceName }, message: { name: `${spaceName}/messages/test` } }),
   });
-  return { owner, target, third, source, store, secrets, deps, id, space, connection: connection!, request, secretName, sql };
+  return { owner, target, third, source, store, secrets, manager, deps, id, space, connection: connection!, request, secretName, sql };
 }
 
 describe("Google Chat installation ownership and dispatch", () => {
@@ -93,6 +93,29 @@ describe("Google Chat installation ownership and dispatch", () => {
     const secret = await orgContext.run({ organizationId: f.owner.id }, () => f.secrets.list("connections/test-google-source/"));
     expect(secret).toHaveLength(1);
     expect((await f.deps.getConnection(f.source.id))!.status).toBe("active");
+  });
+  it("deleting the bot connection releases its spaces so re-adding the app claims them again", async () => {
+    const f = await fixture();
+    const secondId = await activateGoogleChatSpace(f.store, f.source, f.third.id, "spaces/test-second-space");
+    await orgContext.run({ organizationId: f.owner.id }, () =>
+      f.manager.removeConnection(f.source.id));
+    expect(await f.deps.getConnection(f.source.id)).toBeNull();
+    expect((await f.deps.getConnection(f.id))!.status).toBe("stopped");
+    expect((await f.deps.getConnection(secondId))!.status).toBe("stopped");
+    await expect(resolveGoogleChatRuntime(f.connection, f.deps)).rejects.toThrow();
+    const credentials = await orgContext.run({ organizationId: f.owner.id }, () => f.secrets.put(
+      "connections/test-replacement-google-source/credentials",
+      JSON.stringify({ client_email: "bot@example.test", private_key: "replacement-test-key" })));
+    const replacement = { ...f.source, id: "test-replacement-google-source", config: { ...f.source.config, credentials } };
+    await f.sql.begin((tx) => upsertChatConnectionProjection(tx, (value) => f.sql.json(value as any), replacement, f.owner.id, "byo"));
+    const readded = new Request("https://gateway.test/api/v1/webhooks/test-google-source", {
+      method: "POST", body: JSON.stringify({ type: "ADDED_TO_SPACE", space: { name: f.space } }),
+    });
+    expect(await routeGoogleChatWebhook(replacement, readded, f.deps)).toBeUndefined();
+    expect(await activateGoogleChatSpace(f.store, replacement, f.target.id, f.space)).toBe(f.id);
+    expect(await routeGoogleChatWebhook(replacement, f.request(), f.deps)).toBe(f.id);
+    const runtime = await resolveGoogleChatRuntime((await f.deps.getConnection(f.id))!, f.deps);
+    expect((runtime!.config as any).credentials).toContain("replacement-test-key");
   });
   it("observes a real vault rotation that does not change the source row", async () => {
     const f = await fixture();

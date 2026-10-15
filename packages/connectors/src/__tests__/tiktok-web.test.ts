@@ -96,6 +96,32 @@ describe("serialized TikTok page adapter", () => {
 		expect(f.polls()).toBe(2);
 	});
 
+	test("scrolls the last Following card and stops on challenges, sign-out, or navigation during loading", async () => {
+		for (const interrupt of ["none", "challenge", "sign-out", "navigation"]) {
+			let polls = 0;
+			let scrolled = 0;
+			const media = { muted: false };
+			const location = new URL("https://www.tiktok.com/following");
+			const cards = [0, 1].map(index => ({ getClientRects: () => [1], scrollIntoView: () => { scrolled = index + 1; } }));
+			const document = {
+				querySelector: (selector: string) => selector === "#captcha-verify-container-main-page"
+					? { getClientRects: () => polls > 0 && interrupt === "challenge" ? [1] : [] }
+					: { textContent: JSON.stringify({ __DEFAULT_SCOPE__: { "webapp.app-context": { user: polls > 0 && interrupt === "sign-out" ? null : { uid: post.id } } } }) },
+				querySelectorAll: (selector: string) => selector === "video,audio" ? [media] : cards,
+			};
+			const run = new Function("document", "location", "setTimeout", `return (${tiktokPage.toString()})("following_scroll")`);
+			const result = run(document, location, (callback: () => void) => {
+				polls++;
+				if (interrupt === "navigation") location.pathname = "/login";
+				callback();
+			});
+			if (interrupt === "none") await expect(result).resolves.toEqual({ ready: true });
+			else await expect(result).rejects.toThrow(interrupt === "challenge" ? "verification required" : interrupt === "sign-out" ? "sign-in" : "page changed");
+			expect(scrolled).toBe(2);
+			expect(media.muted).toBe(true);
+		}
+	});
+
 	function fixture(cardIds = [post.id], verificationRequired = false) {
 		const clickedPosts: string[] = [];
 		const playedPosts: string[] = [];
@@ -168,7 +194,7 @@ describe("serialized TikTok page adapter", () => {
 
 	test("reports verification before reading source data or touching controls and media", async () => {
 		const f = fixture([post.id], true);
-		for (const command of ["identity", "snapshot", "post_links", "detail", "set_like", "frame"]) {
+		for (const command of ["identity", "snapshot", "post_links", "following_status", "following_scroll", "detail", "set_like", "frame"]) {
 			await expect(f.run(command, { liked: true, seconds: 5 })).rejects.toThrow("TikTok verification required");
 		}
 		expect(f.clickedPosts).toEqual([]);
@@ -191,6 +217,28 @@ describe("serialized TikTok page adapter", () => {
 });
 
 describe("TikTok source reads", () => {
+	test("scrolls Following beyond the initial eight posts to collect 30 distinct posts", async () => {
+		const posts = Array.from({ length: 35 }, (_, index) => ({ ...post, id: String(7000000000000000000n + BigInt(index)) }));
+		const batches = [posts.slice(0, 8), posts.slice(6, 16), posts.slice(14, 24), posts.slice(22, 35)];
+		let batch = 0;
+		const { dispatcher, calls } = browser((action, input) => {
+			if (action === "navigate") return { tab_id: 7 };
+			if (action === "network_intercept_start") return { session_id: "synthetic-session" };
+			if (action === "evaluate") {
+				if (String(input.expression).includes(')("following_scroll"')) batch++;
+				return { value: { ready: true } };
+			}
+			if (action === "network_intercept_drain") return { responses: [{ status: 200, body: JSON.stringify({ status_code: 0, hasMore: true, itemList: batches[batch] }) }] };
+			return {};
+		});
+		const result = await new TikTokConnector().read(context(dispatcher, { feedKey: "following", limit: 30 }));
+		expect(result.rows.map(row => row.origin_id)).toEqual(posts.slice(0, 30).map(row => row.id));
+		expect(batch).toBe(3);
+		expect(result.hasMore).toBe(false);
+		expect(result.nextCursor).toBeUndefined();
+		expect(calls.slice(-2).map(call => call.action)).toEqual(["network_intercept_stop", "close_tab"]);
+	});
+
 	test("focuses each scratch snapshot before waiting for lazy-loaded content", async () => {
 		for (const feedKey of ["for_you", "following", "search"]) {
 			let focused = false;
@@ -261,6 +309,7 @@ describe("TikTok source reads", () => {
 		const { dispatcher, calls } = browser(action => {
 			if (action === "navigate") return { tab_id: 7 };
 			if (action === "network_intercept_start") return { session_id: "synthetic-session" };
+			if (action === "evaluate") return { value: { ready: true } };
 			if (action === "network_intercept_drain") return { responses: [{ status: 200, truncated: true, body: JSON.stringify({ status_code: 0, itemList: [post] }) }] };
 			return {};
 		});
@@ -272,6 +321,7 @@ describe("TikTok source reads", () => {
 		const { dispatcher } = browser(action => {
 			if (action === "navigate") return { tab_id: 7 };
 			if (action === "network_intercept_start") return { session_id: "synthetic-session" };
+			if (action === "evaluate") return { value: { ready: true } };
 			if (action === "network_intercept_drain") return { responses: [{ status: 200, body: JSON.stringify({ status_code: 0, itemList: [post] }) }] };
 			return {};
 		});
@@ -284,6 +334,68 @@ describe("TikTok source reads", () => {
 		const result = await new TikTokConnector().read(context(dispatcher, { feedKey: "search", query: "AI & tools/#" }));
 		expect(calls.filter(call => call.action === "navigate")[1]?.input.url).toBe("https://www.tiktok.com/search?q=AI%20%26%20tools%2F%23");
 		expect(result.rows[0]).toMatchObject({ origin_id: post.id, media: { type: "photos" } });
+	});
+});
+
+describe("Following collection bounds and recovery", () => {
+	const response = (items = [post], hasMore = true) => ({ responses: [{ status: 200, body: JSON.stringify({ status_code: 0, hasMore, itemList: items }) }] });
+	function collection(drain: (attempt: number) => unknown, check?: (expression: string) => void) {
+		let attempts = 0;
+		const { dispatcher, calls } = browser((action, input) => {
+			if (action === "navigate") return { tab_id: 7 };
+			if (action === "network_intercept_start") return { session_id: "synthetic-session" };
+			if (action === "network_intercept_drain") return drain(attempts++);
+			if (action === "evaluate") { check?.(String(input.expression)); return { value: { ready: true } }; }
+			return {};
+		});
+		return { calls, run: (limit = 30) => new TikTokConnector().read(context(dispatcher, { feedKey: "following", limit })) };
+	}
+
+	test("stops without scrolling once the requested limit or source end is reached", async () => {
+		for (const ended of [true, false]) {
+			const f = collection(() => response([post], !ended));
+			expect((await f.run(ended ? 30 : 1)).rows).toHaveLength(1);
+			expect(f.calls.some(call => String(call.input.expression).includes(')("following_scroll"'))).toBe(false);
+		}
+	});
+
+	test("bounds repeated batches without treating duplicates as new posts", async () => {
+		const f = collection(() => response());
+		expect((await f.run()).rows).toHaveLength(1);
+		expect(f.calls.filter(call => call.action === "network_intercept_drain")).toHaveLength(3);
+	});
+
+	test("allows a delayed initial response and keeps collecting after an empty drain", async () => {
+		const f = collection(attempt => attempt === 0 ? { responses: [] } : response([post], false));
+		expect((await f.run()).rows[0]?.origin_id).toBe(post.id);
+	});
+
+	test("bounds continually growing feeds that never reach the requested limit", async () => {
+		const f = collection(attempt => response([{ ...post, id: String(7000000000000000000n + BigInt(attempt)) }]));
+		const result = await f.run();
+		expect(result.rows.length).toBeGreaterThan(1);
+		expect(result.rows.length).toBeLessThan(30);
+		expect(f.calls.filter(call => call.action === "network_intercept_drain").length).toBeLessThanOrEqual(7);
+	});
+
+	test("fails and cleans up when a later response is invalid or capture disappears", async () => {
+		for (const bad of [{ missing: true, responses: [] }, { responses: [{ status: 403, body: "blocked" }] }, { responses: [{ status: 200, body: '{"status_code":1,"itemList":[]}' }] }, { responses: [{ status: 200, body: "not json" }] }]) {
+			const f = collection(attempt => attempt === 0 ? response() : bad);
+			await expect(f.run()).rejects.toThrow();
+			expect(f.calls.slice(-2).map(call => call.action)).toEqual(["network_intercept_stop", "close_tab"]);
+		}
+	});
+
+	test("does not return partial success when verification appears after loading posts", async () => {
+		let checks = 0;
+		const f = collection(() => response(), () => { if (++checks === 2) throw new Error("TikTok verification required"); });
+		await expect(f.run(1)).rejects.toThrow("verification required");
+		expect(f.calls.slice(-2).map(call => call.action)).toEqual(["network_intercept_stop", "close_tab"]);
+	});
+
+	test("an empty capture is not evidence of an empty Following feed", async () => {
+		const f = collection(() => ({ responses: [] }));
+		await expect(f.run()).rejects.toThrow("no verifiable posts");
 	});
 });
 
