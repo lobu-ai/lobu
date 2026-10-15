@@ -111,6 +111,13 @@ function canonical(input: Record<string, unknown>): string {
   );
 }
 
+// EventKit accepts both the feed identity and the bare calendar item identifier.
+// Use the feed form for history comparisons and admission keys alike.
+function reminderOriginId(origin: string): string {
+  const trimmed = origin.trim();
+  return trimmed.startsWith("reminder:") ? trimmed : `reminder:${trimmed}`;
+}
+
 type Write = {
   operation: string;
   input: Record<string, unknown>;
@@ -170,12 +177,14 @@ type Attempts = {
   lastPosition: string;
 };
 
+type FieldWrite = { position: string; parentRunId: number; createdAt: number };
+
 type History = {
   writes: Map<string, Attempts>;
   // The newest attempt on each reminder, including cancellations.
   touched: Map<string, string>;
   // The newest attempt on each reminder field, and the window that proposed it.
-  fields: Map<string, { position: string; parentRunId: number }>;
+  fields: Map<string, FieldWrite>;
   // Reminder fields with an admitted write that has not settled.
   unsettledFields: Set<string>;
   // Names the ordering base of a reminder with no write in the read horizon.
@@ -210,7 +219,7 @@ async function readHistory(
   ];
   const writes = new Map<string, Attempts>();
   const touched = new Map<string, string>();
-  const fields = new Map<string, { position: string; parentRunId: number }>();
+  const fields = new Map<string, FieldWrite>();
   const unsettledFields = new Set<string>();
   const failures = new Map<string, number>();
   // A run can match two filters, and runs created mid-scan must not shift
@@ -234,8 +243,13 @@ async function readHistory(
         if (!input) continue;
         const write: Write = {
           operation,
-          input,
-          parentRunId: Number(run.parent_run_id ?? 0),
+          input:
+            typeof input.origin_id === "string"
+              ? { ...input, origin_id: reminderOriginId(input.origin_id) }
+              : input,
+          // Connector children also have parents, without an Automation window.
+          parentRunId:
+            run.automation_id == null ? 0 : Number(run.parent_run_id ?? 0),
         };
         // A create is identified by its marker; any other write by the window
         // run that proposed it. A write made outside an Automation (a person's
@@ -265,7 +279,7 @@ async function readHistory(
           entry.lastStatus = status;
         }
         writes.set(key, entry);
-        const origin = input.origin_id;
+        const origin = write.input.origin_id;
         if (
           typeof origin === "string" &&
           position > (touched.get(origin) ?? "")
@@ -275,7 +289,11 @@ async function readHistory(
           for (const field of fieldsOf(write)) {
             const key = `${origin}|${field}`;
             if (position > (fields.get(key)?.position ?? ""))
-              fields.set(key, { position, parentRunId: write.parentRunId });
+              fields.set(key, {
+                position,
+                parentRunId: write.parentRunId,
+                createdAt: Date.parse(String(run.created_at)),
+              });
             if (ACTIVE.includes(status)) unsettledFields.add(key);
           }
       }
@@ -304,11 +322,13 @@ async function readHistory(
   };
 }
 
-// The fields of a completion or update no newer write has set. A write is
-// newer when a later window proposed it, or when it followed this write's own
-// latest attempt. An update keeps only its live fields, so it never sets a
-// field back to an older value.
-function unsuperseded(history: History, write: Write): Write | undefined {
+// Preserve fields superseded by a newer window, a later attempt, or a personal
+// write after this window's evidence. Other fields can still be applied.
+function unsuperseded(
+  history: History,
+  write: Write,
+  evidenceEnd: number
+): Write | undefined {
   const origin = write.input.origin_id;
   if (typeof origin !== "string") return write;
   const own = history.writes.get(identity(write))?.lastPosition;
@@ -318,7 +338,8 @@ function unsuperseded(history: History, write: Write): Write | undefined {
     return !(
       latest &&
       (latest.parentRunId > write.parentRunId ||
-        (own !== undefined && latest.position > own))
+        (own !== undefined && latest.position > own) ||
+        (latest.parentRunId === 0 && latest.createdAt > evidenceEnd))
     );
   });
   if (live.length === 0) return undefined;
@@ -364,13 +385,13 @@ function writeOf(change: Change, parentRunId: number): Write {
     return {
       operation: "complete_reminder",
       parentRunId,
-      input: { origin_id: change.origin_id },
+      input: { origin_id: reminderOriginId(change.origin_id) },
     };
   return {
     operation: "update_reminder",
     parentRunId,
     input: {
-      origin_id: change.origin_id,
+      origin_id: reminderOriginId(change.origin_id),
       ...(change.title ? { title: change.title } : {}),
       ...(change.due !== undefined ? { due: change.due } : {}),
     },
@@ -418,10 +439,8 @@ export default async function applyReminderChanges(
   // Every write this window proposes follows its end, so a window inside the
   // read horizon sees all the evidence its changes are checked against. An
   // older window's replay cannot, so it is refused rather than guessed at.
-  if (
-    changes.length > 0 &&
-    Date.parse(ctx.window.window_end) < Date.now() - RECENT_MS
-  )
+  const evidenceEnd = Date.parse(ctx.window.window_end);
+  if (changes.length > 0 && evidenceEnd < Date.now() - RECENT_MS)
     throw new Error(
       "This window is older than the reminder history horizon; propose its changes again from a fresh window"
     );
@@ -468,7 +487,9 @@ export default async function applyReminderChanges(
       );
       continue;
     }
-    const live = markerOf(write) ? write : unsuperseded(history, write);
+    const live = markerOf(write)
+      ? write
+      : unsuperseded(history, write, evidenceEnd);
     if (live) writes.push(live);
   }
 
@@ -546,7 +567,7 @@ export default async function applyReminderChanges(
         const latest = await readHistory(client, connectionId);
         // Another reaction wrote this reminder first. Its write wins when it is
         // newer; otherwise this write retries on top of it.
-        if (!createLine && !unsuperseded(latest, write)) {
+        if (!createLine && !unsuperseded(latest, write, evidenceEnd)) {
           client.log(`Skipped ${write.operation} superseded by a newer write`);
           continue;
         }

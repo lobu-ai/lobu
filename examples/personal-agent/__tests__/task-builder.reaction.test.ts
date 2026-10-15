@@ -187,7 +187,7 @@ describe("Task Collaborator reminder changes", () => {
     }
   });
 
-  test("creates a reminder in the Lobu list with its source line", async () => {
+  test("requests the Lobu list and includes the reminder's source line", async () => {
     const h = harness();
     await applyReminderChanges(context([create]), h.client);
     expect(h.executed).toEqual([
@@ -1127,6 +1127,152 @@ describe("Task Collaborator reminder changes", () => {
     // Replaying the failed window cannot undo the correction.
     await applyReminderChanges(atRun(901, stale), h.client);
     expect(h.executed).toHaveLength(1);
+  });
+
+  test("a person's correction after the window's evidence wins over its first dispatch", async () => {
+    const correction = {
+      created_at: new Date(Date.now() - 60000).toISOString(),
+      operation_key: "update_reminder",
+      parent_run_id: null,
+      automation_id: null,
+      status: "completed",
+      input: { origin_id: "reminder:a", title: "Corrected" },
+    };
+    const h = harness({ recentCreates: [correction] });
+    const stale = atRun(901, [
+      { action: "update", origin_id: "reminder:a", title: "Old", due: null },
+    ]);
+    stale.window.window_end = new Date(Date.now() - 3600000).toISOString();
+    await applyReminderChanges(stale, h.client);
+    // Only the field the person did not touch is written.
+    expect(h.executed).toHaveLength(1);
+    expect(h.executed[0].input).toEqual({ origin_id: "reminder:a", due: null });
+  });
+
+  test("a retry whose first dispatch never reached the ledger yields to a later correction", async () => {
+    let refuse = true;
+    const h = harness({ refuse: () => refuse });
+    const stale = atRun(901, [
+      { action: "update", origin_id: "reminder:a", title: "Old" },
+    ]);
+    stale.window.window_end = new Date(Date.now() - 3600000).toISOString();
+    await expect(applyReminderChanges(stale, h.client)).rejects.toThrow(
+      "synthetic dispatch refusal"
+    );
+    refuse = false;
+    h.runs.push({
+      id: 5000,
+      created_at: new Date().toISOString(),
+      operation_key: "update_reminder",
+      parent_run_id: null,
+      automation_id: null,
+      status: "completed",
+      input: { origin_id: "reminder:a", title: "Corrected" },
+    });
+    await applyReminderChanges(stale, h.client);
+    // Only the refused first dispatch was ever attempted.
+    expect(h.executed).toHaveLength(1);
+  });
+
+  test("a correction the window already read does not suppress its write", async () => {
+    const h = harness({
+      recentCreates: [
+        {
+          created_at: new Date(Date.now() - 7200000).toISOString(),
+          operation_key: "update_reminder",
+          parent_run_id: null,
+          automation_id: null,
+          status: "completed",
+          input: { origin_id: "reminder:a", title: "Corrected" },
+        },
+      ],
+    });
+    const window = atRun(901, [
+      { action: "update", origin_id: "reminder:a", title: "Newer" },
+    ]);
+    window.window.window_end = new Date(Date.now() - 3600000).toISOString();
+    await applyReminderChanges(window, h.client);
+    expect(h.executed).toHaveLength(1);
+  });
+
+  test("personal writes with a connector parent are ordered by evidence time", async () => {
+    for (const parentRunId of [800, 1200]) {
+      for (const afterEvidence of [true, false]) {
+        const h = harness({
+          recentCreates: [
+            {
+              created_at: new Date(
+                Date.now() - (afterEvidence ? 60000 : 7200000)
+              ).toISOString(),
+              operation_key: "update_reminder",
+              parent_run_id: parentRunId,
+              automation_id: null,
+              status: "completed",
+              input: { origin_id: "reminder:a", title: "Corrected" },
+            },
+          ],
+        });
+        const window = atRun(901, [
+          { action: "update", origin_id: "reminder:a", title: "New" },
+        ]);
+        window.window.window_end = new Date(Date.now() - 3600000).toISOString();
+        await applyReminderChanges(window, h.client);
+        expect(h.executed).toHaveLength(afterEvidence ? 0 : 1);
+      }
+    }
+  });
+
+  test("bare and prefixed reminder IDs share correction and pending-write guards", async () => {
+    for (const priorOrigin of ["a", "reminder:a", " reminder:a "]) {
+      for (const proposedOrigin of ["a", "reminder:a"]) {
+        const h = harness({
+          recentCreates: [
+            {
+              created_at: new Date(Date.now() - 60000).toISOString(),
+              operation_key: "update_reminder",
+              parent_run_id: null,
+              automation_id: null,
+              status: "pending",
+              input: { origin_id: priorOrigin, title: "Corrected" },
+            },
+          ],
+        });
+        const window = atRun(901, [
+          { action: "update", origin_id: proposedOrigin, title: "Old" },
+        ]);
+        window.window.window_end = new Date(Date.now() - 3600000).toISOString();
+        await applyReminderChanges(window, h.client);
+        expect(h.executed).toHaveLength(0);
+        window.window.window_end = new Date().toISOString();
+        await expect(applyReminderChanges(window, h.client)).rejects.toThrow(
+          "Waiting for an earlier write"
+        );
+        expect(h.executed).toHaveLength(0);
+      }
+    }
+  });
+
+  test("completion aliases reuse an active write and retry its failed attempt", async () => {
+    const h = harness({
+      recentCreates: [
+        {
+          operation_key: "complete_reminder",
+          input: { origin_id: "a" },
+        },
+      ],
+    });
+    await applyReminderChanges(
+      atRun(901, [{ action: "complete", origin_id: "reminder:a" }]),
+      h.client
+    );
+    expect(h.executed).toHaveLength(0);
+    h.runs[0].status = "failed";
+    await applyReminderChanges(
+      atRun(902, [{ action: "complete", origin_id: "a" }]),
+      h.client
+    );
+    expect(h.executed).toHaveLength(1);
+    expect(h.executed[0].input).toEqual({ origin_id: "reminder:a" });
   });
 
   test("a cancelled write or one out of attempts is not retried", async () => {
