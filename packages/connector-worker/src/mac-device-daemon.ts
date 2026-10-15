@@ -8,6 +8,8 @@ import {
 } from './daemon/automation-process.js';
 import {
   INTERNAL_ACP_ADAPTER_ARG,
+  MAC_DAEMON_CREDENTIAL_REJECTED_EXIT,
+  macDeviceDaemonExitCode,
   macDeviceDaemonMetadata,
   packagedDaemonArgs,
   runMacDeviceDaemon,
@@ -192,5 +194,10 @@ async function start(): Promise<void> {
 
 start().catch((error) => {
   process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+  const exitCode = macDeviceDaemonExitCode(error);
+  // The supervised stdin stays open until the app observes our exit. Exiting
+  // also triggers the CLI supervisors' parent-loss cleanup and native-run
+  // cancellation in the app; waiting for stdio EOF would deadlock relinking.
+  if (exitCode === MAC_DAEMON_CREDENTIAL_REJECTED_EXIT) process.exit(exitCode);
+  process.exitCode = exitCode;
 });
