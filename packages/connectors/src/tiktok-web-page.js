@@ -29,24 +29,17 @@ export async function tiktokPage(command, args = {}) {
 		try { return await wait(identity); } catch { return null; }
 	}
 	if (!identity()) throw new Error("TikTok sign-in is required");
-	if (command === "following_status" || command === "following_scroll") {
-		const assertFollowing = () => {
-			if (location.origin !== "https://www.tiktok.com" || location.pathname !== "/following") throw new Error("TikTok Following page changed");
-			assertNoChallenge();
-			if (!identity()) throw new Error("TikTok sign-in is required");
-		};
+	const assertFollowing = () => {
+		if (location.origin !== "https://www.tiktok.com" || location.pathname !== "/following") throw new Error("TikTok Following page changed");
+		assertNoChallenge();
+		if (!identity()) throw new Error("TikTok sign-in is required");
+	};
+	if (command === "following_status" || command === "following_wait") {
 		assertFollowing();
-		if (command === "following_scroll") {
-			const cards = [...document.querySelectorAll('[data-e2e="recommend-list-item-container"]')].filter(visible);
-			if (!cards.length) throw new Error("TikTok Following has no rendered posts to scroll");
-			document.querySelectorAll("video,audio").forEach(media => { media.muted = true; });
-			cards[cards.length - 1].scrollIntoView({ block: "end", behavior: "instant" });
-			// Allow the page's own lazy-load request to complete before capture is
-			// drained. Recheck the page during the wait, including late challenges.
-			for (let i = 0; i < 4; i++) {
-				await new Promise(resolve => setTimeout(resolve, 250));
-				assertFollowing();
-			}
+		document.querySelectorAll("video,audio").forEach(media => { media.muted = true; });
+		if (command === "following_wait") {
+			await new Promise(resolve => setTimeout(resolve, 250));
+			assertFollowing();
 		}
 		return { ready: true };
 	}
@@ -58,6 +51,49 @@ export async function tiktokPage(command, args = {}) {
 		stats: item.stats && { diggCount: item.stats.diggCount, commentCount: item.stats.commentCount, playCount: item.stats.playCount, shareCount: item.stats.shareCount },
 		digged: item.digged,
 	});
+	if (command === "following_posts") {
+		assertFollowing();
+		const url = new URL(args.url);
+		if (url.origin !== location.origin || url.pathname !== "/api/following/item_list/" || url.username || url.password) throw new Error("Unexpected TikTok Following URL");
+		if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 30 || !Array.isArray(args.seen_ids)) throw new Error("Invalid TikTok Following collection request");
+		const seen = new Set(args.seen_ids);
+		const items = new Map();
+		const requested = new Set();
+		let { cursor, level } = args;
+		let hasMore = true;
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), 16000);
+		try {
+			for (let round = 0; round < 12 && seen.size < args.limit && hasMore; round++) {
+				assertFollowing();
+				if (typeof cursor !== "string" || !cursor || cursor.length > 256 || !Number.isSafeInteger(level) || level < 1) throw new Error("TikTok Following continuation is unavailable");
+				const key = `${level}:${cursor}`;
+				if (requested.has(key)) break;
+				requested.add(key);
+				// Native nine-item requests repeat the first page. Thirty-item
+				// requests expose older pages; preserve the returned cursor's units
+				// and level rather than guessing a timestamp or an offset.
+				url.searchParams.set("count", "30");
+				url.searchParams.set("pullType", "2");
+				url.searchParams.set("cursor", cursor);
+				url.searchParams.set("level", String(level));
+				document.querySelectorAll("video,audio").forEach(media => { media.muted = true; });
+				const response = await fetch(url.href, { credentials: "include", signal: controller.signal });
+				if (response.status !== 200) throw new Error("TikTok Following continuation request failed");
+				const json = await response.json();
+				assertFollowing();
+				if (json.status_code !== 0 || (json.statusCode !== undefined && json.statusCode !== 0) || !Array.isArray(json.itemList) || typeof json.hasMore !== "boolean") throw new Error("TikTok did not return a successful Following feed");
+				for (const item of json.itemList) {
+					seen.add(item.id);
+					items.set(item.id, project(item));
+				}
+				({ cursor, level, hasMore } = json);
+			}
+		} finally { clearTimeout(timer); }
+		assertFollowing();
+		if (seen.size < args.limit && hasMore) throw new Error(`TikTok Following read incomplete: collected ${seen.size} of ${args.limit} requested posts; retry the read`);
+		return { items: [...items.values()] };
+	}
 	if (command === "snapshot") {
 		const d = scope();
 		return { items: (d["webapp.updated-items"] || []).map(project) };
