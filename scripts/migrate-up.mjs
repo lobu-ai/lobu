@@ -29,23 +29,10 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import postgres from "postgres";
+import { declaresNoQuiesce, migrationUpSection } from "./migration-quiesce.mjs";
 
 const CHECK_PENDING_NONE_EXIT = 3;
 const CHECK_PENDING_COMPATIBLE_EXIT = 4;
-
-/**
- * The author's assertion that the code deployed *before* this migration keeps
- * working against the post-migration schema -- the expand half of an
- * expand/contract pair, or a contract whose last reference went away in an
- * earlier deploy.
- *
- * There is deliberately no SQL analysis behind this. Backward compatibility is
- * a property of sequencing relative to the running code, not of the DDL verbs:
- * a DROP COLUMN is safe once nothing reads it, and a widened CHECK constraint
- * is safe because it only ever accepts more. The SQL cannot express either, so
- * only the author can make the call.
- */
-const NO_QUIESCE_MARKER = /^--[ \t]*lobu:no-quiesce\b/m;
 
 const checkPendingOnly = process.argv.slice(2).includes("--check-pending");
 const migrationsDir =
@@ -85,12 +72,12 @@ function loadMigrationUp(dir, file) {
   const upMarker = content.match(/^--\s*migrate:up(.*)$/m);
   if (!upMarker) throw new Error(`${file}: missing -- migrate:up directive`);
   const transaction = parseTransactionOption(upMarker[0]);
-  const up = content.split(/^--\s*migrate:down.*$/m)[0];
+  const up = migrationUpSection(content);
   const sql = up
     .replace(/^--\s*migrate:up.*$/m, "")
     .replace(/^SET transaction_timeout = 0;\s*$/gm, "")
     .trim();
-  return { sql, transaction, noQuiesce: NO_QUIESCE_MARKER.test(up) };
+  return { sql, transaction, noQuiesce: declaresNoQuiesce(up) };
 }
 
 function loadPendingMigrations(applied) {

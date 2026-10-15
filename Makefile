@@ -375,9 +375,10 @@ pre-pr:
 	@bun run knip --include files
 	@echo "🔎 [4/5] Exposed surface naming (Automation is canonical)..."
 	@bun scripts/check-exposed-surface-naming.ts
-	@echo "🔎 [5/5] Gateway LLM + entity-write funnel gates..."
+	@echo "🔎 [5/5] Gateway LLM, entity-write funnel and migration deploy-window gates..."
 	@node scripts/check-gateway-llm-calls.mjs
 	@bun scripts/check-entity-write-funnel.mjs
+	@node scripts/check-migration-quiesce.mjs
 	@# The fixture suite tests the CHECKER, not the tree, so it only needs to run
 	@# when the checker itself moved. CI runs it unconditionally either way.
 	@if git diff --quiet origin/main...HEAD -- scripts/check-entity-write-funnel.mjs scripts/__tests__/check-entity-write-funnel.test.ts 2>/dev/null \
