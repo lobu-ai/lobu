@@ -12,9 +12,9 @@
  *  3. No range is handed out twice: a completed range moves the mark to its
  *     end, and the next claim starts exactly there.
  *
- * The frontier is `now() − AUTOMATION_ARRIVAL_SETTLE_MS`, read from the database
- * clock, so a row stored inside the settle window is never inside a handed-out
- * range while its writer could still be uncommitted.
+ * The frontier is `now() − AUTOMATION_ARRIVAL_SETTLE_MS`, capped at the oldest
+ * open transaction. Both bounds come from the database clock, so an
+ * uncommitted writer's rows stay in a later range.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';

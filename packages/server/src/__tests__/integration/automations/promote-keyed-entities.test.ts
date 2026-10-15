@@ -128,6 +128,16 @@ function ownerAuthCtx(orgId: string, userId: string): AuthContext {
   };
 }
 
+/**
+ * An arrival a few seconds old: after the Automation's mark, and behind any
+ * fire-and-forget write this suite still has in flight. The window stops at the
+ * oldest open transaction, so a row stamped at this very instant can land just
+ * past the horizon when a claim follows it immediately.
+ */
+function arrivedJustNow(): Date {
+  return new Date(Date.now() - 5_000);
+}
+
 async function setupKeyedAutomation(outputs: Record<string, EntityOutput> = OUTPUTS) {
   const sql = getTestDb();
   const dbClient = sql as unknown as DbClient;
@@ -265,6 +275,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
 
     const runId = await queueRunningRun(ctx);
@@ -438,6 +449,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
     // Content that exists in the org but is NOT part of this window's token:
     // stored long before the mark, so no window reaching forward can grant it.
@@ -531,6 +543,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
 
     const runId = await queueRunningRun(ctx);
@@ -617,6 +630,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
 
     const runId = await queueRunningRun(ctx);
@@ -667,6 +681,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
 
     const runId = await queueRunningRun(ctx);
@@ -1056,6 +1071,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
 
     const runId = await queueRunningRun(ctx);
@@ -1181,6 +1197,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
 
     const runId = await queueRunningRun(ctx);
@@ -1264,6 +1281,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
     const runId = await queueRunningRun(ctx);
     const token = await readWindowToken(ctx, runId);
@@ -1347,6 +1365,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
     const runId = await queueRunningRun(ctx);
     const token = await readWindowToken(ctx, runId);
@@ -1430,6 +1449,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
 
     // Pre-create a sibling under the parent whose slug is EXACTLY the one the
@@ -1491,6 +1511,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
 
     // Occupy the base slug and all four readable suffixes. Promotion must reach
@@ -1554,6 +1575,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
 
     const runId = await queueRunningRun(ctx);
@@ -1650,6 +1672,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       organization_id: workspace.org.id,
       content: 'Users report the app crashing and loading slowly.',
       occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+      created_at: arrivedJustNow(),
     });
 
     const runId = await queueRunningRun(ctx);

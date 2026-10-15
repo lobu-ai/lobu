@@ -34,33 +34,90 @@ export function automationArrivalSettleMs(): number {
   return intervals.automationArrivalSettleMs;
 }
 
-/** The newest instant a window may reach, given the database clock. */
-export function automationArrivalHorizon(dbNow: Date): Date {
-  return new Date(dbNow.getTime() - automationArrivalSettleMs());
+/**
+ * The newest instant a window may reach.
+ *
+ * Two bounds, and the window takes the earlier:
+ *
+ *  - `dbNow - settle`, the freshness budget an operator can widen; and
+ *  - the start of the oldest transaction still open on this database.
+ *
+ * The second bound is the one that makes the frontier correct rather than
+ * hopeful. `events.created_at` is `DEFAULT now()` — the writer's TRANSACTION
+ * START — but the row is only visible at commit. A writer still open when the
+ * horizon is read can therefore commit rows stamped behind that horizon, and a
+ * window that closed over them completes without them; the mark then moves
+ * past them and no later window ever reads them. Every such writer is, by
+ * definition, an open transaction whose `xact_start` equals the `created_at` it
+ * stamps, so a horizon at or before the oldest open `xact_start` cannot pass a
+ * row that is not yet visible. A transaction that opens after the read starts
+ * after the reader's own `current_timestamp`, which is already past the
+ * horizon. No writer has to promise how long it stays open; a slow one only
+ * delays the window until it commits or rolls back.
+ */
+export function automationArrivalHorizon(
+  dbNow: Date,
+  oldestOpenTransaction: Date | null
+): Date {
+  const settled = new Date(dbNow.getTime() - automationArrivalSettleMs());
+  return oldestOpenTransaction && oldestOpenTransaction < settled
+    ? oldestOpenTransaction
+    : settled;
+}
+
+interface ArrivalClockRow {
+  db_now: string | Date;
+  oldest_open_transaction: string | Date | null;
 }
 
 /**
- * The database clock, rounded UP to the next whole millisecond.
+ * The two readings `automationArrivalHorizon` needs, as SELECT-list columns.
  *
+ * `db_now` is the database clock rounded UP to the next whole millisecond.
  * Truncating DOWN put the reading up to a millisecond behind the real clock, so
  * a row stored a fraction of a millisecond before the read could land at or
- * after the horizon and be dropped from a window that should have contained it.
- * Invisible against a 60s settle budget; the dominant flake once that budget is
- * collapsed. Rounding up keeps the millisecond precision the value needs to
- * round-trip through a run's `approved_input`, and makes "stored before this
- * read" mean "strictly behind the horizon".
+ * after the horizon and be dropped from a window that should have contained
+ * it. Rounding up keeps the millisecond precision the value needs to round-trip
+ * through a run's `approved_input`. `oldest_open_transaction` is rounded DOWN
+ * for the same reason in the other direction: the window end is exclusive, so
+ * it must not land after the writer's `created_at`.
  *
- * Every arrival instant is read from the clock that stamps `events.created_at`,
- * never from the application's, so application/database skew cannot move the
- * frontier. The window readers below take it from the row they already lock;
- * this is for the one caller that computes a range without reading one.
+ * Every instant comes from the clock that stamps `events.created_at`, never
+ * from the application's, so application/database skew cannot move the
+ * frontier.
+ *
+ * `pg_stat_activity` shows `xact_start` only for sessions of a role the reader
+ * may observe; every event writer runs as the application role the reader runs
+ * as. The reader's own backend is excluded: its own writes are visible to it,
+ * and its own `xact_start` is the `current_timestamp` already in `db_now`. The
+ * backend list is a per-transaction snapshot, which is safe: a transaction
+ * missing from it began after it was taken, hence after this transaction's
+ * `current_timestamp` and past the horizon.
  */
-export async function readDatabaseNow(sql: DbClient): Promise<Date> {
-  const [row] = await sql<{ db_now: string | Date }>`
-    SELECT date_trunc('milliseconds', current_timestamp) + interval '1 millisecond'
-             AS db_now
+function arrivalClockColumns(sql: DbClient) {
+  return sql`
+    date_trunc('milliseconds', current_timestamp) + interval '1 millisecond' AS db_now,
+    (
+      SELECT date_trunc('milliseconds', min(activity.xact_start))
+      FROM pg_stat_activity activity
+      WHERE activity.datname = current_database()
+        AND activity.backend_type = 'client backend'
+        AND activity.pid <> pg_backend_pid()
+    ) AS oldest_open_transaction
   `;
-  return new Date(row.db_now);
+}
+
+function horizonFromRow(row: ArrivalClockRow): Date {
+  return automationArrivalHorizon(
+    new Date(row.db_now),
+    row.oldest_open_transaction ? new Date(row.oldest_open_transaction) : null
+  );
+}
+
+/** The arrival horizon now, for the one caller that computes a range without reading a mark. */
+export async function readArrivalHorizon(sql: DbClient): Promise<Date> {
+  const [row] = await sql<ArrivalClockRow>`SELECT ${arrivalClockColumns(sql)}`;
+  return horizonFromRow(row);
 }
 
 interface WindowDates {
@@ -73,14 +130,13 @@ interface WindowDates {
   lastCompletedWindowStart: Date | null;
 }
 
-interface ArrivalMarkRow {
+interface ArrivalMarkRow extends ArrivalClockRow {
   next_window_start: string | Date | null;
   last_completed_window_start: string | Date | null;
-  db_now: string | Date;
 }
 
 function arrivalWindowFromRow(row: ArrivalMarkRow, mark: Date): WindowDates {
-  const horizon = automationArrivalHorizon(new Date(row.db_now));
+  const horizon = horizonFromRow(row);
   return {
     windowStart: mark,
     // Never inverted: nothing has settled since the mark → an empty window.
@@ -109,8 +165,7 @@ export async function computePendingWindow(
   const read = async (tx: DbClient): Promise<WindowDates> => {
     const [row] = await tx<ArrivalMarkRow>`
       SELECT next_window_start, last_completed_window_start,
-             date_trunc('milliseconds', current_timestamp) + interval '1 millisecond'
-               AS db_now
+             ${arrivalClockColumns(tx)}
       FROM automations
       WHERE id = ${automationId}
       FOR UPDATE
@@ -144,8 +199,7 @@ export async function readPendingWindow(
 ): Promise<WindowDates | null> {
   const [row] = await sql<ArrivalMarkRow>`
     SELECT next_window_start, last_completed_window_start,
-           date_trunc('milliseconds', current_timestamp) + interval '1 millisecond'
-             AS db_now
+           ${arrivalClockColumns(sql)}
     FROM automations
     WHERE id = ${automationId}
     LIMIT 1
@@ -231,9 +285,8 @@ export async function readLastCompletedWindowStart(
 export function requestedArrivalWindow(
   since: Date,
   until: Date,
-  now: Date
+  horizon: Date
 ): { windowStart: Date; windowEnd: Date } {
-  const horizon = automationArrivalHorizon(now);
   const dayAfterUntil = new Date(
     Date.UTC(until.getUTCFullYear(), until.getUTCMonth(), until.getUTCDate() + 1)
   );

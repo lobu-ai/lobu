@@ -23,6 +23,16 @@ const ENV = { JWT_SECRET: 'test-jwt-secret-for-testing-only' } as Env;
  * itself and therefore agrees with whatever it wrote. Only this shape compares
  * them.
  */
+/**
+ * An arrival a few seconds old: after the Automation's mark, and behind any
+ * write still in flight. The window stops at the oldest open transaction, so a
+ * row stamped at this very instant can land just past the horizon when a
+ * claim follows it immediately.
+ */
+function arrivedJustNow(): Date {
+  return new Date(Date.now() - 5_000);
+}
+
 describe('external MCP claim then completion', () => {
   let sql: DbClient;
   let orgId: string;
@@ -75,6 +85,7 @@ describe('external MCP claim then completion', () => {
       entity_id: entityId,
       organization_id: orgId,
       content: 'Arrival inside the claimed window',
+      created_at: arrivedJustNow(),
     });
 
     const claimed = (await api.automations.claimNextWindow({
@@ -172,7 +183,9 @@ describe('external MCP claim then completion', () => {
 
   it('keeps a paginated external claim completable until its explicit lease expires', async () => {
     for (const content of ['First arrival', 'Second arrival']) {
-      await createTestEvent({ entity_id: entityId, organization_id: orgId, content });
+      await createTestEvent({
+        entity_id: entityId, organization_id: orgId, content, created_at: arrivedJustNow(),
+      });
     }
     const first = await api.automations.claimNextWindow({
       automation_id: String(automationId), limit: 1, lease_seconds: 1800,

@@ -23,10 +23,10 @@
  * so two pages sharing items cannot lock them in opposite orders.
  *
  * Nothing that leaves Postgres may run inside: `created_at` is stamped when the
- * transaction starts but the rows only become visible at commit, and Automation
- * windows trust every event write to commit well inside the arrival settle
- * budget (`intervals.automationArrivalSettleMs`). `transaction_timeout` makes
- * that bound hard rather than hoped for.
+ * transaction starts but the rows only become visible at commit, so every
+ * Automation window in the database waits at this transaction's start until it
+ * commits (`automationArrivalHorizon`), on top of the locks above.
+ * `transaction_timeout` keeps that wait short.
  */
 
 import type { DbClient } from '../db/client';
@@ -36,8 +36,9 @@ import { isDeadlockDetected } from '../utils/pg-errors';
 import { lockOrganizationForRelationshipClaims } from '../utils/relationship-claims';
 
 /**
- * A third of the default arrival settle budget (60s). Fixed rather than
- * derived because tests collapse that budget to zero.
+ * Well inside the default arrival settle budget (60s), so a page never holds
+ * Automation windows back further than that budget already does. Fixed rather
+ * than derived because tests collapse that budget to zero.
  */
 const FEED_PAGE_TRANSACTION_TIMEOUT = '20s';
 

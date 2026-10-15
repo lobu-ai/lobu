@@ -31,7 +31,7 @@ import {
   describeUnclaimedArrivals,
   foldUnprocessedRanges,
   parseAutomationWindowDate,
-  readDatabaseNow,
+  readArrivalHorizon,
   readLastCompletedWindowStart,
   readPendingWindow,
   requestedArrivalWindow,
@@ -789,9 +789,9 @@ export async function handleAutomationMode(
     // An agent-chosen arrival range. `until` is inclusive as the caller means
     // it, and the end is clamped to the horizon: a completion may never book
     // rows that are still settling.
-    const [pending, dbNow] = await Promise.all([
+    const [pending, horizon] = await Promise.all([
       readPendingWindow(sql, automationId),
-      readDatabaseNow(sql),
+      readArrivalHorizon(sql),
     ]);
     if (!pending) {
       throw new ToolUserError(`Automation ${automationId} not found`, 404);
@@ -801,13 +801,14 @@ export async function handleAutomationMode(
     ({ windowStart, windowEnd } = requestedArrivalWindow(
       parseAutomationWindowDate(args.since),
       parseAutomationWindowDate(args.until),
-      dbNow
+      horizon
     ));
     if (windowEnd <= windowStart) {
       throw new ToolUserError(
         `Automation ${automationId} has no settled arrivals in the requested range: ` +
-          `everything at or after ${windowStart.toISOString()} was stored within the last ` +
-          `${automationArrivalSettleMs() / 1000}s and is still settling.`,
+          `the arrival horizon has not passed ${windowStart.toISOString()}. ` +
+          `Rows must settle for ${automationArrivalSettleMs() / 1000}s, ` +
+          'and in-flight transactions can delay the window further.',
         409
       );
     }

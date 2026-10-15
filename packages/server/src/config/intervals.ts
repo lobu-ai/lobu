@@ -218,21 +218,16 @@ export const intervals = {
   /**
    * How far behind the database clock an Automation's arrival window may reach.
    *
-   * Automation windows select rows by `events.created_at`, and `created_at`
-   * (`DEFAULT now()`) is stamped at the writer's transaction START while the
-   * row becomes VISIBLE only at commit. Between the two, a concurrent reader
-   * can compute a horizon that already sits past a row it cannot see — and
-   * that row would fall inside a window which completes without it. The
-   * horizon is therefore `now() - this`, and the exposure is exactly one
-   * writer's transaction length.
-   *
-   * Bound the WRITER, not the reader: `events-insert-sites.test.ts` enumerates
-   * the two `INSERT INTO events` sites and asserts their transactions stay far
-   * inside this budget, and production's `idle_in_transaction_session_timeout`
-   * is one minute. The knob exists so an operator can widen the budget during
-   * an incident without a deploy, and so integration tests can collapse it to
-   * see a row they just inserted; widening costs only freshness, since a row
-   * stored inside the settle window belongs to the next run, never to none.
+   * A freshness budget, not the correctness bound. Automation windows select
+   * rows by `events.created_at`, which is stamped at the writer's transaction
+   * START while the row becomes visible only at commit; the horizon is also
+   * capped at the oldest open transaction (`automationArrivalHorizon` in
+   * `utils/window-utils.ts`), so a writer that stays open longer than this
+   * budget delays windows instead of having its rows skipped. The knob exists
+   * so an operator can widen the budget during an incident without a deploy,
+   * and so integration tests can collapse it to see a row they just inserted;
+   * widening costs only freshness, since a row stored inside the settle window
+   * belongs to the next run, never to none.
    *
    * Zero is a legal value (tests), so this reads through `parseEnvIntAllowingZero`
    * rather than `parseEnvInt`, which rejects it.
