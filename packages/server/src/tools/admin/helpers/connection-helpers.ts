@@ -25,7 +25,6 @@ import {
 import { createConnectToken } from '../../../utils/connect-tokens';
 import { getConfiguredPublicGatewayUrl } from '../../../utils/public-origin';
 import {
-  collectFeedRequiredScopes,
   readGrantedScopesFromAuthData,
   readRequestedScopesFromAuthData,
   selectReconnectOAuthScopes,
@@ -619,7 +618,7 @@ export async function issueOAuthReconnectLink(params: {
   // them. The callback records the scopes the provider actually grants.
   const selection = selectReconnectOAuthScopes({
     method: oauthMethod,
-    feedRequiredScopes: collectFeedRequiredScopes(connector.feeds_schema),
+    feedsSchema: connector.feeds_schema,
     historicalScopes: readGrantedScopesFromAuthData(authProfile.auth_data),
     requestedScopes: [
       ...readRequestedScopesFromAuthData(authProfile.auth_data),

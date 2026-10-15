@@ -438,6 +438,26 @@ export interface OAuthMethodScopes {
   optionalScopes?: unknown;
 }
 
+/**
+ * Every scope a connector's OAuth method declares for itself: login, required
+ * and optional scopes plus each feed's `requiredScopes`, deduped in
+ * declaration order. Social-login provisioning, grant reconciliation and
+ * reconnect selection each test scopes against this one set (under their own
+ * membership rule, such as alias equivalence or the isolated-account bypass)
+ * instead of deriving it by hand.
+ */
+export function declaredOAuthScopes(
+  method: OAuthMethodScopes | null | undefined,
+  feedsSchema: unknown
+): string[] {
+  return normalizeScopeList([
+    ...normalizeScopeList(method?.loginScopes),
+    ...normalizeScopeList(method?.requiredScopes),
+    ...normalizeScopeList(method?.optionalScopes),
+    ...collectFeedRequiredScopes(feedsSchema),
+  ]);
+}
+
 export interface ReconnectScopeSelection {
   /** Scopes to request: manifest + honored asks + preserved declared history. */
   requestedScopes: string[];
@@ -457,7 +477,7 @@ export interface ReconnectScopeSelection {
  */
 export function selectReconnectOAuthScopes(params: {
   method: OAuthMethodScopes | null | undefined;
-  feedRequiredScopes?: unknown;
+  feedsSchema?: unknown;
   historicalScopes?: unknown;
   requestedScopes?: unknown;
 }): ReconnectScopeSelection {
@@ -467,11 +487,7 @@ export function selectReconnectOAuthScopes(params: {
   ];
   const optionalSet = new Set(normalizeScopeList(params.method?.optionalScopes));
   const explicit = normalizeScopeList(params.requestedScopes).filter((scope) => optionalSet.has(scope));
-  const declared = new Set([
-    ...manifest,
-    ...optionalSet,
-    ...normalizeScopeList(params.feedRequiredScopes),
-  ]);
+  const declared = new Set(declaredOAuthScopes(params.method, params.feedsSchema));
   const history = normalizeScopeList(params.historicalScopes);
   const requested = [...new Set([...manifest, ...explicit, ...history.filter((scope) => declared.has(scope))])];
   const requestedSet = new Set(requested);

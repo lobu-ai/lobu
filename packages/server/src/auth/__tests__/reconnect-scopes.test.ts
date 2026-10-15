@@ -17,7 +17,7 @@ describe('selectReconnectOAuthScopes', () => {
   it('drops historical scopes nothing declares anymore', () => {
     const selection = selectReconnectOAuthScopes({
       method: YOUTUBE_METHOD,
-      feedRequiredScopes: [],
+      feedsSchema: null,
       historicalScopes: ['openid', 'email', 'profile', YOUTUBE, DRIVE_FILE],
     });
     expect(selection.requestedScopes).toEqual(['openid', 'email', 'profile', YOUTUBE]);
@@ -27,7 +27,7 @@ describe('selectReconnectOAuthScopes', () => {
   it('preserves previously granted declared optionals without re-asking', () => {
     const selection = selectReconnectOAuthScopes({
       method: { ...YOUTUBE_METHOD, optionalScopes: [DRIVE_FILE] },
-      feedRequiredScopes: [],
+      feedsSchema: null,
       historicalScopes: [YOUTUBE, DRIVE_FILE],
     });
     expect(selection.requestedScopes).toEqual(
@@ -39,7 +39,7 @@ describe('selectReconnectOAuthScopes', () => {
   it('honors explicit asks filtered to current optional scopes', () => {
     const selection = selectReconnectOAuthScopes({
       method: { ...YOUTUBE_METHOD, optionalScopes: [DRIVE_READONLY] },
-      feedRequiredScopes: [],
+      feedsSchema: null,
       historicalScopes: [YOUTUBE],
       requestedScopes: [DRIVE_READONLY, 'evil.scope'],
     });
@@ -53,7 +53,7 @@ describe('selectReconnectOAuthScopes', () => {
   it('retains feed-required scopes from history', () => {
     const selection = selectReconnectOAuthScopes({
       method: YOUTUBE_METHOD,
-      feedRequiredScopes: ['items.read'],
+      feedsSchema: { items: { requiredScopes: ['items.read'] } },
       historicalScopes: [YOUTUBE, 'items.read', DRIVE_FILE],
     });
     expect(selection.requestedScopes).toContain('items.read');
@@ -63,7 +63,7 @@ describe('selectReconnectOAuthScopes', () => {
   it('always requests the manifest even with empty history', () => {
     const selection = selectReconnectOAuthScopes({
       method: YOUTUBE_METHOD,
-      feedRequiredScopes: [],
+      feedsSchema: null,
       historicalScopes: [],
     });
     expect(selection.requestedScopes).toEqual(['openid', 'email', 'profile', YOUTUBE]);
@@ -73,7 +73,7 @@ describe('selectReconnectOAuthScopes', () => {
   it('dedupes overlapping scope sources deterministically', () => {
     const selection = selectReconnectOAuthScopes({
       method: { ...YOUTUBE_METHOD, optionalScopes: [DRIVE_READONLY] },
-      feedRequiredScopes: [YOUTUBE],
+      feedsSchema: { videos: { requiredScopes: [YOUTUBE] } },
       historicalScopes: [YOUTUBE, 'openid', DRIVE_READONLY],
       requestedScopes: [DRIVE_READONLY, YOUTUBE],
     });
