@@ -6631,6 +6631,16 @@ export type ManageViewsData = {
                  */
                 default?: unknown;
                 description?: string;
+                /**
+                 * Offer this param in the host's filter bar: an applied value shows as a chip above the view. Options make it a pick list; without them the host asks for a value of the param's type.
+                 */
+                filter?: {
+                  label: string;
+                  options?: Array<{
+                    value: string | number | boolean;
+                    label: string;
+                  }>;
+                };
               };
         };
         /**
@@ -6811,6 +6821,16 @@ export type ManageViewsResponses = {
                    */
                   default?: unknown;
                   description?: string;
+                  /**
+                   * Offer this param in the host's filter bar: an applied value shows as a chip above the view. Options make it a pick list; without them the host asks for a value of the param's type.
+                   */
+                  filter?: {
+                    label: string;
+                    options?: Array<{
+                      value: string | number | boolean;
+                      label: string;
+                    }>;
+                  };
                 };
           };
           actions: {
@@ -6938,6 +6958,16 @@ export type ManageViewsResponses = {
                    */
                   default?: unknown;
                   description?: string;
+                  /**
+                   * Offer this param in the host's filter bar: an applied value shows as a chip above the view. Options make it a pick list; without them the host asks for a value of the param's type.
+                   */
+                  filter?: {
+                    label: string;
+                    options?: Array<{
+                      value: string | number | boolean;
+                      label: string;
+                    }>;
+                  };
                 };
           };
           actions: {
@@ -7072,6 +7102,16 @@ export type ManageViewsResponses = {
                    */
                   default?: unknown;
                   description?: string;
+                  /**
+                   * Offer this param in the host's filter bar: an applied value shows as a chip above the view. Options make it a pick list; without them the host asks for a value of the param's type.
+                   */
+                  filter?: {
+                    label: string;
+                    options?: Array<{
+                      value: string | number | boolean;
+                      label: string;
+                    }>;
+                  };
                 };
           };
           actions: {
