@@ -872,14 +872,22 @@ app.use("/api/workers/*", async (c, next) => {
 					403,
 				);
 			}
-			const scopes = c.var.mcpAuthInfo?.scopes ?? [];
+			// Only a device grant speaks for a device: `device_worker:run` with no
+			// MCP resource audience — the same rule mint-child-token applies. An MCP
+			// app's token (mcp:write/mcp:admin, bound to /mcp) is consent to use
+			// workspace tools, not to act as one of the user's machines, so it must
+			// not register a device or claim runs meant for one.
+			const authInfo = c.var.mcpAuthInfo;
 			if (
-				!scopes.includes("device_worker:run") &&
-				!scopes.includes("mcp:write") &&
-				!scopes.includes("mcp:admin")
+				!authInfo?.scopes.includes("device_worker:run") ||
+				authInfo.resource
 			) {
 				return c.json(
-					{ error: "Worker token missing device_worker:run scope" },
+					{
+						error: "insufficient_scope",
+						error_description:
+							"Worker endpoints require a device token (device_worker:run, not bound to an MCP resource)",
+					},
 					403,
 				);
 			}

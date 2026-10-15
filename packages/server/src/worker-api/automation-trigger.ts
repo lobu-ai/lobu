@@ -32,24 +32,16 @@ export async function triggerAutomationForDevice(c: Context<{ Bindings: Env }>) 
     return c.json({ error: 'Invalid automation_id' }, 400);
   }
 
-  // The middleware already verified the token has `device_worker:run` (or
-  // mcp:write/admin). The trigger surface is user-scoped only — trusted
-  // server workers shouldn't be triggering device-pinned automations, that's
-  // what the scheduled path is for.
+  // The middleware already verified a device token (`device_worker:run`, no
+  // MCP resource). The trigger surface is user-scoped only — trusted server
+  // workers shouldn't be triggering device-pinned automations, that's what the
+  // scheduled path is for.
   if (c.var.workerAuthMode !== 'user') {
     return c.json({ error: 'Endpoint is user-scoped only' }, 403);
   }
   const workerUserId = c.var.workerUserId;
   if (!workerUserId) {
     return c.json({ error: 'Unauthorized' }, 401);
-  }
-  const scopes = c.var.mcpAuthInfo?.scopes ?? [];
-  if (
-    !scopes.includes('device_worker:run') &&
-    !scopes.includes('mcp:write') &&
-    !scopes.includes('mcp:admin')
-  ) {
-    return c.json({ error: 'Worker token missing device_worker:run scope' }, 403);
   }
 
   // Resolve the caller's bound device worker. mcpAuth populates
