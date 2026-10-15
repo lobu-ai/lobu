@@ -28,6 +28,14 @@ describe("Task Collaborator keeps tasks in Apple Reminders", () => {
     expect(automation?.prompt).toContain("client.feeds.readMany");
   });
 
+  test("the agent, not the reaction, recovers failed reminder writes against the live read", () => {
+    expect(automation?.prompt).toContain("FAILED WRITES");
+    expect(automation?.prompt).toContain(
+      "only if no reminder carries its lobu line"
+    );
+    expect(automation?.prompt).not.toContain("larger limit and replace");
+  });
+
   test("uses the Gmail feed's supported stable key", () => {
     expect(automation?.sources?.mail).toBe("@feed:threads");
   });

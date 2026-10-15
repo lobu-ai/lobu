@@ -69,12 +69,12 @@ type Change =
     };
 
 const LIST = "Lobu";
-// Recent writes of any status, plus unsettled writes and failures of any age.
-// Older runs retain admission and failure accounting, but cannot trigger retries.
+// Recent writes of any status, plus unsettled writes and failures of any age,
+// for create admission, failure accounting and per-reminder ordering.
 const RECENT_MS = 2 * 24 * 60 * 60 * 1000;
 const ACTIVE = ["pending", "running", "claimed"];
 const TERMINAL = ["failed", "timeout", "cancelled"];
-// A write is retried until it has failed this many times.
+// Fresh proposals stop after this many failed attempts of the same write.
 const MAX_ATTEMPTS = 3;
 const OPERATIONS = ["create_reminder", "complete_reminder", "update_reminder"];
 
@@ -139,8 +139,8 @@ function identity(write: Write): string {
 // can be retried. Completions and updates are ordered per reminder instead: the
 // key names the newest write to that reminder the reaction saw, so of two
 // reactions that read the same state, the server admits one and the other must
-// re-read before writing over it. The Mac claims its queued operations oldest
-// first, one at a time, so admission order is the order they apply in.
+// re-read before writing over it. Conflicting writes must also wait for earlier
+// attempts to settle: the Mac can execute several admitted operations at once.
 function idempotencyKey(
   connectionId: number,
   write: Write,
@@ -176,8 +176,8 @@ type History = {
   touched: Map<string, string>;
   // The newest attempt on each reminder field, and the window that proposed it.
   fields: Map<string, { position: string; parentRunId: number }>;
-  // Reminder fields with a write still awaiting approval.
-  awaitingApproval: Set<string>;
+  // Reminder fields with an admitted write that has not settled.
+  unsettledFields: Set<string>;
   // Names the ordering base of a reminder with no write in the read horizon.
   horizon: string;
 };
@@ -211,7 +211,7 @@ async function readHistory(
   const writes = new Map<string, Attempts>();
   const touched = new Map<string, string>();
   const fields = new Map<string, { position: string; parentRunId: number }>();
-  const awaitingApproval = new Set<string>();
+  const unsettledFields = new Set<string>();
   const failures = new Map<string, number>();
   // A run can match two filters, and runs created mid-scan must not shift
   // pages, so pages follow the (created_at, id) keyset and each run counts once.
@@ -262,6 +262,9 @@ async function readHistory(
           failures.set(retryKey, (failures.get(retryKey) ?? 0) + 1);
         } else entry.settled = true;
         if (position > entry.lastPosition) {
+          entry.write = write;
+          entry.automationId =
+            run.automation_id == null ? null : Number(run.automation_id);
           entry.lastPosition = position;
           entry.lastStatus = status;
         }
@@ -277,8 +280,7 @@ async function readHistory(
             const key = `${origin}|${field}`;
             if (position > (fields.get(key)?.position ?? ""))
               fields.set(key, { position, parentRunId: write.parentRunId });
-            if (ACTIVE.includes(status) && run.approval_status === "pending")
-              awaitingApproval.add(key);
+            if (ACTIVE.includes(status)) unsettledFields.add(key);
           }
       }
       const last = page.runs.at(-1);
@@ -301,20 +303,16 @@ async function readHistory(
     writes,
     touched,
     fields,
-    awaitingApproval,
+    unsettledFields,
     horizon: `h${createdAfter.slice(0, 10)}`,
   };
 }
 
 // The fields of a completion or update no newer write has set. A write is
 // newer when a later window proposed it, or when it followed this write's own
-// latest attempt; `proposed` adds this reaction's own new changes. An update
-// keeps only its live fields, so it never sets a field back to an older value.
-function unsuperseded(
-  history: History,
-  write: Write,
-  proposed: Map<string, number> = new Map()
-): Write | undefined {
+// latest attempt. An update keeps only its live fields, so it never sets a
+// field back to an older value.
+function unsuperseded(history: History, write: Write): Write | undefined {
   const origin = write.input.origin_id;
   if (typeof origin !== "string") return write;
   const own = history.writes.get(identity(write))?.lastPosition;
@@ -322,10 +320,9 @@ function unsuperseded(
     const key = `${origin}|${field}`;
     const latest = history.fields.get(key);
     return !(
-      (proposed.get(key) ?? 0) > write.parentRunId ||
-      (latest &&
-        (latest.parentRunId > write.parentRunId ||
-          (own !== undefined && latest.position > own)))
+      latest &&
+      (latest.parentRunId > write.parentRunId ||
+        (own !== undefined && latest.position > own))
     );
   });
   if (live.length === 0) return undefined;
@@ -425,9 +422,10 @@ export default async function applyReminderChanges(
   const history = await readHistory(client, connectionId);
 
   // Writes are queued, and the Mac and any approval finish after the reaction
-  // that queued them. Each reaction, including one with no changes, retries
-  // this Automation's recent writes that have since failed. Cancellations and
-  // superseded writes must not be retried.
+  // that queued them. The reaction applies only this window's changes and
+  // never retries an earlier write: it cannot see Reminders, so it cannot tell
+  // whether a timed-out create landed. The agent reads failed writes beside
+  // the live list each window and proposes again what is still missing.
   const failures: string[] = [];
   const fresh: Write[] = [];
   for (const [index, change] of changes.entries()) {
@@ -439,30 +437,8 @@ export default async function applyReminderChanges(
       );
     }
   }
-  // This window's own changes are the newest proposal for the fields they set.
-  const proposed = new Map<string, number>();
-  for (const write of fresh)
-    for (const field of markerOf(write) ? [] : fieldsOf(write))
-      proposed.set(`${write.input.origin_id}|${field}`, write.parentRunId);
 
   const writes: Write[] = [];
-  const retryAfter = new Date(Date.now() - RECENT_MS).toISOString();
-  for (const attempts of history.writes.values()) {
-    if (
-      attempts.automationId !== automationId ||
-      attempts.settled ||
-      attempts.lastStatus === "cancelled" ||
-      attempts.failed >= MAX_ATTEMPTS ||
-      // Older completions are outside the read horizon, so an older failure
-      // cannot safely be retried: a later successful write may supersede it.
-      attempts.lastPosition < retryAfter
-    )
-      continue;
-    const write = markerOf(attempts.write)
-      ? attempts.write
-      : unsuperseded(history, attempts.write, proposed);
-    if (write) writes.push(write);
-  }
   for (const write of fresh) {
     // Trimming changes the input identity. Preserve the original admission,
     // cancellation and retry limit before considering its remaining fields.
@@ -473,6 +449,19 @@ export default async function applyReminderChanges(
       (previous && previous.failed >= MAX_ATTEMPTS)
     )
       continue;
+    // Replaying this extraction has no newer evidence of the create's effect.
+    // Only a later window that checked Reminders may propose another attempt.
+    if (
+      markerOf(write) &&
+      previous &&
+      previous.write.parentRunId >= write.parentRunId &&
+      ["failed", "timeout"].includes(previous.lastStatus)
+    ) {
+      failures.push(
+        "Retrying create_reminder requires a fresh live read in a later window"
+      );
+      continue;
+    }
     const live = markerOf(write) ? write : unsuperseded(history, write);
     if (live) writes.push(live);
   }
@@ -517,19 +506,15 @@ export default async function applyReminderChanges(
     }
     queued.add(retryKey);
     try {
-      // The Mac runs admitted writes oldest first, but approvals can be granted
-      // in any order. While an older write to a field awaits approval, a newer
-      // one is not queued behind it; the reaction retries, and a change still
-      // waiting after its retries fails visibly for the next window to propose.
+      // Approval and device execution can finish out of order. Hold a new
+      // value until all earlier writes to that field have settled.
       if (
         typeof origin === "string" &&
         fieldsOf(write).some((field) =>
-          history.awaitingApproval.has(`${origin}|${field}`)
+          history.unsettledFields.has(`${origin}|${field}`)
         )
       )
-        throw new Error(
-          `Waiting for approval of an earlier write to ${origin}`
-        );
+        throw new Error(`Waiting for an earlier write to ${origin} to settle`);
       let result: Awaited<ReturnType<ReactionClient["operations"]["execute"]>>;
       try {
         result = await client.operations.execute({
@@ -582,9 +567,13 @@ export default async function applyReminderChanges(
       }
       if (typeof origin === "string" && result.run_id != null)
         bases.set(origin, String(result.run_id).padStart(20, "0"));
-      if (typeof origin === "string" && result.status === "pending_approval")
+      if (
+        typeof origin === "string" &&
+        (result.status === "pending_approval" ||
+          result.status === "in_progress")
+      )
         for (const field of fieldsOf(write))
-          history.awaitingApproval.add(`${origin}|${field}`);
+          history.unsettledFields.add(`${origin}|${field}`);
       client.log(`Queued ${write.operation}`, {
         run_id: result.run_id,
         status: result.status,

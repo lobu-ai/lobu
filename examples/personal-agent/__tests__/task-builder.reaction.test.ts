@@ -259,6 +259,50 @@ describe("Task Collaborator reminder changes", () => {
     }
   });
 
+  test("a reaction replay cannot retry its own failed create without a fresh live read", async () => {
+    for (const status of ["failed", "timeout"]) {
+      const h = harness();
+      await applyReminderChanges(context([create]), h.client);
+      // The write may have landed even though its receipt was lost.
+      h.runs[0].status = status;
+      await expect(
+        applyReminderChanges(context([create]), h.client)
+      ).rejects.toThrow("requires a fresh live read");
+      expect(h.runs).toHaveLength(1);
+      // A later window can propose it again after checking the live state.
+      await applyReminderChanges(atRun(902, [create]), h.client);
+      expect(h.runs).toHaveLength(2);
+      h.runs[1].status = status;
+      await expect(
+        applyReminderChanges(context([create]), h.client)
+      ).rejects.toThrow("requires a fresh live read");
+      expect(h.runs).toHaveLength(2);
+    }
+  });
+
+  test("the newest failed create retains its proposing window across history filters", async () => {
+    const h = harness({
+      recentCreates: [
+        {
+          status: "failed",
+          created_at: new Date(Date.now() - 4 * 86400000).toISOString(),
+          parent_run_id: 800,
+          input: { notes: marker(key) },
+        },
+        {
+          status: "timeout",
+          created_at: new Date(Date.now() - 3 * 86400000).toISOString(),
+          parent_run_id: 901,
+          input: { notes: marker(key) },
+        },
+      ],
+    });
+    await expect(
+      applyReminderChanges(context([create]), h.client)
+    ).rejects.toThrow("requires a fresh live read");
+    expect(h.executed).toHaveLength(0);
+  });
+
   test("fresh proposals cannot bypass cancellation or the attempt limit", async () => {
     for (const statuses of [["cancelled"], ["failed", "failed", "failed"]]) {
       for (const change of [
@@ -595,7 +639,7 @@ describe("Task Collaborator reminder changes", () => {
     ).toBe(true);
   });
 
-  test("a write that fails after its reaction is retried by a later reaction with no changes", async () => {
+  test("a reaction never resends an earlier window's failed write by itself", async () => {
     const h = harness();
     await applyReminderChanges(
       context([{ action: "complete", origin_id: "reminder:a" }]),
@@ -604,12 +648,18 @@ describe("Task Collaborator reminder changes", () => {
     // The Mac fails the queued write after the reaction finished.
     h.runs[0].status = "failed";
     await applyReminderChanges(atRun(902, []), h.client);
-    expect(h.executed).toHaveLength(2);
-    expect(h.executed[1]?.input).toEqual({ origin_id: "reminder:a" });
+    expect(h.executed).toHaveLength(1);
+  });
+
+  test("the agent's re-proposal of a failed write orders on the failure", async () => {
+    const change = { action: "complete", origin_id: "reminder:a" };
+    const h = harness();
+    await applyReminderChanges(atRun(901, [change]), h.client);
+    h.runs[0].status = "failed";
+    await applyReminderChanges(atRun(902, [change]), h.client);
     const [first, retry] = h.executed.map((call) =>
       String(call.idempotency_key)
     );
-    // The retry orders on the failed attempt, so it cannot replay that key.
     expect(retry).not.toBe(first);
     expect(retry.endsWith(`:${String(h.runs[0].id).padStart(20, "0")}`)).toBe(
       true
@@ -654,7 +704,7 @@ describe("Task Collaborator reminder changes", () => {
       { action: "complete", origin_id: "reminder:b" },
     ]);
     await expect(applyReminderChanges(newer, h.client)).rejects.toThrow(
-      "Waiting for approval of an earlier write to reminder:a"
+      "Waiting for an earlier write to reminder:a to settle"
     );
     // Other fields and other reminders are not held.
     expect(h.runs.map((run) => run.input)).toEqual([
@@ -672,9 +722,12 @@ describe("Task Collaborator reminder changes", () => {
     });
   });
 
-  test("a reaction holds its own second write while the first awaits approval", async () => {
+  test.each([
+    "pending_approval",
+    "in_progress",
+  ])("a reaction holds its own second write while the first is %s", async (status) => {
     const h = harness({
-      execute: async () => ({ status: "pending_approval" }),
+      execute: async () => ({ status }),
     });
     await expect(
       applyReminderChanges(
@@ -684,21 +737,35 @@ describe("Task Collaborator reminder changes", () => {
         ]),
         h.client
       )
-    ).rejects.toThrow("Waiting for approval");
+    ).rejects.toThrow("Waiting for an earlier write");
     expect(h.runs).toHaveLength(1);
   });
 
-  test("a write waiting only for the Mac does not hold a newer one", async () => {
-    const h = harness();
-    await applyReminderChanges(
-      atRun(901, [{ action: "update", origin_id: "reminder:a", title: "Old" }]),
-      h.client
-    );
-    await applyReminderChanges(
-      atRun(902, [{ action: "update", origin_id: "reminder:a", title: "New" }]),
-      h.client
-    );
-    expect(h.runs.map((run) => run.status)).toEqual(["pending", "pending"]);
+  test("a newer write waits for older writes to settle even without an approval", async () => {
+    for (const status of ["pending", "claimed", "running"]) {
+      const h = harness();
+      await applyReminderChanges(
+        atRun(901, [
+          { action: "update", origin_id: "reminder:a", title: "Old" },
+        ]),
+        h.client
+      );
+      h.runs[0].status = status;
+      const newer = atRun(902, [
+        { action: "update", origin_id: "reminder:a", title: "New" },
+      ]);
+      // The daemon has multiple execution slots: claim order is not effect order.
+      await expect(applyReminderChanges(newer, h.client)).rejects.toThrow(
+        "Waiting for an earlier write"
+      );
+      expect(h.runs).toHaveLength(1);
+      h.runs[0].status = "completed";
+      await applyReminderChanges(newer, h.client);
+      expect(h.runs.at(-1)?.input).toEqual({
+        origin_id: "reminder:a",
+        title: "New",
+      });
+    }
   });
 
   test("an intervening different write allows a fresh correction", async () => {
@@ -717,18 +784,17 @@ describe("Task Collaborator reminder changes", () => {
     );
   });
 
-  test("repeated asynchronous failures across windows stop after three attempts", async () => {
+  test("re-proposals of a write that keeps failing stop after three attempts", async () => {
     for (const change of [
       create,
       { action: "complete", origin_id: "reminder:a" },
     ]) {
       const h = harness();
       await applyReminderChanges(atRun(901, [change]), h.client);
-      for (const runId of [902, 903, 904]) {
+      for (const runId of [902, 903, 904, 905]) {
         h.runs.at(-1)!.status = "failed";
-        await applyReminderChanges(atRun(runId, []), h.client);
+        await applyReminderChanges(atRun(runId, [change]), h.client);
       }
-      await applyReminderChanges(atRun(905, [change]), h.client);
       expect(h.runs).toHaveLength(3);
     }
   });
@@ -770,17 +836,13 @@ describe("Task Collaborator reminder changes", () => {
 
   test("a newer write to other fields of a reminder does not cancel a failed one", async () => {
     const h = harness();
-    await applyReminderChanges(
-      atRun(901, [
-        {
-          action: "update",
-          origin_id: "reminder:b",
-          title: "Renamed",
-          due: "2026-10-20T09:00:00Z",
-        },
-      ]),
-      h.client
-    );
+    const original = {
+      action: "update",
+      origin_id: "reminder:b",
+      title: "Renamed",
+      due: "2026-10-20T09:00:00Z",
+    };
+    await applyReminderChanges(atRun(901, [original]), h.client);
     h.runs[0].status = "failed";
     await applyReminderChanges(
       atRun(902, [
@@ -792,16 +854,17 @@ describe("Task Collaborator reminder changes", () => {
       ]),
       h.client
     );
-    await applyReminderChanges(atRun(903, []), h.client);
-    // The next reaction retries only the title; the due date keeps the newer value.
+    // A stale re-proposal of the original sets only the title; the due date
+    // keeps the newer value.
+    await applyReminderChanges(atRun(901, [original]), h.client);
     expect(h.runs.map((run) => run.input)).toEqual([
       {
         origin_id: "reminder:b",
         title: "Renamed",
         due: "2026-10-20T09:00:00Z",
       },
-      { origin_id: "reminder:b", title: "Renamed" },
       { origin_id: "reminder:b", due: "2026-10-21T09:00:00Z" },
+      { origin_id: "reminder:b", title: "Renamed" },
     ]);
   });
 
@@ -851,7 +914,7 @@ describe("Task Collaborator reminder changes", () => {
     await applyReminderChanges(atRun(901, [original]), h.client);
     for (const runId of [902, 903]) {
       h.runs.at(-1)!.status = "failed";
-      await applyReminderChanges(atRun(runId, []), h.client);
+      await applyReminderChanges(atRun(runId, [original]), h.client);
     }
     h.runs.at(-1)!.status = "failed";
     await applyReminderChanges(
@@ -864,6 +927,8 @@ describe("Task Collaborator reminder changes", () => {
       ]),
       h.client
     );
+    // Its title alone is a different input, but the original is exhausted.
+    await applyReminderChanges(atRun(905, [original]), h.client);
     expect(h.runs).toHaveLength(4);
     expect(h.runs[3].input).toEqual({
       origin_id: "reminder:b",
