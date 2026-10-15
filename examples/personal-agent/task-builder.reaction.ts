@@ -42,7 +42,8 @@ export const input = {
           origin_id: { type: "string", minLength: 1 },
           title: { type: "string", minLength: 1, maxLength: 500 },
           notes: { type: "string" },
-          // null clears an update's due date; a create ignores it.
+          // Reminders notifies at the due time, so a create always has one;
+          // null clears an update's due date.
           due: { type: ["string", "null"], format: "date-time" },
           // A create proposed again names the failed attempt it reassessed.
           retry_of: { type: "integer", minimum: 1 },
@@ -62,8 +63,11 @@ export const input = {
         additionalProperties: false,
         anyOf: [
           {
-            properties: { action: { const: "create" } },
-            required: ["key", "title"],
+            properties: {
+              action: { const: "create" },
+              due: { type: "string" },
+            },
+            required: ["key", "title", "due"],
           },
           {
             properties: { action: { enum: ["complete", "update"] } },
@@ -84,7 +88,7 @@ type Change =
       key: Key;
       title: string;
       notes?: string;
-      due?: string;
+      due: string;
       retry_of?: number;
     }
   | { action: "complete"; origin_id: string; expected: Expected }
@@ -222,7 +226,7 @@ function writeOf(change: Change): Write {
         title: change.title.replace(/\s+/g, " ").trim().slice(0, 500),
         notes: [notes, line].filter(Boolean).join("\n\n"),
         list: LIST,
-        ...(change.due ? { due: change.due } : {}),
+        due: change.due,
       },
     };
   }

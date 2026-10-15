@@ -215,16 +215,19 @@ describe("Task Collaborator reminder changes", () => {
     });
   });
 
-  test("a create without notes or due carries only the source line", async () => {
+  test("a create without notes carries only the source line and its due time", async () => {
     const h = harness();
     await applyReminderChanges(
-      context([{ action: "create", key, title: "Call" }]),
+      context([
+        { action: "create", key, title: "Call", due: "2026-10-20T09:00:00Z" },
+      ]),
       h.client
     );
     expect(h.executed[0]?.input).toEqual({
       title: "Call",
       notes: marker(key),
       list: "Lobu",
+      due: "2026-10-20T09:00:00Z",
     });
   });
 
@@ -663,6 +666,9 @@ describe("Task Collaborator reminder changes", () => {
         expected: { title: "y" },
       },
       { action: "create", key, title: "x", due: "tomorrow" },
+      // A create always has a due time, so Reminders notifies.
+      { action: "create", key, title: "x" },
+      { action: "create", key, title: "x", due: null },
       {
         action: "update",
         origin_id: "reminder:a",
