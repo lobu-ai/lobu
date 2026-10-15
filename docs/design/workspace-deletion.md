@@ -113,11 +113,17 @@ failure like the 2026-10-15 500 is no longer silent.
   materializers, and the chat connection store. The request also cancels the
   workspace's pending runs.
 - **Better Auth endpoints.** Its organization endpoints read through its own
-  adapter, so the same plugin filters a deleting workspace out of their
-  responses (list, get-full-organization, set-active and the rest) and refuses
-  `/organization/update` for it, so an owner's metadata write cannot clear the
-  marker. Residual: an update that passed that check just before the request
-  committed can still land after it.
+  adapter, so the same plugin refuses them in a before hook, before they run,
+  when the request targets a deleting workspace: by organization id or slug,
+  by invitation or member id, or (naming none) through the session's active
+  organization. Only list, check-slug, the per-user listings and set-active
+  skip that fallback; `/organization/list` is filtered in an after hook. The
+  member-role endpoint is a user hook that runs before any plugin hook, so
+  `lockMemberRoleChanges` refuses a deleting workspace for every membership
+  role write. Create and update reject client metadata carrying either
+  deletion key, leaving `requestWorkspaceDeletion` its only writer. Residual:
+  a request that passed the check just before the deletion committed can
+  still land after it.
 - **Purge order.** Events, then runs (both unbounded per workspace), then
   identity associations are retired through the governed unlink path (a live
   one blocks both entity and organization deletes), then entities leaf-first

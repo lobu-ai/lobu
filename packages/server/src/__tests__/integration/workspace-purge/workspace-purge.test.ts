@@ -17,6 +17,7 @@ import { registerScheduledJobsTicker } from "../../../scheduled/scheduled-jobs-s
 import type { TaskScheduler } from "../../../scheduled/task-scheduler";
 import { WORKSPACE_PURGE_TASK } from "../../../scheduled/task-definitions";
 import { getEnvFromProcess } from "../../../utils/env";
+import { isDeletionRequested } from "../../../workspace/deletion-state";
 import {
 	getMembershipRole,
 	getOrgBySlug,
@@ -41,24 +42,29 @@ import { TestApiClient } from "../../setup/test-mcp-client";
 
 const BASE = "http://localhost/api/auth";
 
+/** A bearer token, or `{ cookie }` for a browser session cookie. */
+type Credential = string | { cookie: string };
+
 async function call(
 	path: string,
 	body: Record<string, unknown>,
-	token?: string,
-): Promise<{ status: number; body: Record<string, unknown> }> {
+	credential?: Credential,
+): Promise<{ status: number; body: Record<string, unknown>; cookie: string | null }> {
 	const auth = await createAuth(getEnvFromProcess());
 	const res = await auth.handler(
 		new Request(`${BASE}${path}`, {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				...(token ? { authorization: `Bearer ${token}` } : {}),
+				...(typeof credential === "string" ? { authorization: `Bearer ${credential}` } : {}),
+				...(typeof credential === "object" ? { cookie: credential.cookie } : {}),
 			},
 			body: JSON.stringify(body),
 		}),
 	);
 	const parsed = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-	return { status: res.status, body: parsed };
+	const setCookie = res.headers.get("set-cookie");
+	return { status: res.status, body: parsed, cookie: setCookie ? setCookie.split(";")[0] : null };
 }
 
 async function get(path: string, token: string): Promise<{ status: number; body: unknown }> {
@@ -421,6 +427,207 @@ describe("workspace purge", () => {
 		expect(personal.status).toBe(403);
 		expect(personal.body.code).toBe("PERSONAL_ORGANIZATION_CANNOT_BE_DELETED");
 		expect(await pendingPurgeTask(target.organizationId)).toHaveLength(0);
+	});
+
+	it("refuses a client-supplied deletion marker on create and update", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("injection");
+		const adminSignUp = await call("/sign-up/email", {
+			email: "admin-injection@workspace-purge.test",
+			password: "adminpassword99",
+			name: "Admin",
+		});
+		const adminToken = adminSignUp.body.token as string;
+		const adminId = (adminSignUp.body.user as { id: string }).id;
+		await addUserToOrganization(adminId, target.organizationId, "admin");
+
+		const refusedDelete = await call(
+			"/organization/delete",
+			{ organizationId: target.organizationId },
+			adminToken,
+		);
+		expect(refusedDelete.status).toBe(403);
+		const injected = await call(
+			"/organization/update",
+			{
+				organizationId: target.organizationId,
+				data: { metadata: { deletion_requested_at: "2026-01-01T00:00:00.000Z" } },
+			},
+			adminToken,
+		);
+		expect(injected.status).toBe(400);
+		expect(injected.body.code).toBe("ORGANIZATION_METADATA_KEY_RESERVED");
+		const injectedBy = await call(
+			"/organization/update",
+			{
+				organizationId: target.organizationId,
+				data: { metadata: { deletion_requested_by: adminId } },
+			},
+			adminToken,
+		);
+		expect(injectedBy.status).toBe(400);
+		const [org] = await sql`
+			SELECT metadata FROM organization WHERE id = ${target.organizationId}
+		`;
+		expect(isDeletionRequested(org.metadata)).toBe(false);
+		expect(String(org.metadata ?? "")).not.toContain("deletion_requested");
+		expect(await getOrgBySlug(target.slug)).not.toBeNull();
+
+		const created = await call(
+			"/organization/create",
+			{
+				name: "Born deleting",
+				slug: "purge-born-deleting",
+				metadata: { deletion_requested_at: "2026-01-01T00:00:00.000Z" },
+			},
+			adminToken,
+		);
+		expect(created.status).toBe(400);
+		const born = await sql`SELECT 1 FROM organization WHERE slug = 'purge-born-deleting'`;
+		expect(born).toHaveLength(0);
+
+		// An ordinary metadata update still goes through.
+		const ordinary = await call(
+			"/organization/update",
+			{ organizationId: target.organizationId, data: { metadata: { theme: "dark" } } },
+			adminToken,
+		);
+		expect(ordinary.status).toBe(200);
+	});
+
+	it("refuses org-scoped Better Auth endpoints before they mutate anything", async () => {
+		const sql = getTestDb();
+		const target = await signUpOwnerWithWorkspace("scoped");
+		const live = await createTestOrganization();
+		const adminSignUp = await call("/sign-up/email", {
+			email: "admin-scoped@workspace-purge.test",
+			password: "adminpassword99",
+			name: "Admin",
+		});
+		const adminToken = adminSignUp.body.token as string;
+		const adminId = (adminSignUp.body.user as { id: string }).id;
+		await addUserToOrganization(adminId, target.organizationId, "admin");
+		await addUserToOrganization(adminId, live.id, "member");
+		const plainSignUp = await call("/sign-up/email", {
+			email: "plain-scoped@workspace-purge.test",
+			password: "plainpassword99",
+			name: "Plain",
+		});
+		const plainMemberId = await addUserToOrganization(
+			(plainSignUp.body.user as { id: string }).id,
+			target.organizationId,
+			"member",
+		);
+		const invitationId = "invitation-workspace-purge-scoped";
+		await sql`
+			INSERT INTO invitation (id, "organizationId", email, role, status, "expiresAt", "inviterId")
+			VALUES (${invitationId}, ${target.organizationId}, 'invitee-scoped@workspace-purge.test',
+				'member', 'pending', now() + interval '1 day', ${target.userId})
+		`;
+		const inviteeSignUp = await call("/sign-up/email", {
+			email: "invitee-scoped@workspace-purge.test",
+			password: "inviteepassword99",
+			name: "Invitee",
+		});
+		const inviteeToken = inviteeSignUp.body.token as string;
+		const inviteeId = (inviteeSignUp.body.user as { id: string }).id;
+
+		const activated = await call(
+			"/organization/set-active",
+			{ organizationId: target.organizationId },
+			adminToken,
+		);
+		expect(activated.status).toBe(200);
+		const deleted = await call(
+			"/organization/delete",
+			{ organizationId: target.organizationId },
+			target.token,
+		);
+		expect(deleted.status).toBe(200);
+
+		const memberRows = async () =>
+			sql<{ userId: string; role: string }[]>`
+				SELECT "userId", role FROM member
+				WHERE "organizationId" = ${target.organizationId} ORDER BY "userId"
+			`;
+		const membersBefore = await memberRows();
+
+		// Named by id, by slug, and through the session's active organization.
+		expect(
+			(await get(`/organization/list-members?organizationId=${target.organizationId}`, adminToken))
+				.status,
+		).toBe(404);
+		expect(
+			(await get(`/organization/list-members?organizationSlug=${target.slug}`, adminToken)).status,
+		).toBe(404);
+		expect((await get("/organization/list-members", adminToken)).status).toBe(404);
+		expect((await get("/organization/get-full-organization", adminToken)).status).toBe(404);
+
+		const invite = await call(
+			"/organization/invite-member",
+			{
+				organizationId: target.organizationId,
+				email: "late-invitee@workspace-purge.test",
+				role: "member",
+			},
+			adminToken,
+		);
+		expect(invite.status).toBe(404);
+		// Better Auth's member-role endpoint is served by a user hook that runs
+		// before any plugin hook and reads only the cookie session.
+		const roleChange = await call(
+			"/organization/update-member-role",
+			{ memberId: plainMemberId, role: "admin" },
+			{ cookie: adminSignUp.cookie as string },
+		);
+		expect(roleChange.status).toBe(404);
+		const removal = await call(
+			"/organization/remove-member",
+			{ memberIdOrEmail: plainMemberId, organizationId: target.organizationId },
+			adminToken,
+		);
+		expect(removal.status).toBe(404);
+		const left = await call(
+			"/organization/leave",
+			{ organizationId: target.organizationId },
+			adminToken,
+		);
+		expect(left.status).toBe(404);
+		expect(await memberRows()).toEqual(membersBefore);
+		const invitations = await sql`
+			SELECT email, status FROM invitation WHERE "organizationId" = ${target.organizationId}
+		`;
+		expect(invitations).toEqual([
+			{ email: "invitee-scoped@workspace-purge.test", status: "pending" },
+		]);
+
+		// An invitation into the deleting workspace can be neither read nor accepted.
+		expect((await get(`/organization/get-invitation?id=${invitationId}`, inviteeToken)).status).toBe(
+			404,
+		);
+		const accepted = await call("/organization/accept-invitation", { invitationId }, inviteeToken);
+		expect(accepted.status).toBe(404);
+		const inviteeMembership = await sql`
+			SELECT 1 FROM member WHERE "userId" = ${inviteeId}
+				AND "organizationId" = ${target.organizationId}
+		`;
+		expect(inviteeMembership).toHaveLength(0);
+
+		// Switching away still works; switching back is refused and leaves the
+		// session where it was.
+		const toLive = await call("/organization/set-active", { organizationId: live.id }, adminToken);
+		expect(toLive.status).toBe(200);
+		const back = await call(
+			"/organization/set-active",
+			{ organizationId: target.organizationId },
+			adminToken,
+		);
+		expect(back.status).toBe(404);
+		const sessions = await sql<{ activeOrganizationId: string | null }[]>`
+			SELECT "activeOrganizationId" FROM session WHERE "userId" = ${adminId}
+		`;
+		expect(sessions.map((row) => row.activeOrganizationId)).toEqual([live.id]);
+		expect((await get("/organization/list-members", adminToken)).status).toBe(200);
 	});
 
 	it("hides a requested workspace before the purge runs", async () => {

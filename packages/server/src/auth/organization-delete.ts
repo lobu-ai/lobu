@@ -1,14 +1,33 @@
 import { APIError } from 'better-auth';
 import { createAuthMiddleware } from 'better-auth/api';
 import type { BetterAuthPlugin } from 'better-auth';
-import { getDb } from '../db/client';
+import { getDb, pgTextArray } from '../db/client';
 import { requestWorkspaceDeletion } from '../workspace/deletion';
-import { isDeletionRequested, organizationLiveSql } from '../workspace/deletion-state';
+import {
+  carriesDeletionMarker,
+  isDeletionRequested,
+  organizationLiveSql,
+} from '../workspace/deletion-state';
 import { isPersonalOrgDeletionBlocked } from './personal-org-provisioning';
 
 const ORGANIZATION_DELETE_PATH = '/organization/delete';
+const ORGANIZATION_CREATE_PATH = '/organization/create';
 const ORGANIZATION_UPDATE_PATH = '/organization/update';
+const ORGANIZATION_LIST_PATH = '/organization/list';
+const ORGANIZATION_GET_INVITATION_PATH = '/organization/get-invitation';
 const ORGANIZATION_PATH_PREFIX = '/organization/';
+
+// Organization endpoints that act on no particular workspace. Without an
+// explicit target they must not fall back to the session's active
+// organization: a member whose active workspace is being deleted still lists
+// workspaces, checks slugs and switches (or clears) the active one.
+const UNSCOPED_ORGANIZATION_PATHS = new Set([
+  ORGANIZATION_LIST_PATH,
+  '/organization/check-slug',
+  '/organization/list-user-invitations',
+  '/organization/list-user-teams',
+  '/organization/set-active',
+]);
 
 function organizationNotFound(): APIError {
   return new APIError('NOT_FOUND', {
@@ -109,45 +128,80 @@ export function workspaceDeletionPlugin(
     return ctx.json(deleted);
   });
 
-  // A deleting workspace is read-only: an owner's metadata update would
-  // otherwise overwrite the marker and resurface the workspace mid-purge.
-  const refuseUpdate = createAuthMiddleware(async (ctx) => {
-    const bodyOrgId = ctx.body?.organizationId;
-    let organizationId = typeof bodyOrgId === 'string' && bodyOrgId ? bodyOrgId : null;
-    if (!organizationId && ctx.headers) {
-      const session = await resolveRequestSession(ctx.headers);
-      organizationId = session?.session.activeOrganizationId ?? null;
+  // The deletion marker is written only by `requestWorkspaceDeletion`, after
+  // the owner and personal-workspace checks above. Accepting it from a client
+  // would let an admin hide a workspace with no owner decision and no purge.
+  const refuseReservedMetadata = createAuthMiddleware(async (ctx) => {
+    const metadata =
+      ctx.path === ORGANIZATION_CREATE_PATH ? ctx.body?.metadata : ctx.body?.data?.metadata;
+    if (carriesDeletionMarker(metadata)) {
+      throw new APIError('BAD_REQUEST', {
+        code: 'ORGANIZATION_METADATA_KEY_RESERVED',
+        message: 'Organization metadata cannot set a deletion marker',
+      });
     }
-    if (!organizationId) return;
+  });
+
+  // A deleting workspace is gone for every organization endpoint, so this runs
+  // BEFORE the endpoint: a member, invitation, role or session change must not
+  // be applied and then hidden. The target is every organization the request
+  // names (id, slug, invitation, member); with none named, Better Auth falls
+  // back to the session's active organization, and so does this check.
+  const refuseDeletingTarget = createAuthMiddleware(async (ctx) => {
+    const body = (ctx.body ?? {}) as Record<string, unknown>;
+    const query = (ctx.query ?? {}) as Record<string, unknown>;
+    const strings = (...values: unknown[]) =>
+      values.filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+    const organizationIds = strings(body.organizationId, query.organizationId);
+    const slugs = strings(body.organizationSlug, query.organizationSlug);
+    const invitationIds = strings(
+      body.invitationId,
+      ctx.path === ORGANIZATION_GET_INVITATION_PATH ? query.id : undefined,
+    );
+    const memberIds = strings(body.memberId, body.memberIdOrEmail);
+
+    const namesTarget =
+      organizationIds.length + slugs.length + invitationIds.length + memberIds.length > 0;
+    if (!namesTarget) {
+      if (UNSCOPED_ORGANIZATION_PATHS.has(ctx.path ?? '') || !ctx.headers) return;
+      const session = await resolveRequestSession(ctx.headers);
+      const active = session?.session.activeOrganizationId;
+      if (!active) return;
+      organizationIds.push(active);
+    }
+
     const sql = getDb();
     const deleting = await sql`
       SELECT 1 FROM organization o
-      WHERE o.id = ${organizationId} AND NOT ${sql.unsafe(organizationLiveSql('o'))}
+      WHERE NOT ${sql.unsafe(organizationLiveSql('o'))}
+        AND (
+          o.id = ANY(${pgTextArray(organizationIds)}::text[])
+          OR o.slug = ANY(${pgTextArray(slugs)}::text[])
+          OR o.id IN (
+            SELECT i."organizationId" FROM invitation i
+            WHERE i.id = ANY(${pgTextArray(invitationIds)}::text[])
+          )
+          OR o.id IN (
+            SELECT m."organizationId" FROM member m
+            WHERE m.id = ANY(${pgTextArray(memberIds)}::text[])
+          )
+        )
+      LIMIT 1
     `;
     if (deleting.length > 0) throw organizationNotFound();
   });
 
-  // Better Auth's organization reads (list, get-full-organization,
-  // set-active, ...) go through its own adapter, not our SQL predicate, so the
-  // deleting workspace is filtered from their responses here.
-  const hideFromResponses = createAuthMiddleware(async (ctx) => {
+  // `/organization/list` reads through Better Auth's adapter, not our SQL
+  // predicate, and names no target, so the deleting workspace is filtered from
+  // its response here.
+  const hideFromList = createAuthMiddleware(async (ctx) => {
     const returned = ctx.context.returned;
-    if (Array.isArray(returned)) {
-      const visible = returned.filter(
-        (org) => !isDeletionRequested((org as { metadata?: unknown } | null)?.metadata),
-      );
-      return visible.length !== returned.length ? ctx.json(visible) : undefined;
-    }
-    if (
-      returned &&
-      typeof returned === 'object' &&
-      !(returned instanceof APIError) &&
-      'slug' in returned &&
-      isDeletionRequested((returned as { metadata?: unknown }).metadata)
-    ) {
-      throw organizationNotFound();
-    }
-    return undefined;
+    if (!Array.isArray(returned)) return undefined;
+    const visible = returned.filter(
+      (org) => !isDeletionRequested((org as { metadata?: unknown } | null)?.metadata),
+    );
+    return visible.length !== returned.length ? ctx.json(visible) : undefined;
   });
 
   return {
@@ -155,16 +209,20 @@ export function workspaceDeletionPlugin(
     hooks: {
       before: [
         { matcher: (ctx) => ctx.path === ORGANIZATION_DELETE_PATH, handler },
-        { matcher: (ctx) => ctx.path === ORGANIZATION_UPDATE_PATH, handler: refuseUpdate },
-      ],
-      after: [
+        {
+          matcher: (ctx) =>
+            ctx.path === ORGANIZATION_CREATE_PATH || ctx.path === ORGANIZATION_UPDATE_PATH,
+          handler: refuseReservedMetadata,
+        },
         {
           matcher: (ctx) =>
             (ctx.path ?? '').startsWith(ORGANIZATION_PATH_PREFIX) &&
-            ctx.path !== ORGANIZATION_DELETE_PATH,
-          handler: hideFromResponses,
+            ctx.path !== ORGANIZATION_DELETE_PATH &&
+            ctx.path !== ORGANIZATION_CREATE_PATH,
+          handler: refuseDeletingTarget,
         },
       ],
+      after: [{ matcher: (ctx) => ctx.path === ORGANIZATION_LIST_PATH, handler: hideFromList }],
     },
   } satisfies BetterAuthPlugin;
 }

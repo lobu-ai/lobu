@@ -5,7 +5,8 @@
  * `organization.metadata.deletion_requested_at`; listings, membership checks,
  * schedules and chat routing filter with the SQL predicates below, and the
  * Better Auth organization endpoints (which read through Better Auth's own
- * adapter) filter with {@link isDeletionRequested} in `auth/organization-delete.ts`.
+ * adapter) are refused before they run, and filtered with
+ * {@link isDeletionRequested}, in `auth/organization-delete.ts`.
  * No imports, so any layer can use it without a dependency cycle.
  */
 
@@ -30,18 +31,30 @@ export function organizationIdLiveSql(organizationIdExpr: string): string {
 }
 
 /** The same test on an organization's metadata as Better Auth returns it. */
-export function isDeletionRequested(metadata: unknown): boolean {
+function parseMetadata(metadata: unknown): Record<string, unknown> | null {
   let parsed: unknown = metadata;
   if (typeof metadata === 'string') {
     try {
       parsed = JSON.parse(metadata);
     } catch {
-      return false;
+      return null;
     }
   }
+  return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null;
+}
+
+export function isDeletionRequested(metadata: unknown): boolean {
+  return parseMetadata(metadata)?.[DELETION_REQUESTED_AT_KEY] != null;
+}
+
+/**
+ * True when client-supplied organization metadata names a deletion marker.
+ * `requestWorkspaceDeletion` is the only writer of these keys.
+ */
+export function carriesDeletionMarker(metadata: unknown): boolean {
+  const parsed = parseMetadata(metadata);
   return (
-    typeof parsed === 'object' &&
     parsed !== null &&
-    (parsed as Record<string, unknown>)[DELETION_REQUESTED_AT_KEY] != null
+    (DELETION_REQUESTED_AT_KEY in parsed || DELETION_REQUESTED_BY_KEY in parsed)
   );
 }
