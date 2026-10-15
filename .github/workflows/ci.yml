@@ -1583,10 +1583,17 @@ jobs:
             echo "[migration-never-applied] sentinel present; immutability check is skipped for this PR."
             exit 0
           fi
-          edited=$(git diff --name-only --diff-filter=MRD "$BASE_SHA"...HEAD -- db/migrations/ \
+          # Precondition sidecars (db/migrations/preconditions/) are deploy-time
+          # gates for PENDING migrations, not ledgered history: never recorded in
+          # schema_migrations, never evaluated once their migration is applied.
+          # Editing or deleting one changes behaviour only where its migration
+          # is still pending — exactly where a wrong sidecar has to be fixed —
+          # so the silent-no-op rationale above does not apply. Migration bodies
+          # stay immutable; the runner rejects a sidecar whose migration is gone.
+          edited=$(git diff --name-only --diff-filter=MRD "$BASE_SHA"...HEAD -- db/migrations/ ':!db/migrations/preconditions/' \
             | grep -v '^db/migrations/00000000000000_baseline\.sql$' || true)
           if [ -n "$edited" ]; then
-            echo "::error::Migration files were modified or renamed — applied migrations are immutable (only db/migrations/00000000000000_baseline.sql is excluded). Add a new dated migration instead."
+            echo "::error::Migration files were modified or renamed — applied migrations are immutable (only db/migrations/00000000000000_baseline.sql and db/migrations/preconditions/ are excluded). Add a new dated migration instead."
             echo "$edited"
             exit 1
           fi
