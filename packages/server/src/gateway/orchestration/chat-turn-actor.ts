@@ -57,6 +57,21 @@ export function chatSenderLimitKey(
   return `${prefix}:${JSON.stringify([sender.organizationId ?? null, sender.platform, sender.teamId ?? null, sender.senderId])}`;
 }
 
+/**
+ * Turns per fixed hourly window all senders with confined access (`reply_only`,
+ * `public_visitor`) may start together in one organization, across every
+ * sender and platform. The per-sender limit alone lets many throwaway
+ * accounts multiply it; over this ceiling, such a message gets no turn. A
+ * vouched sender (`org_shared`) and a linked member are not counted. Inherits
+ * the shared limiter's per-pod fallback when Postgres is unavailable.
+ */
+export const UNLINKED_ORGANIZATION_TURNS_PER_HOUR = 120;
+
+/** The shared rate-limit key for {@link UNLINKED_ORGANIZATION_TURNS_PER_HOUR}. */
+export function chatOrganizationLimitKey(organizationId: string): string {
+  return `chat-unlinked-org-turn:${JSON.stringify([organizationId])}`;
+}
+
 /** How often one sender may be shown the access notice. */
 export const CHAT_ACCESS_NOTICE_WINDOW_SECONDS = 24 * 60 * 60;
 
