@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   bridgeImplementsRun,
   createMacDeviceDaemonShutdown,
+  executeAdvertisedConnectorRun,
   macDeviceDaemonMetadata,
   selectMacDeviceDaemonAgentKind,
   validateMacDeviceDaemonOptions,
@@ -288,6 +292,35 @@ describe('WorkerPollLoop', () => {
     expect(executions).toBe(1);
   });
 
+  test('reports the active run count as runs start and finish', async () => {
+    let polled = false;
+    let finish!: () => void;
+    const counts: number[] = [];
+    const loop = new WorkerPollLoop({
+      client: {
+        healthCheck: async () => true,
+        poll: async () => {
+          if (polled) return { next_poll_seconds: 1 } as never;
+          polled = true;
+          return { run_id: 1, run_type: 'action' } as never;
+        },
+      } as never,
+      pollIntervalMs: 1,
+      maxConcurrentJobs: 2,
+      execute: () => new Promise<void>((resolve) => { finish = resolve; }),
+      onActiveJobsChange: (activeJobs) => counts.push(activeJobs),
+    });
+
+    const started = loop.start();
+    while (counts.length === 0) await Bun.sleep(1);
+    expect(counts).toEqual([1]);
+    finish();
+    while (counts.length < 2) await Bun.sleep(1);
+    loop.stop();
+    await started;
+    expect(counts).toEqual([1, 0]);
+  });
+
   test('releases the active-job slot when execution throws synchronously', async () => {
     let polled = false;
     const client = {
@@ -392,5 +425,76 @@ describe('bridgeImplementsRun', () => {
         undefined
       )
     ).toBe(false);
+  });
+});
+
+// os.shell runs in the daemon's own builtin; every other advertised connector
+// stays native app work over the bridge.
+describe('executeAdvertisedConnectorRun', () => {
+  function recordingClient() {
+    const completions: Array<Record<string, unknown>> = [];
+    return {
+      completions,
+      client: {
+        id: 'macos:test',
+        async heartbeat() {},
+        async completeAction(input: Record<string, unknown>) {
+          completions.push(input);
+        },
+      },
+    };
+  }
+  const advertising = (key: string) =>
+    new MutableWorkerAdvertisementProvider({ capabilities: {}, manifests: [{ key }], generation: 1 });
+
+  test.skipIf(!existsSync('/bin/zsh'))('runs os.shell through the daemon builtin, not the bridge', async () => {
+    // An empty ZDOTDIR keeps the developer's own zsh profile out of stdout.
+    const profileDir = mkdtempSync(join(tmpdir(), 'lobu-mac-shell-profile-'));
+    const savedZdotdir = process.env.ZDOTDIR;
+    process.env.ZDOTDIR = profileDir;
+    try {
+      const { client, completions } = recordingClient();
+      const bridge = {
+        run() {
+          throw new Error('os.shell must not reach the native bridge');
+        },
+      };
+      await executeAdvertisedConnectorRun(
+        client as never,
+        {
+          run_id: 71,
+          run_type: 'action',
+          connector_key: 'os.shell',
+          action_key: 'run',
+          action_input: { command: '[[ -o login ]] && echo login', cwd: process.cwd() },
+        },
+        { advertisementProvider: advertising('os.shell'), bridge: bridge as never }
+      );
+      expect(completions).toEqual([
+        expect.objectContaining({ run_id: 71, status: 'success', action_output: expect.objectContaining({ stdout: 'login\n' }) }),
+      ]);
+    } finally {
+      if (savedZdotdir === undefined) delete process.env.ZDOTDIR;
+      else process.env.ZDOTDIR = savedZdotdir;
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps other advertised actions on the native bridge', async () => {
+    const { client, completions } = recordingClient();
+    const calls: Array<Record<string, unknown>> = [];
+    const bridge = {
+      async run(input: Record<string, unknown>) {
+        calls.push(input);
+        return { action_output: { native: true } };
+      },
+    };
+    await executeAdvertisedConnectorRun(
+      client as never,
+      { run_id: 73, run_type: 'action', connector_key: 'apple.computer_use', action_key: 'click' },
+      { advertisementProvider: advertising('apple.computer_use'), bridge: bridge as never }
+    );
+    expect(calls).toEqual([expect.objectContaining({ operation: 'action' })]);
+    expect(completions).toEqual([expect.objectContaining({ status: 'success', action_output: { native: true } })]);
   });
 });

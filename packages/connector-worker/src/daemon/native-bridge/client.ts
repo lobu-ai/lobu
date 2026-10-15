@@ -189,6 +189,21 @@ export class NativeBridgeClient {
     await Promise.allSettled(cancellations);
   }
 
+  /**
+   * Tell the app how many runs this daemon is executing. The app holds staged
+   * updates while any are live: work the daemon runs itself (shell commands,
+   * Automations, chat) never passes through the app's own run table.
+   */
+  async reportActivity(activeRuns: number): Promise<void> {
+    if (!this.handshakeComplete || this.failure) return;
+    await this.send({
+      version: NATIVE_BRIDGE_PROTOCOL_VERSION,
+      kind: 'activity',
+      request_id: randomUUID(),
+      payload: { active_runs: activeRuns },
+    });
+  }
+
   async shutdown(): Promise<void> {
     if (!this.handshakeComplete || this.failure) return;
     await this.send({

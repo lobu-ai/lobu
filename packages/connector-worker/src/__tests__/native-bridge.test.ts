@@ -135,6 +135,32 @@ describe('native bridge handshake', () => {
     output.destroy();
   });
 
+  test('reports the active run count only after the handshake', async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const provider = new MutableWorkerAdvertisementProvider({ capabilities: {}, manifests: [], generation: 0 });
+    const bridge = new NativeBridgeClient(input, output, provider, 'mac:test', 'daemon-build-1');
+    const decoder = new NativeBridgeFrameDecoder();
+
+    await bridge.reportActivity(1);
+    expect(output.read()).toBeNull();
+
+    input.write(helloFrame());
+    await bridge.handshake();
+    await bridge.reportActivity(2);
+    const frames = [];
+    while (!frames.some((frame) => frame.kind === 'activity')) {
+      const chunk = output.read();
+      if (chunk) frames.push(...decoder.append(chunk as Buffer));
+      else await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(frames.filter((frame) => frame.kind === 'activity').map((frame) => frame.payload)).toEqual([
+      { active_runs: 2 },
+    ]);
+    input.destroy();
+    output.destroy();
+  });
+
   test('does not emit a run before hello, then acknowledges nonce/build and owns the run', async () => {
     const input = new PassThrough();
     const output = new PassThrough();

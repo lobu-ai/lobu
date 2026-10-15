@@ -24,6 +24,8 @@ export interface WorkerPollLoopOptions {
   beforeIdlePoll?: () => Promise<void>;
   /** Persisted device credentials treat poll-time revocation as terminal. */
   failClosedOnPollAuthError?: boolean;
+  /** Called with the new count each time a run starts or finishes. */
+  onActiveJobsChange?: (activeJobs: number) => void;
 }
 
 export type WorkerPollLoopExit = (code: number) => void;
@@ -47,6 +49,7 @@ export class WorkerPollLoop {
   private readonly execute: (job: PollResponse) => Promise<unknown>;
   private readonly beforeIdlePoll?: () => Promise<void>;
   private readonly failClosedOnPollAuthError: boolean;
+  private readonly onActiveJobsChange?: (activeJobs: number) => void;
   private running = false;
   private admittingJobs = true;
   private activeJobs = 0;
@@ -64,6 +67,7 @@ export class WorkerPollLoop {
     this.execute = options.execute;
     this.beforeIdlePoll = options.beforeIdlePoll;
     this.failClosedOnPollAuthError = options.failClosedOnPollAuthError === true;
+    this.onActiveJobsChange = options.onActiveJobsChange;
   }
 
   async start(): Promise<void> {
@@ -173,6 +177,7 @@ export class WorkerPollLoop {
     }
 
     this.activeJobs++;
+    this.onActiveJobsChange?.(this.activeJobs);
     Promise.resolve()
       .then(() => this.execute(job))
       .catch((err) => {
@@ -180,6 +185,7 @@ export class WorkerPollLoop {
       })
       .finally(() => {
         this.activeJobs--;
+        this.onActiveJobsChange?.(this.activeJobs);
         this.capacityVersion++;
         this.wakePoll?.(true);
       });
