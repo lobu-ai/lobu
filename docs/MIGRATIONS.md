@@ -54,7 +54,9 @@ Use `DO` / `RAISE EXCEPTION` with an actionable message to assert a prerequisite
 
 Do not declare an external prerequisite when the migration itself repairs the data. The runner does not infer prerequisites by scanning `SET NOT NULL`: a migration can legitimately clear, rebuild, or backfill those NULLs before adding its constraint. Keep assertions about intermediate migration state inside that migration.
 
-The same runner checks prerequisites under its existing advisory lock before applying migrations, including direct startup and fresh installs. This recheck can catch a prerequisite that changed after the hook's check; it is not a guarantee that concurrent writers cannot invalidate data later. Applied migrations do not rerun their sidecars. Keep sidecars with their owning migrations when squashing or removing history; historical migration SQL remains immutable.
+**A sidecar may only assert an external prerequisite — never the effect of another pending migration.** The runner evaluates every pending sidecar before any migration applies, so a sidecar that requires a constraint, column, or index created by an earlier migration refuses every install where that earlier migration is also pending: anyone upgrading release to release, even with nothing to fix. If a migration needs an earlier migration's effect, the filename order already provides it; if it needs data repaired, repair it in a migration that sorts first. The 21.2.1→22.0.0 upgrade was blocked this way once (two sidecars demanded a validated fence that a migration in the same batch creates), which is why `scripts/__tests__/migration-entrypoint.node-test.mjs` runs every sidecar against the previous release tag's schema with no data.
+
+The same runner checks prerequisites under its existing advisory lock before applying migrations, including direct startup and fresh installs. This recheck can catch a prerequisite that changed after the hook's check; it is not a guarantee that concurrent writers cannot invalidate data later. Applied migrations do not rerun their sidecars. Keep sidecars with their owning migrations when squashing or removing history. Historical migration SQL remains immutable, but a sidecar is not ledgered: it may be corrected or deleted after it ships, and CI's immutability check excludes `db/migrations/preconditions/` for that reason.
 
 ---
 
@@ -230,24 +232,48 @@ If the migration partially applied (column created, index missing, view missing)
 - [PR #767](https://github.com/lobu-ai/lobu/pull/767) — the boot-time schema-version assertion that catches behind-DB images at startup.
 - The post-incident commentary on the original migration ([#765](https://github.com/lobu-ai/lobu/pull/765)) for what "operational note" looks like when a migration's risks are flagged but not addressed.
 
-### Retiring physical entity merges
+### Retiring physical entity merges (21.2.1 → 22.0.0)
 
-Existing installations must first deploy the release containing
-`20261009020000_retire_physical_entity_merge.sql`. Use that release's audited
-maintenance tool to retire redirects, active ledgers, pending decisions, and
-saved callers before its deployment. Keep its verified backup outside the
-checkout. The maintenance tool remains available in that release; it is omitted
-after the redirect column is removed.
+22.0.0 retires physical entity merges inside the upgrade. Take a backup first,
+as for any release. `20261009015900_retire_remaining_physical_merges.sql` sorts
+before the retirement migrations and, wherever `entities.merged_into` still
+exists, rewrites every remaining redirect in one transaction: `events.entity_ids`
+and the other entity-id arrays point at the survivor (order kept, duplicates
+removed, no other event column touched); `channel_messages.author_entity_id`
+and child `parent_id` rows are retargeted; live identities and ordinary
+relationships move to the survivor the way the 21.2.1 merge executor moved them,
+keeping `entity_identities.merged_from_entity_id` provenance; active
+`entity_merge_operations` ledgers are deleted (undo is retired; undone rows stay
+as audit); `auto_merge` resolution rules become `auto_link`; the tombstoned
+loser is hard-deleted. `20261009020000` then fences the column and
+`20261009030001` drops it. The migration returns immediately if the column has
+already been dropped; fresh installs replay the earlier migrations and reach
+it without redirects. The batch is quiesced because 21.2.1 code reads the column.
+Soft-deleted identities and relationships, authorization edges and approval
+policies keyed on a merged record cascade away with it. `classify_facet.entity_id`
+and `automation_reactions.entity_id` have no foreign keys and retain their
+historical record IDs.
 
-The following release removes the null `entities.merged_into` column and its
-index, foreign key, and temporary fence. Its preflight requires the validated
-first-release fence whenever the column exists. Complete the first rollout
-before deploying this contract release; a database fence alone does not prove
-that every old reader has stopped. Fresh installs replay the history in order.
+Two conditions stay with the operator. The sidecar of `20261009020000` asserts
+them before anything applies, and each message carries the SQL that lists the
+rows:
 
-The contract release also drops the obsolete rejected-merge index, proposal
-helper, and winner-history index. Identity decision indexes remain, as do
-`entity_identities.merged_from_entity_id` and its provenance index. Historical
-`entity_merge_operations` rows and their audit constraints remain intact;
-execution and undo stay retired. The retained source-run index supports its
-foreign key. These migrations do not delete audit rows or rewrite events.
+- Merge decisions in `runs` (`action_key = 'entity_change'`, operation `merge`,
+  `unmerge` or `resolve_duplicates`) that are pending, in flight, or rejected.
+  Finish or cancel the pending and in-flight ones in the product while still
+  on 21.2.1. 22.0.0 neither executes nor reads any of them; after review, delete
+  the remaining rows.
+- Saved Automation scripts that call `entities.manage`, `entities.search`,
+  `entities.merge`, `entities.unmerge` or `entities.resolveDuplicates`, or read
+  `merged_into`. Rewrite them against the identity-association methods first.
+
+Installs with nonempty `agents.tools_config` are refused by the sidecars of
+`20261005150000` and `20261005173700`: the settings API that managed those
+restrictions is gone in 22.0.0 and the column follows. Review, then clear:
+
+```sql
+SELECT id, organization_id, tools_config FROM agents
+ WHERE tools_config IS NOT NULL AND tools_config <> '{}'::jsonb;
+UPDATE agents SET tools_config = '{}'::jsonb
+ WHERE tools_config IS NOT NULL AND tools_config <> '{}'::jsonb;
+```

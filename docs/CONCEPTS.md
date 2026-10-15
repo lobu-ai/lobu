@@ -91,10 +91,12 @@ Record-level read policies withhold an entire group when any member is denied;
 source permissions still govern history.
 
 The physical-merge redirect column and its execution helpers are removed.
-Existing installations upgrade through the first retirement release, which
-requires owner-verified cleanup and removes runtime readers before the column
-drop. Historical ledger snapshots remain audit-only and do not support undo;
-authentication identity provenance is retained.
+Upgrading from 21.2.1 retires any remaining redirect inside the upgrade: event
+and other references move to the survivor and the tombstoned duplicate is
+deleted (`docs/MIGRATIONS.md`, "Retiring physical entity merges"). Active merge
+ledgers are deleted; undone ledger snapshots remain audit-only and do not
+support undo. Authentication identity provenance on retained identities is
+preserved.
 
 ## The event lifecycle (end to end)
 

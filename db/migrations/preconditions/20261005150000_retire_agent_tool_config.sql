@@ -6,7 +6,7 @@ BEGIN
     WHERE table_schema = 'public' AND table_name = 'agents' AND column_name = 'tools_config'
   ) THEN
     IF EXISTS (SELECT 1 FROM public.agents WHERE tools_config IS NOT NULL AND tools_config <> '{}'::jsonb) THEN
-      RAISE EXCEPTION 'Agent tool configuration retirement requires owner review: clear nonempty agents.tools_config through the existing settings API before upgrading';
+      RAISE EXCEPTION 'Agent tool configuration retirement requires owner review: tool restrictions stored in agents.tools_config are not honored after this release and the settings API that managed them is gone. Review the rows with SELECT id, organization_id, tools_config FROM agents WHERE tools_config IS NOT NULL AND tools_config <> ''{}''::jsonb, then clear them with UPDATE agents SET tools_config = ''{}''::jsonb WHERE tools_config IS NOT NULL AND tools_config <> ''{}''::jsonb; before upgrading (docs/MIGRATIONS.md)';
     END IF;
   END IF;
   IF to_regclass('public.runs') IS NOT NULL THEN
