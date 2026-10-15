@@ -44,14 +44,10 @@ This design turns those steps into the product's delete.
 
 **Who starts a delete, and where it runs, are separate.**
 
-- **Who starts it:**
-  - The workspace owner, from Settings → Delete.
-  - A platform admin, through an admin command, for abandoned or abusive workspaces.
-
-  Both create the same deletion request.
-- **Where it runs:** always on the server, as one background task. No local
-  script carries delete logic. An operator entry point only enqueues the same
-  task, so there is exactly one implementation.
+- **Who starts it:** the workspace owner, from Settings → Delete. There is no
+  platform-admin command (decided 2026-10-15): an abandoned or abusive
+  workspace is removed by an operator directly in the production database.
+- **Where it runs:** on the server, as one background task.
 
 ### Flow
 
@@ -154,8 +150,5 @@ failure like the 2026-10-15 500 is no longer silent.
 - **`scheduled_jobs.source_event_id` has no index.** Each deleted event's
   `ON DELETE SET NULL` check scans `scheduled_jobs`: a 2,000-event batch took
   26 ms with an empty table, 1.4 s with 20k rows and 6.9 s with 100k rows
-  (local, embedded Postgres). An index is a proposed follow-up migration.
-- **Platform-admin entry point.** Not built: there is no existing platform
-  admin command or route to attach it to (`PLATFORM_ADMIN_USER_IDS` only
-  switches the provider-settings view). `requestWorkspaceDeletion` is the
-  function such an entry point would call.
+  (local, embedded Postgres). Production had 9 scheduled jobs on 2026-10-15,
+  none with a source event, so no index is added. Revisit if the table grows.
