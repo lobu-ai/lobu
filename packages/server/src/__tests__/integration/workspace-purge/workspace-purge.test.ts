@@ -613,6 +613,27 @@ describe("workspace purge", () => {
 		`;
 		expect(inviteeMembership).toHaveLength(0);
 
+		// An unrelated member id does not stand in for the active organization:
+		// the update and the email removal both act on it.
+		const smuggledUpdate = await call(
+			"/organization/update",
+			{ memberId: plainMemberId, data: { metadata: { theme: "dark" } } },
+			adminToken,
+		);
+		expect(smuggledUpdate.status).toBe(404);
+		const removalByEmail = await call(
+			"/organization/remove-member",
+			{ memberIdOrEmail: "plain-scoped@workspace-purge.test" },
+			adminToken,
+		);
+		expect(removalByEmail.status).toBe(404);
+		expect(await memberRows()).toEqual(membersBefore);
+		const [marker] = await sql`
+			SELECT (metadata)::jsonb ->> 'deletion_requested_at' AS requested_at
+			FROM organization WHERE id = ${target.organizationId}
+		`;
+		expect(marker.requested_at).not.toBeNull();
+
 		// Switching away still works; switching back is refused and leaves the
 		// session where it was.
 		const toLive = await call("/organization/set-active", { organizationId: live.id }, adminToken);
