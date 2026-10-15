@@ -417,7 +417,35 @@ async function main() {
       `Missing device URL: ${expected}`
     );
   });
-  await check("default approval prevents shell execution", async () => {
+  // A disposable local owner's real web session sets the shell rule for each
+  // phase. Device and worker tokens never change connector policies or
+  // approve operations. The approval check sets its own rule rather than
+  // relying on the org's seeded default, which a personal org makes Auto.
+  const policyPath = `/api/${org.slug}/write-permissions/connector-actions`;
+  const setShellRule = async (effect) => {
+    const policies = await json(policyPath, { headers: sessionHeaders });
+    await json(policyPath, {
+      method: "PUT",
+      headers: sessionHeaders,
+      body: {
+        revision: policies.revision,
+        rules: [
+          ...policies.rules.filter(
+            (rule) =>
+              rule.connection_id !== connection.connection_id ||
+              rule.operation_key !== "os.shell::run"
+          ),
+          {
+            connection_id: connection.connection_id,
+            operation_key: "os.shell::run",
+            effect,
+          },
+        ],
+      },
+    });
+  };
+  await setShellRule("approval");
+  await check("an approval rule prevents shell execution", async () => {
     const result = await execute("printf forbidden > approval-marker");
     assert.equal(result.status, "pending_approval", JSON.stringify(result));
     await delay(1_000);
@@ -426,25 +454,7 @@ async function main() {
       sdk("operations.approve", { run_id: result.run_id })
     );
   });
-  // A disposable local owner's real web session authorizes subsequent tests.
-  // Device and worker tokens never change connector policies or approve operations.
-  const policyPath = `/api/${org.slug}/write-permissions/connector-actions`;
-  const policies = await json(policyPath, { headers: sessionHeaders });
-  await json(policyPath, {
-    method: "PUT",
-    headers: sessionHeaders,
-    body: {
-      revision: policies.revision,
-      rules: [
-        ...policies.rules,
-        {
-          connection_id: connection.connection_id,
-          operation_key: "os.shell::run",
-          effect: "auto",
-        },
-      ],
-    },
-  });
+  await setShellRule("auto");
   await scenario(
     "stdout, stderr, exit code, cwd and stdin round-trip",
     async () => {
