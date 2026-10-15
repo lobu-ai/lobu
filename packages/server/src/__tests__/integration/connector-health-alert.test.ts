@@ -1142,6 +1142,98 @@ describe('connector-health alerter', () => {
     expect(row.unhealthy_alerted_at).toBeNull();
   });
 
+  // Device-backed source listeners have no sync lifecycle to reveal an outage.
+  describe('live listener on a pinned device', () => {
+    const day = 24 * 60 * 60 * 1000;
+    const connectorKey = 'health.device-listener';
+
+    beforeAll(async () => {
+      await createTestConnectorDefinition({
+        key: connectorKey,
+        name: 'Device Listener Health Fixture',
+        version: '1.0.0',
+        organization_id: orgId,
+        feeds_schema: {
+          incoming: {
+            key: 'incoming',
+            operations: ['read'],
+            webhook: { mode: 'trigger', events: ['message'] },
+          },
+        },
+      });
+    });
+
+    async function seedListener(slug: string, lastSeenAt: Date, feedStatus = 'active') {
+      const device = await seedDeviceWorker({
+        orgId,
+        userId,
+        workerId: `worker-${slug}`,
+        lastSeenAt,
+      });
+      const conn = await seedConnection({
+        orgId,
+        userId,
+        connectorKey,
+        slug,
+        createdAt: OLD,
+        deviceWorkerId: device,
+      });
+      await seedFeed({
+        orgId,
+        connectionId: conn.id,
+        feedKey: 'incoming',
+        status: feedStatus,
+      });
+      return conn;
+    }
+
+    it('flags a listener whose pinned device has been silent for days', async () => {
+      const silent = await seedListener('listener-silent', new Date(Date.now() - 5 * day));
+
+      const res = await runConnectorHealthCheck();
+      expect(5 * 24).toBeGreaterThan(cfg.deviceOfflineHours);
+      expect(reasonFor(res.details, silent.id)).toBe('listener_device_offline');
+    });
+
+    it('does not flag a listener whose device is only briefly offline', async () => {
+      const napping = await seedListener('listener-napping', new Date(Date.now() - 30 * 60 * 1000));
+
+      const res = await runConnectorHealthCheck();
+      expect(res.details.some((d) => d.connectionId === napping.id)).toBe(false);
+    });
+
+    it('does not flag a paused listener on a silent device', async () => {
+      const paused = await seedListener(
+        'listener-paused',
+        new Date(Date.now() - 5 * day),
+        'paused',
+      );
+
+      const res = await runConnectorHealthCheck();
+      expect(res.details.some((d) => d.connectionId === paused.id)).toBe(false);
+    });
+
+    it('does not flag a listener waiting on sign-in even when its device is silent', async () => {
+      const sql = getTestDb();
+      const profileId = await seedAuthProfile({
+        orgId,
+        slug: 'listener-needs-signin',
+        status: 'pending_auth',
+      });
+      const needsAuth = await seedListener('listener-needs-auth', new Date(Date.now() - 5 * day));
+      await sql`
+        UPDATE connections SET auth_profile_id = ${profileId} WHERE id = ${needsAuth.id}
+      `;
+
+      const res = await runConnectorHealthCheck();
+      expect(res.details.some((d) => d.connectionId === needsAuth.id)).toBe(false);
+      const [row] = await sql`
+        SELECT unhealthy_alerted_at FROM connections WHERE id = ${needsAuth.id}
+      `;
+      expect(row.unhealthy_alerted_at).toBeNull();
+    });
+  });
+
   // DEFECT B control: a connection that is genuinely stale (Rule C) must KEEP
   // its alert, while a healthy connection carrying a leftover marker gets it
   // cleared. Mirrors prod 387 (true positive) vs 342/347 (stale markers).

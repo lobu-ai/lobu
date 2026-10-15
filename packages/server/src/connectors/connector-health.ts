@@ -273,7 +273,8 @@ export type UnhealthyReason =
   | 'zero_feeds'
   | 'never_collected'
   | 'no_recent_sync'
-  | 'acl_failed';
+  | 'acl_failed'
+  | 'listener_device_offline';
 
 export interface UnhealthyConnection {
   connectionId: number;
@@ -329,6 +330,8 @@ function stoppedCollectingSummary(detail: UnhealthyConnection): string | null {
       return `No feed on this connection has synced successfully since ${detail.lastSyncAt ?? 'an unknown time'}.`;
     case 'acl_failed':
       return 'Lobu could not refresh who may see this connection\'s data, so access is fenced until it can.';
+    case 'listener_device_offline':
+      return 'The device this connection listens on has stopped checking in, so incoming messages are not being received.';
     case 'zero_feeds':
     case 'never_collected':
       return null;
@@ -534,6 +537,9 @@ interface ClassifiedFeed {
    *  in flight, or its device asleep); it holds an open alert episode instead
    *  of recovering it. */
   holdsEpisode: boolean;
+  /** A live listener with usable auth whose device is stale. Read-only feeds
+   *  have no sync lifecycle, so `expected` cannot cover this outage. */
+  listenerOnStaleDevice: boolean;
 }
 
 /**
@@ -636,7 +642,20 @@ function classifyFeed(
   const persistent =
     expected && (cf >= cfg.failureThreshold || deviceStale || stalled);
 
-  return { expected, failing, persistent, holdsEpisode: stallState === 'held' };
+  const listenerOnStaleDevice =
+    deviceStale &&
+    row.feed_status === 'active' &&
+    semantics.executionMode === 'source_only' &&
+    semantics.attention !== 'needs_auth' &&
+    row.webhook_driven === true;
+
+  return {
+    expected,
+    failing,
+    persistent,
+    holdsEpisode: stallState === 'held',
+    listenerOnStaleDevice,
+  };
 }
 
 /**
@@ -744,9 +763,11 @@ function classify(
   let everFinishedASync = false;
   let failingError: string | null = null;
   let expectedError: string | null = null;
+  let listenerOnStaleDevice = false;
 
   for (const row of feeds) {
     const feed = classifyFeed(row, cfg, nowMs);
+    if (feed.listenerOnStaleDevice) listenerOnStaleDevice = true;
     if (!feed.expected) continue;
 
     expectedCount += 1;
@@ -771,8 +792,20 @@ function classify(
   // A connection whose only feeds are deliberately paused (cf=0), read-only,
   // streaming, or auth-waiting is NOT unhealthy — operator intent, on-demand
   // evaluation, or a sign-in the user must complete, none of which is a dead
-  // collector.
-  if (expectedCount === 0) return null;
+  // collector. The exception is a live listener whose pinned device stopped
+  // polling: nothing is receiving its messages. A connection that also has
+  // expected feeds needs no separate rule, because a stale device already
+  // fails every one of them below.
+  if (expectedCount === 0) {
+    if (!listenerOnStaleDevice) return null;
+    return {
+      reason: 'listener_device_offline',
+      feedCount,
+      failingFeedCount: 0,
+      newestSyncAt: null,
+      lastError: null,
+    };
+  }
 
   // Rule A: every feed the operator still EXPECTS to run is failing. The
   // numerator counts a single bad run so a connection whose every expected feed
