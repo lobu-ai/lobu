@@ -1,13 +1,18 @@
 # Workspace-bounded search and recall
 
-Status: **revised 2026-10-16 after end-to-end measurement.** The probe
-budget (V1) is no longer the recommended recall fix: the full recall query
-shows the agent-visible top 5 is already right on 44 of 45 measured queries
-at the default `ivfflat.probes = 1`. F2 (bounded embedding-less fallback)
-ships on its own. Two problems the first pass missed lead the open work:
-agent-scoped recall in the largest workspace scans every workspace's vectors
-and exceeds the 6s budget (section 3), and the combined score lets text rank
-drown vector similarity (section 4). Part 2 adds an extension and two
+Status: **revised 2026-10-16 after end-to-end measurement; Part 1 shipped.**
+The full recall query shows the agent-visible top 5 is already right on 44 of
+45 measured queries at the default `ivfflat.probes = 1`, so the probe budget
+is a small fix, not the recall fix. Shipped:
+
+- #4178: F2, the embedding-less fallback runs under the recall timeout, and
+  `lobu_recall_query_failures_total{sqlstate}` counts recall failures.
+- #4179: agent-scoped recall stays on the exact path (section 3).
+- #4180: `ivfflat.probes = 100` with iterative scan off in the recall
+  transaction (section 1a).
+
+Open: the combined score lets text rank drown vector similarity (section 4),
+and Part 2 below. Part 2 adds an extension and two
 indexes, which is a DB design change under the AGENTS.md rules and needs
 explicit confirmation.
 
@@ -351,15 +356,15 @@ wait.
 Keep the indexes global and bound the work each query does, in two parts. No
 new table and no new column.
 
-1. **Part 1, query-only.** Bound the embedding-less fallback and count
-   recall failures by SQLSTATE (F2). Optionally raise `ivfflat.probes` to 100
-   with iterative scan off, as a small separate change: it fixes the one
-   measured top-5 miss for about +0.15s.
-1b. **Agent-scoped recall (section 3), needs design.** When the scope is
-   selective, the vector arm should filter first instead of running a global
-   ANN. Finding an agent's events quickly may need an expression index on
-   `(organization_id, (metadata->>'agent_id'))`, which is a DB design change
-   and goes through confirmation first.
+1. **Part 1, query-only, shipped.** Bound the embedding-less fallback and
+   count recall failures by SQLSTATE (F2, #4178). Raise `ivfflat.probes` to
+   100 with iterative scan off (#4180): it fixes the one measured top-5 miss
+   for about +0.15s.
+1b. **Agent-scoped recall (section 3), shipped as #4179.** Agent-scoped recall
+   uses the exact path (about 4s instead of 10–13s). If the exact path nears
+   the 6s budget as workspaces grow, the next step is a partial expression
+   index on `(organization_id, (metadata->>'agent_id'))`, which is a DB design
+   change and goes through confirmation first.
 1c. **Ranking scale (section 4), product decision.** Bound or normalise the
    text term and stop rows without embeddings from using the raw text score.
 2. **Part 2, needs approval.** `CREATE EXTENSION btree_gin` plus the two partial
