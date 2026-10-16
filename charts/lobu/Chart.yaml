@@ -2,8 +2,8 @@ apiVersion: v2
 name: lobu
 description: Lobu Platform - Never forget anything. User content analysis with AI.
 type: application
-version: 21.2.2
-appVersion: 21.2.1
+version: 22.0.0
+appVersion: 22.0.0
 keywords:
   - lobu
   - content
