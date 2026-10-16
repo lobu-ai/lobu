@@ -61,8 +61,10 @@ import {
   CHAT_ACCESS_NOTICE_WINDOW_SECONDS,
   CHAT_TURN_EVIDENCE_KEYS,
   chatAccessNotice,
+  chatOrganizationLimitKey,
   chatSenderLimitKey,
   resolveChatTurnActor,
+  UNLINKED_ORGANIZATION_TURNS_PER_HOUR,
   UNLINKED_SENDER_TURNS_PER_HOUR,
 } from "../orchestration/chat-turn-actor.js";
 import { buildCtaCardPayload } from "../platform/link-buttons.js";
@@ -1238,7 +1240,9 @@ export class MessageHandlerBridge {
    * (orchestration/chat-turn-actor.ts) before it is queued. A linked member
    * always passes, untouched. Every unlinked sender is rate-limited per
    * organization + platform + sender through the shared Postgres-backed
-   * limiter; over the limit, the message gets no turn. A sender whose turn
+   * limiter; over the limit, the message gets no turn. Reply-only and
+   * public-visitor turns also share one per-organization ceiling on the same
+   * limiter (UNLINKED_ORGANIZATION_TURNS_PER_HOUR). A sender whose turn
    * cannot use the workspace (reply-only, public visitor) is also told so by a
    * fixed server-posted notice, at most once per notice window. The mint
    * re-derives the same authority from the same evidence when it signs the
@@ -1286,6 +1290,22 @@ export class MessageHandlerBridge {
     }
 
     if (actor.access === "reply_only" || actor.access === "public_visitor") {
+      // One ceiling for the whole workspace, so many throwaway senders cannot
+      // multiply the per-sender limit. Over it the message gets no turn and no
+      // notice. A vouched sender (org_shared) is not counted.
+      if (args.organizationId) {
+        const organizationTurns = await limiter.consume(chatOrganizationLimitKey(args.organizationId), {
+          limit: UNLINKED_ORGANIZATION_TURNS_PER_HOUR,
+          windowSeconds: 60 * 60,
+        });
+        if (!organizationTurns.allowed) {
+          logger.info(
+            { platform, organizationId: args.organizationId, connectionId: this.connection.id, access: actor.access },
+            "Organization is over its unlinked chat turn ceiling — no agent turn"
+          );
+          return false;
+        }
+      }
       const canLink = args.isDirect && !!args.organizationId &&
         chatIdentityLinkKey(platform, args.teamId, args.userId) !== null;
       // A group notice must not suppress the private link, and an expired
