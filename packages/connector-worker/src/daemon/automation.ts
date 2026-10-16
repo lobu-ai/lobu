@@ -106,8 +106,8 @@ export interface AutomationExecutorConfig {
   acpAdapters?: AutomationAcpAdapters;
 }
 
-/** Shared liveness/cancellation control for every device-local agent run. */
-export function monitorDeviceAgentRun(
+/** Liveness and cancellation control for a device Automation run. */
+function monitorDeviceAgentRun(
   client: ExecutorClient,
   runId: number,
   cfg: AutomationExecutorConfig,
@@ -417,10 +417,10 @@ function claudeSessionMeta(
 }
 
 /**
- * Resolve what credential the spawned CLI runs with — the boundary shared by
- * Automation and device-chat CLIs. When the poll envelope carries a per-run
- * `agent_session`, the CLI authenticates as the run's assigned agent for
- * exactly this run: the session token goes into the MCP wiring AND into
+ * Resolve what credential the spawned Automation CLI runs with. When the poll
+ * envelope carries a per-run `agent_session`, the CLI authenticates as the
+ * run's assigned agent for exactly this run: the session token goes into the
+ * MCP wiring AND into
  * LOBU_API_TOKEN/LOBU_MEMORY_URL, which `lobu memory` prefers
  * over the device's ambient CLI session — so an unattended run never acts as
  * the human user or the daemon. Without a session (older server, or a run with

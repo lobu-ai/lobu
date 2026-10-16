@@ -6,28 +6,29 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-// Drive one device chat turn through the shipped executable rather than
+// Drive one device Automation run through the shipped executable rather than
 // importing runCli into Node/Bun: a compiled Bun artifact cannot re-enter its
 // runtime with `process.execPath -e`, and only the real binary proves which
-// supervisor launch it actually uses.
+// supervisor launch it actually uses. The run uses `pi`, which has no ACP
+// adapter, so it takes the supervised `runCli` subprocess path.
 //
-// Usage: node scripts/test-mac-device-daemon-chat.mjs <path-to-lobu-device-daemon>
+// Usage: node scripts/test-mac-device-daemon-automation.mjs <path-to-lobu-device-daemon>
 if (!process.argv[2]) {
   console.error(
-    "usage: node scripts/test-mac-device-daemon-chat.mjs <path-to-lobu-device-daemon>"
+    "usage: node scripts/test-mac-device-daemon-automation.mjs <path-to-lobu-device-daemon>"
   );
   process.exit(2);
 }
 const artifact = resolve(process.argv[2]);
-const work = await mkdtemp(join(tmpdir(), "lobu-packaged-chat-"));
+const work = await mkdtemp(join(tmpdir(), "lobu-packaged-automation-"));
 const bin = join(work, "bin");
 await mkdir(bin);
 await writeFile(
-  join(bin, "codex"),
+  join(bin, "pi"),
   "#!/bin/sh\n" +
     'if [ -n "$WORKER_API_TOKEN" ]; then echo "WORKER_API_TOKEN reached the CLI" >&2; exit 42; fi\n' +
     'printf "%s\\n" "$@" > "$ARG_LOG"\n' +
-    'printf "COMPILED_DEVICE_CHAT_OK\\n"\n',
+    'printf "COMPILED_DEVICE_AUTOMATION_OK\\n"\n',
   { mode: 0o755 }
 );
 let claimed = false;
@@ -45,16 +46,17 @@ const server = createServer(async (req, res) => {
     res.end(
       JSON.stringify({
         run_id: 91,
-        run_type: "chat_message",
+        run_type: "automation",
         organization_id: "org-synthetic",
         payload: {
-          chat: {
-            agent_kind: "codex",
+          automation: {
+            id: "1",
+            name: "Synthetic Automation",
+            agent_kind: "pi",
             execution_config: { model: "synthetic-model", effort: "xhigh" },
-            message: "Return the synthetic test reply.",
-            history: [],
-            agent: { id: "synthetic-agent" },
+            prompt: "Return the synthetic test reply.",
           },
+          event: { fired_at: new Date().toISOString() },
           context: {
             device: { worker_id: "synthetic-device" },
             user: { user_id: "synthetic-user" },
@@ -68,7 +70,7 @@ const server = createServer(async (req, res) => {
         },
       })
     );
-  } else if (req.url === "/api/workers/me/runs/91/complete-chat") {
+  } else if (req.url === "/api/workers/me/runs/91/complete-automation") {
     res.end(
       JSON.stringify({ ok: true, status: body.error ? "failed" : "completed" })
     );
@@ -92,7 +94,7 @@ try {
       "--worker-id",
       "synthetic-device",
       "--default-agent-kind",
-      "codex",
+      "pi",
       "--poll-interval-ms",
       "50",
     ],
@@ -123,14 +125,15 @@ try {
       );
     }),
   ]);
-  assert.equal(report.error, null, JSON.stringify(report));
+  assert.equal(report.error ?? null, null, JSON.stringify(report));
   assert.equal(report.exit_code, 0);
-  assert.equal(report.output, "COMPILED_DEVICE_CHAT_OK");
+  assert.equal(report.exit_reason, "ok");
+  assert.equal(report.output.trim(), "COMPILED_DEVICE_AUTOMATION_OK");
   const args = await readFile(join(work, "args"), "utf8");
-  assert.match(args, /model_reasoning_effort="xhigh"/);
-  assert.match(args, /synthetic-model/);
+  assert.match(args, /^--thinking\nxhigh$/m);
+  assert.match(args, /^synthetic-model$/m);
   console.log(
-    "Compiled device chat: poll → supervised CLI → completion passed"
+    "Compiled device Automation: poll → supervised CLI → completion passed"
   );
 } finally {
   clearTimeout(timeout);

@@ -66,10 +66,6 @@ export interface ExecutorClient {
     runId: number,
     req: CompleteAutomationRequest
   ): Promise<CompleteAutomationResponse>;
-  completeDeviceChat(
-    runId: number,
-    req: CompleteDeviceChatRequest
-  ): Promise<CompleteDeviceChatResponse>;
   /**
    * Report an agent turn. Fleet-only, so it posts to the shared worker route
    * rather than the device-scoped `/me/runs/...` family.
@@ -103,8 +99,6 @@ export type {
   CompleteAuthRequest,
   CompleteAutomationRequest,
   CompleteAutomationResponse,
-  CompleteDeviceChatRequest,
-  CompleteDeviceChatResponse,
   CompleteEmbeddingsRequest,
   CompleteRequest,
   ContentItem,
@@ -129,8 +123,6 @@ import type {
   CompleteAuthRequest,
   CompleteAutomationRequest,
   CompleteAutomationResponse,
-  CompleteDeviceChatRequest,
-  CompleteDeviceChatResponse,
   CompleteEmbeddingsRequest,
   CompleteRequest,
   DispatchChromeActionRequest,
@@ -608,16 +600,6 @@ export class WorkerClient implements ExecutorClient {
 
   async completeAgentTurn(req: CompleteAgentTurnRequest): Promise<CompleteAgentTurnResponse> {
     return this.requestJson<CompleteAgentTurnResponse>('/api/workers/complete-agent-turn', req);
-  }
-
-  async completeDeviceChat(
-    runId: number,
-    req: CompleteDeviceChatRequest
-  ): Promise<CompleteDeviceChatResponse> {
-    return this.requestJson<CompleteDeviceChatResponse>(
-      `/api/workers/me/runs/${runId}/complete-chat`,
-      req
-    );
   }
 
   get mcpWiring(): { url: string; bearer?: string } | undefined {

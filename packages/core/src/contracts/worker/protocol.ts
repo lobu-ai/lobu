@@ -3,7 +3,7 @@
  *
  * Single source of truth for the device/connector-worker job protocol:
  * `POST /api/workers/poll`, `/api/workers/complete`, `/complete-action`,
- * `/complete-embeddings`, `/complete-automation`, `/complete-chat`,
+ * `/complete-embeddings`, `/complete-automation`, `/complete-agent-turn`,
  * `/emit-auth-artifact`, `/poll-auth-signal`, `/stream`, and the chrome-action
  * dispatch.
  *
@@ -108,15 +108,13 @@ export const RunTypeSchema = Type.Union([
   Type.Literal("sync"),
   Type.Literal("action"),
   Type.Literal("automation"),
-  Type.Literal("chat_message"),
   Type.Literal("embed_backfill"),
   Type.Literal("auth"),
   /**
    * One conversation turn executed as one isolate job, claimed only by a fleet
    * worker that advertises the lane and run through `IsolateExecutor`. Distinct
-   * from `chat_message`, a lobu-queue row the gateway drains to a subprocess
-   * worker — or, when the agent is device-pinned, hands to that device through
-   * this same poll. A daemon that predates this lane must never claim an
+   * from `chat_message`, a lobu-queue row the gateway drains itself and never
+   * hands to a poller. A daemon that predates this lane must never claim an
    * `agent_turn`: its dispatch would fall through to a connector sync.
    */
   Type.Literal("agent_turn"),
@@ -347,7 +345,7 @@ export const AutomationPollEventSchema = Type.Object({
   payload: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 });
 
-/** Identity context for a device-local CLI run (automation or chat). */
+/** Identity context for a device-local Automation CLI run. */
 export const AutomationPollContextSchema = Type.Object({
   device: Type.Object({ worker_id: Type.Optional(Type.String()) }),
   user: Type.Object({
@@ -387,42 +385,6 @@ export const AutomationPollContextSchema = Type.Object({
 export const AutomationPollPayloadSchema = Type.Object({
   automation: AutomationPollMetaSchema,
   event: AutomationPollEventSchema,
-  context: AutomationPollContextSchema,
-});
-
-/** One bounded prior turn shipped to a stateless device CLI. */
-export const DeviceChatHistoryMessageSchema = Type.Object({
-  role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
-  content: Type.String({ maxLength: 16_000 }),
-});
-
-/**
- * Cap on the device chat envelope's `ephemeral_context`. Exported because the
- * producer must agree with it BEFORE enqueueing: the server-side planner keeps
- * an Automation whose composed instructions exceed this bound on the durable
- * background lane rather than shipping a device turn the poll route would
- * silently truncate.
- */
-export const DEVICE_CHAT_MAX_CONTEXT_LENGTH = 2_048;
-
-/** Device-local chat execution metadata. Conversation ownership stays with `agent.id`. */
-export const DeviceChatPollPayloadSchema = Type.Object({
-  chat: Type.Object({
-    agent_kind: Type.String({ minLength: 1, maxLength: 64 }),
-    execution_config: Type.Optional(AutomationExecutionConfigSchema),
-    message: Type.String({ maxLength: 32_000 }),
-    ephemeral_context: Type.Optional(
-      Type.String({ maxLength: DEVICE_CHAT_MAX_CONTEXT_LENGTH })
-    ),
-    history: Type.Array(DeviceChatHistoryMessageSchema, { maxItems: 12 }),
-    agent: Type.Object({
-      id: Type.String({ minLength: 1 }),
-      name: Type.Optional(Type.String()),
-      identity_md: Type.Optional(Type.String()),
-      soul_md: Type.Optional(Type.String()),
-      user_md: Type.Optional(Type.String()),
-    }),
-  }),
   context: AutomationPollContextSchema,
 });
 
@@ -876,16 +838,12 @@ export const PollResponseSchema = Type.Object({
   /** Owning org of a claimed device-local CLI run. */
   organization_id: Type.Optional(Type.String()),
   /**
-   * Device-local CLI envelope for `automation` or `chat_message` runs. The
-   * gateway composes the prompt context and the device reports through the
-   * matching completion endpoint. No connector code or credentials are shipped.
+   * Envelope for an `automation` run (a device-local CLI) or an `agent_turn`
+   * run. The gateway composes the prompt context and the worker reports
+   * through the matching completion endpoint. No connector code is shipped.
    */
   payload: Type.Optional(
-    Type.Union([
-      AutomationPollPayloadSchema,
-      DeviceChatPollPayloadSchema,
-      AgentTurnPollPayloadSchema,
-    ])
+    Type.Union([AutomationPollPayloadSchema, AgentTurnPollPayloadSchema])
   ),
 });
 
@@ -1050,22 +1008,6 @@ export const CompleteAutomationResponseSchema = Type.Object({
   error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   run_id: Type.Optional(Type.Union([Type.Integer(), Type.Null()])),
   idempotent: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
-});
-
-/** `POST .../complete-chat` terminal report for a `chat_message` turn. */
-export const CompleteDeviceChatRequestSchema = Type.Object({
-  worker_id: Type.String(),
-  output: Type.Optional(Type.String()),
-  error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  exit_code: Type.Optional(Type.Union([Type.Integer(), Type.Null()])),
-  exit_signal: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  exit_reason: Type.Optional(WorkerExitReasonSchema),
-});
-
-export const CompleteDeviceChatResponseSchema = Type.Object({
-  ok: Type.Boolean(),
-  status: Type.Union([Type.Literal("completed"), Type.Literal("failed")]),
-  idempotent: Type.Optional(Type.Boolean()),
 });
 
 /**
@@ -1428,21 +1370,11 @@ export type AutomationPollMeta = Static<typeof AutomationPollMetaSchema>;
 export type AutomationPollEvent = Static<typeof AutomationPollEventSchema>;
 export type AutomationPollContext = Static<typeof AutomationPollContextSchema>;
 export type AutomationPollPayload = Static<typeof AutomationPollPayloadSchema>;
-export type DeviceChatHistoryMessage = Static<
-  typeof DeviceChatHistoryMessageSchema
->;
-export type DeviceChatPollPayload = Static<typeof DeviceChatPollPayloadSchema>;
 export type CompleteAutomationRequest = Static<
   typeof CompleteAutomationRequestSchema
 >;
 export type CompleteAutomationResponse = Static<
   typeof CompleteAutomationResponseSchema
->;
-export type CompleteDeviceChatRequest = Static<
-  typeof CompleteDeviceChatRequestSchema
->;
-export type CompleteDeviceChatResponse = Static<
-  typeof CompleteDeviceChatResponseSchema
 >;
 export type AgentTurnPollPayload = Static<typeof AgentTurnPollPayloadSchema>;
 export type CompleteAgentTurnRequest = Static<

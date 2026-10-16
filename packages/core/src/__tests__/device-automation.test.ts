@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { Value } from "@sinclair/typebox/value";
+import { AutomationExecutionConfigSchema } from "../contracts/tools/manage-automations.js";
 import type { AutomationPollPayload } from "../contracts/worker/protocol.js";
 import {
   AGENT_KINDS,
@@ -197,5 +199,21 @@ describe("golden strings (byte-compatible with the Mac app)", () => {
       )
     ).toBe(true);
     expect(built).toContain("run_id: 7");
+  });
+});
+
+describe("Automation execution config", () => {
+  test("accepts harness-defined effort strings and rejects non-strings", () => {
+    for (const effort of ["medium", "xhigh", "custom-provider-mode"]) {
+      expect(
+        Value.Check(AutomationExecutionConfigSchema, {
+          model: "test-model",
+          effort,
+        })
+      ).toBe(true);
+    }
+    expect(Value.Check(AutomationExecutionConfigSchema, { effort: 3 })).toBe(
+      false
+    );
   });
 });

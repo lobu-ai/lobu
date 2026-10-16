@@ -5,7 +5,6 @@
 
 import {
   createLogger,
-  type DeviceExecutionTarget,
   type MessagePayload,
   type NixConfig,
 } from "@lobu/core";
@@ -160,8 +159,6 @@ export function buildMessagePayload(params: {
   channelId: string;
   platformMetadata: Record<string, any>;
   agentOptions: Record<string, any>;
-  /** Device placement for this turn; absent runs on the managed runtime. */
-  executionTarget?: DeviceExecutionTarget;
 }): MessagePayload {
   const {
     networkConfig,
@@ -183,9 +180,6 @@ export function buildMessagePayload(params: {
     ephemeralContext: params.ephemeralContext,
     channelId: params.channelId,
     platformMetadata: params.platformMetadata,
-    ...(params.executionTarget
-      ? { executionTarget: params.executionTarget }
-      : {}),
     agentOptions: remainingOptions,
     networkConfig,
     guardrailsInline,

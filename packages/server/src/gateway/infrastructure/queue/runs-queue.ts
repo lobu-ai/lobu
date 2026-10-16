@@ -288,13 +288,6 @@ export class RunsQueue implements IMessageQueue {
             run_at = now()
         WHERE status IN ('claimed', 'running')
           AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task')
-          AND NOT (
-            run_type = 'chat_message'
-            AND COALESCE(
-              action_input->'executionTarget'->>'kind' = 'device',
-              false
-            )
-          )
           -- RunsQueue work uses the 'auto' default. Human-approved rows have
           -- a separate inline lease and reconciliation path that must retain
           -- their running state across a gateway restart.
@@ -601,16 +594,6 @@ export class RunsQueue implements IMessageQueue {
         WHERE status = 'pending'
           AND run_type = ${worker.runType}
           AND queue_name = ${worker.queueName}
-          -- Device-placed chat turns stay on the same messages/chat_message
-          -- substrate, but are claimed by that device's worker poller. The
-          -- gateway consumer must never race it for the same row.
-          AND NOT (
-            queue_name = 'messages'
-            AND COALESCE(
-              action_input->'executionTarget'->>'kind' = 'device',
-              false
-            )
-          )
           AND run_at <= now()
           AND (expires_at IS NULL OR expires_at > now())
         ORDER BY priority DESC, run_at ASC, id ASC

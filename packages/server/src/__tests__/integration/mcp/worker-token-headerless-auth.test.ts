@@ -12,10 +12,7 @@ import { generateWorkerToken, verifyWorkerToken } from '@lobu/core';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { getRevokedTokenStore } from '../../../gateway/auth/revoked-token-store';
 import { buildDeploymentWorkerToken } from '../../../gateway/orchestration/deployment-identity';
-import {
-  buildAutomationRunWorkerAccess,
-  buildDeviceChatRunWorkerAccess,
-} from '../../../gateway/services/run-worker-access';
+import { buildAutomationRunWorkerAccess } from '../../../gateway/services/run-worker-access';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -97,24 +94,6 @@ describe('worker-token MCP auth without the direct-auth header', () => {
     const names = (tools.result?.tools ?? []).map((t) => t.name);
     expect(names).toContain('query_sdk');
     expect(names).toContain('run_sdk');
-  });
-
-  it('a device-chat run token opens the same session as an Automation run token', async () => {
-    const access = buildDeviceChatRunWorkerAccess({
-      agentId: AGENT_ID,
-      conversationId: 'device-chat-conversation',
-      runId: 3,
-      organizationId: org.id,
-      userId: 'device-chat-user',
-      channelId: 'api_device-chat-user',
-      platform: 'api',
-    });
-    const response = await post(`/mcp/${org.slug}`, {
-      body: INITIALIZE_BODY,
-      token: access.token,
-    });
-    expect(response.status).toBe(200);
-    expect(response.headers.get('mcp-session-id')).toBeTruthy();
   });
 
   it('refuses the token on another org even when that org has the same agent id', async () => {

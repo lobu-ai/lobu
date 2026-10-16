@@ -28,15 +28,6 @@ import type {
  */
 export type JobType = "message" | "exec";
 
-/** Where a chat turn executes. Absence means Lobu's managed agent runtime. */
-export interface DeviceExecutionTarget {
-  kind: "device";
-  /** Surrogate `device_workers.id`, never the caller-supplied worker handle. */
-  deviceWorkerId: string;
-  /** Local CLI kind the device advertised (Claude Code, Codex, OpenCode, …). */
-  agentKind: string;
-}
-
 /**
  * Universal message payload for every gateway → worker hop.
  * Used by: platform inbound → runs queue → MessageConsumer → worker.
@@ -72,9 +63,6 @@ export interface MessagePayload {
 
   // ── Message content (used by worker) ───────────────────────────────
   messageText: string;
-
-  /** Optional device placement for this turn; conversation ownership stays `agentId`. */
-  executionTarget?: DeviceExecutionTarget;
 
   /**
    * Ephemeral context prepended to the user prompt for this turn only.

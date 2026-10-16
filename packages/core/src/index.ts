@@ -159,7 +159,6 @@ export type {
 } from "./worker/transport";
 // Gateway ↔ worker wire contract (MessagePayload, JobType, QueuedMessage).
 export type {
-  DeviceExecutionTarget,
   JobType,
   MessagePayload,
   QueuedMessage,

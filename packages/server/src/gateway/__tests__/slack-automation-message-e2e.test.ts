@@ -221,7 +221,10 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     await bridge?.stop();
   });
 
-  test.each(["codex", null])("a device-pinned channel preserves its supported dispatch for CLI %p", async (agentKind) => {
+  // A device pin places an Automation's background runs only: a reply to the
+  // source conversation runs on the Automation's cloud agent, with or without
+  // a local CLI kind, and never parks a chat turn for the device to claim.
+  test.each(["codex", null])("a device-pinned reply Automation answers from the cloud agent (CLI %p)", async (agentKind) => {
     const sql = getDb();
     const owner = await createTestUser({});
     await addUserToOrganization(owner.id, "org-slack-grid-e2e", "owner");
@@ -236,12 +239,12 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     await sql`
       UPDATE automations
       SET device_worker_id = ${device.id}, agent_kind = ${agentKind},
-        execution_config = '{"model":"test-local-model","effort":"medium","timeout_seconds":17,"max_budget_usd":0.5,"permission_mode":"plan"}'::jsonb
+        execution_config = '{"effort":"medium"}'::jsonb
       WHERE organization_id = 'org-slack-grid-e2e'
         AND managed_agent_id = 'agent-slack-grid-e2e'
     `;
     const response = await deliver(signedEventRequest(slackEvent({
-      eventId: "Ev_DEVICE_CHAT_TEST",
+      eventId: "Ev_DEVICE_PINNED_REPLY_TEST",
       channel: CHANNEL_ID,
       ts: "1787292000.101010",
       text: `<@${BOT_USER_ID}> Run the disposable poll test`,
@@ -249,15 +252,6 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       eventType: "app_mention",
     })));
     expect(response.status).toBe(200);
-    if (agentKind === null) {
-      await waitFor(async () => {
-        const background = await sql`SELECT id FROM runs WHERE run_type = 'automation'`;
-        expect(background).toHaveLength(1);
-      });
-      const messages = await sql`SELECT id FROM runs WHERE queue_name = 'messages'`;
-      expect(messages).toHaveLength(0);
-      return;
-    }
     await waitFor(async () => {
       const rows = await sql`SELECT run_type, action_input FROM runs WHERE queue_name = 'messages'`;
       expect(rows).toHaveLength(1);
@@ -265,10 +259,11 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       expect(rows[0]?.action_input).toMatchObject({
         agentId: "agent-slack-grid-e2e",
         platform: "slack",
-        executionTarget: { kind: "device", deviceWorkerId: device.id, agentKind: "codex" },
-        agentOptions: { model: "test-local-model", deviceExecutionConfig: { model: "test-local-model", effort: "medium", timeout_seconds: 17, max_budget_usd: 0.5, permission_mode: "plan" } },
+        agentOptions: { effort: "medium" },
         platformMetadata: { connectionId: RUNTIME_CONNECTION_ID, responseChannel: `slack:${CHANNEL_ID}` },
       });
+      expect(rows[0]?.action_input).not.toHaveProperty("executionTarget");
+      expect(rows[0]?.action_input.agentOptions).not.toHaveProperty("deviceExecutionConfig");
     });
     const background = await sql`SELECT id FROM runs WHERE run_type = 'automation'`;
     expect(background).toHaveLength(0);

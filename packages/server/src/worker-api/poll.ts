@@ -6,17 +6,10 @@
  */
 
 import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, connectionBrowserGrant } from '../connectors/browser-resource';
-import {
-  authorizeCapabilities,
-  entryToMessage,
-  isKnownPlatform,
-  parseSessionEntries,
-} from '@lobu/core';
+import { authorizeCapabilities, isKnownPlatform } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
 import {
-  AutomationExecutionConfigSchema,
   CONNECTOR_HTTP_AUTH_CAPABILITY,
-  DEVICE_CHAT_MAX_CONTEXT_LENGTH,
   PollRequestSchema,
   defaultBackendCapacity,
   type PollRequest,
@@ -31,23 +24,8 @@ import {
   ensureAutomationAgentExists,
   parseAutomationRunPayload,
 } from '../automations/automation';
-import {
-  buildAutomationRunWorkerAccess,
-  buildDeviceChatRunWorkerAccess,
-  DEVICE_CHAT_RUN_SOURCE,
-} from '../gateway/services/run-worker-access';
-import {
-  CHAT_SENDER_NOT_LINKED,
-  chatTurnContext,
-  chatTurnEvidenceFrom,
-  chatTurnSenderName,
-  resolveChatTurnActor,
-} from '../gateway/orchestration/chat-turn-actor';
-import { buildWorkerTokenClaims } from '../gateway/orchestration/worker-token-claims';
-import {
-  readSnapshotJsonl,
-  transcriptText,
-} from '../gateway/services/transcript-snapshot';
+import { buildAutomationRunWorkerAccess } from '../gateway/services/run-worker-access';
+import { readSnapshotJsonl } from '../gateway/services/transcript-snapshot';
 import { resolvePublicOrigin } from '../utils/public-origin';
 import { buildResourcePermalink } from '../utils/url-builder';
 import { getDb, parsePgTextArray, pgTextArray } from '../db/client';
@@ -63,10 +41,7 @@ import type { Outputs } from '../types/automations';
 import { deriveAutomationExtractionSchema } from '../utils/automation-extraction-schema';
 import { withDbRetry } from '../db/with-retry';
 import { incrementCounter, setGauge } from '../gateway/metrics/prometheus';
-import {
-  insertThreadResponseRow,
-  notifyThreadResponse,
-} from '../gateway/orchestration/turn-liveness';
+import { notifyThreadResponse } from '../gateway/orchestration/turn-liveness';
 import type { Env } from '../index';
 import { supportsExactPageActivation } from '../runs/page-activation';
 import { claimPendingAutomationRun } from '../runs/queue-service';
@@ -121,9 +96,6 @@ import { insertAgentTurnResponse, agentTurnClaimEligible, agentTurnLockKey, lock
 // evidence about the agent regardless of the message, so no message
 // classification applies.
 const DISPATCH_FAILURE_OUTCOME: RunOutcome = 'infra_error';
-const DEVICE_CHAT_HISTORY_TAIL_CHARS = 1024 * 1024;
-const DEVICE_CHAT_DISPATCH_ERROR =
-  'The selected device could not start this message.';
 
 const DUE_FEEDS_LOCK_KEY = 71001;
 
@@ -208,75 +180,6 @@ export async function failClaimedWorkerRun(params: {
   });
   if (delivered) await notifyThreadResponse();
   await announceFeedAutoPause(recordedFeedFailure);
-  return transitioned;
-}
-
-/** Fail a claimed device-chat dispatch and emit its visible terminal response atomically. */
-async function failClaimedDeviceChatRun(params: {
-  runId: number;
-  workerId: string;
-  errorMessage: string;
-  message: Record<string, unknown> | null;
-  organizationId: string;
-}): Promise<boolean> {
-  const messageId =
-    typeof params.message?.messageId === 'string'
-      ? params.message.messageId
-      : '';
-  if (!messageId) {
-    return failClaimedWorkerRun({
-      runId: params.runId,
-      workerId: params.workerId,
-      errorMessage: params.errorMessage,
-    });
-  }
-
-  const sql = getDb();
-  const transitioned = await sql.begin(async (tx) => {
-    const rows = await tx`
-      UPDATE public.runs
-      SET status = 'failed',
-          outcome = ${DISPATCH_FAILURE_OUTCOME},
-          completed_at = current_timestamp,
-          error_message = ${params.errorMessage}
-      WHERE id = ${params.runId}
-        ${runLeaseFence(tx, params.workerId)}
-        AND run_type = 'chat_message'
-        AND queue_name = 'messages'
-      RETURNING id
-    `;
-    if (rows.length === 0) return false;
-
-    const stringField = (key: string): string | undefined => {
-      const value = params.message?.[key];
-      return typeof value === 'string' && value.length > 0 ? value : undefined;
-    };
-    const platformMetadata = params.message?.platformMetadata;
-    await insertThreadResponseRow(
-      tx,
-      {
-        messageId,
-        channelId: stringField('channelId'),
-        conversationId: stringField('conversationId'),
-        userId: stringField('userId'),
-        teamId: stringField('teamId') ?? 'api',
-        platform: stringField('platform') ?? 'api',
-        organizationId: params.organizationId,
-        platformMetadata:
-          platformMetadata &&
-          typeof platformMetadata === 'object' &&
-          !Array.isArray(platformMetadata)
-            ? platformMetadata
-            : undefined,
-        error: DEVICE_CHAT_DISPATCH_ERROR,
-        processedMessageIds: [messageId],
-        timestamp: Date.now(),
-      },
-      params.organizationId
-    );
-    return true;
-  });
-  if (transitioned) await notifyThreadResponse();
   return transitioned;
 }
 
@@ -1048,39 +951,6 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
                   AND active.status IN ('claimed', 'running')
               )
             )
-            -- (3) Device chat lane: the ordinary messages/chat_message row is
-            --     pinned through its shared MessagePayload.executionTarget.
-            --     Only an explicitly-advertising daemon can claim it; legacy
-            --     Mac/extension polls with agentKinds=NULL never enter here.
-            OR (
-              ${isUserScopedWorker}
-              AND r.run_type = 'chat_message'
-              AND r.queue_name = 'messages'
-              AND ${deviceWorkerId}::uuid IS NOT NULL
-              AND jsonb_typeof(r.action_input) = 'object'
-              AND (
-                r.target_device_worker_id = ${deviceWorkerId}::uuid
-                OR (
-                  r.target_device_worker_id IS NULL
-                  AND r.action_input->'executionTarget'->>'kind' = 'device'
-                  AND r.action_input->'executionTarget'->>'deviceWorkerId' = ${deviceWorkerId}::text
-                )
-              )
-              AND r.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
-              AND ${agentKindsParam}::text[] IS NOT NULL
-              AND r.action_input->'executionTarget'->>'agentKind' = ANY(${agentKindsParam}::text[])
-              AND 'automations.execute' = ANY(${pgTextArray(authorizedCapabilities)}::text[])
-              AND NOT EXISTS (
-                SELECT 1
-                FROM runs active
-                WHERE active.id < r.id
-                  AND active.run_type = 'chat_message'
-                  AND active.queue_name = 'messages'
-                  AND active.status IN ('pending', 'running')
-                  AND active.organization_id = r.organization_id
-                  AND active.action_input->>'conversationId' = r.action_input->>'conversationId'
-              )
-            )
           )
         ORDER BY
           CASE WHEN r.run_type = 'auth' THEN 0 ELSE 1 END,
@@ -1221,11 +1091,6 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         wv.prompt AS automation_prompt,
         wv.skills AS automation_skills,
         wv.outputs AS automation_outputs,
-        chat_agent.id AS chat_agent_id,
-        chat_agent.name AS chat_agent_name,
-        chat_agent.identity_md AS chat_agent_identity_md,
-        chat_agent.soul_md AS chat_agent_soul_md,
-        chat_agent.user_md AS chat_agent_user_md,
         parent.activation_tab_id AS parent_activation_tab_id,
         parent.run_metadata->>'page_activation_url' AS parent_activation_url
       FROM runs r
@@ -1254,9 +1119,6 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       LEFT JOIN automation_versions wv
         ON wv.id = COALESCE((r.approved_input->>'version_id')::bigint, w.current_version_id)
         AND wv.automation_id = w.automation_group_id
-      LEFT JOIN agents chat_agent
-        ON chat_agent.organization_id = r.organization_id
-        AND chat_agent.id = r.action_input->>'agentId'
       -- A page-activated parent already resolved WHICH user tab the human
       -- opened. The extension's ownership guard cannot see that decision, so
       -- carry it down to the child action; scoped to the same organization for
@@ -1455,12 +1317,6 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     automation_prompt: string | null;
     automation_skills: unknown;
     automation_outputs: Record<string, unknown> | string | null;
-    // Device chat fields (derived from the ordinary MessagePayload row)
-    chat_agent_id: string | null;
-    chat_agent_name: string | null;
-    chat_agent_identity_md: string | null;
-    chat_agent_soul_md: string | null;
-    chat_agent_user_md: string | null;
     // Auth run fields
     run_auth_profile_id: number | null;
     auth_profile_auth_data: Record<string, unknown> | null;
@@ -1540,222 +1396,6 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       credentials: {
         provider: String((turn.provider as { provider?: unknown } | undefined)?.provider ?? 'unknown'),
         accessToken: credential,
-      },
-    });
-  }
-
-  // Device chat reuses the ordinary messages/chat_message row. The poll
-  // response is only an execution envelope: ownership/routing remain on the
-  // original MessagePayload and completion emits the standard thread_response.
-  if (row.run_type === 'chat_message') {
-    const message = row.action_input;
-    const target =
-      message?.executionTarget &&
-      typeof message.executionTarget === 'object' &&
-      !Array.isArray(message.executionTarget)
-        ? (message.executionTarget as Record<string, unknown>)
-        : null;
-    const agentOptions =
-      message?.agentOptions &&
-      typeof message.agentOptions === 'object' &&
-      !Array.isArray(message.agentOptions)
-        ? (message.agentOptions as Record<string, unknown>)
-        : {};
-    const localOptions =
-      agentOptions.deviceExecutionConfig &&
-      typeof agentOptions.deviceExecutionConfig === 'object' &&
-      !Array.isArray(agentOptions.deviceExecutionConfig)
-        ? (agentOptions.deviceExecutionConfig as Record<string, unknown>)
-        : {};
-    const platformMetadata =
-      message?.platformMetadata &&
-      typeof message.platformMetadata === 'object' &&
-      !Array.isArray(message.platformMetadata)
-        ? (message.platformMetadata as Record<string, unknown>)
-        : undefined;
-    // The device wire contract IS the allowlist: `Value.Clean` drops every key
-    // the CLI envelope does not declare (the server-only `finalize_nudges`, a
-    // future server-side setting), so this cannot drift from the schema. A
-    // surviving key with the wrong type fails the check and the whole config is
-    // withheld rather than shipped malformed.
-    const candidateConfig = Value.Clean(
-      AutomationExecutionConfigSchema,
-      structuredClone(localOptions),
-    );
-    const executionConfig = Value.Check(
-      AutomationExecutionConfigSchema,
-      candidateConfig,
-    )
-      ? candidateConfig
-      : {};
-    const agentKind =
-      typeof target?.agentKind === 'string' ? target.agentKind.trim() : '';
-    const conversationId =
-      typeof message?.conversationId === 'string' ? message.conversationId : '';
-    const messageText =
-      typeof message?.messageText === 'string' ? message.messageText : '';
-    const messageId =
-      typeof message?.messageId === 'string' ? message.messageId : '';
-    const userId = typeof message?.userId === 'string' ? message.userId : '';
-    const channelId =
-      typeof message?.channelId === 'string' ? message.channelId : '';
-    // Required, not defaulted: a run without one would mint as an `api` turn
-    // and act as the agent owner instead of its chat sender.
-    const platform =
-      typeof message?.platform === 'string' ? message.platform : '';
-    if (
-      !platform ||
-      !agentKind ||
-      !row.chat_agent_id ||
-      !conversationId ||
-      !messageText ||
-      !messageId ||
-      !userId ||
-      !channelId ||
-      !row.organization_slug
-    ) {
-      const failure = 'device chat run has an incomplete execution envelope';
-      await failClaimedDeviceChatRun({
-        runId: row.run_id,
-        workerId: worker_id,
-        errorMessage: failure,
-        message,
-        organizationId: row.organization_id,
-      });
-      return c.json({
-        next_poll_seconds: 1,
-        skipped_run_id: row.run_id,
-        error: failure,
-        ...pollMetadata,
-      });
-    }
-
-    let agentSession: {
-      conversation_id: string;
-      mcp_url: string;
-      token: string;
-      expires_at: number;
-    };
-    let confined = false;
-    let senderName: string | undefined;
-    try {
-      const teamId =
-        typeof message?.teamId === 'string' ? message.teamId : undefined;
-      // The device turn's chat sender decides its authority, exactly as for a
-      // cloud chat turn. A local CLI cannot be confined to its own thread, so a
-      // sender without workspace access is refused a device session outright.
-      const actor = await resolveChatTurnActor({
-        organizationId: row.organization_id,
-        senderId: userId,
-        claims: {
-          ...buildWorkerTokenClaims({ channelId, platform, teamId, platformMetadata }),
-          source: DEVICE_CHAT_RUN_SOURCE,
-        },
-        evidence: chatTurnEvidenceFrom(platformMetadata),
-      });
-      confined = actor?.access === 'reply_only' || actor?.access === 'public_visitor';
-      if (confined) throw new Error(CHAT_SENDER_NOT_LINKED);
-      senderName = await chatTurnSenderName(actor?.actorUserId);
-      const access = buildDeviceChatRunWorkerAccess({
-        agentId: row.chat_agent_id,
-        conversationId,
-        runId: row.run_id,
-        organizationId: row.organization_id,
-        userId,
-        channelId,
-        platform,
-        teamId,
-        platformMetadata,
-        actorUserId: actor?.actorUserId,
-        chatAccess: actor?.access,
-      });
-      agentSession = {
-        conversation_id: access.conversationId,
-        mcp_url: `${resolvePublicOrigin(c.req.url)}/mcp/${encodeURIComponent(row.organization_slug)}`,
-        token: access.token,
-        expires_at: access.expiresAt,
-      };
-    } catch (err) {
-      const failure = confined
-        ? `device chat refused: ${CHAT_SENDER_NOT_LINKED}`
-        : 'failed to mint the required device chat run session';
-      await failClaimedDeviceChatRun({
-        runId: row.run_id,
-        workerId: worker_id,
-        errorMessage: failure,
-        message,
-        organizationId: row.organization_id,
-      });
-      logger.error({ run_id: row.run_id, err }, failure);
-      return c.json({
-        next_poll_seconds: 1,
-        skipped_run_id: row.run_id,
-        error: failure,
-        ...pollMetadata,
-      });
-    }
-
-    const snapshot = await readSnapshotJsonl({
-      organizationId: row.organization_id,
-      agentId: row.chat_agent_id,
-      conversationId,
-      // History returns at most twelve 16 KB messages. A 1 MB suffix keeps the
-      // poll request bounded while leaving ample room for JSONL overhead and
-      // ordinary longer raw replies; parseSessionEntries ignores a cut line.
-      suffixChars: DEVICE_CHAT_HISTORY_TAIL_CHARS,
-    });
-    const history = snapshot
-      ? parseSessionEntries(snapshot).entries
-          .flatMap((entry) => {
-            const messageEntry = entryToMessage(entry);
-            if (
-              messageEntry?.type !== 'message' ||
-              (messageEntry.role !== 'user' &&
-                messageEntry.role !== 'assistant')
-            ) {
-              return [];
-            }
-            const content = transcriptText(messageEntry.content).slice(0, 16_000);
-            return content
-              ? [{ role: messageEntry.role, content }]
-              : [];
-          })
-          .slice(-12)
-      : [];
-
-    // The same per-turn sender line a cloud chat turn carries.
-    const ephemeralContext = chatTurnContext(
-      senderName,
-      typeof message?.ephemeralContext === 'string' ? message.ephemeralContext : undefined,
-      DEVICE_CHAT_MAX_CONTEXT_LENGTH,
-    );
-    return c.json({
-      ...pollMetadata,
-      run_id: row.run_id,
-      run_type: 'chat_message',
-      organization_id: row.organization_id,
-      payload: {
-        chat: {
-          agent_kind: agentKind,
-          ...(Object.keys(executionConfig).length > 0
-            ? { execution_config: executionConfig }
-            : {}),
-          message: messageText.slice(0, 32_000),
-          ...(ephemeralContext ? { ephemeral_context: ephemeralContext } : {}),
-          history,
-          agent: {
-            id: row.chat_agent_id,
-            name: row.chat_agent_name ?? undefined,
-            identity_md: row.chat_agent_identity_md ?? undefined,
-            soul_md: row.chat_agent_soul_md ?? undefined,
-            user_md: row.chat_agent_user_md ?? undefined,
-          },
-        },
-        context: {
-          device: { worker_id: deviceWorkerId ?? undefined },
-          user: { user_id: effectiveWorkerUserId ?? null },
-          agent_session: agentSession,
-        },
       },
     });
   }

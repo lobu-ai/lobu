@@ -16,7 +16,6 @@ export { activatePageRun } from './worker-api/page-activation';
 
 // Lanes that own their completion route instead of /api/workers/complete
 export { completeAgentTurnRun } from './worker-api/agent-turn';
-export { completeDeviceChatRun } from './worker-api/device-chat';
 
 // Run lifecycle (heartbeat, stream, complete, Automation/auth/action/embedding)
 export {

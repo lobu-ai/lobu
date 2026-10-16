@@ -7,7 +7,6 @@ import type { PollResponse } from '@lobu/core/contracts/worker/protocol';
 import { executeAutomationRun, type AutomationExecutorConfig } from './automation.js';
 import { executeDaemonBuiltinActionRun, hasDaemonBuiltin } from './builtins/index.js';
 import { defaultDeviceMaxConcurrentJobs } from './device-concurrency.js';
-import { executeDeviceChatRun } from './device-chat.js';
 import type { AutomationAcpAdapters } from './automation-acp.js';
 import {
   locateBinary,
@@ -425,9 +424,6 @@ export function createMacDeviceDaemon(
     execute: async (job) => {
       if (job.run_type === 'automation') {
         return executeAutomationRun(client, job, automationConfig);
-      }
-      if (job.run_type === 'chat_message') {
-        return executeDeviceChatRun(client, job, automationConfig);
       }
       if (job.run_type === 'sync' || job.run_type === 'action' || job.run_type === 'auth') {
         return executeAdvertisedConnectorRun(client, job, {

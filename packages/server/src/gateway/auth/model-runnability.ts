@@ -1,7 +1,7 @@
 /**
  * Shared cloud-provider preflight for chat ingress and agent model reporting.
- * This checks configured credentials and routes, not upstream health. Device
- * turns bypass it, and callers without a catalog cannot check provider state.
+ * This checks configured credentials and routes, not upstream health.
+ * Callers without a catalog cannot check provider state.
  */
 
 import type { ModelProviderModule } from "../modules/module-system.js";

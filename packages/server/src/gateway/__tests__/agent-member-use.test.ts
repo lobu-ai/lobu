@@ -281,45 +281,30 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
     });
   }
 
-  test("device placement is owner-scoped, capability-checked, and retained on resume", async () => {
+  // `executionTarget` is no longer part of the create contract. The route
+  // validator strips undeclared keys (Value.Clean), so an older client that
+  // still sends one gets an ordinary cloud session: nothing is stored, echoed,
+  // or enqueued with device placement, not even from a transcript header an
+  // earlier device turn left behind.
+  test("a stale executionTarget is ignored and every turn runs on the cloud agent", async () => {
     const sql = getDb();
     const enqueuedMessages: Array<Record<string, unknown>> = [];
     const queueProducer = {
       enqueueMessage: async (payload: Record<string, unknown>) => {
         enqueuedMessages.push(payload);
-        return "device-chat-job";
+        return "cloud-chat-job";
       },
     } as never;
     const [memberDevice] = await sql<{ id: string }>`
       INSERT INTO device_workers (
         user_id, worker_id, platform, capabilities, label, organization_id, agent_kinds
       ) VALUES (
-        ${MEMBER_ID}, 'member-device-chat', 'macos', ${sql.json(["automations.execute"])},
+        ${MEMBER_ID}, 'member-stale-target', 'macos', ${sql.json(["automations.execute"])},
         'Member Mac', ${AGENT_ORG}, '{pi}'::text[]
       )
       RETURNING id
     `;
-    const [ownerDevice] = await sql<{ id: string }>`
-      INSERT INTO device_workers (
-        user_id, worker_id, platform, capabilities, label, organization_id, agent_kinds
-      ) VALUES (
-        ${AGENT_OWNER_ID}, 'owner-device-chat', 'macos', ${sql.json(["automations.execute"])},
-        'Owner Mac', ${AGENT_ORG}, '{pi}'::text[]
-      )
-      RETURNING id
-    `;
-    const [otherMemberDevice] = await sql<{ id: string }>`
-      INSERT INTO device_workers (
-        user_id, worker_id, platform, capabilities, label, organization_id, agent_kinds
-      ) VALUES (
-        ${MEMBER_ID}, 'member-device-chat-2', 'macos', ${sql.json(["automations.execute"])},
-        'Member Mac 2', ${AGENT_ORG}, '{pi}'::text[]
-      )
-      RETURNING id
-    `;
-    if (!memberDevice || !ownerDevice || !otherMemberDevice) {
-      throw new Error("Failed to seed devices");
-    }
+    if (!memberDevice) throw new Error("Failed to seed device");
 
     setAuthProvider(() => sessionFor(MEMBER_ID));
     const { app, sessions } = makeApp(
@@ -329,26 +314,23 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
       makeSessionManager(),
       queueProducer,
     );
-    const target = {
-      kind: "device" as const,
+    const staleTarget = {
+      kind: "device",
       deviceWorkerId: memberDevice.id,
       agentKind: "pi",
     };
 
     const created = await postCreate(
       app,
-      { thread: "device-thread", executionTarget: target },
+      { thread: "stale-target-thread", executionTarget: staleTarget },
       { "x-lobu-org": AGENT_ORG },
     );
     expect(created.status).toBe(201);
-    expect(
-      ((await created.json()) as { executionTarget: typeof target })
-        .executionTarget,
-    ).toEqual(target);
-    expect(sessions.getStored()?.executionTarget).toEqual(target);
+    expect(await created.json()).not.toHaveProperty("executionTarget");
+    expect(sessions.getStored()).not.toHaveProperty("executionTarget");
 
     const conversationId = sessions.getStored()?.conversationId;
-    if (!conversationId) throw new Error("Missing device chat session");
+    if (!conversationId) throw new Error("Missing chat session");
     const sent = await app.request(
       `/api/v1/agents/${encodeURIComponent(conversationId)}/messages`,
       {
@@ -357,33 +339,19 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
           "content-type": "application/json",
           "x-lobu-org": AGENT_ORG,
         },
-        body: JSON.stringify({ content: "Run this locally" }),
+        body: JSON.stringify({ content: "Answer in the cloud" }),
       },
     );
     expect(sent.status).toBe(200);
     expect(enqueuedMessages).toHaveLength(1);
     expect(enqueuedMessages[0]).toMatchObject({
       conversationId,
-      messageText: "Run this locally",
-      executionTarget: target,
+      messageText: "Answer in the cloud",
     });
+    expect(enqueuedMessages[0]).not.toHaveProperty("executionTarget");
 
-    // Refreshing the canonical chat route does not resend placement. The
-    // server must retain the target already pinned to the conversation.
-    const resumed = await postCreate(
-      app,
-      { thread: "device-thread" },
-      { "x-lobu-org": AGENT_ORG },
-    );
-    expect(resumed.status).toBe(201);
-    expect(
-      ((await resumed.json()) as { executionTarget: typeof target })
-        .executionTarget,
-    ).toEqual(target);
-
-    // Session state expires, while conversation history is durable. Recover
-    // placement from the existing transcript rather than silently switching
-    // this conversation back to the managed runtime.
+    // A transcript header written by an earlier device turn no longer pins
+    // the conversation once its session expires.
     const [historyRun] = await sql<{ id: number }>`
       INSERT INTO runs (
         organization_id, run_type, queue_name, status, run_at, action_input
@@ -398,7 +366,7 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
       id: `device-chat-${conversationId}`,
       timestamp: new Date().toISOString(),
       cwd: "/device",
-      executionTarget: target,
+      executionTarget: staleTarget,
     })}\n`;
     await sql`
       INSERT INTO agent_transcript_snapshot (
@@ -412,110 +380,12 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
     sessions.store.clear();
     const recovered = await postCreate(
       app,
-      { thread: "device-thread" },
+      { thread: "stale-target-thread" },
       { "x-lobu-org": AGENT_ORG },
     );
     expect(recovered.status).toBe(201);
-    expect(
-      ((await recovered.json()) as { executionTarget: typeof target })
-        .executionTarget,
-    ).toEqual(target);
-
-    // The canonical conversation without a thread suffix has the same durable
-    // placement contract. Session expiry must not make it fall back to managed
-    // execution merely because the request omits `thread`.
-    const noThreadConversationId = buildApiConversationId({
-      agentId: AGENT_ID,
-      userId: MEMBER_ID,
-      organizationId: AGENT_ORG,
-    });
-    const [noThreadRun] = await sql<{ id: number }>`
-      INSERT INTO runs (
-        organization_id, run_type, queue_name, status, run_at, action_input
-      ) VALUES (
-        ${AGENT_ORG}, 'chat_message', 'messages', 'completed', now(), ${sql.json({})}
-      )
-      RETURNING id
-    `;
-    await sql`
-      INSERT INTO agent_transcript_snapshot (
-        organization_id, agent_id, conversation_id, run_id,
-        snapshot_jsonl, byte_size, terminal_status
-      ) VALUES (
-        ${AGENT_ORG}, ${AGENT_ID}, ${noThreadConversationId}, ${noThreadRun.id},
-        ${snapshot}, ${Buffer.byteLength(snapshot)}, 'completed'
-      )
-    `;
-    sessions.store.clear();
-    const recoveredWithoutThread = await postCreate(
-      app,
-      {},
-      { "x-lobu-org": AGENT_ORG }
-    );
-    expect(recoveredWithoutThread.status).toBe(201);
-    expect(
-      (
-        (await recoveredWithoutThread.json()) as {
-          executionTarget: typeof target;
-        }
-      ).executionTarget
-    ).toEqual(target);
-
-    // Restore the threaded session cleared by the independent no-thread case
-    // before asserting that an existing conversation cannot change placement.
-    sessions.store.clear();
-    expect(
-      (
-        await postCreate(
-          app,
-          { thread: "device-thread" },
-          { "x-lobu-org": AGENT_ORG },
-        )
-      ).status,
-    ).toBe(201);
-
-    const changedTarget = await postCreate(
-      app,
-      {
-        thread: "device-thread",
-        executionTarget: {
-          ...target,
-          deviceWorkerId: otherMemberDevice.id,
-        },
-      },
-      { "x-lobu-org": AGENT_ORG },
-    );
-    expect(changedTarget.status).toBe(409);
-
-    const unsupportedKind = await postCreate(
-      app,
-      {
-        thread: "unsupported-kind",
-        executionTarget: { ...target, agentKind: "claude-code" },
-      },
-      { "x-lobu-org": AGENT_ORG },
-    );
-    expect(unsupportedKind.status).toBe(400);
-
-    const otherUsersDevice = await postCreate(
-      app,
-      {
-        thread: "other-device",
-        executionTarget: { ...target, deviceWorkerId: ownerDevice.id },
-      },
-      { "x-lobu-org": AGENT_ORG },
-    );
-    expect(otherUsersDevice.status).toBe(400);
-
-    const malformedDevice = await postCreate(
-      app,
-      {
-        thread: "malformed-device",
-        executionTarget: { ...target, deviceWorkerId: "not-a-uuid" },
-      },
-      { "x-lobu-org": AGENT_ORG },
-    );
-    expect(malformedDevice.status).toBe(400);
+    expect(await recovered.json()).not.toHaveProperty("executionTarget");
+    expect(sessions.getStored()).not.toHaveProperty("executionTarget");
   });
 
   test("the same agent id remains isolated across organizations", async () => {
@@ -793,22 +663,6 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
   test("an org admin keeps oversight of a member's session", async () => {
     const sql = getDb();
     const shared = makeSessionManager();
-    const [memberDevice] = await sql<{ id: string }>`
-      INSERT INTO device_workers (
-        user_id, worker_id, platform, capabilities, label, organization_id, agent_kinds
-      ) VALUES (
-        ${MEMBER_ID}, 'member-admin-oversight-device', 'macos',
-        ${sql.json(["automations.execute"])}, 'Member oversight Mac',
-        ${AGENT_ORG}, '{pi}'::text[]
-      )
-      RETURNING id
-    `;
-    if (!memberDevice) throw new Error("Failed to seed member device");
-    const target = {
-      kind: "device" as const,
-      deviceWorkerId: memberDevice.id,
-      agentKind: "pi",
-    };
 
     setAuthProvider(() => sessionFor(MEMBER_ID));
     const member = makeApp(
@@ -819,7 +673,7 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
     );
     const created = await postCreate(
       member.app,
-      { thread: "member-thread", executionTarget: target },
+      { thread: "member-thread" },
       { "x-lobu-org": AGENT_ORG }
     );
     expect(created.status).toBe(201);
@@ -840,20 +694,8 @@ describe("POST /api/v1/agents — org member using an agent they don't own", () 
       { "x-lobu-org": AGENT_ORG }
     );
     expect(resumed.status).toBe(201);
-    expect(
-      ((await resumed.json()) as { executionTarget: typeof target })
-        .executionTarget
-    ).toEqual(target);
-
-    const newMemberDeviceSession = await postCreate(
-      admin.app,
-      {
-        userId: MEMBER_ID,
-        thread: "admin-created-member-device-thread",
-        executionTarget: target,
-      },
-      { "x-lobu-org": AGENT_ORG }
+    expect(((await resumed.json()) as { agentId: string }).agentId).toBe(
+      memberKey
     );
-    expect(newMemberDeviceSession.status).toBe(400);
   });
 });
