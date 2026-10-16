@@ -1,9 +1,9 @@
 /**
- * WhatsApp owns its page adapter, normalization, and collection checkpoints.
- * The paired browser provides generic evaluate and feed_listen operations;
- * its durable record buffer wakes the existing feed sync through worker poll.
- * Successful sync checkpoints acknowledge exact buffered revisions. Ordinary
- * collection still supplies history and reconciles the page's current state.
+ * WhatsApp's feed reads live without importing message history into events.
+ * The page adapter answers source reads and observes new messages; observation
+ * publishes references only, through the paired browser's generic evaluate
+ * and feed_listen operations. An Automation reads content live when it runs. The only
+ * checkpoint is the observation position used to replay missed references.
  *
  * Auth stays in the user's signed-in WhatsApp Web tab. Org policy governs
  * message writes; there is no connector-side action ledger.
@@ -15,40 +15,23 @@ import {
   type ActionResult,
   type ChromeActionDispatcher,
   ConnectorRuntime,
-  type EventEnvelope,
   type FeedReadContext,
   type FeedReadResult,
   type FeedObserveContext,
   type RuntimeConnectorDefinition,
-  type SyncContext,
-  type SyncResult,
 } from "@lobu/connector-sdk";
 import {
-  type BrowserCheckpoint,
-  buildCollectionPlan,
   type ChatFilter,
-  type CollectResponse,
-  type DirtyMarker,
-  isMediaEligible,
-  MAX_MEDIA_BYTES,
-  MAX_MEDIA_PER_RUN,
-  type MediaRecord,
-  type MediaStatus,
-  mergeBrowserCheckpoint,
-  mergeCollectedMessages,
   messageContentKind,
   messagePayloadText,
-  messageRevision,
   messageTitle,
   normalizeRelayedMessage,
-  toEventEnvelope,
+  type ObservationCheckpoint,
   WHATSAPP_ADAPTER_VERSION,
   WHATSAPP_ORIGIN,
-  type WhatsAppMessage,
 } from "./whatsapp-web-helpers.js";
 import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
 
-const SOURCE_OBSERVATION_ERROR_ID = "whatsapp-web:source-observation-error";
 // Each durable browser record is limited to 128 KiB, including its checkpoint.
 const SOURCE_RECORD_MAX_BYTES = 128 * 1024;
 
@@ -72,44 +55,9 @@ const SOURCE_RECORD_MAX_BYTES = 128 * 1024;
  */
 const READY_TIMEOUT_MS = 120_000;
 const READY_POLL_INTERVAL_MS = 500;
-/**
- * Per-item budget, enforced by the ADAPTER inside the page.
- *
- * A caller-side timer cannot bound a dispatch: it cannot cancel one, so racing
- * it only stops us waiting while the request stays in flight in the parent
- * worker. The child then finishes and exits, the device's answer arrives with
- * nobody to receive it, and the parent's reply-send finds a dead IPC channel —
- * which failed a prod sync run that had already written its events, and once
- * killed the worker daemon outright. Measured `download_media` evaluates take
- * 3.9-5.2s, so the old 4s caller-side cap orphaned nearly every media item.
- *
- * The extension's `evaluate` op takes no timeout and its schema is deliberately
- * frozen, but the adapter request shape is ours: send the budget with the
- * request and let the page enforce it, so a slow item comes back as an ordinary
- * `timeout_retryable` answer instead of an abandoned dispatch. This mirrors how
- * `x.ts` hands `timeout_ms` to `wait_for_selector` rather than racing it.
- */
-const MEDIA_ITEM_TIMEOUT_MS = 20_000;
-
-/**
- * Outer bound on the whole media phase, checked between items. The per-item
- * budget above caps any single download; this stops a long queue of merely
- * slow ones from consuming a run. Items past it stay retryable.
- */
-const MEDIA_PHASE_BUDGET_MS = 60_000;
-const MEDIA_CONCURRENCY = 3;
-const MAX_TOTAL_MEDIA_BYTES = 4 * 1024 * 1024;
-const MAX_DIRTY_MARKERS_PERSISTED = 250;
-/**
- * Media retry rows the checkpoint carries between runs. Attachments are never
- * persisted — only the status/backoff bookkeeping the extension kept in
- * IndexedDB, which is what decides whether to re-attempt a download.
- */
-const MAX_MEDIA_RECORDS_PERSISTED = 500;
 
 interface WhatsAppWebConfig {
   chat_filter?: ChatFilter;
-  max_messages_per_sync?: number;
 }
 
 /** Adapter failures the bridge can recover from by re-injecting the program. */
@@ -132,8 +80,8 @@ class WhatsAppAdapterError extends Error {
  *
  * The window is persistent on purpose: a cold tab costs a 20s load plus up to
  * 25s of WhatsApp hydration, and every one of those seconds is spent inside a
- * run's budget. Reusing the window keeps the message model hot for ordinary
- * collection and keeps the page observer attached between syncs.
+ * run's budget. Reusing the window keeps the message model hot for reads and
+ * keeps the page observer attached between runs.
  */
 async function openWhatsAppTab(
   dispatcher: ChromeActionDispatcher
@@ -278,11 +226,6 @@ const TRANSIENT_READINESS_PATTERN = /hydrating|stores_settling/i;
  * its CDP timeout and the adapter never gets to name a state -- the bridge
  * REJECTS the dispatch instead of returning an adapter-shaped error, so this
  * message carries no connector prefix to classify on.
- *
- * Only the readiness phase may treat it as transient. A `collect` that times
- * out is a real failure, and the server's dependency_unavailable branch skips
- * `consecutive_failures` -- classifying it here would let a permanently broken
- * collect retry forever without ever walking the feed toward its hard pause.
  */
 const BARE_EVALUATE_TIMEOUT_PATTERN = /\btimed out\b/i;
 const DEPENDENCY_UNAVAILABLE_PREFIX =
@@ -290,19 +233,15 @@ const DEPENDENCY_UNAVAILABLE_PREFIX =
 
 /**
  * Only readiness-phase WhatsApp failures are transient. Authentication, adapter
- * corruption, unsupported operations, and collection errors remain ordinary
- * connector failures and still count toward source health.
+ * corruption, and unsupported operations remain ordinary connector failures
+ * and still count toward source health.
  */
-function classifyWhatsAppReadinessFailure(
-  error: unknown,
-  { allowBareTimeout = false }: { allowBareTimeout?: boolean } = {}
-): string | null {
+function classifyWhatsAppReadinessFailure(error: unknown): string | null {
   if (!(error instanceof Error)) return null;
   // A dispatch the bridge abandoned never reaches the adapter, so it has no
   // connector prefix to match. Classify it before the prefix gate below, or a
-  // hydration stall that timed out is booked as a hard failure. Readiness only:
-  // see BARE_EVALUATE_TIMEOUT_PATTERN for why collect must not opt in.
-  if (allowBareTimeout && BARE_EVALUATE_TIMEOUT_PATTERN.test(error.message)) {
+  // hydration stall that timed out is booked as a hard failure.
+  if (BARE_EVALUATE_TIMEOUT_PATTERN.test(error.message)) {
     return `${DEPENDENCY_UNAVAILABLE_PREFIX} ${error.message}`;
   }
   // MAIN-world adapter failures may cross the extension/worker boundary without
@@ -358,212 +297,12 @@ async function readyWhatsAppTab(
     }
     await new Promise((resolve) => setTimeout(resolve, READY_POLL_INTERVAL_MS));
   } while (Date.now() < deadline);
-  const transient = classifyWhatsAppReadinessFailure(lastError, {
-    allowBareTimeout: true,
-  });
+  const transient = classifyWhatsAppReadinessFailure(lastError);
   if (transient) throw new Error(transient);
   throw (
     lastError ??
     new Error("WhatsApp Web did not become ready within the run budget")
   );
-}
-
-const MEDIA_STATES: ReadonlySet<string> = new Set([
-  "downloaded",
-  "NEED_POKE",
-  "awaiting_primary_device",
-  "view_once",
-  "expired",
-  "too_large",
-  "timeout_retryable",
-  "metadata_only",
-  "unavailable",
-]);
-const TERMINAL_MEDIA_STATES: ReadonlySet<string> = new Set([
-  "downloaded",
-  "view_once",
-  "expired",
-  "too_large",
-]);
-const RETRYABLE_MEDIA_STATES = [
-  "awaiting_primary_device",
-  "timeout_retryable",
-  "unavailable",
-  "metadata_only",
-];
-
-function mediaBackoff(attempts: number): number {
-  return Date.now() + Math.min(60 * 60_000, 5_000 * 2 ** Math.min(attempts, 8));
-}
-
-/**
- * Download the media the run is allowed to spend on, and carry the retry
- * bookkeeping forward in the checkpoint.
- *
- * The extension cached blobs in IndexedDB; a checkpoint cannot hold megabytes
- * of base64, so only the status/backoff row survives a run. A message whose
- * media already downloaded is not re-attempted because the head cursor has
- * moved past it — the cache only ever mattered for re-emitted rows.
- */
-async function downloadEligibleMedia(
-  dispatcher: ChromeActionDispatcher,
-  tabId: number,
-  messages: WhatsAppMessage[],
-  priorMedia: Record<string, MediaRecord>
-): Promise<{
-  results: Map<string, MediaRecord>;
-  nextMedia: Record<string, MediaRecord>;
-}> {
-  const results = new Map<string, MediaRecord>();
-  const nextMedia: Record<string, MediaRecord> = {};
-  const queue: Array<{
-    message: WhatsAppMessage;
-    previous: MediaRecord | undefined;
-    revision: string;
-  }> = [];
-  let totalBytes = 0;
-
-  const remember = (record: MediaRecord) => {
-    results.set(record.id, record);
-    // Terminal rows need no further bookkeeping; only pending retries are
-    // worth a checkpoint slot. So a prior record is ALWAYS retryable — there
-    // is no terminal-prior case to short-circuit. Re-downloading inside the
-    // recent-overlap window costs one fetch and dedupes on content hash;
-    // persisting terminal rows to avoid it would grow the checkpoint without
-    // bound.
-    if (record.retryable)
-      nextMedia[record.id] = { ...record, attachment: undefined };
-  };
-
-  const defer = (message: WhatsAppMessage, previous?: MediaRecord) => {
-    remember({
-      id: message.id,
-      revision: messageRevision(message),
-      status: "metadata_only",
-      retryable: true,
-      attempts: previous?.attempts ?? 0,
-      next_attempt_at: Date.now() + 5_000,
-      updated_at: Date.now(),
-    });
-  };
-
-  for (const message of messages) {
-    if (!isMediaEligible(message)) continue;
-    const revision = messageRevision(message);
-    const previous = priorMedia[message.id];
-    if (
-      previous?.revision === revision &&
-      (previous.next_attempt_at ?? 0) > Date.now()
-    ) {
-      remember(previous);
-      continue;
-    }
-    if (queue.length >= MAX_MEDIA_PER_RUN) {
-      defer(message, previous);
-      continue;
-    }
-    queue.push({ message, previous, revision });
-  }
-
-  const mediaDeadline = Date.now() + MEDIA_PHASE_BUDGET_MS;
-  let cursor = 0;
-  const worker = async (): Promise<void> => {
-    while (cursor < queue.length) {
-      const item = queue[cursor++];
-      if (!item) return;
-      const { message, previous, revision } = item;
-      if (Date.now() > mediaDeadline) {
-        // Out of phase budget: leave the rest retryable rather than starting a
-        // dispatch this run cannot wait for.
-        defer(message, previous);
-        continue;
-      }
-      try {
-        const response = await invokeAdapter<{
-          status?: string;
-          retryable?: boolean;
-          attachment?: MediaRecord["attachment"];
-        }>(dispatcher, tabId, {
-          op: "download_media",
-          message_id: message.id,
-          max_bytes: MAX_MEDIA_BYTES,
-          timeout_ms: MEDIA_ITEM_TIMEOUT_MS,
-        });
-        const rawStatus = MEDIA_STATES.has(response.status ?? "")
-          ? (response.status as string)
-          : "unavailable";
-        const status = (
-          rawStatus === "NEED_POKE" ? "awaiting_primary_device" : rawStatus
-        ) as MediaStatus;
-        const attempts = (previous?.attempts ?? 0) + 1;
-        const retryable = Boolean(
-          response.retryable ||
-            rawStatus === "NEED_POKE" ||
-            RETRYABLE_MEDIA_STATES.includes(status)
-        );
-        const record: MediaRecord = {
-          id: message.id,
-          revision,
-          status,
-          raw_status: rawStatus,
-          retryable,
-          attachment: response.attachment,
-          mime_type:
-            response.attachment?.mime_type ?? message.media_type ?? null,
-          attempts,
-          next_attempt_at: retryable ? mediaBackoff(attempts) : null,
-          updated_at: Date.now(),
-        };
-        const size = Number(record.attachment?.size_bytes) || 0;
-        if (size && totalBytes + size > MAX_TOTAL_MEDIA_BYTES) {
-          // Over the per-run byte budget: emit the metadata placeholder and
-          // leave the download to a later run.
-          remember({
-            ...record,
-            attachment: undefined,
-            status: "metadata_only",
-            retryable: true,
-          });
-        } else {
-          totalBytes += size;
-          remember(record);
-        }
-      } catch (error) {
-        const attempts = (previous?.attempts ?? 0) + 1;
-        // Both the phase budget and the child-side dispatch backstop mean
-        // "try again later", not "this media is gone".
-        const text = String(error);
-        const timedOut =
-          text.includes("timed out") || text.includes("IPC may be wedged");
-        const reported =
-          error instanceof WhatsAppAdapterError ? error.state : null;
-        const explicitState =
-          reported && MEDIA_STATES.has(reported) ? reported : null;
-        const status = (
-          explicitState === "NEED_POKE"
-            ? "awaiting_primary_device"
-            : (explicitState ??
-              (timedOut ? "timeout_retryable" : "unavailable"))
-        ) as MediaStatus;
-        const retryable = !TERMINAL_MEDIA_STATES.has(status);
-        remember({
-          id: message.id,
-          revision,
-          status,
-          retryable,
-          attempts,
-          next_attempt_at: retryable ? mediaBackoff(attempts) : null,
-          updated_at: Date.now(),
-        });
-      }
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(MEDIA_CONCURRENCY, queue.length) }, () =>
-      worker()
-    )
-  );
-  return { results, nextMedia };
 }
 
 /** Normalise adapter search/read hits into the row shape the tools return. */
@@ -602,18 +341,18 @@ const WRITE_ACTIONS = new Set([
 ]);
 
 export default class WhatsAppWebConnector extends ConnectorRuntime<
-  BrowserCheckpoint,
+  ObservationCheckpoint,
   WhatsAppWebConfig
 > {
   readonly definition: RuntimeConnectorDefinition<
-    BrowserCheckpoint,
+    ObservationCheckpoint,
     WhatsAppWebConfig
   > = {
     key: "whatsapp.web",
     name: "WhatsApp",
     description:
-      "Personal WhatsApp messages read from WhatsApp Web in the paired Owletto Chrome. Syncs one-to-one and group chats, progressively hydrates history, and can search, draft, send, edit, react to, and revoke messages.",
-    version: "1.0.9",
+      "Personal WhatsApp messages read live from WhatsApp Web in the paired Owletto Chrome without importing message history. Automations react to new-message references and read content on demand. Search, draft, send, edit, react to, and revoke messages.",
+    version: "2.0.0",
     faviconDomain: "whatsapp.com",
     authSchema: { methods: [{ type: "browser", mode: "live" }] },
     browser: {
@@ -664,121 +403,6 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
               default: "all",
               description: "Which chats to include.",
             },
-          },
-        },
-      },
-      messages: {
-        sync: (ctx) => this.syncMessages(ctx),
-        webhook: { events: ["message"], mode: "trigger" },
-        key: "messages",
-        name: "Messages",
-        description:
-          "Personal WhatsApp messages from one-to-one and group chats. Syncs live changes and progressively hydrates history available to WhatsApp Web.",
-        configSchema: {
-          type: "object",
-          properties: {
-            chat_filter: {
-              type: "string",
-              enum: ["all", "individual", "group"],
-              default: "all",
-              description: "Which chats to include.",
-            },
-            max_messages_per_sync: {
-              type: "integer",
-              minimum: 1,
-              maximum: 1000,
-              default: 1000,
-              description:
-                "Bounded maximum messages emitted per sync. Additional durable history resumes on later runs.",
-            },
-          },
-        },
-        eventKinds: {
-          message: {
-            description:
-              "A WhatsApp message, caption, media placeholder, edit, revoke, or reaction-updated message.",
-            metadataSchema: {
-              type: "object",
-              required: [
-                "source",
-                "origin_id",
-                "chat_jid",
-                "is_group",
-                "from_me",
-              ],
-              properties: {
-                source: { type: "string", const: "whatsapp_web" },
-                origin_id: { type: "string" },
-                chat_jid: { type: "string" },
-                is_group: { type: "boolean" },
-                from_me: { type: "boolean" },
-                is_direct_inbound: { type: "boolean" },
-                participant: { type: "string" },
-                sender_jid: { type: "string" },
-                sender_phone: { type: "string" },
-                push_name: { type: "string" },
-                media_type: { type: "string" },
-                quoted_id: { type: "string" },
-                is_forwarded: { type: "boolean" },
-                is_starred: { type: "boolean" },
-                is_system_event: { type: "boolean" },
-                edited: { type: "boolean" },
-                edit_timestamp: { type: "number" },
-                revoked: { type: "boolean" },
-                reactions: { type: "array", items: { type: "object" } },
-                voice_note_skipped: {
-                  type: "string",
-                  enum: [
-                    "not_downloaded",
-                    "too_large",
-                    "empty",
-                    "read_error",
-                    "invalid_path",
-                  ],
-                },
-                media_status: {
-                  type: "string",
-                  enum: [
-                    "downloaded",
-                    "awaiting_primary_device",
-                    "view_once",
-                    "expired",
-                    "too_large",
-                    "timeout_retryable",
-                    "metadata_only",
-                    "unavailable",
-                  ],
-                },
-              },
-            },
-            attributions: [
-              {
-                role: "authored_by",
-                autoCreate: true,
-                target: {
-                  entityType: "person",
-                  createWhen: {
-                    path: "metadata.is_direct_inbound",
-                    equals: true,
-                  },
-                  titlePath: "metadata.push_name",
-                  identities: [
-                    { namespace: "wa_jid", eventPath: "metadata.sender_jid" },
-                    { namespace: "phone", eventPath: "metadata.sender_phone" },
-                  ],
-                },
-                traits: {
-                  push_name: {
-                    eventPath: "metadata.push_name",
-                    mergeStrategy: "prefer_non_empty",
-                  },
-                  last_seen_at: {
-                    eventPath: "occurred_at",
-                    mergeStrategy: "overwrite",
-                  },
-                },
-              },
-            ],
           },
         },
       },
@@ -965,7 +589,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     },
   };
 
-  private async observeMessages(ctx: FeedObserveContext<BrowserCheckpoint, WhatsAppWebConfig>): Promise<void> {
+  private async observeMessages(ctx: FeedObserveContext<ObservationCheckpoint, WhatsAppWebConfig>): Promise<void> {
     const dispatcher = requireBrowser(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     const chatFilter = ctx.config.chat_filter ?? "all";
@@ -981,7 +605,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       throw new Error("A browser supporting source subscriptions is required for WhatsApp");
     }
     await invokeAdapter(dispatcher, tabId, {
-      op: "listen", bridge_id: binding.bridge_id, token: binding.token, references_only: true,
+      op: "listen", bridge_id: binding.bridge_id, token: binding.token,
       chat_filter: chatFilter, recent_since: startedAt, minimum_timestamp: startedAt,
     });
     let cursor = ctx.checkpoint ?? null;
@@ -989,9 +613,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       const replay = await invokeAdapter<{
         after: number; references: Array<{ id: string; timestamp: number }>; hasMore: boolean;
       }>(dispatcher, tabId, { op: "observe_messages", input: { after, started_at: startedAt, chat_filter: chatFilter } });
-      const next: BrowserCheckpoint = {
-        schema: "owletto.whatsapp.browser.v1", adapter_version: WHATSAPP_ADAPTER_VERSION,
-        head: {}, backfill: { complete: true, cursor_chat_jid: null, inventory: [], chats: {} },
+      const next: ObservationCheckpoint = {
         observation: { after: replay.after, started_at: startedAt, chat_filter: chatFilter },
       };
       const events = replay.references.map(reference => ({
@@ -1027,225 +649,12 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     }
   }
 
-  private async syncMessages(
-    ctx: SyncContext<BrowserCheckpoint, WhatsAppWebConfig>
-  ): Promise<SyncResult> {
-    const dispatcher = requireBrowser(ctx);
-    const tabId = await readyWhatsAppTab(dispatcher);
-    return await this.collectMessages(ctx, dispatcher, tabId);
-  }
-
-  /**
-   * The collect phase re-checks readiness inside the page, so a message landing
-   * between the passing probe and this dispatch surfaces the same transient
-   * `stores_settling` here. `readyWhatsAppTab` classifies that as a dependency
-   * failure; without the same treatment on this path an ordinary race counts
-   * against the feed's consecutive-failure budget and walks it toward a pause.
-   */
-  private async collectMessages(
-    ctx: SyncContext<BrowserCheckpoint, WhatsAppWebConfig>,
-    dispatcher: ChromeActionDispatcher,
-    tabId: number
-  ): Promise<SyncResult> {
-    try {
-      return await this.collectMessagesInner(ctx, dispatcher, tabId);
-    } catch (error) {
-      const transient = classifyWhatsAppReadinessFailure(error);
-      if (transient) throw new Error(transient);
-      throw error;
-    }
-  }
-
-  private async collectMessagesInner(
-    ctx: SyncContext<BrowserCheckpoint, WhatsAppWebConfig>,
-    dispatcher: ChromeActionDispatcher,
-    tabId: number
-  ): Promise<SyncResult> {
-    const { checkpoint, request } = buildCollectionPlan({
-      checkpoint: ctx.checkpoint as Record<string, unknown> | null,
-      config: ctx.config as Record<string, unknown>,
-    });
-
-    const observed = await dispatcher.dispatch<{
-      bridge_id: string;
-      binding_id: string;
-      epoch: string;
-      token: string;
-      listening?: boolean;
-      records: Array<{ revision: number; payload: Record<string, unknown> }>;
-    }>("feed_listen", { tab_id: tabId }).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("Owletto for Chrome: unknown dispatch") && message.includes("action_key='feed_listen'")) {
-        throw new Error("[lobu:dependency_unavailable:browser_extension_update_required] Update the paired Owletto extension to support connector feed listeners");
-      }
-      throw error;
-    });
-    if (!observed.bridge_id || !Array.isArray(observed.records)) {
-      throw new Error("The paired browser must support connector feed listeners; update the Owletto extension");
-    }
-    const sourceErrors = observed.records.filter((row) =>
-      row.payload.id === SOURCE_OBSERVATION_ERROR_ID &&
-      typeof row.payload.source_error === "string"
-    );
-    // A real rebind proves a prior page failure recovered. A dry snapshot
-    // cannot install that listener, so it must keep surfacing the marker.
-    if (observed.listening !== false) await invokeAdapter(dispatcher, tabId, {
-      op: "listen", bridge_id: observed.bridge_id, token: observed.token,
-      chat_filter: request.chat_filter,
-      minimum_timestamp: request.minimum_timestamp,
-      recent_since: request.recent_since ?? Math.floor(Date.now() / 1000) - 15 * 60,
-    });
-    else if (sourceErrors.length > 0) {
-      throw new Error(String(sourceErrors[0].payload.source_error));
-    }
-
-    // Recovery ranges and media retries remain in the normal feed checkpoint.
-    const dirtyBefore = checkpoint.dirty ?? [];
-    const dirtyBatch = dirtyBefore.slice(0, MAX_DIRTY_MARKERS_PERSISTED);
-    request.dirty_ranges = dirtyBatch.map((marker) => ({
-      key: marker.key,
-      chat_jid: marker.chat_jid ?? null,
-      message_id: marker.message_id ?? null,
-      minimum_timestamp: marker.minimum_timestamp ?? null,
-    }));
-
-    const result = await invokeAdapter<CollectResponse>(
-      dispatcher,
-      tabId,
-      request as unknown as Record<string, unknown>
-    );
-
-    // History pages come back separately from the recent window so a backfill
-    // page can advance its chat cursor without competing for the recent slot.
-    const historyMessages = (result.history_pages ?? []).flatMap(
-      (page) => page.messages ?? []
-    );
-    const inScope = (row: Record<string, unknown>) =>
-      (request.chat_filter !== "group" || row.is_group === true) &&
-      (request.chat_filter !== "individual" || row.is_group !== true) &&
-      (request.minimum_timestamp == null || Number(row.timestamp) >= request.minimum_timestamp);
-    const buffered = observed.records.filter((row) =>
-      !sourceErrors.includes(row) && inScope(row.payload)
-    );
-    const bufferedIds = new Set(buffered.map((row) => row.payload.id));
-    const messages = mergeCollectedMessages(
-      [...(result.messages ?? []), ...historyMessages],
-      buffered.map((row) => row.payload),
-      request.minimum_timestamp
-    ).sort((a, b) => Number(bufferedIds.has(b.id)) - Number(bufferedIds.has(a.id)) || a.timestamp - b.timestamp || a.id.localeCompare(b.id))
-      .slice(0, request.max_messages);
-
-    const emittedIds = new Set(messages.map((message) => message.id));
-    const reconciledKeys = new Set(
-      (result.dirty_reconciled ?? [])
-        .filter(
-          (marker) => marker.message_id && emittedIds.has(marker.message_id)
-        )
-        .map((marker) => marker.key)
-    );
-
-    const { results: media, nextMedia } = await downloadEligibleMedia(
-      dispatcher,
-      tabId,
-      messages,
-      checkpoint.media ?? {}
-    );
-
-    const events: EventEnvelope[] = messages.map((message) =>
-      toEventEnvelope(message, media.get(message.id))
-    );
-
-    const nextCheckpoint = mergeBrowserCheckpoint(
-      checkpoint as unknown as Record<string, unknown>,
-      result,
-      messages
-    );
-    // A live burst can consume this run's budget. Retain collection cursors
-    // when any collected row was deferred, so backfill cannot skip that page.
-    const deferredCollection = mergeCollectedMessages(
-      [...(result.messages ?? []), ...historyMessages], [], request.minimum_timestamp
-    ).some((row) => !emittedIds.has(row.id));
-    if (deferredCollection) {
-      nextCheckpoint.head = checkpoint.head;
-      nextCheckpoint.backfill = { ...checkpoint.backfill, complete: false };
-    }
-    nextCheckpoint.source_ack = {
-      binding_id: observed.binding_id,
-      epoch: observed.epoch,
-      records: observed.records
-        .filter((row) => sourceErrors.includes(row) || emittedIds.has(String(row.payload.id)) || !inScope(row.payload))
-        .map((row) => ({ id: String(row.payload.id), revision: row.revision })),
-    };
-
-    // Carry forward the markers this run did not reconcile, plus anything the
-    // adapter newly quarantined.
-    const dirtyByKey = new Map<string, DirtyMarker>();
-    for (const marker of dirtyBefore) {
-      if (!reconciledKeys.has(marker.key)) dirtyByKey.set(marker.key, marker);
-    }
-    for (const marker of result.quarantined ?? []) {
-      dirtyByKey.set(marker.key, {
-        ...marker,
-        message_id: marker.message_id ?? null,
-        minimum_timestamp: null,
-      });
-    }
-    const dirty: DirtyMarker[] = [...dirtyByKey.values()].slice(
-      0,
-      MAX_DIRTY_MARKERS_PERSISTED
-    );
-    // `mergeBrowserCheckpoint` spreads the prior checkpoint forward, so every
-    // one of these fields must be REPLACED, not conditionally set: a marker
-    // the adapter just reconciled has to leave the checkpoint, or the next run
-    // re-requests it and the list never empties.
-    const diagnostics: Record<string, unknown> = {};
-    if (dirty.length > 0) {
-      nextCheckpoint.dirty = dirty;
-      nextCheckpoint.backfill.complete = false;
-      const reasons: Record<string, number> = {};
-      for (const marker of dirty) {
-        const reason = marker.reason ?? "unknown";
-        reasons[reason] = (reasons[reason] ?? 0) + 1;
-      }
-      diagnostics.dirty_reconciliation = {
-        pending_count: dirty.length,
-        requested_count: dirtyBatch.length,
-        reasons: Object.fromEntries(Object.entries(reasons).slice(0, 10)),
-      };
-    } else {
-      nextCheckpoint.dirty = undefined;
-    }
-
-    const persistedMedia = Object.entries(nextMedia).slice(
-      0,
-      MAX_MEDIA_RECORDS_PERSISTED
-    );
-    nextCheckpoint.media =
-      persistedMedia.length > 0
-        ? Object.fromEntries(persistedMedia)
-        : undefined;
-
-    const mediaStatusCounts: Record<string, number> = {};
-    for (const record of media.values()) {
-      mediaStatusCounts[record.status] =
-        (mediaStatusCounts[record.status] ?? 0) + 1;
-    }
-    if (Object.keys(mediaStatusCounts).length > 0) {
-      diagnostics.media_status_counts = mediaStatusCounts;
-    }
-    nextCheckpoint.diagnostics =
-      Object.keys(diagnostics).length > 0 ? diagnostics : undefined;
-
-    await ctx.commit(events, nextCheckpoint as unknown as BrowserCheckpoint);
-    return { status: "complete" };
-  }
-
   private async readMessages(ctx: FeedReadContext<WhatsAppWebConfig>): Promise<FeedReadResult> {
     if (ctx.offset) throw new Error("WhatsApp live reads paginate with the returned cursor, not an offset.");
     if (ctx.sort) throw new Error("WhatsApp live reads use source storage order; explicit sorting is not supported.");
     // Source message time cannot represent edits, revokes, or delayed arrivals.
-    // Keep Automation change consumption on the existing durable event path.
-    if (ctx.window) throw new Error("WhatsApp live reads do not support change-time windows; use message events for Automation changes.");
+    // Automations subscribe to new-message references and read content by ID.
+    if (ctx.window) throw new Error("WhatsApp live reads do not support change-time windows; subscribe to message.created and read references by id:<message ID>.");
     const dispatcher = requireBrowser(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     const response = await invokeAdapter<{
@@ -1314,8 +723,8 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         };
       }
       // A send that reports no raw WhatsApp key.id did not demonstrably land;
-      // fail loudly rather than record a success the message stream will not
-      // corroborate on the next sync.
+      // fail loudly rather than record a success no message reference will
+      // corroborate.
       if (action === "send_message" && !response.message_id) {
         return {
           success: false,

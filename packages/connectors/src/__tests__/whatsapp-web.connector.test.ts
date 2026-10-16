@@ -1,11 +1,7 @@
 /**
- * Parity suite for the WhatsApp Web connector.
- *
- * The event-shape assertions are ported from the Owletto extension's
- * `whatsapp-web.test.js` with the same fixtures and expected values. The newer
- * source-observation cases cover the generic feed buffer and checkpoint that
- * replace the native connector's IndexedDB outbox, while page calls continue
- * through the generic `evaluate` operation.
+ * Suite for the live-only WhatsApp Web connector: source reads, reference
+ * observation, readiness over the generic `evaluate` bridge, and actions.
+ * Nothing here stores a message; there is no history-import feed.
  */
 
 import { readFileSync } from "node:fs";
@@ -15,22 +11,16 @@ import {
   expect,
   it,
   mock,
-  setSystemTime,
 } from "bun:test";
 import WhatsAppWebConnector from "../whatsapp_web.js";
 import { constrainBrowserInput } from "../../../connector-sdk/src/browser-requirement.js";
-import { whatsAppWebAdapterProgram } from "../whatsapp-web-adapter.js";
 import {
-  buildCollectionPlan,
   canonicalizeJid,
-  initializeBrowserCheckpoint,
-  mergeBrowserCheckpoint,
-  mergeCollectedMessages,
+  messagePayloadText,
+  normalizeRelayedMessage,
+  type ObservationCheckpoint,
   rawMessageId,
-  toEventEnvelope,
-  type BrowserCheckpoint,
 } from "../whatsapp-web-helpers.js";
-import { runSync } from './sync-harness';
 
 /** The extension suite's fixture, unchanged. */
 function message(
@@ -125,7 +115,6 @@ function makeDispatcher(
     calls,
     adapterOps,
     injections,
-    mediaCalls: () => adapterOps.filter((op) => op === "download_media"),
     uninstallAdapter: () => {
       installed = false;
     },
@@ -134,34 +123,25 @@ function makeDispatcher(
 
 const READY = { ok: true, status: { state: "ready" }, capabilities: {} };
 
-function syncCtx(
-  checkpoint: BrowserCheckpoint | null,
-  dispatcher: unknown,
-  config: Record<string, unknown> = {}
-) {
-  return {
-    feedKey: "messages",
-    config,
-    checkpoint,
-    credentials: null,
-    entityIds: [],
-    browser: dispatcher,
-  } as never;
-}
-
 let connector: WhatsAppWebConnector;
 beforeEach(() => {
   connector = new WhatsAppWebConnector();
 });
 
-function messagesFeed() {
-  const feed = connector.definition.feeds?.messages;
-  if (!feed?.sync) throw new Error("messages feed is not declared");
-  return { ...feed, sync: feed.sync };
+/** A live source read: the one path every readiness case goes through now. */
+function liveRead(dispatcher: unknown) {
+  return connector.read({
+    feedKey: "live_messages", config: {}, credentials: null, browser: dispatcher as never,
+  });
+}
+
+function readResponse(rows: Record<string, unknown>[]) {
+  return { ok: true, results: rows, hasMore: false };
 }
 
 describe("WhatsApp live source reads", () => {
   it("declares a source-only feed without sync or event ingestion", () => {
+    expect(Object.keys(connector.definition.feeds)).toEqual(["live_messages"]);
     const feed = connector.definition.feeds.live_messages;
     expect(typeof feed.read).toBe("function");
     expect("sync" in feed).toBe(false);
@@ -270,21 +250,26 @@ describe("WhatsApp live source reads", () => {
 describe("WhatsApp source listener setup", () => {
   const binding = { bridge_id: "synthetic-feed", token: "synthetic-token", subscription: { scope_key: "synthetic-scope" } };
 
-  it("publishes atomic replay batches and leaves delivery to the subscription transport", async () => {
+  it.each([
+    {},
+    {
+      schema: "owletto.whatsapp.browser.v1", adapter_version: 22,
+      head: {}, backfill: { complete: true, cursor_chat_jid: null, inventory: [], chats: {} },
+    },
+  ])("publishes atomic replay batches from current and pre-upgrade checkpoints: %j", async (legacyFields) => {
     const batches: Array<any> = [];
     let pages = 0;
     const page = makeDispatcher({ probe: READY, feed_listen: binding,
       observe_messages: () => ({ ok: true, after: 101 + pages, references: [{ id: "message-" + (++pages), timestamp: 2001 }], hasMore: pages < 2 }),
       publish_changes: (request: any) => { batches.push(request.batch); return { ok: true }; },
     });
-    const checkpoint = initializeBrowserCheckpoint(null);
-    checkpoint.observation = { after: 100, started_at: 2000, chat_filter: "all" };
+    const checkpoint: ObservationCheckpoint = { ...legacyFields, observation: { after: 100, started_at: 2000, chat_filter: "all" } };
     expect(await connector.observe({ feedKey: "live_messages", config: { chat_filter: "all" },
       checkpoint, credentials: null, browser: page.dispatcher })).toBeUndefined();
     expect(batches).toHaveLength(2);
     expect(batches[0].checkpoint.previous).toEqual(checkpoint);
     expect(batches[1].checkpoint.previous).toEqual(batches[0].checkpoint.next);
-    expect(batches[1].checkpoint.next.observation.after).toBe(102);
+    expect(batches[1].checkpoint.next).toEqual({ observation: { after: 102, started_at: 2000, chat_filter: "all" } });
     expect(batches[0].events).toEqual([{ id: "message-1", event_type: "message.created", resource_type: "message",
       resource_ref: "message-1", occurred_at: new Date(2001 * 1000).toISOString() }]);
     expect(batches.every(batch => batch.more === false)).toBe(true);
@@ -300,8 +285,7 @@ describe("WhatsApp source listener setup", () => {
       },
       publish_changes: (request: any) => { batches.push(request.batch); return { ok: true }; },
     });
-    const checkpoint = initializeBrowserCheckpoint(null);
-    checkpoint.observation = { after: 100, started_at: 1, chat_filter: "individual" };
+    const checkpoint: ObservationCheckpoint = { observation: { after: 100, started_at: 1, chat_filter: "individual" } };
     await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
       checkpoint, credentials: null, browser: page.dispatcher });
     expect(requests).toHaveLength(2);
@@ -325,8 +309,7 @@ describe("WhatsApp source listener setup", () => {
         return { ok: true };
       },
     });
-    const checkpoint = initializeBrowserCheckpoint(null);
-    checkpoint.observation = { after: 100, started_at: 2000, chat_filter: "group" };
+    const checkpoint: ObservationCheckpoint = { observation: { after: 100, started_at: 2000, chat_filter: "group" } };
     await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
       checkpoint, credentials: null, browser: page.dispatcher });
     expect(batches.length).toBeGreaterThan(1);
@@ -342,9 +325,9 @@ describe("WhatsApp source listener setup", () => {
   });
 });
 
-// ── canonical identity and cutover (verbatim from the extension suite) ──
+// ── canonical identity (verbatim from the extension suite) ──
 
-describe("canonical WhatsApp identity and cutover", () => {
+describe("canonical WhatsApp identity", () => {
   it("uses raw key.id and never the serialized compound key", () => {
     expect(
       rawMessageId({ id: "3EB0ABC", _serialized: "false_123@c.us_3EB0ABC_in" })
@@ -361,52 +344,6 @@ describe("canonical WhatsApp identity and cutover", () => {
     );
     expect(canonicalizeJid("123-456@g.us")).toBe("123-456@g.us");
     expect(canonicalizeJid("999@lid")).toBe("999@lid");
-  });
-
-  it("sends the history budget as a relative span the page can resolve", () => {
-    const { request } = buildCollectionPlan({});
-    // Absolute instants cannot cross the connector/page boundary: they run on
-    // different machines, so a shared epoch is off by the clock skew.
-    expect(request).not.toHaveProperty("deadline");
-    expect(request.budget_ms).toBeGreaterThan(0);
-    const source = whatsAppWebAdapterProgram.toString();
-    expect(source).toContain("request.budget_ms");
-    expect(source).not.toContain("request.deadline");
-  });
-
-  /**
-   * The extension fences EVERY claimed run at RUN_TIMEOUT_MS (90s) from the
-   * moment it is claimed, and each `dispatcher.dispatch("evaluate", ...)` is
-   * its own such run. The in-page history budget therefore cannot equal the
-   * fence: the adapter would be entitled to spend the entire run paging
-   * history and still owe a serialize-and-return, which it can never afford.
-   * That is the exact shape that stalled a prod feed -- every run died
-   * as `run timed out after 90000ms`, so the checkpoint never advanced and
-   * the next run repeated the identical oversized work.
-   */
-  it("leaves the collect budget headroom under the extension run fence", () => {
-    // Read the fence from the extension rather than hardcoding it: the two
-    // constants live in different repos with nothing linking them, so a
-    // hardcoded copy would keep passing while prod broke again.
-    const background = readFileSync(
-      new URL("../../../owletto/apps/chrome/background.js", import.meta.url),
-      "utf8"
-    );
-    const fenceMatch = background.match(
-      /const RUN_TIMEOUT_MS = ([\d_]+);/
-    );
-    if (!fenceMatch?.[1]) {
-      throw new Error(
-        "background.js no longer declares RUN_TIMEOUT_MS; the collect budget's headroom is now unverified"
-      );
-    }
-    const runFenceMs = Number(fenceMatch[1].replaceAll("_", ""));
-    const { request } = buildCollectionPlan({});
-    expect(Number(request.budget_ms)).toBeLessThan(runFenceMs);
-    // Enough headroom for the round trip the answer still has to make.
-    expect(runFenceMs - Number(request.budget_ms)).toBeGreaterThanOrEqual(
-      20_000
-    );
   });
 
   /**
@@ -436,290 +373,91 @@ describe("canonical WhatsApp identity and cutover", () => {
     expect(readyTimeoutMs).toBeGreaterThanOrEqual(90_000);
   });
 
-  it("collects strictly after the cutover so ingested rows never replay", () => {
-    const { request } = buildCollectionPlan({
-      checkpoint: {
-        schema: "owletto.whatsapp.browser.v1",
-        cutover_unix_seconds: 1_787_358_184,
-      },
-    });
-    // An inclusive floor would re-read the cutover second on every run. That
-    // overlap is what used to justify a second event shape and a media skip.
-    expect(request.minimum_timestamp).toBe(1_787_358_185);
-    expect(request.backfill_disabled).toBe(true);
-    const merged = mergeCollectedMessages(
-      [
-        message("old", { timestamp: 1_787_358_183 }),
-        message("at-cutover", { timestamp: 1_787_358_184 }),
-        message("new", { timestamp: 1_787_358_200 }),
-      ],
-      [],
-      request.minimum_timestamp
-    );
-    expect(merged.map((row) => row.id)).toEqual(["new"]);
-  });
 });
 
-// ── event shape ────────────────────────────────────────────────────────
+// ── live row text ──────────────────────────────────────────────────────
 
-describe("event shape", () => {
-  it("preserves the title, text, and canonical id the extension emitted", () => {
-    const normalized = mergeCollectedMessages([message("3EB0")], [])[0];
-    if (!normalized) throw new Error("fixture did not normalize");
-    const event = toEventEnvelope(normalized, undefined);
-    expect(event.origin_id).toBe("3EB0");
-    expect(event.title).toBe("Alice");
-    expect(event.payload_text).toBe("hello");
-    // Exact fixture for an ordinary inbound 1:1 text message. The only
-    // deliberate change from the extension's expectation is `source`, which
-    // names the connector producing the row.
-    expect(event.metadata).toEqual({
-      source: "whatsapp_web",
-      origin_id: "3EB0",
-      chat_jid: "15551234567@s.whatsapp.net",
-      is_group: false,
-      from_me: false,
-      sender_jid: "15551234567@s.whatsapp.net",
-      sender_phone: "15551234567",
-      push_name: "Alice",
-      is_direct_inbound: true,
-    });
-    expect(event.occurred_at.toISOString()).toBe("2026-08-22T00:23:20.000Z");
-    expect(event.semantic_type).toBe("message");
-    expect(event.attachments).toBeUndefined();
-  });
+function payloadText(raw: Record<string, unknown>): string {
+  const normalized = normalizeRelayedMessage(raw);
+  if (!normalized) throw new Error("fixture did not normalize");
+  return messagePayloadText(normalized);
+}
 
-  it("never puts a media row's base64 thumbnail in payload_text", () => {
+describe("live row text", () => {
+  it("never returns a media row's base64 thumbnail as its text", () => {
     // WhatsApp's `Msg.body` is the message text for a `chat` row and the
     // base64 JPEG THUMBNAIL for a media row — the user's text lives in
     // `caption`. Measured on a live tab (937 loaded messages): 656/656 `chat`
     // rows carry text in `body`, while `body` held a base64 JPEG on 1/22
-    // images, 1/7 videos and 2/2 `interactive` cards. Preferring `body` shipped
-    // that base64 into `payload_text` — hence `search_tsv` and the event
-    // embedding — and, worse, overwrote the `[image]` placeholder, so every
-    // metric keyed on `payload_text` reads a working image as missing.
+    // images, 1/7 videos and 2/2 `interactive` cards.
     const thumbnail = `/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEABsbGxscGx4h${"A".repeat(800)}`;
-    const [image] = mergeCollectedMessages(
-      [
-        message("img", {
-          message_type: "image",
-          media_kind: "image",
-          media_type: "image/jpeg",
-          body: thumbnail,
-          caption: "",
-        }),
-      ],
-      []
-    );
-    if (!image) throw new Error("fixture did not normalize");
-    expect(toEventEnvelope(image, undefined).payload_text).toBe("[image]");
-
+    expect(payloadText(message("img", {
+      message_type: "image", media_kind: "image", media_type: "image/jpeg",
+      body: thumbnail, caption: "",
+    }))).toBe("[image]");
     // A caption is the real text and must still win — including on the
     // `interactive` cards, whose `media_kind` is null but whose `body` is a
     // thumbnail all the same.
-    const [captioned] = mergeCollectedMessages(
-      [
-        message("card", {
-          message_type: "interactive",
-          media_kind: null,
-          body: thumbnail,
-          caption: "Book a table",
-        }),
-      ],
-      []
-    );
-    if (!captioned) throw new Error("fixture did not normalize");
-    expect(toEventEnvelope(captioned, undefined).payload_text).toBe(
-      "Book a table"
-    );
-
-    // The 656 text rows must be untouched, and a short body that merely starts
-    // with the prefix is text a person typed, not a thumbnail.
-    const [chat] = mergeCollectedMessages([message("txt")], []);
-    if (!chat) throw new Error("fixture did not normalize");
-    expect(toEventEnvelope(chat, undefined).payload_text).toBe("hello");
-    const [shortBody] = mergeCollectedMessages(
-      [message("short", { body: "/9j/ is a JPEG magic prefix" })],
-      []
-    );
-    if (!shortBody) throw new Error("fixture did not normalize");
-    expect(toEventEnvelope(shortBody, undefined).payload_text).toBe(
-      "/9j/ is a JPEG magic prefix"
-    );
+    expect(payloadText(message("card", {
+      message_type: "interactive", media_kind: null, body: thumbnail, caption: "Book a table",
+    }))).toBe("Book a table");
+    // Text rows are untouched, and a short body that merely starts with the
+    // prefix is text a person typed, not a thumbnail.
+    expect(payloadText(message("txt"))).toBe("hello");
+    expect(payloadText(message("short", { body: "/9j/ is a JPEG magic prefix" })))
+      .toBe("/9j/ is a JPEG magic prefix");
   });
 
   it("rejects a PNG or WebP thumbnail body too, not just JPEG", () => {
-    // Only JPEG bodies were observed live, but the guard's contract is "base64
-    // image data is not message text". Assert every prefix it claims to match,
-    // so none of them is untested code.
     for (const [prefix, kind] of [
       ["iVBORw0KGgo", "image"],
       ["UklGR", "sticker"],
     ] as const) {
-      const [row] = mergeCollectedMessages(
-        [
-          message(`thumb-${prefix}`, {
-            message_type: kind,
-            media_kind: kind,
-            body: `${prefix}${"A".repeat(200)}`,
-            caption: "",
-          }),
-        ],
-        []
-      );
-      if (!row) throw new Error("fixture did not normalize");
-      expect(toEventEnvelope(row, undefined).payload_text).toBe(`[${kind}]`);
+      expect(payloadText(message(`thumb-${prefix}`, {
+        message_type: kind, media_kind: kind, body: `${prefix}${"A".repeat(200)}`, caption: "",
+      }))).toBe(`[${kind}]`);
     }
   });
-
-  it("adds direct-inbound attribution only to inbound 1:1 messages", () => {
-    const inbound = mergeCollectedMessages([message("new-direct")], [])[0];
-    if (!inbound) throw new Error("fixture did not normalize");
-    // This flag gates person auto-creation, so it must not appear on a message
-    // the user sent or on a group message.
-    expect(
-      toEventEnvelope(inbound, undefined).metadata?.is_direct_inbound
-    ).toBe(true);
-    expect(
-      toEventEnvelope({ ...inbound, from_me: true }, undefined).metadata
-    ).not.toHaveProperty("is_direct_inbound");
-    expect(
-      toEventEnvelope({ ...inbound, is_group: true }, undefined).metadata
-    ).not.toHaveProperty("is_direct_inbound");
-  });
-
-  it("prefers the current snapshot's edits and revokes over stale state", () => {
-    const current = mergeCollectedMessages(
-      [
-        message("same", {
-          body: "edited",
-          edited: true,
-          revoked: true,
-          reactions: [{ emoji: "👍", sender_jid: "2@s.whatsapp.net" }],
-        }),
-      ],
-      [{ message: message("same", { body: "stale original" }) }]
-    );
-    expect(current).toHaveLength(1);
-    expect(current[0]).toMatchObject({
-      id: "same",
-      edited: true,
-      revoked: true,
-    });
-    expect(current[0]?.reactions).toHaveLength(1);
-  });
 });
 
-// ── checkpoint ─────────────────────────────────────────────────────────
+// ── readiness over the generic bridge ──────────────────────────────────
 
-describe("browser checkpoint", () => {
-  it("merges per-chat state without losing prior chats", () => {
-    const base = initializeBrowserCheckpoint(null);
-    base.backfill.chats.a = { has_more: true };
-    const next = mergeBrowserCheckpoint(
-      base as unknown as Record<string, unknown>,
-      {
-        backfill: {
-          complete: false,
-          cursor_chat_jid: "b",
-          inventory: [],
-          chats: { b: { has_more: false } },
-        },
-      },
-      mergeCollectedMessages([message("head")], [])
-    );
-    expect(next.backfill.chats).toEqual({
-      a: { has_more: true },
-      b: { has_more: false },
-    });
-  });
-
-  it("preserves recoverable known-chat inventory and round-trips into the next plan", () => {
-    const next = mergeBrowserCheckpoint(
-      initializeBrowserCheckpoint(null) as unknown as Record<string, unknown>,
-      {
-        backfill: {
-          complete: false,
-          cursor_chat_jid: null,
-          inventory: ["a@s.whatsapp.net", "b@g.us"],
-          chats: {},
-        },
-      },
-      mergeCollectedMessages([message("older-1")], [])
-    );
-    expect(next.backfill).toMatchObject({
-      complete: false,
-      inventory: ["a@s.whatsapp.net", "b@g.us"],
-    });
-    expect(
-      buildCollectionPlan({
-        checkpoint: next as unknown as Record<string, unknown>,
-      }).request.backfill
-    ).toEqual(next.backfill);
-  });
-});
-
-// ── the sync loop over the generic bridge ──────────────────────────────
-
-describe("sync over the generic chrome bridge", () => {
-  it("navigates into the persistent agent window and probes before collecting", async () => {
-    const image = message("plain");
+describe("readiness over the generic chrome bridge", () => {
+  it("navigates into the persistent agent window and probes before reading", async () => {
     const { dispatcher, calls, adapterOps } = makeDispatcher({
       probe: READY,
-      collect: {
-        ok: true,
-        status: {},
-        messages: [image],
-        backfill: {
-          complete: true,
-          cursor_chat_jid: null,
-          inventory: [],
-          chats: {},
-        },
-      },
+      read_messages: readResponse([message("plain")]),
     });
-    const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
+    const result = await liveRead(dispatcher);
     const nav = calls.find((call) => call.action === "navigate");
     expect(nav?.input).toMatchObject({
       url: "https://web.whatsapp.com/",
       persistent: true,
     });
-    expect(adapterOps.slice(0, 3)).toEqual(["probe", "listen", "collect"]);
-    expect(result.events.map((event) => event.origin_id)).toEqual(["plain"]);
+    expect(adapterOps).toEqual(["probe", "read_messages"]);
+    expect(result.rows.map((row) => row.id)).toEqual(["plain"]);
   });
 
   it("re-injects the adapter when the page lost it, then retries the call", async () => {
     const { dispatcher, injections, uninstallAdapter } = makeDispatcher(
       {
         probe: READY,
-        collect: {
-          ok: true,
-          status: {},
-          messages: [message("after-reload")],
-          backfill: {
-            complete: true,
-            cursor_chat_jid: null,
-            inventory: [],
-            chats: {},
-          },
-        },
+        read_messages: readResponse([message("after-reload")]),
       },
       { adapterInstalled: false }
     );
     uninstallAdapter();
-    const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
+    const result = await liveRead(dispatcher);
     expect(injections).toHaveLength(1);
     // The injected expression really is the serialised adapter program, not a
     // stub: it carries the adapter's own global key and its op table.
     expect(injections[0]).toContain("__owlettoWhatsAppAdapterV1");
     expect(injections[0]).toContain("revoke_message");
     expect(injections[0]!.length).toBeGreaterThan(20_000);
-    expect(result.events.map((event) => event.origin_id)).toEqual([
-      "after-reload",
-    ]);
+    expect(result.rows.map((row) => row.id)).toEqual(["after-reload"]);
   });
 
-  it("reloads a disconnected persistent source once before collecting", async () => {
+  it("reloads a disconnected persistent source once before reading", async () => {
     const { dispatcher, calls, adapterOps } = makeDispatcher({
       probe: () =>
         calls.some((call) =>
@@ -730,32 +468,26 @@ describe("sync over the generic chrome bridge", () => {
               ok: false,
               error: { state: "not_ready", reason: "stream_disconnected" },
             },
-      collect: {
-        ok: true,
-        messages: [message("reconnected")],
-        history_pages: [],
-      },
+      read_messages: readResponse([message("reconnected")]),
     });
     const realNow = Date.now;
     let ticks = 0;
     Date.now = () => realNow() + ticks++ * 40_000;
     try {
-      const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
-      expect(result.events.map((event) => event.origin_id)).toEqual([
-        "reconnected",
-      ]);
+      const result = await liveRead(dispatcher);
+      expect(result.rows.map((row) => row.id)).toEqual(["reconnected"]);
       expect(
         calls.filter((call) =>
           String(call.input.expression).includes("location.reload()"),
         ),
       ).toHaveLength(1);
-      expect(adapterOps.at(-1)).toBe("collect");
+      expect(adapterOps.at(-1)).toBe("read_messages");
     } finally {
       Date.now = realNow;
     }
   });
 
-  it("does not repeatedly reload or collect if reconnection fails", async () => {
+  it("does not repeatedly reload or read if reconnection fails", async () => {
     const { dispatcher, calls, adapterOps } = makeDispatcher({
       probe: {
         ok: false,
@@ -767,14 +499,14 @@ describe("sync over the generic chrome bridge", () => {
     Date.now = () => realNow() + ticks++ * 40_000;
     try {
       await expect(
-        runSync(messagesFeed(), syncCtx(null, dispatcher)),
+        liveRead(dispatcher),
       ).rejects.toThrow("stream_disconnected");
       expect(
         calls.filter((call) =>
           String(call.input.expression).includes("location.reload()"),
         ),
       ).toHaveLength(1);
-      expect(adapterOps).not.toContain("collect");
+      expect(adapterOps).not.toContain("read_messages");
     } finally {
       Date.now = realNow;
     }
@@ -809,7 +541,7 @@ describe("sync over the generic chrome bridge", () => {
     Date.now = () => realNow() + ticks++ * 40_000;
     try {
       await expect(
-        runSync(messagesFeed(), syncCtx(null, dispatcher)),
+        liveRead(dispatcher),
       ).rejects.toThrow("stream_disconnected");
     } finally {
       Date.now = realNow;
@@ -834,7 +566,7 @@ describe("sync over the generic chrome bridge", () => {
     });
     try {
       await expect(
-        runSync(messagesFeed(), syncCtx(null, dispatcher))
+        liveRead(dispatcher)
       ).rejects.toThrow(
         /^\[lobu:dependency_unavailable:browser_source_hydrating\] WhatsApp Web hydrating: stores_settling/
       );
@@ -844,54 +576,7 @@ describe("sync over the generic chrome bridge", () => {
   });
 
   /**
-   * A collect that times out is a REAL failure, not hydration. The server's
-   * dependency_unavailable branch deliberately skips consecutive_failures, so
-   * misclassifying this phase would let a permanently broken collect retry
-   * forever without ever walking the feed toward its hard pause -- the exact
-   * blindness that let this outage run for four days.
-   */
-  it("keeps a collect-phase timeout a hard failure", async () => {
-    let probed = false;
-    const dispatch = mock(async (action: string, input: Record<string, unknown>) => {
-      if (action === "navigate") return { tab_id: 42, current_url: input.url };
-      if (action === "feed_listen") {
-        return {
-          bridge_id: "synthetic-feed",
-          binding_id: "synthetic-feed",
-          epoch: "synthetic-epoch",
-          token: "synthetic-token",
-          records: [],
-        };
-      }
-      if (action !== "evaluate") return {};
-      const expression = String(input.expression ?? "");
-      if (expression.includes("a.version ===")) return { value: true };
-      const match = expression.match(/a\.invoke\((\{[\s\S]*\})\);/);
-      if (!match?.[1]) return { value: undefined };
-      const request = JSON.parse(match[1]) as { op: string };
-      // Readiness succeeds; the collect dispatch is the one that hangs.
-      if (request.op === "probe") {
-        probed = true;
-        return {
-          value: {
-            ok: true,
-            status: { ready: true, state: "ready" },
-            capabilities: { collect: true },
-          },
-        };
-      }
-      throw new Error("evaluation timed out");
-    });
-    const dispatcher = { dispatch } as unknown as Parameters<typeof syncCtx>[1];
-    await expect(
-      runSync(messagesFeed(), syncCtx(null, dispatcher))
-    ).rejects.toThrow(/^evaluation timed out$/);
-    expect(probed).toBe(true);
-  });
-
-  /**
-   * The production boundary, which the sibling test above does not reach: the
-   * extension does not RETURN an adapter-shaped error when CDP abandons an
+   * The production boundary: the extension does not RETURN an adapter-shaped error when CDP abandons an
    * evaluation, it REJECTS the dispatch with a bare timeout. That message
    * never carries the connector's own "WhatsApp Web " prefix, so classifying
    * on the prefix first drops it before the transient pattern is ever tried
@@ -911,10 +596,10 @@ describe("sync over the generic chrome bridge", () => {
       // connector prefix.
       throw new Error("evaluation timed out");
     });
-    const dispatcher = { dispatch } as unknown as Parameters<typeof syncCtx>[1];
+    const dispatcher = { dispatch };
     try {
       await expect(
-        runSync(messagesFeed(), syncCtx(null, dispatcher))
+        liveRead(dispatcher)
       ).rejects.toThrow(
         /^\[lobu:dependency_unavailable:browser_source_hydrating\]/
       );
@@ -948,7 +633,7 @@ describe("sync over the generic chrome bridge", () => {
     });
     try {
       await expect(
-        runSync(messagesFeed(), syncCtx(null, dispatcher))
+        liveRead(dispatcher)
       ).rejects.toThrow(
         /^\[lobu:dependency_unavailable:browser_source_hydrating\]/
       );
@@ -957,30 +642,8 @@ describe("sync over the generic chrome bridge", () => {
     }
   });
 
-  /**
-   * `collect` re-checks readiness inside the page, so a message arriving between
-   * the passing probe and the collect dispatch surfaces `stores_settling` from
-   * the COLLECT path rather than the readiness loop. That is an ordinary race,
-   * not a broken feed: unclassified it counts against the consecutive-failure
-   * budget and walks an otherwise healthy feed toward a hard pause.
-   */
-  it("treats collect-phase hydration as transient, not a real failure", async () => {
-    const { dispatcher } = makeDispatcher({
-      probe: () => ({ ok: true, state: "ready", message_count: 1, chat_count: 1 }),
-      collect: () => ({
-        ok: false,
-        error: { state: "hydrating", reason: "stores_settling" },
-      }),
-    });
-    await expect(
-      runSync(messagesFeed(), syncCtx(null, dispatcher))
-    ).rejects.toThrow(
-      /^\[lobu:dependency_unavailable:browser_source_hydrating\] WhatsApp Web hydrating: stores_settling/
-    );
-  });
-
-  it("bumps the WhatsApp connector version for reply-to-source messages", () => {
-    expect(connector.definition.version).toBe("1.0.9");
+  it("bumps the WhatsApp connector version for the live-only definition", () => {
+    expect(connector.definition.version).toBe("2.0.0");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
@@ -991,309 +654,14 @@ describe("sync over the generic chrome bridge", () => {
       },
     });
     await expect(
-      runSync(messagesFeed(), syncCtx(null, dispatcher))
+      liveRead(dispatcher)
     ).rejects.toThrow(/not signed in.*web\.whatsapp\.com.*Linked Devices/is);
   });
 
   it("refuses to run without a paired extension", async () => {
-    await expect(runSync(messagesFeed(), syncCtx(null, undefined))).rejects.toThrow(
+    await expect(liveRead(undefined)).rejects.toThrow(
       /Browser setup is required/i
     );
-  });
-});
-
-// ── media (ported bounds) ──────────────────────────────────────────────
-
-function imageMessages(
-  count: number,
-  prefix = "image"
-): Record<string, unknown>[] {
-  return Array.from({ length: count }, (_, index) =>
-    message(`${prefix}-${index}`, {
-      body: "",
-      message_type: "image",
-      media_kind: "image",
-      media_type: "image/jpeg",
-    })
-  );
-}
-
-function collectResponse(messages: Record<string, unknown>[]) {
-  return {
-    ok: true,
-    status: {},
-    messages,
-    backfill: {
-      complete: true,
-      cursor_chat_jid: null,
-      inventory: [],
-      chats: {},
-    },
-  };
-}
-
-describe("media", () => {
-  it("keeps media attempts bounded and marks overflow metadata-only", async () => {
-    const { dispatcher, mediaCalls } = makeDispatcher({
-      probe: READY,
-      collect: collectResponse(imageMessages(13)),
-      download_media: { ok: true, status: "unavailable" },
-    });
-    const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
-    expect(mediaCalls()).toHaveLength(12);
-    expect(
-      result.events.filter(
-        (event) => event.metadata?.media_status === "metadata_only"
-      )
-    ).toHaveLength(1);
-  });
-
-  it("enforces a total raw attachment budget and defers excess bytes", async () => {
-    const { dispatcher } = makeDispatcher({
-      probe: READY,
-      collect: collectResponse(imageMessages(3, "large")),
-      download_media: {
-        ok: true,
-        status: "downloaded",
-        attachment: {
-          kind: "image",
-          filename: "image.jpg",
-          mime_type: "image/jpeg",
-          data: "AA==",
-          size_bytes: 2 * 1024 * 1024,
-        },
-      },
-    });
-    const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
-    expect(result.events.filter((event) => event.attachments)).toHaveLength(2);
-    expect(
-      result.events.filter(
-        (event) => event.metadata?.media_status === "metadata_only"
-      )
-    ).toHaveLength(1);
-  });
-
-  /**
-   * A chrome dispatch cannot be cancelled, so a per-dispatch local timeout does
-   * not stop it — it only stops US waiting. The request stays in flight in the
-   * parent worker; the child then finishes and exits, and the device's answer
-   * arrives with nobody to receive it. In prod that failed a sync run which had
-   * already written its events, and once killed the worker daemon outright,
-   * taking every other connector's runs with it. Measured `download_media`
-   * evaluates ran 3.9-5.2s against the old 4s cap, so it orphaned a dispatch on
-   * nearly every media item.
-   *
-   * A runtime test cannot pin this: the cap was a real timer, so proving it
-   * fires means burning that many seconds of wall clock, and it would only
-   * catch a cap shorter than the delay chosen. Guard the shape instead — no
-   * timer may race a dispatch, whatever its constant.
-   */
-  it("still matches the executor timeout message it depends on", () => {
-    // `whatsapp_web.ts` decides "retryable" vs "this media is gone" by matching
-    // the dispatch backstop's free-text message, which is produced in another
-    // package. Nothing links the two, so a reword there would silently
-    // downgrade every timed-out media item to `unavailable` — permanently
-    // gone, never retried — with all tests still green. Pin the substrings the
-    // connector actually greps for; if this fails, fix the matcher, not this.
-    const producer = readFileSync(
-      new URL(
-        "../../../connector-worker/src/executor/isolate.ts",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-    const consumer = readFileSync(
-      new URL("../whatsapp_web.ts", import.meta.url),
-      "utf8",
-    );
-    const matched = [...consumer.matchAll(/text\.includes\("([^"]+)"\)/g)].map(
-      (m) => m[1],
-    );
-    expect(matched).toContain("IPC may be wedged");
-    // Every marker the connector greps for must exist in the producer, except
-    // "timed out", which is the generic phrasing several sources emit.
-    for (const marker of matched.filter((m) => m !== "timed out")) {
-      expect(
-        producer.includes(marker),
-        `isolate.ts no longer emits "${marker}"; whatsapp_web.ts would downgrade a retryable timeout to unavailable`,
-      ).toBe(true);
-    }
-  });
-
-  it("never races an uncancellable dispatch against a local timer", () => {
-    const source = readFileSync(
-      new URL("../whatsapp_web.ts", import.meta.url),
-      "utf8"
-    );
-    const races = [...source.matchAll(/Promise\.race/g)];
-    expect(
-      races,
-      "a dispatch abandoned by Promise.race stays in flight and orphans its reply"
-    ).toHaveLength(0);
-  });
-
-  it("uses a media answer that arrives after many turns", async () => {
-    let release: ((value: unknown) => void) | null = null;
-    const { dispatcher, mediaCalls } = makeDispatcher({
-      probe: READY,
-      collect: collectResponse(imageMessages(1, "slow")),
-      download_media: () =>
-        new Promise((resolve) => {
-          release = resolve;
-        }),
-    });
-
-    const pending = runSync(messagesFeed(), syncCtx(null, dispatcher));
-    // Let the run reach the media phase and block there.
-    for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
-    expect(mediaCalls()).toHaveLength(1);
-    expect(release).not.toBeNull();
-
-    // Answer far later than any per-dispatch cap would have allowed. The run
-    // must still be waiting for THIS answer and must use it.
-    (release as unknown as (value: unknown) => void)({
-      ok: true,
-      status: "downloaded",
-      attachment: {
-        kind: "image",
-        filename: "slow.jpg",
-        mime_type: "image/jpeg",
-        data: "AA==",
-        size_bytes: 12,
-      },
-    });
-    const result = await pending;
-    expect(result.events.filter((event) => event.attachments)).toHaveLength(1);
-    expect(result.events[0]?.metadata?.media_status).toBe("downloaded");
-  });
-
-  it("stops starting dispatches once the media phase budget is spent", async () => {
-    const { dispatcher, mediaCalls } = makeDispatcher({
-      probe: READY,
-      collect: collectResponse(imageMessages(3, "budget")),
-      // The first answer burns the whole phase budget. Nothing after it may
-      // start a dispatch this run cannot afford to wait for.
-      download_media: () => {
-        setSystemTime(new Date(Date.now() + 90_000));
-        return { ok: true, status: "unavailable" };
-      },
-    });
-    try {
-      const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
-      expect(mediaCalls().length).toBeLessThan(3);
-      // The skipped items stay retryable rather than being reported as gone.
-      expect(
-        result.events.filter(
-          (event) => event.metadata?.media_status === "metadata_only"
-        ).length
-      ).toBeGreaterThan(0);
-    } finally {
-      setSystemTime();
-    }
-  });
-
-  it("respects media backoff carried in the checkpoint instead of redownloading", async () => {
-    // The extension read this backoff out of IndexedDB; the connector's only
-    // durable store is the checkpoint, so the second run is fed the first
-    // run's checkpoint — the equivalent continuity.
-    const images = imageMessages(1, "retry");
-    const first = makeDispatcher({
-      probe: READY,
-      collect: collectResponse(images),
-      download_media: { ok: true, status: "unavailable" },
-    });
-    const firstRun = await runSync(messagesFeed(), syncCtx(null, first.dispatcher));
-    expect(first.mediaCalls()).toHaveLength(1);
-
-    const second = makeDispatcher({
-      probe: READY,
-      collect: collectResponse(images),
-      download_media: { ok: true, status: "unavailable" },
-    });
-    await runSync(
-      messagesFeed(),
-      syncCtx(firstRun.checkpoint as BrowserCheckpoint, second.dispatcher)
-    );
-    expect(second.mediaCalls()).toHaveLength(0);
-  });
-
-  it("never collects an already-ingested row, so its media is never fetched", async () => {
-    // The cutover floor is the chokepoint: a row at or before it never reaches
-    // collection, so nothing downstream needs an overlap special case.
-    const migrated = initializeBrowserCheckpoint({
-      schema: "owletto.whatsapp.browser.v1",
-      cutover_unix_seconds: 1_787_358_184,
-    });
-    const overlap = message("overlap-media", {
-      timestamp: 1_787_358_184,
-      occurred_at: new Date(1_787_358_184 * 1000).toISOString(),
-      message_type: "image",
-      media_kind: "image",
-      media_type: "image/jpeg",
-    });
-    const { dispatcher, mediaCalls } = makeDispatcher({
-      probe: READY,
-      collect: collectResponse([overlap]),
-      download_media: { ok: true, status: "downloaded" },
-    });
-    const result = await runSync(messagesFeed(), syncCtx(migrated, dispatcher));
-    expect(mediaCalls()).toHaveLength(0);
-    expect(result.events).toHaveLength(0);
-  });
-});
-
-// ── checkpoint clearing ────────────────────────────────────────────────
-
-describe("checkpoint fields clear when their cause is gone", () => {
-  // mergeBrowserCheckpoint spreads the PRIOR checkpoint forward, so a field
-  // that is only ever conditionally assigned can never leave the checkpoint.
-  // A stale `dirty` list would pin backfill.complete to false forever and make
-  // every run re-request markers the adapter already reconciled.
-  it("drops dirty markers the adapter reconciled", async () => {
-    const priorDirty = {
-      key: "chat-1:100",
-      chat_jid: "15551234567@s.whatsapp.net",
-      message_id: "3EB0",
-      minimum_timestamp: null,
-      reason: "missing_stable_timestamp_or_identity",
-    };
-    const prior = initializeBrowserCheckpoint(null);
-    prior.dirty = [priorDirty];
-
-    const { dispatcher } = makeDispatcher({
-      probe: READY,
-      collect: {
-        ...collectResponse([message("3EB0")]),
-        dirty_reconciled: [{ key: priorDirty.key, message_id: "3EB0" }],
-      },
-    });
-    const result = await runSync(messagesFeed(), syncCtx(prior, dispatcher));
-    const next = result.checkpoint as BrowserCheckpoint;
-    expect(next.dirty ?? []).toEqual([]);
-    expect(next.backfill.complete).toBe(true);
-    expect(next.diagnostics?.dirty_reconciliation).toBeUndefined();
-  });
-
-  it("drops media retry rows once nothing is pending", async () => {
-    const prior = initializeBrowserCheckpoint(null);
-    prior.media = {
-      "stale-retry": {
-        id: "stale-retry",
-        revision: "0-00000000",
-        status: "unavailable",
-        retryable: true,
-        attempts: 3,
-        next_attempt_at: Date.now() - 1,
-        updated_at: Date.now() - 1,
-      },
-    };
-    const { dispatcher } = makeDispatcher({
-      probe: READY,
-      // A plain text message: nothing media-eligible, so no retry row survives.
-      collect: collectResponse([message("plain-text")]),
-    });
-    const result = await runSync(messagesFeed(), syncCtx(prior, dispatcher));
-    expect((result.checkpoint as BrowserCheckpoint).media ?? {}).toEqual({});
   });
 });
 
@@ -1444,165 +812,6 @@ describe("placement", () => {
     // auth run carries no chrome dispatcher, so there is nothing to relay.
     expect(connector.definition.authSchema?.methods).toEqual([
       { type: "browser", mode: "live" },
-    ]);
-  });
-});
-
-describe("quarantined messages", () => {
-  /**
-   * The adapter and the connector meet on the DirtyMarker shape. A message with
-   * no stable timestamp is quarantined by the adapter and carried in the
-   * checkpoint's `dirty` list until a later run reconciles it.
-   *
-   * Two fields do that work, and both have to arrive: `key` is what
-   * `reconciledKeys` matches to DROP a marker, and `message_id` is what the
-   * adapter filters `dirty_ranges` on to look one up. A marker missing either
-   * is not "slightly wrong" — it is permanently stuck, and because `dirty`
-   * being non-empty pins `backfill.complete = false`, the backfill never
-   * finishes either.
-   */
-  it("carries a quarantined message forward with a reconcilable identity", async () => {
-    const dispatcher = makeDispatcher({
-      probe: READY,
-      collect: {
-        ok: true,
-        messages: [],
-        quarantined: [
-          {
-            key: "111@s.whatsapp.net:QUARANTINED-1",
-            message_id: "QUARANTINED-1",
-            chat_jid: "111@s.whatsapp.net",
-            reason: "missing_stable_timestamp",
-          },
-        ],
-        chats_seen: 1,
-        backfill: { complete: true },
-      },
-    });
-    const { checkpoint } = await runSync(
-      messagesFeed(),
-      syncCtx(initializeBrowserCheckpoint({}), dispatcher.dispatcher)
-    );
-
-    const dirty = (checkpoint as { dirty?: unknown[] }).dirty ?? [];
-    expect(dirty).toHaveLength(1);
-    const marker = dirty[0] as Record<string, unknown>;
-    expect(marker.message_id).toBe("QUARANTINED-1");
-    expect(marker.key).toBe("111@s.whatsapp.net:QUARANTINED-1");
-  });
-
-  it("does not accumulate a duplicate when the same message is re-quarantined", async () => {
-    const quarantined = [
-      {
-        key: "111@s.whatsapp.net:QUARANTINED-1",
-        message_id: "QUARANTINED-1",
-        chat_jid: "111@s.whatsapp.net",
-        reason: "missing_stable_timestamp",
-      },
-    ];
-    const run = (checkpoint: BrowserCheckpoint) =>
-      runSync(
-        messagesFeed(),
-        syncCtx(
-          checkpoint,
-          makeDispatcher({
-            probe: READY,
-            collect: {
-              ok: true,
-              messages: [],
-              quarantined,
-              chats_seen: 1,
-              backfill: { complete: true },
-            },
-          }).dispatcher
-        )
-      );
-    const first = await run(initializeBrowserCheckpoint({}));
-    const second = await run(first.checkpoint as BrowserCheckpoint);
-    expect((second.checkpoint as { dirty?: unknown[] }).dirty).toHaveLength(1);
-  });
-});
-
-describe("buffered source records use normal feed ingestion", () => {
-  const observation = (records: Array<{ revision: number; payload: Record<string, unknown> }>, extra = {}) => ({
-    bridge_id: "synthetic-feed", binding_id: "synthetic-feed", epoch: "synthetic-epoch", token: "synthetic-token", records, ...extra,
-  });
-
-  it("treats a missing extension capability as a dependency while retaining real listener failures", async () => {
-    const missing = makeDispatcher({ probe: READY, feed_listen: () => {
-      throw new Error("Owletto for Chrome: unknown dispatch (connector='chrome', action_key='feed_listen').");
-    } });
-    await expect(runSync(messagesFeed(), syncCtx(null, missing.dispatcher))).rejects.toThrow(
-      /^\[lobu:dependency_unavailable:browser_extension_update_required\]/
-    );
-    const broken = makeDispatcher({
-      probe: READY,
-      feed_listen: () => {
-        throw new Error("Feed listener could not bind its page document");
-      },
-    });
-    await expect(
-      runSync(messagesFeed(), syncCtx(null, broken.dispatcher))
-    ).rejects.toThrow("Feed listener could not bind its page document");
-  });
-
-  it("prioritizes buffered records without advancing past deferred history and acknowledges only emitted revisions", async () => {
-    const checkpoint = initializeBrowserCheckpoint(null);
-    const { dispatcher, calls } = makeDispatcher({
-      probe: READY,
-      feed_listen: observation([{ revision: 1, payload: message("live-a") }, { revision: 2, payload: message("live-b") }]),
-      collect: { ...collectResponse([]), history_pages: [{ messages: [message("history", { timestamp: 1000 })] }], backfill: { complete: true, chats: { synthetic: { oldest_timestamp: 1000 } } } },
-    });
-    const result = await runSync(messagesFeed(), syncCtx(checkpoint, dispatcher, { max_messages_per_sync: 1 }));
-    expect(result.events.map((event) => event.origin_id)).toEqual(["live-a"]);
-    expect(calls.find(call => call.action === "feed_listen")?.input).toEqual({
-      tab_id: 42, allowed_origins: ["https://web.whatsapp.com"],
-    });
-    const next = result.checkpoint as BrowserCheckpoint;
-    expect(next.source_ack?.records).toEqual([{ id: "live-a", revision: 1 }]);
-    expect(next.backfill).toEqual(checkpoint.backfill);
-    expect(next.head).toEqual(checkpoint.head);
-  });
-
-  it("uses the current source model for buffered identity and lets dry runs inspect without installing an observer", async () => {
-    const { dispatcher, adapterOps } = makeDispatcher({
-      probe: READY,
-      feed_listen: observation([{ revision: 7, payload: message("same", { body: "old" }) }], { listening: false }),
-      collect: collectResponse([message("same", { body: "edited" })]),
-    });
-    const result = await runSync(messagesFeed(), syncCtx(null, dispatcher));
-    expect(result.events).toHaveLength(1);
-    expect(result.events[0].payload_text).toBe("edited");
-    expect((result.checkpoint as BrowserCheckpoint).source_ack?.records).toEqual([{ id: "same", revision: 7 }]);
-    expect(adapterOps).not.toContain("listen");
-  });
-
-  it("surfaces a page error until a successful listener rebind proves recovery", async () => {
-    const sourceError = {
-      revision: 9,
-      payload: {
-        id: "whatsapp-web:source-observation-error",
-        source_error: "WhatsApp source observation failed; recovery is required",
-      },
-    };
-    const preview = makeDispatcher({
-      probe: READY,
-      feed_listen: observation([sourceError], { listening: false }),
-      collect: collectResponse([]),
-    });
-    await expect(runSync(messagesFeed(), syncCtx(null, preview.dispatcher))).rejects.toThrow(
-      "WhatsApp source observation failed; recovery is required"
-    );
-
-    const recovered = makeDispatcher({
-      probe: READY,
-      feed_listen: observation([sourceError]),
-      collect: collectResponse([]),
-    });
-    const result = await runSync(messagesFeed(), syncCtx(null, recovered.dispatcher));
-    expect(result.events).toEqual([]);
-    expect((result.checkpoint as BrowserCheckpoint).source_ack?.records).toEqual([
-      { id: "whatsapp-web:source-observation-error", revision: 9 },
     ]);
   });
 });
