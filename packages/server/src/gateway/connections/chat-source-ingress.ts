@@ -87,7 +87,8 @@ export async function handleChatSourceIngress(
     if (candidates.length === 0) return;
 
     const read = await readSourceFeed({
-      scope: { organizationId, principal: null },
+      // Server-side ingress for a subscribed Automation: no chat caller.
+      scope: { organizationId, principal: null, chatAccess: null },
       automationId: candidates[0],
       feedId,
       query: `id:${signal.resource_ref}`,

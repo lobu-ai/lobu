@@ -19,6 +19,7 @@
  * `search_memory`'s top-level `agent_id` arg) — not any of the above.
  */
 
+import type { ChatTurnAccess } from '@lobu/core';
 import { SaveContentSchema } from '@lobu/core/contracts/tools/save-memory';
 import { type Static, Type } from '@sinclair/typebox';
 import { getMcpConnectionScopes } from '../auth/oauth/scopes';
@@ -98,6 +99,8 @@ export interface ToolSourceContext {
   /** The linked member behind a userless chat turn: attribution only. */
   memberUserId?: string;
   source?: string;
+  /** The chat turn's signed tier (see `chatTurnAccessOf`); absent for non-chat calls. */
+  chatAccess?: ChatTurnAccess;
 }
 
 /**
@@ -134,7 +137,7 @@ export interface ToolContext {
    */
   automationReadPrincipalId?: string | null;
   /** Verified source conversation for worker-originated tool calls, when any. */
-  sourceContext?: ToolSourceContext | null;
+  sourceContext: ToolSourceContext | null;
   /** `x-lobu-apply-id` when this call belongs to a `lobu apply` run (REST proxy only). */
   applyId?: string | null;
   /** Server-only seed shared by browser operations within one SDK invocation. */

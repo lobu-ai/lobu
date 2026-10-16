@@ -1,7 +1,7 @@
 /**
  * Who besides an admin may decide a connector-operation run: the member whose
- * own device runs it, through a private connection they created — and nobody
- * else. Both gates (web `manage_operations` and the chat card) and the approval
+ * own device runs it, through a shared connection or a private one they created.
+ * Both gates (web `manage_operations` and the chat card) and the approval
  * notification's recipients read the same `runDeciderUserIdSql`.
  */
 
@@ -21,7 +21,7 @@ import {
 	seedOwnerContext,
 } from "../setup/test-fixtures";
 
-describe("run decider: a member's own private device", () => {
+describe("run decider: a member's own device", () => {
 	let orgId: string;
 	let ownerCtx: ToolContext;
 	let memberCtx: ToolContext;
@@ -152,13 +152,12 @@ describe("run decider: a member's own private device", () => {
 		expect(run).toMatchObject({ approval_status: "approved", status: "pending" });
 	});
 
-	it("revokes the device owner's decision authority when their connection is shared, unpinned, or deleted", async () => {
+	it("revokes the device owner's decision authority when their connection is unpinned or deleted", async () => {
 		const sql = getTestDb();
 		const [original] = await sql`
 			SELECT device_worker_id FROM connections WHERE id = ${ownPrivate}
 		`;
 		for (const mutation of [
-			sql`UPDATE connections SET visibility = 'org' WHERE id = ${ownPrivate}`,
 			sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${ownPrivate}`,
 			sql`UPDATE connections SET deleted_at = NOW() WHERE id = ${ownPrivate}`,
 		]) {
@@ -182,7 +181,7 @@ describe("run decider: a member's own private device", () => {
 		}
 	});
 
-	it("names the device owner as decider only for their own private connection", async () => {
+	it("names the device owner as decider for a shared connection on their device, and a private one only they created", async () => {
 		const own = await pendingRun(ownPrivate, "demo.decider.private");
 		const shared = await pendingRun(ownShared, "demo.decider.shared");
 		const elsewhere = await pendingRun(othersDevice, "demo.decider.elsewhere");
@@ -191,11 +190,11 @@ describe("run decider: a member's own private device", () => {
 			state: "pending",
 			ownerUserId: memberCtx.userId,
 		});
-		expect((await resolveEntityApprovalRun(shared, orgId)).ownerUserId).toBeNull();
+		expect((await resolveEntityApprovalRun(shared, orgId)).ownerUserId).toBe(memberCtx.userId);
 		expect((await resolveEntityApprovalRun(elsewhere, orgId)).ownerUserId).toBeNull();
 	});
 
-	it("lets the device owner decide their own private run and nobody else non-admin", async () => {
+	it("lets the device owner decide runs on their device and nobody else non-admin", async () => {
 		const own = await pendingRun(ownPrivate, "demo.decider.private");
 		await expect(
 			manageOperations({ action: "reject", run_id: own }, {} as Env, otherCtx),
@@ -209,21 +208,26 @@ describe("run decider: a member's own private device", () => {
 		expect(rejected.error).toBeUndefined();
 		expect(rejected.rejected).toBe(true);
 
-		for (const [connectionId, key] of [
-			[ownShared, "demo.decider.shared"],
-			[othersDevice, "demo.decider.elsewhere"],
-		] as const) {
-			const runId = await pendingRun(connectionId, key);
-			await expect(
-				manageOperations({ action: "reject", run_id: runId }, {} as Env, memberCtx),
-			).rejects.toThrow(/requires admin or owner access/);
-			const byOwner = (await manageOperations(
-				{ action: "reject", run_id: runId },
-				{} as Env,
-				ownerCtx,
-			)) as { rejected?: boolean };
-			expect(byOwner.rejected).toBe(true);
-		}
+		const shared = await pendingRun(ownShared, "demo.decider.shared");
+		await expect(
+			manageOperations({ action: "reject", run_id: shared }, {} as Env, otherCtx),
+		).rejects.toThrow(/requires admin or owner access/);
+		expect(((await manageOperations(
+			{ action: "reject", run_id: shared },
+			{} as Env,
+			memberCtx,
+		)) as { rejected?: boolean }).rejected).toBe(true);
+
+		const elsewhere = await pendingRun(othersDevice, "demo.decider.elsewhere");
+		await expect(
+			manageOperations({ action: "reject", run_id: elsewhere }, {} as Env, memberCtx),
+		).rejects.toThrow(/requires admin or owner access/);
+		const byOwner = (await manageOperations(
+			{ action: "reject", run_id: elsewhere },
+			{} as Env,
+			ownerCtx,
+		)) as { rejected?: boolean };
+		expect(byOwner.rejected).toBe(true);
 	});
 
 	it("notifies the device owner alongside the admins, and only them", async () => {
@@ -254,6 +258,8 @@ describe("run decider: a member's own private device", () => {
 		expect(await recipientsFor(ownPrivate, "demo.decider.private")).toEqual(
 			[ownerCtx.userId, memberCtx.userId].sort(),
 		);
-		expect(await recipientsFor(ownShared, "demo.decider.shared")).toEqual([ownerCtx.userId]);
+		expect(await recipientsFor(ownShared, "demo.decider.shared")).toEqual(
+			[ownerCtx.userId, memberCtx.userId].sort(),
+		);
 	});
 });

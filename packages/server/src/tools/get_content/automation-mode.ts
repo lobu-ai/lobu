@@ -47,12 +47,16 @@ import type { ToolContext } from '../registry';
 import type { GetContentResult } from './types';
 import { parseJson, parseRecordArray, toNullableScore } from './types';
 import { stableJson } from '../../utils/insert-event';
+import { sourceReadScopeFromToolContext } from '../../authz/scope';
 
 // ============================================
 // Content Query (inlined from automation-content-query)
 // ============================================
 
 interface ContentQueryParams extends Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal'> {
+  /** The caller's chat tier source; required so a device-backed live read is gated (authz/device-access.ts). */
+  sourceContext: ToolContext['sourceContext'] | null;
+  tokenType: ToolContext['tokenType'] | null;
   sources: AutomationSource[];
   /** Already-resolved source set when the caller must make one atomic routing decision. */
   normalizedSources?: NormalizedAutomationSource[];
@@ -452,9 +456,7 @@ async function queryContentData(
           window: { start: params.window_start, end: params.window_end },
           cursor: params.sourcePage?.next_cursor,
           sourceRevision: params.sourcePage?.revision,
-        }, 30_000, {
-          organizationId: params.organizationId, principal: params.userId, agentId: params.agentId,
-        }, params.abortSignal, params.actingAutomationId),
+        }, 30_000, sourceReadScopeFromToolContext(params), params.abortSignal, params.actingAutomationId),
       })));
     for (const { source, result } of livePages) {
       results[source.name] = result.rows;
@@ -569,6 +571,9 @@ export async function fingerprintAutomationSources(args: {
     window_start: args.windowStart,
     window_end: args.windowEnd,
     organizationId: String(row.organization_id),
+    // Scheduled and headless: no caller tier. Live feed sources returned above.
+    sourceContext: null,
+    tokenType: null,
     // Scheduled fingerprinting is a read on behalf of the Automation author.
     // Without that durable principal, private sources look permanently empty.
     userId: row.created_by as string,
@@ -607,6 +612,9 @@ export async function handleAutomationMode(
   env: Env,
   sql: DbClient,
   context: Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal'> & {
+    /** Required: the device access rule reads the caller's tier from these. */
+    sourceContext: ToolContext['sourceContext'] | null;
+    tokenType: ToolContext['tokenType'] | null;
     organizationId: string;
     /** Verified caller, or null when the read is a headless Automation run. */
     userId: string | null;
@@ -863,6 +871,8 @@ export async function handleAutomationMode(
     // The requested Automation selects sources, never the caller's authority.
     agentId: context.agentId,
     actingAutomationId: context.actingAutomationId,
+    sourceContext: context.sourceContext,
+    tokenType: context.tokenType,
     abortSignal: context.abortSignal,
     entityIds: automationEntityIds,
     query:

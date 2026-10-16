@@ -306,6 +306,62 @@ describe('device-backed source feed read', () => {
     }
   });
 
+  describe('device access rule (authz/device-access.ts)', () => {
+    let otherMemberId: string;
+    beforeAll(async () => {
+      const other = await createTestUser({ email: 'dir-live-other@test.com' });
+      otherMemberId = other.id;
+      await addUserToOrganization(other.id, orgId, 'member');
+    });
+    beforeEach(async () => {
+      await getTestDb()`UPDATE connections SET visibility = 'org' WHERE id = ${connectionId}`;
+    });
+    afterAll(async () => {
+      await getTestDb()`UPDATE connections SET visibility = 'private' WHERE id = ${connectionId}`;
+    });
+
+    it.each([
+      ['org_shared', /cannot ask them to approve a live read/],
+      ['reply_only', /cannot use a member's paired device/],
+      ['public_visitor', /cannot use a member's paired device/],
+    ] as const)('refuses a %s chat turn before anything reaches the device', async (chatAccess, message) => {
+      await expect(readSourceFeed({
+        deadlineAt: Date.now() + 5000,
+        scope: { organizationId: orgId, principal: null, chatAccess },
+        feedId,
+      })).rejects.toThrow(message);
+      expect(await readRunRows()).toHaveLength(0);
+    });
+
+    it('refuses an anonymous reader of a public workspace end to end, before the device', async () => {
+      const sql = getTestDb();
+      await sql`UPDATE "organization" SET visibility = 'public' WHERE id = ${orgId}`;
+      try {
+        const [org] = await sql<{ slug: string }>`SELECT slug FROM "organization" WHERE id = ${orgId}`;
+        const response = await post(`/api/${org.slug}/manage_feeds`, {
+          body: { action: 'read_feeds', reads: [{ feed_id: feedId }], timeout_ms: 2000 },
+        });
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as { results?: Array<{ ok?: boolean; error_code?: string; error?: string }> };
+        expect(body.results?.[0]).toMatchObject({ ok: false, error_code: 'PERMISSION' });
+        expect(body.results?.[0]?.error).toMatch(/cannot use a member's paired device/);
+        expect(await readRunRows()).toHaveLength(0);
+      } finally {
+        await sql`UPDATE "organization" SET visibility = 'private' WHERE id = ${orgId}`;
+      }
+    });
+
+    it("lets another member's own direct message read the shared device feed", async () => {
+      const reading = readSourceFeed({
+        deadlineAt: Date.now() + 30_000,
+        scope: { organizationId: orgId, principal: otherMemberId, chatAccess: 'member' },
+        feedId,
+      });
+      await respondAsDevice({ status: 'success', action_output: { rows: DEVICE_ROWS, columns: DEVICE_COLUMNS } });
+      expect((await reading).rows).toEqual(DEVICE_ROWS);
+    });
+  });
+
   it('dispatches to the paired device, returns live rows, and retains nothing', async () => {
     const reading = readSourceFeed({
       deadlineAt: Date.now() + 30_000,

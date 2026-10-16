@@ -110,6 +110,8 @@ function publicToolContext(
 ): ToolContext {
 	return {
 		organizationId,
+		// No chat turn behind this call (authz/device-access.ts).
+		sourceContext: null,
 		userId: null,
 		memberRole: null,
 		isAuthenticated: false,

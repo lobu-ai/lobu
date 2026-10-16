@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 
 const readFeed = vi.fn();
-const scope = { organizationId: 'cursor-test-org', principal: 'cursor-test-user' };
+const scope = { organizationId: 'cursor-test-org', principal: 'cursor-test-user', chatAccess: null };
 let readPage: typeof import('./source-feed-page').readSourceFeedPage;
 beforeAll(async () => {
   vi.resetModules();

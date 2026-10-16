@@ -19,9 +19,11 @@ export const ENTITY_CHANGE_ACTION_KEYS = [
  *
  * - an entity-change proposal is decided by the field owner it records in
  *   `action_input.owner_user_id` (resolved from field_controls at propose time);
- * - a connector operation on a PRIVATE connection pinned to a device is decided
- *   by that device's owner when they also created the connection: it runs on
- *   their own machine, through a connection they own.
+ * - a connector operation on a connection pinned to a device is decided by that
+ *   device's owner: it runs on their own machine. A connection shared with the
+ *   workspace qualifies, so a chat request the device access rule holds for the
+ *   owner (authz/device-access.ts) reaches them; a PRIVATE connection qualifies
+ *   only when the device owner also created it.
  *
  * An action run's `action_input` is agent-authored and is never read here — that
  * would let the agent nominate its own approver.
@@ -41,8 +43,7 @@ export function runDeciderUserIdSql(sql: DbClient) {
 			WHERE c.id = runs.connection_id
 			  AND c.organization_id = runs.organization_id
 			  AND c.deleted_at IS NULL
-			  AND c.visibility = 'private'
-			  AND c.created_by = dw.user_id
+			  AND (c.visibility <> 'private' OR c.created_by = dw.user_id)
 		)
 	END`;
 }

@@ -199,6 +199,8 @@ async function resolvePublicPath(
 function buildToolContext(requestUrl: string, organizationId: string): ToolContext {
   return {
     organizationId,
+    // No chat turn behind this call (authz/device-access.ts).
+    sourceContext: null,
     userId: null,
     memberRole: null,
     isAuthenticated: false,

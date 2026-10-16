@@ -138,6 +138,8 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
       { action: 'connect_managed', managed_by_org: org, connector_key: connector },
       {
         organizationId: home.id,
+        // No chat turn behind this call (authz/device-access.ts).
+        sourceContext: null,
         userId: session.user.id,
         memberRole: 'owner',
         isAuthenticated: true,
