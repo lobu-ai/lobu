@@ -1,8 +1,15 @@
 # Workspace-bounded search and recall
 
-Status: **Part 1 accepted 2026-10-15; Part 2 pending Part 1 measurements.**
-Part 1 below is query-only; Part 2 adds an extension and two indexes, which is
-a DB design change under the AGENTS.md rules and needs explicit confirmation.
+Status: **revised 2026-10-16 after end-to-end measurement.** The probe
+budget (V1) is no longer the recommended recall fix: the full recall query
+shows the agent-visible top 5 is already right on 44 of 45 measured queries
+at the default `ivfflat.probes = 1`. F2 (bounded embedding-less fallback)
+ships on its own. Two problems the first pass missed lead the open work:
+agent-scoped recall in the largest workspace scans every workspace's vectors
+and exceeds the 6s budget (section 3), and the combined score lets text rank
+drown vector similarity (section 4). Part 2 adds an extension and two
+indexes, which is a DB design change under the AGENTS.md rules and needs
+explicit confirmation.
 
 Evidence was measured on 2026-10-15 against production running
 [`9da1deb36`](https://github.com/lobu-ai/lobu/tree/9da1deb36c17a7eff5ce1ad610dfe8af21cdec73)
@@ -72,6 +79,47 @@ the most to recall.**
 Because there is no error, agents get plausible but wrong results. #4098 fixed
 the timeout case, but this one is not a timeout.
 
+### 1a. Correction, 2026-10-16: the full recall query, measured end to end
+
+The tables above compare top-30 ids, from one or two query vectors, against
+the exact path. Three things make that the wrong yardstick:
+
+- Recall returns `content_limit` snippets, 5 by default, so the top 5 is what
+  an agent sees.
+- Many rows tie on `combined_score` (for example 30 rows at exactly 1.8), and
+  the two paths break ties differently (`id % 997` vs newest id). Exact-id
+  overlap counts those tie-breaks as misses.
+- The final ranking is text-dominated (section 4), so vector-arm recall only
+  decides the answer when the text arms find little.
+
+The rerun used captured candidate SQL for 45 queries: 10 workspace-neutral
+queries, 5 paraphrases with little word overlap, and 5 agent-scoped queries,
+across four workspaces (408k and 201k vectors use IVFFlat; 53k and 37k get
+exact plans at every probe value, checked with `EXPLAIN`), under real member
+or agent scope. The metric is strict and tie-aware: every exact-path row
+scoring strictly above the k-th score must be returned, and only rows tied at
+the k-th score may fill the remaining slots.
+
+| measure | probes=1 (today) | probes=32 + iterative | probes=100 | probes=200 |
+|---|---|---|---|---|
+| top-5 correct, 45 queries | 44/45 | 45/45 | 45/45 | 45/45 |
+| top-30 strict, 201k ws, 10 queries (min / mean) | 4 / 27.4 | 24 / 29.4 | 28 / 29.8 | 30 / 30 |
+| vector arm alone, recall@30 mean, 408k / 201k ws | 7.2 / 6.2 | 20.4 / 20.8 (probes=32) | 25.6 / 27.6 | 27.4 / 28.9 |
+| full query p50 / p95 / max, 3 concurrent sessions | 2.4 / 3.6 / 4.5s | — | — | 3.0 / 4.3 / 5.3s |
+
+The one top-5 miss is a rare keyword in the 201k workspace: the text arms find
+almost nothing, so the vector arm decides, and at probes=1 the candidate path
+returns 4 rows. Every other measured query already returns the right top 5.
+
+Why probes plateau: in pgvector 0.8.1 `ivfflat.probes` is the batch size of
+lists scanned, and the next batch is read only when the executor still wants
+rows. For a workspace holding a quarter or more of the vectors, the first
+batch already fills the ANN `LIMIT`, so recall is set by `probes` alone;
+raising the `LIMIT` or enabling iterative scan does not help (both measured).
+
+Query embedding takes 20–40ms. Recall traffic is about 32 calls a day across
+20 workspaces.
+
 ### 2. Latency: text-arm cost grows with in-workspace match count
 
 #4099 bounded the text arms by workspace scope. That fixed the 20–32s scans
@@ -121,6 +169,33 @@ over every match. It is bounded by the workspace, but grows with the
 workspace's history. That conflicts with "request paths never aggregate
 history" once a term is common.
 
+### 3. Agent-scoped recall scans every workspace's vectors
+
+An agent's `search_memory` call is scoped to that agent's memory
+(`args.agent_id ?? ctx.agentId`, filtered on `metadata->>'agent_id'`). In the
+largest workspace the busiest agent owns 62 of 408k vectors. With a filter
+that selective, the vector arm abandons the IVFFlat index: the plan is a
+parallel sequential scan of all 756k vectors from every workspace, a sort,
+and 756k event lookups to apply the filter. That takes about 9s, and the full
+candidate query takes 10–13s at every probe setting, so these calls should
+always hit the 6s timeout and return partial coverage. The exact path answers
+the same queries in about 4s because it filters first. In the last 30 days,
+20 of the 90 `search_memory` calls in the largest workspace were
+agent-scoped. Log retention (about 40 minutes) did not allow confirming the
+timeouts in production; the SQLSTATE counter shipped with F2 will.
+
+### 4. The combined score lets text rank drown vector similarity
+
+The score is `COALESCE(0.4 × text + 0.6 × similarity, text)`, where `text` is
+a 1.0 substring bonus plus `ts_rank_cd`. `ts_rank_cd` is unbounded: measured
+top-5 scores range from 2.4 to 42, while the vector term adds about 0.2–0.35.
+Rows with no embedding fall back to the unweighted text score, so they
+outrank embedded rows on any text match. In the largest workspace 1.37M
+title-only `audit` rows have no embedding. Vector quality therefore changes
+the answer only when the text arms find little. This affects the exact and
+candidate paths alike and is a product decision about ranking, not part of
+the bounded-work design.
+
 ### What has already shipped (not part of this design)
 
 - **Honest failure (#4098).** The candidate transaction preserves the SQLSTATE,
@@ -158,9 +233,15 @@ server is PostgreSQL 18.1.
 
 ### Vector arm
 
-**V1. Query-only probe budget (no schema change).** Inside the existing
-candidate transaction, add `SET LOCAL ivfflat.probes = 32` and
-`SET LOCAL ivfflat.iterative_scan = 'relaxed_order'`.
+**V1. Query-only probe budget (no schema change). Superseded by section
+1a.** Inside the existing candidate transaction, add
+`SET LOCAL ivfflat.probes = 32` and
+`SET LOCAL ivfflat.iterative_scan = 'relaxed_order'`. The end-to-end rerun
+found probes=32 leaves the vector arm at about 20/30 in both large
+workspaces; probes=100 with iterative scan off fixes the one measured top-5
+miss for about +0.15s. With the default `ivfflat.max_probes`, iterative scan
+can read all 1,000 lists when filters starve the first batch, so it should
+not be enabled without a cap. The original notes follow.
 
 - Quality, measured: full-query overlap goes from 4/30 to 26/30. Vector-only
   recall goes from 1–29/30 to 25–30/30. Probes=100 reached 30/30 on every
@@ -259,20 +340,28 @@ connection.
 **F2. Bound the embedding-less recall fallback.** When no query embedding is
 available, recall uses the unbounded exact path. Run it under the same
 `SET LOCAL statement_timeout` so it fails into partial coverage rather than
-running 6–9s. It is query-only, with no schema or API change. Ship it as a
-small PR alongside Part 1.
+running 6–9s. It is query-only, with no schema or API change. Ships on its
+own, with a `lobu_recall_query_failures_total{sqlstate}` counter. Blank or
+sub-3-character queries without an embedding still take the list path, and
+the timeout covers the statement only, not embedding generation or pool
+wait.
 
 ## Recommendation
 
 Keep the indexes global and bound the work each query does, in two parts. No
 new table and no new column.
 
-1. **Part 1, query-only, can ship without the DB-design gate.** Set the
-   candidate transaction's vector budget to `ivfflat.probes = 32` and
-   `ivfflat.iterative_scan = 'relaxed_order'` (V1), and bound the
-   embedding-less fallback (F2). This fixes the measured quality gap (4/30 to
-   26/30) at a cost of up to 1s. Because it changes which results agents see,
-   it still goes past Emre as a normal PR.
+1. **Part 1, query-only.** Bound the embedding-less fallback and count
+   recall failures by SQLSTATE (F2). Optionally raise `ivfflat.probes` to 100
+   with iterative scan off, as a small separate change: it fixes the one
+   measured top-5 miss for about +0.15s.
+1b. **Agent-scoped recall (section 3), needs design.** When the scope is
+   selective, the vector arm should filter first instead of running a global
+   ANN. Finding an agent's events quickly may need an expression index on
+   `(organization_id, (metadata->>'agent_id'))`, which is a DB design change
+   and goes through confirmation first.
+1c. **Ranking scale (section 4), product decision.** Bound or normalise the
+   text term and stop rows without embeddings from using the raw text score.
 2. **Part 2, needs approval.** `CREATE EXTENSION btree_gin` plus the two partial
    composite GIN indexes (T1). They are built concurrently, benchmarked against
    the plan shapes below, and dropped if the win is under 30%. The global text
@@ -406,14 +495,14 @@ Pass criteria:
 
 ## Open questions
 
-1. **Probe budget.** 32 measured as the knee: 25–30/30 recall for up to +1s.
-   100 reached 30/30 everywhere but was not timed in the full query. Is
-   25/30 acceptable, or should Part 1 measure 64?
-   **Answer:** probes = 32; Part 1 also times 64 and records both.
+1. **Probe budget.** Answered by section 1a: 32 is not the knee in the full
+   query; 100 fixes the one top-5 miss, and 200 adds latency under
+   concurrency for little more.
 2. **Timeout rate.** It is unmeasurable today, because the log keeps about 40
    minutes and `pg_stat_statements` omits cancels. Should Part 1 also count
    candidate-path failures by SQLSTATE in the existing metrics, with no new
    table? Without that, the value of Part 2 is only estimated.
+   **Answer:** yes; F2 ships `lobu_recall_query_failures_total{sqlstate}`.
 3. **HNSW (V3).** Should it be benchmarked on a restored snapshot instead of
    prod? The restore-drill job is currently failing, so that would need fixing
    first.
