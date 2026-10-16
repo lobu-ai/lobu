@@ -3,10 +3,10 @@
  *
  * Ported from the Owletto extension's whatsapp-web-main-v1.js. WhatsApp's
  * normalization and action code retain the extension implementation; the
- * connector-owned feed listener below now observes changes and emits records
- * through the generic browser transport. Do not "clean it up" casually: it
- * reaches into WhatsApp's own module registry via window.require and its shape
- * is load-bearing.
+ * connector-owned feed listener below observes new messages and emits
+ * references only (never content) through the generic browser transport. It
+ * reaches into WhatsApp's own module registry via window.require; those private
+ * module shapes are load-bearing.
  *
  * How it gets into the page: the connector serialises this function with
  * Function.prototype.toString() and runs `(<source>)()` through the generic
@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 22;
+  const ADAPTER_VERSION = 23;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const MAX_RECORD_BYTES = 128 * 1024;
   const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -91,8 +91,7 @@ export function whatsAppWebAdapterProgram() {
       });
     };
     const resident = listeners.get(request.bridge_id);
-    const previous = resident?.request.references_only === request.references_only
-      && resident?.request.chat_filter === request.chat_filter
+    const previous = resident?.request.chat_filter === request.chat_filter
       && resident?.request.minimum_timestamp === request.minimum_timestamp ? resident : null;
     detach(request.bridge_id);
     // A new listener identity fences pending normalization from the detached
@@ -112,16 +111,17 @@ export function whatsAppWebAdapterProgram() {
     const observe = (model, kind) => {
       if (state.error) return;
       const sequence = ++state.sequence;
-      const normalized = request.references_only ? Promise.resolve(messageReference(model)) : normalizeMessage(model, "reconcile");
-      void normalized.then((record) => {
+      // A throwing model getter must reach the error record below, not escape
+      // the collection handler, so the reference is read inside the promise.
+      void new Promise((resolve) => resolve(messageReference(model))).then((record) => {
         if (listeners.get(state.id) !== state || !record || record.timestamp <= 0) return;
         if (state.request.chat_filter === "group" && !record.is_group) return;
         if (state.request.chat_filter === "individual" && record.is_group) return;
         if (state.request.minimum_timestamp != null && record.timestamp < state.request.minimum_timestamp) return;
-        // Loading historical models also emits add. Changes to old messages
-        // still pass; they are exactly what the recent collection window misses.
+        // Loading historical models also emits add. A change still passes: a
+        // placeholder that hydrates after subscription start is a new message.
         if (kind === "add" && record.timestamp < state.request.recent_since) return;
-        if (request.references_only) record = {
+        record = {
           id: record.id,
           events: [{ id: record.id, event_type: "message.created", resource_ref: record.id,
             resource_type: "message", occurred_at: new Date(record.timestamp * 1000).toISOString() }],
@@ -191,7 +191,7 @@ export function whatsAppWebAdapterProgram() {
   // not server delivery: the server advances the cursor only with its own commit.
   async function publishChanges(request) {
     const state = listeners.get(request.bridge_id);
-    if (!state?.request.references_only || state.token !== request.token) throw new Error("Source listener is unavailable");
+    if (!state || state.token !== request.token) throw new Error("Source listener is unavailable");
     const record = request.batch;
     const bytes = new TextEncoder().encode(JSON.stringify(record)).length;
     const previous = state.pending.get(record.id);
@@ -484,20 +484,8 @@ export function whatsAppWebAdapterProgram() {
   }
 
   /**
-   * Name lookups for one collect.
-   *
-   * `normalizeMessage` runs per message and used to walk a whole collection on
-   * each call -- the chat name over 947 chats, the sender name over 5323
-   * contacts. That is O(messages x collection) of SYNCHRONOUS work: measured on
-   * a live prod tab the contact scan alone projects to ~6.8s, a real collect
-   * never yielded the main thread, and the extension's 90s run fence killed the
-   * run. Every run was slower than the last as backfill grew the store.
-   *
-   * Built once per collect and thrown away with it -- no cache to invalidate,
-   * and nothing here outlives the call. Only names are indexed: they read
-   * static fields, whereas `collectionByRawId` serves the reaction paths, which
-   * mutate a model in place without changing the collection, so that one keeps
-   * scanning.
+   * Build name lookups once per read or search so normalizing each message
+   * does not rescan every chat and contact. Nothing here outlives the call.
    */
   function nameIndex(collections) {
     const byId = (collection) => {
@@ -545,8 +533,7 @@ export function whatsAppWebAdapterProgram() {
     const collections =
       collectionsOverride ?? requireFirst(["WAWebCollections"]);
     if (!collections) return null;
-    // A single normalise (the watch path) builds its own; a collect passes one
-    // in so the whole run shares it.
+    // Reads and searches share one name index across their result batch.
     const nameLookup = names ?? nameIndex(collections);
     let row = modelData(model);
     let key = row.id ?? model?.id;
@@ -671,7 +658,7 @@ export function whatsAppWebAdapterProgram() {
     // Socket.stream was DISCONNECTED, then both were CONNECTED after reload.
     // Current WhatsApp exposes account and transport state separately. An
     // authenticated account can retain hydrated stores while its stream is
-    // disconnected; those cached messages are not a successful live sync.
+    // disconnected; those cached messages are not a successful live read.
     const socket = requireFirst(["WAWebSocketModel"])?.Socket;
     const connection =
       socket ??
@@ -776,7 +763,6 @@ export function whatsAppWebAdapterProgram() {
   }
 
   function operationCapabilities() {
-    const history = requireFirst(["WAWebChatLoadMessages"]);
     const search = requireFirst([
       "WAWebChatMessageSearch",
       "WAWebMessageSearch",
@@ -787,23 +773,13 @@ export function whatsAppWebAdapterProgram() {
     const edit = requireFirst(EDIT_MODULES);
     const reaction = requireFirst(REACTION_MODULES);
     const revoke = requireFirst(REVOKE_MODULES);
-    // Same nesting as the download path: the module root only exports
-    // `{ enforceKaleidoscopeScore, downloadManager }`.
-    const mediaModule = requireFirst(["WAWebDownloadManager"]);
-    const media = mediaModule?.downloadManager ?? mediaModule;
     const hasFunction = (module, names) =>
       names.some((name) => typeof module?.[name] === "function");
     return {
-      collect: hasFunction(history, ["loadEarlierMsgs"]),
       read_messages:
         typeof indexedDB !== "undefined" &&
         typeof requireFirst(["WAWebMsgKey"])?.fromString === "function" &&
         typeof requireFirst(["WAWebCollections"])?.Msg?.getMessagesById === "function",
-      download_media:
-        hasFunction(media, ["downloadAndMaybeDecrypt"]) ||
-        models(requireFirst(["WAWebCollections"])?.Msg).some(
-          (model) => typeof model?.downloadMedia === "function"
-        ),
       search_messages:
         hasFunction(search, ["searchMessages", "searchMsgs", "search"]) ||
         Boolean(requireFirst(["WAWebCollections"])?.Msg),
@@ -829,130 +805,6 @@ export function whatsAppWebAdapterProgram() {
     };
   }
 
-  function oldestMessage(chat) {
-    let oldest = null;
-    for (const message of models(modelData(chat).msgs ?? chat?.msgs)) {
-      const row = modelData(message);
-      const timestamp = unixSeconds(row);
-      const id = rawId(row.id ?? message?.id);
-      if (!id) continue;
-      if (
-        !oldest ||
-        timestamp < oldest.timestamp ||
-        (timestamp === oldest.timestamp && id < oldest.id)
-      ) {
-        oldest = { timestamp, id };
-      }
-    }
-    return oldest;
-  }
-
-  function chatHasEarlier(chat) {
-    const row = modelData(chat);
-    const state =
-      row.msgs?.msgLoadState ??
-      chat?.msgs?.msgLoadState ??
-      row.msgLoadState ??
-      {};
-    if (state.noEarlierMsgs === true || state.hasEarlierMsgs === false)
-      return false;
-    if (row.hasEarlierMsgs === false) return false;
-    return true;
-  }
-
-  async function loadEarlier(chat, limit, deadline) {
-    const loader = requireFirst(["WAWebChatLoadMessages"]);
-    if (typeof loader?.loadEarlierMsgs !== "function") {
-      return {
-        available: false,
-        reason: "WAWebChatLoadMessages.loadEarlierMsgs unavailable",
-        loads: 0,
-      };
-    }
-    let loads = 0;
-    const beforeIds = new Set(
-      models(modelData(chat).msgs ?? chat?.msgs)
-        .map((message) => rawId(modelData(message).id ?? message?.id))
-        .filter(Boolean)
-    );
-    let previous = oldestMessage(chat);
-    let madeProgress = false;
-    while (loads < limit && chatHasEarlier(chat)) {
-      if (deadline && Date.now() >= deadline)
-        throw new Error("history deadline budget exhausted");
-      await loader.loadEarlierMsgs({ chat, msgCollection: chat.msgs });
-      loads += 1;
-      const next = oldestMessage(chat);
-      if (
-        !next ||
-        (previous &&
-          next.id === previous.id &&
-          next.timestamp === previous.timestamp)
-      )
-        break;
-      madeProgress = true;
-      previous = next;
-    }
-    let hasMore = chatHasEarlier(chat);
-    const loadedIds = () =>
-      models(modelData(chat).msgs ?? chat?.msgs)
-        .map((message) => rawId(modelData(message).id ?? message?.id))
-        .filter((id) => id && !beforeIds.has(id));
-    if (hasMore && !madeProgress) {
-      return {
-        available: true,
-        loads,
-        has_more: true,
-        loaded_ids: loadedIds(),
-        frontier_advanced: false,
-        error: "WhatsApp history loader made no progress",
-      };
-    }
-    if (hasMore) {
-      const phone =
-        loader.loadEarlierMsgsFromPhone ??
-        loader.requestEarlierMsgsFromPhone ??
-        loader.loadEarlierMsgsFromServer;
-      const state =
-        modelData(chat).msgs?.msgLoadState ?? chat?.msgs?.msgLoadState ?? {};
-      const wantsPhone =
-        state.canRequestFromPhone === true || state.hasMoreFromPhone === true;
-      if (wantsPhone && typeof phone !== "function") {
-        return {
-          available: true,
-          loads,
-          has_more: true,
-          loaded_ids: loadedIds(),
-          frontier_advanced: false,
-          error:
-            "phone-assisted WhatsApp history is advertised but its loader is unavailable",
-        };
-      }
-      if (typeof phone === "function" && wantsPhone) {
-        try {
-          await phone.call(loader, { chat, msgCollection: chat.msgs });
-          hasMore = chatHasEarlier(chat);
-        } catch (error) {
-          return {
-            available: true,
-            loads,
-            has_more: true,
-            loaded_ids: loadedIds(),
-            frontier_advanced: false,
-            error: `phone-assisted history failed: ${String(error)}`,
-          };
-        }
-      }
-    }
-    return {
-      available: true,
-      loads,
-      has_more: hasMore,
-      loaded_ids: loadedIds(),
-      frontier_advanced: true,
-    };
-  }
-
   function uniqueMessageModels(collections) {
     const byId = new Map();
     for (const message of models(collections.Msg)) {
@@ -966,208 +818,6 @@ export function whatsAppWebAdapterProgram() {
       }
     }
     return [...byId.values()];
-  }
-
-  async function collect(request) {
-    const status = readiness();
-    if (!status.ready) return { ok: false, error: status };
-    const collections = requireFirst(["WAWebCollections"]);
-    const chatFilter = ["all", "individual", "group"].includes(
-      request.chat_filter
-    )
-      ? request.chat_filter
-      : "all";
-    const chatRows = [];
-    for (const chat of models(collections.Chat)) {
-      const raw = widString(modelData(chat).id ?? chat?.id);
-      const jid = (await canonicalJid(raw)).jid;
-      if (
-        !jid ||
-        jid === "status@broadcast" ||
-        jid.endsWith("@newsletter") ||
-        (chatFilter === "group" && !jid.endsWith("@g.us")) ||
-        (chatFilter === "individual" && jid.endsWith("@g.us"))
-      )
-        continue;
-      chatRows.push({ chat, jid });
-    }
-    chatRows.sort((a, b) => a.jid.localeCompare(b.jid));
-    const backfill = request.backfill ?? { complete: false, chats: {} };
-    const updates = {};
-    let cursor = backfill.cursor_chat_jid ?? null;
-    const loadedByChat = new Map();
-    const backfillMessageIds = new Set();
-    const eligible = request.backfill_disabled
-      ? []
-      : chatRows.filter(
-          (entry) => backfill.chats?.[entry.jid]?.has_more !== false
-        );
-    if (eligible.length > 0) {
-      let start = cursor
-        ? eligible.findIndex((entry) => entry.jid > cursor)
-        : 0;
-      if (start < 0) start = 0;
-      const rotated = [...eligible.slice(start), ...eligible.slice(0, start)];
-      const selected = rotated.slice(
-        0,
-        Math.max(1, Number(request.max_chats) || 1)
-      );
-      // The connector sends a relative budget, not an absolute instant: it runs
-      // on a different machine than this page, so any shared epoch would be off
-      // by the clock skew between them. Resolving it here against this page's
-      // own clock keeps the budget exact.
-      const budgetMs = Number(request.budget_ms);
-      const historyDeadline =
-        Number.isFinite(budgetMs) && budgetMs > 0
-          ? Date.now() + budgetMs
-          : null;
-      for (const entry of selected) {
-        if (historyDeadline && Date.now() >= historyDeadline) break;
-        try {
-          const loaded = await loadEarlier(
-            entry.chat,
-            Math.max(1, Number(request.max_loads_per_chat) || 1),
-            historyDeadline
-          );
-          if (!loaded.available) {
-            return {
-              ok: false,
-              error: {
-                state: "capability_unavailable",
-                reason: loaded.reason,
-              },
-            };
-          }
-          const oldest = oldestMessage(entry.chat);
-          for (const id of loaded.loaded_ids) backfillMessageIds.add(id);
-          loadedByChat.set(entry.jid, loaded.loaded_ids);
-          if (loaded.frontier_advanced === false) {
-            updates[entry.jid] = {
-              ...(backfill.chats?.[entry.jid] ?? {}),
-              error: loaded.error,
-              has_more: true,
-              loads: loaded.loads,
-            };
-            continue;
-          }
-          updates[entry.jid] = {
-            oldest_timestamp: oldest?.timestamp ?? null,
-            oldest_id: oldest?.id ?? null,
-            has_more: loaded.has_more,
-            loads: loaded.loads,
-          };
-          cursor = entry.jid;
-        } catch (error) {
-          if (/unavailable/i.test(String(error))) {
-            return {
-              ok: false,
-              error: {
-                state: "capability_unavailable",
-                reason: String(error),
-              },
-            };
-          }
-          updates[entry.jid] = {
-            ...(backfill.chats?.[entry.jid] ?? {}),
-            error: String(error),
-            has_more: true,
-          };
-        }
-      }
-    }
-
-    const minimum = Number.isFinite(Number(request.minimum_timestamp))
-      ? Number(request.minimum_timestamp)
-      : null;
-    const recent = Number.isFinite(Number(request.recent_since))
-      ? Number(request.recent_since)
-      : null;
-    const dirtyRanges = Array.isArray(request.dirty_ranges)
-      ? request.dirty_ranges
-      : [];
-    const dirtyByMessageId = new Map(
-      dirtyRanges
-        .filter((marker) => marker?.message_id)
-        .map((marker) => [marker.message_id, marker])
-    );
-    const normalized = [];
-    const quarantined = [];
-    const names = nameIndex(collections);
-    for (const model of uniqueMessageModels(collections)) {
-      const message = await normalizeMessage(
-        model,
-        "reconcile",
-        collections,
-        names
-      );
-      if (!message) continue;
-      if (message.timestamp <= 0) {
-        quarantined.push({
-          key: `${message.chat_jid}:${message.id}`,
-          message_id: message.id,
-          chat_jid: message.chat_jid,
-          reason: "missing_stable_timestamp",
-        });
-        continue;
-      }
-      if (chatFilter === "group" && !message.is_group) continue;
-      if (chatFilter === "individual" && message.is_group) continue;
-      if (minimum != null && message.timestamp < minimum) continue;
-      if (
-        recent != null &&
-        message.timestamp < recent &&
-        !backfillMessageIds.has(message.id) &&
-        !dirtyByMessageId.has(message.id)
-      )
-        continue;
-      normalized.push(message);
-    }
-    normalized.sort(
-      (a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id)
-    );
-    const maxMessages = Math.max(
-      1,
-      Math.min(Number(request.max_messages) || 1_000, 2_000)
-    );
-    const byId = new Map(normalized.map((message) => [message.id, message]));
-    const historyPages = [];
-    for (const [chatJid, ids] of loadedByChat) {
-      historyPages.push({
-        chat_jid: chatJid,
-        ...(updates[chatJid] ?? {}),
-        messages: ids.map((id) => byId.get(id)).filter(Boolean),
-      });
-    }
-    const messages = normalized
-      .filter((message) => !backfillMessageIds.has(message.id))
-      .slice(-maxMessages)
-      .sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
-    const mergedChats = { ...(backfill.chats ?? {}), ...updates };
-    return {
-      ok: true,
-      status,
-      messages,
-      history_pages: historyPages,
-      quarantined,
-      dirty_reconciled: normalized
-        .filter((message) => dirtyByMessageId.has(message.id))
-        .map((message) => ({
-          key: dirtyByMessageId.get(message.id).key,
-          message_id: message.id,
-        })),
-      backfill: {
-        // `chatRows` is empty when the tab answered `probe` but its Chat
-        // collection has not populated yet. A bare `.every()` is vacuously true
-        // there, which would record a finished backfill that never ran.
-        complete:
-          request.backfill_disabled === true ||
-          (chatRows.length > 0 &&
-            chatRows.every((entry) => mergedChats[entry.jid]?.has_more === false)),
-        cursor_chat_jid: cursor,
-        inventory: chatRows.map((entry) => entry.jid),
-        chats: updates,
-      },
-    };
   }
 
   async function resolveChat(collections, input) {
@@ -1581,7 +1231,7 @@ export function whatsAppWebAdapterProgram() {
     const message = collectionByRawId(collections.Msg, raw);
     if (!message)
       throw new Error(
-        `WhatsApp message ${raw} is not loaded; sync or search it first`
+        `WhatsApp message ${raw} is not loaded; read it with id:${raw} from the live messages feed or search it first`
       );
     return message;
   }
@@ -1731,195 +1381,6 @@ export function whatsAppWebAdapterProgram() {
     };
   }
 
-  async function blobFromMedia(model) {
-    const row = modelData(model);
-    let result = null;
-    if (typeof model?.downloadMedia === "function") {
-      result = await model.downloadMedia({
-        downloadEvenIfExpensive: true,
-        rmrReason: 1,
-      });
-    }
-    result =
-      result ??
-      modelData(model).mediaData?.mediaBlob ??
-      model?.mediaData?.mediaBlob ??
-      row.mediaBlob ??
-      null;
-    if (!result) {
-      // The module exports `{ enforceKaleidoscopeScore, downloadManager }` —
-      // the method sits on the nested object, so probing the module root only
-      // ever found `undefined` and this fallback never ran.
-      const managerModule = requireFirst(["WAWebDownloadManager"]);
-      const manager = managerModule?.downloadManager ?? managerModule;
-      if (typeof manager?.downloadAndMaybeDecrypt === "function") {
-        // `downloadQpl` is NOT optional: the very first thing the function
-        // does is call `downloadQpl.addAnnotations(...)`, so omitting it threw
-        // "Cannot read properties of undefined" before a byte was fetched.
-        // It is only WhatsApp's performance logger, so a stub that answers
-        // every method with a no-op satisfies it — and a permissive proxy
-        // keeps working when a future build calls a method we have not seen
-        // (this already happened once: `addAnnotations` alone was not enough,
-        // the build also calls `addPoint`).
-        result = await manager.downloadAndMaybeDecrypt({
-          directPath: row.directPath,
-          encFilehash: row.encFilehash,
-          filehash: row.filehash,
-          mediaKey: row.mediaKey,
-          mediaKeyTimestamp: row.mediaKeyTimestamp,
-          type: row.type,
-          mimetype: row.mimetype,
-          downloadOrigin: null,
-          partialVideoOpts: null,
-          downloadQpl: new Proxy(
-            {},
-            {
-              get: () => () => {
-                /* WhatsApp's QPL telemetry; nothing to record here. */
-              },
-            }
-          ),
-          signal: new AbortController().signal,
-        });
-      }
-    }
-    if (result === "NEED_POKE" || result?.status === "NEED_POKE")
-      return { status: "NEED_POKE" };
-    const candidate = result?.blob ?? result?.mediaBlob ?? result;
-    if (candidate instanceof Blob)
-      return { status: "downloaded", blob: candidate };
-    // `downloadAndMaybeDecrypt` resolves the decrypted bytes as a raw
-    // ArrayBuffer, not a Blob. Falling through to the Blob checks below
-    // reported a perfectly good download as `unavailable`.
-    if (candidate instanceof ArrayBuffer || ArrayBuffer.isView(candidate))
-      return {
-        status: "downloaded",
-        blob: new Blob([candidate], {
-          type: row.mimetype || "application/octet-stream",
-        }),
-      };
-    if (candidate?.getData) {
-      const data = await candidate.getData();
-      if (data instanceof Blob) return { status: "downloaded", blob: data };
-      if (data instanceof ArrayBuffer || ArrayBuffer.isView(data))
-        return {
-          status: "downloaded",
-          blob: new Blob([data], { type: row.mimetype }),
-        };
-    }
-    return { status: row.directPath ? "unavailable" : "expired" };
-  }
-
-  function bytesToBase64(bytes) {
-    let binary = "";
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-    }
-    return btoa(binary);
-  }
-
-  async function downloadMedia(input) {
-    const collections = requireFirst(["WAWebCollections"]);
-    const model = resolveMessage(collections, input?.message_id);
-    const row = modelData(model);
-    if (row.isViewOnce || row.viewOnce || row.type === "view_once")
-      return { status: "view_once" };
-    const limit = Math.max(1, Number(input?.max_bytes) || 1);
-    const size = Number(row.size ?? row.fileSize ?? 0);
-    if (size > limit) return { status: "too_large", size_bytes: size };
-    const isVideo =
-      row.type === "video" || String(row.mimetype ?? "").startsWith("video/");
-    if (isVideo && size <= 0) {
-      return { status: "metadata_only", retryable: true, size_bytes: null };
-    }
-    // Bound the fetch HERE, where the work happens, so the dispatch always
-    // answers. A caller-side timer cannot cancel an in-flight dispatch: it only
-    // stops the caller waiting, and the reply then arrives with nobody left to
-    // receive it. Racing inside the page is safe — there is no IPC child to
-    // outlive — and it turns "too slow" into an ordinary retryable answer.
-    const budgetMs = Math.max(0, Number(input?.timeout_ms) || 0);
-    let downloaded;
-    // Held so a download that wins the race can cancel its own timer. A sync
-    // collects several items, and a stray rejecting timer per item would keep
-    // firing into the page long after its answer shipped.
-    let budgetTimer = null;
-    try {
-      downloaded = budgetMs
-        ? await Promise.race([
-            blobFromMedia(model),
-            new Promise((_, reject) => {
-              budgetTimer = setTimeout(
-                () =>
-                  reject(
-                    Object.assign(
-                      new Error("media download exceeded its budget"),
-                      { state: "timeout_retryable" }
-                    )
-                  ),
-                budgetMs
-              );
-            }),
-          ])
-        : await blobFromMedia(model);
-    } catch (error) {
-      const detail = String(error);
-      const reported = String(error?.state ?? error?.status ?? "");
-      const explicit = [
-        "NEED_POKE",
-        "awaiting_primary_device",
-        "view_once",
-        "expired",
-        "too_large",
-        "timeout_retryable",
-        "metadata_only",
-        "unavailable",
-      ].find(
-        (state) =>
-          reported === state ||
-          detail.toLowerCase().includes(state.toLowerCase())
-      );
-      return {
-        status: explicit ?? "unavailable",
-        retryable: [
-          "NEED_POKE",
-          "awaiting_primary_device",
-          "timeout_retryable",
-          "metadata_only",
-          "unavailable",
-        ].includes(explicit ?? "unavailable"),
-        detail: detail.slice(0, 200),
-      };
-    } finally {
-      if (budgetTimer !== null) clearTimeout(budgetTimer);
-    }
-    if (!downloaded.blob) return downloaded;
-    if (downloaded.blob.size > limit)
-      return { status: "too_large", size_bytes: downloaded.blob.size };
-    const bytes = new Uint8Array(await downloaded.blob.arrayBuffer());
-    if (bytes.length === 0) return { status: "unavailable", detail: "empty" };
-    const mime =
-      downloaded.blob.type || row.mimetype || "application/octet-stream";
-    const kind = mime.startsWith("audio/")
-      ? "audio"
-      : mime.startsWith("image/")
-        ? "image"
-        : "file";
-    return {
-      status: "downloaded",
-      attachment: {
-        kind,
-        filename:
-          row.filename ??
-          row.fileName ??
-          `whatsapp-${rawId(row.id ?? model?.id)}`,
-        mime_type: mime,
-        data: bytesToBase64(bytes),
-        size_bytes: bytes.length,
-      },
-    };
-  }
-
   async function invoke(request) {
     try {
       if (Number(request?.adapter_version) !== ADAPTER_VERSION) {
@@ -1954,11 +1415,8 @@ export function whatsAppWebAdapterProgram() {
           },
         };
       }
-      if (request.op === "collect") return await collect(request);
       if (request.op === "read_messages")
         return { ok: true, ...(await readMessages(request.input)) };
-      if (request.op === "download_media")
-        return { ok: true, ...(await downloadMedia(request)) };
       if (request.op === "search_messages")
         return { ok: true, ...(await searchMessages(request.input)) };
       if (request.op === "draft_message")
