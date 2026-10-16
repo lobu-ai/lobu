@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import type { EventAttributionRule } from "@lobu/connector-sdk";
 import { getErrorMessage } from "@lobu/core";
 import type { GetContentArgs } from "@lobu/core/contracts/tools/read-knowledge";
-import type { AuthzScope } from "../authz/scope";
+import type { SourceReadScope } from "../authz/scope";
 import { compileConnectionRowVisibility } from "../authz/connection-visibility";
 import { getDb } from "../db/client";
 import { readSourceFeedPage } from "../lib/source-feed-page";
@@ -63,7 +63,7 @@ function matchablePath(
 }
 
 async function loadSourceFeeds(
-  scope: AuthzScope,
+  scope: SourceReadScope,
   type: string
 ): Promise<SourceFeed[]> {
   const sql = getDb();
@@ -241,7 +241,7 @@ function activityStreams(feeds: SourceFeed[], type: string) {
  * stay at the source. A failing feed is reported, never shown as "no activity", and resumes where it stopped.
  */
 export async function readSourceRecordActivity(
-  scope: AuthzScope,
+  scope: SourceReadScope,
   record: SourceRecordRef,
   options: { limit: number; cursor?: string; signal?: AbortSignal; automationId?: number | null } &
     Pick<GetContentArgs, "platforms" | "connection_ids" | "feed_ids">
@@ -463,7 +463,7 @@ function rowLink(
  * so consumers merge pages by (relationship_type, direction, entity_type, key),
  * keeping the newest occurred_at. This also handles a recovering source safely. */
 async function readLinkPage(
-  scope: AuthzScope,
+  scope: SourceReadScope,
   record: SourceRecordRef,
   reads: LinkRead[],
   request: string,
@@ -612,7 +612,7 @@ async function readLinkPage(
  * start the first bounded page; see readLinkPage for continuation semantics.
  */
 export async function readSourceRecordLinks(
-  scope: AuthzScope,
+  scope: SourceReadScope,
   record: SourceRecordRef,
   options: {
     limit: number;

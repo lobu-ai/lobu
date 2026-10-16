@@ -26,6 +26,14 @@ export interface AuthzScope {
 }
 
 /**
+ * Scope for a live source read, which may run on a member's paired device.
+ * `chatAccess` is required (null for a caller that is not a chat turn), so
+ * every read path states the caller's tier for the device access rule
+ * (authz/device-access.ts) instead of silently dropping it.
+ */
+export type SourceReadScope = AuthzScope & { chatAccess: ChatTurnAccess | null };
+
+/**
  * Build read scope without replacing the execution identity. An authenticated
  * user always takes precedence over the Automation's server-resolved creator.
  */
@@ -34,15 +42,14 @@ export function authzScopeFromToolContext(ctx: {
   userId: string | null;
   agentId?: string | null;
   automationReadPrincipalId?: string | null;
-  tokenType?: string;
+  tokenType?: string | null;
   sourceContext?: { chatAccess?: ChatTurnAccess } | null;
-}): AuthzScope {
-  const chatAccess = chatAccessOfToolContext(ctx);
+}): SourceReadScope {
   return {
     organizationId: ctx.organizationId,
     principal: ctx.userId ?? ctx.automationReadPrincipalId ?? null,
     agentId: ctx.agentId ?? null,
-    ...(chatAccess ? { chatAccess } : {}),
+    chatAccess: chatAccessOfToolContext(ctx),
   };
 }
 

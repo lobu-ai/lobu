@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { FeedReadMatch, FeedReadWindow } from '@lobu/connector-sdk';
-import type { AuthzScope } from '../authz/scope';
+import type { SourceReadScope } from '../authz/scope';
 import { readSourceFeed } from './connector-pushdown';
 
 export interface SourceFeedPageRequest {
@@ -106,7 +106,7 @@ function sourceReadError(message: string): Error & { exitReason: 'timeout' } {
 export async function readSourceFeedPage(
   read: SourceFeedPageRequest,
   timeoutMs: number,
-  scope: AuthzScope,
+  scope: SourceReadScope,
   signal?: AbortSignal,
   automationId?: number | null,
 ) {

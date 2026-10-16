@@ -44,7 +44,7 @@ export function decideDeviceAccess(chatAccess: ChatTurnAccess | null): DeviceAcc
  * admin-tools turn carries no tier: it acts as its verified user.
  */
 export function chatAccessOfToolContext(ctx: {
-  tokenType?: string;
+  tokenType?: string | null;
   sourceContext?: { chatAccess?: ChatTurnAccess } | null;
 }): ChatTurnAccess | null {
   if (ctx.tokenType === "anonymous") return "public_visitor";

@@ -17,6 +17,7 @@ import { connectionBrowserResource } from '../../../connectors/browser-resource'
 import { handleListAvailable } from '../../../tools/admin/manage_operations/handlers/list-available';
 import { qualifiedOperationKey } from '../../../tools/admin/manage_operations/handlers/shared';
 import { manageFeeds } from '../../../tools/admin/manage_feeds';
+import { manageAutomations } from '../../../tools/admin/manage_automations';
 import { getContent } from '../../../tools/get_content/handler';
 import * as sourceFeedPage from '../../../lib/source-feed-page';
 import type { ToolContext } from '../../../tools/registry';
@@ -491,6 +492,32 @@ describe('compiled browser source reads', () => {
       { organizationId: orgId, principal: userId, agentId: agent.agentId, chatAccess: 'member' },
       controller.signal, actingAutomationId,
     );
+  });
+
+  it('carries the caller chat tier into the live reads of a claimed Automation window', async () => {
+    const sql = getTestDb();
+    const [automation] = await sql`WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
+      INSERT INTO automations (id, automation_group_id, organization_id, created_by, name, slug, sources, next_window_start)
+      SELECT id, id, ${orgId}, ${userId}, 'Claimed source fixture', 'claimed-source-' || id,
+        ${sql.json([{ name: 'items', query: `@feed:${feedId}` }])}, now() - interval '2 days'
+      FROM next_id RETURNING id`;
+    await sql`UPDATE connector_definitions SET feeds_schema = ${sql.json({
+      items: { key: 'items', operations: ['read'], readWindowAxis: 'source_at' },
+    })} WHERE organization_id = ${orgId} AND key = ${SOURCE_KEY}`;
+    const pageRead = vi.spyOn(sourceFeedPage, 'readSourceFeedPage').mockRejectedValue(new Error('Stopped at source reader'));
+    try {
+      await manageAutomations(
+        { action: 'claim_next_window', automation_id: String(automation.id) },
+        {} as Env,
+        { ...context(), sourceContext: { platform: 'slack', chatAccess: 'org_shared' } },
+      ).catch(() => undefined);
+      expect(pageRead).toHaveBeenCalled();
+      expect(pageRead.mock.calls[0][2]).toMatchObject({ organizationId: orgId, chatAccess: 'org_shared' });
+    } finally {
+      pageRead.mockRestore();
+      await sql`DELETE FROM runs WHERE automation_id = ${automation.id}`;
+      await sql`DELETE FROM automations WHERE id = ${automation.id}`;
+    }
   });
 
   it('cancels a claimed step and ignores a late completion without publishing artifacts', async () => {

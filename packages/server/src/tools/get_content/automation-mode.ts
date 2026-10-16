@@ -53,7 +53,10 @@ import { authzScopeFromToolContext } from '../../authz/scope';
 // Content Query (inlined from automation-content-query)
 // ============================================
 
-interface ContentQueryParams extends Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal' | 'sourceContext'>, Partial<Pick<ToolContext, 'tokenType'>> {
+interface ContentQueryParams extends Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal'> {
+  /** The caller's chat tier source; required so a device-backed live read is gated (authz/device-access.ts). */
+  sourceContext: ToolContext['sourceContext'] | null;
+  tokenType: ToolContext['tokenType'] | null;
   sources: AutomationSource[];
   /** Already-resolved source set when the caller must make one atomic routing decision. */
   normalizedSources?: NormalizedAutomationSource[];
@@ -568,6 +571,9 @@ export async function fingerprintAutomationSources(args: {
     window_start: args.windowStart,
     window_end: args.windowEnd,
     organizationId: String(row.organization_id),
+    // Scheduled and headless: no caller tier. Live feed sources returned above.
+    sourceContext: null,
+    tokenType: null,
     // Scheduled fingerprinting is a read on behalf of the Automation author.
     // Without that durable principal, private sources look permanently empty.
     userId: row.created_by as string,
@@ -605,7 +611,10 @@ export async function handleAutomationMode(
   args: GetContentArgs,
   env: Env,
   sql: DbClient,
-  context: Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal' | 'sourceContext'> & Partial<Pick<ToolContext, 'tokenType'>> & {
+  context: Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal'> & {
+    /** Required: the device access rule reads the caller's tier from these. */
+    sourceContext: ToolContext['sourceContext'] | null;
+    tokenType: ToolContext['tokenType'] | null;
     organizationId: string;
     /** Verified caller, or null when the read is a headless Automation run. */
     userId: string | null;

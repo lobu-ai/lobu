@@ -23,7 +23,7 @@ import { compileConnectionRowVisibility } from '../authz/connection-visibility';
 import { DEVICE_ACCESS_REFUSED, DEVICE_READ_NEEDS_OWNER, decideDeviceAccess } from '../authz/device-access';
 import { resolveActingPrincipal, resolveConnectorPolicy } from '../authz/entity-policy';
 import { DEVICE_FEED_READ_ACTION_KEY } from './device-feed-read-protocol';
-import type { AuthzScope } from '../authz/scope';
+import type { AuthzScope, SourceReadScope } from '../authz/scope';
 import { getDb } from '../db/client';
 import { dbEgressConfig } from '../utils/cloud-mode';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
@@ -191,8 +191,9 @@ export interface ReadSourceFeedParams {
    * through the SAME connection-visibility compiler every read seam uses, so a
    * user is fenced exactly as on the SQL seam: org-visible connections, or a
    * private connection they own. A `null` principal (headless) sees org-only.
+   * `chatAccess` feeds the device access rule for device-backed feeds.
    */
-  scope: AuthzScope;
+  scope: SourceReadScope;
   /** Trusted execution provenance, never a caller-supplied source attribution. */
   automationId?: number | null;
   /** The configured feed to read directly from its source. */
