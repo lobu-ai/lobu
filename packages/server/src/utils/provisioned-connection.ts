@@ -44,6 +44,8 @@ export async function createProvisionedConnection(
       params.env,
       {
         organizationId: params.organizationId,
+        // No chat turn behind this call (authz/device-access.ts).
+        sourceContext: null,
         userId: params.userId,
         memberRole: null,
         isAuthenticated: true,

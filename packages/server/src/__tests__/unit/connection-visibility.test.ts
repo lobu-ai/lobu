@@ -69,13 +69,11 @@ describe('connection-visibility compiler (M1 one-compiler)', () => {
       organizationId: 'o',
       principal: 'u',
       agentId: 'a',
-      chatAccess: null,
     });
     expect(authzScopeFromToolContext({ organizationId: 'o', userId: null })).toEqual({
       organizationId: 'o',
       principal: null,
       agentId: null,
-      chatAccess: null,
     });
   });
 
@@ -92,7 +90,6 @@ describe('connection-visibility compiler (M1 one-compiler)', () => {
       organizationId: 'org_test',
       principal: 'user_creator',
       agentId: 'agent_test',
-      chatAccess: null,
     });
     expect(compileConnectionFkVisibility(readScope, 1, 'ev').params).toEqual([
       'org_test', 'user_creator',

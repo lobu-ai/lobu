@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatTurnAccess } from '@lobu/core';
-import { authzScopeFromToolContext } from '../authz/scope';
+import { sourceReadScopeFromToolContext } from '../authz/scope';
 
 const adapterRead = vi.fn();
 const nativeRead = vi.fn();
@@ -45,9 +45,10 @@ beforeEach(() => {
 function read(chatAccess: ChatTurnAccess | null) {
   return readSourceFeed({
     feedId: 1, deadlineAt: Date.now() + 5000,
-    scope: authzScopeFromToolContext({
+    scope: sourceReadScopeFromToolContext({
       organizationId: 'synthetic-org',
       userId: chatAccess === 'member' ? 'synthetic-member' : null,
+      tokenType: chatAccess ? 'pat' : null,
       sourceContext: chatAccess ? { chatAccess } : null,
     }),
   });

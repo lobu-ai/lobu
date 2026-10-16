@@ -24,7 +24,7 @@ import {
   TEMPLATE_ACTION_CAPABILITY_META_KEY,
 } from '../../interactions/template-action-capability';
 import { getLobuCoreServices } from '../../lobu/gateway';
-import { authzScopeFromToolContext } from '../../authz/scope';
+import { authzScopeFromToolContext, sourceReadScopeFromToolContext } from '../../authz/scope';
 import { ToolUserError } from '../../utils/errors';
 import { readSourceRecordActivity } from '../../utils/source-record-reads';
 import {
@@ -972,7 +972,7 @@ async function readRecordContent(args: GetContentArgs, ctx: ToolContext): Promis
     throw new ToolUserError(`record cannot be combined with ${extra.map(([key]) => key).join(', ')}.`, 400);
   }
   const pageLimit = Math.max(1, Math.min(100, Math.trunc(limit ?? 50)));
-  const result = await readSourceRecordActivity(authzScopeFromToolContext(ctx), record!, {
+  const result = await readSourceRecordActivity(sourceReadScopeFromToolContext(ctx), record!, {
     limit: pageLimit,
     cursor: record_cursor,
     platforms,

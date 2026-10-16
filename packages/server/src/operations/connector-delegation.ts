@@ -47,6 +47,8 @@ export async function executeConnectorOperation(params: Delegation, execute: typ
   if (!actor.ownerResolved) throw new ToolUserError('Connector requester is no longer available.', 403);
   const ctx: ToolContext = {
     organizationId: parent.organization_id, userId: parent.created_by_user_id,
+    // No chat turn behind this call (authz/device-access.ts).
+    sourceContext: null,
     agentId: actor.kind === 'agent' ? actor.id : actor.ownerAgentId,
     actingAutomationId: parent.automation_id, actingRunId: params.parentRunId,
     memberRole: null, isAuthenticated: true, tokenType: 'pat', scopedToOrg: true,

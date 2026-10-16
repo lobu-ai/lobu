@@ -27,7 +27,7 @@ describe('decideDeviceAccess', () => {
 
 describe('chatAccessOfToolContext', () => {
   it('reads the signed tier off the source context', () => {
-    expect(chatAccessOfToolContext({ sourceContext: { chatAccess: 'org_shared' } })).toBe('org_shared');
+    expect(chatAccessOfToolContext({ tokenType: 'pat', sourceContext: { chatAccess: 'org_shared' } })).toBe('org_shared');
   });
 
   it('treats an anonymous caller (the public-read path) as a public visitor', () => {
@@ -35,7 +35,7 @@ describe('chatAccessOfToolContext', () => {
   });
 
   it('is null for a call that is not a chat turn', () => {
-    expect(chatAccessOfToolContext({ sourceContext: null })).toBeNull();
-    expect(chatAccessOfToolContext({ sourceContext: {} })).toBeNull();
+    expect(chatAccessOfToolContext({ tokenType: 'pat', sourceContext: null })).toBeNull();
+    expect(chatAccessOfToolContext({ tokenType: null, sourceContext: {} })).toBeNull();
   });
 });

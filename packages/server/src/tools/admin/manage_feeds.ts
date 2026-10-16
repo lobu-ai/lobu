@@ -41,7 +41,7 @@ import {
 } from '../../authz/channel-about';
 import { compileConnectionRowVisibility } from '../../authz/connection-visibility';
 import { readSourceFeedPage, SourceCursorError } from '../../lib/source-feed-page';
-import { authzScopeFromToolContext } from '../../authz/scope';
+import { authzScopeFromToolContext, sourceReadScopeFromToolContext } from '../../authz/scope';
 import { resolveAutomationConnectionVisibilityUserId } from '../../authz/automation-connection-visibility';
 import { reconcileAtlassianMcpJiraSite } from '../../connect/atlassian-mcp-site';
 import { deriveFeedHealthSemantics, feedTriggerEligibilitySql, feedWebhookDrivenSql } from '../../connectors/feed-health-semantics';
@@ -591,7 +591,7 @@ async function handleReadFeeds(
     : DEFAULT_BATCH_READ_TIMEOUT_MS;
   // Reuse the operation bridge's durable-owner visibility rule. Keep the
   // Automation identity on the context for policy and dispatch provenance.
-  const scope = { ...authzScopeFromToolContext(ctx), principal: await resolveAutomationConnectionVisibilityUserId(ctx, getDb()) };
+  const scope = { ...sourceReadScopeFromToolContext(ctx), principal: await resolveAutomationConnectionVisibilityUserId(ctx, getDb()) };
   const results = await Promise.all(
     args.reads.slice(0, 10).map(async (read) => {
       try {

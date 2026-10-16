@@ -170,6 +170,8 @@ export async function listOrgInstalled(
 	if (wanted.has("automations")) {
 		const toolCtx: ToolContext = {
 			organizationId,
+			// No chat turn behind this call (authz/device-access.ts).
+			sourceContext: null,
 			userId: ctx.userId ?? null,
 			memberRole: ctx.memberRole ?? null,
 			isAuthenticated: ctx.isAuthenticated ?? false,

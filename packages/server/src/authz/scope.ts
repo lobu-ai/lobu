@@ -5,7 +5,7 @@
  * connections. Write policy and approvals use the execution context separately.
  */
 import type { ChatTurnAccess } from '@lobu/core';
-import { chatAccessOfToolContext } from './device-access';
+import { chatAccessOfToolContext, type DeviceAccessCaller } from './device-access';
 
 export interface AuthzScope {
   /** The tenant. Every read is partitioned by this first. */
@@ -18,18 +18,15 @@ export interface AuthzScope {
   agentId?: string | null;
   /** Policy snapshot the read is compiled against. Reserved for M2+/M6. */
   policyVersion?: number | null;
-  /**
-   * The chat tier of the turn making the read, or null/absent when the caller
-   * is not a chat turn. Live device reads decide on it (authz/device-access.ts).
-   */
-  chatAccess?: ChatTurnAccess | null;
 }
 
 /**
  * Scope for a live source read, which may run on a member's paired device.
  * `chatAccess` is required (null for a caller that is not a chat turn), so
  * every read path states the caller's tier for the device access rule
- * (authz/device-access.ts) instead of silently dropping it.
+ * (authz/device-access.ts) instead of silently dropping it. Build one with
+ * {@link sourceReadScopeFromToolContext}; a system caller writes the literal
+ * with `chatAccess: null`.
  */
 export type SourceReadScope = AuthzScope & { chatAccess: ChatTurnAccess | null };
 
@@ -42,15 +39,22 @@ export function authzScopeFromToolContext(ctx: {
   userId: string | null;
   agentId?: string | null;
   automationReadPrincipalId?: string | null;
-  tokenType?: string | null;
-  sourceContext?: { chatAccess?: ChatTurnAccess } | null;
-}): SourceReadScope {
+}): AuthzScope {
   return {
     organizationId: ctx.organizationId,
     principal: ctx.userId ?? ctx.automationReadPrincipalId ?? null,
     agentId: ctx.agentId ?? null,
-    chatAccess: chatAccessOfToolContext(ctx),
   };
+}
+
+/**
+ * {@link authzScopeFromToolContext} plus the caller's tier for a live source
+ * read. Both tier inputs are required: a caller cannot omit them by accident.
+ */
+export function sourceReadScopeFromToolContext(
+  ctx: Parameters<typeof authzScopeFromToolContext>[0] & DeviceAccessCaller,
+): SourceReadScope {
+  return { ...authzScopeFromToolContext(ctx), chatAccess: chatAccessOfToolContext(ctx) };
 }
 
 /**

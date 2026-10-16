@@ -47,7 +47,7 @@ import type { ToolContext } from '../registry';
 import type { GetContentResult } from './types';
 import { parseJson, parseRecordArray, toNullableScore } from './types';
 import { stableJson } from '../../utils/insert-event';
-import { authzScopeFromToolContext } from '../../authz/scope';
+import { sourceReadScopeFromToolContext } from '../../authz/scope';
 
 // ============================================
 // Content Query (inlined from automation-content-query)
@@ -456,7 +456,7 @@ async function queryContentData(
           window: { start: params.window_start, end: params.window_end },
           cursor: params.sourcePage?.next_cursor,
           sourceRevision: params.sourcePage?.revision,
-        }, 30_000, authzScopeFromToolContext(params), params.abortSignal, params.actingAutomationId),
+        }, 30_000, sourceReadScopeFromToolContext(params), params.abortSignal, params.actingAutomationId),
       })));
     for (const { source, result } of livePages) {
       results[source.name] = result.rows;

@@ -40,6 +40,8 @@ export function connectionOperationsExecutor(
   return async ({ operationKey, input, idempotencyKey }) => {
     const ctx: ToolContext = {
       organizationId,
+      // No chat turn behind this call (authz/device-access.ts).
+      sourceContext: null,
       userId: ownerId,
       memberRole: null,
       isAuthenticated: true,

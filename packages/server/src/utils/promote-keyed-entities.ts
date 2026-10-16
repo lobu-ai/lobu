@@ -359,6 +359,8 @@ async function upsertKeyedEntity(params: {
       // funnel so metadata, derived names, rules and approvals stay atomic.
       const updated = await updateEntity(entityId, { metadata: params.fieldValues }, {} as Env, {
         organizationId,
+        // No chat turn behind this call (authz/device-access.ts).
+        sourceContext: null,
         userId: null,
         memberRole: null,
         agentId: params.automationAgentId,

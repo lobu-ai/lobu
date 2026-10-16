@@ -76,7 +76,7 @@ import {
 	type RelationshipColumnSpec,
 	updateEntity,
 } from "../../utils/entity-management";
-import { authzScopeFromToolContext } from "../../authz/scope";
+import { sourceReadScopeFromToolContext } from "../../authz/scope";
 import { ToolUserError } from "../../utils/errors";
 import { readSourceRecordLinks } from "../../utils/source-record-reads";
 import {
@@ -1860,7 +1860,7 @@ async function handleListLinks(
 		}
 		await assertEntityReadAllowed(args, ctx, args.record.type);
 		const result = await readSourceRecordLinks(
-			authzScopeFromToolContext(ctx),
+			sourceReadScopeFromToolContext(ctx),
 			args.record,
 			{
 				limit: Math.min(Math.max(args.limit ?? 100, 1), 500),

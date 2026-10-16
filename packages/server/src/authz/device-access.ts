@@ -35,6 +35,16 @@ export function decideDeviceAccess(chatAccess: ChatTurnAccess | null): DeviceAcc
 }
 
 /**
+ * What a caller must state to reach a member's device. Both keys are
+ * required: `tokenType: null` and `sourceContext: null` mean a system caller
+ * with no chat turn behind it.
+ */
+export interface DeviceAccessCaller {
+  tokenType: string | null;
+  sourceContext: { chatAccess?: ChatTurnAccess } | null;
+}
+
+/**
  * The tier a tool call uses a device with, or null when the caller is a
  * workspace principal acting as itself. The MCP boundary
  * (workspace/multi-tenant.ts) sets `sourceContext.chatAccess` from the signed
@@ -43,10 +53,7 @@ export function decideDeviceAccess(chatAccess: ChatTurnAccess | null): DeviceAcc
  * which a `public_visitor` chat turn also takes) is a `public_visitor`. An
  * admin-tools turn carries no tier: it acts as its verified user.
  */
-export function chatAccessOfToolContext(ctx: {
-  tokenType?: string | null;
-  sourceContext?: { chatAccess?: ChatTurnAccess } | null;
-}): ChatTurnAccess | null {
+export function chatAccessOfToolContext(ctx: DeviceAccessCaller): ChatTurnAccess | null {
   if (ctx.tokenType === "anonymous") return "public_visitor";
   return ctx.sourceContext?.chatAccess ?? null;
 }

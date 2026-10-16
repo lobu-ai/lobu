@@ -137,7 +137,7 @@ export interface ToolContext {
    */
   automationReadPrincipalId?: string | null;
   /** Verified source conversation for worker-originated tool calls, when any. */
-  sourceContext?: ToolSourceContext | null;
+  sourceContext: ToolSourceContext | null;
   /** `x-lobu-apply-id` when this call belongs to a `lobu apply` run (REST proxy only). */
   applyId?: string | null;
   /** Server-only seed shared by browser operations within one SDK invocation. */
