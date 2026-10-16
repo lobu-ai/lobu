@@ -2071,6 +2071,28 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(plan.backgroundTargets).toEqual([automation]);
   });
 
+  test.each([
+    ["fits a chat turn", "Reply briefly.", "reply"],
+    ["exceeds a chat turn's context", `${"Context line.\n".repeat(200)}FINAL: sign the reply.`, "background"],
+  ] as const)("a device-pinned reply Automation whose prompt %s", (_label, instructions, lane) => {
+    const automation: MatchingAutomationActivation = {
+      automationId: 72, organizationId: "org-bound", agentId: "local-agent",
+      deviceWorkerId: "device-test", agentKind: "codex", model: null,
+      executionConfig: null, instructions, minCooldownSeconds: 0,
+      trigger: { kind: "event", connector_key: "slack", connection_id: 42,
+        event_types: ["message.created"], match: { channel_id: CHANNEL_ID },
+        execution: "turn", output: "reply_to_source", active_run: "steer" },
+    };
+    const plan = planAutomationActivations({
+      connector_key: "slack", connection_id: 42, event_type: "message.created",
+      delivery_id: "synthetic-delivery", label: "Synthetic message", input_text: "Run this",
+    }, [automation]);
+    // A prompt longer than a chat turn carries keeps its whole text on the
+    // device background lane instead of being cut on the cloud reply.
+    expect(plan.replyTargets.length).toBe(lane === "reply" ? 1 : 0);
+    expect(plan.backgroundTargets).toEqual(lane === "background" ? [automation] : []);
+  });
+
   test("unroutable model provider posts a plain Slack text fallback and skips enqueue", async () => {
     // Empty allow-list (allow-all) but the provider module isn't present/routable.
     const providerCatalog = makeCatalogMock({ modules: [], allowedRefs: null });

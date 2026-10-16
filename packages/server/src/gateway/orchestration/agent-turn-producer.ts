@@ -59,6 +59,7 @@ import {
   resolveTurnAttachments,
 } from "./agent-turn-attachments.js";
 import { notifyThreadResponse, type TurnFailure } from "./turn-liveness.js";
+import { CHAT_TURN_CONTEXT_CHARS } from "./chat-turn-limits.js";
 import {
   chatSenderWorkspacesClaim,
   chatTurnAccessOf,
@@ -1163,7 +1164,7 @@ export async function enqueueAgentTurn(
     const ephemeralContext = chatTurnContext(
       chatAccess ? await chatTurnSenderName(turnClaims.actorUserId) : undefined,
       data.ephemeralContext,
-      2_048,
+      CHAT_TURN_CONTEXT_CHARS,
     );
     const turn: TurnEnvelope = {
       agent_id: data.agentId,

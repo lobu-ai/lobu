@@ -8,6 +8,7 @@ import {
 import type { DbClient } from "../db/client";
 import { getDb } from "../db/client";
 import { authorizedChatLinkIds } from "../gateway/channels/chat-link-authorization";
+import { CHAT_TURN_CONTEXT_CHARS } from "../gateway/orchestration/chat-turn-limits";
 import { runtimeConnectionPredicate } from "../lobu/stores/connections-projection";
 import {
   type AutomationEventRunQueued,
@@ -119,11 +120,16 @@ export function planAutomationActivations(
   const replyTargets: ChatReplyActivation[] = [];
   const backgroundTargets: MatchingAutomationActivation[] = [];
   for (const match of matches) {
-    // A reply always runs on the Automation's cloud agent, which owns the
+    // A reply runs on the Automation's cloud agent, which owns the
     // conversation: a device pin places only background runs. An Automation
     // with no agent (device-only) has no conversation identity to reply as,
-    // so it stays on the durable background lane.
-    if (match.agentId != null && repliesToSource(match.trigger)) {
+    // so it stays on the durable background lane. So does a device-pinned one
+    // whose prompt is longer than a chat turn carries: the device run keeps
+    // the whole prompt, where the reply would cut it.
+    const fitsChatTurn =
+      match.deviceWorkerId == null ||
+      buildAutomationTurnContext(match).length <= CHAT_TURN_CONTEXT_CHARS;
+    if (match.agentId != null && fitsChatTurn && repliesToSource(match.trigger)) {
       replyTargets.push({ ...match, agentId: match.agentId });
     } else {
       backgroundTargets.push(match);
