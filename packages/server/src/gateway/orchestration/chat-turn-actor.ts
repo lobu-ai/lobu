@@ -26,7 +26,6 @@ import type { ChatTurnAccess } from "@lobu/core";
 import { getDb } from "../../db/client.js";
 import { resolveChatSenderMember } from "../../lobu/stores/chat-identity.js";
 import { CHAT_IDENTITY_LINK_TTL_SECONDS } from "../../lobu/stores/chat-identity-link.js";
-import { DEVICE_CHAT_RUN_SOURCE } from "../services/run-worker-access.js";
 
 /** The server's refusal for a chat turn that may not use workspace tools. */
 export const CHAT_SENDER_NOT_LINKED =
@@ -107,34 +106,14 @@ export function chatTurnEvidenceFrom(
  *
  * Every non-API turn is one, unless it carries a headless `source`
  * (Automation run, platform CLI, messaging API): those have no chat sender and
- * keep their existing principal. A device-placed chat turn is still a chat
- * turn — its run-scoped token names the device lane as its `source`, but the
- * message it runs came from a chat sender all the same. Only an explicit
- * `api` platform exempts one; a device turn with no platform at all is a chat
- * turn whose sender is unknown, so it fails closed instead of borrowing the
- * agent owner.
+ * keep their existing principal. An explicit `api` platform exempts one.
  */
 export function isChatSenderTurn(claims: {
   platform?: string;
   source?: string;
 }): boolean {
   if (claims.platform === "api") return false;
-  if (claims.source === DEVICE_CHAT_RUN_SOURCE) return true;
   return !!claims.platform && claims.source === undefined;
-}
-
-/**
- * The chat sender's platform id on a verified token. A device-placed chat
- * turn's token names the agent as `userId` and carries the sender as
- * `sessionKey` (gateway/services/run-worker-access.ts); every other chat token
- * carries the sender as `userId`. Attribution reads it only through here.
- */
-export function chatSenderIdOf(claims: {
-  userId?: string;
-  source?: string;
-  sessionKey?: string;
-}): string | undefined {
-  return claims.source === DEVICE_CHAT_RUN_SOURCE ? claims.sessionKey : claims.userId;
 }
 
 export interface ChatTurnActor {

@@ -1,9 +1,8 @@
 # Chat turns act in the sender's workspaces
 
 Status: accepted design (confirmed 2026-10-15), implemented for gateway chat turns.
-Device-placed turns remain single-workspace. This changes the
-chat turn-token contract (`chatSenderWorkspaces`). It adds no table, no SDK
-method and no public API.
+This changes the chat turn-token contract (`chatSenderWorkspaces`). It adds no
+table, no SDK method and no public API.
 
 Evidence checked on 2026-10-15 against `origin/main` at
 [`9ac7d26500227d09ec0c52fa5468ba7e2ca78472`](https://github.com/lobu-ai/lobu/tree/9ac7d26500227d09ec0c52fa5468ba7e2ca78472).
@@ -89,7 +88,6 @@ conditions: the sender is a linked member, and the conversation is private.
 - In another workspace the call acts as the sender with no agent, the same
   principal an OAuth MCP client has there. That workspace's role, connector
   policy and approvals decide; approving still needs a human web session.
-- Device-placed chat turns do not get the claim yet.
 
 ## Settled open questions
 

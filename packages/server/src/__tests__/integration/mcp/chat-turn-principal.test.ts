@@ -25,8 +25,6 @@
 import { generateWorkerToken, mintGatewayMcpToken, verifyWorkerToken, type MessagePayload } from '@lobu/core';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mintTurnToken } from '../../../gateway/orchestration/agent-turn-producer';
-import { chatSenderIdOf } from '../../../gateway/orchestration/chat-turn-actor';
-import { buildDeviceChatRunWorkerAccess, DEVICE_CHAT_RUN_SOURCE } from '../../../gateway/services/run-worker-access';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -148,22 +146,6 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
       teamId: TEAM_ID,
       platformUserId: SENDER_PLATFORM_ID,
     });
-  });
-
-  it('attributes a device-placed chat turn to its platform sender, not the agent', async () => {
-    // The device-chat mint signs the agent as `userId` and the sender as
-    // `sessionKey`; attribution must recover the sender from the same claims
-    // the production mint writes, whichever lane minted them.
-    const device = verifyWorkerToken(buildDeviceChatRunWorkerAccess({
-      agentId: AGENT_ID, conversationId: 'conv-device', runId: 1, organizationId: org.id,
-      userId: STRANGER_PLATFORM_ID, channelId: 'C-device', platform: 'slack', teamId: TEAM_ID,
-      chatAccess: 'org_shared',
-    }).token);
-    expect(device?.userId).not.toBe(STRANGER_PLATFORM_ID);
-    expect(chatSenderIdOf(device ?? {})).toBe(STRANGER_PLATFORM_ID);
-
-    const cloud = verifyWorkerToken(await mintTurnToken(slackChatMessage(org.id, STRANGER_PLATFORM_ID, { isDirect: false, senderVouched: true }), 1));
-    expect(chatSenderIdOf(cloud ?? {})).toBe(STRANGER_PLATFORM_ID);
   });
 
   it('signs the linked member as the actor and keeps the platform sender as userId', async () => {
@@ -304,16 +286,6 @@ describe('chat turn principal: the verified sender, never the agent owner', () =
     });
     const refused = await openSession(org.slug, mintGatewayMcpToken(legacy) as string);
     expect(refused.status).toBe(403);
-  });
-
-  it('fails closed on a device chat token with no platform instead of borrowing the owner', async () => {
-    const platformless = generateWorkerToken(AGENT_ID, 'conv-device-platformless', 'api-device', {
-      channelId: 'C-device', agentId: AGENT_ID, organizationId: org.id,
-      source: DEVICE_CHAT_RUN_SOURCE, sessionKey: STRANGER_PLATFORM_ID,
-    });
-    const refused = await openSession(org.slug, platformless);
-    expect(refused.status).toBe(403);
-    expect(refused.body).toMatchObject({ error_description: 'Chat sender is not a linked member of this organization' });
   });
 
   it("is admitted or refused on the sender's membership, never the owner's role", async () => {

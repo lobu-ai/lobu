@@ -1,9 +1,6 @@
-import { type ChatTurnAccess, generateWorkerToken } from "@lobu/core";
+import { generateWorkerToken } from "@lobu/core";
 import { AUTOMATION_RUN_SOURCE } from "../automation-run-session.js";
-import {
-	buildWorkerTokenClaims,
-	type WorkerTokenClaimsArgs,
-} from "../orchestration/worker-token-claims.js";
+import { buildWorkerTokenClaims } from "../orchestration/worker-token-claims.js";
 
 export interface RunWorkerAccess {
 	conversationId: string;
@@ -14,56 +11,6 @@ export interface RunWorkerAccess {
 function workerTokenTtlMs(): number {
 	const raw = Number.parseInt(process.env.WORKER_TOKEN_TTL_MS ?? "", 10);
 	return Number.isFinite(raw) && raw > 0 ? raw : 2 * 60 * 60 * 1000;
-}
-
-function buildRunWorkerAccess(args: {
-	agentId: string;
-	conversationId: string;
-	runId: number;
-	organizationId: string;
-	userId: string;
-	channelId: string;
-	source: string;
-	/** Origin platform of the turn. Absent for a run with no chat transport. */
-	platform?: string;
-	/** Worker routing key; the native team is lifted off `platformMetadata`. */
-	teamId?: string;
-	platformMetadata?: WorkerTokenClaimsArgs["platformMetadata"];
-	/** Verified member the turn acts as. See WorkerTokenData.actorUserId. */
-	actorUserId?: string;
-	/** Chat turn authority. See WorkerTokenData.chatAccess. */
-	chatAccess?: ChatTurnAccess;
-}): RunWorkerAccess {
-	const issuedAt = Date.now();
-	return {
-		conversationId: args.conversationId,
-		expiresAt: issuedAt + workerTokenTtlMs(),
-		token: generateWorkerToken(
-			args.agentId,
-			args.conversationId,
-			// `deploymentName`. It keys per-turn liveness markers and secret
-			// mappings, so it stays agent-scoped — a platform workspace id here
-			// would collapse every agent in that workspace onto one identity.
-			`api-${args.agentId.slice(0, 8)}`,
-			{
-				// One place for the routing claims, so this mint cannot diverge
-				// from the per-run and deployment mints (#1274).
-				...buildWorkerTokenClaims({
-					channelId: args.channelId,
-					agentId: args.agentId,
-					organizationId: args.organizationId,
-					platform: args.platform ?? "api",
-					teamId: args.teamId,
-					platformMetadata: args.platformMetadata,
-				}),
-				runId: args.runId,
-				source: args.source,
-				sessionKey: args.userId,
-				...(args.actorUserId ? { actorUserId: args.actorUserId } : {}),
-				...(args.chatAccess ? { chatAccess: args.chatAccess } : {}),
-			},
-		),
-	};
 }
 
 /**
@@ -87,49 +34,30 @@ export function buildAutomationRunWorkerAccess(args: {
 	}
 
 	const userId = `automation_${args.automationId}`;
-	return buildRunWorkerAccess({
-		agentId: args.agentId,
+	const issuedAt = Date.now();
+	return {
 		conversationId,
-		runId: args.runId,
-		organizationId: args.organizationId,
-		userId,
-		channelId: `api_${userId}`,
-		source: AUTOMATION_RUN_SOURCE,
-	});
-}
-
-/**
- * The one name for "this turn is a device-placed chat turn", stamped into the
- * signed worker token and read back by the direct-MCP auth lane so a spawned
- * local CLI can reach Lobu tools with the same per-run identity Automations use.
- */
-export const DEVICE_CHAT_RUN_SOURCE = "device-chat";
-
-/**
- * Mint the same run-scoped agent identity for a device-placed chat turn.
- *
- * A device chat turn originates on a chat platform, so it also carries that
- * turn's routing claims (platform, native team, connection, response thread),
- * so a card the local CLI posts back reaches the chat thread the turn came
- * from. The platform is required: defaulted to `api`, a chat turn would act as
- * the agent owner instead of its sender.
- *
- * `actorUserId` and `chatAccess` are the chat sender's authority, resolved by
- * the caller through `resolveChatTurnActor`, exactly like a cloud chat turn.
- */
-export function buildDeviceChatRunWorkerAccess(args: {
-	agentId: string;
-	conversationId: string;
-	runId: number;
-	organizationId: string;
-	userId: string;
-	channelId: string;
-	/** Required: an `api` turn says so; a missing platform would mint as one. */
-	platform: string;
-	teamId?: string;
-	platformMetadata?: WorkerTokenClaimsArgs["platformMetadata"];
-	actorUserId?: string;
-	chatAccess?: ChatTurnAccess;
-}): RunWorkerAccess {
-	return buildRunWorkerAccess({ ...args, source: DEVICE_CHAT_RUN_SOURCE });
+		expiresAt: issuedAt + workerTokenTtlMs(),
+		token: generateWorkerToken(
+			args.agentId,
+			conversationId,
+			// `deploymentName`. It keys per-turn liveness markers and secret
+			// mappings, so it stays agent-scoped — a platform workspace id here
+			// would collapse every agent in that workspace onto one identity.
+			`api-${args.agentId.slice(0, 8)}`,
+			{
+				// One place for the routing claims, so this mint cannot diverge
+				// from the per-run and deployment mints (#1274).
+				...buildWorkerTokenClaims({
+					channelId: `api_${userId}`,
+					agentId: args.agentId,
+					organizationId: args.organizationId,
+					platform: "api",
+				}),
+				runId: args.runId,
+				source: AUTOMATION_RUN_SOURCE,
+				sessionKey: userId,
+			},
+		),
+	};
 }

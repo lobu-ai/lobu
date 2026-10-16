@@ -5,7 +5,6 @@ import {
   type AutomationExecutionConfig,
   type AutomationTrigger,
 } from "@lobu/core/contracts/tools/manage-automations";
-import { DEVICE_CHAT_MAX_CONTEXT_LENGTH } from "@lobu/core/contracts/worker/protocol";
 import type { DbClient } from "../db/client";
 import { getDb } from "../db/client";
 import { authorizedChatLinkIds } from "../gateway/channels/chat-link-authorization";
@@ -24,8 +23,9 @@ export interface MatchingAutomationActivation {
   organizationId: string;
   /**
    * The Automation's managed agent. Retained even when `deviceWorkerId` places
-   * execution on a device — the agent still owns the conversation. Null only
-   * for a device-only Automation, which has no conversation identity.
+   * background execution on a device — the agent still owns the conversation
+   * and answers live replies. Null only for a device-only Automation, which
+   * has no conversation identity.
    */
   agentId: string | null;
 
@@ -67,11 +67,7 @@ export interface RuntimeConnectionAutomationLookup {
   crossOrganization?: boolean;
 }
 
-/**
- * The Automation preamble a live chat turn carries as its `ephemeralContext`.
- * Shared with the planner so the device-lane size gate below measures the
- * exact string the chat bridge will send.
- */
+/** The Automation preamble a live chat turn carries as its `ephemeralContext`. */
 export function buildAutomationTurnContext(
   match: Pick<MatchingAutomationActivation, "automationId" | "instructions">,
 ): string {
@@ -123,18 +119,11 @@ export function planAutomationActivations(
   const replyTargets: ChatReplyActivation[] = [];
   const backgroundTargets: MatchingAutomationActivation[] = [];
   for (const match of matches) {
-    // A device pin joins the live chat lane only when it names a local CLI —
-    // the device claim filter matches runs on `agentKind`, so a null kind is
-    // claimable by no device — and when its composed instructions fit the
-    // device chat envelope, which the poll route truncates. Either gap keeps
-    // the Automation on the durable background lane, which needs no kind and
-    // carries the whole prompt.
-    const canUseDeviceChat =
-      match.deviceWorkerId == null ||
-      (match.agentKind != null &&
-        buildAutomationTurnContext(match).length <=
-          DEVICE_CHAT_MAX_CONTEXT_LENGTH);
-    if (match.agentId != null && canUseDeviceChat && repliesToSource(match.trigger)) {
+    // A reply always runs on the Automation's cloud agent, which owns the
+    // conversation: a device pin places only background runs. An Automation
+    // with no agent (device-only) has no conversation identity to reply as,
+    // so it stays on the durable background lane.
+    if (match.agentId != null && repliesToSource(match.trigger)) {
       replyTargets.push({ ...match, agentId: match.agentId });
     } else {
       backgroundTargets.push(match);

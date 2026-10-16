@@ -5,7 +5,7 @@ import { logRunFailure } from "../runs/log-run-failure";
  * A turn delivers: it writes the native Pi session the turn produced onto the
  * run row, persists the conversation's snapshot, and publishes the
  * `thread_response` the client is waiting on — all inside the same fenced
- * terminal transition, the way `device-chat.ts` does for the device lane.
+ * terminal transition.
  *
  * `sweepStaleAgentTurnRuns` covers the path that never reaches this route: a
  * worker that crashes mid-turn is terminalized by the reaper, which delivers

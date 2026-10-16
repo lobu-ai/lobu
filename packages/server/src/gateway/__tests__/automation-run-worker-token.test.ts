@@ -1,10 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { verifyWorkerToken } from "@lobu/core";
 import { AUTOMATION_RUN_SOURCE } from "../automation-run-session.js";
-import {
-  buildAutomationRunWorkerAccess,
-  buildDeviceChatRunWorkerAccess,
-} from "../services/run-worker-access.js";
+import { buildAutomationRunWorkerAccess } from "../services/run-worker-access.js";
 
 // Minting encrypts with ENCRYPTION_KEY. The gateway lane runs many files in one
 // bun process and its peers set/restore the key per file, so this suite cannot
@@ -59,40 +56,4 @@ describe("Automation run WorkerToken parity", () => {
     ).toThrow(/Automation conversation mismatch/);
   });
 
-  test.each([undefined, "member-test"])("device chat retains native routing and carries the resolved actor %s", (actorUserId) => {
-    const access = buildDeviceChatRunWorkerAccess({
-      agentId: "agent-test",
-      conversationId: "conversation-test",
-      runId: 789,
-      organizationId: "org-test",
-      userId: "user-test",
-      actorUserId,
-      channelId: "channel-test",
-      platform: "slack",
-      teamId: "routing-team",
-      platformMetadata: {
-        teamId: "native-team",
-        connectionId: "connection-test",
-        responseThreadId: "slack:channel-test:thread-test",
-      },
-    });
-    const claims = verifyWorkerToken(access.token);
-    expect(claims).not.toBeNull();
-    if (!claims) throw new Error("worker token did not verify");
-    expect(claims).toMatchObject({
-      platform: "slack",
-      // The native team wins over the worker routing key, exactly as the
-      // per-run chat mint resolves it.
-      teamId: "native-team",
-      connectionId: "connection-test",
-      responseThreadId: "slack:channel-test:thread-test",
-      source: "device-chat",
-      runId: 789,
-    });
-    expect(claims.actorUserId).toBe(actorUserId);
-    // `deploymentName` keys per-turn liveness markers and secret mappings, so
-    // it must stay agent-scoped: a platform team id here would give every
-    // agent in that workspace one shared identity.
-    expect(claims.deploymentName).toBe("api-agent-te");
-  });
 });

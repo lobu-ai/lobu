@@ -117,12 +117,6 @@
       "import": "./dist/contracts/worker/device-automation.js",
       "require": "./dist/contracts/worker/device-automation.js"
     },
-    "./contracts/worker/device-chat": {
-      "types": "./dist/contracts/worker/device-chat.d.ts",
-      "bun": "./src/contracts/worker/device-chat.ts",
-      "import": "./dist/contracts/worker/device-chat.js",
-      "require": "./dist/contracts/worker/device-chat.js"
-    },
     "./contracts/tools/manage-agents": {
       "types": "./dist/contracts/tools/manage-agents.d.ts",
       "bun": "./src/contracts/tools/manage-agents.ts",

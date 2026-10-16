@@ -746,7 +746,6 @@ import {
 	completeAuthRun,
 	completeEmbeddings,
 	completeAutomationRun,
-	completeDeviceChatRun,
 	completeWorkerJob,
 	deleteDeviceWorker,
 	emitAuthArtifact,
@@ -846,10 +845,6 @@ app.use("/api/workers/*", async (c, next) => {
 			// gate here would just block legitimate posts from the bound device.
 			const isAutomationCompleteSubpath =
 				/^\/api\/workers\/me\/runs\/\d+\/complete-automation$/.test(requestPath);
-			// Device chat uses the same user-scoped daemon and performs exact run,
-			// claimant, and pinned-device authorization in its handler.
-			const isDeviceChatCompleteSubpath =
-				/^\/api\/workers\/me\/runs\/\d+\/complete-chat$/.test(requestPath);
 			// /api/workers/me/automations/<automation_id>/trigger — device-side manual
 			// re-run endpoint. The handler does its own bound-workerId →
 			// device_worker_id match, so the org-scope gate here would block
@@ -859,7 +854,6 @@ app.use("/api/workers/*", async (c, next) => {
 			if (
 				!allowedPathsForUserWorker.has(requestPath) &&
 				!isAutomationCompleteSubpath &&
-				!isDeviceChatCompleteSubpath &&
 				!isAutomationTriggerSubpath
 			) {
 				return c.json(
@@ -954,7 +948,6 @@ app.post("/api/workers/dispatch-chrome-action", dispatchChromeAction);
 app.post("/api/workers/execute-operation", executeWorkerOperation);
 app.post("/api/workers/complete-embeddings", completeEmbeddings);
 app.post("/api/workers/me/runs/:runId/complete-automation", completeAutomationRun);
-app.post("/api/workers/me/runs/:runId/complete-chat", completeDeviceChatRun);
 app.post(
 	"/api/workers/me/automations/:automation_id/trigger",
 	triggerAutomationForDevice,

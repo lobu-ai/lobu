@@ -24,7 +24,7 @@
  *    but not the bulk CTE: an authoritative turn has a client waiting on its
  *    reply, so its timeout must publish a `thread_response` in the same
  *    transaction. `sweepStaleAgentTurnRuns` (worker-api/agent-turn.ts) owns
- *    that, the way `sweepStaleDeviceChatRuns` does for device chat.
+ *    that.
  *  - `automation` — driven in-process by the embedded gateway. Lifecycle is
  *    handled by the durable terminal-event resolution (run-completion.ts)
  *    + the dedicated `sweepStaleAutomationRuns` / `resetOrphanedAutomationRuns`
@@ -72,7 +72,6 @@ import {
 } from '../lib/device-feed-read-protocol';
 import { buildStaleRunWhereSql } from './stale-run-sweeper';
 import { sweepStaleAgentTurnRuns } from '../worker-api/agent-turn';
-import { sweepStaleDeviceChatRuns } from '../worker-api/device-chat';
 
 /** Advisory-lock key for cross-pod coordination of the stale-run reaper.
  *  Picked from the >2^31 range to avoid collisions with the queue-NOTIFY
@@ -627,19 +626,6 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         timed_out_actions: unknown;
       }>;
 
-      // Device-placed chat turns are claimed by the device's own poller, so the
-      // connector reaper above never sees them; they terminalize through the
-      // adapter that also publishes their thread_response.
-      let deviceChatsReaped = 0;
-      try {
-        deviceChatsReaped = await sweepStaleDeviceChatRuns(thresholdSeconds);
-      } catch (err) {
-        logger.error(
-          { error: String(err) },
-          '[reaper] Failed to sweep stale device chat runs'
-        );
-      }
-
       // Agent turns share the connector lanes' claim + heartbeat contract but
       // not their terminal semantics: a crashed fleet worker leaves a client
       // waiting on an authoritative turn's reply, so the sweep that times the
@@ -660,7 +646,6 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
 
       const reapedRow = reaped[0];
       const reapedCount =
-        deviceChatsReaped +
         agentTurnsReaped +
         approvalActionsReaped +
         (reapedRow?.reaped ?? 0);
@@ -788,7 +773,6 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
         {
           reaped: reapedCount,
           approvalActionsReaped,
-          deviceChatsReaped,
           agentTurnsReaped,
           agentTurnErrorsDelivered,
           retriesCreated,

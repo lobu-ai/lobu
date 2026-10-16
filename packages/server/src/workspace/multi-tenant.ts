@@ -17,10 +17,8 @@ import { isPublicReadable } from '../auth/tool-access';
 import { getDb } from '../db/client';
 import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import { getRevokedTokenStore } from '../gateway/auth/revoked-token-store';
-import { DEVICE_CHAT_RUN_SOURCE } from '../gateway/services/run-worker-access';
 import {
   CHAT_SENDER_NOT_LINKED,
-  chatSenderIdOf,
   chatTurnAccessOf,
   chatTurnReachesSenderWorkspaces,
 } from '../gateway/orchestration/chat-turn-actor';
@@ -334,12 +332,10 @@ export class MultiTenantProvider implements WorkspaceProvider {
           }
         );
       }
-      // Per-run tokens minted server-side for a spawned local CLI (Automation
-      // runs and device-placed chat turns) are the only worker tokens allowed
-      // on this lane; a deployment's ordinary worker token is not.
-      const perRunCliSource =
-        workerTokenData?.source === AUTOMATION_RUN_SOURCE ||
-        workerTokenData?.source === DEVICE_CHAT_RUN_SOURCE;
+      // Per-run tokens minted server-side for a spawned local Automation CLI
+      // are the only worker tokens allowed on this lane; a deployment's
+      // ordinary worker token is not.
+      const perRunCliSource = workerTokenData?.source === AUTOMATION_RUN_SOURCE;
       if (!gatewayMcpTokenData && !perRunCliSource) {
         return c.json(
           {
@@ -457,7 +453,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
             channelId: tokenData.channelId || undefined,
             teamId: tokenData.teamId || undefined,
             connectionId: tokenData.connectionId || undefined,
-            userId: chatSenderIdOf(tokenData) || undefined,
+            userId: tokenData.userId || undefined,
             ...(userless && tokenData.actorUserId ? { memberUserId: tokenData.actorUserId } : {}),
             source: tokenData.source || undefined,
           },

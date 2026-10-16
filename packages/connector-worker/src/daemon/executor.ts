@@ -17,7 +17,6 @@ import {
   hasDaemonBuiltinConnector,
 } from './builtins/index.js';
 import { executeAgentTurnRun } from './agent-turn.js';
-import { executeDeviceChatRun } from './device-chat.js';
 import { WorkerHttpError, type ContentItem, type ExecutorClient, type PollResponse } from './client.js';
 import { attachedInteractiveSession, attachInteractiveSession } from './interactive-session.js';
 import { log } from './log.js';
@@ -282,8 +281,6 @@ export async function executeRun(
         // unreachable for them — but if a run does slip through (deploy skew), the
         // dispatcher reports the failure rather than stomping the run.
         return await executeAutomationRun(client, job, cfg);
-      case 'chat_message':
-        return await executeDeviceChatRun(client, job, cfg);
       case 'agent_turn':
         return await executeAgentTurnRun(client, job, env, cfg);
       case 'embed_backfill':

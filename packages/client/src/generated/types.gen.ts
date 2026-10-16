@@ -7636,11 +7636,6 @@ export type PostApiV1AgentsData = {
       runId: number;
       automationId: number;
     };
-    executionTarget?: {
-      kind: "device";
-      deviceWorkerId: string;
-      agentKind: string;
-    };
     networkConfig?: {
       allowedDomains?: Array<string>;
       deniedDomains?: Array<string>;
@@ -7696,11 +7691,6 @@ export type PostApiV1AgentsResponses = {
     expiresAt: number;
     sseUrl: string;
     messagesUrl: string;
-    executionTarget?: {
-      kind: "device";
-      deviceWorkerId: string;
-      agentKind: string;
-    };
   };
 };
 

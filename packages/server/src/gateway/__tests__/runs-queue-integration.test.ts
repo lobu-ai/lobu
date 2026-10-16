@@ -401,7 +401,7 @@ describe("RunsQueue — graceful shutdown", () => {
 });
 
 describe("RunsQueue — startup recovery scan", () => {
-  test("recovers gateway claims without stealing device chat lifecycle", async () => {
+  test("recovers stale gateway claims", async () => {
     if (!queue) throw new Error("queue not started");
     // Stop the live queue first so we can manipulate rows freely.
     await queue.stop();
@@ -410,51 +410,32 @@ describe("RunsQueue — startup recovery scan", () => {
     const sql = getDb();
     // Insert a row in `claimed` state with an old claimed_at to simulate a
     // crashed prior run.
-    const inserted = await sql<{ id: number; queue_name: string }>`
+    const inserted = await sql<{ id: number }>`
       INSERT INTO runs (run_type, queue_name, action_input, status, claimed_at, claimed_by, run_at)
       VALUES
         ('chat_message', 'recovery-q', '{}'::jsonb, 'claimed',
          now() - interval '20 minutes', 'gateway-old-pid',
-         now() - interval '20 minutes'),
-        ('chat_message', 'messages', ${sql.json({
-          executionTarget: {
-            kind: "device",
-            deviceWorkerId: "00000000-0000-4000-8000-000000000001",
-            agentKind: "pi",
-          },
-        })}, 'running', now() - interval '20 minutes', 'device-old-pid',
          now() - interval '20 minutes')
-      RETURNING id, queue_name
+      RETURNING id
     `;
-    const gatewayRunId = Number(
-      inserted.find((row) => row.queue_name === "recovery-q")?.id
-    );
-    const deviceRunId = Number(
-      inserted.find((row) => row.queue_name === "messages")?.id
-    );
+    const gatewayRunId = Number(inserted[0]?.id);
 
     // New RunsQueue instance — startup scan should reset the row.
     const fresh = new RunsQueue();
     await fresh.start();
     queue = fresh;
 
-    // Scope by id: `messages` is the live production queue name, so a sibling
-    // file in this shared database can leave rows behind that a queue_name
-    // filter would pick up instead.
-    const rows = await sql<{
-      id: number;
+    // Scope by id: a sibling file in this shared database can leave rows
+    // behind that a queue_name filter would pick up instead.
+    const [gatewayChat] = await sql<{
       status: string;
       claimed_by: string | null;
     }>`
-      SELECT id, status, claimed_by
+      SELECT status, claimed_by
       FROM runs
-      WHERE id IN (${gatewayRunId}, ${deviceRunId})
+      WHERE id = ${gatewayRunId}
     `;
-    const deviceChat = rows.find((row) => Number(row.id) === deviceRunId);
-    const gatewayChat = rows.find((row) => Number(row.id) === gatewayRunId);
     expect(gatewayChat?.status).toBe("pending");
     expect(gatewayChat?.claimed_by).toBeNull();
-    expect(deviceChat?.status).toBe("running");
-    expect(deviceChat?.claimed_by).toBe("device-old-pid");
   });
 });
