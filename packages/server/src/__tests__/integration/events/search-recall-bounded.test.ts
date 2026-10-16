@@ -10,7 +10,10 @@ import { type DbClient, getDb, PROD_PG_VALUE_OPTIONS } from '../../../db/client'
 import { getMetricsText } from '../../../gateway/metrics/prometheus';
 import { search } from '../../../tools/search';
 import { searchContentByText } from '../../../utils/content-search';
-import { CANDIDATE_QUERY_TIMEOUT_MS } from '../../../utils/content-search/fts';
+import {
+  CANDIDATE_IVFFLAT_PROBES,
+  CANDIDATE_QUERY_TIMEOUT_MS,
+} from '../../../utils/content-search/fts';
 import { runBoundedRecallQuery } from '../../../utils/content-search/search-path';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase } from '../../setup/test-db';
@@ -42,15 +45,24 @@ describe('recall query budget', () => {
     }
   });
 
-  it('applies the recall timeout only inside its own transaction', async () => {
+  it('applies the recall budget only inside its own transaction', async () => {
     const sql = postgres(process.env.DATABASE_URL!, { max: 1, ...PROD_PG_VALUE_OPTIONS });
     const settingsSql = `SELECT pg_backend_pid() AS pid,
+              current_setting('ivfflat.probes') AS probes,
+              current_setting('ivfflat.iterative_scan') AS iterative_scan,
               current_setting('statement_timeout') AS statement_timeout`;
     try {
+      // Load pgvector, then use nondefault settings to prove overrides and restoration.
+      await sql.unsafe("SELECT '[1]'::vector");
+      await sql.unsafe('SET statement_timeout = 11000');
+      await sql.unsafe('SET ivfflat.probes = 7');
+      await sql.unsafe('SET ivfflat.iterative_scan = relaxed_order');
       const [before] = await sql.unsafe(settingsSql);
       const [row] = await runBoundedRecallQuery(sql as unknown as DbClient, settingsSql, []);
       expect(row).toEqual({
         pid: before.pid,
+        probes: String(CANDIDATE_IVFFLAT_PROBES),
+        iterative_scan: 'off',
         statement_timeout: `${CANDIDATE_QUERY_TIMEOUT_MS / 1000}s`,
       });
 
