@@ -428,8 +428,11 @@ export async function searchContentBySingleQuery(
   // The bounded candidate path is opt-in for recall/search_memory snippets: the
   // caller ignores exact totals/pagination and only needs a small set of highly
   // relevant rows under the agent recall timeout.
+  // A selective agent filter can make the global ANN candidate scan expensive.
+  // Keep agent recall on the exact org-scoped path, under the same timeout.
   const useCandidatePath =
     options.approximate_candidate_search === true &&
+    options.agent_id == null &&
     entityId == null &&
     options.organization_id != null &&
     !useDateFeed &&
