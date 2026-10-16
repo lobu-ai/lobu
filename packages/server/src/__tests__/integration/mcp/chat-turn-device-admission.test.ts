@@ -8,6 +8,7 @@ import { mintGatewayMcpToken, type MessagePayload } from '@lobu/core';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { mintTurnToken } from '../../../gateway/orchestration/agent-turn-producer';
+import { resolveRunDeciderUserId } from '../../../tools/admin/run-decider';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -102,6 +103,7 @@ async function executeAsChatTurn(orgSlug: string, token: string, connectionId: n
 describe('chat-turn admission to device-pinned connections', () => {
   let org: Awaited<ReturnType<typeof createTestOrganization>>;
   let connectionId: number;
+  let deviceOwnerId: string;
 
   async function runOf(result: { runId?: number }) {
     expect(result.runId).toBeDefined();
@@ -126,6 +128,7 @@ describe('chat-turn admission to device-pinned connections', () => {
     const deviceOwner = await createTestUser({ email: 'device-admission-owner@example.test' });
     const otherMember = await createTestUser({ email: 'device-admission-other@example.test' });
     await addUserToOrganization(admin.id, org.id, 'owner');
+    deviceOwnerId = deviceOwner.id;
     await addUserToOrganization(deviceOwner.id, org.id, 'member');
     await addUserToOrganization(otherMember.id, org.id, 'member');
     await createTestAgent({ organizationId: org.id, agentId: AGENT_ID, ownerUserId: admin.id });
@@ -171,10 +174,17 @@ describe('chat-turn admission to device-pinned connections', () => {
     expect(await runOf(result)).toMatchObject({ approval_status: 'pending', status: 'pending', claimed_by: null });
   });
 
-  it("holds another member's direct-message request for approval", async () => {
+  it("auto-admits another member's own direct-message request on the shared device", async () => {
     const token = await chatTurnToken(org.id, OTHER_MEMBER_PLATFORM_ID, { isDirect: true });
     const result = await executeAsChatTurn(org.slug, token, connectionId, 'synthetic-other-dm');
-    expect(await runOf(result)).toMatchObject({ approval_status: 'pending', status: 'pending', claimed_by: null });
+    expect(await runOf(result)).toMatchObject({ approval_status: 'auto', status: 'pending', claimed_by: null });
+  });
+
+  it("routes a coworker's held request to the device owner to decide", async () => {
+    const token = await chatTurnToken(org.id, COWORKER_PLATFORM_ID, { isDirect: false, senderVouched: true });
+    const result = await executeAsChatTurn(org.slug, token, connectionId, 'synthetic-owner-decides');
+    expect(await runOf(result)).toMatchObject({ approval_status: 'pending' });
+    expect(await resolveRunDeciderUserId(getTestDb(), result.runId as number, org.id)).toBe(deviceOwnerId);
   });
 
   it("auto-admits the device owner's own direct-message request", async () => {

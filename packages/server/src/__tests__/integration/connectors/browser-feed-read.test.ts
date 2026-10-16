@@ -480,14 +480,15 @@ describe('compiled browser source reads', () => {
     const pageRead = vi.spyOn(sourceFeedPage, 'readSourceFeedPage').mockRejectedValue(stop);
     const controller = new AbortController();
     const actingAutomationId = hasSession ? automationIds[1] : undefined;
+    const sourceContext = { chatAccess: 'member' as const };
     await expect(getContent({
       automation_id: automationIds[0], since: '2026-01-01', until: '2026-01-02',
     }, {} as Env, {
-      ...context(), agentId: agent.agentId, actingAutomationId, abortSignal: controller.signal,
+      ...context(), agentId: agent.agentId, actingAutomationId, sourceContext, abortSignal: controller.signal,
     })).rejects.toThrow('Stopped at source reader');
     expect(pageRead).toHaveBeenCalledWith(
       expect.objectContaining({ feed_id: feedId }), 30_000,
-      { organizationId: orgId, principal: userId, agentId: agent.agentId },
+      { organizationId: orgId, principal: userId, agentId: agent.agentId, chatAccess: 'member' },
       controller.signal, actingAutomationId,
     );
   });

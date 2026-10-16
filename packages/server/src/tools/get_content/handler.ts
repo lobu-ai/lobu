@@ -416,6 +416,7 @@ async function getContentImpl(
         userId: resolveAutomationVisibilityUserId(ctx, args.automation_id),
         agentId: ctx.agentId,
         actingAutomationId: ctx.actingAutomationId,
+        sourceContext: ctx.sourceContext,
         abortSignal: ctx.abortSignal,
         excludeWorkspaceAudit,
         claimedWindow,

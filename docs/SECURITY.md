@@ -100,13 +100,18 @@ Implications, by design:
   Devices page lists it under `update_required`. Only a connection's creator can share
   it with the workspace (`manage_connections` `update` with `visibility: 'org'`), which never
   changes where it runs; a personal-credential connection can never be widened. A run on a
-  `private` connection pinned to the creator's own device can be approved by that creator, not
-  only by an owner/admin (`runDeciderUserIdSql`); once shared, it is admin-decided again.
-- **Chat turns need approval to use another member's pinned device.** An operation on a
-  device-pinned connection is never auto-admitted from chat unless the turn is the device owner's own
-  direct message (the `member` tier acting as that user). A vouched coworker, a member writing in
-  a group conversation, or another member's direct message queues it for approval even under an
-  Auto connector policy; an explicit Block still refuses it.
+  connection pinned to a device can be approved by that device's owner, not only by an
+  owner/admin (`runDeciderUserIdSql`); for a `private` connection, only when the device owner
+  also created it.
+- **One rule decides who may use a member's pinned device** (`decideDeviceAccess`,
+  `authz/device-access.ts`), for operations and for live device feed reads alike. The device
+  owner, and a member acting as themselves (an app or MCP session, an Automation, or the `member`
+  tier: a linked member's own direct message), may use it. Operations still follow organization
+  connector policy. An `org_shared` chat turn (a vouched coworker, or a member writing in a
+  group conversation) asks the owner: an operation queues for approval even under an Auto policy,
+  and the device owner can decide it. A live feed read, which has no queued run to approve,
+  is refused with that reason.
+  A `public_visitor` or `reply_only` turn is refused. An explicit Block always refuses an operation first.
 - **Page-visit drafts follow current placement.** A Chrome device sees and activates drafts in its
   owner's personal workspace, its current home, and workspaces where it is pinned, never through a
   connection a Devices-page move invalidated.

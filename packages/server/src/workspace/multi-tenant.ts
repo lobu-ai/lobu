@@ -456,6 +456,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
             userId: tokenData.userId || undefined,
             ...(userless && tokenData.actorUserId ? { memberUserId: tokenData.actorUserId } : {}),
             source: tokenData.source || undefined,
+            ...(chatAccess ? { chatAccess } : {}),
           },
           // Admin-tools allowlist rides the per-run worker token. Carried
           // through so the execute gate lets an admin-tools turn call its

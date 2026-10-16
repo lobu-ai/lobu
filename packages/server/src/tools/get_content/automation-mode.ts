@@ -47,12 +47,13 @@ import type { ToolContext } from '../registry';
 import type { GetContentResult } from './types';
 import { parseJson, parseRecordArray, toNullableScore } from './types';
 import { stableJson } from '../../utils/insert-event';
+import { authzScopeFromToolContext } from '../../authz/scope';
 
 // ============================================
 // Content Query (inlined from automation-content-query)
 // ============================================
 
-interface ContentQueryParams extends Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal'> {
+interface ContentQueryParams extends Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal' | 'sourceContext'> {
   sources: AutomationSource[];
   /** Already-resolved source set when the caller must make one atomic routing decision. */
   normalizedSources?: NormalizedAutomationSource[];
@@ -452,9 +453,7 @@ async function queryContentData(
           window: { start: params.window_start, end: params.window_end },
           cursor: params.sourcePage?.next_cursor,
           sourceRevision: params.sourcePage?.revision,
-        }, 30_000, {
-          organizationId: params.organizationId, principal: params.userId, agentId: params.agentId,
-        }, params.abortSignal, params.actingAutomationId),
+        }, 30_000, authzScopeFromToolContext(params), params.abortSignal, params.actingAutomationId),
       })));
     for (const { source, result } of livePages) {
       results[source.name] = result.rows;
@@ -606,7 +605,7 @@ export async function handleAutomationMode(
   args: GetContentArgs,
   env: Env,
   sql: DbClient,
-  context: Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal'> & {
+  context: Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal' | 'sourceContext'> & {
     organizationId: string;
     /** Verified caller, or null when the read is a headless Automation run. */
     userId: string | null;
@@ -863,6 +862,7 @@ export async function handleAutomationMode(
     // The requested Automation selects sources, never the caller's authority.
     agentId: context.agentId,
     actingAutomationId: context.actingAutomationId,
+    sourceContext: context.sourceContext,
     abortSignal: context.abortSignal,
     entityIds: automationEntityIds,
     query:

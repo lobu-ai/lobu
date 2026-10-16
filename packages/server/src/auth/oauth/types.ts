@@ -6,6 +6,7 @@
  */
 
 import type { CaptureIdentity } from '../../gateway/routes/internal/capture-mode';
+import type { ChatTurnAccess } from '@lobu/core';
 
 // ============================================
 // Client Types (RFC 7591)
@@ -235,6 +236,7 @@ export interface AuthInfo {
     /** The linked member behind a userless chat turn: attribution only. */
     memberUserId?: string;
     source?: string;
+    chatAccess?: ChatTurnAccess;
   } | null;
   resource?: string;
   tokenType: 'access_token' | 'pat';

@@ -4,6 +4,9 @@
  * script, its server-resolved creator. A null principal sees only org-visible
  * connections. Write policy and approvals use the execution context separately.
  */
+import type { ChatTurnAccess } from '@lobu/core';
+import { chatAccessOfToolContext } from './device-access';
+
 export interface AuthzScope {
   /** The tenant. Every read is partitioned by this first. */
   organizationId: string;
@@ -15,6 +18,11 @@ export interface AuthzScope {
   agentId?: string | null;
   /** Policy snapshot the read is compiled against. Reserved for M2+/M6. */
   policyVersion?: number | null;
+  /**
+   * The chat tier of the turn making the read, or null/absent when the caller
+   * is not a chat turn. Live device reads decide on it (authz/device-access.ts).
+   */
+  chatAccess?: ChatTurnAccess | null;
 }
 
 /**
@@ -26,11 +34,13 @@ export function authzScopeFromToolContext(ctx: {
   userId: string | null;
   agentId?: string | null;
   automationReadPrincipalId?: string | null;
+  sourceContext?: { chatAccess?: ChatTurnAccess } | null;
 }): AuthzScope {
   return {
     organizationId: ctx.organizationId,
     principal: ctx.userId ?? ctx.automationReadPrincipalId ?? null,
     agentId: ctx.agentId ?? null,
+    chatAccess: chatAccessOfToolContext(ctx),
   };
 }
 

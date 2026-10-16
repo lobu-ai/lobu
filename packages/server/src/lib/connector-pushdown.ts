@@ -20,6 +20,7 @@ import {
   type ToolErrorCode,
 } from '@lobu/core';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
+import { DEVICE_ACCESS_REFUSED, DEVICE_READ_NEEDS_OWNER, decideDeviceAccess } from '../authz/device-access';
 import { resolveActingPrincipal, resolveConnectorPolicy } from '../authz/entity-policy';
 import { DEVICE_FEED_READ_ACTION_KEY } from './device-feed-read-protocol';
 import type { AuthzScope } from '../authz/scope';
@@ -455,6 +456,21 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     feed.runtime,
     hasConnectorCode
   );
+  // Compiled connectors can also drive a pinned browser. Gate before choosing
+  // the reader; synchronous source reads cannot wait for owner approval.
+  if (feed.device_worker_id !== null || metadataOnlyDeviceConnector) {
+    const access = decideDeviceAccess({
+      chatAccess: p.scope.chatAccess ?? null,
+      callerUserId: p.scope.principal,
+      deviceOwnerUserId: feed.device_owner_user_id,
+    });
+    if (access !== 'run') {
+      throw new ToolError(
+        'PERMISSION',
+        access === 'refuse' ? DEVICE_ACCESS_REFUSED : DEVICE_READ_NEEDS_OWNER
+      );
+    }
+  }
   // Preserve the existing active-only contract for ordinary source adapters.
   // A metadata-only device feed gets one exception: its canonical readiness
   // preflight may explain why reconciliation auto-paused it. It still cannot
