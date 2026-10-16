@@ -26,6 +26,7 @@ import {
 import { buildLatestClassificationsCteSql, buildThreadMetaCteSql } from './ctes';
 import { buildEntityLinkUnion, entityLinkMatchSql, fetchEntityIdentityScopes } from './entity-link';
 import {
+  CANDIDATE_IVFFLAT_PROBES,
   CANDIDATE_QUERY_TIMEOUT_MS,
   CANDIDATE_VECTOR_LIMIT,
   TSQUERY_SQL,
@@ -73,6 +74,8 @@ export async function runBoundedRecallQuery(
   try {
     return (await sql.begin(async (tx: DbClient) => {
       await tx.unsafe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
+      await tx.unsafe(`SET LOCAL ivfflat.probes = ${CANDIDATE_IVFFLAT_PROBES}`);
+      await tx.unsafe('SET LOCAL ivfflat.iterative_scan = off');
       return await tx.unsafe(querySQL, queryParams);
     })) as any[];
   } catch (error) {

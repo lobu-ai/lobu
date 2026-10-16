@@ -1,7 +1,5 @@
 /**
- * Full-text search (FTS) / tsquery helpers:
- * STOPWORDS, buildTsqueryString, NORMALIZED_QUERY_SQL, TSQUERY_SQL,
- * buildSearchDocumentExpr, CANDIDATE_VECTOR_LIMIT, CANDIDATE_QUERY_TIMEOUT_MS.
+ * Full-text search helpers and recall query budgets.
  */
 
 const STOPWORDS = [
@@ -80,3 +78,7 @@ export const CANDIDATE_VECTOR_LIMIT = 200;
 // Bound pathological candidate scans. Failures propagate to recall's existing
 // partial-coverage handling rather than masquerading as successful empty results.
 export const CANDIDATE_QUERY_TIMEOUT_MS = 6000;
+// Probe more of the global IVFFlat index because workspace filtering can
+// discard most of a single list's rows. The recall transaction disables
+// iterative scanning so selective filters cannot expand this probe budget.
+export const CANDIDATE_IVFFLAT_PROBES = 100;
