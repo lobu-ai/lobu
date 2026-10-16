@@ -56,6 +56,13 @@ function initializeMetrics() {
     "Transient DB connection drops retried, by call-site op and outcome (retried|exhausted)",
     "counter"
   );
+  // Bounded recall query failures, by SQLSTATE (57014 includes statement
+  // timeouts). search_memory reports these as partial coverage.
+  registerMetric(
+    "lobu_recall_query_failures_total",
+    "Bounded recall queries that failed, by Postgres SQLSTATE",
+    "counter"
+  );
   registerMetric(
     "lobu_worker_dispatch_failures_total",
     "Connector runs that timed out before any worker claimed them, by run type and bounded reason",

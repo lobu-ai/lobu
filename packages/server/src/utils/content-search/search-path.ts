@@ -2,8 +2,10 @@
  * Content search path: searchContentBySingleQuery.
  */
 
+import postgres from 'postgres';
 import type { Env } from '../../index';
 import { type DbClient, pgTextArray } from '../../db/client';
+import { incrementCounter } from '../../gateway/metrics/prometheus';
 import {
   buildConnectionFilter,
   buildFeedFilter,
@@ -56,6 +58,30 @@ import {
   buildProducedByAutomationClause,
 } from './visibility';
 import { getErrorMessage } from "@lobu/core";
+
+/**
+ * Run a recall query inside its own transaction with the recall budget applied
+ * via `SET LOCAL`. Database failures (including their SQLSTATE) propagate so
+ * recall can report partial coverage instead of claiming a successful empty
+ * search.
+ */
+export async function runBoundedRecallQuery(
+  sql: DbClient,
+  querySQL: string,
+  queryParams: unknown[]
+): Promise<any[]> {
+  try {
+    return (await sql.begin(async (tx: DbClient) => {
+      await tx.unsafe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
+      return await tx.unsafe(querySQL, queryParams);
+    })) as any[];
+  } catch (error) {
+    incrementCounter('lobu_recall_query_failures_total', {
+      sqlstate: error instanceof postgres.PostgresError ? error.code : 'unknown',
+    });
+    throw error;
+  }
+}
 
 export async function searchContentBySingleQuery(
   sql: DbClient,
@@ -654,13 +680,10 @@ export async function searchContentBySingleQuery(
   }
 
   let rawRows: any[];
-  if (useCandidatePath) {
-    // Preserve database failures (including their SQLSTATE) so recall can
-    // report partial coverage instead of claiming a successful empty search.
-    rawRows = (await sql.begin(async (tx: DbClient) => {
-      await tx.unsafe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
-      return await tx.unsafe(querySQL, queryParams);
-    })) as any[];
+  // Recall opted into a bounded answer. Without a query embedding it cannot use
+  // the candidate path, but it still must not outlast the candidate budget.
+  if (options.approximate_candidate_search === true) {
+    rawRows = await runBoundedRecallQuery(sql, querySQL, queryParams);
   } else {
     rawRows = (await sql.unsafe(querySQL, queryParams)) as any[];
   }
