@@ -81,3 +81,12 @@ it('also gates an unpinned native device source', async () => {
   await expect(read('org_shared')).rejects.toMatchObject({ code: 'PERMISSION' });
   expect(nativeRead).not.toHaveBeenCalled();
 });
+
+it('refuses org-shared chat even when the read principal is the device owner', async () => {
+  await expect(readSourceFeed({
+    feedId: 1, deadlineAt: Date.now() + 5000,
+    scope: { organizationId: 'synthetic-org', principal: 'synthetic-owner', chatAccess: 'org_shared' },
+  })).rejects.toMatchObject({ code: 'PERMISSION' });
+  expect(adapterRead).not.toHaveBeenCalled();
+  expect(nativeRead).not.toHaveBeenCalled();
+});

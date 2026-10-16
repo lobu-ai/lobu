@@ -459,11 +459,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   // Compiled connectors can also drive a pinned browser. Gate before choosing
   // the reader; synchronous source reads cannot wait for owner approval.
   if (feed.device_worker_id !== null || metadataOnlyDeviceConnector) {
-    const access = decideDeviceAccess({
-      chatAccess: p.scope.chatAccess ?? null,
-      callerUserId: p.scope.principal,
-      deviceOwnerUserId: feed.device_owner_user_id,
-    });
+    const access = decideDeviceAccess(p.scope.chatAccess ?? null);
     if (access !== 'run') {
       throw new ToolError(
         'PERMISSION',

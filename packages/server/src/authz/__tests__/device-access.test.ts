@@ -7,24 +7,21 @@ import type { ChatTurnAccess } from '@lobu/core';
 import { describe, expect, it } from 'vitest';
 import { chatAccessOfToolContext, decideDeviceAccess, type DeviceAccessDecision } from '../device-access.js';
 
-const OWNER = 'user-device-owner';
-const OTHER = 'user-other-member';
-
 describe('decideDeviceAccess', () => {
-  const cases: Array<[string, ChatTurnAccess | null, string | null, DeviceAccessDecision]> = [
-    ['the owner in an app or MCP session', null, OWNER, 'run'],
-    ["the owner's own direct message", 'member', OWNER, 'run'],
-    ['another member in an app or MCP session', null, OTHER, 'run'],
-    ["another member's own direct message", 'member', OTHER, 'run'],
-    ['a headless call with no user (Automation)', null, null, 'run'],
-    ['a vouched coworker or a group conversation', 'org_shared', null, 'ask_owner'],
-    ['a public visitor', 'public_visitor', null, 'refuse'],
-    ['a reply-only sender', 'reply_only', null, 'refuse'],
-    ['a reply-only token that names the owner', 'reply_only', OWNER, 'refuse'],
+  // The signed tier alone decides: the owner and any member acting as
+  // themselves arrive as a non-chat call or the `member` tier; the owner
+  // writing in a group conversation is `org_shared` like anyone else there.
+  const cases: Array<[string, ChatTurnAccess | null, DeviceAccessDecision]> = [
+    ['an app or MCP session, owner or another member', null, 'run'],
+    ['a headless Automation', null, 'run'],
+    ["a member's own direct message, owner or not", 'member', 'run'],
+    ['a vouched coworker, or anyone in a group conversation', 'org_shared', 'ask_owner'],
+    ['a public visitor', 'public_visitor', 'refuse'],
+    ['a reply-only sender', 'reply_only', 'refuse'],
   ];
 
-  it.each(cases)('%s', (_label, chatAccess, callerUserId, expected) => {
-    expect(decideDeviceAccess({ chatAccess, callerUserId, deviceOwnerUserId: OWNER })).toBe(expected);
+  it.each(cases)('%s', (_label, chatAccess, expected) => {
+    expect(decideDeviceAccess(chatAccess)).toBe(expected);
   });
 });
 

@@ -7,13 +7,17 @@
  * workspace lets members use it under organization policy; it does not let a
  * chat audience the owner never chose drive their machine unattended.
  *
- * - The device owner runs it.
- * - A member acting as themselves runs it: an app or MCP session, an
- *   Automation, or the `member` chat tier (a linked member's own direct
- *   message, whose user is the sender).
- * - An `org_shared` chat turn (a vouched coworker, or a member writing in a
- *   group conversation) asks the owner first.
+ * - The device owner, and any member acting as themselves, run it: an app or
+ *   MCP session, an Automation, or the `member` chat tier (a linked member's
+ *   own direct message, whose user is the sender).
+ * - An `org_shared` chat turn (a vouched coworker, or any member, the owner
+ *   included, writing in a group conversation) asks the owner first: its
+ *   reply is visible to the whole conversation.
  * - A `public_visitor` or `reply_only` turn is refused.
+ *
+ * The signed chat tier alone decides. It never consults the caller or owner
+ * user id: an `org_shared` turn is userless, and a read path may substitute a
+ * durable principal (an Automation's author) that must not unlock the device.
  *
  * Operations also apply organization connector policy: Block wins, and Ask
  * queues a `run` decision for approval.
@@ -23,17 +27,10 @@ import type { ChatTurnAccess } from "@lobu/core";
 
 export type DeviceAccessDecision = "run" | "ask_owner" | "refuse";
 
-export function decideDeviceAccess(args: {
-  /** The verified chat tier of the turn, or null when the caller is not a chat turn. */
-  chatAccess: ChatTurnAccess | null;
-  /** The Lobu user the call acts as, or null for a userless call. */
-  callerUserId: string | null;
-  /** `device_workers.user_id` of the pinned device. */
-  deviceOwnerUserId: string | null;
-}): DeviceAccessDecision {
-  if (args.chatAccess === "reply_only" || args.chatAccess === "public_visitor") return "refuse";
-  if (args.callerUserId && args.callerUserId === args.deviceOwnerUserId) return "run";
-  if (args.chatAccess === "org_shared") return "ask_owner";
+/** @param chatAccess the turn's verified chat tier, or null when the caller is not a chat turn. */
+export function decideDeviceAccess(chatAccess: ChatTurnAccess | null): DeviceAccessDecision {
+  if (chatAccess === "reply_only" || chatAccess === "public_visitor") return "refuse";
+  if (chatAccess === "org_shared") return "ask_owner";
   return "run";
 }
 

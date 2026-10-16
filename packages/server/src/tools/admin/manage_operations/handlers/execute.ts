@@ -723,11 +723,7 @@ export async function handleExecute(
 	// the existing approval flow, which the device owner decides.
 	const deviceAccess = connection.device_worker_id === null
 		? "run"
-		: decideDeviceAccess({
-				chatAccess: chatAccessOfToolContext(ctx),
-				callerUserId: ctx.userId,
-				deviceOwnerUserId: connection.device_owner_user_id,
-			});
+		: decideDeviceAccess(chatAccessOfToolContext(ctx));
 	if (deviceAccess === "refuse") {
 		return { error: DEVICE_ACCESS_REFUSED };
 	}
