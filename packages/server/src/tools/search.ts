@@ -1286,7 +1286,10 @@ export async function gatherLocalRecall(
     local_sources.push('events');
   } else {
     localRecallFailed = true;
-    logger.warn(`[search] local events recall failed: ${getErrorMessage(contentResult.reason)}`);
+    const pgCode = (contentResult.reason as { code?: unknown } | null)?.code;
+    logger.warn(
+      `[search] local events recall failed (pg_code=${typeof pgCode === 'string' ? pgCode : 'none'}): ${getErrorMessage(contentResult.reason)}`
+    );
   }
   if (shouldSearchConversation && conversationResult.status === 'fulfilled') {
     local_sources.push('channel_messages');
