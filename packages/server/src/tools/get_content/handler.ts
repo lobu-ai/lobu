@@ -417,6 +417,7 @@ async function getContentImpl(
         agentId: ctx.agentId,
         actingAutomationId: ctx.actingAutomationId,
         sourceContext: ctx.sourceContext,
+        tokenType: ctx.tokenType,
         abortSignal: ctx.abortSignal,
         excludeWorkspaceAudit,
         claimedWindow,

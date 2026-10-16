@@ -34,6 +34,7 @@ export function authzScopeFromToolContext(ctx: {
   userId: string | null;
   agentId?: string | null;
   automationReadPrincipalId?: string | null;
+  tokenType?: string;
   sourceContext?: { chatAccess?: ChatTurnAccess } | null;
 }): AuthzScope {
   const chatAccess = chatAccessOfToolContext(ctx);

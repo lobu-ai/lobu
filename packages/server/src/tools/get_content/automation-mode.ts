@@ -53,7 +53,7 @@ import { authzScopeFromToolContext } from '../../authz/scope';
 // Content Query (inlined from automation-content-query)
 // ============================================
 
-interface ContentQueryParams extends Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal' | 'sourceContext'> {
+interface ContentQueryParams extends Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal' | 'sourceContext'>, Partial<Pick<ToolContext, 'tokenType'>> {
   sources: AutomationSource[];
   /** Already-resolved source set when the caller must make one atomic routing decision. */
   normalizedSources?: NormalizedAutomationSource[];
@@ -605,7 +605,7 @@ export async function handleAutomationMode(
   args: GetContentArgs,
   env: Env,
   sql: DbClient,
-  context: Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal' | 'sourceContext'> & {
+  context: Pick<ToolContext, 'agentId' | 'actingAutomationId' | 'abortSignal' | 'sourceContext'> & Partial<Pick<ToolContext, 'tokenType'>> & {
     organizationId: string;
     /** Verified caller, or null when the read is a headless Automation run. */
     userId: string | null;
@@ -863,6 +863,7 @@ export async function handleAutomationMode(
     agentId: context.agentId,
     actingAutomationId: context.actingAutomationId,
     sourceContext: context.sourceContext,
+    tokenType: context.tokenType,
     abortSignal: context.abortSignal,
     entityIds: automationEntityIds,
     query:

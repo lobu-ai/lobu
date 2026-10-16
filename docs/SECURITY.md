@@ -111,7 +111,7 @@ Implications, by design:
   group conversation) asks the owner: an operation queues for approval even under an Auto policy,
   and the device owner can decide it. A live feed read, which has no queued run to approve,
   is refused with that reason.
-  A `public_visitor` or `reply_only` turn is refused. An explicit Block always refuses an operation first.
+  A `public_visitor` or `reply_only` turn, and any anonymous reader of a public workspace, is refused. An explicit Block always refuses an operation first.
 - **Page-visit drafts follow current placement.** A Chrome device sees and activates drafts in its
   owner's personal workspace, its current home, and workspaces where it is pinned, never through a
   connection a Devices-page move invalidated.

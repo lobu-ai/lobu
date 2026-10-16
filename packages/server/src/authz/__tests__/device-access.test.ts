@@ -30,6 +30,10 @@ describe('chatAccessOfToolContext', () => {
     expect(chatAccessOfToolContext({ sourceContext: { chatAccess: 'org_shared' } })).toBe('org_shared');
   });
 
+  it('treats an anonymous caller (the public-read path) as a public visitor', () => {
+    expect(chatAccessOfToolContext({ tokenType: 'anonymous', sourceContext: null })).toBe('public_visitor');
+  });
+
   it('is null for a call that is not a chat turn', () => {
     expect(chatAccessOfToolContext({ sourceContext: null })).toBeNull();
     expect(chatAccessOfToolContext({ sourceContext: {} })).toBeNull();

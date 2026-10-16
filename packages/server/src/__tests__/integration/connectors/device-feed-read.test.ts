@@ -333,6 +333,24 @@ describe('device-backed source feed read', () => {
       expect(await readRunRows()).toHaveLength(0);
     });
 
+    it('refuses an anonymous reader of a public workspace end to end, before the device', async () => {
+      const sql = getTestDb();
+      await sql`UPDATE "organization" SET visibility = 'public' WHERE id = ${orgId}`;
+      try {
+        const [org] = await sql<{ slug: string }>`SELECT slug FROM "organization" WHERE id = ${orgId}`;
+        const response = await post(`/api/${org.slug}/manage_feeds`, {
+          body: { action: 'read_feeds', reads: [{ feed_id: feedId }], timeout_ms: 2000 },
+        });
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as { results?: Array<{ ok?: boolean; error_code?: string; error?: string }> };
+        expect(body.results?.[0]).toMatchObject({ ok: false, error_code: 'PERMISSION' });
+        expect(body.results?.[0]?.error).toMatch(/cannot use a member's paired device/);
+        expect(await readRunRows()).toHaveLength(0);
+      } finally {
+        await sql`UPDATE "organization" SET visibility = 'private' WHERE id = ${orgId}`;
+      }
+    });
+
     it("lets another member's own direct message read the shared device feed", async () => {
       const reading = readSourceFeed({
         deadlineAt: Date.now() + 30_000,

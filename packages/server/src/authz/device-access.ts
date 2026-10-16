@@ -35,15 +35,19 @@ export function decideDeviceAccess(chatAccess: ChatTurnAccess | null): DeviceAcc
 }
 
 /**
- * The chat tier a tool call runs with, or null when it is not a chat turn. The
- * MCP boundary (workspace/multi-tenant.ts) sets `sourceContext.chatAccess` from
- * the signed turn token through `chatTurnAccessOf`, which already turns a chat
- * token without a tier into `reply_only`. An admin-tools turn carries no tier:
- * it acts as its verified user.
+ * The tier a tool call uses a device with, or null when the caller is a
+ * workspace principal acting as itself. The MCP boundary
+ * (workspace/multi-tenant.ts) sets `sourceContext.chatAccess` from the signed
+ * turn token through `chatTurnAccessOf`, which already turns a chat token
+ * without a tier into `reply_only`. An anonymous caller (the public-read path,
+ * which a `public_visitor` chat turn also takes) is a `public_visitor`. An
+ * admin-tools turn carries no tier: it acts as its verified user.
  */
 export function chatAccessOfToolContext(ctx: {
+  tokenType?: string;
   sourceContext?: { chatAccess?: ChatTurnAccess } | null;
 }): ChatTurnAccess | null {
+  if (ctx.tokenType === "anonymous") return "public_visitor";
   return ctx.sourceContext?.chatAccess ?? null;
 }
 
