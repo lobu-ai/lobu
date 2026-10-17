@@ -177,6 +177,10 @@ const ContentSnippetSchema = Type.Object({
   platform: Type.String(),
   occurred_at: Type.Union([Type.String(), Type.Null()]),
   similarity: Type.Optional(Type.Number()),
+  match_score: Type.Number({
+    description:
+      'Content ranking score, highest first: 0.4 x text relevance + 0.6 x vector similarity (text relevance alone when the query has no embedding). May be negative. Exact ID matches score 1; unranked listings score 0.',
+  }),
   entity_ids: Type.Array(Type.Integer()),
   workspace_slug: Type.String(),
   /** Every granted workspace through which this stable event was visible. */
@@ -721,7 +725,7 @@ export function mergeFederatedSearchResults(
     : allMatches.slice(0, entityLimit);
   const content = mergeContentProvenance(fulfilled.flatMap((result) => result.content ?? []))
     .sort((a, b) => {
-      const score = Number(b.similarity ?? 0) - Number(a.similarity ?? 0);
+      const score = b.match_score - a.match_score;
       if (score !== 0) return score;
       return String(b.occurred_at ?? '').localeCompare(String(a.occurred_at ?? ''));
     })
@@ -857,6 +861,7 @@ function toExactContentSnippet(item: ContentItem, workspaceSlug: string): Conten
       typeof item.platform === 'string' && item.platform.length > 0 ? item.platform : 'lobu',
     occurred_at: typeof item.occurred_at === 'string' ? item.occurred_at : null,
     similarity: 1,
+    match_score: 1,
     entity_ids: Array.isArray(item.entity_ids)
       ? item.entity_ids.map(Number).filter((value) => Number.isSafeInteger(value) && value > 0)
       : [],
@@ -968,6 +973,8 @@ async function fetchContentSnippets(
       platform,
       occurred_at: c.occurred_at,
       similarity: c.similarity,
+      // `combined_score` is the SQL ranking key; Postgres numeric arrives as a string.
+      match_score: Number(c.combined_score ?? 0),
       entity_ids: Array.isArray(c.entity_ids) ? c.entity_ids.map(Number) : [],
       workspace_slug: workspaceSlug,
       workspace_slugs: [workspaceSlug],
