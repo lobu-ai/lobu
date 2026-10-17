@@ -93,8 +93,8 @@ export async function claimSourceBrowser(params: {
   await saveLease(lease, scope.organizationId, sql);
   return lease;
 }
-export async function sourceBrowserLease(org: string, runId: number): Promise<SourceBrowserLease | undefined> {
-  const [row] = await getDb()`SELECT run_metadata FROM runs WHERE id = ${runId} AND organization_id = ${org}`;
+export async function sourceBrowserLease(org: string, runId: number, sql: DbClient = getDb()): Promise<SourceBrowserLease | undefined> {
+  const [row] = await sql`SELECT run_metadata FROM runs WHERE id = ${runId} AND organization_id = ${org}`;
   return row?.run_metadata?.[BROWSER_RECOVERY_KEY];
 }
 export async function saveSourceBrowserTab(org: string, runId: number, output: Record<string, unknown>, chromeConnectionId: number) {
@@ -112,11 +112,16 @@ export async function saveSourceBrowserTab(org: string, runId: number, output: R
 export async function finishSourceBrowser(org: string, runId: number, retained: boolean, cleanupAcknowledged = false): Promise<BrowserRecovery | undefined> {
   const sql = getDb();
   return sql.begin(async tx => {
-    const lease = await sourceBrowserLease(org, runId);
-    if (!lease) return undefined;
-    const [profile] = await tx`SELECT metadata FROM auth_profiles WHERE id = ${lease.binding.auth_profile_id}
+    const initial = await sourceBrowserLease(org, runId, tx);
+    if (!initial) return undefined;
+    // Match claimSourceBrowser's profile-before-run lock order. A dispatch may
+    // save its exact tab while we wait, so reload the lease under the run lock.
+    const [profile] = await tx`SELECT metadata FROM auth_profiles WHERE id = ${initial.binding.auth_profile_id}
       AND organization_id = ${org} FOR UPDATE`;
     if (profile?.metadata?.[BROWSER_RECOVERY_KEY]?.run_id !== runId) throw recoveryUnavailable('Browser recovery ownership changed.');
+    const [row] = await tx`SELECT run_metadata FROM runs WHERE id = ${runId} AND organization_id = ${org} FOR UPDATE`;
+    const lease = row?.run_metadata?.[BROWSER_RECOVERY_KEY] as SourceBrowserLease | undefined;
+    if (!lease || lease.state !== 'reading' || lease.binding.auth_profile_id !== initial.binding.auth_profile_id) throw recoveryUnavailable('Browser recovery lease changed.');
     const ready = retained && !!lease.owner.flow_id && !lease.resumed && !!lease.tab && !!lease.chrome_connection_id;
     const hold = ready || (!!lease.tab && !cleanupAcknowledged);
     const expires_at = hold ? new Date(Date.now() + TTL_MS).toISOString() : lease.expires_at;

@@ -33,6 +33,8 @@ export function createSourceReadBridge(
   let settled = false;
   let tabClosed = false;
   let leased = false;
+  const workController = new AbortController();
+  const workSignal = AbortSignal.any([signal, workController.signal]);
   const dispatches = new Set<Promise<unknown>>();
   const createParent = async (retainOnInterruption = false): Promise<number> => {
     const actor = await resolveActingPrincipal(sql, {
@@ -70,19 +72,20 @@ export function createSourceReadBridge(
       if (p.recoveryId) await (parent ??= createParent());
     },
     onChromeDispatch(actionKey: string, actionInput: Record<string, unknown>) {
+      const cleanup = actionKey === 'network_intercept_stop' || actionKey === 'close_tab';
+      const dispatchSignal = cleanup ? signal : workSignal;
       const pending = (async () => {
-        if (signal.aborted) throw sourceReadDeadlineError(p.feedId);
+        if (dispatchSignal.aborted) throw sourceReadDeadlineError(p.feedId);
         const parentRunId = await (parent ??= createParent(actionKey === 'navigate' && actionInput.new_tab === true && actionInput.retain_on_interruption === true));
-        if (signal.aborted) throw sourceReadDeadlineError(p.feedId);
+        if (dispatchSignal.aborted) throw sourceReadDeadlineError(p.feedId);
         // A leased tab is closed or retained by settle(); an unleased scratch tab
         // still closes through the connector's own cleanup.
         if (interruption && actionKey === 'close_tab' && leased) return { closed: false, cleanup_pending: true };
-        const cleanup = actionKey === 'network_intercept_stop' || actionKey === 'close_tab';
         if (interruption && !cleanup) throw interruption;
         const result = await dispatchChromeActionToExtension({
           organizationId: p.scope.organizationId, actionKey, actionInput: Object.fromEntries(Object.entries(actionInput).filter(([key]) => key !== 'retain_on_interruption')), parentRunId,
           visibilityUserId: p.scope.principal,
-          abortSignal: signal,
+          abortSignal: dispatchSignal,
           skipAccountProbe: !!interruption && cleanup,
           verifySourceAccount: actionKey === 'close_tab',
         });
@@ -107,6 +110,9 @@ export function createSourceReadBridge(
     async settle(status: 'completed' | 'failed' | 'timeout'): Promise<void> {
       if (settled) return;
       settled = true;
+      // A crashed isolate can leave an unawaited dispatch. Cancel ordinary work
+      // before joining it, while keeping capture/tab cleanup within its budget.
+      workController.abort();
       await Promise.allSettled(dispatches);
       if (parent) {
         const runId = await parent.catch(() => undefined);

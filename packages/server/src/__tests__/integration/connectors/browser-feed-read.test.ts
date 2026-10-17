@@ -1,6 +1,7 @@
 import { handleExecute } from '../../../tools/admin/manage_operations/handlers/execute';
 import { deriveBrowserActionContext } from '../../../worker-api/browser-action-context';
-import { authorizeRecoveryAction } from '../../../lib/browser-recovery';
+import { authorizeRecoveryAction, claimSourceBrowser, finishSourceBrowser, saveSourceBrowserTab } from '../../../lib/browser-recovery';
+import { createSourceReadBridge } from '../../../lib/source-read-bridge';
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../../../index';
@@ -529,6 +530,26 @@ describe('compiled browser source reads', () => {
       pageRead.mockRestore();
       await sql`DELETE FROM runs WHERE automation_id = ${automation.id}`;
       await sql`DELETE FROM automations WHERE id = ${automation.id}`;
+    }
+  });
+
+  it('settles a failed source promptly while an orphaned browser dispatch is pending', async () => {
+    const controller = new AbortController();
+    const bridge = createSourceReadBridge({ id: feedId, connection_id: connectionId, connector_key: SOURCE_KEY,
+      feed_key: 'items', pinned_version: null, definition_version: VERSION, selected_artifact_hash: compiled.compiledCodeHash },
+    { scope: { organizationId: orgId, principal: userId }, feedId, deadlineAt: Date.now() + 5000 }, controller.signal);
+    const dispatch = bridge.onChromeDispatch('evaluate', { expression: 'private query' }).catch(() => undefined);
+    await waitForChild();
+    let requiredAbort = false;
+    const watchdog = setTimeout(() => { requiredAbort = true; controller.abort(); }, 2000);
+    try {
+      await bridge.settle('failed');
+      expect(requiredAbort).toBe(false);
+      await expectScrubbed();
+    } finally {
+      clearTimeout(watchdog);
+      controller.abort();
+      await dispatch;
     }
   });
 
@@ -1068,6 +1089,40 @@ describe('compiled browser source reads', () => {
     await reading;
     return jobs;
   }
+  it('finishes from the latest tab lease after waiting for the profile lock', async () => {
+    const profile = await recoverySetup();
+    const sql = getTestDb();
+    const runId = await sql.begin(async tx => {
+      const run = await createConnectorOperationRun({ organizationId: orgId, connectionId, connectorKey: SOURCE_KEY,
+        operationKey: 'inspect', operationInput: {}, approvalMode: 'inline', policyPrincipalKind: 'user', policyPrincipalId: userId, createdByUserId: userId, db: tx });
+      await claimSourceBrowser({ runId: run.runId, connectionId, version: VERSION, requestHash: 'synthetic-request',
+        scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(), deadlineAt: Date.now() + 5000 }, tx);
+      await tx`UPDATE runs SET status = 'running' WHERE id = ${run.runId}`;
+      return run.runId;
+    });
+    let unlock!: () => void;
+    let locked!: (pid: number) => void;
+    const acquired = new Promise<number>(resolve => { locked = resolve; });
+    const release = new Promise<void>(resolve => { unlock = resolve; });
+    const holder = sql.begin(async tx => {
+      await tx`SELECT id FROM auth_profiles WHERE id = ${profile.id} FOR UPDATE`;
+      locked(Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid));
+      await release;
+    });
+    const pid = await acquired;
+    const finishing = finishSourceBrowser(orgId, runId, true, true);
+    try {
+      await expect.poll(async () => (await sql`SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))
+      ) AS waiting`)[0].waiting).toBe(true);
+      const [chrome] = await sql`SELECT id FROM connections WHERE organization_id = ${orgId} AND connector_key = 'chrome'`;
+      await saveSourceBrowserTab(orgId, runId, { browser_tab: { tab_id: 77, target_id: 'synthetic-late-target', window_id: 3 } }, Number(chrome.id));
+    } finally {
+      unlock();
+      await holder;
+    }
+    expect(await finishing).toMatchObject({ tab_id: 77, target_id: 'synthetic-late-target', window_id: 3 });
+  });
   it('preserves structured navigation failure during the account probe and closes its exact created target', async () => {
     await recoverySetup(); const reading = recoveryRead(); const jobs = await serveRecovery(reading, { navigationFails: true });
     const failure = (await reading).results[0];

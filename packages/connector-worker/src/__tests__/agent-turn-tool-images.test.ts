@@ -11,7 +11,7 @@ afterEach(() => { globalThis.fetch = originalFetch; });
 
 // Uses the real session and provider serializer; only the network is synthetic.
 // The canned model response proves transport, NOT visual understanding.
-test.each(['image', 'resource', 'text-only-model', 'failed-tool', 'empty'])('%s delivers pixels or an explicit failure to the next provider request', async (kind) => {
+test.each(['image', 'resource', 'text-only-model', 'failed-tool', 'failed-content', 'empty'])('%s delivers pixels or an explicit failure to the next provider request', async (kind) => {
   const data = syntheticImage().bytes.toString('base64');
   const events: AgentTurnEvent[] = [];
   const modelRequests: unknown[] = [];
@@ -21,7 +21,8 @@ test.each(['image', 'resource', 'text-only-model', 'failed-tool', 'empty'])('%s 
       const image = kind === 'resource'
         ? { type: 'resource', resource: { uri: 'lobu://run/42/attachment/0', mimeType: 'image/png', blob: data } }
         : { type: 'image', mimeType: 'image/png', data };
-      return Response.json({ content: [{ type: 'text', text: 'Synthetic observation.' }, image], ...(kind === 'failed-tool' ? { isError: true, error: 'Synthetic observation failed.' } : {}) });
+      return Response.json({ content: [{ type: 'text', text: kind === 'failed-content' ? 'Synthetic observation failed.' : 'Synthetic observation.' }, image],
+        ...(kind === 'failed-tool' ? { isError: true, error: 'Synthetic observation failed.' } : kind === 'failed-content' ? { isError: true } : {}) });
     }
     expect(String(url)).toBe('https://provider.example.test/v1/chat/completions');
     modelRequests.push(JSON.parse(String(init?.body)));
@@ -41,9 +42,10 @@ test.each(['image', 'resource', 'text-only-model', 'failed-tool', 'empty'])('%s 
   if (kind === 'empty') {
     expect(JSON.stringify(modelRequests[1])).not.toContain(data);
     expect(JSON.stringify(modelRequests[1])).toContain('observe completed.');
-  } else if (kind === 'text-only-model' || kind === 'failed-tool') {
+  } else if (kind === 'text-only-model' || kind === 'failed-tool' || kind === 'failed-content') {
     expect(JSON.stringify(modelRequests[1])).not.toContain(data);
     expect(JSON.stringify(modelRequests[1])).toContain(kind === 'text-only-model' ? 'does not declare image input support' : 'Synthetic observation failed');
+    if (kind !== 'text-only-model') expect(JSON.stringify(modelRequests[1])).not.toContain('does not declare image input support');
   } else {
     expect(JSON.stringify(modelRequests[1])).toContain(`data:image/png;base64,${data}`);
   }

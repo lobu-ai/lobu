@@ -118,7 +118,8 @@ async function callMcpTool(
   // Ordinary agent tools render this same result below; no second transport.
   return {
     ...reply,
-    ...mcpToolResult(reply.content, reply.error || '', supportsImages && reply.isError !== true, imageBudget),
+    ...mcpToolResult(reply.isError === true ? reply.content?.filter(part => part?.type === 'text') : reply.content,
+      reply.error || '', supportsImages, imageBudget),
   };
 }
 
