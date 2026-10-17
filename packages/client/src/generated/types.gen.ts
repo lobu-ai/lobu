@@ -3780,6 +3780,10 @@ export type ManageFeedsData = {
          */
         reads: Array<{
           /**
+           * Consume a recovery handoff once for the identical source request, on its retained tab. The expected account is verified again.
+           */
+          recovery_id?: string;
+          /**
            * Feed ID to query at its source.
            */
           feed_id: number;
@@ -3980,6 +3984,18 @@ export type ManageFeedsResponses = {
           error?: string;
           error_code?: string;
           retryable?: boolean;
+          interruption?: {
+            reason: string;
+            recovery?: {
+              recovery_id: string;
+              expires_at: string;
+              tab_id: number;
+              target_id: string;
+              window_id: number;
+              device_worker_id: string;
+              chrome_connection_id: number;
+            };
+          };
         }>;
         failures: number;
         timeout_ms: number;
