@@ -98,6 +98,7 @@ export function createSourceReadBridge(
             requestHash: sourceRecoveryHash({
               feedId: feed.id,
               revision: params.sourceRevision,
+              artifact: feed.selected_artifact_hash,
               query: params.query,
               cursor: params.cursor,
               limit: params.limit,
@@ -199,6 +200,9 @@ export function createSourceReadBridge(
             abortSignal: signal,
           });
           if (cleanup.interruption) {
+            // A failed final account probe revokes source authority. Leave the
+            // exact owned target to extension expiry; do not bypass that veto
+            // with another close action. Keep the fence until its bounded TTL.
             interruption = new BrowserInterruptionError(
               cleanup.interruption.reason,
               cleanup.interruption.message,

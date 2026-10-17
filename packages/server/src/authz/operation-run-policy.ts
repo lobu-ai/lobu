@@ -78,27 +78,28 @@ async function isSourceReadFeedStillReadable(sql: DbClient, organizationId: stri
   return feeds.length > 0;
 }
 
+// Current source visibility and policy for a source-read run's stored requester.
+async function resolveSourceReadAccess(sql: DbClient, organizationId: string, run: PolicyRun): Promise<ConnectorPolicyResult> {
+  const actor = await resolveStoredActingPrincipal(sql, organizationId, run.policy_principal_kind, run.policy_principal_id);
+  if (!actor.ownerResolved) return unavailable();
+  if (run.run_metadata?.[SOURCE_FEED_SUBSCRIPTION_METADATA_KEY] === true) {
+    const subscriptions = run.feed_id == null ? [] : await sourceFeedSubscriptions(sql, organizationId, Number(run.feed_id), Number(run.automation_id));
+    if (subscriptions[0]?.principal !== run.created_by_user_id) return unavailable();
+  }
+  if (actor.kind === 'automation') {
+    const visibilityUserId = await resolveAutomationConnectionVisibilityUserId({ organizationId, userId: null, actingAutomationId: run.automation_id }, sql);
+    if (visibilityUserId !== run.created_by_user_id || !visibilityUserId) return unavailable();
+    const policy = await resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), actor,
+      operation: { connector_key: run.connector_key ?? '', operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
+    // Source reads require current Auto authority and have no approval flow.
+    // Return a veto so browser implementation steps cannot inherit an Ask.
+    if (policy.effect !== 'auto') return { ...policy, effect: 'deny' };
+  }
+  return await isSourceReadFeedStillReadable(sql, organizationId, run)
+    ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();
+}
 // Recovery checks source visibility and current policy without reviving the old
 // timed run or inheriting its authority for a new Chrome operation.
-async function resolveSourceReadAccess(sql: DbClient, organizationId: string, run: PolicyRun): Promise<ConnectorPolicyResult> {
-    const actor = await resolveStoredActingPrincipal(sql, organizationId, run.policy_principal_kind, run.policy_principal_id);
-    if (!actor.ownerResolved) return unavailable();
-    if (run.run_metadata?.[SOURCE_FEED_SUBSCRIPTION_METADATA_KEY] === true) {
-      const subscriptions = run.feed_id == null ? [] : await sourceFeedSubscriptions(sql, organizationId, Number(run.feed_id), Number(run.automation_id));
-      if (subscriptions[0]?.principal !== run.created_by_user_id) return unavailable();
-    }
-    if (actor.kind === 'automation') {
-      const visibilityUserId = await resolveAutomationConnectionVisibilityUserId({ organizationId: organizationId, userId: null, actingAutomationId: run.automation_id }, sql);
-      if (visibilityUserId !== run.created_by_user_id || !visibilityUserId) return unavailable();
-      const policy = await resolveConnectorPolicy({ organizationId: organizationId, connectionId: Number(run.connection_id), actor,
-        operation: { connector_key: run.connector_key ?? '', operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
-      // Source reads require current Auto authority and have no approval flow.
-      // Return a veto so browser implementation steps cannot inherit an Ask.
-      if (policy.effect !== 'auto') return { ...policy, effect: 'deny' };
-    }
-    return await isSourceReadFeedStillReadable(sql, organizationId, run)
-      ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();
-}
 export async function sourceReadRecoveryAllowed(organizationId: string, runId: number): Promise<boolean> {
   const sql = getDb();
   const run = await loadPolicyRun(sql, organizationId, runId);

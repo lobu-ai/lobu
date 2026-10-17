@@ -663,6 +663,7 @@ describe("typed browser interruption transport", () => {
 	test("a selector failure inspects the owned page before classifying recovery", async () => {
 		const b = browser((action, input) => {
 			if (action === "navigate") return { tab_id: 77 };
+			if (action === "network_intercept_start") return { session_id: "synthetic-session" };
 			if (action === "wait_for_selector") throw new Error("Synthetic selector timeout");
 			if (action === "evaluate") {
 				expect(input.expression).toContain('"read_failure"');

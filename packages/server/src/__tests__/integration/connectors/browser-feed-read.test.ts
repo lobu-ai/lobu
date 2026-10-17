@@ -34,6 +34,7 @@ import { post } from '../../setup/test-helpers';
 import * as sourceListeners from '../../../runs/source-feed-listener';
 import * as sourceNotifications from '../../../runs/feed-notifications';
 import * as cloudCredentials from '../../../connect/cloud-credential';
+import * as connectorCode from '../../../utils/ensure-connector-installed';
 import { sourceFeedScopeKey } from '../../../runs/source-feed-subscriptions';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 
@@ -1300,6 +1301,24 @@ describe('compiled browser source reads', () => {
     const resumed = read({ order: 'desc', column: 'id' }, (await interrupted).results[0].interruption.recovery.recovery_id);
     await serveRecovery(resumed);
     expect((await resumed).results[0]).toMatchObject({ ok: true, rows: ROWS });
+  });
+  it('refuses recovery when resolved connector bytes change under the same catalog version', async () => {
+    await recoverySetup();
+    const interrupted = recoveryRead();
+    await serveRecovery(interrupted, { challenge: 'late' });
+    const id = (await interrupted).results[0].interruption.recovery.recovery_id;
+    // A cloud image can replace bundled bytes before catalog metadata refreshes.
+    const resolver = vi.spyOn(connectorCode, 'resolveConnectorCodeForKey')
+      .mockResolvedValue(`${compiled.compiledCode}\n/* synthetic image revision */`);
+    const changed = recoveryRead(id);
+    const jobs = await serveRecovery(changed);
+    expect(resolver).toHaveBeenCalledWith(SOURCE_KEY, orgId, VERSION);
+    expect((await changed).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    expect(jobs).toHaveLength(0);
+    resolver.mockRestore();
+    const unchanged = recoveryRead(id);
+    await serveRecovery(unchanged);
+    expect((await unchanged).results[0]).toMatchObject({ ok: true, rows: ROWS });
   });
   it('records final account verification failure when the host cleans up the source tab', async () => {
     await recoverySetup();

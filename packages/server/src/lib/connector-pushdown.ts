@@ -34,6 +34,7 @@ import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-c
 import { isMetadataOnlyDeviceConnector, readDeviceFeed } from './device-feed-read';
 import { readSourceFeedFromAdapter } from './source-feed-adapters';
 import { createSourceReadBridge, sourceReadDeadlineError } from './source-read-bridge';
+import { computeCodeHash } from '../utils/compiler-core';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
 
 const logger = createLogger('connector-pushdown');
@@ -572,7 +573,9 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   const onAbort = () => controller.abort();
   p.signal?.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(onAbort, timeoutMs);
-  const browser = createSourceReadBridge(feed, {
+  // Bundled cloud code can change before its catalog version is refreshed.
+  // Bind the read/recovery to the exact bytes passed to the executor below.
+  const browser = createSourceReadBridge({ ...feed, selected_artifact_hash: computeCodeHash(compiledCode) }, {
     ...p, sourceRevision,
     sourceSubscriptionScopeKey: sourceSubscription
       ? sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version) : undefined,

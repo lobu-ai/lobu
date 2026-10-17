@@ -5,6 +5,7 @@ import { enqueueTasksInTransaction } from '../scheduled/task-scheduler';
 import { SOURCE_FEED_LISTENER_TASK } from '../scheduled/task-definitions';
 import { dbEgressConfig } from '../utils/cloud-mode';
 import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed';
+import { computeCodeHash } from '../utils/compiler-core';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
 import { feedBackoff, feedRetryAtSql } from '../connectors/feed-backoff';
 import { connectionBrowserGrant } from '../connectors/browser-resource';
@@ -115,17 +116,18 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
     const [feed] = await sql`
       SELECT f.id, f.connection_id, f.feed_key, f.config, f.checkpoint, f.pinned_version,
         c.connector_key, c.config AS connection_config, c.auth_profile_id, c.app_auth_profile_id,
-        d.version AS definition_version,
-        (SELECT cv.compiled_code_hash FROM connector_versions cv
-         WHERE cv.connector_key = c.connector_key AND cv.version = COALESCE(f.pinned_version, d.version)
-           AND (cv.organization_id = c.organization_id OR cv.organization_id IS NULL)
-         ORDER BY cv.organization_id NULLS LAST LIMIT 1) AS selected_artifact_hash
+        d.version AS definition_version
       FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
       JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
       WHERE f.id = ${task.feedId} AND f.organization_id = ${task.organizationId}
     `;
     if (!feed) return;
 
+    const compiledCode = await resolveConnectorCodeForKey(
+      feed.connector_key,
+      task.organizationId,
+      feed.pinned_version ?? feed.definition_version,
+    );
     browser = createSourceReadBridge(
       {
         id: Number(feed.id),
@@ -134,7 +136,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         connector_key: String(feed.connector_key),
         pinned_version: feed.pinned_version,
         definition_version: feed.definition_version,
-        selected_artifact_hash: feed.selected_artifact_hash,
+        selected_artifact_hash: computeCodeHash(compiledCode),
       },
       {
         scope: {
@@ -158,11 +160,6 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb
       RETURNING consecutive_failures`;
     if (!started) return;
-    const compiledCode = await resolveConnectorCodeForKey(
-      feed.connector_key,
-      task.organizationId,
-      feed.pinned_version ?? feed.definition_version,
-    );
     const auth = await resolveExecutionAuth({
       organizationId: task.organizationId,
       connectionId: Number(feed.connection_id),

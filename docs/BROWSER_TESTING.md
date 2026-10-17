@@ -156,8 +156,9 @@ can include an expiring recovery descriptor only after old capture cleanup is
 acknowledged. Retention requires a stable caller conversation or Automation run
 and an adapter-owned scratch tab requesting `retain_on_interruption: true` on
 its initial `navigate` step. Persistent warm-tab readers keep using their existing
-tabs and timeout classification. Login, account mismatch, loading failure, timeout, unsupported
-extension versions, and uncertain cleanup do not grant recovery authority.
+tabs and timeout classification. Login, account mismatch, loading failure,
+timeout, unsupported extension versions, and uncertain cleanup do not grant
+recovery authority.
 
 For recovery explicitly permitted by the calling agent's instructions:
 
@@ -197,6 +198,6 @@ not immediately admit work into a tab whose cleanup is uncertain.
 
 An Automation whose instructions stop on verification or login keeps stopping;
 this transport opts no Automation into interactive recovery and never changes
-its instructions or read budget. Use local synthetic browser
-fixtures and isolated database tests before any separately authorized runtime
-trial. Synthetic transport success does not prove live verification success.
+its instructions or read budget. Use local synthetic browser fixtures and
+isolated database tests before any separately authorized runtime trial.
+Synthetic transport success does not prove live verification success.
