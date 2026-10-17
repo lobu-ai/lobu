@@ -153,12 +153,12 @@ Gotchas:
 A failed `feeds.readMany` entry may return `error_code: "BROWSER_INTERRUPTED"`,
 `retryable: false`, and `interruption: { reason, recovery? }`. A visible challenge
 can include an expiring recovery descriptor only after old capture cleanup is
-acknowledged. Retention requires a stable caller conversation or Automation run
-and an adapter-owned scratch tab requesting `retain_on_interruption: true` on
-its initial `navigate` step. Persistent warm-tab readers keep using their existing
-tabs and timeout classification. Login, account mismatch, loading failure,
-timeout, unsupported extension versions, and uncertain cleanup do not grant
-recovery authority.
+acknowledged. Retention requires a stable caller flow (a conversation, MCP
+activity, or Automation run) and an adapter-owned scratch tab requesting
+`retain_on_interruption: true` on its initial `navigate` step. Persistent
+warm-tab readers keep using their existing tabs and timeout classification.
+Login, account mismatch, loading failure, timeout, unsupported extension versions,
+and uncertain cleanup do not grant recovery authority.
 
 For recovery explicitly permitted by the calling agent's instructions:
 

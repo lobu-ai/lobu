@@ -1302,6 +1302,21 @@ describe('compiled browser source reads', () => {
     await serveRecovery(resumed);
     expect((await resumed).results[0]).toMatchObject({ ok: true, rows: ROWS });
   });
+  it('rejects malformed recovery IDs without dispatching or consuming the valid recovery', async () => {
+    await recoverySetup();
+    const interrupted = recoveryRead();
+    await serveRecovery(interrupted, { challenge: 'late' });
+    const id = (await interrupted).results[0].interruption.recovery.recovery_id;
+    for (const invalid of ['missing-delimiter', '0.invalid', 'not-a-number.invalid',
+      '9007199254740992.invalid', `0${id}`, ` ${id}`, `${id}.extra`, id.split('.')[0]]) {
+      const reading = recoveryRead(invalid);
+      expect(await serveRecovery(reading)).toHaveLength(0);
+      expect((await reading).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    }
+    const resumed = recoveryRead(id);
+    await serveRecovery(resumed);
+    expect((await resumed).results[0]).toMatchObject({ ok: true, rows: ROWS });
+  });
   it('refuses recovery when resolved connector bytes change under the same catalog version', async () => {
     await recoverySetup();
     const interrupted = recoveryRead();

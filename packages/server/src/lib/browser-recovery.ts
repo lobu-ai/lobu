@@ -60,11 +60,14 @@ function matchesBrowserResource(
       JSON.stringify([...resource.requirement.origins].sort())
   );
 }
+// The full ID is compared exactly against the stored lease, so only the run
+// prefix needs validating here.
 function runIdFromRecovery(id: string): number {
-  const match = /^([1-9][0-9]*)\.([0-9a-f-]{36})$/.exec(id);
-  if (!match || !Number.isSafeInteger(Number(match[1])))
+  const dot = id.indexOf(".");
+  const runId = Number(id.slice(0, dot));
+  if (dot < 1 || !Number.isSafeInteger(runId) || runId < 1)
     throw recoveryUnavailable("Invalid browser recovery ID.");
-  return Number(match[1]);
+  return runId;
 }
 function assertRecoveryOwner(
   lease: SourceBrowserLease,
