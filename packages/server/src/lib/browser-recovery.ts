@@ -56,12 +56,13 @@ function matchesBrowserResource(
   resource: BrowserResource,
 ): boolean {
   const binding = browserBindingSnapshot(resource);
+  const origins = [...resource.requirement.origins].sort();
   return (
     lease.binding.device_worker_id === binding.device_worker_id &&
     lease.binding.auth_profile_id === binding.auth_profile_id &&
     lease.binding.account_id === binding.account_id &&
-    JSON.stringify(lease.origins) ===
-      JSON.stringify([...resource.requirement.origins].sort())
+    lease.origins.length === origins.length &&
+    lease.origins.every((origin, index) => origin === origins[index])
   );
 }
 // The full ID is compared exactly against the stored lease, so only the run

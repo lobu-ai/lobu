@@ -262,13 +262,19 @@ export function classifyToolError(signal: ToolErrorSignal): ToolErrorCode {
 }
 
 /** Produced at the connector's page boundary, never inferred from error prose. */
+const PAGE_INTERRUPTION_REASON_VALUES = [
+  "challenge_required",
+  "login_required",
+  "account_mismatch",
+  "loading_failure",
+] as const;
 export type BrowserInterruptionReason =
-  | "challenge_required"
-  | "login_required"
-  | "account_mismatch"
-  | "loading_failure"
+  | (typeof PAGE_INTERRUPTION_REASON_VALUES)[number]
   | "timeout"
   | "recovery_unavailable";
+const PAGE_INTERRUPTION_REASONS = new Set<string>(
+  PAGE_INTERRUPTION_REASON_VALUES
+);
 export interface BrowserRecovery {
   recovery_id: string;
   expires_at: string;
@@ -304,12 +310,8 @@ export function browserPageInterruption(
   )?.__lobu_browser_interruption;
   if (
     !marker ||
-    ![
-      "challenge_required",
-      "login_required",
-      "account_mismatch",
-      "loading_failure",
-    ].includes(String(marker.reason)) ||
+    typeof marker.reason !== "string" ||
+    !PAGE_INTERRUPTION_REASONS.has(marker.reason) ||
     typeof marker.message !== "string"
   )
     return undefined;
