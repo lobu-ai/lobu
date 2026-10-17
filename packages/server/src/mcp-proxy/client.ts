@@ -676,22 +676,52 @@ async function fetchJsonObject(url: string): Promise<Record<string, unknown> | n
     FETCH_TIMEOUT_INIT_MS
   );
   if (!response.ok) return null;
-  const value = JSON.parse(new TextDecoder().decode((await readResponseBody(response)).bytes)) as unknown;
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode((await readResponseBody(response)).bytes));
+  } catch {
+    // A catch-all route that answers a well-known path with HTML is absent
+    // metadata, not a malformed document.
+    return null;
+  }
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+/**
+ * RFC 9728 well-known locations for a server that sent no `resource_metadata`
+ * challenge, in MCP authorization-spec order: the path-specific document
+ * first, then the origin root.
+ */
+function protectedResourceMetadataUrls(upstreamUrl: string): string[] {
+  const upstream = new URL(upstreamUrl);
+  const path = upstream.pathname === '/' ? '' : upstream.pathname;
+  const root = `${upstream.origin}/.well-known/oauth-protected-resource`;
+  return path || upstream.search ? [`${root}${path}${upstream.search}`, root] : [root];
 }
 
 async function discoverMcpOAuthMetadata(
   upstreamUrl: string,
   authenticateHeader: string | null
 ): Promise<McpOAuthMetadata | null> {
-  const resourceMetadataUrl = readResourceMetadataUrl(authenticateHeader);
-  if (!resourceMetadataUrl) return null;
-
-  const resourceMetadata = await fetchJsonObject(resourceMetadataUrl);
-  if (!resourceMetadata) {
-    throw new Error(`MCP OAuth resource metadata was unavailable: ${resourceMetadataUrl}`);
+  const challengedMetadataUrl = readResourceMetadataUrl(authenticateHeader);
+  let resourceMetadataUrl: string | null = null;
+  let resourceMetadata: Record<string, unknown> | null = null;
+  for (const candidateUrl of challengedMetadataUrl
+    ? [challengedMetadataUrl]
+    : protectedResourceMetadataUrls(upstreamUrl)) {
+    resourceMetadata = await fetchJsonObject(candidateUrl);
+    if (resourceMetadata) {
+      resourceMetadataUrl = candidateUrl;
+      break;
+    }
+  }
+  if (!resourceMetadata || !resourceMetadataUrl) {
+    if (challengedMetadataUrl) {
+      throw new Error(`MCP OAuth resource metadata was unavailable: ${challengedMetadataUrl}`);
+    }
+    return null;
   }
 
   const resource =
@@ -883,7 +913,10 @@ export async function probeMcpServer(upstreamUrl: string): Promise<{
   serverInfo: { name: string; version: string };
   instructions?: string;
   tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>;
+  /** OAuth the server requires (401 challenge) or advertises beside anonymous access. */
   oauth?: McpOAuthMetadata;
+  /** Initialize succeeded without credentials, so OAuth (if any) is optional. */
+  anonymousAccess: boolean;
 }> {
   assertSafeUrl(upstreamUrl);
   let mcpSessionId: string | null = null;
@@ -948,6 +981,7 @@ export async function probeMcpServer(upstreamUrl: string): Promise<{
         : { instructions: 'OAuth-protected remote MCP server.' }),
       tools: [],
       oauth: error.metadata,
+      anonymousAccess: false,
     };
   }
 
@@ -975,7 +1009,7 @@ export async function probeMcpServer(upstreamUrl: string): Promise<{
 
   const capabilities = initResponse.result?.capabilities ?? {};
   if (!Object.hasOwn(capabilities, 'tools')) {
-    return { serverInfo, instructions, tools: [] };
+    return { serverInfo, instructions, tools: [], ...(await discoverAdvertisedOAuth(upstreamUrl)) };
   }
 
   // An advertised tools capability makes tools/list mandatory.
@@ -998,5 +1032,33 @@ export async function probeMcpServer(upstreamUrl: string): Promise<{
     inputSchema?: Record<string, unknown>;
   }>;
 
-  return { serverInfo, instructions, tools: typedTools };
+  return {
+    serverInfo,
+    instructions,
+    tools: typedTools,
+    ...(await discoverAdvertisedOAuth(upstreamUrl)),
+  };
+}
+
+/**
+ * A server that answered initialize anonymously may still publish RFC 9728
+ * protected-resource metadata, offering signed-in access (an account's quota or
+ * extra tools) beside its anonymous tier. Discovery is best-effort here: the
+ * anonymous install is already usable, so unreachable or invalid metadata only
+ * means no sign-in is offered.
+ */
+async function discoverAdvertisedOAuth(
+  upstreamUrl: string
+): Promise<{ oauth?: McpOAuthMetadata; anonymousAccess: true }> {
+  try {
+    const oauth = await discoverMcpOAuthMetadata(upstreamUrl, null);
+    if (oauth) selectMcpOAuthClientAuthMethod(oauth);
+    return oauth ? { oauth, anonymousAccess: true } : { anonymousAccess: true };
+  } catch (error) {
+    logger.warn(
+      { upstream_url: upstreamUrl, error: errorMessage(error) },
+      'Ignoring invalid OAuth metadata advertised by an anonymous MCP server'
+    );
+    return { anonymousAccess: true };
+  }
 }

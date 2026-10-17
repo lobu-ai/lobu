@@ -409,6 +409,139 @@ describe('OAuth-protected MCP connector installation', () => {
     ).toBe(true);
   });
 
+  it.each([false, true])('keeps anonymous connections when optional OAuth registration fails=%s', async (registrationFails) => {
+    const optionalUrl = 'https://mcp.example.com/mcp';
+    let registrationCount = 0;
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      if (href === optionalUrl) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body.method === 'initialize') {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 0,
+              result: {
+                protocolVersion: MCP_PROTOCOL_VERSION,
+                capabilities: { tools: {} },
+                serverInfo: { name: 'Free Tier MCP', version: '1.0.0' },
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json', 'Mcp-Session-Id': 'anon' } }
+          );
+        }
+        if (body.method === 'tools/list') {
+          return jsonResponse({
+            jsonrpc: '2.0',
+            id: 1,
+            result: { tools: [{ name: 'web_search', inputSchema: { type: 'object' } }] },
+          });
+        }
+        return new Response(null, { status: 202 });
+      }
+      if (href === 'https://mcp.example.com/.well-known/oauth-protected-resource/mcp') {
+        return jsonResponse({
+          resource: optionalUrl,
+          authorization_servers: [authorizationServer],
+          scopes_supported: ['mcp:tools'],
+        });
+      }
+      if (href === authorizationMetadataUrl) {
+        return jsonResponse({
+          issuer: authorizationServer,
+          authorization_endpoint: 'https://auth.example.com/authorize',
+          token_endpoint: 'https://auth.example.com/token',
+          registration_endpoint: registrationUrl,
+          token_endpoint_auth_methods_supported: ['none'],
+          code_challenge_methods_supported: ['S256'],
+        });
+      }
+      if (href === registrationUrl) {
+        registrationCount += 1;
+        if (registrationFails) return new Response('unavailable', { status: 503 });
+        return jsonResponse({ client_id: 'optional-client', token_endpoint_auth_method: 'none' });
+      }
+      throw new Error(`Unexpected fetch: ${href}`);
+    }) as typeof fetch;
+
+    const { org, ctx } = await seedOwnerContext({
+      orgName: 'Optional MCP OAuth Org',
+      userName: 'Optional MCP OAuth Owner',
+    });
+    process.env.PUBLIC_GATEWAY_URL = 'https://gateway.test';
+    __resetPublicOriginCachesForTests();
+    ctx.baseUrl = 'https://gateway.test';
+
+    const installed = await manageConnections(
+      { action: 'install_connector', mcp_url: optionalUrl },
+      TEST_ENV,
+      ctx
+    );
+    expect(installed).toMatchObject({
+      action: 'install_connector',
+      connector_key: 'mcp.free-tier-mcp',
+    });
+    expect(registrationCount).toBe(1);
+
+    const sql = getTestDb();
+    const [definition] = (await sql`
+      SELECT auth_schema FROM connector_definitions
+      WHERE organization_id = ${org.id} AND key = 'mcp.free-tier-mcp' AND status = 'active'
+    `) as Array<{ auth_schema: { methods: Array<Record<string, unknown>> } }>;
+    expect(definition.auth_schema.methods).toEqual([
+      expect.objectContaining({ type: 'oauth', required: false, provider: 'mcp.free-tier-mcp' }),
+      { type: 'none' },
+    ]);
+
+    const anonymous = await manageConnections(
+      {
+        action: 'create',
+        connector_key: 'mcp.free-tier-mcp',
+        auth_profile_slug: null,
+        app_auth_profile_slug: null,
+      },
+      TEST_ENV,
+      ctx
+    );
+    expect(anonymous).toMatchObject({ action: 'create' });
+    const anonymousId = Number((anonymous as { connection: { id: number } }).connection.id);
+    const [anonymousRow] = (await sql`
+      SELECT status, auth_profile_id, app_auth_profile_id FROM connections WHERE id = ${anonymousId}
+    `) as Array<{ status: string; auth_profile_id: number | null; app_auth_profile_id: number | null }>;
+    expect(anonymousRow).toEqual({ status: 'active', auth_profile_id: null, app_auth_profile_id: null });
+
+    if (registrationFails) {
+      const profiles = await sql`
+        SELECT id FROM auth_profiles
+        WHERE organization_id = ${org.id} AND connector_key = 'mcp.free-tier-mcp'
+      `;
+      expect(profiles).toHaveLength(0);
+      return;
+    }
+
+    const signIn = await manageConnections(
+      { action: 'connect', connector_key: 'mcp.free-tier-mcp' },
+      TEST_ENV,
+      ctx
+    );
+    expect(signIn).toMatchObject({
+      action: 'connect',
+      status: 'pending_auth',
+      auth_type: 'oauth',
+      connect_url: expect.stringMatching(
+        /^https:\/\/gateway\.test\/connect\/[A-Za-z0-9_-]+\/oauth\/start$/
+      ),
+    });
+    const startResponse = await connectRoutes.request(
+      `/${String((signIn as { connect_token: string }).connect_token)}/oauth/start`
+    );
+    expect(startResponse.status).toBe(302);
+    const authorizeUrl = new URL(startResponse.headers.get('location')!);
+    expect(authorizeUrl.searchParams.get('client_id')).toBe('optional-client');
+    expect(authorizeUrl.searchParams.get('scope')).toBe('mcp:tools');
+    expect(authorizeUrl.searchParams.get('resource')).toBe(optionalUrl);
+  });
+
   it('stamps the source-readable Jira issues feed onto an Atlassian Rovo MCP install', async () => {
     const atlassianUrl = 'https://mcp.atlassian.com/v1/mcp';
     globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
