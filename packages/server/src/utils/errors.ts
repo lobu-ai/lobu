@@ -47,6 +47,7 @@ export function toolErrorHttpStatus(code: ToolErrorCode): number {
     case 'VALIDATION':
     case 'AUTH_MISSING':
     case 'AUTH_INVALID':
+    case 'BROWSER_INTERRUPTED':
       return 400;
     case 'UPSTREAM_TIMEOUT':
     case 'UPSTREAM_5XX':

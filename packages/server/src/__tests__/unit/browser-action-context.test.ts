@@ -255,3 +255,11 @@ describe('page-activation trust stamp', () => {
 function escapeRe(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+
+it('strips caller recovery authority and accepts only the host descriptor', () => {
+  const context = { title: 'Synthetic session', flow_id: 'synthetic-flow', kind: 'mcp' as const };
+  expect(trustedChromeActionInput({ browser_recovery_control: { mode: 'act' }, recovery_id: 'public-reference' }, context)).not.toHaveProperty('browser_recovery_control');
+  const control = { mode: 'observe', recovery_id: 'host-reference', tab_id: 77 };
+  expect(trustedChromeActionInput({ browser_recovery_control: { mode: 'act' } }, context, null, [], control).browser_recovery_control).toEqual(control);
+});

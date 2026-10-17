@@ -48,6 +48,14 @@ export const ReadFeedAction = Type.Object({
 });
 
 const FeedSourceRead = Type.Object({
+  recovery_id: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 128,
+      description:
+        "Consume a recovery handoff once for the identical source request, on its retained tab. The expected account is verified again.",
+    })
+  ),
   feed_id: Type.Integer({
     minimum: 1,
     description: "Feed ID to query at its source.",
@@ -256,6 +264,22 @@ export const ManageFeedsResultSchema = Type.Union([
         error: Type.Optional(Type.String()),
         error_code: Type.Optional(Type.String()),
         retryable: Type.Optional(Type.Boolean()),
+        interruption: Type.Optional(
+          Type.Object({
+            reason: Type.String(),
+            recovery: Type.Optional(
+              Type.Object({
+                recovery_id: Type.String(),
+                expires_at: Type.String(),
+                tab_id: Type.Integer(),
+                target_id: Type.String(),
+                window_id: Type.Integer(),
+                device_worker_id: Type.String(),
+                chrome_connection_id: Type.Integer(),
+              })
+            ),
+          })
+        ),
       })
     ),
     failures: Type.Integer(),

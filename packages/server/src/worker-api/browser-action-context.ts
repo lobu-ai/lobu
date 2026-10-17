@@ -139,11 +139,13 @@ export function trustedChromeActionInput(
   input: Record<string, unknown>,
   context: BrowserActionContext,
   activationTabId?: number | null,
-  activationTargetUrls: string[] = []
+  activationTargetUrls: string[] = [],
+  recoveryControl?: Record<string, unknown>
 ): Record<string, unknown> {
   const trusted = { ...input };
   // No longer sent, but still stripped: the 0.8 extension keys tab ownership on
   // it, so a caller-supplied copy would let an agent address another flow's tabs.
+  delete trusted.browser_recovery_control;
   delete trusted.browser_context_id;
   delete trusted.browser_context_title;
   delete trusted.browser_flow_id;
@@ -158,6 +160,7 @@ export function trustedChromeActionInput(
   delete trusted.activation_target_urls;
   return {
     ...trusted,
+    ...(recoveryControl ? { browser_recovery_control: recoveryControl } : {}),
     browser_context_title: context.title,
     browser_flow_id: context.flow_id,
     ...(Number.isInteger(activationTabId) && (activationTabId as number) > 0
