@@ -118,27 +118,29 @@ describe("serialized TikTok page adapter", () => {
 		expect(f.polls()).toBe(2);
 	});
 
-	test("waits for Following capture and stops on challenges, sign-out, or navigation during loading", async () => {
-		for (const interrupt of ["none", "challenge", "sign-out", "navigation"]) {
-			let polls = 0;
-			const media = { muted: false };
-			const location = new URL("https://www.tiktok.com/following");
-			const document = {
-				querySelector: (selector: string) => selector === "#captcha-verify-container-main-page"
-					? { getClientRects: () => polls > 0 && interrupt === "challenge" ? [1] : [] }
-					: { textContent: JSON.stringify({ __DEFAULT_SCOPE__: { "webapp.app-context": { user: polls > 0 && interrupt === "sign-out" ? null : { uid: post.id } } } }) },
-				querySelectorAll: () => [media],
-			};
-			const run = new Function("document", "location", "setTimeout", `return (${tiktokPage.toString()})("following_wait")`);
-			const result = run(document, location, (callback: () => void) => {
-				polls++;
-				if (interrupt === "navigation") location.pathname = "/login";
-				callback();
-			});
-			if (interrupt === "none") await expect(result).resolves.toEqual({ ready: true });
-			else await expect(result).rejects.toThrow(interrupt === "challenge" ? "verification required" : interrupt === "sign-out" ? "sign-in" : "page changed");
-			expect(polls).toBe(1);
-			expect(media.muted).toBe(true);
+	test("guards timeline capture against challenge, sign-out, account switch, and navigation", async () => {
+		for (const [feed, path] of [["following", "/following"], ["for_you", "/"]]) {
+			for (const interrupt of ["none", "challenge", "sign-out", "account-switch", "navigation"]) {
+				let polls = 0;
+				const media = { muted: false };
+				const location = new URL(`https://www.tiktok.com${path}`);
+				const document = {
+					querySelector: (selector: string) => selector === "#captcha-verify-container-main-page"
+						? { getClientRects: () => polls > 0 && interrupt === "challenge" ? [1] : [] }
+						: { textContent: JSON.stringify({ __DEFAULT_SCOPE__: { "webapp.app-context": { user: polls > 0 && interrupt === "sign-out" ? null : { uid: polls > 0 && interrupt === "account-switch" ? "7000000000000000099" : post.id } } } }) },
+					querySelectorAll: () => [media],
+				};
+				const run = new Function("document", "location", "setTimeout", `return (${tiktokPage.toString()})(${JSON.stringify(`${feed}_wait`)})`);
+				const result = run(document, location, (callback: () => void) => {
+					polls++;
+					if (interrupt === "navigation") location.pathname = "/login";
+					callback();
+				});
+				if (interrupt === "none") await expect(result).resolves.toEqual({ ready: true });
+				else await expect(result).rejects.toThrow(interrupt === "challenge" ? "verification required" : interrupt === "sign-out" ? "sign-in" : interrupt === "account-switch" ? "account changed" : "page changed");
+				expect(polls).toBe(1);
+				expect(media.muted).toBe(true);
+			}
 		}
 	});
 
@@ -214,7 +216,7 @@ describe("serialized TikTok page adapter", () => {
 
 	test("reports verification before reading source data or touching controls and media", async () => {
 		const f = fixture([post.id], true);
-		for (const command of ["identity", "snapshot", "post_links", "following_status", "following_wait", "detail", "set_like", "frame"]) {
+		for (const command of ["identity", "post_links", "following_status", "following_wait", "for_you_status", "for_you_wait", "detail", "set_like", "frame"]) {
 			await expect(f.run(command, { liked: true, seconds: 5 })).rejects.toThrow("TikTok verification required");
 		}
 		expect(f.clickedPosts).toEqual([]);
@@ -236,7 +238,76 @@ describe("serialized TikTok page adapter", () => {
 	});
 });
 
+function recommendationBrowser(items: unknown[] = [post], responseOverrides: Record<string, unknown> = {}, lateFailure = false) {
+	let observations = 0;
+	return browser(action => {
+		if (action === "navigate") return { tab_id: 7 };
+		if (action === "network_intercept_start") return { session_id: "synthetic-session" };
+		if (action === "evaluate") {
+			if (++observations === 2 && lateFailure) throw new Error("TikTok verification required");
+			return { value: { ready: true } };
+		}
+		if (action === "network_intercept_drain") return { responses: [{ url: "https://www.tiktok.com/api/recommend/item_list/", status: 200, body: JSON.stringify({ status_code: 0, statusCode: 0, hasMore: true, itemList: items }), ...responseOverrides }] };
+		return {};
+	});
+}
+
 describe("TikTok source reads", () => {
+	test("waits for the native For You recommendation response", async () => {
+		let drains = 0;
+		const { dispatcher, calls } = browser(action => {
+			if (action === "navigate") return { tab_id: 7 };
+			if (action === "network_intercept_start") return { session_id: "synthetic-session" };
+			if (action === "evaluate") return { value: { ready: true } };
+			if (action === "network_intercept_drain") return { responses: ++drains === 1 ? [] : [{ url: "https://www.tiktok.com/api/recommend/item_list/", status: 200, body: JSON.stringify({ status_code: 0, statusCode: 0, hasMore: true, itemList: [post, post] }) }] };
+			return {};
+		});
+		const result = await new TikTokConnector().read(context(dispatcher, { limit: 30 }));
+		expect(result.rows).toHaveLength(1);
+		expect(result.rows[0]?.origin_id).toBe(post.id);
+		expect(drains).toBe(2);
+		expect(calls.find(call => call.action === "network_intercept_start")?.input.patterns).toEqual(["https://www.tiktok.com/api/recommend/item_list/**"]);
+		expect(calls.slice(-2).map(call => call.action)).toEqual(["network_intercept_stop", "close_tab"]);
+	});
+
+	test("rejects unverified recommendation responses and stops capture before closing", async () => {
+		for (const bad of [
+			{ status: 403 }, { truncated: true }, { base64_encoded: true }, { body: "not json" },
+			{ url: "https://example.com/api/recommend/item_list/" },
+			{ url: "https://www.tiktok.com/api/following/item_list/" },
+			{ url: "https://user@www.tiktok.com/api/recommend/item_list/" },
+			{ body: JSON.stringify({ status_code: 0, statusCode: 1, hasMore: true, itemList: [post] }) },
+			{ body: JSON.stringify({ status_code: 0, itemList: [post] }) },
+			{ body: JSON.stringify({ status_code: 0, hasMore: false, itemList: [{ ...post, id: null }] }) },
+		]) {
+			const { dispatcher, calls } = recommendationBrowser([post], bad);
+			await expect(new TikTokConnector().read(context(dispatcher))).rejects.toThrow();
+			expect(calls.slice(-2).map(call => call.action)).toEqual(["network_intercept_stop", "close_tab"]);
+		}
+	});
+
+	test("does not claim empty For You coverage or return rows after a late challenge", async () => {
+		for (const [items, lateFailure] of [[[], false], [[post], true]] as const) {
+			const { dispatcher, calls } = recommendationBrowser([...items], {}, lateFailure);
+			await expect(new TikTokConnector().read(context(dispatcher))).rejects.toThrow(lateFailure ? "verification required" : "no verifiable posts");
+			expect(calls.slice(-2).map(call => call.action)).toEqual(["network_intercept_stop", "close_tab"]);
+		}
+	});
+
+	test("bounds an absent For You capture without inventing an empty feed", async () => {
+		let drains = 0;
+		const { dispatcher, calls } = browser(action => {
+			if (action === "navigate") return { tab_id: 7 };
+			if (action === "network_intercept_start") return { session_id: "synthetic-session" };
+			if (action === "evaluate") return { value: { ready: true } };
+			if (action === "network_intercept_drain") { drains++; return { responses: [] }; }
+			return {};
+		});
+		await expect(new TikTokConnector().read(context(dispatcher))).rejects.toThrow("no verifiable posts");
+		expect(drains).toBe(5);
+		expect(calls.slice(-2).map(call => call.action)).toEqual(["network_intercept_stop", "close_tab"]);
+	});
+
 	test("follows source cursor and level beyond the repeated first page to collect 30 distinct posts", async () => {
 		const posts = Array.from({ length: 35 }, (_, index) => ({ ...post, id: String(7000000000000000000n + BigInt(index)) }));
 		const batches = [posts.slice(0, 8), posts.slice(6, 16), posts.slice(14, 24), posts.slice(22, 28), posts.slice(26, 35)];
@@ -276,8 +347,8 @@ describe("TikTok source reads", () => {
 				if (action === "focus_tab") focused = true;
 				if (action === "wait_for_selector" && !focused) throw new Error("Background snapshot did not load");
 				if (action === "network_intercept_start") return { session_id: "synthetic-session" };
-				if (action === "network_intercept_drain") return { responses: [{ url: "https://www.tiktok.com/api/following/item_list/", status: 200, body: JSON.stringify({ status_code: 0, hasMore: false, itemList: [post] }) }] };
-				if (action === "evaluate") return { value: { items: [post], rows: [{ url: `https://www.tiktok.com/@example_creator/video/${post.id}`, text: post.desc }] } };
+				if (action === "network_intercept_drain") return { responses: [{ url: `https://www.tiktok.com/api/${feedKey === "following" ? "following" : "recommend"}/item_list/`, status: 200, body: JSON.stringify({ status_code: 0, hasMore: false, itemList: [post] }) }] };
+				if (action === "evaluate") return { value: { rows: [{ url: `https://www.tiktok.com/@example_creator/video/${post.id}`, text: post.desc }] } };
 				return {};
 			});
 			const result = await new TikTokConnector().read(context(dispatcher, { feedKey, ...(feedKey === "search" ? { query: "agent memory" } : {}) }));
@@ -320,7 +391,7 @@ describe("TikTok source reads", () => {
 	});
 
 	test("deduplicates the source snapshot and never claims complete history", async () => {
-		const { dispatcher } = browser(action => action === "navigate" ? { tab_id: 7 } : action === "evaluate" ? { value: { items: [post, post] } } : {});
+		const { dispatcher } = recommendationBrowser([post, post]);
 		const result = await new TikTokConnector().read(context(dispatcher));
 		expect(result.rows).toHaveLength(1);
 		expect(result.rows[0]?.origin_id).toBe(post.id);
@@ -330,7 +401,7 @@ describe("TikTok source reads", () => {
 	});
 
 	test("accepts the platform's default page size while bounding the browser snapshot", async () => {
-		const { dispatcher } = browser(action => action === "navigate" ? { tab_id: 7 } : action === "evaluate" ? { value: { items: [post] } } : {});
+		const { dispatcher } = recommendationBrowser([post]);
 		expect((await new TikTokConnector().read(context(dispatcher, { limit: 50 }))).rows).toHaveLength(1);
 	});
 

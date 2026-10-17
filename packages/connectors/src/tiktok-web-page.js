@@ -28,18 +28,22 @@ export async function tiktokPage(command, args = {}) {
 	if (command === "identity") {
 		try { return await wait(identity); } catch { return null; }
 	}
-	if (!identity()) throw new Error("TikTok sign-in is required");
-	const assertFollowing = () => {
-		if (location.origin !== "https://www.tiktok.com" || location.pathname !== "/following") throw new Error("TikTok Following page changed");
+	const owner = identity()?.accountId;
+	if (!owner) throw new Error("TikTok sign-in is required");
+	const assertTimeline = (path) => {
+		if (location.origin !== "https://www.tiktok.com" || location.pathname !== path) throw new Error("TikTok timeline page changed");
 		assertNoChallenge();
 		if (!identity()) throw new Error("TikTok sign-in is required");
+		if (identity().accountId !== owner) throw new Error("TikTok account changed during the read");
 	};
-	if (command === "following_status" || command === "following_wait") {
-		assertFollowing();
+	const assertFollowing = () => assertTimeline("/following");
+	if (["following_status", "following_wait", "for_you_status", "for_you_wait"].includes(command)) {
+		const path = command.startsWith("following_") ? "/following" : "/";
+		assertTimeline(path);
 		document.querySelectorAll("video,audio").forEach(media => { media.muted = true; });
-		if (command === "following_wait") {
+		if (command.endsWith("_wait")) {
 			await new Promise(resolve => setTimeout(resolve, 250));
-			assertFollowing();
+			assertTimeline(path);
 		}
 		return { ready: true };
 	}
@@ -93,10 +97,6 @@ export async function tiktokPage(command, args = {}) {
 		assertFollowing();
 		if (seen.size < args.limit && hasMore) throw new Error(`TikTok Following read incomplete: collected ${seen.size} of ${args.limit} requested posts; retry the read`);
 		return { items: [...items.values()] };
-	}
-	if (command === "snapshot") {
-		const d = scope();
-		return { items: (d["webapp.updated-items"] || []).map(project) };
 	}
 	if (command === "post_links") {
 		// Hidden preload links appear before search results render. Their presence

@@ -98,25 +98,27 @@ async function sourcePost(browser: ChromeActionDispatcher, tabId: number, url: s
 	}
 }
 
-async function followingPosts(browser: ChromeActionDispatcher, tabId: number, sessionId: string, limit: number): Promise<RecordValue[]> {
+async function timelinePosts(browser: ChromeActionDispatcher, tabId: number, sessionId: string, limit: number, feedKey: "for_you" | "following"): Promise<RecordValue[]> {
+	const endpoint = feedKey === "following" ? "following" : "recommend";
+	const label = feedKey === "following" ? "Following" : "For You";
 	const unique = new Map<unknown, RecordValue>();
 	let continuation: RecordValue | undefined;
 	for (let poll = 0; poll < 5; poll++) {
-		await page(browser, tabId, poll ? "following_wait" : "following_status");
+		await page(browser, tabId, `${feedKey}_${poll ? "wait" : "status"}`);
 		const data = await browser.dispatch("network_intercept_drain", { session_id: sessionId, allowed_origins: ORIGINS });
-		if (data.missing || !Array.isArray(data.responses)) throw new Error("TikTok Following capture is unavailable");
+		if (data.missing || !Array.isArray(data.responses)) throw new Error(`TikTok ${label} capture is unavailable`);
 		for (const response of data.responses) {
 			const r = object(response);
 			const url = new URL(String(r.url));
-			if (url.origin !== ORIGIN || url.pathname !== "/api/following/item_list/" || url.username || url.password) throw new Error("TikTok Following capture has an unexpected URL");
-			if (r.status !== 200 || r.truncated || r.base64_encoded || typeof r.body !== "string") throw new Error("TikTok Following response is unavailable or truncated");
+			if (url.origin !== ORIGIN || url.pathname !== `/api/${endpoint}/item_list/` || url.username || url.password) throw new Error(`TikTok ${label} capture has an unexpected URL`);
+			if (r.status !== 200 || r.truncated || r.base64_encoded || typeof r.body !== "string") throw new Error(`TikTok ${label} response is unavailable or truncated`);
 			const json = object(JSON.parse(r.body));
-			if (json.status_code !== 0 || (json.statusCode !== undefined && json.statusCode !== 0) || !Array.isArray(json.itemList) || typeof json.hasMore !== "boolean") throw new Error("TikTok did not return a successful Following feed");
+			if (json.status_code !== 0 || (json.statusCode !== undefined && json.statusCode !== 0) || !Array.isArray(json.itemList) || typeof json.hasMore !== "boolean") throw new Error(`TikTok did not return a successful ${label} feed`);
 			for (const item of json.itemList) {
 				const row = normalizeTikTokPost(item);
 				unique.set(row.origin_id, row);
 			}
-			continuation = json.hasMore ? { url: url.href, cursor: json.cursor, level: json.level } : undefined;
+			continuation = feedKey === "following" && json.hasMore ? { url: url.href, cursor: json.cursor, level: json.level } : undefined;
 		}
 		if (data.responses.length) break;
 	}
@@ -131,7 +133,7 @@ async function followingPosts(browser: ChromeActionDispatcher, tabId: number, se
 		}
 	}
 	// Do not return a successful partial read when a late challenge appeared.
-	await page(browser, tabId, "following_status");
+	await page(browser, tabId, `${feedKey}_status`);
 	return [...unique.values()];
 }
 
@@ -151,18 +153,19 @@ async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedReadResult>
 	return scratch(browser, async tabId => {
 		let sessionId: string | undefined;
 		try {
-			if (ctx.feedKey === "following") {
-				const start = await browser.dispatch("network_intercept_start", { tab_id: tabId, patterns: [`${ORIGIN}/api/following/item_list/**`], max_body_bytes: 2097152, max_buffer_responses: 10, allowed_origins: ORIGINS });
+			if (ctx.feedKey !== "search") {
+				const endpoint = ctx.feedKey === "following" ? "following" : "recommend";
+				const start = await browser.dispatch("network_intercept_start", { tab_id: tabId, patterns: [`${ORIGIN}/api/${endpoint}/item_list/**`], max_body_bytes: 2097152, max_buffer_responses: 10, allowed_origins: ORIGINS });
 				if (typeof start.session_id !== "string") throw new Error("TikTok feed capture did not start");
 				sessionId = start.session_id;
 			}
 			// Snapshot/search results also lazy-load only in a visible tab.
 			await navigate(browser, tabId, url, true);
 			let rows: RecordValue[] = [];
-			if (ctx.feedKey === "following") {
+			if (ctx.feedKey === "following" || ctx.feedKey === "for_you") {
 				await browser.dispatch("wait_for_selector", { tab_id: tabId, selector: '[data-e2e="recommend-list-item-container"]', timeout_ms: 15000, allowed_origins: ORIGINS });
-				rows = await followingPosts(browser, tabId, sessionId!, limit);
-			} else if (ctx.feedKey === "search") {
+				rows = await timelinePosts(browser, tabId, sessionId!, limit, ctx.feedKey);
+			} else {
 				await browser.dispatch("wait_for_selector", { tab_id: tabId, selector: 'a[href*="/video/"],a[href*="/photo/"]', timeout_ms: 15000, allowed_origins: ORIGINS });
 				const data = await page(browser, tabId, "post_links");
 				rows = (Array.isArray(data.rows) ? data.rows : []).map(value => {
@@ -170,9 +173,6 @@ async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedReadResult>
 					const sourceUrl = normalizeTikTokPostUrl(r.url);
 					return { origin_id: sourceUrl.split("/").pop(), source_url: sourceUrl, text: r.text, media: { type: sourceUrl.includes("/photo/") ? "photos" : "video" } };
 				});
-			} else {
-				const data = await page(browser, tabId, "snapshot");
-				rows = (Array.isArray(data.items) ? data.items : []).map(normalizeTikTokPost);
 			}
 			if (!rows.length) throw new Error("TikTok returned no verifiable posts; this is not proof of an empty feed");
 			const unique = [...new Map(rows.map(row => [row.origin_id, row])).values()];
@@ -205,7 +205,7 @@ async function readTikTokInbox(ctx: FeedReadContext): Promise<FeedReadResult> {
 
 export default class TikTokConnector extends ConnectorRuntime {
 	readonly definition: RuntimeConnectorDefinition = {
-		key: "tiktok.web", name: "TikTok", version: "1.1.5", faviconDomain: "tiktok.com",
+		key: "tiktok.web", name: "TikTok", version: "1.1.7", faviconDomain: "tiktok.com",
 		description: "Read TikTok through your signed-in paired browser, inspect post visuals, set likes, and prepare comments for human submission. Automations decide what to read and act on.",
 		browser: { origins: ORIGINS, authMethods: ["browser"], accountProbe: { url: ORIGIN, expression: expression("identity") } },
 		authSchema: { methods: [{ type: "browser", mode: "live" }] },
