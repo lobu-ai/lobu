@@ -162,6 +162,21 @@ describe("console logger pino-style metadata", () => {
     expect(line).not.toContain("synthetic-header-secret");
   });
 
+  test("redacts prefixed authorization headers and serialized credential fields", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        "x-authorization": "Bearer synthetic-prefixed-secret",
+        credentials_json: '{"password":"synthetic-serialized-secret"}',
+        token_count: 7,
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).toContain("token_count");
+    expect(line).not.toContain("synthetic-prefixed-secret");
+    expect(line).not.toContain("synthetic-serialized-secret");
+  });
+
   test("redacts credential query pairs embedded in object keys", () => {
     const line = captureWarn((log) => {
       log.warn({
@@ -239,7 +254,11 @@ describe("console logger structured output", () => {
         log.warn(new Error("fetch failed https://example.test/path?token=synthetic-error-secret"));
         log.warn(["fetch failed https://example.test/path?token=synthetic-array-secret"]);
         log.warn({ authorizationHeader: "Bearer synthetic-header-secret" });
-        log.warn({ "https://example.test/path?token=synthetic-key-secret": "cached" });`,
+        log.warn({ "https://example.test/path?token=synthetic-key-secret": "cached" });
+        log.warn({
+          "x-authorization": "Bearer synthetic-json-prefixed-secret",
+          credentials_json: '{"password":"synthetic-json-serialized-secret"}',
+        });`,
       ],
       {
         env: {
@@ -256,7 +275,7 @@ describe("console logger structured output", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    expect(records).toHaveLength(5);
+    expect(records).toHaveLength(6);
     expect(records[0]).toMatchObject({
       level: "warn",
       message: expect.stringContaining("fetch failed"),
@@ -269,15 +288,21 @@ describe("console logger structured output", () => {
       level: "warn",
       message: expect.stringContaining("fetch failed"),
     });
-    expect(records[3]).toMatchObject({
-      level: "warn",
-      message: expect.stringContaining("[REDACTED]"),
-    });
+    expect(records[3].level).toBe("warn");
+    expect(records[3].message).toContain("[REDACTED]");
     expect(records[4].message).toContain("https://example.test/path");
+    expect(records[5].level).toBe("warn");
+    expect(records[5].message).toContain("[REDACTED]");
+    expect(records[5].message).not.toContain("synthetic-json-prefixed-secret");
+    expect(records[5].message).not.toContain(
+      "synthetic-json-serialized-secret"
+    );
     expect(output).not.toContain("synthetic-pino-secret");
     expect(output).not.toContain("synthetic-error-secret");
     expect(output).not.toContain("synthetic-array-secret");
     expect(output).not.toContain("synthetic-header-secret");
     expect(output).not.toContain("synthetic-key-secret");
+    expect(output).not.toContain("synthetic-json-prefixed-secret");
+    expect(output).not.toContain("synthetic-json-serialized-secret");
   });
 });

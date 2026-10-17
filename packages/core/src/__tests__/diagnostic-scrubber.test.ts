@@ -328,6 +328,21 @@ describe("diagnostic credential scrubber", () => {
     expect(result.authorization_mode).toBe("strict");
   });
 
+  it("redacts prefixed authorization headers and serialized credential fields", () => {
+    // Split-form names the whole/suffix rules miss: a trailing
+    // `authorization` segment is a vendor-prefixed header, and a leading
+    // `credential(s)` segment names a serialized credential field. The mode
+    // half of `authorization_mode` stays readable by construction.
+    const result = scrubDiagnosticValue({
+      "x-authorization": `Bearer ${SECRET}`,
+      credentials_json: JSON.stringify({ password: SECRET }),
+      authorization_mode: "strict",
+    }) as Record<string, unknown>;
+    expect(result["x-authorization"]).toBe("[REDACTED]");
+    expect(result.credentials_json).toBe("[REDACTED]");
+    expect(result.authorization_mode).toBe("strict");
+  });
+
   it("redacts credential query pairs embedded in object keys", () => {
     // Attribution and cache maps keyed by URL carry the secret in the KEY
     // text, past value-side redaction. The key stays identifiable; the

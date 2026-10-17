@@ -31,6 +31,30 @@ const SECRET_KEY_EXACT = new Set([
   "authorizationheader",
 ]);
 
+/**
+ * Split-form credential names the whole/suffix rules miss, with the
+ * credential term pinned to one end so the mode half of `authorization_mode`
+ * stays readable:
+ * - a TRAILING `authorization` segment is a (possibly vendor-prefixed)
+ *   authorization header (`x-authorization`, `proxy-authorization`);
+ * - a LEADING `credential`/`credentials` segment names a serialized
+ *   credential field (`credentials_json`, `credential_blob`).
+ * Separator-less compounds (`authorizationHeader`) have no segments to pin,
+ * so they stay in SECRET_KEY_EXACT above.
+ */
+function hasAffixedCredentialSegment(key: string): boolean {
+  const segments = key
+    .replace(/[^a-z0-9]+/gi, "_")
+    .toLowerCase()
+    .split("_")
+    .filter((segment) => segment.length > 0);
+  if (segments.length === 0) return false;
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  if (last === "authorization") return true;
+  return first === "credential" || first === "credentials";
+}
+
 /** Bound recursive work on diagnostic values. */
 const MAX_DEPTH = 8;
 const MAX_ENTRIES = 1000;
@@ -49,6 +73,7 @@ function isSecretObjectKey(key: string): boolean {
   if (isSecretKey(key)) return true;
   if (isSecretKey(squashKey(key))) return true;
   if (SECRET_KEY_EXACT.has(squashKey(key))) return true;
+  if (hasAffixedCredentialSegment(key)) return true;
   // Matched per separated segment, not against the squashed whole:
   // `X-Hub-Signature-256` squashes to `xhubsignature256`, which no exact set
   // can ever hold, so every real signature header would slip through.
