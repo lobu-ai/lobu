@@ -41,7 +41,7 @@ import { resolveBoundChannelRows, stripPlatformPrefix } from '../gateway/channel
 import { filterChannelsForRequester } from '../authz/channel-visibility';
 import { redactConnectionRows } from '../utils/connection-config-redaction';
 import { toVectorLiteral } from '../utils/entity-management';
-import { generateEmbeddings } from '../utils/embeddings';
+import { generateQueryEmbedding } from '../utils/embeddings';
 import { ToolUserError } from '../utils/errors';
 import logger from '../utils/logger';
 import { expandSearchQueries } from '../utils/query-expansion';
@@ -221,6 +221,7 @@ const WorkspaceCoverageSchema = Type.Object({
     Type.Literal('partial'),
     Type.Literal('unavailable'),
   ]),
+  reason: Type.Optional(Type.Literal('query_embedding_unavailable')),
   local_sources: Type.Array(
     Type.Union([Type.Literal('events'), Type.Literal('channel_messages')])
   ),
@@ -238,6 +239,12 @@ const SearchCoverageSchema = Type.Object({
     Type.Literal('all_granted'),
   ]),
   status: Type.Union([Type.Literal('complete'), Type.Literal('partial')]),
+  /**
+   * Why recall is partial when the cause is not visible in the other fields:
+   * `query_embedding_unavailable` means no query embedding could be generated,
+   * so content was ranked on text alone and carries no `similarity`.
+   */
+  reason: Type.Optional(Type.Literal('query_embedding_unavailable')),
   workspace_slug: Type.Optional(Type.String()),
   local_sources: Type.Array(
     Type.Union([Type.Literal('events'), Type.Literal('channel_messages')])
@@ -325,6 +332,9 @@ function hasSearchHits(result: UnifiedSearchResult): boolean {
   );
 }
 
+const QUERY_EMBEDDING_UNAVAILABLE_SUGGESTION =
+  'Search returned partial results ranked on text only: the query embedding was unavailable, so semantic matches may be missing. Retry the search.';
+
 function withRecall<T extends UnifiedSearchResult>(
   result: T,
   recall: Partial<UnifiedSearchResult>
@@ -332,7 +342,9 @@ function withRecall<T extends UnifiedSearchResult>(
   Object.assign(result, recall);
   if (recall.coverage?.status === 'partial') {
     result.suggestion =
-      'Search returned partial results. Some memory sources could not be searched or discovered. Retry the search.';
+      recall.coverage.reason === 'query_embedding_unavailable'
+        ? QUERY_EMBEDDING_UNAVAILABLE_SUGGESTION
+        : 'Search returned partial results. Some memory sources could not be searched or discovered. Retry the search.';
     if (!hasSearchHits(result)) result.discovery_status = 'discovering';
   }
   return result;
@@ -343,6 +355,8 @@ interface WorkspaceSearchExecution {
   recallQueryEmbedding?: number[];
   /** The federation layer already attempted embedding generation once. */
   preventShardEmbeddingGeneration?: boolean;
+  /** That attempt failed, so every shard recalls on text alone. */
+  queryEmbeddingUnavailable?: boolean;
   /** Public-catalog entity resolved once and formatted on the first shard. */
   preResolvedEntity?: EntityQueryRow;
   /** Entity authorization shared with content-only shards. */
@@ -437,16 +451,8 @@ async function sharedRecallEmbedding(
       attempted: false,
     };
   }
-  try {
-    const embeddings = await generateEmbeddings([args.query.trim()], env);
-    return { ...(embeddings[0] ? { embedding: embeddings[0] } : {}), attempted: true };
-  } catch (err) {
-    logger.warn(
-      { err: getErrorMessage(err) },
-      '[search] shared embedding failed; federated recall will use text only'
-    );
-    return { attempted: true };
-  }
+  const embedding = await generateQueryEmbedding(args.query.trim(), env);
+  return { ...(embedding ? { embedding } : {}), attempted: true };
 }
 
 async function settleWithConcurrency<T, R>(
@@ -518,6 +524,7 @@ function asWorkspaceCoverage(
   return {
     workspace_slug: workspace.slug,
     status: coverage?.status ?? 'complete',
+    ...(coverage?.reason ? { reason: coverage.reason } : {}),
     local_sources: coverage?.local_sources ?? [],
     source_queried: false,
     source_feed_discovery: coverage?.source_feed_discovery ?? 'complete',
@@ -760,6 +767,9 @@ export function mergeFederatedSearchResults(
   const coverage: SearchCoverage = {
     scope: args.workspace ? 'selected_workspace' : 'all_granted',
     status,
+    ...(workspaceCoverage.some((entry) => entry.reason === 'query_embedding_unavailable')
+      ? { reason: 'query_embedding_unavailable' as const }
+      : {}),
     local_sources: localSources,
     source_queried: false,
     source_feed_discovery: workspaceCoverage.every(
@@ -800,7 +810,9 @@ export function mergeFederatedSearchResults(
     suggestion: ambiguousTop
       ? `Found "${top?.name}" in more than one workspace. Pass workspace to narrow before acting.`
       : status === 'partial'
-        ? 'Search returned partial results; one or more granted workspaces was temporarily unavailable.'
+        ? coverage.reason === 'query_embedding_unavailable'
+          ? QUERY_EMBEDDING_UNAVAILABLE_SUGGESTION
+          : 'Search returned partial results; one or more granted workspaces was temporarily unavailable.'
         : matches.length === 0 && !hasAnyRecall
           ? buildEmptySearchSuggestion(args.query ?? null, args, coverage, callerMax)
           : selectedResult?.suggestion,
@@ -889,7 +901,7 @@ async function fetchContentSnippets(
   minSimilarity?: number,
   excludeWorkspaceAudit?: boolean,
   entityId?: number
-): Promise<ContentSnippet[]> {
+): Promise<{ snippets: ContentSnippet[]; queryEmbeddingUnavailable: boolean }> {
   const result = await searchContentByText(
     query,
     {
@@ -933,7 +945,7 @@ async function fetchContentSnippets(
     env
   );
 
-  return result.content.map((c) => {
+  const snippets = result.content.map((c) => {
     // payload_text is `string | null` (a content row can have no text body).
     // Coalesce to '' — both to avoid `.length`/`.slice` throwing on null and to
     // keep the (non-nullable) `text_content` schema field honest: "" is the
@@ -958,6 +970,7 @@ async function fetchContentSnippets(
       workspace_slugs: [workspaceSlug],
     };
   });
+  return { snippets, queryEmbeddingUnavailable: result.query_embedding_unavailable === true };
 }
 
 // Generic "what did we talk about" recall words carry no signal against a
@@ -1128,6 +1141,8 @@ export interface RecallContext {
   contentLimit: number;
   env?: Env;
   queryEmbedding?: number[];
+  /** A shared embedding attempt already failed; report recall as text-only. */
+  queryEmbeddingUnavailable?: boolean;
   /** Caller-supplied similarity floor for recalled content (schema 0.0-1.0,
    * default 0.3). Undefined means "use the documented default". */
   minSimilarity?: number;
@@ -1209,8 +1224,12 @@ function buildCoverage(
   local_sources: SearchCoverage['local_sources'],
   discovered: PromiseSettledResult<Awaited<ReturnType<typeof discoverSourceFeeds>>>,
   localRecallFailed = false,
+  queryEmbeddingUnavailable = false,
   scope: SearchCoverage['scope'] = 'current_workspace'
 ): SearchCoverage {
+  const reason = queryEmbeddingUnavailable
+    ? ({ reason: 'query_embedding_unavailable' } as const)
+    : {};
   if (discovered.status === 'rejected') {
     logger.warn(
       `[search] source feed coverage lookup failed: ${getErrorMessage(discovered.reason)}`
@@ -1218,6 +1237,7 @@ function buildCoverage(
     return {
       scope,
       status: 'partial',
+      ...reason,
       workspace_slug: workspaceSlug,
       local_sources,
       source_queried: false,
@@ -1228,7 +1248,8 @@ function buildCoverage(
   }
   return {
     scope,
-    status: localRecallFailed ? 'partial' : 'complete',
+    status: localRecallFailed || queryEmbeddingUnavailable ? 'partial' : 'complete',
+    ...reason,
     workspace_slug: workspaceSlug,
     local_sources,
     source_queried: false,
@@ -1281,8 +1302,10 @@ export async function gatherLocalRecall(
   const result: Partial<UnifiedSearchResult> = {};
   const local_sources: SearchCoverage['local_sources'] = [];
   let localRecallFailed = false;
+  let queryEmbeddingUnavailable = ctx.queryEmbeddingUnavailable === true;
   if (contentResult.status === 'fulfilled') {
-    result.content = contentResult.value;
+    result.content = contentResult.value.snippets;
+    queryEmbeddingUnavailable ||= contentResult.value.queryEmbeddingUnavailable;
     local_sources.push('events');
   } else {
     localRecallFailed = true;
@@ -1307,7 +1330,8 @@ export async function gatherLocalRecall(
     ctx.workspaceSlug,
     local_sources,
     sourceFeedsResult,
-    localRecallFailed
+    localRecallFailed,
+    queryEmbeddingUnavailable
   );
   return result;
 }
@@ -1378,6 +1402,7 @@ async function searchImpl(
         workspaceSlug: target.slug,
         recallQueryEmbedding: sharedEmbedding.embedding,
         preventShardEmbeddingGeneration: sharedEmbedding.attempted,
+        queryEmbeddingUnavailable: sharedEmbedding.attempted && !sharedEmbedding.embedding,
         coverageScope: 'selected_workspace',
       }
     );
@@ -1426,6 +1451,7 @@ async function searchImpl(
           workspaceSlug: target.slug,
           recallQueryEmbedding: sharedEmbedding.embedding,
           preventShardEmbeddingGeneration: sharedEmbedding.attempted,
+          queryEmbeddingUnavailable: sharedEmbedding.attempted && !sharedEmbedding.embedding,
           ...(index === 0 && publicEntity ? { preResolvedEntity: publicEntity } : {}),
           ...(publicEntity ? { authorizedEntityId: args.entity_id } : {}),
           coverageScope: 'all_granted',
@@ -1598,6 +1624,7 @@ async function searchWorkspaceImpl(
           // federation's shared vector is recall-only so enabling federation
           // cannot silently change fuzzy entity ranking/default limits.
           queryEmbedding: args.query_embedding ?? execution.recallQueryEmbedding,
+          queryEmbeddingUnavailable: execution.queryEmbeddingUnavailable,
           minSimilarity: args.min_similarity,
           entityId,
           workspaceSlug,

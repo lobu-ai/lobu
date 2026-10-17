@@ -100,6 +100,24 @@ describe('formatToolResult', () => {
       expect(md).toContain('`federation-alpha`, `federation-beta`');
     });
 
+    it('says when recall ranked on text only', () => {
+      const md = formatToolResult('search_memory', {
+        entity: null,
+        matches: [],
+        coverage: {
+          local_sources: ['events'],
+          source_queried: false,
+          source_feed_discovery: 'complete',
+          scope: 'current_workspace',
+          status: 'partial',
+          reason: 'query_embedding_unavailable',
+          source_feeds: [],
+          more_source_feeds: false,
+        },
+      });
+      expect(md).toContain('Ranking was text-only');
+    });
+
     it('renders the local/source boundary and explicit feed IDs', () => {
       const result = {
         entity: null,

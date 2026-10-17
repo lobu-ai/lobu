@@ -452,6 +452,9 @@ function formatSearchCoverage(coverage: any): string {
     md += `Workspace: \`${coverage.workspace_slug}\`.\n\n`;
   }
   md += `Local stores searched: ${localSources.length > 0 ? localSources.join(', ') : 'none completed'}.\n\n`;
+  if (coverage.reason === 'query_embedding_unavailable') {
+    md += 'Ranking was text-only: the query embedding was unavailable, so semantic matches may be missing.\n\n';
+  }
   if (coverage.source_feed_discovery === 'unavailable') {
     md += 'Source feed discovery was unavailable for this search.\n\n';
     return md;

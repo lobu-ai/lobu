@@ -8,6 +8,8 @@
  * embeddings from the service when needed (e.g., classifier values).
  */
 
+import { getErrorMessage } from '@lobu/core';
+import { incrementCounter } from '../gateway/metrics/prometheus';
 import type { Env } from '../index';
 import logger from '../utils/logger';
 
@@ -244,6 +246,29 @@ export async function generateEmbeddings(
     return payload.embeddings;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+/**
+ * Embed a search query, or return null when the embeddings service cannot.
+ * Count embedding failures separately from SQL failures so text-only fallback
+ * remains observable.
+ */
+export async function generateQueryEmbedding(
+  query: string,
+  env: Env,
+  model?: string | null
+): Promise<number[] | null> {
+  try {
+    const [embedding] = await generateEmbeddings([query], env, model);
+    return embedding;
+  } catch (err) {
+    incrementCounter('lobu_recall_query_embedding_failures_total');
+    logger.warn(
+      { err: getErrorMessage(err) },
+      '[search] query embedding failed; recall falls back to text-only ranking'
+    );
+    return null;
   }
 }
 
