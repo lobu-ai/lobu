@@ -10,7 +10,7 @@ import { getDb, type DbClient } from "../db/client";
 import { stableJson } from "../utils/insert-event";
 
 const BROWSER_RECOVERY_KEY = "browser_recovery";
-const TTL_MS = 5 * 60_000;
+export const SOURCE_BROWSER_RETENTION_MS = 5 * 60_000;
 const RECOVERY_OBSERVATIONS = new Set(["screenshot", "get_accessibility_tree"]);
 const RECOVERY_ACTIONS = new Set(["click_ref", "focus_tab"]);
 type BrowserResource = NonNullable<
@@ -91,8 +91,11 @@ async function readRecovery(
   org: string,
   sql: DbClient,
 ): Promise<SourceBrowserLease> {
+  // A cancelled/timed-out source can keep metadata for expiry cleanup, but that
+  // metadata must not authorize a continuation or browser observations.
   const [row] =
-    await sql`SELECT run_metadata FROM runs WHERE id = ${runIdFromRecovery(id)} AND organization_id = ${org}`;
+    await sql`SELECT run_metadata FROM runs WHERE id = ${runIdFromRecovery(id)} AND organization_id = ${org}
+      AND status = 'failed'`;
   const lease = row?.run_metadata?.[BROWSER_RECOVERY_KEY] as
     | SourceBrowserLease
     | undefined;
@@ -268,7 +271,18 @@ export async function saveSourceBrowserTab(
     );
   });
 }
-export type SourceBrowserCleanup = "retained" | "closed" | "unacknowledged";
+export type SourceBrowserCleanup =
+  | { kind: "retained"; expiresAt: string }
+  | { kind: "closed" | "unacknowledged" };
+
+export function canRetainSourceBrowser(lease: SourceBrowserLease): boolean {
+  return (
+    !!lease.owner.flow_id &&
+    !lease.resumed &&
+    !!lease.tab &&
+    !!lease.chrome_connection_id
+  );
+}
 
 export async function finishSourceBrowser(
   org: string,
@@ -298,15 +312,15 @@ export async function finishSourceBrowser(
     )
       throw recoveryUnavailable("Browser recovery lease changed.");
     const ready =
-      cleanup === "retained" &&
-      !!lease.owner.flow_id &&
-      !lease.resumed &&
-      !!lease.tab &&
-      !!lease.chrome_connection_id;
-    const hold = ready || (!!lease.tab && cleanup === "unacknowledged");
-    const expires_at = hold
-      ? new Date(Date.now() + TTL_MS).toISOString()
-      : lease.expires_at;
+      cleanup.kind === "retained" &&
+      Date.parse(cleanup.expiresAt) > Date.now() &&
+      canRetainSourceBrowser(lease);
+    const hold = ready || (!!lease.tab && cleanup.kind === "unacknowledged");
+    const expires_at = !hold
+      ? lease.expires_at
+      : cleanup.kind === "retained"
+        ? cleanup.expiresAt
+        : new Date(Date.now() + SOURCE_BROWSER_RETENTION_MS).toISOString();
     await saveLease(
       { ...lease, expires_at, state: ready ? "ready" : "closed" },
       org,
@@ -333,16 +347,14 @@ export async function finishSourceBrowser(
 export function browserRecoveryControl(
   lease: SourceBrowserLease,
   mode: "read" | "retain" | "observe" | "act",
+  expiresAt = lease.expires_at,
 ) {
   return {
     ...lease.tab,
     recovery_id: lease.recovery_id,
     owner_run_id: lease.run_id,
     mode,
-    expires_at:
-      mode === "retain"
-        ? new Date(Date.now() + TTL_MS).toISOString()
-        : lease.expires_at,
+    expires_at: expiresAt,
     resumed: lease.resumed === true,
   };
 }

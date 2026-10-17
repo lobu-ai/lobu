@@ -16,7 +16,6 @@ import { createHash } from 'node:crypto';
 import { stableJson } from '../utils/insert-event';
 import {
   classifyToolError,
-  createLogger,
   getErrorMessage,
   ToolError,
   type ToolErrorCode,
@@ -34,10 +33,9 @@ import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-c
 import { isMetadataOnlyDeviceConnector, readDeviceFeed } from './device-feed-read';
 import { readSourceFeedFromAdapter } from './source-feed-adapters';
 import { createSourceReadBridge, sourceReadDeadlineError } from './source-read-bridge';
+import { sourceRecoveryHash } from './browser-recovery';
 import { computeCodeHash } from '../utils/compiler-core';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
-
-const logger = createLogger('connector-pushdown');
 
 interface ConnectorQueryParams {
   /** The ACL gate — tenant + principal. Its `organizationId`/`principal` drive
@@ -203,7 +201,9 @@ export interface ReadSourceFeedParams {
   automationId?: number | null;
   /** The configured feed to read directly from its source. */
   feedId: number;
+  /** One-shot recovery handoff from an interrupted, otherwise identical read. */
   recoveryId?: string;
+  /** Stable caller flow; a browser tab is retained for recovery only when set. */
   flowId?: string;
   /** Internal observer for the bounded pager; no caller-controlled browser authority. */
   onBrowserLease?: () => void;
@@ -575,71 +575,59 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   const timer = setTimeout(onAbort, timeoutMs);
   // Bundled cloud code can change before its catalog version is refreshed.
   // Bind the read/recovery to the exact bytes passed to the executor below.
-  const browser = createSourceReadBridge({ ...feed, selected_artifact_hash: computeCodeHash(compiledCode) }, {
-    ...p, sourceRevision,
+  const artifactHash = computeCodeHash(compiledCode);
+  const browser = createSourceReadBridge({ ...feed, selected_artifact_hash: artifactHash }, {
+    scope: p.scope, automationId: p.automationId, feedId: p.feedId,
+    deadlineAt: p.deadlineAt, flowId: p.flowId, recoveryId: p.recoveryId,
+    onBrowserLease: p.onBrowserLease,
+    requestHash: sourceRecoveryHash({ feedId: feed.id, revision: sourceRevision, artifact: artifactHash,
+      query: p.query, cursor: p.cursor, limit: p.limit, offset: p.offset,
+      sort: p.sort, window: p.window, match: p.match }),
     sourceSubscriptionScopeKey: sourceSubscription
       ? sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version) : undefined,
   }, controller.signal);
   try {
-    await browser.prepare();
-    const result = await executeCompiledConnector({
-      compiledCode,
-      job: {
-        mode: 'read',
-        feedId: feed.id,
-        feedKey: feed.feed_key,
-        query: p.query,
-        cursor: p.cursor,
-        window: p.window,
-        config,
-        env: dbEgressConfig(),
-        sessionState,
-        browser: await connectionBrowserGrant(p.scope.organizationId, feed.connection_id, feed.pinned_version ?? feed.definition_version),
-        credentials,
-        httpAuth,
-        limit: p.limit,
-        offset: p.offset,
-        sort: p.sort,
-        match: p.match,
-      },
-      hooks: {
-        onHttpFetch, signal: controller.signal,
-        onChromeDispatch: browser.onChromeDispatch,
-      },
-      timeoutMs,
-    });
+    return await browser.run(async () => {
+      const result = await executeCompiledConnector({
+        compiledCode,
+        job: {
+          mode: 'read',
+          feedId: feed.id,
+          feedKey: feed.feed_key,
+          query: p.query,
+          cursor: p.cursor,
+          window: p.window,
+          config,
+          env: dbEgressConfig(),
+          sessionState,
+          browser: await connectionBrowserGrant(p.scope.organizationId, feed.connection_id, feed.pinned_version ?? feed.definition_version),
+          credentials,
+          httpAuth,
+          limit: p.limit,
+          offset: p.offset,
+          sort: p.sort,
+          match: p.match,
+        },
+        hooks: {
+          onHttpFetch, signal: controller.signal,
+          onChromeDispatch: browser.onChromeDispatch,
+        },
+        timeoutMs,
+      });
 
-    if (result.mode !== 'read') {
-      throw new Error(`Expected read result, got mode=${result.mode}`);
-    }
-    const page = finish({
-      rows: result.rows,
-      rowCursors: result.rowCursors,
-      columns: result.columns ?? [],
-      total: result.total,
-      nextCursor: result.nextCursor,
-      hasMore: result.hasMore,
-      window: result.window,
+      if (result.mode !== 'read') {
+        throw new Error(`Expected read result, got mode=${result.mode}`);
+      }
+      return finish({
+        rows: result.rows,
+        rowCursors: result.rowCursors,
+        columns: result.columns ?? [],
+        total: result.total,
+        nextCursor: result.nextCursor,
+        hasMore: result.hasMore,
+        window: result.window,
+      });
     });
-    await browser.settle('completed');
-    if (browser.interruption) throw browser.interruption;
-    return page;
-  } catch (error) {
-    // The isolate reports signal termination as a crash; this controller owns
-    // the source-read deadline and caller cancellation, so preserve that cause.
-    try {
-      await browser.settle(controller.signal.aborted ? 'timeout' : 'failed');
-    } catch (cleanupError) {
-      // The read has already failed. Preserve its cause, while a failed cleanup
-      // grants no recovery authority and leaves the existing ownership fence.
-      logger.warn({ feedId: p.feedId, error: getErrorMessage(cleanupError) }, 'Browser cleanup failed after a source-read failure');
-    }
-    if (browser.interruption) throw browser.interruption;
-    if (controller.signal.aborted) {
-      if (browser.leased) throw new BrowserInterruptionError('timeout', 'Browser source read timed out or was cancelled; no recovery handoff was issued.');
-      throw sourceReadDeadlineError(p.feedId);
-    }
-    throw error;
   } finally {
     controller.abort();
     clearTimeout(timer);

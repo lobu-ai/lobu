@@ -1,9 +1,10 @@
-import { ToolError, BrowserInterruptionError, browserPageInterruption } from '@lobu/core';
+import { ToolError, BrowserInterruptionError, browserPageInterruption, createLogger, getErrorMessage } from '@lobu/core';
 import {
+  canRetainSourceBrowser,
   claimSourceBrowser,
   finishSourceBrowser,
   sourceBrowserLease,
-  sourceRecoveryHash,
+  SOURCE_BROWSER_RETENTION_MS,
   type SourceBrowserCleanup,
 } from './browser-recovery';
 import { resolveActingPrincipal } from '../authz/entity-policy';
@@ -13,6 +14,8 @@ import { createConnectorOperationRun } from '../runs/queue-service';
 import { dispatchChromeActionToExtension } from '../worker-api/dispatch-chrome-action';
 import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, SOURCE_FEED_SCOPE_METADATA_KEY } from './device-feed-read-protocol';
 import { scrubSourceReadRun } from './source-read-run';
+
+const logger = createLogger('source-read-bridge');
 
 export function sourceReadDeadlineError(feedId: number): Error & { exitReason: 'timeout' } {
   return Object.assign(new Error(`source read for feed '${feedId}' timed out`), {
@@ -38,14 +41,7 @@ interface SourceReadBridgeOptions {
   flowId?: string;
   onBrowserLease?: () => void;
   recoveryId?: string;
-  sourceRevision?: string;
-  query?: string;
-  cursor?: string;
-  limit?: number;
-  offset?: number;
-  sort?: unknown;
-  window?: unknown;
-  match?: unknown;
+  requestHash: string;
   sourceSubscriptionScopeKey?: string;
 }
 
@@ -57,8 +53,6 @@ export function createSourceReadBridge(
   const sql = getDb();
   let parent: Promise<number> | undefined;
   let interruption: BrowserInterruptionError | undefined;
-  let settled = false;
-  let tabClosed = false;
   let leased = false;
   const workController = new AbortController();
   const workSignal = AbortSignal.any([signal, workController.signal]);
@@ -95,18 +89,7 @@ export function createSourceReadBridge(
             deadlineAt: params.deadlineAt,
             flowId: params.flowId,
             recoveryId: params.recoveryId,
-            requestHash: sourceRecoveryHash({
-              feedId: feed.id,
-              revision: params.sourceRevision,
-              artifact: feed.selected_artifact_hash,
-              query: params.query,
-              cursor: params.cursor,
-              limit: params.limit,
-              offset: params.offset,
-              sort: params.sort,
-              window: params.window,
-              match: params.match,
-            }),
+            requestHash: params.requestHash,
           },
           tx,
         );
@@ -115,9 +98,6 @@ export function createSourceReadBridge(
     });
   };
   return {
-    async prepare() {
-      if (params.recoveryId) await (parent ??= createParent());
-    },
     onChromeDispatch(actionKey: string, actionInput: Record<string, unknown>) {
       const cleanup = actionKey === 'network_intercept_stop' || actionKey === 'close_tab';
       const dispatchSignal = cleanup ? signal : workSignal;
@@ -129,31 +109,24 @@ export function createSourceReadBridge(
             actionInput.retain_on_interruption === true,
         ));
         if (dispatchSignal.aborted) throw sourceReadDeadlineError(params.feedId);
-        // A leased tab is closed or retained by settle(); an unleased scratch tab
-        // still closes through the connector's own cleanup.
-        if (interruption && actionKey === 'close_tab' && leased)
+        // The host is the sole finalizer of leased tabs. Unleased adapters keep
+        // their own cleanup, including on older extensions.
+        if (actionKey === 'close_tab' && leased)
           return { closed: false, cleanup_pending: true };
         if (interruption && !cleanup) throw interruption;
         const result = await dispatchChromeActionToExtension({
           organizationId: params.scope.organizationId,
           actionKey,
-          actionInput: Object.fromEntries(
-            Object.entries(actionInput).filter(([key]) => key !== 'retain_on_interruption'),
-          ),
+          actionInput,
           parentRunId,
           visibilityUserId: params.scope.principal,
           abortSignal: dispatchSignal,
           skipAccountProbe: !!interruption && cleanup,
-          verifySourceAccount: actionKey === 'close_tab',
         });
         const marker = result.interruption ?? browserPageInterruption(result.output?.value);
-        if (marker) {
-          interruption = new BrowserInterruptionError(marker.reason, marker.message);
-          throw interruption;
-        }
+        if (marker) throw new BrowserInterruptionError(marker.reason, marker.message);
         if (result.status !== 'completed')
           throw new Error(result.error_message ?? `Browser source step ${result.status}`);
-        if (actionKey === 'close_tab') tabClosed = true;
         return result.output ?? {};
       })().catch((error) => {
         if (error instanceof BrowserInterruptionError) interruption = error;
@@ -163,86 +136,76 @@ export function createSourceReadBridge(
       pending.finally(() => dispatches.delete(pending)).catch(() => {});
       return pending;
     },
-    get leased() {
-      return leased;
-    },
-    get interruption() {
-      return interruption;
-    },
-    async settle(status: 'completed' | 'failed' | 'timeout'): Promise<void> {
-      if (settled) return;
-      settled = true;
+    async run<T>(work: () => Promise<T>): Promise<T> {
+      let result: { ok: true; value: T } | { ok: false; error: unknown };
+      try {
+        if (params.recoveryId) await (parent ??= createParent());
+        result = { ok: true, value: await work() };
+      } catch (error) {
+        result = { ok: false, error };
+      }
       // A crashed isolate can leave an unawaited dispatch. Cancel ordinary work
       // before joining it, while keeping capture/tab cleanup within its budget.
       workController.abort();
       await Promise.allSettled(dispatches);
-      if (!parent) return;
-      const runId = await parent.catch(() => undefined);
-      if (runId === undefined) return;
-      let cleanupFailed = false;
+      const runId = await parent?.catch(() => undefined);
+      let cleanupError: { error: unknown } | undefined;
       try {
-        const lease = await sourceBrowserLease(params.scope.organizationId, runId);
-        let outcome: SourceBrowserCleanup = tabClosed ? 'closed' : 'unacknowledged';
-        if (lease?.tab && !tabClosed && !signal.aborted) {
-          const eligible =
-            interruption?.reason === 'challenge_required' &&
-            !!lease.owner.flow_id &&
-            !lease.resumed;
-          const cleanup = await dispatchChromeActionToExtension({
-            organizationId: params.scope.organizationId,
-            actionKey: 'close_tab',
-            actionInput: { tab_id: lease.tab.tab_id },
-            parentRunId: runId,
-            visibilityUserId: params.scope.principal,
-            skipAccountProbe: status !== 'completed',
-            verifySourceAccount: status === 'completed',
-            retainSourceTab: eligible,
-            abortSignal: signal,
-          });
-          if (cleanup.interruption) {
-            // Final verification failed. Leave the exact owned target to
-            // extension expiry without bypassing account checks with another
-            // close action. Keep the fence until its bounded TTL.
-            interruption = new BrowserInterruptionError(
-              cleanup.interruption.reason,
-              cleanup.interruption.message,
-            );
-          } else if (status === 'completed' && cleanup.status !== 'completed') {
-            interruption = new BrowserInterruptionError(
-              'recovery_unavailable',
-              cleanup.error_message ??
-                'Final browser account verification or cleanup was not acknowledged.',
-            );
+        if (runId !== undefined) {
+          const lease = await sourceBrowserLease(params.scope.organizationId, runId);
+          let outcome: SourceBrowserCleanup = { kind: 'unacknowledged' };
+          if (leased && result.ok && !interruption && !lease?.tab) {
+            interruption = new BrowserInterruptionError('recovery_unavailable', 'The source read did not confirm an exact owned browser tab.');
           }
-          if (cleanup.status === 'completed') {
-            if (eligible && cleanup.output?.cleanup_ack === true) outcome = 'retained';
-            else if (!eligible && !cleanup.interruption) outcome = 'closed';
+          if (lease?.tab && !signal.aborted) {
+            const retainUntil = interruption?.reason === 'challenge_required' && canRetainSourceBrowser(lease)
+              ? new Date(Date.now() + SOURCE_BROWSER_RETENTION_MS).toISOString() : undefined;
+            const cleanup = await dispatchChromeActionToExtension({
+              organizationId: params.scope.organizationId,
+              actionKey: 'close_tab',
+              actionInput: { tab_id: lease.tab.tab_id },
+              parentRunId: runId,
+              visibilityUserId: params.scope.principal,
+              skipAccountProbe: !result.ok || !!interruption,
+              retainUntil,
+              abortSignal: signal,
+            });
+            if (cleanup.interruption) {
+              // Never bypass a failed final verification with another close.
+              // Exact-target expiry handles cleanup with uncertain authority.
+              interruption = new BrowserInterruptionError(cleanup.interruption.reason, cleanup.interruption.message);
+            } else if (result.ok && cleanup.status !== 'completed') {
+              interruption = new BrowserInterruptionError('recovery_unavailable',
+                cleanup.error_message ?? 'Final browser account verification or cleanup was not acknowledged.');
+            }
+            const acknowledged = cleanup.status === 'completed' && !cleanup.interruption;
+            if (acknowledged) {
+              if (!retainUntil) outcome = { kind: 'closed' };
+              else if (cleanup.output?.cleanup_ack === true) outcome = { kind: 'retained', expiresAt: retainUntil };
+            }
           }
-        }
-        const recovery = await finishSourceBrowser(params.scope.organizationId, runId, outcome);
-        if (interruption && recovery) {
-          interruption = new BrowserInterruptionError(
-            interruption.reason,
-            interruption.message,
-            recovery,
-          );
+          const recovery = await finishSourceBrowser(params.scope.organizationId, runId, outcome);
+          if (interruption && recovery) {
+            interruption = new BrowserInterruptionError(interruption.reason, interruption.message, recovery);
+          }
         }
       } catch (error) {
-        cleanupFailed = true;
-        throw error;
+        cleanupError = { error };
+        if (!result.ok) logger.warn({ feedId: params.feedId, error: getErrorMessage(error) }, 'Browser cleanup failed after source work failed');
+      }
+      try {
+        // Decide the result once. Cancellation never carries recovery authority,
+        // and cleanup failure rejects successful work without hiding a read error.
+        if (signal.aborted && leased) throw new BrowserInterruptionError('timeout', 'Browser source read timed out or was cancelled; no recovery handoff was issued.');
+        if (interruption) throw interruption;
+        if (cleanupError && result.ok) throw cleanupError.error;
+        if (signal.aborted) throw sourceReadDeadlineError(params.feedId);
+        if (!result.ok) throw result.error;
+        return result.value;
       } finally {
-        if (signal.aborted && leased) {
-          // Cancellation may arrive after the source returned rows or after
-          // retention was acknowledged. Neither grants a recovery handoff.
-          interruption = new BrowserInterruptionError(
-            interruption?.reason ?? 'timeout',
-            interruption?.message ?? 'Browser source read timed out or was cancelled before completion.',
-          );
-        }
-        // Both typed interruptions and thrown cleanup failures reject the read.
-        await scrubSourceReadRun(runId, params.scope.organizationId, feed.feed_key,
+        if (runId !== undefined) await scrubSourceReadRun(runId, params.scope.organizationId, feed.feed_key,
           signal.aborted ? 'timeout'
-            : status === 'completed' && (interruption || cleanupFailed) ? 'failed' : status);
+            : !result.ok || interruption || cleanupError ? 'failed' : 'completed');
       }
     },
   };

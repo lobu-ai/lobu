@@ -627,10 +627,8 @@ export async function dispatchChromeActionToExtension(params: {
   abortSignal?: AbortSignal;
   /** Host-only recursion for the declared self-identity probe. Never accepted from worker input. */
   skipAccountProbe?: boolean;
-  /** Host-only source cleanup; never accepted from connector input. */
-  retainSourceTab?: boolean;
-  /** Source completion re-verifies the expected account on its leased tab. */
-  verifySourceAccount?: boolean;
+  /** Host-only retention deadline; never accepted from connector input. */
+  retainUntil?: string;
 }): Promise<ChromeActionDispatchResult> {
   const {
     organizationId,
@@ -818,7 +816,7 @@ export async function dispatchChromeActionToExtension(params: {
   const alreadyVerified = verifiedBinding?.device_worker_id === browserResource.deviceWorkerId
     && verifiedBinding?.auth_profile_id === browserResource.authProfileId
     && verifiedBinding?.account_id === browserResource.accountId;
-  if (!params.skipAccountProbe && probe && (!alreadyVerified || (params.verifySourceAccount && sourceLease))) {
+  if (!params.skipAccountProbe && probe && (!alreadyVerified || (sourceLease && actionKey === 'close_tab'))) {
     if (!browserResource.live || !browserResource.authProfileId) {
       return { status: 'failed', error_message: dependencyUnavailableError('browser_setup_required', 'Connect this browser account before reading it.') };
     }
@@ -965,7 +963,7 @@ export async function dispatchChromeActionToExtension(params: {
         parentRunId,
         runMetadata: {
           browser_context: browserContext,
-          ...(sourceLease ? { browser_recovery_control: browserRecoveryControl(sourceLease, params.retainSourceTab ? 'retain' : 'read') } : {}),
+          ...(sourceLease ? { browser_recovery_control: browserRecoveryControl(sourceLease, params.retainUntil ? 'retain' : 'read', params.retainUntil) } : {}),
           source_attribution: parent.run_metadata?.source_attribution,
           [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,
           ...(params.skipAccountProbe ? { [BROWSER_ACCOUNT_PROBE_METADATA_KEY]: true } : {}),

@@ -1,7 +1,7 @@
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
-import { createLogger, getErrorMessage } from '@lobu/core';
 import { getDb, pgTextArray, pgBigintArray, type DbClient } from '../db/client';
 import { createSourceReadBridge } from '../lib/source-read-bridge';
+import { sourceRecoveryHash } from '../lib/browser-recovery';
 import { enqueueTasksInTransaction } from '../scheduled/task-scheduler';
 import { SOURCE_FEED_LISTENER_TASK } from '../scheduled/task-definitions';
 import { dbEgressConfig } from '../utils/cloud-mode';
@@ -15,7 +15,6 @@ import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
 
 const LISTENER_SETUP_TIMEOUT_MS = 150_000;
-const logger = createLogger('source-feed-listener');
 
 export interface SourceFeedListenerTask {
   organizationId: string;
@@ -107,7 +106,6 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
   const sql = getDb();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), LISTENER_SETUP_TIMEOUT_MS);
-  let browser: ReturnType<typeof createSourceReadBridge> | undefined;
   let config: Record<string, unknown> | undefined;
 
   try {
@@ -124,12 +122,22 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
     `;
     if (!feed) return;
 
+    const checkpoint = feed.checkpoint?.cursor as Record<string, unknown> | null ?? null;
+    config = feed.config ?? {};
+    // Keep setup due until it completes. A gateway crash after binding the page
+    // must still be recoverable when the abandoned task is reaped.
+    const [started] = await sql`UPDATE feeds SET next_run_at = now()
+      WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
+        AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb
+      RETURNING consecutive_failures`;
+    if (!started) return;
     const compiledCode = await resolveConnectorCodeForKey(
       feed.connector_key,
       task.organizationId,
       feed.pinned_version ?? feed.definition_version,
     );
-    browser = createSourceReadBridge(
+    const artifactHash = computeCodeHash(compiledCode);
+    const browser = createSourceReadBridge(
       {
         id: Number(feed.id),
         connection_id: Number(feed.connection_id),
@@ -137,7 +145,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         connector_key: String(feed.connector_key),
         pinned_version: feed.pinned_version,
         definition_version: feed.definition_version,
-        selected_artifact_hash: computeCodeHash(compiledCode),
+        selected_artifact_hash: artifactHash,
       },
       {
         scope: {
@@ -148,19 +156,11 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         automationId: subscription.automationId,
         feedId: task.feedId,
         deadlineAt: Date.now() + LISTENER_SETUP_TIMEOUT_MS,
+        requestHash: sourceRecoveryHash({ feedId: task.feedId, artifact: artifactHash }),
         sourceSubscriptionScopeKey: sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version),
       },
       controller.signal,
     );
-    const checkpoint = feed.checkpoint?.cursor as Record<string, unknown> | null ?? null;
-    config = feed.config ?? {};
-    // Keep setup due until it completes. A gateway crash after binding the page
-    // must still be recoverable when the abandoned task is reaped.
-    const [started] = await sql`UPDATE feeds SET next_run_at = now()
-      WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
-        AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb
-      RETURNING consecutive_failures`;
-    if (!started) return;
     const auth = await resolveExecutionAuth({
       organizationId: task.organizationId,
       connectionId: Number(feed.connection_id),
@@ -170,7 +170,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
       logContext: { feedId: String(task.feedId) },
       logMessage: 'Failed to resolve source listener credentials',
     });
-    await executeCompiledConnector({
+    await browser.run(async () => executeCompiledConnector({
       compiledCode,
       job: {
         mode: 'observe',
@@ -193,11 +193,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         signal: controller.signal,
       },
       timeoutMs: LISTENER_SETUP_TIMEOUT_MS,
-    });
-
-    // Account verification and cleanup are part of setup, before success writes.
-    await browser.settle('completed');
-    if (browser.interruption) throw browser.interruption;
+    }));
 
     // Only a valid browser delivery confirms recovery. Keep the failure count
     // through setup, and do not erase a rejected page received during setup.
@@ -207,11 +203,6 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb
         AND consecutive_failures = ${started.consecutive_failures}`;
   } catch (error) {
-    try {
-      await browser?.settle(controller.signal.aborted ? 'timeout' : 'failed');
-    } catch (cleanupError) {
-      logger.warn({ feedId: task.feedId, error: getErrorMessage(cleanupError) }, 'Browser cleanup failed after source listener setup failed');
-    }
     await recordSourceFeedFailure(sql, task, config, 'Source listener setup failed; check the paired browser.');
     throw error;
   } finally {
