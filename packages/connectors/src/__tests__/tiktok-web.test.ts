@@ -253,6 +253,23 @@ function recommendationBrowser(items: unknown[] = [post], responseOverrides: Rec
 }
 
 describe("TikTok source reads", () => {
+	test("excludes non-post ad units but keeps canonical posts including promoted posts", async () => {
+		const adUnit = { ...post, isAd: true, author: { ...post.author, uniqueId: "Synthetic Ad Brand" } };
+		const promotedPost = { ...post, id: "7000000000000000009", isAd: true };
+		const { dispatcher } = recommendationBrowser([adUnit, post, promotedPost]);
+		const result = await new TikTokConnector().read(context(dispatcher));
+		expect(result.rows.map(row => row.origin_id)).toEqual([post.id, promotedPost.id]);
+		expect(result.rows.every(row => String(row.source_url).startsWith("https://www.tiktok.com/@example_creator/video/"))).toBe(true);
+	});
+
+	test("requires an explicit ad marker to exclude a non-post identity and never claims an ad-only feed is empty", async () => {
+		for (const isAd of [false, undefined, "true", true]) {
+			const { dispatcher, calls } = recommendationBrowser([{ ...post, isAd, author: { uniqueId: "Synthetic Ad Brand" } }]);
+			await expect(new TikTokConnector().read(context(dispatcher))).rejects.toThrow(isAd === true ? "no verifiable posts" : "valid source identity");
+			expect(calls.slice(-2).map(call => call.action)).toEqual(["network_intercept_stop", "close_tab"]);
+		}
+	});
+
 	test("waits for the native For You recommendation response", async () => {
 		let drains = 0;
 		const { dispatcher, calls } = browser(action => {
