@@ -49,6 +49,20 @@ const Github = defineConnector({
 });
 
 describe("defineConnector", () => {
+	test("preserves the optional updatedEvent flag in serialized feed metadata", () => {
+		const Updates = defineConnector({
+			key: "test_updates", name: "Test updates", version: "1.0.0",
+			feeds: {
+				items: { name: "Items", sync: async () => ({ status: "complete" }), eventKinds: {
+					item: { updatedEvent: true }, legacy: {}, disabled: { updatedEvent: false },
+				} },
+			},
+		});
+		expect(JSON.parse(JSON.stringify(new Updates().definition.feeds))).toMatchObject({
+			items: { eventKinds: { item: { updatedEvent: true }, legacy: {}, disabled: { updatedEvent: false } } },
+		});
+	});
+
 	test("returns a ConnectorRuntime subclass the worker can detect", () => {
 		expect(isConnectorRuntimeClass(Github)).toBe(true);
 		expect(new Github()).toBeInstanceOf(ConnectorRuntime);

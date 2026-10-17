@@ -218,6 +218,8 @@ export interface InsertedEvent {
   created_at: string;
   /** Whether this call landed a new immutable row or reused identical state. */
   change: EventChangeKind;
+  /** Prior head's activity time when onConflictUpdate superseded a source item. */
+  previous_occurred_at?: string | null;
 }
 
 /** Key-order-independent JSON serialization for semantic equality checks. */
@@ -769,6 +771,7 @@ export async function insertEvent(
     activeSql: DbClient
   ): Promise<InsertedEvent> => {
     let supersedesEventId = params.supersedesEventId ?? null;
+    let previousOccurredAt: string | null | undefined;
 
     if (options?.onConflictUpdate) {
       let existing = await findCurrentEventByOrigin(activeSql, sourceOriginLookupParams);
@@ -837,16 +840,18 @@ export async function insertEvent(
           );
         } else {
           supersedesEventId = existing.id;
+          previousOccurredAt = existing.occurred_at;
         }
       }
     }
 
-    return insertRow(activeSql, supersedesEventId);
+    return insertRow(activeSql, supersedesEventId, previousOccurredAt);
   };
 
   const insertRow = async (
     sql: DbClient,
-    supersedesEventId: number | null
+    supersedesEventId: number | null,
+    previousOccurredAt: string | null | undefined
   ): Promise<InsertedEvent> => {
     let lineage: EventLineage =
       supersedesEventId != null
@@ -1033,6 +1038,7 @@ export async function insertEvent(
     const persisted: InsertedEvent = {
       ...inserted,
       change: supersedesEventId === null ? 'inserted' : 'superseded',
+      ...(previousOccurredAt !== undefined ? { previous_occurred_at: previousOccurredAt } : {}),
     };
     await options?.afterPersist?.(persisted, sql);
     return persisted;
