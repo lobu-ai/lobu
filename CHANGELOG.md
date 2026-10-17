@@ -1,5 +1,35 @@
 # Changelog
 
+## [23.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v22.0.0...lobu-v23.0.0) (2026-10-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* `executionTarget` is no longer accepted or returned by the agent API.
+
+### Features
+
+* **chart:** alert when search runs without query embeddings ([#4199](https://github.com/lobu-ai/lobu/issues/4199)) ([b4b750e](https://github.com/lobu-ai/lobu/commit/b4b750e2751c44c09a08cdcc3df3f80c5d57e6a7))
+* **db:** drop feeds.kind and feeds.virtual ([#4187](https://github.com/lobu-ai/lobu/issues/4187)) ([ddd73d5](https://github.com/lobu-ai/lobu/commit/ddd73d54b4ba84a9cb1c2c76f2b0594d234e749d)), closes [#3134](https://github.com/lobu-ai/lobu/issues/3134)
+* **search:** order search_memory content by match_score and expose it ([#4194](https://github.com/lobu-ai/lobu/issues/4194)) ([408552e](https://github.com/lobu-ai/lobu/commit/408552e65d328f362dc140832cd899ce340a4b34))
+
+
+### Bug Fixes
+
+* **connectors:** capture native TikTok For You posts ([#4197](https://github.com/lobu-ai/lobu/issues/4197)) ([ac4b592](https://github.com/lobu-ai/lobu/commit/ac4b592b463ef031659260b4a7c76868c0855787))
+* **connectors:** exclude TikTok ad units without post identity ([#4198](https://github.com/lobu-ai/lobu/issues/4198)) ([64253a3](https://github.com/lobu-ai/lobu/commit/64253a39630560d9cad5831a38585a3c01e99f7c))
+* **mcp:** offer optional OAuth sign-in when an anonymous MCP server advertises it ([#4193](https://github.com/lobu-ai/lobu/issues/4193)) ([8275ae5](https://github.com/lobu-ai/lobu/commit/8275ae5ec9b83dd6f91d4523f7dcf3713597bea9))
+* **media:** deliver authorized screenshot pixels to models ([#4196](https://github.com/lobu-ai/lobu/issues/4196)) ([574e5a4](https://github.com/lobu-ai/lobu/commit/574e5a4ea247f82abf62c96eb01709c09f29827b))
+* **search:** collapse identical content in search_memory recall ([#4191](https://github.com/lobu-ai/lobu/issues/4191)) ([3a3ea2b](https://github.com/lobu-ai/lobu/commit/3a3ea2b8c3675fb7f3c96952884720f23c7afae5))
+* **search:** keep text rank and vector similarity on one scale ([#4189](https://github.com/lobu-ai/lobu/issues/4189)) ([e1d1a0a](https://github.com/lobu-ai/lobu/commit/e1d1a0a23d20a9c78c389f4ef9dff9fdfbe2183b))
+* **search:** report text-only recall when the query embedding is unavailable ([#4190](https://github.com/lobu-ai/lobu/issues/4190)) ([09e5f49](https://github.com/lobu-ai/lobu/commit/09e5f49bcb6b092f97cc9f6913decf08ac3ca556))
+* **server:** one device access rule for actions and feed reads ([#4183](https://github.com/lobu-ai/lobu/issues/4183)) ([12f9a62](https://github.com/lobu-ai/lobu/commit/12f9a6286c11f4af6fcaf5640d48db1b01ac3b28))
+
+
+### Code Refactoring
+
+* remove the device chat lane ([#4182](https://github.com/lobu-ai/lobu/issues/4182)) ([bad0797](https://github.com/lobu-ai/lobu/commit/bad0797e3ce241d662b5c3c09b87d4d0700afbcb))
+
 ## [22.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v21.2.1...lobu-v22.0.0) (2026-10-16)
 
 
