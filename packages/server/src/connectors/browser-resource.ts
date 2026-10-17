@@ -7,6 +7,8 @@ import { getManagedByOrg } from '../utils/connector-auth';
 export const BROWSER_EXTENSION_UPDATE_REQUIRED = 'Update the Lobu Chrome extension to version 0.9.2 or newer, then reload it and retry setup.';
 /** Gateway-only child metadata; account probes use scratch tabs, not draft activation. */
 export const BROWSER_ACCOUNT_PROBE_METADATA_KEY = 'browser_account_probe';
+/** Shared profile/run metadata key for bounded source ownership. */
+export const BROWSER_RECOVERY_KEY = 'browser_recovery';
 export function browserExtensionSupportsOrigins(version: string | null | undefined): boolean {
   return !!version && compareSemverish(version, '0.9.2') >= 0;
 }
@@ -34,8 +36,8 @@ export async function connectionBrowserResource(organizationId: string, connecti
     SELECT cd.browser, cd.auth_schema, ap.profile_kind, ap.auth_data, ap.auth_data->>'account_id' AS browser_account_id,
            ap.status AS profile_status, ap.id AS auth_profile_id, ap.device_worker_id AS profile_device_id,
            c.device_worker_id, c.created_by, c.status, c.config, dw.platform, dw.app_version,
-           CASE WHEN (ap.metadata->'browser_recovery'->>'expires_at')::timestamptz > clock_timestamp()
-             THEN (ap.metadata->'browser_recovery'->>'run_id')::bigint END AS recovery_run_id,
+           CASE WHEN (ap.metadata->${BROWSER_RECOVERY_KEY}->>'expires_at')::timestamptz > clock_timestamp()
+             THEN (ap.metadata->${BROWSER_RECOVERY_KEY}->>'run_id')::bigint END AS recovery_run_id,
            dw.last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS}) AS online
     FROM connections c
     JOIN connector_definitions cd ON cd.organization_id = c.organization_id

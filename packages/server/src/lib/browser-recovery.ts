@@ -3,13 +3,13 @@ import { BrowserInterruptionError, type BrowserRecovery } from "@lobu/core";
 import { sourceReadRecoveryAllowed } from "../authz/operation-run-policy";
 import type { AuthzScope } from "../authz/scope";
 import {
+  BROWSER_RECOVERY_KEY,
   browserBindingSnapshot,
   connectionBrowserResource,
 } from "../connectors/browser-resource";
 import { getDb, type DbClient } from "../db/client";
 import { stableJson } from "../utils/insert-event";
 
-const BROWSER_RECOVERY_KEY = "browser_recovery";
 export const SOURCE_BROWSER_RETENTION_MS = 5 * 60_000;
 const RECOVERY_OBSERVATIONS = new Set(["screenshot", "get_accessibility_tree"]);
 const RECOVERY_ACTIONS = new Set(["click_ref", "focus_tab"]);
@@ -322,6 +322,7 @@ export async function finishSourceBrowser(
   org: string,
   runId: number,
   cleanup: SourceBrowserCleanup,
+  signal: AbortSignal,
 ): Promise<BrowserRecovery | undefined> {
   const sql = getDb();
   return sql.begin(async (tx) => {
@@ -341,36 +342,47 @@ export async function finishSourceBrowser(
       lease.binding.auth_profile_id !== initial.binding.auth_profile_id
     )
       throw recoveryUnavailable("Browser recovery lease changed.");
-    const ready =
+    const now = lease.run.observed_at.getTime();
+    const readyUntil =
       cleanup.kind === "retained" &&
-      Date.parse(cleanup.expiresAt) > lease.run.observed_at.getTime() &&
-      canRetainSourceBrowser(lease);
-    const hold = ready || (!!lease.tab && cleanup.kind === "unacknowledged");
-    const expires_at = !hold
-      ? lease.expires_at
-      : cleanup.kind === "retained"
+      !signal.aborted &&
+      Date.parse(lease.expires_at) > now &&
+      Date.parse(cleanup.expiresAt) > now &&
+      canRetainSourceBrowser(lease)
         ? cleanup.expiresAt
-        : new Date(lease.run.observed_at.getTime() + SOURCE_BROWSER_RETENTION_MS).toISOString();
+        : undefined;
+    // A ready handoff or uncertain cleanup keeps the bounded fence; all else releases it.
+    const holdUntil =
+      readyUntil ??
+      (lease.tab && cleanup.kind === "unacknowledged"
+        ? new Date(now + SOURCE_BROWSER_RETENTION_MS).toISOString()
+        : undefined);
     await saveLease(
-      { ...lease, expires_at, state: ready ? "ready" : "closed" },
+      {
+        ...lease,
+        expires_at: holdUntil ?? lease.expires_at,
+        state: readyUntil ? "ready" : "closed",
+      },
       org,
       tx,
     );
     await tx`UPDATE auth_profiles SET metadata = ${
-      hold
-        ? tx`COALESCE(metadata, '{}'::jsonb) || ${tx.json({ [BROWSER_RECOVERY_KEY]: { run_id: runId, expires_at } })}`
+      holdUntil
+        ? tx`COALESCE(metadata, '{}'::jsonb) || ${tx.json({ [BROWSER_RECOVERY_KEY]: { run_id: runId, expires_at: holdUntil } })}`
         : tx`COALESCE(metadata, '{}'::jsonb) - ${BROWSER_RECOVERY_KEY}`
     }
       WHERE id = ${lease.binding.auth_profile_id} AND organization_id = ${org}`;
-    if (ready)
-      return {
-        recovery_id: lease.recovery_id,
-        expires_at,
-        ...lease.tab!,
-        device_worker_id: lease.binding.device_worker_id!,
-        chrome_connection_id: lease.chrome_connection_id!,
-      };
-    return undefined;
+    if (!readyUntil) return undefined;
+    // Either write can wait past cancellation. Roll back rather than extend
+    // the original read deadline into a handoff its caller cannot receive.
+    signal.throwIfAborted();
+    return {
+      recovery_id: lease.recovery_id,
+      expires_at: readyUntil,
+      ...lease.tab!,
+      device_worker_id: lease.binding.device_worker_id!,
+      chrome_connection_id: lease.chrome_connection_id!,
+    };
   });
 }
 /** Server-stamped descriptor. Raw public recovery/observation IDs confer no device authority. */

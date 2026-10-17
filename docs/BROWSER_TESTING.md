@@ -195,15 +195,20 @@ browser step on the same account. Enqueue and acquisition share the profile row
 lock, so a step cannot slip past an earlier ownership check.
 
 The same fence blocks other connector actions and feed syncs on the account,
-so they cannot change its browser state during recovery. Unacknowledged cleanup
-or a timed-out leased read holds that fence for at most five minutes; it does
-not immediately admit work into a tab whose cleanup is uncertain. Database time
-governs server ownership and deadlines. Private dispatch timing carries the
+so they cannot change its browser state during recovery. Unacknowledged cleanup,
+including an opened tab whose read times out before cleanup, holds that fence
+for at most five minutes; it does not immediately admit work into a tab whose
+cleanup is uncertain. If retention was acknowledged but cancellation or expiry
+is observed during finalization, no handoff is issued and
+ownership ends no later than the original read deadline; the idle target still
+closes at its device expiry. Database time governs server ownership and
+deadlines. Private dispatch timing carries the
 remaining budget to the extension, which subtracts delivery delay and measures
 local elapsed time. A browser worker restart invalidates the retained lease and
 cleans up its exact target; it cannot restore stale observation authority.
 
-A lost action response still consumes its observation, and a lost resume response
+A response lost after the handoff commits can leave its bounded reservation until
+expiry. A lost action response still consumes its observation, and a lost resume response
 still consumes the recovery ID. Do not replay either. Failed image delivery
 requires a fresh observation or human handoff, never inference from a resource
 link. After expiry or cleanup, a fresh normal read must verify the account again.

@@ -1138,7 +1138,7 @@ describe('compiled browser source reads', () => {
     await reading;
     return jobs;
   }
-  it('finishes from the latest tab lease after waiting for the profile lock', async () => {
+  it.each(['active', 'cancelled', 'expired'])('finishes from the latest tab lease after waiting for the profile lock (%s)', async state => {
     const profile = await recoverySetup();
     const sql = getTestDb();
     const runId = await sql.begin(async tx => {
@@ -1159,18 +1159,28 @@ describe('compiled browser source reads', () => {
       await release;
     });
     const pid = await acquired;
-    const finishing = finishSourceBrowser(orgId, runId, { kind: 'retained', expiresAt: new Date(Date.now() + SOURCE_BROWSER_RETENTION_MS).toISOString() });
+    const controller = new AbortController();
+    const finishing = finishSourceBrowser(orgId, runId, { kind: 'retained', expiresAt: new Date(Date.now() + SOURCE_BROWSER_RETENTION_MS).toISOString() }, controller.signal);
     try {
       await expect.poll(async () => (await sql`SELECT EXISTS (
         SELECT 1 FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))
       ) AS waiting`)[0].waiting).toBe(true);
       const [chrome] = await sql`SELECT id FROM connections WHERE organization_id = ${orgId} AND connector_key = 'chrome'`;
       await saveSourceBrowserTab(orgId, runId, { browser_tab: { tab_id: 77, target_id: 'synthetic-late-target', window_id: 3 } }, Number(chrome.id));
+      if (state === 'cancelled') controller.abort();
+      if (state === 'expired') await sql`UPDATE runs SET run_metadata = jsonb_set(run_metadata,
+        '{browser_recovery,expires_at}', to_jsonb(clock_timestamp() - interval '1 second')) WHERE id = ${runId}`;
     } finally {
       unlock();
       await holder;
     }
-    expect(await finishing).toMatchObject({ tab_id: 77, target_id: 'synthetic-late-target', window_id: 3 });
+    if (state === 'active') {
+      expect(await finishing).toMatchObject({ tab_id: 77, target_id: 'synthetic-late-target', window_id: 3 });
+    } else {
+      expect(await finishing).toBeUndefined();
+      expect((await sql`SELECT metadata FROM auth_profiles WHERE id = ${profile.id}`)[0]
+        .metadata.browser_recovery).toBeUndefined();
+    }
   });
   it('preserves structured navigation failure during the account probe and closes its exact created target', async () => {
     await recoverySetup(); const reading = recoveryRead(); const jobs = await serveRecovery(reading, { navigationFails: true });
@@ -1260,7 +1270,63 @@ describe('compiled browser source reads', () => {
       .toEqual([{ status: 'timeout' }]);
     const [profile] = await getTestDb()`SELECT metadata FROM auth_profiles WHERE id =
       (SELECT auth_profile_id FROM connections WHERE id = ${connectionId})`;
-    expect(Date.parse(profile.metadata.browser_recovery.expires_at)).toBeGreaterThan(Date.now() + 240_000);
+    expect(profile.metadata.browser_recovery).toBeUndefined();
+    await expectScrubbed();
+  });
+  it('does not commit a handoff when the caller times out during finalization writes', async () => {
+    const profile = await recoverySetup();
+    const sql = getTestDb();
+    let reached!: () => void;
+    let release!: () => void;
+    let settled!: () => void;
+    const finalizing = new Promise<void>(resolve => { reached = resolve; });
+    const proceed = new Promise<void>(resolve => { release = resolve; });
+    const finalized = new Promise<void>(resolve => { settled = resolve; });
+    const finish = browserRecovery.finishSourceBrowser;
+    vi.spyOn(browserRecovery, 'finishSourceBrowser').mockImplementation(async (...args) => {
+      expect(args[2].kind).toBe('retained');
+      let locked!: (pid: number) => void;
+      const acquired = new Promise<number>(resolve => { locked = resolve; });
+      const holder = sql.begin(async tx => {
+        // SELECT FOR UPDATE can inspect the lease, but its subsequent UPDATE waits.
+        await tx`LOCK TABLE runs IN SHARE MODE`;
+        locked(Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid));
+        await proceed;
+      });
+      const pid = await acquired;
+      const finishing = finish(...args);
+      finishing.catch(() => {});
+      try {
+        await expect.poll(async () => (await sql`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))
+        ) AS waiting`)[0].waiting).toBe(true);
+        reached();
+        await proceed;
+        await holder;
+        return await finishing;
+      } finally { release(); await holder; settled(); }
+    });
+    const reading = recoveryRead();
+    const serving = serveRecovery(reading, { challenge: 'late' });
+    await finalizing;
+    try {
+      const failure = (await reading).results[0];
+      expect(failure).toMatchObject({ ok: false, interruption: { reason: 'timeout' } });
+      expect(failure.interruption.recovery).toBeUndefined();
+    } finally {
+      release();
+      await finalized;
+      await serving;
+    }
+    await expect.poll(async () => (await sql`SELECT status FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)[0].status).toBe('timeout');
+    expect((await sql`SELECT run_metadata FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)[0]
+      .run_metadata.browser_recovery.state).not.toBe('ready');
+    const [ownership] = await sql`SELECT metadata, clock_timestamp() AS observed_at
+      FROM auth_profiles WHERE id = ${profile.id}`;
+    expect(Date.parse(ownership.metadata.browser_recovery.expires_at)).toBeLessThanOrEqual(ownership.observed_at.getTime());
+    expect((await connectionBrowserResource(orgId, connectionId))?.recoveryRunId).toBeNull();
     await expectScrubbed();
   });
   it('admits one feed per browser account in a parallel batch and releases it after success', async () => {

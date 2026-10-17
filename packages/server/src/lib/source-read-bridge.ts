@@ -183,7 +183,7 @@ export function createSourceReadBridge(
               else if (cleanup.output?.cleanup_ack === true) outcome = { kind: 'retained', expiresAt: retainUntil };
             }
           }
-          const recovery = await finishSourceBrowser(params.scope.organizationId, runId, outcome);
+          const recovery = await finishSourceBrowser(params.scope.organizationId, runId, outcome, signal);
           if (interruption && recovery) {
             interruption = new BrowserInterruptionError(interruption.reason, interruption.message, recovery);
           }
