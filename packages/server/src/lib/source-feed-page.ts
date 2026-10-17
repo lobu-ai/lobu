@@ -1,3 +1,4 @@
+import { BrowserInterruptionError } from '@lobu/core';
 import { createHash } from 'node:crypto';
 import type { FeedReadMatch, FeedReadWindow } from '@lobu/connector-sdk';
 import type { SourceReadScope } from '../authz/scope';
@@ -5,6 +6,7 @@ import { readSourceFeed } from './connector-pushdown';
 
 export interface SourceFeedPageRequest {
   feed_id: number;
+  recovery_id?: string;
   query?: string;
   cursor?: string;
   limit?: number;
@@ -109,6 +111,7 @@ export async function readSourceFeedPage(
   scope: SourceReadScope,
   signal?: AbortSignal,
   automationId?: number | null,
+  flowId?: string,
 ) {
   const page = decodeSourceCursor(
     read.cursor,
@@ -125,10 +128,13 @@ export async function readSourceFeedPage(
   if (signal?.aborted) onCallerAbort();
   const offset = page.sourceCursor ? 0 : page.position;
   const limit = Math.max(1, Math.min(500, Math.trunc(read.limit ?? 50)));
+  let browserLeased = false;
   const pending = readSourceFeed({
+    onBrowserLease: () => { browserLeased = true; },
     scope: scope,
-    automationId,
+    automationId, flowId,
     feedId: read.feed_id,
+    recoveryId: read.recovery_id,
     query: read.query,
     cursor: page.sourceCursor,
     limit,
@@ -146,9 +152,9 @@ export async function readSourceFeedPage(
     timer = setTimeout(() => {
       controller.abort();
       reject(
-        sourceReadError(
-          `source read ${read.feed_id} timed out after ${timeoutMs}ms`,
-        ),
+        browserLeased
+          ? new BrowserInterruptionError('timeout', `Browser source read ${read.feed_id} timed out; no recovery handoff was issued.`)
+          : sourceReadError(`source read ${read.feed_id} timed out after ${timeoutMs}ms`),
       );
     }, timeoutMs);
   });

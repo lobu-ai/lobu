@@ -1814,6 +1814,42 @@ describe('agent turn producer', () => {
     expect(claimed.payload.turn.session_jsonl).toBe(trimmed);
   });
 
+  it.each(['user', 'toolResult'])('preserves conversation text when %s images outgrow the snapshot cap', async (role) => {
+    const org = await createTestOrganization();
+    const sql = getTestDb();
+    const dependencies = { agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueAgentTurn(await admittedMessage(messageFor(org.id)), dependencies);
+    await enqueueAgentTurn(await admittedMessage({ ...messageFor(org.id), messageId: 'after-image' }), dependencies);
+    const [first, second] = await agentTurnRuns();
+    expect((await (await pollFleet('fleet-image', { agent_turn: true })).json()).run_id).toBe(first.id);
+    const data = Buffer.alloc(4 * 1024 * 1024).toString('base64');
+    const oversized = nativeSession([
+      { type: 'message', id: 'native-user', parentId: null,
+        message: { role: 'user', content: 'what is the isolate lane?', timestamp: 1 } },
+      { type: 'message', id: 'native-image', parentId: 'native-user',
+        message: { role, toolCallId: 'synthetic-call', toolName: 'observe', content: [{ type: 'text', text: 'Observation metadata retained.' }, { type: 'image', mimeType: 'image/png', data }], timestamp: 2 } },
+      { type: 'message', id: 'native-answer', parentId: 'native-image',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'the isolate answer' }], timestamp: 3 } },
+    ]);
+    const completed = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: first.id, worker_id: 'fleet-image', status: 'completed', text: 'the isolate answer', session_jsonl: oversized,
+    });
+    expect((await completed.json()).status).toBe('completed');
+    const [snapshot] = await sql`SELECT snapshot_jsonl, byte_size FROM agent_transcript_snapshot WHERE run_id = ${first.id}`;
+    expect(snapshot.snapshot_jsonl).toContain('Observation metadata retained.');
+    expect(snapshot.snapshot_jsonl).toContain('what is the isolate lane?');
+    expect(snapshot.snapshot_jsonl).toContain('the isolate answer');
+    expect(snapshot.snapshot_jsonl).toContain('Image omitted from saved history');
+    expect(snapshot.snapshot_jsonl).not.toContain(data);
+    expect(snapshot.byte_size).toBeLessThan(4 * 1024 * 1024);
+    const entries = snapshot.snapshot_jsonl.trim().split('\n').map((line: string) => JSON.parse(line));
+    expect(entries.slice(1).map((entry: { id: string }) => entry.id)).toEqual(['native-user', 'native-image', 'native-answer']);
+    expect((await runRow(first.id)).action_input.result.session_jsonl).toBe(snapshot.snapshot_jsonl);
+    const claimed = await (await pollFleet('fleet-after-image', { agent_turn: true })).json();
+    expect(claimed.run_id).toBe(second.id);
+    expect(claimed.payload.turn.session_jsonl).toBe(snapshot.snapshot_jsonl);
+  });
+
   it('resets the native session when an oversize snapshot has no compaction to trim to', async () => {
     const org = await createTestOrganization();
     const sql = getTestDb();

@@ -5,6 +5,18 @@ import {
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import type { Static, TSchema } from "@sinclair/typebox";
+import type { ToolResult } from "./mcp-content";
+
+export {
+  toolImageBudget,
+  type ToolImageBudget,
+  mcpToolResult,
+  isToolImageMimeType,
+  MAX_TOOL_IMAGE_BYTES,
+  MAX_TOOL_IMAGE_BYTES_TOTAL,
+  MAX_TOOL_IMAGES,
+  type ToolResult,
+} from "./mcp-content";
 
 export type { ToolLogger } from "@lobu/core/agent-tooling";
 
@@ -116,10 +128,10 @@ export function joinTextContent(
     .join("\n");
 }
 
-export function withErrorHandling(
+export function withErrorHandling<T extends ToolResult = TextResult>(
   label: string,
-  fn: () => Promise<TextResult>
-): Promise<TextResult> {
+  fn: () => Promise<T>
+): Promise<T | TextResult> {
   return fn().catch((error) => {
     logger.error(`${label} error:`, error);
     return textResult(
@@ -206,7 +218,7 @@ export async function postLinkButton(
 }
 
 export function toToolResult(
-  result: TextResult
+  result: ToolResult
 ): AgentToolResult<Record<string, unknown>> {
   return { content: result.content, details: {} };
 }

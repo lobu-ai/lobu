@@ -1,10 +1,11 @@
 // Self-contained browser adapter. Serialized into the user's paired browser;
 // keep every dependency inside this function, as in the WhatsApp page adapter.
 export async function tiktokPage(command, args = {}) {
+	const interrupt = (reason, message) => { throw Object.assign(new Error(message), { browser_interruption: reason }); };
 	const visible = (e) => !!e && e.getClientRects().length > 0;
 	const assertNoChallenge = () => {
 		if (visible(document.querySelector("#captcha-verify-container-main-page"))) {
-			throw new Error("TikTok verification required; complete the challenge in the connected browser");
+			interrupt("challenge_required", "TikTok verification required; complete the challenge in the connected browser");
 		}
 	};
 	assertNoChallenge();
@@ -19,20 +20,27 @@ export async function tiktokPage(command, args = {}) {
 	};
 	const wait = async (read) => {
 		for (let i = 0; i < 40; i++) {
+			assertNoChallenge();
 			const value = read();
 			if (value) return value;
 			await new Promise(resolve => setTimeout(resolve, 250));
 		}
-		throw new Error("TikTok page did not expose the requested content; it may be loading, signed out, or unavailable");
+		interrupt("loading_failure", "TikTok page did not expose the requested content");
 	};
 	if (command === "identity") {
-		try { return await wait(identity); } catch { return null; }
+		try { return await wait(identity); } catch (error) {
+			if (error.browser_interruption !== "loading_failure") throw error;
+			return null;
+		}
 	}
-	if (!identity()) throw new Error("TikTok sign-in is required");
+	const owner = identity()?.accountId;
+	if (!owner) interrupt("login_required", "TikTok sign-in is required");
+	if (command === "read_failure") interrupt("loading_failure", "TikTok page did not finish loading the requested content");
 	const assertFollowing = () => {
 		if (location.origin !== "https://www.tiktok.com" || location.pathname !== "/following") throw new Error("TikTok Following page changed");
 		assertNoChallenge();
-		if (!identity()) throw new Error("TikTok sign-in is required");
+		if (!identity()) interrupt("login_required", "TikTok sign-in is required");
+		if (identity().accountId !== owner) interrupt("account_mismatch", "TikTok account changed during the read");
 	};
 	if (command === "following_status" || command === "following_wait") {
 		assertFollowing();

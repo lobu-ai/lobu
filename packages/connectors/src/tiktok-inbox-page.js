@@ -1,14 +1,14 @@
 // Serialized into the paired browser. Read only the inbox's own loaded records
 // and read loaders; never return provider clients, tickets, or arbitrary state.
 export async function tiktokInboxPage(input) {
-	const fail = message => { throw new Error(`TikTok inbox: ${message}`); };
+	const fail = (message, reason) => { throw Object.assign(new Error(`TikTok inbox: ${message}`), reason ? { browser_interruption: reason } : {}); };
 	const visible = element => !!element?.getClientRects().length;
 	const account = () => {
 		if (location.origin !== "https://www.tiktok.com") fail("Wrong page origin");
-		if (visible(document.querySelector("#captcha-verify-container-main-page"))) fail("Verification required in the connected browser");
+		if (visible(document.querySelector("#captcha-verify-container-main-page"))) fail("Verification required in the connected browser", "challenge_required");
 		const raw = document.querySelector("#__UNIVERSAL_DATA_FOR_REHYDRATION__")?.textContent;
 		const user = raw && JSON.parse(raw).__DEFAULT_SCOPE__?.["webapp.app-context"]?.user;
-		if (typeof user?.uid !== "string" || !/^\d+$/.test(user.uid)) fail("Sign-in is required");
+		if (typeof user?.uid !== "string" || !/^\d+$/.test(user.uid)) fail("Sign-in is required", "login_required");
 		return user.uid;
 	};
 	const owner = account();
@@ -16,12 +16,12 @@ export async function tiktokInboxPage(input) {
 	const pause = () => new Promise(resolve => setTimeout(resolve, 100));
 	const wait = async read => {
 		while (Date.now() < deadline) {
-			if (account() !== owner) fail("Account changed during the read");
+			if (account() !== owner) fail("Account changed during the read", "account_mismatch");
 			const value = read();
 			if (value) return value;
 			await pause();
 		}
-		fail("Inbox did not finish loading; restart this page read");
+		fail("Inbox did not finish loading; restart this page read", "loading_failure");
 	};
 	const readWithinDeadline = async read => {
 		let outcome;
@@ -47,7 +47,7 @@ export async function tiktokInboxPage(input) {
 			const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(row)));
 			return { ...row, source_revision: [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, "0")).join("") };
 		}));
-		if (account() !== owner) fail("Account changed during the read");
+		if (account() !== owner) fail("Account changed during the read", "account_mismatch");
 		return { rows: revised, hasMore: !!next, ...(next ? { nextCursor: JSON.stringify({ v: feed === "messages" ? 2 : 1, feed, account: owner, ...next }) } : {}) };
 	};
 	// React attaches the source record and loading state to these exact inbox
@@ -162,7 +162,7 @@ export async function tiktokInboxPage(input) {
 		return null;
 	};
 	const api = await wait(clientApi);
-	if (api.instance.ctx?.option?.userId !== owner) fail("Message client belongs to a different account");
+	if (api.instance.ctx?.option?.userId !== owner) fail("Message client belongs to a different account", "account_mismatch");
 	await wait(() => {
 		if (api.stateStore.isInitError || api.stateStore.isNotAvailable) fail("Message initialization failed");
 		return api.stateStore.isInitSucceeded && api.stateStore.isInitLoadDone;
@@ -175,7 +175,7 @@ export async function tiktokInboxPage(input) {
 	const snapshot = [...ids].sort();
 	const finish = async (rows, next) => {
 		const output = await result(rows, next);
-		if (api.instance.ctx?.option?.userId !== owner) fail("Message client changed accounts during the read");
+		if (api.instance.ctx?.option?.userId !== owner) fail("Message client changed accounts during the read", "account_mismatch");
 		const latest = api.instance.getConversationList();
 		if (!Array.isArray(latest) || JSON.stringify(latest.map(thread => thread.id).sort()) !== JSON.stringify(snapshot)) fail("Conversation set changed; restart the read, previous coverage is incomplete");
 		return output;
@@ -204,7 +204,7 @@ export async function tiktokInboxPage(input) {
 	};
 	for (let page = 0; page < 20; page++) {
 		await wait(() => !thread.isPullingMessages);
-		if (api.instance.ctx?.option?.userId !== owner) fail("Message client changed accounts during the read");
+		if (api.instance.ctx?.option?.userId !== owner) fail("Message client changed accounts during the read", "account_mismatch");
 		const messages = thread.getMessageList().map(project).sort((a,b) => b.occurred_at.localeCompare(a.occurred_at) || b.id.localeCompare(a.id));
 		const start = cursor.after ? messages.findIndex(message => message.id === cursor.after) + 1 : 0;
 		if ((cursor.after && !start) || start === messages.length && thread.hasMoreMessages) {

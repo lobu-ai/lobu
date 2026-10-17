@@ -147,3 +147,47 @@ Gotchas:
 - Sessions that re-auth often (Revolut, ~hourly) must be freshly logged in *in the paired Chrome* right before you navigate+evaluate, or the fresh tab redirects to the sign-in wall.
 - Per-call dispatch latency is 5–60s and virtualized lists recycle content out — for paginated scrapes, iterate inside the connector's own run, not via one-shot `evaluate`s.
 - **Connector-side changes ship via re-apply, not the app release.** Per-org connectors (`examples/personal-agent`) live in `connector_definitions`/`connector_versions` and only update on `lobu apply` (or `connections.installConnector` for a single bundle). An organization-scoped artifact shadows the shared artifact for the active version. Catalog refresh skips keys with no bundled source, but re-syncs keys that do have bundled source and can reset their active definition to bundled metadata, so verify the active version after deploy rather than assuming an override survived. An app deploy that adds a *capability* (e.g. `show_notification`) does nothing until the connector that *calls* it is re-applied. **And a new chrome action also needs the matching handler in the extension build** — dispatching `show_notification` to an older installed extension fails with `Owletto for Chrome: unknown dispatch ... action_key='show_notification'`. So three things gate such a notification: an up-to-date extension build (the handler), a re-applied connector (the call), and macOS notification permission on the extension.
+
+## Bounded source-read recovery
+
+A failed `feeds.readMany` entry may return `error_code: "BROWSER_INTERRUPTED"`,
+`retryable: false`, and `interruption: { reason, recovery? }`. A visible challenge
+can include an expiring recovery descriptor only after old capture cleanup is
+acknowledged. Retention requires a stable caller conversation or Automation run
+and an adapter-owned scratch tab requesting `retain_on_interruption: true` on
+its initial `navigate` step. Persistent warm-tab readers keep using their existing
+tabs and timeout classification. Login, account mismatch, loading failure, timeout, unsupported
+extension versions, and uncertain cleanup do not grant recovery authority.
+
+For recovery explicitly permitted by the calling agent's instructions:
+
+1. Retain the original feed request, cursor, query, limit, and source identity.
+   Count the failed attempt against the caller's source-read budget.
+2. Discover operations on the descriptor's exact `chrome_connection_id`. Use its
+   `tab_id` and `recovery_id` for `screenshot` or `get_accessibility_tree`. Do not
+   select by title, switch device/profile/window, or follow private artifact URLs.
+3. For vision, the model must actually receive image pixels. A resource link or
+   image-delivery diagnostic is insufficient. Hand off to the browser owner when
+   image delivery fails or the required interaction is unavailable.
+4. Each permitted `click_ref` or `focus_tab` needs the newest `observation_id`.
+   Observations expire after 30 seconds and are invalidated by page/viewport
+   changes or consumption. Existing Chrome approval and origin checks apply.
+   This version has no recovery drag or arbitrary evaluation. Human recovery is
+   the fallback; a challenge never overrides an agent's stop rule.
+5. After authorized recovery or human completion, repeat the identical source
+   request once with `recovery_id`. A new timed read uses the retained target and
+   verifies the expected account again. Success requires valid source rows; a
+   click receipt or visual judgment is never success. Only successful reads
+   advance cursors or deduplication state.
+
+A handoff expires after five minutes, with at most sixteen observations and eight
+consumed actions. Expiry cleanup closes only the original scrape-owned target;
+closed/reused tabs, moved windows, account changes, policy revocation, and
+competing ownership fail closed. Unacknowledged cleanup holds the account lease
+for the bounded expiry instead of immediately admitting another read.
+
+An Automation whose instructions stop on verification or login keeps stopping;
+this transport opts no Automation into interactive recovery and never changes
+its instructions or read budget. Use local synthetic browser
+fixtures and isolated database tests before any separately authorized runtime
+trial. Synthetic transport success does not prove live verification success.

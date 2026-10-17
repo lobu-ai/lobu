@@ -22,6 +22,8 @@ export type ToolErrorCode =
   // ── permanent: retrying the identical call cannot succeed ──
   /** No auth profile configured for a connector that requires one. */
   | "AUTH_MISSING"
+  /** Browser work stopped; an explicit bounded recovery or human handoff is required. */
+  | "BROWSER_INTERRUPTED"
   /** Credentials were rejected by the upstream (HTTP 401/403). */
   | "AUTH_INVALID"
   /** Connector / feed / connection / resource does not exist (HTTP 404). */
@@ -56,6 +58,11 @@ export const TOOL_ERRORS: Record<ToolErrorCode, ToolErrorSpec> = {
   AUTH_MISSING: {
     retryable: false,
     message: "No auth profile is configured for this connector.",
+  },
+  BROWSER_INTERRUPTED: {
+    retryable: false,
+    message:
+      "Browser reading was interrupted. Observe the retained tab or ask its owner for help.",
   },
   AUTH_INVALID: {
     retryable: false,
@@ -252,4 +259,62 @@ export function classifyToolError(signal: ToolErrorSignal): ToolErrorCode {
   }
 
   return "INTERNAL";
+}
+
+/** Produced at the connector's page boundary, never inferred from error prose. */
+export type BrowserInterruptionReason =
+  | "challenge_required"
+  | "login_required"
+  | "account_mismatch"
+  | "loading_failure"
+  | "timeout"
+  | "recovery_unavailable";
+export interface BrowserRecovery {
+  recovery_id: string;
+  expires_at: string;
+  tab_id: number;
+  target_id: string;
+  window_id: number;
+  device_worker_id: string;
+  chrome_connection_id: number;
+}
+export class BrowserInterruptionError extends ToolError {
+  constructor(
+    readonly reason: BrowserInterruptionReason,
+    message: string,
+    readonly recovery?: BrowserRecovery
+  ) {
+    super("BROWSER_INTERRUPTED", message);
+  }
+  override toJSON() {
+    return {
+      ...super.toJSON(),
+      reason: this.reason,
+      ...(this.recovery ? { recovery: this.recovery } : {}),
+    };
+  }
+}
+export function browserPageInterruption(
+  value: unknown
+): { reason: BrowserInterruptionReason; message: string } | undefined {
+  const marker = (
+    value as {
+      __lobu_browser_interruption?: { reason?: unknown; message?: unknown };
+    } | null
+  )?.__lobu_browser_interruption;
+  if (
+    !marker ||
+    ![
+      "challenge_required",
+      "login_required",
+      "account_mismatch",
+      "loading_failure",
+    ].includes(String(marker.reason)) ||
+    typeof marker.message !== "string"
+  )
+    return undefined;
+  return {
+    reason: marker.reason as BrowserInterruptionReason,
+    message: marker.message.slice(0, 1000),
+  };
 }

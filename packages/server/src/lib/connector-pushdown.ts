@@ -8,6 +8,7 @@
  * operations.execute.
  */
 
+import { BrowserInterruptionError } from '@lobu/core';
 import { connectionBrowserGrant } from '../connectors/browser-resource';
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
 import { assertFeedReadWindow, validateFeedReadWindow, type FeedReadMatch, type FeedReadWindow, type FeedReadWindowCoverage, type QueryContext } from '@lobu/connector-sdk';
@@ -198,6 +199,10 @@ export interface ReadSourceFeedParams {
   automationId?: number | null;
   /** The configured feed to read directly from its source. */
   feedId: number;
+  recoveryId?: string;
+  flowId?: string;
+  /** Internal observer for the bounded pager; no caller-controlled browser authority. */
+  onBrowserLease?: () => void;
   /** Optional source-native filter/search expression. */
   query?: string;
   /** Source-native continuation token recovered from the public cursor envelope. */
@@ -480,6 +485,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     throw new ToolError('VALIDATION', 'Only compiled connector feeds can filter source reads by match.');
   }
 
+  if (p.recoveryId && !hasConnectorCode) throw new BrowserInterruptionError('recovery_unavailable', 'Recovery is only valid for its original compiled browser source read.');
   if (metadataOnlyDeviceConnector) {
     if (p.window) {
       throw new ToolError('VALIDATION', 'This device reader does not support source-time windows.');
@@ -513,7 +519,7 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     });
   }
 
-  const adapterResult = await readSourceFeedFromAdapter({
+  const adapterResult = p.recoveryId ? null : await readSourceFeedFromAdapter({
     organizationId: p.scope.organizationId,
     connectionId: Number(feed.connection_id),
     connectorKey: feed.connector_key,
@@ -564,12 +570,13 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   p.signal?.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(onAbort, timeoutMs);
   const browser = createSourceReadBridge(feed, {
-    ...p,
+    ...p, sourceRevision,
     sourceSubscriptionScopeKey: sourceSubscription
       ? sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version) : undefined,
   }, controller.signal);
   let status: 'completed' | 'failed' | 'timeout' = 'failed';
   try {
+    await browser.prepare();
     const result = await executeCompiledConnector({
       compiledCode,
       job: {
@@ -609,18 +616,25 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
       hasMore: result.hasMore,
       window: result.window,
     });
+    await browser.settle('completed');
+    if (browser.interruption) throw browser.interruption;
     status = 'completed';
     return page;
   } catch (error) {
     // The isolate reports signal termination as a crash; this controller owns
     // the source-read deadline and caller cancellation, so preserve that cause.
-    if (controller.signal.aborted) throw sourceReadDeadlineError(p.feedId);
+    await browser.settle(controller.signal.aborted ? 'timeout' : 'failed');
+    if (browser.interruption) throw browser.interruption;
+    if (controller.signal.aborted) {
+      if (browser.leased) throw new BrowserInterruptionError('timeout', 'Browser source read timed out or was cancelled; no recovery handoff was issued.');
+      throw sourceReadDeadlineError(p.feedId);
+    }
     throw error;
   } finally {
     if (controller.signal.aborted) status = 'timeout';
+    await browser.settle(status);
     controller.abort();
     clearTimeout(timer);
     p.signal?.removeEventListener('abort', onAbort);
-    await browser.settle(status);
   }
 }

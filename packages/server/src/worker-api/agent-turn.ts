@@ -94,7 +94,10 @@ function parseTurnSnapshot(snapshot: string | undefined): TurnSnapshot | string 
  * message after it, since each one re-hydrated the same last stored snapshot
  * and grew it again.
  *
- * Within the cap the snapshot is kept verbatim. Over it, the log is trimmed to
+ * Within the cap the snapshot is kept verbatim. Over it, inline image bytes
+ * are replaced with an explicit notice before sacrificing conversation text.
+ * The current turn already used those pixels; a future observation must be
+ * fresh. Message IDs, tool pairs and text remain intact. The log is then trimmed to
  * what Pi still sends the model: from the newest compaction's first kept entry
  * (re-rooted) through the compaction summary to the end. That is exactly the
  * context `buildSessionContext` derives from the full log — the entries dropped
@@ -109,6 +112,23 @@ function boundSnapshot(
 ): string {
 	const byteSize = Buffer.byteLength(sessionJsonl, "utf8");
 	if (byteSize <= MAX_SNAPSHOT_BYTES) return sessionJsonl;
+	let omittedImages = 0;
+	const entries = snapshot.entries.map((entry): SessionEntry => {
+		if (entry.type !== 'message'
+			|| (entry.message.role !== 'user' && entry.message.role !== 'toolResult')
+			|| !Array.isArray(entry.message.content)) return entry;
+		return { ...entry, message: { ...entry.message, content: entry.message.content.map(part => {
+			if (part.type !== 'image') return part;
+			omittedImages++;
+			return { type: 'text' as const, text: '[Image omitted from saved history to fit the transcript budget. Its pixels are unavailable in this turn; request a fresh observation when needed.]' };
+		}) } };
+	});
+	if (omittedImages) {
+		snapshot = { ...snapshot, entries };
+		const withoutImages = `${[snapshot.header, ...entries].map(entry => JSON.stringify(entry)).join('\n')}\n`;
+		logger.info({ ...context, omittedImages, byteSize }, 'Omitted image bytes from oversized saved history');
+		if (Buffer.byteLength(withoutImages, 'utf8') <= MAX_SNAPSHOT_BYTES) return withoutImages;
+	}
 	const trimmed = trimToCompaction(snapshot);
 	if (trimmed !== null && Buffer.byteLength(trimmed, "utf8") <= MAX_SNAPSHOT_BYTES) {
 		logger.info(

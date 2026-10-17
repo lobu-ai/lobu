@@ -20,6 +20,8 @@
  * can land on any replica and finalize the run row.
  */
 
+import { browserPageInterruption, type BrowserInterruptionReason } from '@lobu/core';
+import { BROWSER_RECOVERY_KEY, browserRecoveryControl, saveSourceBrowserTab, sourceBrowserLease } from '../lib/browser-recovery';
 import { BROWSER_VERIFY_OPERATION, constrainBrowserInput } from '@lobu/connector-sdk';
 import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, BROWSER_EXTENSION_UPDATE_REQUIRED, browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
 import type { DispatchChromeActionRequest } from '@lobu/core/contracts/worker/protocol';
@@ -91,6 +93,7 @@ export interface ChromeActionDispatchResult {
   status: 'completed' | 'failed' | 'timeout';
   output?: Record<string, unknown>;
   error_message?: string;
+  interruption?: { reason: BrowserInterruptionReason; message: string };
 }
 
 export type ResolveOnlineChromeOptions = {
@@ -624,6 +627,10 @@ export async function dispatchChromeActionToExtension(params: {
   abortSignal?: AbortSignal;
   /** Host-only recursion for the declared self-identity probe. Never accepted from worker input. */
   skipAccountProbe?: boolean;
+  /** Host-only source cleanup; never accepted from connector input. */
+  retainSourceTab?: boolean;
+  /** Source completion re-verifies the expected account on its leased tab. */
+  verifySourceAccount?: boolean;
 }): Promise<ChromeActionDispatchResult> {
   const {
     organizationId,
@@ -797,19 +804,31 @@ export async function dispatchChromeActionToExtension(params: {
     };
   }
 
+  if (browserResource.authProfileId) {
+    const [profile] = await sql`SELECT metadata FROM auth_profiles WHERE id = ${browserResource.authProfileId} AND organization_id = ${organizationId}`;
+    const held = profile?.metadata?.[BROWSER_RECOVERY_KEY];
+    if (held && Date.parse(held.expires_at) > Date.now() && held.run_id !== parentRunId) {
+      const message = 'This browser account is owned by another active source read or recovery.';
+      return { status: 'failed', interruption: { reason: 'recovery_unavailable', message }, error_message: message };
+    }
+  }
+  const sourceLease = sourceRead ? await sourceBrowserLease(organizationId, parentRunId) : undefined;
+  if (sourceLease && sourceLease.state !== 'reading') return { status: 'failed', error_message: 'This source read has ended.' };
   const probe = browserResource.requirement.accountProbe;
   const verifiedBinding = parent.run_metadata?.browser_verified as Record<string, unknown> | undefined;
   const alreadyVerified = verifiedBinding?.device_worker_id === browserResource.deviceWorkerId
     && verifiedBinding?.auth_profile_id === browserResource.authProfileId
     && verifiedBinding?.account_id === browserResource.accountId;
-  if (!params.skipAccountProbe && probe && !alreadyVerified) {
+  if (!params.skipAccountProbe && probe && (!alreadyVerified || (params.verifySourceAccount && sourceLease))) {
     if (!browserResource.live || !browserResource.authProfileId) {
       return { status: 'failed', error_message: dependencyUnavailableError('browser_setup_required', 'Connect this browser account before reading it.') };
     }
     const probeStep = (key: string, input: Record<string, unknown>) => dispatchChromeActionToExtension({
       ...params, actionKey: key, actionInput: input, skipAccountProbe: true,
     });
-    const nav = await probeStep('navigate', { url: probe.url, persistent: true, wait_for_load: true });
+    const nav: ChromeActionDispatchResult = sourceLease?.tab
+      ? { status: 'completed', output: { tab_id: sourceLease.tab.tab_id } }
+      : await probeStep('navigate', { url: probe.url, ...(sourceLease ? { new_tab: true } : { persistent: true }), wait_for_load: true });
     if (nav.status !== 'completed') return nav;
     const tabId = nav.output?.tab_id;
     if (typeof tabId !== 'number') return { status: 'failed', error_message: 'Browser account probe did not return a tab.' };
@@ -821,6 +840,8 @@ export async function dispatchChromeActionToExtension(params: {
     }
     const evaluated = await probeStep('evaluate', { tab_id: tabId, expression: probe.expression, await_promise: true });
     if (evaluated.status !== 'completed') return evaluated;
+    const interruption = browserPageInterruption(evaluated.output?.value);
+    if (interruption) return { status: 'failed', interruption, error_message: interruption.message };
     const identity = evaluated.output?.value as { accountId?: unknown; displayName?: unknown } | null;
     const accountId = typeof identity?.accountId === 'string' ? identity.accountId.trim() : '';
     const accountMismatch = !!accountId && !!browserResource.accountId && browserResource.accountId !== accountId;
@@ -839,7 +860,7 @@ export async function dispatchChromeActionToExtension(params: {
         await notifyBrowserAuthExpired({ orgId: organizationId, connectionId: Number(connection.id),
           connectorKey: connection.connector_key }).catch(error => logger.warn({ error }, 'Browser sign-in notification failed'));
       }
-      return { status: 'failed', error_message: accountMismatch
+      return { status: 'failed', interruption: { reason: accountMismatch ? 'account_mismatch' : 'login_required', message: accountMismatch ? 'Browser account changed.' : 'Browser sign-in is required.' }, error_message: accountMismatch
         ? dependencyUnavailableError('browser_account_mismatch', 'The selected browser is signed into a different account. Restore the original login, then verify this connection again.')
         : dependencyUnavailableError('browser_login_required', 'Sign in to the provider in the selected browser, then verify this connection again.') };
     }
@@ -887,7 +908,17 @@ export async function dispatchChromeActionToExtension(params: {
     return { status: 'completed', output: { browser_ready: true, account_verified: !!probe } };
   }
 
+  const currentSourceLease = sourceRead ? await sourceBrowserLease(organizationId, parentRunId) : undefined;
   const operationInput: Record<string, unknown> = { ...scopedInput };
+  if (currentSourceLease?.tab && actionKey === 'navigate' && operationInput.new_tab === true) {
+    // The account probe and source reader share ONE owned target. Never replace
+    // a recovered page with about:blank or create another tab after a handoff.
+    if (operationInput.url === 'about:blank') return { status: 'completed', output: { tab_id: currentSourceLease.tab.tab_id, browser_tab: currentSourceLease.tab } };
+    operationInput.tab_id = currentSourceLease.tab.tab_id;
+    delete operationInput.new_tab;
+  }
+  delete operationInput.browser_recovery_control;
+  delete operationInput.retain_on_interruption;
   // Routing directive, not an extension argument — the extension must never see it.
   delete operationInput[TARGET_BROWSER_CONNECTION_INPUT_KEY];
   delete operationInput.require_page_activation;
@@ -925,6 +956,7 @@ export async function dispatchChromeActionToExtension(params: {
         parentRunId,
         runMetadata: {
           browser_context: browserContext,
+          ...(currentSourceLease ? { browser_recovery_control: browserRecoveryControl(currentSourceLease, params.retainSourceTab ? 'retain' : 'read') } : {}),
           source_attribution: parent.run_metadata?.source_attribution,
           [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,
           ...(params.skipAccountProbe ? { [BROWSER_ACCOUNT_PROBE_METADATA_KEY]: true } : {}),
@@ -972,7 +1004,9 @@ export async function dispatchChromeActionToExtension(params: {
       result.output && typeof result.output === 'object' && !Array.isArray(result.output)
         ? (result.output as Record<string, unknown>)
         : undefined;
-    return { ...result, status: result.status, output };
+    if (sourceRead && output) await saveSourceBrowserTab(organizationId, parentRunId, output, chromeConnection.connectionId);
+    const interruption = browserPageInterruption(output?.value);
+    return { ...result, status: result.status, output, ...(interruption ? { interruption } : {}) };
   } finally {
     if (sourceRead) await scrubSourceReadRun(runId, organizationId);
   }

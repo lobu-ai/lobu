@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { isRetryable, ToolError } from '@lobu/core';
+import { isRetryable, ToolError, BrowserInterruptionError } from '@lobu/core';
 import { classifyPushdownFailure } from '../../lib/connector-pushdown';
 
 // Mirror of ConnectorExecutionError's surface: a message plus the propagated httpStatus.
@@ -74,4 +74,11 @@ describe('classifyPushdownFailure', () => {
     expect(code).toBe('NOT_FOUND');
     expect(isRetryable(code)).toBe(false);
   });
+});
+
+
+it('keeps a typed browser interruption non-retryable even when its prose says timeout', () => {
+  const code = classifyPushdownFailure(new BrowserInterruptionError('challenge_required', 'timeout is not challenge evidence'));
+  expect(code).toBe('BROWSER_INTERRUPTED');
+  expect(isRetryable(code)).toBe(false);
 });

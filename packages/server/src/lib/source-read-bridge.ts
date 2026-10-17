@@ -1,4 +1,5 @@
-import { ToolError } from '@lobu/core';
+import { ToolError, BrowserInterruptionError, browserPageInterruption } from '@lobu/core';
+import { claimSourceBrowser, finishSourceBrowser, sourceBrowserLease, sourceRecoveryHash } from './browser-recovery';
 import { resolveActingPrincipal } from '../authz/entity-policy';
 import type { AuthzScope } from '../authz/scope';
 import { getDb } from '../db/client';
@@ -23,13 +24,17 @@ export function createSourceReadBridge(
     definition_version: string | null;
     selected_artifact_hash: string | null;
   },
-  p: { scope: AuthzScope; automationId?: number | null; feedId: number; deadlineAt: number; sourceSubscriptionScopeKey?: string },
+  p: { scope: AuthzScope; automationId?: number | null; feedId: number; deadlineAt: number; flowId?: string; onBrowserLease?: () => void; recoveryId?: string; sourceRevision?: string; query?: string; cursor?: string; limit?: number; offset?: number; sort?: unknown; window?: unknown; match?: unknown; sourceSubscriptionScopeKey?: string },
   signal: AbortSignal,
 ) {
   const sql = getDb();
   let parent: Promise<number> | undefined;
+  let interruption: BrowserInterruptionError | undefined;
+  let settled = false;
+  let tabClosed = false;
+  let leased = false;
   const dispatches = new Set<Promise<unknown>>();
-  const createParent = async (): Promise<number> => {
+  const createParent = async (retainOnInterruption = false): Promise<number> => {
     const actor = await resolveActingPrincipal(sql, {
       organizationId: p.scope.organizationId, userId: p.scope.principal,
       agentId: p.scope.agentId, sessionAutomationId: p.automationId,
@@ -50,32 +55,80 @@ export function createSourceReadBridge(
         connector_version = ${feed.pinned_version ?? feed.definition_version},
         connector_artifact_hash = ${feed.selected_artifact_hash}
         WHERE id = ${run.runId} AND organization_id = ${p.scope.organizationId}`;
+      if (retainOnInterruption || p.recoveryId) leased = !!await claimSourceBrowser({ runId: run.runId, connectionId: Number(feed.connection_id),
+        version: feed.pinned_version ?? feed.definition_version, scope: p.scope, automationId: p.automationId,
+        deadlineAt: p.deadlineAt, flowId: p.flowId, recoveryId: p.recoveryId,
+        requestHash: sourceRecoveryHash({ feedId: feed.id, revision: p.sourceRevision, query: p.query,
+          cursor: p.cursor, limit: p.limit, offset: p.offset, sort: p.sort, window: p.window, match: p.match }),
+      }, tx);
+      if (leased) p.onBrowserLease?.();
       return run.runId;
     });
   };
   return {
+    async prepare() {
+      if (p.recoveryId) await (parent ??= createParent());
+    },
     onChromeDispatch(actionKey: string, actionInput: Record<string, unknown>) {
       const pending = (async () => {
         if (signal.aborted) throw sourceReadDeadlineError(p.feedId);
-        const parentRunId = await (parent ??= createParent());
+        const parentRunId = await (parent ??= createParent(actionKey === 'navigate' && actionInput.new_tab === true && actionInput.retain_on_interruption === true));
         if (signal.aborted) throw sourceReadDeadlineError(p.feedId);
+        // A leased tab is closed or retained by settle(); an unleased scratch tab
+        // still closes through the connector's own cleanup.
+        if (interruption && actionKey === 'close_tab' && leased) return { closed: false, cleanup_pending: true };
+        const cleanup = actionKey === 'network_intercept_stop' || actionKey === 'close_tab';
+        if (interruption && !cleanup) throw interruption;
         const result = await dispatchChromeActionToExtension({
-          organizationId: p.scope.organizationId, actionKey, actionInput, parentRunId,
+          organizationId: p.scope.organizationId, actionKey, actionInput: Object.fromEntries(Object.entries(actionInput).filter(([key]) => key !== 'retain_on_interruption')), parentRunId,
           visibilityUserId: p.scope.principal,
           abortSignal: signal,
+          skipAccountProbe: !!interruption && cleanup,
+          verifySourceAccount: actionKey === 'close_tab',
         });
+        const marker = result.interruption ?? browserPageInterruption(result.output?.value);
+        if (marker) {
+          interruption = new BrowserInterruptionError(marker.reason, marker.message);
+          throw interruption;
+        }
         if (result.status !== 'completed') throw new Error(result.error_message ?? `Browser source step ${result.status}`);
+        if (actionKey === 'close_tab') tabClosed = true;
         return result.output ?? {};
-      })();
+      })().catch(error => {
+        if (error instanceof BrowserInterruptionError) interruption = error;
+        throw error;
+      });
       dispatches.add(pending);
       pending.finally(() => dispatches.delete(pending)).catch(() => {});
       return pending;
     },
+    get leased() { return leased; },
+    get interruption() { return interruption; },
     async settle(status: 'completed' | 'failed' | 'timeout'): Promise<void> {
+      if (settled) return;
+      settled = true;
       await Promise.allSettled(dispatches);
       if (parent) {
         const runId = await parent.catch(() => undefined);
-        if (runId !== undefined) await scrubSourceReadRun(runId, p.scope.organizationId, feed.feed_key, status);
+        if (runId !== undefined) {
+          try {
+            const lease = await sourceBrowserLease(p.scope.organizationId, runId);
+            let retained = false;
+            let cleanupAcknowledged = tabClosed;
+            if (lease?.tab && !tabClosed && !signal.aborted) {
+              const eligible = interruption?.reason === 'challenge_required' && !!lease.owner.flow_id && !lease.resumed;
+              const cleanup = await dispatchChromeActionToExtension({ organizationId: p.scope.organizationId,
+                actionKey: 'close_tab', actionInput: { tab_id: lease.tab.tab_id }, parentRunId: runId,
+                visibilityUserId: p.scope.principal, skipAccountProbe: status !== 'completed', verifySourceAccount: status === 'completed', retainSourceTab: eligible, abortSignal: signal });
+              if (cleanup.interruption) interruption = new BrowserInterruptionError(cleanup.interruption.reason, cleanup.interruption.message);
+              else if (status === 'completed' && cleanup.status !== 'completed') interruption = new BrowserInterruptionError('recovery_unavailable', cleanup.error_message ?? 'Final browser account verification or cleanup was not acknowledged.');
+              retained = eligible && cleanup.status === 'completed' && cleanup.output?.cleanup_ack === true;
+              cleanupAcknowledged = cleanup.status === 'completed' && (eligible ? retained : !cleanup.interruption);
+            }
+            const recovery = await finishSourceBrowser(p.scope.organizationId, runId, retained, cleanupAcknowledged);
+            if (interruption && recovery) interruption = new BrowserInterruptionError(interruption.reason, interruption.message, recovery);
+          } finally { await scrubSourceReadRun(runId, p.scope.organizationId, feed.feed_key, status); }
+        }
       }
     },
   };
