@@ -74,13 +74,28 @@ function squashKey(key: string): string {
  * test the squashed form too.
  */
 function isSecretObjectKey(key: string): boolean {
+  return isStrongSecretKey(key) || hasAffixedCredentialSegment(key);
+}
+
+/**
+ * The collapsing half of key classification: a key whose NAME alone proves
+ * the value is a credential, so the whole value is replaced without
+ * inspection. Affixed credential containers (`hasAffixedCredentialSegment`)
+ * are deliberately excluded: a scalar beneath one IS the serialized
+ * credential and collapses, but a structured value beneath one is a
+ * credential MAP whose leaves decide individually (the Loki connector
+ * pre-redacts its leaves and expects per-key treatment here) — collapsing
+ * the parent would destroy the surviving key names.
+ */
+function isStrongSecretKey(key: string): boolean {
   if (isSecretKey(key)) return true;
   if (isSecretKey(squashKey(key))) return true;
   if (SECRET_KEY_EXACT.has(squashKey(key))) return true;
-  if (hasAffixedCredentialSegment(key)) return true;
   // Matched per separated segment, not against the squashed whole:
   // `X-Hub-Signature-256` squashes to `xhubsignature256`, which no exact set
   // can ever hold, so every real signature header would slip through.
+  // Segment-matched signature headers collapse like any other proven key;
+  // only affixed credential CONTAINERS recurse (see above).
   return key
     .replace(/[^a-z0-9]+/gi, "_")
     .toLowerCase()
@@ -213,13 +228,22 @@ export function scrubDiagnosticValue(value: unknown): unknown {
         // credential field was present) while any query pair embedded in the
         // key text itself is redacted; value-side redaction never reaches it.
         const outKey = scrubKey(key);
-        const secret = isSecretObjectKey(key);
-        serialized[outKey] = secret
-          ? "[REDACTED]"
-          : scrub(
-              (current as unknown as Record<string, unknown>)[key],
-              depth + 1
-            );
+        if (isStrongSecretKey(key)) {
+          serialized[outKey] = "[REDACTED]";
+          continue;
+        }
+        const value = (current as unknown as Record<string, unknown>)[key];
+        // An affixed credential container holding a scalar IS the serialized
+        // credential — collapse it. A structured value beneath one is a
+        // credential map: recurse so each leaf decides individually.
+        if (
+          hasAffixedCredentialSegment(key) &&
+          (value === null || typeof value !== "object")
+        ) {
+          serialized[outKey] = "[REDACTED]";
+          continue;
+        }
+        serialized[outKey] = scrub(value, depth + 1);
       }
       return serialized;
     }
@@ -244,9 +268,19 @@ export function scrubDiagnosticValue(value: unknown): unknown {
     const result: Record<string, unknown> = {};
     try {
       for (const key of Object.keys(current).slice(0, MAX_ENTRIES)) {
-        if (isSecretObjectKey(key)) {
+        if (isStrongSecretKey(key)) {
           // See above: the key name stays readable, but a URL or
           // `name=value` diagnostic used as a key is scrubbed in place.
+          result[scrubKey(key)] = "[REDACTED]";
+          continue;
+        }
+        const value = (current as Record<string, unknown>)[key];
+        // See above: an affixed container holding a scalar collapses, while
+        // a structured value beneath one recurses leaf by leaf.
+        if (
+          hasAffixedCredentialSegment(key) &&
+          (value === null || typeof value !== "object")
+        ) {
           result[scrubKey(key)] = "[REDACTED]";
           continue;
         }
@@ -254,10 +288,7 @@ export function scrubDiagnosticValue(value: unknown): unknown {
         // its secret in the key text, past value-side redaction.
         const outKey = scrubKey(key);
         try {
-          result[outKey] = scrub(
-            (current as Record<string, unknown>)[key],
-            depth + 1
-          );
+          result[outKey] = scrub(value, depth + 1);
         } catch {
           result[outKey] = "[UNREADABLE]";
         }

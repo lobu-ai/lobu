@@ -352,6 +352,26 @@ describe("diagnostic credential scrubber", () => {
     expect(result.token_count).toBe(7);
   });
 
+  it("recurses into credential maps instead of collapsing them", () => {
+    // An affixed container holding a scalar IS the serialized credential,
+    // but a structured value beneath one is a credential MAP: each leaf
+    // decides individually, so pre-redacted leaves and surviving key names
+    // pass through (the Loki connector relies on this per-key treatment).
+    const result = scrubDiagnosticValue({
+      credentialsByName: {
+        PGPASSWORD: "[REDACTED]",
+        note: "kept",
+      },
+      credentials_json: JSON.stringify({ password: SECRET }),
+    }) as Record<string, Record<string, unknown>>;
+    expect(result.credentialsByName).toEqual({
+      PGPASSWORD: "[REDACTED]",
+      note: "kept",
+    });
+    expect(result.credentials_json).toBe("[REDACTED]");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
   it("redacts credential query pairs embedded in object keys", () => {
     // Attribution and cache maps keyed by URL carry the secret in the KEY
     // text, past value-side redaction. The key stays identifiable; the
