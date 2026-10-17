@@ -1,6 +1,7 @@
 import { handleExecute } from '../../../tools/admin/manage_operations/handlers/execute';
 import { deriveBrowserActionContext } from '../../../worker-api/browser-action-context';
 import { authorizeRecoveryAction, claimSourceBrowser, finishSourceBrowser, saveSourceBrowserTab } from '../../../lib/browser-recovery';
+import * as browserRecovery from '../../../lib/browser-recovery';
 import { createSourceReadBridge } from '../../../lib/source-read-bridge';
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -256,12 +257,14 @@ describe('compiled browser source reads', () => {
   });
 
   it.each([
-    { failures: 0, rejectDuringSetup: false, editDuringSetup: false },
-    { failures: 0, rejectDuringSetup: false, editDuringSetup: true },
-    { failures: 2, rejectDuringSetup: false, editDuringSetup: false },
-    { failures: 2, rejectDuringSetup: true, editDuringSetup: false },
-  ])('runs compiled observation through browser claim/completion and recovery: %j', async ({ failures, rejectDuringSetup, editDuringSetup }) => {
+    { failures: 0, rejectDuringSetup: false, editDuringSetup: false, cleanupFails: false },
+    { failures: 0, rejectDuringSetup: false, editDuringSetup: true, cleanupFails: false },
+    { failures: 2, rejectDuringSetup: false, editDuringSetup: false, cleanupFails: false },
+    { failures: 2, rejectDuringSetup: true, editDuringSetup: false, cleanupFails: false },
+    { failures: 2, rejectDuringSetup: false, editDuringSetup: false, cleanupFails: true },
+  ])('runs compiled observation through browser claim/completion and recovery: %j', async ({ failures, rejectDuringSetup, editDuringSetup, cleanupFails }) => {
     const sql = getTestDb();
+    if (cleanupFails) vi.spyOn(browserRecovery, 'finishSourceBrowser').mockRejectedValue(new Error('Synthetic settlement failure'));
     const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId });
     const [automation] = await sql`WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
       INSERT INTO automations (id, automation_group_id, organization_id, managed_agent_id, created_by, name, slug, triggers)
@@ -327,6 +330,12 @@ describe('compiled browser source reads', () => {
         break;
       }
       await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (cleanupFails) {
+      await expect(observed).rejects.toThrow('Synthetic settlement failure');
+      expect((await sql`SELECT consecutive_failures, last_error IS NOT NULL AS failed, next_run_at > now() AS deferred
+        FROM feeds WHERE id = ${feedId}`)[0]).toMatchObject({ consecutive_failures: failures + 1, failed: true, deferred: true });
+      return;
     }
     await observed;
     expect(answered).toBe(true);
@@ -1069,6 +1078,8 @@ describe('compiled browser source reads', () => {
     navigationFails?: boolean;
     challenge?: 'probe' | 'late';
     changedAccount?: boolean;
+    /** Probes after this many return no identity. */
+    missingIdentityAfter?: number;
     cleanupFails?: boolean;
     loseOwnershipOnCleanup?: boolean;
     appVersion?: string;
@@ -1088,7 +1099,8 @@ describe('compiled browser source reads', () => {
         const challenge = (options.challenge === 'probe' && probe) || (options.challenge === 'late' && job.operation_key === 'evaluate' && !probe);
         const output = job.operation_key === 'navigate' ? { tab_id: 77, browser_tab: { tab_id: 77, target_id: 'synthetic-target', window_id: 3 } }
           : challenge ? { value: { __lobu_browser_interruption: { reason: 'challenge_required', message: 'Synthetic visible verification' } } }
-          : probe ? { value: { accountId: options.changedAccount && probes > 1 ? 'changed-account' : 'fixture-account' } }
+          : probe ? { value: options.missingIdentityAfter !== undefined && probes > options.missingIdentityAfter ? null
+            : { accountId: options.changedAccount && probes > 1 ? 'changed-account' : 'fixture-account' } }
           : job.operation_key === 'close_tab' ? { cleanup_ack: !options.cleanupFails, closed: true }
           : { rows: ROWS };
         const navigationFailed = options.navigationFails && job.operation_key === 'navigate';
@@ -1334,6 +1346,35 @@ describe('compiled browser source reads', () => {
     const unchanged = recoveryRead(id);
     await serveRecovery(unchanged);
     expect((await unchanged).results[0]).toMatchObject({ ok: true, rows: ROWS });
+  });
+  it.each([false, true])('rejects missing final identity without inventing a login failure (host cleanup=%s)', async hostCleanup => {
+    const profile = await recoverySetup();
+    const notify = vi.spyOn(notifications, 'notifyBrowserAuthExpired').mockResolvedValue();
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET config = config || ${sql.json({ synthetic_host_cleanup: hostCleanup })}::jsonb WHERE id = ${feedId}`;
+    const reading = recoveryRead();
+    await serveRecovery(reading, { missingIdentityAfter: 1 });
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    expect(failure.rows).toBeUndefined();
+    expect(failure.interruption.recovery).toBeUndefined();
+    expect((await sql`SELECT status FROM auth_profiles WHERE id = ${profile.id}`)[0].status).toBe('active');
+    expect((await sql`SELECT status FROM connections WHERE id = ${connectionId}`)[0].status).toBe('active');
+    expect(notify).not.toHaveBeenCalled();
+    await expectScrubbed();
+  });
+  it('rejects missing identity on the resumed source tab without inventing a login failure', async () => {
+    const profile = await recoverySetup();
+    const notify = vi.spyOn(notifications, 'notifyBrowserAuthExpired').mockResolvedValue();
+    const sql = getTestDb();
+    const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const resumed = recoveryRead((await interrupted).results[0].interruption.recovery.recovery_id);
+    await serveRecovery(resumed, { missingIdentityAfter: 0 });
+    const failure = (await resumed).results[0];
+    expect(failure).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    expect(failure.rows).toBeUndefined();
+    expect((await sql`SELECT status FROM auth_profiles WHERE id = ${profile.id}`)[0].status).toBe('active');
+    expect(notify).not.toHaveBeenCalled();
   });
   it('records final account verification failure when the host cleans up the source tab', async () => {
     await recoverySetup();

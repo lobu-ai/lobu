@@ -1,4 +1,5 @@
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
+import { createLogger, getErrorMessage } from '@lobu/core';
 import { getDb, pgTextArray, pgBigintArray, type DbClient } from '../db/client';
 import { createSourceReadBridge } from '../lib/source-read-bridge';
 import { enqueueTasksInTransaction } from '../scheduled/task-scheduler';
@@ -14,6 +15,7 @@ import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from './source-feed-subscriptions';
 
 const LISTENER_SETUP_TIMEOUT_MS = 150_000;
+const logger = createLogger('source-feed-listener');
 
 export interface SourceFeedListenerTask {
   organizationId: string;
@@ -106,7 +108,6 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), LISTENER_SETUP_TIMEOUT_MS);
   let browser: ReturnType<typeof createSourceReadBridge> | undefined;
-  let status: 'completed' | 'failed' | 'timeout' = 'failed';
   let config: Record<string, unknown> | undefined;
 
   try {
@@ -194,6 +195,10 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
       timeoutMs: LISTENER_SETUP_TIMEOUT_MS,
     });
 
+    // Account verification and cleanup are part of setup, before success writes.
+    await browser.settle('completed');
+    if (browser.interruption) throw browser.interruption;
+
     // Only a valid browser delivery confirms recovery. Keep the failure count
     // through setup, and do not erase a rejected page received during setup.
     await sql`UPDATE feeds SET last_error = NULL,
@@ -201,18 +206,16 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
       WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
         AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb
         AND consecutive_failures = ${started.consecutive_failures}`;
-    status = 'completed';
   } catch (error) {
+    try {
+      await browser?.settle(controller.signal.aborted ? 'timeout' : 'failed');
+    } catch (cleanupError) {
+      logger.warn({ feedId: task.feedId, error: getErrorMessage(cleanupError) }, 'Browser cleanup failed after source listener setup failed');
+    }
     await recordSourceFeedFailure(sql, task, config, 'Source listener setup failed; check the paired browser.');
     throw error;
   } finally {
-    if (controller.signal.aborted) status = 'timeout';
-    // Settle before aborting: settle() reads an aborted signal as cancellation.
-    try {
-      await browser?.settle(status);
-    } finally {
-      controller.abort();
-      clearTimeout(timer);
-    }
+    controller.abort();
+    clearTimeout(timer);
   }
 }

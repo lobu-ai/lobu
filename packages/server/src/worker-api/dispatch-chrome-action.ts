@@ -825,8 +825,10 @@ export async function dispatchChromeActionToExtension(params: {
     const probeStep = (key: string, input: Record<string, unknown>) => dispatchChromeActionToExtension({
       ...params, actionKey: key, actionInput: input, skipAccountProbe: true,
     });
-    const nav: ChromeActionDispatchResult = sourceLease?.tab
-      ? { status: 'completed', output: { tab_id: sourceLease.tab.tab_id } }
+    // A leased read probes its exact source tab, not the probe URL.
+    const sourceTab = sourceLease?.tab;
+    const nav: ChromeActionDispatchResult = sourceTab
+      ? { status: 'completed', output: { tab_id: sourceTab.tab_id } }
       : await probeStep('navigate', { url: probe.url, ...(sourceLease ? { new_tab: true } : { persistent: true }), wait_for_load: true });
     if (nav.status !== 'completed') return nav;
     const tabId = nav.output?.tab_id;
@@ -844,6 +846,12 @@ export async function dispatchChromeActionToExtension(params: {
     const identity = evaluated.output?.value as { accountId?: unknown; displayName?: unknown } | null;
     const accountId = typeof identity?.accountId === 'string' ? identity.accountId.trim() : '';
     const accountMismatch = !!accountId && !!browserResource.accountId && browserResource.accountId !== accountId;
+    if (sourceTab && (!accountId || accountId.length > 512)) {
+      // A source page may not expose the probe URL's identity data. Reject the
+      // read without inventing evidence that its saved login has expired.
+      const message = 'The expected browser account could not be verified on the source page.';
+      return { status: 'failed', interruption: { reason: 'recovery_unavailable', message }, error_message: message };
+    }
     if (!accountId || accountId.length > 512 || accountMismatch) {
       const expiredConnections = await sql.begin(async tx => {
         await tx`UPDATE auth_profiles SET status = 'pending_auth', updated_at = now()

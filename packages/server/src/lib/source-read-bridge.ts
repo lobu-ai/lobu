@@ -200,9 +200,9 @@ export function createSourceReadBridge(
             abortSignal: signal,
           });
           if (cleanup.interruption) {
-            // A failed final account probe revokes source authority. Leave the
-            // exact owned target to extension expiry; do not bypass that veto
-            // with another close action. Keep the fence until its bounded TTL.
+            // Final verification failed. Leave the exact owned target to
+            // extension expiry without bypassing account checks with another
+            // close action. Keep the fence until its bounded TTL.
             interruption = new BrowserInterruptionError(
               cleanup.interruption.reason,
               cleanup.interruption.message,
