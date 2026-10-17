@@ -375,6 +375,35 @@ describe("diagnostic credential scrubber", () => {
     expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 
+  it("redacts password/secret segments with trailing qualifiers", () => {
+    // `password_confirmation`, `secret_value`: the credential term is not a
+    // suffix, so the shared denylist misses them; the container rule still
+    // collapses scalar values while recursing structured ones.
+    const result = scrubDiagnosticValue({
+      password_confirmation: SECRET,
+      secret_value: { nested: SECRET },
+      authorization_mode: "strict",
+      token_count: 7,
+    }) as Record<string, unknown>;
+    expect(result.password_confirmation).toBe("[REDACTED]");
+    expect(result.secret_value).toEqual({ nested: "[REDACTED]" });
+    expect(result.authorization_mode).toBe("strict");
+    expect(result.token_count).toBe(7);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("redacts prefixed authorization-header compounds", () => {
+    // The auth term followed by a `header` segment is still a header
+    // (`requestAuthorizationHeader`); a bare `headers` map or one ending in
+    // any other segment stays readable.
+    const result = scrubDiagnosticValue({
+      requestAuthorizationHeader: `Bearer ${SECRET}`,
+      headers: { "content-type": "application/json" },
+    }) as Record<string, unknown>;
+    expect(result.requestAuthorizationHeader).toBe("[REDACTED]");
+    expect(result.headers).toEqual({ "content-type": "application/json" });
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
   it("redacts concatenated and provider-prefixed credential names", () => {
     // Separator-free compounds the suffix rules never see: a bare credential
     // ending (`PGPASSWORD`) and a provider-prefixed serialized field

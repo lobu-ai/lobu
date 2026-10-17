@@ -162,6 +162,32 @@ describe("console logger pino-style metadata", () => {
     expect(line).not.toContain("synthetic-header-secret");
   });
 
+  test("redacts password/secret segments with trailing qualifiers", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        password_confirmation: "synthetic-confirm-secret",
+        secret_value: { nested: "synthetic-nested-secret" },
+        token_count: 7,
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).toContain("token_count");
+    expect(line).not.toContain("synthetic-confirm-secret");
+    expect(line).not.toContain("synthetic-nested-secret");
+  });
+
+  test("redacts prefixed authorization-header compounds", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        requestAuthorizationHeader: "Bearer synthetic-req-auth-secret",
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain("synthetic-req-auth-secret");
+  });
+
   test("redacts prefixed authorization headers and serialized credential fields", () => {
     const line = captureWarn((log) => {
       log.warn({
@@ -299,6 +325,10 @@ describe("console logger structured output", () => {
           oauthCredentialsJson:
             '{"token":"synthetic-json-oauth-secret"}',
           credentialsByName: { github: "synthetic-json-provider-secret" },
+          password_confirmation: "synthetic-json-confirm-secret",
+          secret_value: { nested: "synthetic-json-nested-secret" },
+          requestAuthorizationHeader:
+            "Bearer synthetic-json-req-auth-secret",
         });
         log.warn({
           headers: { "x-authorization": ["Bearer synthetic-json-array-secret"] },
@@ -349,6 +379,12 @@ describe("console logger structured output", () => {
     expect(records[5].message).not.toContain("synthetic-json-camel-secret");
     expect(records[5].message).not.toContain("synthetic-json-blob-secret");
     expect(records[5].message).not.toContain("synthetic-json-xauth-secret");
+    expect(records[5].message).not.toContain("synthetic-json-concat-secret");
+    expect(records[5].message).not.toContain("synthetic-json-oauth-secret");
+    expect(records[5].message).not.toContain("synthetic-json-provider-secret");
+    expect(records[5].message).not.toContain("synthetic-json-confirm-secret");
+    expect(records[5].message).not.toContain("synthetic-json-nested-secret");
+    expect(records[5].message).not.toContain("synthetic-json-req-auth-secret");
     expect(records[6].level).toBe("warn");
     expect(records[6].message).toContain("[REDACTED]");
     expect(records[6].message).not.toContain("synthetic-json-array-secret");
@@ -370,6 +406,9 @@ describe("console logger structured output", () => {
     expect(output).not.toContain("synthetic-json-concat-secret");
     expect(output).not.toContain("synthetic-json-oauth-secret");
     expect(output).not.toContain("synthetic-json-provider-secret");
+    expect(output).not.toContain("synthetic-json-confirm-secret");
+    expect(output).not.toContain("synthetic-json-nested-secret");
+    expect(output).not.toContain("synthetic-json-req-auth-secret");
     expect(output).not.toContain("synthetic-json-array-secret");
     expect(output).not.toContain("synthetic-json-error-prop-secret");
   });

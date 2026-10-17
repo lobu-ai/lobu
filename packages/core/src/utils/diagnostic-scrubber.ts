@@ -69,29 +69,51 @@ function splitKeySegments(key: string): string[] {
 
 /**
  * A TRAILING `authorization` segment is a (possibly vendor-prefixed)
- * authorization header (`x-authorization`, `xAuthorization`). Headers are
- * scalar-or-list carriers, never credential maps, so this classifies as a
- * strong secret key regardless of value type.
+ * authorization header (`x-authorization`, `xAuthorization`). A trailing
+ * `header`/`headers` segment is transparent to that test
+ * (`requestAuthorizationHeader`, `authorization-headers`): strip it first.
+ * Headers are scalar-or-list carriers, never credential maps, so this
+ * classifies as a strong secret key regardless of value type. A bare
+ * `headers` map, or one ending in any other segment (`authorization_mode`),
+ * stays readable.
  */
 function hasTrailingAuthorizationSegment(key: string): boolean {
   const segments = splitKeySegments(key);
-  return (
-    segments.length > 0 && segments[segments.length - 1] === "authorization"
-  );
+  // A trailing `header`/`headers` segment is transparent to the test below
+  // (`requestAuthorizationHeader`, `authorization-headers`); anything else
+  // stays (`authorization_mode`, a bare `headers` map).
+  const core =
+    segments.length > 0 &&
+    (segments[segments.length - 1] === "header" ||
+      segments[segments.length - 1] === "headers")
+      ? segments.slice(0, -1)
+      : segments;
+  return core.length > 0 && core[core.length - 1] === "authorization";
 }
 
 /**
- * A `credential`/`credentials` segment anywhere in the key names a
- * credential CONTAINER (`credentials_json`, `credentialsJson`,
- * `oauthCredentialsJson`, `credentialsByName`). Container semantics live in
- * the walk: a scalar beneath one IS the serialized credential and collapses,
+ * A `credential`/`password`/`secret` segment anywhere in the key names a
+ * credential CONTAINER (`credentials_json`, `password_confirmation`,
+ * `secret_value`, `oauthCredentialsJson`). Container semantics live in the
+ * walk: a scalar beneath one IS the serialized credential and collapses,
  * while a structured value beneath one recurses with every descendant
  * treated as credential-adjacent (a map's leaves cannot be trusted by key
- * name alone — `credentialsByName.github` proves it).
+ * name alone — `credentialsByName.github` proves it). `token` is deliberately
+ * absent: bare token segments collide with usage counts (`token_count` stays
+ * readable per the logger contract); `authorization` stays pinned to the
+ * trailing rule above so `authorization_mode` stays readable.
  */
+const CONTAINER_KEY_SEGMENTS = new Set([
+  "credential",
+  "credentials",
+  "password",
+  "passwd",
+  "secret",
+]);
+
 function hasCredentialSegment(key: string): boolean {
-  return splitKeySegments(key).some(
-    (segment) => segment === "credential" || segment === "credentials"
+  return splitKeySegments(key).some((segment) =>
+    CONTAINER_KEY_SEGMENTS.has(segment)
   );
 }
 
