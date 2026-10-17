@@ -389,6 +389,7 @@
         "@lobu/connector-worker": "workspace:*",
         "@lobu/connectors": "workspace:*",
         "@lobu/core": "workspace:*",
+        "@lobu/plugin-toolkit": "workspace:*",
         "@lobu/views": "workspace:*",
         "@mariozechner/pi-ai": "^0.73.1",
         "@mariozechner/pi-coding-agent": "^0.73.1",

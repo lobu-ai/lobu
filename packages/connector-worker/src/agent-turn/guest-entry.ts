@@ -20,7 +20,7 @@
  */
 
 import type { AgentTool, AgentMessage } from '@mariozechner/pi-agent-core';
-import type { TextResult } from '@lobu/plugin-toolkit';
+import { mcpToolResult, toolImageBudget, type ToolImageBudget, type ToolResult } from '@lobu/plugin-toolkit';
 import { createGatewayTools } from './gateway-tools.js';
 import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
@@ -76,8 +76,10 @@ async function callMcpTool(
   credential: string,
   tool: AgentTurnTool,
   args: unknown,
-  timeoutMs = TOOL_CALL_TIMEOUT_MS
-): Promise<TextResult> {
+  timeoutMs = TOOL_CALL_TIMEOUT_MS,
+  supportsImages = true,
+  imageBudget?: ToolImageBudget
+): Promise<ToolResult> {
   const url = `${gatewayUrl}/mcp/${encodeURIComponent(tool.mcpId)}/tools/${encodeURIComponent(tool.name)}`;
   let response: Response;
   try {
@@ -116,7 +118,8 @@ async function callMcpTool(
   // Ordinary agent tools render this same result below; no second transport.
   return {
     ...reply,
-    content: [{ type: 'text', text: text || reply.error || '' }],
+    ...mcpToolResult(reply.isError === true ? reply.content?.filter(part => part?.type === 'text') : reply.content,
+      reply.error || '', supportsImages, imageBudget),
   };
 }
 
@@ -134,9 +137,10 @@ function buildTools(
   onInBandReplyDelivered: () => void,
   emit: (event: AgentTurnEvent) => void,
   runtimeExec?: (request: RuntimeExecRequest) => Promise<RuntimeExecResult>
-): { tools: AgentTool[]; workspace: AgentWorkspace | null; canReadFiles: boolean } {
+): { tools: AgentTool[]; workspace: AgentWorkspace | null; canReadFiles: boolean; imageBudget: ToolImageBudget } {
+  const imageBudget = toolImageBudget((input.images ?? []).map(image => ({ type: 'image', data: image.data })));
   const tools = input.tools;
-  if (!tools) return { tools: [], workspace: null, canReadFiles: false };
+  if (!tools) return { tools: [], workspace: null, canReadFiles: false, imageBudget };
   // ONE workspace for the whole turn: the file tools act on it and
   // `upload_file` reads it, so the file the model just wrote is the file it can
   // show. Built even when no file tool was admitted but a media tool was, since
@@ -175,11 +179,21 @@ function buildTools(
     // A plain JSON schema: pi-ai validates arguments against it as-is.
     parameters: tool.inputSchema as never,
     execute: async (_toolCallId: string, args: unknown) => {
-      const result = await callMcpTool(tools.gatewayUrl, credential, tool, args);
+      const result = await callMcpTool(
+        tools.gatewayUrl,
+        credential,
+        tool,
+        args,
+        TOOL_CALL_TIMEOUT_MS,
+        input.provider.input?.includes('image') === true,
+        imageBudget
+      );
       const text = joinText(result.content);
       if (result.isError === true) throw new Error(String(result.error || text || `${tool.name} failed`));
       return {
-        content: [{ type: 'text' as const, text: text || `${tool.name} completed.` }],
+        content: text || result.content.some((part) => part.type === 'image')
+          ? result.content
+          : [{ type: 'text' as const, text: `${tool.name} completed.` }],
         details: {},
       };
     },
@@ -192,6 +206,7 @@ function buildTools(
     tools: [...mcp, ...gateway, ...media, ...(workspace?.tools ?? [])],
     workspace,
     canReadFiles,
+    imageBudget,
   };
 }
 
@@ -388,7 +403,7 @@ export async function runAgentTurn(
               { mcpId, name: toolName, description: '', inputSchema: {} },
               args,
               options?.timeoutMs
-            ),
+            ).then((result) => ({ ...result, content: [{ type: 'text' as const, text: joinText(result.content) }] })),
           logger: guestLogger,
         })
       : null;
@@ -489,6 +504,12 @@ export async function runAgentTurn(
     const text = messageText(message);
     return text === undefined ? undefined : messageContext.get(text);
   });
+  // Only the isolate must fit the full checkpoint through a bounded bridge.
+  // buildTools charged this prompt's images; add the already-hydrated history.
+  built.imageBudget.bytes += toolImageBudget(session.sessionManager.getEntries().flatMap<unknown>(entry =>
+    entry.type === 'message' && 'content' in entry.message && Array.isArray(entry.message.content)
+      ? entry.message.content : []
+  )).bytes;
   session.subscribe((event) => {
     if (event.type === 'compaction_end' && event.errorMessage) console.warn(event.errorMessage);
   });

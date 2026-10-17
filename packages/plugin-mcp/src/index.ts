@@ -2,6 +2,7 @@ import type { McpToolDef } from "@lobu/core";
 import { defineLobuPlugin } from "@lobu/plugin-api";
 import {
   defineTool,
+  joinTextContent,
   toToolResult,
   type GatewayParams,
   type TextResult,
@@ -53,17 +54,21 @@ export function createMcpToolDefinitions(
         parameters: definition.inputSchema
           ? Type.Unsafe(definition.inputSchema)
           : Type.Object({}),
-        execute: async (_toolCallId, args) => {
+        execute: async (_toolCallId, args, _signal, _onUpdate, context) => {
           const result = await callMcpTool(
             gateway,
             mcpId,
             definition.name,
-            (args || {}) as Record<string, unknown>
+            (args || {}) as Record<string, unknown>,
+            {
+              supportsImages: context?.model?.input.includes("image") === true,
+            }
           );
-          const text = result.content?.[0]?.text;
-          if (typeof text === "string") {
-            await maybePostApprovalCard(gateway, definition.name, text);
-          }
+          await maybePostApprovalCard(
+            gateway,
+            definition.name,
+            joinTextContent(result.content)
+          );
           return toToolResult(result);
         },
       });

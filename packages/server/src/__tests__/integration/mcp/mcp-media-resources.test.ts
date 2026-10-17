@@ -26,6 +26,8 @@ import {
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
+import { syntheticImage } from '../../../../../../scripts/__tests__/fixtures/synthetic-image';
+import { materializeActionOutputAttachments } from '../../../utils/inline-attachments';
 
 function mockWorkerCtx(body: unknown): {
   ctx: Context<{ Bindings: Env }>;
@@ -46,6 +48,8 @@ function mockWorkerCtx(body: unknown): {
 describe('MCP media resources', () => {
   let org: Awaited<ReturnType<typeof createTestOrganization>>;
   let token: string;
+  let bareToken: string;
+  let ownerId: string;
   let artifactStore: ArtifactStore;
   let artifactsDir: string;
   let restoreCoreServices: (() => void) | undefined;
@@ -71,6 +75,7 @@ describe('MCP media resources', () => {
       slug: 'mcp-media-org',
     });
     const owner = await createTestUser({ email: 'mcp-media-owner@test.example.com' });
+    ownerId = owner.id;
     await addUserToOrganization(owner.id, org.id, 'owner');
     const client = await createTestOAuthClient();
     token = (
@@ -78,6 +83,11 @@ describe('MCP media resources', () => {
         scope: 'mcp:admin mcp:write mcp:read profile:read',
       })
     ).token;
+    bareToken = (await createTestAccessToken(owner.id, org.id, client.client_id, {
+      scope: 'mcp:admin mcp:write mcp:read profile:read', resource: 'http://localhost/mcp',
+    })).token;
+    // Current account OAuth grants have no implicit default workspace.
+    await getDb()`UPDATE oauth_tokens SET organization_id = NULL WHERE client_id = ${client.client_id} AND resource = 'http://localhost/mcp'`;
     clearInMemoryMcpSessionsForTests();
   });
 
@@ -90,8 +100,7 @@ describe('MCP media resources', () => {
     if (artifactsDir) rmSync(artifactsDir, { recursive: true, force: true });
   });
 
-  async function initSession(): Promise<string> {
-    const path = `/mcp/${org.slug}`;
+  async function initSession(path = `/mcp/${org.slug}`): Promise<string> {
     const initResponse = await post(path, {
       body: {
         jsonrpc: '2.0',
@@ -103,8 +112,9 @@ describe('MCP media resources', () => {
           clientInfo: { name: 'lobu-mcp-media-test', version: '1.0' },
         },
       },
-      token,
+      token: path === '/mcp' ? bareToken : token,
     });
+    expect(initResponse.status, JSON.stringify(await initResponse.json())).toBe(200);
     const sessionId = initResponse.headers.get('mcp-session-id');
     expect(sessionId).toBeTruthy();
     await post(path, {
@@ -113,7 +123,7 @@ describe('MCP media resources', () => {
         'mcp-session-id': sessionId!,
         'mcp-protocol-version': MCP_PROTOCOL_VERSION,
       },
-      token,
+      token: path === '/mcp' ? bareToken : token,
     });
     return sessionId!;
   }
@@ -282,11 +292,13 @@ describe('MCP media resources', () => {
     expect((await readdir(artifactsDir)).sort()).toEqual(artifactsBeforeFailedInsert);
   });
 
-  it('does not let a resource URI bypass workspace authorization', async () => {
+  it.each(['bound', 'bare'])('does not let a resource URI bypass workspace authorization (%s)', async mode => {
     const otherOrg = await createTestOrganization({
       name: 'Other MCP Media Org',
-      slug: 'other-mcp-media-org',
+      slug: `other-mcp-media-org-${mode}`,
     });
+    // Membership alone cannot widen an account OAuth grant snapshot.
+    if (mode === 'bare') await addUserToOrganization(ownerId, otherOrg.id, 'owner');
     const bytes = Buffer.from('other-workspace-image');
     const artifact = await artifactStore.publish({
       buffer: bytes,
@@ -295,13 +307,13 @@ describe('MCP media resources', () => {
       publicGatewayUrl: 'http://localhost',
       binding: eventArtifactBinding({
         organizationId: otherOrg.id,
-        originId: 'other-mcp-media-event',
+        originId: `other-mcp-media-event-${mode}`,
       }),
     });
     const event = await insertEvent({
       entityIds: [],
       organizationId: otherOrg.id,
-      originId: 'other-mcp-media-event',
+      originId: `other-mcp-media-event-${mode}`,
       title: 'Other workspace photo',
       payloadType: 'media',
       content: '',
@@ -317,8 +329,9 @@ describe('MCP media resources', () => {
       ],
     });
 
-    const sessionId = await initSession();
-    const response = await post(`/mcp/${org.slug}`, {
+    const path = mode === 'bare' ? '/mcp' : `/mcp/${org.slug}`;
+    const sessionId = await initSession(path);
+    const response = await post(path, {
       body: {
         jsonrpc: '2.0',
         id: 'cross-org-media',
@@ -326,7 +339,7 @@ describe('MCP media resources', () => {
         params: { uri: `lobu://event/${event.id}/attachment/0` },
       },
       headers: { 'mcp-session-id': sessionId },
-      token,
+      token: mode === 'bare' ? bareToken : token,
     });
 
     expect(response.status).toBe(200);
@@ -538,8 +551,40 @@ describe('MCP media resources', () => {
     expect(body.error?.message).toContain('Unknown resource');
   });
 
-  it('returns operation attachments as stable resource links and serves their bytes', async () => {
-    const imageBytes = Buffer.from('fake-image-bytes');
+  it.each(['child', 'unrelated', 'foreign', 'unlisted', 'unfinished', 'unbound', 'noncanonical'])('preserves only authorized completed child artifacts: %s', async (kind) => {
+    const sql = getDb();
+    const [parent] = await sql`
+      INSERT INTO runs (organization_id, run_type, status, approval_status)
+      VALUES (${org.id}, 'action', 'running', 'auto') RETURNING id
+    `;
+    const parentId = Number(parent!.id);
+    const otherOrg = kind === 'foreign' ? await createTestOrganization({ name: 'Other Child Org', slug: 'other-child-org' }) : org;
+    const [child] = await sql`
+      INSERT INTO runs (organization_id, parent_run_id, run_type, status, approval_status)
+      VALUES (${otherOrg.id}, ${kind === 'unrelated' ? null : parentId}, 'action', ${kind === 'unfinished' ? 'running' : 'completed'}, 'auto') RETURNING id
+    `;
+    const childId = Number(child!.id);
+    const bytes = syntheticImage().bytes;
+    const binding = kind === 'unbound' ? undefined : kind === 'noncanonical' ? `run:0${childId}` : runArtifactBinding(childId);
+    const artifact = await artifactStore.publish({ buffer: bytes, filename: 'child.png', contentType: 'image/png', publicGatewayUrl: 'http://localhost', binding });
+    const attachment = { kind: 'image', filename: 'child.png', mime_type: 'image/png', artifact_id: artifact.artifactId, size_bytes: bytes.length };
+    if (kind !== 'unlisted') await sql`UPDATE runs SET action_output = ${sql.json({ attachments: [attachment] })} WHERE id = ${childId}`;
+    const materialized = await materializeActionOutputAttachments(parentId, { attachments: [attachment] });
+    const returned = (materialized.output.attachments as Array<{ artifact_id: string }>)[0]!;
+    const parentArtifact = await artifactStore.read(returned.artifact_id, { binding: runArtifactBinding(parentId) });
+    if (kind === 'child') {
+      expect(parentArtifact?.bytes).toEqual(bytes);
+      expect(materialized.publishedArtifactIds).toEqual([returned.artifact_id]);
+    } else {
+      expect(parentArtifact).toBeNull();
+      expect(materialized.publishedArtifactIds).toEqual([]);
+    }
+    // Delegation must not mutate the child's artifact or loosen its binding.
+    expect((await artifactStore.read(artifact.artifactId, { binding }))?.bytes).toEqual(bytes);
+  });
+
+  it.each(['direct', 'wrapped', 'bare'])('returns %s operation attachments as pixels and stable resource links', async (shape) => {
+    const imageBytes = syntheticImage().bytes;
     const sql = getDb();
     const [run] = await sql`
       INSERT INTO runs (
@@ -552,8 +597,8 @@ describe('MCP media resources', () => {
     const runId = Number(run!.id);
     const artifact = await artifactStore.publish({
       buffer: imageBytes,
-      filename: 'candidate.jpg',
-      contentType: 'image/jpeg',
+      filename: 'candidate.png',
+      contentType: 'image/png',
       publicGatewayUrl: 'http://localhost',
       ttlMs: -1,
       binding: runArtifactBinding(runId),
@@ -569,8 +614,8 @@ describe('MCP media resources', () => {
         attachments: [
           {
             kind: 'image',
-            filename: 'candidate.jpg',
-            mime_type: 'image/jpeg',
+            filename: 'candidate.png',
+            mime_type: 'image/png',
             artifact_id: artifact.artifactId,
             download_url: artifact.downloadUrl,
             size_bytes: imageBytes.length,
@@ -580,8 +625,8 @@ describe('MCP media resources', () => {
       WHERE id = ${runId}
     `;
 
-    const sessionId = await initSession();
-    const path = `/mcp/${org.slug}`;
+    const path = shape === 'bare' ? '/mcp' : `/mcp/${org.slug}`;
+    const sessionId = await initSession(path);
     const response = await post(path, {
       body: {
         jsonrpc: '2.0',
@@ -590,12 +635,16 @@ describe('MCP media resources', () => {
         params: {
           name: 'run_sdk',
           arguments: {
-            script: `export default async (_ctx, client) => client.operations.getRun(${runId});`,
+            script: shape === 'bare'
+              ? `export default async (_ctx, client) => ({ shots: [await (await client.org('${org.slug}')).operations.getRun(${runId})] });`
+              : shape === 'direct'
+              ? `export default async (_ctx, client) => client.operations.getRun(${runId});`
+              : `export default async (_ctx, client) => ({ shots: [await client.operations.getRun(${runId})] });`,
           },
         },
       },
       headers: { 'mcp-session-id': sessionId },
-      token,
+      token: shape === 'bare' ? bareToken : token,
     });
 
     expect(response.status).toBe(200);
@@ -608,11 +657,15 @@ describe('MCP media resources', () => {
       expect.objectContaining({
         type: 'resource_link',
         uri: `lobu://run/${runId}/attachment/0`,
-        name: 'candidate.jpg',
-        mimeType: 'image/jpeg',
+        name: 'candidate.png',
+        mimeType: 'image/png',
         size: imageBytes.length,
       })
     );
+    expect(body.result?.content).toContainEqual({
+      type: 'image', mimeType: 'image/png', data: imageBytes.toString('base64'),
+    });
+    expect(JSON.stringify(body.result?.structuredContent)).not.toContain(imageBytes.toString('base64'));
 
     const readResponse = await post(path, {
       body: {
@@ -622,13 +675,13 @@ describe('MCP media resources', () => {
         params: { uri: resource.uri },
       },
       headers: { 'mcp-session-id': sessionId },
-      token,
+      token: shape === 'bare' ? bareToken : token,
     });
     expect(readResponse.status).toBe(200);
     const readBody = await readResponse.json();
     expect(readBody.result?.contents?.[0]).toEqual({
       uri: resource.uri,
-      mimeType: 'image/jpeg',
+      mimeType: 'image/png',
       blob: imageBytes.toString('base64'),
     });
   });

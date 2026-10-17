@@ -8,10 +8,12 @@ import {
   createGatewayClient,
   gatewayFetch,
   joinTextContent,
+  mcpToolResult,
   textResult,
   withErrorHandling,
   type GatewayParams,
   type TextResult,
+  type ToolResult,
 } from "@lobu/plugin-toolkit";
 
 const logger = createLogger("plugin-mcp");
@@ -189,8 +191,11 @@ export async function callMcpTool(
   mcpId: string,
   toolName: string,
   args: Record<string, unknown>,
-  options?: { timeoutMs?: number }
-): Promise<TextResult> {
+  options?: {
+    timeoutMs?: number;
+    supportsImages?: boolean;
+  }
+): Promise<ToolResult> {
   return withErrorHandling(`${mcpId}/${toolName}`, async () => {
     let response: Response;
     const wantsJson = TOOLS_REQUESTING_JSON_FORMAT.has(toolName);
@@ -248,7 +253,10 @@ export async function callMcpTool(
       return textResult(`Error: ${errorMsg}`);
     }
 
-    const text = joinTextContent(data.content);
-    return textResult(text || `${toolName} completed.`);
+    return mcpToolResult(
+      data.content,
+      `${toolName} completed.`,
+      options?.supportsImages
+    );
   });
 }
