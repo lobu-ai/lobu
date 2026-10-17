@@ -929,6 +929,9 @@ async function fetchContentSnippets(
       // default is a chronological date feed).
       sort_by: 'score',
       approximate_candidate_search: true,
+      // Copies of one notice or page visit (distinct source items, identical
+      // title + text) would otherwise fill every recall slot.
+      collapse_identical_content: true,
     },
     env
   );
