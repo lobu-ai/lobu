@@ -131,6 +131,15 @@ export interface ContentSearchOptions {
   // use a bounded hybrid candidate set instead of the exact full match set. Do
   // not use for user-visible get_content pagination/totals.
   approximate_candidate_search?: boolean;
+
+  /**
+   * Recall-only: keep the best-ranked row per identical (title, payload_text)
+   * so returned snippets do not repeat the same title and text. Collapses
+   * inside a bounded over-fetch of the score-ordered matches (see
+   * COLLAPSE_POOL_* in fts.ts); `total` still counts uncollapsed matches.
+   * Ignored for date-ordered, cursor, and offset reads.
+   */
+  collapse_identical_content?: boolean;
 }
 
 /**

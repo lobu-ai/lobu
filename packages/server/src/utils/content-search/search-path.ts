@@ -33,6 +33,8 @@ import {
   CANDIDATE_IVFFLAT_PROBES,
   CANDIDATE_QUERY_TIMEOUT_MS,
   CANDIDATE_VECTOR_LIMIT,
+  COLLAPSE_POOL_FACTOR,
+  COLLAPSE_POOL_MAX,
   TSQUERY_SQL,
   buildSearchDocumentExpr,
   buildTsqueryString,
@@ -559,6 +561,35 @@ export async function searchContentBySingleQuery(
   const probeOrderBy = preferChronologicalOrdering
     ? buildOrderByClause('date', options.sort_order, 'rp', 'result_set')
     : `rp.combined_score DESC, (rp.id % 997) ASC, COALESCE(rp.occurred_at, rp.created_at) DESC, rp.id DESC`;
+  // Bound the window before comparing content. Rows without text stay separate:
+  // their title alone does not prove the content is the same.
+  const collapseIdentical =
+    options.collapse_identical_content === true &&
+    !useDateFeed &&
+    !preferChronologicalOrdering &&
+    effectiveOffset === 0;
+  const collapsePoolLimit = Math.min(validatedLimit * COLLAPSE_POOL_FACTOR, COLLAPSE_POOL_MAX);
+  const collapsedIdsCteSql = collapseIdentical
+    ? `collapsed_ids AS (
+        SELECT pool.id, pool.score, pool.occurred_at, pool.created_at, pool.title, pool.payload_text, pool.best_sim, pool.search_tsv
+        FROM (
+          SELECT ranked.*, ROW_NUMBER() OVER (
+            PARTITION BY ranked.title, ranked.payload_text,
+              CASE WHEN LENGTH(ranked.payload_text) > 0 THEN NULL ELSE ranked.id END
+            ORDER BY ranked.pool_score DESC, (ranked.id % 997) ASC, COALESCE(ranked.occurred_at, ranked.created_at) DESC, ranked.id DESC
+          ) AS copy_rank
+          FROM (
+            SELECT fi.*, ${combinedScoreExpr} AS pool_score
+            FROM filtered_ids fi
+            ORDER BY ${resultSetOrderBy}
+            LIMIT ${collapsePoolLimit}
+          ) ranked
+        ) pool
+        WHERE pool.copy_rank = 1
+      ),
+      `
+    : '';
+  const rankedSource = collapseIdentical ? 'collapsed_ids' : 'filtered_ids';
   const nonDateResultSetSql = includeTotal
     ? `result_set AS (
         SELECT
@@ -568,7 +599,7 @@ export async function searchContentBySingleQuery(
           ${combinedScoreExpr} as combined_score,
           (SELECT total_count FROM full_count) as total_count,
           NULL::bigint as cursor_fetched_count
-        FROM filtered_ids fi
+        FROM ${rankedSource} fi
         ORDER BY ${resultSetOrderBy}
         LIMIT $${limitParamIdx}
         OFFSET $${offsetParamIdx}
@@ -581,7 +612,7 @@ export async function searchContentBySingleQuery(
           ${textRankExpr} as text_rank,
           ${similarityExpr} as similarity,
           ${combinedScoreExpr} as combined_score
-        FROM filtered_ids fi
+        FROM ${rankedSource} fi
         ORDER BY ${resultSetOrderBy}
         LIMIT $${limitParamIdx}
         OFFSET $${offsetParamIdx}
@@ -636,7 +667,7 @@ export async function searchContentBySingleQuery(
     : `
       WITH RECURSIVE ${useCandidatePath ? searchCandidatesCteSql : ''}${nonDateFilteredIdsCteSql},
       ${fullCountCteSql},
-      ${nonDateResultSetSql},
+      ${collapsedIdsCteSql}${nonDateResultSetSql},
       ${ctes}
       ${searchFinalSelect}`;
 

@@ -208,6 +208,32 @@ stays in [0, 1]. The score is `0.4 × text + 0.6 × COALESCE(similarity, 0)`, so
 an unembedded row is weighted like any other. The entity blend in
 `search_memory` uses the same normalization.
 
+### 5. Copies of one item fill the top k
+
+Measured 2026-10-17 in the largest workspace over the top 50 of 12 queries
+(597 rows). Five of the 12 top-5 answers held a single title, for example the
+same "auto-paused" notice five times or the same page revisited five times.
+
+- **Same source item re-synced** (same `connection_id` + `origin_id` among
+  current rows): 0 in the sample and 0 across all 2.5M current events.
+  Supersede already keeps one current row per source item.
+- **Identical title + `payload_text`, distinct source items**: the dominant
+  class, 0 to 43 extra copies per query in the top 50 (notifications, tab
+  events, page revisits).
+- **Same connection + title + URL, different text**: catches keystroke
+  snapshots of one input field, but would also merge distinct content. Over the
+  last 14 days it maps 192 distinct comments onto 29 keys and 1,008 distinct
+  log rows onto 825. Not a safe generic key; it stays a connector-side concern.
+
+**Implementation (this change, query only).** Ranked recall over-fetches the
+score-ordered top `limit × 20` (capped at 1,000) and keeps the best-ranked row per identical
+title + `payload_text`. Rows with no text are never merged. The window is a
+top-N of the already-filtered match set, never an aggregate over history.
+The existing candidate caps still apply before this window, so heavy
+duplication can leave fewer than `limit` distinct results. Queryless reads
+without an embedding continue through the chronological list path.
+`get_content` and other non-recall reads are unchanged.
+
 ### What has already shipped (not part of this design)
 
 - **Honest failure (#4098).** The candidate transaction preserves the SQLSTATE,
