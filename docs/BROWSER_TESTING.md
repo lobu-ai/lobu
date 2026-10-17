@@ -183,8 +183,17 @@ For recovery explicitly permitted by the calling agent's instructions:
 A handoff expires after five minutes, with at most sixteen observations and eight
 consumed actions. Expiry cleanup closes only the original scrape-owned target;
 closed/reused tabs, moved windows, account changes, policy revocation, and
-competing ownership fail closed. Unacknowledged cleanup holds the account lease
-for the bounded expiry instead of immediately admitting another read.
+competing ownership fail closed. Recovery-enabled reads acquire exclusive
+ownership of their browser account before opening a tab. Sequence feeds sharing
+that account, including feeds requested through `feeds.readMany`: a competing
+read fails with non-retryable `recovery_unavailable` and no handoff. After the
+owner finishes, a fresh normal read can acquire the account. Reads on distinct
+accounts remain independent.
+
+The same fence blocks other connector actions and feed syncs on the account,
+so they cannot change its browser state during recovery. Unacknowledged cleanup
+or a timed-out leased read holds that fence for at most five minutes; it does
+not immediately admit work into a tab whose cleanup is uncertain.
 
 An Automation whose instructions stop on verification or login keeps stopping;
 this transport opts no Automation into interactive recovery and never changes

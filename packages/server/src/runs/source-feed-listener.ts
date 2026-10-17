@@ -210,8 +210,12 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
     throw error;
   } finally {
     if (controller.signal.aborted) status = 'timeout';
-    controller.abort();
-    clearTimeout(timer);
-    await browser?.settle(status);
+    // Settle before aborting: settle() reads an aborted signal as cancellation.
+    try {
+      await browser?.settle(status);
+    } finally {
+      controller.abort();
+      clearTimeout(timer);
+    }
   }
 }

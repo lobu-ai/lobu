@@ -145,7 +145,6 @@ export function trustedChromeActionInput(
   const trusted = { ...input };
   // No longer sent, but still stripped: the 0.8 extension keys tab ownership on
   // it, so a caller-supplied copy would let an agent address another flow's tabs.
-  delete trusted.browser_recovery_control;
   delete trusted.browser_context_id;
   delete trusted.browser_context_title;
   delete trusted.browser_flow_id;
@@ -158,6 +157,7 @@ export function trustedChromeActionInput(
   // way to launder any tab id, or any target URL, into that authority.
   delete trusted.activation_tab_id;
   delete trusted.activation_target_urls;
+  delete trusted.browser_recovery_control;
   return {
     ...trusted,
     ...(recoveryControl ? { browser_recovery_control: recoveryControl } : {}),

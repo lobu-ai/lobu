@@ -178,6 +178,7 @@ export function createSourceReadBridge(
       if (!parent) return;
       const runId = await parent.catch(() => undefined);
       if (runId === undefined) return;
+      let cleanupFailed = false;
       try {
         const lease = await sourceBrowserLease(params.scope.organizationId, runId);
         let outcome: SourceBrowserCleanup = tabClosed ? 'closed' : 'unacknowledged';
@@ -222,10 +223,22 @@ export function createSourceReadBridge(
             recovery,
           );
         }
+      } catch (error) {
+        cleanupFailed = true;
+        throw error;
       } finally {
-        // A read that ends interrupted is reported to its caller as a failure.
+        if (signal.aborted && leased) {
+          // Cancellation may arrive after the source returned rows or after
+          // retention was acknowledged. Neither grants a recovery handoff.
+          interruption = new BrowserInterruptionError(
+            interruption?.reason ?? 'timeout',
+            interruption?.message ?? 'Browser source read timed out or was cancelled before completion.',
+          );
+        }
+        // Both typed interruptions and thrown cleanup failures reject the read.
         await scrubSourceReadRun(runId, params.scope.organizationId, feed.feed_key,
-          status === 'completed' && interruption ? 'failed' : status);
+          signal.aborted ? 'timeout'
+            : status === 'completed' && (interruption || cleanupFailed) ? 'failed' : status);
       }
     },
   };

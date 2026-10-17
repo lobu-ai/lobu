@@ -1064,8 +1064,17 @@ describe('compiled browser source reads', () => {
   async function recoveryRead(recovery_id?: string, query = 'private query') {
     return manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query, limit: 2, ...(recovery_id ? { recovery_id } : {}) }], timeout_ms: 5000 }, {} as Env, recoveryContext()) as Promise<Record<string, any>>;
   }
-  async function serveRecovery(reading: Promise<unknown>, options: { navigationFails?: boolean; challenge?: 'probe' | 'late'; changedAccount?: boolean; cleanupFails?: boolean; loseOwnershipOnCleanup?: boolean; appVersion?: string } = {}) {
-    let finished = false; let probes = 0;
+  async function serveRecovery(reading: Promise<unknown>, options: {
+    navigationFails?: boolean;
+    challenge?: 'probe' | 'late';
+    changedAccount?: boolean;
+    cleanupFails?: boolean;
+    loseOwnershipOnCleanup?: boolean;
+    appVersion?: string;
+    afterCleanup?: () => void;
+  } = {}) {
+    let finished = false;
+    let probes = 0;
     reading.finally(() => { finished = true; }).catch(() => {});
     const jobs: Record<string, any>[] = [];
     for (let i = 0; i < 70 && !finished; i++) {
@@ -1090,6 +1099,7 @@ describe('compiled browser source reads', () => {
         }
         const completion = await post('/api/workers/complete-action', { body: { run_id: job.run_id, worker_id: WORKER_ID, status: navigationFailed ? 'failed' : 'success', ...(navigationFailed ? { error_message: 'Synthetic navigation failure' } : {}), action_output: output } });
         expect(completion.status).toBe(200);
+        if (job.operation_key === 'close_tab') options.afterCleanup?.();
       }
       await new Promise(resolve => setTimeout(resolve, 50));
     }
@@ -1149,6 +1159,100 @@ describe('compiled browser source reads', () => {
     const sql = getTestDb();
     expect((await sql`SELECT metadata FROM auth_profiles WHERE id = ${profile.id}`)[0].metadata.browser_recovery.run_id).toBe(2147483000);
     await expectScrubbed();
+  });
+  it('records failure when final cleanup throws after a successful source read', async () => {
+    const profile = await recoverySetup();
+    const reading = recoveryRead();
+    await serveRecovery(reading, { loseOwnershipOnCleanup: true });
+
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({
+      ok: false,
+      retryable: false,
+      interruption: { reason: 'recovery_unavailable' },
+    });
+    expect(failure.rows).toBeUndefined();
+    expect(failure.interruption.recovery).toBeUndefined();
+    const sql = getTestDb();
+    expect(await sql`SELECT status FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)
+      .toEqual([{ status: 'failed' }]);
+    expect((await sql`SELECT metadata FROM auth_profiles WHERE id = ${profile.id}`)[0]
+      .metadata.browser_recovery.run_id).toBe(2147483000);
+    await expectScrubbed();
+  });
+  it('rejects completion when cancellation precedes final account verification', async () => {
+    await recoverySetup();
+    const controller = new AbortController();
+    const bridge = createSourceReadBridge({
+      id: feedId, connection_id: connectionId, connector_key: SOURCE_KEY,
+      feed_key: 'items', pinned_version: null, definition_version: VERSION,
+      selected_artifact_hash: compiled.compiledCodeHash,
+    }, {
+      scope: { organizationId: orgId, principal: userId }, feedId,
+      deadlineAt: Date.now() + 5000, flowId: recoveryFlow(),
+    }, controller.signal);
+    const navigating = bridge.onChromeDispatch('navigate', {
+      url: 'about:blank', new_tab: true, retain_on_interruption: true,
+    });
+    await serveRecovery(navigating);
+
+    controller.abort();
+    await bridge.settle('completed');
+
+    expect(bridge.interruption).toMatchObject({ reason: 'timeout' });
+    expect(bridge.interruption?.recovery).toBeUndefined();
+    expect(await getTestDb()`SELECT status FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)
+      .toEqual([{ status: 'timeout' }]);
+    await expectScrubbed();
+  });
+  it('withholds recovery when cancellation races the cleanup acknowledgement', async () => {
+    await recoverySetup();
+    const controller = new AbortController();
+    const reading = manageFeeds({
+      action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2 }], timeout_ms: 5000,
+    }, {} as Env, { ...recoveryContext(), abortSignal: controller.signal }) as Promise<Record<string, any>>;
+    await serveRecovery(reading, { challenge: 'late', afterCleanup: () => controller.abort() });
+
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({ ok: false, retryable: false, error_code: 'BROWSER_INTERRUPTED' });
+    expect(failure.interruption.recovery).toBeUndefined();
+    expect(failure.rows).toBeUndefined();
+    expect(await getTestDb()`SELECT status FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)
+      .toEqual([{ status: 'timeout' }]);
+    await expectScrubbed();
+  });
+  it('admits one feed per browser account in a parallel batch and releases it after success', async () => {
+    await recoverySetup();
+    const sql = getTestDb();
+    const [otherFeed] = await sql`INSERT INTO feeds
+      (organization_id, connection_id, feed_key, status, config)
+      SELECT organization_id, connection_id, feed_key, status, config
+      FROM feeds WHERE id = ${feedId} RETURNING id`;
+    const reads = [feedId, Number(otherFeed.id)].map(id => ({
+      feed_id: id, query: 'private query', limit: 2,
+    }));
+    const reading = manageFeeds({ action: 'read_feeds', reads, timeout_ms: 5000 },
+      {} as Env, recoveryContext()) as Promise<Record<string, any>>;
+    const jobs = await serveRecovery(reading);
+    const results = (await reading).results;
+
+    expect(results.filter((result: Record<string, any>) => result.ok)).toHaveLength(1);
+    const blocked = results.find((result: Record<string, any>) => !result.ok);
+    expect(blocked).toMatchObject({
+      retryable: false,
+      interruption: { reason: 'recovery_unavailable' },
+    });
+    expect(blocked.interruption.recovery).toBeUndefined();
+    expect(jobs.filter(job => job.operation_key === 'navigate')).toHaveLength(1);
+
+    const next = manageFeeds({
+      action: 'read_feeds', reads: reads.filter(read => read.feed_id === blocked.feed_id), timeout_ms: 5000,
+    }, {} as Env, recoveryContext()) as Promise<Record<string, any>>;
+    await serveRecovery(next);
+    expect((await next).results[0]).toMatchObject({ ok: true, rows: ROWS });
   });
   it.each(['probe', 'late'] as const)('recovery retains an exact interrupted tab during %s and returns a non-retryable handoff', async challenge => {
     await recoverySetup(); const reading = recoveryRead(); const jobs = await serveRecovery(reading, { challenge });

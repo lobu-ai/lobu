@@ -804,6 +804,9 @@ export async function dispatchChromeActionToExtension(params: {
     };
   }
 
+  // This account-wide fence deliberately includes syncs and connector actions:
+  // they must not change browser/account state while another read or recovery
+  // owns it. Unacknowledged cleanup keeps that ownership only until its expiry.
   if (browserResource.authProfileId && await browserAccountHeldByOtherRun(organizationId, browserResource.authProfileId, parentRunId)) {
     const message = 'This browser account is owned by another active source read or recovery.';
     return { status: 'failed', interruption: { reason: 'recovery_unavailable', message }, error_message: message };
