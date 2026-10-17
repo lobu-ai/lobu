@@ -17,6 +17,8 @@
 // path does not resolve.
 
 import { requireBrowser } from "@lobu/connector-sdk/browser-requirement";
+import * as browserHandoffBanner from "@lobu/connector-sdk/browser-handoff-banner";
+import * as browserSourceRead from "@lobu/connector-sdk/browser-source-read";
 
 interface DomScrapeOpts {
   dispatcher: {
@@ -117,6 +119,8 @@ export function connectorSdkMock() {
   };
   return {
     requireBrowser,
+    ...browserHandoffBanner,
+    ...browserSourceRead,
     extensionNetworkSync: notUsed("extensionNetworkSync"),
     // Connectors create their HTTP client as a class field at construction, so a
     // throwing stub would break `new XConnector()`. Return an inert client whose

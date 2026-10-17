@@ -10,7 +10,11 @@
  */
 
 import {
+  assertNoOffsetPaging,
+  assertNoSort,
+  assertNoWindow,
   requireBrowser,
+  splitReferenceBatches,
   type ActionContext,
   type ActionResult,
   type ChromeActionDispatcher,
@@ -31,9 +35,6 @@ import {
   WHATSAPP_ORIGIN,
 } from "./whatsapp-web-helpers.js";
 import { whatsAppWebAdapterProgram } from "./whatsapp-web-adapter.js";
-
-// Each durable browser record is limited to 128 KiB, including its checkpoint.
-const SOURCE_RECORD_MAX_BYTES = 128 * 1024;
 
 /**
  * How long a run waits for WhatsApp Web to finish hydrating before giving up.
@@ -620,28 +621,18 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         id: reference.id, event_type: "message.created", resource_type: "message",
         resource_ref: reference.id, occurred_at: new Date(reference.timestamp * 1000).toISOString(),
       }));
-      for (let offset = 0; ;) {
-        const batchThrough = (end: number) => ({
-          id: `replay:${chatFilter}:${startedAt}:${after}:${replay.after}:${offset}`,
-          events: events.slice(offset, end),
-          // Earlier chunks may be replayed after interruption; existing signal
-          // dedupe handles them. Advance only after the entire page is accepted.
-          ...(end === events.length ? { checkpoint: { previous: cursor, next } } : {}),
-          more: end === events.length && replay.hasMore && page === 9,
-        });
-        let end = Math.min(offset + 500, events.length);
-        let batch = batchThrough(end);
-        const size = () => new TextEncoder().encode(JSON.stringify(batch)).length;
-        while (size() > SOURCE_RECORD_MAX_BYTES && end - offset > 1) {
-          end = offset + Math.floor((end - offset) / 2);
-          batch = batchThrough(end);
-        }
-        if (size() > SOURCE_RECORD_MAX_BYTES) throw new Error("Source reference or checkpoint exceeds the browser record limit");
+      // Earlier chunks may be replayed after interruption; existing signal
+      // dedupe handles them. Advance only after the entire page is accepted.
+      const batches = splitReferenceBatches(events, (slice, isLast, offset) => ({
+        id: `replay:${chatFilter}:${startedAt}:${after}:${replay.after}:${offset}`,
+        events: slice,
+        ...(isLast ? { checkpoint: { previous: cursor, next } } : {}),
+        more: isLast && replay.hasMore && page === 9,
+      }));
+      for (const batch of batches) {
         await invokeAdapter(dispatcher, tabId, {
           op: "publish_changes", bridge_id: binding.bridge_id, token: binding.token, batch,
         });
-        if (end === events.length) break;
-        offset = end;
       }
       if (!replay.hasMore) return;
       cursor = next;
@@ -650,11 +641,11 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
   }
 
   private async readMessages(ctx: FeedReadContext<WhatsAppWebConfig>): Promise<FeedReadResult> {
-    if (ctx.offset) throw new Error("WhatsApp live reads paginate with the returned cursor, not an offset.");
-    if (ctx.sort) throw new Error("WhatsApp live reads use source storage order; explicit sorting is not supported.");
+    assertNoOffsetPaging(ctx, "WhatsApp live reads paginate with the returned cursor, not an offset.");
+    assertNoSort(ctx, "WhatsApp live reads use source storage order; explicit sorting is not supported.");
     // Source message time cannot represent edits, revokes, or delayed arrivals.
     // Automations subscribe to new-message references and read content by ID.
-    if (ctx.window) throw new Error("WhatsApp live reads do not support change-time windows; subscribe to message.created and read references by id:<message ID>.");
+    assertNoWindow(ctx, "WhatsApp live reads do not support change-time windows; subscribe to message.created and read references by id:<message ID>.");
     const dispatcher = requireBrowser(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     const response = await invokeAdapter<{

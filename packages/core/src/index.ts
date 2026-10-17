@@ -37,6 +37,7 @@ export type { CommandContext, CommandDefinition } from "./command-registry";
 export { CommandRegistry } from "./command-registry";
 export * from "./connector-query-errors";
 export * from "./constants";
+export * from "./device-pin-tombstones";
 // Interaction-envelope wire literals (tool_approval resourceKind / attribution).
 // Deep import `@lobu/core/contracts/interaction-envelope` also works under
 // bundler/NodeNext resolution; plugin packages with classic `moduleResolution:

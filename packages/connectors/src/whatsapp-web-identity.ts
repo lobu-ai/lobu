@@ -29,9 +29,20 @@ export const WHATSAPP_WEB_IDENTITY = {
 	USER_JID: "whatsapp_user_jid",
 } as const;
 
-const PHONE_SERVER = "s.whatsapp.net";
-const LEGACY_PHONE_SERVER = "c.us";
-const LID_SERVER = "lid";
+export const WHATSAPP_PHONE_SERVER = "s.whatsapp.net";
+export const WHATSAPP_LEGACY_PHONE_SERVER = "c.us";
+export const WHATSAPP_LID_SERVER = "lid";
+/** Chat JID suffix for WhatsApp groups (a conversation, not a person). */
+export const WHATSAPP_GROUP_SUFFIX = "@g.us";
+/**
+ * Chat JID suffixes for 1:1 chats, including the web client's legacy phone
+ * spelling. Anything else (group, broadcast, newsletter) is not a DM.
+ */
+export const WHATSAPP_DM_SUFFIXES = [
+  "@s.whatsapp.net",
+  "@c.us",
+  "@lid",
+] as const;
 
 /** True when `value` is only ASCII digits, with a length in [min, max]. */
 function isDigits(value: string, min: number, max: number): boolean {
@@ -67,10 +78,13 @@ export function normalizeWhatsAppUserJid(
 	const user = colon === -1 ? userPart : userPart.slice(0, colon);
 	if (colon !== -1 && !isDigits(userPart.slice(colon + 1), 1, 4)) return null;
 	if (!isDigits(user, 5, 32)) return null;
-	if (server === PHONE_SERVER || server === LEGACY_PHONE_SERVER) {
-		return `${user}@${PHONE_SERVER}`;
+	if (
+    server === WHATSAPP_PHONE_SERVER ||
+    server === WHATSAPP_LEGACY_PHONE_SERVER
+  ) {
+		return `${user}@${WHATSAPP_PHONE_SERVER}`;
 	}
-	if (server === LID_SERVER) return `${user}@${LID_SERVER}`;
+	if (server === WHATSAPP_LID_SERVER) return `${user}@${WHATSAPP_LID_SERVER}`;
 	return null;
 }
 

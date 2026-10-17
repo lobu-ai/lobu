@@ -7,6 +7,13 @@
  * that live reads and searches return. These helpers do not ingest events.
  */
 
+import {
+  normalizeWhatsAppUserJid,
+  WHATSAPP_GROUP_SUFFIX,
+  WHATSAPP_LEGACY_PHONE_SERVER,
+  WHATSAPP_PHONE_SERVER,
+} from "./whatsapp-web-identity.js";
+
 export const WHATSAPP_ADAPTER_VERSION = 23;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 
@@ -64,17 +71,23 @@ export function rawMessageId(value: unknown): string | null {
 
 export function canonicalizeJid(value: unknown): string | null {
   if (typeof value !== "string") return null;
+  // A strict person JID normalizes through the identity module (legacy
+  // `@c.us` spelling, multi-device suffixes); chats, groups, broadcasts and
+  // newsletters are not user keys and pass through in canonical case.
+  const user = normalizeWhatsAppUserJid(value);
+  if (user) return user;
   const jid = value.trim().toLowerCase();
   if (!jid?.includes("@")) return null;
-  if (jid.endsWith("@c.us")) return `${jid.slice(0, -5)}@s.whatsapp.net`;
+  if (jid.endsWith(`@${WHATSAPP_LEGACY_PHONE_SERVER}`))
+    return `${jid.slice(0, -WHATSAPP_LEGACY_PHONE_SERVER.length - 1)}@${WHATSAPP_PHONE_SERVER}`;
   return jid;
 }
 
 function jidPhone(jid: unknown): string | null {
-  const canonical = canonicalizeJid(jid);
-  if (!canonical?.endsWith("@s.whatsapp.net")) return null;
-  const digits = canonical.slice(0, -"@s.whatsapp.net".length);
-  return /^\d+$/.test(digits) ? digits : null;
+  if (typeof jid !== "string") return null;
+  const user = normalizeWhatsAppUserJid(jid);
+  if (!user || !user.endsWith(`@${WHATSAPP_PHONE_SERVER}`)) return null;
+  return user.slice(0, -WHATSAPP_PHONE_SERVER.length - 1);
 }
 
 function finiteSeconds(value: unknown): number | null {
@@ -117,7 +130,7 @@ export function normalizeRelayedMessage(
     participant: fromMe ? participant : null,
     sender_phone: fromMe ? null : (raw.sender_phone ?? jidPhone(senderJid)),
     push_name: fromMe ? null : raw.push_name,
-    is_group: chatJid.endsWith("@g.us"),
+    is_group: chatJid.endsWith(WHATSAPP_GROUP_SUFFIX),
     from_me: fromMe,
     timestamp,
     occurred_at: new Date(timestamp * 1000).toISOString(),

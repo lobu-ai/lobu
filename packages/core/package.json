@@ -213,6 +213,12 @@
       "import": "./dist/reserved.js",
       "require": "./dist/reserved.js"
     },
+    "./device-pin-tombstones": {
+      "types": "./dist/device-pin-tombstones.d.ts",
+      "bun": "./src/device-pin-tombstones.ts",
+      "import": "./dist/device-pin-tombstones.js",
+      "require": "./dist/device-pin-tombstones.js"
+    },
     "./refs": {
       "types": "./dist/refs.d.ts",
       "bun": "./src/refs.ts",

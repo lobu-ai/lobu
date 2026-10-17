@@ -21,6 +21,15 @@ import {
   type WebhookRegistration,
   type WebhookRegistrationContext,
 } from '@lobu/connector-sdk';
+import {
+  adfToText,
+  buildJiraJql,
+  JIRA_ISSUE_COLUMNS,
+  JIRA_ISSUE_FIELDS,
+  jiraActorName,
+  jiraAsString,
+  mapJiraIssueToRow,
+} from './jira-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -106,193 +115,6 @@ interface JiraSearchResponse {
   /** Token-based pagination cursor for the /search/jql endpoint (absent on the last page). */
   nextPageToken?: string;
   isLast?: boolean;
-}
-
-/** Stable column set returned by direct source reads. */
-const JIRA_ISSUE_COLUMNS = [
-  { name: 'id', type: 'string' },
-  { name: 'key', type: 'string' },
-  { name: 'summary', type: 'string' },
-  { name: 'status', type: 'string' },
-  { name: 'assignee', type: 'string' },
-  { name: 'reporter', type: 'string' },
-  { name: 'priority', type: 'string' },
-  { name: 'project_key', type: 'string' },
-  { name: 'project_name', type: 'string' },
-  { name: 'labels', type: 'string' },
-  { name: 'created_at', type: 'string' },
-  { name: 'updated_at', type: 'string' },
-  { name: 'description', type: 'string' },
-  { name: 'url', type: 'string' },
-] as const;
-
-const ISSUE_FIELDS =
-  'summary,description,status,assignee,reporter,priority,project,labels,created,updated';
-
-/** Sort columns the live path can honor by rewriting ORDER BY. */
-const SORT_COLUMNS: Record<string, string> = {
-  updated: 'updated',
-  updated_at: 'updated',
-  created: 'created',
-  created_at: 'created',
-  key: 'key',
-  priority: 'priority',
-  status: 'status',
-};
-
-const ADF_BLOCK_TYPES = new Set([
-  'blockquote',
-  'bulletList',
-  'codeBlock',
-  'heading',
-  'listItem',
-  'orderedList',
-  'paragraph',
-  'rule',
-  'table',
-  'tableCell',
-  'tableHeader',
-  'tableRow',
-]);
-
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
-}
-
-function actorName(user: JiraUser | null | undefined): string | undefined {
-  return user?.displayName ?? user?.emailAddress ?? undefined;
-}
-
-/**
- * Jira v3 descriptions/comment bodies use the Atlassian Document Format (ADF) —
- * a nested JSON node tree. Flatten its text nodes to plain text. Strings (older
- * payloads) pass through unchanged.
- */
-function adfToText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (!value || typeof value !== 'object') return '';
-  const node = value as { type?: string; text?: string; content?: unknown[] };
-  // Soft line break inside a paragraph (not a block boundary).
-  if (node.type === 'hardBreak') return '\n';
-  if (typeof node.text === 'string') return node.text;
-  if (Array.isArray(node.content)) {
-    let out = '';
-    for (const child of node.content) {
-      const text = adfToText(child);
-      if (!text) continue;
-      const childType =
-        child && typeof child === 'object' ? (child as { type?: string }).type : undefined;
-      // hardBreak already contributes '\n' as its text; don't insert a second.
-      if (out && childType && ADF_BLOCK_TYPES.has(childType)) out += '\n';
-      out += text;
-    }
-    return out.trim();
-  }
-  return '';
-}
-
-/**
- * Peel a trailing `ORDER BY …` so caller JQL can be AND-composed without
- * wrapping the sort clause.
- */
-function splitTrailingOrderBy(jql: string): { body: string; orderBy: string | null } {
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-  let depth = 0;
-  for (let i = 0; i < jql.length; i += 1) {
-    const char = jql[i];
-    if (quote) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === '\\') {
-        escaped = true;
-      } else if (char === quote) {
-        quote = null;
-      }
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char === '(') {
-      depth += 1;
-      continue;
-    }
-    if (char === ')') {
-      depth = Math.max(0, depth - 1);
-      continue;
-    }
-    if (
-      depth === 0 &&
-      (i === 0 || /\s/.test(jql[i - 1])) &&
-      /^order\s+by\b/i.test(jql.slice(i))
-    ) {
-      return { body: jql.slice(0, i).trim(), orderBy: jql.slice(i).trim() };
-    }
-  }
-  return { body: jql.trim(), orderBy: null };
-}
-
-function buildJiraJql(args: {
-  baseQuery: string;
-  query?: string;
-  sort?: { column: string; order: 'asc' | 'desc' };
-  defaultWhenEmpty?: string;
-  window?: { start: string; end: string };
-}): string {
-  const trimmed = args.baseQuery.trim();
-  // Keep an omitted scope bounded instead of scanning the whole site.
-  const jql = trimmed.length > 0 ? trimmed : (args.defaultWhenEmpty ?? 'updated >= -90d');
-
-  // If the base is only ORDER BY, treat the restriction as empty and keep sort.
-  let { body, orderBy } = splitTrailingOrderBy(jql);
-  if (!body && orderBy) {
-    body = args.defaultWhenEmpty ?? 'updated >= -90d';
-  }
-
-  const callerQuery = args.query?.trim() ?? '';
-  if (callerQuery) {
-    const caller = splitTrailingOrderBy(callerQuery);
-    if (caller.body) {
-      body = body.length > 0 ? `(${body}) AND (${caller.body})` : caller.body;
-    }
-    if (caller.orderBy) {
-      throw new Error(
-        'Jira source read query cannot contain ORDER BY; use the separate sort field',
-      );
-    }
-  }
-
-  if (args.window) {
-    const bounds = `updated >= ${Date.parse(args.window.start)} AND updated < ${Date.parse(args.window.end)}`;
-    body = body ? `(${body}) AND (${bounds})` : bounds;
-  }
-
-  // `body` is non-empty from here on: an empty base fell back to
-  // `defaultWhenEmpty`, and the caller query can further restrict it.
-  if (orderBy) {
-    if (args.sort) {
-      throw new Error(
-        'Jira source read: cannot apply sort when the base JQL already contains ORDER BY',
-      );
-    }
-    return `${body} ${orderBy}`;
-  }
-
-  if (args.sort) {
-    const field = SORT_COLUMNS[args.sort.column];
-    if (!field) {
-      throw new Error(
-        `Jira source read sort column '${args.sort.column}' is unsupported; ` +
-          `use one of: ${Object.keys(SORT_COLUMNS).join(', ')}`,
-      );
-    }
-    const dir = args.sort.order === 'asc' ? 'ASC' : 'DESC';
-    return `${body} ORDER BY ${field} ${dir}`;
-  }
-
-  return `${body} ORDER BY updated DESC`;
 }
 
 // ---------------------------------------------------------------------------
@@ -463,11 +285,11 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
       throw new Error('Jira source reads require Atlassian OAuth credentials.');
     }
 
-    const baseQuery = asString(ctx.config.query) ?? asString(ctx.config.jql) ?? '';
+    const baseQuery = jiraAsString(ctx.config.query) ?? jiraAsString(ctx.config.jql) ?? '';
 
     const jql = buildJiraJql({
       baseQuery,
-      query: asString(ctx.query),
+      query: jiraAsString(ctx.query),
       window: ctx.window,
       ...(ctx.window ? { defaultWhenEmpty: '' } : {}),
       sort: ctx.sort,
@@ -492,7 +314,7 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
     const params = new URLSearchParams({
       jql,
       maxResults: String(Math.min(this.PAGE_SIZE, limit)),
-      fields: ISSUE_FIELDS,
+      fields: JIRA_ISSUE_FIELDS,
     });
     if (ctx.cursor) params.set('nextPageToken', ctx.cursor);
     const data = await http.json<JiraSearchResponse>(
@@ -540,7 +362,7 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
       end: new Date().toISOString(),
     };
     const jql = buildJiraJql({
-      baseQuery: asString(ctx.config.query) ?? asString(ctx.config.jql) ?? '',
+      baseQuery: jiraAsString(ctx.config.query) ?? jiraAsString(ctx.config.jql) ?? '',
       defaultWhenEmpty: `updated >= -${lookbackDays}d`,
       window,
     });
@@ -559,7 +381,7 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
       const params = new URLSearchParams({
         jql,
         maxResults: String(this.PAGE_SIZE),
-        fields: ISSUE_FIELDS,
+        fields: JIRA_ISSUE_FIELDS,
       });
       if (pageToken) {
         seenTokens.add(pageToken);
@@ -675,24 +497,10 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
     config: JiraConfig,
   ): Record<string, unknown> | null {
     if (!issue?.id) return null;
-    const fields = issue.fields ?? {};
-    const labels = Array.isArray(fields.labels) ? fields.labels.join(', ') : null;
-    return {
-      id: issue.id,
-      key: issue.key ?? null,
-      summary: fields.summary ?? null,
-      status: fields.status?.name ?? null,
-      assignee: actorName(fields.assignee) ?? null,
-      reporter: actorName(fields.reporter) ?? null,
-      priority: fields.priority?.name ?? null,
-      project_key: fields.project?.key ?? null,
-      project_name: fields.project?.name ?? null,
-      labels,
-      created_at: fields.created ?? null,
-      updated_at: fields.updated ?? null,
-      description: adfToText(fields.description) || null,
-      url: this.issueUrl(issue, config) ?? null,
-    };
+    return mapJiraIssueToRow(
+      issue,
+      config as unknown as Record<string, unknown>,
+    );
   }
 
   private issueEvent(issue: JiraIssue | undefined, config: JiraConfig): EventEnvelope | null {
@@ -705,25 +513,25 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
       origin_id: `jira_issue_${issue.id}`,
       title: fields.summary ?? issue.key ?? undefined,
       payload_text: adfToText(fields.description),
-      author_name: actorName(fields.reporter ?? fields.assignee),
+      author_name: jiraActorName(fields.reporter ?? fields.assignee),
       source_url: this.issueUrl(issue, config),
       occurred_at: createdAt,
       origin_type: 'issue',
       metadata: {
         key: issue.key ?? null,
         status: fields.status?.name ?? null,
-        assignee: actorName(fields.assignee) ?? null,
-        reporter: actorName(fields.reporter) ?? null,
+        assignee: jiraActorName(fields.assignee) ?? null,
+        reporter: jiraActorName(fields.reporter) ?? null,
         updated_at: fields.updated ?? null,
       },
     };
   }
 
   private issueUrl(issue: JiraIssue | undefined, config?: JiraConfig): string | undefined {
-    const siteUrl = asString(config?.site_url);
-    const key = asString(issue?.key);
-    const cloudId = asString(config?.cloud_id);
-    const siteCloudId = asString(config?.site_cloud_id);
+    const siteUrl = jiraAsString(config?.site_url);
+    const key = jiraAsString(issue?.key);
+    const cloudId = jiraAsString(config?.cloud_id);
+    const siteCloudId = jiraAsString(config?.site_cloud_id);
     // Only rewrite to /browse when site_url was discovered for THIS cloud_id.
     // A feed-level cloud_id override must not inherit another site's host.
     if (siteUrl && key && cloudId && siteCloudId && cloudId === siteCloudId) {
@@ -756,7 +564,7 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
     sessionState: Record<string, unknown> | null | undefined,
     credentials: SyncCredentials | null | undefined,
   ): Promise<string> {
-    const fromConfig = asString(config.cloud_id) ?? asString(sessionState?.cloud_id);
+    const fromConfig = jiraAsString(config.cloud_id) ?? jiraAsString(sessionState?.cloud_id);
     if (fromConfig) return fromConfig;
 
     if (!credentials?.accessToken) {
@@ -804,7 +612,7 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
           ? distinctUsable[0]
           : null;
 
-    const id = asString(site?.id);
+    const id = jiraAsString(site?.id);
     if (!id) {
       if (jiraScoped.length > 1 || distinctUsable.length > 1) {
         throw new Error(
@@ -819,8 +627,8 @@ export default class JiraConnector extends ConnectorRuntime<JiraCheckpoint, Jira
     // Cache on this job's config so subsequent calls in the same run skip the hop.
     config.cloud_id = id;
     config.site_cloud_id = id;
-    const siteUrl = asString(site?.url);
-    const siteName = asString(site?.name);
+    const siteUrl = jiraAsString(site?.url);
+    const siteName = jiraAsString(site?.name);
     if (siteUrl) config.site_url = siteUrl;
     else delete config.site_url;
     if (siteName) config.site_name = siteName;

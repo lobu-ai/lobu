@@ -108,6 +108,38 @@ describe('native bridge run forwarding', () => {
     ]);
   });
 
+  test('never flips an executed run to failed when success delivery is exhausted', async () => {
+    const client = fakeClient() as { calls: Record<string, unknown[]>; id: string };
+    client.completeAction = async (value: unknown) => {
+      client.calls.completeAction.push(value);
+      throw new Error('gateway unreachable');
+    };
+    const bridge = {
+      run: async () => ({}),
+    } as never;
+
+    const result = await executeNativeBridgeRun(client as never, bridge, {
+      run_id: 10,
+      run_type: 'action',
+      action_key: 'open',
+      action_input: {},
+    } as never);
+
+    // The execution succeeded; its success terminal was selected but both
+    // delivery attempts failed. The outcome is immutable: no failed payload
+    // may be emitted (that would finalize an executed action as failed, drop
+    // its output, and encourage duplicate execution).
+    expect(result.error).toBeDefined();
+    expect(client.calls.completeAction).toHaveLength(2);
+    for (const call of client.calls.completeAction) {
+      expect(call).toEqual(expect.objectContaining({ run_id: 10, status: 'success' }));
+      expect(call).not.toHaveProperty('error_message');
+    }
+    expect(client.calls.complete).toEqual([]);
+    expect(client.calls.completeAuth).toEqual([]);
+    expect(client.calls.completeAutomation).toEqual([]);
+  });
+
   test('retries terminal delivery after the first completion request fails', async () => {
     const client = fakeClient() as { calls: Record<string, unknown[]>; id: string };
     let completionAttempts = 0;
@@ -170,6 +202,70 @@ describe('native bridge run forwarding', () => {
     expect((client.calls.complete[0] as Record<string, unknown>).checkpoint).toBeUndefined();
   });
 
+  test('retries a failed sync terminal and preserves partial progress', async () => {
+    const client = fakeClient() as {
+      calls: Record<string, unknown[]>;
+      id: string;
+      stream: (value: unknown) => Promise<void>;
+    };
+    let completionAttempts = 0;
+    client.complete = async (value: unknown) => {
+      completionAttempts += 1;
+      client.calls.complete.push(value);
+      if (completionAttempts === 1) throw new Error('terminal delivery failed');
+    };
+    const bridge = {
+      run: async (options: { operation: string; onStream?: (payload: Record<string, unknown>, sequence: number) => Promise<void> }) => {
+        expect(options.operation).toBe('sync');
+        await options.onStream?.({ items: [item('a')] }, 1);
+        throw new Error('bridge exploded');
+      },
+    } as never;
+
+    const result = await executeNativeBridgeRun(client as never, bridge, {
+      run_id: 13,
+      run_type: 'sync',
+      connector_key: 'apple.files',
+    } as never);
+
+    expect(result.error).toBe('bridge exploded');
+    expect(completionAttempts).toBe(2);
+    expect(client.calls.complete).toHaveLength(2);
+    expect(client.calls.complete[0]).toEqual(client.calls.complete[1]);
+    expect(client.calls.complete[1]).toEqual(
+      expect.objectContaining({ run_id: 13, status: 'failed', error_message: 'bridge exploded', items_collected: 1 }),
+    );
+  });
+
+  test('retries a failed auth terminal', async () => {
+    const client = fakeClient() as { calls: Record<string, unknown[]>; id: string };
+    let completionAttempts = 0;
+    client.completeAuth = async (value: unknown) => {
+      completionAttempts += 1;
+      client.calls.completeAuth.push(value);
+      if (completionAttempts === 1) throw new Error('terminal delivery failed');
+    };
+    const bridge = {
+      run: async () => {
+        throw new Error('app EOF');
+      },
+    } as never;
+
+    const result = await executeNativeBridgeRun(client as never, bridge, {
+      run_id: 14,
+      run_type: 'auth',
+      connector_key: 'apple.files',
+    } as never);
+
+    expect(result.error).toBe('app EOF');
+    expect(completionAttempts).toBe(2);
+    expect(client.calls.completeAuth).toHaveLength(2);
+    expect(client.calls.completeAuth[0]).toEqual(client.calls.completeAuth[1]);
+    expect(client.calls.completeAuth[1]).toEqual(
+      expect.objectContaining({ run_id: 14, status: 'failed', error_message: 'app EOF' }),
+    );
+  });
+
   test('completes auth exactly once with bridge credentials and metadata', async () => {
     const client = fakeClient() as { calls: Record<string, unknown[]>; id: string };
     const bridge = {
@@ -221,7 +317,7 @@ describe('native bridge run forwarding', () => {
     expect(operations).toEqual(['read', 'read']);
   });
 
-  test('rejects automation and embed_backfill runs without using completeAction', async () => {
+  test('reports automation and embed_backfill failures per run_type without using completeAction', async () => {
     const client = fakeClient() as {
       calls: Record<string, unknown[]>;
       id: string;
@@ -241,14 +337,14 @@ describe('native bridge run forwarding', () => {
       run_type: 'embed_backfill',
     } as never);
 
-    expect(automation.error).toContain('native bridge does not execute run_type automation');
-    expect(embedBackfill.error).toContain('native bridge does not execute run_type embed_backfill');
+    expect(automation.error).toBe('must not execute');
+    expect(embedBackfill.error).toBe('must not execute');
     expect(client.calls.completeAction).toEqual([]);
     expect(client.calls.completeAutomation).toEqual([
-      expect.objectContaining({ runId: 17, value: expect.objectContaining({ error: automation.error }) }),
+      expect.objectContaining({ runId: 17, value: expect.objectContaining({ error: 'must not execute', exit_reason: 'error_message' }) }),
     ]);
     expect(client.calls.complete).toEqual([
-      expect.objectContaining({ run_id: 18, status: 'failed', error_message: embedBackfill.error }),
+      expect.objectContaining({ run_id: 18, status: 'failed', error_message: 'must not execute' }),
     ]);
   });
 
