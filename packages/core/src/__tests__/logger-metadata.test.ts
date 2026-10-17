@@ -183,6 +183,28 @@ describe("console logger pino-style metadata", () => {
     expect(line).not.toContain("synthetic-blob-secret");
   });
 
+  test("collapses array-valued authorization headers and Error properties", () => {
+    const arrayLine = captureWarn((log) => {
+      log.warn({
+        headers: { "x-authorization": ["Bearer synthetic-array-secret"] },
+      });
+    });
+    expect(arrayLine).toContain("[REDACTED]");
+    expect(arrayLine).not.toContain("synthetic-array-secret");
+
+    const errorLine = captureWarn((log) => {
+      log.warn(
+        Object.assign(new Error("boom"), {
+          headers: {
+            "x-authorization": ["Bearer synthetic-error-prop-secret"],
+          },
+        })
+      );
+    });
+    expect(errorLine).toContain("boom");
+    expect(errorLine).not.toContain("synthetic-error-prop-secret");
+  });
+
   test("redacts credential query pairs embedded in object keys", () => {
     const line = captureWarn((log) => {
       log.warn({
@@ -267,7 +289,15 @@ describe("console logger structured output", () => {
           credentialsJson: '{"password":"synthetic-json-camel-secret"}',
           credentialBlob: "synthetic-json-blob-secret",
           xAuthorization: "Bearer synthetic-json-xauth-secret",
-        });`,
+        });
+        log.warn({
+          headers: { "x-authorization": ["Bearer synthetic-json-array-secret"] },
+        });
+        log.warn(
+          Object.assign(new Error("synthetic-json-boom"), {
+            headers: { "x-authorization": ["Bearer synthetic-json-error-prop-secret"] },
+          })
+        );`,
       ],
       {
         env: {
@@ -284,7 +314,7 @@ describe("console logger structured output", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    expect(records).toHaveLength(6);
+    expect(records).toHaveLength(8);
     expect(records[0]).toMatchObject({
       level: "warn",
       message: expect.stringContaining("fetch failed"),
@@ -306,6 +336,17 @@ describe("console logger structured output", () => {
     expect(records[5].message).not.toContain(
       "synthetic-json-serialized-secret"
     );
+    expect(records[5].message).not.toContain("synthetic-json-camel-secret");
+    expect(records[5].message).not.toContain("synthetic-json-blob-secret");
+    expect(records[5].message).not.toContain("synthetic-json-xauth-secret");
+    expect(records[6].level).toBe("warn");
+    expect(records[6].message).toContain("[REDACTED]");
+    expect(records[6].message).not.toContain("synthetic-json-array-secret");
+    expect(records[7].level).toBe("warn");
+    expect(records[7].message).toContain("synthetic-json-boom");
+    expect(records[7].message).not.toContain(
+      "synthetic-json-error-prop-secret"
+    );
     expect(output).not.toContain("synthetic-pino-secret");
     expect(output).not.toContain("synthetic-error-secret");
     expect(output).not.toContain("synthetic-array-secret");
@@ -316,5 +357,7 @@ describe("console logger structured output", () => {
     expect(output).not.toContain("synthetic-json-camel-secret");
     expect(output).not.toContain("synthetic-json-blob-secret");
     expect(output).not.toContain("synthetic-json-xauth-secret");
+    expect(output).not.toContain("synthetic-json-array-secret");
+    expect(output).not.toContain("synthetic-json-error-prop-secret");
   });
 });

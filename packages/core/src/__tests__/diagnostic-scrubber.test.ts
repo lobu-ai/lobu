@@ -372,6 +372,32 @@ describe("diagnostic credential scrubber", () => {
     expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 
+  it("collapses authorization headers regardless of value type", () => {
+    // Headers are scalar-or-list carriers, never credential maps: an
+    // array-valued header collapses wholesale instead of recursing into
+    // elements whose text carries no assignment for value-side rules.
+    const result = scrubDiagnosticValue({
+      headers: {
+        "x-authorization": [`Bearer ${SECRET}`],
+        "content-type": "application/json",
+      },
+    }) as { headers: Record<string, unknown> };
+    expect(result.headers["x-authorization"]).toBe("[REDACTED]");
+    expect(result.headers["content-type"]).toBe("application/json");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("applies key classification to Error custom properties", () => {
+    const error = Object.assign(new Error("boom"), {
+      headers: { "x-authorization": [`Bearer ${SECRET}`] },
+    });
+    const result = scrubDiagnosticValue({ cause: error }) as {
+      cause: { headers: Record<string, unknown> };
+    };
+    expect(result.cause.headers["x-authorization"]).toBe("[REDACTED]");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
   it("redacts credential query pairs embedded in object keys", () => {
     // Attribution and cache maps keyed by URL carry the secret in the KEY
     // text, past value-side redaction. The key stays identifiable; the

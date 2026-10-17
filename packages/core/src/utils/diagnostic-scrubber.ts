@@ -44,19 +44,42 @@ const SECRET_KEY_EXACT = new Set([
  * correctly. Separator-less all-lowercase compounds have no boundary to
  * split, so they stay in SECRET_KEY_EXACT above.
  */
-function hasAffixedCredentialSegment(key: string): boolean {
-  const segments = key
+function splitKeySegments(key: string): string[] {
+  return key
     .replace(/([A-Z])(?=[A-Z][a-z])/g, "$1_")
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .replace(/[^a-z0-9]+/gi, "_")
     .toLowerCase()
     .split("_")
     .filter((segment) => segment.length > 0);
-  if (segments.length === 0) return false;
-  const first = segments[0];
-  const last = segments[segments.length - 1];
-  if (last === "authorization") return true;
-  return first === "credential" || first === "credentials";
+}
+
+/**
+ * A TRAILING `authorization` segment is a (possibly vendor-prefixed)
+ * authorization header (`x-authorization`, `xAuthorization`). Headers are
+ * scalar-or-list carriers, never credential maps, so this classifies as a
+ * strong secret key regardless of value type.
+ */
+function hasTrailingAuthorizationSegment(key: string): boolean {
+  const segments = splitKeySegments(key);
+  return (
+    segments.length > 0 && segments[segments.length - 1] === "authorization"
+  );
+}
+
+/**
+ * A LEADING `credential`/`credentials` segment names a serialized credential
+ * field (`credentials_json`, `credentialsJson`, `credentialBlob`). Applied
+ * by value type in the walk below: a scalar beneath one IS the serialized
+ * credential and collapses, while a structured value beneath one is a
+ * credential map whose leaves decide individually.
+ */
+function hasLeadingCredentialSegment(key: string): boolean {
+  const segments = splitKeySegments(key);
+  return (
+    segments.length > 0 &&
+    (segments[0] === "credential" || segments[0] === "credentials")
+  );
 }
 
 /** Bound recursive work on diagnostic values. */
@@ -74,13 +97,13 @@ function squashKey(key: string): string {
  * test the squashed form too.
  */
 function isSecretObjectKey(key: string): boolean {
-  return isStrongSecretKey(key) || hasAffixedCredentialSegment(key);
+  return isStrongSecretKey(key) || hasLeadingCredentialSegment(key);
 }
 
 /**
  * The collapsing half of key classification: a key whose NAME alone proves
  * the value is a credential, so the whole value is replaced without
- * inspection. Affixed credential containers (`hasAffixedCredentialSegment`)
+ * inspection. Leading-credential containers (`hasLeadingCredentialSegment`)
  * are deliberately excluded: a scalar beneath one IS the serialized
  * credential and collapses, but a structured value beneath one is a
  * credential MAP whose leaves decide individually (the Loki connector
@@ -91,6 +114,7 @@ function isStrongSecretKey(key: string): boolean {
   if (isSecretKey(key)) return true;
   if (isSecretKey(squashKey(key))) return true;
   if (SECRET_KEY_EXACT.has(squashKey(key))) return true;
+  if (hasTrailingAuthorizationSegment(key)) return true;
   // Matched per separated segment, not against the squashed whole:
   // `X-Hub-Signature-256` squashes to `xhubsignature256`, which no exact set
   // can ever hold, so every real signature header would slip through.
@@ -237,7 +261,7 @@ export function scrubDiagnosticValue(value: unknown): unknown {
         // credential — collapse it. A structured value beneath one is a
         // credential map: recurse so each leaf decides individually.
         if (
-          hasAffixedCredentialSegment(key) &&
+          hasLeadingCredentialSegment(key) &&
           (value === null || typeof value !== "object")
         ) {
           serialized[outKey] = "[REDACTED]";
@@ -278,7 +302,7 @@ export function scrubDiagnosticValue(value: unknown): unknown {
         // See above: an affixed container holding a scalar collapses, while
         // a structured value beneath one recurses leaf by leaf.
         if (
-          hasAffixedCredentialSegment(key) &&
+          hasLeadingCredentialSegment(key) &&
           (value === null || typeof value !== "object")
         ) {
           result[scrubKey(key)] = "[REDACTED]";
