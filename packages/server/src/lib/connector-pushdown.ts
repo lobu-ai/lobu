@@ -205,8 +205,6 @@ export interface ReadSourceFeedParams {
   recoveryId?: string;
   /** Stable caller flow; a browser tab is retained for recovery only when set. */
   flowId?: string;
-  /** Internal observer for the bounded pager; no caller-controlled browser authority. */
-  onBrowserLease?: () => void;
   /** Optional source-native filter/search expression. */
   query?: string;
   /** Source-native continuation token recovered from the public cursor envelope. */
@@ -222,7 +220,7 @@ export interface ReadSourceFeedParams {
   sort?: { column: string; order: 'asc' | 'desc' };
   /** Caller cancellation, threaded into device, HTTP, and compiled-connector transports. */
   signal?: AbortSignal;
-  /** Absolute wall-clock deadline. Compiled connectors are killed at this deadline. */
+  /** Absolute deadline covering resolution, transport, and finalization. */
   deadlineAt: number;
 }
 
@@ -272,7 +270,37 @@ export function classifyPushdownFailure(err: unknown): ToolErrorCode {
  */
 export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourceFeedResult> {
   if (p.window) validateFeedReadWindow(p.window);
-  remainingReadMs(p);
+  const timeoutMs = remainingReadMs(p);
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(p.signal?.reason);
+  p.signal?.addEventListener('abort', onAbort, { once: true });
+  let browserLeased = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(browserLeased
+        ? new BrowserInterruptionError('timeout', `Browser source read ${p.feedId} timed out; no recovery handoff was issued.`)
+        : sourceReadDeadlineError(p.feedId));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      readSourceFeedWithinDeadline({ ...p, signal: controller.signal }, () => { browserLeased = true; }),
+      deadline,
+    ]);
+  } finally {
+    controller.abort();
+    if (timer) clearTimeout(timer);
+    p.signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+/** Every transport receives the one source-read deadline and cancellation signal. */
+async function readSourceFeedWithinDeadline(
+  p: ReadSourceFeedParams & { signal: AbortSignal },
+  onBrowserLease: () => void,
+): Promise<ReadSourceFeedResult> {
   const sql = getDb();
   let sourceSubscription = false;
   if (p.scope.principal === null && p.automationId != null) {
@@ -569,68 +597,58 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   };
 
   const timeoutMs = remainingReadMs(p);
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  p.signal?.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(onAbort, timeoutMs);
   // Bundled cloud code can change before its catalog version is refreshed.
   // Bind the read/recovery to the exact bytes passed to the executor below.
   const artifactHash = computeCodeHash(compiledCode);
   const browser = createSourceReadBridge({ ...feed, selected_artifact_hash: artifactHash }, {
     scope: p.scope, automationId: p.automationId, feedId: p.feedId,
     deadlineAt: p.deadlineAt, flowId: p.flowId, recoveryId: p.recoveryId,
-    onBrowserLease: p.onBrowserLease,
+    onBrowserLease,
     requestHash: sourceRecoveryHash({ feedId: feed.id, revision: sourceRevision, artifact: artifactHash,
       query: p.query, cursor: p.cursor, limit: p.limit, offset: p.offset,
       sort: p.sort, window: p.window, match: p.match }),
     sourceSubscriptionScopeKey: sourceSubscription
       ? sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version) : undefined,
-  }, controller.signal);
-  try {
-    return await browser.run(async () => {
-      const result = await executeCompiledConnector({
-        compiledCode,
-        job: {
-          mode: 'read',
-          feedId: feed.id,
-          feedKey: feed.feed_key,
-          query: p.query,
-          cursor: p.cursor,
-          window: p.window,
-          config,
-          env: dbEgressConfig(),
-          sessionState,
-          browser: await connectionBrowserGrant(p.scope.organizationId, feed.connection_id, feed.pinned_version ?? feed.definition_version),
-          credentials,
-          httpAuth,
-          limit: p.limit,
-          offset: p.offset,
-          sort: p.sort,
-          match: p.match,
-        },
-        hooks: {
-          onHttpFetch, signal: controller.signal,
-          onChromeDispatch: browser.onChromeDispatch,
-        },
-        timeoutMs,
-      });
-
-      if (result.mode !== 'read') {
-        throw new Error(`Expected read result, got mode=${result.mode}`);
-      }
-      return finish({
-        rows: result.rows,
-        rowCursors: result.rowCursors,
-        columns: result.columns ?? [],
-        total: result.total,
-        nextCursor: result.nextCursor,
-        hasMore: result.hasMore,
-        window: result.window,
-      });
+  }, p.signal);
+  return browser.run(async () => {
+    const result = await executeCompiledConnector({
+      compiledCode,
+      job: {
+        mode: 'read',
+        feedId: feed.id,
+        feedKey: feed.feed_key,
+        query: p.query,
+        cursor: p.cursor,
+        window: p.window,
+        config,
+        env: dbEgressConfig(),
+        sessionState,
+        browser: await connectionBrowserGrant(p.scope.organizationId, feed.connection_id, feed.pinned_version ?? feed.definition_version),
+        credentials,
+        httpAuth,
+        limit: p.limit,
+        offset: p.offset,
+        sort: p.sort,
+        match: p.match,
+      },
+      hooks: {
+        onHttpFetch, signal: p.signal,
+        onChromeDispatch: browser.onChromeDispatch,
+      },
+      timeoutMs,
     });
-  } finally {
-    controller.abort();
-    clearTimeout(timer);
-    p.signal?.removeEventListener('abort', onAbort);
-  }
+
+    if (result.mode !== 'read') {
+      throw new Error(`Expected read result, got mode=${result.mode}`);
+    }
+    return finish({
+      rows: result.rows,
+      rowCursors: result.rowCursors,
+      columns: result.columns ?? [],
+      total: result.total,
+      nextCursor: result.nextCursor,
+      hasMore: result.hasMore,
+      window: result.window,
+    });
+  });
 }

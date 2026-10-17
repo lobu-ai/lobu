@@ -1,4 +1,3 @@
-import { BrowserInterruptionError } from '@lobu/core';
 import { createHash } from 'node:crypto';
 import type { FeedReadMatch, FeedReadWindow } from '@lobu/connector-sdk';
 import type { SourceReadScope } from '../authz/scope';
@@ -100,10 +99,6 @@ function encodeSourceCursor(
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
 }
 
-function sourceReadError(message: string): Error & { exitReason: 'timeout' } {
-  return Object.assign(new Error(message), { exitReason: 'timeout' as const });
-}
-
 /** Shared bounded pager for direct feed reads and Automation source windows. */
 export async function readSourceFeedPage(
   read: SourceFeedPageRequest,
@@ -121,17 +116,10 @@ export async function readSourceFeedPage(
     read.window,
     read.match,
   );
-  const controller = new AbortController();
-  const deadlineAt = Date.now() + timeoutMs;
-  const onCallerAbort = () => controller.abort(signal?.reason);
-  signal?.addEventListener('abort', onCallerAbort, { once: true });
-  if (signal?.aborted) onCallerAbort();
   const offset = page.sourceCursor ? 0 : page.position;
   const limit = Math.max(1, Math.min(500, Math.trunc(read.limit ?? 50)));
-  let browserLeased = false;
-  const pending = readSourceFeed({
-    onBrowserLease: () => { browserLeased = true; },
-    scope: scope,
+  const result = await readSourceFeed({
+    scope,
     automationId, flowId,
     feedId: read.feed_id,
     recoveryId: read.recovery_id,
@@ -143,90 +131,72 @@ export async function readSourceFeedPage(
     window: read.window,
     match: read.match,
     sourceRevision: read.sourceRevision,
-    signal: controller.signal,
-    deadlineAt,
+    signal,
+    deadlineAt: Date.now() + timeoutMs,
   });
-  pending.catch(() => {});
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(
-        browserLeased
-          ? new BrowserInterruptionError('timeout', `Browser source read ${read.feed_id} timed out; no recovery handoff was issued.`)
-          : sourceReadError(`source read ${read.feed_id} timed out after ${timeoutMs}ms`),
-      );
-    }, timeoutMs);
-  });
-  try {
-    const result = await Promise.race([pending, deadline]);
-    if (!Array.isArray(result.rows) || result.rows.some((row) => !row || typeof row !== 'object' || Array.isArray(row))) {
-      throw new Error('Source reader returned malformed rows.');
-    }
-    if (result.rows.length > limit) throw new Error('Source reader exceeded the requested page limit.');
-    if (result.rowCursors !== undefined && (
-      !Array.isArray(result.rowCursors) || result.rowCursors.length !== result.rows.length ||
-      result.rowCursors.some((cursor) => typeof cursor !== 'string' || !cursor.trim() || cursor === page.sourceCursor) ||
-      new Set(result.rowCursors).size !== result.rowCursors.length
-    )) throw new Error('Source reader returned malformed row cursors.');
-    if (result.nextCursor !== undefined &&
-        (typeof result.nextCursor !== 'string' || !result.nextCursor.trim())) {
-      throw new Error('Source reader returned a malformed continuation cursor.');
-    }
-    if (read.window && result.hasMore && !result.nextCursor) {
-      throw new Error('Windowed source reader reported more results without a continuation cursor.');
-    }
-    if (read.match && result.hasMore && !result.nextCursor) {
-      throw new Error('Matched source reader reported more results without a continuation cursor.');
-    }
-    if (result.nextCursor && result.nextCursor === page.sourceCursor) {
-      throw new Error('Source reader returned a non-advancing cursor.');
-    }
-    const nextPosition = page.position + result.rows.length;
-    // Once a source has selected token pagination, absence of a replacement
-    // token means exhaustion. Never downgrade that traversal to an offset
-    // cursor: token-only providers reject offsets and cannot resume that page.
-    let hasMore: boolean;
-    if (result.nextCursor !== undefined) {
-      hasMore = true;
-    } else if (page.sourceCursor !== undefined || read.match) {
-      // A matched read pages only by its own cursor (see FeedReadContext.match):
-      // an invented offset would be ignored and re-read the same page forever.
-      hasMore = false;
-    } else if (result.hasMore !== undefined) {
-      hasMore = result.hasMore;
-    } else if (result.total !== undefined) {
-      hasMore = nextPosition < result.total;
-    } else {
-      hasMore = result.rows.length >= limit;
-    }
-    return {
-      feed_id: read.feed_id,
-      ok: true as const,
-      rows: result.rows,
-      row_cursors: result.rowCursors?.map((cursor, index) => encodeSourceCursor(
-        read.feed_id, page.position + index + 1, read.query, read.sort, cursor, read.window, read.match,
-      )),
-      columns: result.columns,
-      window: result.window,
-      sourceRevision: result.sourceRevision,
-      ...(result.total === undefined ? {} : { total: result.total }),
-      ...(hasMore
-        ? {
-            next_cursor: encodeSourceCursor(
-              read.feed_id,
-              nextPosition,
-              read.query,
-              read.sort,
-              result.nextCursor,
-              read.window,
-              read.match,
-            ),
-          }
-        : {}),
-    };
-  } finally {
-    if (timer) clearTimeout(timer);
-    signal?.removeEventListener('abort', onCallerAbort);
+  if (!Array.isArray(result.rows) || result.rows.some((row) => !row || typeof row !== 'object' || Array.isArray(row))) {
+    throw new Error('Source reader returned malformed rows.');
   }
+  if (result.rows.length > limit) throw new Error('Source reader exceeded the requested page limit.');
+  if (result.rowCursors !== undefined && (
+    !Array.isArray(result.rowCursors) || result.rowCursors.length !== result.rows.length ||
+    result.rowCursors.some((cursor) => typeof cursor !== 'string' || !cursor.trim() || cursor === page.sourceCursor) ||
+    new Set(result.rowCursors).size !== result.rowCursors.length
+  )) throw new Error('Source reader returned malformed row cursors.');
+  if (result.nextCursor !== undefined &&
+      (typeof result.nextCursor !== 'string' || !result.nextCursor.trim())) {
+    throw new Error('Source reader returned a malformed continuation cursor.');
+  }
+  if (read.window && result.hasMore && !result.nextCursor) {
+    throw new Error('Windowed source reader reported more results without a continuation cursor.');
+  }
+  if (read.match && result.hasMore && !result.nextCursor) {
+    throw new Error('Matched source reader reported more results without a continuation cursor.');
+  }
+  if (result.nextCursor && result.nextCursor === page.sourceCursor) {
+    throw new Error('Source reader returned a non-advancing cursor.');
+  }
+  const nextPosition = page.position + result.rows.length;
+  // Once a source has selected token pagination, absence of a replacement
+  // token means exhaustion. Never downgrade that traversal to an offset
+  // cursor: token-only providers reject offsets and cannot resume that page.
+  let hasMore: boolean;
+  if (result.nextCursor !== undefined) {
+    hasMore = true;
+  } else if (page.sourceCursor !== undefined || read.match) {
+    // A matched read pages only by its own cursor (see FeedReadContext.match):
+    // an invented offset would be ignored and re-read the same page forever.
+    hasMore = false;
+  } else if (result.hasMore !== undefined) {
+    hasMore = result.hasMore;
+  } else if (result.total !== undefined) {
+    hasMore = nextPosition < result.total;
+  } else {
+    hasMore = result.rows.length >= limit;
+  }
+  return {
+    feed_id: read.feed_id,
+    ok: true as const,
+    rows: result.rows,
+    row_cursors: result.rowCursors?.map((cursor, index) => encodeSourceCursor(
+      read.feed_id, page.position + index + 1, read.query, read.sort, cursor, read.window, read.match,
+    )),
+    columns: result.columns,
+    window: result.window,
+    sourceRevision: result.sourceRevision,
+    ...(result.total === undefined ? {} : { total: result.total }),
+    ...(hasMore
+      ? {
+          next_cursor: encodeSourceCursor(
+            read.feed_id,
+            nextPosition,
+            read.query,
+            read.sort,
+            result.nextCursor,
+            read.window,
+            read.match,
+          ),
+        }
+      : {}),
+  };
 }
