@@ -20,6 +20,8 @@
  * can land on any replica and finalize the run row.
  */
 
+import { BrowserInterruptionError, browserPageInterruption, type BrowserInterruptionReason } from '@lobu/core';
+import { browserAccountHeldByOtherRun, browserRecoveryControl, saveSourceBrowserTab, sourceBrowserLease } from '../lib/browser-recovery';
 import { BROWSER_VERIFY_OPERATION, constrainBrowserInput } from '@lobu/connector-sdk';
 import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, BROWSER_EXTENSION_UPDATE_REQUIRED, browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
 import type { DispatchChromeActionRequest } from '@lobu/core/contracts/worker/protocol';
@@ -91,6 +93,7 @@ export interface ChromeActionDispatchResult {
   status: 'completed' | 'failed' | 'timeout';
   output?: Record<string, unknown>;
   error_message?: string;
+  interruption?: { reason: BrowserInterruptionReason; message: string };
 }
 
 export type ResolveOnlineChromeOptions = {
@@ -624,6 +627,8 @@ export async function dispatchChromeActionToExtension(params: {
   abortSignal?: AbortSignal;
   /** Host-only recursion for the declared self-identity probe. Never accepted from worker input. */
   skipAccountProbe?: boolean;
+  /** Host-only retention deadline; never accepted from connector input. */
+  retainUntil?: string;
 }): Promise<ChromeActionDispatchResult> {
   const {
     organizationId,
@@ -797,19 +802,25 @@ export async function dispatchChromeActionToExtension(params: {
     };
   }
 
+  let sourceLease = sourceRead ? await sourceBrowserLease(organizationId, parentRunId) : undefined;
+  if (sourceLease && sourceLease.state !== 'reading') return { status: 'failed', error_message: 'This source read has ended.' };
   const probe = browserResource.requirement.accountProbe;
   const verifiedBinding = parent.run_metadata?.browser_verified as Record<string, unknown> | undefined;
   const alreadyVerified = verifiedBinding?.device_worker_id === browserResource.deviceWorkerId
     && verifiedBinding?.auth_profile_id === browserResource.authProfileId
     && verifiedBinding?.account_id === browserResource.accountId;
-  if (!params.skipAccountProbe && probe && !alreadyVerified) {
+  if (!params.skipAccountProbe && probe && (!alreadyVerified || (sourceLease && actionKey === 'close_tab'))) {
     if (!browserResource.live || !browserResource.authProfileId) {
       return { status: 'failed', error_message: dependencyUnavailableError('browser_setup_required', 'Connect this browser account before reading it.') };
     }
     const probeStep = (key: string, input: Record<string, unknown>) => dispatchChromeActionToExtension({
       ...params, actionKey: key, actionInput: input, skipAccountProbe: true,
     });
-    const nav = await probeStep('navigate', { url: probe.url, persistent: true, wait_for_load: true });
+    // A leased read probes its exact source tab, not the probe URL.
+    const sourceTab = sourceLease?.tab;
+    const nav: ChromeActionDispatchResult = sourceTab
+      ? { status: 'completed', output: { tab_id: sourceTab.tab_id } }
+      : await probeStep('navigate', { url: probe.url, ...(sourceLease ? { new_tab: true } : { persistent: true }), wait_for_load: true });
     if (nav.status !== 'completed') return nav;
     const tabId = nav.output?.tab_id;
     if (typeof tabId !== 'number') return { status: 'failed', error_message: 'Browser account probe did not return a tab.' };
@@ -821,9 +832,17 @@ export async function dispatchChromeActionToExtension(params: {
     }
     const evaluated = await probeStep('evaluate', { tab_id: tabId, expression: probe.expression, await_promise: true });
     if (evaluated.status !== 'completed') return evaluated;
+    const interruption = browserPageInterruption(evaluated.output?.value);
+    if (interruption) return { status: 'failed', interruption, error_message: interruption.message };
     const identity = evaluated.output?.value as { accountId?: unknown; displayName?: unknown } | null;
     const accountId = typeof identity?.accountId === 'string' ? identity.accountId.trim() : '';
     const accountMismatch = !!accountId && !!browserResource.accountId && browserResource.accountId !== accountId;
+    if (sourceTab && (!accountId || accountId.length > 512)) {
+      // A source page may not expose the probe URL's identity data. Reject the
+      // read without inventing evidence that its saved login has expired.
+      const message = 'The expected browser account could not be verified on the source page.';
+      return { status: 'failed', interruption: { reason: 'recovery_unavailable', message }, error_message: message };
+    }
     if (!accountId || accountId.length > 512 || accountMismatch) {
       const expiredConnections = await sql.begin(async tx => {
         await tx`UPDATE auth_profiles SET status = 'pending_auth', updated_at = now()
@@ -839,7 +858,7 @@ export async function dispatchChromeActionToExtension(params: {
         await notifyBrowserAuthExpired({ orgId: organizationId, connectionId: Number(connection.id),
           connectorKey: connection.connector_key }).catch(error => logger.warn({ error }, 'Browser sign-in notification failed'));
       }
-      return { status: 'failed', error_message: accountMismatch
+      return { status: 'failed', interruption: { reason: accountMismatch ? 'account_mismatch' : 'login_required', message: accountMismatch ? 'Browser account changed.' : 'Browser sign-in is required.' }, error_message: accountMismatch
         ? dependencyUnavailableError('browser_account_mismatch', 'The selected browser is signed into a different account. Restore the original login, then verify this connection again.')
         : dependencyUnavailableError('browser_login_required', 'Sign in to the provider in the selected browser, then verify this connection again.') };
     }
@@ -865,6 +884,9 @@ export async function dispatchChromeActionToExtension(params: {
     await sql`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${sql.json({ browser_verified: {
       device_worker_id: browserResource.deviceWorkerId, auth_profile_id: browserResource.authProfileId, account_id: accountId,
     } })} WHERE id = ${parentRunId} AND organization_id = ${organizationId} AND status = 'running'`;
+    // The probe may have saved the first exact tab; reload so the source step
+    // below shares that target instead of opening another.
+    if (sourceLease) sourceLease = await sourceBrowserLease(organizationId, parentRunId);
   }
   if (actionKey === BROWSER_VERIFY_OPERATION) {
     if (parent.action_key !== BROWSER_VERIFY_OPERATION) return { status: 'failed', error_message: 'Browser verification requires its own authorized operation.' };
@@ -888,6 +910,15 @@ export async function dispatchChromeActionToExtension(params: {
   }
 
   const operationInput: Record<string, unknown> = { ...scopedInput };
+  if (sourceLease?.tab && actionKey === 'navigate' && operationInput.new_tab === true) {
+    // The account probe and source reader share ONE owned target. Never replace
+    // a recovered page with about:blank or create another tab after a handoff.
+    if (operationInput.url === 'about:blank') return { status: 'completed', output: { tab_id: sourceLease.tab.tab_id, browser_tab: sourceLease.tab } };
+    operationInput.tab_id = sourceLease.tab.tab_id;
+    delete operationInput.new_tab;
+  }
+  delete operationInput.browser_recovery_control;
+  delete operationInput.retain_on_interruption;
   // Routing directive, not an extension argument — the extension must never see it.
   delete operationInput[TARGET_BROWSER_CONNECTION_INPUT_KEY];
   delete operationInput.require_page_activation;
@@ -900,6 +931,11 @@ export async function dispatchChromeActionToExtension(params: {
   let runId: number;
   try {
     const claim = await sql.begin(async (tx) => {
+      // Fence every browser step, including probes, syncs and connector actions.
+      // Acquisition and enqueue share the profile-before-run lock order.
+      if (browserResource.authProfileId && await browserAccountHeldByOtherRun(organizationId, browserResource.authProfileId, parentRunId, tx)) {
+        throw new BrowserInterruptionError('recovery_unavailable', 'This browser account is owned by another active source read or recovery.');
+      }
       // Serialize with source-read cancellation. A bridge call already in flight
       // may not enqueue fresh work after its waiter has closed the parent.
       let sourceDeadline: Date | undefined;
@@ -925,6 +961,7 @@ export async function dispatchChromeActionToExtension(params: {
         parentRunId,
         runMetadata: {
           browser_context: browserContext,
+          ...(sourceLease ? { browser_recovery_control: browserRecoveryControl(sourceLease, params.retainUntil ? 'retain' : 'read', params.retainUntil) } : {}),
           source_attribution: parent.run_metadata?.source_attribution,
           [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,
           ...(params.skipAccountProbe ? { [BROWSER_ACCOUNT_PROBE_METADATA_KEY]: true } : {}),
@@ -940,6 +977,7 @@ export async function dispatchChromeActionToExtension(params: {
     });
     runId = claim.runId;
   } catch (err) {
+    if (err instanceof BrowserInterruptionError) return { status: 'failed', interruption: { reason: err.reason, message: err.message }, error_message: err.message };
     const msg = errorMessage(err);
     logger.error(
       { err: msg, parent_run_id: parentRunId, action_key: actionKey },
@@ -972,7 +1010,9 @@ export async function dispatchChromeActionToExtension(params: {
       result.output && typeof result.output === 'object' && !Array.isArray(result.output)
         ? (result.output as Record<string, unknown>)
         : undefined;
-    return { ...result, status: result.status, output };
+    if (sourceRead && output) await saveSourceBrowserTab(organizationId, parentRunId, output, chromeConnection.connectionId);
+    const interruption = browserPageInterruption(output?.value);
+    return { ...result, status: result.status, output, ...(interruption ? { interruption } : {}) };
   } finally {
     if (sourceRead) await scrubSourceReadRun(runId, organizationId);
   }

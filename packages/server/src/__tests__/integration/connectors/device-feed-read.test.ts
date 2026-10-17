@@ -1193,6 +1193,31 @@ describe('device source-feed read lifecycle — deadlines and orphan sweeping', 
     `;
   });
 
+  it('enforces the source deadline for a direct device read without a pager', async () => {
+    const controller = new AbortController();
+    const reading = readSourceFeed({
+      scope: { organizationId: lifecycleOrgId, principal: lifecycleUserId },
+      feedId: lifecycleFeedId,
+      deadlineAt: Date.now() + 250,
+      signal: controller.signal,
+      query: 'synthetic deadline probe',
+    }).then(value => value, error => error);
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        reading,
+        new Promise(resolve => { watchdog = setTimeout(() => resolve('still waiting past deadline'), 1500); }),
+      ]);
+      expect(result).toMatchObject({ exitReason: 'timeout' });
+    } finally {
+      if (watchdog) clearTimeout(watchdog);
+      controller.abort();
+      await reading;
+    }
+    await expect.poll(async () => (await lifecycleRuns())[0]?.status).toBe('timeout');
+    expect((await lifecycleRuns())[0].action_input).toEqual({ scrubbed: true, feed_key: FEED_KEY });
+  });
+
   // The abort has to reach the WAITER, not just the caller. A `Promise.race`
   // alone would return control while the run stayed pending for the full 60s
   // queue budget, holding the caller's query and claimable by a device that

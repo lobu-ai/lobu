@@ -19,6 +19,7 @@ const CDN_SUBSTITUTED_STATUSES = [502, 504];
 // fails to compile rather than silently escaping this suite.
 const ALL_CODES = Object.keys({
   AUTH_MISSING: true,
+  BROWSER_INTERRUPTED: true,
   AUTH_INVALID: true,
   NOT_FOUND: true,
   VALIDATION: true,

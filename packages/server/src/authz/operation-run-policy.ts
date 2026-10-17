@@ -26,6 +26,7 @@ type PolicyRun = {
   connection_id: number | null;
   feed_id: number | null;
   expires_at: Date | null;
+  unexpired: boolean;
   connector_key: string | null;
   action_key: string | null;
   action_input: Record<string, unknown> | null;
@@ -45,7 +46,7 @@ async function loadPolicyRun(sql: DbClient, organizationId: string, runId: numbe
   const [run] = await sql<PolicyRun>`
     SELECT id, run_type, status, approval_status, claimed_by, connection_id, connector_key,
            action_key, action_input, policy_principal_kind, policy_principal_id,
-           created_by_user_id, automation_id, parent_run_id, run_metadata, feed_id, expires_at
+           created_by_user_id, automation_id, parent_run_id, run_metadata, feed_id, expires_at, expires_at > clock_timestamp() AS unexpired
     FROM runs WHERE id = ${runId} AND organization_id = ${organizationId}
     ${lock ? sql`FOR UPDATE` : sql``}
   `;
@@ -78,6 +79,35 @@ async function isSourceReadFeedStillReadable(sql: DbClient, organizationId: stri
   return feeds.length > 0;
 }
 
+// Current source visibility and policy for a source-read run's stored requester.
+async function resolveSourceReadAccess(sql: DbClient, organizationId: string, run: PolicyRun): Promise<ConnectorPolicyResult> {
+  const actor = await resolveStoredActingPrincipal(sql, organizationId, run.policy_principal_kind, run.policy_principal_id);
+  if (!actor.ownerResolved) return unavailable();
+  if (run.run_metadata?.[SOURCE_FEED_SUBSCRIPTION_METADATA_KEY] === true) {
+    const subscriptions = run.feed_id == null ? [] : await sourceFeedSubscriptions(sql, organizationId, Number(run.feed_id), Number(run.automation_id));
+    if (subscriptions[0]?.principal !== run.created_by_user_id) return unavailable();
+  }
+  if (actor.kind === 'automation') {
+    const visibilityUserId = await resolveAutomationConnectionVisibilityUserId({ organizationId, userId: null, actingAutomationId: run.automation_id }, sql);
+    if (visibilityUserId !== run.created_by_user_id || !visibilityUserId) return unavailable();
+    const policy = await resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), actor,
+      operation: { connector_key: run.connector_key ?? '', operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
+    // Source reads require current Auto authority and have no approval flow.
+    // Return a veto so browser implementation steps cannot inherit an Ask.
+    if (policy.effect !== 'auto') return { ...policy, effect: 'deny' };
+  }
+  return await isSourceReadFeedStillReadable(sql, organizationId, run)
+    ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();
+}
+// Recovery checks source visibility and current policy without reviving the old
+// timed run or inheriting its authority for a new Chrome operation.
+export async function sourceReadRecoveryAllowed(organizationId: string, runId: number): Promise<boolean> {
+  const sql = getDb();
+  const run = await loadPolicyRun(sql, organizationId, runId);
+  return !!run && run.action_key === DEVICE_FEED_READ_ACTION_KEY && isSourceFeedRead(run.run_metadata)
+    && (await resolveSourceReadAccess(sql, organizationId, run)).effect === 'auto';
+}
+
 /** Resolve execution authority from persisted provenance, never from the worker's input. */
 export async function resolveRunConnectorPolicy(params: {
   organizationId: string;
@@ -90,24 +120,8 @@ export async function resolveRunConnectorPolicy(params: {
   if (run.action_key === DEVICE_FEED_READ_ACTION_KEY && isSourceFeedRead(run.run_metadata)) {
     if (run.run_type !== 'action' || run.parent_run_id !== null || !['pending', 'running'].includes(run.status)
       || !['auto', 'approved'].includes(run.approval_status)
-      || !run.expires_at || new Date(run.expires_at).getTime() <= Date.now()) return unavailable();
-    const actor = await resolveStoredActingPrincipal(sql, params.organizationId, run.policy_principal_kind, run.policy_principal_id);
-    if (!actor.ownerResolved) return unavailable();
-    if (run.run_metadata?.[SOURCE_FEED_SUBSCRIPTION_METADATA_KEY] === true) {
-      const subscriptions = run.feed_id == null ? [] : await sourceFeedSubscriptions(sql, params.organizationId, Number(run.feed_id), Number(run.automation_id));
-      if (subscriptions[0]?.principal !== run.created_by_user_id) return unavailable();
-    }
-    if (actor.kind === 'automation') {
-      const visibilityUserId = await resolveAutomationConnectionVisibilityUserId({ organizationId: params.organizationId, userId: null, actingAutomationId: run.automation_id }, sql);
-      if (visibilityUserId !== run.created_by_user_id || !visibilityUserId) return unavailable();
-      const policy = await resolveConnectorPolicy({ organizationId: params.organizationId, connectionId: Number(run.connection_id), actor,
-        operation: { connector_key: run.connector_key ?? '', operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
-      // Source reads require current Auto authority and have no approval flow.
-      // Return a veto so browser implementation steps cannot inherit an Ask.
-      if (policy.effect !== 'auto') return { ...policy, effect: 'deny' };
-    }
-    return await isSourceReadFeedStillReadable(sql, params.organizationId, run)
-      ? { effect: 'auto', ruleIds: [], reason: 'parent_approval' } : unavailable();
+      || !run.unexpired) return unavailable();
+    return resolveSourceReadAccess(sql, params.organizationId, run);
   }
   // This reserved action is the transport for an already-authorized source feed
   // read. It is deliberately absent from the public connector action catalog.

@@ -640,3 +640,38 @@ describe("TikTok actions", () => {
 		}
 	});
 });
+
+describe("typed browser interruption transport", () => {
+	test("preserves a late challenge while the account probe is waiting", async () => {
+		let challenge = false;
+		const document = { querySelector: (selector: string) => selector === "#captcha-verify-container-main-page"
+			? { getClientRects: () => challenge ? [1] : [] } : { textContent: '{"__DEFAULT_SCOPE__":{}}' } };
+		const expression = new TikTokConnector().definition.browser!.accountProbe!.expression;
+		const run = new Function("document", "setTimeout", `return ${expression}`);
+		expect(await run(document, (fn: () => void) => { challenge = true; fn(); })).toMatchObject({
+			__lobu_browser_interruption: { reason: "challenge_required" },
+		});
+	});
+
+	test("keeps loading failure distinct from visible verification", async () => {
+		const document = { querySelector: (selector: string) => selector === "#captcha-verify-container-main-page" ? null
+			: { textContent: JSON.stringify({ __DEFAULT_SCOPE__: { "webapp.app-context": { user: { uid: "123" } } } }) }, querySelectorAll: () => [] };
+		const run = new Function("document", "setTimeout", `return (${tiktokPage.toString()})("post_links")`);
+		await expect(run(document, (fn: () => void) => fn())).rejects.toMatchObject({ browser_interruption: "loading_failure" });
+	});
+
+	test("a selector failure inspects the owned page before classifying recovery", async () => {
+		const b = browser((action, input) => {
+			if (action === "navigate") return { tab_id: 77 };
+			if (action === "network_intercept_start") return { session_id: "synthetic-session" };
+			if (action === "wait_for_selector") throw new Error("Synthetic selector timeout");
+			if (action === "evaluate") {
+				expect(input.expression).toContain('"read_failure"');
+				return { value: { __lobu_browser_interruption: { reason: "challenge_required", message: "Synthetic visible verification" } } };
+			}
+			return {};
+		});
+		await expect(new TikTokConnector().read(context(b.dispatcher))).rejects.toThrow("Synthetic visible verification");
+		expect(b.calls.at(-1)?.action).toBe("close_tab");
+	});
+});

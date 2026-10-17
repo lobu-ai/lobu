@@ -1,3 +1,4 @@
+import { authorizeRecoveryAction } from '../../../../lib/browser-recovery';
 import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
 import { connectionBrowserGrant } from '../../../../connectors/browser-resource';
 import { connectorRunEnv } from "@lobu/connector-worker/env";
@@ -745,6 +746,11 @@ export async function handleExecute(
 		approval_notification: notificationContext,
 		source_attribution: requestSourceAttribution(ctx),
 	};
+	if (connection.connector_manifest_backed && connection.device_platform === 'chrome-extension') {
+		const control = await authorizeRecoveryAction({ scope: { ...authzScopeFromToolContext(ctx), principal: visibilityUserId },
+			automationId: ctx.actingAutomationId, flowId: browserContext?.flow_id, connectionId: connection.id, action: operation.operation_key, input });
+		if (control) runMetadata = { ...runMetadata, browser_recovery_control: control };
+	}
 	const shouldQueue = policy.effect === "approval" || deviceAccess === "ask_owner";
 	const activation = args.activation
 		? {

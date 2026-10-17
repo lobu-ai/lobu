@@ -57,21 +57,41 @@ export function normalizeTikTokPost(value: unknown): RecordValue {
 	};
 }
 
+// Keep structured page failures in a successful CDP value. CDP exceptions only
+// preserve prose, which cannot safely distinguish a challenge from a timeout.
+function pageExpression(source: string): string {
+	return `Promise.resolve().then(() => ${source}).catch(error => { if (!error.browser_interruption) throw error; return { __lobu_browser_interruption: { reason: error.browser_interruption, message: error.message } }; })`;
+}
+
 function expression(command: string, args: RecordValue = {}): string {
-	return `(${tiktokPage.toString()})(${JSON.stringify(command)},${JSON.stringify(args)})`;
+	return pageExpression(`(${tiktokPage.toString()})(${JSON.stringify(command)},${JSON.stringify(args)})`);
 }
 
 async function page(browser: ChromeActionDispatcher, tabId: number, command: string, args: RecordValue = {}): Promise<RecordValue> {
 	const output = await browser.dispatch("evaluate", { tab_id: tabId, expression: expression(command, args), allowed_origins: ORIGINS });
+	// Only the source-read bridge throws a typed interruption; operation and
+	// worker dispatchers return the marker as a completed value.
+	const interruption = object(object(output.value).__lobu_browser_interruption);
+	if (interruption.reason) throw new Error(String(interruption.message));
 	if (!output.value || typeof output.value !== "object") throw new Error("TikTok page returned no data");
 	return object(output.value);
 }
 
 async function scratch<T>(browser: ChromeActionDispatcher, run: (tabId: number) => Promise<T>): Promise<T> {
-	const nav = await browser.dispatch("navigate", { url: "about:blank", new_tab: true, allowed_origins: ORIGINS });
+	const nav = await browser.dispatch("navigate", { url: "about:blank", new_tab: true, retain_on_interruption: true, allowed_origins: ORIGINS });
 	if (typeof nav.tab_id !== "number") throw new Error("TikTok scratch tab was not created");
 	try { return await run(nav.tab_id); }
 	finally { await browser.dispatch("close_tab", { tab_id: nav.tab_id, allowed_origins: ORIGINS }); }
+}
+
+async function waitFor(browser: ChromeActionDispatcher, tabId: number, selector: string): Promise<void> {
+	try { await browser.dispatch("wait_for_selector", { tab_id: tabId, selector, timeout_ms: 15000, allowed_origins: ORIGINS }); }
+	catch (error) {
+		// Inspect the page while it is still owned. A selector timeout alone is
+		// neither verification evidence nor permission for a recovery handoff.
+		await page(browser, tabId, "read_failure");
+		throw error;
+	}
 }
 
 async function navigate(browser: ChromeActionDispatcher, tabId: number, url: string, focus = false): Promise<void> {
@@ -79,7 +99,7 @@ async function navigate(browser: ChromeActionDispatcher, tabId: number, url: str
 	// TikTok's video page can remain blank in a fresh background tab. Its own
 	// controls appeared immediately after focus in the live browser probe.
 	if (focus) await browser.dispatch("focus_tab", { tab_id: tabId, draw_attention: false, allowed_origins: ORIGINS });
-	await browser.dispatch("wait_for_selector", { tab_id: tabId, selector: '[data-e2e="nav-profile"]', timeout_ms: 15000, allowed_origins: ORIGINS });
+	await waitFor(browser, tabId, '[data-e2e="nav-profile"]');
 }
 
 async function sourcePost(browser: ChromeActionDispatcher, tabId: number, url: string): Promise<RecordValue> {
@@ -91,7 +111,7 @@ async function sourcePost(browser: ChromeActionDispatcher, tabId: number, url: s
 	if (typeof start.session_id !== "string") throw new Error("TikTok photo capture did not start");
 	try {
 		await navigate(browser, tabId, url);
-		await browser.dispatch("wait_for_selector", { tab_id: tabId, selector: '[data-e2e="recommend-list-item-container"] .swiper', timeout_ms: 15000, allowed_origins: ORIGINS });
+		await waitFor(browser, tabId, '[data-e2e="recommend-list-item-container"] .swiper');
 		const data = await browser.dispatch("network_intercept_drain", { session_id: start.session_id, allowed_origins: ORIGINS });
 		for (const response of Array.isArray(data.responses) ? data.responses : []) {
 			const r = object(response);
@@ -175,10 +195,10 @@ async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedReadResult>
 			await navigate(browser, tabId, url, true);
 			let rows: RecordValue[] = [];
 			if (ctx.feedKey === "following" || ctx.feedKey === "for_you") {
-				await browser.dispatch("wait_for_selector", { tab_id: tabId, selector: '[data-e2e="recommend-list-item-container"]', timeout_ms: 15000, allowed_origins: ORIGINS });
+				await waitFor(browser, tabId, '[data-e2e="recommend-list-item-container"]');
 				rows = await timelinePosts(browser, tabId, sessionId!, limit, ctx.feedKey);
 			} else {
-				await browser.dispatch("wait_for_selector", { tab_id: tabId, selector: 'a[href*="/video/"],a[href*="/photo/"]', timeout_ms: 15000, allowed_origins: ORIGINS });
+				await waitFor(browser, tabId, 'a[href*="/video/"],a[href*="/photo/"]');
 				const data = await page(browser, tabId, "post_links");
 				rows = (Array.isArray(data.rows) ? data.rows : []).map(value => {
 					const r = object(value);
@@ -205,11 +225,12 @@ async function readTikTokInbox(ctx: FeedReadContext): Promise<FeedReadResult> {
 		await navigate(browser, tabId, ORIGIN);
 		const result = await browser.dispatch("evaluate", {
 			tab_id: tabId,
-			expression: `(${tiktokInboxPage.toString()})(${JSON.stringify({ feed: ctx.feedKey, limit: Math.min(ctx.limit ?? 20, 100), cursor: ctx.cursor })})`,
+			expression: pageExpression(`(${tiktokInboxPage.toString()})(${JSON.stringify({ feed: ctx.feedKey, limit: Math.min(ctx.limit ?? 20, 100), cursor: ctx.cursor })})`),
 			await_promise: true,
 			allowed_origins: ORIGINS,
 		});
 		const data = object(result.value);
+		if (data.__lobu_browser_interruption) throw new Error(String(object(data.__lobu_browser_interruption).message));
 		if (!Array.isArray(data.rows) || typeof data.hasMore !== "boolean" || (data.hasMore && typeof data.nextCursor !== "string")) throw new Error("TikTok inbox returned no verifiable page");
 		return data as unknown as FeedReadResult;
 	});
@@ -217,7 +238,7 @@ async function readTikTokInbox(ctx: FeedReadContext): Promise<FeedReadResult> {
 
 export default class TikTokConnector extends ConnectorRuntime {
 	readonly definition: RuntimeConnectorDefinition = {
-		key: "tiktok.web", name: "TikTok", version: "1.1.8", faviconDomain: "tiktok.com",
+		key: "tiktok.web", name: "TikTok", version: "1.1.9", faviconDomain: "tiktok.com",
 		description: "Read TikTok through your signed-in paired browser, inspect post visuals, set likes, and prepare comments for human submission. Automations decide what to read and act on.",
 		browser: { origins: ORIGINS, authMethods: ["browser"], accountProbe: { url: ORIGIN, expression: expression("identity") } },
 		authSchema: { methods: [{ type: "browser", mode: "live" }] },

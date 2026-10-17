@@ -7,7 +7,7 @@
  *   1. happy: worker posts 'completed' with action_output → returns
  *      { status: 'completed', output }
  *   2. worker-failed: worker posts 'failed' → returns
- *      { status: 'failed', error_message }
+ *      { status: 'failed', error_message, output }
  *   3. timeout-pre-claim: run never claimed before the queue budget →
  *      gateway marks the row 'timeout', returns timeout
  *   4. late-claim: the claim lands just before the queue deadline, so only the
@@ -241,11 +241,12 @@ describe('waitForDeviceActionRun', () => {
       ...FAST_BUDGETS,
       sleep: workerTurn(async () => {
         await claim(runId, WORKER_ID);
-        await workerCompleteAction(runId, WORKER_ID, 'failed');
+        await workerCompleteAction(runId, WORKER_ID, 'failed', { browser_tab: { tab_id: 41 }, reason: 'synthetic-loading-failure' });
       }),
     });
     expect(out.status).toBe('failed');
     expect(out.error_message).toBe('worker-failed');
+    expect(out.output).toEqual({ browser_tab: { tab_id: 41 }, reason: 'synthetic-loading-failure' });
   });
 
   it('times out + marks row when no worker claims within the queue budget', async () => {
