@@ -551,7 +551,7 @@ describe('MCP media resources', () => {
     expect(body.error?.message).toContain('Unknown resource');
   });
 
-  it.each(['child', 'unrelated', 'foreign', 'unlisted', 'unfinished'])('preserves only authorized completed child artifacts: %s', async (kind) => {
+  it.each(['child', 'unrelated', 'foreign', 'unlisted', 'unfinished', 'unbound', 'noncanonical'])('preserves only authorized completed child artifacts: %s', async (kind) => {
     const sql = getDb();
     const [parent] = await sql`
       INSERT INTO runs (organization_id, run_type, status, approval_status)
@@ -565,7 +565,8 @@ describe('MCP media resources', () => {
     `;
     const childId = Number(child!.id);
     const bytes = syntheticImage().bytes;
-    const artifact = await artifactStore.publish({ buffer: bytes, filename: 'child.png', contentType: 'image/png', publicGatewayUrl: 'http://localhost', binding: runArtifactBinding(childId) });
+    const binding = kind === 'unbound' ? undefined : kind === 'noncanonical' ? `run:0${childId}` : runArtifactBinding(childId);
+    const artifact = await artifactStore.publish({ buffer: bytes, filename: 'child.png', contentType: 'image/png', publicGatewayUrl: 'http://localhost', binding });
     const attachment = { kind: 'image', filename: 'child.png', mime_type: 'image/png', artifact_id: artifact.artifactId, size_bytes: bytes.length };
     if (kind !== 'unlisted') await sql`UPDATE runs SET action_output = ${sql.json({ attachments: [attachment] })} WHERE id = ${childId}`;
     const materialized = await materializeActionOutputAttachments(parentId, { attachments: [attachment] });
@@ -579,7 +580,7 @@ describe('MCP media resources', () => {
       expect(materialized.publishedArtifactIds).toEqual([]);
     }
     // Delegation must not mutate the child's artifact or loosen its binding.
-    expect((await artifactStore.read(artifact.artifactId, { binding: runArtifactBinding(childId) }))?.bytes).toEqual(bytes);
+    expect((await artifactStore.read(artifact.artifactId, { binding }))?.bytes).toEqual(bytes);
   });
 
   it.each(['direct', 'wrapped', 'bare'])('returns %s operation attachments as pixels and stable resource links', async (shape) => {

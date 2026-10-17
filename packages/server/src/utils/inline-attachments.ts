@@ -24,6 +24,7 @@ import { getDb } from "../db/client";
 import { getLobuCoreServices } from "../lobu/gateway";
 import {
   runArtifactBinding,
+  parseRunArtifactBinding,
   type ArtifactStore,
 } from "../gateway/files/artifact-store";
 import { resolvePublicGatewayUrl } from "./public-origin";
@@ -282,6 +283,7 @@ export async function materializeActionOutputAttachments(
     return { output: actionOutput, publishedArtifactIds: [] };
   }
   const artifactStore = getLobuCoreServices()?.getArtifactStore?.();
+  const sql = getDb();
   const attachments: unknown[] = [];
   for (const raw of actionOutput.attachments) {
     if (!artifactStore || !raw || typeof raw !== "object") {
@@ -296,15 +298,15 @@ export async function materializeActionOutputAttachments(
     // A connector may return media from a browser child. Re-publish only a
     // completed, same-organization DIRECT child's actual output, with a new
     // parent binding. Never graft an arbitrary artifact or weaken store reads.
-    const sql = getDb();
-    const children = await sql`
+    const metadata = await artifactStore.inspect(attachment.artifact_id);
+    const childId = parseRunArtifactBinding(metadata?.binding);
+    const children = childId === undefined ? [] : await sql`
       SELECT child.id FROM runs child
       JOIN runs parent ON parent.id = child.parent_run_id
-      WHERE parent.id = ${runId}
+      WHERE child.id = ${childId} AND parent.id = ${runId}
         AND child.organization_id = parent.organization_id
         AND child.status = 'completed'
         AND child.action_output->'attachments' @> ${sql.json([{ artifact_id: attachment.artifact_id }])}::jsonb
-      LIMIT 2
     `;
     const stored = children.length === 1
       ? await artifactStore.read(attachment.artifact_id, {

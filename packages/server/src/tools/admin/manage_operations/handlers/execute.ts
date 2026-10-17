@@ -746,7 +746,7 @@ export async function handleExecute(
 		approval_notification: notificationContext,
 		source_attribution: requestSourceAttribution(ctx),
 	};
-	if (connection.connector_key === 'chrome') {
+	if (connection.connector_manifest_backed && connection.device_platform === 'chrome-extension') {
 		const control = await authorizeRecoveryAction({ scope: { ...authzScopeFromToolContext(ctx), principal: visibilityUserId },
 			automationId: ctx.actingAutomationId, flowId: browserContext?.flow_id, connectionId: connection.id, action: operation.operation_key, input });
 		if (control) runMetadata = { ...runMetadata, browser_recovery_control: control };
