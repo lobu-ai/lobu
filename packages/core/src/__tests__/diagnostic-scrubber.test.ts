@@ -404,6 +404,45 @@ describe("diagnostic credential scrubber", () => {
     expect(result.headers).toEqual({ "content-type": "application/json" });
     expect(JSON.stringify(result)).not.toContain(SECRET);
   });
+  it("redacts leading credential terms with trailing qualifiers", () => {
+    // The qualifier half is matched positionally because the shared suffix
+    // rules are end-anchored (`token_value`, `accessTokenValue`,
+    // `api_key_value`). A usage-metric qualifier stays readable
+    // (`token_count`, `token_total`).
+    const result = scrubDiagnosticValue({
+      token_value: SECRET,
+      accessTokenValue: SECRET,
+      api_key_value: SECRET,
+      token_count: 7,
+      token_total: 9,
+    }) as Record<string, unknown>;
+    expect(result.token_value).toBe("[REDACTED]");
+    expect(result.accessTokenValue).toBe("[REDACTED]");
+    expect(result.api_key_value).toBe("[REDACTED]");
+    expect(result.token_count).toBe(7);
+    expect(result.token_total).toBe(9);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("redacts Error and RegExp values beneath credential containers", () => {
+    // Built-in rendering (Error message/stack, RegExp source) bypasses
+    // key-side classification, so the container flag travels with the value.
+    const result = scrubDiagnosticValue({
+      credentialsByName: {
+        provider: new Error(`login failed: ${SECRET}`),
+        pattern: /token=synthetic-pattern-secret/,
+      },
+    }) as {
+      credentialsByName: {
+        provider: { name: string; message: string };
+        pattern: string;
+      };
+    };
+    expect(result.credentialsByName.provider.message).toBe("[REDACTED]");
+    expect(result.credentialsByName.pattern).toBe("[REDACTED]");
+    expect(result.credentialsByName.provider.name).toBe("Error");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
   it("redacts concatenated and provider-prefixed credential names", () => {
     // Separator-free compounds the suffix rules never see: a bare credential
     // ending (`PGPASSWORD`) and a provider-prefixed serialized field

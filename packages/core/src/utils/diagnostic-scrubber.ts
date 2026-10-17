@@ -94,14 +94,19 @@ function hasTrailingAuthorizationSegment(key: string): boolean {
 /**
  * A `credential`/`password`/`secret` segment anywhere in the key names a
  * credential CONTAINER (`credentials_json`, `password_confirmation`,
- * `secret_value`, `oauthCredentialsJson`). Container semantics live in the
- * walk: a scalar beneath one IS the serialized credential and collapses,
- * while a structured value beneath one recurses with every descendant
- * treated as credential-adjacent (a map's leaves cannot be trusted by key
- * name alone — `credentialsByName.github` proves it). `token` is deliberately
- * absent: bare token segments collide with usage counts (`token_count` stays
- * readable per the logger contract); `authorization` stays pinned to the
- * trailing rule above so `authorization_mode` stays readable.
+ * `secret_value`, `oauthCredentialsJson`). So does a LEADING credential term
+ * with a trailing qualifier (`token_value`, `accessTokenValue`,
+ * `api_key_value`): the qualifier half is matched positionally because the
+ * shared suffix rules are end-anchored and never see it. The one exemption is
+ * a usage-metric qualifier (`token_count`, `token_total`), which stays
+ * readable per the logger contract. Container semantics live in the walk: a
+ * scalar beneath one IS the serialized credential and collapses, while a
+ * structured value beneath one recurses with every descendant treated as
+ * credential-adjacent (a map's leaves cannot be trusted by key name alone —
+ * `credentialsByName.github` proves it). `token` stays out of the segment
+ * set (bare token segments collide with usage counters); `authorization`
+ * stays pinned to the trailing rule above so `authorization_mode` stays
+ * readable.
  */
 const CONTAINER_KEY_SEGMENTS = new Set([
   "credential",
@@ -111,10 +116,40 @@ const CONTAINER_KEY_SEGMENTS = new Set([
   "secret",
 ]);
 
+/** Qualifiers that make a trailing segment a usage metric, not a secret. */
+const BENIGN_COUNT_QUALIFIERS = new Set([
+  "count",
+  "counts",
+  "total",
+  "totals",
+  "used",
+  "usage",
+  "remaining",
+  "limit",
+  "limits",
+  "max",
+  "quota",
+  "quotas",
+]);
+
 function hasCredentialSegment(key: string): boolean {
-  return splitKeySegments(key).some((segment) =>
-    CONTAINER_KEY_SEGMENTS.has(segment)
-  );
+  const segments = splitKeySegments(key);
+  if (segments.some((segment) => CONTAINER_KEY_SEGMENTS.has(segment))) {
+    return true;
+  }
+  for (let end = 1; end <= segments.length; end++) {
+    const head = segments.slice(0, end).join("_");
+    if (head === "authorization") continue;
+    if (isSecretKey(head) || isSecretKey(squashKey(head))) {
+      const tail = segments.slice(end);
+      const qualifier = tail.length === 1 ? tail[0] : undefined;
+      if (qualifier !== undefined && BENIGN_COUNT_QUALIFIERS.has(qualifier)) {
+        continue;
+      }
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Bound recursive work on diagnostic values. */
@@ -278,11 +313,18 @@ export function scrubDiagnosticValue(value: unknown): unknown {
     // returns nothing and a plain walk would flatten it to `{}` — discarding
     // the only part of the event worth reading.
     if (current instanceof Error) {
+      // message/stack are scrubbed as text; under a credential container
+      // they ARE the credential and collapse instead.
       const serialized: Record<string, unknown> = {
         name: current.name,
-        message: scrubString(current.message),
+        message: underCredentialContainer
+          ? "[REDACTED]"
+          : scrubString(current.message),
       };
-      if (current.stack) serialized.stack = scrubString(current.stack);
+      if (current.stack)
+        serialized.stack = underCredentialContainer
+          ? "[REDACTED]"
+          : scrubString(current.stack);
       if (current.cause !== undefined)
         serialized.cause = scrub(
           current.cause,
@@ -299,16 +341,13 @@ export function scrubDiagnosticValue(value: unknown): unknown {
           underCredentialContainer
         );
       for (const key of Object.keys(current)) {
-        // A strong-secret key collapses wholesale; its readable name is kept
-        // while any query pair embedded in the key text itself is redacted
-        // (value-side redaction never reaches key text).
         const outKey = scrubKey(key);
         if (isStrongSecretKey(key)) {
           serialized[outKey] = "[REDACTED]";
           continue;
         }
-        // A credential container propagates credential-adjacency to its whole
-        // subtree: scalars beneath one collapse, structured values recurse.
+        // Container adjacency propagates: scalars beneath one collapse,
+        // structured values recurse with the flag set.
         const childContainer =
           underCredentialContainer || hasCredentialSegment(key);
         const value = (current as unknown as Record<string, unknown>)[key];
@@ -321,7 +360,8 @@ export function scrubDiagnosticValue(value: unknown): unknown {
     // yields `{}` (Date, Map, Set, RegExp) or one key per byte (Buffer). A
     // readable summary costs less payload and tells triage strictly more.
     if (current instanceof Date) return current.toISOString();
-    if (current instanceof RegExp) return String(current);
+    if (current instanceof RegExp)
+      return underCredentialContainer ? "[REDACTED]" : String(current);
     if (ArrayBuffer.isView(current)) {
       return `[${current.constructor.name} ${current.byteLength} bytes]`;
     }
@@ -337,17 +377,11 @@ export function scrubDiagnosticValue(value: unknown): unknown {
     const result: Record<string, unknown> = {};
     try {
       for (const key of Object.keys(current).slice(0, MAX_ENTRIES)) {
-        // A strong-secret key collapses wholesale; its readable name is kept
-        // while any query pair embedded in the key text itself is redacted.
         const outKey = scrubKey(key);
         if (isStrongSecretKey(key)) {
           result[outKey] = "[REDACTED]";
           continue;
         }
-        // A credential container propagates credential-adjacency to its whole
-        // subtree (scalars collapse, structured values recurse); anything
-        // else scrubs normally. A URL or `name=value` diagnostic used as a
-        // key carries its secret in the key text, past value-side redaction.
         const childContainer =
           underCredentialContainer || hasCredentialSegment(key);
         try {

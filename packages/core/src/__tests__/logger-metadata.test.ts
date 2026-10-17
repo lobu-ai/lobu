@@ -188,6 +188,38 @@ describe("console logger pino-style metadata", () => {
     expect(line).not.toContain("synthetic-req-auth-secret");
   });
 
+  test("redacts leading credential terms with trailing qualifiers", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        token_value: "synthetic-token-value-secret",
+        accessTokenValue: "synthetic-access-secret",
+        api_key_value: "synthetic-apikey-secret",
+        token_count: 7,
+        token_total: 9,
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).toContain("token_count");
+    expect(line).not.toContain("synthetic-token-value-secret");
+    expect(line).not.toContain("synthetic-access-secret");
+    expect(line).not.toContain("synthetic-apikey-secret");
+  });
+
+  test("redacts Error and RegExp values beneath credential containers", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        credentialsByName: {
+          provider: new Error("login failed: synthetic-provider-error-secret"),
+          pattern: /token=synthetic-provider-pattern-secret/,
+        },
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain("synthetic-provider-error-secret");
+    expect(line).not.toContain("synthetic-provider-pattern-secret");
+  });
   test("redacts prefixed authorization headers and serialized credential fields", () => {
     const line = captureWarn((log) => {
       log.warn({
@@ -329,6 +361,9 @@ describe("console logger structured output", () => {
           secret_value: { nested: "synthetic-json-nested-secret" },
           requestAuthorizationHeader:
             "Bearer synthetic-json-req-auth-secret",
+          token_value: "synthetic-json-token-value-secret",
+          accessTokenValue: "synthetic-json-access-secret",
+          api_key_value: "synthetic-json-apikey-secret",
         });
         log.warn({
           headers: { "x-authorization": ["Bearer synthetic-json-array-secret"] },
@@ -336,6 +371,9 @@ describe("console logger structured output", () => {
         log.warn(
           Object.assign(new Error("synthetic-json-boom"), {
             headers: { "x-authorization": ["Bearer synthetic-json-error-prop-secret"] },
+            credentialsByName: {
+              provider: new Error("login failed: synthetic-json-provider-error-secret"),
+            },
           })
         );`,
       ],
@@ -385,6 +423,11 @@ describe("console logger structured output", () => {
     expect(records[5].message).not.toContain("synthetic-json-confirm-secret");
     expect(records[5].message).not.toContain("synthetic-json-nested-secret");
     expect(records[5].message).not.toContain("synthetic-json-req-auth-secret");
+    expect(records[5].message).not.toContain(
+      "synthetic-json-token-value-secret"
+    );
+    expect(records[5].message).not.toContain("synthetic-json-access-secret");
+    expect(records[5].message).not.toContain("synthetic-json-apikey-secret");
     expect(records[6].level).toBe("warn");
     expect(records[6].message).toContain("[REDACTED]");
     expect(records[6].message).not.toContain("synthetic-json-array-secret");
@@ -392,6 +435,9 @@ describe("console logger structured output", () => {
     expect(records[7].message).toContain("synthetic-json-boom");
     expect(records[7].message).not.toContain(
       "synthetic-json-error-prop-secret"
+    );
+    expect(records[7].message).not.toContain(
+      "synthetic-json-provider-error-secret"
     );
     expect(output).not.toContain("synthetic-pino-secret");
     expect(output).not.toContain("synthetic-error-secret");
@@ -409,6 +455,10 @@ describe("console logger structured output", () => {
     expect(output).not.toContain("synthetic-json-confirm-secret");
     expect(output).not.toContain("synthetic-json-nested-secret");
     expect(output).not.toContain("synthetic-json-req-auth-secret");
+    expect(output).not.toContain("synthetic-json-token-value-secret");
+    expect(output).not.toContain("synthetic-json-access-secret");
+    expect(output).not.toContain("synthetic-json-apikey-secret");
+    expect(output).not.toContain("synthetic-json-provider-error-secret");
     expect(output).not.toContain("synthetic-json-array-secret");
     expect(output).not.toContain("synthetic-json-error-prop-secret");
   });
