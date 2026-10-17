@@ -10,6 +10,7 @@ import {
   seedSystemEntityTypes,
 } from '../../__tests__/setup/test-fixtures';
 import { cleanupTestDatabase, getTestDb } from '../../__tests__/setup/test-db';
+import { installConnectorFromMcpUrl } from '../../catalog/connector-definitions';
 import { createAuthProfile } from '../../utils/auth-profiles';
 import { resolveCredentialsByConnectionId } from '../credential-resolver';
 
@@ -53,6 +54,153 @@ async function createMcpTestConnection(connectorKey: string): Promise<{
   });
   return { connectionId: connection.id, organizationId: organization.id };
 }
+
+const ANONYMOUS_TIER_MCP_URL = 'https://mcp.example.com/mcp';
+
+/**
+ * A remote MCP server that answers initialize anonymously (a free tier) while
+ * publishing RFC 9728 protected-resource metadata for signed-in access.
+ */
+function mockOptionalOAuthServer(options?: {
+  pathMetadata?: boolean;
+  rootMetadata?: boolean;
+  resource?: string;
+  tokenEndpointAuthMethods?: string[];
+}): typeof fetch {
+  const resourceMetadata = {
+    resource: options?.resource ?? ANONYMOUS_TIER_MCP_URL,
+    authorization_servers: ['https://auth.example.com'],
+    scopes_supported: ['mcp:tools'],
+    bearer_methods_supported: ['header'],
+  };
+  return vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    const href = String(url);
+    if (href === ANONYMOUS_TIER_MCP_URL) {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (body.method === 'initialize') {
+        return jsonResponse(
+          {
+            jsonrpc: '2.0',
+            id: 0,
+            result: {
+              protocolVersion: MCP_PROTOCOL_VERSION,
+              capabilities: { tools: {} },
+              serverInfo: { name: 'optional-oauth', version: '1.0.0' },
+            },
+          },
+          'anon-session'
+        );
+      }
+      if (body.method === 'tools/list') {
+        return jsonResponse({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { tools: [{ name: 'web_search', inputSchema: { type: 'object' } }] },
+        });
+      }
+      return new Response(null, { status: 202 });
+    }
+    if (href === 'https://mcp.example.com/.well-known/oauth-protected-resource/mcp') {
+      return options?.pathMetadata === false
+        ? new Response('not found', { status: 404 })
+        : jsonResponse(resourceMetadata);
+    }
+    if (href === 'https://mcp.example.com/.well-known/oauth-protected-resource') {
+      return options?.rootMetadata === false
+        ? new Response('<html>not found</html>', { status: 404 })
+        : jsonResponse(resourceMetadata);
+    }
+    if (href === 'https://auth.example.com/.well-known/oauth-authorization-server') {
+      return jsonResponse({
+        issuer: 'https://auth.example.com',
+        authorization_endpoint: 'https://auth.example.com/oauth/authorize',
+        token_endpoint: 'https://auth.example.com/oauth/token',
+        registration_endpoint: 'https://auth.example.com/oauth/register',
+        token_endpoint_auth_methods_supported: options?.tokenEndpointAuthMethods ?? ['none'],
+        code_challenge_methods_supported: ['S256'],
+        scopes_supported: ['mcp:tools'],
+      });
+    }
+    return new Response('not found', { status: 404 });
+  }) as typeof fetch;
+}
+
+describe('installConnectorFromMcpUrl auth schema', () => {
+  it('offers optional OAuth beside anonymous access when the server advertises it', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+    ] as Awaited<ReturnType<typeof dns.lookup>>);
+    globalThis.fetch = mockOptionalOAuthServer();
+    const organization = await createTestOrganization();
+
+    const installed = await installConnectorFromMcpUrl({
+      organizationId: organization.id,
+      mcpUrl: ANONYMOUS_TIER_MCP_URL,
+    });
+
+    expect(installed.authSchema).toEqual({
+      methods: [
+        expect.objectContaining({
+          type: 'oauth',
+          provider: 'mcp.optional-oauth',
+          required: false,
+          requiredScopes: ['mcp:tools'],
+          authorizationUrl: 'https://auth.example.com/oauth/authorize',
+          tokenUrl: 'https://auth.example.com/oauth/token',
+          tokenEndpointAuthMethod: 'none',
+          usePkce: true,
+          resource: ANONYMOUS_TIER_MCP_URL,
+        }),
+        { type: 'none' },
+      ],
+    });
+    expect(installed.mcpOAuth?.registrationUrl).toBe('https://auth.example.com/oauth/register');
+  });
+
+  it('keeps OAuth required when initialize demands it', async () => {
+    const upstreamUrl = 'https://mcp.example.com/locked';
+    const resourceMetadataUrl = 'https://mcp.example.com/.well-known/oauth-protected-resource/locked';
+    vi.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+    ] as Awaited<ReturnType<typeof dns.lookup>>);
+    globalThis.fetch = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href === upstreamUrl) {
+        return new Response('{}', {
+          status: 401,
+          headers: { 'WWW-Authenticate': `Bearer resource_metadata="${resourceMetadataUrl}"` },
+        });
+      }
+      if (href === resourceMetadataUrl) {
+        return jsonResponse({
+          resource: upstreamUrl,
+          authorization_servers: ['https://auth.example.com'],
+          scopes_supported: ['mcp:tools'],
+        });
+      }
+      if (href === 'https://auth.example.com/.well-known/oauth-authorization-server') {
+        return jsonResponse({
+          issuer: 'https://auth.example.com',
+          authorization_endpoint: 'https://auth.example.com/oauth/authorize',
+          token_endpoint: 'https://auth.example.com/oauth/token',
+          token_endpoint_auth_methods_supported: ['none'],
+          code_challenge_methods_supported: ['S256'],
+        });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch;
+    const organization = await createTestOrganization();
+
+    const installed = await installConnectorFromMcpUrl({
+      organizationId: organization.id,
+      mcpUrl: upstreamUrl,
+    });
+
+    expect(installed.authSchema).toEqual({
+      methods: [expect.objectContaining({ type: 'oauth', required: true })],
+    });
+  });
+});
 
 describe('probeMcpServer capability discovery', () => {
   it('blocks a hostname that resolves to loopback before opening an upstream socket', async () => {
@@ -135,6 +283,132 @@ describe('probeMcpServer capability discovery', () => {
         codeChallengeMethodsSupported: ['S256'],
       },
     });
+  });
+
+  it('discovers advertised OAuth on a server that also answers anonymously', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+    ] as Awaited<ReturnType<typeof dns.lookup>>);
+    globalThis.fetch = mockOptionalOAuthServer();
+
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
+
+    expect(result.anonymousAccess).toBe(true);
+    expect(result.tools.map((tool) => tool.name)).toEqual(['web_search']);
+    expect(result.oauth).toMatchObject({
+      resource: ANONYMOUS_TIER_MCP_URL,
+      resourceMetadataUrl: 'https://mcp.example.com/.well-known/oauth-protected-resource/mcp',
+      authorizationServer: 'https://auth.example.com',
+      authorizationUrl: 'https://auth.example.com/oauth/authorize',
+      tokenUrl: 'https://auth.example.com/oauth/token',
+      registrationUrl: 'https://auth.example.com/oauth/register',
+      scopesSupported: ['mcp:tools'],
+    });
+  });
+
+  it('falls back to the root protected-resource metadata URL', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+    ] as Awaited<ReturnType<typeof dns.lookup>>);
+    globalThis.fetch = mockOptionalOAuthServer({ pathMetadata: false });
+
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
+
+    expect(result.oauth?.resourceMetadataUrl).toBe(
+      'https://mcp.example.com/.well-known/oauth-protected-resource'
+    );
+  });
+
+  it.each(['/mcp/', '/mcp?tenant=test', '/?tenant=test'])(
+    'preserves the resource path and query in discovery for %s',
+    async (suffix) => {
+      const upstreamUrl = `https://mcp.example.com${suffix}`;
+      const metadataSuffix = suffix.startsWith('/?') ? suffix.slice(1) : suffix;
+      const metadataUrl = `https://mcp.example.com/.well-known/oauth-protected-resource${metadataSuffix}`;
+      const optionalServer = mockOptionalOAuthServer({ resource: upstreamUrl });
+      globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url) === upstreamUrl) return optionalServer(ANONYMOUS_TIER_MCP_URL, init);
+        if (String(url) === metadataUrl) {
+          return optionalServer('https://mcp.example.com/.well-known/oauth-protected-resource/mcp', init);
+        }
+        if (new URL(String(url)).hostname === 'mcp.example.com') {
+          return new Response('not found', { status: 404 });
+        }
+        return optionalServer(url, init);
+      }) as typeof fetch;
+
+      const result = await probeMcpServer(upstreamUrl);
+
+      expect(result.oauth?.resourceMetadataUrl).toBe(metadataUrl);
+      expect(result.anonymousAccess).toBe(true);
+    }
+  );
+
+  it('keeps anonymous access when advertised OAuth has no supported client authentication', async () => {
+    globalThis.fetch = mockOptionalOAuthServer({ tokenEndpointAuthMethods: ['private_key_jwt'] });
+
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
+
+    expect(result.oauth).toBeUndefined();
+    expect(result.anonymousAccess).toBe(true);
+    expect(result.tools.map((tool) => tool.name)).toEqual(['web_search']);
+  });
+
+  it('keeps an anonymous server without protected-resource metadata OAuth-free', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+    ] as Awaited<ReturnType<typeof dns.lookup>>);
+    globalThis.fetch = mockOptionalOAuthServer({ pathMetadata: false, rootMetadata: false });
+
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
+
+    expect(result.anonymousAccess).toBe(true);
+    expect(result.oauth).toBeUndefined();
+    expect(result.tools.map((tool) => tool.name)).toEqual(['web_search']);
+  });
+
+  it('falls back to root metadata when a catch-all route returns HTML', async () => {
+    const optionalServer = mockOptionalOAuthServer();
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) =>
+      String(url) === 'https://mcp.example.com/.well-known/oauth-protected-resource/mcp'
+        ? new Response('<html>home</html>', { headers: { 'Content-Type': 'text/html' } })
+        : optionalServer(url, init)) as typeof fetch;
+
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
+
+    expect(result.oauth?.resourceMetadataUrl).toBe(
+      'https://mcp.example.com/.well-known/oauth-protected-resource'
+    );
+  });
+
+  it('finds well-known metadata for a 401 challenge that omits resource_metadata', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+    ] as Awaited<ReturnType<typeof dns.lookup>>);
+    const optionalServer = mockOptionalOAuthServer();
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) =>
+      String(url) === ANONYMOUS_TIER_MCP_URL
+        ? new Response('{}', { status: 401, headers: { 'WWW-Authenticate': 'Bearer' } })
+        : optionalServer(url, init)) as typeof fetch;
+
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
+
+    expect(result.anonymousAccess).toBe(false);
+    expect(result.oauth?.resourceMetadataUrl).toBe(
+      'https://mcp.example.com/.well-known/oauth-protected-resource/mcp'
+    );
+  });
+
+  it('ignores advertised metadata whose resource names a different server', async () => {
+    vi.spyOn(dns, 'lookup').mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+    ] as Awaited<ReturnType<typeof dns.lookup>>);
+    globalThis.fetch = mockOptionalOAuthServer({ resource: 'https://other.example.com/mcp' });
+
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
+
+    expect(result.oauth).toBeUndefined();
+    expect(result.tools.map((tool) => tool.name)).toEqual(['web_search']);
   });
 
   it('accepts SSE JSON-RPC responses and an empty 202 initialized notification', async () => {
@@ -478,6 +752,120 @@ describe('discoverTools capability discovery', () => {
     expect(first.map((tool) => tool.originalName)).toEqual(['account_session_1']);
     expect(second.map((tool) => tool.originalName)).toEqual(['account_session_2']);
     expect(issuedSessions).toBe(2);
+  });
+});
+
+describe('optional MCP OAuth connections', () => {
+  it('lists tools anonymously and with the signed-in bearer per connection', async () => {
+    const sql = getTestDb();
+    const organization = await createTestOrganization();
+    const owner = await createTestUser({ email: `optional-oauth-${organization.id}@example.com` });
+    await addUserToOrganization(owner.id, organization.id, 'owner');
+    const connectorKey = 'mcp.optional-oauth';
+    await createTestConnectorDefinition({
+      key: connectorKey,
+      name: 'Optional OAuth MCP',
+      organization_id: organization.id,
+      auth_schema: {
+        methods: [
+          {
+            type: 'oauth',
+            provider: connectorKey,
+            required: false,
+            requiredScopes: ['mcp:tools'],
+            authorizationUrl: 'https://auth.example.com/oauth/authorize',
+            tokenUrl: 'https://auth.example.com/oauth/token',
+            tokenEndpointAuthMethod: 'none',
+            usePkce: true,
+            clientIdKey: 'MCP_CLIENT_ID',
+            clientSecretKey: 'MCP_CLIENT_SECRET',
+            resource: ANONYMOUS_TIER_MCP_URL,
+          },
+          { type: 'none' },
+        ],
+      },
+    });
+    const anonymous = await createTestConnection({
+      organization_id: organization.id,
+      connector_key: connectorKey,
+      createDefaultFeed: false,
+    });
+    const signedIn = await createTestConnection({
+      organization_id: organization.id,
+      connector_key: connectorKey,
+      createDefaultFeed: false,
+      visibility: 'private',
+    });
+    const appProfile = await createAuthProfile({
+      organizationId: organization.id,
+      connectorKey,
+      displayName: 'Optional OAuth App',
+      profileKind: 'oauth_app',
+      provider: connectorKey,
+      authData: { MCP_CLIENT_ID: 'dynamic-client-id' },
+    });
+    const accountId = `acct_optional_${organization.id}`;
+    await sql`
+      INSERT INTO "account" (
+        id, "accountId", "providerId", "userId",
+        "accessToken", "accessTokenExpiresAt", scope, "createdAt", "updatedAt"
+      ) VALUES (
+        ${accountId}, ${accountId}, ${connectorKey}, ${owner.id},
+        ${'signed-in-token'}, ${new Date(Date.now() + 86_400_000).toISOString()},
+        'mcp:tools', NOW(), NOW()
+      )
+    `;
+    const accountProfile = await createAuthProfile({
+      organizationId: organization.id,
+      connectorKey,
+      displayName: 'Optional OAuth Account',
+      profileKind: 'oauth_account',
+      provider: connectorKey,
+      accountId,
+    });
+    await sql`
+      UPDATE connections
+      SET auth_profile_id = ${accountProfile.id}, app_auth_profile_id = ${appProfile.id}
+      WHERE id = ${signedIn.id}
+    `;
+
+    const authorizations: Array<string | null> = [];
+    globalThis.fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const authorization = new Headers(init?.headers).get('authorization');
+      authorizations.push(authorization);
+      if (body.method === 'initialize') {
+        return jsonResponse(
+          {
+            jsonrpc: '2.0',
+            id: 0,
+            result: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: { tools: {} } },
+          },
+          authorization ? 'signed-in-session' : 'anon-session'
+        );
+      }
+      if (body.method === 'tools/list') {
+        const names = authorization === 'Bearer signed-in-token'
+          ? ['web_search', 'deep_research']
+          : ['web_search'];
+        return jsonResponse({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { tools: names.map((name) => ({ name, inputSchema: { type: 'object' } })) },
+        });
+      }
+      return new Response(null, { status: 202 });
+    }) as typeof fetch;
+
+    const config = { upstream_url: ANONYMOUS_TIER_MCP_URL, tool_prefix: 'optional' };
+    const anonymousTools = await discoverTools(connectorKey, config, organization.id, anonymous.id);
+    const anonymousAuthorizations = authorizations.splice(0);
+    const signedInTools = await discoverTools(connectorKey, config, organization.id, signedIn.id);
+
+    expect(anonymousTools.map((tool) => tool.originalName)).toEqual(['web_search']);
+    expect(anonymousAuthorizations.every((value) => value === null)).toBe(true);
+    expect(signedInTools.map((tool) => tool.originalName)).toEqual(['web_search', 'deep_research']);
+    expect(authorizations.every((value) => value === 'Bearer signed-in-token')).toBe(true);
   });
 });
 

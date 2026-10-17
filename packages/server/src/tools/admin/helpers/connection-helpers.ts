@@ -8,6 +8,8 @@ import { findLiveBrowserProfile, type LiveBrowserProfileParams } from '../../../
 import { getScopedConnectorDefinition } from '../../../catalog/connector-definitions';
 import { oauthAccountOwnershipError } from '../../../authz/oauth-account-ownership';
 import { getDb } from '../../../db/client';
+import { getErrorMessage } from '@lobu/core';
+import logger from '../../../utils/logger';
 import {
   type AuthProfileKind,
   type AuthProfileRow,
@@ -1061,6 +1063,16 @@ export async function maybeUpsertAuthAfterInstall(
       metadata: oauthMetadata,
       redirectUris: [redirectUri],
       clientName: `Lobu - ${installed.name}`,
+    }).catch((error) => {
+      if (!getAuthMethods(installed.authSchema).some((method) => method.type === 'none')) {
+        throw error;
+      }
+      // Optional sign-in setup must not prevent an otherwise usable anonymous install.
+      logger.warn(
+        { connector_key: installed.connectorKey, error: getErrorMessage(error) },
+        'Optional MCP OAuth registration failed; configure an OAuth app or retry installation to sign in'
+      );
+      return null;
     });
     if (!registration) return;
 

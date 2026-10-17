@@ -299,13 +299,14 @@ export async function installConnectorFromMcpUrl(params: {
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "_")
 		.replace(/^_+|_+$/g, "");
+	// Keep anonymous access selectable when discovery did not require credentials.
 	const authSchema = probed.oauth
 		? {
 				methods: [
 					{
 						type: "oauth",
 						provider: connectorKey,
-						required: true,
+						required: !probed.anonymousAccess,
 						requiredScopes: getMcpOAuthRequestedScopes(probed.oauth),
 						authorizationUrl: probed.oauth.authorizationUrl,
 						tokenUrl: probed.oauth.tokenUrl,
@@ -322,6 +323,7 @@ export async function installConnectorFromMcpUrl(params: {
 							? "Lobu registers the OAuth client automatically; connect an account to continue."
 							: "Configure an OAuth client for this MCP server, then connect an account.",
 					},
+					...(probed.anonymousAccess ? [{ type: "none" }] : []),
 				],
 			}
 		: null;
