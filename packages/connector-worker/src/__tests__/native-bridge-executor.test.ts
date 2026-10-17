@@ -108,6 +108,38 @@ describe('native bridge run forwarding', () => {
     ]);
   });
 
+  test('never flips an executed run to failed when success delivery is exhausted', async () => {
+    const client = fakeClient() as { calls: Record<string, unknown[]>; id: string };
+    client.completeAction = async (value: unknown) => {
+      client.calls.completeAction.push(value);
+      throw new Error('gateway unreachable');
+    };
+    const bridge = {
+      run: async () => ({}),
+    } as never;
+
+    const result = await executeNativeBridgeRun(client as never, bridge, {
+      run_id: 10,
+      run_type: 'action',
+      action_key: 'open',
+      action_input: {},
+    } as never);
+
+    // The execution succeeded; its success terminal was selected but both
+    // delivery attempts failed. The outcome is immutable: no failed payload
+    // may be emitted (that would finalize an executed action as failed, drop
+    // its output, and encourage duplicate execution).
+    expect(result.error).toBeDefined();
+    expect(client.calls.completeAction).toHaveLength(2);
+    for (const call of client.calls.completeAction) {
+      expect(call).toEqual(expect.objectContaining({ run_id: 10, status: 'success' }));
+      expect(call).not.toHaveProperty('error_message');
+    }
+    expect(client.calls.complete).toEqual([]);
+    expect(client.calls.completeAuth).toEqual([]);
+    expect(client.calls.completeAutomation).toEqual([]);
+  });
+
   test('retries terminal delivery after the first completion request fails', async () => {
     const client = fakeClient() as { calls: Record<string, unknown[]>; id: string };
     let completionAttempts = 0;

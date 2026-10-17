@@ -127,10 +127,19 @@ export async function executeNativeBridgeRun(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log.info(`[native-bridge] Run ${runId} failed:`, message);
-    try {
-      await reportTerminalFailure(client, job, message, 'error_message');
-    } catch (completionError) {
-      log.info(`[native-bridge] Terminal report for run ${runId} failed:`, completionError);
+    if (terminalReporter === undefined) {
+      // No terminal was selected yet (bridge, stream, or timeout failure):
+      // report it under the run's own type.
+      try {
+        await reportTerminalFailure(client, job, message, 'error_message');
+      } catch (completionError) {
+        log.info(`[native-bridge] Terminal report for run ${runId} failed:`, completionError);
+      }
+    } else {
+      // A success terminal was already selected but its delivery budget is
+      // exhausted. Its outcome is immutable: never flip an executed run to
+      // failed and drop its output — leave it for stale-run handling.
+      log.info(`[native-bridge] Terminal report for run ${runId} failed:`, message);
     }
     return { itemsCollected, error: message };
   } finally {
