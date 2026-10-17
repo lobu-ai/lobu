@@ -192,6 +192,7 @@ export function createSourceReadBridge(
         cleanupError = { error };
         if (!result.ok) logger.warn({ feedId: params.feedId, error: getErrorMessage(error) }, 'Browser cleanup failed after source work failed');
       }
+      let status: 'completed' | 'failed' | 'timeout' = signal.aborted ? 'timeout' : 'failed';
       try {
         // Decide the result once. Cancellation never carries recovery authority,
         // and cleanup failure rejects successful work without hiding a read error.
@@ -200,11 +201,10 @@ export function createSourceReadBridge(
         if (cleanupError && result.ok) throw cleanupError.error;
         if (signal.aborted) throw sourceReadDeadlineError(params.feedId);
         if (!result.ok) throw result.error;
+        status = 'completed';
         return result.value;
       } finally {
-        if (runId !== undefined) await scrubSourceReadRun(runId, params.scope.organizationId, feed.feed_key,
-          signal.aborted ? 'timeout'
-            : !result.ok || interruption || cleanupError ? 'failed' : 'completed');
+        if (runId !== undefined) await scrubSourceReadRun(runId, params.scope.organizationId, feed.feed_key, status);
       }
     },
   };

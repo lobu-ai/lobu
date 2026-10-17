@@ -69,6 +69,8 @@ function expression(command: string, args: RecordValue = {}): string {
 
 async function page(browser: ChromeActionDispatcher, tabId: number, command: string, args: RecordValue = {}): Promise<RecordValue> {
 	const output = await browser.dispatch("evaluate", { tab_id: tabId, expression: expression(command, args), allowed_origins: ORIGINS });
+	// Only the source-read bridge throws a typed interruption; operation and
+	// worker dispatchers return the marker as a completed value.
 	const interruption = object(object(output.value).__lobu_browser_interruption);
 	if (interruption.reason) throw new Error(String(interruption.message));
 	if (!output.value || typeof output.value !== "object") throw new Error("TikTok page returned no data");
