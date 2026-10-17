@@ -26,9 +26,12 @@ interface EntityCandidate {
 
 // Per-process cache (60s TTL); concurrent events in the same org share a fetch.
 // This only reduces duplicate reads; correctness does not require a shared cache.
+// Capped at MAX_CACHED_ORGS entries: without a cap, one entry per org-id ever
+// seen (including ad-hoc/typo'd ids that never repeat) leaks memory indefinitely.
 const entityCache = new Map<string, { entities: EntityCandidate[]; ts: number }>();
 const inflightFetches = new Map<string, Promise<EntityCandidate[]>>();
 const CACHE_TTL_MS = 60_000;
+const MAX_CACHED_ORGS = 100;
 const MAX_CONTENT_LENGTH = 5_000;
 const MAX_AUTO_LINKS = 20;
 const MIN_NAME_LENGTH = 3;
@@ -60,6 +63,12 @@ async function getOrgEntities(organizationId: string): Promise<EntityCandidate[]
       }));
 
       entityCache.set(organizationId, { entities, ts: Date.now() });
+      // Evict the oldest entry when the cap is exceeded. Insertion-ordered
+      // Map: first key is the oldest.
+      if (entityCache.size > MAX_CACHED_ORGS) {
+        const oldest = entityCache.keys().next();
+        if (!oldest.done) entityCache.delete(oldest.value);
+      }
       return entities;
     } finally {
       inflightFetches.delete(organizationId);

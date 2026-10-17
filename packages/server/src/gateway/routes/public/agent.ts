@@ -43,6 +43,7 @@ import type { ArtifactStore } from "../../files/artifact-store.js";
 import type { QueueProducer } from "../../infrastructure/queue/queue-producer.js";
 import type { PlatformRegistry } from "../../platform.js";
 import {
+  buildAutomationRunConversationId,
   parseAutomationRunConversationId,
   verifyAutomationRunIntent,
 } from "../../permissions/automation-run-intent.js";
@@ -929,12 +930,21 @@ export function createAgentApi(config: AgentApiConfig): Hono {
     // both derive from this conversationId. Injecting `_<org>_` mid-id splits
     // `automation_<id>` from `run_<id>`, breaking automation→worker dispatch (caught
     // by the sdk-e2e gate). Keep the prod-proven shape for the automation path.
-    const conversationId = buildApiConversationId({
-      agentId,
-      userId,
-      organizationId: automationIntent ? undefined : tokenOrganizationId,
-      threadId: effectiveThread || undefined,
-    });
+    // The automation id is derived by buildAutomationRunConversationId — the
+    // one function that owns this shared key — rather than re-templating the
+    // userId/thread halves above (which remain for channelId derivation).
+    const conversationId = automationIntent
+      ? buildAutomationRunConversationId(
+          agentId,
+          automationIntent.automationId,
+          automationIntent.runId
+        )
+      : buildApiConversationId({
+          agentId,
+          userId,
+          organizationId: tokenOrganizationId,
+          threadId: effectiveThread || undefined,
+        });
     // Validate the packed id, not individual request fields: a caller can place
     // `_automation_<id>_run_<id>` across userId/thread boundaries or entirely
     // inside either field. Only the verified internal intent may create the
