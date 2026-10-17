@@ -1110,7 +1110,7 @@ describe('compiled browser source reads', () => {
       await release;
     });
     const pid = await acquired;
-    const finishing = finishSourceBrowser(orgId, runId, true, true);
+    const finishing = finishSourceBrowser(orgId, runId, 'retained');
     try {
       await expect.poll(async () => (await sql`SELECT EXISTS (
         SELECT 1 FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))

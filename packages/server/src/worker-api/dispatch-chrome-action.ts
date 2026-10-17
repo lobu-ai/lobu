@@ -21,7 +21,7 @@
  */
 
 import { browserPageInterruption, type BrowserInterruptionReason } from '@lobu/core';
-import { BROWSER_RECOVERY_KEY, browserRecoveryControl, saveSourceBrowserTab, sourceBrowserLease } from '../lib/browser-recovery';
+import { browserAccountHeldByOtherRun, browserRecoveryControl, saveSourceBrowserTab, sourceBrowserLease } from '../lib/browser-recovery';
 import { BROWSER_VERIFY_OPERATION, constrainBrowserInput } from '@lobu/connector-sdk';
 import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, BROWSER_EXTENSION_UPDATE_REQUIRED, browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
 import type { DispatchChromeActionRequest } from '@lobu/core/contracts/worker/protocol';
@@ -804,15 +804,11 @@ export async function dispatchChromeActionToExtension(params: {
     };
   }
 
-  if (browserResource.authProfileId) {
-    const [profile] = await sql`SELECT metadata FROM auth_profiles WHERE id = ${browserResource.authProfileId} AND organization_id = ${organizationId}`;
-    const held = profile?.metadata?.[BROWSER_RECOVERY_KEY];
-    if (held && Date.parse(held.expires_at) > Date.now() && held.run_id !== parentRunId) {
-      const message = 'This browser account is owned by another active source read or recovery.';
-      return { status: 'failed', interruption: { reason: 'recovery_unavailable', message }, error_message: message };
-    }
+  if (browserResource.authProfileId && await browserAccountHeldByOtherRun(organizationId, browserResource.authProfileId, parentRunId)) {
+    const message = 'This browser account is owned by another active source read or recovery.';
+    return { status: 'failed', interruption: { reason: 'recovery_unavailable', message }, error_message: message };
   }
-  const sourceLease = sourceRead ? await sourceBrowserLease(organizationId, parentRunId) : undefined;
+  let sourceLease = sourceRead ? await sourceBrowserLease(organizationId, parentRunId) : undefined;
   if (sourceLease && sourceLease.state !== 'reading') return { status: 'failed', error_message: 'This source read has ended.' };
   const probe = browserResource.requirement.accountProbe;
   const verifiedBinding = parent.run_metadata?.browser_verified as Record<string, unknown> | undefined;
@@ -886,6 +882,9 @@ export async function dispatchChromeActionToExtension(params: {
     await sql`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${sql.json({ browser_verified: {
       device_worker_id: browserResource.deviceWorkerId, auth_profile_id: browserResource.authProfileId, account_id: accountId,
     } })} WHERE id = ${parentRunId} AND organization_id = ${organizationId} AND status = 'running'`;
+    // The probe may have saved the first exact tab; reload so the source step
+    // below shares that target instead of opening another.
+    if (sourceLease) sourceLease = await sourceBrowserLease(organizationId, parentRunId);
   }
   if (actionKey === BROWSER_VERIFY_OPERATION) {
     if (parent.action_key !== BROWSER_VERIFY_OPERATION) return { status: 'failed', error_message: 'Browser verification requires its own authorized operation.' };
@@ -908,13 +907,12 @@ export async function dispatchChromeActionToExtension(params: {
     return { status: 'completed', output: { browser_ready: true, account_verified: !!probe } };
   }
 
-  const currentSourceLease = sourceRead ? await sourceBrowserLease(organizationId, parentRunId) : undefined;
   const operationInput: Record<string, unknown> = { ...scopedInput };
-  if (currentSourceLease?.tab && actionKey === 'navigate' && operationInput.new_tab === true) {
+  if (sourceLease?.tab && actionKey === 'navigate' && operationInput.new_tab === true) {
     // The account probe and source reader share ONE owned target. Never replace
     // a recovered page with about:blank or create another tab after a handoff.
-    if (operationInput.url === 'about:blank') return { status: 'completed', output: { tab_id: currentSourceLease.tab.tab_id, browser_tab: currentSourceLease.tab } };
-    operationInput.tab_id = currentSourceLease.tab.tab_id;
+    if (operationInput.url === 'about:blank') return { status: 'completed', output: { tab_id: sourceLease.tab.tab_id, browser_tab: sourceLease.tab } };
+    operationInput.tab_id = sourceLease.tab.tab_id;
     delete operationInput.new_tab;
   }
   delete operationInput.browser_recovery_control;
@@ -956,7 +954,7 @@ export async function dispatchChromeActionToExtension(params: {
         parentRunId,
         runMetadata: {
           browser_context: browserContext,
-          ...(currentSourceLease ? { browser_recovery_control: browserRecoveryControl(currentSourceLease, params.retainSourceTab ? 'retain' : 'read') } : {}),
+          ...(sourceLease ? { browser_recovery_control: browserRecoveryControl(sourceLease, params.retainSourceTab ? 'retain' : 'read') } : {}),
           source_attribution: parent.run_metadata?.source_attribution,
           [CONNECTOR_PARENT_RUN_METADATA_KEY]: parentRunId,
           ...(params.skipAccountProbe ? { [BROWSER_ACCOUNT_PROBE_METADATA_KEY]: true } : {}),

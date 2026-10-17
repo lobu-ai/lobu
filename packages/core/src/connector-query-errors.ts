@@ -62,7 +62,7 @@ export const TOOL_ERRORS: Record<ToolErrorCode, ToolErrorSpec> = {
   BROWSER_INTERRUPTED: {
     retryable: false,
     message:
-      "Browser reading was interrupted. Observe the retained tab or ask its owner for help.",
+      "Browser reading was interrupted; see interruption.reason for the next step.",
   },
   AUTH_INVALID: {
     retryable: false,
