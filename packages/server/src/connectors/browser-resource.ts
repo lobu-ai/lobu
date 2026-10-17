@@ -10,6 +10,9 @@ export const BROWSER_ACCOUNT_PROBE_METADATA_KEY = 'browser_account_probe';
 export function browserExtensionSupportsOrigins(version: string | null | undefined): boolean {
   return !!version && compareSemverish(version, '0.9.2') >= 0;
 }
+function browserExtensionSupportsRecovery(version: string | null | undefined): boolean {
+  return !!version && compareSemverish(version, '0.9.7') >= 0;
+}
 
 export function selectedBrowserRequirement(browser: unknown, authSchema: unknown, profileKind?: string | null, browserSelected = false, config?: Record<string, unknown> | null): ConnectorBrowserRequirement | null {
   const methods = (authSchema as { methods?: Array<{ type: string; mode?: string }> } | null)?.methods ?? [];
@@ -48,7 +51,7 @@ export async function connectionBrowserResource(organizationId: string, connecti
     profileDeviceId: row.profile_device_id as string | null, authProfileId: row.auth_profile_id as number | null,
     accountId: row.browser_account_id as string | null, online: row.online === true, status: row.status as string,
     supportsScopedOrigins: browserExtensionSupportsOrigins(row.app_version as string | null),
-    supportsRecovery: !!row.app_version && compareSemverish(row.app_version, '0.9.7') >= 0,
+    supportsRecovery: browserExtensionSupportsRecovery(row.app_version as string | null),
     profileStatus: row.profile_status as string | null,
     live: row.profile_kind === 'browser_session' && row.auth_data?.mode === 'live' };
 }

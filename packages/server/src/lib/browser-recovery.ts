@@ -7,6 +7,7 @@ import {
   connectionBrowserResource,
 } from "../connectors/browser-resource";
 import { getDb, type DbClient } from "../db/client";
+import { stableJson } from "../utils/insert-event";
 
 const BROWSER_RECOVERY_KEY = "browser_recovery";
 const TTL_MS = 5 * 60_000;
@@ -42,8 +43,9 @@ interface SourceBrowserLease {
 const recoveryUnavailable = (message: string) =>
   new BrowserInterruptionError("recovery_unavailable", message);
 export function sourceRecoveryHash(request: Record<string, unknown>): string {
-  // Call sites construct this fixed-key record; no source content or credentials are persisted.
-  return createHash("sha256").update(JSON.stringify(request)).digest("hex");
+  // Key order inside sort/window/match is caller-controlled, so hash a stable form.
+  // No source content or credentials are persisted.
+  return createHash("sha256").update(stableJson(request)).digest("hex");
 }
 function matchesBrowserResource(
   lease: SourceBrowserLease,

@@ -22,6 +22,7 @@ describe("TOOL_ERRORS catalog", () => {
   test("permanent codes are not retryable", () => {
     for (const code of [
       "AUTH_MISSING",
+      "BROWSER_INTERRUPTED",
       "AUTH_INVALID",
       "NOT_FOUND",
       "VALIDATION",

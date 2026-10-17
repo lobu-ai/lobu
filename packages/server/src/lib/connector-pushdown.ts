@@ -577,7 +577,6 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     sourceSubscriptionScopeKey: sourceSubscription
       ? sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version) : undefined,
   }, controller.signal);
-  let status: 'completed' | 'failed' | 'timeout' = 'failed';
   try {
     await browser.prepare();
     const result = await executeCompiledConnector({
@@ -621,7 +620,6 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     });
     await browser.settle('completed');
     if (browser.interruption) throw browser.interruption;
-    status = 'completed';
     return page;
   } catch (error) {
     // The isolate reports signal termination as a crash; this controller owns
@@ -640,8 +638,6 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
     }
     throw error;
   } finally {
-    if (controller.signal.aborted) status = 'timeout';
-    await browser.settle(status);
     controller.abort();
     clearTimeout(timer);
     p.signal?.removeEventListener('abort', onAbort);

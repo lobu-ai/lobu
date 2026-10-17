@@ -63,7 +63,9 @@ const SOURCE = `
           try {
             const page = await dispatcher.dispatch('evaluate', { tab_id: tab.tab_id, expression: ctx.query });
             return { rows: page.rows, hasMore: false };
-          } finally { await dispatcher.dispatch('close_tab', { tab_id: tab.tab_id }); }
+          } finally {
+            if (!ctx.config.synthetic_host_cleanup) await dispatcher.dispatch('close_tab', { tab_id: tab.tab_id });
+          }
         }
         const page = await dispatcher.dispatch('evaluate', { expression: ctx.query });
         return { rows: page.rows, hasMore: false };
@@ -1183,6 +1185,29 @@ describe('compiled browser source reads', () => {
     const id = (await interrupted).results[0].interruption.recovery.recovery_id;
     expect((await recoveryRead(id, 'plain')).results[0]).toMatchObject({ ok: false, retryable: false });
     const resumed = recoveryRead(id); await serveRecovery(resumed); expect((await resumed).results[0].ok).toBe(true);
+  });
+  it('recovery accepts the same source sort with reordered JSON keys', async () => {
+    await recoverySetup();
+    const read = (sort: { column: string; order: 'desc' }, recovery_id?: string) => manageFeeds({
+      action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2, sort, recovery_id }], timeout_ms: 5000,
+    }, {} as Env, recoveryContext()) as Promise<Record<string, any>>;
+    const interrupted = read({ column: 'id', order: 'desc' });
+    await serveRecovery(interrupted, { challenge: 'late' });
+    const resumed = read({ order: 'desc', column: 'id' }, (await interrupted).results[0].interruption.recovery.recovery_id);
+    await serveRecovery(resumed);
+    expect((await resumed).results[0]).toMatchObject({ ok: true, rows: ROWS });
+  });
+  it('records final account verification failure when the host cleans up the source tab', async () => {
+    await recoverySetup();
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET config = config || '{"synthetic_host_cleanup":true}'::jsonb WHERE id = ${feedId}`;
+    const reading = recoveryRead();
+    await serveRecovery(reading, { changedAccount: true });
+    expect((await reading).results[0]).toMatchObject({ ok: false, interruption: { reason: 'account_mismatch' } });
+    expect((await reading).results[0].rows).toBeUndefined();
+    expect(await sql`SELECT status, action_output, action_input->>'scrubbed' AS scrubbed FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)
+      .toEqual([{ status: 'failed', action_output: null, scrubbed: 'true' }]);
   });
   it('recovery success requires the expected account after the source returned rows', async () => {
     await recoverySetup(); const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });

@@ -11,12 +11,7 @@ import type { AuthzScope } from '../authz/scope';
 import { getDb } from '../db/client';
 import { createConnectorOperationRun } from '../runs/queue-service';
 import { dispatchChromeActionToExtension } from '../worker-api/dispatch-chrome-action';
-import {
-  DEVICE_FEED_READ_ACTION_KEY,
-  SOURCE_FEED_READ_METADATA_KEY,
-  SOURCE_FEED_SUBSCRIPTION_METADATA_KEY,
-  SOURCE_FEED_SCOPE_METADATA_KEY,
-} from './device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, SOURCE_FEED_SCOPE_METADATA_KEY } from './device-feed-read-protocol';
 import { scrubSourceReadRun } from './source-read-run';
 
 export function sourceReadDeadlineError(feedId: number): Error & { exitReason: 'timeout' } {
@@ -70,35 +65,20 @@ export function createSourceReadBridge(
   const dispatches = new Set<Promise<unknown>>();
   const createParent = async (retainOnInterruption = false): Promise<number> => {
     const actor = await resolveActingPrincipal(sql, {
-      organizationId: params.scope.organizationId,
-      userId: params.scope.principal,
-      agentId: params.scope.agentId,
-      sessionAutomationId: params.automationId,
+      organizationId: params.scope.organizationId, userId: params.scope.principal,
+      agentId: params.scope.agentId, sessionAutomationId: params.automationId,
     });
-    if (!actor.ownerResolved)
-      throw new ToolError('PERMISSION', 'Source reader has no valid requesting principal.');
+    if (!actor.ownerResolved) throw new ToolError('PERMISSION', 'Source reader has no valid requesting principal.');
     return sql.begin(async (tx) => {
       const run = await createConnectorOperationRun({
-        organizationId: params.scope.organizationId,
-        connectionId: Number(feed.connection_id),
-        connectorKey: feed.connector_key,
-        operationKey: DEVICE_FEED_READ_ACTION_KEY,
-        operationInput: { feed_key: feed.feed_key },
-        approvalMode: 'inline',
-        policyPrincipalKind: actor.kind,
-        policyPrincipalId: actor.id,
-        createdByUserId: params.scope.principal,
-        automationId: params.automationId,
-        runMetadata: {
-          [SOURCE_FEED_READ_METADATA_KEY]: true,
-          ...(params.sourceSubscriptionScopeKey
-            ? {
-                [SOURCE_FEED_SUBSCRIPTION_METADATA_KEY]: true,
-                [SOURCE_FEED_SCOPE_METADATA_KEY]: params.sourceSubscriptionScopeKey,
-              }
-            : {}),
-        },
-        db: tx,
+        organizationId: params.scope.organizationId, connectionId: Number(feed.connection_id),
+        connectorKey: feed.connector_key, operationKey: DEVICE_FEED_READ_ACTION_KEY,
+        operationInput: { feed_key: feed.feed_key }, approvalMode: 'inline',
+        policyPrincipalKind: actor.kind, policyPrincipalId: actor.id,
+        createdByUserId: params.scope.principal, automationId: params.automationId,
+        runMetadata: { [SOURCE_FEED_READ_METADATA_KEY]: true,
+          ...(params.sourceSubscriptionScopeKey ? { [SOURCE_FEED_SUBSCRIPTION_METADATA_KEY]: true,
+            [SOURCE_FEED_SCOPE_METADATA_KEY]: params.sourceSubscriptionScopeKey } : {}) }, db: tx,
       });
       await tx`UPDATE runs SET feed_id = ${feed.id}, expires_at = ${new Date(params.deadlineAt)},
         connector_version = ${feed.pinned_version ?? feed.definition_version},
@@ -243,7 +223,9 @@ export function createSourceReadBridge(
           );
         }
       } finally {
-        await scrubSourceReadRun(runId, params.scope.organizationId, feed.feed_key, status);
+        // A read that ends interrupted is reported to its caller as a failure.
+        await scrubSourceReadRun(runId, params.scope.organizationId, feed.feed_key,
+          status === 'completed' && interruption ? 'failed' : status);
       }
     },
   };
