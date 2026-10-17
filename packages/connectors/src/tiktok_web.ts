@@ -26,10 +26,15 @@ export function normalizeTikTokPostUrl(value: unknown): string {
 	return `${ORIGIN}${url.pathname}`;
 }
 
+function hasPostIdentity(item: RecordValue): boolean {
+	const author = object(item.author);
+	return typeof item.id === "string" && /^[0-9]+$/.test(item.id) && typeof author.uniqueId === "string" && HANDLE.test(author.uniqueId);
+}
+
 export function normalizeTikTokPost(value: unknown): RecordValue {
 	const item = object(value);
 	const author = object(item.author);
-	if (typeof item.id !== "string" || !/^[0-9]+$/.test(item.id) || typeof author.uniqueId !== "string" || !HANDLE.test(author.uniqueId)) {
+	if (!hasPostIdentity(item)) {
 		throw new Error("TikTok returned a post without a valid source identity");
 	}
 	const video = object(item.video);
@@ -115,6 +120,10 @@ async function timelinePosts(browser: ChromeActionDispatcher, tabId: number, ses
 			const json = object(JSON.parse(r.body));
 			if (json.status_code !== 0 || (json.statusCode !== undefined && json.statusCode !== 0) || !Array.isArray(json.itemList) || typeof json.hasMore !== "boolean") throw new Error(`TikTok did not return a successful ${label} feed`);
 			for (const item of json.itemList) {
+				const record = object(item);
+				// Some recommendation ads use an advertiser label in uniqueId,
+				// not a creator handle. They cannot produce a canonical post URL.
+				if (feedKey === "for_you" && record.isAd === true && !hasPostIdentity(record)) continue;
 				const row = normalizeTikTokPost(item);
 				unique.set(row.origin_id, row);
 			}
@@ -205,14 +214,14 @@ async function readTikTokInbox(ctx: FeedReadContext): Promise<FeedReadResult> {
 
 export default class TikTokConnector extends ConnectorRuntime {
 	readonly definition: RuntimeConnectorDefinition = {
-		key: "tiktok.web", name: "TikTok", version: "1.1.7", faviconDomain: "tiktok.com",
+		key: "tiktok.web", name: "TikTok", version: "1.1.8", faviconDomain: "tiktok.com",
 		description: "Read TikTok through your signed-in paired browser, inspect post visuals, set likes, and prepare comments for human submission. Automations decide what to read and act on.",
 		browser: { origins: ORIGINS, authMethods: ["browser"], accountProbe: { url: ORIGIN, expression: expression("identity") } },
 		authSchema: { methods: [{ type: "browser", mode: "live" }] },
 		feeds: {
 			messages: { key: "messages", name: "Messages", description: "Read a recent page per conversation before older history, with sender, direction, source IDs, evidence revisions and timestamps. Cursors cover the initial conversation set; a changed set reports incomplete coverage and needs a fresh scan. Unsupported media is identified, not transcribed. No message is sent.", read: readTikTokInbox },
 			activity: { key: "activity", name: "Activity", description: "Read loaded TikTok activity including likes, comments, mentions and followers, with source IDs and links. Follow the returned cursor for older entries. Opening the activity panel may clear its unread badge.", read: readTikTokInbox },
-			for_you: { key: "for_you", name: "For You", description: "Initial personalized timeline snapshot. No history coverage or continuation; repeat reads can overlap.", read: readTikTokSnapshot },
+			for_you: { key: "for_you", name: "For You", description: "Initial personalized timeline snapshot. Ad units without canonical post identity are excluded. No history coverage or continuation; repeat reads can overlap.", read: readTikTokSnapshot },
 			following: { key: "following", name: "Following", description: "Read up to 30 distinct Following posts using TikTok's source continuation. Returns fewer only at the source end; stalled or budget-limited reads report an error. No complete history coverage or caller continuation; repeat reads can overlap.", read: readTikTokSnapshot },
 			search: { key: "search", name: "Search", description: "Browser search results for videos and photo posts. Use query when reading. Initial snapshot without continuation.", read: readTikTokSnapshot, configSchema: { type: "object", properties: { query: { type: "string", maxLength: 200 } }, additionalProperties: false } },
 		},
