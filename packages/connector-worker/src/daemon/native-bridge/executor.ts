@@ -19,6 +19,7 @@ export async function executeNativeBridgeRun(
 
   const runId = job.run_id;
   const requestId = randomUUID();
+  let currentOperation: ReturnType<typeof nativeOperation> | undefined;
   let itemsCollected = 0;
   let checkpoint = asRecord(job.checkpoint);
   let terminalDelivered = false;
@@ -81,7 +82,7 @@ export async function executeNativeBridgeRun(
   };
 
   try {
-    const currentOperation = nativeOperation(job);
+    currentOperation = nativeOperation(job);
     heartbeatInterval = setInterval(() => {
       void client.heartbeat(runId).catch((error) => {
         log.debug(`[native-bridge] Heartbeat for run ${runId} failed:`, error);
@@ -127,19 +128,28 @@ export async function executeNativeBridgeRun(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log.info(`[native-bridge] Run ${runId} failed:`, message);
-    if (terminalReporter === undefined) {
-      // No terminal was selected yet (bridge, stream, or timeout failure):
-      // report it under the run's own type.
+    if (terminalReporter !== undefined) {
+      // A success terminal was already selected but its delivery budget is
+      // exhausted. Its outcome is immutable: never flip an executed run to
+      // failed and drop its output — leave it for stale-run handling.
+      log.info(`[native-bridge] Terminal report for run ${runId} failed:`, message);
+    } else if (currentOperation === 'sync' || currentOperation === 'auth') {
+      // No terminal was selected yet and the run is a sync/auth: keep its
+      // own completion, preserving the bounded retry and partial progress.
+      const complete = currentOperation === 'sync' ? completeSync : completeAuth;
+      try {
+        await complete({}, message);
+      } catch (completionError) {
+        log.info(`[native-bridge] Terminal report for run ${runId} failed:`, completionError);
+      }
+    } else {
+      // No terminal was selected yet (bridge, stream, or timeout failure on
+      // any other run shape): report it under the run's own type.
       try {
         await reportTerminalFailure(client, job, message, 'error_message');
       } catch (completionError) {
         log.info(`[native-bridge] Terminal report for run ${runId} failed:`, completionError);
       }
-    } else {
-      // A success terminal was already selected but its delivery budget is
-      // exhausted. Its outcome is immutable: never flip an executed run to
-      // failed and drop its output — leave it for stale-run handling.
-      log.info(`[native-bridge] Terminal report for run ${runId} failed:`, message);
     }
     return { itemsCollected, error: message };
   } finally {

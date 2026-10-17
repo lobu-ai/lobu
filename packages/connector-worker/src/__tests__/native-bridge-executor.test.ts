@@ -197,9 +197,73 @@ describe('native bridge run forwarding', () => {
 
     expect(result.error).toBe('stream delivery failed');
     expect(client.calls.complete).toEqual([
-      expect.objectContaining({ run_id: 11, status: 'failed', error_message: 'stream delivery failed', items_collected: 0 }),
+      expect.objectContaining({ run_id: 11, status: 'failed', items_collected: 1 }),
     ]);
     expect((client.calls.complete[0] as Record<string, unknown>).checkpoint).toBeUndefined();
+  });
+
+  test('retries a failed sync terminal and preserves partial progress', async () => {
+    const client = fakeClient() as {
+      calls: Record<string, unknown[]>;
+      id: string;
+      stream: (value: unknown) => Promise<void>;
+    };
+    let completionAttempts = 0;
+    client.complete = async (value: unknown) => {
+      completionAttempts += 1;
+      client.calls.complete.push(value);
+      if (completionAttempts === 1) throw new Error('terminal delivery failed');
+    };
+    const bridge = {
+      run: async (options: { operation: string; onStream?: (payload: Record<string, unknown>, sequence: number) => Promise<void> }) => {
+        expect(options.operation).toBe('sync');
+        await options.onStream?.({ items: [item('a')] }, 1);
+        throw new Error('bridge exploded');
+      },
+    } as never;
+
+    const result = await executeNativeBridgeRun(client as never, bridge, {
+      run_id: 13,
+      run_type: 'sync',
+      connector_key: 'apple.files',
+    } as never);
+
+    expect(result.error).toBe('bridge exploded');
+    expect(completionAttempts).toBe(2);
+    expect(client.calls.complete).toHaveLength(2);
+    expect(client.calls.complete[0]).toEqual(client.calls.complete[1]);
+    expect(client.calls.complete[1]).toEqual(
+      expect.objectContaining({ run_id: 13, status: 'failed', error_message: 'bridge exploded', items_collected: 1 }),
+    );
+  });
+
+  test('retries a failed auth terminal', async () => {
+    const client = fakeClient() as { calls: Record<string, unknown[]>; id: string };
+    let completionAttempts = 0;
+    client.completeAuth = async (value: unknown) => {
+      completionAttempts += 1;
+      client.calls.completeAuth.push(value);
+      if (completionAttempts === 1) throw new Error('terminal delivery failed');
+    };
+    const bridge = {
+      run: async () => {
+        throw new Error('app EOF');
+      },
+    } as never;
+
+    const result = await executeNativeBridgeRun(client as never, bridge, {
+      run_id: 14,
+      run_type: 'auth',
+      connector_key: 'apple.files',
+    } as never);
+
+    expect(result.error).toBe('app EOF');
+    expect(completionAttempts).toBe(2);
+    expect(client.calls.completeAuth).toHaveLength(2);
+    expect(client.calls.completeAuth[0]).toEqual(client.calls.completeAuth[1]);
+    expect(client.calls.completeAuth[1]).toEqual(
+      expect.objectContaining({ run_id: 14, status: 'failed', error_message: 'app EOF' }),
+    );
   });
 
   test('completes auth exactly once with bridge credentials and metadata', async () => {
