@@ -55,7 +55,7 @@ async function createMcpTestConnection(connectorKey: string): Promise<{
   return { connectionId: connection.id, organizationId: organization.id };
 }
 
-const OPTIONAL_OAUTH_UPSTREAM = 'https://mcp.example.com/mcp';
+const ANONYMOUS_TIER_MCP_URL = 'https://mcp.example.com/mcp';
 
 /**
  * A remote MCP server that answers initialize anonymously (a free tier) while
@@ -68,14 +68,14 @@ function mockOptionalOAuthServer(options?: {
   tokenEndpointAuthMethods?: string[];
 }): typeof fetch {
   const resourceMetadata = {
-    resource: options?.resource ?? OPTIONAL_OAUTH_UPSTREAM,
+    resource: options?.resource ?? ANONYMOUS_TIER_MCP_URL,
     authorization_servers: ['https://auth.example.com'],
     scopes_supported: ['mcp:tools'],
     bearer_methods_supported: ['header'],
   };
   return vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url);
-    if (href === OPTIONAL_OAUTH_UPSTREAM) {
+    if (href === ANONYMOUS_TIER_MCP_URL) {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.method === 'initialize') {
         return jsonResponse(
@@ -135,7 +135,7 @@ describe('installConnectorFromMcpUrl auth schema', () => {
 
     const installed = await installConnectorFromMcpUrl({
       organizationId: organization.id,
-      mcpUrl: OPTIONAL_OAUTH_UPSTREAM,
+      mcpUrl: ANONYMOUS_TIER_MCP_URL,
     });
 
     expect(installed.authSchema).toEqual({
@@ -149,7 +149,7 @@ describe('installConnectorFromMcpUrl auth schema', () => {
           tokenUrl: 'https://auth.example.com/oauth/token',
           tokenEndpointAuthMethod: 'none',
           usePkce: true,
-          resource: OPTIONAL_OAUTH_UPSTREAM,
+          resource: ANONYMOUS_TIER_MCP_URL,
         }),
         { type: 'none' },
       ],
@@ -291,12 +291,12 @@ describe('probeMcpServer capability discovery', () => {
     ] as Awaited<ReturnType<typeof dns.lookup>>);
     globalThis.fetch = mockOptionalOAuthServer();
 
-    const result = await probeMcpServer(OPTIONAL_OAUTH_UPSTREAM);
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
 
     expect(result.anonymousAccess).toBe(true);
     expect(result.tools.map((tool) => tool.name)).toEqual(['web_search']);
     expect(result.oauth).toMatchObject({
-      resource: OPTIONAL_OAUTH_UPSTREAM,
+      resource: ANONYMOUS_TIER_MCP_URL,
       resourceMetadataUrl: 'https://mcp.example.com/.well-known/oauth-protected-resource/mcp',
       authorizationServer: 'https://auth.example.com',
       authorizationUrl: 'https://auth.example.com/oauth/authorize',
@@ -312,7 +312,7 @@ describe('probeMcpServer capability discovery', () => {
     ] as Awaited<ReturnType<typeof dns.lookup>>);
     globalThis.fetch = mockOptionalOAuthServer({ pathMetadata: false });
 
-    const result = await probeMcpServer(OPTIONAL_OAUTH_UPSTREAM);
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
 
     expect(result.oauth?.resourceMetadataUrl).toBe(
       'https://mcp.example.com/.well-known/oauth-protected-resource'
@@ -327,7 +327,7 @@ describe('probeMcpServer capability discovery', () => {
       const metadataUrl = `https://mcp.example.com/.well-known/oauth-protected-resource${metadataSuffix}`;
       const optionalServer = mockOptionalOAuthServer({ resource: upstreamUrl });
       globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-        if (String(url) === upstreamUrl) return optionalServer(OPTIONAL_OAUTH_UPSTREAM, init);
+        if (String(url) === upstreamUrl) return optionalServer(ANONYMOUS_TIER_MCP_URL, init);
         if (String(url) === metadataUrl) {
           return optionalServer('https://mcp.example.com/.well-known/oauth-protected-resource/mcp', init);
         }
@@ -347,7 +347,7 @@ describe('probeMcpServer capability discovery', () => {
   it('keeps anonymous access when advertised OAuth has no supported client authentication', async () => {
     globalThis.fetch = mockOptionalOAuthServer({ tokenEndpointAuthMethods: ['private_key_jwt'] });
 
-    const result = await probeMcpServer(OPTIONAL_OAUTH_UPSTREAM);
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
 
     expect(result.oauth).toBeUndefined();
     expect(result.anonymousAccess).toBe(true);
@@ -360,7 +360,7 @@ describe('probeMcpServer capability discovery', () => {
     ] as Awaited<ReturnType<typeof dns.lookup>>);
     globalThis.fetch = mockOptionalOAuthServer({ pathMetadata: false, rootMetadata: false });
 
-    const result = await probeMcpServer(OPTIONAL_OAUTH_UPSTREAM);
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
 
     expect(result.anonymousAccess).toBe(true);
     expect(result.oauth).toBeUndefined();
@@ -374,7 +374,7 @@ describe('probeMcpServer capability discovery', () => {
         ? new Response('<html>home</html>', { headers: { 'Content-Type': 'text/html' } })
         : optionalServer(url, init)) as typeof fetch;
 
-    const result = await probeMcpServer(OPTIONAL_OAUTH_UPSTREAM);
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
 
     expect(result.oauth?.resourceMetadataUrl).toBe(
       'https://mcp.example.com/.well-known/oauth-protected-resource'
@@ -387,11 +387,11 @@ describe('probeMcpServer capability discovery', () => {
     ] as Awaited<ReturnType<typeof dns.lookup>>);
     const optionalServer = mockOptionalOAuthServer();
     globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) =>
-      String(url) === OPTIONAL_OAUTH_UPSTREAM
+      String(url) === ANONYMOUS_TIER_MCP_URL
         ? new Response('{}', { status: 401, headers: { 'WWW-Authenticate': 'Bearer' } })
         : optionalServer(url, init)) as typeof fetch;
 
-    const result = await probeMcpServer(OPTIONAL_OAUTH_UPSTREAM);
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
 
     expect(result.anonymousAccess).toBe(false);
     expect(result.oauth?.resourceMetadataUrl).toBe(
@@ -405,7 +405,7 @@ describe('probeMcpServer capability discovery', () => {
     ] as Awaited<ReturnType<typeof dns.lookup>>);
     globalThis.fetch = mockOptionalOAuthServer({ resource: 'https://other.example.com/mcp' });
 
-    const result = await probeMcpServer(OPTIONAL_OAUTH_UPSTREAM);
+    const result = await probeMcpServer(ANONYMOUS_TIER_MCP_URL);
 
     expect(result.oauth).toBeUndefined();
     expect(result.tools.map((tool) => tool.name)).toEqual(['web_search']);
@@ -779,7 +779,7 @@ describe('optional MCP OAuth connections', () => {
             usePkce: true,
             clientIdKey: 'MCP_CLIENT_ID',
             clientSecretKey: 'MCP_CLIENT_SECRET',
-            resource: OPTIONAL_OAUTH_UPSTREAM,
+            resource: ANONYMOUS_TIER_MCP_URL,
           },
           { type: 'none' },
         ],
@@ -857,7 +857,7 @@ describe('optional MCP OAuth connections', () => {
       return new Response(null, { status: 202 });
     }) as typeof fetch;
 
-    const config = { upstream_url: OPTIONAL_OAUTH_UPSTREAM, tool_prefix: 'optional' };
+    const config = { upstream_url: ANONYMOUS_TIER_MCP_URL, tool_prefix: 'optional' };
     const anonymousTools = await discoverTools(connectorKey, config, organization.id, anonymous.id);
     const anonymousAuthorizations = authorizations.splice(0);
     const signedInTools = await discoverTools(connectorKey, config, organization.id, signedIn.id);
