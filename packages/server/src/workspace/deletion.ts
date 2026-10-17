@@ -102,7 +102,7 @@ export async function requestWorkspaceDeletion(
           error_message = 'Workspace deletion requested',
           completed_at = now()
       WHERE organization_id = ${org.id}
-        AND status = 'pending'
+        AND status IN ('pending', 'awaiting_approval')
     `;
     // No session stays on the workspace: Better Auth's organization endpoints
     // fall back to the active organization (there is no session cookie cache,

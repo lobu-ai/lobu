@@ -720,10 +720,13 @@ export async function handleExecute(
 	}
 	// A device-pinned connection runs on one member's own machine
 	// (authz/device-access.ts). Block above still wins; `ask_owner` queues for
-	// the existing approval flow, which the device owner decides.
-	const deviceAccess = connection.device_worker_id === null
-		? "run"
-		: decideDeviceAccess(chatAccessOfToolContext(ctx));
+	// the existing approval flow, which the device owner decides. Native device
+	// execution (a device pin or a connector runtime) is what places work on
+	// the device, so only that gates the device-access decision — matching
+	// `executesOnDevice` below and the connector-pushdown admission check.
+	const deviceAccess = (connection.device_worker_id !== null || connection.connector_runtime !== null)
+		? decideDeviceAccess(chatAccessOfToolContext(ctx))
+		: "run";
 	if (deviceAccess === "refuse") {
 		return { error: DEVICE_ACCESS_REFUSED };
 	}

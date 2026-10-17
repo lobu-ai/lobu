@@ -624,7 +624,7 @@ async function getContentImpl(
         limit,
         offset,
       }));
-    } else if (args.sort_by === 'score' && entityId) {
+    } else if (!args.query && args.sort_by === 'score' && entityId) {
       logger.info('[get_content] Using sophisticated multi-signal score ranking');
 
       const filters: Parameters<typeof getNormalizedScoreContent>[3] = {

@@ -14,39 +14,9 @@ export interface Logger {
   debug: (message: any, ...args: any[]) => void;
 }
 
-const SENSITIVE_LOG_KEY_PATTERN =
-  /(?:credential|secret|token|password|api(?:_|-)?key|authorization)/i;
-
-function createRedactingReplacer() {
-  const seen = new WeakSet<object>();
-
-  return (key: string, value: unknown) => {
-    if (SENSITIVE_LOG_KEY_PATTERN.test(key)) return "[REDACTED]";
-
-    if (value instanceof Error) {
-      return {
-        name: value.name,
-        message: value.message,
-        stack: value.stack,
-      };
-    }
-
-    if (typeof value === "object" && value !== null) {
-      if (seen.has(value)) return "[Circular Reference]";
-      seen.add(value);
-    }
-
-    return value;
-  };
-}
-
 function safeStringify(value: unknown, space?: number): string {
   try {
-    return JSON.stringify(
-      scrubDiagnosticValue(value),
-      createRedactingReplacer(),
-      space
-    );
+    return JSON.stringify(scrubDiagnosticValue(value), null, space);
   } catch {
     return "[unserializable]";
   }
@@ -79,14 +49,20 @@ function createConsoleLogger(serviceName: string): Logger {
         // Keep the metadata object as a trailing arg so it still renders.
         // Slicing it away accepted the signature and then dropped the payload,
         // emptying every structured diagnostic that uses this call shape.
-        msgStr = args[0];
+        // The message itself is a string, so it takes the same boundary
+        // scrubbing as any other string message.
+        msgStr = scrubDiagnosticValue(args[0]) as string;
         args = [message, ...args.slice(1)];
       } else {
         // Just an object, stringify it
         msgStr = safeStringify(message);
       }
     } else {
-      msgStr = String(message);
+      // Everything else funnels through String() here: plain strings,
+      // Errors, and top-level arrays (their join is just message text).
+      // Scrub the converted text — the removed final scrub used to cover
+      // all of these, and that coverage now lives here.
+      msgStr = scrubDiagnosticValue(String(message)) as string;
     }
 
     if (USE_JSON_FORMAT) {
@@ -107,7 +83,7 @@ function createConsoleLogger(serviceName: string): Logger {
       msgStr += ` ${safeStringify(args.length === 1 ? args[0] : args)}`;
     }
 
-    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${scrubDiagnosticValue(msgStr)}`;
+    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${msgStr}`;
   };
 
   return {

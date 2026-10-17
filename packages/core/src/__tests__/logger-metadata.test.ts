@@ -115,6 +115,170 @@ describe("console logger pino-style metadata", () => {
     expect(line).toContain("only");
     expect(line).toContain("object");
   });
+
+  test("scrubs a credential-bearing URL in a pino-style message", () => {
+    const line = captureWarn((log) => {
+      log.warn(
+        { op: "fetch" },
+        "fetch failed https://example.test/path?token=synthetic-pino-secret"
+      );
+    });
+
+    expect(line).toContain("fetch failed");
+    expect(line).toContain("op");
+    expect(line).not.toContain("synthetic-pino-secret");
+  });
+
+  test("scrubs a credential-bearing URL in a top-level Error", () => {
+    const line = captureWarn((log) => {
+      log.warn(
+        new Error(
+          "fetch failed https://example.test/path?token=synthetic-error-secret"
+        )
+      );
+    });
+
+    expect(line).toContain("fetch failed");
+    expect(line).not.toContain("synthetic-error-secret");
+  });
+
+  test("scrubs a credential-bearing URL in a top-level array", () => {
+    const line = captureWarn((log) => {
+      log.warn([
+        "fetch failed https://example.test/path?token=synthetic-array-secret",
+      ]);
+    });
+
+    expect(line).toContain("fetch failed");
+    expect(line).not.toContain("synthetic-array-secret");
+  });
+
+  test("redacts camel-cased credential headers the suffix denylist misses", () => {
+    const line = captureWarn((log) => {
+      log.warn({ authorizationHeader: "Bearer synthetic-header-secret" });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain("synthetic-header-secret");
+  });
+
+  test("redacts password/secret segments with trailing qualifiers", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        password_confirmation: "synthetic-confirm-secret",
+        secret_value: { nested: "synthetic-nested-secret" },
+        token_count: 7,
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).toContain("token_count");
+    expect(line).not.toContain("synthetic-confirm-secret");
+    expect(line).not.toContain("synthetic-nested-secret");
+  });
+
+  test("redacts prefixed authorization-header compounds", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        requestAuthorizationHeader: "Bearer synthetic-req-auth-secret",
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain("synthetic-req-auth-secret");
+  });
+
+  test("redacts leading credential terms with trailing qualifiers", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        token_value: "synthetic-token-value-secret",
+        accessTokenValue: "synthetic-access-secret",
+        api_key_value: "synthetic-apikey-secret",
+        token_count: 7,
+        token_total: 9,
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).toContain("token_count");
+    expect(line).not.toContain("synthetic-token-value-secret");
+    expect(line).not.toContain("synthetic-access-secret");
+    expect(line).not.toContain("synthetic-apikey-secret");
+  });
+
+  test("redacts Error and RegExp values beneath credential containers", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        credentialsByName: {
+          provider: new Error("login failed: synthetic-provider-error-secret"),
+          pattern: /token=synthetic-provider-pattern-secret/,
+        },
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain("synthetic-provider-error-secret");
+    expect(line).not.toContain("synthetic-provider-pattern-secret");
+  });
+  test("redacts prefixed authorization headers and serialized credential fields", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        "x-authorization": "Bearer synthetic-prefixed-secret",
+        xAuthorization: "Bearer synthetic-xauth-secret",
+        credentials_json: '{"password":"synthetic-serialized-secret"}',
+        credentialsJson: '{"password":"synthetic-camel-secret"}',
+        credentialBlob: "synthetic-blob-secret",
+        PGPASSWORD: "synthetic-concat-secret",
+        oauthCredentialsJson: '{"token":"synthetic-oauth-secret"}',
+        credentialsByName: { github: "synthetic-provider-secret" },
+        token_count: 7,
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).toContain("token_count");
+    expect(line).not.toContain("synthetic-prefixed-secret");
+    expect(line).not.toContain("synthetic-xauth-secret");
+    expect(line).not.toContain("synthetic-serialized-secret");
+    expect(line).not.toContain("synthetic-camel-secret");
+    expect(line).not.toContain("synthetic-blob-secret");
+    expect(line).not.toContain("synthetic-concat-secret");
+    expect(line).not.toContain("synthetic-oauth-secret");
+    expect(line).not.toContain("synthetic-provider-secret");
+  });
+
+  test("collapses array-valued authorization headers and Error properties", () => {
+    const arrayLine = captureWarn((log) => {
+      log.warn({
+        headers: { "x-authorization": ["Bearer synthetic-array-secret"] },
+      });
+    });
+    expect(arrayLine).toContain("[REDACTED]");
+    expect(arrayLine).not.toContain("synthetic-array-secret");
+
+    const errorLine = captureWarn((log) => {
+      log.warn(
+        Object.assign(new Error("boom"), {
+          headers: {
+            "x-authorization": ["Bearer synthetic-error-prop-secret"],
+          },
+        })
+      );
+    });
+    expect(errorLine).toContain("boom");
+    expect(errorLine).not.toContain("synthetic-error-prop-secret");
+  });
+
+  test("redacts credential query pairs embedded in object keys", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        "https://example.test/path?token=synthetic-key-secret": "cached",
+      });
+    });
+
+    expect(line).toContain("https://example.test/path");
+    expect(line).not.toContain("synthetic-key-secret");
+  });
 });
 
 describe("console logger structured output", () => {
@@ -169,5 +333,133 @@ describe("console logger structured output", () => {
     });
     expect(output).not.toContain("synthetic-secret");
     expect(output).not.toContain("hidden");
+  });
+
+  test("honors LOG_FORMAT=json for pino-style messages and top-level Errors", () => {
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "-e",
+        `import { createLogger } from ${JSON.stringify(new URL("../logger.ts", import.meta.url).pathname)};
+        const log = createLogger("synthetic-service");
+        log.warn({ op: "fetch" }, "fetch failed https://example.test/path?token=synthetic-pino-secret");
+        log.warn(new Error("fetch failed https://example.test/path?token=synthetic-error-secret"));
+        log.warn(["fetch failed https://example.test/path?token=synthetic-array-secret"]);
+        log.warn({ authorizationHeader: "Bearer synthetic-header-secret" });
+        log.warn({ "https://example.test/path?token=synthetic-key-secret": "cached" });
+        log.warn({
+          "x-authorization": "Bearer synthetic-json-prefixed-secret",
+          credentials_json: '{"password":"synthetic-json-serialized-secret"}',
+          credentialsJson: '{"password":"synthetic-json-camel-secret"}',
+          credentialBlob: "synthetic-json-blob-secret",
+          xAuthorization: "Bearer synthetic-json-xauth-secret",
+          PGPASSWORD: "synthetic-json-concat-secret",
+          oauthCredentialsJson:
+            '{"token":"synthetic-json-oauth-secret"}',
+          credentialsByName: { github: "synthetic-json-provider-secret" },
+          password_confirmation: "synthetic-json-confirm-secret",
+          secret_value: { nested: "synthetic-json-nested-secret" },
+          requestAuthorizationHeader:
+            "Bearer synthetic-json-req-auth-secret",
+          token_value: "synthetic-json-token-value-secret",
+          accessTokenValue: "synthetic-json-access-secret",
+          api_key_value: "synthetic-json-apikey-secret",
+        });
+        log.warn({
+          headers: { "x-authorization": ["Bearer synthetic-json-array-secret"] },
+        });
+        log.warn(
+          Object.assign(new Error("synthetic-json-boom"), {
+            headers: { "x-authorization": ["Bearer synthetic-json-error-prop-secret"] },
+            credentialsByName: {
+              provider: new Error("login failed: synthetic-json-provider-error-secret"),
+            },
+          })
+        );`,
+      ],
+      {
+        env: {
+          ...process.env,
+          USE_WINSTON_LOGGER: "false",
+          LOG_FORMAT: "json",
+          LOG_LEVEL: "info",
+        },
+      }
+    );
+    expect(result.exitCode).toBe(0);
+    const output = result.stderr.toString() + result.stdout.toString();
+    const records = output
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(records).toHaveLength(8);
+    expect(records[0]).toMatchObject({
+      level: "warn",
+      message: expect.stringContaining("fetch failed"),
+    });
+    expect(records[1]).toMatchObject({
+      level: "warn",
+      message: expect.stringContaining("fetch failed"),
+    });
+    expect(records[2]).toMatchObject({
+      level: "warn",
+      message: expect.stringContaining("fetch failed"),
+    });
+    expect(records[3].level).toBe("warn");
+    expect(records[3].message).toContain("[REDACTED]");
+    expect(records[4].message).toContain("https://example.test/path");
+    expect(records[5].level).toBe("warn");
+    expect(records[5].message).toContain("[REDACTED]");
+    expect(records[5].message).not.toContain("synthetic-json-prefixed-secret");
+    expect(records[5].message).not.toContain(
+      "synthetic-json-serialized-secret"
+    );
+    expect(records[5].message).not.toContain("synthetic-json-camel-secret");
+    expect(records[5].message).not.toContain("synthetic-json-blob-secret");
+    expect(records[5].message).not.toContain("synthetic-json-xauth-secret");
+    expect(records[5].message).not.toContain("synthetic-json-concat-secret");
+    expect(records[5].message).not.toContain("synthetic-json-oauth-secret");
+    expect(records[5].message).not.toContain("synthetic-json-provider-secret");
+    expect(records[5].message).not.toContain("synthetic-json-confirm-secret");
+    expect(records[5].message).not.toContain("synthetic-json-nested-secret");
+    expect(records[5].message).not.toContain("synthetic-json-req-auth-secret");
+    expect(records[5].message).not.toContain(
+      "synthetic-json-token-value-secret"
+    );
+    expect(records[5].message).not.toContain("synthetic-json-access-secret");
+    expect(records[5].message).not.toContain("synthetic-json-apikey-secret");
+    expect(records[6].level).toBe("warn");
+    expect(records[6].message).toContain("[REDACTED]");
+    expect(records[6].message).not.toContain("synthetic-json-array-secret");
+    expect(records[7].level).toBe("warn");
+    expect(records[7].message).toContain("synthetic-json-boom");
+    expect(records[7].message).not.toContain(
+      "synthetic-json-error-prop-secret"
+    );
+    expect(records[7].message).not.toContain(
+      "synthetic-json-provider-error-secret"
+    );
+    expect(output).not.toContain("synthetic-pino-secret");
+    expect(output).not.toContain("synthetic-error-secret");
+    expect(output).not.toContain("synthetic-array-secret");
+    expect(output).not.toContain("synthetic-header-secret");
+    expect(output).not.toContain("synthetic-key-secret");
+    expect(output).not.toContain("synthetic-json-prefixed-secret");
+    expect(output).not.toContain("synthetic-json-serialized-secret");
+    expect(output).not.toContain("synthetic-json-camel-secret");
+    expect(output).not.toContain("synthetic-json-blob-secret");
+    expect(output).not.toContain("synthetic-json-xauth-secret");
+    expect(output).not.toContain("synthetic-json-concat-secret");
+    expect(output).not.toContain("synthetic-json-oauth-secret");
+    expect(output).not.toContain("synthetic-json-provider-secret");
+    expect(output).not.toContain("synthetic-json-confirm-secret");
+    expect(output).not.toContain("synthetic-json-nested-secret");
+    expect(output).not.toContain("synthetic-json-req-auth-secret");
+    expect(output).not.toContain("synthetic-json-token-value-secret");
+    expect(output).not.toContain("synthetic-json-access-secret");
+    expect(output).not.toContain("synthetic-json-apikey-secret");
+    expect(output).not.toContain("synthetic-json-provider-error-secret");
+    expect(output).not.toContain("synthetic-json-array-secret");
+    expect(output).not.toContain("synthetic-json-error-prop-secret");
   });
 });
