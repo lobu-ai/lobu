@@ -152,6 +152,26 @@ describe("console logger pino-style metadata", () => {
     expect(line).toContain("fetch failed");
     expect(line).not.toContain("synthetic-array-secret");
   });
+
+  test("redacts camel-cased credential headers the suffix denylist misses", () => {
+    const line = captureWarn((log) => {
+      log.warn({ authorizationHeader: "Bearer synthetic-header-secret" });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain("synthetic-header-secret");
+  });
+
+  test("redacts credential query pairs embedded in object keys", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        "https://example.test/path?token=synthetic-key-secret": "cached",
+      });
+    });
+
+    expect(line).toContain("https://example.test/path");
+    expect(line).not.toContain("synthetic-key-secret");
+  });
 });
 
 describe("console logger structured output", () => {
@@ -217,7 +237,9 @@ describe("console logger structured output", () => {
         const log = createLogger("synthetic-service");
         log.warn({ op: "fetch" }, "fetch failed https://example.test/path?token=synthetic-pino-secret");
         log.warn(new Error("fetch failed https://example.test/path?token=synthetic-error-secret"));
-        log.warn(["fetch failed https://example.test/path?token=synthetic-array-secret"]);`,
+        log.warn(["fetch failed https://example.test/path?token=synthetic-array-secret"]);
+        log.warn({ authorizationHeader: "Bearer synthetic-header-secret" });
+        log.warn({ "https://example.test/path?token=synthetic-key-secret": "cached" });`,
       ],
       {
         env: {
@@ -234,7 +256,7 @@ describe("console logger structured output", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    expect(records).toHaveLength(3);
+    expect(records).toHaveLength(5);
     expect(records[0]).toMatchObject({
       level: "warn",
       message: expect.stringContaining("fetch failed"),
@@ -247,8 +269,15 @@ describe("console logger structured output", () => {
       level: "warn",
       message: expect.stringContaining("fetch failed"),
     });
+    expect(records[3]).toMatchObject({
+      level: "warn",
+      message: expect.stringContaining("[REDACTED]"),
+    });
+    expect(records[4].message).toContain("https://example.test/path");
     expect(output).not.toContain("synthetic-pino-secret");
     expect(output).not.toContain("synthetic-error-secret");
     expect(output).not.toContain("synthetic-array-secret");
+    expect(output).not.toContain("synthetic-header-secret");
+    expect(output).not.toContain("synthetic-key-secret");
   });
 });

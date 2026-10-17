@@ -313,4 +313,30 @@ describe("diagnostic credential scrubber", () => {
     expect(result.cause.message).not.toContain(SECRET);
     expect(result.cause.stack).toBeDefined();
   });
+
+  it("redacts camel-cased credential headers the suffix denylist never sees", () => {
+    // `authorizationHeader` squashes to a whole name the shared denylist does
+    // not classify; the old substring logger replacer caught it, so the
+    // scrubber carries it as an exact name to avoid the regression.
+    const result = scrubDiagnosticValue({
+      authorizationHeader: `Bearer ${SECRET}`,
+      authorization_header: `Bearer ${SECRET}`,
+      authorization_mode: "strict",
+    }) as Record<string, unknown>;
+    expect(result.authorizationHeader).toBe("[REDACTED]");
+    expect(result.authorization_header).toBe("[REDACTED]");
+    expect(result.authorization_mode).toBe("strict");
+  });
+
+  it("redacts credential query pairs embedded in object keys", () => {
+    // Attribution and cache maps keyed by URL carry the secret in the KEY
+    // text, past value-side redaction. The key stays identifiable; the
+    // secret portion does not survive.
+    const result = scrubDiagnosticValue({
+      [`https://example.test/path?token=${SECRET}`]: "cached",
+    }) as Record<string, unknown>;
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(SECRET);
+    expect(serialized).toContain("https://example.test/path");
+  });
 });

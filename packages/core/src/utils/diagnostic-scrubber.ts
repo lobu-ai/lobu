@@ -20,9 +20,16 @@ const SECRET_KEY_SEGMENTS = new Set(["signature", "sig"]);
  * Whole (squashed) key names the shared denylist does not classify. Carried
  * over from the bespoke sanitizer this module replaced: `verifier` and `state`
  * are far too broad as segments (`freshness_state`, `run_state`), so these two
- * are matched only as complete names.
+ * are matched only as complete names. `authorizationheader` is the same story:
+ * HTTP client options carry it camel-cased (`authorizationHeader`), which the
+ * shared suffix denylist never sees, while `authorization` alone as a segment
+ * would sweep up `authorization_mode` and `authorization_policy`.
  */
-const SECRET_KEY_EXACT = new Set(["codeverifier", "sessionstate"]);
+const SECRET_KEY_EXACT = new Set([
+  "codeverifier",
+  "sessionstate",
+  "authorizationheader",
+]);
 
 /** Bound recursive work on diagnostic values. */
 const MAX_DEPTH = 8;
@@ -73,6 +80,25 @@ function decodeKey(raw: string): string {
 function isSecretQueryParam(name: string): boolean {
   const key = decodeKey(name);
   return isSecretObjectKey(key) || SECRET_QUERY_PARAMS.has(squashKey(key));
+}
+
+/**
+ * Object keys are data too: attribution and cache maps keyed by URL or raw
+ * `name=value` diagnostics carry credentials in the KEY text, where
+ * value-side redaction never reaches. Redact the secret portion while keeping
+ * the key identifiable. Clean keys (the common case) return untouched; two
+ * distinct keys that scrub identically collapse, last wins.
+ */
+function scrubKey(key: string): string {
+  if (
+    !key.includes("?") &&
+    !key.includes(";") &&
+    !key.includes("=") &&
+    !key.includes("://")
+  ) {
+    return key;
+  }
+  return scrubString(key);
 }
 
 function scrubString(value: string): string {
@@ -154,7 +180,12 @@ export function scrubDiagnosticValue(value: unknown): unknown {
       if ("errors" in current && Array.isArray(current.errors))
         serialized.errors = scrub(current.errors, depth + 1);
       for (const key of Object.keys(current)) {
-        serialized[key] = isSecretObjectKey(key)
+        // A secret-named key stays readable (triage needs to know WHICH
+        // credential field was present) while any query pair embedded in the
+        // key text itself is redacted; value-side redaction never reaches it.
+        const outKey = scrubKey(key);
+        const secret = isSecretObjectKey(key);
+        serialized[outKey] = secret
           ? "[REDACTED]"
           : scrub(
               (current as unknown as Record<string, unknown>)[key],
@@ -185,16 +216,21 @@ export function scrubDiagnosticValue(value: unknown): unknown {
     try {
       for (const key of Object.keys(current).slice(0, MAX_ENTRIES)) {
         if (isSecretObjectKey(key)) {
-          result[key] = "[REDACTED]";
+          // See above: the key name stays readable, but a URL or
+          // `name=value` diagnostic used as a key is scrubbed in place.
+          result[scrubKey(key)] = "[REDACTED]";
           continue;
         }
+        // See above: a URL or `name=value` diagnostic used as a key carries
+        // its secret in the key text, past value-side redaction.
+        const outKey = scrubKey(key);
         try {
-          result[key] = scrub(
+          result[outKey] = scrub(
             (current as Record<string, unknown>)[key],
             depth + 1
           );
         } catch {
-          result[key] = "[UNREADABLE]";
+          result[outKey] = "[UNREADABLE]";
         }
       }
     } catch {
