@@ -802,13 +802,6 @@ export async function dispatchChromeActionToExtension(params: {
     };
   }
 
-  // This account-wide fence deliberately includes syncs and connector actions:
-  // they must not change browser/account state while another read or recovery
-  // owns it. Unacknowledged cleanup keeps that ownership only until its expiry.
-  if (browserResource.recoveryRunId != null && browserResource.recoveryRunId !== parentRunId) {
-    const message = 'This browser account is owned by another active source read or recovery.';
-    return { status: 'failed', interruption: { reason: 'recovery_unavailable', message }, error_message: message };
-  }
   let sourceLease = sourceRead ? await sourceBrowserLease(organizationId, parentRunId) : undefined;
   if (sourceLease && sourceLease.state !== 'reading') return { status: 'failed', error_message: 'This source read has ended.' };
   const probe = browserResource.requirement.accountProbe;
@@ -938,8 +931,8 @@ export async function dispatchChromeActionToExtension(params: {
   let runId: number;
   try {
     const claim = await sql.begin(async (tx) => {
-      // Acquisition and enqueue share the profile-before-run lock order. The
-      // earlier check is only an early exit; it cannot authorize queued work.
+      // Fence every browser step, including probes, syncs and connector actions.
+      // Acquisition and enqueue share the profile-before-run lock order.
       if (browserResource.authProfileId && await browserAccountHeldByOtherRun(organizationId, browserResource.authProfileId, parentRunId, tx)) {
         throw new BrowserInterruptionError('recovery_unavailable', 'This browser account is owned by another active source read or recovery.');
       }

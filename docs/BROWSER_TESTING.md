@@ -151,70 +151,46 @@ Gotchas:
 ## Bounded source-read recovery
 
 A failed `feeds.readMany` entry may return `error_code: "BROWSER_INTERRUPTED"`,
-`retryable: false`, and `interruption: { reason, recovery? }`. A visible challenge
-can include an expiring recovery descriptor only after old capture cleanup is
-acknowledged. Retention requires a stable caller flow (a conversation, MCP
-activity, or Automation run) and an adapter-owned scratch tab requesting
-`retain_on_interruption: true` on its initial `navigate` step. Persistent
-warm-tab readers keep using their existing tabs and timeout classification.
-Login, account mismatch, loading failure, timeout, unsupported extension versions,
-and uncertain cleanup do not grant recovery authority. Exact-tab recovery requires
-Chrome extension 0.9.9 or newer.
+`retryable: false`, and `interruption: { reason, recovery? }`. With Chrome extension
+0.9.9+, a visible challenge can retain its exact scrape-owned tab after capture
+cleanup is acknowledged. Retention requires a stable caller flow and an adapter
+requesting `retain_on_interruption: true` when opening its scratch tab.
+Login, account mismatch, loading failure, timeout, and uncertain cleanup do not
+grant recovery authority. Persistent warm-tab readers keep using their existing
+tabs and timeout classification.
 
 For recovery explicitly permitted by the calling agent's instructions:
 
-1. Retain the original feed request, cursor, query, limit, and source identity.
+1. Keep the original feed request, cursor, query, limit, and source identity.
    Count the failed attempt against the caller's source-read budget.
-2. Discover operations on the descriptor's exact `chrome_connection_id`. Use its
-   `tab_id` and `recovery_id` for `screenshot` or `get_accessibility_tree`. Do not
-   select by title, switch device/profile/window, or follow private artifact URLs.
-3. For vision, the model must actually receive image pixels. A resource link or
-   image-delivery diagnostic is insufficient. Hand off to the browser owner when
-   image delivery fails or the required interaction is unavailable.
-4. Each permitted `click_ref` or `focus_tab` needs the newest `observation_id`.
-   Observations expire after 30 seconds and are invalidated by page/viewport
-   changes or consumption. Existing Chrome approval and origin checks apply.
-   This version has no recovery drag or arbitrary evaluation. Human recovery is
-   the fallback; a challenge never overrides an agent's stop rule.
+2. Discover operations on the returned `chrome_connection_id`. Observe its exact
+   `tab_id` using `recovery_id` with `screenshot` or `get_accessibility_tree`.
+   Never target by title or switch device, profile, or window.
+3. For vision, verify that the model actually received image pixels. A resource
+   link or delivery diagnostic is insufficient. Do not follow private artifact
+   URLs; request a fresh observation or hand off to the browser owner.
+4. Each authorized `click_ref` or `focus_tab` requires the newest `observation_id`.
+   It expires after 30 seconds and is invalidated by page/viewport changes or use.
+   Existing approval and origin checks apply. Recovery drag and arbitrary
+   evaluation are unsupported; use human recovery when needed.
 5. After authorized recovery or human completion, repeat the identical source
-   request once with `recovery_id`. A new timed read uses the retained target and
-   verifies the expected account again. Success requires valid source rows; a
-   click receipt or visual judgment is never success. Only successful reads
-   advance cursors or deduplication state.
+   request once with `recovery_id`. The fresh read uses the retained target and
+   verifies the expected account again. Only a successful source read advances
+   cursors or deduplication state; a click receipt or visual judgment is insufficient.
 
-A handoff expires after five minutes, with at most sixteen observations and eight
-consumed actions. Expiry cleanup closes only the original scrape-owned target;
-closed/reused tabs, moved windows, account changes, policy revocation, and
-competing ownership fail closed. Recovery-enabled reads acquire exclusive
-ownership of their browser account before opening a tab. Sequence feeds sharing
-that account, including feeds requested through `feeds.readMany`: a competing
-read fails with non-retryable `recovery_unavailable` and no handoff. After the
-owner finishes, a fresh normal read can acquire the account. Reads on distinct
-accounts remain independent. Acquisition also refuses an already queued or running
-browser step on the same account. Enqueue and acquisition share the profile row
-lock, so a step cannot slip past an earlier ownership check.
+Each handoff permits five minutes, sixteen observations, eight consumed actions,
+and one fresh read. Lost action/read responses still consume their observation or
+recovery ID: do not replay them. Closed/reused tabs, moved windows, account changes,
+policy revocation, expiry, or browser worker restart fail closed. Expiry cleanup
+closes only the original scrape-owned target.
 
-The same fence blocks other connector actions and feed syncs on the account,
-so they cannot change its browser state during recovery. Unacknowledged cleanup,
-including an opened tab whose read times out before cleanup, holds that fence
-for at most five minutes; it does not immediately admit work into a tab whose
-cleanup is uncertain. If retention was acknowledged but cancellation or expiry
-is observed during finalization, no handoff is issued and
-ownership ends no later than the original read deadline; the idle target still
-closes at its device expiry. Database time governs server ownership and
-deadlines. Private dispatch timing carries the
-remaining budget to the extension, which subtracts delivery delay and measures
-local elapsed time. A browser worker restart invalidates the retained lease and
-cleans up its exact target; it cannot restore stale observation authority.
+Sequence feeds sharing a browser account, including within `feeds.readMany`.
+Competing reads, syncs and connector actions fail with `recovery_unavailable`
+while that account is held. Uncertain cleanup or a lost handoff response may hold
+it for up to five minutes without granting usable recovery authority. Once the
+owner finishes or expires, a fresh normal read must verify the account again.
 
-A response lost after the handoff commits can leave its bounded reservation until
-expiry. A lost action response still consumes its observation, and a lost resume response
-still consumes the recovery ID. Do not replay either. Failed image delivery
-requires a fresh observation or human handoff, never inference from a resource
-link. After expiry or cleanup, a fresh normal read must verify the account again.
-
-An Automation whose instructions stop on verification or login keeps stopping;
-this transport opts no Automation into interactive recovery and never changes
-its instructions or read budget. Use local synthetic browser fixtures and
-isolated database tests before any separately authorized runtime trial.
-Synthetic transport success does not prove live verification success.
+Agent instructions that stop on login/verification still stop. This contract
+changes neither Automation instructions nor source-read budgets. Validate with
+local synthetic fixtures before a separately authorized runtime trial; synthetic
+success does not prove live verification success.

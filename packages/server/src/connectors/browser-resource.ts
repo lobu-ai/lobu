@@ -36,8 +36,6 @@ export async function connectionBrowserResource(organizationId: string, connecti
     SELECT cd.browser, cd.auth_schema, ap.profile_kind, ap.auth_data, ap.auth_data->>'account_id' AS browser_account_id,
            ap.status AS profile_status, ap.id AS auth_profile_id, ap.device_worker_id AS profile_device_id,
            c.device_worker_id, c.created_by, c.status, c.config, dw.platform, dw.app_version,
-           CASE WHEN (ap.metadata->${BROWSER_RECOVERY_KEY}->>'expires_at')::timestamptz > clock_timestamp()
-             THEN (ap.metadata->${BROWSER_RECOVERY_KEY}->>'run_id')::bigint END AS recovery_run_id,
            dw.last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS}) AS online
     FROM connections c
     JOIN connector_definitions cd ON cd.organization_id = c.organization_id
@@ -57,7 +55,6 @@ export async function connectionBrowserResource(organizationId: string, connecti
     supportsScopedOrigins: browserExtensionSupportsOrigins(row.app_version as string | null),
     supportsRecovery: browserExtensionSupportsRecovery(row.app_version as string | null),
     profileStatus: row.profile_status as string | null,
-    recoveryRunId: row.recovery_run_id as number | null,
     live: row.profile_kind === 'browser_session' && row.auth_data?.mode === 'live' };
 }
 

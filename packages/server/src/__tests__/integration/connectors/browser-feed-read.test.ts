@@ -1326,7 +1326,9 @@ describe('compiled browser source reads', () => {
     const [ownership] = await sql`SELECT metadata, clock_timestamp() AS observed_at
       FROM auth_profiles WHERE id = ${profile.id}`;
     expect(Date.parse(ownership.metadata.browser_recovery.expires_at)).toBeLessThanOrEqual(ownership.observed_at.getTime());
-    expect((await connectionBrowserResource(orgId, connectionId))?.recoveryRunId).toBeNull();
+    expect(await sql.begin(tx => browserRecovery.browserAccountHeldByOtherRun(
+      orgId, profile.id, Number(ownership.metadata.browser_recovery.run_id) + 1, tx,
+    ))).toBe(false);
     await expectScrubbed();
   });
   it('admits one feed per browser account in a parallel batch and releases it after success', async () => {
@@ -1359,7 +1361,7 @@ describe('compiled browser source reads', () => {
     await serveRecovery(next);
     expect((await next).results[0]).toMatchObject({ ok: true, rows: ROWS });
   });
-  it('rechecks account ownership when an older browser step reaches the enqueue transaction', async () => {
+  it('checks account ownership when an older browser step reaches the enqueue transaction', async () => {
     await recoverySetup();
     const parent = await createConnectorOperationRun({ organizationId: orgId, connectionId, connectorKey: SOURCE_KEY,
       operationKey: 'inspect', operationInput: {}, approvalMode: 'inline', policyPrincipalKind: 'user', policyPrincipalId: userId, createdByUserId: userId });
