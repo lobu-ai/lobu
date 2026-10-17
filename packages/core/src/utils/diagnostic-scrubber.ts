@@ -24,25 +24,38 @@ const SECRET_KEY_SEGMENTS = new Set(["signature", "sig"]);
  * HTTP client options carry it camel-cased (`authorizationHeader`), which the
  * shared suffix denylist never sees, while `authorization` alone as a segment
  * would sweep up `authorization_mode` and `authorization_policy`.
+ * `authorizationcode` is the OAuth code in any casing or separator style.
  */
 const SECRET_KEY_EXACT = new Set([
   "codeverifier",
   "sessionstate",
   "authorizationheader",
+  "authorizationcode",
 ]);
 
 /**
- * Split-form credential names the whole/suffix rules miss, with the
- * credential term pinned to one end so the mode half of `authorization_mode`
- * stays readable:
- * - a TRAILING `authorization` segment is a (possibly vendor-prefixed)
- *   authorization header (`x-authorization`, `xAuthorization`);
- * - a LEADING `credential`/`credentials` segment names a serialized
- *   credential field (`credentials_json`, `credentialsJson`, `credentialBlob`).
- * Case boundaries are split before lowercasing (mirroring `normalizeKey` in
- * secret-redaction, including its acronym run), so camelCase compounds pin
- * correctly. Separator-less all-lowercase compounds have no boundary to
- * split, so they stay in SECRET_KEY_EXACT above.
+ * Concatenated credential names the separator-based rules never see:
+ * `PGPASSWORD`, `clientsecret`, `customapikey`. Matched as a bare ending
+ * (case-insensitive, separator-free) so `tokenizer` and `keyboard` stay
+ * readable. `token` is deliberately absent: bare token endings collide with
+ * usage counts (`token_count`-style keys stay preserved per the logger
+ * contract), while password/secret/apikey endings have no benign reading.
+ */
+const BARE_CREDENTIAL_SUFFIXES = ["password", "passwd", "secret", "apikey"];
+
+function hasConcatenatedCredentialSuffix(key: string): boolean {
+  const flat = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return BARE_CREDENTIAL_SUFFIXES.some(
+    (suffix) => flat.length > suffix.length && flat.endsWith(suffix)
+  );
+}
+
+/**
+ * Split-form credential names the whole/suffix rules miss. Case boundaries
+ * are split before lowercasing (mirroring `normalizeKey` in secret-redaction,
+ * including its acronym run), so camelCase compounds pin correctly.
+ * Separator-less all-lowercase compounds fall through to the bare-suffix
+ * rule above.
  */
 function splitKeySegments(key: string): string[] {
   return key
@@ -68,17 +81,17 @@ function hasTrailingAuthorizationSegment(key: string): boolean {
 }
 
 /**
- * A LEADING `credential`/`credentials` segment names a serialized credential
- * field (`credentials_json`, `credentialsJson`, `credentialBlob`). Applied
- * by value type in the walk below: a scalar beneath one IS the serialized
- * credential and collapses, while a structured value beneath one is a
- * credential map whose leaves decide individually.
+ * A `credential`/`credentials` segment anywhere in the key names a
+ * credential CONTAINER (`credentials_json`, `credentialsJson`,
+ * `oauthCredentialsJson`, `credentialsByName`). Container semantics live in
+ * the walk: a scalar beneath one IS the serialized credential and collapses,
+ * while a structured value beneath one recurses with every descendant
+ * treated as credential-adjacent (a map's leaves cannot be trusted by key
+ * name alone — `credentialsByName.github` proves it).
  */
-function hasLeadingCredentialSegment(key: string): boolean {
-  const segments = splitKeySegments(key);
-  return (
-    segments.length > 0 &&
-    (segments[0] === "credential" || segments[0] === "credentials")
+function hasCredentialSegment(key: string): boolean {
+  return splitKeySegments(key).some(
+    (segment) => segment === "credential" || segment === "credentials"
   );
 }
 
@@ -97,29 +110,27 @@ function squashKey(key: string): string {
  * test the squashed form too.
  */
 function isSecretObjectKey(key: string): boolean {
-  return isStrongSecretKey(key) || hasLeadingCredentialSegment(key);
+  return isStrongSecretKey(key) || hasCredentialSegment(key);
 }
 
 /**
  * The collapsing half of key classification: a key whose NAME alone proves
  * the value is a credential, so the whole value is replaced without
- * inspection. Leading-credential containers (`hasLeadingCredentialSegment`)
- * are deliberately excluded: a scalar beneath one IS the serialized
- * credential and collapses, but a structured value beneath one is a
- * credential MAP whose leaves decide individually (the Loki connector
- * pre-redacts its leaves and expects per-key treatment here) — collapsing
- * the parent would destroy the surviving key names.
+ * inspection. Credential CONTAINERS (`hasCredentialSegment`) are deliberately
+ * excluded — their collapse rule depends on the value type (see the walk),
+ * and collapsing a map parent would destroy surviving key names the Loki
+ * connector pre-redacted.
  */
 function isStrongSecretKey(key: string): boolean {
   if (isSecretKey(key)) return true;
   if (isSecretKey(squashKey(key))) return true;
   if (SECRET_KEY_EXACT.has(squashKey(key))) return true;
   if (hasTrailingAuthorizationSegment(key)) return true;
+  if (hasConcatenatedCredentialSuffix(key)) return true;
   // Matched per separated segment, not against the squashed whole:
   // `X-Hub-Signature-256` squashes to `xhubsignature256`, which no exact set
   // can ever hold, so every real signature header would slip through.
-  // Segment-matched signature headers collapse like any other proven key;
-  // only affixed credential CONTAINERS recurse (see above).
+  // Segment-matched signature headers collapse like any other proven key.
   return key
     .replace(/[^a-z0-9]+/gi, "_")
     .toLowerCase()
@@ -211,11 +222,17 @@ function scrubString(value: string): string {
 export function scrubDiagnosticValue(value: unknown): unknown {
   const seen = new WeakSet<object>();
 
-  function scrub(current: unknown, depth = 0): unknown {
-    if (typeof current === "string") return scrubString(current);
+  function scrub(
+    current: unknown,
+    depth = 0,
+    underCredentialContainer = false
+  ): unknown {
+    if (typeof current === "string")
+      return underCredentialContainer ? "[REDACTED]" : scrubString(current);
     // A copied toJSON hook could reintroduce secrets after this walk finishes.
     if (typeof current === "function") return "[Function]";
-    if (current === null || typeof current !== "object") return current;
+    if (current === null || typeof current !== "object")
+      return underCredentialContainer ? "[REDACTED]" : current;
     if (seen.has(current)) return "[CIRCULAR]";
     // Bound deeply nested values before cloning them on the logging hot path.
     if (depth >= MAX_DEPTH) return "[TRUNCATED]";
@@ -224,13 +241,17 @@ export function scrubDiagnosticValue(value: unknown): unknown {
     // [CIRCULAR] would corrupt the event; only an ancestor is a real cycle.
     seen.add(current);
     try {
-      return walk(current, depth);
+      return walk(current, depth, underCredentialContainer);
     } finally {
       seen.delete(current);
     }
   }
 
-  function walk(current: object, depth: number): unknown {
+  function walk(
+    current: object,
+    depth: number,
+    underCredentialContainer: boolean
+  ): unknown {
     // An Error carries name/message/stack on its prototype, so Object.keys
     // returns nothing and a plain walk would flatten it to `{}` — discarding
     // the only part of the event worth reading.
@@ -241,33 +262,35 @@ export function scrubDiagnosticValue(value: unknown): unknown {
       };
       if (current.stack) serialized.stack = scrubString(current.stack);
       if (current.cause !== undefined)
-        serialized.cause = scrub(current.cause, depth + 1);
+        serialized.cause = scrub(
+          current.cause,
+          depth + 1,
+          underCredentialContainer
+        );
       // AggregateError.errors is non-enumerable, just like cause and stack.
       // Reuse the same walk so nested failures keep their codes without
       // bypassing credential redaction, depth limits, or cycle detection.
       if ("errors" in current && Array.isArray(current.errors))
-        serialized.errors = scrub(current.errors, depth + 1);
+        serialized.errors = scrub(
+          current.errors,
+          depth + 1,
+          underCredentialContainer
+        );
       for (const key of Object.keys(current)) {
-        // A secret-named key stays readable (triage needs to know WHICH
-        // credential field was present) while any query pair embedded in the
-        // key text itself is redacted; value-side redaction never reaches it.
+        // A strong-secret key collapses wholesale; its readable name is kept
+        // while any query pair embedded in the key text itself is redacted
+        // (value-side redaction never reaches key text).
         const outKey = scrubKey(key);
         if (isStrongSecretKey(key)) {
           serialized[outKey] = "[REDACTED]";
           continue;
         }
+        // A credential container propagates credential-adjacency to its whole
+        // subtree: scalars beneath one collapse, structured values recurse.
+        const childContainer =
+          underCredentialContainer || hasCredentialSegment(key);
         const value = (current as unknown as Record<string, unknown>)[key];
-        // An affixed credential container holding a scalar IS the serialized
-        // credential — collapse it. A structured value beneath one is a
-        // credential map: recurse so each leaf decides individually.
-        if (
-          hasLeadingCredentialSegment(key) &&
-          (value === null || typeof value !== "object")
-        ) {
-          serialized[outKey] = "[REDACTED]";
-          continue;
-        }
-        serialized[outKey] = scrub(value, depth + 1);
+        serialized[outKey] = scrub(value, depth + 1, childContainer);
       }
       return serialized;
     }
@@ -286,33 +309,31 @@ export function scrubDiagnosticValue(value: unknown): unknown {
     if (Array.isArray(current)) {
       return current
         .slice(0, MAX_ENTRIES)
-        .map((item) => scrub(item, depth + 1));
+        .map((item) => scrub(item, depth + 1, underCredentialContainer));
     }
 
     const result: Record<string, unknown> = {};
     try {
       for (const key of Object.keys(current).slice(0, MAX_ENTRIES)) {
-        if (isStrongSecretKey(key)) {
-          // See above: the key name stays readable, but a URL or
-          // `name=value` diagnostic used as a key is scrubbed in place.
-          result[scrubKey(key)] = "[REDACTED]";
-          continue;
-        }
-        const value = (current as Record<string, unknown>)[key];
-        // See above: an affixed container holding a scalar collapses, while
-        // a structured value beneath one recurses leaf by leaf.
-        if (
-          hasLeadingCredentialSegment(key) &&
-          (value === null || typeof value !== "object")
-        ) {
-          result[scrubKey(key)] = "[REDACTED]";
-          continue;
-        }
-        // See above: a URL or `name=value` diagnostic used as a key carries
-        // its secret in the key text, past value-side redaction.
+        // A strong-secret key collapses wholesale; its readable name is kept
+        // while any query pair embedded in the key text itself is redacted.
         const outKey = scrubKey(key);
+        if (isStrongSecretKey(key)) {
+          result[outKey] = "[REDACTED]";
+          continue;
+        }
+        // A credential container propagates credential-adjacency to its whole
+        // subtree (scalars collapse, structured values recurse); anything
+        // else scrubs normally. A URL or `name=value` diagnostic used as a
+        // key carries its secret in the key text, past value-side redaction.
+        const childContainer =
+          underCredentialContainer || hasCredentialSegment(key);
         try {
-          result[outKey] = scrub(value, depth + 1);
+          result[outKey] = scrub(
+            (current as Record<string, unknown>)[key],
+            depth + 1,
+            childContainer
+          );
         } catch {
           result[outKey] = "[UNREADABLE]";
         }

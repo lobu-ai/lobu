@@ -170,6 +170,9 @@ describe("console logger pino-style metadata", () => {
         credentials_json: '{"password":"synthetic-serialized-secret"}',
         credentialsJson: '{"password":"synthetic-camel-secret"}',
         credentialBlob: "synthetic-blob-secret",
+        PGPASSWORD: "synthetic-concat-secret",
+        oauthCredentialsJson: '{"token":"synthetic-oauth-secret"}',
+        credentialsByName: { github: "synthetic-provider-secret" },
         token_count: 7,
       });
     });
@@ -181,6 +184,9 @@ describe("console logger pino-style metadata", () => {
     expect(line).not.toContain("synthetic-serialized-secret");
     expect(line).not.toContain("synthetic-camel-secret");
     expect(line).not.toContain("synthetic-blob-secret");
+    expect(line).not.toContain("synthetic-concat-secret");
+    expect(line).not.toContain("synthetic-oauth-secret");
+    expect(line).not.toContain("synthetic-provider-secret");
   });
 
   test("collapses array-valued authorization headers and Error properties", () => {
@@ -289,6 +295,10 @@ describe("console logger structured output", () => {
           credentialsJson: '{"password":"synthetic-json-camel-secret"}',
           credentialBlob: "synthetic-json-blob-secret",
           xAuthorization: "Bearer synthetic-json-xauth-secret",
+          PGPASSWORD: "synthetic-json-concat-secret",
+          oauthCredentialsJson:
+            '{"token":"synthetic-json-oauth-secret"}',
+          credentialsByName: { github: "synthetic-json-provider-secret" },
         });
         log.warn({
           headers: { "x-authorization": ["Bearer synthetic-json-array-secret"] },
@@ -357,6 +367,9 @@ describe("console logger structured output", () => {
     expect(output).not.toContain("synthetic-json-camel-secret");
     expect(output).not.toContain("synthetic-json-blob-secret");
     expect(output).not.toContain("synthetic-json-xauth-secret");
+    expect(output).not.toContain("synthetic-json-concat-secret");
+    expect(output).not.toContain("synthetic-json-oauth-secret");
+    expect(output).not.toContain("synthetic-json-provider-secret");
     expect(output).not.toContain("synthetic-json-array-secret");
     expect(output).not.toContain("synthetic-json-error-prop-secret");
   });

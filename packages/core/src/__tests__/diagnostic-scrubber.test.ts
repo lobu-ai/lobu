@@ -353,22 +353,41 @@ describe("diagnostic credential scrubber", () => {
   });
 
   it("recurses into credential maps instead of collapsing them", () => {
-    // An affixed container holding a scalar IS the serialized credential,
-    // but a structured value beneath one is a credential MAP: each leaf
-    // decides individually, so pre-redacted leaves and surviving key names
-    // pass through (the Loki connector relies on this per-key treatment).
+    // A structured value beneath a credential container recurses, so
+    // pre-redacted leaves and surviving key names pass through (the Loki
+    // connector relies on this per-key treatment) — but raw scalar leaves
+    // beneath one are credential-adjacent and collapse, including provider
+    // names the key rules alone would miss (`credentialsByName.github`).
     const result = scrubDiagnosticValue({
       credentialsByName: {
         PGPASSWORD: "[REDACTED]",
+        github: `token-${SECRET}`,
         note: "kept",
       },
       credentials_json: JSON.stringify({ password: SECRET }),
     }) as Record<string, Record<string, unknown>>;
     expect(result.credentialsByName).toEqual({
       PGPASSWORD: "[REDACTED]",
-      note: "kept",
+      github: "[REDACTED]",
+      note: "[REDACTED]",
     });
     expect(result.credentials_json).toBe("[REDACTED]");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("redacts concatenated and provider-prefixed credential names", () => {
+    // Separator-free compounds the suffix rules never see: a bare credential
+    // ending (`PGPASSWORD`) and a provider-prefixed serialized field
+    // (`oauthCredentialsJson`). Bare `token` endings stay out deliberately —
+    // they collide with usage counts the logger contract preserves.
+    const result = scrubDiagnosticValue({
+      PGPASSWORD: SECRET,
+      oauthCredentialsJson: JSON.stringify({ token: SECRET }),
+      token_count: 7,
+    }) as Record<string, unknown>;
+    expect(result.PGPASSWORD).toBe("[REDACTED]");
+    expect(result.oauthCredentialsJson).toBe("[REDACTED]");
+    expect(result.token_count).toBe(7);
     expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 
