@@ -29,7 +29,6 @@ import type { DbClient } from "../../../db/client";
 import {
 	applyEventAttributions,
 	clearEntityLinkRulesCache,
-	loadAttributionRuleByType,
 	resolveSenderIdentity,
 } from "../../../utils/entity-link-upsert";
 import { ensureMemberEntityType } from "../../../utils/member-entity-type";
@@ -153,20 +152,12 @@ describe("entity write transactions never reach for a pooled connection", () => 
 		});
 		clearEntityLinkRulesCache();
 
-		// Both rule loaders are covered here: `loadAttributionRuleByType` is what the
-		// GitHub webhook path calls, `loadEventAttributionRules` is what
-		// `applyEventAttributions` calls. A caller-supplied handle may already be an
-		// open transaction (the sync dry-run path threads its rolled-back one), so a
-		// rule read on the pool would hold that transaction's connection while
-		// waiting for a second one.
-		const { byTypeRule, statements } = await getTestDb().begin(async (tx) => {
+		// The attribution-plan loader is what `applyEventAttributions` calls. A
+		// caller-supplied handle may already be an open transaction (the sync
+		// dry-run path threads its rolled-back one), so a rule read on the pool
+		// would hold that transaction's connection while waiting for a second one.
+		const { statements } = await getTestDb().begin(async (tx) => {
 			const recorded = recordingHandle(tx);
-			const rule = await loadAttributionRuleByType(recorded.handle, {
-				connectorKey,
-				orgId,
-				entityType: "person",
-				role: "authored_by",
-			});
 			await applyEventAttributions(
 				{
 					connectorKey,
@@ -184,17 +175,16 @@ describe("entity write transactions never reach for a pooled connection", () => 
 				},
 				recorded.handle,
 			);
-			return { byTypeRule: rule, statements: recorded.statements };
+			return { statements: recorded.statements };
 		});
 
-		// Liveness: the rule really resolved, so the reads asserted below are the
-		// real ones rather than an early bail-out.
-		expect(byTypeRule).not.toBeNull();
+		// Liveness: the plan read really happened, so the reads asserted below are
+		// the real ones rather than an early bail-out.
 		expect(
 			statements.filter((statement) =>
 				/FROM connector_definitions/.test(statement),
 			).length,
-		).toBeGreaterThanOrEqual(2);
+		).toBeGreaterThanOrEqual(1);
 		expect(matched(statements, /FROM "member"/)).toBe(true);
 	});
 });

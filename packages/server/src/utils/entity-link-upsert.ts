@@ -175,7 +175,6 @@ function resolveEventAttributions(
 const RULES_CACHE_TTL_MS = 60_000;
 // Per-pod caches — no cross-replica sharing.
 const plansCache = new TtlCache<EventAttributionPlan>(RULES_CACHE_TTL_MS);
-const rulesByTypeCache = new TtlCache<RuleMap>(RULES_CACHE_TTL_MS);
 const creatorCache = new TtlCache<string | null>(RULES_CACHE_TTL_MS);
 
 /**
@@ -248,69 +247,8 @@ async function loadEventAttributionPlan(
   });
 }
 
-/**
- * Load the FIRST attribution rule matching `entityType` (and `role`, when given)
- * declared anywhere in the connector's feeds_schema. The live app-webhook path
- * resolves an actor without a feed context (a delivery names an event, not a
- * feed), and a connector's person attribution is identical across its feeds — so
- * any feed's rule serves.
- *
- * `role` disambiguates when one entity type is targeted by several roles on the
- * same kind (e.g. an X DM attributes `person` both `authored_by` and `about`):
- * pass the role the caller actually wants ('authored_by' for a webhook actor)
- * rather than relying on declaration order.
- */
-export async function loadAttributionRuleByType(
-  sql: DbClient,
-  params: {
-    connectorKey: string;
-    orgId: string;
-    entityType: string;
-    role?: EventAttributionRule['role'];
-  }
-): Promise<ResolvedEventAttributionRule | null> {
-  const roleKey = params.role ?? '__any__';
-  const cacheKey = `${params.orgId}:${params.connectorKey}:__bytype__:${params.entityType}:${roleKey}`;
-  const map = await rulesByTypeCache.getOrSet(cacheKey, async () => {
-    const rows = await sql`
-      SELECT feeds_schema
-      FROM connector_definitions
-      WHERE key = ${params.connectorKey}
-        AND organization_id = ${params.orgId}
-        AND status = 'active'
-      LIMIT 1
-    `;
-    const result: RuleMap = {};
-    const feedsSchema = rows[0]?.feeds_schema as Record<string, any> | null | undefined;
-    if (feedsSchema) {
-      for (const feed of Object.values(feedsSchema)) {
-        const eventKinds = (
-          feed as {
-            eventKinds?: Record<string, EventKindAttributionDefinition>;
-          }
-        )?.eventKinds;
-        if (!eventKinds) continue;
-        for (const def of Object.values(eventKinds)) {
-          const match = resolveEventAttributions(def).find(
-            (r) =>
-              r.entityType === params.entityType &&
-              (params.role === undefined || r.role === params.role)
-          );
-          if (match) {
-            result[params.entityType] = [match];
-            return result;
-          }
-        }
-      }
-    }
-    return result;
-  });
-  return map[params.entityType]?.[0] ?? null;
-}
-
 export function clearEntityLinkRulesCache(): void {
   plansCache.clear();
-  rulesByTypeCache.clear();
   creatorCache.clear();
 }
 
