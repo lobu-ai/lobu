@@ -245,6 +245,7 @@ export type SearchMemoryResponses = {
     coverage?: {
       scope: "current_workspace" | "selected_workspace" | "all_granted";
       status: "complete" | "partial";
+      reason?: "query_embedding_unavailable";
       workspace_slug?: string;
       local_sources: Array<"events" | "channel_messages">;
       source_queried: false;
@@ -262,6 +263,7 @@ export type SearchMemoryResponses = {
       workspaces?: Array<{
         workspace_slug: string;
         status: "complete" | "partial" | "unavailable";
+        reason?: "query_embedding_unavailable";
         local_sources: Array<"events" | "channel_messages">;
         source_queried: false;
         source_feed_discovery: "complete" | "unavailable";

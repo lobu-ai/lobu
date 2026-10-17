@@ -64,6 +64,11 @@ function initializeMetrics() {
     "counter"
   );
   registerMetric(
+    "lobu_recall_query_embedding_failures_total",
+    "Search query embeddings that failed to generate, leaving recall text-only",
+    "counter"
+  );
+  registerMetric(
     "lobu_worker_dispatch_failures_total",
     "Connector runs that timed out before any worker claimed them, by run type and bounded reason",
     "counter"

@@ -14,7 +14,11 @@ import {
   groupClassificationFilters,
 } from '../content-query-filters';
 import { parseDateAlias, toEndOfDay } from '../date-aliases';
-import { embeddingModelSqlLiteral, generateEmbeddings, resolveEmbeddingModel } from '../embeddings';
+import {
+  embeddingModelSqlLiteral,
+  generateQueryEmbedding,
+  resolveEmbeddingModel,
+} from '../embeddings';
 import { toVectorLiteral } from '../entity-management';
 import logger from '../logger';
 import { validateNumericId } from '../sql-validation';
@@ -58,7 +62,6 @@ import {
   buildOrgScopeWhere,
   buildProducedByAutomationClause,
 } from './visibility';
-import { getErrorMessage } from "@lobu/core";
 
 /**
  * Run a recall query inside its own transaction with the recall budget applied
@@ -110,16 +113,10 @@ export async function searchContentBySingleQuery(
   let queryEmbedding: number[] | null = options.query_embedding?.length
     ? options.query_embedding
     : null;
+  let queryEmbeddingUnavailable = false;
   if (!queryEmbedding && env?.EMBEDDINGS_SERVICE_URL) {
-    try {
-      const embeddings = await generateEmbeddings([trimmedQuery], env, embeddingModel);
-      queryEmbedding = embeddings[0] ?? null;
-    } catch (err) {
-      logger.warn(
-        { err: getErrorMessage(err) },
-        '[content-search] Embedding generation failed, falling back to text-only search'
-      );
-    }
+    queryEmbedding = await generateQueryEmbedding(trimmedQuery, env, embeddingModel);
+    queryEmbeddingUnavailable = queryEmbedding === null;
   }
   const hasEmbedding = queryEmbedding !== null;
   // Clamp to [0, 1] so a caller can't produce an always-true / always-false
@@ -729,5 +726,6 @@ export async function searchContentBySingleQuery(
       cursor,
       fetchedCount: rawRows[0]?.cursor_fetched_count,
     }),
+    ...(queryEmbeddingUnavailable && { query_embedding_unavailable: true }),
   };
 }

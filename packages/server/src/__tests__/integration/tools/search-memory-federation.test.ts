@@ -616,7 +616,7 @@ describe('search_memory direct OAuth workspace federation', () => {
     try {
       const address = service.address();
       if (!address || typeof address === 'string') throw new Error('embedding test server missing');
-      await search(
+      const embedded = await search(
         {
           query: 'Atlas Project',
           include_content: true,
@@ -627,12 +627,13 @@ describe('search_memory direct OAuth workspace federation', () => {
         context()
       );
       expect(requests).toBe(1);
+      expect(embedded.coverage?.reason).toBeUndefined();
 
       // A failed shared attempt also stays single: individual shards fall
       // back to text instead of stampeding the unavailable embedding service.
       requests = 0;
       fail = true;
-      await search(
+      const textOnly = await search(
         {
           query: 'Atlas Project',
           include_content: true,
@@ -643,6 +644,14 @@ describe('search_memory direct OAuth workspace federation', () => {
         context()
       );
       expect(requests).toBe(1);
+      expect(textOnly.coverage?.status).toBe('partial');
+      expect(textOnly.coverage?.reason).toBe('query_embedding_unavailable');
+      expect(
+        textOnly.coverage?.workspaces?.every(
+          (workspace) => workspace.reason === 'query_embedding_unavailable'
+        )
+      ).toBe(true);
+      expectValidSearchResult(textOnly);
     } finally {
       await new Promise<void>((resolve, reject) =>
         service.close((error) => (error ? reject(error) : resolve()))

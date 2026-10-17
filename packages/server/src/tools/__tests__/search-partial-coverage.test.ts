@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
+import { getMetricsText } from '../../gateway/metrics/prometheus';
 import type { Env } from '../../index';
 import * as contentSearch from '../../utils/content-search';
 import * as workspace from '../../workspace';
@@ -60,4 +61,88 @@ describe('search_memory partial coverage guidance', () => {
       }
     }
   );
+});
+
+describe('search_memory without a query embedding', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const ctx = {
+    organizationId: 'synthetic-org',
+    userId: 'synthetic-user',
+    tokenType: 'session',
+    memberRole: 'owner',
+  } as ToolContext;
+  const env = { EMBEDDINGS_SERVICE_URL: 'http://embeddings.invalid' } as Env;
+  const embeddingFailures = () =>
+    Number(getMetricsText().match(/^lobu_recall_query_embedding_failures_total (\d+)$/m)?.[1] ?? 0);
+
+  function mockEmptyDatabase() {
+    const sql = {
+      unsafe: vi.fn(async () => []),
+      begin: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(sql)),
+    } as unknown as db.DbClient;
+    vi.spyOn(db, 'getDb').mockReturnValue(sql);
+    vi.spyOn(workspace, 'getWorkspaceProvider').mockReturnValue({
+      getOrgSlug: async () => 'synthetic-workspace',
+    } as ReturnType<typeof workspace.getWorkspaceProvider>);
+  }
+
+  it.each(['network', 'http', 'invalid_embedding'] as const)(
+    'reports text-only recall as partial coverage after an embedding %s failure',
+    async (failure) => {
+      mockEmptyDatabase();
+      const fetch = vi.spyOn(globalThis, 'fetch');
+      if (failure === 'network') {
+        fetch.mockRejectedValue(new TypeError('fetch failed'));
+      } else if (failure === 'http') {
+        fetch.mockResolvedValue(new Response('synthetic outage', { status: 503 }));
+      } else {
+        fetch.mockResolvedValue(new Response(JSON.stringify({ embeddings: [[]] })));
+      }
+      const before = embeddingFailures();
+
+      const result = await search({ query: 'synthetic customer meeting' }, env, ctx);
+
+      expect(result.coverage?.status).toBe('partial');
+      expect(result.coverage?.reason).toBe('query_embedding_unavailable');
+      expect(result.discovery_status).toBe('discovering');
+      expect(result.suggestion).toContain('text only');
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(embeddingFailures()).toBe(before + 1);
+    }
+  );
+
+  it('does not report an embedding failure when the caller supplied a vector', async () => {
+    mockEmptyDatabase();
+    const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'));
+    const before = embeddingFailures();
+
+    const result = await search(
+      { query: 'synthetic customer meeting', query_embedding: new Array(768).fill(0.01) },
+      env,
+      ctx
+    );
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(result.coverage?.status).toBe('complete');
+    expect(result.coverage?.reason).toBeUndefined();
+    expect(embeddingFailures()).toBe(before);
+  });
+
+  it('keeps coverage complete when the query embedding is generated', async () => {
+    mockEmptyDatabase();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ embeddings: [new Array(768).fill(0.01)] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    const before = embeddingFailures();
+
+    const result = await search({ query: 'synthetic customer meeting' }, env, ctx);
+
+    expect(result.coverage?.status).toBe('complete');
+    expect(result.coverage?.reason).toBeUndefined();
+    expect(embeddingFailures()).toBe(before);
+  });
 });

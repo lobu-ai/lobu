@@ -215,6 +215,8 @@ export interface ContentSearchResponse {
   /** Exact match count, or null when the caller passed `include_total: false`. */
   total: number | null;
   page: ContentSearchPageInfo;
+  /** The query embedding could not be generated, so ranking was text-only. */
+  query_embedding_unavailable?: true;
 }
 
 interface DateCursor {
