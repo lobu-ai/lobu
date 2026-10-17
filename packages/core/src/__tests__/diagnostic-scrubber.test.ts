@@ -332,15 +332,24 @@ describe("diagnostic credential scrubber", () => {
     // Split-form names the whole/suffix rules miss: a trailing
     // `authorization` segment is a vendor-prefixed header, and a leading
     // `credential(s)` segment names a serialized credential field. The mode
-    // half of `authorization_mode` stays readable by construction.
+    // half of `authorization_mode` stays readable by construction, as does
+    // `token_count` (a leading `token` segment is not a credential pin).
     const result = scrubDiagnosticValue({
       "x-authorization": `Bearer ${SECRET}`,
+      xAuthorization: `Bearer ${SECRET}`,
       credentials_json: JSON.stringify({ password: SECRET }),
+      credentialsJson: JSON.stringify({ password: SECRET }),
+      credentialBlob: SECRET,
       authorization_mode: "strict",
+      token_count: 7,
     }) as Record<string, unknown>;
     expect(result["x-authorization"]).toBe("[REDACTED]");
+    expect(result.xAuthorization).toBe("[REDACTED]");
     expect(result.credentials_json).toBe("[REDACTED]");
+    expect(result.credentialsJson).toBe("[REDACTED]");
+    expect(result.credentialBlob).toBe("[REDACTED]");
     expect(result.authorization_mode).toBe("strict");
+    expect(result.token_count).toBe(7);
   });
 
   it("redacts credential query pairs embedded in object keys", () => {

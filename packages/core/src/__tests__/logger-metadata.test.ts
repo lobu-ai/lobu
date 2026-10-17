@@ -166,7 +166,10 @@ describe("console logger pino-style metadata", () => {
     const line = captureWarn((log) => {
       log.warn({
         "x-authorization": "Bearer synthetic-prefixed-secret",
+        xAuthorization: "Bearer synthetic-xauth-secret",
         credentials_json: '{"password":"synthetic-serialized-secret"}',
+        credentialsJson: '{"password":"synthetic-camel-secret"}',
+        credentialBlob: "synthetic-blob-secret",
         token_count: 7,
       });
     });
@@ -174,7 +177,10 @@ describe("console logger pino-style metadata", () => {
     expect(line).toContain("[REDACTED]");
     expect(line).toContain("token_count");
     expect(line).not.toContain("synthetic-prefixed-secret");
+    expect(line).not.toContain("synthetic-xauth-secret");
     expect(line).not.toContain("synthetic-serialized-secret");
+    expect(line).not.toContain("synthetic-camel-secret");
+    expect(line).not.toContain("synthetic-blob-secret");
   });
 
   test("redacts credential query pairs embedded in object keys", () => {
@@ -258,6 +264,9 @@ describe("console logger structured output", () => {
         log.warn({
           "x-authorization": "Bearer synthetic-json-prefixed-secret",
           credentials_json: '{"password":"synthetic-json-serialized-secret"}',
+          credentialsJson: '{"password":"synthetic-json-camel-secret"}',
+          credentialBlob: "synthetic-json-blob-secret",
+          xAuthorization: "Bearer synthetic-json-xauth-secret",
         });`,
       ],
       {
@@ -304,5 +313,8 @@ describe("console logger structured output", () => {
     expect(output).not.toContain("synthetic-key-secret");
     expect(output).not.toContain("synthetic-json-prefixed-secret");
     expect(output).not.toContain("synthetic-json-serialized-secret");
+    expect(output).not.toContain("synthetic-json-camel-secret");
+    expect(output).not.toContain("synthetic-json-blob-secret");
+    expect(output).not.toContain("synthetic-json-xauth-secret");
   });
 });

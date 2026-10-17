@@ -36,14 +36,18 @@ const SECRET_KEY_EXACT = new Set([
  * credential term pinned to one end so the mode half of `authorization_mode`
  * stays readable:
  * - a TRAILING `authorization` segment is a (possibly vendor-prefixed)
- *   authorization header (`x-authorization`, `proxy-authorization`);
+ *   authorization header (`x-authorization`, `xAuthorization`);
  * - a LEADING `credential`/`credentials` segment names a serialized
- *   credential field (`credentials_json`, `credential_blob`).
- * Separator-less compounds (`authorizationHeader`) have no segments to pin,
- * so they stay in SECRET_KEY_EXACT above.
+ *   credential field (`credentials_json`, `credentialsJson`, `credentialBlob`).
+ * Case boundaries are split before lowercasing (mirroring `normalizeKey` in
+ * secret-redaction, including its acronym run), so camelCase compounds pin
+ * correctly. Separator-less all-lowercase compounds have no boundary to
+ * split, so they stay in SECRET_KEY_EXACT above.
  */
 function hasAffixedCredentialSegment(key: string): boolean {
   const segments = key
+    .replace(/([A-Z])(?=[A-Z][a-z])/g, "$1_")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .replace(/[^a-z0-9]+/gi, "_")
     .toLowerCase()
     .split("_")
