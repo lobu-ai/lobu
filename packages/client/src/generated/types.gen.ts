@@ -227,6 +227,10 @@ export type SearchMemoryResponses = {
       platform: string;
       occurred_at: string | null;
       similarity?: number;
+      /**
+       * Content ranking score, highest first: 0.4 x text relevance + 0.6 x vector similarity (text relevance alone when the query has no embedding). May be negative. Exact ID matches score 1; unranked listings score 0.
+       */
+      match_score: number;
       entity_ids: Array<number>;
       workspace_slug: string;
       workspace_slugs: Array<string>;

@@ -430,6 +430,7 @@ describe('search_memory direct OAuth workspace federation', () => {
       context()
     );
     expect(exact.content?.map((item) => item.id)).toEqual([sharedEvent.id]);
+    expect(exact.content?.[0]?.match_score).toBe(1);
     expect(exact.content?.[0]?.workspace_slugs).toEqual([orgA.slug, orgB.slug].sort());
     expectValidSearchResult(exact);
 
@@ -594,6 +595,63 @@ describe('search_memory direct OAuth workspace federation', () => {
     expect(result.children?.every((child) => child.parent_entity_id === atlasA.id)).toBe(true);
     expect(result.children?.every((child) => child.workspace_slug === orgA.slug)).toBe(true);
     expectValidSearchResult(result);
+  });
+
+  it('orders merged content by match_score, not raw similarity', async () => {
+    const axis = (entries: Record<number, number>) => {
+      const v = new Array(768).fill(0);
+      for (const [i, value] of Object.entries(entries)) v[Number(i)] = value;
+      return v;
+    };
+    // Closer vector, no text match: similarity 0.8, match_score 0.6 × 0.8.
+    const vectorOnly = await createTestEvent({
+      organization_id: orgA.id,
+      entity_id: atlasA.id,
+      content: 'Quarterly planning for the harbor team.',
+      embedding: axis({ 0: 0.8, 1: 0.6 }),
+    });
+    // Farther vector plus a text match: similarity 0.7, higher match_score.
+    const textAndVector = await createTestEvent({
+      organization_id: orgB.id,
+      entity_id: atlasB.id,
+      content: 'Ospreyline migration plan for the harbor team.',
+      embedding: axis({ 0: 0.7, 2: Math.sqrt(0.51) }),
+    });
+    // Text matching admits rows below the vector threshold, including negative scores.
+    const negativeScore = await createTestEvent({
+      organization_id: orgA.id,
+      entity_id: atlasA.id,
+      content: 'Ospreyline notes from the harbor team.',
+      embedding: axis({ 0: -1 }),
+    });
+
+    const result = await search(
+      {
+        query: 'ospreyline',
+        query_embedding: axis({ 0: 1 }),
+        include_public_catalogs: false,
+        include_connections: false,
+        content_limit: 5,
+      },
+      {} as Env,
+      context()
+    );
+    // Validate the serialized shape a client receives.
+    expectValidSearchResult(JSON.parse(JSON.stringify(result)));
+    const content = result.content ?? [];
+    expect(content.map((item) => item.id)).toEqual([
+      textAndVector.id,
+      vectorOnly.id,
+      negativeScore.id,
+    ]);
+    const byId = new Map(content.map((item) => [item.id, item]));
+    expect(byId.get(vectorOnly.id)!.similarity!).toBeGreaterThan(
+      byId.get(textAndVector.id)!.similarity!
+    );
+    expect(byId.get(vectorOnly.id)!.match_score).toBeCloseTo(0.48, 6);
+    expect(byId.get(textAndVector.id)!.match_score).toBeGreaterThan(0.48);
+    expect(byId.get(negativeScore.id)!.similarity).toBeCloseTo(-1, 6);
+    expect(byId.get(negativeScore.id)!.match_score).toBeLessThan(0);
   });
 
   it('generates one shared recall embedding for all workspace shards', async () => {
