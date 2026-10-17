@@ -222,6 +222,17 @@ export async function runWorkspacePurgeTask(
     while ((await batch(table, (tx) => deleteBatchByOrganization(tx, table, organizationId))) > 0);
   }
 
+  // 7. The public namespace entry. It is keyed by `ref_id`, not
+  //    `organization_id`, so it is neither cascaded from `organization` nor
+  //    part of the batch tables above. One row per workspace at most.
+  await batch('namespace', async (tx) => {
+    const deleted = await tx.unsafe(
+      "DELETE FROM namespace WHERE type = 'organization' AND ref_id = $1",
+      [organizationId],
+    );
+    return deleted.count;
+  });
+
   logger.info(
     { event: 'workspace_purge_finished', organizationId, taskRunId: ctx.taskRunId, counts },
     '[workspace-purge] Finished',

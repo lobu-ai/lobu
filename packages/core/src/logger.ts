@@ -14,39 +14,9 @@ export interface Logger {
   debug: (message: any, ...args: any[]) => void;
 }
 
-const SENSITIVE_LOG_KEY_PATTERN =
-  /(?:credential|secret|token|password|api(?:_|-)?key|authorization)/i;
-
-function createRedactingReplacer() {
-  const seen = new WeakSet<object>();
-
-  return (key: string, value: unknown) => {
-    if (SENSITIVE_LOG_KEY_PATTERN.test(key)) return "[REDACTED]";
-
-    if (value instanceof Error) {
-      return {
-        name: value.name,
-        message: value.message,
-        stack: value.stack,
-      };
-    }
-
-    if (typeof value === "object" && value !== null) {
-      if (seen.has(value)) return "[Circular Reference]";
-      seen.add(value);
-    }
-
-    return value;
-  };
-}
-
 function safeStringify(value: unknown, space?: number): string {
   try {
-    return JSON.stringify(
-      scrubDiagnosticValue(value),
-      createRedactingReplacer(),
-      space
-    );
+    return JSON.stringify(scrubDiagnosticValue(value), null, space);
   } catch {
     return "[unserializable]";
   }
@@ -86,7 +56,10 @@ function createConsoleLogger(serviceName: string): Logger {
         msgStr = safeStringify(message);
       }
     } else {
-      msgStr = String(message);
+      msgStr =
+        typeof message === "string"
+          ? (scrubDiagnosticValue(message) as string)
+          : String(message);
     }
 
     if (USE_JSON_FORMAT) {
@@ -107,7 +80,7 @@ function createConsoleLogger(serviceName: string): Logger {
       msgStr += ` ${safeStringify(args.length === 1 ? args[0] : args)}`;
     }
 
-    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${scrubDiagnosticValue(msgStr)}`;
+    return `[${timestamp.replace("T", " ").slice(0, 19)}] [${lvl}] [${serviceName}] ${msgStr}`;
   };
 
   return {

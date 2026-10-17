@@ -489,7 +489,9 @@ export async function proposeEntityChange(
 						? `${actorNoun} proposed updating ${fieldList} on this entity.`
 						: operation === "delete"
 							? `${actorNoun} proposed deleting this entity.`
-							: `${actorNoun} proposed creating this entity.`),
+							: identityProposal
+								? `${actorNoun} proposed ${operation === "link" ? "associating" : "separating"} these identity records.`
+								: `${actorNoun} proposed creating this entity.`),
 				semanticType: "operation",
 				runId,
 				// A proposal is something the Automation produced, so it belongs in the

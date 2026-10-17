@@ -866,7 +866,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
   async getOrgSlug(orgId: string): Promise<string | null> {
     const sql = getDb();
     const rows = await sql`
-      SELECT slug FROM "organization" WHERE id = ${orgId} LIMIT 1
+      SELECT slug FROM "organization" WHERE id = ${orgId} AND ${sql.unsafe(organizationLiveSql('organization'))} LIMIT 1
     `;
     return rows[0] ? (rows[0].slug as string) : null;
   }
@@ -878,7 +878,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
     const sql = getDb();
     const placeholders = uniqueOrgIds.map((_, i) => `$${i + 1}`).join(', ');
     const rows = await sql.unsafe<{ id: string; slug: string }>(
-      `SELECT id, slug FROM "organization" WHERE id IN (${placeholders})`,
+      `SELECT id, slug FROM "organization" WHERE id IN (${placeholders}) AND ${organizationLiveSql('organization')}`,
       uniqueOrgIds
     );
     for (const row of rows) {
@@ -896,14 +896,14 @@ export class MultiTenantProvider implements WorkspaceProvider {
         n.ref_id,
         o.name as org_name
       FROM namespace n
-      LEFT JOIN organization o ON n.type = 'organization' AND n.ref_id = o.id
+      JOIN organization o ON n.type = 'organization' AND n.ref_id = o.id AND ${sql.unsafe(organizationLiveSql('o'))}
       WHERE n.slug = ${slug}
         AND n.type = ${type}
     `;
     if (rows.length === 0) {
       // Fallback: namespace entry may be missing, query organization table directly
       const orgRows = await sql`
-        SELECT id, name, slug FROM organization WHERE slug = ${slug} LIMIT 1
+        SELECT id, name, slug FROM organization o WHERE o.slug = ${slug} AND ${sql.unsafe(organizationLiveSql('o'))} LIMIT 1
       `;
       if (orgRows.length > 0) {
         const org = orgRows[0] as { id: string; name: string; slug: string };
