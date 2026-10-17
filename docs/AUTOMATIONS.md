@@ -319,7 +319,13 @@ allowed catalog for connector-sourced events; when a connector declares none,
 the platform derives the catalog from its feed `eventKinds` (default-on). Each
 declared kind becomes a subscribable event type. A feed's first successful
 non-dry sync establishes its baseline without activation; later inserts of a
-matching kind activate subscribers. Entity-type `eventKinds` describe durable
+matching kind activate subscribers. A feed kind may opt in with
+`updatedEvent: true` to a separate `<kind>.updated` trigger: a supersede activates
+it only when `occurred_at` strictly advances past the replaced head. Unchanged
+rows, volatile-only updates and reformats with the same activity time stay quiet.
+The original kind remains insert-only; subscribe to both types to hear both.
+Literal kind slugs across the connector's feeds win collisions, and updated
+keys over 100 characters are omitted. Entity-type `eventKinds` describe durable
 workspace semantics and are the catalog for workspace-sourced events.
 
 The generic `webhook` connector exposes `delivery.received`. Its authenticated

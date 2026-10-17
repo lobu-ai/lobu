@@ -236,9 +236,15 @@ realtime subscriptions merely by implementing an on-demand `read` handler.
 - **`eventKinds`.** Declare the event types the feed can emit. A feed's
   `eventKinds` are also the default Automation trigger catalog: each kind becomes
   a subscribable event type. The first successful non-dry sync establishes the
-  feed's baseline without activation; later inserts activate subscribers. The
-  derived path fires feed `eventKinds` only — if you declare explicit
-  `automationEvents` keys that differ from your feed `eventKinds`, attach matching
+  feed's baseline without activation; later inserts activate subscribers.
+  Set `eventKinds.<kind>.updatedEvent: true` to also offer `<kind>.updated` for
+  supersedes with strictly newer `occurred_at` activity. Keep `occurred_at` on
+  the source's activity time; unchanged rows, volatile-only updates and
+  same-time reformats stay quiet. The original kind remains insert-only.
+  Literal kinds across the connector's feeds win slug collisions; composite
+  keys over 100 characters are omitted. The
+  derived path fires feed kinds and their opted-in updated types only — for other
+  explicit `automationEvents` keys, attach matching
   `automation_signals` to each emitted `EventEnvelope`, or those triggers never
   fire (the picker advertises them but ingestion never emits them).
 - **Entity relationships.** Give the event kind's attribution rules stable

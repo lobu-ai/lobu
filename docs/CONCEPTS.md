@@ -124,7 +124,10 @@ flowchart LR
    use the connector's resolved event catalog (declared `automationEvents` in the
    connector definition — persisted in the catalog as `automation_events` — else
    its feed `eventKinds`). For feed-derived triggers, the first successful
-   non-dry sync establishes a baseline; only later inserted items activate.
+   non-dry sync establishes a baseline; later inserted items activate their kind.
+   Kinds with `updatedEvent: true` also emit `<kind>.updated` when a supersede
+   carries strictly newer `occurred_at` activity. Unchanged and volatile-only
+   updates stay quiet.
    Workspace triggers fire only on **newly persisted declared event outputs**
    from another Automation. Ordinary knowledge saves and connector-ingested
    events do not activate workspace-source triggers; connector events activate

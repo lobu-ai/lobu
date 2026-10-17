@@ -10,9 +10,11 @@ import { type DbClient, getDb } from "../db/client";
  *
  * Convention (default-on, no per-connector declaration needed):
  *  - `event_type` is the feed's declared kind slug.
- *  - Only `change === 'inserted'` activates. A re-scraped row that supersedes
- *    the current head (e.g. an X tweet whose engagement metrics moved) is not
- *    a new source item and does not re-fire — that is what a listener wants.
+ *  - The kind itself activates only on insert. A kind with `updatedEvent: true`
+ *    also derives `<kind>.updated` on supersede when `occurred_at` advanced.
+ *    Unchanged rows, volatile-only state updates and reformats without newer
+ *    activity never derive updates. Connector-authored drafts choose their own
+ *    update semantics instead (see connector-signal.ts).
  *
  * Feed scoping is deliberately NOT exposed: events dedupe by
  * (connection_id, origin_id), so an origin first observed by one feed (e.g. an
@@ -36,6 +38,8 @@ export interface ConnectorDeriveFeedContext {
 	feedPreviouslySynced: boolean;
 	/** Declared eventKinds for this feed, or null when the connector declares none. */
 	eventKinds: Record<string, unknown> | null;
+	/** All literal kinds across the connector's feeds reserve their own slugs. */
+	declaredEventKinds?: ReadonlySet<string>;
 }
 
 export interface ConnectorDeriveEventInput {
@@ -45,7 +49,9 @@ export interface ConnectorDeriveEventInput {
 	title: string | null;
 	payloadText: string | null;
 	sourceUrl: string | null;
-	occurredAt: Date | string;
+	occurredAt: Date | string | null;
+	/** Activity time of the head replaced by this supersede, read during ingest. */
+	previousOccurredAt?: Date | string | null;
 	metadata: Record<string, unknown> | undefined;
 }
 
@@ -69,10 +75,12 @@ export async function loadConnectorDeriveFeedContext(
 	const sql = db ?? getDb();
 	const rows = await sql<{
 		event_kinds: unknown;
+		feeds_schema: unknown;
 		feed_previously_synced: boolean;
 	}>`
 		SELECT
 			d.feeds_schema -> ${args.feedKey} -> 'eventKinds' AS event_kinds,
+			d.feeds_schema,
 			EXISTS (
 				SELECT 1
 				FROM runs r
@@ -122,6 +130,7 @@ export async function loadConnectorDeriveFeedContext(
 		connectorKey: args.connectorKey,
 		feedPreviouslySynced: args.liveRecord === true || row.feed_previously_synced,
 		eventKinds,
+		declaredEventKinds: new Set(feedEventKinds(row.feeds_schema).flatMap(Object.keys)),
 	};
 }
 
@@ -136,15 +145,24 @@ export function deriveConnectorActivationSignals(
 	change: EventChangeKind,
 	eventId: number,
 ): ConnectorTriggerSignal[] {
-	if (change !== "inserted") return [];
+	if (change !== "inserted" && change !== "superseded") return [];
 	if (event.connectionId == null) return [];
 	if (!ctx.feedPreviouslySynced) return [];
 	if (ctx.eventKinds == null) return [];
 	const kind = normalizeEventKind(event.kind);
 	// An overlong kind has no activatable surface (same rule as the catalog).
 	if (kind.length === 0 || ctx.eventKinds[kind] == null) return [];
+	const eventType = change === "inserted"
+		? kind
+		: derivedUpdatedEventType(kind, ctx.eventKinds[kind],
+			ctx.declaredEventKinds ?? new Set(Object.keys(ctx.eventKinds)));
+	if (!eventType) return [];
 
-	const occurred = new Date(event.occurredAt);
+	const occurred = new Date(event.occurredAt ?? NaN);
+	if (change === "superseded") {
+		const previous = new Date(event.previousOccurredAt ?? NaN);
+		if (!(occurred.getTime() > previous.getTime())) return [];
+	}
 	const occurredAt = Number.isFinite(occurred.getTime())
 		? occurred.toISOString()
 		: new Date().toISOString();
@@ -208,7 +226,7 @@ export function deriveConnectorActivationSignals(
 			connection_id: event.connectionId,
 			resource_type: kind,
 			...(resourceRef ? { resource_ref: resourceRef } : {}),
-			event_type: kind,
+			event_type: eventType,
 			delivery_id: `derived:${ctx.connectorKey}:${event.connectionId}:event:${eventId}`,
 			label,
 			input_text: inputText,
@@ -231,24 +249,48 @@ function normalizeEventKind(kind: string): string {
 	return kind.length <= 100 ? kind : "";
 }
 
+/** Shared by activation and the catalog: literal kinds own their namespace. */
+function derivedUpdatedEventType(
+	kind: string,
+	spec: unknown,
+	declaredKinds: ReadonlySet<string>,
+): string | null {
+	if (!spec || typeof spec !== "object" || Array.isArray(spec) ||
+		(spec as Record<string, unknown>).updatedEvent !== true) return null;
+	const updated = normalizeEventKind(`${kind}.updated`);
+	return updated && !declaredKinds.has(updated) ? updated : null;
+}
+
+function feedEventKinds(feeds: unknown): Array<Record<string, unknown>> {
+	if (!feeds || typeof feeds !== "object" || Array.isArray(feeds)) return [];
+	return Object.values(feeds).flatMap((feed) => {
+		if (!feed || typeof feed !== "object" || Array.isArray(feed)) return [];
+		const kinds = (feed as Record<string, unknown>).eventKinds;
+		return kinds && typeof kinds === "object" && !Array.isArray(kinds)
+			? [kinds as Record<string, unknown>] : [];
+	});
+}
+
 /**
  * Under the default-on convention, every declared eventKind is a subscribable
  * Automation trigger type. Same-kind slugs across feeds aggregate into one entry
  * (the runtime fires `event_type = kind` for any feed). Returns `[]` when the
- * connector declares no eventKinds.
+ * connector declares no eventKinds. Opted-in kinds additionally advertise a
+ * separate updated trigger, using the same bounds and collision rule as ingest.
  */
 export function deriveAutomationEventCatalogFromFeeds(
 	feeds: unknown,
 ): Array<{ key: string; label: string }> {
-	if (!feeds || typeof feeds !== "object") return [];
+	const kindsByFeed = feedEventKinds(feeds);
+	const declaredKinds = new Set(kindsByFeed.flatMap(Object.keys));
 	const seen = new Set<string>();
-	for (const feed of Object.values(feeds as Record<string, unknown>)) {
-		if (!feed || typeof feed !== "object") continue;
-		const eventKinds = (feed as Record<string, unknown>).eventKinds;
-		if (!eventKinds || typeof eventKinds !== "object") continue;
-		for (const kind of Object.keys(eventKinds as Record<string, unknown>)) {
+	for (const eventKinds of kindsByFeed) {
+		for (const [kind, spec] of Object.entries(eventKinds)) {
 			const normalized = normalizeEventKind(kind);
-			if (normalized) seen.add(normalized);
+			if (!normalized) continue;
+			seen.add(normalized);
+			const updated = derivedUpdatedEventType(kind, spec, declaredKinds);
+			if (updated) seen.add(updated);
 		}
 	}
 	return [...seen].map((key) => ({

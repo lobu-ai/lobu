@@ -252,7 +252,19 @@ feeds: {
 }
 ```
 
-A feed's `eventKinds` are also the **default Automation trigger catalog**. The first successful non-dry sync establishes a baseline without activation; later inserts whose kind matches a declared `eventKinds` key activate subscribers. A non-empty `automationEvents` declaration (camelCase in `ConnectorDefinition`, persisted as `automation_events` in the catalog) replaces that derived catalog in the trigger picker. Keys that differ from the feed's `eventKinds` fire only when the emitted `EventEnvelope` carries matching `automation_signals`.
+A feed's `eventKinds` are also the **default Automation trigger catalog**. The first successful non-dry sync establishes a baseline without activation; later inserts whose kind matches a declared `eventKinds` key activate subscribers. A non-empty `automationEvents` declaration (camelCase in `ConnectorDefinition`, persisted as `automation_events` in the catalog) replaces that derived catalog in the trigger picker. Keys outside the feed kinds and their opted-in updated types fire only when the emitted `EventEnvelope` carries matching `automation_signals`.
+
+Set `eventKinds.<kind>.updatedEvent: true` to also expose a distinct `<kind>.updated`
+trigger (for example, Gmail's `thread.updated`). After the baseline, it fires when
+ingestion supersedes the source item with changed durable content and strictly
+newer `occurred_at` than the previous head. Use source activity time, not a scheduled
+start time. Unchanged rows, volatile-only counter updates and same-time reformats
+stay quiet. The original `<kind>` trigger remains insert-only; subscribe to both
+types for new items and later activity. Literal kinds declared by any feed of the
+connector win slug collisions, and composite keys over 100 characters are omitted.
+The optional boolean persists unchanged in `connector_definitions.feeds_schema`;
+existing definitions without it retain their semantics. Explicit `automationEvents`
+still replace the derived picker catalog, so include the updated key there if used.
 
 ## Syncing Data
 
