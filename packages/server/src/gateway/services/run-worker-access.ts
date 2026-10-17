@@ -1,5 +1,6 @@
 import { generateWorkerToken } from "@lobu/core";
 import { AUTOMATION_RUN_SOURCE } from "../automation-run-session.js";
+import { buildAutomationRunConversationId } from "../permissions/automation-run-intent.js";
 import { buildWorkerTokenClaims } from "../orchestration/worker-token-claims.js";
 
 export interface RunWorkerAccess {
@@ -25,7 +26,11 @@ export function buildAutomationRunWorkerAccess(args: {
 	organizationId: string;
 	conversationId?: string;
 }): RunWorkerAccess {
-	const expectedConversationId = `${args.agentId}_automation_${args.automationId}_run_${args.runId}`;
+	const expectedConversationId = buildAutomationRunConversationId(
+		args.agentId,
+		args.automationId,
+		args.runId,
+	);
 	const conversationId = args.conversationId ?? expectedConversationId;
 	if (conversationId !== expectedConversationId) {
 		throw new Error(

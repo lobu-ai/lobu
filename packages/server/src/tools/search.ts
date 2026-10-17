@@ -380,6 +380,10 @@ function applyCoverageScope(
 
 const FEDERATED_SEARCH_CONCURRENCY = 4;
 const MAX_CHILDREN = 20;
+// Correlated per-entity content counts saturate here: the probe stops the
+// scan after this many rows instead of walking the entity's full history.
+// Stats above the cap read as the cap (saturating, not exact).
+const CONTENT_COUNT_PROBE_LIMIT = 1001;
 
 function workspaceUnavailable(): ToolUserError {
   // Deliberately identical for unknown, ungranted, and no-longer-member
@@ -946,6 +950,9 @@ async function fetchContentSnippets(
       // default is a chronological date feed).
       sort_by: 'score',
       approximate_candidate_search: true,
+      // Recall discards `total` and only needs the top snippets: skip the
+      // unbounded `full_count` over all workspace events.
+      include_total: false,
       // Copies of one notice or page visit (distinct source items, identical
       // title + text) would otherwise fill every recall slot.
       collapse_identical_content: true,
@@ -1811,9 +1818,12 @@ function entitySelectColumns(callerOrgParamIdx: number, scope: AuthzScope, visib
   pe.name as parent_name, pe.slug as parent_slug, pet.slug as parent_entity_type,
   CASE WHEN ${ownOrg} THEN
     COALESCE((
-      SELECT COUNT(*) FROM current_event_records ev
-      WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}
-        AND ev.organization_id = e.organization_id ${visibilitySql}
+      SELECT COUNT(*) FROM (
+        SELECT 1 FROM current_event_records ev
+        WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}
+          AND ev.organization_id = e.organization_id ${visibilitySql}
+        LIMIT ${CONTENT_COUNT_PROBE_LIMIT}
+      ) content_probe
     ), 0)
   ELSE 0 END as content_count,
   CASE WHEN ${ownOrg} THEN
@@ -2236,9 +2246,12 @@ async function formatEntityResult(
         e.metadata::jsonb->>'market' as market,
         CASE WHEN $1::boolean THEN
           COALESCE(
-            (SELECT COUNT(*) FROM current_event_records ev
+            (SELECT COUNT(*) FROM (
+              SELECT 1 FROM current_event_records ev
               WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}
-                AND ev.organization_id = e.organization_id ${childVisibility.sql}),
+                AND ev.organization_id = e.organization_id ${childVisibility.sql}
+              LIMIT ${CONTENT_COUNT_PROBE_LIMIT}
+            ) child_content_probe),
             0
           )
         ELSE 0 END as content_count

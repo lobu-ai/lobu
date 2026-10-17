@@ -60,9 +60,8 @@ export interface ContentSearchOptions {
   until?: string; // ISO date
   engagement_min?: number; // Minimum engagement score (0-100)
   engagement_max?: number; // Maximum engagement score (0-100)
-  min_similarity?: number; // 0.0 - 1.0, default: 0.6
-  limit?: number; // default: 50, max: 100
-  content_ids?: number[]; // Filter to specific content IDs
+  min_similarity?: number; // 0.0 - 1.0, default: 0.3 (clamped to [0, 1])
+  limit?: number; // default: 50, clamped to the path's max page size
   /**
    * Filter by semantic type — single value or array (matches any). The reserved
    * `notification` value expands to notification_targets presence because a

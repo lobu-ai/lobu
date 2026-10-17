@@ -104,7 +104,13 @@ export async function searchContentBySingleQuery(
   const cursor = resolveDateCursor(options);
   const effectiveOffset = useDateFeed ? 0 : offset;
   const fetchLimit = useDateFeed ? limit + 1 : limit;
-  const includeTotal = options.include_total !== false;
+  // Recall (`approximate_candidate_search`) discards `total` and only needs
+  // the top snippets, so default it out of the unbounded `full_count` over
+  // all workspace events. An explicit `include_total: true` still opts in.
+  const includeTotal =
+    options.approximate_candidate_search === true
+      ? options.include_total === true
+      : options.include_total !== false;
   const trimmedQuery = queryText.trim();
 
   // One resolution for both the query vector and the stored vectors it is ranked
@@ -728,10 +734,13 @@ export async function searchContentBySingleQuery(
 
   let emptyPageTotal: number | null = null;
   if (includeTotal && !useDateFeed && rawRows.length === 0 && effectiveOffset > 0) {
+    // The candidate path requires effectiveOffset === 0, so this block only
+    // ever runs on the exact path: no search_candidates CTE, and params end
+    // before the cursor/limit/offset tail.
     const countSQL = `
-      WITH RECURSIVE ${useCandidatePath ? searchCandidatesCteSql : ''}${nonDateFilteredIdsCteSql}
+      WITH RECURSIVE ${nonDateFilteredIdsCteSql}
       SELECT COUNT(*) as total_count FROM filtered_ids`;
-    const countParams = useCandidatePath ? queryParams : queryParams.slice(0, cursorBaseParamIdx - 1);
+    const countParams = queryParams.slice(0, cursorBaseParamIdx - 1);
     const countRows = (await sql.unsafe(countSQL, countParams)) as any[];
     emptyPageTotal = parseInt(String(countRows[0]?.total_count ?? '0'), 10);
   }

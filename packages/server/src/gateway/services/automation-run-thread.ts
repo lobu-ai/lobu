@@ -1,4 +1,9 @@
 import { getDb, pgBigintArray } from "../../db/client.js";
+import {
+	AUTOMATION_CONVERSATION_SEGMENT,
+	AUTOMATION_RUN_SEGMENT,
+} from "../permissions/automation-run-intent.js";
+import { mapApprovalInteractionRow } from "./approval-interaction.js";
 import { paginateSessionMessages } from "./session-message-page.js";
 import { AUTOMATION_RUN_TYPES_PG } from "../../runs/run-types.js";
 
@@ -89,12 +94,15 @@ export async function readAutomationRunThreads(args: {
 			  -- the conversationId, so that is the join key: POST /api/v1/agents
 			  -- builds it as agentId + _automation_<automationId> + _run_<runId> from a
 			  -- server-VERIFIED automation_run intent, and rejects any other caller
-			  -- that tries to construct the shape (automation-run-intent.ts). Equality
+			  -- that tries to construct the shape (automation-run-intent.ts). The
+			  -- segments come from that module's canonical constants, so the
+			  -- per-row SQL concat cannot drift from
+			  -- buildAutomationRunConversationId. Equality
 			  -- on (organization_id, agent_id, conversation_id) is the leading
 			  -- prefix of agent_transcript_snapshot_latest, so this stays a seek.
 			  AND transcript.conversation_id =
-			      ${agentId} || '_automation_' || ${automationId}::text
-			      || '_run_' || r.id::text
+			      ${agentId} || ${AUTOMATION_CONVERSATION_SEGMENT} || ${automationId}::text
+			      || ${AUTOMATION_RUN_SEGMENT} || r.id::text
 			  AND transcript.terminal_status = 'completed'
 			ORDER BY transcript.created_at DESC
 			LIMIT 1
@@ -180,36 +188,10 @@ export async function readAutomationRunThreads(args: {
 		ORDER BY e.run_id
 	`;
 	const actions = approvalRows.map((row) => {
-		const resourceKind =
-			row.resource_kind ??
-			(row.tool === "manage_automations"
-				? "automation"
-				: row.tool === "manage_agents"
-					? "agent"
-					: row.tool === "entity_field_change" || row.tool === "entity_change"
-						? "entity"
-						: null);
-		const rawProposal = row.proposal ?? null;
-		const proposal =
-			resourceKind === "automation" &&
-			rawProposal &&
-			typeof rawProposal === "object" &&
-			(rawProposal as { args?: unknown }).args &&
-			typeof (rawProposal as { args: unknown }).args === "object"
-				? (rawProposal as { args: Record<string, unknown> }).args
-				: rawProposal;
+		const mapped = mapApprovalInteractionRow(row);
 		return {
 			parentRunId: Number(row.parent_run_id),
-			type: "tool-approval" as const,
-			eventId: Number(row.event_id),
-			runId: Number(row.run_id),
-			action: row.action,
-			proposal,
-			current: row.current ?? null,
-			fields: row.fields ?? null,
-			attribution: row.attribution ?? null,
-			resourceKind,
-			reason: row.reason ?? null,
+			...mapped,
 			status: row.interaction_status,
 			reviewedByName: row.reviewed_by_name,
 		};

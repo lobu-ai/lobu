@@ -4,6 +4,7 @@
  */
 
 import { pgTextArray } from '../../db/client';
+import { INTERNAL_OPS_EXCLUSION_SQL } from './sql-fragments';
 import type { ContentSearchOptions } from './types';
 
 /**
@@ -130,3 +131,111 @@ export const RUN_JOIN_SQL = `LEFT JOIN automation_run_events iwf
           ON iwf.event_id = f.id
           AND ($5::int IS NOT NULL)
           AND iwf.run_id = $5::int`;
+
+/**
+ * Per-request event filters that every `read_knowledge` builder must apply
+ * identically: platform, occurred_at window, run, engagement, semantic type,
+ * interaction status, agent/client/conversation scope, and the workspace-audit
+ * / internal-ops discovery filters.
+ *
+ * Dynamic parameter appending: each bound value is pushed onto `params` and
+ * its fragment references `$${params.length}`, so callers never track a
+ * fixed positional slot by hand and two builders cannot drift a `$N` apart.
+ * `sinceDate`/`untilDate` are pre-parsed Dates (callers own the date-alias
+ * parsing). The events table is always aliased `f`: INTERNAL_OPS_EXCLUSION_SQL
+ * is `f`-bound, and every `read_knowledge` builder that needs these filters
+ * already reads `current_event_records f`.
+ *
+ * Entity-link, org scope, classification EXISTS, automation
+ * analyzed/produced/excluded, visibility, and entity-types clauses stay with
+ * their dedicated builders — they need arm-splitting or cross-table joins
+ * this helper must not hide.
+ */
+export function appendStandardEventFilters(
+  conditions: string[],
+  params: any[],
+  filters: Pick<
+    ContentSearchOptions,
+    | 'platform'
+    | 'run_id'
+    | 'engagement_min'
+    | 'engagement_max'
+    | 'semantic_type'
+    | 'interaction_status'
+    | 'agent_id'
+    | 'client_id'
+    | 'mcp_session_ids'
+    | 'exclude_workspace_audit'
+    | 'exclude_internal_ops'
+  > & { sinceDate?: Date | null; untilDate?: Date | null }
+): { sinceParam: string | null; untilParam: string | null } {
+  const alias = 'f';
+  let sinceParam: string | null = null;
+  let untilParam: string | null = null;
+  if (filters.platform) {
+    params.push(filters.platform);
+    conditions.push(`${alias}.connector_key = $${params.length}`);
+  }
+  if (filters.sinceDate) {
+    params.push(filters.sinceDate.toISOString());
+    conditions.push(`${alias}.occurred_at >= $${params.length}`);
+    sinceParam = `$${params.length}::timestamptz`;
+  }
+  if (filters.untilDate) {
+    params.push(filters.untilDate.toISOString());
+    conditions.push(`${alias}.occurred_at <= $${params.length}`);
+    untilParam = `$${params.length}::timestamptz`;
+  }
+  if (filters.run_id != null) {
+    params.push(filters.run_id);
+    conditions.push(
+      `EXISTS (SELECT 1 FROM automation_run_events iwf WHERE iwf.event_id = ${alias}.id AND iwf.run_id = $${params.length})`
+    );
+  }
+  if (filters.engagement_min != null) {
+    params.push(filters.engagement_min);
+    conditions.push(`${alias}.score >= $${params.length}`);
+  }
+  if (filters.engagement_max != null) {
+    params.push(filters.engagement_max);
+    conditions.push(`${alias}.score <= $${params.length}`);
+  }
+  if (filters.semantic_type) {
+    // Match any of the requested types — single-string callers get wrapped
+    // into a one-element Postgres array literal so the same predicate fits.
+    const types = Array.isArray(filters.semantic_type)
+      ? filters.semantic_type
+      : [filters.semantic_type];
+    params.push(pgTextArray(types));
+    conditions.push(buildSemanticTypeFilterSql(alias, `$${params.length}`));
+  }
+  if (filters.exclude_workspace_audit) {
+    conditions.push(`NOT (${alias}.metadata ? '_lobu_workspace_audit')`);
+  }
+  // Internal-ops discovery filter. An explicit semantic_type filter wins: a
+  // caller asking for 'audit' rows is reading the ops trail on purpose.
+  if (filters.exclude_internal_ops && !filters.semantic_type) {
+    conditions.push(INTERNAL_OPS_EXCLUSION_SQL);
+  }
+  if (filters.interaction_status) {
+    params.push(filters.interaction_status);
+    conditions.push(`${alias}.interaction_status = $${params.length}`);
+  }
+  if (filters.agent_id) {
+    params.push(filters.agent_id);
+    conditions.push(`${alias}.metadata->>'agent_id' = $${params.length}`);
+  }
+  if (filters.client_id) {
+    // `events.client_id` is a real indexed column, not a metadata field — a
+    // plain column predicate. Always ANY() so one id and a re-registered
+    // client's many ids share a single shape.
+    const clientIds = Array.isArray(filters.client_id) ? filters.client_id : [filters.client_id];
+    params.push(pgTextArray(clientIds));
+    conditions.push(`${alias}.client_id = ANY($${params.length}::text[])`);
+  }
+  if (filters.mcp_session_ids !== undefined) {
+    params.push(pgTextArray(filters.mcp_session_ids));
+    conditions.push(`${alias}.metadata->>'mcp_session_id' = ANY($${params.length}::text[])`);
+  }
+  return { sinceParam, untilParam };
+}

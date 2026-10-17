@@ -2,7 +2,7 @@
  * Content listing path: executeListQuery and listContentInternal.
  */
 
-import { type DbClient, pgTextArray } from '../../db/client';
+import { type DbClient } from '../../db/client';
 import {
   buildConnectionFilter,
   buildFeedFilter,
@@ -46,7 +46,7 @@ import {
   type OrgScopeWhere,
 } from './visibility';
 import {
-  buildSemanticTypeFilterSql,
+  appendStandardEventFilters,
   buildStandardParams,
   buildEffectiveAtRangeSql,
   buildStandardWhereSql,
@@ -476,81 +476,25 @@ export async function listContentInternal(
     baseConditions.push(feedFilterClause);
     baseConditions.push(runFilterClause);
 
-    if (options.platform) {
-      baseParams.push(options.platform);
-      baseConditions.push(`f.connector_key = $${baseParams.length}`);
-    }
-    let sinceParam: string | null = null;
-    let untilParam: string | null = null;
-    if (sinceDate) {
-      baseParams.push(sinceDate.toISOString());
-      baseConditions.push(`f.occurred_at >= $${baseParams.length}`);
-      sinceParam = `$${baseParams.length}::timestamptz`;
-    }
-    if (untilDate) {
-      baseParams.push(untilDate.toISOString());
-      baseConditions.push(`f.occurred_at <= $${baseParams.length}`);
-      untilParam = `$${baseParams.length}::timestamptz`;
-    }
-    if (options.run_id != null) {
-      baseParams.push(options.run_id);
-      baseConditions.push(
-        `EXISTS (SELECT 1 FROM automation_run_events iwf WHERE iwf.event_id = f.id AND iwf.run_id = $${baseParams.length})`
-      );
-    }
-    if (options.engagement_min != null) {
-      baseParams.push(options.engagement_min);
-      baseConditions.push(`f.score >= $${baseParams.length}`);
-    }
-    if (options.engagement_max != null) {
-      baseParams.push(options.engagement_max);
-      baseConditions.push(`f.score <= $${baseParams.length}`);
-    }
-    if (options.semantic_type) {
-      // Match any of the requested types — single-string callers get wrapped
-      // into a one-element Postgres array literal so the same predicate fits.
-      const types = Array.isArray(options.semantic_type)
-        ? options.semantic_type
-        : [options.semantic_type];
-      baseParams.push(pgTextArray(types));
-      baseConditions.push(buildSemanticTypeFilterSql('f', `$${baseParams.length}`));
-    }
-    if (options.exclude_workspace_audit) {
-      baseConditions.push(`NOT (f.metadata ? '_lobu_workspace_audit')`);
-    }
-    // Internal-ops filter, same rule as the search path and the standard
-    // branch below. Recall does not reach this classification-filtered branch
-    // today (fetchContentSnippets sends no classification_filters), but the
-    // option is a contract on ContentSearchOptions, and exclude_workspace_audit
-    // above is likewise applied on every builder. An explicit semantic_type
-    // filter still wins, as in search-path.ts.
-    if (options.exclude_internal_ops && !options.semantic_type) {
-      baseConditions.push(INTERNAL_OPS_EXCLUSION_SQL);
-    }
-    if (options.interaction_status) {
-      baseParams.push(options.interaction_status);
-      baseConditions.push(`f.interaction_status = $${baseParams.length}`);
-    }
-    if (options.agent_id) {
-      baseParams.push(options.agent_id);
-      baseConditions.push(`f.metadata->>'agent_id' = $${baseParams.length}`);
-    }
-    if (options.client_id) {
-      // `events.client_id` is a real indexed column (idx_events_client_id), not
-      // a metadata field — so this is a plain column predicate. Always ANY() so
-      // one id and a re-registered client's many ids share a single shape.
-      const clientIds = Array.isArray(options.client_id)
-        ? options.client_id
-        : [options.client_id];
-      baseParams.push(pgTextArray(clientIds));
-      baseConditions.push(`f.client_id = ANY($${baseParams.length}::text[])`);
-    }
-    if (options.mcp_session_ids !== undefined) {
-      baseParams.push(pgTextArray(options.mcp_session_ids));
-      baseConditions.push(
-        `f.metadata->>'mcp_session_id' = ANY($${baseParams.length}::text[])`
-      );
-    }
+    const { sinceParam, untilParam } = appendStandardEventFilters(
+      baseConditions,
+      baseParams,
+      {
+        platform: options.platform,
+        sinceDate,
+        untilDate,
+        run_id: options.run_id,
+        engagement_min: options.engagement_min,
+        engagement_max: options.engagement_max,
+        semantic_type: options.semantic_type,
+        interaction_status: options.interaction_status,
+        agent_id: options.agent_id,
+        client_id: options.client_id,
+        mcp_session_ids: options.mcp_session_ids,
+        exclude_workspace_audit: options.exclude_workspace_audit,
+        exclude_internal_ops: options.exclude_internal_ops,
+      }
+    );
 
     const classificationExists = buildClassificationExistsClauses(
       filtersBySlug,
