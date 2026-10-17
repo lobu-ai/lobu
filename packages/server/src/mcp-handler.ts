@@ -56,7 +56,7 @@ import {
 } from './mcp-session-state';
 import { MCP_SESSION_MAX_AGE_MS, McpSessionStore, type PersistedMcpSession } from './mcp-session-store';
 import { LOBU_SKILL_MARKDOWN } from './skills/lobu-skill.generated';
-import { readMcpAttachmentResource } from './mcp-media-resources';
+import { mcpImagesForResourceLinks, readMcpAttachmentResource } from './mcp-media-resources';
 import { isAdminOrOwnerRole } from './tools/access-control';
 import {
   type AuthContext,
@@ -661,7 +661,10 @@ function createServerForContext(
         await touchAgentLastUsed(authCtx.organizationId, authCtx.agentId);
       }
 
-      const attachedContent = getMcpResultContent(result) ?? [];
+      const attachedContent = [...(getMcpResultContent(result) ?? [])];
+      attachedContent.push(...await mcpImagesForResourceLinks(attachedContent, (uri, maxBytes) =>
+        readMcpAttachmentResource(uri, env, callAuthCtx, maxBytes)
+      ));
 
       // executeTool has already passed the rich SDK result through the internal
       // audit seam. Do not expose logs, stacks, org traversal, or call traces to

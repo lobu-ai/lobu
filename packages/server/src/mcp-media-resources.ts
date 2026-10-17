@@ -1,4 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { isToolImageMimeType, MAX_TOOL_IMAGE_BYTES, MAX_TOOL_IMAGE_BYTES_TOTAL, MAX_TOOL_IMAGES, mcpToolResult } from '@lobu/plugin-toolkit';
 import {
   ArtifactStore,
   eventArtifactBinding,
@@ -6,7 +7,9 @@ import {
 } from './gateway/files/artifact-store';
 import type { Env } from './index';
 import { getLobuCoreServices } from './lobu/gateway';
-import { type AuthContext, executeTool } from './tools/execute';
+import { type AuthContext, executeTool, toAccountToolContext } from './tools/execute';
+import { getDb } from './db/client';
+import { resolveCrossOrgToolContext } from './sandbox/client-sdk';
 
 // resources/read embeds base64 in one JSON-RPC response, so the decoded cap
 // bounds how much a single read can amplify app memory. Kept at the limit
@@ -113,7 +116,7 @@ function resourceLinksForKnowledgeRead(value: Record<string, unknown>): Resource
  * attachments as MCP resource links. Links use Lobu-owned stable ids, never
  * ephemeral signed download URLs.
  */
-export function mcpResourceLinksForSdkReturnValue(value: unknown): ResourceLink[] {
+function resourceLinksForSdkLeaf(value: unknown): ResourceLink[] {
   if (!isRecord(value)) return [];
 
   if (value.action === 'execute' && value.status === 'completed') {
@@ -129,6 +132,74 @@ export function mcpResourceLinksForSdkReturnValue(value: unknown): ResourceLink[
   }
 
   return resourceLinksForKnowledgeRead(value);
+}
+
+export function mcpResourceLinksForSdkReturnValue(value: unknown): ResourceLink[] {
+  const links = new Map<string, ResourceLink>();
+  const seen = new Set<object>();
+  let visited = 0;
+  function visit(current: unknown, depth: number): void {
+    if (depth > 8 || visited >= 1_000 || links.size >= 64) return;
+    visited++;
+    if (!current || typeof current !== 'object' || seen.has(current)) return;
+    seen.add(current);
+    const own = resourceLinksForSdkLeaf(current);
+    if (own.length > 0) {
+      for (const link of own) {
+        if (links.size >= 64) break;
+        links.set(link.uri, link);
+      }
+      return;
+    }
+    for (const child of Object.values(current)) {
+      visit(child, depth + 1);
+      if (visited >= 1_000 || links.size >= 64) break;
+    }
+  }
+  visit(value, 0);
+  return [...links.values()];
+}
+
+/**
+ * Resolve only host-authored Lobu links, through the SAME reader used by
+ * resources/read. No signed URL, arbitrary fetch, or caller-supplied artifact
+ * binding. A missing image never changes an already completed operation into
+ * a retryable failure: report the delivery problem alongside the resource.
+ */
+export async function mcpImagesForResourceLinks(
+  content: CallToolResult['content'],
+  read: (uri: string, maxBytes: number) => Promise<{ contents: Array<{ mimeType: string; blob: string }> } | null>
+): Promise<CallToolResult['content']> {
+  const output: CallToolResult['content'] = [];
+  const seen = new Set<string>();
+  let bytes = 0;
+  let attempted = 0;
+  for (const link of content) {
+    if (link.type !== 'resource_link' || !parseAttachmentUri(link.uri) || !isToolImageMimeType(link.mimeType) || seen.has(link.uri)) continue;
+    seen.add(link.uri);
+    const limit = Math.min(MAX_TOOL_IMAGE_BYTES, MAX_TOOL_IMAGE_BYTES_TOTAL - bytes);
+    if (attempted >= MAX_TOOL_IMAGES || limit <= 0 || (typeof link.size === 'number' && link.size > limit)) {
+      output.push({ type: 'text', text: `Image not delivered for ${link.uri}: tool image budget exhausted.` });
+      continue;
+    }
+    attempted++;
+    try {
+      const resource = await read(link.uri, limit);
+      const stored = resource?.contents[0];
+      if (!stored) throw new Error('unavailable');
+      const normalized = mcpToolResult([{ type: 'image', mimeType: stored.mimeType, data: stored.blob }], '');
+      const image = normalized.content.find(part => part.type === 'image');
+      const size = image ? Buffer.from(image.data, 'base64').length : 0;
+      if (!image || size > limit) throw new Error('unavailable');
+      output.push(image);
+      bytes += size;
+    } catch {
+      // Do not leak a permission/storage error's details or suggest repeating
+      // the operation (which could have side effects).
+      output.push({ type: 'text', text: `Image not delivered for ${link.uri}: unavailable, invalid, unauthorized, or over budget. Do not infer visual contents.` });
+    }
+  }
+  return output;
 }
 
 function parseAttachmentUri(uri: string): ResourceRef | null {
@@ -206,7 +277,8 @@ async function loadResourceAttachment(
 export async function readMcpAttachmentResource(
   uri: string,
   env: Env,
-  authCtx: AuthContext
+  authCtx: AuthContext,
+  maxBytes = MAX_MCP_RESOURCE_BYTES
 ): Promise<
   | {
       contents: Array<{
@@ -220,6 +292,24 @@ export async function readMcpAttachmentResource(
   const ref = parseAttachmentUri(uri);
   if (!ref) return null;
 
+  // Account-scoped SDK calls may select a workspace without changing the MCP
+  // session's anchor. Resolve the resource's workspace through the same live
+  // grant/membership gate as client.org(), then use the normal resource reader.
+  // The indexed id lookup locates a workspace; it confers no read authority.
+  if (!authCtx.organizationId || authCtx.allowCrossOrg || authCtx.chatSenderReach) {
+    const sql = getDb();
+    const [row] = ref.kind === 'run'
+      ? await sql`SELECT organization_id FROM runs WHERE id = ${ref.id}`
+      : await sql`SELECT organization_id FROM events WHERE id = ${ref.id}`;
+    if (!row?.organization_id) throw new Error(`Unknown resource: ${uri}`);
+    if (row.organization_id !== authCtx.organizationId) {
+      const workspace = await resolveCrossOrgToolContext(row.organization_id, toAccountToolContext(authCtx))
+        .catch(() => null);
+      if (!workspace) throw new Error(`Unknown resource: ${uri}`);
+      authCtx = { ...authCtx, organizationId: workspace.organizationId,
+        memberRole: workspace.memberRole, agentId: workspace.agentId ?? null };
+    }
+  }
   const loaded = await loadResourceAttachment(ref, env, authCtx);
   const attachment = loaded?.attachment;
   if (!loaded || !attachment || typeof attachment.artifact_id !== 'string') {
@@ -235,15 +325,16 @@ export async function readMcpAttachmentResource(
     binding: loaded.binding,
   });
   if (!metadata) throw new Error(`Unknown resource: ${uri}`);
-  if (metadata.size > MAX_MCP_RESOURCE_BYTES) {
+  const limit = Math.min(MAX_MCP_RESOURCE_BYTES, maxBytes);
+  if (metadata.size > limit) {
     throw new Error(
-      `MCP resource is too large to inline (${metadata.size} bytes; limit ${MAX_MCP_RESOURCE_BYTES})`
+      `MCP resource is too large to inline (${metadata.size} bytes; limit ${limit})`
     );
   }
 
   const stored = await artifactStore.read(attachment.artifact_id, {
     binding: loaded.binding,
-    maxBytes: MAX_MCP_RESOURCE_BYTES,
+    maxBytes: limit,
   });
   if (!stored) throw new Error(`Unknown resource: ${uri}`);
   return {

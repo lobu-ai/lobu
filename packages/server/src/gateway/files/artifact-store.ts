@@ -85,6 +85,14 @@ export function runArtifactBinding(runId: number): string {
   return `run:${runId}`;
 }
 
+/** Decode only canonical run bindings; artifact metadata alone grants no access. */
+export function parseRunArtifactBinding(binding: string | undefined): number | undefined {
+  if (!binding?.startsWith('run:')) return undefined;
+  const runId = Number(binding.slice(4));
+  return Number.isSafeInteger(runId) && runId > 0 && binding === runArtifactBinding(runId)
+    ? runId : undefined;
+}
+
 export function eventArtifactBinding(params: {
   organizationId: string;
   connectionId?: number | null;

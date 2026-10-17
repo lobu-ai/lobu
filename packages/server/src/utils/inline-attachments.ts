@@ -24,6 +24,7 @@ import { getDb } from "../db/client";
 import { getLobuCoreServices } from "../lobu/gateway";
 import {
   runArtifactBinding,
+  parseRunArtifactBinding,
   type ArtifactStore,
 } from "../gateway/files/artifact-store";
 import { resolvePublicGatewayUrl } from "./public-origin";
@@ -281,9 +282,48 @@ export async function materializeActionOutputAttachments(
   if (!Array.isArray(actionOutput.attachments)) {
     return { output: actionOutput, publishedArtifactIds: [] };
   }
+  const artifactStore = getLobuCoreServices()?.getArtifactStore?.();
+  const sql = getDb();
+  const attachments: unknown[] = [];
+  for (const raw of actionOutput.attachments) {
+    if (!artifactStore || !raw || typeof raw !== "object") {
+      attachments.push(raw);
+      continue;
+    }
+    const attachment = raw as InlineAttachment;
+    if (typeof attachment.data === "string" || typeof attachment.artifact_id !== "string") {
+      attachments.push(raw);
+      continue;
+    }
+    // A connector may return media from a browser child. Re-publish only a
+    // completed, same-organization DIRECT child's actual output, with a new
+    // parent binding. Never graft an arbitrary artifact or weaken store reads.
+    const metadata = await artifactStore.inspect(attachment.artifact_id);
+    const childId = parseRunArtifactBinding(metadata?.binding);
+    const children = childId === undefined ? [] : await sql`
+      SELECT child.id FROM runs child
+      JOIN runs parent ON parent.id = child.parent_run_id
+      WHERE child.id = ${childId} AND parent.id = ${runId}
+        AND child.organization_id = parent.organization_id
+        AND child.status = 'completed'
+        AND child.action_output->'attachments' @> ${sql.json([{ artifact_id: attachment.artifact_id }])}::jsonb
+    `;
+    const stored = children.length === 1
+      ? await artifactStore.read(attachment.artifact_id, {
+          binding: runArtifactBinding(Number(children[0]!.id)),
+          maxBytes: MAX_INLINE_ATTACHMENT_BYTES,
+        })
+      : null;
+    attachments.push(stored ? {
+      ...attachment,
+      filename: stored.metadata.filename,
+      mime_type: stored.metadata.contentType,
+      data: stored.bytes.toString("base64"),
+    } : raw);
+  }
   const { items, publishedArtifactIds, rejected } =
     await materializeInlineAttachments(
-      [{ id: `action:${runId}`, attachments: actionOutput.attachments }],
+      [{ id: `action:${runId}`, attachments }],
       () => runArtifactBinding(runId)
     );
   return {

@@ -20,7 +20,7 @@
  */
 
 import type { AgentTool, AgentMessage } from '@mariozechner/pi-agent-core';
-import type { TextResult } from '@lobu/plugin-toolkit';
+import { mcpToolResult, toolImageBudget, type ToolImageBudget, type ToolResult } from '@lobu/plugin-toolkit';
 import { createGatewayTools } from './gateway-tools.js';
 import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
@@ -76,8 +76,10 @@ async function callMcpTool(
   credential: string,
   tool: AgentTurnTool,
   args: unknown,
-  timeoutMs = TOOL_CALL_TIMEOUT_MS
-): Promise<TextResult> {
+  timeoutMs = TOOL_CALL_TIMEOUT_MS,
+  supportsImages = true,
+  imageBudget?: ToolImageBudget
+): Promise<ToolResult> {
   const url = `${gatewayUrl}/mcp/${encodeURIComponent(tool.mcpId)}/tools/${encodeURIComponent(tool.name)}`;
   let response: Response;
   try {
@@ -116,7 +118,8 @@ async function callMcpTool(
   // Ordinary agent tools render this same result below; no second transport.
   return {
     ...reply,
-    content: [{ type: 'text', text: text || reply.error || '' }],
+    ...mcpToolResult(reply.isError === true ? reply.content?.filter(part => part?.type === 'text') : reply.content,
+      reply.error || '', supportsImages, imageBudget),
   };
 }
 
@@ -137,6 +140,18 @@ function buildTools(
 ): { tools: AgentTool[]; workspace: AgentWorkspace | null; canReadFiles: boolean } {
   const tools = input.tools;
   if (!tools) return { tools: [], workspace: null, canReadFiles: false };
+  // The checkpoint carries the full session, including older image blocks.
+  // Charge those AND this prompt's images before admitting tool pixels. The
+  // image allowance leaves bridge space for text; it is not a total turn cap.
+  const previousContent = input.sessionJsonl.trim().split('\n').filter(line => line.trim())
+    .flatMap(line => {
+      const entry = JSON.parse(line);
+      return entry.type === 'message' && Array.isArray(entry.message?.content) ? entry.message.content : [];
+    });
+  const imageBudget = toolImageBudget([
+    ...previousContent,
+    ...(input.images ?? []).map(image => ({ type: 'image', data: image.data })),
+  ]);
   // ONE workspace for the whole turn: the file tools act on it and
   // `upload_file` reads it, so the file the model just wrote is the file it can
   // show. Built even when no file tool was admitted but a media tool was, since
@@ -175,11 +190,21 @@ function buildTools(
     // A plain JSON schema: pi-ai validates arguments against it as-is.
     parameters: tool.inputSchema as never,
     execute: async (_toolCallId: string, args: unknown) => {
-      const result = await callMcpTool(tools.gatewayUrl, credential, tool, args);
+      const result = await callMcpTool(
+        tools.gatewayUrl,
+        credential,
+        tool,
+        args,
+        TOOL_CALL_TIMEOUT_MS,
+        input.provider.input?.includes('image') === true,
+        imageBudget
+      );
       const text = joinText(result.content);
       if (result.isError === true) throw new Error(String(result.error || text || `${tool.name} failed`));
       return {
-        content: [{ type: 'text' as const, text: text || `${tool.name} completed.` }],
+        content: text || result.content.some((part) => part.type === 'image')
+          ? result.content
+          : [{ type: 'text' as const, text: `${tool.name} completed.` }],
         details: {},
       };
     },
@@ -388,7 +413,7 @@ export async function runAgentTurn(
               { mcpId, name: toolName, description: '', inputSchema: {} },
               args,
               options?.timeoutMs
-            ),
+            ).then((result) => ({ ...result, content: [{ type: 'text' as const, text: joinText(result.content) }] })),
           logger: guestLogger,
         })
       : null;
