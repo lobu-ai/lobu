@@ -109,7 +109,8 @@ export interface ContentSearchOptions {
   after_id?: number; // Stable tie-breaker for after_occurred_at
 
   // Ranking tuning. combined_score = vector_weight*cosine + (1-vector_weight)*text_rank
-  // when both signals are available. Defaults to 0.6 (60% vector, 40% text) which
+  // whenever the query has an embedding; text_rank is in [0, 1] and a row with no
+  // comparable vector contributes cosine 0. Defaults to 0.6 (60% vector, 40% text) which
   // matches the prior hard-coded weighting. Raise toward 1.0 for noisy/long-form content
   // where text rank is dominated by stopword-like matches (e.g. conversational logs).
   vector_weight?: number;
