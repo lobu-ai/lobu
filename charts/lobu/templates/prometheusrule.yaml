@@ -121,4 +121,20 @@ spec:
           annotations:
             summary: "Lobu fleet workers have stopped polling"
             description: "No authorized fleet-worker poll was observed for roughly 10m. Cloud connector work cannot be admitted or claimed. Check worker pods, /api/worker/poll traffic, app ingress, and DB availability."
+    - name: lobu-recall
+      rules:
+        # Query embedding failures degrade recall to text-only ranking without
+        # failing requests (lobu#4190). Hold for 30m after the condition clears
+        # to bridge gaps in search traffic; Alertmanager controls notifications.
+        - alert: LobuRecallQueryEmbeddingFailing
+          expr: |
+            sum(increase(lobu_recall_query_embedding_failures_total{namespace="{{ .Release.Namespace }}"}[10m])) by (namespace) > 0
+          for: 0m
+          keep_firing_for: 30m
+          labels:
+            severity: warning
+            service: lobu
+          annotations:
+            summary: "Lobu search query embedding failures detected"
+            description: "Search queries could not be embedded, so recall fell back to text-only ranking. This alert stays firing for 30m after the last detected increase. Check the {{ include "lobu.fullname" . }}-embeddings deployment and app logs for `[search] query embedding failed`."
 {{- end }}
