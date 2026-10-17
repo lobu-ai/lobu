@@ -82,8 +82,6 @@ export function createSourceReadBridge(
         leased = await claimSourceBrowser(
           {
             runId: run.runId,
-            connectionId: Number(feed.connection_id),
-            version: feed.pinned_version ?? feed.definition_version,
             scope: params.scope,
             automationId: params.automationId,
             deadlineAt: params.deadlineAt,

@@ -16,20 +16,24 @@ const RECOVERY_ACTIONS = new Set(["click_ref", "focus_tab"]);
 type BrowserResource = NonNullable<
   Awaited<ReturnType<typeof connectionBrowserResource>>
 >;
+interface SourceBrowserRun {
+  id: number;
+  status: string;
+  connection_id: number;
+  connector_version: string | null;
+  created_by_user_id: string | null;
+  automation_id: number | null;
+}
 interface SourceBrowserLease {
+  run: SourceBrowserRun;
   recovery_id: string;
-  run_id: number;
   state: "reading" | "ready" | "consumed" | "closed";
   expires_at: string;
-  source_connection_id: number;
-  connector_version: string;
   chrome_connection_id?: number;
   request_hash: string;
   origins: string[];
   owner: {
-    principal: string | null;
     agent_id: string | null;
-    automation_id: number | null;
     flow_id: string | null;
   };
   binding: {
@@ -76,9 +80,9 @@ function assertRecoveryOwner(
   flowId?: string,
 ) {
   if (
-    lease.owner.principal !== scope.principal ||
+    lease.run.created_by_user_id !== scope.principal ||
     lease.owner.agent_id !== (scope.agentId ?? null) ||
-    lease.owner.automation_id !== (automationId ?? null) ||
+    lease.run.automation_id !== (automationId ?? null) ||
     lease.owner.flow_id !== (flowId ?? null)
   )
     throw recoveryUnavailable(
@@ -93,14 +97,10 @@ async function readRecovery(
 ): Promise<SourceBrowserLease> {
   // A cancelled/timed-out source can keep metadata for expiry cleanup, but that
   // metadata must not authorize a continuation or browser observations.
-  const [row] =
-    await sql`SELECT run_metadata FROM runs WHERE id = ${runIdFromRecovery(id)} AND organization_id = ${org}
-      AND status = 'failed'`;
-  const lease = row?.run_metadata?.[BROWSER_RECOVERY_KEY] as
-    | SourceBrowserLease
-    | undefined;
+  const lease = await sourceBrowserLease(org, runIdFromRecovery(id), sql);
   if (
     !lease ||
+    lease.run.status !== "failed" ||
     lease.recovery_id !== id ||
     lease.state !== "ready" ||
     !lease.tab ||
@@ -118,15 +118,14 @@ async function saveLease(
   org: string,
   sql: DbClient,
 ) {
-  await sql`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${sql.json({ [BROWSER_RECOVERY_KEY]: lease })}
-    WHERE id = ${lease.run_id} AND organization_id = ${org}`;
+  const { run, ...metadata } = lease;
+  await sql`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${sql.json({ [BROWSER_RECOVERY_KEY]: metadata })}
+    WHERE id = ${run.id} AND organization_id = ${org}`;
 }
 /** One existing profile row serializes readers across replicas. No process-local lease authority. */
 export async function claimSourceBrowser(
   params: {
     runId: number;
-    connectionId: number;
-    version: string | null;
     requestHash: string;
     scope: AuthzScope;
     automationId?: number | null;
@@ -137,14 +136,21 @@ export async function claimSourceBrowser(
   sql: DbClient,
 ): Promise<boolean> {
   const { scope } = params;
+  const record = await loadSourceBrowserRun(
+    scope.organizationId,
+    params.runId,
+    sql,
+  );
+  if (!record) throw recoveryUnavailable("The source read run is unavailable.");
+  const { run } = record;
   const resource = await connectionBrowserResource(
     scope.organizationId,
-    params.connectionId,
-    params.version,
+    run.connection_id,
+    run.connector_version,
     sql,
   );
   if (
-    !params.version ||
+    !run.connector_version ||
     !resource?.supportsRecovery ||
     !resource.live ||
     !resource.authProfileId ||
@@ -169,11 +175,11 @@ export async function claimSourceBrowser(
     previous = await readRecovery(params.recoveryId, scope.organizationId, sql);
     assertRecoveryOwner(previous, scope, params.automationId, params.flowId);
     if (
-      previous.connector_version !== params.version ||
-      previous.source_connection_id !== params.connectionId ||
+      previous.run.connector_version !== run.connector_version ||
+      previous.run.connection_id !== run.connection_id ||
       previous.request_hash !== params.requestHash ||
       !matchesBrowserResource(previous, resource) ||
-      held?.run_id !== previous.run_id
+      held?.run_id !== previous.run.id
     ) {
       throw recoveryUnavailable(
         "Recovery source request, account, or browser binding changed.",
@@ -185,18 +191,14 @@ export async function claimSourceBrowser(
     );
   }
   const lease: SourceBrowserLease = {
+    run,
     recovery_id: previous?.recovery_id ?? `${params.runId}.${randomUUID()}`,
-    run_id: params.runId,
     state: "reading",
     expires_at: new Date(params.deadlineAt).toISOString(),
-    source_connection_id: params.connectionId,
-    connector_version: params.version,
     request_hash: params.requestHash,
     origins: [...resource.requirement.origins].sort(),
     owner: {
-      principal: scope.principal,
       agent_id: scope.agentId ?? null,
-      automation_id: params.automationId ?? null,
       flow_id: params.flowId ?? null,
     },
     binding: browserBindingSnapshot(resource),
@@ -208,19 +210,39 @@ export async function claimSourceBrowser(
       scope.organizationId,
       sql,
     );
-  await sql`UPDATE auth_profiles SET metadata = COALESCE(metadata, '{}'::jsonb) || ${sql.json({ [BROWSER_RECOVERY_KEY]: { run_id: lease.run_id, expires_at: lease.expires_at } })}
+  await sql`UPDATE auth_profiles SET metadata = COALESCE(metadata, '{}'::jsonb) || ${sql.json({ [BROWSER_RECOVERY_KEY]: { run_id: run.id, expires_at: lease.expires_at } })}
     WHERE id = ${resource.authProfileId} AND organization_id = ${scope.organizationId}`;
   await saveLease(lease, scope.organizationId, sql);
   return true;
+}
+async function loadSourceBrowserRun(
+  org: string,
+  runId: number,
+  sql: DbClient,
+  lock = false,
+) {
+  const [row] = await sql<
+    SourceBrowserRun & { run_metadata: Record<string, unknown> | null }
+  >`
+    SELECT id, status, connection_id, connector_version, created_by_user_id, automation_id, run_metadata
+    FROM runs WHERE id = ${runId} AND organization_id = ${org} ${lock ? sql`FOR UPDATE` : sql``}`;
+  if (!row) return undefined;
+  const { run_metadata, ...run } = row;
+  return {
+    run,
+    metadata: run_metadata?.[BROWSER_RECOVERY_KEY] as
+      | Omit<SourceBrowserLease, "run">
+      | undefined,
+  };
 }
 export async function sourceBrowserLease(
   org: string,
   runId: number,
   sql: DbClient = getDb(),
+  lock = false,
 ): Promise<SourceBrowserLease | undefined> {
-  const [row] =
-    await sql`SELECT run_metadata FROM runs WHERE id = ${runId} AND organization_id = ${org}`;
-  return row?.run_metadata?.[BROWSER_RECOVERY_KEY];
+  const record = await loadSourceBrowserRun(org, runId, sql, lock);
+  return record?.metadata ? { ...record.metadata, run: record.run } : undefined;
 }
 /** True while another run's unexpired read or recovery holds this browser account. */
 export async function browserAccountHeldByOtherRun(
@@ -251,12 +273,8 @@ export async function saveSourceBrowserTab(
     return;
   const sql = getDb();
   await sql.begin(async (tx) => {
-    const [row] =
-      await tx`SELECT run_metadata FROM runs WHERE id = ${runId} AND organization_id = ${org} AND status = 'running' FOR UPDATE`;
-    const lease = row?.run_metadata?.[BROWSER_RECOVERY_KEY] as
-      | SourceBrowserLease
-      | undefined;
-    if (!lease) return;
+    const lease = await sourceBrowserLease(org, runId, tx, true);
+    if (!lease || lease.run.status !== "running") return;
     if (
       lease.tab &&
       Object.entries(tab).some(
@@ -300,11 +318,7 @@ export async function finishSourceBrowser(
       AND organization_id = ${org} FOR UPDATE`;
     if (profile?.metadata?.[BROWSER_RECOVERY_KEY]?.run_id !== runId)
       throw recoveryUnavailable("Browser recovery ownership changed.");
-    const [row] =
-      await tx`SELECT run_metadata FROM runs WHERE id = ${runId} AND organization_id = ${org} FOR UPDATE`;
-    const lease = row?.run_metadata?.[BROWSER_RECOVERY_KEY] as
-      | SourceBrowserLease
-      | undefined;
+    const lease = await sourceBrowserLease(org, runId, tx, true);
     if (
       !lease ||
       lease.state !== "reading" ||
@@ -352,7 +366,7 @@ export function browserRecoveryControl(
   return {
     ...lease.tab,
     recovery_id: lease.recovery_id,
-    owner_run_id: lease.run_id,
+    owner_run_id: lease.run.id,
     mode,
     expires_at: expiresAt,
     resumed: lease.resumed === true,
@@ -396,14 +410,14 @@ export async function authorizeRecoveryAction(params: {
   return browserRecoveryControl(lease, observe ? "observe" : "act");
 }
 async function validateRecoveryBinding(lease: SourceBrowserLease, org: string) {
-  if (!(await sourceReadRecoveryAllowed(org, lease.run_id)))
+  if (!(await sourceReadRecoveryAllowed(org, lease.run.id)))
     throw recoveryUnavailable(
       "The source is no longer readable by this requester.",
     );
   const resource = await connectionBrowserResource(
     org,
-    lease.source_connection_id,
-    lease.connector_version,
+    lease.run.connection_id,
+    lease.run.connector_version,
   );
   if (
     !resource?.supportsRecovery ||
@@ -433,7 +447,7 @@ export async function validateRecoveryDispatch(
     org,
     getDb(),
   );
-  if (lease.run_id !== descriptor.owner_run_id)
+  if (lease.run.id !== descriptor.owner_run_id)
     throw recoveryUnavailable("Recovery owner changed before dispatch.");
   await validateRecoveryBinding(lease, org);
 }

@@ -1142,7 +1142,7 @@ describe('compiled browser source reads', () => {
     const runId = await sql.begin(async tx => {
       const run = await createConnectorOperationRun({ organizationId: orgId, connectionId, connectorKey: SOURCE_KEY,
         operationKey: 'inspect', operationInput: {}, approvalMode: 'inline', policyPrincipalKind: 'user', policyPrincipalId: userId, createdByUserId: userId, db: tx });
-      await claimSourceBrowser({ runId: run.runId, connectionId, version: VERSION, requestHash: 'synthetic-request',
+      await claimSourceBrowser({ runId: run.runId, requestHash: 'synthetic-request',
         scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(), deadlineAt: Date.now() + 5000 }, tx);
       await tx`UPDATE runs SET status = 'running' WHERE id = ${run.runId}`;
       return run.runId;
@@ -1298,8 +1298,10 @@ describe('compiled browser source reads', () => {
     expect(jobs.at(-1)?.action_input.browser_recovery_control.mode).toBe('retain');
     expect(jobs.at(-1)?.action_input.browser_recovery_control.expires_at).toBe(failure.interruption.recovery.expires_at);
     await expectScrubbed();
-    const [held] = await getTestDb()`SELECT run_metadata FROM runs WHERE id = ${Number(failure.interruption.recovery.recovery_id.split('.')[0])} AND organization_id = ${orgId}`;
-    expect(held.run_metadata.browser_recovery.connector_version).toBe(VERSION);
+    const [held] = await getTestDb()`SELECT connector_version, run_metadata FROM runs WHERE id = ${Number(failure.interruption.recovery.recovery_id.split('.')[0])} AND organization_id = ${orgId}`;
+    expect(held.connector_version).toBe(VERSION);
+    expect(held.run_metadata.browser_recovery).not.toHaveProperty('run');
+    expect(held.run_metadata.browser_recovery).not.toHaveProperty('connector_version');
     const recovery = failure.interruption.recovery;
     expect(await authorizeRecoveryAction({ scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(), connectionId: recovery.chrome_connection_id, action: 'screenshot', input: { recovery_id: recovery.recovery_id, tab_id: 77 } })).toMatchObject({ mode: 'observe', target_id: 'synthetic-target' });
   });
@@ -1339,6 +1341,22 @@ describe('compiled browser source reads', () => {
     const id = (await interrupted).results[0].interruption.recovery.recovery_id;
     expect((await recoveryRead(id, 'plain')).results[0]).toMatchObject({ ok: false, retryable: false });
     const resumed = recoveryRead(id); await serveRecovery(resumed); expect((await resumed).results[0].ok).toBe(true);
+  });
+  it.each(['observation', 'resume'])('uses the parent run requester for recovery %s authority', async mode => {
+    await recoverySetup();
+    const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const recovery = (await interrupted).results[0].interruption.recovery;
+    await getTestDb()`UPDATE runs SET created_by_user_id = NULL
+      WHERE id = ${Number(recovery.recovery_id.split('.')[0])} AND organization_id = ${orgId}`;
+    if (mode === 'observation') {
+      await expect(authorizeRecoveryAction({ scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(),
+        connectionId: recovery.chrome_connection_id, action: 'screenshot',
+        input: { recovery_id: recovery.recovery_id, tab_id: 77 } })).rejects.toThrow('requester');
+    } else {
+      const resumed = recoveryRead(recovery.recovery_id); const jobs = await serveRecovery(resumed);
+      expect((await resumed).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+      expect(jobs).toHaveLength(0);
+    }
   });
   it('recovery accepts the same source sort with reordered JSON keys', async () => {
     await recoverySetup();
