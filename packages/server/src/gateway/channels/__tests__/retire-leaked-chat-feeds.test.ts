@@ -15,6 +15,7 @@
 import { readFile } from "node:fs/promises";
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -31,21 +32,33 @@ import {
 const ORG = "org-feedleak";
 const CHANNEL = "slack:D_LEAK";
 
-/** Replay the migration's `migrate:up` body against the seeded rows. */
-async function runCleanup(): Promise<void> {
+async function migrationSection(
+  name: string,
+  section: "up" | "down",
+): Promise<string> {
   const sql = await readFile(
-    new URL(
-      "../../../../../../db/migrations/20260723160000_retire_leaked_chat_feeds.sql",
-      import.meta.url,
-    ),
+    new URL(`../../../../../../db/migrations/${name}`, import.meta.url),
     "utf8",
   );
   const start = sql.indexOf("-- migrate:up");
   const end = sql.indexOf("-- migrate:down");
   expect(start).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
-  await getDb().unsafe(sql.slice(start + "-- migrate:up".length, end));
+  return section === "up"
+    ? sql.slice(start + "-- migrate:up".length, end)
+    : sql.slice(end + "-- migrate:down".length);
 }
+
+/** Replay the migration's `migrate:up` body against the seeded rows. */
+async function runCleanup(): Promise<void> {
+  await getDb().unsafe(
+    await migrationSection("20260723160000_retire_leaked_chat_feeds.sql", "up"),
+  );
+}
+
+// The historical input carried feeds.kind/virtual; the contract migration's
+// down/up restores those slots for this replay and drops them again.
+const DROP_KIND_VIRTUAL = "20261017120000_drop_feeds_kind_virtual.sql";
 
 async function insertConnection(opts: {
   slug: string;
@@ -126,6 +139,11 @@ describe("retiring leaked chat feeds", () => {
   beforeEach(async () => {
     await resetTestDatabase();
     await seedAgentRow("agent-feedleak", { organizationId: ORG });
+    await getDb().unsafe(await migrationSection(DROP_KIND_VIRTUAL, "down"));
+  });
+
+  afterEach(async () => {
+    await getDb().unsafe(await migrationSection(DROP_KIND_VIRTUAL, "up"));
   });
 
   afterAll(async () => {
