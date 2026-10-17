@@ -57,16 +57,12 @@ function createConsoleLogger(serviceName: string): Logger {
         // Just an object, stringify it
         msgStr = safeStringify(message);
       }
-    } else if (message instanceof Error) {
-      // String(Error) is the message text ("Error: ..."), so it takes the
-      // same string scrubbing — otherwise a credential-bearing URL in the
-      // message would emit verbatim.
-      msgStr = scrubDiagnosticValue(String(message)) as string;
     } else {
-      msgStr =
-        typeof message === "string"
-          ? (scrubDiagnosticValue(message) as string)
-          : String(message);
+      // Everything else funnels through String() here: plain strings,
+      // Errors, and top-level arrays (their join is just message text).
+      // Scrub the converted text — the removed final scrub used to cover
+      // all of these, and that coverage now lives here.
+      msgStr = scrubDiagnosticValue(String(message)) as string;
     }
 
     if (USE_JSON_FORMAT) {

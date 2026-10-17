@@ -141,6 +141,17 @@ describe("console logger pino-style metadata", () => {
     expect(line).toContain("fetch failed");
     expect(line).not.toContain("synthetic-error-secret");
   });
+
+  test("scrubs a credential-bearing URL in a top-level array", () => {
+    const line = captureWarn((log) => {
+      log.warn([
+        "fetch failed https://example.test/path?token=synthetic-array-secret",
+      ]);
+    });
+
+    expect(line).toContain("fetch failed");
+    expect(line).not.toContain("synthetic-array-secret");
+  });
 });
 
 describe("console logger structured output", () => {
@@ -205,7 +216,8 @@ describe("console logger structured output", () => {
         `import { createLogger } from ${JSON.stringify(new URL("../logger.ts", import.meta.url).pathname)};
         const log = createLogger("synthetic-service");
         log.warn({ op: "fetch" }, "fetch failed https://example.test/path?token=synthetic-pino-secret");
-        log.warn(new Error("fetch failed https://example.test/path?token=synthetic-error-secret"));`,
+        log.warn(new Error("fetch failed https://example.test/path?token=synthetic-error-secret"));
+        log.warn(["fetch failed https://example.test/path?token=synthetic-array-secret"]);`,
       ],
       {
         env: {
@@ -222,7 +234,7 @@ describe("console logger structured output", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    expect(records).toHaveLength(2);
+    expect(records).toHaveLength(3);
     expect(records[0]).toMatchObject({
       level: "warn",
       message: expect.stringContaining("fetch failed"),
@@ -231,7 +243,12 @@ describe("console logger structured output", () => {
       level: "warn",
       message: expect.stringContaining("fetch failed"),
     });
+    expect(records[2]).toMatchObject({
+      level: "warn",
+      message: expect.stringContaining("fetch failed"),
+    });
     expect(output).not.toContain("synthetic-pino-secret");
     expect(output).not.toContain("synthetic-error-secret");
+    expect(output).not.toContain("synthetic-array-secret");
   });
 });
