@@ -158,7 +158,8 @@ activity, or Automation run) and an adapter-owned scratch tab requesting
 `retain_on_interruption: true` on its initial `navigate` step. Persistent
 warm-tab readers keep using their existing tabs and timeout classification.
 Login, account mismatch, loading failure, timeout, unsupported extension versions,
-and uncertain cleanup do not grant recovery authority.
+and uncertain cleanup do not grant recovery authority. Exact-tab recovery requires
+Chrome extension 0.9.9 or newer.
 
 For recovery explicitly permitted by the calling agent's instructions:
 
@@ -189,12 +190,23 @@ ownership of their browser account before opening a tab. Sequence feeds sharing
 that account, including feeds requested through `feeds.readMany`: a competing
 read fails with non-retryable `recovery_unavailable` and no handoff. After the
 owner finishes, a fresh normal read can acquire the account. Reads on distinct
-accounts remain independent.
+accounts remain independent. Acquisition also refuses an already queued or running
+browser step on the same account. Enqueue and acquisition share the profile row
+lock, so a step cannot slip past an earlier ownership check.
 
 The same fence blocks other connector actions and feed syncs on the account,
 so they cannot change its browser state during recovery. Unacknowledged cleanup
 or a timed-out leased read holds that fence for at most five minutes; it does
-not immediately admit work into a tab whose cleanup is uncertain.
+not immediately admit work into a tab whose cleanup is uncertain. Database time
+governs server ownership and deadlines. Private dispatch timing carries the
+remaining budget to the extension, which subtracts delivery delay and measures
+local elapsed time. A browser worker restart invalidates the retained lease and
+cleans up its exact target; it cannot restore stale observation authority.
+
+A lost action response still consumes its observation, and a lost resume response
+still consumes the recovery ID. Do not replay either. Failed image delivery
+requires a fresh observation or human handoff, never inference from a resource
+link. After expiry or cleanup, a fresh normal read must verify the account again.
 
 An Automation whose instructions stop on verification or login keeps stopping;
 this transport opts no Automation into interactive recovery and never changes

@@ -74,7 +74,8 @@ export function createSourceReadBridge(
           ...(params.sourceSubscriptionScopeKey ? { [SOURCE_FEED_SUBSCRIPTION_METADATA_KEY]: true,
             [SOURCE_FEED_SCOPE_METADATA_KEY]: params.sourceSubscriptionScopeKey } : {}) }, db: tx,
       });
-      await tx`UPDATE runs SET feed_id = ${feed.id}, expires_at = ${new Date(params.deadlineAt)},
+      await tx`UPDATE runs SET feed_id = ${feed.id},
+        expires_at = clock_timestamp() + ${Math.max(0, params.deadlineAt - Date.now())}::double precision * interval '1 millisecond',
         connector_version = ${feed.pinned_version ?? feed.definition_version},
         connector_artifact_hash = ${feed.selected_artifact_hash}
         WHERE id = ${run.runId} AND organization_id = ${params.scope.organizationId}`;
@@ -157,7 +158,7 @@ export function createSourceReadBridge(
           }
           if (lease?.tab && !signal.aborted) {
             const retainUntil = interruption?.reason === 'challenge_required' && canRetainSourceBrowser(lease)
-              ? new Date(Date.now() + SOURCE_BROWSER_RETENTION_MS).toISOString() : undefined;
+              ? new Date(lease.run.observed_at.getTime() + SOURCE_BROWSER_RETENTION_MS).toISOString() : undefined;
             const cleanup = await dispatchChromeActionToExtension({
               organizationId: params.scope.organizationId,
               actionKey: 'close_tab',

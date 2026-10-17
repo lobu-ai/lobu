@@ -26,6 +26,7 @@ type PolicyRun = {
   connection_id: number | null;
   feed_id: number | null;
   expires_at: Date | null;
+  unexpired: boolean;
   connector_key: string | null;
   action_key: string | null;
   action_input: Record<string, unknown> | null;
@@ -45,7 +46,7 @@ async function loadPolicyRun(sql: DbClient, organizationId: string, runId: numbe
   const [run] = await sql<PolicyRun>`
     SELECT id, run_type, status, approval_status, claimed_by, connection_id, connector_key,
            action_key, action_input, policy_principal_kind, policy_principal_id,
-           created_by_user_id, automation_id, parent_run_id, run_metadata, feed_id, expires_at
+           created_by_user_id, automation_id, parent_run_id, run_metadata, feed_id, expires_at, expires_at > clock_timestamp() AS unexpired
     FROM runs WHERE id = ${runId} AND organization_id = ${organizationId}
     ${lock ? sql`FOR UPDATE` : sql``}
   `;
@@ -119,7 +120,7 @@ export async function resolveRunConnectorPolicy(params: {
   if (run.action_key === DEVICE_FEED_READ_ACTION_KEY && isSourceFeedRead(run.run_metadata)) {
     if (run.run_type !== 'action' || run.parent_run_id !== null || !['pending', 'running'].includes(run.status)
       || !['auto', 'approved'].includes(run.approval_status)
-      || !run.expires_at || new Date(run.expires_at).getTime() <= Date.now()) return unavailable();
+      || !run.unexpired) return unavailable();
     return resolveSourceReadAccess(sql, params.organizationId, run);
   }
   // This reserved action is the transport for an already-authorized source feed

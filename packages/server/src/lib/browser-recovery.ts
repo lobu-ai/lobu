@@ -1,6 +1,6 @@
-import { sourceReadRecoveryAllowed } from "../authz/operation-run-policy";
 import { createHash, randomUUID } from "node:crypto";
 import { BrowserInterruptionError, type BrowserRecovery } from "@lobu/core";
+import { sourceReadRecoveryAllowed } from "../authz/operation-run-policy";
 import type { AuthzScope } from "../authz/scope";
 import {
   browserBindingSnapshot,
@@ -17,6 +17,8 @@ type BrowserResource = NonNullable<
   Awaited<ReturnType<typeof connectionBrowserResource>>
 >;
 interface SourceBrowserRun {
+  /** Database observation time, never persisted in lease metadata. */
+  observed_at: Date;
   id: number;
   status: string;
   connection_id: number;
@@ -106,7 +108,7 @@ async function readRecovery(
     lease.state !== "ready" ||
     !lease.tab ||
     !Number.isFinite(Date.parse(lease.expires_at)) ||
-    Date.parse(lease.expires_at) <= Date.now()
+    Date.parse(lease.expires_at) <= lease.run.observed_at.getTime()
   ) {
     throw recoveryUnavailable(
       "Browser recovery is expired, consumed, closed, or unavailable. Start a new authorized read after human recovery.",
@@ -166,7 +168,7 @@ export async function claimSourceBrowser(
     return false;
   }
   const [profile] =
-    await sql`SELECT metadata FROM auth_profiles WHERE id = ${resource.authProfileId}
+    await sql`SELECT metadata, clock_timestamp() AS observed_at FROM auth_profiles WHERE id = ${resource.authProfileId}
     AND organization_id = ${scope.organizationId} FOR UPDATE`;
   const held = profile?.metadata?.[BROWSER_RECOVERY_KEY] as
     | { run_id: number; expires_at: string }
@@ -186,16 +188,26 @@ export async function claimSourceBrowser(
         "Recovery source request, account, or browser binding changed.",
       );
     }
-  } else if (held && Date.parse(held.expires_at) > Date.now()) {
+  } else if (held && Date.parse(held.expires_at) > profile.observed_at.getTime()) {
     throw recoveryUnavailable(
       "This browser account already has an active read or recovery. Finish that work first.",
     );
   }
+  // Enqueue takes this same profile lock. Inspect only the indexed in-flight
+  // set, so a step admitted before this claim cannot overlap the new reader.
+  const [busy] = await sql`SELECT step.id FROM runs step
+    JOIN runs parent ON parent.id = step.parent_run_id AND parent.organization_id = step.organization_id
+    JOIN connections source ON source.id = parent.connection_id AND source.organization_id = parent.organization_id
+    WHERE step.organization_id = ${scope.organizationId} AND step.connector_key = 'chrome'
+      AND step.status IN ('pending', 'claimed', 'running') AND step.approval_status IN ('auto', 'approved')
+      AND COALESCE(parent.run_metadata->'browser_binding'->>'auth_profile_id', source.auth_profile_id::text) = ${String(resource.authProfileId)}
+    LIMIT 1`;
+  if (busy) throw recoveryUnavailable("This browser account has an unfinished browser step. Finish that work first.");
   const lease: SourceBrowserLease = {
     run,
     recovery_id: previous?.recovery_id ?? `${params.runId}.${randomUUID()}`,
     state: "reading",
-    expires_at: new Date(params.deadlineAt).toISOString(),
+    expires_at: new Date(profile.observed_at.getTime() + Math.max(0, params.deadlineAt - Date.now())).toISOString(),
     request_hash: params.requestHash,
     origins: [...resource.requirement.origins].sort(),
     owner: {
@@ -225,7 +237,8 @@ async function loadSourceBrowserRun(
   const [row] = await sql<
     SourceBrowserRun & { run_metadata: Record<string, unknown> | null }
   >`
-    SELECT id, status, connection_id, connector_version, created_by_user_id, automation_id, run_metadata
+    SELECT id, status, connection_id, connector_version, created_by_user_id, automation_id, run_metadata,
+      clock_timestamp() AS observed_at
     FROM runs WHERE id = ${runId} AND organization_id = ${org} ${lock ? sql`FOR UPDATE` : sql``}`;
   if (!row) return undefined;
   const { run_metadata, ...run } = row;
@@ -245,17 +258,19 @@ export async function sourceBrowserLease(
   const record = await loadSourceBrowserRun(org, runId, sql, lock);
   return record?.metadata ? { ...record.metadata, run: record.run } : undefined;
 }
-/** True while another run's unexpired read or recovery holds this browser account. */
+/** Lock the profile before enqueue and refuse another run's unexpired ownership. */
 export async function browserAccountHeldByOtherRun(
   org: string,
   authProfileId: number,
   runId: number,
+  sql: DbClient,
 ): Promise<boolean> {
   const [profile] =
-    await getDb()`SELECT metadata FROM auth_profiles WHERE id = ${authProfileId} AND organization_id = ${org}`;
+    await sql`SELECT metadata, clock_timestamp() AS observed_at FROM auth_profiles
+      WHERE id = ${authProfileId} AND organization_id = ${org} FOR UPDATE`;
   const held = profile?.metadata?.[BROWSER_RECOVERY_KEY];
   return (
-    !!held && Date.parse(held.expires_at) > Date.now() && held.run_id !== runId
+    !!held && Date.parse(held.expires_at) > profile.observed_at.getTime() && held.run_id !== runId
   );
 }
 export async function saveSourceBrowserTab(
@@ -328,14 +343,14 @@ export async function finishSourceBrowser(
       throw recoveryUnavailable("Browser recovery lease changed.");
     const ready =
       cleanup.kind === "retained" &&
-      Date.parse(cleanup.expiresAt) > Date.now() &&
+      Date.parse(cleanup.expiresAt) > lease.run.observed_at.getTime() &&
       canRetainSourceBrowser(lease);
     const hold = ready || (!!lease.tab && cleanup.kind === "unacknowledged");
     const expires_at = !hold
       ? lease.expires_at
       : cleanup.kind === "retained"
         ? cleanup.expiresAt
-        : new Date(Date.now() + SOURCE_BROWSER_RETENTION_MS).toISOString();
+        : new Date(lease.run.observed_at.getTime() + SOURCE_BROWSER_RETENTION_MS).toISOString();
     await saveLease(
       { ...lease, expires_at, state: ready ? "ready" : "closed" },
       org,

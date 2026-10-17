@@ -20,7 +20,7 @@
  * can land on any replica and finalize the run row.
  */
 
-import { browserPageInterruption, type BrowserInterruptionReason } from '@lobu/core';
+import { BrowserInterruptionError, browserPageInterruption, type BrowserInterruptionReason } from '@lobu/core';
 import { browserAccountHeldByOtherRun, browserRecoveryControl, saveSourceBrowserTab, sourceBrowserLease } from '../lib/browser-recovery';
 import { BROWSER_VERIFY_OPERATION, constrainBrowserInput } from '@lobu/connector-sdk';
 import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, BROWSER_EXTENSION_UPDATE_REQUIRED, browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
@@ -805,7 +805,7 @@ export async function dispatchChromeActionToExtension(params: {
   // This account-wide fence deliberately includes syncs and connector actions:
   // they must not change browser/account state while another read or recovery
   // owns it. Unacknowledged cleanup keeps that ownership only until its expiry.
-  if (browserResource.authProfileId && await browserAccountHeldByOtherRun(organizationId, browserResource.authProfileId, parentRunId)) {
+  if (browserResource.recoveryRunId != null && browserResource.recoveryRunId !== parentRunId) {
     const message = 'This browser account is owned by another active source read or recovery.';
     return { status: 'failed', interruption: { reason: 'recovery_unavailable', message }, error_message: message };
   }
@@ -938,6 +938,11 @@ export async function dispatchChromeActionToExtension(params: {
   let runId: number;
   try {
     const claim = await sql.begin(async (tx) => {
+      // Acquisition and enqueue share the profile-before-run lock order. The
+      // earlier check is only an early exit; it cannot authorize queued work.
+      if (browserResource.authProfileId && await browserAccountHeldByOtherRun(organizationId, browserResource.authProfileId, parentRunId, tx)) {
+        throw new BrowserInterruptionError('recovery_unavailable', 'This browser account is owned by another active source read or recovery.');
+      }
       // Serialize with source-read cancellation. A bridge call already in flight
       // may not enqueue fresh work after its waiter has closed the parent.
       let sourceDeadline: Date | undefined;
@@ -979,6 +984,7 @@ export async function dispatchChromeActionToExtension(params: {
     });
     runId = claim.runId;
   } catch (err) {
+    if (err instanceof BrowserInterruptionError) return { status: 'failed', interruption: { reason: err.reason, message: err.message }, error_message: err.message };
     const msg = errorMessage(err);
     logger.error(
       { err: msg, parent_run_id: parentRunId, action_key: actionKey },
