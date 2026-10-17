@@ -49,12 +49,19 @@ function createConsoleLogger(serviceName: string): Logger {
         // Keep the metadata object as a trailing arg so it still renders.
         // Slicing it away accepted the signature and then dropped the payload,
         // emptying every structured diagnostic that uses this call shape.
-        msgStr = args[0];
+        // The message itself is a string, so it takes the same boundary
+        // scrubbing as any other string message.
+        msgStr = scrubDiagnosticValue(args[0]) as string;
         args = [message, ...args.slice(1)];
       } else {
         // Just an object, stringify it
         msgStr = safeStringify(message);
       }
+    } else if (message instanceof Error) {
+      // String(Error) is the message text ("Error: ..."), so it takes the
+      // same string scrubbing — otherwise a credential-bearing URL in the
+      // message would emit verbatim.
+      msgStr = scrubDiagnosticValue(String(message)) as string;
     } else {
       msgStr =
         typeof message === "string"

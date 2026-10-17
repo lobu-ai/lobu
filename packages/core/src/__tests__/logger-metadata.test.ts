@@ -115,6 +115,32 @@ describe("console logger pino-style metadata", () => {
     expect(line).toContain("only");
     expect(line).toContain("object");
   });
+
+  test("scrubs a credential-bearing URL in a pino-style message", () => {
+    const line = captureWarn((log) => {
+      log.warn(
+        { op: "fetch" },
+        "fetch failed https://example.test/path?token=synthetic-pino-secret"
+      );
+    });
+
+    expect(line).toContain("fetch failed");
+    expect(line).toContain("op");
+    expect(line).not.toContain("synthetic-pino-secret");
+  });
+
+  test("scrubs a credential-bearing URL in a top-level Error", () => {
+    const line = captureWarn((log) => {
+      log.warn(
+        new Error(
+          "fetch failed https://example.test/path?token=synthetic-error-secret"
+        )
+      );
+    });
+
+    expect(line).toContain("fetch failed");
+    expect(line).not.toContain("synthetic-error-secret");
+  });
 });
 
 describe("console logger structured output", () => {
@@ -169,5 +195,43 @@ describe("console logger structured output", () => {
     });
     expect(output).not.toContain("synthetic-secret");
     expect(output).not.toContain("hidden");
+  });
+
+  test("honors LOG_FORMAT=json for pino-style messages and top-level Errors", () => {
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "-e",
+        `import { createLogger } from ${JSON.stringify(new URL("../logger.ts", import.meta.url).pathname)};
+        const log = createLogger("synthetic-service");
+        log.warn({ op: "fetch" }, "fetch failed https://example.test/path?token=synthetic-pino-secret");
+        log.warn(new Error("fetch failed https://example.test/path?token=synthetic-error-secret"));`,
+      ],
+      {
+        env: {
+          ...process.env,
+          USE_WINSTON_LOGGER: "false",
+          LOG_FORMAT: "json",
+          LOG_LEVEL: "info",
+        },
+      }
+    );
+    expect(result.exitCode).toBe(0);
+    const output = result.stderr.toString() + result.stdout.toString();
+    const records = output
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({
+      level: "warn",
+      message: expect.stringContaining("fetch failed"),
+    });
+    expect(records[1]).toMatchObject({
+      level: "warn",
+      message: expect.stringContaining("fetch failed"),
+    });
+    expect(output).not.toContain("synthetic-pino-secret");
+    expect(output).not.toContain("synthetic-error-secret");
   });
 });
