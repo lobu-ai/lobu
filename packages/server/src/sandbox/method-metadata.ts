@@ -943,10 +943,10 @@ export default async (_ctx, client) => {
 	},
 	"feeds.readMany": {
 		summary:
-			"Explicitly query several source-backed feeds in parallel. Each read has its own query, sort, limit, and opaque cursor; sources are deadline-bounded and fail independently.",
+			"Explicitly query several source-backed feeds in parallel. Each read has its own query, sort, limit, and opaque cursor; sources are deadline-bounded and fail independently. A BROWSER_INTERRUPTED result may include an expiring recovery_id. After authorized browser recovery or human completion, pass it once with the identical original read request for a fresh expected-account read on the retained tab. A recovery_id does not override policy or an agent's stop instructions.",
 		access: "read",
 		signature:
-			"feeds.readMany(input: { reads: Array<{ feed_id: number; query?: string; sort?: { column: string; order: 'asc' | 'desc' }; limit?: number; cursor?: string }>; timeout_ms?: number }): Promise<unknown>",
+			"feeds.readMany(input: { reads: Array<{ feed_id: number; query?: string; sort?: { column: string; order: 'asc' | 'desc' }; limit?: number; cursor?: string; recovery_id?: string }>; timeout_ms?: number }): Promise<unknown>",
 		example:
 			"const feeds = await client.feeds.readMany({ reads: [{ feed_id: 42, query: 'urgent', limit: 25 }, { feed_id: 43 }] });",
 	},
