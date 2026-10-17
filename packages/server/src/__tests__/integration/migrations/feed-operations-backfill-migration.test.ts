@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getDb } from '../../../db/client';
 import {
   executeMigrationSection,
@@ -18,6 +18,9 @@ import {
 } from '../../setup/test-fixtures';
 
 const MIGRATION = '20260824121000_feed_operations_backfill.sql';
+// This replays a historical migration whose input carried feeds.kind/virtual.
+// The later contract migration's down/up restores and re-drops those slots.
+const DROP_KIND_VIRTUAL = '20261017120000_drop_feeds_kind_virtual.sql';
 
 function resolveMigrationsDir(): string {
   let dir = __dirname;
@@ -34,6 +37,13 @@ function resolveMigrationsDir(): string {
 describe('feed operations backfill migration', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
+    const restore = loadMigrationDown(resolveMigrationsDir(), DROP_KIND_VIRTUAL);
+    await executeMigrationSection((statement) => getDb().unsafe(statement), restore);
+  });
+
+  afterEach(async () => {
+    const drop = loadMigrationUp(resolveMigrationsDir(), DROP_KIND_VIRTUAL);
+    await executeMigrationSection((statement) => getDb().unsafe(statement), drop);
   });
 
   it('converts legacy definition snapshots and keeps scheduled/manual sync runnable', async () => {
