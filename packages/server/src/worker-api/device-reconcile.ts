@@ -187,7 +187,6 @@ async function ensureDeviceConnectorWired(
       connectorKey: currentSource.key,
       connectorVersion: currentSource.metadata.version,
       manifestHash: currentSource.manifestHash,
-      definitionManifestHash: currentSource.definitionManifestHash,
       sourcePath: currentSource.sourcePath,
     };
   };

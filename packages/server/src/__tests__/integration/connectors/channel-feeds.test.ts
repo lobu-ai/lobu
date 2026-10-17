@@ -115,8 +115,7 @@ describe("channel feeds", () => {
 
     const sql = getDb();
     const rows = await sql`
-      SELECT id, schedule, next_run_at, checkpoint, status, feed_key, config,
-             kind, virtual
+      SELECT id, schedule, next_run_at, checkpoint, status, feed_key, config
       FROM feeds WHERE connection_id = ${conn.id} AND deleted_at IS NULL
     `;
     expect(rows.length).toBe(1);
@@ -126,10 +125,6 @@ describe("channel feeds", () => {
     expect(rows[0]?.checkpoint).toBeNull();
     expect(rows[0]?.feed_key).toBe("slack:C100");
     expect((rows[0]?.config as { store?: string })?.store).toBe("channel_messages");
-    // Retained only for old replicas during the rolling column-removal window.
-    // The capability-era runtime selects the store from config above.
-    expect(rows[0]?.kind).toBe("streaming");
-    expect(rows[0]?.virtual).toBe(false);
 
     // Idempotent: a second ensure returns the same id, no duplicate row.
     const again = await ensureChannelFeed({

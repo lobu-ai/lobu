@@ -40,15 +40,12 @@ export interface DeviceConnectorSource {
   metadata: ConnectorMetadata;
   sourcePath: string;
   manifestHash: string;
-  definitionManifestHash: string;
 }
 
 export interface ManifestClaimAuthorization {
   connectorKey: string;
   connectorVersion: string;
   manifestHash: string;
-  /** Hash of the canonical definition projected from this artifact. */
-  definitionManifestHash?: string;
   /** Exact artifact provenance; present for manifest-backed claims. */
   sourcePath?: string;
 }
@@ -72,7 +69,7 @@ export function deviceManifestToConnectorMetadata(manifest: DeviceConnectorManif
     kind: 'data',
     authSchema: manifest.auth_schema ?? { methods: [{ type: 'none' }] },
     webhook: null,
-    feeds: manifestFeedsForMetadata(manifest),
+    feeds: manifest.feeds_schema ?? {},
     actions: manifest.actions_schema ?? null,
     automationEvents: null,
     optionsSchema: manifest.options_schema ?? null,
@@ -101,17 +98,6 @@ export function validateDeviceConnectorManifests(params: {
   capabilities: readonly string[];
   manifests: unknown;
 }): DeviceManifestValidationResult {
-  return validateDeviceConnectorManifestsInternal(params, false);
-}
-
-function validateDeviceConnectorManifestsInternal(
-  params: {
-    platform: string | null;
-    capabilities: readonly string[];
-    manifests: unknown;
-  },
-  allowLegacyMissingOperations: boolean
-): DeviceManifestValidationResult {
   const { platform, manifests } = params;
   if (!Array.isArray(manifests)) return { manifests: [], accepted: false };
   if (!platform || !isKnownPlatform(platform)) return { manifests: [], accepted: false };
@@ -130,7 +116,7 @@ function validateDeviceConnectorManifestsInternal(
   let accepted = true;
   for (const raw of manifests) {
     try {
-      const manifest = normalizeManifest(raw, allowLegacyMissingOperations);
+      const manifest = normalizeManifest(raw);
       if (seen.has(manifest.key)) continue;
       seen.add(manifest.key);
 
@@ -328,7 +314,6 @@ export async function getDeviceManifestSourcesForUser(params: {
         metadata: deviceManifestToConnectorMetadata(stored.manifest),
         sourcePath: `device-manifest://${sourceCandidate.platform}/${stored.manifest.key}@${stored.manifest.version}`,
         manifestHash: stored.manifest_hash,
-        definitionManifestHash: projectedDefinitionManifestHash(stored.manifest),
       },
     ];
   });
@@ -369,19 +354,11 @@ export async function getDeviceManifestClaimAuthorizationsForDevice(params: {
     // Revalidate the persisted payload before using it as claim authority. The
     // row may predate manifest hashes, and connector_manifests is durable input
     // rather than an authorization primitive by itself.
-    const validation = validateDeviceConnectorManifestsInternal(
-      {
-        platform: row.platform,
-        capabilities,
-        manifests: [stored.manifest],
-      },
-      // Legacy feed schemas without `operations` stay acceptable here (#3132):
-      // this path revalidates an ALREADY-STORED manifest, and a device that
-      // registered before operations existed must keep its claim authorization.
-      // A field a device could not have known to send when it registered is
-      // never a reason to revoke its claim.
-      true
-    );
+    const validation = validateDeviceConnectorManifests({
+      platform: row.platform,
+      capabilities,
+      manifests: [stored.manifest],
+    });
     const validated = validation.manifests[0];
     if (!validation.accepted || !validated || validated.manifest_hash !== stored.manifest_hash) {
       continue;
@@ -391,7 +368,6 @@ export async function getDeviceManifestClaimAuthorizationsForDevice(params: {
       connectorKey: validated.manifest.key,
       connectorVersion: validated.manifest.version,
       manifestHash: validated.manifest_hash,
-      definitionManifestHash: projectedDefinitionManifestHash(validated.manifest),
       sourcePath: `device-manifest://${row.platform}/${validated.manifest.key}@${validated.manifest.version}`,
     };
     authorizations.set(
@@ -433,7 +409,7 @@ export function storedManifestMap(valid: StoredDeviceManifest[]): Record<string,
   return Object.fromEntries(valid.map((entry) => [entry.manifest.key, entry]));
 }
 
-function normalizeManifest(raw: unknown, allowLegacyMissingOperations = false): DeviceConnectorManifest {
+function normalizeManifest(raw: unknown): DeviceConnectorManifest {
   if (!isRecord(raw)) throw new Error('manifest must be an object');
   const key = stringField(raw, 'key');
   const version = stringField(raw, 'version');
@@ -446,7 +422,7 @@ function normalizeManifest(raw: unknown, allowLegacyMissingOperations = false): 
   const platforms = runtime.platforms.filter((v): v is string => typeof v === 'string');
   if (platforms.length === 0) throw new Error('runtime.platforms cannot be empty');
   const feedsSchema = optionalRecord(raw, 'feeds_schema') ?? {};
-  validateFeedOperations(feedsSchema, allowLegacyMissingOperations);
+  validateFeedOperations(feedsSchema);
   rejectRemovedEntityLinks(feedsSchema);
   const actionsSchema = optionalRecord(raw, 'actions_schema');
   rejectReservedActionKeys(actionsSchema);
@@ -469,18 +445,10 @@ function normalizeManifest(raw: unknown, allowLegacyMissingOperations = false): 
   };
 }
 
-function validateFeedOperations(
-  feedsSchema: Record<string, unknown>,
-  allowLegacyMissingOperations: boolean
-): void {
+function validateFeedOperations(feedsSchema: Record<string, unknown>): void {
   for (const [feedKey, feedDefinition] of Object.entries(feedsSchema)) {
     if (!isRecord(feedDefinition)) throw new Error(`feeds_schema.${feedKey} must be an object`);
     const operations = feedDefinition.operations;
-    // Manifests persisted before feed operations became required carried the
-    // capability in `virtual` instead. Keep their original JSON shape so the
-    // artifact hash stays valid — `manifestFeedsForMetadata` projects them onto
-    // operations. New poll payloads still use the strict public validator.
-    if (operations === undefined && allowLegacyMissingOperations) continue;
     if (
       !Array.isArray(operations) ||
       operations.length === 0 ||
@@ -528,7 +496,7 @@ function parseStoredManifest(raw: unknown): StoredDeviceManifest | null {
   if (!isRecord(raw) || !isRecord(raw.manifest)) return null;
   if (typeof raw.manifest_hash !== 'string' || typeof raw.received_at !== 'string') return null;
   try {
-    const manifest = normalizeManifest(raw.manifest, true);
+    const manifest = normalizeManifest(raw.manifest);
     if (deviceManifestHash(manifest) !== raw.manifest_hash) return null;
     manifest.manifest_hash = raw.manifest_hash;
     return { manifest_hash: raw.manifest_hash, received_at: raw.received_at, manifest };
@@ -552,30 +520,6 @@ export function newestAdvertisedVersions(connectorManifests: unknown): Map<strin
     if (!current || compareSemverish(version, current) > 0) newest.set(key, version);
   }
   return newest;
-}
-
-function manifestFeedsForMetadata(manifest: DeviceConnectorManifest): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(manifest.feeds_schema ?? {}).map(([feedKey, feedDefinition]) => {
-      if (isRecord(feedDefinition) && feedDefinition.operations === undefined) {
-        return [
-          feedKey,
-          {
-            ...feedDefinition,
-            operations: feedDefinition.virtual === true ? ['read'] : ['sync'],
-          },
-        ];
-      }
-      return [feedKey, feedDefinition];
-    })
-  );
-}
-
-function projectedDefinitionManifestHash(manifest: DeviceConnectorManifest): string {
-  return deviceManifestHash({
-    ...manifest,
-    feeds_schema: manifestFeedsForMetadata(manifest),
-  });
 }
 
 function compareManifestWinner(a: StoredDeviceManifest, b: StoredDeviceManifest): number {

@@ -69,19 +69,13 @@ export async function ensureChannelFeed(opts: {
 		]);
 		const again = await findChannelFeedId(tx, connectionId, channelKey);
 		if (again !== null) return again;
-		// Keep the retired discriminator coherent while old replicas can still
-		// compile @feed sources from it. New code selects the data plane solely
-		// from config.store; remove these two writes with the retained columns.
-		// TODO(#3134): delete kind/virtual and this dual-write
-		// after the rolling window guarantees no pre-capability replica can run.
 		const inserted = await tx`
       INSERT INTO feeds (
         organization_id, connection_id, feed_key, display_name,
-        status, config, kind, virtual
+        status, config
       ) VALUES (
         ${organizationId}, ${connectionId}::bigint, ${channelKey}, ${displayName},
-        'active', ${tx.json({ store: CHANNEL_FEED_STORE })}::jsonb,
-        'streaming', false
+        'active', ${tx.json({ store: CHANNEL_FEED_STORE })}::jsonb
       )
       RETURNING id
     `;

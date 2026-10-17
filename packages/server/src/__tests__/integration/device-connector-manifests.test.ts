@@ -11,6 +11,7 @@ import { reconcileDeviceCapabilities } from '../../worker-api/device-reconcile';
 import { TestApiClient } from '../setup/test-mcp-client';
 import {
   deviceManifestHash,
+  getDeviceManifestClaimAuthorizationsForDevice,
   type DeviceConnectorManifest,
 } from '../../worker-api/device-manifests';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
@@ -761,8 +762,8 @@ describe('device connector manifests', () => {
     );
   });
 
-  it('keeps a persisted pre-operations bridge manifest authorized and scheduled', async () => {
-    const { orgId, workerId } = await seedDeviceOwner();
+  it('ignores a persisted pre-operations bridge manifest until a valid re-advertisement', async () => {
+    const { userId, orgId, workerId } = await seedDeviceOwner();
     const sql = getTestDb();
     const currentManifest = manifest({ runtime: { platforms: ['macos'] } });
     const snapshotFeed = {
@@ -809,34 +810,48 @@ describe('device connector manifests', () => {
 
     const reconcileResponse = await pollPersistedInventory(0);
     expect(reconcileResponse.status).toBe(200);
+    expect(await readDefinition(orgId)).toBeNull();
+    const deviceId = await deviceIdFor(workerId);
+    // An empty poll alone cannot prove rejection: no run exists to claim.
+    expect(await getDeviceManifestClaimAuthorizationsForDevice({ sql, userId, deviceId })).toEqual([]);
 
-    const definition = await readDefinition(orgId);
-    expect(definition?.feeds_schema).toEqual(
-      expect.objectContaining({
-        snapshots: expect.objectContaining({ operations: ['sync'] }),
-        live_snapshots: expect.objectContaining({ operations: ['read'] }),
-      }),
+    const claimResponse = await pollPersistedInventory(1);
+    expect(claimResponse.status).toBe(200);
+    const body = (await claimResponse.json()) as Record<string, unknown>;
+    expect(body.connector_key).toBeUndefined();
+    expect(body.connector_manifest_hash).toBeUndefined();
+
+    const upgradedManifest = {
+      ...currentManifest,
+      feeds_schema: {
+        ...currentManifest.feeds_schema,
+        live_snapshots: { key: 'live_snapshots', name: 'Live snapshots', operations: ['read'] },
+      },
+    };
+    const upgradedResponse = await poll(
+      workerId, [upgradedManifest], 'macos', { screentime: true }, { capacityAvailable: 0 },
     );
-    const feeds = (await sql`
+    expect(upgradedResponse.status).toBe(200);
+    expect((await readDefinition(orgId))?.feeds_schema).toEqual(upgradedManifest.feeds_schema);
+    expect(await getDeviceManifestClaimAuthorizationsForDevice({ sql, userId, deviceId })).toEqual([
+      expect.objectContaining({
+        connectorKey: CONNECTOR_KEY,
+        connectorVersion: upgradedManifest.version,
+        manifestHash: deviceManifestHash(upgradedManifest as DeviceConnectorManifest),
+      }),
+    ]);
+    const feeds = await sql`
       SELECT f.feed_key, f.next_run_at
       FROM feeds f
       JOIN connections c ON c.id = f.connection_id
       WHERE c.organization_id = ${orgId}
         AND c.connector_key = ${CONNECTOR_KEY}
-        AND f.feed_key IN ('snapshots', 'live_snapshots')
       ORDER BY f.feed_key
-    `) as unknown as Array<{ feed_key: string; next_run_at: Date | string | null }>;
+    `;
     expect(feeds).toEqual([
       { feed_key: 'live_snapshots', next_run_at: null },
       { feed_key: 'snapshots', next_run_at: expect.anything() },
     ]);
-
-    const claimResponse = await pollPersistedInventory(1);
-    expect(claimResponse.status).toBe(200);
-    const body = (await claimResponse.json()) as Record<string, unknown>;
-    expect(body.connector_key).toBe(CONNECTOR_KEY);
-    expect(body.feed_key).toBe('snapshots');
-    expect(body.connector_manifest_hash).toBe(legacyHash);
   });
 
   it('reconciles a same-version compiled artifact back to manifest-only poll payload', async () => {
