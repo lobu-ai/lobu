@@ -14,7 +14,6 @@ import {
   type GatewayParams,
   type TextResult,
   type ToolResult,
-  type ToolImageBudget,
 } from "@lobu/plugin-toolkit";
 
 const logger = createLogger("plugin-mcp");
@@ -195,7 +194,6 @@ export async function callMcpTool(
   options?: {
     timeoutMs?: number;
     supportsImages?: boolean;
-    imageBudget?: ToolImageBudget;
   }
 ): Promise<ToolResult> {
   return withErrorHandling(`${mcpId}/${toolName}`, async () => {
@@ -258,8 +256,7 @@ export async function callMcpTool(
     return mcpToolResult(
       data.content,
       `${toolName} completed.`,
-      options?.supportsImages,
-      options?.imageBudget
+      options?.supportsImages
     );
   });
 }

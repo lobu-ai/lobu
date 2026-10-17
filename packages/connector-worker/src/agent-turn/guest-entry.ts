@@ -137,21 +137,10 @@ function buildTools(
   onInBandReplyDelivered: () => void,
   emit: (event: AgentTurnEvent) => void,
   runtimeExec?: (request: RuntimeExecRequest) => Promise<RuntimeExecResult>
-): { tools: AgentTool[]; workspace: AgentWorkspace | null; canReadFiles: boolean } {
+): { tools: AgentTool[]; workspace: AgentWorkspace | null; canReadFiles: boolean; imageBudget: ToolImageBudget } {
+  const imageBudget = toolImageBudget((input.images ?? []).map(image => ({ type: 'image', data: image.data })));
   const tools = input.tools;
-  if (!tools) return { tools: [], workspace: null, canReadFiles: false };
-  // The checkpoint carries the full session, including older image blocks.
-  // Charge those AND this prompt's images before admitting tool pixels. The
-  // image allowance leaves bridge space for text; it is not a total turn cap.
-  const previousContent = input.sessionJsonl.trim().split('\n').filter(line => line.trim())
-    .flatMap(line => {
-      const entry = JSON.parse(line);
-      return entry.type === 'message' && Array.isArray(entry.message?.content) ? entry.message.content : [];
-    });
-  const imageBudget = toolImageBudget([
-    ...previousContent,
-    ...(input.images ?? []).map(image => ({ type: 'image', data: image.data })),
-  ]);
+  if (!tools) return { tools: [], workspace: null, canReadFiles: false, imageBudget };
   // ONE workspace for the whole turn: the file tools act on it and
   // `upload_file` reads it, so the file the model just wrote is the file it can
   // show. Built even when no file tool was admitted but a media tool was, since
@@ -217,6 +206,7 @@ function buildTools(
     tools: [...mcp, ...gateway, ...media, ...(workspace?.tools ?? [])],
     workspace,
     canReadFiles,
+    imageBudget,
   };
 }
 
@@ -514,6 +504,12 @@ export async function runAgentTurn(
     const text = messageText(message);
     return text === undefined ? undefined : messageContext.get(text);
   });
+  // Only the isolate must fit the full checkpoint through a bounded bridge.
+  // buildTools charged this prompt's images; add the already-hydrated history.
+  built.imageBudget.bytes += toolImageBudget(session.sessionManager.getEntries().flatMap<unknown>(entry =>
+    entry.type === 'message' && 'content' in entry.message && Array.isArray(entry.message.content)
+      ? entry.message.content : []
+  )).bytes;
   session.subscribe((event) => {
     if (event.type === 'compaction_end' && event.errorMessage) console.warn(event.errorMessage);
   });

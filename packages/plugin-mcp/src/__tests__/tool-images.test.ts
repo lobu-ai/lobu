@@ -7,8 +7,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-test("shares the retained-image budget across concurrent tools and rehydrates it", async () => {
-  // Eight padded PNGs fill the 10 MiB retained-byte budget.
+test("bounds each legacy MCP result without permanently disabling later observations", async () => {
   const bytes = Buffer.alloc((10 * 1024 * 1024) / 8);
   syntheticImage().bytes.copy(bytes);
   const image = {
@@ -18,70 +17,45 @@ test("shares the retained-image budget across concurrent tools and rehydrates it
   };
   globalThis.fetch = (async () =>
     Response.json({
-      content: Array.from({ length: 6 }, () => image),
+      content: Array.from({ length: 9 }, () => image),
     })) as typeof fetch;
-  const sessionManager = {
-    getSessionId: () => "synthetic-session",
-    getEntries: () => [
-      { type: "message", message: { role: "user", content: [image, image] } },
-    ],
-  };
   const context = {
     model: { input: ["text", "image"] },
-    sessionManager,
-  } as never;
-  const gateway = {
-    gatewayUrl: "https://gateway.example.test",
-    workerToken: "synthetic-token",
-    channelId: "test",
-    conversationId: "test",
-  };
-  const definitions = {
-    synthetic: [
-      { name: "observe", inputSchema: { type: "object" } },
-      { name: "observe_again", inputSchema: { type: "object" } },
-    ],
-  };
-  const tools = createMcpToolDefinitions(definitions, gateway);
-  const results = await Promise.all(
-    tools.map((tool) => tool.execute("call", {}, undefined, undefined, context))
-  );
-  expect(
-    results
-      .flatMap((result) => result.content)
-      .filter((part) => part.type === "image")
-  ).toHaveLength(6);
-  expect(JSON.stringify(results)).toContain("image budget exhausted");
-  // Fresh plugin instance reads a checkpoint with all eight images retained.
-  sessionManager.getEntries = () => [
-    {
-      type: "message",
-      message: {
-        role: "user",
-        content: Array.from({ length: 8 }, () => image),
-      },
+    sessionManager: {
+      getSessionId: () => "synthetic-session",
+      getEntries: () => [
+        {
+          type: "message",
+          message: {
+            role: "user",
+            content: Array.from({ length: 8 }, () => image),
+          },
+        },
+      ],
     },
-  ];
-  const [rehydrated] = createMcpToolDefinitions(definitions, gateway);
-  const result = await rehydrated!.execute(
-    "call",
-    {},
-    undefined,
-    undefined,
-    context
+  } as never;
+  const [tool] = createMcpToolDefinitions(
+    { synthetic: [{ name: "observe", inputSchema: { type: "object" } }] },
+    {
+      gatewayUrl: "https://gateway.example.test",
+      workerToken: "synthetic-token",
+      channelId: "test",
+      conversationId: "test",
+    }
   );
-  expect(result.content.some((part) => part.type === "image")).toBe(false);
-  // Pi can reuse the manager object for a new conversation.
-  sessionManager.getSessionId = () => "new-synthetic-session";
-  sessionManager.getEntries = () => [];
-  const fresh = await tools[0]!.execute(
-    "call",
-    {},
-    undefined,
-    undefined,
-    context
-  );
-  expect(fresh.content.filter((part) => part.type === "image")).toHaveLength(6);
+  for (let call = 0; call < 2; call++) {
+    const result = await tool!.execute(
+      `call-${call}`,
+      {},
+      undefined,
+      undefined,
+      context
+    );
+    expect(result.content.filter((part) => part.type === "image")).toHaveLength(
+      8
+    );
+    expect(JSON.stringify(result.content)).toContain("image budget exhausted");
+  }
 });
 
 test.each([

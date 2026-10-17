@@ -119,7 +119,6 @@ export function mcpToolResult(
     else if (
       !isToolImageMimeType(mimeType) ||
       size === null ||
-      size === 0 ||
       !hasImageSignature(data as string, mimeType)
     )
       reason =

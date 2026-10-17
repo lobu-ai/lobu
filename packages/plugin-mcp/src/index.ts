@@ -3,11 +3,9 @@ import { defineLobuPlugin } from "@lobu/plugin-api";
 import {
   defineTool,
   joinTextContent,
-  toolImageBudget,
   toToolResult,
   type GatewayParams,
   type TextResult,
-  type ToolImageBudget,
 } from "@lobu/plugin-toolkit";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -41,12 +39,6 @@ export function createMcpToolDefinitions(
   mcpContext?: Record<string, string>
 ): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
-  // Shared across the session's MCP tools, including concurrent tool calls.
-  // Rehydrate from the session itself; this is a byte budget, not a lease.
-  const imageBudgets = new WeakMap<
-    object,
-    { sessionId: string; budget: ToolImageBudget }
-  >();
   for (const [mcpId, definitions] of Object.entries(mcpTools)) {
     const contextPrefix = mcpContext?.[mcpId];
     for (const definition of definitions) {
@@ -63,29 +55,6 @@ export function createMcpToolDefinitions(
           ? Type.Unsafe(definition.inputSchema)
           : Type.Object({}),
         execute: async (_toolCallId, args, _signal, _onUpdate, context) => {
-          let imageBudget: ToolImageBudget | undefined;
-          if (context?.sessionManager) {
-            const retained = toolImageBudget(
-              context.sessionManager
-                .getEntries()
-                .flatMap<unknown>((entry) =>
-                  entry.type === "message" &&
-                  "content" in entry.message &&
-                  Array.isArray(entry.message.content)
-                    ? entry.message.content
-                    : []
-                )
-            );
-            const sessionId = context.sessionManager.getSessionId();
-            const previous = imageBudgets.get(context.sessionManager);
-            imageBudget =
-              previous?.sessionId === sessionId ? previous.budget : retained;
-            imageBudget.bytes = Math.max(imageBudget.bytes, retained.bytes);
-            imageBudgets.set(context.sessionManager, {
-              sessionId,
-              budget: imageBudget,
-            });
-          }
           const result = await callMcpTool(
             gateway,
             mcpId,
@@ -93,7 +62,6 @@ export function createMcpToolDefinitions(
             (args || {}) as Record<string, unknown>,
             {
               supportsImages: context?.model?.input.includes("image") === true,
-              imageBudget,
             }
           );
           await maybePostApprovalCard(

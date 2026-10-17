@@ -7,8 +7,10 @@ import { buildAgentGuest } from '../../agent-turn/bundle.js';
 import type { AgentTurnEvent, AgentTurnInput } from '../../agent-turn/types.js';
 import { IsolateExecutor } from '../../executor/isolate.js';
 
-test('real guest and native session carry pixels to the provider and restore them next turn', async () => {
-  const data = imageFixture.syntheticImage().bytes.toString('base64');
+for (const exhaustBudget of [false, true]) test(`real guest restores pixels and their bridge budget (exhaust: ${exhaustBudget})`, async () => {
+  const bytes = exhaustBudget ? Buffer.alloc(5 * 1024 * 1024) : imageFixture.syntheticImage().bytes;
+  if (exhaustBudget) imageFixture.syntheticImage().bytes.copy(bytes);
+  const data = bytes.toString('base64');
   const requests: string[] = [];
   const unexpected: string[] = [];
   const traces: AgentTurnEvent[] = [];
@@ -26,8 +28,8 @@ test('real guest and native session carry pixels to the provider and restore the
       return;
     }
     requests.push(Buffer.concat(chunks).toString());
-    const choice = requests.length === 1
-      ? { index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'observe-call', type: 'function', function: { name: 'observe', arguments: '{}' } }] }, finish_reason: 'tool_calls' }
+    const choice = requests.length === 1 || (exhaustBudget && (requests.length === 3 || requests.length === 4))
+      ? { index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: `observe-call-${requests.length}`, type: 'function', function: { name: 'observe', arguments: '{}' } }] }, finish_reason: 'tool_calls' }
       : { index: 0, delta: { role: 'assistant', content: 'Transport recorded.' }, finish_reason: 'stop' };
     res.setHeader('content-type', 'text/event-stream');
     res.end(`data: ${JSON.stringify({ id: 'synthetic', object: 'chat.completion.chunk', created: 1, model: 'synthetic', choices: [choice] })}\n\ndata: [DONE]\n\n`);
@@ -57,7 +59,12 @@ test('real guest and native session carry pixels to the provider and restore the
     assert.ok(first.turn.sessionJsonl.includes(data));
     const second = await run({ ...input, sessionJsonl: first.turn.sessionJsonl, userMessage: 'Recall the observation.' });
     assert.equal(second.mode, 'agent_turn');
-    assert.equal(requests.length, 3);
+    assert.equal(requests.length, exhaustBudget ? 5 : 3);
+    if (exhaustBudget) {
+      assert.ok(requests[4]!.includes('image budget exhausted'));
+      assert.equal(requests[4]!.split(`data:image/png;base64,${data}`).length - 1, 2);
+      assert.ok(Buffer.byteLength(second.turn.sessionJsonl) < AGENT_TURN_BRIDGE_BYTES);
+    }
     assert.ok(requests[2]!.includes(`data:image/png;base64,${data}`));
     assert.ok(!JSON.stringify(traces).includes(data));
     assert.deepEqual(unexpected, []);

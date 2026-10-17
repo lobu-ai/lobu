@@ -125,17 +125,7 @@ test.each([0, 1])('repeated screenshots account for %i input images and the reta
   expect(Buffer.byteLength(result.sessionJsonl)).toBeLessThan(AGENT_TURN_BRIDGE_BYTES);
   expect(lastRequest).toContain('image budget exhausted');
   expect(result.text).toBe('Recorded.');
-  // A subsequent turn must account for the image blocks already checkpointed.
-  requests = 0;
-  const replayed = await runAgentTurn({ ...input, images: undefined, sessionJsonl: result.sessionJsonl }, () => {});
-  expect(requests).toBe(6);
-  // This source-level harness does not use the isolate's session-file shim.
-  // Inspect the new tool messages to prove the supplied checkpoint is charged.
-  const replayedTools = replayed.sessionJsonl.trim().split('\n').map(line => JSON.parse(line))
-    .filter(entry => entry.type === 'message' && entry.message.role === 'toolResult');
-  expect(replayedTools.flatMap(entry => entry.message.content).filter(part => part.type === 'image')).toHaveLength(0);
-  expect(lastRequest).toContain('image budget exhausted');
-  expect(Buffer.byteLength(replayed.sessionJsonl)).toBeLessThan(AGENT_TURN_BRIDGE_BYTES);
+  // Checkpoint restoration and its budget are covered by the real isolate below.
 });
 
 test('native isolate preserves tool pixels across checkpoint restoration', async () => {
@@ -148,5 +138,5 @@ test('native isolate preserves tool pixels across checkpoint restoration', async
     new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
   ]);
   expect({ exitCode, stderr, stdout: exitCode ? stdout : '' }).toEqual({ exitCode: 0, stderr: '', stdout: '' });
-  expect(stdout).toContain('tests 1');
+  expect(stdout).toContain('tests 2');
 }, 30_000);
