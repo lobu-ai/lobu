@@ -273,12 +273,9 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
       'granted_organization_ids',
       'authorization_grant_type',
     ]),
-    feeds: new Set([
-      'checkpoint',
-    ]),
-    // next_window_start is
-    // internal scheduler coordination state, exposed through the Automation
-    // contract as pending_analysis.next_window rather than raw query_sql. The
+    feeds: new Set(['checkpoint']),
+    // next_window_start is internal scheduler coordination state, exposed through
+    // the Automation contract as pending_analysis.next_window rather than raw query_sql. The
     // latest-completion scalar is the rest of that same scheduler-internal
     // projection.
     automations: new Set([

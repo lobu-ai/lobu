@@ -7,7 +7,7 @@
  * that live reads and searches return. These helpers do not ingest events.
  */
 
-export const WHATSAPP_ADAPTER_VERSION = 23;
+export const WHATSAPP_ADAPTER_VERSION = 24;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 
 export type ChatFilter = "all" | "individual" | "group";
@@ -104,11 +104,7 @@ export function normalizeRelayedMessage(
   }
   const senderJid = canonicalizeJid(raw.sender_jid);
   const fromMe = Boolean(raw.from_me);
-  // History-sync leftovers (`participant`, `reactions`) stay off the typed
-  // surface: search/read rows never project them, and the adapter-local
-  // `normalizeReactions` still verifies react_message writes. Destructure them
-  // out so the `...rest` spread below cannot leak raw values through the index
-  // signature either.
+  // Retired history-sync fields must not survive through the raw-field spread.
   const { participant: _droppedParticipant, reactions: _droppedReactions, ...rest } = raw;
   return {
     ...rest,

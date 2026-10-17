@@ -543,6 +543,29 @@ describe("whatsAppWebAdapterProgram message actions", () => {
 });
 
 describe("whatsAppWebAdapterProgram version", () => {
+  it("replaces the resident version 23 adapter and detaches its listeners", () => {
+    let detached = 0;
+    const resident = {
+      version: 23,
+      detach: () => { detached++; },
+    };
+    const globals = { __owlettoWhatsAppAdapterV1: resident };
+    const install = new Function(
+      "globalThis",
+      `(${whatsAppWebAdapterProgram.toString()})();`
+    );
+
+    install(globals);
+    expect(detached).toBe(1);
+    expect(globals.__owlettoWhatsAppAdapterV1).not.toBe(resident);
+    expect(globals.__owlettoWhatsAppAdapterV1.version).toBe(WHATSAPP_ADAPTER_VERSION);
+
+    const installed = globals.__owlettoWhatsAppAdapterV1;
+    install(globals);
+    expect(globals.__owlettoWhatsAppAdapterV1).toBe(installed);
+    expect(detached).toBe(1);
+  });
+
   // The connector reuses a resident adapter whenever its version matches, so a
   // fix shipped without bumping this number leaves every open
   // WhatsApp tab running the old program. The two constants live in different
@@ -684,8 +707,6 @@ describe("WhatsApp source observation", () => {
     source.emit("add", "historical", 900);
     await settle();
     expect(source.posts).toHaveLength(0);
-    // The single minimum_timestamp gate covers both adds and changes now that
-    // the redundant recent_since filter is consolidated into it.
     source.emit("change", "edited history", 900);
     await settle();
     expect(source.posts).toHaveLength(0);
