@@ -10,9 +10,10 @@ is a small fix, not the recall fix. Shipped:
 - #4179: agent-scoped recall stays on the exact path (section 3).
 - #4180: `ivfflat.probes = 100` with iterative scan off in the recall
   transaction (section 1a).
+- Ranking scale (section 4): text rank is normalized to [0, 1], and rows
+  without a comparable embedding contribute similarity 0 to the weighted sum.
 
-Open: the combined score lets text rank drown vector similarity (section 4),
-and Part 2 below. Part 2 adds an extension and two
+Open: Part 2 below. Part 2 adds an extension and two
 indexes, which is a DB design change under the AGENTS.md rules and needs
 explicit confirmation.
 
@@ -191,8 +192,8 @@ timeouts in production; the SQLSTATE counter shipped with F2 will.
 
 ### 4. The combined score lets text rank drown vector similarity
 
-The score is `COALESCE(0.4 × text + 0.6 × similarity, text)`, where `text` is
-a 1.0 substring bonus plus `ts_rank_cd`. `ts_rank_cd` is unbounded: measured
+At measurement time, the score was `COALESCE(0.4 × text + 0.6 × similarity, text)`,
+where `text` was a 1.0 substring bonus plus `ts_rank_cd`. `ts_rank_cd` is unbounded: measured
 top-5 scores range from 2.4 to 42, while the vector term adds about 0.2–0.35.
 Rows with no embedding fall back to the unweighted text score, so they
 outrank embedded rows on any text match. In the largest workspace 1.37M
@@ -201,6 +202,12 @@ the answer only when the text arms find little. This affects the exact and
 candidate paths alike and is a product decision about ranking, not part of
 the bounded-work design.
 
+**Fixed (query only).** The text component is `0.5 × substring match +
+0.5 × ts_rank_cd(…, 32)`, where normalization 32 is `rank / (rank + 1)`, so it
+stays in [0, 1]. The score is `0.4 × text + 0.6 × COALESCE(similarity, 0)`, so
+an unembedded row is weighted like any other. The entity blend in
+`search_memory` uses the same normalization.
+
 ### What has already shipped (not part of this design)
 
 - **Honest failure (#4098).** The candidate transaction preserves the SQLSTATE,
@@ -208,9 +215,8 @@ the bounded-work design.
   guidance instead of a complete empty answer. The tests are
   `tools/__tests__/search-partial-coverage.test.ts` and
   `search-memory-recall-contract.test.ts`. **No further PR is needed for the
-  timeout case.** One residual: when no query embedding is available,
-  `useCandidatePath` is false, so recall falls to the exact path with no 6s
-  bound. That is a small query-only follow-up (see Part 1).
+  timeout case.** #4178 also bounds the exact fallback when no query embedding
+  is available (see Part 1).
 - **Workspace-scoped text arms (#4099)**, plus superseded-vector reclamation and
   the IVFFlat reindex (3.9GB index, down from 9.8GB).
 - **DB resize.** Production already runs 4 CPU / 64G, `shared_buffers=16GB` and

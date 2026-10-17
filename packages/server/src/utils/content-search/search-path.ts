@@ -335,9 +335,12 @@ export async function searchContentBySingleQuery(
   const searchWhereFor = (orgScopeSql: string) => `${matchCondition}
           AND ${standardFiltersFor(orgScopeSql)}`;
 
+  // Text relevance in [0, 1]: half substring match, half full-text rank.
+  // Normalization 32 maps rank to rank / (rank + 1), so repeated terms
+  // cannot overwhelm cosine similarity (which ranges from -1 to 1).
   const textRankExpr = `
-    (CASE WHEN LENGTH($1) > 0 AND fi.payload_text ILIKE '%' || $1 || '%' THEN 1.0 ELSE 0.0 END)
-    + CASE WHEN LENGTH($1) > 0 THEN COALESCE(ts_rank_cd(${resultDocumentExpr}, ${TSQUERY_SQL}), 0) ELSE 0 END
+    (CASE WHEN LENGTH($1) > 0 AND fi.payload_text ILIKE '%' || $1 || '%' THEN 0.5 ELSE 0.0 END)
+    + CASE WHEN LENGTH($1) > 0 THEN 0.5 * COALESCE(ts_rank_cd(${resultDocumentExpr}, ${TSQUERY_SQL}, 32), 0) ELSE 0 END
   `;
   let similarityExpr: string;
   let combinedScoreExpr: string;
@@ -367,14 +370,15 @@ export async function searchContentBySingleQuery(
       );
     }
     // Same model scope as matchCondition: a row whose stamp differs from the
-    // configured model contributes no vector similarity (NULL → COALESCE falls
-    // back to the text-only score), so stale-model rows can never rank via an
-    // incompatible <=> comparison.
+    // configured model contributes no vector similarity, so stale-model rows can
+    // never rank via an incompatible <=> comparison.
     // filtered_ids precomputes the best-chunk similarity per event as best_sim
     // (NULL when no comparable chunk), so scoring reads that column instead of a
     // per-row <=> against a single view embedding that no longer exists.
+    // A row without a comparable chunk scores similarity 0 inside the same
+    // weighted sum, avoiding an unweighted text bonus for missing embeddings.
     similarityExpr = `fi.best_sim`;
-    combinedScoreExpr = `COALESCE((${textRankExpr}) * ${textWeight} + fi.best_sim * ${vectorWeight}, ${textRankExpr})`;
+    combinedScoreExpr = `(${textRankExpr}) * ${textWeight} + COALESCE(fi.best_sim, 0) * ${vectorWeight}`;
     searchExtraColumns =
       'rs.text_rank, rs.similarity, rs.combined_score, rs.total_count, rs.cursor_fetched_count';
     orderByExpr = preferChronologicalOrdering

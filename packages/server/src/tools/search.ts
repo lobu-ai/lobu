@@ -1967,11 +1967,13 @@ async function queryEntities(
   let vectorSimExpr: string;
 
   if (hasEmbedding) {
-    // Blended scoring: 0.6 vector + 0.3 text + 0.1 name
+    // Blended scoring: 0.6 vector + 0.3 text + 0.1 name. Normalization 32
+    // bounds text rank to [0, 1] via rank / (rank + 1), so repeated terms
+    // cannot overwhelm cosine similarity (which ranges from -1 to 1).
     vectorSimExpr = `CASE WHEN e.embedding IS NOT NULL THEN 1 - (e.embedding <=> $${embeddingParamIdx}::vector) ELSE 0 END`;
     const textRankExpr =
       queryParamIdx !== null
-        ? `COALESCE(ts_rank_cd(e.content_tsv, websearch_to_tsquery('english', $${queryParamIdx})), 0)`
+        ? `COALESCE(ts_rank_cd(e.content_tsv, websearch_to_tsquery('english', $${queryParamIdx}), 32), 0)`
         : '0';
     const nameSimExpr =
       queryParamIdx !== null ? `similarity(LOWER(e.name), LOWER($${queryParamIdx}))` : '0';
