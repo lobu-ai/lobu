@@ -165,7 +165,7 @@ describe('native bridge run forwarding', () => {
 
     expect(result.error).toBe('stream delivery failed');
     expect(client.calls.complete).toEqual([
-      expect.objectContaining({ run_id: 11, status: 'failed', items_collected: 1 }),
+      expect.objectContaining({ run_id: 11, status: 'failed', error_message: 'stream delivery failed', items_collected: 0 }),
     ]);
     expect((client.calls.complete[0] as Record<string, unknown>).checkpoint).toBeUndefined();
   });
@@ -221,7 +221,7 @@ describe('native bridge run forwarding', () => {
     expect(operations).toEqual(['read', 'read']);
   });
 
-  test('rejects automation and embed_backfill runs without using completeAction', async () => {
+  test('reports automation and embed_backfill failures per run_type without using completeAction', async () => {
     const client = fakeClient() as {
       calls: Record<string, unknown[]>;
       id: string;
@@ -241,14 +241,14 @@ describe('native bridge run forwarding', () => {
       run_type: 'embed_backfill',
     } as never);
 
-    expect(automation.error).toContain('native bridge does not execute run_type automation');
-    expect(embedBackfill.error).toContain('native bridge does not execute run_type embed_backfill');
+    expect(automation.error).toBe('must not execute');
+    expect(embedBackfill.error).toBe('must not execute');
     expect(client.calls.completeAction).toEqual([]);
     expect(client.calls.completeAutomation).toEqual([
-      expect.objectContaining({ runId: 17, value: expect.objectContaining({ error: automation.error }) }),
+      expect.objectContaining({ runId: 17, value: expect.objectContaining({ error: 'must not execute', exit_reason: 'error_message' }) }),
     ]);
     expect(client.calls.complete).toEqual([
-      expect.objectContaining({ run_id: 18, status: 'failed', error_message: embedBackfill.error }),
+      expect.objectContaining({ run_id: 18, status: 'failed', error_message: 'must not execute' }),
     ]);
   });
 

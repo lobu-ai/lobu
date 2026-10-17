@@ -44,11 +44,16 @@ import {
 import { gfmToMarkdown } from "mdast-util-gfm";
 import { type Handlers, toMarkdown } from "mdast-util-to-markdown";
 
+import {
+  WHATSAPP_DM_SUFFIXES,
+  WHATSAPP_GROUP_SUFFIX,
+} from "@lobu/connectors/whatsapp-web-identity";
+
 export const WHATSAPP_WEB_PLATFORM = "whatsapp.web";
 
 const THREAD_PREFIX = `${WHATSAPP_WEB_PLATFORM}:`;
-const GROUP_SUFFIX = "@g.us";
-const DM_SUFFIXES = ["@s.whatsapp.net", "@c.us", "@lid"];
+const GROUP_SUFFIX = WHATSAPP_GROUP_SUFFIX;
+const DM_SUFFIXES: readonly string[] = WHATSAPP_DM_SUFFIXES;
 
 /** One message row as the connector's live feed and search return it. */
 export interface WhatsAppWebMessageRow {

@@ -16,6 +16,11 @@ import {
 	type AtlassianAccessibleResource,
 	type JiraCloudSite,
 } from "../connect/atlassian-resources";
+import {
+	buildJiraJql,
+	JIRA_ISSUE_COLUMNS,
+	mapJiraIssueToRow,
+} from "@lobu/connectors/jira-helpers";
 
 export const ATLASSIAN_JIRA_ISSUES_FEED_KEY = "issues";
 
@@ -34,22 +39,7 @@ function sourceCallOptions(params: {
 	return { signal: params.signal, timeoutMs };
 }
 
-export const ATLASSIAN_JIRA_ISSUE_COLUMNS = [
-	{ name: "id", type: "string" },
-	{ name: "key", type: "string" },
-	{ name: "summary", type: "string" },
-	{ name: "status", type: "string" },
-	{ name: "assignee", type: "string" },
-	{ name: "reporter", type: "string" },
-	{ name: "priority", type: "string" },
-	{ name: "project_key", type: "string" },
-	{ name: "project_name", type: "string" },
-	{ name: "labels", type: "string" },
-	{ name: "created_at", type: "string" },
-	{ name: "updated_at", type: "string" },
-	{ name: "description", type: "string" },
-	{ name: "url", type: "string" },
-] as const;
+export const ATLASSIAN_JIRA_ISSUE_COLUMNS = JIRA_ISSUE_COLUMNS;
 
 /** Same issues feed the bundled Jira connector declares. */
 export const ATLASSIAN_MCP_FEEDS = {
@@ -114,16 +104,6 @@ export const ATLASSIAN_MCP_FEEDS = {
 	},
 };
 
-const SORT_COLUMNS: Record<string, string> = {
-	updated: "updated",
-	updated_at: "updated",
-	created: "created",
-	created_at: "created",
-	key: "key",
-	priority: "priority",
-	status: "status",
-};
-
 export function isAtlassianMcpUrl(url: string | null | undefined): boolean {
 	if (!url) return false;
 	try {
@@ -174,184 +154,21 @@ function asString(value: unknown): string | undefined {
 		: undefined;
 }
 
-function actorName(user: unknown): string | undefined {
-	if (!user || typeof user !== "object") {
-		return typeof user === "string" && user.trim() ? user.trim() : undefined;
-	}
-	const record = user as Record<string, unknown>;
-	return (
-		asString(record.displayName) ??
-		asString(record.emailAddress) ??
-		asString(record.name)
-	);
-}
-
-function namedField(value: unknown): string | undefined {
-	if (typeof value === "string") return asString(value);
-	if (!value || typeof value !== "object") return undefined;
-	return asString((value as Record<string, unknown>).name);
-}
-
-function atlassianDocumentToText(value: unknown): string {
-	if (typeof value === "string") return value;
-	if (!value || typeof value !== "object") return "";
-	const node = value as { type?: string; text?: string; content?: unknown[] };
-	if (node.type === "hardBreak") return "\n";
-	if (typeof node.text === "string") return node.text;
-	if (Array.isArray(node.content)) {
-		return node.content
-			.map((child) => atlassianDocumentToText(child))
-			.join("")
-			.trim();
-	}
-	return "";
-}
-
-function splitTrailingOrderBy(jql: string): { body: string; orderBy: string | null } {
-	let quote: '"' | "'" | null = null;
-	let escaped = false;
-	let depth = 0;
-	for (let i = 0; i < jql.length; i += 1) {
-		const char = jql[i];
-		if (quote) {
-			if (escaped) escaped = false;
-			else if (char === "\\") escaped = true;
-			else if (char === quote) quote = null;
-			continue;
-		}
-		if (char === '"' || char === "'") {
-			quote = char;
-			continue;
-		}
-		if (char === "(") {
-			depth += 1;
-			continue;
-		}
-		if (char === ")") {
-			depth = Math.max(0, depth - 1);
-			continue;
-		}
-		if (
-			depth === 0 &&
-			(i === 0 || /\s/.test(jql[i - 1])) &&
-			/^order\s+by\b/i.test(jql.slice(i))
-		) {
-			return { body: jql.slice(0, i).trim(), orderBy: jql.slice(i).trim() };
-		}
-	}
-	return { body: jql.trim(), orderBy: null };
-}
-
 export function buildAtlassianMcpJql(args: {
 	baseQuery: string;
 	window?: FeedReadWindow;
 	query?: string;
 	sort?: { column: string; order: "asc" | "desc" };
 }): string {
-	const trimmed = args.baseQuery.trim();
-	const jql = trimmed.length > 0 ? trimmed : (args.window ? "" : "updated >= -90d");
-	let { body, orderBy } = splitTrailingOrderBy(jql);
-	if (!body && orderBy) body = args.window ? "" : "updated >= -90d";
-
-	const callerQuery = args.query?.trim() ?? "";
-	if (args.window) {
-		const bounds = `updated >= ${Date.parse(args.window.start)} AND updated < ${Date.parse(args.window.end)}`;
-		body = body ? `(${body}) AND (${bounds})` : bounds;
-	}
-	if (callerQuery) {
-		const caller = splitTrailingOrderBy(callerQuery);
-		if (caller.body) {
-			body = body.length > 0 ? `(${body}) AND (${caller.body})` : caller.body;
-		}
-		if (caller.orderBy) {
-			throw new Error(
-				"Jira source read query cannot contain ORDER BY; use the separate sort field",
-			);
-		}
-	}
-
-	if (orderBy) {
-		if (args.sort) {
-			throw new Error(
-				"Jira source read: cannot apply sort when the base JQL already contains ORDER BY",
-			);
-		}
-		return body.length > 0 ? `${body} ${orderBy}` : orderBy;
-	}
-
-	if (args.sort) {
-		const field = SORT_COLUMNS[args.sort.column];
-		if (!field) {
-			throw new Error(
-				`Jira source read sort column '${args.sort.column}' is unsupported`,
-			);
-		}
-		const dir = args.sort.order === "asc" ? "ASC" : "DESC";
-		return body.length > 0
-			? `${body} ORDER BY ${field} ${dir}`
-			: `ORDER BY ${field} ${dir}`;
-	}
-
-	return body.length > 0
-		? `${body} ORDER BY updated DESC`
-		: "updated >= -90d ORDER BY updated DESC";
-}
-
-function issueUrl(
-	issue: Record<string, unknown>,
-	fields: Record<string, unknown>,
-	config: Record<string, unknown>,
-): string | undefined {
-	const key = asString(issue.key);
-	const siteUrl = asString(config.site_url);
-	const cloudId = asString(config.cloud_id);
-	const siteCloudId = asString(config.site_cloud_id);
-	if (siteUrl && key && cloudId && siteCloudId && cloudId === siteCloudId) {
-		return `${siteUrl.replace(/\/+$/, "")}/browse/${encodeURIComponent(key)}`;
-	}
-	return asString(issue.self) ?? asString(fields.url) ?? asString(issue.url);
-}
-
-function mapAtlassianIssueToRow(
-	raw: unknown,
-	config: Record<string, unknown> = {},
-): Record<string, unknown> | null {
-	if (!raw || typeof raw !== "object") return null;
-	const issue = raw as Record<string, unknown>;
-	const fields =
-		issue.fields && typeof issue.fields === "object"
-			? (issue.fields as Record<string, unknown>)
-			: issue;
-	const id = asString(issue.id) ?? asString(issue.key) ?? asString(fields.id);
-	if (!id) return null;
-	const labelsRaw = fields.labels ?? issue.labels;
-	const labels = Array.isArray(labelsRaw)
-		? labelsRaw.filter((label): label is string => typeof label === "string").join(", ")
-		: asString(labelsRaw) ?? null;
-	return {
-		id,
-		key: asString(issue.key) ?? asString(fields.key) ?? null,
-		summary: asString(fields.summary) ?? asString(issue.summary) ?? null,
-		status: namedField(fields.status) ?? namedField(issue.status) ?? null,
-		assignee: actorName(fields.assignee ?? issue.assignee) ?? null,
-		reporter: actorName(fields.reporter ?? issue.reporter) ?? null,
-		priority: namedField(fields.priority) ?? namedField(issue.priority) ?? null,
-		project_key:
-			asString((fields.project as { key?: unknown } | undefined)?.key) ??
-			asString(fields.projectKey) ??
-			asString(issue.project_key) ??
-			null,
-		project_name:
-			asString((fields.project as { name?: unknown } | undefined)?.name) ??
-			asString(fields.projectName) ??
-			null,
-		labels,
-		created_at: asString(fields.created) ?? asString(issue.created) ?? null,
-		updated_at: asString(fields.updated) ?? asString(issue.updated) ?? null,
-		description:
-			atlassianDocumentToText(fields.description ?? issue.description) || null,
-		url: issueUrl(issue, fields, config) ?? null,
-	};
+	return buildJiraJql({
+		baseQuery: args.baseQuery,
+		query: args.query,
+		sort: args.sort,
+		window: args.window,
+		// An omitted scope stays bounded on plain reads; a windowed read is
+		// already bounded by its time window.
+		defaultWhenEmpty: args.window ? "" : "updated >= -90d",
+	});
 }
 
 function tryParseJson(text: string): unknown {
@@ -423,7 +240,7 @@ export function parseAtlassianMcpIssues(
 	}
 	const rows: Record<string, unknown>[] = [];
 	for (const item of collected) {
-		const row = mapAtlassianIssueToRow(item, config);
+		const row = mapJiraIssueToRow(item, config);
 		if (
 			requirePage &&
 			(!row || !Number.isFinite(Date.parse(String(row.updated_at ?? ""))))

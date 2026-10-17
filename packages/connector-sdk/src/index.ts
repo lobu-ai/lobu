@@ -226,6 +226,26 @@ export type {
 
 export { applyLookbackCutoff } from './checkpoint/lookback.js';
 export {
+  buildInjectHandoffBannerExpression,
+  truncateHandoffReason,
+} from './browser-handoff-banner.js';
+export type { HandoffBannerOptions } from './browser-handoff-banner.js';
+export {
+  assertInboxSourceRead,
+  assertNoCursor,
+  assertNoMatch,
+  assertNoOffsetPaging,
+  assertNoQuery,
+  assertNoSort,
+  assertNoWindow,
+  assertPositiveReadLimit,
+  assertSnapshotSourceRead,
+  jsonByteLength,
+  SOURCE_RECORD_MAX_BYTES,
+  SOURCE_REFERENCE_BATCH_MAX_EVENTS,
+  splitReferenceBatches,
+} from './browser-source-read.js';
+export {
   buildTimestampCheckpoint,
   filterByCheckpoint,
   finalizeTimestampSync,

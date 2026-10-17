@@ -20,6 +20,14 @@
       "types": "./dist/browser-requirement.d.ts",
       "import": "./dist/browser-requirement.js"
     },
+    "./browser-handoff-banner": {
+      "types": "./dist/browser-handoff-banner.d.ts",
+      "import": "./dist/browser-handoff-banner.js"
+    },
+    "./browser-source-read": {
+      "types": "./dist/browser-source-read.d.ts",
+      "import": "./dist/browser-source-read.js"
+    },
     "./define-connector": {
       "import": {
         "types": "./dist/define-connector.d.ts",

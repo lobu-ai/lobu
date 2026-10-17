@@ -31,7 +31,9 @@
  */
 
 import {
+  buildInjectHandoffBannerExpression as buildSharedHandoffBannerExpression,
   requireBrowser,
+  truncateHandoffReason as truncateSharedHandoffReason,
   type ActionContext,
   type ActionResult,
   type ChromeActionDispatcher,
@@ -1877,16 +1879,19 @@ function chromeOriginsInput(): { allowed_origins: string[] } {
 }
 
 /** Cap the explanation shown in the in-page banner. */
-export function truncateHandoffReason(
-  reason: string | undefined | null,
-  maxLen = 120
-): string | undefined {
-  if (reason == null) return undefined;
-  const t = reason.replace(/\s+/g, " ").trim();
-  if (!t) return undefined;
-  if (t.length <= maxLen) return t;
-  return `${t.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
-}
+export const truncateHandoffReason = truncateSharedHandoffReason;
+
+const LINKEDIN_HANDOFF_INSTRUCTION =
+  "Review the draft and click Post yourself \u2014 Lobu did not submit.";
+const LINKEDIN_HANDOFF_FOOTER =
+  "After posting or editing, record the outcome in Lobu Activity. You can also reject it with a reason.";
+const LINKEDIN_HANDOFF_COMPOSER_SELECTORS = [
+  ".comments-comment-box-comment__text-editor .ql-editor",
+  ".comments-comment-box__form .ql-editor",
+  'div.ql-editor[contenteditable="true"]',
+  'div[role="textbox"][contenteditable="true"]',
+];
+const LINKEDIN_HANDOFF_HOST_SELECTORS = [".comments-comment-box", "form"];
 
 /**
  * JS expression: inject a small Lobu handoff banner on the page.
@@ -1897,124 +1902,14 @@ export function buildInjectHandoffBannerExpression(opts: {
   reason?: string;
   title?: string;
 }): string {
-  const title = opts.title ?? "Lobu staged this comment";
-  const reason = truncateHandoffReason(opts.reason);
-  const titleLit = JSON.stringify(title);
-  const reasonLit = JSON.stringify(reason ?? null);
-  return `(async()=>{
-  const TITLE = ${titleLit};
-  const REASON = ${reasonLit};
-  const ID = 'lobu-handoff-banner';
-  try {
-    const prev = document.getElementById(ID);
-    if (prev) prev.remove();
-  } catch (_) {}
-
-  const root = document.createElement('div');
-  root.id = ID;
-  root.setAttribute('role', 'status');
-  root.setAttribute('data-lobu', 'handoff-banner');
-  // Keep styles self-contained; avoid LinkedIn class collisions.
-  root.style.cssText = [
-    'position:fixed',
-    'top:12px',
-    'left:50%',
-    'transform:translateX(-50%)',
-    'z-index:2147483646',
-    'max-width:min(520px,calc(100vw - 24px))',
-    'font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif',
-    'color:#0f172a',
-    'background:#fff',
-    'border:1px solid #cbd5e1',
-    'border-left:4px solid #0ea5e9',
-    'border-radius:10px',
-    'box-shadow:0 8px 28px rgba(15,23,42,.18)',
-    'padding:10px 12px',
-    'display:flex',
-    'gap:10px',
-    'align-items:flex-start',
-    'pointer-events:auto',
-  ].join(';');
-
-  const body = document.createElement('div');
-  body.style.cssText = 'flex:1;min-width:0';
-
-  const head = document.createElement('div');
-  head.style.cssText = 'font-weight:600;margin:0 0 2px;color:#0c4a6e';
-  head.textContent = TITLE;
-
-  const line = document.createElement('div');
-  line.style.cssText = 'color:#334155;margin:0 0 2px';
-  line.textContent = 'Review the draft and click Post yourself — Lobu did not submit.';
-
-  body.appendChild(head);
-  body.appendChild(line);
-
-  if (REASON) {
-    const why = document.createElement('div');
-    why.style.cssText = 'color:#64748b;margin:4px 0 0;font-size:12px';
-    why.textContent = 'Why: ' + REASON;
-    body.appendChild(why);
-  }
-
-  const foot = document.createElement('div');
-  foot.style.cssText = 'color:#64748b;margin:4px 0 0;font-size:12px';
-  foot.textContent = 'After posting or editing, record the outcome in Lobu Activity. You can also reject it with a reason.';
-  body.appendChild(foot);
-
-  const close = document.createElement('button');
-  close.type = 'button';
-  close.setAttribute('aria-label', 'Dismiss');
-  close.textContent = '×';
-  close.style.cssText = [
-    'flex:none',
-    'border:0',
-    'background:transparent',
-    'color:#64748b',
-    'font:20px/1 sans-serif',
-    'cursor:pointer',
-    'padding:0 2px',
-  ].join(';');
-  close.onclick = function () { try { root.remove(); } catch (_) {} };
-
-  root.appendChild(body);
-  root.appendChild(close);
-
-  // Prefer anchoring near the comment composer when we can find it.
-  let anchored = false;
-  try {
-    const composer =
-      document.querySelector('.comments-comment-box-comment__text-editor .ql-editor') ||
-      document.querySelector('.comments-comment-box__form .ql-editor') ||
-      document.querySelector('div.ql-editor[contenteditable="true"]') ||
-      document.querySelector('div[role="textbox"][contenteditable="true"]');
-    if (composer) {
-      const host =
-        composer.closest('.comments-comment-box') ||
-        composer.closest('form') ||
-        composer.parentElement;
-      if (host && host.parentElement) {
-        root.style.position = 'relative';
-        root.style.top = '0';
-        root.style.left = '0';
-        root.style.transform = 'none';
-        root.style.margin = '8px 0 12px';
-        root.style.maxWidth = '100%';
-        host.parentElement.insertBefore(root, host);
-        anchored = true;
-      }
-    }
-  } catch (_) {}
-
-  if (!anchored) {
-    (document.body || document.documentElement).appendChild(root);
-  }
-
-  // No auto-dismiss: the draft lives in the user's page, so its context should
-  // still be present when the user returns later. The dismiss button remains.
-
-  return { ok: true, anchored: anchored, has_reason: !!REASON };
-})()`;
+  return buildSharedHandoffBannerExpression({
+    reason: opts.reason,
+    title: opts.title ?? "Lobu staged this comment",
+    instruction: LINKEDIN_HANDOFF_INSTRUCTION,
+    footer: LINKEDIN_HANDOFF_FOOTER,
+    composerSelectors: LINKEDIN_HANDOFF_COMPOSER_SELECTORS,
+    hostSelectors: LINKEDIN_HANDOFF_HOST_SELECTORS,
+  });
 }
 
 /** JS expression: open the comment composer if collapsed, then fill it. */

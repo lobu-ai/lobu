@@ -25,10 +25,14 @@ import { NativeBridgeClient } from './native-bridge/client.js';
 import { executeNativeBridgeRun } from './native-bridge/executor.js';
 import { NATIVE_BRIDGE_PROTOCOL } from './native-bridge/protocol.js';
 import { reportTerminalFailure } from './terminal-failure.js';
+import { assertValidWorkerId } from './worker-id.js';
 
 export const MAC_DEVICE_PLATFORM = 'macos';
-const WORKER_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const WORKER_PAT_PATTERN = /^owl_pat_[A-Za-z0-9_-]{32}$/;
+
+export type ValidatedMacDeviceDaemonOptions =
+  Required<Pick<MacDeviceDaemonOptions, 'apiUrl' | 'workerId' | 'workerApiToken'>> &
+  Omit<MacDeviceDaemonOptions, 'apiUrl' | 'workerId' | 'workerApiToken'>;
 const DEFAULT_POLL_INTERVAL_MS = 10000;
 // Source reads default to a ten-second end-to-end deadline. Keep the signed
 // Mac daemon's claim latency well below that even when the server returns its
@@ -179,14 +183,9 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 export function validateMacDeviceDaemonOptions(
   options: MacDeviceDaemonOptions,
   hostThreads?: number
-): Required<Pick<MacDeviceDaemonOptions, 'apiUrl' | 'workerId' | 'workerApiToken'>> &
-  Omit<MacDeviceDaemonOptions, 'apiUrl' | 'workerId' | 'workerApiToken'> {
+): ValidatedMacDeviceDaemonOptions {
   const workerId = options.workerId?.trim() || defaultWorkerId();
-  if (!WORKER_ID_PATTERN.test(workerId)) {
-    throw new Error(
-      `invalid --worker-id '${workerId}': expected 1-128 characters of letters, digits, dot, underscore, colon or hyphen`
-    );
-  }
+  assertValidWorkerId(workerId);
   const pollIntervalMs = validateNumber(options.pollIntervalMs, '--poll-interval-ms');
   const maxConcurrentJobs = validateNumber(
     options.maxConcurrentJobs,
@@ -314,14 +313,14 @@ export async function executeAdvertisedConnectorRun(
 }
 
 export function createMacDeviceDaemon(
-  options: MacDeviceDaemonOptions,
+  options: ValidatedMacDeviceDaemonOptions,
   dependencies: {
     advertisementProvider?: MutableWorkerAdvertisementProvider;
     bridge?: NativeBridgeClient;
     shutdownController?: AbortController;
   } = {}
 ): WorkerPollLoop {
-  const validated = validateMacDeviceDaemonOptions(options);
+  const validated = options;
   if (validated.noPoll) throw new Error('cannot create a polling daemon with --no-poll');
 
   const discoveredAgentKinds = resolveRunnableAgentKinds();
@@ -445,9 +444,9 @@ export function createMacDeviceDaemon(
   return loop;
 }
 
-export async function runMacDeviceDaemon(options: MacDeviceDaemonOptions): Promise<void> {
+export async function runMacDeviceDaemon(options: ValidatedMacDeviceDaemonOptions): Promise<void> {
   setDebug(options.debug === true);
-  const validated = validateMacDeviceDaemonOptions(options);
+  const validated = options;
   if (validated.noPoll) return;
   if (validated.supervisedStdio) {
     const advertisementProvider = new MutableWorkerAdvertisementProvider({
