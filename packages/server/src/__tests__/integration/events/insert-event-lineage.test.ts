@@ -109,6 +109,37 @@ describe('insertEvent lineage on supersede', () => {
     await cleanupTestDatabase();
   });
 
+  it('returns the replaced head activity time only on a source supersede, including afterPersist', async () => {
+    const org = await createTestOrganization();
+    const connection = await createTestConnection({ organization_id: org.id, connector_key: 'test_updates' });
+    const params = {
+      entityIds: [], organizationId: org.id, connectionId: Number(connection.id),
+      originId: 'test-thread-1', semanticType: 'thread', content: 'Original message',
+      occurredAt: new Date('2026-08-11T09:00:00.000Z'),
+    };
+    const seen: unknown[] = [];
+    const options = { onConflictUpdate: true, afterPersist: async (row: { previous_occurred_at?: string | null }) => {
+      seen.push(row.previous_occurred_at);
+    } };
+    const first = await insertEvent(params, options);
+    expect(first.change).toBe('inserted');
+    expect(first).not.toHaveProperty('previous_occurred_at');
+    const reply = { ...params, content: 'Original message\nNew reply', occurredAt: new Date('2026-08-11T10:00:00.000Z') };
+    const next = await insertEvent(reply, options);
+    expect(next.change).toBe('superseded');
+    expect(new Date(next.previous_occurred_at!).toISOString()).toBe(params.occurredAt.toISOString());
+    expect(new Date(seen[1] as string).toISOString()).toBe(params.occurredAt.toISOString());
+    const replay = await insertEvent(reply, options);
+    expect(replay.change).toBe('unchanged');
+    expect(replay).not.toHaveProperty('previous_occurred_at');
+    const counters = await insertEvent({ ...reply, metadata: { reply_count: 3 } }, options);
+    expect(counters.change).toBe('state_updated');
+    expect(counters).not.toHaveProperty('previous_occurred_at');
+    expect(seen[0]).toBeUndefined();
+    expect(seen[2]).toBeUndefined();
+    expect(seen[3]).toBeUndefined();
+  });
+
   it('copies producer and source lineage even when the successor omits them', async () => {
     const org = await createTestOrganization();
     const user = await createTestUser();

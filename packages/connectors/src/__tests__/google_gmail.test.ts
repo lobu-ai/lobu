@@ -132,6 +132,25 @@ async function syncThreads(threads: FakeThread[], config: Record<string, unknown
   return result.events as Array<{ origin_id: string; metadata: Record<string, unknown> }>;
 }
 
+test('threads opt in to updated events and replies advance activity on the same origin', async () => {
+  const connector = new GmailConnector();
+  expect(connector.definition.feeds.threads.eventKinds.thread.updatedEvent).toBe(true);
+  const messages = [{ id: 'test-message-1', body: 'Original message', date: '2026-07-01T10:00:00Z' }];
+  connector.createClient = () => fakeHttp([{ id: 'test-thread-1', messages }]);
+  const context = { feedKey: 'threads', config: {}, credentials: { accessToken: 'tok' } };
+  const first = await runSync(connector, { ...context, checkpoint: {} });
+  messages.push({ id: 'test-message-2', body: 'New reply', date: '2026-07-01T11:00:00Z' });
+  const second = await runSync(connector, { ...context, checkpoint: first.checkpoint });
+  expect(first.events).toHaveLength(1);
+  expect(second.events).toHaveLength(1);
+  expect(second.events[0].origin_id).toBe(first.events[0].origin_id);
+  expect(first.events[0].metadata?.message_count).toBe(1);
+  expect(second.events[0].metadata?.message_count).toBe(2);
+  expect(new Date(second.events[0].occurred_at!).getTime()).toBeGreaterThan(new Date(first.events[0].occurred_at!).getTime());
+  expect(second.events[0].payload_text).toContain('Original message');
+  expect(second.events[0].payload_text).toContain('New reply');
+});
+
 test('the checkpoint precedes sync requests so messages arriving during sync remain eligible', async () => {
   const connector = new GmailConnector();
   let firstRequestAt = Number.POSITIVE_INFINITY;

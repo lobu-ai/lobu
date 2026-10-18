@@ -816,7 +816,8 @@ export async function ingestConnectorItems(
 										title: item.title ?? null,
 										payloadText: item.payload_text ?? null,
 										sourceUrl: item.source_url ?? null,
-										occurredAt: item.occurred_at ?? new Date(),
+										occurredAt: item.occurred_at ?? null,
+										previousOccurredAt: persisted.previous_occurred_at,
 										metadata: item.metadata as
 											| Record<string, unknown>
 											| undefined,

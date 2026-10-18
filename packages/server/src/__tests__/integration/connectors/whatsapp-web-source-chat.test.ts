@@ -19,19 +19,31 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { planAutomationActivationsForRuntimeConnection } from "../../../automations/activation";
 import { upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
 import { AutomationSubscriptionService } from "../../../gateway/channels/automation-subscription-service";
-import { CommandRegistry } from "@lobu/core";
+import { CommandRegistry, verifyWorkerToken } from "@lobu/core";
+import { AgentSettingsStore } from "../../../gateway/auth/settings/agent-settings-store";
+import { AuthProfilesManager } from "../../../gateway/auth/settings/auth-profiles-manager";
+import { UserAuthProfileStore } from "../../../gateway/auth/settings/user-auth-profile-store";
 import { ChatInstanceManager } from "../../../gateway/connections/chat-instance-manager";
 import { ChatResponseBridge } from "../../../gateway/connections/chat-response-bridge";
 import { handleChatSourceIngress } from "../../../gateway/connections/chat-source-ingress";
 import { connectorTransportPlatforms } from "../../../gateway/connections/platforms/index";
+import { mintTurnToken } from "../../../gateway/orchestration/agent-turn-producer";
+import {
+  chatOrganizationLimitKey,
+  chatSenderLimitKey,
+  UNLINKED_ORGANIZATION_TURNS_PER_HOUR,
+} from "../../../gateway/orchestration/chat-turn-actor";
 import { RunsQueue } from "../../../gateway/infrastructure/queue/runs-queue";
 import type { QueueJob } from "../../../gateway/infrastructure/queue/types";
-import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
+import { orgContext } from "../../../lobu/stores/org-context";
+import { PostgresSecretStore } from "../../../lobu/stores/postgres-secret-store";
+import { createPostgresAgentConfigStore, createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
 import { CHAT_SOURCE_INGRESS_QUEUE, type ChatSourceIngressJob } from "../../../runs/chat-ingress-jobs";
 import { receiveFeedNotifications } from "../../../runs/feed-notifications";
 import { sourceFeedScopeKey } from "../../../runs/source-feed-subscriptions";
 import * as executeHandler from "../../../tools/admin/manage_operations/handlers/execute";
 import { upsertBundledConnectorForOrg } from "../../../utils/ensure-connector-installed";
+import { getRateLimiter, resetRateLimiterForTests } from "../../../utils/rate-limiter";
 import * as chromeDispatch from "../../../worker-api/dispatch-chrome-action";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
@@ -46,6 +58,8 @@ const DM_JID = "15550001111@s.whatsapp.net";
 const OTHER_DM_JID = "15550003333@s.whatsapp.net";
 const GROUP_JID = "120363000000000001@g.us";
 const GROUP_SENDER = "15550002222@s.whatsapp.net";
+/** A WhatsApp account no member has linked. */
+const STRANGER_JID = "15550004444@s.whatsapp.net";
 const BASE_TIME = 1_787_358_200;
 
 interface DeviceMessage {
@@ -60,6 +74,7 @@ interface DeviceMessage {
 let sql: ReturnType<typeof getTestDb>;
 let orgId: string;
 let ownerId: string;
+let memberIds: string[];
 let deviceId: string;
 let connectionId: number;
 let feedId: number;
@@ -165,6 +180,56 @@ async function completeTurns(text = "Reply from the agent"): Promise<void> {
   }
 }
 
+/** The bridge's rate-limit identity for a WhatsApp sender (no native team). */
+const whatsAppSender = (senderId: string) =>
+  ({ organizationId: orgId, platform: "whatsapp.web", teamId: undefined, senderId });
+
+/** Total persisted increments for a key across its fixed windows. */
+async function limiterCount(key: string): Promise<number> {
+  const rows = await sql`SELECT count FROM rate_limit_counters WHERE key = ${key}`;
+  return rows.reduce((total, row) => total + Number(row.count), 0);
+}
+
+/**
+ * The worker token the producer signs for a dispatched turn, as the message
+ * consumer hands it over: a claimed `messages` run, then the real mint.
+ */
+async function mintedClaims(payload: Record<string, any>) {
+  const [input] = await sql`INSERT INTO runs (organization_id, run_type, queue_name, status, action_input)
+    VALUES (${payload.organizationId}, 'chat_message', 'messages', 'claimed', ${sql.json(payload)}) RETURNING id`;
+  const claims = verifyWorkerToken(await mintTurnToken(payload as any, Number(input.id)));
+  expect(claims).toBeTruthy();
+  return claims!;
+}
+
+/**
+ * The model credential the provider proxy would resolve for a turn's claims,
+ * through the production stores and owner resolver: the sender owns no profile,
+ * so it must come from the agent owner's.
+ */
+async function modelCredentialFor(claims: { agentId?: string; organizationId?: string; userId: string }) {
+  const settings = new AgentSettingsStore(createPostgresAgentConfigStore());
+  const userAuthProfiles = new UserAuthProfileStore(new PostgresSecretStore());
+  const manager = new AuthProfilesManager({
+    ephemeralProfiles: { get: () => undefined } as never,
+    declaredAgents: { get: () => undefined } as never,
+    userAuthProfiles,
+    secretStore: new PostgresSecretStore(),
+    agentOwnerResolver: async (id) => (await settings.getMetadata(id))?.owner.userId,
+    agentOrgResolver: async () => orgId,
+  });
+  return orgContext.run({ organizationId: orgId }, async () => {
+    await userAuthProfiles.upsert(ownerId, agentId, {
+      id: "owner-claude-key", provider: "claude", credential: "synthetic-owner-api-key",
+      authType: "api-key", label: "claude", model: "*", createdAt: 0,
+    });
+    const profile = await manager.getBestProfile(claims.agentId!, "claude", undefined, {
+      organizationId: claims.organizationId, userId: claims.userId,
+    });
+    return profile?.credential;
+  });
+}
+
 function buildManager(): ChatInstanceManager {
   const built = new ChatInstanceManager();
   const interactions = new EventEmitter();
@@ -206,6 +271,8 @@ describe("WhatsApp Web source chat", () => {
     failNext = null;
     enqueued = [];
     sends = [];
+    memberIds = [];
+    resetRateLimiterForTests();
     const org = await createTestOrganization({ name: "WhatsApp source chat" });
     orgId = org.id;
     const owner = await createTestUser({ email: "wa-owner@example.test" });
@@ -232,6 +299,7 @@ describe("WhatsApp Web source chat", () => {
     for (const [index, jid] of [DM_JID, GROUP_SENDER].entries()) {
       const member = await createTestUser({ email: `wa-member-${index}@example.test` });
       await addUserToOrganization(member.id, orgId, "member");
+      memberIds.push(member.id);
       await linkChatIdentityInGraph({ organizationId: orgId, userId: member.id, platform: "whatsapp.web", platformUserId: jid });
     }
 
@@ -252,8 +320,11 @@ describe("WhatsApp Web source chat", () => {
   }, 120_000);
 
   afterEach(async () => {
+    // Queue shutdown needs a progressing clock for its drain timeout.
+    vi.useRealTimers();
     await queue?.stop();
     queue = null;
+    resetRateLimiterForTests();
     vi.restoreAllMocks();
   });
 
@@ -522,6 +593,94 @@ describe("WhatsApp Web source chat", () => {
     if (withFallback) expect(enqueued[0].messageId).toContain(`:automation:${fallbackId}`);
     await completeTurns();
     expect(sends).toHaveLength(withFallback ? 1 : 0);
+  }, 60_000);
+
+  it("answers a private org's unlinked WhatsApp sender reply-only, with one access notice per window", async () => {
+    // Keep both deliveries in the same notice window while queue timers stay real.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    await insertAutomation("dm-reply", replyTo());
+    deviceMessages.push(
+      { id: "SYNTHST1", chat_jid: STRANGER_JID, body: "who are you?" },
+      { id: "SYNTHST2", chat_jid: STRANGER_JID, body: "still there?" },
+    );
+
+    await deliver("SYNTHST1", "first");
+    await drain();
+    await deliver("SYNTHST2", "second");
+    await drain();
+
+    // Both messages get a turn; only the first gets the notice.
+    expect(enqueued.map((payload) => payload.messageText)).toEqual([
+      expect.stringContaining("who are you?"), expect.stringContaining("still there?"),
+    ]);
+    expect(sends).toHaveLength(1);
+    expect(sends[0].input).toMatchObject({ chat_jid: STRANGER_JID });
+    expect(String(sends[0].input.text)).toContain("I can't use this workspace's tools for you");
+
+    // The admission spent the sender's and the organization's shared counters.
+    const sender = whatsAppSender(STRANGER_JID);
+    expect(await limiterCount(chatSenderLimitKey("turns", sender))).toBe(2);
+    expect(await limiterCount(chatOrganizationLimitKey(orgId))).toBe(2);
+    // A DM notice carries the one-click link, so it is metered on the link
+    // counter; both messages consulted it and only the first was allowed.
+    expect(await limiterCount(chatSenderLimitKey("link", sender))).toBe(2);
+    expect(await limiterCount(chatSenderLimitKey("notice", sender))).toBe(0);
+    expect(String(sends[0].input.text)).toContain("/connect/chat-identity?token=");
+
+    // The producer signs the turn reply-only, as the sender, acting as nobody.
+    const claims = await mintedClaims(enqueued[0]);
+    expect(claims).toMatchObject({ userId: STRANGER_JID, agentId, organizationId: orgId, chatAccess: "reply_only" });
+    expect(claims.actorUserId).toBeUndefined();
+    // The stranger owns no model credential; the agent owner's still runs the turn.
+    expect(await modelCredentialFor(claims)).toBe("synthetic-owner-api-key");
+
+    await completeTurns();
+    expect(sends.map((send) => send.input.text).slice(1)).toEqual(["Reply from the agent", "Reply from the agent"]);
+  }, 60_000);
+
+  it("answers a linked member's WhatsApp DM as that member, with no notice", async () => {
+    await insertAutomation("dm-reply", replyTo());
+    deviceMessages.push({ id: "SYNTHMB1", chat_jid: DM_JID, body: "what's on my list?" });
+
+    await deliver("SYNTHMB1");
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(sends).toHaveLength(0);
+    // A linked member is never counted against the unlinked limits.
+    const sender = whatsAppSender(DM_JID);
+    for (const key of [
+      chatSenderLimitKey("turns", sender), chatSenderLimitKey("notice", sender),
+      chatSenderLimitKey("link", sender), chatOrganizationLimitKey(orgId),
+    ]) expect(await limiterCount(key)).toBe(0);
+
+    const claims = await mintedClaims(enqueued[0]);
+    expect(claims).toMatchObject({ userId: DM_JID, chatAccess: "member", actorUserId: memberIds[0] });
+
+    await completeTurns();
+    expect(sends).toHaveLength(1);
+    expect(sends[0].input).toEqual({ chat_jid: DM_JID, text: "Reply from the agent" });
+  }, 60_000);
+
+  it("gives an unlinked sender no turn and no notice once the organization is over its cap", async () => {
+    // Seeding and admission must share an hourly window, even across a wall-clock boundary.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    await insertAutomation("dm-reply", replyTo());
+    // Other strangers already spent this hour's ceiling, on another replica.
+    const limiter = getRateLimiter();
+    for (let turn = 0; turn < UNLINKED_ORGANIZATION_TURNS_PER_HOUR; turn += 1) {
+      await limiter.consume(chatOrganizationLimitKey(orgId), {
+        limit: UNLINKED_ORGANIZATION_TURNS_PER_HOUR, windowSeconds: 60 * 60,
+      });
+    }
+    resetRateLimiterForTests();
+    deviceMessages.push({ id: "SYNTHST3", chat_jid: STRANGER_JID, body: "hello?" });
+
+    await deliver("SYNTHST3");
+    await drain();
+    expect(await ingressJobs()).toEqual([expect.objectContaining({ status: "completed" })]);
+    expect(enqueued).toHaveLength(0);
+    expect(sends).toHaveLength(0);
+    expect(await limiterCount(chatOrganizationLimitKey(orgId))).toBe(UNLINKED_ORGANIZATION_TURNS_PER_HOUR + 1);
   }, 60_000);
 
   it("resolves the connection's numeric runtime id for chat routing", async () => {

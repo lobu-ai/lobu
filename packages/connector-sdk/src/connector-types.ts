@@ -610,6 +610,16 @@ export interface FeedDefinition {
       description?: string;
       metadataSchema?: Record<string, unknown>;
       /**
+       * Opt in to a separate `<kind>.updated` Automation trigger when a sync
+       * supersedes this source item with changed durable content and strictly
+       * newer `occurred_at` activity. The original kind remains insert-only.
+       * Unchanged rows, volatile-only updates and cold-start backfills stay
+       * quiet. Use activity time for `occurred_at`, not a scheduled start time.
+       * A declared literal kind wins a collision; composite keys over 100
+       * characters are not derived. Persisted unchanged in feeds_schema.
+       */
+      updatedEvent?: boolean;
+      /**
        * Generic event attribution declarations. New connector work should model
        * "who authored / what resource this event belongs to / what it is about"
        * here. Durable cross-connector identity is expressed as entity

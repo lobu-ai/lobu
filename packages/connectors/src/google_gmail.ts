@@ -246,6 +246,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         eventKinds: {
           thread: {
             description: 'A Gmail email thread',
+            updatedEvent: true,
             metadataSchema: {
               type: 'object',
               properties: {

@@ -22,6 +22,8 @@ export function materializeConnectorAutomationSignal(args: {
 	// declared draft keeps firing on `updated_event_type` and no more: routing it
 	// through the `unchanged` arm would fall back to `event_type` and start
 	// firing for connectors that never declared an updated kind.
+	// Derived updatedEvent triggers exclude state_updated; explicit drafts
+	// intentionally keep the connector's chosen counter-update semantics here.
 	const eventType =
 		args.change === "inserted"
 			? args.draft.event_type

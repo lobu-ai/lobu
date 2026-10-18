@@ -1,5 +1,6 @@
 /// <reference path="./linkedin-inbox-adapter.d.ts" />
 import {
+  assertInboxSourceRead,
   requireBrowser,
   type FeedObserveContext,
   type FeedReadContext,
@@ -55,11 +56,7 @@ async function invoke<T>(
 export async function readLinkedInInbox<F>(
   ctx: FeedReadContext<F>
 ): Promise<FeedReadResult> {
-  if (ctx.offset || ctx.sort || ctx.window || ctx.query || ctx.match) {
-    throw new Error(
-      "LinkedIn inbox reads use source order and the returned cursor; search, offsets, sorting, matching, and time windows are not supported."
-    );
-  }
+  assertInboxSourceRead(ctx, "LinkedIn");
   const browser = requireBrowser(ctx);
   return invoke(browser, await readyTab(browser), "read", {
     feed: ctx.feedKey,

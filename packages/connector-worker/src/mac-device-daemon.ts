@@ -97,6 +97,13 @@ function option(options: Record<string, string | true>, key: string): string | u
   return value;
 }
 
+function parsePositiveInt(raw: string, flag: string): number {
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new Error(`${flag} must be a positive integer (got '${raw}')`);
+  }
+  return Number(raw);
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const raw = parseArgs(args);
@@ -105,7 +112,6 @@ async function main(): Promise<void> {
     return;
   }
   if (raw.version) {
-    if (raw.version !== true) throw new Error('--version does not accept a value');
     process.stdout.write(`${JSON.stringify(macDeviceDaemonMetadata(VERSION))}\n`);
     return;
   }
@@ -119,44 +125,29 @@ async function main(): Promise<void> {
   const defaultAgentKind = option(raw, 'default-agent-kind');
   const supervisedStdio = raw['supervised-stdio'] === true;
   const debug = raw.debug === true;
-  if (raw.debug !== undefined && !debug) throw new Error('--debug does not accept a value');
-  if (raw['no-poll'] !== undefined && !noPoll) {
-    throw new Error('--no-poll does not accept a value');
-  }
-  if (raw['supervised-stdio'] !== undefined && !supervisedStdio) {
-    throw new Error('--supervised-stdio does not accept a value');
-  }
 
   const options = {
     apiUrl,
     workerId,
     workerApiToken: process.env.WORKER_API_TOKEN,
     version: VERSION,
-    ...(pollInterval ? { pollIntervalMs: Number(pollInterval) } : {}),
-    ...(maxConcurrent ? { maxConcurrentJobs: Number(maxConcurrent) } : {}),
+    ...(pollInterval
+      ? { pollIntervalMs: parsePositiveInt(pollInterval, '--poll-interval-ms') }
+      : {}),
+    ...(maxConcurrent
+      ? { maxConcurrentJobs: parsePositiveInt(maxConcurrent, '--max-concurrent-jobs') }
+      : {}),
     ...(defaultAgentKind ? { defaultAgentKind: defaultAgentKind as AgentKind } : {}),
     debug,
     noPoll,
     supervisedStdio,
   };
-  if (pollInterval) {
-    if (!/^[1-9]\d*$/.test(pollInterval)) {
-      throw new Error(`--poll-interval-ms must be a positive integer (got '${pollInterval}')`);
-    }
-    options.pollIntervalMs = Number(pollInterval);
-  }
-  if (maxConcurrent) {
-    if (!/^[1-9]\d*$/.test(maxConcurrent)) {
-      throw new Error(`--max-concurrent-jobs must be a positive integer (got '${maxConcurrent}')`);
-    }
-    options.maxConcurrentJobs = Number(maxConcurrent);
-  }
-  validateMacDeviceDaemonOptions(options);
+  const validated = validateMacDeviceDaemonOptions(options);
   if (noPoll) {
     process.stdout.write(`${JSON.stringify(macDeviceDaemonMetadata(VERSION))}\n`);
     return;
   }
-  await runMacDeviceDaemon(options);
+  await runMacDeviceDaemon(validated);
 }
 
 async function start(): Promise<void> {

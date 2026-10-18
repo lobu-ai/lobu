@@ -3,6 +3,7 @@ import type { ContentItem, PollResponse, StreamBatch } from '../client.js';
 import type { WorkerClient } from '../client.js';
 import { log } from '../log.js';
 import { NativeBridgeClient, type NativeBridgeRunResult } from './client.js';
+import { reportTerminalFailure } from '../terminal-failure.js';
 
 const FEED_READ_ACTION = '__lobu_feed_read';
 const NATIVE_BRIDGE_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -18,7 +19,7 @@ export async function executeNativeBridgeRun(
 
   const runId = job.run_id;
   const requestId = randomUUID();
-  let operation: ReturnType<typeof nativeOperation> | undefined;
+  let currentOperation: ReturnType<typeof nativeOperation> | undefined;
   let itemsCollected = 0;
   let checkpoint = asRecord(job.checkpoint);
   let terminalDelivered = false;
@@ -81,8 +82,7 @@ export async function executeNativeBridgeRun(
   };
 
   try {
-    const currentOperation = nativeOperation(job);
-    operation = currentOperation;
+    currentOperation = nativeOperation(job);
     heartbeatInterval = setInterval(() => {
       void client.heartbeat(runId).catch((error) => {
         log.debug(`[native-bridge] Heartbeat for run ${runId} failed:`, error);
@@ -128,21 +128,28 @@ export async function executeNativeBridgeRun(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log.info(`[native-bridge] Run ${runId} failed:`, message);
-    try {
-      if (operation === 'sync') await completeSync({}, message);
-      else if (operation === 'auth') await completeAuth({}, message);
-      else if (job.run_type === 'automation') {
-        await client.completeAutomation(runId, {
-          worker_id: client.id,
-          output: '',
-          error: message,
-          duration_ms: 0,
-          exit_reason: 'error_message',
-        });
-      } else if (job.run_type === 'embed_backfill') await completeSync({}, message);
-      else await completeAction({}, message);
-    } catch (completionError) {
-      log.info(`[native-bridge] Terminal report for run ${runId} failed:`, completionError);
+    if (terminalReporter !== undefined) {
+      // A success terminal was already selected but its delivery budget is
+      // exhausted. Its outcome is immutable: never flip an executed run to
+      // failed and drop its output — leave it for stale-run handling.
+      log.info(`[native-bridge] Terminal report for run ${runId} failed:`, message);
+    } else if (currentOperation === 'sync' || currentOperation === 'auth') {
+      // No terminal was selected yet and the run is a sync/auth: keep its
+      // own completion, preserving the bounded retry and partial progress.
+      const complete = currentOperation === 'sync' ? completeSync : completeAuth;
+      try {
+        await complete({}, message);
+      } catch (completionError) {
+        log.info(`[native-bridge] Terminal report for run ${runId} failed:`, completionError);
+      }
+    } else {
+      // No terminal was selected yet (bridge, stream, or timeout failure on
+      // any other run shape): report it under the run's own type.
+      try {
+        await reportTerminalFailure(client, job, message, 'error_message');
+      } catch (completionError) {
+        log.info(`[native-bridge] Terminal report for run ${runId} failed:`, completionError);
+      }
     }
     return { itemsCollected, error: message };
   } finally {
@@ -175,9 +182,6 @@ async function runWithTimeout(
 }
 
 function nativeOperation(job: PollResponse): 'sync' | 'action' | 'read' | 'auth' {
-  if (job.run_type === 'automation' || job.run_type === 'embed_backfill') {
-    throw new Error('native bridge does not execute run_type ' + String(job.run_type));
-  }
   if (job.run_type === 'sync') return 'sync';
   if (job.run_type === 'auth') return 'auth';
   if (job.action_key === FEED_READ_ACTION) return 'read';

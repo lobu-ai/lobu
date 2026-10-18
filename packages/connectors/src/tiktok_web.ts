@@ -1,4 +1,7 @@
 import {
+	assertInboxSourceRead,
+	assertPositiveReadLimit,
+	assertSnapshotSourceRead,
 	ConnectorRuntime,
 	requireBrowser,
 	type ActionContext,
@@ -147,9 +150,9 @@ async function timelinePosts(browser: ChromeActionDispatcher, tabId: number, ses
 }
 
 async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedReadResult> {
-	if (ctx.cursor || ctx.offset || ctx.sort || ctx.window || ctx.match) throw new Error("TikTok snapshot feeds do not support pagination, sorting, time windows, or exact-match filters");
+	assertSnapshotSourceRead(ctx, "TikTok");
 	if (ctx.query && ctx.feedKey !== "search") throw new Error("Use the TikTok search feed for queries");
-	if (ctx.limit !== undefined && (!Number.isInteger(ctx.limit) || ctx.limit < 1)) throw new Error("limit must be a positive integer");
+	assertPositiveReadLimit(ctx);
 	const limit = Math.min(ctx.limit ?? 10, 30);
 	let url = ORIGIN;
 	if (ctx.feedKey === "following") url += "/following";
@@ -195,8 +198,8 @@ async function readTikTokSnapshot(ctx: FeedReadContext): Promise<FeedReadResult>
 }
 
 async function readTikTokInbox(ctx: FeedReadContext): Promise<FeedReadResult> {
-	if (ctx.offset || ctx.sort || ctx.window || ctx.match || ctx.query) throw new Error("TikTok inbox reads use source order and the returned cursor; search, offsets, sorting, matching, and time windows are unsupported");
-	if (ctx.limit !== undefined && (!Number.isInteger(ctx.limit) || ctx.limit < 1)) throw new Error("limit must be a positive integer");
+	assertInboxSourceRead(ctx, "TikTok");
+	assertPositiveReadLimit(ctx);
 	const browser = requireBrowser(ctx);
 	return scratch(browser, async tabId => {
 		await navigate(browser, tabId, ORIGIN);
