@@ -29,6 +29,12 @@
  *
  * It never goes through `chat.processMessage`: the Chat SDK writes its dedupe
  * marker before handling, so a failed attempt's retry would be dropped.
+ *
+ * A settled ingress logs its disposition and best-effort stores it in
+ * `run_metadata.disposition`. This identifies an ingress skip or handoff;
+ * "admitted" does not guarantee a reply, since the bridge still applies its
+ * own gates. If the metadata write fails, the log retains the disposition.
+ * A job that exhausts its retries is recorded as a failed run.
  */
 
 import { createLogger } from "@lobu/core";
@@ -52,6 +58,25 @@ import { resolveChatTarget } from "./platforms/shared.js";
 const logger = createLogger("chat-source-ingress");
 const SOURCE_READ_TIMEOUT_MS = 60_000;
 
+/** Where ingress stopped, or whether it handed off to the chat bridge. */
+type ChatSourceDisposition =
+  /** Handed to the reply path of one reply Automation. */
+  | "admitted"
+  /** The connection is no longer an active chat transport. */
+  | "not_chat_transport"
+  /** No candidate Automation is still an authorized source subscriber. */
+  | "no_subscribed_reply_automation"
+  /** Nothing answers it: the account's own, system, revoked or broadcast message. */
+  | "not_answerable"
+  /** No reply trigger matches this message. */
+  | "no_matching_reply_trigger"
+  /** A group message that neither addresses the bot nor has a trigger scoped to its group. */
+  | "group_not_addressed"
+  /** The reference carries no source timestamp, so its age cannot be checked. */
+  | "missing_source_time"
+  /** Sent before every matching reply Automation's latest update (a replay). */
+  | "older_than_reply_automation";
+
 export async function handleChatSourceIngress(
   manager: ChatInstanceManager,
   job: QueueJob<ChatSourceIngressJob>,
@@ -71,21 +96,18 @@ export async function handleChatSourceIngress(
     throw Object.assign(new Error("An older message on this connection is still being admitted"), { deferral: true });
   }
 
-  await orgContext.run({ organizationId }, async () => {
+  const disposition = await orgContext.run({ organizationId }, async (): Promise<ChatSourceDisposition> => {
     const runtimeId = String(connectionId);
-    if (!(await manager.warmConnection(runtimeId))) {
-      logger.info({ connectionId }, "Chat source ingress: connection is not an active chat transport; dropping");
-      return;
-    }
+    if (!(await manager.warmConnection(runtimeId))) return "not_chat_transport";
     const instance = manager.getInstance(runtimeId);
     const descriptor = instance && getPlatformDescriptor(instance.connection.platform);
-    if (!instance || !descriptor?.parseSourceMessage) return;
+    if (!instance || !descriptor?.parseSourceMessage) return "not_chat_transport";
 
     const subscribed = new Set(
       (await sourceFeedSubscriptions(sql, organizationId, feedId)).map((s) => s.automationId),
     );
     const candidates = job.data.automationIds.filter((id) => subscribed.has(id));
-    if (candidates.length === 0) return;
+    if (candidates.length === 0) return "no_subscribed_reply_automation";
 
     const read = await readSourceFeed({
       // Server-side ingress for a subscribed Automation: no chat caller.
@@ -129,7 +151,7 @@ export async function handleChatSourceIngress(
     await dispatchAutomationRunsBestEffort(
       await queueAutomationActivations({ signal, matches: plan.backgroundTargets }),
     );
-    if (!parsed || !message) return;
+    if (!parsed || !message) return "not_answerable";
     const thread = await resolveChatTarget(instance.chat, instance.connection.platform, {
       channelId: message.threadId,
       responseThreadId: message.threadId,
@@ -141,7 +163,10 @@ export async function handleChatSourceIngress(
     // or a trigger scoped to that group; mention_only was checked above.
     const eligible = plan.replyTargets.filter((target) =>
       thread.isDM === true || isMention || target.trigger.match?.channel_id === parsed.channelId);
-    if (eligible.length === 0 || !signal.occurred_at) return;
+    if (eligible.length === 0) {
+      return plan.replyTargets.length === 0 ? "no_matching_reply_trigger" : "group_not_addressed";
+    }
+    if (!signal.occurred_at) return "missing_source_time";
     const current = new Set(
       (await sql<{ id: number | string }>`
         SELECT id FROM automations
@@ -154,7 +179,7 @@ export async function handleChatSourceIngress(
     const [replyTarget] = eligible
       .filter((target) => current.has(target.automationId))
       .sort((a, b) => a.automationId - b.automationId);
-    if (!replyTarget) return;
+    if (!replyTarget) return "older_than_reply_automation";
     const post = getResponseStrategy(instance.connection.platform).post;
     const ctx = {
       connectionId: runtimeId,
@@ -179,5 +204,17 @@ export async function handleChatSourceIngress(
       replyTargets: [replyTarget],
       backgroundTargets: [],
     });
+    return "admitted";
   });
+  logger.info({ connectionId, jobId: job.id, disposition }, "Chat source ingress settled");
+  // Ingress has already settled; a diagnostic write failure must not cause
+  // another admission attempt.
+  try {
+    await sql`UPDATE runs
+      SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${sql.json({ disposition })}::jsonb
+      WHERE id = ${Number(job.id)}`;
+  } catch (error) {
+    logger.warn({ connectionId, jobId: job.id, disposition, error: String(error) },
+      "Chat source ingress: could not record the disposition");
+  }
 }
