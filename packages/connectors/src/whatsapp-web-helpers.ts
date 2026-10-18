@@ -14,7 +14,7 @@ import {
   WHATSAPP_PHONE_SERVER,
 } from "./whatsapp-web-identity.js";
 
-export const WHATSAPP_ADAPTER_VERSION = 24;
+export const WHATSAPP_ADAPTER_VERSION = 25;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 
 export type ChatFilter = "all" | "individual" | "group";
@@ -37,6 +37,8 @@ export interface WhatsAppMessage {
   media_kind?: string | null;
   media_type?: string | null;
   quoted_id?: string | null;
+  /** The message @mentions the account or quotes one of its messages. */
+  mentions_me?: boolean;
   edited?: boolean;
   edit_timestamp?: number | null;
   revoked?: boolean;

@@ -542,6 +542,88 @@ describe("whatsAppWebAdapterProgram message actions", () => {
   });
 });
 
+describe("whatsAppWebAdapterProgram mentions of the own account", () => {
+  const wid = (serialized: string) => ({
+    _serialized: serialized,
+    toString: () => serialized,
+  });
+  const ME_PN = "447000000000@c.us";
+  const ME_LID = "99000000000001@lid";
+  const GROUP = "120363000000000001@g.us";
+  const OTHER = "15550002222@c.us";
+
+  /** One loaded group message, read back through the loaded-model search. */
+  async function normalized(row: Record<string, unknown>) {
+    const message = {
+      attributes: {
+        id: { fromMe: false, remote: wid(GROUP), id: "3EB0MENTION", participant: wid(OTHER) },
+        author: wid(OTHER),
+        body: "hey team",
+        type: "chat",
+        t: 1_700_000_000,
+        ...row,
+      },
+    };
+    const modules: Record<string, unknown> = {
+      WAWebCollections: { Msg: { _models: [message] }, Chat: { _models: [] } },
+      WAWebUserPrefsMeUser: {
+        getMaybeMePnUser: () => wid(ME_PN),
+        getMaybeMeLidUser: () => wid(ME_LID),
+      },
+    };
+    const globals: Record<string, any> = {};
+    const page = {
+      globalThis: globals,
+      document: { querySelector: () => null, querySelectorAll: () => [] },
+      window: { require: (n: string) => modules[n] ?? null },
+      location: { origin: "https://web.whatsapp.com" },
+      setTimeout: (fn: () => void) => {
+        fn();
+        return 0;
+      },
+      clearTimeout: () => {},
+    };
+    const run = new Function(
+      ...Object.keys(page),
+      `"use strict";(${whatsAppWebAdapterProgram.toString()})();`,
+    );
+    run(...Object.values(page));
+    const result = await globals.__owlettoWhatsAppAdapterV1.invoke({
+      op: "search_messages",
+      adapter_version: WHATSAPP_ADAPTER_VERSION,
+      input: { query: "hey" },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.results).toHaveLength(1);
+    return result.results[0];
+  }
+
+  it("flags a mention of the account's phone number", async () => {
+    expect((await normalized({ mentionedJidList: [wid(OTHER), wid(ME_PN)] })).mentions_me).toBe(true);
+  });
+
+  it("flags a mention of the account's lid", async () => {
+    expect((await normalized({ mentionedJidList: [wid(ME_LID)] })).mentions_me).toBe(true);
+  });
+
+  it("flags a reply quoting the account's own message", async () => {
+    const quoted = await normalized({ quotedStanzaID: "3EB0BOTSAID", quotedParticipant: wid(ME_PN) });
+    expect(quoted.quoted_id).toBe("3EB0BOTSAID");
+    expect(quoted.mentions_me).toBe(true);
+    expect((await normalized({ quotedStanzaID: "3EB0BOTSAID", quotedParticipant: wid(ME_LID) })).mentions_me)
+      .toBe(true);
+  });
+
+  it("does not flag chatter that mentions or quotes someone else", async () => {
+    expect((await normalized({})).mentions_me).toBe(false);
+    expect((await normalized({
+      mentionedJidList: [wid(OTHER)],
+      quotedStanzaID: "3EB0OTHER",
+      quotedParticipant: wid(OTHER),
+    })).mentions_me).toBe(false);
+  });
+});
+
 describe("whatsAppWebAdapterProgram version", () => {
   it("replaces the resident version 23 adapter and detaches its listeners", () => {
     let detached = 0;

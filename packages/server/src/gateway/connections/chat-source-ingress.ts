@@ -16,7 +16,8 @@
  *      unless nothing should answer it (own, system, revoked, broadcast);
  *   6. the hydrated message is matched again per Automation (its first
  *      matching trigger wins); background targets are queued on the source
- *      signal, and a group reply needs an Automation scoped to that group;
+ *      signal, and a group reply needs the message to mention the bot (the
+ *      platform's mention flag) or an Automation scoped to that group;
  *   7. a message sent before a reply Automation's latest database update
  *      gets no reply from it (a device replays older references when a feed
  *      is subscribed again);
@@ -104,12 +105,17 @@ export async function handleChatSourceIngress(
     const parsed = descriptor.parseSourceMessage(adapter, row);
     const message = parsed?.message ?? null;
     // A message nothing answers still activates background triggers on its chat.
+    // The mention attributes match the chat bridge's own signal, so a
+    // `mention_only` trigger reads the same flag on every chat transport.
+    const isMention = message?.isMention === true;
     const hydrated = parsed
       ? {
           ...signal,
           attributes: {
             channel_id: parsed.channelId,
-            ...(message ? { user_id: message.author.userId } : {}),
+            ...(message
+              ? { user_id: message.author.userId, is_mention: isMention, mention_only: isMention }
+              : {}),
           },
         }
       : signal;
@@ -131,8 +137,10 @@ export async function handleChatSourceIngress(
     });
     if (!thread) throw new Error(`Could not open chat thread ${message.threadId}`);
 
+    // Matching triggers may answer DMs. Groups additionally need a mention
+    // or a trigger scoped to that group; mention_only was checked above.
     const eligible = plan.replyTargets.filter((target) =>
-      thread.isDM === true || target.trigger.match?.channel_id === parsed.channelId);
+      thread.isDM === true || isMention || target.trigger.match?.channel_id === parsed.channelId);
     if (eligible.length === 0 || !signal.occurred_at) return;
     const current = new Set(
       (await sql<{ id: number | string }>`
