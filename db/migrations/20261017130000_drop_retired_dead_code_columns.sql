@@ -32,12 +32,15 @@ ALTER TABLE public.feeds
 ALTER TABLE public.automations DROP COLUMN IF EXISTS scheduler_client_id;
 
 -- migrate:down
+-- Best-effort restore. repair_attempt_count was integer; restored as bigint to
+-- satisfy the lock-safety lint (prefer-bigint-over-int) while staying
+-- value-compatible with any pre-drop rows.
 ALTER TABLE public.entities ADD COLUMN IF NOT EXISTS enabled_classifiers text[];
 ALTER TABLE public.automation_versions ADD COLUMN IF NOT EXISTS classifiers jsonb;
 ALTER TABLE public.connector_definitions ADD COLUMN IF NOT EXISTS default_repair_agent_id text;
 ALTER TABLE public.feeds ADD COLUMN IF NOT EXISTS repair_agent_id text;
 ALTER TABLE public.feeds ADD COLUMN IF NOT EXISTS repair_thread_id text;
-ALTER TABLE public.feeds ADD COLUMN IF NOT EXISTS repair_attempt_count integer DEFAULT 0 NOT NULL;
+ALTER TABLE public.feeds ADD COLUMN IF NOT EXISTS repair_attempt_count bigint DEFAULT 0 NOT NULL;
 ALTER TABLE public.feeds ADD COLUMN IF NOT EXISTS last_repair_at timestamp with time zone;
 ALTER TABLE public.feeds ADD COLUMN IF NOT EXISTS last_repair_post_hash text;
 ALTER TABLE public.automations ADD COLUMN IF NOT EXISTS scheduler_client_id text;
