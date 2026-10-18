@@ -3638,7 +3638,7 @@ export type ManageConversationsData = {
       }
     | {
         /**
-         * Fetch one conversation by its (platform, conversation_id).
+         * Fetch one conversation by id, optionally scoped to a platform.
          */
         action: "get";
         /**
@@ -3646,7 +3646,7 @@ export type ManageConversationsData = {
          */
         agent_id: string;
         /**
-         * Conversation platform ("web" for app-owned conversations, or a channel platform like "slack"). Defaults to "web".
+         * Conversation platform ("web" for app-owned conversations, or a channel platform like "slack"). When omitted, resolves a unique active match for this agent across platforms; ambiguous ids return not found.
          */
         platform?: string;
         /**

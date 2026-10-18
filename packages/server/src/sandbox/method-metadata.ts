@@ -406,7 +406,7 @@ export default async (_ctx, client) => {
 	},
 	"conversations.get": {
 		summary:
-			"Fetch one conversation by (platform, conversation_id). platform defaults to 'web'.",
+			"Fetch one conversation by id. Omit platform to resolve a unique active match for the agent across platforms; ambiguous ids return not found.",
 		access: "read",
 		example:
 			"const { conversation } = await client.conversations.get({ agent_id: 'researcher', conversation_id: 'researcher_u1_org1_daily' });",

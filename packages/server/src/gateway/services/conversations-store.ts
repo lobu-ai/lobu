@@ -249,7 +249,8 @@ export async function findConversationById(args: {
 export async function getConversation(args: {
 	organizationId: string;
 	agentId: string;
-	platform: string;
+	/** Omitted: resolve only if the id is unique across this agent's platforms. */
+	platform?: string;
 	conversationId: string;
 }): Promise<ConversationListRow | null> {
 	const { organizationId, agentId, platform, conversationId } = args;
@@ -271,13 +272,14 @@ export async function getConversation(args: {
     FROM public.conversations
     WHERE organization_id = ${organizationId}
       AND agent_id = ${agentId}
-      AND platform = ${platform}
+      ${platform === undefined ? sql`` : sql`AND platform = ${platform}`}
       AND conversation_id = ${conversationId}
       AND archived_at IS NULL
-    LIMIT 1
+    LIMIT 2
   `;
+	// Two rows suffice to reject ambiguity; explicit platforms remain unique by PK.
+	if (rows.length !== 1) return null;
 	const r = rows[0];
-	if (!r) return null;
 	return {
 		platform: r.platform,
 		conversationId: r.conversation_id,

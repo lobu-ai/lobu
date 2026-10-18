@@ -6,7 +6,7 @@
  * Actions:
  * - list: List an agent's conversations, newest-first (the materialized
  *   `conversations` entity — the same source the sidebar reads).
- * - get:  Fetch one conversation by (platform, conversation_id).
+ * - get:  Fetch one conversation by id, optionally scoped to a platform.
  * - send: Enqueue a message to an agent conversation and, by default, block
  *   until the turn completes and return its reply. `wait:false` returns
  *   immediately with the message id (fire-and-forget).
@@ -130,7 +130,7 @@ async function handleGet(
     throw new ToolUserError("get requires an authenticated caller", 401);
   }
   await assertAgentInOrg(args.agent_id, ctx, env);
-  const platform = (args.platform ?? "web").toLowerCase();
+  const platform = args.platform?.toLowerCase();
   const row = await getConversation({
     organizationId: ctx.organizationId,
     agentId: args.agent_id,

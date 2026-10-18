@@ -28,13 +28,14 @@ export const ListConversationsAction = Type.Object({
 
 export const GetConversationAction = Type.Object({
   action: Type.Literal("get", {
-    description: "Fetch one conversation by its (platform, conversation_id).",
+    description:
+      "Fetch one conversation by id, optionally scoped to a platform.",
   }),
   agent_id: AgentId,
   platform: Type.Optional(
     Type.String({
       description:
-        'Conversation platform ("web" for app-owned conversations, or a channel platform like "slack"). Defaults to "web".',
+        'Conversation platform ("web" for app-owned conversations, or a channel platform like "slack"). When omitted, resolves a unique active match for this agent across platforms; ambiguous ids return not found.',
     })
   ),
   conversation_id: ConversationId,
