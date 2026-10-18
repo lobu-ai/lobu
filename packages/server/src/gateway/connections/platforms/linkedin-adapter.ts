@@ -11,7 +11,7 @@
  * `send_message` takes. A thread id does not say whether the conversation is a
  * group, so the row's explicit `is_group: false` is what makes a message
  * answerable, and the connector refuses to send into anything but a direct
- * message (the scope Emre approved for direct sends).
+ * message.
  */
 
 import { Message, NotImplementedError } from "chat";

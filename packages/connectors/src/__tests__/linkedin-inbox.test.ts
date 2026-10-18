@@ -1143,6 +1143,7 @@ function messenger(options: {
 }) {
   const profile = "urn:li:fsd_profile:synthetic-self";
   const posts: any[] = [];
+  const accepted = new Map<string, any>();
   const fetcher = async (url: string, init?: any) => {
     let data: unknown;
     if (url === "/voyager/api/me") {
@@ -1176,7 +1177,8 @@ function messenger(options: {
       expect(init?.method).toBe("POST");
       const body = JSON.parse(init.body);
       posts.push(body);
-      const created = {
+      const created = (body.dedupeByClientGeneratedToken &&
+        accepted.get(body.message.originToken)) || {
         entityUrn: `urn:li:msg_message:(${profile},sent-${posts.length})`,
         deliveredAt: Date.now(),
         body: { text: body.message.body.text },
@@ -1185,8 +1187,12 @@ function messenger(options: {
           ? {}
           : { originToken: body.message.originToken }),
       };
+      accepted.set(body.message.originToken, created);
       if (options.showSent !== false) {
-        (options.messages[body.message.conversationUrn] ??= []).unshift(created);
+        const visible = (options.messages[body.message.conversationUrn] ??= []);
+        if (!visible.some((message) => message.entityUrn === created.entityUrn)) {
+          visible.unshift(created);
+        }
       }
       data = { value: { entityUrn: created.entityUrn } };
     } else {
@@ -1328,7 +1334,7 @@ describe("LinkedIn direct messages", () => {
     }
   });
 
-  test("without origin tokens, an identical recent own text counts as the earlier attempt", async () => {
+  test("without echoed tokens, provider deduplication retries a key but preserves distinct replies", async () => {
     const { api, dom, posts } = messenger({
       conversations: [{ entityUrn: DM, groupChat: false }],
       messages: { [DM]: [INBOUND] },
@@ -1340,9 +1346,32 @@ describe("LinkedIn direct messages", () => {
         text: "On my way.",
         idempotency_key: "k1",
       };
-      await api.send(input);
-      expect(await api.send(input)).toMatchObject({ already_sent: true });
-      expect(posts).toHaveLength(1);
+      const first = await api.send(input);
+      expect(await api.send(input)).toMatchObject({ message_id: first.message_id });
+      const second = await api.send({ ...input, idempotency_key: "k2" });
+      expect(second.message_id).not.toBe(first.message_id);
+      expect(posts.every((post) => post.dedupeByClientGeneratedToken === true)).toBe(true);
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test("concurrent attempts of one key confirm the same provider message", async () => {
+    const messages: Record<string, any[]> = { [DM]: [INBOUND] };
+    const { api, dom, posts } = messenger({
+      conversations: [{ entityUrn: DM, groupChat: false }],
+      messages,
+    });
+    try {
+      const input = {
+        conversation_id: "2-synthetic-dm==",
+        text: "hi",
+        idempotency_key: "same-key",
+      };
+      const [first, second] = await Promise.all([api.send(input), api.send(input)]);
+      expect(first.message_id).toBe(second.message_id);
+      expect(messages[DM].filter((message) => message.sender.hostIdentityUrn === SELF)).toHaveLength(1);
+      expect(posts.every((post) => post.dedupeByClientGeneratedToken === true)).toBe(true);
     } finally {
       dom.window.close();
     }
@@ -1351,6 +1380,7 @@ describe("LinkedIn direct messages", () => {
   test.each([
     ["a group", { entityUrn: GROUP, groupChat: true }, "2-synthetic-group==", "only answers direct messages"],
     ["unknown membership", { entityUrn: DM }, "2-synthetic-dm==", "only answers direct messages"],
+    ["conflicting membership", { entityUrn: DM, groupChat: false, conversationParticipants: [{}, {}, {}] }, "2-synthetic-dm==", "only answers direct messages"],
     ["an absent conversation", { entityUrn: GROUP, groupChat: false }, "2-synthetic-dm==", "not among the recent conversations"],
   ])("send_message refuses %s without sending", async (_, conversation, threadId, error) => {
     const { api, dom, posts } = messenger({

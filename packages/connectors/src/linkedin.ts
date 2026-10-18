@@ -1,7 +1,7 @@
 /**
  * LinkedIn Connector
  *
- * Example-only — not bundled with Lobu. A single connector that spans BOTH:
+ * Built-in connector spanning live browser feeds and local export readers:
  *
  *   • LIVE feeds (home_feed, company_updates, jobs) — scraped via the paired
  *     Owletto Chrome extension's network-intercept / content-script primitives.
@@ -15,7 +15,9 @@
  *
  *   • TAKEOUT feeds (connections, messages, invitations, applied_jobs, profile,
  *     companies, learning, events, endorsements, media) — read from the user's
- *     local LinkedIn Data Export CSV files.
+ *     local LinkedIn Data Export CSV files through an injected reader. The
+ *     platform does not currently supply that reader; those feeds fail with
+ *     a missing-capability error until a filesystem-capable caller supplies it.
  *
  * Folding both into ONE connector (key "linkedin") means a single connection
  * dedups all people on the shared `linkedin_slug`/`email` identity: a person met

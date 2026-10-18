@@ -356,11 +356,12 @@ export function linkedInInboxProgram() {
   // participants. Null when neither is shown: callers treat unknown as "not a
   // direct message", so nothing is ever sent into a group by mistake.
   function groupOf(conversation) {
+    const participants = conversation?.conversationParticipants;
+    if (Array.isArray(participants) && participants.length > 2) return true;
     if (typeof conversation?.groupChat === "boolean")
       return conversation.groupChat;
-    const participants = conversation?.conversationParticipants;
     return Array.isArray(participants) && participants.length > 0
-      ? participants.length > 2
+      ? false
       : null;
   }
   // The thread token is the conversation's chat id: the URN minus the mailbox.
@@ -895,7 +896,6 @@ export function linkedInInboxProgram() {
   // client origin token, so a retry finds the first attempt instead of sending
   // again. Group or unknown conversations are refused.
   const SEND_RECONFIRM_ATTEMPTS = 5;
-  const SAME_TEXT_WINDOW_MS = 15 * 60 * 1000;
   async function originTokenOf(mailbox, conversation, idempotencyKey) {
     const hex = await digest(
       JSON.stringify([mailbox, conversation, idempotencyKey])
@@ -908,26 +908,6 @@ export function linkedInInboxProgram() {
       `${((Number.parseInt(hex[16], 16) & 3) | 8).toString(16)}${hex.slice(17, 20)}`,
       hex.slice(20, 32),
     ].join("-");
-  }
-  // The earlier attempt of this key, if the conversation shows one. When
-  // LinkedIn exposes no origin tokens on our messages, an identical text we
-  // sent moments ago is taken as that attempt rather than risk a duplicate.
-  function earlierAttempt(elements, mailbox, originToken, text, now) {
-    const own = elements.filter(
-      (message) => message.sender?.hostIdentityUrn === mailbox
-    );
-    const byToken = own.find((message) => message.originToken === originToken);
-    if (byToken) return byToken;
-    if (own.some((message) => typeof message.originToken === "string"))
-      return null;
-    return (
-      own.find(
-        (message) =>
-          (message.body?.text ?? "").trim() === text &&
-          Number.isFinite(message.deliveredAt) &&
-          now - message.deliveredAt < SAME_TEXT_WINDOW_MS
-      ) ?? null
-    );
   }
   function trackingId() {
     const alphabet =
@@ -964,12 +944,10 @@ export function linkedInInboxProgram() {
         ? new Date(message.deliveredAt).toISOString()
         : null,
     });
-    const prior = earlierAttempt(
-      await messageElements(conversation),
-      mailbox,
-      originToken,
-      text,
-      Date.now()
+    const prior = (await messageElements(conversation)).find(
+      (message) =>
+        message.sender?.hostIdentityUrn === mailbox &&
+        message.originToken === originToken
     );
     if (prior) return { ...sent(prior), already_sent: true };
     const response = await (
@@ -990,7 +968,9 @@ export function linkedInInboxProgram() {
             },
             mailboxUrn: mailbox,
             trackingId: trackingId(),
-            dedupeByClientGeneratedToken: false,
+            // Reads can lag or omit origin tokens, so request provider-side
+            // deduplication for retries and concurrent attempts too.
+            dedupeByClientGeneratedToken: true,
           }),
         }
       )
@@ -1007,7 +987,7 @@ export function linkedInInboxProgram() {
       if (shown) return sent(shown);
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    fail("LinkedIn accepted the message but it did not appear in the conversation; not retrying");
+    fail("LinkedIn accepted the message but it did not appear in the conversation; retry with the same idempotency_key to reconcile");
   }
   async function listen(input) {
     if (!input.bridge_id || !input.token)
