@@ -3,7 +3,7 @@ import { JSDOM } from "jsdom";
 import { webcrypto } from "node:crypto";
 import { linkedInInboxProgram } from "../linkedin-inbox-adapter.js";
 import { observeLinkedInInbox, readLinkedInInbox } from "../linkedin-inbox";
-import LinkedInConnector from "../linkedin.connector";
+import LinkedInConnector from "../linkedin";
 
 function adapter(fetcher: (url: string, init?: any) => Promise<any>) {
   const dom = new JSDOM("", {

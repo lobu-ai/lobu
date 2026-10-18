@@ -17,7 +17,7 @@
  * claim (not recall-indexed).
  */
 
-import type { ConnectorIdentityModule } from "./linkedin-identity.ts";
+import type { ConnectorIdentityModule } from "./connector-identity-module.ts";
 
 /** Connector-owned identity namespaces (not SDK-global). */
 export const X_IDENTITY = {

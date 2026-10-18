@@ -6,7 +6,7 @@ import { buildLinkedInLikeExpression, setLinkedInLike } from "../linkedin-like";
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 let LinkedIn: any;
 beforeAll(async () => {
-  LinkedIn = (await import("../linkedin.connector")).default;
+  LinkedIn = (await import("../linkedin")).default;
 });
 
 test("LinkedIn declares an idempotent set_like action", () => {

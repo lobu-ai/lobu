@@ -34,8 +34,8 @@
  */
 
 import type { EventEnvelope } from "@lobu/connector-sdk";
-import { normalizeLinkedInSlug } from "./linkedin-identity.ts";
-import { stableId, stripHtml } from "./takeout-utils.ts";
+import { normalizeLinkedInSlug } from "./linkedin-identity.js";
+import { stableId, stripHtml } from "./takeout-utils.js";
 
 /**
  * Reads one CSV inside the export, by POSIX-style relative path, and returns

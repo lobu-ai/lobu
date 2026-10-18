@@ -44,16 +44,16 @@ import {
   type EventEnvelope,
   extensionDomScrape,
   extensionNetworkSync,
+  IDENTITY,
   type SyncContext,
   type SyncResult,
 } from "@lobu/connector-sdk";
 import {
-  LINKEDIN_EMAIL_NAMESPACE,
   LINKEDIN_IDENTITY,
   normalizeLinkedInMemberId,
   normalizeLinkedInSlug,
-} from "./linkedin-identity.ts";
-import { setLinkedInLike } from "./linkedin-like.ts";
+} from "./linkedin-identity.js";
+import { setLinkedInLike } from "./linkedin-like.js";
 import {
   readCompanyFollows,
   readConnections,
@@ -66,20 +66,20 @@ import {
   readProfile,
   readRichMedia,
   type TakeoutCsvReader,
-} from "./linkedin-takeout.ts";
+} from "./linkedin-takeout.js";
 import {
   batchSize,
   type LocalTakeoutConfig,
   maxEventCursor,
   takeBatch,
-} from "./takeout-utils.ts";
+} from "./takeout-utils.js";
 import {
   observeLinkedInInbox,
   readLinkedInInbox,
   type LinkedInInboxCheckpoint,
-} from "./linkedin-inbox.ts";
-import { prepareLinkedInDraft } from "./linkedin-drafts.ts";
-import { LINKEDIN_HOME_URL } from "./linkedin-browser-script.ts";
+} from "./linkedin-inbox.js";
+import { prepareLinkedInDraft } from "./linkedin-drafts.js";
+import { LINKEDIN_HOME_URL } from "./linkedin-browser-script.js";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -173,7 +173,7 @@ const LINKEDIN_CONNECTION_ATTRIBUTIONS: EventAttributionRule[] = [
           namespace: LINKEDIN_IDENTITY.SLUG,
           eventPath: "metadata.linkedin_slug",
         },
-        { namespace: LINKEDIN_EMAIL_NAMESPACE, eventPath: "metadata.email" },
+        { namespace: IDENTITY.EMAIL, eventPath: "metadata.email" },
       ],
     },
     traits: {
@@ -370,7 +370,7 @@ const LINKEDIN_HOME_COMMENT_ATTRIBUTIONS: EventAttributionRule[] = [
   },
   {
     name: "parent_comment_author",
-    role: "in_reply_to",
+    role: "mentions",
     autoCreate: true,
     target: {
       entityType: "person",

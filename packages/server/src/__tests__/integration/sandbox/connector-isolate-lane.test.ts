@@ -38,7 +38,6 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = resolve(HERE, "../../../../..");
 const SDK_DIR = join(PACKAGES_DIR, "connector-sdk");
 const CONNECTORS_DIR = join(PACKAGES_DIR, "connectors/src");
-const PERSONAL_AGENT_DIR = resolve(PACKAGES_DIR, "../examples/personal-agent");
 
 /**
  * Node builtins each bundled connector's own bundle imports, keyed by file
@@ -54,6 +53,8 @@ const CONNECTOR_BUILTIN_IMPORTS: Record<string, string[]> = {
 	github: ["crypto"],
 	jira: ["crypto"],
 	linear: ["crypto"],
+	// Takeout row identity (stableId) hashes; `crypto` comes from the prelude.
+	linkedin: ["crypto"],
 	// Reaches its database over the isolate's Direct Sockets bridge, so it needs
 	// no transport builtin; what is left is all prelude-provided.
 	postgres: ["buffer", "events", "stream"],
@@ -244,7 +245,7 @@ describe("connector isolate lane", () => {
 });
 
 /**
- * The `personal-agent` example ships a LinkedIn connector that declares LIVE
+ * The built-in LinkedIn connector declares LIVE
  * browser feeds and local Data Export (takeout) feeds under ONE connector key,
  * so a person met in the live feed and a person in the CSV export collapse onto
  * the same identity.
@@ -261,8 +262,8 @@ describe("connector isolate lane", () => {
  * legitimately ineligible and declares `requiredCapability: "os.files"`, which
  * no worker serves yet; pinning that here would freeze an unrelated decision.
  */
-describe("personal-agent example: mixed live/takeout connector", () => {
-	const ENTRY = join(PERSONAL_AGENT_DIR, "linkedin.connector.ts");
+describe("linkedin: mixed live/takeout connector", () => {
+	const ENTRY = join(CONNECTORS_DIR, "linkedin.ts");
 
 	it("compiles to an isolate-eligible bundle so the live feeds can load", async () => {
 		const report = await bundle(ENTRY);

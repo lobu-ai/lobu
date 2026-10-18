@@ -202,7 +202,7 @@ describe("LinkedIn URL artifact", () => {
     const source = await temporaryDirectory();
     const destination = await temporaryDirectory();
     await writeFile(
-      join(source, "linkedin.connector.ts"),
+      join(source, "linkedin.ts"),
       `export default class Connector { marker = ${JSON.stringify(path)}; }`
     );
     await expect(buildLinkedInArtifact(destination, source)).rejects.toThrow(

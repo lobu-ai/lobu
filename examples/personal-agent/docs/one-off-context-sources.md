@@ -111,7 +111,7 @@ Some exports also ship JSON under `history/` instead of HTML. Lobu has no Takeou
 
 #### What the live connector covers (Chrome extension)
 
-The example `linkedin` connector (in `linkedin.connector.ts`) scrapes via the **paired Owletto Chrome extension** — you must be signed into linkedin.com in that browser profile.
+The built-in `linkedin` connector (`packages/connectors/src/linkedin.ts`) scrapes via the **paired Owletto Chrome extension** — you must be signed into linkedin.com in that browser profile.
 
 | Feed | What you get | Requires |
 |------|----------------|----------|

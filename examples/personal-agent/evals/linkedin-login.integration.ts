@@ -1,5 +1,5 @@
 import { beforeAll, beforeEach, expect, test } from "vitest";
-import LinkedInConnector from "../linkedin.connector";
+import LinkedInConnector from "../../../packages/connectors/src/linkedin";
 import {
   cleanupTestDatabase,
   getTestDb,

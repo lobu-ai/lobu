@@ -18,7 +18,6 @@ import {
 import { duplicateCandidateQuery } from "./duplicate-report.reaction.ts";
 import type DuplicateReportReaction from "./duplicate-report.reaction.ts";
 import type HackerNewsConnector from "./hackernews.connector.ts";
-import type LinkedInConnector from "./linkedin.connector.ts";
 import type LinkedInFlagReaction from "./linkedin-flag.reaction.ts";
 import {
   linkedInFeedFlaggerPrompt,
@@ -729,7 +728,6 @@ export default defineConfig({
     connectorFromFile<typeof RevolutTransactionsConnector>(
       "./revolut-transactions.connector.ts"
     ),
-    connectorFromFile<typeof LinkedInConnector>("./linkedin.connector.ts"),
     connectorFromFile<typeof HackerNewsConnector>("./hackernews.connector.ts"),
     connectorFromFile<typeof SpotifyConnector>("./spotify.connector.ts"),
     // Reuse installed takeout definitions: the local sources need filesystem

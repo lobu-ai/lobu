@@ -1,4 +1,3 @@
-/// <reference path="./linkedin-inbox-adapter.d.ts" />
 import {
   assertInboxSourceRead,
   requireBrowser,
@@ -11,7 +10,7 @@ import { linkedInInboxProgram } from "./linkedin-inbox-adapter.js";
 import {
   LINKEDIN_HOME_URL,
   linkedInScriptArgument,
-} from "./linkedin-browser-script.ts";
+} from "./linkedin-browser-script.js";
 
 export interface LinkedInInboxCheckpoint {
   linkedin_inbox?: Record<string, unknown>;

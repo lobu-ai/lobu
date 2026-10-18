@@ -2,8 +2,9 @@
  * From a Lobu checkout after its package build:
  *   node examples/relationships/build-linkedin.mjs <output-directory>
  *
- * Emits one URL-installable linkedin.js for the existing install form. Source
- * stays in personal-agent; nothing is published or installed by this command.
+ * Emits one URL-installable linkedin.js for the existing install form, built
+ * from the built-in connector source; nothing is published or installed by this
+ * command.
  */
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,12 +16,12 @@ import { assertPortableArtifact } from "../../scripts/artifact-portability.mjs";
 export async function buildLinkedInArtifact(
   outputDirectory,
   sourceDirectory = fileURLToPath(
-    new URL("../personal-agent/", import.meta.url)
+    new URL("../../packages/connectors/src/", import.meta.url)
   )
 ) {
   const artifact =
     await createIsolateConnectorCompiler().compileConnectorArtifactFromFile(
-      join(sourceDirectory, "linkedin.connector.ts"),
+      join(sourceDirectory, "linkedin.ts"),
       sourceDirectory
     );
   const staging = await mkdtemp(join(tmpdir(), "relationships-linkedin-"));

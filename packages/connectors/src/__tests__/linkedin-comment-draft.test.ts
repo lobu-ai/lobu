@@ -4,10 +4,10 @@ import { connectorSdkMock } from "./connector-sdk.mock";
 
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 let buildFillCommentExpression: (body: string) => string;
-let prepareLinkedInComment: typeof import("../linkedin.connector").prepareLinkedInComment;
+let prepareLinkedInComment: typeof import("../linkedin").prepareLinkedInComment;
 beforeAll(async () => {
   ({ buildFillCommentExpression, prepareLinkedInComment } = await import(
-    "../linkedin.connector"
+    "../linkedin"
   ));
 });
 

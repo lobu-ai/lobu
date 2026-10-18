@@ -4,7 +4,7 @@
  * Single source of truth for the Instagram identity vocabulary in the example
  * package. The takeout connector (instagram-takeout.connector.ts) imports from
  * here; a server wiring the example package would assemble `instagramIdentityModule`
- * into its ingest normalizer chain — mirroring x-identity.ts / linkedin-identity.ts.
+ * into its ingest normalizer chain — mirroring x-identity.ts.
  *
  * Unlike X (immutable numeric `x_user_id`) or LinkedIn (member id from the live
  * Voyager feed), the Instagram TAKEOUT exposes NO stable numeric id anywhere —
@@ -17,7 +17,7 @@
  * connector to fuse with, so the namespace string is scoped to this package.
  */
 
-import type { ConnectorIdentityModule } from "./linkedin-identity.ts";
+import type { ConnectorIdentityModule } from "./connector-identity-module.ts";
 
 /** Connector-owned identity namespaces (not SDK-global). */
 export const INSTAGRAM_IDENTITY = {

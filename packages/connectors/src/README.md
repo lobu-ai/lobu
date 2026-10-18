@@ -556,6 +556,7 @@ For source-backed bundled connectors, the worker recompiles a `.ts` file after i
 |-----------|------|-------|---------|
 | `github` | app_installation/oauth/env_keys | issues, PRs, comments, discussions, commits, stargazers | create/comment/close/reopen issues; create/merge PRs |
 | `hackernews` | none | stories, front page, comments | - |
+| `linkedin` | browser/none | notifications, inbox messages, home feed, company updates, jobs, local Data Export | like, prepare message/post/comment drafts |
 | `market.quotes` | none | - | quote (read-only, quotes returned to the caller, never persisted) |
 | `producthunt` | env_keys | posts & comments | - |
 | `reddit` | oauth/none | posts, comments, user activity | - |
