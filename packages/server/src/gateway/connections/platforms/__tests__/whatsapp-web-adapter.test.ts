@@ -3,31 +3,44 @@
  * operations, and the ids it mints. Synthetic ids throughout.
  */
 
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { describe, expect, spyOn, test } from "bun:test";
 import { Chat, NotImplementedError } from "chat";
 import * as operations from "../../../../tools/admin/manage_operations/handlers/execute.js";
 import { ChatInstanceManager } from "../../chat-instance-manager.js";
 import { ChatResponseBridge } from "../../chat-response-bridge.js";
-import { connectionOperationsExecutor, whatsappWebPlatform } from "../whatsapp-web.js";
 import {
-  WhatsAppWebAdapter,
-  type WhatsAppWebMessageRow,
-  type WhatsAppWebOperationOutcome,
-  type WhatsAppWebOperationRequest,
-} from "../whatsapp-web-adapter.js";
+  type ConnectorChatOperationOutcome,
+  type ConnectorChatOperationRequest,
+} from "../connector-chat.js";
+import { connectionOperationsExecutor } from "../connector-chat-platform.js";
+import { whatsappWebPlatform } from "../whatsapp-web.js";
+import { WhatsAppWebAdapter, type WhatsAppWebMessageRow } from "../whatsapp-web-adapter.js";
 
 const DM_JID = "15550000001@s.whatsapp.net";
 const LID_JID = "90000000000001@lid";
 const GROUP_JID = "120363000000000001@g.us";
 
+// A warm module registry hides cycles through operation handling and platform registration.
+for (const module of ["connector-chat", "whatsapp-web-adapter"]) {
+  test(`${module} imports in a fresh process`, () => {
+    const moduleUrl = new URL(`../${module}.ts`, import.meta.url);
+    const result = spawnSync(process.execPath, [
+      "--eval", `import ${JSON.stringify(moduleUrl.href)};`,
+    ], { encoding: "utf8", timeout: 15_000 });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+  }, 20_000);
+}
+
 function harness(
-  outcomes: Array<WhatsAppWebOperationOutcome | Error> = [
+  outcomes: Array<ConnectorChatOperationOutcome | Error> = [
     { status: "completed", output: { sent: true, message_id: "RAWOUT1" } },
   ],
   connectionId = "101",
 ) {
-  const calls: WhatsAppWebOperationRequest[] = [];
+  const calls: ConnectorChatOperationRequest[] = [];
   const adapter = new WhatsAppWebAdapter({
     connectionId,
     userName: "bot",
@@ -323,7 +336,7 @@ describe("WhatsApp Web source rows", () => {
 });
 
 describe("WhatsApp Web gateway delivery", () => {
-  function gateway(outcomes?: Array<WhatsAppWebOperationOutcome | Error>) {
+  function gateway(outcomes?: Array<ConnectorChatOperationOutcome | Error>) {
     const { adapter, calls } = harness(outcomes);
     const chat = new Chat({
       userName: "bot",
@@ -408,7 +421,7 @@ describe("WhatsApp Web gateway delivery", () => {
   test("a failed settings-notice send is not followed by a fallback send", async () => {
     for (const outcome of [
       new Error("timed out"),
-      { status: "pending_approval", error: "awaiting approval" } as WhatsAppWebOperationOutcome,
+      { status: "pending_approval", error: "awaiting approval" } as ConnectorChatOperationOutcome,
     ]) {
       const { bridge, calls } = gateway([outcome]);
       await bridge.handleEphemeral(settingsNotice);
