@@ -153,6 +153,11 @@ async function deliver(messageIds: string | string[], notificationId = "n-1", oc
 const ingressJobs = () => sql`SELECT id, status, attempts FROM runs
   WHERE organization_id = ${orgId} AND queue_name = ${CHAT_SOURCE_INGRESS_QUEUE} ORDER BY id`;
 
+/** Why each ingress job answered or stayed silent, in source order. */
+const dispositions = async () => (await sql`SELECT run_metadata->>'disposition' AS disposition FROM runs
+  WHERE organization_id = ${orgId} AND queue_name = ${CHAT_SOURCE_INGRESS_QUEUE} ORDER BY id`)
+  .map((row) => row.disposition);
+
 async function startWorker(): Promise<void> {
   queue = new RunsQueue();
   await queue.start();
@@ -353,6 +358,7 @@ describe("WhatsApp Web source chat", () => {
     await completeTurns();
     expect(sends).toHaveLength(1);
     expect(sends[0].input).toEqual({ chat_jid: DM_JID, text: "Reply from the agent" });
+    expect(await dispositions()).toEqual(["admitted"]);
   }, 60_000);
 
   it.each(["source read", "turn dispatch"] as const)("delivers once when the first attempt fails at the %s", async (stage) => {
@@ -368,6 +374,49 @@ describe("WhatsApp Web source chat", () => {
     expect(enqueued).toHaveLength(1);
     await completeTurns();
     expect(sends).toHaveLength(1);
+    expect(await dispositions()).toEqual(["admitted"]);
+  }, 60_000);
+
+  it.each([false, true])("preserves admission and existing metadata (write failure: %s)", async (failWrite) => {
+    await queue!.stop();
+    queue = null;
+    await insertAutomation("dm-reply", replyTo());
+    deviceMessages.push({ id: "SYNTHMETA1", chat_jid: DM_JID, body: "once please" });
+    await deliver("SYNTHMETA1");
+    const [job] = await ingressJobs();
+    await sql`UPDATE runs SET run_metadata = ${sql.json({ synthetic_marker: "preserved" })} WHERE id = ${job.id}`;
+    if (failWrite) {
+      await sql.unsafe(`
+        CREATE FUNCTION synthetic_fail_ingress_disposition() RETURNS trigger AS $$
+        BEGIN
+          RAISE EXCEPTION 'synthetic disposition write failure';
+        END $$ LANGUAGE plpgsql;
+        CREATE TRIGGER synthetic_fail_ingress_disposition BEFORE UPDATE OF run_metadata ON runs
+          FOR EACH ROW WHEN (NEW.run_metadata ? 'disposition')
+          EXECUTE FUNCTION synthetic_fail_ingress_disposition();
+      `);
+    }
+    try {
+      await startWorker();
+      await drain();
+      expect(await ingressJobs()).toEqual([expect.objectContaining({ status: "completed", attempts: 0 })]);
+      const [stored] = await sql`SELECT run_metadata FROM runs WHERE id = ${job.id}`;
+      expect(stored.run_metadata).toEqual({
+        synthetic_marker: "preserved", ...(failWrite ? {} : { disposition: "admitted" }),
+      });
+      expect(enqueued).toHaveLength(1);
+      await completeTurns();
+      expect(sends).toHaveLength(1);
+    } finally {
+      await queue?.stop();
+      queue = null;
+      if (failWrite) {
+        await sql.unsafe(`
+          DROP TRIGGER synthetic_fail_ingress_disposition ON runs;
+          DROP FUNCTION synthetic_fail_ingress_disposition();
+        `);
+      }
+    }
   }, 60_000);
 
   it("retries a command's confirmation under the same send key", async () => {
@@ -419,6 +468,7 @@ describe("WhatsApp Web source chat", () => {
     await drain();
     expect(enqueued).toHaveLength(0);
     expect(sends).toHaveLength(0);
+    expect(await dispositions()).toEqual(["no_matching_reply_trigger"]);
   }, 60_000);
 
   it("does not reply into a group without an Automation scoped to that group", async () => {
@@ -429,6 +479,7 @@ describe("WhatsApp Web source chat", () => {
     await drain();
     expect(enqueued).toHaveLength(0);
     expect(sends).toHaveLength(0);
+    expect(await dispositions()).toEqual(["group_not_addressed"]);
   }, 60_000);
 
   it("replies into a group that an Automation is scoped to", async () => {
@@ -468,6 +519,7 @@ describe("WhatsApp Web source chat", () => {
     await drain();
     expect(enqueued).toHaveLength(0);
     expect(sends).toHaveLength(0);
+    expect(await dispositions()).toEqual(["group_not_addressed"]);
   }, 60_000);
 
   it.each([
@@ -550,6 +602,7 @@ describe("WhatsApp Web source chat", () => {
     await drain();
     expect(enqueued).toHaveLength(0);
     expect(sends).toHaveLength(0);
+    expect(await dispositions()).toEqual(["not_answerable"]);
   }, 60_000);
 
   it("still runs a background Automation once, on the source signal", async () => {
@@ -663,6 +716,7 @@ describe("WhatsApp Web source chat", () => {
     await drain();
     expect(enqueued).toHaveLength(0);
     expect(sends).toHaveLength(0);
+    expect(await dispositions()).toEqual(["older_than_reply_automation"]);
     // Background Automations still see the replayed message.
     const runs = await sql`SELECT automation_id FROM runs WHERE organization_id = ${orgId} AND run_type = 'automation'`;
     expect(runs.map((run) => Number(run.automation_id))).toEqual([archiveId]);
@@ -677,6 +731,7 @@ describe("WhatsApp Web source chat", () => {
     expect(await ingressJobs()).toEqual([expect.objectContaining({ status: "completed", attempts: 0 })]);
     expect(enqueued).toHaveLength(0);
     expect(sends).toHaveLength(0);
+    expect(await dispositions()).toEqual(["missing_source_time"]);
   }, 60_000);
 
   it.each([false, true])("rechecks edits before ingress and selects a still-current reply (fallback: %s)", async (withFallback) => {
@@ -784,6 +839,8 @@ describe("WhatsApp Web source chat", () => {
     expect(enqueued).toHaveLength(0);
     expect(sends).toHaveLength(0);
     expect(await limiterCount(chatOrganizationLimitKey(orgId))).toBe(UNLINKED_ORGANIZATION_TURNS_PER_HOUR + 1);
+    // Ingress handed off to the bridge, whose organization limit declined the turn.
+    expect(await dispositions()).toEqual(["admitted"]);
   }, 60_000);
 
   it("resolves the connection's numeric runtime id for chat routing", async () => {
