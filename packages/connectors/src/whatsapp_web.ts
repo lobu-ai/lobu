@@ -328,6 +328,7 @@ function normalizedSearchResults(
       push_name: message.push_name ?? null,
       is_group: message.is_group,
       quoted_id: message.quoted_id ?? null,
+      mentions_me: message.mentions_me === true,
     });
   }
   return rows;
@@ -353,7 +354,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read live from WhatsApp Web in the paired Owletto Chrome without importing message history. Automations react to new-message references and read content on demand. Search, draft, send, edit, react to, and revoke messages.",
-    version: "2.0.0",
+    version: "2.1.0",
     faviconDomain: "whatsapp.com",
     authSchema: { methods: [{ type: "browser", mode: "live" }] },
     browser: {
@@ -380,7 +381,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
           channel_id: {
             type: "string",
             title: "Chat",
-            description: "WhatsApp chat ID. Replies into a group need this set to that group.",
+            description: "WhatsApp chat ID. Scoping replies to a group allows replies without a mention, subject to the other trigger filters. Unscoped group replies require an @mention or a reply quoting the account.",
           },
         },
       },
@@ -678,6 +679,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         { name: "push_name", type: "string" },
         { name: "is_group", type: "boolean" },
         { name: "quoted_id", type: "string" },
+        { name: "mentions_me", type: "boolean" },
       ],
       nextCursor: response.nextCursor,
       hasMore: response.hasMore,

@@ -68,6 +68,8 @@ export interface WhatsAppWebMessageRow {
   is_group?: boolean;
   /** `text`, `media`, `revoked` or `system`, as the connector classifies it. */
   content_kind?: string;
+  /** The message @mentions the paired account or quotes one of its messages. */
+  mentions_me?: boolean;
 }
 
 export interface WhatsAppWebOperationRequest {
@@ -210,6 +212,9 @@ export class WhatsAppWebAdapter implements Adapter<string, WhatsAppWebMessageRow
       text,
       formatted: this.converter.toAst(text),
       raw,
+      // Only a group has anyone else to address: a DM quoting the bot is
+      // still just a DM, so a `mention_only` trigger never answers it.
+      isMention: isGroup && raw.mentions_me === true,
       author: {
         userId,
         userName: displayName,

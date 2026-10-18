@@ -184,6 +184,24 @@ describe("WhatsApp live source reads", () => {
     expect(columns).toEqual(expect.arrayContaining(["push_name", "sender_phone", "is_group"]));
   });
 
+  it("carries whether a live row addresses the account", async () => {
+    const page = makeDispatcher({
+      probe: READY,
+      read_messages: { ok: true, results: [
+        message("mention", { chat_jid: "120363000000000000@g.us", mentions_me: true }),
+        message("chatter", { chat_jid: "120363000000000000@g.us", mentions_me: false }),
+        message("legacy"),
+      ], hasMore: false },
+    });
+    const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null, browser: page.dispatcher });
+    expect(result.rows.map((row) => [row.id, row.mentions_me])).toEqual([
+      ["mention", true],
+      ["chatter", false],
+      ["legacy", false],
+    ]);
+    expect(result.columns).toContainEqual({ name: "mentions_me", type: "boolean" });
+  });
+
   it("classifies each live row's content structurally", async () => {
     const page = makeDispatcher({
       probe: READY,
@@ -642,8 +660,8 @@ describe("readiness over the generic chrome bridge", () => {
     }
   });
 
-  it("bumps the WhatsApp connector version for the live-only definition", () => {
-    expect(connector.definition.version).toBe("2.0.0");
+  it("bumps the WhatsApp connector version for the mention-carrying definition", () => {
+    expect(connector.definition.version).toBe("2.1.0");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {

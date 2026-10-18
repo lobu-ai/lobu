@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 24;
+  const ADAPTER_VERSION = 25;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const MAX_RECORD_BYTES = 128 * 1024;
   const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -261,6 +261,50 @@ export function whatsAppWebAdapterProgram() {
       /* WhatsApp's private module graph throws freely; a miss is not fatal. */
     }
     return null;
+  }
+
+  /**
+   * Every canonical form of the account's own identity. `meUser()` prefers
+   * the phone-number WID, but a group can address a member by its LID WID
+   * instead, so a mention or a quote of the account must match either form.
+   */
+  async function ownJids() {
+    const module = requireFirst(["WAWebUserPrefsMeUser"]);
+    const candidates = [meUser()];
+    for (const accessor of ["getMaybeMePnUser", "getMaybeMeLidUser"]) {
+      try {
+        candidates.push(module?.[accessor]?.());
+      } catch {
+        /* WhatsApp's private module graph throws freely; a miss is not fatal. */
+      }
+    }
+    const forms = new Set();
+    for (const value of candidates) {
+      const own = await canonicalJid(value);
+      if (own.jid) forms.add(own.jid);
+      if (own.lid) forms.add(own.lid);
+    }
+    return forms;
+  }
+
+  /**
+   * Whether a message addresses the account: it @mentions the account, or it
+   * replies to (quotes) one of the account's messages.
+   */
+  async function mentionsOwnAccount(row) {
+    const addressed = [
+      ...(Array.isArray(row.mentionedJidList) ? row.mentionedJidList : []),
+      row.quotedParticipant,
+    ].filter(Boolean);
+    if (addressed.length === 0) return false;
+    const own = await ownJids();
+    for (const value of addressed) {
+      const candidate = await canonicalJid(value);
+      if (own.has(candidate.jid) || (candidate.lid && own.has(candidate.lid))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -607,6 +651,7 @@ export function whatsAppWebAdapterProgram() {
         : null,
       media_filename: row.filename ?? row.fileName ?? row.title ?? null,
       quoted_id: quotedId,
+      mentions_me: await mentionsOwnAccount(row),
       is_forwarded: Boolean(row.isForwarded || Number(row.forwardingScore) > 0),
       is_starred: Boolean(row.star ?? row.isStarred),
       is_system_event: SYSTEM_TYPES.has(type),

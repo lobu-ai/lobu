@@ -57,6 +57,7 @@ import {
 const DM_JID = "15550001111@s.whatsapp.net";
 const OTHER_DM_JID = "15550003333@s.whatsapp.net";
 const GROUP_JID = "120363000000000001@g.us";
+const OTHER_GROUP_JID = "120363000000000002@g.us";
 const GROUP_SENDER = "15550002222@s.whatsapp.net";
 /** A WhatsApp account no member has linked. */
 const STRANGER_JID = "15550004444@s.whatsapp.net";
@@ -69,6 +70,9 @@ interface DeviceMessage {
   timestamp?: number;
   from_me?: boolean;
   sender_jid?: string;
+  quoted_id?: string;
+  /** The device's verdict: the message @mentions the account or quotes it. */
+  mentions_me?: boolean;
 }
 
 let sql: ReturnType<typeof getTestDb>;
@@ -437,6 +441,105 @@ describe("WhatsApp Web source chat", () => {
     await completeTurns();
     expect(sends).toHaveLength(1);
     expect(sends[0].input).toEqual({ chat_jid: GROUP_JID, text: "Reply from the agent" });
+  }, 60_000);
+
+  it.each([
+    ["an @mention of the bot", { mentions_me: true }],
+    ["a reply quoting the bot", { mentions_me: true, quoted_id: "SYNTHBOTSAID" }],
+  ] as const)("answers %s in a group with an unscoped reply Automation", async (_, addressed) => {
+    await insertAutomation("dm-reply", replyTo());
+    deviceMessages.push({ id: "SYNTHGR3", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "bot, summarize", ...addressed });
+
+    await deliver("SYNTHGR3");
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({ agentId, messageText: expect.stringContaining("bot, summarize") });
+    await completeTurns();
+    expect(sends).toHaveLength(1);
+    expect(sends[0].input).toEqual({ chat_jid: GROUP_JID, text: "Reply from the agent" });
+  }, 60_000);
+
+  it("stays silent on group chatter that does not address the bot", async () => {
+    await insertAutomation("dm-reply", replyTo());
+    await insertAutomation("mentions-only", replyTo({ mention_only: true }));
+    deviceMessages.push({ id: "SYNTHGR4", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "lunch?", mentions_me: false });
+
+    await deliver("SYNTHGR4");
+    await drain();
+    expect(enqueued).toHaveLength(0);
+    expect(sends).toHaveLength(0);
+  }, 60_000);
+
+  it.each([
+    ["a DM", { id: "SYNTHDM18", chat_jid: DM_JID, body: "hello bot" }, 0],
+    ["a DM quoting the bot", { id: "SYNTHDM19", chat_jid: DM_JID, body: "re: that", mentions_me: true }, 0],
+    ["a group mention", { id: "SYNTHGR5", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "hey bot", mentions_me: true }, 1],
+  ] as const)("answers only mentions with a mention_only reply trigger: %s", async (_, message, expected) => {
+    await insertAutomation("mentions-only", replyTo({ mention_only: true }));
+    deviceMessages.push({ ...message });
+
+    await deliver(message.id);
+    await drain();
+    expect(enqueued).toHaveLength(expected);
+    await completeTurns();
+    expect(sends.map((send) => send.input.chat_jid)).toEqual(expected ? [GROUP_JID] : []);
+  }, 60_000);
+
+  it("answers every message of a group a reply trigger is scoped to, mention or not", async () => {
+    await insertAutomation("group-reply", replyTo({ channel_id: GROUP_JID }));
+    deviceMessages.push(
+      { id: "SYNTHGR6", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "plain", mentions_me: false },
+      { id: "SYNTHGR7", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "addressed", mentions_me: true },
+    );
+
+    await deliver(["SYNTHGR6", "SYNTHGR7"]);
+    await drain();
+    expect(enqueued.map((payload) => payload.messageText)).toEqual([
+      expect.stringContaining("plain"), expect.stringContaining("addressed"),
+    ]);
+  }, 60_000);
+
+  it("answers a group mention through an Automation's unscoped trigger after a trigger scoped elsewhere", async () => {
+    await insertAutomation("other-group-then-anywhere", replyTo({ channel_id: OTHER_GROUP_JID }), replyTo());
+    deviceMessages.push({ id: "SYNTHGR8", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "anyone?", mentions_me: true });
+
+    await deliver("SYNTHGR8");
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    await completeTurns();
+    expect(sends.map((send) => send.input.chat_jid)).toEqual([GROUP_JID]);
+  }, 60_000);
+
+  it("answers an unlinked sender's group mention reply-only, with a notice but no link", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    await insertAutomation("dm-reply", replyTo());
+    deviceMessages.push({ id: "SYNTHGR9", chat_jid: GROUP_JID, sender_jid: STRANGER_JID, body: "hey bot", mentions_me: true });
+
+    await deliver("SYNTHGR9");
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(sends).toHaveLength(1);
+    expect(sends[0].input).toMatchObject({ chat_jid: GROUP_JID });
+    expect(String(sends[0].input.text)).toContain("I can't use this workspace's tools for you");
+    // Anyone reading the group could redeem a link, so none is posted there.
+    expect(String(sends[0].input.text)).not.toContain("/connect/chat-identity?token=");
+    const sender = whatsAppSender(STRANGER_JID);
+    expect(await limiterCount(chatSenderLimitKey("notice", sender))).toBe(1);
+    expect(await limiterCount(chatSenderLimitKey("link", sender))).toBe(0);
+    const claims = await mintedClaims(enqueued[0]);
+    expect(claims).toMatchObject({ userId: STRANGER_JID, chatAccess: "reply_only" });
+  }, 60_000);
+
+  it("answers a linked member's group mention with workspace-shared access", async () => {
+    await insertAutomation("dm-reply", replyTo());
+    deviceMessages.push({ id: "SYNTHGR10", chat_jid: GROUP_JID, sender_jid: GROUP_SENDER, body: "hey bot", mentions_me: true });
+
+    await deliver("SYNTHGR10");
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(sends).toHaveLength(0);
+    const claims = await mintedClaims(enqueued[0]);
+    expect(claims).toMatchObject({ userId: GROUP_SENDER, chatAccess: "org_shared" });
   }, 60_000);
 
   it("never answers the account's own message", async () => {

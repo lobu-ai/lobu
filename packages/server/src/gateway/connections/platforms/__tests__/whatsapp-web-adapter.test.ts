@@ -282,6 +282,17 @@ describe("WhatsApp Web source rows", () => {
     expect(parsed?.message?.author.userId).toBe(DM_JID);
   });
 
+  test("a row that addresses the account is a mention of the bot", () => {
+    const { adapter } = harness([]);
+    const group = { chat_jid: GROUP_JID, is_group: true };
+    expect(adapter.parseSourceRow(source({ ...group, mentions_me: true }))?.message?.isMention).toBe(true);
+    for (const overrides of [{ mentions_me: false }, {}]) {
+      expect(adapter.parseSourceRow(source({ ...group, ...overrides }))?.message?.isMention).toBe(false);
+    }
+    // A DM that quotes the bot is a DM, not a mention.
+    expect(adapter.parseSourceRow(source({ mentions_me: true }))?.message?.isMention).toBe(false);
+  });
+
   test("nothing answers our own, unverified, revoked, system, media-only or broadcast rows", () => {
     const { adapter } = harness([]);
     for (const overrides of [
