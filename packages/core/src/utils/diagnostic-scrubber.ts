@@ -94,19 +94,19 @@ function hasTrailingAuthorizationSegment(key: string): boolean {
 /**
  * A `credential`/`password`/`secret` segment anywhere in the key names a
  * credential CONTAINER (`credentials_json`, `password_confirmation`,
- * `secret_value`, `oauthCredentialsJson`). So does a LEADING credential term
- * with a trailing qualifier (`token_value`, `accessTokenValue`,
- * `api_key_value`): the qualifier half is matched positionally because the
- * shared suffix rules are end-anchored and never see it. The one exemption is
- * a usage-metric qualifier (`token_count`, `token_total`), which stays
- * readable per the logger contract. Container semantics live in the walk: a
- * scalar beneath one IS the serialized credential and collapses, while a
- * structured value beneath one recurses with every descendant treated as
- * credential-adjacent (a map's leaves cannot be trusted by key name alone —
- * `credentialsByName.github` proves it). `token` stays out of the segment
- * set (bare token segments collide with usage counters); `authorization`
- * stays pinned to the trailing rule above so `authorization_mode` stays
- * readable.
+ * `secret_value`, `oauthCredentialsJson`, `credentialsByName`). A bare
+ * `token` segment does too, unless a usage-metric qualifier is present
+ * (`token_count`, `token_total` stay readable per the logger contract — the
+ * plural `tokens` never matches, so `max_tokens` is safe regardless).
+ * Compound leading heads (`accessTokenValue`, `api_key_value`) match when the
+ * joined head classifies under the shared suffix rules; a whole-name exact
+ * match never seeds one (`cookie` in `cookie-policy`, `auth` in
+ * `authorization_mode`), so those stay readable. Container semantics live in
+ * the walk: a scalar beneath one IS the serialized credential and collapses,
+ * while a structured value beneath one recurses with every descendant
+ * treated as credential-adjacent (a map's leaves cannot be trusted by key
+ * name alone — `credentialsByName.github` proves it). `authorization` stays
+ * pinned to the trailing-header rule above.
  */
 const CONTAINER_KEY_SEGMENTS = new Set([
   "credential",
@@ -116,7 +116,7 @@ const CONTAINER_KEY_SEGMENTS = new Set([
   "secret",
 ]);
 
-/** Qualifiers that make a trailing segment a usage metric, not a secret. */
+/** Qualifiers that mark a key as usage metadata, never a credential. */
 const BENIGN_COUNT_QUALIFIERS = new Set([
   "count",
   "counts",
@@ -137,13 +137,20 @@ function hasCredentialSegment(key: string): boolean {
   if (segments.some((segment) => CONTAINER_KEY_SEGMENTS.has(segment))) {
     return true;
   }
-  for (let end = 1; end <= segments.length; end++) {
+  if (
+    segments.includes("token") &&
+    !segments.some((segment) => BENIGN_COUNT_QUALIFIERS.has(segment))
+  ) {
+    return true;
+  }
+  for (let end = 2; end <= segments.length; end++) {
     const head = segments.slice(0, end).join("_");
-    if (head === "authorization") continue;
+    if (SECRET_KEY_EXACT.has(head) || SECRET_KEY_EXACT.has(squashKey(head))) {
+      continue;
+    }
     if (isSecretKey(head) || isSecretKey(squashKey(head))) {
       const tail = segments.slice(end);
-      const qualifier = tail.length === 1 ? tail[0] : undefined;
-      if (qualifier !== undefined && BENIGN_COUNT_QUALIFIERS.has(qualifier)) {
+      if (tail.length === 1 && BENIGN_COUNT_QUALIFIERS.has(tail[0] as string)) {
         continue;
       }
       return true;

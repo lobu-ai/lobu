@@ -443,6 +443,21 @@ describe("diagnostic credential scrubber", () => {
     expect(result.credentialsByName.provider.name).toBe("Error");
     expect(JSON.stringify(result)).not.toContain(SECRET);
   });
+  it("leaves non-credential hyphenated keys readable", () => {
+    // Whole-name exact matches never seed a compound head: `cookie-policy`
+    // and `authorization_mode` stay readable even though `cookie` and
+    // `authorization` classify on their own.
+    const result = scrubDiagnosticValue({
+      "cookie-policy": "strict",
+      authorization_mode: "oauth",
+      "content-type": "application/json",
+    }) as Record<string, unknown>;
+    expect(result).toEqual({
+      "cookie-policy": "strict",
+      authorization_mode: "oauth",
+      "content-type": "application/json",
+    });
+  });
   it("redacts concatenated and provider-prefixed credential names", () => {
     // Separator-free compounds the suffix rules never see: a bare credential
     // ending (`PGPASSWORD`) and a provider-prefixed serialized field
