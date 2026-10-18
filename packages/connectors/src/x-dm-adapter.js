@@ -96,7 +96,11 @@ export function xDirectMessagesProgram() {
 		const body = await request(
 			`${DM_API}/user_updates.json?cursor=${encodeURIComponent(cursor)}&${DM_PARAMS}`,
 		);
-		return body?.user_events ?? fail("Inbox updates are unavailable");
+		const events = body?.user_events ?? fail("Inbox updates are unavailable");
+		// A quiet inbox answers with only its cursor and last-seen ids: no
+		// `entries` key means nothing arrived. Inbox and conversation reads
+		// still require their entries.
+		return "entries" in events ? events : { ...events, entries: [] };
 	}
 	function timeOf(value) {
 		if (value === null || value === undefined || value === "")

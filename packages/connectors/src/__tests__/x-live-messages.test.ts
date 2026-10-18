@@ -506,13 +506,45 @@ describe("X live_messages observe", () => {
 		expect(browser.posts.every((post) => !post.record.checkpoint)).toBe(true);
 	});
 
-	test.each([
-		"entries",
-		"cursor",
-	])("refuses updates missing %s without advancing the checkpoint", async (field) => {
+	test("treats a quiet inbox update without entries as zero events and advances its cursor", async () => {
+		// The exact shape x.com returns for user_updates when nothing arrived
+		// (observed live): no `entries` key at all.
+		const x = fakeX((body) =>
+			body.user_events
+				? {
+						user_events: {
+							cursor: "cursor-quiet",
+							last_seen_event_id: "5003",
+							trusted_last_seen_event_id: "5003",
+							untrusted_last_seen_event_id: "5003",
+						},
+					}
+				: body,
+		);
+		const browser = page(x);
+		await connector().definition.feeds.live_messages.observe({
+			feedKey: "live_messages",
+			config: {},
+			credentials: null,
+			checkpoint: {
+				x_dm: { account: SELF, cursor: "cursor-0", started_at: 1 },
+			},
+			browser: browser.dispatcher,
+		});
+		expect(browser.posts).toHaveLength(1);
+		const record = browser.posts[0].record;
+		expect(record.source_error).toBeUndefined();
+		expect(record.events).toEqual([]);
+		expect(record.checkpoint.next.x_dm).toMatchObject({
+			account: SELF,
+			cursor: "cursor-quiet",
+		});
+	});
+
+	test("refuses updates missing cursor without advancing the checkpoint", async () => {
 		const x = fakeX((body) => {
-			const state = body.user_events as Record<string, unknown>;
-			delete state[field];
+			const state = body.user_events as Record<string, unknown> | undefined;
+			if (state) delete state.cursor;
 			return body;
 		});
 		const browser = page(x);
