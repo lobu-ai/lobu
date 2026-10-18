@@ -465,12 +465,78 @@ describe("diagnostic credential scrubber", () => {
       "content-type": "application/json",
     });
   });
+  it("redacts separator-free token compounds without touching usage counters", () => {
+    // `csrftoken`, `githubtoken`, `authtoken`: bare `token` endings with no
+    // separator. `max_tokens` and `totalTokens` stay readable — usage
+    // metadata, per the logger contract.
+    const result = scrubDiagnosticValue({
+      csrftoken: SECRET,
+      githubtoken: SECRET,
+      authtoken: SECRET,
+      max_tokens: 100,
+      totalTokens: 9,
+    }) as Record<string, unknown>;
+    expect(result.csrftoken).toBe("[REDACTED]");
+    expect(result.githubtoken).toBe("[REDACTED]");
+    expect(result.authtoken).toBe("[REDACTED]");
+    expect(result.max_tokens).toBe(100);
+    expect(result.totalTokens).toBe(9);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("redacts authorization compounds with credential qualifiers anywhere after", () => {
+    // `authorizationValueJson`: the qualifier need not directly follow.
+    // Config qualifiers stay readable.
+    const result = scrubDiagnosticValue({
+      authorizationValueJson: JSON.stringify({ token: SECRET }),
+      authorization_mode: "strict",
+    }) as Record<string, unknown>;
+    expect(result.authorizationValueJson).toBe("[REDACTED]");
+    expect(result.authorization_mode).toBe("strict");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("redacts credential terms buried in separator-free compounds", () => {
+    // `clientsecretvalue`: no separators and no credential suffix for the
+    // shared rules or split segment tests to catch.
+    const result = scrubDiagnosticValue({
+      clientsecretvalue: SECRET,
+    }) as Record<string, unknown>;
+    expect(result.clientsecretvalue).toBe("[REDACTED]");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("refuses usage-metric exemptions for credential-bearing names", () => {
+    // A benign qualifier only exempts an exact two-segment usage metric
+    // (`token_count`); anywhere else the credential term wins
+    // (`used_access_token`, `token_usage_secret`).
+    const result = scrubDiagnosticValue({
+      used_access_token: SECRET,
+      token_usage_secret: SECRET,
+      token_count: 7,
+    }) as Record<string, unknown>;
+    expect(result.used_access_token).toBe("[REDACTED]");
+    expect(result.token_usage_secret).toBe("[REDACTED]");
+    expect(result.token_count).toBe(7);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("stays linear on pathological segmented keys", () => {
+    const key = `${"a_".repeat(2000)}token_count`;
+    const started = performance.now();
+    const result = scrubDiagnosticValue({ [key]: "kept" }) as Record<
+      string,
+      unknown
+    >;
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(result[key]).toBe("kept");
+  });
   it("redacts concatenated and provider-prefixed credential names", () => {
     // Separator-free compounds the suffix rules never see: bare credential
     // endings (`PGPASSWORD`, `authtoken`, `idtoken`) and a provider-prefixed
-    // serialized field (`oauthCredentialsJson`). Bare `token` endings stay
-    // out deliberately — they collide with usage counts the logger contract
-    // preserves.
+    // serialized field (`oauthCredentialsJson`). Bare `*token` compounds
+    // collapse; two-segment usage metrics (`token_count`) stay readable via
+    // the benign-usage exemption.
     const result = scrubDiagnosticValue({
       PGPASSWORD: SECRET,
       authtoken: SECRET,

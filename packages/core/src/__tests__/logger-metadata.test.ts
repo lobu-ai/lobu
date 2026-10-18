@@ -188,6 +188,23 @@ describe("console logger pino-style metadata", () => {
     expect(line).not.toContain("synthetic-req-auth-secret");
   });
 
+  test("redacts concatenated auth tokens and auth-header compounds", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        csrftoken: "synthetic-csrf-secret",
+        githubtoken: "synthetic-github-secret",
+        authorizationValueJson: '{"token":"synthetic-authzjson-secret"}',
+        clientsecretvalue: "synthetic-clientsecret-secret",
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain("synthetic-csrf-secret");
+    expect(line).not.toContain("synthetic-github-secret");
+    expect(line).not.toContain("synthetic-authzjson-secret");
+    expect(line).not.toContain("synthetic-clientsecret-secret");
+  });
+
   test("redacts leading credential terms with trailing qualifiers", () => {
     const line = captureWarn((log) => {
       log.warn({
@@ -420,6 +437,11 @@ describe("console logger structured output", () => {
           authorization_value: "synthetic-json-authz-value-secret",
           used_access_token: "synthetic-json-used-secret",
           token_usage_secret: "synthetic-json-usage-secret",
+          csrftoken: "synthetic-json-csrftoken-secret",
+          githubtoken: "synthetic-json-githubtoken-secret",
+          authorizationValueJson:
+            '{"token":"synthetic-json-authzjson-secret"}',
+          clientsecretvalue: "synthetic-json-clientsecret-secret",
         });
         log.warn({
           headers: { "x-authorization": ["Bearer synthetic-json-array-secret"] },
@@ -491,6 +513,14 @@ describe("console logger structured output", () => {
     );
     expect(records[5].message).not.toContain("synthetic-json-used-secret");
     expect(records[5].message).not.toContain("synthetic-json-usage-secret");
+    expect(records[5].message).not.toContain("synthetic-json-csrftoken-secret");
+    expect(records[5].message).not.toContain(
+      "synthetic-json-githubtoken-secret"
+    );
+    expect(records[5].message).not.toContain("synthetic-json-authzjson-secret");
+    expect(records[5].message).not.toContain(
+      "synthetic-json-clientsecret-secret"
+    );
     expect(records[6].level).toBe("warn");
     expect(records[6].message).toContain("[REDACTED]");
     expect(records[6].message).not.toContain("synthetic-json-array-secret");
@@ -526,6 +556,10 @@ describe("console logger structured output", () => {
     expect(output).not.toContain("synthetic-json-authz-value-secret");
     expect(output).not.toContain("synthetic-json-used-secret");
     expect(output).not.toContain("synthetic-json-usage-secret");
+    expect(output).not.toContain("synthetic-json-csrftoken-secret");
+    expect(output).not.toContain("synthetic-json-githubtoken-secret");
+    expect(output).not.toContain("synthetic-json-authzjson-secret");
+    expect(output).not.toContain("synthetic-json-clientsecret-secret");
     expect(output).not.toContain("synthetic-json-provider-error-secret");
     expect(output).not.toContain("synthetic-json-array-secret");
     expect(output).not.toContain("synthetic-json-error-prop-secret");

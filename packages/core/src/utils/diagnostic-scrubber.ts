@@ -36,18 +36,18 @@ const SECRET_KEY_EXACT = new Set([
 /**
  * Concatenated credential names the separator-based rules never see:
  * `PGPASSWORD`, `clientsecret`, `customapikey`, `myauthtoken` (the shared
- * denylist has no `auth_?token` form). Matched as a bare ending
+ * denylist has no `auth_?token` form), `idtoken`, and any other bare
+ * `*token` compound (`csrftoken`, `githubtoken`). Matched as a bare ending
  * (case-insensitive, separator-free) so `tokenizer` and `keyboard` stay
- * readable. `token` is deliberately absent: bare token endings collide with
- * usage counts (`token_count`-style keys stay preserved per the logger
- * contract), while password/secret/apikey/authtoken endings have no benign
- * reading.
+ * readable. Bare `token_count`-style usage keys stay readable because the
+ * benign-usage exemption runs before every classification below.
  */
 const BARE_CREDENTIAL_SUFFIXES = [
   "password",
   "passwd",
   "secret",
   "apikey",
+  "token",
   "authtoken",
   "idtoken",
 ];
@@ -58,10 +58,6 @@ function hasBareCredentialSuffix(key: string, allowEqual = false): boolean {
     (suffix) =>
       flat.endsWith(suffix) && (allowEqual || flat.length > suffix.length)
   );
-}
-
-function hasConcatenatedCredentialSuffix(key: string): boolean {
-  return hasBareCredentialSuffix(key);
 }
 
 /**
@@ -109,22 +105,23 @@ function hasTrailingAuthorizationSegment(key: string): boolean {
  * A leading credential run names a credential CONTAINER
  * (`credentials_json`, `credentialsByName`, `password_confirmation`,
  * `secret_value`, `oauthCredentialsJson`, `token_value`,
- * `accessTokenValue`, `api_key_value`, `authtoken`, `idtoken`). The head
- * must classify under the shared suffix rules, read as a suffix term, or
- * end with a bare credential term the shared rules miss (`authtoken`,
- * `idtoken`, since the denylist has no `auth_?token` / `id_?token` form) — a
- * whole-name exact match never seeds one (`cookie`, `authorization`, `auth`,
- * `bearer`), so `cookie-policy` and `authorization_mode` stay readable.
- * `authorization` is pinned to the trailing-header rule, except a credential
- * qualifier directly after it (`authorization_value`); config qualifiers
- * (`authorization_mode`, `authorization_policy`) stay readable. A two-segment
- * usage metric (`token_count`, `token_total`, `max_tokens`, `totalTokens`)
- * is exempt everywhere: usage metadata stays readable per the logger
- * contract. Container semantics live in the walk: a scalar beneath one IS
- * the serialized credential and collapses, while a structured value beneath
- * one recurses with every descendant treated as credential-adjacent (a map's
- * leaves cannot be trusted by key name alone —
- * `credentialsByName.github` proves it).
+ * `accessTokenValue`, `api_key_value`, `authtoken`, `csrftoken`,
+ * `githubtoken`, `clientsecretvalue`). The head must classify under the
+ * shared suffix rules, read as a suffix term, or end with a bare credential
+ * term the shared rules miss — a whole-name exact match never seeds one
+ * (`cookie`, `authorization`, `auth`, `bearer`), so `cookie-policy` and
+ * `authorization_mode` stay readable. `authorization` is pinned to the
+ * trailing-header rule, except a credential qualifier anywhere after it
+ * (`authorization_value`, `authorizationValueJson`); config qualifiers
+ * (`authorization_mode`, `authorization_policy`) stay readable. A
+ * two-segment usage metric (`token_count`, `token_total`, `max_tokens`,
+ * `totalTokens`) is exempt everywhere: usage metadata stays readable per
+ * the logger contract. Only the leading run (at most four segments) is
+ * scanned, so pathological keys stay linear. Container semantics live in
+ * the walk: a scalar beneath one IS the serialized credential and collapses,
+ * while a structured value beneath one recurses with every descendant
+ * treated as credential-adjacent (a map's leaves cannot be trusted by key
+ * name alone — `credentialsByName.github` proves it).
  */
 
 /** Qualifiers that mark a key as usage metadata, never a credential. */
@@ -183,18 +180,24 @@ function isBenignUsageKey(key: string): boolean {
 function hasCredentialSegment(key: string): boolean {
   if (isBenignUsageKey(key)) return false;
   const segments = splitKeySegments(key);
-  for (let end = 1; end <= segments.length; end++) {
-    const head = segments.slice(0, end).join("_");
+  // Bounded lookahead: real credential compounds are short
+  // (`access_token`, `oauth_credentials`); scanning an unbounded prefix run
+  // turns a pathological key into quadratic work.
+  const end = Math.min(segments.length, MAX_CREDENTIAL_PREFIX_PARTS);
+  for (let length = 1; length <= end; length++) {
+    const head = segments.slice(0, length).join("_");
     if (head === "authorization") {
       // Pinned to the trailing-header rule — except a credential qualifier
-      // directly after it.
-      const tail = segments.slice(end);
-      const qualifier = tail.length === 1 ? tail[0] : undefined;
+      // anywhere after it (`authorization_value`,
+      // `authorizationValueJson`).
+      const tail = segments.slice(length);
       if (
-        qualifier !== undefined &&
-        (AUTH_CREDENTIAL_QUALIFIERS.has(qualifier) ||
-          isSecretKey(qualifier) ||
-          isSecretKey(squashKey(qualifier)))
+        tail.some(
+          (segment) =>
+            AUTH_CREDENTIAL_QUALIFIERS.has(segment) ||
+            isSecretKey(segment) ||
+            isSecretKey(squashKey(segment))
+        )
       ) {
         return true;
       }
@@ -208,8 +211,26 @@ function hasCredentialSegment(key: string): boolean {
     if (!qualifies) continue;
     return true;
   }
-  return false;
+  // Separator-free compounds with the credential term in the middle
+  // (`clientsecretvalue`): the shared rules and split segment tests never
+  // see them. `token` and bare `key` stay out here — `tokenizer`,
+  // `keyboard` and usage counters stay readable.
+  const flat = squashKey(key);
+  return SUBSTRING_CREDENTIALS.some((term) => flat.includes(term));
 }
+
+/** Longest credential-name prefix worth testing; real compounds are short. */
+const MAX_CREDENTIAL_PREFIX_PARTS = 6;
+
+/** Credential terms matched as substrings of separator-free compounds. */
+const SUBSTRING_CREDENTIALS = [
+  "secret",
+  "password",
+  "passwd",
+  "credential",
+  "credentials",
+  "apikey",
+];
 
 /** Bound recursive work on diagnostic values. */
 const MAX_DEPTH = 8;
@@ -244,7 +265,7 @@ function isStrongSecretKey(key: string): boolean {
   if (isSecretKey(squashKey(key))) return true;
   if (SECRET_KEY_EXACT.has(squashKey(key))) return true;
   if (hasTrailingAuthorizationSegment(key)) return true;
-  if (hasConcatenatedCredentialSuffix(key)) return true;
+  if (hasBareCredentialSuffix(key)) return true;
   // Matched per separated segment, not against the squashed whole:
   // `X-Hub-Signature-256` squashes to `xhubsignature256`, which no exact set
   // can ever hold, so every real signature header would slip through.
