@@ -20,6 +20,9 @@
  *   - liked_tweets:  posts the user has liked (API v2 or signed-in extension backfill)
  *   - bookmarks:        posts the user has bookmarked (API v2 or extension)
  *   - direct_messages:  1:1 and group DMs (OAuth API; extension fallback on /messages)
+ *   - live_messages:    DMs read live from the signed-in browser without importing
+ *                    history; Automations subscribe to `message.created` and can
+ *                    answer through `send_message`
  *   - following_timeline: live chronological Following timeline (OAuth API,
  *                    source reads only; does not import tweet events)
  *   - home_feed:        personalized x.com home timeline (extension only — the
@@ -29,11 +32,13 @@
  */
 
 import {
-	buildInjectHandoffBannerExpression as buildSharedHandoffBannerExpression,
-	requireBrowser,
-	truncateHandoffReason as truncateSharedHandoffReason,
 	type ActionContext,
 	type ActionResult,
+	assertNoMatch,
+	assertNoOffsetPaging,
+	assertNoSort,
+	assertNoWindow,
+	buildInjectHandoffBannerExpression as buildSharedHandoffBannerExpression,
 	type ChromeActionDispatcher,
 	ConnectorRuntime,
 	calculateEngagementScore,
@@ -44,15 +49,19 @@ import {
 	type EventEnvelope,
 	extensionDomScrape,
 	extensionNetworkSync,
+	type FeedObserveContext,
 	type FeedReadContext,
 	type FeedReadResult,
 	type HttpClient,
 	HttpStatusError,
 	paginateByCursor,
 	type RuntimeConnectorDefinition,
+	requireBrowser,
 	type SyncContext,
 	type SyncResult,
+	truncateHandoffReason as truncateSharedHandoffReason,
 } from "@lobu/connector-sdk";
+import { xDirectMessagesProgram } from "./x-dm-adapter.js";
 
 /** What one X sync gathers before it is committed. */
 type XSyncPage = {
@@ -3082,6 +3091,145 @@ export async function prepareXReply(
 	};
 }
 
+// ── Live DMs (browser source program) ─────────────────────────
+
+/**
+ * A neutral signed-in route for the live DM program. Opening /messages marks
+ * conversations read, so the program calls the DM endpoints from here instead.
+ */
+const X_LIVE_MESSAGES_TAB_URL = "https://x.com/home";
+
+const X_LIVE_MESSAGE_COLUMNS = [
+	{ name: "id", type: "string" },
+	{ name: "message_id", type: "string" },
+	{ name: "conversation_id", type: "string" },
+	{ name: "conversation_name", type: "string" },
+	{ name: "sender_id", type: "string" },
+	{ name: "sender_handle", type: "string" },
+	{ name: "sender_name", type: "string" },
+	{ name: "from_me", type: "boolean" },
+	{ name: "is_group", type: "boolean" },
+	{ name: "text", type: "string" },
+	{ name: "content_kind", type: "string" },
+	{ name: "occurred_at", type: "string" },
+];
+
+/** Keep data inert in generated page code, including an HTML script context. */
+function xScriptArgument(value: unknown): string {
+	const literal = JSON.stringify(JSON.stringify(value)).replace(
+		/[<>\u2028\u2029]/g,
+		(char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+	);
+	return `JSON.parse(${literal})`;
+}
+
+async function readyXLiveTab(
+	dispatcher: ChromeActionDispatcher,
+): Promise<number> {
+	const nav = await dispatcher.dispatch<{
+		tab_id?: number;
+		current_url?: string;
+	}>("navigate", {
+		url: X_LIVE_MESSAGES_TAB_URL,
+		persistent: true,
+		wait_for_load: true,
+	});
+	if (isXAuthWall(nav.current_url)) {
+		throw new Error(
+			"X is not signed in on the paired Chrome. Sign in at https://x.com, then retry.",
+		);
+	}
+	if (typeof nav.tab_id !== "number") {
+		throw new Error("Chrome did not return an X tab id");
+	}
+	return nav.tab_id;
+}
+
+/** One call into the page program, installing it first when absent or stale. */
+async function invokeXDirectMessages<T>(
+	dispatcher: ChromeActionDispatcher,
+	tabId: number,
+	op: "read" | "listen" | "send",
+	input: Record<string, unknown>,
+): Promise<T> {
+	const result = await dispatcher.dispatch<{
+		value?: T;
+		exception?: { description?: string } | unknown;
+	}>("evaluate", {
+		tab_id: tabId,
+		expression: `(() => { (${xDirectMessagesProgram.toString()})(); return globalThis.__lobuXDirectMessagesV1.${op}(${xScriptArgument(input)}); })()`,
+		await_promise: true,
+	});
+	if (result.exception || !result.value) {
+		const description = (
+			result.exception as { description?: unknown } | undefined
+		)?.description;
+		throw new Error(
+			typeof description === "string"
+				? description.split("\n")[0]
+				: `X direct messages ${op} failed: ${JSON.stringify(result.exception ?? "empty response")}`,
+		);
+	}
+	return result.value;
+}
+
+async function readXLiveMessages(
+	ctx: FeedReadContext,
+): Promise<FeedReadResult> {
+	const message =
+		"X live messages read the recent inbox in source order with the returned cursor, or one message by id:<message id>; search, offsets, sorting, matching, and time windows are unsupported";
+	assertNoOffsetPaging(ctx, message);
+	assertNoSort(ctx, message);
+	assertNoWindow(ctx, message);
+	assertNoMatch(ctx, message);
+	const dispatcher = requireXBrowser(ctx);
+	const tabId = await readyXLiveTab(dispatcher);
+	const page = await invokeXDirectMessages<{
+		rows: Array<Record<string, unknown>>;
+		nextCursor?: string;
+		hasMore: boolean;
+	}>(dispatcher, tabId, "read", {
+		query: ctx.query,
+		cursor: ctx.cursor,
+		limit: ctx.limit,
+	});
+	return {
+		rows: page.rows,
+		columns: X_LIVE_MESSAGE_COLUMNS,
+		...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+		hasMore: page.hasMore,
+	};
+}
+
+/**
+ * Attach the page program's listener. It checks for new DMs once a minute
+ * while the browser is online and publishes `message.created` references
+ * through the bridge; the checkpoint is X's own inbox update cursor.
+ */
+async function observeXLiveMessages(ctx: FeedObserveContext): Promise<void> {
+	const dispatcher = requireXBrowser(ctx);
+	const tabId = await readyXLiveTab(dispatcher);
+	const binding = await dispatcher.dispatch<{
+		bridge_id?: string;
+		token?: string;
+		listening?: boolean;
+		subscription?: { scope_key: string };
+	}>("feed_listen", { tab_id: tabId });
+	if (
+		!binding.bridge_id ||
+		!binding.token ||
+		!binding.subscription ||
+		binding.listening === false
+	) {
+		throw new Error("The paired browser must support source subscriptions");
+	}
+	await invokeXDirectMessages(dispatcher, tabId, "listen", {
+		checkpoint: ctx.checkpoint ?? null,
+		bridge_id: binding.bridge_id,
+		token: binding.token,
+	});
+}
+
 // ── Connector ──────────────────────────────────────────────────
 
 export default class XConnector extends ConnectorRuntime {
@@ -3089,8 +3237,8 @@ export default class XConnector extends ConnectorRuntime {
 		key: "x",
 		name: "X (Twitter)",
 		description:
-			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, and reads the chronological Following timeline live through the X API. Links social actors into the person graph.",
-		version: "3.14.2",
+			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, reads the chronological Following timeline live through the X API, and reads and answers DMs live in the paired browser. Links social actors into the person graph.",
+		version: "3.15.0",
 		faviconDomain: "x.com",
 		browser: {
 			origins: ["https://x.com", "https://twitter.com"],
@@ -3149,7 +3297,43 @@ export default class XConnector extends ConnectorRuntime {
 				},
 			],
 		},
+		// Declaring automationEvents replaces the eventKinds-derived catalog, so
+		// every kind the sync feeds emit is listed alongside the live DM event.
+		automationEvents: [
+			{
+				key: "message.created",
+				label: "New DM",
+				resourceType: "message",
+				description:
+					"A new X direct message reference from the paired browser. The Automation reads its content from the live messages feed, or replies in the conversation it came from.",
+				filterSchema: {
+					type: "object",
+					properties: {
+						channel_id: {
+							type: "string",
+							title: "Conversation",
+							description: "X DM conversation ID.",
+						},
+					},
+				},
+				capabilities: { replyToSource: true },
+			},
+			{ key: "tweet", label: "Tweet" },
+			{ key: "reply", label: "Reply" },
+			{ key: "liked_tweet", label: "Liked Tweet" },
+			{ key: "bookmark", label: "Bookmark" },
+			{ key: "dm_message", label: "DM Message" },
+		],
 		feeds: {
+			live_messages: {
+				key: "live_messages",
+				name: "Live messages",
+				description:
+					"Read recent X direct messages live from the paired browser without importing history or marking them read, page by the returned cursor, or read one message by id:<message id>. Active Automations subscribe to new-message references; the browser checks once a minute while it is online and resumes from X's inbox update cursor after reconnecting. Requires a browser-authenticated X connection.",
+				read: readXLiveMessages,
+				observe: observeXLiveMessages,
+				webhook: { mode: "trigger", events: ["message.created"] },
+			},
 			following_timeline: {
 				key: "following_timeline",
 				name: "Following Timeline (live)",
@@ -3285,6 +3469,50 @@ export default class XConnector extends ConnectorRuntime {
 			},
 		},
 		actions: {
+			send_message: {
+				key: "send_message",
+				kind: "write",
+				name: "Send DM reply",
+				description:
+					"Requires an X connection authenticated through your paired Chrome browser. Send a text reply into an exact existing X direct message conversation and confirm it appears there. This direct send is approved only for answering DMs on bot accounts the owner operates; public replies and posts stay draft-only through prepare_reply. A retry with the same idempotency_key returns the earlier message when X shows it on the latest conversation page, and refuses rather than risk a second send when it cannot tell.",
+				annotations: {
+					destructiveHint: false,
+					idempotentHint: true,
+					openWorldHint: true,
+				},
+				inputSchema: {
+					type: "object",
+					required: ["conversation_id", "text", "idempotency_key"],
+					additionalProperties: false,
+					properties: {
+						conversation_id: {
+							type: "string",
+							pattern: "^[0-9]{1,20}(-[0-9]{1,20})?$",
+							description:
+								"Exact X DM conversation ID, the conversation_id of a live_messages row.",
+						},
+						text: { type: "string", minLength: 1, maxLength: 10000 },
+						idempotency_key: {
+							type: "string",
+							minLength: 1,
+							maxLength: 200,
+							description:
+								"Stable key for this reply, sent to X as its client request ID. Reuse it on retry so an earlier send is recognised instead of repeated.",
+						},
+					},
+				},
+				outputSchema: {
+					type: "object",
+					properties: {
+						sent: { type: "boolean" },
+						deduplicated: { type: "boolean" },
+						id: { type: "string" },
+						message_id: { type: "string" },
+						conversation_id: { type: "string" },
+						occurred_at: { type: "string" },
+					},
+				},
+			},
 			prepare_reply: {
 				key: "prepare_reply",
 				kind: "write",
@@ -3354,6 +3582,21 @@ export default class XConnector extends ConnectorRuntime {
 
 	async execute(ctx: ActionContext): Promise<ActionResult> {
 		try {
+			if (ctx.actionKey === "send_message") {
+				const dispatcher = requireXBrowser(ctx);
+				const tabId = await readyXLiveTab(dispatcher);
+				const output = await invokeXDirectMessages<Record<string, unknown>>(
+					dispatcher,
+					tabId,
+					"send",
+					{
+						conversation_id: ctx.input.conversation_id,
+						text: ctx.input.text,
+						idempotency_key: ctx.input.idempotency_key,
+					},
+				);
+				return { success: true, output };
+			}
 			if (ctx.actionKey !== "prepare_reply") {
 				return { success: false, error: `Unknown action: ${ctx.actionKey}` };
 			}
