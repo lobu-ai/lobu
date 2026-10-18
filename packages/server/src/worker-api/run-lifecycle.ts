@@ -160,13 +160,14 @@ async function finalizeRun(
 async function readRunCompletionFlags(
 	sql: DbClient,
 	runId: number
-): Promise<{ browser: boolean; sourceRead: boolean }> {
+): Promise<{ browser: boolean; sourceRead: boolean; agentTurn: boolean }> {
 	const rows = (await sql`
-    SELECT connector_key, run_metadata FROM runs WHERE id = ${runId} LIMIT 1
-  `) as unknown as Array<{ connector_key: string | null; run_metadata: Record<string, unknown> | null }>;
+    SELECT connector_key, run_metadata, run_type = 'agent_turn' AS agent_turn FROM runs WHERE id = ${runId} LIMIT 1
+  `) as unknown as Array<{ connector_key: string | null; run_metadata: Record<string, unknown> | null; agent_turn: boolean }>;
 	return {
 		browser: isBrowserConnectorKey(rows[0]?.connector_key),
 		sourceRead: isSourceFeedRead(rows[0]?.run_metadata),
+		agentTurn: rows[0]?.agent_turn === true,
 	};
 }
 
@@ -1287,15 +1288,11 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 
 		const sql = getDb();
 		// The lane that owns its own completion route, resolved in ONE
-		// primary-key read: this runs on every generic completion, so each extra
-		// round trip is paid by every connector run.
-		const [dedicatedLane] = await sql<{ agent_turn: boolean }>`
-      SELECT run_type = 'agent_turn' AS agent_turn
-      FROM runs
-      WHERE id = ${req.run_id}
-      LIMIT 1
-    `;
-		if (dedicatedLane?.agent_turn) {
+		// primary-key read alongside the browser/source-read flags below: this
+		// runs on every generic completion, so each extra round trip is paid by
+		// every connector run.
+		const { browser: isBrowserRun, agentTurn: isAgentTurn } = await readRunCompletionFlags(sql, req.run_id);
+		if (isAgentTurn) {
 			// An agent turn carries a transcript and a reply; finalizing it with
 			// sync semantics would drop both and mark the turn done. Refuse, leave
 			// the run in progress, and let the lane's own endpoint (or the
@@ -1305,7 +1302,6 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 				409
 			);
 		}
-		const { browser: isBrowserRun } = await readRunCompletionFlags(sql, req.run_id);
 		if (isBrowserRun) {
 			req.error_message = sanitizeBrowserText(req.error_message) ?? undefined;
 			req.output_tail = sanitizeBrowserText(req.output_tail) ?? undefined;

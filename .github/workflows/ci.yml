@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
+  # Manual fallback: pull_request event delivery failed silently for #4204/#4206
+  # (no run created for any push, close/reopen, or edit), so CI could not start.
+  workflow_dispatch:
 
 # Least-privilege GITHUB_TOKEN for every job in this workflow. No job writes to
 # the GitHub API (no artifacts, no `gh`, no comments); the submodule checkout

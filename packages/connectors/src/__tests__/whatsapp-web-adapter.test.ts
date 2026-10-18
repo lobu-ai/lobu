@@ -543,6 +543,29 @@ describe("whatsAppWebAdapterProgram message actions", () => {
 });
 
 describe("whatsAppWebAdapterProgram version", () => {
+  it("replaces the resident version 23 adapter and detaches its listeners", () => {
+    let detached = 0;
+    const resident = {
+      version: 23,
+      detach: () => { detached++; },
+    };
+    const globals = { __owlettoWhatsAppAdapterV1: resident };
+    const install = new Function(
+      "globalThis",
+      `(${whatsAppWebAdapterProgram.toString()})();`
+    );
+
+    install(globals);
+    expect(detached).toBe(1);
+    expect(globals.__owlettoWhatsAppAdapterV1).not.toBe(resident);
+    expect(globals.__owlettoWhatsAppAdapterV1.version).toBe(WHATSAPP_ADAPTER_VERSION);
+
+    const installed = globals.__owlettoWhatsAppAdapterV1;
+    install(globals);
+    expect(globals.__owlettoWhatsAppAdapterV1).toBe(installed);
+    expect(detached).toBe(1);
+  });
+
   // The connector reuses a resident adapter whenever its version matches, so a
   // fix shipped without bumping this number leaves every open
   // WhatsApp tab running the old program. The two constants live in different
@@ -589,7 +612,7 @@ describe("WhatsApp source observation", () => {
       posts, handlers,
       publish: (batch: unknown) => adapter.invoke({ op: "publish_changes", adapter_version: WHATSAPP_ADAPTER_VERSION,
         bridge_id: "synthetic-feed", token: "synthetic-token", batch }),
-      listen: (token = "synthetic-token", extra = {}) => adapter.invoke({ op: "listen", adapter_version: WHATSAPP_ADAPTER_VERSION, bridge_id: "synthetic-feed", token, recent_since: 1000, ...extra }),
+      listen: (token = "synthetic-token", extra = {}) => adapter.invoke({ op: "listen", adapter_version: WHATSAPP_ADAPTER_VERSION, bridge_id: "synthetic-feed", token, minimum_timestamp: 1000, ...extra }),
       emit: (kind: string, body: string, t = 1100, remote = "15550000000@c.us") => {
         for (const fn of handlers.get(kind) ?? []) fn({ attributes: { id: { id: "synthetic-message", remote }, from: "15550000000@c.us", body, type: "chat", t } });
       },
@@ -678,7 +701,7 @@ describe("WhatsApp source observation", () => {
     expect(source.posts.map(post => post.record)).toEqual([{ id: "synthetic-message", events: [{ id: "synthetic-message", event_type: "message.created", resource_ref: "synthetic-message", resource_type: "message", occurred_at: new Date(1100 * 1000).toISOString() }] }]);
   });
 
-  it("ignores historical hydration while retaining changes to old messages", async () => {
+  it("ignores historical hydration and changes to pre-subscription messages", async () => {
     const source = install();
     await source.listen();
     source.emit("add", "historical", 900);
@@ -686,10 +709,7 @@ describe("WhatsApp source observation", () => {
     expect(source.posts).toHaveLength(0);
     source.emit("change", "edited history", 900);
     await settle();
-    expect(source.posts[0].record.id).toBe("synthetic-message");
-    source.emit("change", "edited again", 900);
-    await settle();
-    expect(source.posts).toHaveLength(1);
+    expect(source.posts).toHaveLength(0);
   });
 
   it("reattaches once, retries unaccepted records, and stops on revocation", async () => {

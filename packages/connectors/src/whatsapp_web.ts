@@ -450,6 +450,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
               enum: ["whatsapp_fts", "loaded_model_fallback"],
             },
             results: { type: "array", items: { type: "object" } },
+            hasMore: { type: "boolean" },
           },
         },
       },
@@ -607,7 +608,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     }
     await invokeAdapter(dispatcher, tabId, {
       op: "listen", bridge_id: binding.bridge_id, token: binding.token,
-      chat_filter: chatFilter, recent_since: startedAt, minimum_timestamp: startedAt,
+      chat_filter: chatFilter, minimum_timestamp: startedAt,
     });
     let cursor = ctx.checkpoint ?? null;
     for (let page = 0; page < 10; page++) {
@@ -704,9 +705,6 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
             results: normalizedSearchResults(
               response.results as unknown[] | undefined
             ),
-            ...(typeof response.total === "number"
-              ? { total: response.total }
-              : {}),
             ...(typeof response.hasMore === "boolean"
               ? { hasMore: response.hasMore }
               : {}),

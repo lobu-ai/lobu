@@ -77,30 +77,6 @@ export const ATLASSIAN_MCP_FEEDS = {
 				},
 			},
 		},
-		eventKinds: {
-			issue: {
-				description: "A Jira issue",
-				metadataSchema: {
-					type: "object",
-					properties: {
-						key: { type: "string" },
-						status: { type: "string" },
-						assignee: { type: "string" },
-						reporter: { type: "string" },
-						updated_at: { type: "string" },
-					},
-				},
-			},
-			comment: {
-				description: "A comment on a Jira issue",
-				metadataSchema: {
-					type: "object",
-					properties: {
-						updated_at: { type: "string" },
-					},
-				},
-			},
-		},
 	},
 };
 

@@ -131,35 +131,3 @@ export async function authorizeRunForWorker(
   }
   return null;
 }
-
-/** Verify a user-scoped caller is the exact device named by a run target. */
-export async function authorizePinnedDeviceForWorker(
-  c: Context<{ Bindings: Env }>,
-  workerId: string,
-  pinnedDeviceWorkerId: string,
-): Promise<Response | null> {
-  if (c.var.workerAuthMode !== 'user') return null;
-  const workerUserId = c.var.workerUserId;
-  const boundWorkerId = c.var.mcpAuthInfo?.workerId ?? null;
-  if (!workerUserId || (boundWorkerId && boundWorkerId !== workerId)) {
-    return c.json(
-      { error: 'Forbidden: worker token is not bound to this device' },
-      403,
-    );
-  }
-  // Normal onboarding mints a worker-bound child token. Keep the same
-  // owner + worker-id fallback as Automation completion for advanced setups
-  // that intentionally supply an older unbound user PAT.
-  const effectiveWorkerId = boundWorkerId ?? workerId;
-  const rows = await getDb()<{ id: string }>`
-    SELECT id
-    FROM device_workers
-    WHERE user_id = ${workerUserId}
-      AND worker_id = ${effectiveWorkerId}
-      AND id = ${pinnedDeviceWorkerId}::uuid
-    LIMIT 1
-  `;
-  return rows.length > 0
-    ? null
-    : c.json({ error: 'Forbidden: device worker mismatch' }, 403);
-}

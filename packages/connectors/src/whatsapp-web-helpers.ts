@@ -14,12 +14,10 @@ import {
   WHATSAPP_PHONE_SERVER,
 } from "./whatsapp-web-identity.js";
 
-export const WHATSAPP_ADAPTER_VERSION = 23;
+export const WHATSAPP_ADAPTER_VERSION = 24;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 
 export type ChatFilter = "all" | "individual" | "group";
-
-export type WhatsAppReaction = Record<string, unknown>;
 
 /** A message after `normalizeRelayedMessage` — every field the port relies on. */
 export interface WhatsAppMessage {
@@ -27,14 +25,12 @@ export interface WhatsAppMessage {
   chat_jid: string;
   chat_name?: string | null;
   sender_jid: string | null;
-  participant: string | null;
   sender_phone: string | null;
   push_name?: string | null;
   is_group: boolean;
   from_me: boolean;
   timestamp: number;
   occurred_at: string;
-  reactions: WhatsAppReaction[];
   body?: string | null;
   caption?: string | null;
   message_type?: string | null;
@@ -120,25 +116,20 @@ export function normalizeRelayedMessage(
     return null;
   }
   const senderJid = canonicalizeJid(raw.sender_jid);
-  const participant = canonicalizeJid(raw.participant);
   const fromMe = Boolean(raw.from_me);
+  // Retired history-sync fields must not survive through the raw-field spread.
+  const { participant: _droppedParticipant, reactions: _droppedReactions, ...rest } = raw;
   return {
-    ...raw,
+    ...rest,
     id,
     chat_jid: chatJid,
     sender_jid: fromMe ? null : senderJid,
-    participant: fromMe ? participant : null,
     sender_phone: fromMe ? null : (raw.sender_phone ?? jidPhone(senderJid)),
     push_name: fromMe ? null : raw.push_name,
     is_group: chatJid.endsWith(WHATSAPP_GROUP_SUFFIX),
     from_me: fromMe,
     timestamp,
     occurred_at: new Date(timestamp * 1000).toISOString(),
-    reactions: Array.isArray(raw.reactions)
-      ? [...raw.reactions].sort((a, b) =>
-          JSON.stringify(a).localeCompare(JSON.stringify(b))
-        )
-      : [],
   };
 }
 

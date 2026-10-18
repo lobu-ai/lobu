@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 23;
+  const ADAPTER_VERSION = 24;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   const MAX_RECORD_BYTES = 128 * 1024;
   const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -108,7 +108,7 @@ export function whatsAppWebAdapterProgram() {
     state.token = request.token;
     state.request = request;
     state.post = (entry) => post(state, entry);
-    const observe = (model, kind) => {
+    const observe = (model) => {
       if (state.error) return;
       const sequence = ++state.sequence;
       // A throwing model getter must reach the error record below, not escape
@@ -118,9 +118,6 @@ export function whatsAppWebAdapterProgram() {
         if (state.request.chat_filter === "group" && !record.is_group) return;
         if (state.request.chat_filter === "individual" && record.is_group) return;
         if (state.request.minimum_timestamp != null && record.timestamp < state.request.minimum_timestamp) return;
-        // Loading historical models also emits add. A change still passes: a
-        // placeholder that hydrates after subscription start is a new message.
-        if (kind === "add" && record.timestamp < state.request.recent_since) return;
         record = {
           id: record.id,
           events: [{ id: record.id, event_type: "message.created", resource_ref: record.id,
@@ -154,8 +151,8 @@ export function whatsAppWebAdapterProgram() {
         reportError(state, "WhatsApp source observation failed; recovery is required", sequence);
       });
     };
-    state.onAdd = (model) => observe(model, "add");
-    state.onChange = (model) => observe(model, "change");
+    state.onAdd = (model) => observe(model);
+    state.onChange = (model) => observe(model);
     state.onReply = (event) => {
       if (event.source !== window || event.origin !== location.origin || event.data?.token !== state.token) return;
       if (event.data.type === "lobu-feed-record:stop") { detach(state.id); return; }

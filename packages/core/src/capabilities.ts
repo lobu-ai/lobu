@@ -54,7 +54,6 @@ export const MAC_DEVICE_CAPABILITIES = [
   "photos",
   "calendar",
   "reminders",
-  "system_audio",
   "computer_use",
 ] as const;
 

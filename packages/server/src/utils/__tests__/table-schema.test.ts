@@ -235,11 +235,7 @@ describe('validateAndScopeQuery', () => {
  */
 describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
   const INTENTIONALLY_OMITTED: Record<string, Set<string>> = {
-    // enabled_classifiers (entities) and classifiers (automation_versions) were
-    // retired with Automation classifier extraction. Schema exposure is removed
-    // ahead of the two-phase column drop.
-    entities: new Set(['embedding', 'content_tsv', 'content_hash', 'field_controls', 'enabled_classifiers']),
-    automation_versions: new Set(['classifiers']),
+    entities: new Set(['embedding', 'content_tsv', 'content_hash', 'field_controls']),
     // superseded_by: the query_sql events CTE reads from current_event_records,
     // which doesn't expose the column — and never usefully can: the Stage-2
     // flip makes the view `WHERE superseded_by IS NULL`, so through the view
@@ -260,10 +256,6 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
       'api_config',
       'openapi_config',
       'default_connection_config',
-      // Retired with the connector repair-agent subsystem. Schema exposure is
-      // removed ahead of the two-phase column drop, so the physical column
-      // outlives its QUERYABLE_SCHEMA entry until the phase-2 migration.
-      'default_repair_agent_id',
     ]),
     // user_id: always the caller under the CTE's owner filter, so projecting it
     // adds nothing but a correlation handle.
@@ -281,27 +273,12 @@ describe('QUERYABLE_SCHEMA vs database (drift detection)', () => {
       'granted_organization_ids',
       'authorization_grant_type',
     ]),
-    // repair_*/last_repair_*: same retired repair-agent subsystem, awaiting the
-    // phase-2 DROP COLUMN migration.
-    feeds: new Set([
-      'checkpoint',
-      'repair_agent_id',
-      'repair_thread_id',
-      'repair_attempt_count',
-      'last_repair_at',
-      'last_repair_post_hash',
-    ]),
-    // scheduler_client_id: retired with the Automation scheduler rework in #2499,
-    // which stopped writing it and replaced it with agent_kind on the read path.
-    // Prod has it NULL on every row. Schema exposure is removed ahead of the
-    // two-phase column drop, so the physical column outlives its
-    // QUERYABLE_SCHEMA entry until the phase-2 migration. next_window_start is
-    // internal scheduler coordination state, exposed through the Automation
-    // contract as pending_analysis.next_window rather than raw query_sql. The
+    feeds: new Set(['checkpoint']),
+    // next_window_start is internal scheduler coordination state, exposed through
+    // the Automation contract as pending_analysis.next_window rather than raw query_sql. The
     // latest-completion scalar is the rest of that same scheduler-internal
     // projection.
     automations: new Set([
-      'scheduler_client_id',
       'next_window_start',
       'last_completed_window_start',
     ]),

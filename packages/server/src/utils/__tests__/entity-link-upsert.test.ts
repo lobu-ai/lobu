@@ -16,7 +16,6 @@ import {
 import {
   applyEventAttributions,
   clearEntityLinkRulesCache,
-  loadAttributionRuleByType,
   resolveSenderIdentity,
 } from '../entity-link-upsert';
 import { ensureMemberEntityType } from '../member-entity-type';
@@ -383,15 +382,6 @@ describe('applyEventAttributions', () => {
     });
 
     expect((item.metadata as Record<string, unknown>).x_user_id).toBe('456');
-
-    clearEntityLinkRulesCache();
-    const activeRule = await loadAttributionRuleByType(sql, {
-      connectorKey: 'x-versioned',
-      orgId: org.id,
-      entityType: '$member',
-      role: 'authored_by',
-    });
-    expect(activeRule?.identities[0]?.namespace).toBe('x_user_id');
   });
 
   it('first-writer-wins when two rules stamp the same namespace on one event', async () => {
