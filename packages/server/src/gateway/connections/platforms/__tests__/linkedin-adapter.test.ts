@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { NotImplementedError } from "chat";
-import type { ConnectorChatOperationRequest } from "../connector-chat.js";
+import { type ConnectorChatOperationRequest, splitText } from "../connector-chat.js";
 import { LinkedInAdapter } from "../linkedin-adapter.js";
 
 const THREAD = "2-c3ludGhldGljLWRt==";
@@ -101,5 +101,58 @@ describe("LinkedIn adapter", () => {
     await expect(adapter.postMessage(`linkedin:202:${THREAD}`, "hi")).rejects.toThrow("Invalid LinkedIn thread ID");
     await expect(adapter.openDM()).rejects.toBeInstanceOf(NotImplementedError);
     expect(calls).toHaveLength(0);
+  });
+
+  test("a reply over LinkedIn's 3000-character limit goes out as ordered parts with derived keys", async () => {
+    const { adapter, calls } = harness();
+    await adapter.postMessage(`linkedin:101:${THREAD}`, "a".repeat(3000), "reply-key");
+    expect(calls.map((call) => call.idempotencyKey)).toEqual(["reply-key"]);
+
+    calls.length = 0;
+    const first = `${"a".repeat(2000)}\n\n${"b".repeat(998)}`;
+    const second = "c".repeat(1500);
+    await adapter.postMessage(`linkedin:101:${THREAD}`, `${first}\n\n${second}`, "reply-key");
+    expect(calls.map((call) => [call.input.text, call.idempotencyKey, call.input.idempotency_key])).toEqual([
+      [first, "reply-key", "reply-key"],
+      [second, "reply-key:1", "reply-key:1"],
+    ]);
+    for (const call of calls) expect(String(call.input.text).length).toBeLessThanOrEqual(3000);
+  });
+
+  test("a redelivery after a partial send reuses every part's key", async () => {
+    const calls: ConnectorChatOperationRequest[] = [];
+    let failSecond = true;
+    const adapter = new LinkedInAdapter({
+      connectionId: "101",
+      userName: "bot",
+      newIdempotencyKey: () => "fresh-key",
+      execute: async (request) => {
+        calls.push(request);
+        if (request.idempotencyKey.endsWith(":1") && failSecond) {
+          failSecond = false;
+          return { status: "timeout", error: "page did not confirm" };
+        }
+        return { status: "completed", output: { sent: true, message_id: `sent-${request.idempotencyKey}` } };
+      },
+    });
+    const text = `${"a".repeat(2999)} ${"b".repeat(10)}`;
+    await expect(adapter.postMessage(`linkedin:101:${THREAD}`, text, "reply-key")).rejects.toThrow("timeout");
+    const sent = await adapter.postMessage(`linkedin:101:${THREAD}`, text, "reply-key");
+    expect(calls.map((call) => call.idempotencyKey)).toEqual(["reply-key", "reply-key:1", "reply-key", "reply-key:1"]);
+    expect(sent.id).toBe("101:sent-reply-key:1");
+  });
+});
+
+describe("splitText", () => {
+  test("breaks at the last paragraph, line or space break and hard-cuts only without one", () => {
+    expect(splitText("short", 10)).toEqual(["short"]);
+    expect(splitText("aaaa\n\nbbbb cc", 10)).toEqual(["aaaa", "bbbb cc"]);
+    expect(splitText("aaaa\nbbbb cccc", 10)).toEqual(["aaaa", "bbbb cccc"]);
+    expect(splitText("aaaa bbbb cccc", 10)).toEqual(["aaaa bbbb", "cccc"]);
+    expect(splitText("abcdefghijklmnop", 10)).toEqual(["abcdefghij", "klmnop"]);
+    // A surrogate pair straddling the hard cut stays whole.
+    const parts = splitText(`${"a".repeat(9)}😀b`, 10);
+    expect(parts).toEqual(["a".repeat(9), "😀b"]);
+    expect(parts.join("")).toBe(`${"a".repeat(9)}😀b`);
   });
 });

@@ -45,6 +45,7 @@ export class LinkedInAdapter extends ConnectorChatAdapter<LinkedInMessageRow> {
   readonly name = LINKEDIN_PLATFORM;
   protected readonly label = "LinkedIn";
   protected readonly converter = new PlainTextFormatConverter();
+  protected readonly maxTextLength = 3000;
 
   protected override get chatIdNoun(): string {
     return "LinkedIn conversation thread id";

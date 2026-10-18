@@ -40,6 +40,7 @@ export class XAdapter extends ConnectorChatAdapter<XMessageRow> {
   readonly name = X_PLATFORM;
   protected readonly label = "X";
   protected readonly converter = new PlainTextFormatConverter();
+  protected readonly maxTextLength = 10000;
 
   protected override get chatIdNoun(): string {
     return "X DM conversation id";
