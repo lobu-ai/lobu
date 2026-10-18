@@ -529,12 +529,16 @@ export function linkedInInboxProgram() {
     return { rows, continuation };
   }
   // Walks the inbox from the most recently active conversation, following
-  // LinkedIn's cursor for at most `pages` pages, and returns the first
-  // non-null `visit` result. Catch-up observes threads beyond the first page,
-  // so lookups by id must reach them too.
-  async function searchConversations(mailbox, pages, visit) {
+  // LinkedIn's cursor to the end of the inbox, and returns the first non-null
+  // `visit` result. Catch-up can observe a thread on any page, so a lookup
+  // must reach it too: running out of time fails (the caller retries) rather
+  // than reporting the target absent.
+  async function searchConversations(mailbox, visit) {
+    const deadline = Date.now() + LOOKUP_DEADLINE_MS;
     let cursor;
-    for (let page = 1; page <= pages; page++) {
+    for (;;) {
+      if (Date.now() > deadline)
+        fail("The inbox search ran out of time before reaching the end; retry");
       const source = await conversationsPage(mailbox, cursor);
       for (const thread of source.elements) {
         const found = await visit(thread);
@@ -544,15 +548,13 @@ export function linkedInInboxProgram() {
       if (typeof cursor !== "string" || !cursor || cursor.length > 4096)
         return null;
     }
-    return null;
   }
-  // A message reference names no conversation, so `id:<message URN>` looks
-  // through the most recently active conversations: a new message's thread is
-  // near the top. Not found is an empty page; the caller retries.
+  // A message reference names no conversation, so `id:<message URN>` searches
+  // the inbox from the most recently active conversation: a new message's
+  // thread is near the top. Not found is an empty page; the caller retries.
   async function findMessage(id, mailbox) {
     const row = await searchConversations(
       mailbox,
-      LOOKUP_CONVERSATION_PAGES,
       async (thread) =>
         (await messagesPage(thread.entityUrn, mailbox, groupOf(thread))).find(
           (message) => message.id === id
@@ -620,7 +622,8 @@ export function linkedInInboxProgram() {
   const NOTIFICATION_PAGES_PER_PASS = 10;
   const CONVERSATION_PAGES_PER_PASS = 2;
   // Lookups by id or conversation reach the 100 most recently active threads.
-  const LOOKUP_CONVERSATION_PAGES = 5;
+  // Under the server's 60-second source read deadline.
+  const LOOKUP_DEADLINE_MS = 45000;
   const RECENT_MESSAGE_PAGE = 20;
   const SEEN_LIMIT = 256;
   const BATCH_EVENTS = 500;
@@ -952,11 +955,10 @@ export function linkedInInboxProgram() {
     const conversation = `urn:li:msg_conversation:(${mailbox},${thread})`;
     const recent = await searchConversations(
       mailbox,
-      LOOKUP_CONVERSATION_PAGES,
       async (element) => (element.entityUrn === conversation ? element : null)
     );
     if (!recent)
-      fail("The conversation is not among the recent conversations; not sending");
+      fail("The conversation is not in the inbox; not sending");
     if (groupOf(recent) !== false)
       fail("send_message only answers direct messages; this conversation is a group or its membership is unknown");
     const originToken = await originTokenOf(mailbox, conversation, idempotencyKey);

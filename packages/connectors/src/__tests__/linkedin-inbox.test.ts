@@ -1305,8 +1305,9 @@ describe("LinkedIn direct messages", () => {
     }
   });
 
-  test("a message and its conversation beyond the first inbox page are still found and answered", async () => {
-    const busier = Array.from({ length: 20 }, (_, index) => ({
+  test("a message and its conversation deep in the inbox are still found and answered", async () => {
+    // 101 busier conversations put the target on LinkedIn's sixth page.
+    const busier = Array.from({ length: 101 }, (_, index) => ({
       entityUrn: `urn:li:msg_conversation:(${SELF},2-synthetic-busy-${index}==)`,
       groupChat: false,
       lastActivityAt: 1700000000100 - index,
@@ -1324,7 +1325,7 @@ describe("LinkedIn direct messages", () => {
       const sent = await api.send({
         conversation_id: "2-synthetic-dm==",
         text: "Yes, here.",
-        idempotency_key: "page-two",
+        idempotency_key: "page-six",
       });
       expect(sent).toMatchObject({ sent: true, conversation_id: "2-synthetic-dm==" });
       expect(posts).toHaveLength(1);
@@ -1414,7 +1415,7 @@ describe("LinkedIn direct messages", () => {
     ["a group", { entityUrn: GROUP, groupChat: true }, "2-synthetic-group==", "only answers direct messages"],
     ["unknown membership", { entityUrn: DM }, "2-synthetic-dm==", "only answers direct messages"],
     ["conflicting membership", { entityUrn: DM, groupChat: false, conversationParticipants: [{}, {}, {}] }, "2-synthetic-dm==", "only answers direct messages"],
-    ["an absent conversation", { entityUrn: GROUP, groupChat: false }, "2-synthetic-dm==", "not among the recent conversations"],
+    ["an absent conversation", { entityUrn: GROUP, groupChat: false }, "2-synthetic-dm==", "not in the inbox"],
   ])("send_message refuses %s without sending", async (_, conversation, threadId, error) => {
     const { api, dom, posts } = messenger({
       conversations: [conversation],
