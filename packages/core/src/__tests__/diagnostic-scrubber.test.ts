@@ -313,4 +313,306 @@ describe("diagnostic credential scrubber", () => {
     expect(result.cause.message).not.toContain(SECRET);
     expect(result.cause.stack).toBeDefined();
   });
+
+  it("redacts camel-cased credential headers the suffix denylist never sees", () => {
+    // `authorizationHeader` squashes to a whole name the shared denylist does
+    // not classify; the old substring logger replacer caught it, so the
+    // scrubber carries it as an exact name to avoid the regression.
+    const result = scrubDiagnosticValue({
+      authorizationHeader: `Bearer ${SECRET}`,
+      authorization_header: `Bearer ${SECRET}`,
+      authorization_mode: "strict",
+    }) as Record<string, unknown>;
+    expect(result.authorizationHeader).toBe("[REDACTED]");
+    expect(result.authorization_header).toBe("[REDACTED]");
+    expect(result.authorization_mode).toBe("strict");
+  });
+
+  it("redacts prefixed authorization headers and serialized credential fields", () => {
+    // Split-form names the whole/suffix rules miss: a trailing
+    // `authorization` segment is a vendor-prefixed header, and a leading
+    // `credential(s)` segment names a serialized credential field. The mode
+    // half of `authorization_mode` stays readable by construction, as does
+    // `token_count` (a leading `token` segment is not a credential pin).
+    const result = scrubDiagnosticValue({
+      "x-authorization": `Bearer ${SECRET}`,
+      xAuthorization: `Bearer ${SECRET}`,
+      credentials_json: JSON.stringify({ password: SECRET }),
+      credentialsJson: JSON.stringify({ password: SECRET }),
+      credentialBlob: SECRET,
+      authorization_mode: "strict",
+      token_count: 7,
+    }) as Record<string, unknown>;
+    expect(result["x-authorization"]).toBe("[REDACTED]");
+    expect(result.xAuthorization).toBe("[REDACTED]");
+    expect(result.credentials_json).toBe("[REDACTED]");
+    expect(result.credentialsJson).toBe("[REDACTED]");
+    expect(result.credentialBlob).toBe("[REDACTED]");
+    expect(result.authorization_mode).toBe("strict");
+    expect(result.token_count).toBe(7);
+  });
+
+  it("recurses into credential maps instead of collapsing them", () => {
+    // A structured value beneath a credential container recurses, so
+    // pre-redacted leaves and surviving key names pass through (the Loki
+    // connector relies on this per-key treatment) — but raw scalar leaves
+    // beneath one are credential-adjacent and collapse, including provider
+    // names the key rules alone would miss (`credentialsByName.github`).
+    const result = scrubDiagnosticValue({
+      credentialsByName: {
+        PGPASSWORD: "[REDACTED]",
+        github: `token-${SECRET}`,
+        note: "kept",
+      },
+      credentials_json: JSON.stringify({ password: SECRET }),
+    }) as Record<string, Record<string, unknown>>;
+    expect(result.credentialsByName).toEqual({
+      PGPASSWORD: "[REDACTED]",
+      github: "[REDACTED]",
+      note: "[REDACTED]",
+    });
+    expect(result.credentials_json).toBe("[REDACTED]");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("redacts password/secret segments with trailing qualifiers", () => {
+    // `password_confirmation`, `secret_value`: the credential term is not a
+    // suffix, so the shared denylist misses them; the container rule still
+    // collapses scalar values while recursing structured ones.
+    const result = scrubDiagnosticValue({
+      password_confirmation: SECRET,
+      secret_value: { nested: SECRET },
+      authorization_mode: "strict",
+      token_count: 7,
+    }) as Record<string, unknown>;
+    expect(result.password_confirmation).toBe("[REDACTED]");
+    expect(result.secret_value).toEqual({ nested: "[REDACTED]" });
+    expect(result.authorization_mode).toBe("strict");
+    expect(result.token_count).toBe(7);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("redacts authorization values and serialized authorization objects", () => {
+    const result = scrubDiagnosticValue({
+      authorization_value: SECRET,
+      authorizationValueJson: JSON.stringify({ token: SECRET }),
+      authorization_mode: "strict",
+      authorization_policy: "admin-only",
+    }) as Record<string, unknown>;
+    expect(result.authorization_value).toBe("[REDACTED]");
+    expect(result.authorizationValueJson).toBe("[REDACTED]");
+    expect(result.authorization_mode).toBe("strict");
+    expect(result.authorization_policy).toBe("admin-only");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("scrubs credential text out of Error names", () => {
+    const error = new Error("boom");
+    Object.defineProperty(error, "name", {
+      value: "Custom password=synthetic-name-secret",
+      enumerable: false,
+    });
+    const result = scrubDiagnosticValue({ cause: error }) as {
+      cause: { name: string; message: string };
+    };
+    expect(result.cause.name).not.toContain("synthetic-name-secret");
+    expect(result.cause.name).toContain("Custom");
+    expect(result.cause.message).toBe("boom");
+    expect(JSON.stringify(result)).not.toContain("synthetic-name-secret");
+  });
+  it("redacts prefixed authorization headers", () => {
+    // The auth term followed by a `header` segment is still a header
+    // (`requestAuthorizationHeader`); a bare `headers` map or one ending in
+    // any other segment stays readable.
+    const result = scrubDiagnosticValue({
+      requestAuthorizationHeader: `Bearer ${SECRET}`,
+      headers: { "content-type": "application/json" },
+    }) as Record<string, unknown>;
+    expect(result.requestAuthorizationHeader).toBe("[REDACTED]");
+    expect(result.headers).toEqual({ "content-type": "application/json" });
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+  it("redacts leading credential terms with trailing qualifiers", () => {
+    // The qualifier half is matched positionally because the shared suffix
+    // rules are end-anchored (`token_value`, `accessTokenValue`,
+    // `api_key_value`). A usage-metric qualifier stays readable
+    // (`token_count`, `token_total`, `max_tokens`).
+    const result = scrubDiagnosticValue({
+      token_value: SECRET,
+      accessTokenValue: SECRET,
+      api_key_value: SECRET,
+      token_count: 7,
+      token_total: 9,
+      max_tokens: 100,
+      totalTokens: 9,
+    }) as Record<string, unknown>;
+    expect(result.token_value).toBe("[REDACTED]");
+    expect(result.accessTokenValue).toBe("[REDACTED]");
+    expect(result.api_key_value).toBe("[REDACTED]");
+    expect(result.token_count).toBe(7);
+    expect(result.token_total).toBe(9);
+    expect(result.max_tokens).toBe(100);
+    expect(result.totalTokens).toBe(9);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+    expect(scrubDiagnosticValue("usage token_count=7")).toBe(
+      "usage token_count=7"
+    );
+  });
+
+  it("redacts Error and RegExp values beneath credential containers", () => {
+    // Built-in rendering (Error message/stack, RegExp source) bypasses
+    // key-side classification, so the container flag travels with the value.
+    const result = scrubDiagnosticValue({
+      credentialsByName: {
+        provider: new Error(`login failed: ${SECRET}`),
+        pattern: /token=synthetic-pattern-secret/,
+      },
+    }) as {
+      credentialsByName: {
+        provider: { name: string; message: string };
+        pattern: string;
+      };
+    };
+    expect(result.credentialsByName.provider.message).toBe("[REDACTED]");
+    expect(result.credentialsByName.pattern).toBe("[REDACTED]");
+    expect(result.credentialsByName.provider.name).toBe("Error");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+  it("leaves non-credential hyphenated keys readable", () => {
+    // Whole-name exact matches never seed a compound head: `cookie-policy`
+    // and `authorization_mode` stay readable even though `cookie` and
+    // `authorization` classify on their own.
+    const result = scrubDiagnosticValue({
+      "cookie-policy": "strict",
+      authorization_mode: "oauth",
+      "content-type": "application/json",
+    }) as Record<string, unknown>;
+    expect(result).toEqual({
+      "cookie-policy": "strict",
+      authorization_mode: "oauth",
+      "content-type": "application/json",
+    });
+  });
+  it("redacts separator-free token compounds without touching usage counters", () => {
+    // `csrftoken`, `githubtoken`, `authtoken`: bare `token` endings with no
+    // separator. `max_tokens` and `totalTokens` stay readable — usage
+    // metadata, per the logger contract.
+    const result = scrubDiagnosticValue({
+      csrftoken: SECRET,
+      githubtoken: SECRET,
+      authtoken: SECRET,
+      max_tokens: 100,
+      totalTokens: 9,
+    }) as Record<string, unknown>;
+    expect(result.csrftoken).toBe("[REDACTED]");
+    expect(result.githubtoken).toBe("[REDACTED]");
+    expect(result.authtoken).toBe("[REDACTED]");
+    expect(result.max_tokens).toBe(100);
+    expect(result.totalTokens).toBe(9);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("redacts credential terms buried in separator-free compounds", () => {
+    // `clientsecretvalue`: no separators and no credential suffix for the
+    // shared rules or split segment tests to catch.
+    const result = scrubDiagnosticValue({
+      clientsecretvalue: SECRET,
+    }) as Record<string, unknown>;
+    expect(result.clientsecretvalue).toBe("[REDACTED]");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("refuses usage-metric exemptions for credential-bearing names", () => {
+    // A benign qualifier only exempts an exact two-segment usage metric
+    // (`token_count`); anywhere else the credential term wins
+    // (`used_access_token`, `token_usage_secret`).
+    const result = scrubDiagnosticValue({
+      used_access_token: SECRET,
+      token_usage_secret: SECRET,
+      token_count: 7,
+    }) as Record<string, unknown>;
+    expect(result.used_access_token).toBe("[REDACTED]");
+    expect(result.token_usage_secret).toBe("[REDACTED]");
+    expect(result.token_count).toBe(7);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("stays linear on pathological segmented keys", () => {
+    const key = `${"a_".repeat(2000)}token_count`;
+    const started = performance.now();
+    const result = scrubDiagnosticValue({ [key]: "kept" }) as Record<
+      string,
+      unknown
+    >;
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(result[key]).toBe("kept");
+  });
+  it("redacts concatenated and provider-prefixed credential names", () => {
+    // Separator-free compounds the suffix rules never see: bare credential
+    // endings (`PGPASSWORD`, `authtoken`, `idtoken`) and a provider-prefixed
+    // serialized field (`oauthCredentialsJson`). Bare `*token` compounds
+    // collapse; two-segment usage metrics (`token_count`) stay readable via
+    // the benign-usage exemption.
+    const result = scrubDiagnosticValue({
+      PGPASSWORD: SECRET,
+      authtoken: SECRET,
+      idtoken: SECRET,
+      oauthCredentialsJson: JSON.stringify({ token: SECRET }),
+      token_count: 7,
+    }) as Record<string, unknown>;
+    expect(result.PGPASSWORD).toBe("[REDACTED]");
+    expect(result.authtoken).toBe("[REDACTED]");
+    expect(result.idtoken).toBe("[REDACTED]");
+    expect(result.oauthCredentialsJson).toBe("[REDACTED]");
+    expect(result.token_count).toBe(7);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("scrubs credential patterns out of RegExp sources", () => {
+    // A RegExp source is message text: `password=...` assignments scrub the
+    // same as anywhere else (the base caught these in its final text pass).
+    const result = scrubDiagnosticValue({
+      pattern: /test password=synthetic-pattern-secret/,
+    }) as Record<string, unknown>;
+    expect(JSON.stringify(result)).not.toContain("synthetic-pattern-secret");
+    expect(JSON.stringify(result)).toContain("test password=");
+  });
+
+  it("collapses authorization headers regardless of value type", () => {
+    // Headers are scalar-or-list carriers, never credential maps: an
+    // array-valued header collapses wholesale instead of recursing into
+    // elements whose text carries no assignment for value-side rules.
+    const result = scrubDiagnosticValue({
+      headers: {
+        "x-authorization": [`Bearer ${SECRET}`],
+        "content-type": "application/json",
+      },
+    }) as { headers: Record<string, unknown> };
+    expect(result.headers["x-authorization"]).toBe("[REDACTED]");
+    expect(result.headers["content-type"]).toBe("application/json");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("applies key classification to Error custom properties", () => {
+    const error = Object.assign(new Error("boom"), {
+      headers: { "x-authorization": [`Bearer ${SECRET}`] },
+    });
+    const result = scrubDiagnosticValue({ cause: error }) as {
+      cause: { headers: Record<string, unknown> };
+    };
+    expect(result.cause.headers["x-authorization"]).toBe("[REDACTED]");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("redacts credential query pairs embedded in object keys", () => {
+    // Attribution and cache maps keyed by URL carry the secret in the KEY
+    // text, past value-side redaction. The key stays identifiable; the
+    // secret portion does not survive.
+    const result = scrubDiagnosticValue({
+      [`https://example.test/path?token=${SECRET}`]: "cached",
+    }) as Record<string, unknown>;
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(SECRET);
+    expect(serialized).toContain("https://example.test/path");
+  });
 });

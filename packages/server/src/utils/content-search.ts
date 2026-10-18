@@ -37,7 +37,7 @@ export async function searchContentByText(
   const limit = Math.min(options.limit ?? 50, 500);
   const offset = options.offset ?? 0;
 
-  if (!queryText || queryText.trim().length < 3) {
+  if (!queryText || queryText.trim().length === 0) {
     // Vector-only path: when the caller supplied a pre-computed embedding but
     // no usable text query, run the single-query ranker with empty text so the
     // cosine-distance branch drives retrieval (text ILIKE/tsquery are guarded

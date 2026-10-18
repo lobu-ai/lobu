@@ -1,6 +1,6 @@
 import { type Static, Type } from '@sinclair/typebox';
 import type { AccountToolContext } from './tools/registry';
-import { resolveCrossOrgToolContext } from './sandbox/client-sdk';
+import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from './sandbox/client-sdk';
 import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace } from './auth/oauth/workspace-grants';
 import { getLobuCoreServices } from './lobu/gateway';
 import { attachmentFromUrl, ingestInputFiles, MAX_INPUT_FILES } from './gateway/files/input-files';
@@ -34,7 +34,16 @@ export async function ingestMcpFiles(
 ) {
   let owner = ctx;
   if (organization && organization !== ctx.organizationId) {
-    if (ctx.allowCrossOrg) owner = await resolveCrossOrgToolContext(organization, ctx);
+    if (ctx.allowCrossOrg) {
+      try {
+        owner = await resolveCrossOrgToolContext(organization, ctx);
+      } catch (err) {
+        if (err instanceof CrossOrgAccessDenied) {
+          throw new ToolUserError(err.message, 403);
+        }
+        throw err;
+      }
+    }
     else {
       // A scoped connection may name its current workspace by slug, but cannot switch.
       const current = ctx.organizationId && ctx.userId
