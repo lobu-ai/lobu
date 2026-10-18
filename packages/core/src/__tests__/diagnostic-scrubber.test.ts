@@ -466,19 +466,61 @@ describe("diagnostic credential scrubber", () => {
     });
   });
   it("redacts concatenated and provider-prefixed credential names", () => {
-    // Separator-free compounds the suffix rules never see: a bare credential
-    // ending (`PGPASSWORD`) and a provider-prefixed serialized field
-    // (`oauthCredentialsJson`). Bare `token` endings stay out deliberately —
-    // they collide with usage counts the logger contract preserves.
+    // Separator-free compounds the suffix rules never see: bare credential
+    // endings (`PGPASSWORD`, `authtoken`, `idtoken`) and a provider-prefixed
+    // serialized field (`oauthCredentialsJson`). Bare `token` endings stay
+    // out deliberately — they collide with usage counts the logger contract
+    // preserves.
     const result = scrubDiagnosticValue({
       PGPASSWORD: SECRET,
+      authtoken: SECRET,
+      idtoken: SECRET,
       oauthCredentialsJson: JSON.stringify({ token: SECRET }),
       token_count: 7,
     }) as Record<string, unknown>;
     expect(result.PGPASSWORD).toBe("[REDACTED]");
+    expect(result.authtoken).toBe("[REDACTED]");
+    expect(result.idtoken).toBe("[REDACTED]");
     expect(result.oauthCredentialsJson).toBe("[REDACTED]");
     expect(result.token_count).toBe(7);
     expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("redacts authorization values while keeping config qualifiers", () => {
+    // `authorization_value` names a credential; `authorization_mode` and
+    // `authorization_policy` name configuration and stay readable.
+    const result = scrubDiagnosticValue({
+      authorization_value: SECRET,
+      authorization_mode: "strict",
+      authorization_policy: "admin-only",
+    }) as Record<string, unknown>;
+    expect(result.authorization_value).toBe("[REDACTED]");
+    expect(result.authorization_mode).toBe("strict");
+    expect(result.authorization_policy).toBe("admin-only");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("refuses usage-metric exemptions for credential-bearing names", () => {
+    // A benign qualifier only exempts a bare token pair
+    // (`token_count`); a credential term anywhere else keeps the redaction
+    // (`used_access_token`, `token_usage_secret`).
+    const result = scrubDiagnosticValue({
+      used_access_token: SECRET,
+      token_usage_secret: SECRET,
+    }) as Record<string, unknown>;
+    expect(result.used_access_token).toBe("[REDACTED]");
+    expect(result.token_usage_secret).toBe("[REDACTED]");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("scrubs credential patterns out of RegExp sources", () => {
+    // A RegExp source is message text: `password=...` assignments scrub the
+    // same as anywhere else (the base caught these in its final text pass).
+    const result = scrubDiagnosticValue({
+      pattern: /test password=synthetic-pattern-secret/,
+    }) as Record<string, unknown>;
+    expect(JSON.stringify(result)).not.toContain("synthetic-pattern-secret");
+    expect(JSON.stringify(result)).toContain("test password=");
   });
 
   it("collapses authorization headers regardless of value type", () => {

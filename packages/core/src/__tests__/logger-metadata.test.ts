@@ -206,6 +206,57 @@ describe("console logger pino-style metadata", () => {
     expect(line).not.toContain("synthetic-apikey-secret");
   });
 
+  test("redacts concatenated and provider-prefixed credential names", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        PGPASSWORD: "synthetic-concat-secret",
+        authtoken: "synthetic-authtoken-secret",
+        idtoken: "synthetic-idtoken-secret",
+        oauthCredentialsJson: '{"token":"synthetic-oauth-secret"}',
+        authorization_value: "synthetic-authz-value-secret",
+        secretsByName: { provider: "synthetic-provider-secret" },
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain("synthetic-concat-secret");
+    expect(line).not.toContain("synthetic-authtoken-secret");
+    expect(line).not.toContain("synthetic-idtoken-secret");
+    expect(line).not.toContain("synthetic-oauth-secret");
+    expect(line).not.toContain("synthetic-authz-value-secret");
+    expect(line).not.toContain("synthetic-provider-secret");
+  });
+
+  test("refuses usage-metric exemptions for credential-bearing names", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        used_access_token: "synthetic-used-secret",
+        token_usage_secret: "synthetic-usage-secret",
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain("synthetic-used-secret");
+    expect(line).not.toContain("synthetic-usage-secret");
+  });
+
+  test("redacts concatenated auth tokens and authorization values", () => {
+    const line = captureWarn((log) => {
+      log.warn({
+        authtoken: "synthetic-concat-authtoken-secret",
+        authorization_value: "synthetic-authz-value-secret",
+        used_access_token: "synthetic-used-secret",
+        token_usage_secret: "synthetic-usage-secret",
+      });
+    });
+
+    expect(line).toContain("[REDACTED]");
+    expect(line).not.toContain("synthetic-concat-authtoken-secret");
+    expect(line).not.toContain("synthetic-authz-value-secret");
+    expect(line).not.toContain("synthetic-used-secret");
+    expect(line).not.toContain("synthetic-usage-secret");
+  });
+
   test("redacts Error and RegExp values beneath credential containers", () => {
     const line = captureWarn((log) => {
       log.warn({
@@ -364,6 +415,11 @@ describe("console logger structured output", () => {
           token_value: "synthetic-json-token-value-secret",
           accessTokenValue: "synthetic-json-access-secret",
           api_key_value: "synthetic-json-apikey-secret",
+          authtoken: "synthetic-json-authtoken-secret",
+          idtoken: "synthetic-json-idtoken-secret",
+          authorization_value: "synthetic-json-authz-value-secret",
+          used_access_token: "synthetic-json-used-secret",
+          token_usage_secret: "synthetic-json-usage-secret",
         });
         log.warn({
           headers: { "x-authorization": ["Bearer synthetic-json-array-secret"] },
@@ -428,6 +484,13 @@ describe("console logger structured output", () => {
     );
     expect(records[5].message).not.toContain("synthetic-json-access-secret");
     expect(records[5].message).not.toContain("synthetic-json-apikey-secret");
+    expect(records[5].message).not.toContain("synthetic-json-authtoken-secret");
+    expect(records[5].message).not.toContain("synthetic-json-idtoken-secret");
+    expect(records[5].message).not.toContain(
+      "synthetic-json-authz-value-secret"
+    );
+    expect(records[5].message).not.toContain("synthetic-json-used-secret");
+    expect(records[5].message).not.toContain("synthetic-json-usage-secret");
     expect(records[6].level).toBe("warn");
     expect(records[6].message).toContain("[REDACTED]");
     expect(records[6].message).not.toContain("synthetic-json-array-secret");
@@ -458,6 +521,11 @@ describe("console logger structured output", () => {
     expect(output).not.toContain("synthetic-json-token-value-secret");
     expect(output).not.toContain("synthetic-json-access-secret");
     expect(output).not.toContain("synthetic-json-apikey-secret");
+    expect(output).not.toContain("synthetic-json-authtoken-secret");
+    expect(output).not.toContain("synthetic-json-idtoken-secret");
+    expect(output).not.toContain("synthetic-json-authz-value-secret");
+    expect(output).not.toContain("synthetic-json-used-secret");
+    expect(output).not.toContain("synthetic-json-usage-secret");
     expect(output).not.toContain("synthetic-json-provider-error-secret");
     expect(output).not.toContain("synthetic-json-array-secret");
     expect(output).not.toContain("synthetic-json-error-prop-secret");

@@ -49,6 +49,7 @@ const BARE_CREDENTIAL_SUFFIXES = [
   "secret",
   "apikey",
   "authtoken",
+  "idtoken",
 ];
 
 function hasBareCredentialSuffix(key: string, allowEqual = false): boolean {
@@ -108,19 +109,20 @@ function hasTrailingAuthorizationSegment(key: string): boolean {
  * A leading credential run names a credential CONTAINER
  * (`credentials_json`, `credentialsByName`, `password_confirmation`,
  * `secret_value`, `oauthCredentialsJson`, `token_value`,
- * `accessTokenValue`, `api_key_value`, `authtoken`). The head must classify
- * under the shared suffix rules, read as a suffix term, or end with a bare
- * credential term the shared rules miss (`authtoken`, since the denylist has
- * no `auth_?token` form) — a whole-name exact match never seeds one
- * (`cookie`, `authorization`, `auth`, `bearer`), so `cookie-policy` and
- * `authorization_mode` stay readable. A usage-metric qualifier exempts the
- * head (`token_count`, `token_total` stay readable per the logger contract).
- * `authorization` is pinned to the trailing-header rule below, except a
- * credential qualifier directly after it (`authorization_value`); config
- * qualifiers (`authorization_mode`, `authorization_policy`) stay readable.
- * Container semantics live in the walk: a scalar beneath one IS the
- * serialized credential and collapses, while a structured value beneath one
- * recurses with every descendant treated as credential-adjacent (a map's
+ * `accessTokenValue`, `api_key_value`, `authtoken`, `idtoken`). The head
+ * must classify under the shared suffix rules, read as a suffix term, or
+ * end with a bare credential term the shared rules miss (`authtoken`,
+ * `idtoken`, since the denylist has no `auth_?token` / `id_?token` form) — a
+ * whole-name exact match never seeds one (`cookie`, `authorization`, `auth`,
+ * `bearer`), so `cookie-policy` and `authorization_mode` stay readable.
+ * `authorization` is pinned to the trailing-header rule, except a credential
+ * qualifier directly after it (`authorization_value`); config qualifiers
+ * (`authorization_mode`, `authorization_policy`) stay readable. A two-segment
+ * usage metric (`token_count`, `token_total`, `max_tokens`, `totalTokens`)
+ * is exempt everywhere: usage metadata stays readable per the logger
+ * contract. Container semantics live in the walk: a scalar beneath one IS
+ * the serialized credential and collapses, while a structured value beneath
+ * one recurses with every descendant treated as credential-adjacent (a map's
  * leaves cannot be trusted by key name alone —
  * `credentialsByName.github` proves it).
  */
@@ -165,7 +167,21 @@ function isWholeNameOnly(head: string): boolean {
   return !isSuffixTerm(head) && !hasBareCredentialSuffix(head, true);
 }
 
+/** Two-segment usage metrics (`token_count`, `max_tokens`, `totalTokens`). */
+function isBenignUsageKey(key: string): boolean {
+  const segments = splitKeySegments(key);
+  if (segments.length !== 2) return false;
+  const [first, second] = segments as [string, string];
+  const isTokenWord = (segment: string) =>
+    segment === "token" || segment === "tokens";
+  return (
+    (isTokenWord(first) && BENIGN_COUNT_QUALIFIERS.has(second)) ||
+    (BENIGN_COUNT_QUALIFIERS.has(first) && isTokenWord(second))
+  );
+}
+
 function hasCredentialSegment(key: string): boolean {
+  if (isBenignUsageKey(key)) return false;
   const segments = splitKeySegments(key);
   for (let end = 1; end <= segments.length; end++) {
     const head = segments.slice(0, end).join("_");
@@ -190,14 +206,6 @@ function hasCredentialSegment(key: string): boolean {
       isSecretKey(squashKey(head)) ||
       hasBareCredentialSuffix(head, true);
     if (!qualifies) continue;
-    const tail = segments.slice(end);
-    const tailQualifier = tail.length === 1 ? tail[0] : undefined;
-    if (
-      tailQualifier !== undefined &&
-      BENIGN_COUNT_QUALIFIERS.has(tailQualifier)
-    ) {
-      continue;
-    }
     return true;
   }
   return false;
@@ -217,22 +225,6 @@ function squashKey(key: string): string {
  * arbitrarily-cased header (`CoOkIe`) normalizes to `co_ok_ie` and misses;
  * test the squashed form too.
  */
-/**
- * Usage metrics are never credentials, even when they count tokens:
- * `token_count`, `token_total`, `max_tokens`, `totalTokens`. The shared
- * suffix denylist flags the bare `token(s)` forms, so the scrubber exempts
- * them explicitly — usage metadata stays readable per the logger contract.
- * Scoped to token-bearing keys only; `secret_count`-style names still
- * collapse, matching the base redactor.
- */
-function isBenignUsageKey(key: string): boolean {
-  const segments = splitKeySegments(key);
-  return (
-    (segments.includes("token") || segments.includes("tokens")) &&
-    segments.some((segment) => BENIGN_COUNT_QUALIFIERS.has(segment))
-  );
-}
-
 function isSecretObjectKey(key: string): boolean {
   if (isBenignUsageKey(key)) return false;
   return isStrongSecretKey(key) || hasCredentialSegment(key);
@@ -430,9 +422,13 @@ export function scrubDiagnosticValue(value: unknown): unknown {
     // Built-ins whose state is not enumerable: walking them as plain objects
     // yields `{}` (Date, Map, Set, RegExp) or one key per byte (Buffer). A
     // readable summary costs less payload and tells triage strictly more.
+    // A RegExp source can itself embed a credential (`/password=.../`),
+    // so it takes the same string scrubbing as any other message text.
     if (current instanceof Date) return current.toISOString();
     if (current instanceof RegExp)
-      return underCredentialContainer ? "[REDACTED]" : String(current);
+      return underCredentialContainer
+        ? "[REDACTED]"
+        : scrubString(String(current));
     if (ArrayBuffer.isView(current)) {
       return `[${current.constructor.name} ${current.byteLength} bytes]`;
     }
