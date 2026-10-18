@@ -408,20 +408,27 @@ describe("diagnostic credential scrubber", () => {
     // The qualifier half is matched positionally because the shared suffix
     // rules are end-anchored (`token_value`, `accessTokenValue`,
     // `api_key_value`). A usage-metric qualifier stays readable
-    // (`token_count`, `token_total`).
+    // (`token_count`, `token_total`, `max_tokens`).
     const result = scrubDiagnosticValue({
       token_value: SECRET,
       accessTokenValue: SECRET,
       api_key_value: SECRET,
       token_count: 7,
       token_total: 9,
+      max_tokens: 100,
+      totalTokens: 9,
     }) as Record<string, unknown>;
     expect(result.token_value).toBe("[REDACTED]");
     expect(result.accessTokenValue).toBe("[REDACTED]");
     expect(result.api_key_value).toBe("[REDACTED]");
     expect(result.token_count).toBe(7);
     expect(result.token_total).toBe(9);
+    expect(result.max_tokens).toBe(100);
+    expect(result.totalTokens).toBe(9);
     expect(JSON.stringify(result)).not.toContain(SECRET);
+    expect(scrubDiagnosticValue("usage token_count=7")).toBe(
+      "usage token_count=7"
+    );
   });
 
   it("redacts Error and RegExp values beneath credential containers", () => {
