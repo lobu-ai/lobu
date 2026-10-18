@@ -18,6 +18,8 @@ import type { ChatPlatformDescriptor } from "./types.js";
 import { whatsappPlatform } from "./whatsapp.js";
 import { whatsappWebPlatform } from "./whatsapp-web.js";
 import { WHATSAPP_WEB_PLATFORM } from "./whatsapp-web-adapter.js";
+import { xPlatform } from "./x.js";
+import { X_PLATFORM } from "./x-adapter.js";
 
 export const PLATFORM_REGISTRY: Record<string, ChatPlatformDescriptor> = {
   telegram: telegramPlatform,
@@ -27,6 +29,7 @@ export const PLATFORM_REGISTRY: Record<string, ChatPlatformDescriptor> = {
   teams: teamsPlatform,
   gchat: gchatPlatform,
   [WHATSAPP_WEB_PLATFORM]: whatsappWebPlatform,
+  [X_PLATFORM]: xPlatform,
 };
 
 /** Look up a platform's capability descriptor, or undefined when unsupported. */

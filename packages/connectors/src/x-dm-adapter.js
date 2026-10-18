@@ -111,15 +111,24 @@ export function xDirectMessagesProgram() {
 	// Message text with t.co links expanded and the attachment's own link removed.
 	function textOf(data) {
 		let value = String(data.text ?? "");
+		const mediaLinks = new Set(
+			Object.values(data.attachment ?? {}).flatMap((media) => [
+				media?.url,
+				media?.expanded_url,
+			]),
+		);
 		for (const url of data.entities?.urls ?? []) {
 			if (typeof url?.url === "string" && typeof url.expanded_url === "string")
-				value = value.split(url.url).join(url.expanded_url);
+				value = value
+					.split(url.url)
+					.join(
+						mediaLinks.has(url.url) || mediaLinks.has(url.expanded_url)
+							? ""
+							: url.expanded_url,
+					);
 		}
-		for (const media of Object.values(data.attachment ?? {})) {
-			for (const link of [media?.url, media?.expanded_url]) {
-				if (typeof link === "string" && link)
-					value = value.split(link).join("");
-			}
+		for (const link of mediaLinks) {
+			if (typeof link === "string" && link) value = value.split(link).join("");
 		}
 		return value.trim();
 	}
@@ -174,6 +183,9 @@ export function xDirectMessagesProgram() {
 				sender_name: typeof sender?.name === "string" ? sender.name : null,
 				from_me: senderId === self,
 				is_group: isGroup,
+				// A message request: the conversation sits in the untrusted inbox
+				// until the account accepts it.
+				is_request: info?.trusted === false,
 				text,
 				content_kind: text ? "text" : data.attachment ? "media" : "empty",
 				occurred_at: new Date(time).toISOString(),
@@ -192,10 +204,14 @@ export function xDirectMessagesProgram() {
 				(candidate) => candidate.message_id === messageId,
 			);
 			if (row) return row;
-			if (timeline.status !== "HAS_MORE" || !timeline.min_entry_id) break;
+			if (timeline.status !== "HAS_MORE") return null;
+			if (!timeline.min_entry_id)
+				fail(
+					"Message lookup is incomplete: conversation cursor is unavailable",
+				);
 			maxId = String(timeline.min_entry_id);
 		}
-		return null;
+		fail("Message lookup is incomplete: conversation page limit reached");
 	}
 	async function read(input) {
 		const self = account();

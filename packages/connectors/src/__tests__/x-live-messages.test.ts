@@ -16,6 +16,8 @@ const SELF = "1000";
 const PEER = "2000";
 const DM = `${SELF}-${PEER}`;
 const GROUP = "3000";
+const STRANGER = "8000";
+const REQUEST = `${SELF}-${STRANGER}`;
 
 interface FakeMessage {
 	id: string;
@@ -52,7 +54,9 @@ function fakeX(
 		},
 	};
 	const conversations = {
-		[DM]: { conversation_id: DM, type: "ONE_TO_ONE" },
+		[DM]: { conversation_id: DM, type: "ONE_TO_ONE", trusted: true },
+		// A message request: someone the account does not follow wrote first.
+		[REQUEST]: { conversation_id: REQUEST, type: "ONE_TO_ONE", trusted: false },
 		[GROUP]: {
 			conversation_id: GROUP,
 			type: "GROUP_DM",
@@ -359,7 +363,7 @@ describe("X live_messages contract", () => {
 			"idempotency_key",
 		]);
 		expect(action.description).toContain("prepare_reply");
-		expect(action.annotations.idempotentHint).toBe(true);
+		expect(action.annotations.idempotentHint).toBe(false);
 	});
 });
 
@@ -406,6 +410,7 @@ describe("X live_messages read", () => {
 			sender_name: "Synthetic Peer",
 			from_me: false,
 			is_group: false,
+			is_request: false,
 			text: "hello https://example.com/page",
 			content_kind: "text",
 			occurred_at: "2026-10-01T10:00:00.000Z",
@@ -422,6 +427,59 @@ describe("X live_messages read", () => {
 		});
 		// Reading never opens /messages and never marks anything read.
 		expect(x.requests.every((r) => !r.path.includes("mark_read"))).toBe(true);
+	});
+
+	test("marks a message request conversation and still reads it by id", async () => {
+		const x = fakeX();
+		x.messages.push({
+			id: "7001",
+			conversation_id: REQUEST,
+			sender_id: STRANGER,
+			text: "hi, can you help?",
+			time: Date.parse("2026-10-01T11:00:00.000Z"),
+		});
+		const { dispatcher } = page(x);
+		const recent = await read(dispatcher);
+		expect(recent.rows[0]).toMatchObject({
+			id: `${REQUEST}:7001`,
+			is_request: true,
+			is_group: false,
+			from_me: false,
+		});
+		const exact = await read(dispatcher, { query: `id:${REQUEST}:7001` });
+		expect(exact.rows[0]).toMatchObject({ is_request: true });
+	});
+
+	test.each([
+		["https://t.co/media", "", ""],
+		["https://example.com/photo", "", ""],
+		[
+			"https://t.co/media",
+			"caption https://t.co/page ",
+			"caption https://example.com/page",
+		],
+	])("removes attachment URL %s and preserves caption %s", async (mediaUrl, caption, expectedText) => {
+		const x = fakeX();
+		x.messages.push({
+			id: "5001",
+			conversation_id: DM,
+			sender_id: PEER,
+			text: `${caption}https://t.co/media`,
+			urls: [
+				{
+					url: "https://t.co/media",
+					expanded_url: "https://example.com/photo",
+				},
+				{ url: "https://t.co/page", expanded_url: "https://example.com/page" },
+			],
+			attachment: { photo: { url: mediaUrl } },
+			time: Date.now(),
+		});
+		const result = await read(page(x).dispatcher);
+		expect(result.rows[0]).toMatchObject({
+			text: expectedText,
+			content_kind: expectedText ? "text" : "media",
+		});
 	});
 
 	test("pages the recent inbox with the returned cursor", async () => {
@@ -469,6 +527,46 @@ describe("X live_messages read", () => {
 			text: "hello https://example.com/page",
 		});
 		expect(x.requests.some((r) => r.path.includes("max_id=5004"))).toBe(true);
+	});
+
+	test("reports an incomplete exact lookup when its page budget is exhausted", async () => {
+		const x = fakeX();
+		for (let index = 0; index < 11; index++) {
+			x.messages.push({
+				id: String(5001 + index),
+				conversation_id: DM,
+				sender_id: PEER,
+				text: "message",
+				time: Date.now() + index,
+			});
+		}
+		await expect(
+			read(page(x).dispatcher, { query: `id:${DM}:5001` }),
+		).rejects.toThrow("lookup is incomplete");
+	});
+
+	test("reports an incomplete exact lookup when X omits the next page cursor", async () => {
+		const x = fakeX((body) => {
+			const timeline = body.conversation_timeline as
+				| Record<string, unknown>
+				| undefined;
+			if (timeline) {
+				timeline.status = "HAS_MORE";
+				delete timeline.min_entry_id;
+			}
+			return body;
+		});
+		seed(x);
+		await expect(
+			read(page(x).dispatcher, { query: `id:${DM}:4999` }),
+		).rejects.toThrow("lookup is incomplete");
+	});
+
+	test("returns no row when an exact lookup reaches the end of history", async () => {
+		const x = fakeX();
+		seed(x);
+		const result = await read(page(x).dispatcher, { query: `id:${DM}:4999` });
+		expect(result).toMatchObject({ rows: [], hasMore: false });
 	});
 
 	test("rejects free-text search", async () => {

@@ -105,8 +105,15 @@ export abstract class ConnectorChatAdapter<Row>
    * the native chat id an Automation's `channel_id` filter names.
    */
   abstract parseSourceRow(row: Record<string, unknown>): ConnectorChatSourceMessage<Row>;
-  /** The connector's `send_message` input for one reply. */
-  protected abstract sendInput(chatId: string, text: string): Record<string, unknown>;
+  /**
+   * The connector's `send_message` input for one reply. `idempotencyKey` is the
+   * operation's key, for connectors whose send also dedupes on its own input.
+   */
+  protected abstract sendInput(
+    chatId: string,
+    text: string,
+    idempotencyKey: string,
+  ): Record<string, unknown>;
   /** The raw row a completed `send_message` stands for; its `id` is the raw message id. */
   protected abstract sentRow(
     chatId: string,
@@ -206,7 +213,7 @@ export abstract class ConnectorChatAdapter<Row>
     if (!text.trim()) throw new Error(`Refusing to send an empty ${this.label} message`);
     const outcome = await this.options.execute({
       operationKey: "send_message",
-      input: this.sendInput(chatId, text),
+      input: this.sendInput(chatId, text, idempotencyKey),
       idempotencyKey,
     });
     if (outcome.status !== "completed") {

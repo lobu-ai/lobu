@@ -3109,6 +3109,7 @@ const X_LIVE_MESSAGE_COLUMNS = [
 	{ name: "sender_name", type: "string" },
 	{ name: "from_me", type: "boolean" },
 	{ name: "is_group", type: "boolean" },
+	{ name: "is_request", type: "boolean" },
 	{ name: "text", type: "string" },
 	{ name: "content_kind", type: "string" },
 	{ name: "occurred_at", type: "string" },
@@ -3329,7 +3330,7 @@ export default class XConnector extends ConnectorRuntime {
 				key: "live_messages",
 				name: "Live messages",
 				description:
-					"Read recent X direct messages live from the paired browser without importing history or marking them read, page by the returned cursor, or read one message by id:<message id>. Active Automations subscribe to new-message references; the browser checks once a minute while it is online and resumes from X's inbox update cursor after reconnecting. Requires a browser-authenticated X connection.",
+					"Read recent X direct messages live from the paired browser without importing history or marking them read, page by the returned cursor, or read one message by id:<message id>. Message requests from accounts the user does not follow are included and marked is_request. Active Automations subscribe to new-message references; the browser checks once a minute while it is online and resumes from X's inbox update cursor after reconnecting. Requires a browser-authenticated X connection.",
 				read: readXLiveMessages,
 				observe: observeXLiveMessages,
 				webhook: { mode: "trigger", events: ["message.created"] },
@@ -3474,10 +3475,10 @@ export default class XConnector extends ConnectorRuntime {
 				kind: "write",
 				name: "Send DM reply",
 				description:
-					"Requires an X connection authenticated through your paired Chrome browser. Send a text reply into an exact existing X direct message conversation and confirm it appears there. This direct send is approved only for answering DMs on bot accounts the owner operates; public replies and posts stay draft-only through prepare_reply. A retry with the same idempotency_key returns the earlier message when X shows it on the latest conversation page, and refuses rather than risk a second send when it cannot tell.",
+					"Requires an X connection authenticated through your paired Chrome browser. Send a text reply into an exact existing X direct message conversation and confirm it appears there. This direct send is approved only for answering DMs on bot accounts the owner operates; public replies and posts stay draft-only through prepare_reply. On retry, reuse both this input's idempotency_key and the enclosing operations.execute idempotency_key. The browser can recognise an earlier send only while its request ID is on the latest conversation page; matching recent text without a request ID is refused.",
 				annotations: {
 					destructiveHint: false,
-					idempotentHint: true,
+					idempotentHint: false,
 					openWorldHint: true,
 				},
 				inputSchema: {
@@ -3497,7 +3498,7 @@ export default class XConnector extends ConnectorRuntime {
 							minLength: 1,
 							maxLength: 200,
 							description:
-								"Stable key for this reply, sent to X as its client request ID. Reuse it on retry so an earlier send is recognised instead of repeated.",
+								"Stable key used to derive X's client request ID. Reuse it and the enclosing operation's idempotency_key on retry; browser deduplication only checks the latest conversation page.",
 						},
 					},
 				},
