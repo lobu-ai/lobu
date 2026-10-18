@@ -8,7 +8,7 @@
  * `ChatResponseBridge` picks one strategy per payload based on the platform
  * field and delegates the delta/completion shape to it, so the bridge never
  * branches on a platform slug to stream a response. Platform-specific
- * strategies live in sibling modules (`./slack.ts`); this module owns the
+ * strategies live in sibling modules (`./slack.ts`, `./connector-chat.ts`); this module owns the
  * platform-clean default strategy and the lookup.
  *
  * This registry covers RESPONSE STREAMING only. The other per-platform
@@ -21,7 +21,8 @@ import { createLogger } from "@lobu/core";
 import type { ThreadResponsePayload } from "../../infrastructure/queue/index.js";
 import { AsyncPushIterator } from "./async-push-iterator.js";
 import { SlackResponseStrategy } from "./slack.js";
-import { whatsappWebResponseStrategy } from "./whatsapp-web.js";
+import { getPlatformDescriptor } from "../platforms/index.js";
+import { connectorChatResponseStrategy } from "./connector-chat.js";
 import type {
   PlatformResponseStrategy,
   ResolveTarget,
@@ -163,12 +164,9 @@ const defaultStrategy = new DefaultResponseStrategy();
 export function getResponseStrategy(
   platform: string
 ): PlatformResponseStrategy {
-  switch (platform) {
-    case "slack":
-      return slackStrategy;
-    case "whatsapp.web":
-      return whatsappWebResponseStrategy;
-    default:
-      return defaultStrategy;
+  if (platform === "slack") return slackStrategy;
+  if (getPlatformDescriptor(platform)?.connectorTransport) {
+    return connectorChatResponseStrategy(platform);
   }
+  return defaultStrategy;
 }

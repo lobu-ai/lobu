@@ -3,10 +3,7 @@ import type { AdapterPostableMessage } from "chat";
 import { stripPlatformPrefix } from "../../channels/bound-channels.js";
 import type { ThreadResponsePayload } from "../../infrastructure/queue/index.js";
 import { platformMetadataString } from "../platform-metadata.js";
-import {
-  WHATSAPP_WEB_PLATFORM,
-  type WhatsAppWebAdapter,
-} from "../platforms/whatsapp-web-adapter.js";
+import type { ConnectorChatAdapter } from "../platforms/connector-chat.js";
 import type { PlatformResponseStrategy, StrategyContext } from "./types.js";
 
 /**
@@ -17,17 +14,18 @@ import type { PlatformResponseStrategy, StrategyContext } from "./types.js";
  * for the same message stay distinct.
  */
 async function postOnce(
+  platform: string,
   ctx: StrategyContext,
   target: string,
   messageId: string,
   content: AdapterPostableMessage
 ): Promise<void> {
   const adapter = ctx.instance.chat.getAdapter(
-    WHATSAPP_WEB_PLATFORM
-  ) as WhatsAppWebAdapter;
+    platform
+  ) as ConnectorChatAdapter<unknown>;
   // Same canonical spelling `resolveChatTarget` uses; the adapter refuses a
   // thread that belongs to another connection.
-  const threadId = `${WHATSAPP_WEB_PLATFORM}:${stripPlatformPrefix(WHATSAPP_WEB_PLATFORM, target)}`;
+  const threadId = `${platform}:${stripPlatformPrefix(platform, target)}`;
   const contentHash = createHash("sha256")
     .update(JSON.stringify(content))
     .digest("hex");
@@ -43,19 +41,27 @@ function responseThread(ctx: StrategyContext, payload: ThreadResponsePayload): s
   return platformMetadataString(payload.platformMetadata, "responseThreadId") ?? ctx.channelId;
 }
 
-export const whatsappWebResponseStrategy: PlatformResponseStrategy = {
-  deliversAtCompletion: true,
-  async disposeOnFullReplacement() {},
-  // Deltas can land on different replicas; only the terminal text is complete.
-  async handleDelta() {
-    return null;
-  },
-  async handleCompletion({ ctx, payload }) {
-    const text = payload.finalText;
-    if (!text?.trim()) return;
-    await postOnce(ctx, responseThread(ctx, payload), payload.messageId, { markdown: text });
-  },
-  post({ ctx, threadId, messageId, content }) {
-    return postOnce(ctx, threadId, messageId, content as AdapterPostableMessage);
-  },
-};
+/**
+ * The response strategy of a connector-transport platform
+ * (`ChatPlatformDescriptor.connectorTransport`, see `platforms/connector-chat.ts`).
+ */
+export function connectorChatResponseStrategy(platform: string): PlatformResponseStrategy {
+  return {
+    deliversAtCompletion: true,
+    async disposeOnFullReplacement() {},
+    // Deltas can land on different replicas; only the terminal text is complete.
+    async handleDelta() {
+      return null;
+    },
+    async handleCompletion({ ctx, payload }) {
+      const text = payload.finalText;
+      if (!text?.trim()) return;
+      await postOnce(platform, ctx, responseThread(ctx, payload), payload.messageId, {
+        markdown: text,
+      });
+    },
+    post({ ctx, threadId, messageId, content }) {
+      return postOnce(platform, ctx, threadId, messageId, content as AdapterPostableMessage);
+    },
+  };
+}
