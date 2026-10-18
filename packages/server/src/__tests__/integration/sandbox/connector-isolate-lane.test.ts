@@ -336,7 +336,9 @@ describe("linkedin: mixed live/takeout connector", () => {
 			expect(out.actions).toContain("prepare_comment");
 			expect(out.actions).toContain("prepare_message");
 			expect(out.actions).toContain("prepare_post");
-			expect(out.actions).not.toContain("send_message");
+			// Direct send is approved only for direct-message replies; posts and
+			// comments stay draft-only through the prepare_* actions above.
+			expect(out.actions).toContain("send_message");
 			expect(out.sources).toEqual([
 				{ key: "notifications", read: "function", observe: "function", sync: "undefined" },
 				{ key: "live_messages", read: "function", observe: "function", sync: "undefined" },

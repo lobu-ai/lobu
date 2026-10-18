@@ -1,6 +1,13 @@
 import {
   assertInboxSourceRead,
+  assertNoCursor,
+  assertNoMatch,
+  assertNoOffsetPaging,
+  assertNoSort,
+  assertNoWindow,
   requireBrowser,
+  type ActionContext,
+  type ActionResult,
   type FeedObserveContext,
   type FeedReadContext,
   type FeedReadResult,
@@ -34,7 +41,7 @@ async function readyTab(browser: ChromeActionDispatcher): Promise<number> {
 async function invoke<T>(
   browser: ChromeActionDispatcher,
   tabId: number,
-  op: "read" | "listen",
+  op: "read" | "listen" | "send",
   input: Record<string, unknown>
 ): Promise<T> {
   const result = await browser.dispatch<{ value?: T; exception?: unknown }>(
@@ -52,13 +59,55 @@ async function invoke<T>(
   return result.value;
 }
 
+/**
+ * Send one text reply into an existing direct-message conversation from the
+ * scrape-owned tab, without opening the inbox. The page program refuses group
+ * or unknown conversations, dedupes on `idempotency_key`, and returns only once
+ * the message shows in the conversation.
+ */
+export async function sendLinkedInMessage(
+  ctx: ActionContext
+): Promise<ActionResult> {
+  try {
+    const browser = requireBrowser(ctx);
+    const output = await invoke<Record<string, unknown>>(
+      browser,
+      await readyTab(browser),
+      "send",
+      {
+        conversation_id: ctx.input.conversation_id,
+        text: ctx.input.text,
+        idempotency_key: ctx.input.idempotency_key,
+      }
+    );
+    return { success: true, output };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export async function readLinkedInInbox<F>(
   ctx: FeedReadContext<F>
 ): Promise<FeedReadResult> {
-  assertInboxSourceRead(ctx, "LinkedIn");
+  if (ctx.feedKey === "live_messages" && ctx.query?.startsWith("id:")) {
+    // A message reference read back by id (chat ingress, Automations).
+    const message =
+      "LinkedIn message lookup by id:<message URN> takes no cursor, offset, sorting, matching, or time window";
+    assertNoCursor(ctx, message);
+    assertNoOffsetPaging(ctx, message);
+    assertNoSort(ctx, message);
+    assertNoWindow(ctx, message);
+    assertNoMatch(ctx, message);
+  } else {
+    assertInboxSourceRead(ctx, "LinkedIn");
+  }
   const browser = requireBrowser(ctx);
   return invoke(browser, await readyTab(browser), "read", {
     feed: ctx.feedKey,
+    query: ctx.query,
     cursor: ctx.cursor,
     limit: ctx.limit,
   });

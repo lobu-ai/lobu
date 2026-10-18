@@ -352,7 +352,19 @@ export function linkedInInboxProgram() {
       "messengerConversationsByCategoryQuery"
     );
   }
-  async function messagesPage(conversation, mailbox) {
+  // A conversation is a group when LinkedIn says so or it has more than two
+  // participants. Null when neither is shown: callers treat unknown as "not a
+  // direct message", so nothing is ever sent into a group by mistake.
+  function groupOf(conversation) {
+    if (typeof conversation?.groupChat === "boolean")
+      return conversation.groupChat;
+    const participants = conversation?.conversationParticipants;
+    return Array.isArray(participants) && participants.length > 0
+      ? participants.length > 2
+      : null;
+  }
+  // The thread token is the conversation's chat id: the URN minus the mailbox.
+  function threadOf(conversation, mailbox) {
     if (
       typeof conversation !== "string" ||
       !conversation.startsWith(`urn:li:msg_conversation:(${mailbox},`)
@@ -364,13 +376,35 @@ export function linkedInInboxProgram() {
     );
     if (!/^[A-Za-z0-9_-]+=*$/.test(thread))
       fail("Unsupported conversation URL identity");
-    const result = await graph(
-      "messengerMessages.5846eeb71c981f11e0134cb6626cc314",
-      `conversationUrn:${encode(conversation)}`,
-      "messengerMessagesBySyncToken"
-    );
+    return thread;
+  }
+  function memberIdOf(urn) {
+    const match =
+      typeof urn === "string" &&
+      urn.match(/^urn:li:(?:fsd_profile|member):([A-Za-z0-9_-]+)$/);
+    return match ? match[1] : null;
+  }
+  // Only a vanity `/in/<slug>` URL names a slug; a member-id URL does not.
+  function slugOf(profileUrl) {
+    const match =
+      typeof profileUrl === "string" && profileUrl.match(/\/in\/([^/?#]+)/i);
+    if (!match || /^ACo/.test(match[1])) return null;
+    const slug = match[1].toLowerCase();
+    return /^[a-z0-9_-]+$/.test(slug) ? slug : null;
+  }
+  async function messageElements(conversation) {
+    return (
+      await graph(
+        "messengerMessages.5846eeb71c981f11e0134cb6626cc314",
+        `conversationUrn:${encode(conversation)}`,
+        "messengerMessagesBySyncToken"
+      )
+    ).elements;
+  }
+  async function messagesPage(conversation, mailbox, group = null) {
+    const thread = threadOf(conversation, mailbox);
     const messages = await Promise.all(
-      result.elements.map(async (message) => {
+      (await messageElements(conversation)).map(async (message) => {
         if (
           typeof message.entityUrn !== "string" ||
           !Number.isFinite(message.deliveredAt)
@@ -378,17 +412,34 @@ export function linkedInInboxProgram() {
           fail("Message identity or timestamp is unavailable");
         const member = message.sender?.participantType?.member;
         const recalled = message.messageBodyRenderFormat === "RECALLED";
+        const text = recalled
+          ? ""
+          : (message.body?.text ?? message.renderContentFallbackText ?? "");
+        const hasAttachments =
+          Array.isArray(message.renderContent) &&
+          message.renderContent.length > 0;
         return {
           id: message.entityUrn,
           conversation_id: conversation,
+          thread_id: thread,
+          is_group: group,
           // LinkedIn's router retains base64 padding in its canonical URL.
           // Encoding '=' here leaves page-activated drafts waiting on a URL
           // that differs from the one the user actually visits.
           conversation_url: `https://www.linkedin.com/messaging/thread/${thread}/`,
-          text: recalled
-            ? ""
-            : (message.body?.text ?? message.renderContentFallbackText ?? ""),
+          text,
           recalled,
+          // `text` is answerable; `media` carries attachments; `revoked` was
+          // recalled; `system` is LinkedIn's own event in the thread.
+          content_kind: recalled
+            ? "revoked"
+            : message.messageBodyRenderFormat === "SYSTEM"
+              ? "system"
+              : hasAttachments
+                ? "media"
+                : text.trim()
+                  ? "text"
+                  : "system",
           source_revision: await digest(
             JSON.stringify([
               message.entityUrn,
@@ -402,10 +453,10 @@ export function linkedInInboxProgram() {
               message.lastEditedAt,
             ])
           ),
-          has_attachments:
-            Array.isArray(message.renderContent) &&
-            message.renderContent.length > 0,
+          has_attachments: hasAttachments,
           sender_id: message.sender?.hostIdentityUrn ?? null,
+          sender_member_id: memberIdOf(message.sender?.hostIdentityUrn),
+          sender_slug: slugOf(member?.profileUrl),
           sender_name: clean(
             `${member?.firstName?.text ?? ""} ${member?.lastName?.text ?? ""}`
           ),
@@ -453,37 +504,62 @@ export function linkedInInboxProgram() {
   // Pages conversations, then each conversation's recent message page.
   async function readMessages(cursor, limit, mailbox) {
     let threads = cursor.threads;
+    let groups = cursor.groups ?? [];
     let next = cursor.next;
     if (!threads) {
       const source = await conversationsPage(mailbox, cursor.page);
       threads = source.elements.map((thread) => thread.entityUrn);
+      groups = source.elements.map(groupOf);
       next = source.metadata?.nextCursor;
     }
-    if (!Array.isArray(threads) || threads.length > 20)
+    if (!Array.isArray(threads) || threads.length > 20 || !Array.isArray(groups))
       fail("Invalid message cursor");
     const messages = threads.length
-      ? await messagesPage(threads[0], mailbox)
+      ? await messagesPage(threads[0], mailbox, groups[0] ?? null)
       : [];
     const { rows, more } = resume(messages, cursor, limit, "Message");
     const continuation = more
-      ? { threads, next, after: rows.at(-1).id }
+      ? { threads, groups, next, after: rows.at(-1).id }
       : threads.length > 1
-        ? { threads: threads.slice(1), next }
+        ? { threads: threads.slice(1), groups: groups.slice(1), next }
         : next
           ? { page: next }
           : null;
     return { rows, continuation };
   }
+  // A message reference names no conversation, so `id:<message URN>` looks
+  // through the most recently active conversations: a new message's thread is
+  // at the top. Not found is an empty page; the caller retries.
+  async function findMessage(id, mailbox) {
+    const source = await conversationsPage(mailbox);
+    for (const thread of source.elements) {
+      const row = (
+        await messagesPage(thread.entityUrn, mailbox, groupOf(thread))
+      ).find((message) => message.id === id);
+      if (row) return { rows: [row], continuation: null };
+    }
+    return { rows: [], continuation: null };
+  }
   async function read(input) {
     const mailbox = await account();
     const cursor = cursorOf(input.cursor, input.feed, mailbox);
     const limit = Math.max(1, Math.min(100, input.limit ?? 20));
+    const byId =
+      input.feed === "live_messages" &&
+      typeof input.query === "string" &&
+      input.query.startsWith("id:")
+        ? input.query.slice(3).trim()
+        : null;
+    if (byId !== null && (!byId.startsWith("urn:li:msg_message:") || input.cursor))
+      fail("Message lookup takes one id:<message URN> and no cursor");
     const { rows, continuation } =
       input.feed === "notifications"
         ? await readNotifications(cursor, limit)
-        : input.feed === "live_messages"
-          ? await readMessages(cursor, limit, mailbox)
-          : fail("Unknown source feed");
+        : byId
+          ? await findMessage(byId, mailbox)
+          : input.feed === "live_messages"
+            ? await readMessages(cursor, limit, mailbox)
+            : fail("Unknown source feed");
     if ((await account()) !== mailbox)
       fail("LinkedIn account changed during the read");
     return {
@@ -565,7 +641,11 @@ export function linkedInInboxProgram() {
     round,
     mailbox
   ) {
-    const messages = await messagesPage(thread.entityUrn, mailbox);
+    const messages = await messagesPage(
+      thread.entityUrn,
+      mailbox,
+      groupOf(thread)
+    );
     let reachedSeen = false;
     for (const row of messages) {
       if (Date.parse(row.occurred_at) < round.floor) continue;
@@ -810,6 +890,125 @@ export function linkedInInboxProgram() {
       else post(listener, listener.batches[0]);
     }
   }
+  // Direct send, approved ONLY for replying to direct messages on accounts the
+  // owner operates. One reply per idempotency key: the key becomes LinkedIn's
+  // client origin token, so a retry finds the first attempt instead of sending
+  // again. Group or unknown conversations are refused.
+  const SEND_RECONFIRM_ATTEMPTS = 5;
+  const SAME_TEXT_WINDOW_MS = 15 * 60 * 1000;
+  async function originTokenOf(mailbox, conversation, idempotencyKey) {
+    const hex = await digest(
+      JSON.stringify([mailbox, conversation, idempotencyKey])
+    );
+    // UUID-shaped (version 4 / variant bits set), like LinkedIn's own tokens.
+    return [
+      hex.slice(0, 8),
+      hex.slice(8, 12),
+      `4${hex.slice(13, 16)}`,
+      `${((Number.parseInt(hex[16], 16) & 3) | 8).toString(16)}${hex.slice(17, 20)}`,
+      hex.slice(20, 32),
+    ].join("-");
+  }
+  // The earlier attempt of this key, if the conversation shows one. When
+  // LinkedIn exposes no origin tokens on our messages, an identical text we
+  // sent moments ago is taken as that attempt rather than risk a duplicate.
+  function earlierAttempt(elements, mailbox, originToken, text, now) {
+    const own = elements.filter(
+      (message) => message.sender?.hostIdentityUrn === mailbox
+    );
+    const byToken = own.find((message) => message.originToken === originToken);
+    if (byToken) return byToken;
+    if (own.some((message) => typeof message.originToken === "string"))
+      return null;
+    return (
+      own.find(
+        (message) =>
+          (message.body?.text ?? "").trim() === text &&
+          Number.isFinite(message.deliveredAt) &&
+          now - message.deliveredAt < SAME_TEXT_WINDOW_MS
+      ) ?? null
+    );
+  }
+  function trackingId() {
+    const alphabet =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    return [...crypto.getRandomValues(new Uint8Array(16))]
+      .map((byte) => alphabet[byte % alphabet.length])
+      .join("");
+  }
+  async function send(input) {
+    const mailbox = await account();
+    const thread = input.conversation_id;
+    if (typeof thread !== "string" || !/^[A-Za-z0-9_-]+=*$/.test(thread))
+      fail("conversation_id must be a LinkedIn conversation thread id");
+    const text = typeof input.text === "string" ? input.text.trim() : "";
+    if (!text || text.length > 3000)
+      fail("text must contain 1-3000 characters");
+    const idempotencyKey = input.idempotency_key;
+    if (typeof idempotencyKey !== "string" || !idempotencyKey)
+      fail("idempotency_key is required");
+    const conversation = `urn:li:msg_conversation:(${mailbox},${thread})`;
+    const recent = (await conversationsPage(mailbox)).elements.find(
+      (element) => element.entityUrn === conversation
+    );
+    if (!recent)
+      fail("The conversation is not among the recent conversations; not sending");
+    if (groupOf(recent) !== false)
+      fail("send_message only answers direct messages; this conversation is a group or its membership is unknown");
+    const originToken = await originTokenOf(mailbox, conversation, idempotencyKey);
+    const sent = (message) => ({
+      sent: true,
+      message_id: message.entityUrn,
+      conversation_id: thread,
+      delivered_at: Number.isFinite(message.deliveredAt)
+        ? new Date(message.deliveredAt).toISOString()
+        : null,
+    });
+    const prior = earlierAttempt(
+      await messageElements(conversation),
+      mailbox,
+      originToken,
+      text,
+      Date.now()
+    );
+    if (prior) return { ...sent(prior), already_sent: true };
+    const response = await (
+      await request(
+        "/voyager/api/voyagerMessagingDashMessengerMessages?action=createMessage",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify({
+            message: {
+              body: { attributes: [], text },
+              renderContentUnions: [],
+              conversationUrn: conversation,
+              originToken,
+            },
+            mailboxUrn: mailbox,
+            trackingId: trackingId(),
+            dedupeByClientGeneratedToken: false,
+          }),
+        }
+      )
+    ).json();
+    const messageId = response?.value?.entityUrn;
+    // Confirm the message is in the conversation before reporting success.
+    for (let attempt = 0; attempt < SEND_RECONFIRM_ATTEMPTS; attempt++) {
+      const shown = (await messageElements(conversation)).find(
+        (message) =>
+          message.sender?.hostIdentityUrn === mailbox &&
+          ((typeof messageId === "string" && message.entityUrn === messageId) ||
+            message.originToken === originToken)
+      );
+      if (shown) return sent(shown);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    fail("LinkedIn accepted the message but it did not appear in the conversation; not retrying");
+  }
   async function listen(input) {
     if (!input.bridge_id || !input.token)
       fail("Source subscription binding is required");
@@ -843,5 +1042,5 @@ export function linkedInInboxProgram() {
       fail("Unable to attach source subscription");
     return { listening: true };
   }
-  globalThis[key] = { version, read, listen, detach };
+  globalThis[key] = { version, read, listen, send, detach };
 }

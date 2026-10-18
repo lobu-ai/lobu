@@ -63,8 +63,8 @@ beforeEach(async () => {
 });
 
 describe("connector-transport chat store eligibility", () => {
-  it("whatsapp.web and x are the declared connector transports", () => {
-    expect(connectorTransportPlatforms()).toEqual(["whatsapp.web", "x"]);
+  it("whatsapp.web, x and linkedin are the declared connector transports", () => {
+    expect(connectorTransportPlatforms()).toEqual(["whatsapp.web", "x", "linkedin"]);
   });
 
   it("keeps an unpinned connection of a reply-capable connector out; the pinned one is in", async () => {

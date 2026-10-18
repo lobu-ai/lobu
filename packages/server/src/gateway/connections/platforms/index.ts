@@ -11,6 +11,8 @@
 
 import { discordPlatform } from "./discord.js";
 import { gchatPlatform } from "./gchat.js";
+import { linkedinPlatform } from "./linkedin.js";
+import { LINKEDIN_PLATFORM } from "./linkedin-adapter.js";
 import { slackPlatform } from "./slack.js";
 import { teamsPlatform } from "./teams.js";
 import { telegramPlatform } from "./telegram.js";
@@ -30,6 +32,7 @@ export const PLATFORM_REGISTRY: Record<string, ChatPlatformDescriptor> = {
   gchat: gchatPlatform,
   [WHATSAPP_WEB_PLATFORM]: whatsappWebPlatform,
   [X_PLATFORM]: xPlatform,
+  [LINKEDIN_PLATFORM]: linkedinPlatform,
 };
 
 /** Look up a platform's capability descriptor, or undefined when unsupported. */

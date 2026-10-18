@@ -32,15 +32,18 @@
 import {
   type Adapter,
   type AdapterPostableMessage,
-  type BaseFormatConverter,
+  BaseFormatConverter,
   type ChatInstance,
   type FetchResult,
   type FormattedContent,
   type Message,
   NotImplementedError,
+  parseMarkdown,
   type RawMessage,
   type StreamChunk,
   type ThreadInfo,
+  toPlainText,
+  walkAst,
 } from "chat";
 
 export interface ConnectorChatOperationRequest {
@@ -262,5 +265,43 @@ export abstract class ConnectorChatAdapter<Row>
       isDM: this.isDM(threadId),
       metadata: this.threadMetadata(chatId),
     };
+  }
+}
+
+/**
+ * Formatting for connector chats that render no markdown (LinkedIn, X DMs).
+ * Links keep their target and list items keep a marker; every other construct
+ * flattens to its text.
+ */
+export class PlainTextFormatConverter extends BaseFormatConverter {
+  fromAst(ast: FormattedContent): string {
+    const plain = walkAst(structuredClone(ast), (node) => {
+      if (node.type === "link") {
+        const label = toPlainText({ type: "root", children: node.children });
+        return {
+          type: "text",
+          value: !label || label === node.url ? node.url : `${label} (${node.url})`,
+        };
+      }
+      if (node.type === "list") {
+        node.children.forEach((item, index) => {
+          const marker = node.ordered ? `${(node.start ?? 1) + index}. ` : "- ";
+          const first = item.children[0];
+          if (first?.type === "paragraph") {
+            first.children.unshift({ type: "text", value: marker });
+          } else {
+            item.children.unshift({
+              type: "paragraph",
+              children: [{ type: "text", value: marker }],
+            });
+          }
+        });
+      }
+      return node;
+    });
+    return toPlainText(plain).trim();
+  }
+  toAst(platformText: string): FormattedContent {
+    return parseMarkdown(platformText);
   }
 }

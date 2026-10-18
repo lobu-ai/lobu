@@ -15,6 +15,7 @@
 
 import type { ChatUserIdentity } from "@lobu/connectors/chat-user-identity";
 import { gchatChatUserIdentity } from "@lobu/connectors/google-identity";
+import { linkedInChatUserIdentity } from "@lobu/connectors/linkedin-identity";
 import { slackChatUserIdentity } from "@lobu/connectors/slack-identity";
 import { whatsAppWebChatUserIdentity } from "@lobu/connectors/whatsapp-web-identity";
 
@@ -23,6 +24,7 @@ export const CHAT_USER_IDENTITIES: readonly ChatUserIdentity[] = [
 	slackChatUserIdentity,
 	gchatChatUserIdentity,
 	whatsAppWebChatUserIdentity,
+	linkedInChatUserIdentity,
 ];
 
 /**

@@ -76,6 +76,7 @@ import {
 import {
   observeLinkedInInbox,
   readLinkedInInbox,
+  sendLinkedInMessage,
   type LinkedInInboxCheckpoint,
 } from "./linkedin-inbox.js";
 import { prepareLinkedInDraft } from "./linkedin-drafts.js";
@@ -2897,8 +2898,8 @@ export default class LinkedInConnector extends ConnectorRuntime<
     key: "linkedin",
     name: "LinkedIn",
     description:
-      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes and prepare message, post, or comment drafts for human submission. Also supports local LinkedIn Data Export CSV files.",
-    version: "3.18.8",
+      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, answer direct messages, and prepare message, post, or comment drafts for human submission. Also supports local LinkedIn Data Export CSV files.",
+    version: "3.19.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
     browser: {
@@ -2966,7 +2967,8 @@ export default class LinkedInConnector extends ConnectorRuntime<
         label: "Message Created",
         resourceType: "message",
         description:
-          "A new inbox message reference. Read its content from the live messages feed.",
+          "A new inbox message reference. Read its content from the live messages feed by id:<message URN>. A reply Automation can answer a direct message in its conversation.",
+        capabilities: { replyToSource: true },
       },
       {
         key: "source.gap",
@@ -3007,7 +3009,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "live_messages",
         name: "Live Messages",
         description:
-          "Read recent messages from inbox conversations without marking them seen. The cursor pages conversations and their recent message pages, not a full history export. Subscriptions check once per minute while the browser is online and report catch-up gaps.",
+          "Read recent messages from inbox conversations without marking them seen. The cursor pages conversations and their recent message pages, not a full history export; `id:<message URN>` reads one recent message back. Rows carry the conversation's thread_id, whether it is a group, the sender's member id, slug and name, and the message's content_kind. Subscriptions check once per minute while the browser is online and report catch-up gaps.",
         read: (ctx) => readLinkedInInbox(ctx),
         observe: (ctx) => observeLinkedInInbox(ctx),
         webhook: { mode: "trigger", events: ["message.created", "source.gap"] },
@@ -3243,6 +3245,38 @@ export default class LinkedInConnector extends ConnectorRuntime<
             liked: { type: "boolean" },
           },
           additionalProperties: false,
+        },
+      },
+      send_message: {
+        key: "send_message",
+        name: "Send direct message reply",
+        kind: "write",
+        description:
+          "Send a text reply into an exact existing LinkedIn direct-message conversation (thread_id from the live messages feed) and confirm it appears there. This direct send is approved only for answering direct messages on accounts the owner operates; group conversations are refused, and posts, comments and other messages stay draft-only through prepare_message, prepare_post and prepare_comment. A retry with the same idempotency_key returns the earlier message instead of sending again.",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["conversation_id", "text", "idempotency_key"],
+          additionalProperties: false,
+          properties: {
+            conversation_id: {
+              type: "string",
+              pattern: "^[A-Za-z0-9_-]+=*$",
+              maxLength: 500,
+              description: "The conversation's thread_id.",
+            },
+            text: { type: "string", minLength: 1, maxLength: 3000 },
+            idempotency_key: {
+              type: "string",
+              minLength: 1,
+              maxLength: 300,
+              description: "One reply per key: a retry returns the first send.",
+            },
+          },
         },
       },
       prepare_message: {
@@ -3516,6 +3550,9 @@ export default class LinkedInConnector extends ConnectorRuntime<
             ctx.input.liked
           ),
         };
+      }
+      if (ctx.actionKey === "send_message") {
+        return await sendLinkedInMessage(ctx);
       }
       if (
         ctx.actionKey === "prepare_message" ||
