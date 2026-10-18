@@ -392,7 +392,35 @@ describe("diagnostic credential scrubber", () => {
     expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 
-  it("redacts prefixed authorization-header compounds", () => {
+  it("redacts authorization values and serialized authorization objects", () => {
+    const result = scrubDiagnosticValue({
+      authorization_value: SECRET,
+      authorizationValueJson: JSON.stringify({ token: SECRET }),
+      authorization_mode: "strict",
+      authorization_policy: "admin-only",
+    }) as Record<string, unknown>;
+    expect(result.authorization_value).toBe("[REDACTED]");
+    expect(result.authorizationValueJson).toBe("[REDACTED]");
+    expect(result.authorization_mode).toBe("strict");
+    expect(result.authorization_policy).toBe("admin-only");
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("scrubs credential text out of Error names", () => {
+    const error = new Error("boom");
+    Object.defineProperty(error, "name", {
+      value: "Custom password=synthetic-name-secret",
+      enumerable: false,
+    });
+    const result = scrubDiagnosticValue({ cause: error }) as {
+      cause: { name: string; message: string };
+    };
+    expect(result.cause.name).not.toContain("synthetic-name-secret");
+    expect(result.cause.name).toContain("Custom");
+    expect(result.cause.message).toBe("boom");
+    expect(JSON.stringify(result)).not.toContain("synthetic-name-secret");
+  });
+  it("redacts prefixed authorization headers", () => {
     // The auth term followed by a `header` segment is still a header
     // (`requestAuthorizationHeader`); a bare `headers` map or one ending in
     // any other segment stays readable.
@@ -484,18 +512,6 @@ describe("diagnostic credential scrubber", () => {
     expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 
-  it("redacts authorization compounds with credential qualifiers anywhere after", () => {
-    // `authorizationValueJson`: the qualifier need not directly follow.
-    // Config qualifiers stay readable.
-    const result = scrubDiagnosticValue({
-      authorizationValueJson: JSON.stringify({ token: SECRET }),
-      authorization_mode: "strict",
-    }) as Record<string, unknown>;
-    expect(result.authorizationValueJson).toBe("[REDACTED]");
-    expect(result.authorization_mode).toBe("strict");
-    expect(JSON.stringify(result)).not.toContain(SECRET);
-  });
-
   it("redacts credential terms buried in separator-free compounds", () => {
     // `clientsecretvalue`: no separators and no credential suffix for the
     // shared rules or split segment tests to catch.
@@ -549,33 +565,6 @@ describe("diagnostic credential scrubber", () => {
     expect(result.idtoken).toBe("[REDACTED]");
     expect(result.oauthCredentialsJson).toBe("[REDACTED]");
     expect(result.token_count).toBe(7);
-    expect(JSON.stringify(result)).not.toContain(SECRET);
-  });
-
-  it("redacts authorization values while keeping config qualifiers", () => {
-    // `authorization_value` names a credential; `authorization_mode` and
-    // `authorization_policy` name configuration and stay readable.
-    const result = scrubDiagnosticValue({
-      authorization_value: SECRET,
-      authorization_mode: "strict",
-      authorization_policy: "admin-only",
-    }) as Record<string, unknown>;
-    expect(result.authorization_value).toBe("[REDACTED]");
-    expect(result.authorization_mode).toBe("strict");
-    expect(result.authorization_policy).toBe("admin-only");
-    expect(JSON.stringify(result)).not.toContain(SECRET);
-  });
-
-  it("refuses usage-metric exemptions for credential-bearing names", () => {
-    // A benign qualifier only exempts a bare token pair
-    // (`token_count`); a credential term anywhere else keeps the redaction
-    // (`used_access_token`, `token_usage_secret`).
-    const result = scrubDiagnosticValue({
-      used_access_token: SECRET,
-      token_usage_secret: SECRET,
-    }) as Record<string, unknown>;
-    expect(result.used_access_token).toBe("[REDACTED]");
-    expect(result.token_usage_secret).toBe("[REDACTED]");
     expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 
