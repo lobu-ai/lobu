@@ -953,35 +953,46 @@ export async function handleAutomationMode(
     : (parseJson(automation.entities) ?? []);
 
   // Compute unprocessed ranges when no specific date range requested
-  // This helps agents understand what months need processing
+  // This helps agents understand what months need processing.
+  // Bounded to the recent-arrival horizon (same 90-day precedent as
+  // get_automation's pending histogram): without a bound the planner walks
+  // the entity's full event history. Bucketed and bounded on `created_at` —
+  // arrival order is what windows claim on (window_axis: 'created_at'), so a
+  // backfilled old event counts in its arrival month, not its source month.
   let unprocessedRanges: UnprocessedRange[] | undefined;
   if (!args.since && !args.until) {
+    const UNPROCESSED_RANGES_LOOKBACK_DAYS = 90;
+    const lookbackIso = new Date(
+      Date.now() - UNPROCESSED_RANGES_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
+    ).toISOString();
     // Query content and linked counts by month in parallel
     const [monthlyContent, monthlyLinked] = await Promise.all([
       sql.unsafe(
         `
         SELECT
-          DATE_TRUNC('month', c.occurred_at) as month,
+          DATE_TRUNC('month', c.created_at) as month,
           COUNT(*) as total
         FROM current_event_records c
         WHERE c.entity_ids && ARRAY[${entityIdPlaceholders}]::bigint[]
-        GROUP BY DATE_TRUNC('month', c.occurred_at)
+          AND c.created_at >= $${sourceEntityIds.length + 1}::timestamptz
+        GROUP BY DATE_TRUNC('month', c.created_at)
         ORDER BY month
       `,
-        sourceEntityIds
+        [...sourceEntityIds, lookbackIso]
       ),
       sql.unsafe(
         `
         SELECT
-          DATE_TRUNC('month', c.occurred_at) as month,
+          DATE_TRUNC('month', c.created_at) as month,
           COUNT(DISTINCT c.id) as linked
         FROM current_event_records c
         JOIN automation_run_events iwc ON c.id = iwc.event_id
         WHERE c.entity_ids && ARRAY[${entityIdPlaceholders}]::bigint[]
-          AND iwc.automation_id = $${sourceEntityIds.length + 1}
-        GROUP BY DATE_TRUNC('month', c.occurred_at)
+          AND c.created_at >= $${sourceEntityIds.length + 1}::timestamptz
+          AND iwc.automation_id = $${sourceEntityIds.length + 2}
+        GROUP BY DATE_TRUNC('month', c.created_at)
       `,
-        [...sourceEntityIds, automationId]
+        [...sourceEntityIds, lookbackIso, automationId]
       ),
     ]);
 

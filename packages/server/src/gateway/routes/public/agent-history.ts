@@ -32,6 +32,7 @@ import {
 import { isAdminOrOwnerRole } from "../../../tools/access-control.js";
 import { getMembershipRole } from "../../../workspace/multi-tenant.js";
 import { buildApiConversationId } from "../../services/api-conversation-id.js";
+import { mapApprovalInteractionRow } from "../../services/approval-interaction.js";
 import { findConversationById } from "../../services/conversations-store.js";
 import { readAutomationRunThreads } from "../../services/automation-run-thread.js";
 import {
@@ -698,39 +699,7 @@ export function createAgentHistoryRoutes(deps: {
 				  AND metadata->>'conversationId' = ${conversationId}
 				ORDER BY run_id
 			`;
-			interactions = rows.map((r) => {
-				const resourceKind =
-					r.resource_kind ??
-					(r.tool === "manage_automations"
-						? "automation"
-						: r.tool === "manage_agents"
-							? "agent"
-							: r.tool === "entity_field_change" || r.tool === "entity_change"
-								? "entity"
-								: null);
-				// manage_automations stores proposal as `{ args }`; SPA expects flat fields.
-				const rawProposal = r.proposal ?? null;
-				const proposal =
-					resourceKind === "automation" &&
-					rawProposal &&
-					typeof rawProposal === "object" &&
-					(rawProposal as { args?: unknown }).args &&
-					typeof (rawProposal as { args: unknown }).args === "object"
-						? (rawProposal as { args: Record<string, unknown> }).args
-						: rawProposal;
-				return {
-					type: "tool-approval" as const,
-					eventId: Number(r.event_id),
-					runId: Number(r.run_id),
-					action: r.action,
-					proposal,
-					current: r.current ?? null,
-					fields: r.fields ?? null,
-					attribution: r.attribution ?? null,
-					resourceKind,
-					reason: r.reason ?? null,
-				};
-			});
+			interactions = rows.map((r) => mapApprovalInteractionRow(r));
 			const errorInteraction = await readLatestAgentErrorInteraction(
 				scope.organizationId,
 				conversationId

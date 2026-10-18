@@ -28,6 +28,10 @@ import {
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { getDb } from "../../db/client.js";
+import {
+	AUTOMATION_CONVERSATION_SEGMENT,
+	AUTOMATION_RUN_SEGMENT,
+} from "../permissions/automation-run-intent.js";
 import { MAX_SNAPSHOT_BYTES } from "../services/transcript-snapshot.js";
 
 const logger = createLogger("worker-transcript");
@@ -99,12 +103,15 @@ async function isRunOwnedByJwtScope(
         -- Device-pinned Automation runs carry no agentId/conversationId in
         -- action_input: the identity is derived at poll time by
         -- buildAutomationRunWorkerAccess from (agent, automation, run). Prove
-        -- ownership from the automation's own agent plus the same derived id.
+        -- ownership from the automation's own agent plus the same derived id
+        -- (segments from automation-run-intent.ts, matching
+        -- buildAutomationRunConversationId — this concat is per-row so it
+        -- cannot bind a prebuilt id).
         OR (
           r.run_type = 'automation'
           AND automation.managed_agent_id = ${agentId}
           AND ${conversationId} =
-            ${agentId} || '_automation_' || r.automation_id::text || '_run_' || r.id::text
+            ${agentId} || ${AUTOMATION_CONVERSATION_SEGMENT} || r.automation_id::text || ${AUTOMATION_RUN_SEGMENT} || r.id::text
         )
       )
     LIMIT 1

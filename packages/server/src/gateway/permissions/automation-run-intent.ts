@@ -30,11 +30,37 @@ import logger from "../../utils/logger.js";
  */
 const SERVER_DISPATCHER = "lobu-dispatcher";
 const INTERNAL_SERVICE_CLIENT = "lobu-internal";
-const AUTOMATION_CONVERSATION_SUFFIX = /_automation_(\d+)_run_(\d+)$/;
+
+/**
+ * The two literal segments of an Automation run conversation id. They live
+ * here, once: every SQL concatenation and JS template that needs the
+ * `..._automation_<id>_run_<id>` shape composes these (via
+ * {@link buildAutomationRunConversationId} in JS, or the constants inline in
+ * per-row SQL that cannot bind a prebuilt id) instead of re-typing them.
+ */
+export const AUTOMATION_CONVERSATION_SEGMENT = "_automation_";
+export const AUTOMATION_RUN_SEGMENT = "_run_";
+const AUTOMATION_CONVERSATION_SUFFIX = new RegExp(
+	`${AUTOMATION_CONVERSATION_SEGMENT}(\\d+)${AUTOMATION_RUN_SEGMENT}(\\d+)$`,
+);
 
 export interface AutomationRunIntent {
 	runId: number;
 	automationId: number;
+}
+
+/**
+ * The single function that derives an Automation run conversation id.
+ * AGENTS.md rule: a shared key is derived by one function, never read off
+ * whatever carried it — so every mint site calls this instead of
+ * re-templating `${agentId}_automation_..._run_...` by hand.
+ */
+export function buildAutomationRunConversationId(
+	agentId: string,
+	automationId: number,
+	runId: number,
+): string {
+	return `${agentId}${AUTOMATION_CONVERSATION_SEGMENT}${automationId}${AUTOMATION_RUN_SEGMENT}${runId}`;
 }
 
 /**

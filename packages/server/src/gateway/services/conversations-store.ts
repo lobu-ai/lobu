@@ -1,6 +1,7 @@
 import { createLogger } from "@lobu/core";
 import { channelResourceIdentity } from "../../authz/channel-about.js";
 import { getDb } from "../../db/client.js";
+import { parseAutomationRunConversationId } from "../permissions/automation-run-intent.js";
 import { getPlatformDescriptor } from "../connections/platforms/index.js";
 
 const logger = createLogger("conversations-store");
@@ -8,13 +9,12 @@ const logger = createLogger("conversations-store");
 /** A conversation's origin class, mirroring how the listing partitions ids. */
 export type ConversationKind = "owned" | "platform";
 
-/** Automation conversation id shape: `{agentId}_automation_{id}_run_{runId}`. These
- *  stay derived from `agent_transcript_snapshot` (one sidebar entry per AUTOMATION,
- *  not per run) and must NEVER get a `conversations` row. */
-const AUTOMATION_CONVERSATION_ID = /_automation_\d+_run_\d+$/;
-
+/** Automation conversation id shape, derived by
+ * `buildAutomationRunConversationId` (`{agentId}_automation_{id}_run_{runId}`).
+ * These stay derived from `agent_transcript_snapshot` (one sidebar entry per
+ * AUTOMATION, not per run) and must NEVER get a `conversations` row. */
 export function isAutomationConversationId(conversationId: string): boolean {
-	return AUTOMATION_CONVERSATION_ID.test(conversationId);
+	return parseAutomationRunConversationId(conversationId) !== null;
 }
 
 /**
