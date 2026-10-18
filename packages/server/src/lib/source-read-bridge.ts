@@ -96,6 +96,45 @@ export function createSourceReadBridge(
       return run.runId;
     });
   };
+  // Close (or retain for recovery) the exact source tab, then release or hand
+  // off its profile ownership. Folds any cleanup interruption into `interruption`.
+  const finalizeBrowser = async (runId: number, workOk: boolean): Promise<void> => {
+    const lease = await sourceBrowserLease(params.scope.organizationId, runId);
+    if (leased && workOk && !interruption && !lease?.tab) {
+      interruption = new BrowserInterruptionError('recovery_unavailable', 'The source read did not confirm an exact owned browser tab.');
+    }
+    let outcome: SourceBrowserCleanup = { kind: 'unacknowledged' };
+    if (lease?.tab && !signal.aborted) {
+      const retainUntil = interruption?.reason === 'challenge_required' && canRetainSourceBrowser(lease)
+        ? new Date(lease.run.observed_at.getTime() + SOURCE_BROWSER_RETENTION_MS).toISOString() : undefined;
+      const cleanup = await dispatchChromeActionToExtension({
+        organizationId: params.scope.organizationId,
+        actionKey: 'close_tab',
+        actionInput: { tab_id: lease.tab.tab_id },
+        parentRunId: runId,
+        visibilityUserId: params.scope.principal,
+        skipAccountProbe: !workOk || !!interruption,
+        retainUntil,
+        abortSignal: signal,
+      });
+      if (cleanup.interruption) {
+        // Never bypass a failed final verification with another close.
+        // Exact-target expiry handles cleanup with uncertain authority.
+        interruption = new BrowserInterruptionError(cleanup.interruption.reason, cleanup.interruption.message);
+      } else if (cleanup.status !== 'completed') {
+        if (workOk) interruption = new BrowserInterruptionError('recovery_unavailable',
+          cleanup.error_message ?? 'Final browser account verification or cleanup was not acknowledged.');
+      } else if (!retainUntil) {
+        outcome = { kind: 'closed' };
+      } else if (cleanup.output?.cleanup_ack === true) {
+        outcome = { kind: 'retained', expiresAt: retainUntil };
+      }
+    }
+    const recovery = await finishSourceBrowser(params.scope.organizationId, runId, outcome, signal);
+    if (interruption && recovery) {
+      interruption = new BrowserInterruptionError(interruption.reason, interruption.message, recovery);
+    }
+  };
   return {
     onChromeDispatch(actionKey: string, actionInput: Record<string, unknown>) {
       const cleanup = actionKey === 'network_intercept_stop' || actionKey === 'close_tab';
@@ -150,44 +189,7 @@ export function createSourceReadBridge(
       const runId = await parent?.catch(() => undefined);
       let cleanupError: { error: unknown } | undefined;
       try {
-        if (runId !== undefined) {
-          const lease = await sourceBrowserLease(params.scope.organizationId, runId);
-          let outcome: SourceBrowserCleanup = { kind: 'unacknowledged' };
-          if (leased && result.ok && !interruption && !lease?.tab) {
-            interruption = new BrowserInterruptionError('recovery_unavailable', 'The source read did not confirm an exact owned browser tab.');
-          }
-          if (lease?.tab && !signal.aborted) {
-            const retainUntil = interruption?.reason === 'challenge_required' && canRetainSourceBrowser(lease)
-              ? new Date(lease.run.observed_at.getTime() + SOURCE_BROWSER_RETENTION_MS).toISOString() : undefined;
-            const cleanup = await dispatchChromeActionToExtension({
-              organizationId: params.scope.organizationId,
-              actionKey: 'close_tab',
-              actionInput: { tab_id: lease.tab.tab_id },
-              parentRunId: runId,
-              visibilityUserId: params.scope.principal,
-              skipAccountProbe: !result.ok || !!interruption,
-              retainUntil,
-              abortSignal: signal,
-            });
-            if (cleanup.interruption) {
-              // Never bypass a failed final verification with another close.
-              // Exact-target expiry handles cleanup with uncertain authority.
-              interruption = new BrowserInterruptionError(cleanup.interruption.reason, cleanup.interruption.message);
-            } else if (result.ok && cleanup.status !== 'completed') {
-              interruption = new BrowserInterruptionError('recovery_unavailable',
-                cleanup.error_message ?? 'Final browser account verification or cleanup was not acknowledged.');
-            }
-            const acknowledged = cleanup.status === 'completed' && !cleanup.interruption;
-            if (acknowledged) {
-              if (!retainUntil) outcome = { kind: 'closed' };
-              else if (cleanup.output?.cleanup_ack === true) outcome = { kind: 'retained', expiresAt: retainUntil };
-            }
-          }
-          const recovery = await finishSourceBrowser(params.scope.organizationId, runId, outcome, signal);
-          if (interruption && recovery) {
-            interruption = new BrowserInterruptionError(interruption.reason, interruption.message, recovery);
-          }
-        }
+        if (runId !== undefined) await finalizeBrowser(runId, result.ok);
       } catch (error) {
         cleanupError = { error };
         if (!result.ok) logger.warn({ feedId: params.feedId, error: getErrorMessage(error) }, 'Browser cleanup failed after source work failed');

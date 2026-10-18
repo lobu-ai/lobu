@@ -167,12 +167,11 @@ export async function claimSourceBrowser(
       );
     return false;
   }
-  const [profile] =
-    await sql`SELECT metadata, clock_timestamp() AS observed_at FROM auth_profiles WHERE id = ${resource.authProfileId}
-    AND organization_id = ${scope.organizationId} FOR UPDATE`;
-  const held = profile?.metadata?.[BROWSER_RECOVERY_KEY] as
-    | { run_id: number; expires_at: string }
-    | undefined;
+  const profile = await lockBrowserProfile(
+    scope.organizationId,
+    resource.authProfileId,
+    sql,
+  );
   let previous: SourceBrowserLease | undefined;
   if (params.recoveryId) {
     previous = await readRecovery(params.recoveryId, scope.organizationId, sql);
@@ -182,13 +181,13 @@ export async function claimSourceBrowser(
       previous.run.connection_id !== run.connection_id ||
       previous.request_hash !== params.requestHash ||
       !matchesBrowserResource(previous, resource) ||
-      held?.run_id !== previous.run.id
+      profile.held?.run_id !== previous.run.id
     ) {
       throw recoveryUnavailable(
         "Recovery source request, account, or browser binding changed.",
       );
     }
-  } else if (held && Date.parse(held.expires_at) > profile.observed_at.getTime()) {
+  } else if (profile.activeRunId !== undefined) {
     throw recoveryUnavailable(
       "This browser account already has an active read or recovery. Finish that work first.",
     );
@@ -207,7 +206,7 @@ export async function claimSourceBrowser(
     run,
     recovery_id: previous?.recovery_id ?? `${params.runId}.${randomUUID()}`,
     state: "reading",
-    expires_at: new Date(profile.observed_at.getTime() + Math.max(0, params.deadlineAt - Date.now())).toISOString(),
+    expires_at: new Date(profile.observedAt + Math.max(0, params.deadlineAt - Date.now())).toISOString(),
     request_hash: params.requestHash,
     origins: [...resource.requirement.origins].sort(),
     owner: {
@@ -223,8 +222,7 @@ export async function claimSourceBrowser(
       scope.organizationId,
       sql,
     );
-  await sql`UPDATE auth_profiles SET metadata = COALESCE(metadata, '{}'::jsonb) || ${sql.json({ [BROWSER_RECOVERY_KEY]: { run_id: run.id, expires_at: lease.expires_at } })}
-    WHERE id = ${resource.authProfileId} AND organization_id = ${scope.organizationId}`;
+  await setProfileHold(scope.organizationId, resource.authProfileId, { run_id: run.id, expires_at: lease.expires_at }, sql);
   await saveLease(lease, scope.organizationId, sql);
   return true;
 }
@@ -258,6 +256,38 @@ export async function sourceBrowserLease(
   const record = await loadSourceBrowserRun(org, runId, sql, lock);
   return record?.metadata ? { ...record.metadata, run: record.run } : undefined;
 }
+/**
+ * Every owner check and handoff takes this profile row lock first, then the run
+ * lock. `activeRunId` is set only while the stored ownership is unexpired.
+ */
+async function lockBrowserProfile(org: string, authProfileId: number, sql: DbClient) {
+  const [profile] =
+    await sql`SELECT metadata, clock_timestamp() AS observed_at FROM auth_profiles
+      WHERE id = ${authProfileId} AND organization_id = ${org} FOR UPDATE`;
+  if (!profile) throw recoveryUnavailable("The browser account is unavailable.");
+  const held = profile.metadata?.[BROWSER_RECOVERY_KEY] as
+    | { run_id: number; expires_at: string }
+    | undefined;
+  const observedAt = (profile.observed_at as Date).getTime();
+  return {
+    held,
+    observedAt,
+    activeRunId: held && Date.parse(held.expires_at) > observedAt ? held.run_id : undefined,
+  };
+}
+/** Write (or with `undefined`, release) the profile's ownership under its held lock. */
+async function setProfileHold(
+  org: string,
+  authProfileId: number,
+  hold: { run_id: number; expires_at: string } | undefined,
+  sql: DbClient,
+) {
+  await sql`UPDATE auth_profiles SET metadata = ${
+    hold
+      ? sql`COALESCE(metadata, '{}'::jsonb) || ${sql.json({ [BROWSER_RECOVERY_KEY]: hold })}`
+      : sql`COALESCE(metadata, '{}'::jsonb) - ${BROWSER_RECOVERY_KEY}`
+  } WHERE id = ${authProfileId} AND organization_id = ${org}`;
+}
 /** Lock the profile before enqueue and refuse another run's unexpired ownership. */
 export async function browserAccountHeldByOtherRun(
   org: string,
@@ -265,13 +295,8 @@ export async function browserAccountHeldByOtherRun(
   runId: number,
   sql: DbClient,
 ): Promise<boolean> {
-  const [profile] =
-    await sql`SELECT metadata, clock_timestamp() AS observed_at FROM auth_profiles
-      WHERE id = ${authProfileId} AND organization_id = ${org} FOR UPDATE`;
-  const held = profile?.metadata?.[BROWSER_RECOVERY_KEY];
-  return (
-    !!held && Date.parse(held.expires_at) > profile.observed_at.getTime() && held.run_id !== runId
-  );
+  const { activeRunId } = await lockBrowserProfile(org, authProfileId, sql);
+  return activeRunId !== undefined && activeRunId !== runId;
 }
 export async function saveSourceBrowserTab(
   org: string,
@@ -330,10 +355,8 @@ export async function finishSourceBrowser(
     if (!initial) return undefined;
     // Match claimSourceBrowser's profile-before-run lock order. A dispatch may
     // save its exact tab while we wait, so reload the lease under the run lock.
-    const [profile] =
-      await tx`SELECT metadata FROM auth_profiles WHERE id = ${initial.binding.auth_profile_id}
-      AND organization_id = ${org} FOR UPDATE`;
-    if (profile?.metadata?.[BROWSER_RECOVERY_KEY]?.run_id !== runId)
+    const profile = await lockBrowserProfile(org, initial.binding.auth_profile_id!, tx);
+    if (profile.held?.run_id !== runId)
       throw recoveryUnavailable("Browser recovery ownership changed.");
     const lease = await sourceBrowserLease(org, runId, tx, true);
     if (
@@ -366,12 +389,8 @@ export async function finishSourceBrowser(
       org,
       tx,
     );
-    await tx`UPDATE auth_profiles SET metadata = ${
-      holdUntil
-        ? tx`COALESCE(metadata, '{}'::jsonb) || ${tx.json({ [BROWSER_RECOVERY_KEY]: { run_id: runId, expires_at: holdUntil } })}`
-        : tx`COALESCE(metadata, '{}'::jsonb) - ${BROWSER_RECOVERY_KEY}`
-    }
-      WHERE id = ${lease.binding.auth_profile_id} AND organization_id = ${org}`;
+    await setProfileHold(org, lease.binding.auth_profile_id!,
+      holdUntil ? { run_id: runId, expires_at: holdUntil } : undefined, tx);
     if (!readyUntil) return undefined;
     // Either write can wait past cancellation. Roll back rather than extend
     // the original read deadline into a handoff its caller cannot receive.

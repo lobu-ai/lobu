@@ -25,7 +25,6 @@ type PolicyRun = {
   claimed_by: string | null;
   connection_id: number | null;
   feed_id: number | null;
-  expires_at: Date | null;
   unexpired: boolean;
   connector_key: string | null;
   action_key: string | null;
@@ -46,7 +45,7 @@ async function loadPolicyRun(sql: DbClient, organizationId: string, runId: numbe
   const [run] = await sql<PolicyRun>`
     SELECT id, run_type, status, approval_status, claimed_by, connection_id, connector_key,
            action_key, action_input, policy_principal_kind, policy_principal_id,
-           created_by_user_id, automation_id, parent_run_id, run_metadata, feed_id, expires_at, expires_at > clock_timestamp() AS unexpired
+           created_by_user_id, automation_id, parent_run_id, run_metadata, feed_id, expires_at > clock_timestamp() AS unexpired
     FROM runs WHERE id = ${runId} AND organization_id = ${organizationId}
     ${lock ? sql`FOR UPDATE` : sql``}
   `;
