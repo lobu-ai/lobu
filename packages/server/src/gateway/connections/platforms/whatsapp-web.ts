@@ -6,7 +6,7 @@
  * durable run record all apply and the gateway never holds a credential.
  */
 
-import { connectorChatPlatform } from "./connector-chat.js";
+import { connectorChatPlatform } from "./connector-chat-platform.js";
 import type { ChatPlatformDescriptor } from "./types.js";
 import { WhatsAppWebAdapter } from "./whatsapp-web-adapter.js";
 
