@@ -5,6 +5,7 @@
  * platform binding, capability authorization, and multi-lane run claiming.
  */
 
+import { validateRecoveryDispatch } from '../lib/browser-recovery';
 import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, connectionBrowserGrant } from '../connectors/browser-resource';
 import { authorizeCapabilities, isKnownPlatform } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
@@ -230,6 +231,7 @@ function formatDeviceAutomationInstructions(
  * Returns run details or empty response if no runs available.
  */
 export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
+  const pollStartedAt = performance.now();
   let worker_id: string;
   let capabilities: Record<string, boolean> = {};
   let platform: string | null = null;
@@ -1813,6 +1815,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   let selectedActionInput = row.approved_input ?? row.action_input ?? undefined;
   if (row.run_type === 'action' && selectedActionInput) {
     try {
+      if (row.run_metadata?.browser_recovery_control) await validateRecoveryDispatch(row.organization_id, row.run_metadata.browser_recovery_control as Record<string, unknown>);
       selectedActionInput = await resolveOperationFiles(selectedActionInput, row.run_metadata);
     } catch (error) {
       const message = errorMessage(error);
@@ -1842,7 +1845,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         isAccountProbe || row.parent_activation_tab_id == null
           ? null
           : Number(row.parent_activation_tab_id),
-        !isAccountProbe && row.parent_activation_url ? [row.parent_activation_url] : []
+        !isAccountProbe && row.parent_activation_url ? [row.parent_activation_url] : [],
+        row.run_metadata?.browser_recovery_control as Record<string, unknown> | undefined
       )
     : selectedActionInput;
 
@@ -1858,6 +1862,20 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       })
     : undefined;
 
+  const browserGrant = await connectionBrowserGrant(row.organization_id, row.connection_id, row.connector_version);
+  if (isChromeAction && actionInput?.browser_recovery_control) {
+    const control = actionInput.browser_recovery_control as Record<string, unknown>;
+    const clockStartedAt = performance.now();
+    const [clock] = await sql`SELECT clock_timestamp() AS observed_at`;
+    const clockElapsedMs = performance.now() - clockStartedAt;
+    // Private dispatch timing, stamped after all other awaits. The extension
+    // subtracts transport time and uses local elapsed clocks, never compares
+    // the gateway's absolute deadline with the Mac's wall clock.
+    actionInput.browser_recovery_control = { ...control,
+      remaining_ms: Math.max(0, Date.parse(String(control.expires_at)) - clock.observed_at.getTime() - clockElapsedMs),
+      poll_elapsed_ms: performance.now() - pollStartedAt,
+    };
+  }
   return c.json({
     ...pollMetadata,
     run_id: row.run_id,
@@ -1895,7 +1913,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       Object.keys(connectionCredentials).length > 0 ? connectionCredentials : undefined,
     compiled_code: compiledCode,
     session_state: sessionState ?? undefined,
-    browser_grant: await connectionBrowserGrant(row.organization_id, row.connection_id, row.connector_version),
+    browser_grant: browserGrant,
     action_key: row.action_key ?? undefined,
     // Mac/iOS bridge decodes `operation_key`; chrome uses `action_key` directly.
     operation_key: row.action_key ?? undefined,

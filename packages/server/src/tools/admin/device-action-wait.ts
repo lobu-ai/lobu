@@ -320,6 +320,7 @@ export async function waitForDeviceActionRunWithOptions(
     if (row.status === 'failed' || row.status === 'timeout' || row.status === 'cancelled') {
       return {
         status: row.status === 'timeout' ? 'timeout' : 'failed',
+        output: row.action_output ?? {},
         error_message: row.error_message ?? `Run ${runId} ${row.status}`,
       };
     }
@@ -452,6 +453,7 @@ export async function waitForDeviceActionRunWithOptions(
     if (final?.status === 'failed' || final?.status === 'cancelled') {
       return {
         status: 'failed',
+        output: final.action_output ?? {},
         error_message: final.error_message ?? `Run ${runId} failed`,
       };
     }

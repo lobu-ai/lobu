@@ -1,10 +1,12 @@
 import { executeCompiledConnector } from '@lobu/connector-worker/executor/runtime';
 import { getDb, pgTextArray, pgBigintArray, type DbClient } from '../db/client';
 import { createSourceReadBridge } from '../lib/source-read-bridge';
+import { sourceRecoveryHash } from '../lib/browser-recovery';
 import { enqueueTasksInTransaction } from '../scheduled/task-scheduler';
 import { SOURCE_FEED_LISTENER_TASK } from '../scheduled/task-definitions';
 import { dbEgressConfig } from '../utils/cloud-mode';
 import { resolveConnectorCodeForKey } from '../utils/ensure-connector-installed';
+import { computeCodeHash } from '../utils/compiler-core';
 import { mergeExecutionConfig, resolveExecutionAuth } from '../utils/execution-context';
 import { feedBackoff, feedRetryAtSql } from '../connectors/feed-backoff';
 import { connectionBrowserGrant } from '../connectors/browser-resource';
@@ -104,8 +106,6 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
   const sql = getDb();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), LISTENER_SETUP_TIMEOUT_MS);
-  let browser: ReturnType<typeof createSourceReadBridge> | undefined;
-  let status: 'completed' | 'failed' | 'timeout' = 'failed';
   let config: Record<string, unknown> | undefined;
 
   try {
@@ -115,40 +115,13 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
     const [feed] = await sql`
       SELECT f.id, f.connection_id, f.feed_key, f.config, f.checkpoint, f.pinned_version,
         c.connector_key, c.config AS connection_config, c.auth_profile_id, c.app_auth_profile_id,
-        d.version AS definition_version,
-        (SELECT cv.compiled_code_hash FROM connector_versions cv
-         WHERE cv.connector_key = c.connector_key AND cv.version = COALESCE(f.pinned_version, d.version)
-           AND (cv.organization_id = c.organization_id OR cv.organization_id IS NULL)
-         ORDER BY cv.organization_id NULLS LAST LIMIT 1) AS selected_artifact_hash
+        d.version AS definition_version
       FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
       JOIN LATERAL (${feedDefinitionSelection(sql)}) d ON true
       WHERE f.id = ${task.feedId} AND f.organization_id = ${task.organizationId}
     `;
     if (!feed) return;
 
-    browser = createSourceReadBridge(
-      {
-        id: Number(feed.id),
-        connection_id: Number(feed.connection_id),
-        feed_key: String(feed.feed_key),
-        connector_key: String(feed.connector_key),
-        pinned_version: feed.pinned_version,
-        definition_version: feed.definition_version,
-        selected_artifact_hash: feed.selected_artifact_hash,
-      },
-      {
-        scope: {
-          organizationId: task.organizationId,
-          principal: subscription.principal,
-          agentId: subscription.agentId,
-        },
-        automationId: subscription.automationId,
-        feedId: task.feedId,
-        deadlineAt: Date.now() + LISTENER_SETUP_TIMEOUT_MS,
-        sourceSubscriptionScopeKey: sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version),
-      },
-      controller.signal,
-    );
     const checkpoint = feed.checkpoint?.cursor as Record<string, unknown> | null ?? null;
     config = feed.config ?? {};
     // Keep setup due until it completes. A gateway crash after binding the page
@@ -163,6 +136,31 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
       task.organizationId,
       feed.pinned_version ?? feed.definition_version,
     );
+    const artifactHash = computeCodeHash(compiledCode);
+    const browser = createSourceReadBridge(
+      {
+        id: Number(feed.id),
+        connection_id: Number(feed.connection_id),
+        feed_key: String(feed.feed_key),
+        connector_key: String(feed.connector_key),
+        pinned_version: feed.pinned_version,
+        definition_version: feed.definition_version,
+        selected_artifact_hash: artifactHash,
+      },
+      {
+        scope: {
+          organizationId: task.organizationId,
+          principal: subscription.principal,
+          agentId: subscription.agentId,
+        },
+        automationId: subscription.automationId,
+        feedId: task.feedId,
+        deadlineAt: Date.now() + LISTENER_SETUP_TIMEOUT_MS,
+        requestHash: sourceRecoveryHash({ feedId: task.feedId, artifact: artifactHash }),
+        sourceSubscriptionScopeKey: sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version),
+      },
+      controller.signal,
+    );
     const auth = await resolveExecutionAuth({
       organizationId: task.organizationId,
       connectionId: Number(feed.connection_id),
@@ -172,7 +170,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
       logContext: { feedId: String(task.feedId) },
       logMessage: 'Failed to resolve source listener credentials',
     });
-    await executeCompiledConnector({
+    await browser.run(async () => executeCompiledConnector({
       compiledCode,
       job: {
         mode: 'observe',
@@ -195,7 +193,7 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
         signal: controller.signal,
       },
       timeoutMs: LISTENER_SETUP_TIMEOUT_MS,
-    });
+    }));
 
     // Only a valid browser delivery confirms recovery. Keep the failure count
     // through setup, and do not erase a rejected page received during setup.
@@ -204,14 +202,11 @@ export async function runSourceFeedListener(task: SourceFeedListenerTask): Promi
       WHERE id = ${task.feedId} AND organization_id = ${task.organizationId}
         AND COALESCE(config, '{}'::jsonb) = ${sql.json(config)}::jsonb
         AND consecutive_failures = ${started.consecutive_failures}`;
-    status = 'completed';
   } catch (error) {
     await recordSourceFeedFailure(sql, task, config, 'Source listener setup failed; check the paired browser.');
     throw error;
   } finally {
-    if (controller.signal.aborted) status = 'timeout';
     controller.abort();
     clearTimeout(timer);
-    await browser?.settle(status);
   }
 }

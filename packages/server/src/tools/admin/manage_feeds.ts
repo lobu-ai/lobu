@@ -14,8 +14,10 @@
  * - recollect_feed: Clear a feed's sync cursor so the next sync starts over
  */
 
+import { deriveBrowserActionContext } from '../../worker-api/browser-action-context';
 import type { FeedOperation } from '@lobu/connector-sdk';
 import {
+  BrowserInterruptionError,
   getErrorMessage,
   isRetryable,
   parseJsonObject,
@@ -596,7 +598,7 @@ async function handleReadFeeds(
     args.reads.slice(0, 10).map(async (read) => {
       try {
         const { window: _window, sourceRevision: _revision, row_cursors: _rowCursors, ...result } =
-          await readSourceFeedPage(read, timeoutMs, scope, ctx.abortSignal, ctx.actingAutomationId);
+          await readSourceFeedPage(read, timeoutMs, scope, ctx.abortSignal, ctx.actingAutomationId, deriveBrowserActionContext(ctx)?.flow_id);
         return result;
       } catch (err) {
         const error_code = sourceErrorCode(err);
@@ -606,6 +608,7 @@ async function handleReadFeeds(
           error: getErrorMessage(err),
           error_code,
           retryable: isRetryable(error_code),
+          ...(err instanceof BrowserInterruptionError ? { interruption: { reason: err.reason, ...(err.recovery ? { recovery: err.recovery } : {}) } } : {}),
         };
       }
     }),

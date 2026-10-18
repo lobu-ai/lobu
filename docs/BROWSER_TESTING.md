@@ -147,3 +147,50 @@ Gotchas:
 - Sessions that re-auth often (Revolut, ~hourly) must be freshly logged in *in the paired Chrome* right before you navigate+evaluate, or the fresh tab redirects to the sign-in wall.
 - Per-call dispatch latency is 5–60s and virtualized lists recycle content out — for paginated scrapes, iterate inside the connector's own run, not via one-shot `evaluate`s.
 - **Connector-side changes ship via re-apply, not the app release.** Per-org connectors (`examples/personal-agent`) live in `connector_definitions`/`connector_versions` and only update on `lobu apply` (or `connections.installConnector` for a single bundle). An organization-scoped artifact shadows the shared artifact for the active version. Catalog refresh skips keys with no bundled source, but re-syncs keys that do have bundled source and can reset their active definition to bundled metadata, so verify the active version after deploy rather than assuming an override survived. An app deploy that adds a *capability* (e.g. `show_notification`) does nothing until the connector that *calls* it is re-applied. **And a new chrome action also needs the matching handler in the extension build** — dispatching `show_notification` to an older installed extension fails with `Owletto for Chrome: unknown dispatch ... action_key='show_notification'`. So three things gate such a notification: an up-to-date extension build (the handler), a re-applied connector (the call), and macOS notification permission on the extension.
+
+## Bounded source-read recovery
+
+A failed `feeds.readMany` entry may return `error_code: "BROWSER_INTERRUPTED"`,
+`retryable: false`, and `interruption: { reason, recovery? }`. With Chrome extension
+0.9.9+, a visible challenge can retain its exact scrape-owned tab after capture
+cleanup is acknowledged. Retention requires a stable caller flow and an adapter
+requesting `retain_on_interruption: true` when opening its scratch tab.
+Login, account mismatch, loading failure, timeout, and uncertain cleanup do not
+grant recovery authority. Persistent warm-tab readers keep using their existing
+tabs and timeout classification.
+
+For recovery explicitly permitted by the calling agent's instructions:
+
+1. Keep the original feed request, cursor, query, limit, and source identity.
+   Count the failed attempt against the caller's source-read budget.
+2. Discover operations on the returned `chrome_connection_id`. Observe its exact
+   `tab_id` using `recovery_id` with `screenshot` or `get_accessibility_tree`.
+   Never target by title or switch device, profile, or window.
+3. For vision, verify that the model actually received image pixels. A resource
+   link or delivery diagnostic is insufficient. Do not follow private artifact
+   URLs; request a fresh observation or hand off to the browser owner.
+4. Each authorized `click_ref` or `focus_tab` requires the newest `observation_id`.
+   It expires after 30 seconds and is invalidated by page/viewport changes or use.
+   Existing approval and origin checks apply. Recovery drag and arbitrary
+   evaluation are unsupported; use human recovery when needed.
+5. After authorized recovery or human completion, repeat the identical source
+   request once with `recovery_id`. The fresh read uses the retained target and
+   verifies the expected account again. Only a successful source read advances
+   cursors or deduplication state; a click receipt or visual judgment is insufficient.
+
+Each handoff permits five minutes, sixteen observations, eight consumed actions,
+and one fresh read. Lost action/read responses still consume their observation or
+recovery ID: do not replay them. Closed/reused tabs, moved windows, account changes,
+policy revocation, expiry, or browser worker restart fail closed. Expiry cleanup
+closes only the original scrape-owned target.
+
+Sequence feeds sharing a browser account, including within `feeds.readMany`.
+Competing reads, syncs and connector actions fail with `recovery_unavailable`
+while that account is held. Uncertain cleanup or a lost handoff response may hold
+it for up to five minutes without granting usable recovery authority. Once the
+owner finishes or expires, a fresh normal read must verify the account again.
+
+Agent instructions that stop on login/verification still stop. This contract
+changes neither Automation instructions nor source-read budgets. Validate with
+local synthetic fixtures before a separately authorized runtime trial; synthetic
+success does not prove live verification success.

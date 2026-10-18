@@ -1,3 +1,10 @@
+import { resolveRunConnectorPolicy } from '../../../authz/operation-run-policy';
+import * as browserResources from '../../../connectors/browser-resource';
+import { handleExecute } from '../../../tools/admin/manage_operations/handlers/execute';
+import { deriveBrowserActionContext } from '../../../worker-api/browser-action-context';
+import { authorizeRecoveryAction, claimSourceBrowser, finishSourceBrowser, saveSourceBrowserTab, sourceRecoveryHash, SOURCE_BROWSER_RETENTION_MS } from '../../../lib/browser-recovery';
+import * as browserRecovery from '../../../lib/browser-recovery';
+import { createSourceReadBridge } from '../../../lib/source-read-bridge';
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../../../index';
@@ -30,6 +37,7 @@ import { post } from '../../setup/test-helpers';
 import * as sourceListeners from '../../../runs/source-feed-listener';
 import * as sourceNotifications from '../../../runs/feed-notifications';
 import * as cloudCredentials from '../../../connect/cloud-credential';
+import * as connectorCode from '../../../utils/ensure-connector-installed';
 import { sourceFeedScopeKey } from '../../../runs/source-feed-subscriptions';
 import { runAutomationScriptTask } from '../../../automations/script-task';
 
@@ -54,6 +62,15 @@ const SOURCE = `
         if (ctx.query === 'plain') return { rows: [{ id: 'plain' }], hasMore: false };
         const dispatcher = ctx.browser;
         if (!dispatcher) throw new Error('source read has no browser grant');
+        if (ctx.config.synthetic_recovery) {
+          const tab = await dispatcher.dispatch('navigate', { url: 'about:blank', new_tab: true, retain_on_interruption: true });
+          try {
+            const page = await dispatcher.dispatch('evaluate', { tab_id: tab.tab_id, expression: ctx.query });
+            return { rows: page.rows, hasMore: false };
+          } finally {
+            if (!ctx.config.synthetic_host_cleanup) await dispatcher.dispatch('close_tab', { tab_id: tab.tab_id });
+          }
+        }
         const page = await dispatcher.dispatch('evaluate', { expression: ctx.query });
         return { rows: page.rows, hasMore: false };
       },
@@ -68,6 +85,8 @@ const CHROME: DeviceConnectorManifest = {
     evaluate: { key: 'evaluate', name: 'Evaluate', kind: 'read' },
     navigate: { key: 'navigate', name: 'Navigate', kind: 'write' },
     focus_tab: { key: 'focus_tab', name: 'Focus tab', kind: 'write' },
+    close_tab: { key: 'close_tab', name: 'Close', kind: 'write' },
+    screenshot: { key: 'screenshot', name: 'Screenshot', kind: 'read' },
     feed_listen: { key: 'feed_listen', name: 'Listen', kind: 'read' },
   },
 };
@@ -240,12 +259,14 @@ describe('compiled browser source reads', () => {
   });
 
   it.each([
-    { failures: 0, rejectDuringSetup: false, editDuringSetup: false },
-    { failures: 0, rejectDuringSetup: false, editDuringSetup: true },
-    { failures: 2, rejectDuringSetup: false, editDuringSetup: false },
-    { failures: 2, rejectDuringSetup: true, editDuringSetup: false },
-  ])('runs compiled observation through browser claim/completion and recovery: %j', async ({ failures, rejectDuringSetup, editDuringSetup }) => {
+    { failures: 0, rejectDuringSetup: false, editDuringSetup: false, cleanupFails: false },
+    { failures: 0, rejectDuringSetup: false, editDuringSetup: true, cleanupFails: false },
+    { failures: 2, rejectDuringSetup: false, editDuringSetup: false, cleanupFails: false },
+    { failures: 2, rejectDuringSetup: true, editDuringSetup: false, cleanupFails: false },
+    { failures: 2, rejectDuringSetup: false, editDuringSetup: false, cleanupFails: true },
+  ])('runs compiled observation through browser claim/completion and recovery: %j', async ({ failures, rejectDuringSetup, editDuringSetup, cleanupFails }) => {
     const sql = getTestDb();
+    if (cleanupFails) vi.spyOn(browserRecovery, 'finishSourceBrowser').mockRejectedValue(new Error('Synthetic settlement failure'));
     const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId });
     const [automation] = await sql`WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
       INSERT INTO automations (id, automation_group_id, organization_id, managed_agent_id, created_by, name, slug, triggers)
@@ -264,8 +285,15 @@ describe('compiled browser source reads', () => {
     };`;
     await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: 'script', source: script } })}
       WHERE id = ${automation.id}`;
-    await sql`UPDATE feeds SET consecutive_failures = ${failures},
+    await sql`UPDATE feeds SET consecutive_failures = ${failures}, next_run_at = now() + interval '1 hour',
       last_error = ${failures ? 'Synthetic prior source failure' : null} WHERE id = ${feedId}`;
+    const resolveCode = connectorCode.resolveConnectorCodeForKey;
+    const startedBeforeResolution: boolean[] = [];
+    vi.spyOn(connectorCode, 'resolveConnectorCodeForKey').mockImplementation(async (...args) => {
+      const [state] = await sql`SELECT next_run_at <= now() AS started FROM feeds WHERE id = ${feedId}`;
+      startedBeforeResolution.push(state.started);
+      return resolveCode(...args);
+    });
     const observed = sourceListeners.runSourceFeedListener({ organizationId: orgId, feedId });
     let finished = false;
     observed.finally(() => { finished = true; }).catch(() => {});
@@ -311,6 +339,13 @@ describe('compiled browser source reads', () => {
         break;
       }
       await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    expect(startedBeforeResolution).toEqual([true]);
+    if (cleanupFails) {
+      await expect(observed).rejects.toThrow('Synthetic settlement failure');
+      expect((await sql`SELECT consecutive_failures, last_error IS NOT NULL AS failed, next_run_at > now() AS deferred
+        FROM feeds WHERE id = ${feedId}`)[0]).toMatchObject({ consecutive_failures: failures + 1, failed: true, deferred: true });
+      return;
     }
     await observed;
     expect(answered).toBe(true);
@@ -520,6 +555,31 @@ describe('compiled browser source reads', () => {
     }
   });
 
+  it('settles a failed source promptly while an orphaned browser dispatch is pending', async () => {
+    const controller = new AbortController();
+    const bridge = createSourceReadBridge({ id: feedId, connection_id: connectionId, connector_key: SOURCE_KEY,
+      feed_key: 'items', pinned_version: null, definition_version: VERSION, selected_artifact_hash: compiled.compiledCodeHash },
+    { scope: { organizationId: orgId, principal: userId }, feedId, deadlineAt: Date.now() + 5000,
+      requestHash: sourceRecoveryHash({ feedId, artifact: compiled.compiledCodeHash }) }, controller.signal);
+    let dispatch: Promise<unknown> | undefined;
+    let requiredAbort = false;
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await expect(bridge.run(async () => {
+        dispatch = bridge.onChromeDispatch('evaluate', { expression: 'private query' }).catch(() => undefined);
+        await waitForChild();
+        watchdog = setTimeout(() => { requiredAbort = true; controller.abort(); }, 2000);
+        throw new Error('Synthetic source failure');
+      })).rejects.toThrow('Synthetic source failure');
+      expect(requiredAbort).toBe(false);
+      await expectScrubbed();
+    } finally {
+      clearTimeout(watchdog);
+      controller.abort();
+      await dispatch;
+    }
+  });
+
   it('cancels a claimed step and ignores a late completion without publishing artifacts', async () => {
     const materialize = vi.spyOn(inlineAttachments, 'materializeActionOutputAttachments');
     const controller = new AbortController();
@@ -527,7 +587,7 @@ describe('compiled browser source reads', () => {
     const childId = await answerBrowser(reading, false);
     expect(childId).toBeDefined();
     controller.abort();
-    expect((await reading).results[0]).toMatchObject({ ok: false, error_code: 'UPSTREAM_TIMEOUT' });
+    expect((await reading).results[0]).toMatchObject({ ok: false, error_code: 'UPSTREAM_TIMEOUT', retryable: true });
     await expectScrubbed();
     const response = await post('/api/workers/complete-action', { body: {
       run_id: childId, worker_id: WORKER_ID, status: 'success', action_output: {
@@ -1013,6 +1073,645 @@ describe('compiled browser source reads', () => {
     expect(await dispatchChromeActionToExtension({ organizationId: orgId, parentRunId: run.runId, actionKey: 'evaluate', actionInput: { expression: 'self_probe' } }))
       .toMatchObject({ status: 'failed', error_message: expect.stringContaining('browser_binding_mismatch') });
     expect(await sql`SELECT id FROM runs WHERE parent_run_id = ${run.runId}`).toHaveLength(0);
+  });
+
+  async function recoverySetup() {
+    await liveDefinition();
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET config = '{"synthetic_recovery":true}'::jsonb WHERE id = ${feedId}`;
+    const profile = await ensureLiveBrowserProfile({ organizationId: orgId, connectorKey: SOURCE_KEY, deviceWorkerId: deviceId, userId });
+    await sql`UPDATE auth_profiles SET status = 'active', auth_data = ${sql.json({ mode: 'live', account_id: 'fixture-account' })} WHERE id = ${profile.id}`;
+    await sql`UPDATE connections SET auth_profile_id = ${profile.id} WHERE id = ${connectionId}`;
+    return profile;
+  }
+  const recoveryContext = () => ({ ...context(), mcpSessionId: 'synthetic-recovery-session', clientId: 'synthetic-recovery-client' });
+  const recoveryFlow = () => deriveBrowserActionContext(recoveryContext())!.flow_id;
+  async function recoveryRead(recovery_id?: string, query = 'private query') {
+    return manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query, limit: 2, ...(recovery_id ? { recovery_id } : {}) }], timeout_ms: 5000 }, {} as Env, recoveryContext()) as Promise<Record<string, any>>;
+  }
+  async function serveRecovery(reading: Promise<unknown>, options: {
+    navigationFails?: boolean;
+    missingTabIdentity?: boolean;
+    challenge?: 'probe' | 'late';
+    changedAccount?: boolean;
+    /** Probes after this many return no identity. */
+    missingIdentityAfter?: number;
+    cleanupFails?: boolean;
+    cleanupMarker?: boolean;
+    loseOwnershipOnCleanup?: boolean;
+    appVersion?: string;
+    afterCleanup?: () => void;
+  } = {}) {
+    let finished = false;
+    let probes = 0;
+    reading.finally(() => { finished = true; }).catch(() => {});
+    const jobs: Record<string, any>[] = [];
+    for (let i = 0; i < 70 && !finished; i++) {
+      const response = await post('/api/workers/poll', { body: { worker_id: WORKER_ID, platform: 'chrome-extension', app_version: options.appVersion ?? '9.9.0', capabilities: { 'browser.debugger': true, 'browser.tabs': true } } });
+      const job = await response.json();
+      if (job.run_id) {
+        jobs.push(job);
+        const probe = job.operation_key === 'evaluate' && job.action_input.expression === 'self_probe';
+        if (probe) probes++;
+        const challenge = (options.challenge === 'probe' && probe) || (options.challenge === 'late' && job.operation_key === 'evaluate' && !probe);
+        const output = job.operation_key === 'navigate' ? { tab_id: 77,
+          ...(!options.missingTabIdentity ? { browser_tab: { tab_id: 77, target_id: 'synthetic-target', window_id: 3 } } : {}) }
+          : challenge ? { value: { __lobu_browser_interruption: { reason: 'challenge_required', message: 'Synthetic visible verification' } } }
+          : probe ? { value: options.missingIdentityAfter !== undefined && probes > options.missingIdentityAfter ? null
+            : { accountId: options.changedAccount && probes > 1 ? 'changed-account' : 'fixture-account' } }
+          : job.operation_key === 'close_tab' ? { cleanup_ack: !options.cleanupFails, closed: true,
+            ...(options.cleanupMarker ? { value: { __lobu_browser_interruption: { reason: 'account_mismatch', message: 'Synthetic cleanup mismatch' } } } : {}) }
+          : { rows: ROWS };
+        const navigationFailed = options.navigationFails && job.operation_key === 'navigate';
+        if (navigationFailed) Object.assign(output, { value: { __lobu_browser_interruption: { reason: 'loading_failure', message: 'Synthetic navigation failure' } } });
+        if (options.loseOwnershipOnCleanup && job.operation_key === 'close_tab') {
+          const sql = getTestDb();
+          await sql`UPDATE auth_profiles SET metadata = metadata || ${sql.json({ browser_recovery: { run_id: 2147483000, expires_at: new Date(Date.now() + 60_000).toISOString() } })}
+            WHERE id = (SELECT auth_profile_id FROM connections WHERE id = ${connectionId})`;
+        }
+        const completion = await post('/api/workers/complete-action', { body: { run_id: job.run_id, worker_id: WORKER_ID, status: navigationFailed ? 'failed' : 'success', ...(navigationFailed ? { error_message: 'Synthetic navigation failure' } : {}), action_output: output } });
+        expect(completion.status).toBe(200);
+        if (job.operation_key === 'close_tab') options.afterCleanup?.();
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    await reading;
+    return jobs;
+  }
+  it.each(['active', 'cancelled', 'expired'])('finishes from the latest tab lease after waiting for the profile lock (%s)', async state => {
+    const profile = await recoverySetup();
+    const sql = getTestDb();
+    const runId = await sql.begin(async tx => {
+      const run = await createConnectorOperationRun({ organizationId: orgId, connectionId, connectorKey: SOURCE_KEY,
+        operationKey: 'inspect', operationInput: {}, approvalMode: 'inline', policyPrincipalKind: 'user', policyPrincipalId: userId, createdByUserId: userId, db: tx });
+      await claimSourceBrowser({ runId: run.runId, requestHash: 'synthetic-request',
+        scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(), deadlineAt: Date.now() + 5000 }, tx);
+      await tx`UPDATE runs SET status = 'running' WHERE id = ${run.runId}`;
+      return run.runId;
+    });
+    let unlock!: () => void;
+    let locked!: (pid: number) => void;
+    const acquired = new Promise<number>(resolve => { locked = resolve; });
+    const release = new Promise<void>(resolve => { unlock = resolve; });
+    const holder = sql.begin(async tx => {
+      await tx`SELECT id FROM auth_profiles WHERE id = ${profile.id} FOR UPDATE`;
+      locked(Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid));
+      await release;
+    });
+    const pid = await acquired;
+    const controller = new AbortController();
+    const finishing = finishSourceBrowser(orgId, runId, { kind: 'retained', expiresAt: new Date(Date.now() + SOURCE_BROWSER_RETENTION_MS).toISOString() }, controller.signal);
+    try {
+      await expect.poll(async () => (await sql`SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))
+      ) AS waiting`)[0].waiting).toBe(true);
+      const [chrome] = await sql`SELECT id FROM connections WHERE organization_id = ${orgId} AND connector_key = 'chrome'`;
+      await saveSourceBrowserTab(orgId, runId, { browser_tab: { tab_id: 77, target_id: 'synthetic-late-target', window_id: 3 } }, Number(chrome.id));
+      if (state === 'cancelled') controller.abort();
+      if (state === 'expired') await sql`UPDATE runs SET run_metadata = jsonb_set(run_metadata,
+        '{browser_recovery,expires_at}', to_jsonb(clock_timestamp() - interval '1 second')) WHERE id = ${runId}`;
+    } finally {
+      unlock();
+      await holder;
+    }
+    if (state === 'active') {
+      expect(await finishing).toMatchObject({ tab_id: 77, target_id: 'synthetic-late-target', window_id: 3 });
+    } else {
+      expect(await finishing).toBeUndefined();
+      expect((await sql`SELECT metadata FROM auth_profiles WHERE id = ${profile.id}`)[0]
+        .metadata.browser_recovery).toBeUndefined();
+    }
+  });
+  it('preserves structured navigation failure during the account probe and closes its exact created target', async () => {
+    await recoverySetup(); const reading = recoveryRead(); const jobs = await serveRecovery(reading, { navigationFails: true });
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'loading_failure' } });
+    expect(failure.interruption.recovery).toBeUndefined();
+    expect(jobs.map(job => job.operation_key)).toEqual(['navigate', 'close_tab']);
+    expect(jobs.at(-1)?.action_input.browser_recovery_control).toMatchObject({ tab_id: 77, target_id: 'synthetic-target', mode: 'read' });
+    await expectScrubbed();
+  });
+  it('preserves the original interruption without recovery authority when cleanup loses ownership', async () => {
+    const profile = await recoverySetup();
+    const reading = recoveryRead();
+    await serveRecovery(reading, { challenge: 'late', loseOwnershipOnCleanup: true });
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({ ok: false, retryable: false, error_code: 'BROWSER_INTERRUPTED', interruption: { reason: 'challenge_required' } });
+    expect(failure.interruption.recovery).toBeUndefined();
+    const sql = getTestDb();
+    expect((await sql`SELECT metadata FROM auth_profiles WHERE id = ${profile.id}`)[0].metadata.browser_recovery.run_id).toBe(2147483000);
+    await expectScrubbed();
+  });
+  it('records failure when final cleanup throws after a successful source read', async () => {
+    const profile = await recoverySetup();
+    const reading = recoveryRead();
+    await serveRecovery(reading, { loseOwnershipOnCleanup: true });
+
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({
+      ok: false,
+      retryable: false,
+      interruption: { reason: 'recovery_unavailable' },
+    });
+    expect(failure.rows).toBeUndefined();
+    expect(failure.interruption.recovery).toBeUndefined();
+    const sql = getTestDb();
+    expect(await sql`SELECT status FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)
+      .toEqual([{ status: 'failed' }]);
+    expect((await sql`SELECT metadata FROM auth_profiles WHERE id = ${profile.id}`)[0]
+      .metadata.browser_recovery.run_id).toBe(2147483000);
+    await expectScrubbed();
+  });
+  it('rejects completion when cancellation precedes final account verification', async () => {
+    await recoverySetup();
+    const controller = new AbortController();
+    const bridge = createSourceReadBridge({
+      id: feedId, connection_id: connectionId, connector_key: SOURCE_KEY,
+      feed_key: 'items', pinned_version: null, definition_version: VERSION,
+      selected_artifact_hash: compiled.compiledCodeHash,
+    }, {
+      scope: { organizationId: orgId, principal: userId }, feedId,
+      deadlineAt: Date.now() + 5000, flowId: recoveryFlow(),
+      requestHash: sourceRecoveryHash({ feedId, artifact: compiled.compiledCodeHash }),
+    }, controller.signal);
+    const reading = bridge.run(async () => {
+      await bridge.onChromeDispatch('navigate', {
+        url: 'about:blank', new_tab: true, retain_on_interruption: true,
+      });
+      controller.abort();
+      return ROWS;
+    }).then(() => ({ error: undefined }), error => ({ error }));
+    await serveRecovery(reading);
+    expect((await reading).error).toMatchObject({ reason: 'timeout' });
+    expect((await reading).error?.recovery).toBeUndefined();
+    expect(await getTestDb()`SELECT status FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)
+      .toEqual([{ status: 'timeout' }]);
+    const [profile] = await getTestDb()`SELECT metadata FROM auth_profiles WHERE id =
+      (SELECT auth_profile_id FROM connections WHERE id = ${connectionId})`;
+    expect(Date.parse(profile.metadata.browser_recovery.expires_at)).toBeGreaterThan(Date.now() + 240_000);
+    await expectScrubbed();
+  });
+  it('withholds recovery when cancellation races the cleanup acknowledgement', async () => {
+    await recoverySetup();
+    const controller = new AbortController();
+    const reading = manageFeeds({
+      action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2 }], timeout_ms: 5000,
+    }, {} as Env, { ...recoveryContext(), abortSignal: controller.signal }) as Promise<Record<string, any>>;
+    await serveRecovery(reading, { challenge: 'late', afterCleanup: () => controller.abort() });
+
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({ ok: false, retryable: false, error_code: 'BROWSER_INTERRUPTED' });
+    expect(failure.interruption.recovery).toBeUndefined();
+    expect(failure.rows).toBeUndefined();
+    expect(await getTestDb()`SELECT status FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)
+      .toEqual([{ status: 'timeout' }]);
+    const [profile] = await getTestDb()`SELECT metadata FROM auth_profiles WHERE id =
+      (SELECT auth_profile_id FROM connections WHERE id = ${connectionId})`;
+    expect(profile.metadata.browser_recovery).toBeUndefined();
+    await expectScrubbed();
+  });
+  it('does not commit a handoff when the caller times out during finalization writes', async () => {
+    const profile = await recoverySetup();
+    const sql = getTestDb();
+    let reached!: () => void;
+    let release!: () => void;
+    let settled!: () => void;
+    const finalizing = new Promise<void>(resolve => { reached = resolve; });
+    const proceed = new Promise<void>(resolve => { release = resolve; });
+    const finalized = new Promise<void>(resolve => { settled = resolve; });
+    const finish = browserRecovery.finishSourceBrowser;
+    vi.spyOn(browserRecovery, 'finishSourceBrowser').mockImplementation(async (...args) => {
+      expect(args[2].kind).toBe('retained');
+      let locked!: (pid: number) => void;
+      const acquired = new Promise<number>(resolve => { locked = resolve; });
+      const holder = sql.begin(async tx => {
+        // SELECT FOR UPDATE can inspect the lease, but its subsequent UPDATE waits.
+        await tx`LOCK TABLE runs IN SHARE MODE`;
+        locked(Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid));
+        await proceed;
+      });
+      const pid = await acquired;
+      const finishing = finish(...args);
+      finishing.catch(() => {});
+      try {
+        await expect.poll(async () => (await sql`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))
+        ) AS waiting`)[0].waiting).toBe(true);
+        reached();
+        await proceed;
+        await holder;
+        return await finishing;
+      } finally { release(); await holder; settled(); }
+    });
+    const reading = recoveryRead();
+    const serving = serveRecovery(reading, { challenge: 'late' });
+    await finalizing;
+    try {
+      const failure = (await reading).results[0];
+      expect(failure).toMatchObject({ ok: false, interruption: { reason: 'timeout' } });
+      expect(failure.interruption.recovery).toBeUndefined();
+    } finally {
+      release();
+      await finalized;
+      await serving;
+    }
+    await expect.poll(async () => (await sql`SELECT status FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)[0].status).toBe('timeout');
+    expect((await sql`SELECT run_metadata FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)[0]
+      .run_metadata.browser_recovery.state).not.toBe('ready');
+    const [ownership] = await sql`SELECT metadata, clock_timestamp() AS observed_at
+      FROM auth_profiles WHERE id = ${profile.id}`;
+    expect(Date.parse(ownership.metadata.browser_recovery.expires_at)).toBeLessThanOrEqual(ownership.observed_at.getTime());
+    expect(await sql.begin(tx => browserRecovery.browserAccountHeldByOtherRun(
+      orgId, profile.id, Number(ownership.metadata.browser_recovery.run_id) + 1, tx,
+    ))).toBe(false);
+    await expectScrubbed();
+  });
+  it('admits one feed per browser account in a parallel batch and releases it after success', async () => {
+    await recoverySetup();
+    const sql = getTestDb();
+    const [otherFeed] = await sql`INSERT INTO feeds
+      (organization_id, connection_id, feed_key, status, config)
+      SELECT organization_id, connection_id, feed_key, status, config
+      FROM feeds WHERE id = ${feedId} RETURNING id`;
+    const reads = [feedId, Number(otherFeed.id)].map(id => ({
+      feed_id: id, query: 'private query', limit: 2,
+    }));
+    const reading = manageFeeds({ action: 'read_feeds', reads, timeout_ms: 5000 },
+      {} as Env, recoveryContext()) as Promise<Record<string, any>>;
+    const jobs = await serveRecovery(reading);
+    const results = (await reading).results;
+
+    expect(results.filter((result: Record<string, any>) => result.ok)).toHaveLength(1);
+    const blocked = results.find((result: Record<string, any>) => !result.ok);
+    expect(blocked).toMatchObject({
+      retryable: false,
+      interruption: { reason: 'recovery_unavailable' },
+    });
+    expect(blocked.interruption.recovery).toBeUndefined();
+    expect(jobs.filter(job => job.operation_key === 'navigate')).toHaveLength(1);
+
+    const next = manageFeeds({
+      action: 'read_feeds', reads: reads.filter(read => read.feed_id === blocked.feed_id), timeout_ms: 5000,
+    }, {} as Env, recoveryContext()) as Promise<Record<string, any>>;
+    await serveRecovery(next);
+    expect((await next).results[0]).toMatchObject({ ok: true, rows: ROWS });
+  });
+  it('checks account ownership when an older browser step reaches the enqueue transaction', async () => {
+    await recoverySetup();
+    const parent = await createConnectorOperationRun({ organizationId: orgId, connectionId, connectorKey: SOURCE_KEY,
+      operationKey: 'inspect', operationInput: {}, approvalMode: 'inline', policyPrincipalKind: 'user', policyPrincipalId: userId, createdByUserId: userId });
+    const original = browserResources.connectionBrowserResource;
+    let entered!: () => void, release!: () => void;
+    const checked = new Promise<void>(resolve => { entered = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    let paused = false;
+    vi.spyOn(browserResources, 'connectionBrowserResource').mockImplementation(async (...args) => {
+      const resource = await original(...args);
+      if (args[1] === connectionId && !paused) {
+        paused = true; entered(); await resume;
+      }
+      return resource;
+    });
+    const older = dispatchChromeActionToExtension({ organizationId: orgId, parentRunId: parent.runId,
+      actionKey: 'evaluate', actionInput: { expression: 'private query' }, skipAccountProbe: true });
+    await checked;
+    try {
+      const reading = recoveryRead();
+      await serveRecovery(reading, { challenge: 'late' });
+      expect((await reading).results[0].interruption.recovery).toBeDefined();
+    } finally { release(); }
+    const jobs = await serveRecovery(older);
+    expect(await older).toMatchObject({ status: 'failed', interruption: { reason: 'recovery_unavailable' } });
+    expect(jobs).toHaveLength(0);
+  });
+  it.each([{ status: 'pending', legacy: false }, { status: 'running', legacy: false }, { status: 'pending', legacy: true }])('does not take ownership from an already $status browser step (legacy=$legacy)', async ({ status, legacy }) => {
+    await recoverySetup();
+    const sql = getTestDb();
+    const parent = await createConnectorOperationRun({ organizationId: orgId, connectionId, connectorKey: SOURCE_KEY,
+      operationKey: 'inspect', operationInput: {}, approvalMode: 'inline', policyPrincipalKind: 'user', policyPrincipalId: userId, createdByUserId: userId });
+    if (legacy) await sql`UPDATE runs SET run_metadata = run_metadata - 'browser_binding' WHERE id = ${parent.runId}`;
+    const controller = new AbortController();
+    const older = dispatchChromeActionToExtension({ organizationId: orgId, parentRunId: parent.runId,
+      actionKey: 'evaluate', actionInput: { expression: 'private query' }, skipAccountProbe: true, abortSignal: controller.signal });
+    const child = await waitForChild();
+    if (status === 'running') expect(await answerBrowser(older, false)).toBe(Number(child.id));
+    try {
+      await expect(sql.begin(async tx => {
+        const run = await createConnectorOperationRun({ organizationId: orgId, connectionId, connectorKey: SOURCE_KEY,
+          operationKey: 'inspect', operationInput: {}, approvalMode: 'inline', policyPrincipalKind: 'user', policyPrincipalId: userId, createdByUserId: userId, db: tx });
+        await claimSourceBrowser({ runId: run.runId, requestHash: 'synthetic-request',
+          scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(), deadlineAt: Date.now() + 5000 }, tx);
+      })).rejects.toThrow('unfinished browser step');
+    } finally { controller.abort(); await older; }
+  });
+  it('uses the database deadline for source authority when the gateway clock differs', async () => {
+    await recoverySetup();
+    const reading = recoveryRead();
+    const sql = getTestDb();
+    let parentId = 0;
+    await expect.poll(async () => {
+      const [run] = await sql`SELECT id FROM runs WHERE organization_id = ${orgId}
+        AND action_key = '__lobu_feed_read' AND status = 'running'`;
+      parentId = Number(run?.id ?? 0); return parentId;
+    }).toBeGreaterThan(0);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 10 * 60_000);
+    try {
+      expect((await resolveRunConnectorPolicy({ organizationId: orgId, runId: parentId }))?.effect).toBe('auto');
+      await sql`UPDATE runs SET expires_at = clock_timestamp() - interval '1 second' WHERE id = ${parentId}`;
+      clock.mockReturnValue(now - 10 * 60_000);
+      expect((await resolveRunConnectorPolicy({ organizationId: orgId, runId: parentId }))?.effect).toBe('deny');
+    } finally {
+      clock.mockRestore();
+      await serveRecovery(reading);
+    }
+  });
+  it('does not expire another reader when the gateway clock is ahead of Postgres', async () => {
+    const profile = await recoverySetup();
+    const reading = recoveryRead(); await serveRecovery(reading, { challenge: 'late' });
+    const recovery = (await reading).results[0].interruption.recovery;
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 10 * 60_000);
+    expect(await browserRecovery.browserAccountHeldByOtherRun(orgId, profile.id, Number(recovery.recovery_id.split('.')[0]) + 1, getTestDb())).toBe(true);
+    await expect(authorizeRecoveryAction({ scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(),
+      connectionId: recovery.chrome_connection_id, action: 'screenshot', input: { recovery_id: recovery.recovery_id, tab_id: 77 } })).resolves.toMatchObject({ mode: 'observe' });
+  });
+  it.each(['before_dispatch', 'after_read'] as const)('does not replay a consumed recovery after response loss %s', async point => {
+    await recoverySetup();
+    const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const id = (await interrupted).results[0].interruption.recovery.recovery_id;
+    const controller = new AbortController();
+    const resumed = manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2, recovery_id: id }], timeout_ms: 5000 },
+      {} as Env, { ...recoveryContext(), abortSignal: controller.signal }) as Promise<Record<string, any>>;
+    if (point === 'before_dispatch') {
+      await expect.poll(async () => (await getTestDb()`SELECT EXISTS (SELECT 1 FROM runs
+        WHERE organization_id = ${orgId} AND run_metadata->'browser_recovery'->>'resumed' = 'true') AS resumed`)[0].resumed).toBe(true);
+      controller.abort();
+      await resumed;
+    } else await serveRecovery(resumed, { afterCleanup: () => controller.abort() });
+    expect((await resumed).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'timeout' } });
+    expect((await resumed).results[0]).not.toHaveProperty('rows');
+    const replay = recoveryRead(id);
+    expect(await serveRecovery(replay)).toHaveLength(0);
+    expect((await replay).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    await expectScrubbed();
+  });
+  it.each(['probe', 'late'] as const)('recovery retains an exact interrupted tab during %s and returns a non-retryable handoff', async challenge => {
+    await recoverySetup(); const reading = recoveryRead(); const jobs = await serveRecovery(reading, { challenge });
+    const failure = (await reading).results[0];
+    expect(failure, JSON.stringify(failure)).toMatchObject({ ok: false, retryable: false, error_code: 'BROWSER_INTERRUPTED', interruption: { reason: 'challenge_required', recovery: { tab_id: 77, target_id: 'synthetic-target', window_id: 3, device_worker_id: deviceId } } });
+    expect(jobs.at(-1)?.action_input.browser_recovery_control.mode).toBe('retain');
+    expect(jobs.at(-1)?.action_input.browser_recovery_control.expires_at).toBe(failure.interruption.recovery.expires_at);
+    expect(jobs.at(-1)?.action_input.browser_recovery_control.remaining_ms).toBeGreaterThan(0);
+    expect(jobs.at(-1)?.action_input.browser_recovery_control.remaining_ms).toBeLessThanOrEqual(SOURCE_BROWSER_RETENTION_MS);
+    expect(jobs.at(-1)?.action_input.browser_recovery_control.poll_elapsed_ms).toBeGreaterThanOrEqual(0);
+    await expectScrubbed();
+    const [held] = await getTestDb()`SELECT connector_version, run_metadata FROM runs WHERE id = ${Number(failure.interruption.recovery.recovery_id.split('.')[0])} AND organization_id = ${orgId}`;
+    expect(held.connector_version).toBe(VERSION);
+    expect(held.run_metadata.browser_recovery).not.toHaveProperty('run');
+    expect(held.run_metadata.browser_recovery).not.toHaveProperty('connector_version');
+    const recovery = failure.interruption.recovery;
+    expect(await authorizeRecoveryAction({ scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(), connectionId: recovery.chrome_connection_id, action: 'screenshot', input: { recovery_id: recovery.recovery_id, tab_id: 77 } })).toMatchObject({ mode: 'observe', target_id: 'synthetic-target' });
+  });
+  it('an opted-in recovery read cancels without a retry or handoff', async () => {
+    await recoverySetup(); const controller = new AbortController();
+    const reading = manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2 }], timeout_ms: 5000 }, {} as Env, { ...recoveryContext(), abortSignal: controller.signal }) as Promise<Record<string, any>>;
+    expect(await answerBrowser(reading, false)).toBeDefined(); controller.abort();
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({ ok: false, error_code: 'BROWSER_INTERRUPTED', retryable: false, interruption: { reason: 'timeout' } });
+    expect(failure.interruption.recovery).toBeUndefined(); await expectScrubbed();
+  });
+  it('recovery consumes once, rejects competing claims, and freshly verifies the account before and after reading', async () => {
+    await recoverySetup(); const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const id = (await interrupted).results[0].interruption.recovery.recovery_id;
+    const reads = [recoveryRead(id), recoveryRead(id)]; const jobs = await serveRecovery(Promise.all(reads));
+    const results = (await Promise.all(reads)).map(r => r.results[0]);
+    expect(results.filter(r => r.ok)).toHaveLength(1); expect(results.find(r => !r.ok)).toMatchObject({ retryable: false });
+    expect(jobs.filter(j => j.operation_key === 'navigate')).toHaveLength(0);
+    expect(jobs.filter(j => j.action_input?.expression === 'self_probe')).toHaveLength(2);
+    expect(jobs.filter(j => j.operation_key === 'close_tab')).toHaveLength(1);
+    expect(results.find(r => r.ok).rows).toEqual(ROWS);
+    expect((await recoveryRead(id)).results[0]).toMatchObject({ ok: false, retryable: false });
+  });
+  it.each(['timeout', 'cancelled'])('rejects a recovery whose source run became %s after retention', async status => {
+    await recoverySetup();
+    const interrupted = recoveryRead();
+    await serveRecovery(interrupted, { challenge: 'late' });
+    const id = (await interrupted).results[0].interruption.recovery.recovery_id;
+    await getTestDb()`UPDATE runs SET status = ${status} WHERE id = ${Number(id.split('.')[0])} AND organization_id = ${orgId}`;
+    const resumed = recoveryRead(id);
+    const jobs = await serveRecovery(resumed);
+    expect((await resumed).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    expect(jobs).toHaveLength(0);
+  });
+  it('recovery refuses a changed request without consuming the original continuation', async () => {
+    await recoverySetup(); const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'probe' });
+    const id = (await interrupted).results[0].interruption.recovery.recovery_id;
+    expect((await recoveryRead(id, 'plain')).results[0]).toMatchObject({ ok: false, retryable: false });
+    const resumed = recoveryRead(id); await serveRecovery(resumed); expect((await resumed).results[0].ok).toBe(true);
+  });
+  it.each(['observation', 'resume'])('uses the parent run requester for recovery %s authority', async mode => {
+    await recoverySetup();
+    const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const recovery = (await interrupted).results[0].interruption.recovery;
+    await getTestDb()`UPDATE runs SET created_by_user_id = NULL
+      WHERE id = ${Number(recovery.recovery_id.split('.')[0])} AND organization_id = ${orgId}`;
+    if (mode === 'observation') {
+      await expect(authorizeRecoveryAction({ scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(),
+        connectionId: recovery.chrome_connection_id, action: 'screenshot',
+        input: { recovery_id: recovery.recovery_id, tab_id: 77 } })).rejects.toThrow('requester');
+    } else {
+      const resumed = recoveryRead(recovery.recovery_id); const jobs = await serveRecovery(resumed);
+      expect((await resumed).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+      expect(jobs).toHaveLength(0);
+    }
+  });
+  it('recovery accepts the same source sort with reordered JSON keys', async () => {
+    await recoverySetup();
+    const read = (sort: { column: string; order: 'desc' }, recovery_id?: string) => manageFeeds({
+      action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2, sort, recovery_id }], timeout_ms: 5000,
+    }, {} as Env, recoveryContext()) as Promise<Record<string, any>>;
+    const interrupted = read({ column: 'id', order: 'desc' });
+    await serveRecovery(interrupted, { challenge: 'late' });
+    const resumed = read({ order: 'desc', column: 'id' }, (await interrupted).results[0].interruption.recovery.recovery_id);
+    await serveRecovery(resumed);
+    expect((await resumed).results[0]).toMatchObject({ ok: true, rows: ROWS });
+  });
+  it('rejects malformed recovery IDs without dispatching or consuming the valid recovery', async () => {
+    await recoverySetup();
+    const interrupted = recoveryRead();
+    await serveRecovery(interrupted, { challenge: 'late' });
+    const id = (await interrupted).results[0].interruption.recovery.recovery_id;
+    for (const invalid of ['missing-delimiter', '0.invalid', 'not-a-number.invalid',
+      '9007199254740992.invalid', `0${id}`, ` ${id}`, `${id}.extra`, id.split('.')[0]]) {
+      const reading = recoveryRead(invalid);
+      expect(await serveRecovery(reading)).toHaveLength(0);
+      expect((await reading).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    }
+    const resumed = recoveryRead(id);
+    await serveRecovery(resumed);
+    expect((await resumed).results[0]).toMatchObject({ ok: true, rows: ROWS });
+  });
+  it('refuses recovery when resolved connector bytes change under the same catalog version', async () => {
+    await recoverySetup();
+    const interrupted = recoveryRead();
+    await serveRecovery(interrupted, { challenge: 'late' });
+    const id = (await interrupted).results[0].interruption.recovery.recovery_id;
+    // A cloud image can replace bundled bytes before catalog metadata refreshes.
+    const resolver = vi.spyOn(connectorCode, 'resolveConnectorCodeForKey')
+      .mockResolvedValue(`${compiled.compiledCode}\n/* synthetic image revision */`);
+    const changed = recoveryRead(id);
+    const jobs = await serveRecovery(changed);
+    expect(resolver).toHaveBeenCalledWith(SOURCE_KEY, orgId, VERSION);
+    expect((await changed).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    expect(jobs).toHaveLength(0);
+    resolver.mockRestore();
+    const unchanged = recoveryRead(id);
+    await serveRecovery(unchanged);
+    expect((await unchanged).results[0]).toMatchObject({ ok: true, rows: ROWS });
+  });
+  it.each([false, true])('rejects missing final identity without inventing a login failure (host cleanup=%s)', async hostCleanup => {
+    const profile = await recoverySetup();
+    const notify = vi.spyOn(notifications, 'notifyBrowserAuthExpired').mockResolvedValue();
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET config = config || ${sql.json({ synthetic_host_cleanup: hostCleanup })}::jsonb WHERE id = ${feedId}`;
+    const reading = recoveryRead();
+    await serveRecovery(reading, { missingIdentityAfter: 1 });
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    expect(failure.rows).toBeUndefined();
+    expect(failure.interruption.recovery).toBeUndefined();
+    expect((await sql`SELECT status FROM auth_profiles WHERE id = ${profile.id}`)[0].status).toBe('active');
+    expect((await sql`SELECT status FROM connections WHERE id = ${connectionId}`)[0].status).toBe('active');
+    expect(notify).not.toHaveBeenCalled();
+    await expectScrubbed();
+  });
+  it('rejects missing identity on the resumed source tab without inventing a login failure', async () => {
+    const profile = await recoverySetup();
+    const notify = vi.spyOn(notifications, 'notifyBrowserAuthExpired').mockResolvedValue();
+    const sql = getTestDb();
+    const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const resumed = recoveryRead((await interrupted).results[0].interruption.recovery.recovery_id);
+    await serveRecovery(resumed, { missingIdentityAfter: 0 });
+    const failure = (await resumed).results[0];
+    expect(failure).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    expect(failure.rows).toBeUndefined();
+    expect((await sql`SELECT status FROM auth_profiles WHERE id = ${profile.id}`)[0].status).toBe('active');
+    expect(notify).not.toHaveBeenCalled();
+  });
+  it('rejects a leased read without a confirmed exact source tab', async () => {
+    await recoverySetup();
+    const reading = recoveryRead();
+    await serveRecovery(reading, { missingTabIdentity: true });
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'recovery_unavailable' } });
+    expect(failure.rows).toBeUndefined();
+    expect(failure.interruption.recovery).toBeUndefined();
+  });
+  it('records final account verification failure when the host cleans up the source tab', async () => {
+    await recoverySetup();
+    const sql = getTestDb();
+    await sql`UPDATE feeds SET config = config || '{"synthetic_host_cleanup":true}'::jsonb WHERE id = ${feedId}`;
+    const reading = recoveryRead();
+    await serveRecovery(reading, { changedAccount: true });
+    expect((await reading).results[0]).toMatchObject({ ok: false, interruption: { reason: 'account_mismatch' } });
+    expect((await reading).results[0].rows).toBeUndefined();
+    expect(await sql`SELECT status, action_output, action_input->>'scrubbed' AS scrubbed FROM runs
+      WHERE organization_id = ${orgId} AND action_key = '__lobu_feed_read'`)
+      .toEqual([{ status: 'failed', action_output: null, scrubbed: 'true' }]);
+  });
+  it('recovery success requires the expected account after the source returned rows', async () => {
+    await recoverySetup(); const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const resumed = recoveryRead((await interrupted).results[0].interruption.recovery.recovery_id);
+    await serveRecovery(resumed, { changedAccount: true });
+    expect((await resumed).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'account_mismatch' } });
+    expect((await resumed).results[0].rows).toBeUndefined();
+  });
+  it('does not issue a handoff when acknowledged retention also returns an interruption', async () => {
+    await recoverySetup();
+    const reading = recoveryRead();
+    await serveRecovery(reading, { challenge: 'late', cleanupMarker: true });
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'account_mismatch' } });
+    expect(failure.interruption.recovery).toBeUndefined();
+    expect(failure.rows).toBeUndefined();
+  });
+  it('recovery does not issue a handoff without cleanup acknowledgement or after its one retry', async () => {
+    await recoverySetup(); const failed = recoveryRead(); await serveRecovery(failed, { challenge: 'late', cleanupFails: true });
+    expect((await failed).results[0].interruption.recovery).toBeUndefined();
+    expect((await recoveryRead()).results[0]).toMatchObject({ ok: false, retryable: false });
+  });
+  it('recovery does not grant another handoff after one fresh read', async () => {
+    await recoverySetup();
+    const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const resumed = recoveryRead((await interrupted).results[0].interruption.recovery.recovery_id);
+    await serveRecovery(resumed, { challenge: 'late' });
+    expect((await resumed).results[0].interruption.recovery).toBeUndefined();
+  });
+  it('recovery rejects another requester, a changed account binding, and an archived source', async () => {
+    const profile = await recoverySetup(); const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const recovery = (await interrupted).results[0].interruption.recovery;
+    const request = { scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(), connectionId: recovery.chrome_connection_id, action: 'screenshot', input: { recovery_id: recovery.recovery_id, tab_id: 77 } };
+    await expect(authorizeRecoveryAction({ ...request, scope: { ...request.scope, agentId: 'synthetic-other-agent' } })).rejects.toThrow('requester');
+    await expect(authorizeRecoveryAction({ ...request, flowId: 'another-session' })).rejects.toThrow('requester');
+    await getTestDb()`UPDATE auth_profiles SET auth_data = auth_data || '{"account_id":"changed"}'::jsonb WHERE id = ${profile.id}`;
+    await expect(authorizeRecoveryAction(request)).rejects.toThrow('binding');
+    await getTestDb()`UPDATE auth_profiles SET auth_data = auth_data || '{"account_id":"fixture-account"}'::jsonb WHERE id = ${profile.id}`;
+    await getTestDb()`UPDATE feeds SET status = 'paused' WHERE id = ${feedId}`;
+    await expect(authorizeRecoveryAction(request)).rejects.toThrow('no longer readable');
+  });
+
+  it.each(['0.9.6', '0.9.8'])('an unleased reader on %s closes its scratch tab and is probed once on success', async appVersion => {
+    await recoverySetup();
+    const oldExtension = () => getTestDb()`UPDATE device_workers SET app_version = ${appVersion} WHERE id = ${deviceId}::uuid`;
+    await oldExtension(); const failed = recoveryRead(); const failedJobs = await serveRecovery(failed, { challenge: 'late', appVersion });
+    expect((await failed).results[0]).toMatchObject({ ok: false, retryable: false, interruption: { reason: 'challenge_required' } });
+    expect((await failed).results[0].interruption.recovery).toBeUndefined();
+    expect(failedJobs.at(-1)).toMatchObject({ operation_key: 'close_tab', action_input: { tab_id: 77 } });
+    expect(failedJobs.at(-1)?.action_input).not.toHaveProperty('browser_recovery_control');
+    await oldExtension(); const read = recoveryRead(); const jobs = await serveRecovery(read, { appVersion });
+    expect((await read).results[0]).toMatchObject({ ok: true, rows: ROWS });
+    expect(jobs.filter(j => j.action_input?.expression === 'self_probe')).toHaveLength(1);
+  });
+
+  it('recovery operations retain normal approval policy and receive only host-stamped authority at poll', async () => {
+    await recoverySetup(); const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const recovery = (await interrupted).results[0].interruption.recovery;
+    await upsertEntityApprovalPolicy(orgId, { resourceClass: 'connector_action', connectorKey: 'chrome', effects: { execute: 'auto' } });
+    const available = await handleListAvailable({ action: 'list_available', connection_id: recovery.chrome_connection_id }, recoveryContext()) as Record<string, any>;
+    const operation = available.operations.find((item: Record<string, any>) => item.operation_key === 'screenshot');
+    expect(operation).toBeDefined();
+    const args = { action: 'execute' as const, connection_id: recovery.chrome_connection_id, operation_key: operation.operation_key, background: true,
+      input: { tab_id: 77, recovery_id: recovery.recovery_id, browser_recovery_control: { mode: 'act', tab_id: 999 } } };
+    const queued = await handleExecute(args, recoveryContext(), {} as Env) as Record<string, any>;
+    expect(queued, JSON.stringify(queued)).toHaveProperty('run_id');
+    const response = await post('/api/workers/poll', { body: { worker_id: WORKER_ID, platform: 'chrome-extension', app_version: '9.9.0', capabilities: { 'browser.debugger': true } } });
+    const job = await response.json();
+    expect(job).toMatchObject({ run_id: queued.run_id, action_input: { browser_recovery_control: { mode: 'observe', tab_id: 77, target_id: 'synthetic-target' } } });
+    await post('/api/workers/complete-action', { body: { run_id: job.run_id, worker_id: WORKER_ID, status: 'success', action_output: {} } });
+    await upsertEntityApprovalPolicy(orgId, { resourceClass: 'connector_action', connectorKey: 'chrome', operationKey: qualifiedOperationKey('chrome', 'screenshot'), effects: { execute: 'deny' } });
+    const denied = await handleExecute(args, recoveryContext(), {} as Env) as Record<string, any>;
+    expect(denied).toHaveProperty('error');
+  });
+
+  it('recovery rechecks origin, Chrome device binding, and expiry before observations', async () => {
+    await recoverySetup(); const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
+    const recovery = (await interrupted).results[0].interruption.recovery;
+    const request = { scope: { organizationId: orgId, principal: userId }, flowId: recoveryFlow(), connectionId: recovery.chrome_connection_id, action: 'screenshot', input: { recovery_id: recovery.recovery_id, tab_id: 77 } };
+    const sql = getTestDb();
+    await sql`UPDATE connections SET device_worker_id = NULL WHERE id = ${recovery.chrome_connection_id}`;
+    await expect(authorizeRecoveryAction(request)).rejects.toThrow('another device');
+    await sql`UPDATE connections SET device_worker_id = ${deviceId}::uuid WHERE id = ${recovery.chrome_connection_id}`;
+    await sql`UPDATE connector_definitions SET browser = jsonb_set(browser, '{origins}', '["https://source.example","https://changed.example"]'::jsonb) WHERE organization_id = ${orgId} AND key = ${SOURCE_KEY}`;
+    await expect(authorizeRecoveryAction(request)).rejects.toThrow('binding');
+    const runId = Number(recovery.recovery_id.split('.')[0]);
+    await sql`UPDATE runs SET run_metadata = jsonb_set(run_metadata, '{browser_recovery,expires_at}', to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id = ${runId} AND organization_id = ${orgId}`;
+    await expect(authorizeRecoveryAction(request)).rejects.toThrow('expired');
   });
 
 });

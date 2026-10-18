@@ -139,7 +139,8 @@ export function trustedChromeActionInput(
   input: Record<string, unknown>,
   context: BrowserActionContext,
   activationTabId?: number | null,
-  activationTargetUrls: string[] = []
+  activationTargetUrls: string[] = [],
+  recoveryControl?: Record<string, unknown>
 ): Record<string, unknown> {
   const trusted = { ...input };
   // No longer sent, but still stripped: the 0.8 extension keys tab ownership on
@@ -156,8 +157,10 @@ export function trustedChromeActionInput(
   // way to launder any tab id, or any target URL, into that authority.
   delete trusted.activation_tab_id;
   delete trusted.activation_target_urls;
+  delete trusted.browser_recovery_control;
   return {
     ...trusted,
+    ...(recoveryControl ? { browser_recovery_control: recoveryControl } : {}),
     browser_context_title: context.title,
     browser_flow_id: context.flow_id,
     ...(Number.isInteger(activationTabId) && (activationTabId as number) > 0

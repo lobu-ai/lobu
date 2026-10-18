@@ -2,6 +2,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { agentGuestBundle } from '@lobu/connector-worker/agent-turn';
+import { IsolateExecutor } from '@lobu/connector-worker/executor/isolate';
 import { MCP_PROTOCOL_VERSION } from '@lobu/core';
 import type { Context } from 'hono';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -43,6 +47,39 @@ function mockWorkerCtx(body: unknown): {
     },
   } as unknown as Context<{ Bindings: Env }>;
   return { ctx, result: () => captured };
+}
+
+/** The actual MCP result crosses the isolate and provider serializer as bytes. */
+async function modelRequestAfterObservation(toolResult: unknown): Promise<string> {
+  const requests: string[] = [];
+  const server = createServer(async (req, res) => {
+    let body = ''; for await (const part of req) body += part;
+    if (req.url === '/mcp/synthetic/tools/observe') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(toolResult)); return;
+    }
+    if (req.url !== '/v1/chat/completions') { res.writeHead(404); res.end(); return; }
+    requests.push(body);
+    const choice = requests.length === 1
+      ? { index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'observe-call', type: 'function', function: { name: 'observe', arguments: '{}' } }] }, finish_reason: 'tool_calls' }
+      : { index: 0, delta: { role: 'assistant', content: 'Observed.' }, finish_reason: 'stop' };
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(`data: ${JSON.stringify({ id: 'synthetic', object: 'chat.completion.chunk', created: 1, model: 'synthetic', choices: [choice] })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const executor = new IsolateExecutor({ timeoutMs: 30_000, allowedDomains: ['127.0.0.1'] });
+    const result = await executor.execute(await agentGuestBundle(), {
+      mode: 'agent_turn', config: {}, credentials: { provider: 'openai', accessToken: 'synthetic-key' }, sessionState: null, env: {},
+      turn: { provider: { api: 'openai-completions', provider: 'openai', modelId: 'synthetic', baseUrl: `${origin}/v1`, input: ['text', 'image'] },
+        systemPrompt: 'Observe once.', userMessage: 'Inspect the screenshot.', sessionJsonl: '',
+        tools: { gatewayUrl: origin, definitions: [{ mcpId: 'synthetic', name: 'observe', description: 'Observe a synthetic screenshot', inputSchema: { type: 'object', properties: {} } }] } },
+    }, {});
+    expect(result.mode).toBe('agent_turn');
+    expect(requests).toHaveLength(2);
+    return requests[1];
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 }
 
 describe('MCP media resources', () => {
@@ -666,6 +703,12 @@ describe('MCP media resources', () => {
       type: 'image', mimeType: 'image/png', data: imageBytes.toString('base64'),
     });
     expect(JSON.stringify(body.result?.structuredContent)).not.toContain(imageBytes.toString('base64'));
+    expect(await modelRequestAfterObservation(body.result)).toContain(`data:image/png;base64,${imageBytes.toString('base64')}`);
+    if (shape === 'wrapped') {
+      // A transport that delivers only links must never invent visible pixels.
+      const linksOnly = { ...body.result, content: body.result.content.filter((item: { type: string }) => item.type !== 'image') };
+      expect(await modelRequestAfterObservation(linksOnly)).not.toContain(imageBytes.toString('base64'));
+    }
 
     const readResponse = await post(path, {
       body: {

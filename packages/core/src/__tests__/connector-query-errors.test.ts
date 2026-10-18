@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  browserPageInterruption,
   classifyToolError,
   isRetryable,
   isToolError,
@@ -8,6 +9,17 @@ import {
   type ToolErrorCode,
   toToolErrorCode,
 } from "../connector-query-errors";
+
+test("page interruptions reject a reason array instead of coercing it", () => {
+  expect(
+    browserPageInterruption({
+      __lobu_browser_interruption: {
+        reason: ["challenge_required"],
+        message: "Malformed reason",
+      },
+    })
+  ).toBeUndefined();
+});
 
 describe("TOOL_ERRORS catalog", () => {
   test("every code has a spec with a message", () => {
@@ -22,6 +34,7 @@ describe("TOOL_ERRORS catalog", () => {
   test("permanent codes are not retryable", () => {
     for (const code of [
       "AUTH_MISSING",
+      "BROWSER_INTERRUPTED",
       "AUTH_INVALID",
       "NOT_FOUND",
       "VALIDATION",
