@@ -6,12 +6,14 @@
  * is LinkedIn's: row mapping, DM detection and plain-text formatting.
  *
  * Ids: a thread is one LinkedIn conversation on one connection
- * (`linkedin:<connection id>:<thread id>`), where the thread id is the
- * conversation URN's token (`2-…=`), the same value the connector's
- * `send_message` takes. A thread id does not say whether the conversation is a
- * group, so the row's explicit `is_group: false` is what makes a message
- * answerable, and the connector refuses to send into anything but a direct
- * message.
+ * (`linkedin:<connection id>:<chat id>`). In the member's own inbox the chat
+ * id is the conversation URN's token (`2-…=`), the same value the connector's
+ * `send_message` takes. A company page inbox's conversation must be answered
+ * from that page's mailbox, so its chat id is the full conversation URN,
+ * URI-encoded because chat ids carry no `:`; `send_message` takes the decoded
+ * URN. A thread id does not say whether the conversation is a group, so the
+ * row's explicit `is_group: false` is what makes a message answerable, and the
+ * connector refuses to send into anything but a direct message.
  */
 
 import { Message, NotImplementedError } from "chat";
@@ -20,6 +22,27 @@ import { normalizeLinkedInMemberId } from "@lobu/connectors/linkedin-identity";
 import { ConnectorChatAdapter, PlainTextFormatConverter } from "./connector-chat.js";
 
 export const LINKEDIN_PLATFORM = "linkedin";
+
+const PAGE_CONVERSATION_PREFIX = "urn:li:msg_conversation:(urn:li:fsd_pageMailbox:";
+const ENCODED_CONVERSATION_PREFIX = encodeURIComponent("urn:li:msg_conversation:(");
+
+/** A row's chat id: its thread token, or its full URN for a page inbox. */
+function chatIdOf(row: { thread_id: string; conversation_id?: string }): string {
+  return typeof row.conversation_id === "string" && row.conversation_id.startsWith(PAGE_CONVERSATION_PREFIX)
+    ? encodeURIComponent(row.conversation_id)
+    : row.thread_id;
+}
+
+/** What `send_message` takes for a chat id: the thread token or the conversation URN. */
+function conversationOf(chatId: string): string {
+  return chatId.startsWith(ENCODED_CONVERSATION_PREFIX) ? decodeURIComponent(chatId) : chatId;
+}
+
+/** The thread token of a conversation URN, or the chat id when it is one already. */
+function threadTokenOf(conversation: string): string {
+  const match = /,([^,()]+)\)$/.exec(conversation);
+  return conversation.startsWith("urn:") && match ? match[1] : conversation;
+}
 
 /** One message row as the connector's `live_messages` feed returns it. */
 export interface LinkedInMessageRow {
@@ -75,7 +98,7 @@ export class LinkedInAdapter extends ConnectorChatAdapter<LinkedInMessageRow> {
     const userName = raw.sender_slug || raw.sender_name || userId;
     return new Message({
       id: this.scopeMessageId(raw.id),
-      threadId: this.encodeThreadId(raw.thread_id),
+      threadId: this.encodeThreadId(chatIdOf(raw)),
       text,
       formatted: this.converter.toAst(text),
       raw,
@@ -100,7 +123,7 @@ export class LinkedInAdapter extends ConnectorChatAdapter<LinkedInMessageRow> {
    * The inbound chat message a live source row is, or null when nothing should
    * answer it: our own message, a recalled, system or attachment message, a
    * group, or a conversation LinkedIn did not identify as 1:1. `channelId` is
-   * the thread id an Automation's `channel_id` filter names.
+   * the thread token an Automation's `channel_id` filter names, in either inbox.
    */
   parseSourceRow(
     row: Record<string, unknown>,
@@ -130,7 +153,7 @@ export class LinkedInAdapter extends ConnectorChatAdapter<LinkedInMessageRow> {
     text: string,
     idempotencyKey: string,
   ): Record<string, unknown> {
-    return { conversation_id: threadId, text, idempotency_key: idempotencyKey };
+    return { conversation_id: conversationOf(threadId), text, idempotency_key: idempotencyKey };
   }
 
   protected sentRow(
@@ -138,9 +161,11 @@ export class LinkedInAdapter extends ConnectorChatAdapter<LinkedInMessageRow> {
     text: string,
     output: Record<string, unknown>,
   ): LinkedInMessageRow {
+    const conversation = conversationOf(threadId);
     return {
       id: output.message_id as string,
-      thread_id: threadId,
+      ...(conversation === threadId ? {} : { conversation_id: conversation }),
+      thread_id: threadTokenOf(conversation),
       text,
       content_kind: "text",
       from_me: true,

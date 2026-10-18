@@ -2687,6 +2687,19 @@ const companyUpdatesConfigSchema = {
   },
 };
 
+const liveMessagesConfigSchema = {
+  type: "object",
+  properties: {
+    inbox: {
+      type: "string",
+      pattern: "^(?:me|urn:li:fsd_pageMailbox:[0-9]+)$",
+      default: "me",
+      description:
+        'Whose inbox to read: "me" (default) for the signed-in member, or a company page\'s mailbox URN (urn:li:fsd_pageMailbox:<number>, the mailboxUrn the page\'s admin inbox at /company/<id>/admin/inbox/ requests; it differs from the company id). The signed-in member must administer the page. Changing it restarts the feed\'s subscription from a fresh baseline.',
+    },
+  },
+};
+
 const homeFeedConfigSchema = {
   type: "object",
   properties: {
@@ -2901,7 +2914,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, answer direct messages, and prepare message, post, or comment drafts for human submission. Also supports local LinkedIn Data Export CSV files.",
-    version: "3.19.0",
+    version: "3.20.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
     browser: {
@@ -3011,7 +3024,8 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "live_messages",
         name: "Live Messages",
         description:
-          "Read recent messages from inbox conversations without marking them seen. The cursor pages conversations and their recent message pages, not a full history export; `id:<message URN>` reads one recent message back. Rows carry the conversation's thread_id, whether it is a group, the sender's member id, slug and name, and the message's content_kind. Subscriptions check once per minute while the browser is online and report catch-up gaps.",
+          "Read recent messages from inbox conversations without marking them seen. The cursor pages conversations and their recent message pages, not a full history export; `id:<message URN>` reads one recent message back. Rows carry the conversation's thread_id and full conversation_id, whether it is a group, the sender's member id, slug and name, and the message's content_kind; a company page inbox's rows also carry the visitor's topic when LinkedIn shows one. The `inbox` setting reads a company page's inbox the signed-in member administers instead of the member's own. Subscriptions check once per minute while the browser is online and report catch-up gaps.",
+        configSchema: liveMessagesConfigSchema,
         read: (ctx) => readLinkedInInbox(ctx),
         observe: (ctx) => observeLinkedInInbox(ctx),
         webhook: { mode: "trigger", events: ["message.created", "source.gap"] },
@@ -3254,7 +3268,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         name: "Send direct message reply",
         kind: "write",
         description:
-          "Send a text reply into an exact existing LinkedIn direct-message conversation (thread_id from the live messages feed) and confirm it appears there. This direct send is approved only for answering direct messages on accounts the owner operates; group conversations are refused, and posts, comments and other messages stay draft-only through prepare_message, prepare_post and prepare_comment. A retry with the same idempotency_key returns the earlier message instead of sending again.",
+          "Send a text reply into an exact existing LinkedIn direct-message conversation and confirm it appears there. Pass a member-inbox row's thread_id, or a row's full conversation_id to reply from the inbox the message came from (a company page the signed-in member administers). This direct send is approved only for answering direct messages on accounts the owner operates; group conversations are refused, and posts, comments and other messages stay draft-only through prepare_message, prepare_post and prepare_comment. A retry with the same idempotency_key returns the earlier message instead of sending again.",
         annotations: {
           openWorldHint: true,
           destructiveHint: false,
@@ -3267,9 +3281,11 @@ export default class LinkedInConnector extends ConnectorRuntime<
           properties: {
             conversation_id: {
               type: "string",
-              pattern: "^[A-Za-z0-9_-]+=*$",
+              pattern:
+                "^(?:[A-Za-z0-9_-]+=*|urn:li:msg_conversation:\\((?:urn:li:fsd_profile:[A-Za-z0-9_-]+|urn:li:fsd_pageMailbox:[0-9]+),[A-Za-z0-9_-]+=*\\))$",
               maxLength: 500,
-              description: "The conversation's thread_id.",
+              description:
+                "The row's thread_id (the member's own inbox) or its full conversation_id (the inbox it names).",
             },
             text: { type: "string", minLength: 1, maxLength: 3000 },
             idempotency_key: {

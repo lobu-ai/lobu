@@ -30,13 +30,17 @@ export function linkedInInboxProgram() {
       "x-restli-protocol-version": "2.0.0",
     };
   }
-  async function request(url, init = {}) {
+  // `denied` names what a 401/403 means for this request, when it means more
+  // than a failed request.
+  async function request(url, init = {}, denied = null) {
     const response = await fetch(url, {
       credentials: "include",
       signal: AbortSignal.timeout(20000),
       ...init,
       headers: { ...headers(), ...init.headers },
     });
+    if (denied && (response.status === 401 || response.status === 403))
+      fail(denied);
     if (!response.ok) fail(`Source request failed (HTTP ${response.status})`);
     if (
       response.redirected &&
@@ -52,6 +56,70 @@ export function linkedInInboxProgram() {
     if (typeof urn !== "string" || !urn.startsWith("urn:li:fs_miniProfile:"))
       fail("Account identity is unavailable");
     return urn.replace("fs_miniProfile", "fsd_profile");
+  }
+  const PAGE_MAILBOX = /^urn:li:fsd_pageMailbox:[0-9]+$/;
+  const NOT_ADMIN =
+    "The signed-in LinkedIn account does not administer this page inbox";
+  // The page's own inbox answers its admins only: LinkedIn's page inbox reads
+  // these counts first, and a non-admin is refused.
+  async function assertAdministers(mailbox) {
+    const json = await (
+      await request(
+        `/voyager/api/voyagerMessagingGraphQL/graphql?queryId=messengerMailboxCounts.fc528a5a81a76dff212a4a3d2d48e84b&variables=(mailboxUrn:${encode(mailbox)})`,
+        {},
+        NOT_ADMIN
+      )
+    ).json();
+    // Only the status and an answer are verified live; the collection's name
+    // is not, so any non-null answer counts and nothing else does.
+    if (
+      (Array.isArray(json?.errors) && json.errors.length) ||
+      !json?.data ||
+      typeof json.data !== "object" ||
+      Object.values(json.data).every((value) => value == null)
+    )
+      fail(NOT_ADMIN);
+  }
+  // The inbox one feed reads: the signed-in member's own ("me", the default),
+  // or a company page's mailbox the member administers. `member` is the
+  // signed-in account, which must not change while the inbox is in use.
+  async function inboxOf(selected) {
+    const member = await account();
+    if (selected === undefined || selected === null || selected === "me")
+      return { mailbox: member, member, page: false };
+    if (typeof selected !== "string" || !PAGE_MAILBOX.test(selected))
+      fail(
+        'inbox must be "me" or a page mailbox URN (urn:li:fsd_pageMailbox:<number>)'
+      );
+    await assertAdministers(selected);
+    return { mailbox: selected, member, page: true };
+  }
+  // Whether a message was sent from this inbox. A member inbox's own messages
+  // carry the member's identity. A page inbox holds conversations between the
+  // page and members, so the page's mailbox, the page as an organization
+  // participant, or the signed-in admin are all the page speaking.
+  function fromMe(sender, inbox) {
+    const host = sender?.hostIdentityUrn;
+    if (typeof host !== "string") return null;
+    if (!inbox.page) return host === inbox.mailbox;
+    return (
+      host === inbox.mailbox ||
+      host === inbox.member ||
+      !!sender.participantType?.organization
+    );
+  }
+  // A page conversation's visitor-chosen topic, when LinkedIn shows one.
+  function topicOf(conversation, inbox) {
+    if (!inbox.page) return undefined;
+    for (const value of [
+      conversation?.topic,
+      conversation?.conversationTopic,
+      conversation?.subject,
+    ]) {
+      const text = clean(typeof value === "string" ? value : value?.text);
+      if (text) return text;
+    }
+    return undefined;
   }
   async function graph(query, variables, collection) {
     const json = await (
@@ -402,8 +470,8 @@ export function linkedInInboxProgram() {
       )
     ).elements;
   }
-  async function messagesPage(conversation, mailbox, group = null) {
-    const thread = threadOf(conversation, mailbox);
+  async function messagesPage(conversation, inbox, group = null, topic) {
+    const thread = threadOf(conversation, inbox.mailbox);
     const messages = await Promise.all(
       (await messageElements(conversation)).map(async (message) => {
         if (
@@ -461,11 +529,9 @@ export function linkedInInboxProgram() {
           sender_name: clean(
             `${member?.firstName?.text ?? ""} ${member?.lastName?.text ?? ""}`
           ),
-          from_me:
-            typeof message.sender?.hostIdentityUrn === "string"
-              ? message.sender.hostIdentityUrn === mailbox
-              : null,
+          from_me: fromMe(message.sender, inbox),
           occurred_at: new Date(message.deliveredAt).toISOString(),
+          ...(topic ? { topic } : {}),
         };
       })
     );
@@ -474,11 +540,16 @@ export function linkedInInboxProgram() {
         b.occurred_at.localeCompare(a.occurred_at) || a.id.localeCompare(b.id)
     );
   }
-  function cursorOf(raw, feed, mailbox) {
+  function cursorOf(raw, feed, inbox) {
     if (!raw) return {};
     if (typeof raw !== "string" || raw.length > 100000) fail("Invalid cursor");
     const cursor = JSON.parse(raw);
-    if (cursor.v !== 1 || cursor.feed !== feed || cursor.account !== mailbox)
+    if (
+      cursor.v !== 1 ||
+      cursor.feed !== feed ||
+      cursor.account !== inbox.mailbox ||
+      (cursor.member ?? cursor.account) !== inbox.member
+    )
       fail("Cursor belongs to a different source or account");
     return cursor;
   }
@@ -503,26 +574,45 @@ export function linkedInInboxProgram() {
     return { rows, continuation };
   }
   // Pages conversations, then each conversation's recent message page.
-  async function readMessages(cursor, limit, mailbox) {
+  async function readMessages(cursor, limit, inbox) {
     let threads = cursor.threads;
     let groups = cursor.groups ?? [];
+    // Only a page inbox's cursor carries topics; a member cursor is unchanged.
+    let topics = cursor.topics;
     let next = cursor.next;
     if (!threads) {
-      const source = await conversationsPage(mailbox, cursor.page);
+      const source = await conversationsPage(inbox.mailbox, cursor.page);
       threads = source.elements.map((thread) => thread.entityUrn);
       groups = source.elements.map(groupOf);
+      if (inbox.page)
+        topics = source.elements.map((thread) => topicOf(thread, inbox) ?? null);
       next = source.metadata?.nextCursor;
     }
-    if (!Array.isArray(threads) || threads.length > 20 || !Array.isArray(groups))
+    if (
+      !Array.isArray(threads) ||
+      threads.length > 20 ||
+      !Array.isArray(groups) ||
+      (topics !== undefined && !Array.isArray(topics))
+    )
       fail("Invalid message cursor");
     const messages = threads.length
-      ? await messagesPage(threads[0], mailbox, groups[0] ?? null)
+      ? await messagesPage(
+          threads[0],
+          inbox,
+          groups[0] ?? null,
+          typeof topics?.[0] === "string" ? topics[0] : undefined
+        )
       : [];
     const { rows, more } = resume(messages, cursor, limit, "Message");
     const continuation = more
-      ? { threads, groups, next, after: rows.at(-1).id }
+      ? { threads, groups, topics, next, after: rows.at(-1).id }
       : threads.length > 1
-        ? { threads: threads.slice(1), groups: groups.slice(1), next }
+        ? {
+            threads: threads.slice(1),
+            groups: groups.slice(1),
+            topics: topics?.slice(1),
+            next,
+          }
         : next
           ? { page: next }
           : null;
@@ -552,19 +642,27 @@ export function linkedInInboxProgram() {
   // A message reference names no conversation, so `id:<message URN>` searches
   // the inbox from the most recently active conversation: a new message's
   // thread is near the top. Not found is an empty page; the caller retries.
-  async function findMessage(id, mailbox) {
+  async function findMessage(id, inbox) {
     const row = await searchConversations(
-      mailbox,
+      inbox.mailbox,
       async (thread) =>
-        (await messagesPage(thread.entityUrn, mailbox, groupOf(thread))).find(
-          (message) => message.id === id
-        ) ?? null
+        (
+          await messagesPage(
+            thread.entityUrn,
+            inbox,
+            groupOf(thread),
+            topicOf(thread, inbox)
+          )
+        ).find((message) => message.id === id) ?? null
     );
     return { rows: row ? [row] : [], continuation: null };
   }
   async function read(input) {
-    const mailbox = await account();
-    const cursor = cursorOf(input.cursor, input.feed, mailbox);
+    const inbox = await inboxOf(
+      input.feed === "live_messages" ? input.inbox : undefined
+    );
+    const mailbox = inbox.mailbox;
+    const cursor = cursorOf(input.cursor, input.feed, inbox);
     const limit = Math.max(1, Math.min(100, input.limit ?? 20));
     const byId =
       input.feed === "live_messages" &&
@@ -578,11 +676,11 @@ export function linkedInInboxProgram() {
       input.feed === "notifications"
         ? await readNotifications(cursor, limit)
         : byId
-          ? await findMessage(byId, mailbox)
+          ? await findMessage(byId, inbox)
           : input.feed === "live_messages"
-            ? await readMessages(cursor, limit, mailbox)
+            ? await readMessages(cursor, limit, inbox)
             : fail("Unknown source feed");
-    if ((await account()) !== mailbox)
+    if ((await account()) !== inbox.member)
       fail("LinkedIn account changed during the read");
     return {
       rows: await Promise.all(
@@ -602,6 +700,7 @@ export function linkedInInboxProgram() {
               v: 1,
               feed: input.feed,
               account: mailbox,
+              ...(inbox.page ? { member: inbox.member } : {}),
               ...continuation,
             }),
           }
@@ -664,12 +763,13 @@ export function linkedInInboxProgram() {
     { previous, observe, gap },
     thread,
     round,
-    mailbox
+    inbox
   ) {
     const messages = await messagesPage(
       thread.entityUrn,
-      mailbox,
-      groupOf(thread)
+      inbox,
+      groupOf(thread),
+      topicOf(thread, inbox)
     );
     let reachedSeen = false;
     for (const row of messages) {
@@ -694,7 +794,7 @@ export function linkedInInboxProgram() {
       );
     }
   }
-  async function catchUpMessages(pass, mailbox) {
+  async function catchUpMessages(pass, inbox) {
     const { previous, observedAt } = pass;
     const startedAt = previous?.started_at ?? observedAt;
     // A round reads threads active since `since` and their messages since
@@ -712,14 +812,14 @@ export function linkedInInboxProgram() {
     round.floor = Math.min(round.floor, round.since);
     let cursor = round.cursor;
     for (let page = 1; ; page++) {
-      const result = await conversationsPage(mailbox, cursor);
+      const result = await conversationsPage(inbox.mailbox, cursor);
       const active = result.elements.filter((thread) => {
         if (!Number.isFinite(thread.lastActivityAt))
           fail("Conversation activity is unavailable");
         return thread.lastActivityAt >= round.since;
       });
       for (const thread of active)
-        await catchUpConversation(pass, thread, round, mailbox);
+        await catchUpConversation(pass, thread, round, inbox);
       const next =
         active.length === result.elements.length
           ? (result.metadata?.nextCursor ?? null)
@@ -744,7 +844,7 @@ export function linkedInInboxProgram() {
       floor: previous?.round ? round.floor : round.since,
     };
   }
-  async function snapshot(feed, previous, mailbox) {
+  async function snapshot(feed, previous, inbox) {
     const observedAt = Date.now();
     const observed = new Map();
     const events = [];
@@ -781,12 +881,13 @@ export function linkedInInboxProgram() {
     const { more = false, ...position } =
       feed === "notifications"
         ? await observeNotifications(pass)
-        : await catchUpMessages(pass, mailbox);
-    if ((await account()) !== mailbox)
+        : await catchUpMessages(pass, inbox);
+    if ((await account()) !== inbox.member)
       fail("LinkedIn account changed during observation");
     const checkpoint = {
       feed,
-      account: mailbox,
+      account: inbox.mailbox,
+      ...(inbox.page ? { member: inbox.member } : {}),
       ...position,
       // Keep this pass's identities first, in source order, then older ones.
       seen: Object.fromEntries(
@@ -869,13 +970,17 @@ export function linkedInInboxProgram() {
     if (!active(listener)) return;
     try {
       if (!listener.batches.length) {
-        if ((await account()) !== listener.mailbox)
+        const { feed, checkpoint, inbox } = listener;
+        if ((await account()) !== inbox.member)
           fail("LinkedIn account changed; reconnect this source");
-        const { feed, checkpoint, mailbox } = listener;
+        // A checkpoint of another inbox (the feed's inbox setting changed)
+        // restarts from a fresh baseline; the batch still names it as the
+        // previous checkpoint it replaces.
+        const prior = checkpoint?.linkedin_inbox;
         const result = await snapshot(
           feed,
-          checkpoint?.linkedin_inbox,
-          mailbox
+          prior?.account === inbox.mailbox ? prior : undefined,
+          inbox
         );
         listener.batches = await batchesOf(feed, checkpoint, result);
       }
@@ -941,11 +1046,33 @@ export function linkedInInboxProgram() {
       .map((byte) => alphabet[byte & 63])
       .join("");
   }
+  // `conversation_id` is a thread id of the member's own inbox, or a full
+  // conversation URN whose mailbox names the inbox the reply leaves from: the
+  // member's own or a page the member administers.
+  async function sendTarget(given) {
+    if (typeof given === "string" && /^[A-Za-z0-9_-]+=*$/.test(given)) {
+      const member = await account();
+      return { inbox: { mailbox: member, member, page: false }, thread: given };
+    }
+    const match =
+      typeof given === "string" &&
+      given.match(
+        /^urn:li:msg_conversation:\((urn:li:fsd_profile:[A-Za-z0-9_-]+|urn:li:fsd_pageMailbox:[0-9]+),([A-Za-z0-9_-]+=*)\)$/
+      );
+    if (!match)
+      fail(
+        "conversation_id must be a LinkedIn conversation thread id or conversation URN"
+      );
+    if (PAGE_MAILBOX.test(match[1]))
+      return { inbox: await inboxOf(match[1]), thread: match[2] };
+    const member = await account();
+    if (match[1] !== member)
+      fail("The conversation belongs to another LinkedIn account; not sending");
+    return { inbox: { mailbox: member, member, page: false }, thread: match[2] };
+  }
   async function send(input) {
-    const mailbox = await account();
-    const thread = input.conversation_id;
-    if (typeof thread !== "string" || !/^[A-Za-z0-9_-]+=*$/.test(thread))
-      fail("conversation_id must be a LinkedIn conversation thread id");
+    const { inbox, thread } = await sendTarget(input.conversation_id);
+    const mailbox = inbox.mailbox;
     const text = typeof input.text === "string" ? input.text.trim() : "";
     if (!text || text.length > 3000)
       fail("text must contain 1-3000 characters");
@@ -965,17 +1092,19 @@ export function linkedInInboxProgram() {
     const sent = (message) => ({
       sent: true,
       message_id: message.entityUrn,
-      conversation_id: thread,
+      conversation_id: input.conversation_id,
       delivered_at: Number.isFinite(message.deliveredAt)
         ? new Date(message.deliveredAt).toISOString()
         : null,
     });
     const prior = (await messageElements(conversation)).find(
       (message) =>
-        message.sender?.hostIdentityUrn === mailbox &&
+        fromMe(message.sender, inbox) === true &&
         message.originToken === originToken
     );
     if (prior) return { ...sent(prior), already_sent: true };
+    if ((await account()) !== inbox.member)
+      fail("LinkedIn account changed during conversation lookup; not sending");
     const response = await (
       await request(
         "/voyager/api/voyagerMessagingDashMessengerMessages?action=createMessage",
@@ -1006,7 +1135,7 @@ export function linkedInInboxProgram() {
     for (let attempt = 0; attempt < SEND_RECONFIRM_ATTEMPTS; attempt++) {
       const shown = (await messageElements(conversation)).find(
         (message) =>
-          message.sender?.hostIdentityUrn === mailbox &&
+          fromMe(message.sender, inbox) === true &&
           ((typeof messageId === "string" && message.entityUrn === messageId) ||
             message.originToken === originToken)
       );
@@ -1018,11 +1147,15 @@ export function linkedInInboxProgram() {
   async function listen(input) {
     if (!input.bridge_id || !input.token)
       fail("Source subscription binding is required");
-    const mailbox = await account();
+    const inbox = await inboxOf(
+      input.feed === "live_messages" ? input.inbox : undefined
+    );
     const previous = input.checkpoint?.linkedin_inbox;
+    // A mailbox change restarts the baseline, but never permits a changed sign-in.
     if (
       previous &&
-      (previous.feed !== input.feed || previous.account !== mailbox)
+      (previous.feed !== input.feed ||
+        (previous.member ?? previous.account) !== inbox.member)
     )
       fail("Source checkpoint belongs to another account or feed");
     const prior = listeners.get(input.bridge_id);
@@ -1031,7 +1164,7 @@ export function linkedInInboxProgram() {
       id: input.bridge_id,
       token: input.token,
       feed: input.feed,
-      mailbox,
+      inbox,
       // The last posted record; only its receipt may advance delivery.
       sequence: 0,
       // The checkpoint the next snapshot starts from, set by the final batch's receipt.

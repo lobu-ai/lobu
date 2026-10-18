@@ -1140,16 +1140,30 @@ function messenger(options: {
   messages: Record<string, any[]>;
   echoOriginToken?: boolean;
   showSent?: boolean;
+  /** Page mailboxes the signed-in member administers. */
+  administers?: string[];
+  member?: string;
+  mailboxCountsResponse?: unknown;
 }) {
   const profile = "urn:li:fsd_profile:synthetic-self";
   const posts: any[] = [];
+  const calls: string[] = [];
   const accepted = new Map<string, any>();
   const fetcher = async (url: string, init?: any) => {
+    calls.push(url);
     let data: unknown;
-    if (url === "/voyager/api/me") {
+    if (url.includes("messengerMailboxCounts.")) {
+      const mailbox = decodeURIComponent(
+        url.slice(url.indexOf("mailboxUrn:") + "mailboxUrn:".length, -1)
+      );
+      if (!(options.administers ?? []).includes(mailbox)) {
+        return { ok: false, status: 403, json: async () => ({}) };
+      }
+      data = options.mailboxCountsResponse ?? { data: { messengerMailboxCountsByMailbox: { elements: [] } } };
+    } else if (url === "/voyager/api/me") {
       data = {
         miniProfile: {
-          entityUrn: profile.replace("fsd_profile", "fs_miniProfile"),
+          entityUrn: (options.member ?? profile).replace("fsd_profile", "fs_miniProfile"),
         },
       };
     } else if (url.includes("messengerConversations.")) {
@@ -1184,10 +1198,10 @@ function messenger(options: {
       posts.push(body);
       const created = (body.dedupeByClientGeneratedToken &&
         accepted.get(body.message.originToken)) || {
-        entityUrn: `urn:li:msg_message:(${profile},sent-${posts.length})`,
+        entityUrn: `urn:li:msg_message:(${body.mailboxUrn},sent-${posts.length})`,
         deliveredAt: Date.now(),
         body: { text: body.message.body.text },
-        sender: { hostIdentityUrn: profile },
+        sender: { hostIdentityUrn: body.mailboxUrn },
         ...(options.echoOriginToken === false
           ? {}
           : { originToken: body.message.originToken }),
@@ -1205,7 +1219,7 @@ function messenger(options: {
     }
     return { ok: true, status: 200, json: async () => data };
   };
-  return { profile, posts, ...adapter(fetcher) };
+  return { profile, posts, calls, ...adapter(fetcher) };
 }
 
 const SELF = "urn:li:fsd_profile:synthetic-self";
@@ -1448,6 +1462,265 @@ describe("LinkedIn direct messages", () => {
   }, 15_000);
 });
 
+const PAGE = "urn:li:fsd_pageMailbox:900001";
+const PAGE_DM = `urn:li:msg_conversation:(${PAGE},2-synthetic-page-dm==)`;
+const PAGE_INBOUND = {
+  ...INBOUND,
+  entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-page-inbound)`,
+  deliveredAt: 1700000000000,
+};
+/** How a page's own reply may be attributed: the mailbox, the page, or the admin. */
+const PAGE_REPLIES = [
+  { entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-page-reply-1)`, deliveredAt: 1700000000003, body: { text: "Thanks!" }, sender: { hostIdentityUrn: PAGE } },
+  { entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-page-reply-2)`, deliveredAt: 1700000000002, body: { text: "Following up" }, sender: { hostIdentityUrn: "urn:li:fsd_company:900002", participantType: { organization: { name: { text: "Synthetic Co" } } } } },
+  { entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-page-reply-3)`, deliveredAt: 1700000000001, body: { text: "Admin here" }, sender: { hostIdentityUrn: SELF } },
+];
+
+describe("LinkedIn page inboxes", () => {
+  test("a page cursor cannot resume after the signed-in member changes", async () => {
+    const options = {
+      member: SELF,
+      administers: [PAGE],
+      conversations: [{ entityUrn: PAGE_DM, groupChat: false }],
+      messages: { [PAGE_DM]: [...PAGE_REPLIES, PAGE_INBOUND] },
+    };
+    const { api, dom } = messenger(options);
+    try {
+      const first = await api.read({ feed: "live_messages", inbox: PAGE, limit: 1 });
+      options.member = "urn:li:fsd_profile:synthetic-other-admin";
+      await expect(api.read({ feed: "live_messages", inbox: PAGE, cursor: first.nextCursor }))
+        .rejects.toThrow("different source or account");
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test("a page checkpoint remains bound to its signed-in member across reattachment", async () => {
+    const options = {
+      member: SELF,
+      administers: [PAGE],
+      conversations: [],
+      messages: {},
+    };
+    const { api, dom } = messenger(options);
+    const sent: any[] = [];
+    dom.window.postMessage = (message: unknown) => { sent.push(message); };
+    try {
+      await api.listen({ feed: "live_messages", inbox: PAGE, bridge_id: "page", token: "token" });
+      const checkpoint = sent[0].record.checkpoint.next;
+      options.member = "urn:li:fsd_profile:synthetic-other-admin";
+      for (const inbox of [PAGE, "me"]) {
+        await expect(api.listen({ feed: "live_messages", inbox, bridge_id: "reattach", token: "token", checkpoint }))
+          .rejects.toThrow("belongs to another account");
+      }
+      options.member = SELF;
+      await expect(api.listen({ feed: "live_messages", inbox: "me", bridge_id: "member", token: "token", checkpoint }))
+        .resolves.toEqual({ listening: true });
+    } finally {
+      api.detach();
+      dom.window.close();
+    }
+  });
+
+  test("an empty or null mailbox authorization result refuses reads and sends", async () => {
+    for (const data of [{}, { messengerMailboxCountsByMailbox: null }]) {
+      const { api, dom, calls, posts } = messenger({
+        administers: [PAGE],
+        mailboxCountsResponse: { data },
+        conversations: [{ entityUrn: PAGE_DM, groupChat: false }],
+        messages: { [PAGE_DM]: [PAGE_INBOUND] },
+      });
+      try {
+        await expect(api.read({ feed: "live_messages", inbox: PAGE })).rejects.toThrow();
+        await expect(api.send({ conversation_id: PAGE_DM, text: "hi", idempotency_key: "key" })).rejects.toThrow();
+        expect(calls.some((url) => url.includes("messengerConversations."))).toBe(false);
+        expect(posts).toHaveLength(0);
+      } finally {
+        dom.window.close();
+      }
+    }
+  });
+
+  test("a page send refuses a member change during conversation lookup", async () => {
+    const options = {
+      member: SELF,
+      administers: [PAGE],
+      conversations: [{ entityUrn: PAGE_DM, groupChat: false }],
+      messages: {},
+    };
+    Object.defineProperty(options.messages, PAGE_DM, {
+      get() {
+        options.member = "urn:li:fsd_profile:synthetic-other-admin";
+        return [];
+      },
+    });
+    const { api, dom, posts } = messenger(options);
+    try {
+      await expect(api.send({ conversation_id: PAGE_DM, text: "hi", idempotency_key: "key" }))
+        .rejects.toThrow("account changed");
+      expect(posts).toHaveLength(0);
+    } finally {
+      dom.window.close();
+    }
+  }, 15_000);
+
+  test("a page feed reads the page's mailbox and treats the page's own messages as ours", async () => {
+    const { api, dom, calls } = messenger({
+      administers: [PAGE],
+      conversations: [
+        { entityUrn: PAGE_DM, groupChat: false, lastActivityAt: 1700000000003, topic: { text: "Other" } },
+      ],
+      messages: { [PAGE_DM]: [...PAGE_REPLIES, PAGE_INBOUND] },
+    });
+    try {
+      const page = await api.read({ feed: "live_messages", inbox: PAGE, limit: 20 });
+      const conversationsUrl = calls.find((url) => url.includes("messengerConversations."));
+      expect(conversationsUrl).toContain(`mailboxUrn:${encodeURIComponent(PAGE)}`);
+      expect(page.rows.map((row: any) => [row.id, row.from_me])).toEqual([
+        [PAGE_REPLIES[0].entityUrn, true],
+        [PAGE_REPLIES[1].entityUrn, true],
+        [PAGE_REPLIES[2].entityUrn, true],
+        [PAGE_INBOUND.entityUrn, false],
+      ]);
+      expect(page.rows[3]).toMatchObject({
+        conversation_id: PAGE_DM,
+        thread_id: "2-synthetic-page-dm==",
+        is_group: false,
+        sender_member_id: "ACoAASyntheticPeer",
+        topic: "Other",
+      });
+      const first = await api.read({ feed: "live_messages", inbox: PAGE, limit: 1 });
+      expect(JSON.parse(first.nextCursor).account).toBe(PAGE);
+      // A page cursor never resumes the member's inbox.
+      await expect(
+        api.read({ feed: "live_messages", limit: 1, cursor: first.nextCursor })
+      ).rejects.toThrow("different source or account");
+      const found = await api.read({
+        feed: "live_messages",
+        inbox: PAGE,
+        query: `id:${PAGE_INBOUND.entityUrn}`,
+      });
+      expect(found.rows).toMatchObject([{ id: PAGE_INBOUND.entityUrn, conversation_id: PAGE_DM }]);
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test("member rows carry no page-only fields", async () => {
+    const { api, dom } = messenger({
+      conversations: [{ entityUrn: DM, groupChat: false, lastActivityAt: 1700000000000, topic: { text: "Other" } }],
+      messages: { [DM]: [INBOUND] },
+    });
+    try {
+      const { rows } = await api.read({ feed: "live_messages", inbox: "me", limit: 20 });
+      expect(rows).toHaveLength(1);
+      expect("topic" in rows[0]).toBe(false);
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test("a page the signed-in member does not administer is refused before any read or send", async () => {
+    const { api, dom, calls, posts } = messenger({
+      conversations: [{ entityUrn: PAGE_DM, groupChat: false, lastActivityAt: 1700000000000 }],
+      messages: { [PAGE_DM]: [PAGE_INBOUND] },
+    });
+    try {
+      await expect(
+        api.read({ feed: "live_messages", inbox: PAGE, limit: 20 })
+      ).rejects.toThrow("does not administer");
+      await expect(
+        api.send({ conversation_id: PAGE_DM, text: "hi", idempotency_key: "k" })
+      ).rejects.toThrow("does not administer");
+      expect(calls.some((url) => url.includes("messengerConversations."))).toBe(false);
+      expect(posts).toHaveLength(0);
+      for (const inbox of ["900001", "urn:li:fsd_company:900002", "urn:li:fsd_profile:someone"]) {
+        await expect(api.read({ feed: "live_messages", inbox })).rejects.toThrow("inbox must be");
+      }
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test("send_message replies from the inbox its full conversation URN names", async () => {
+    const { api, dom, posts } = messenger({
+      administers: [PAGE],
+      conversations: [
+        { entityUrn: PAGE_DM, groupChat: false, lastActivityAt: 1700000000001 },
+        { entityUrn: DM, groupChat: false, lastActivityAt: 1700000000000 },
+      ],
+      messages: { [PAGE_DM]: [PAGE_INBOUND], [DM]: [INBOUND] },
+    });
+    try {
+      const input = { conversation_id: PAGE_DM, text: "Happy to help.", idempotency_key: "page-key" };
+      const first = await api.send(input);
+      expect(first).toMatchObject({ sent: true, conversation_id: PAGE_DM });
+      expect(posts[0]).toMatchObject({
+        mailboxUrn: PAGE,
+        message: { conversationUrn: PAGE_DM },
+      });
+      expect(await api.send(input)).toMatchObject({ already_sent: true, message_id: first.message_id });
+      expect(posts).toHaveLength(1);
+      // The member's own conversation URN is the member inbox.
+      await api.send({ conversation_id: DM, text: "Hi", idempotency_key: "member-key" });
+      expect(posts[1]).toMatchObject({ mailboxUrn: SELF, message: { conversationUrn: DM } });
+      await expect(
+        api.send({
+          conversation_id: "urn:li:msg_conversation:(urn:li:fsd_profile:someone-else,2-synthetic-dm==)",
+          text: "Hi",
+          idempotency_key: "k",
+        })
+      ).rejects.toThrow("another LinkedIn account");
+      expect(posts).toHaveLength(2);
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test("switching a feed's inbox restarts its checkpoint; a changed member account still fails", async () => {
+    const { api, dom } = messenger({
+      administers: [PAGE],
+      conversations: [{ entityUrn: PAGE_DM, groupChat: false, lastActivityAt: Date.now() }],
+      messages: { [PAGE_DM]: [{ ...PAGE_INBOUND, deliveredAt: Date.now() }] },
+    });
+    const sent: any[] = [];
+    dom.window.postMessage = (message: unknown) => {
+      sent.push(message);
+    };
+    const memberCheckpoint = {
+      linkedin_inbox: { feed: "live_messages", account: SELF, started_at: 1, after: 1, floor: 1, seen: {} },
+    };
+    try {
+      await api.listen({
+        feed: "live_messages",
+        inbox: PAGE,
+        bridge_id: "synthetic-bridge",
+        token: "synthetic-token",
+        checkpoint: memberCheckpoint,
+      });
+      expect(sent).toHaveLength(1);
+      expect(sent[0].record.source_error).toBeUndefined();
+      // A fresh baseline: nothing from the page's history is replayed.
+      expect(sent[0].record.events).toEqual([]);
+      expect(sent[0].record.checkpoint.previous).toEqual(memberCheckpoint);
+      expect(sent[0].record.checkpoint.next.linkedin_inbox.account).toBe(PAGE);
+      await expect(
+        api.listen({
+          feed: "live_messages",
+          bridge_id: "synthetic-bridge-2",
+          token: "synthetic-token-2",
+          checkpoint: {
+            linkedin_inbox: { ...memberCheckpoint.linkedin_inbox, account: "urn:li:fsd_profile:someone-else" },
+          },
+        })
+      ).rejects.toThrow("belongs to another account");
+    } finally {
+      api.detach();
+      dom.window.close();
+    }
+  });
+});
+
 describe("LinkedIn chat declarations", () => {
   test("message.created can answer its source and send_message is a keyed direct send", () => {
     const definition = new LinkedInConnector().definition;
@@ -1460,6 +1733,45 @@ describe("LinkedIn chat declarations", () => {
     });
     expect(send?.description).toContain("approved only for answering direct messages");
     expect(send?.description).toContain("draft-only");
+    const pattern = new RegExp(
+      (send?.inputSchema as any).properties.conversation_id.pattern
+    );
+    for (const accepted of ["2-synthetic-dm==", DM, PAGE_DM]) {
+      expect(pattern.test(accepted)).toBe(true);
+    }
+    for (const refused of [
+      "urn:li:msg_conversation:(urn:li:fsd_company:1,2-x==)",
+      `${PAGE_DM} `,
+      "a:b",
+    ]) {
+      expect(pattern.test(refused)).toBe(false);
+    }
+    const inbox = (definition.feeds?.live_messages?.configSchema as any)
+      ?.properties?.inbox;
+    expect(new RegExp(inbox.pattern).test(PAGE)).toBe(true);
+    expect(new RegExp(inbox.pattern).test("me")).toBe(true);
+    expect(new RegExp(inbox.pattern).test("900001")).toBe(false);
+  });
+
+  test("only a live messages read carries its feed's inbox to the page", async () => {
+    const expressions: string[] = [];
+    const browser = {
+      dispatch: async (action: string, input: any) => {
+        if (action === "navigate") return { tab_id: 7 };
+        expressions.push(input.expression);
+        return { value: { rows: [], hasMore: false } };
+      },
+    };
+    for (const feedKey of ["live_messages", "notifications"]) {
+      await readLinkedInInbox({
+        feedKey,
+        config: { inbox: PAGE },
+        credentials: null,
+        browser,
+      } as any);
+    }
+    expect(expressions[0]).toContain(PAGE);
+    expect(expressions[1]).not.toContain(PAGE);
   });
 
   test("an id: read reaches the page with its query, and other queries are refused", async () => {

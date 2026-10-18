@@ -96,6 +96,31 @@ describe("LinkedIn adapter", () => {
     });
   });
 
+  test("a company page row replies from the page inbox its conversation URN names", async () => {
+    const { adapter, calls } = harness();
+    const pageConversation = `urn:li:msg_conversation:(urn:li:fsd_pageMailbox:900001,${THREAD})`;
+    // A member-inbox row keeps the bare thread id.
+    expect(adapter.parseSourceRow(row({
+      conversation_id: `urn:li:msg_conversation:(urn:li:fsd_profile:ACoAASelf,${THREAD})`,
+    }))?.message?.threadId).toBe(`linkedin:101:${THREAD}`);
+    const parsed = adapter.parseSourceRow(row({ conversation_id: pageConversation }));
+    // Automations filter on the thread id either way.
+    expect(parsed?.channelId).toBe(THREAD);
+    const threadId = parsed?.message?.threadId as string;
+    expect(threadId).toBe(`linkedin:101:${encodeURIComponent(pageConversation)}`);
+    expect(adapter.isDM(threadId)).toBe(true);
+    const sent = await adapter.postMessage(threadId, "Happy to help.", "page-key");
+    expect(calls).toEqual([{
+      operationKey: "send_message",
+      input: { conversation_id: pageConversation, text: "Happy to help.", idempotency_key: "page-key" },
+      idempotencyKey: "page-key",
+    }]);
+    expect(sent).toMatchObject({
+      threadId,
+      raw: { thread_id: THREAD, conversation_id: pageConversation, from_me: true },
+    });
+  });
+
   test("refuses another connection's thread and never opens a new conversation", async () => {
     const { adapter, calls } = harness();
     await expect(adapter.postMessage(`linkedin:202:${THREAD}`, "hi")).rejects.toThrow("Invalid LinkedIn thread ID");

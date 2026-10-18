@@ -52,6 +52,8 @@ const MEMBER_ID = "ACoAASyntheticMember";
 /** A LinkedIn account no member has linked. */
 const STRANGER_ID = "ACoAASyntheticStranger";
 const BASE_TIME = 1_787_358_200;
+/** A company page's mailbox the signed-in member administers. */
+const PAGE = "urn:li:fsd_pageMailbox:900001";
 
 interface InboxMessage {
   id: string;
@@ -61,6 +63,8 @@ interface InboxMessage {
   from_me?: boolean;
   is_group?: boolean | null;
   content_kind?: string;
+  /** The page mailbox the message is in; the member's own inbox when absent. */
+  mailbox?: string;
 }
 
 let sql: ReturnType<typeof getTestDb>;
@@ -76,6 +80,7 @@ let manager: ChatInstanceManager;
 let queue: RunsQueue | null = null;
 let inbox: InboxMessage[];
 let reads: string[];
+let readInboxes: unknown[];
 let failNextSend: boolean;
 let enqueued: Array<Record<string, any>>;
 let sends: Array<{ input: Record<string, unknown>; idempotencyKey?: string }>;
@@ -87,7 +92,7 @@ function row(message: InboxMessage, index: number) {
   const sender = message.from_me ? SELF : `urn:li:fsd_profile:${message.sender ?? MEMBER_ID}`;
   return {
     id: messageUrn(message.id),
-    conversation_id: `urn:li:msg_conversation:(${SELF},${message.thread})`,
+    conversation_id: `urn:li:msg_conversation:(${message.mailbox ?? SELF},${message.thread})`,
     thread_id: message.thread,
     is_group: message.is_group === undefined ? message.thread === GROUP_THREAD : message.is_group,
     conversation_url: `https://www.linkedin.com/messaging/thread/${message.thread}/`,
@@ -121,6 +126,7 @@ function fakeLinkedInTab(params: { actionKey: string; actionInput: Record<string
   const input = new Function(`return ${argument};`)() as Record<string, unknown>;
   expect(input.feed).toBe("live_messages");
   reads.push(String(input.query));
+  readInboxes.push(input.inbox);
   const id = String(input.query).slice("id:".length);
   const rows = inbox
     .map((message, index) => row(message, index))
@@ -147,13 +153,14 @@ const replyTo = (match?: Record<string, unknown>) =>
   ({ output: "reply_to_source", ...(match ? { match } : {}) });
 
 /** The browser's reference delivery for messages, in source order. */
-async function deliver(messageIds: string | string[], notificationId = "n-1") {
+async function deliver(messageIds: string | string[], notificationId = "n-1", feedConfig: Record<string, unknown> = {}) {
   const ids = (typeof messageIds === "string" ? [messageIds] : messageIds).map(messageUrn);
   const [receipt] = await receiveFeedNotifications(sql, [{
     feed_id: feedId, connection_id: connectionId, feed_key: "live_messages",
     notification_id: notificationId, changed: true,
     subscription: {
-      scope_key: sourceFeedScopeKey({}, version), binding_id: "synthetic-binding",
+      // The subscription binds the feed's config: a changed inbox rebinds it.
+      scope_key: sourceFeedScopeKey(feedConfig, version), binding_id: "synthetic-binding",
       epoch: "synthetic-epoch", needs_rebind: false,
       records: [{ revision: 1, payload: { id: `batch-${ids.join("-")}`, events: ids.map((id) => ({
         id, event_type: "message.created", resource_type: "message",
@@ -236,6 +243,7 @@ describe("LinkedIn source chat", () => {
     await cleanupTestDatabase();
     inbox = [];
     reads = [];
+    readInboxes = [];
     failNextSend = false;
     enqueued = [];
     sends = [];
@@ -326,6 +334,7 @@ describe("LinkedIn source chat", () => {
     expect(verifyWorkerToken(await mintTurnToken(enqueued[0] as any, Number(claimed.id))))
       .toMatchObject({ userId: MEMBER_ID, chatAccess: "member", actorUserId: memberId });
 
+    expect(readInboxes).toEqual([undefined]);
     await completeTurns("**Yes**, around all afternoon.");
     expect(sends).toHaveLength(1);
     expect(sends[0].input).toEqual({
@@ -335,6 +344,27 @@ describe("LinkedIn source chat", () => {
       idempotency_key: sends[0].idempotencyKey,
     });
     expect(sends[0].idempotencyKey).toMatch(/^chat-post:/);
+  }, 60_000);
+
+  it("answers a company page inbox's DM from that page's inbox", async () => {
+    await sql`UPDATE feeds SET config = ${sql.json({ inbox: PAGE })} WHERE id = ${feedId}`;
+    await insertAutomation("page-reply", replyTo({ channel_id: DM_THREAD }));
+    inbox.push({ id: "SYNTHPG1", thread: DM_THREAD, text: "a question for the page", mailbox: PAGE });
+
+    await deliver("SYNTHPG1", "n-1", { inbox: PAGE });
+    await drain();
+    // The feed's inbox setting reaches the page program with the lookup.
+    expect(readInboxes).toEqual([PAGE]);
+    expect(await dispositions()).toEqual(["admitted"]);
+    expect(enqueued).toHaveLength(1);
+
+    await completeTurns("Happy to help.");
+    expect(sends).toHaveLength(1);
+    expect(sends[0].input).toEqual({
+      conversation_id: `urn:li:msg_conversation:(${PAGE},${DM_THREAD})`,
+      text: "Happy to help.",
+      idempotency_key: sends[0].idempotencyKey,
+    });
   }, 60_000);
 
   it("retries a failed send under the same idempotency key", async () => {

@@ -23,6 +23,17 @@ export interface LinkedInInboxCheckpoint {
   linkedin_inbox?: Record<string, unknown>;
 }
 
+/**
+ * The live messages feed's `inbox` setting: absent or "me" reads the signed-in
+ * member's inbox; a page mailbox URN reads that company page's inbox, which the
+ * member must administer. Other feeds read the member's own sources.
+ */
+function inboxOf(feedKey: string, config: unknown): unknown {
+  return feedKey === "live_messages"
+    ? (config as { inbox?: unknown } | null | undefined)?.inbox
+    : undefined;
+}
+
 async function readyTab(browser: ChromeActionDispatcher): Promise<number> {
   // Opening the inbox itself marks conversations seen. A scrape-owned neutral
   // tab supplies authentication without changing notification/message state.
@@ -61,7 +72,8 @@ async function invoke<T>(
 
 /**
  * Send one text reply into an existing direct-message conversation from the
- * scrape-owned tab, without opening the inbox. The page program refuses group
+ * scrape-owned tab, without opening the inbox. A full conversation URN sends
+ * from the inbox it names (a company page's, for a page feed's row). The page program refuses group
  * or unknown conversations, dedupes on `idempotency_key`, and returns only once
  * the message shows in the conversation.
  */
@@ -107,6 +119,7 @@ export async function readLinkedInInbox<F>(
   const browser = requireBrowser(ctx);
   return invoke(browser, await readyTab(browser), "read", {
     feed: ctx.feedKey,
+    inbox: inboxOf(ctx.feedKey, ctx.config),
     query: ctx.query,
     cursor: ctx.cursor,
     limit: ctx.limit,
@@ -135,6 +148,7 @@ export async function observeLinkedInInbox<
   }
   await invoke(browser, tabId, "listen", {
     feed: ctx.feedKey,
+    inbox: inboxOf(ctx.feedKey, ctx.config),
     checkpoint: ctx.checkpoint,
     bridge_id: binding.bridge_id,
     token: binding.token,
