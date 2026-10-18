@@ -6,7 +6,7 @@
  * TakeoutCsvReader}, so this module imports no `node:fs` and no `node:path` and
  * stays isolate-eligible.
  *
- * WHY THE INJECTION: `linkedin.connector.ts` declares live browser feeds and
+ * WHY THE INJECTION: `linkedin.ts` declares live browser feeds and
  * these takeout feeds on ONE connector key, because a person met in the live
  * home feed and a person in the CSV export must collapse onto the same
  * `linkedin_slug`/`email` identity. But the connector bundle runs in a V8
@@ -34,8 +34,8 @@
  */
 
 import type { EventEnvelope } from "@lobu/connector-sdk";
-import { normalizeLinkedInSlug } from "./linkedin-identity.ts";
-import { stableId, stripHtml } from "./takeout-utils.ts";
+import { normalizeLinkedInSlug } from "./linkedin-identity.js";
+import { stableId, stripHtml } from "./takeout-utils.js";
 
 /**
  * Reads one CSV inside the export, by POSIX-style relative path, and returns
@@ -113,10 +113,8 @@ export function readConnections(readCsv: TakeoutCsvReader): EventEnvelope[] {
           company: row.Company,
           position: row.Position,
           linkedin_url: row.URL,
-          // Pre-canonicalized identity key. The server never loads example
-          // connectors' normalizer modules, so we emit the already-lowercased
-          // /in/<slug> here; the engine stores it verbatim (trim fallback) and
-          // case-variant URLs from any source collapse to one entity.
+          // Canonicalize at the source as well as through the server's shared
+          // LinkedIn identity normalizer so CSV and live URLs match.
           linkedin_slug: normalizeLinkedInSlug(row.URL) ?? undefined,
         },
       },

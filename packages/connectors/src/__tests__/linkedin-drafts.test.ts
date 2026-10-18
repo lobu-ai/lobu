@@ -4,8 +4,9 @@ import { connectorSdkMock } from "./connector-sdk.mock";
 import { linkedInScriptArgument } from "../linkedin-browser-script";
 
 mock.module("@lobu/connector-sdk", connectorSdkMock);
-const { fillLinkedInDraft, linkedInDraftUrl, prepareLinkedInDraft } =
+const { linkedInDraftUrl, prepareLinkedInDraft } =
   await import("../linkedin-drafts");
+const { fillLinkedInDraft } = await import("../linkedin-draft-page.js");
 const threadUrl = "https://www.linkedin.com/messaging/thread/synthetic-thread/";
 
 function draftPage(html: string, url = threadUrl) {

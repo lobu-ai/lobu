@@ -3,7 +3,7 @@ import { connectorSdkMock } from "./connector-sdk.mock";
 
 // Stub @lobu/connector-sdk (it pulls in playwright + dist/source registry
 // collisions) so the connector imports without the browser stack. Same pattern
-// as linkedin.connector.test.ts — see connector-sdk.mock.ts.
+// as the other connector tests here — see connector-sdk.mock.ts.
 mock.module("@lobu/connector-sdk", connectorSdkMock);
 
 const { normalizeHnItemId, prepareHnComment } = await import(

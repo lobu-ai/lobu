@@ -7,6 +7,7 @@
  * connector that extracted them.
  */
 
+import type { ChatUserIdentity } from "./chat-user-identity.js";
 import type { ConnectorIdentityModule } from "./connector-identity-module.js";
 
 /** Connector-owned identity namespaces (not SDK-global). */
@@ -19,6 +20,13 @@ export const LINKEDIN_IDENTITY = {
 	SLUG: "linkedin_slug",
 	/** Immutable member id from `urn:li:fsd_profile:<id>`. */
 	MEMBER_ID: "linkedin_member_id",
+	/**
+	 * A direct-message sender's member id, linking the sender to a Lobu member.
+	 * Distinct from `linkedin_member_id`, the person-entity attribution key, so
+	 * a chat link on a `$member` never collides with the contact entity the same
+	 * sender's messages auto-create.
+	 */
+	USER_MEMBER_ID: "linkedin_user_member_id",
 } as const;
 
 export type LinkedInIdentityNamespace =
@@ -66,6 +74,7 @@ export function normalizeLinkedInIdentityValue(
 		case LINKEDIN_IDENTITY.SLUG:
 			return normalizeLinkedInSlug(raw);
 		case LINKEDIN_IDENTITY.MEMBER_ID:
+		case LINKEDIN_IDENTITY.USER_MEMBER_ID:
 			return normalizeLinkedInMemberId(raw);
 		default:
 			return undefined;
@@ -77,4 +86,27 @@ export const linkedInIdentityModule: ConnectorIdentityModule = {
 	key: "linkedin",
 	recallNamespaces: [LINKEDIN_IDENTITY.SLUG, LINKEDIN_IDENTITY.MEMBER_ID],
 	normalize: normalizeLinkedInIdentityValue,
+};
+
+/**
+ * LinkedIn's direct-message sender model. Member ids are unique across
+ * LinkedIn, so there is no tenant axis: `teamId` is ignored and the scope is
+ * global.
+ *
+ * LinkedIn's OpenID sign-in returns an opaque `sub`, not the messaging member
+ * id, so no sign-in extractor writes this namespace; a link comes only from the
+ * explicit, sender-proven chat link offered in the direct message.
+ */
+export const linkedInChatUserIdentity: ChatUserIdentity = {
+	platform: "linkedin",
+	providerId: "linkedin",
+	namespace: LINKEDIN_IDENTITY.USER_MEMBER_ID,
+	buildUserKey(_teamId, platformUserId) {
+		return normalizeLinkedInMemberId(platformUserId);
+	},
+	userKeyScope: () => ({ kind: "global" }),
+	// The stored key is the member id the adapter puts on a message author.
+	platformUserIdFromKey(key) {
+		return normalizeLinkedInMemberId(key);
+	},
 };

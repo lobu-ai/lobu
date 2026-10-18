@@ -13,6 +13,7 @@ const EXPECTED_BUNDLED_CONNECTORS = [
 	"herdr",
 	"jira",
 	"linear",
+	"linkedin",
 	"market.quotes",
 	"microsoft.outlook",
 	"postgres",
@@ -87,6 +88,7 @@ describe("bundled connector lifecycle matrix", () => {
 			// 67 compiled + 6 hand-written (get_thread, send_email, …).
 			"google.gmail": 73,
 			herdr: 12,
+			linkedin: 9,
 			"market.quotes": 1,
 			// outlook's first actions: list_attachments + download_attachment.
 			"microsoft.outlook": 2,

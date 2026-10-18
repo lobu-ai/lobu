@@ -22,25 +22,30 @@
  *   adapter name and the Chat SDK's lock, subscription and dedupe state, so two
  *   connections seeing the same chat or raw id must never contend or suppress
  *   each other. A chat id may not contain `:`.
- * - `postMessage` issues exactly ONE operation per call and surfaces any
+ * - `postMessage` issues ONE operation per part, in order, and surfaces any
  *   non-completed outcome as an error; it never retries, because a send that
- *   failed after the page delivered it would double-send. Callers that may
- *   redeliver pass a stable idempotency key so the existing run is adopted.
+ *   failed after the page delivered it would double-send. A reply longer than
+ *   the connector's `send_message` text limit is split into parts, each with
+ *   its own key derived from the reply's, so a redelivery that passes the same
+ *   stable idempotency key adopts every part already sent.
  * - Streaming is buffered and posted once: never a placeholder plus edits.
  */
 
 import {
   type Adapter,
   type AdapterPostableMessage,
-  type BaseFormatConverter,
+  BaseFormatConverter,
   type ChatInstance,
   type FetchResult,
   type FormattedContent,
   type Message,
   NotImplementedError,
+  parseMarkdown,
   type RawMessage,
   type StreamChunk,
   type ThreadInfo,
+  toPlainText,
+  walkAst,
 } from "chat";
 
 export interface ConnectorChatOperationRequest {
@@ -80,6 +85,8 @@ export abstract class ConnectorChatAdapter<Row>
   /** Human platform name for error messages ("WhatsApp Web"). */
   protected abstract readonly label: string;
   protected abstract readonly converter: BaseFormatConverter;
+  /** The connector's `send_message` text limit, in UTF-16 code units. */
+  protected abstract readonly maxTextLength: number;
   /** How errors name a native chat id ("WhatsApp chat JID"). */
   protected get chatIdNoun(): string {
     return `${this.label} chat id`;
@@ -211,22 +218,28 @@ export abstract class ConnectorChatAdapter<Row>
   ): Promise<RawMessage<Row>> {
     const chatId = this.decodeThreadId(threadId);
     if (!text.trim()) throw new Error(`Refusing to send an empty ${this.label} message`);
-    const outcome = await this.options.execute({
-      operationKey: "send_message",
-      input: this.sendInput(chatId, text, idempotencyKey),
-      idempotencyKey,
-    });
-    if (outcome.status !== "completed") {
-      // Ambiguous or refused: report it and stop. Retrying could deliver twice.
-      throw new Error(`${this.label} send_message ${outcome.status}: ${outcome.error}`);
+    let raw: (Row & { id: string }) | undefined;
+    const parts = splitText(text, this.maxTextLength);
+    for (const [index, part] of parts.entries()) {
+      // The first part keeps the reply's key, so a single-part reply is unchanged.
+      const key = index === 0 ? idempotencyKey : `${idempotencyKey}:${index}`;
+      const outcome = await this.options.execute({
+        operationKey: "send_message",
+        input: this.sendInput(chatId, part, key),
+        idempotencyKey: key,
+      });
+      if (outcome.status !== "completed") {
+        // Ambiguous or refused: report it and stop. Retrying could deliver twice.
+        throw new Error(`${this.label} send_message ${outcome.status}: ${outcome.error}`);
+      }
+      if (typeof outcome.output.message_id !== "string" || !outcome.output.message_id) {
+        throw new Error(`${this.label} send_message completed without a message id`);
+      }
+      raw = this.sentRow(chatId, part, outcome.output);
     }
-    if (typeof outcome.output.message_id !== "string" || !outcome.output.message_id) {
-      throw new Error(`${this.label} send_message completed without a message id`);
-    }
-    const raw = this.sentRow(chatId, text, outcome.output);
     // The thread stays the one the reply was addressed to, whatever alias the
-    // connector reports the chat under.
-    return { id: this.scopeMessageId(raw.id), threadId, raw };
+    // connector reports the chat under. The last part stands for the reply.
+    return { id: this.scopeMessageId(raw!.id), threadId, raw: raw! };
   }
 
   /** Text is the only reply path; the engine needs no edit when it streams once. */
@@ -262,5 +275,71 @@ export abstract class ConnectorChatAdapter<Row>
       isDM: this.isDM(threadId),
       metadata: this.threadMetadata(chatId),
     };
+  }
+}
+
+/**
+ * Splits text into parts of at most `max` code units, breaking at the last
+ * paragraph break, line break or space inside each window, and mid-text only
+ * when a window has none. Parts keep their text verbatim apart from the
+ * whitespace a break consumes.
+ */
+export function splitText(text: string, max: number): string[] {
+  if (text.length <= max) return [text];
+  const parts: string[] = [];
+  let rest = text.trim();
+  while (rest.length > max) {
+    // A break starting at `max` still leaves a part of exactly `max`.
+    let cut = rest.lastIndexOf("\n\n", max);
+    if (cut <= 0) cut = rest.lastIndexOf("\n", max);
+    if (cut <= 0) cut = rest.lastIndexOf(" ", max);
+    // Never split a surrogate pair when a window holds no break.
+    if (cut <= 0) cut = isHighSurrogate(rest.charCodeAt(max - 1)) ? max - 1 : max;
+    parts.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest) parts.push(rest);
+  return parts;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+/**
+ * Formatting for connector chats that render no markdown (LinkedIn, X DMs).
+ * Links keep their target and list items keep a marker; every other construct
+ * flattens to its text.
+ */
+export class PlainTextFormatConverter extends BaseFormatConverter {
+  fromAst(ast: FormattedContent): string {
+    const plain = walkAst(structuredClone(ast), (node) => {
+      if (node.type === "link") {
+        const label = toPlainText({ type: "root", children: node.children });
+        return {
+          type: "text",
+          value: !label || label === node.url ? node.url : `${label} (${node.url})`,
+        };
+      }
+      if (node.type === "list") {
+        node.children.forEach((item, index) => {
+          const marker = node.ordered ? `${(node.start ?? 1) + index}. ` : "- ";
+          const first = item.children[0];
+          if (first?.type === "paragraph") {
+            first.children.unshift({ type: "text", value: marker });
+          } else {
+            item.children.unshift({
+              type: "paragraph",
+              children: [{ type: "text", value: marker }],
+            });
+          }
+        });
+      }
+      return node;
+    });
+    return toPlainText(plain).trim();
+  }
+  toAst(platformText: string): FormattedContent {
+    return parseMarkdown(platformText);
   }
 }

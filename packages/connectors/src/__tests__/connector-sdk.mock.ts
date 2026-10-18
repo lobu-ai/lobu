@@ -23,6 +23,7 @@ import * as fileOutput from '../../../connector-sdk/src/file-output.js';
 import { requireBrowser } from '../../../connector-sdk/src/browser-requirement.js';
 import * as browserHandoffBanner from '../../../connector-sdk/src/browser-handoff-banner.js';
 import * as browserSourceRead from '../../../connector-sdk/src/browser-source-read.js';
+import { IDENTITY } from '../../../connector-sdk/src/identity-namespaces.js';
 
 interface DomScrapeOpts {
   dispatcher: {
@@ -162,6 +163,8 @@ export function connectorSdkMock() {
     ...fileOutput,
     ...browserHandoffBanner,
     ...browserSourceRead,
+    // Real generic identity namespaces: connectors read them at module load.
+    IDENTITY,
     // Sole platform entity-type slug for ACL-gated resources. Must stay in step
     // with ACL_RESOURCE_TYPE_SLUG in packages/connector-sdk/src/acl-source.ts.
     ACL_RESOURCE_TYPE_SLUG: '$resource',

@@ -90,6 +90,7 @@ export class WhatsAppWebAdapter extends ConnectorChatAdapter<WhatsAppWebMessageR
   readonly name = WHATSAPP_WEB_PLATFORM;
   protected readonly label = "WhatsApp Web";
   protected readonly converter = new WhatsAppWebFormatConverter();
+  protected readonly maxTextLength = 65536;
 
   protected override get chatIdNoun(): string {
     return "WhatsApp chat JID";

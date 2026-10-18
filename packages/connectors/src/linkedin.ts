@@ -1,7 +1,7 @@
 /**
  * LinkedIn Connector
  *
- * Example-only — not bundled with Lobu. A single connector that spans BOTH:
+ * Built-in connector spanning live browser feeds and local export readers:
  *
  *   • LIVE feeds (home_feed, company_updates, jobs) — scraped via the paired
  *     Owletto Chrome extension's network-intercept / content-script primitives.
@@ -15,7 +15,9 @@
  *
  *   • TAKEOUT feeds (connections, messages, invitations, applied_jobs, profile,
  *     companies, learning, events, endorsements, media) — read from the user's
- *     local LinkedIn Data Export CSV files.
+ *     local LinkedIn Data Export CSV files through an injected reader. The
+ *     platform does not currently supply that reader; those feeds fail with
+ *     a missing-capability error until a filesystem-capable caller supplies it.
  *
  * Folding both into ONE connector (key "linkedin") means a single connection
  * dedups all people on the shared `linkedin_slug`/`email` identity: a person met
@@ -44,16 +46,16 @@ import {
   type EventEnvelope,
   extensionDomScrape,
   extensionNetworkSync,
+  IDENTITY,
   type SyncContext,
   type SyncResult,
 } from "@lobu/connector-sdk";
 import {
-  LINKEDIN_EMAIL_NAMESPACE,
   LINKEDIN_IDENTITY,
   normalizeLinkedInMemberId,
   normalizeLinkedInSlug,
-} from "./linkedin-identity.ts";
-import { setLinkedInLike } from "./linkedin-like.ts";
+} from "./linkedin-identity.js";
+import { setLinkedInLike } from "./linkedin-like.js";
 import {
   readCompanyFollows,
   readConnections,
@@ -66,20 +68,21 @@ import {
   readProfile,
   readRichMedia,
   type TakeoutCsvReader,
-} from "./linkedin-takeout.ts";
+} from "./linkedin-takeout.js";
 import {
   batchSize,
   type LocalTakeoutConfig,
   maxEventCursor,
   takeBatch,
-} from "./takeout-utils.ts";
+} from "./takeout-utils.js";
 import {
   observeLinkedInInbox,
   readLinkedInInbox,
+  sendLinkedInMessage,
   type LinkedInInboxCheckpoint,
-} from "./linkedin-inbox.ts";
-import { prepareLinkedInDraft } from "./linkedin-drafts.ts";
-import { LINKEDIN_HOME_URL } from "./linkedin-browser-script.ts";
+} from "./linkedin-inbox.js";
+import { prepareLinkedInDraft } from "./linkedin-drafts.js";
+import { LINKEDIN_HOME_URL } from "./linkedin-browser-script.js";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -173,7 +176,7 @@ const LINKEDIN_CONNECTION_ATTRIBUTIONS: EventAttributionRule[] = [
           namespace: LINKEDIN_IDENTITY.SLUG,
           eventPath: "metadata.linkedin_slug",
         },
-        { namespace: LINKEDIN_EMAIL_NAMESPACE, eventPath: "metadata.email" },
+        { namespace: IDENTITY.EMAIL, eventPath: "metadata.email" },
       ],
     },
     traits: {
@@ -370,7 +373,7 @@ const LINKEDIN_HOME_COMMENT_ATTRIBUTIONS: EventAttributionRule[] = [
   },
   {
     name: "parent_comment_author",
-    role: "in_reply_to",
+    role: "mentions",
     autoCreate: true,
     target: {
       entityType: "person",
@@ -2897,8 +2900,8 @@ export default class LinkedInConnector extends ConnectorRuntime<
     key: "linkedin",
     name: "LinkedIn",
     description:
-      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes and prepare message, post, or comment drafts for human submission. Also supports local LinkedIn Data Export CSV files.",
-    version: "3.18.8",
+      "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, answer direct messages, and prepare message, post, or comment drafts for human submission. Also supports local LinkedIn Data Export CSV files.",
+    version: "3.19.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account. Local takeout imports need no browser.
     browser: {
@@ -2966,7 +2969,8 @@ export default class LinkedInConnector extends ConnectorRuntime<
         label: "Message Created",
         resourceType: "message",
         description:
-          "A new inbox message reference. Read its content from the live messages feed.",
+          "A new inbox message reference. Read its content from the live messages feed by id:<message URN>. A reply Automation can answer a direct message in its conversation.",
+        capabilities: { replyToSource: true },
       },
       {
         key: "source.gap",
@@ -3007,7 +3011,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         key: "live_messages",
         name: "Live Messages",
         description:
-          "Read recent messages from inbox conversations without marking them seen. The cursor pages conversations and their recent message pages, not a full history export. Subscriptions check once per minute while the browser is online and report catch-up gaps.",
+          "Read recent messages from inbox conversations without marking them seen. The cursor pages conversations and their recent message pages, not a full history export; `id:<message URN>` reads one recent message back. Rows carry the conversation's thread_id, whether it is a group, the sender's member id, slug and name, and the message's content_kind. Subscriptions check once per minute while the browser is online and report catch-up gaps.",
         read: (ctx) => readLinkedInInbox(ctx),
         observe: (ctx) => observeLinkedInInbox(ctx),
         webhook: { mode: "trigger", events: ["message.created", "source.gap"] },
@@ -3243,6 +3247,38 @@ export default class LinkedInConnector extends ConnectorRuntime<
             liked: { type: "boolean" },
           },
           additionalProperties: false,
+        },
+      },
+      send_message: {
+        key: "send_message",
+        name: "Send direct message reply",
+        kind: "write",
+        description:
+          "Send a text reply into an exact existing LinkedIn direct-message conversation (thread_id from the live messages feed) and confirm it appears there. This direct send is approved only for answering direct messages on accounts the owner operates; group conversations are refused, and posts, comments and other messages stay draft-only through prepare_message, prepare_post and prepare_comment. A retry with the same idempotency_key returns the earlier message instead of sending again.",
+        annotations: {
+          openWorldHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          required: ["conversation_id", "text", "idempotency_key"],
+          additionalProperties: false,
+          properties: {
+            conversation_id: {
+              type: "string",
+              pattern: "^[A-Za-z0-9_-]+=*$",
+              maxLength: 500,
+              description: "The conversation's thread_id.",
+            },
+            text: { type: "string", minLength: 1, maxLength: 3000 },
+            idempotency_key: {
+              type: "string",
+              minLength: 1,
+              maxLength: 300,
+              description: "One reply per key: a retry returns the first send.",
+            },
+          },
         },
       },
       prepare_message: {
@@ -3516,6 +3552,9 @@ export default class LinkedInConnector extends ConnectorRuntime<
             ctx.input.liked
           ),
         };
+      }
+      if (ctx.actionKey === "send_message") {
+        return await sendLinkedInMessage(ctx);
       }
       if (
         ctx.actionKey === "prepare_message" ||

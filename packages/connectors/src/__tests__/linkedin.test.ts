@@ -6,7 +6,7 @@ import path from "node:path";
 import { JSDOM } from "jsdom";
 import { connectorSdkMock } from "./connector-sdk.mock";
 import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
-import { getSelectableMethods } from "../../../packages/owletto/src/components/entity-tabs/connections-tab/auth-helpers";
+import { getSelectableMethods } from "../../../owletto/src/components/entity-tabs/connections-tab/auth-helpers";
 
 // Stub @lobu/connector-sdk (it pulls in playwright) so the connector imports
 // without the browser stack. Shared superset — see connector-sdk.mock.ts.
@@ -41,7 +41,6 @@ let genericScrape: (
 ) => Promise<Record<string, unknown>>;
 let readConnections: any;
 let readJobs: any;
-let assertDirectory: any;
 let parseCsv: any;
 
 // Most tests below exercise author, engagement, media, or noise parsing rather
@@ -81,7 +80,7 @@ function buildHomeFeedEvents(rows: any[], occurredAt: Date): any[] {
 }
 
 beforeAll(async () => {
-  const mod = await import("../linkedin.connector");
+  const mod = await import("../linkedin");
   LinkedInConnector = mod.default;
   buildHomeFeedEventsRaw = mod.buildHomeFeedEvents;
   homeFeedObjectAllSupported = mod.homeFeedObjectAllSupported;
@@ -104,13 +103,11 @@ beforeAll(async () => {
   buildScrapeCommentsExpression = mod.buildScrapeCommentsExpression;
   verifyLinkedInStagedComment = mod.verifyLinkedInStagedComment;
   genericScrape = (
-    await import("../../../packages/owletto/apps/chrome/tools.js")
+    await import("../../../owletto/apps/chrome/tools.js")
   ).genericScrape;
   const takeoutMod = await import("../linkedin-takeout");
   readConnections = takeoutMod.readConnections;
   readJobs = takeoutMod.readJobs;
-  const takeoutFsMod = await import("../takeout-fs");
-  assertDirectory = takeoutFsMod.assertDirectory;
   parseCsv = (await import("../takeout-utils")).parseCsv;
   const identityMod = await import("../linkedin-identity");
   normalizeLinkedInSlug = identityMod.normalizeLinkedInSlug;
@@ -2878,39 +2875,6 @@ describe("LinkedInConnector takeout identity attributions", () => {
     ).rejects.toThrow("Unknown LinkedIn feed");
   });
 
-  test("rejects a missing export directory rather than returning an empty sync", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "li-reader-missing-"));
-    try {
-      expect(() =>
-        assertDirectory({ takeout_dir: path.join(dir, "missing") }, "LinkedIn")
-      ).toThrow("takeout directory does not exist");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("rejects a regular file as an export directory", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "li-reader-file-"));
-    try {
-      const file = path.join(dir, "not-a-directory");
-      writeFileSync(file, "fixture");
-      expect(() => assertDirectory({ takeout_dir: file }, "LinkedIn")).toThrow(
-        "takeout directory does not exist"
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("accepts a valid export directory", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "li-reader-empty-"));
-    try {
-      expect(assertDirectory({ takeout_dir: dir }, "LinkedIn")).toBe(dir);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   test("connections feed mints a person keyed on linkedin_slug + email, neither primary", () => {
     const def = new LinkedInConnector().definition;
     const attr = def.feeds.connections.eventKinds.connection.attributions?.[0];
@@ -3420,7 +3384,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.18.8");
+    expect(c.definition.version).toBe("3.19.0");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
