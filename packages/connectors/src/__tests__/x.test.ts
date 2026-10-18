@@ -847,10 +847,24 @@ describe("XConnector definition", () => {
 	});
 
 	test("verifies the stable signed-in id and ignores a stale cookie on the login page", async () => {
-		const probe = new Function("document", "location", `return ${new XConnector().definition.browser.accountProbe.expression}`);
-		const document = { cookie: "twid=u%3D123456", querySelector: () => ({ getAttribute: () => "/renamed-handle" }) };
-		expect(await probe(document, { pathname: "/home" })).toEqual({ accountId: "123456" });
-		expect(await probe({ ...document, querySelector: () => null }, { pathname: "/login" })).toBeNull();
+		const probe = new Function(
+			"document",
+			"location",
+			`return ${new XConnector().definition.browser.accountProbe.expression}`,
+		);
+		const document = {
+			cookie: "twid=u%3D123456",
+			querySelector: () => ({ getAttribute: () => "/renamed-handle" }),
+		};
+		expect(await probe(document, { pathname: "/home" })).toEqual({
+			accountId: "123456",
+		});
+		expect(
+			await probe(
+				{ ...document, querySelector: () => null },
+				{ pathname: "/login" },
+			),
+		).toBeNull();
 	});
 	test("declares search, account, and extension-only home timeline feeds", () => {
 		const def = new XConnector().definition;
@@ -861,6 +875,7 @@ describe("XConnector definition", () => {
 			"following_timeline",
 			"home_feed",
 			"liked_tweets",
+			"live_messages",
 			"my_tweets",
 			"tweets",
 		]);
@@ -2123,7 +2138,7 @@ describe("isReplySubmitLabel", () => {
 
 describe("prepare_reply action contract", () => {
 	test("pins the connector version for catalog upgrades", () => {
-		expect(new XConnector().definition.version).toBe("3.14.2");
+		expect(new XConnector().definition.version).toBe("3.15.0");
 	});
 
 	test("classifies staging a reply as a write for org policy", () => {

@@ -54,6 +54,7 @@ describe("chat platform descriptor contract", () => {
       ],
       // Its transport is the connector connection: no chat credential at all.
       "whatsapp.web": [],
+      x: [],
     });
   });
 

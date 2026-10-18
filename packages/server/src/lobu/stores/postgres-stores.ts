@@ -355,12 +355,17 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
 
 /**
  * A connector connection (credential_mode NULL) joins the chat store when its
- * platform is a declared connector transport AND its active connector
- * definition declares an Automation event that can reply to its source. Both
- * are declarations: the gateway's (it can run that transport) and the
- * connector's (its messages can be answered where they came from).
+ * platform is a declared connector transport, its active connector definition
+ * declares an Automation event that can reply to its source, AND it is pinned
+ * to a paired device. The first two are declarations: the gateway's (it can
+ * run that transport) and the connector's (its messages can be answered where
+ * they came from). The pin is the transport itself: a connector transport
+ * answers through its paired device, since every send runs as a device
+ * operation, so a connection without one (an API-only connection of a
+ * mixed-auth connector) is never a chat.
  */
 const CONNECTOR_TRANSPORT_ROW_SQL = `c.credential_mode IS NULL
+	AND c.device_worker_id IS NOT NULL
 	AND c.connector_key = ANY($1::text[])
 	AND EXISTS (
 		SELECT 1 FROM connector_definitions d
