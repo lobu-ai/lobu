@@ -6,7 +6,7 @@
  * multi-signal score ranking. With a query present they must go through
  * text search instead: the query filters rows. The fixture gives the
  * NON-matching decoy a higher stored score, so routing to the score builder
- * (the old behavior for any `sort_by: 'score'` + `entity_id` call) surfaces
+ * (the pre-fix path for any `sort_by: 'score'` + `entity_id` call) surfaces
  * the decoy first and inflates the total — a loud failure instead of a
  * silent pass.
  */
