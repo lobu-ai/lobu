@@ -528,18 +528,37 @@ export function linkedInInboxProgram() {
           : null;
     return { rows, continuation };
   }
+  // Walks the inbox from the most recently active conversation, following
+  // LinkedIn's cursor for at most `pages` pages, and returns the first
+  // non-null `visit` result. Catch-up observes threads beyond the first page,
+  // so lookups by id must reach them too.
+  async function searchConversations(mailbox, pages, visit) {
+    let cursor;
+    for (let page = 1; page <= pages; page++) {
+      const source = await conversationsPage(mailbox, cursor);
+      for (const thread of source.elements) {
+        const found = await visit(thread);
+        if (found) return found;
+      }
+      cursor = source.metadata?.nextCursor;
+      if (typeof cursor !== "string" || !cursor || cursor.length > 4096)
+        return null;
+    }
+    return null;
+  }
   // A message reference names no conversation, so `id:<message URN>` looks
   // through the most recently active conversations: a new message's thread is
-  // at the top. Not found is an empty page; the caller retries.
+  // near the top. Not found is an empty page; the caller retries.
   async function findMessage(id, mailbox) {
-    const source = await conversationsPage(mailbox);
-    for (const thread of source.elements) {
-      const row = (
-        await messagesPage(thread.entityUrn, mailbox, groupOf(thread))
-      ).find((message) => message.id === id);
-      if (row) return { rows: [row], continuation: null };
-    }
-    return { rows: [], continuation: null };
+    const row = await searchConversations(
+      mailbox,
+      LOOKUP_CONVERSATION_PAGES,
+      async (thread) =>
+        (await messagesPage(thread.entityUrn, mailbox, groupOf(thread))).find(
+          (message) => message.id === id
+        ) ?? null
+    );
+    return { rows: row ? [row] : [], continuation: null };
   }
   async function read(input) {
     const mailbox = await account();
@@ -600,6 +619,8 @@ export function linkedInInboxProgram() {
   // its checkpoint; notifications reorder at the top and report a gap instead.
   const NOTIFICATION_PAGES_PER_PASS = 10;
   const CONVERSATION_PAGES_PER_PASS = 2;
+  // Lookups by id or conversation reach the 100 most recently active threads.
+  const LOOKUP_CONVERSATION_PAGES = 5;
   const RECENT_MESSAGE_PAGE = 20;
   const SEEN_LIMIT = 256;
   const BATCH_EVENTS = 500;
@@ -929,8 +950,10 @@ export function linkedInInboxProgram() {
     if (typeof idempotencyKey !== "string" || !idempotencyKey)
       fail("idempotency_key is required");
     const conversation = `urn:li:msg_conversation:(${mailbox},${thread})`;
-    const recent = (await conversationsPage(mailbox)).elements.find(
-      (element) => element.entityUrn === conversation
+    const recent = await searchConversations(
+      mailbox,
+      LOOKUP_CONVERSATION_PAGES,
+      async (element) => (element.entityUrn === conversation ? element : null)
     );
     if (!recent)
       fail("The conversation is not among the recent conversations; not sending");

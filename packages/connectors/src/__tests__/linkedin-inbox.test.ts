@@ -1153,11 +1153,16 @@ function messenger(options: {
         },
       };
     } else if (url.includes("messengerConversations.")) {
+      // Twenty per page, like LinkedIn, with an opaque `page-<n>` cursor.
+      const cursor = url.match(/nextCursor:([^,)]+)/)?.[1];
+      const page = cursor ? Number(decodeURIComponent(cursor).slice(5)) : 0;
+      const elements = options.conversations.slice(page * 20, page * 20 + 20);
+      const more = options.conversations.length > page * 20 + 20;
       data = {
         data: {
           messengerConversationsByCategoryQuery: {
-            elements: options.conversations,
-            metadata: {},
+            elements,
+            metadata: more ? { nextCursor: `page-${page + 1}` } : {},
           },
         },
       };
@@ -1295,6 +1300,34 @@ describe("LinkedIn direct messages", () => {
       await expect(
         api.read({ feed: "live_messages", query: "id:not-a-message" })
       ).rejects.toThrow("Message lookup");
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test("a message and its conversation beyond the first inbox page are still found and answered", async () => {
+    const busier = Array.from({ length: 20 }, (_, index) => ({
+      entityUrn: `urn:li:msg_conversation:(${SELF},2-synthetic-busy-${index}==)`,
+      groupChat: false,
+      lastActivityAt: 1700000000100 - index,
+    }));
+    const { api, dom, posts } = messenger({
+      conversations: [...busier, { entityUrn: DM, groupChat: false, lastActivityAt: 1700000000000 }],
+      messages: { [DM]: [INBOUND] },
+    });
+    try {
+      const found = await api.read({
+        feed: "live_messages",
+        query: `id:${INBOUND.entityUrn}`,
+      });
+      expect(found.rows).toMatchObject([{ id: INBOUND.entityUrn, thread_id: "2-synthetic-dm==" }]);
+      const sent = await api.send({
+        conversation_id: "2-synthetic-dm==",
+        text: "Yes, here.",
+        idempotency_key: "page-two",
+      });
+      expect(sent).toMatchObject({ sent: true, conversation_id: "2-synthetic-dm==" });
+      expect(posts).toHaveLength(1);
     } finally {
       dom.window.close();
     }
