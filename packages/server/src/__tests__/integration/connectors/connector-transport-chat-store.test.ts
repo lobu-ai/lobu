@@ -34,7 +34,8 @@ async function defineConnector(key: string, automationEvents: unknown): Promise<
   `;
 }
 
-async function connection(key: string): Promise<string> {
+/** A connector connection, pinned to its owner's paired device unless `pinned` is false. */
+async function connection(key: string, { pinned = true }: { pinned?: boolean } = {}): Promise<string> {
   const owner = await createTestUser();
   const created = await createTestConnection({
     organization_id: orgId,
@@ -42,6 +43,15 @@ async function connection(key: string): Promise<string> {
     created_by: owner.id,
     createDefaultFeed: false,
   });
+  if (pinned) {
+    const [device] = await getDb()`
+      INSERT INTO device_workers (user_id, worker_id, platform, app_version, capabilities, label, organization_id, last_seen_at)
+      VALUES (${owner.id}, ${`synthetic-browser-${created.id}`}, 'chrome-extension', '9.9.0',
+        ${getDb().json(["browser.tabs"])}, 'Synthetic browser', ${orgId}, NOW())
+      RETURNING id
+    `;
+    await getDb()`UPDATE connections SET device_worker_id = ${device.id}::uuid WHERE id = ${created.id}`;
+  }
   return String(created.id);
 }
 
@@ -53,8 +63,23 @@ beforeEach(async () => {
 });
 
 describe("connector-transport chat store eligibility", () => {
-  it("only whatsapp.web is a declared connector transport", () => {
-    expect(connectorTransportPlatforms()).toEqual(["whatsapp.web"]);
+  it("whatsapp.web and x are the declared connector transports", () => {
+    expect(connectorTransportPlatforms()).toEqual(["whatsapp.web", "x"]);
+  });
+
+  it("keeps an unpinned connection of a reply-capable connector out; the pinned one is in", async () => {
+    // A connector transport answers through its paired device: a connection
+    // with no device (an API-only one of a mixed-auth connector) is not a chat.
+    await defineConnector("whatsapp.web", REPLYABLE_EVENTS);
+    const unpinned = await connection("whatsapp.web", { pinned: false });
+    const pinned = await connection("whatsapp.web");
+
+    expect(await inOrg(() => store.getConnection(unpinned))).toBeNull();
+    expect(await inOrg(() => store.getConnection(pinned))).toMatchObject({ id: pinned });
+    expect((await store.listConnections()).map((c) => c.id)).toEqual([pinned]);
+    expect(
+      (await inOrg(() => store.listConnections({ platform: "whatsapp.web" }))).map((c) => c.id),
+    ).toEqual([pinned]);
   });
 
   it("keeps a whatsapp.web connection out while its connector declares no reply-to-source event", async () => {
