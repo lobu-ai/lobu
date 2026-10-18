@@ -11,16 +11,9 @@
  * number, so the conversation id alone tells a DM from a group.
  */
 
-import {
-  BaseFormatConverter,
-  type FormattedContent,
-  Message,
-  parseMarkdown,
-  toPlainText,
-  walkAst,
-} from "chat";
+import { Message } from "chat";
 
-import { ConnectorChatAdapter } from "./connector-chat.js";
+import { ConnectorChatAdapter, PlainTextFormatConverter } from "./connector-chat.js";
 
 export const X_PLATFORM = "x";
 
@@ -43,47 +36,10 @@ export interface XMessageRow {
   occurred_at?: string | null;
 }
 
-/**
- * X DMs render no markdown. Links keep their target and list items keep a
- * marker; every other construct flattens to its text.
- */
-class XFormatConverter extends BaseFormatConverter {
-  fromAst(ast: FormattedContent): string {
-    const plain = walkAst(structuredClone(ast), (node) => {
-      if (node.type === "link") {
-        const label = toPlainText({ type: "root", children: node.children });
-        return {
-          type: "text",
-          value: !label || label === node.url ? node.url : `${label} (${node.url})`,
-        };
-      }
-      if (node.type === "list") {
-        node.children.forEach((item, index) => {
-          const marker = node.ordered ? `${(node.start ?? 1) + index}. ` : "- ";
-          const first = item.children[0];
-          if (first?.type === "paragraph") {
-            first.children.unshift({ type: "text", value: marker });
-          } else {
-            item.children.unshift({
-              type: "paragraph",
-              children: [{ type: "text", value: marker }],
-            });
-          }
-        });
-      }
-      return node;
-    });
-    return toPlainText(plain).trim();
-  }
-  toAst(platformText: string): FormattedContent {
-    return parseMarkdown(platformText);
-  }
-}
-
 export class XAdapter extends ConnectorChatAdapter<XMessageRow> {
   readonly name = X_PLATFORM;
   protected readonly label = "X";
-  protected readonly converter = new XFormatConverter();
+  protected readonly converter = new PlainTextFormatConverter();
 
   protected override get chatIdNoun(): string {
     return "X DM conversation id";
