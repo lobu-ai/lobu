@@ -10,8 +10,8 @@ import { join, resolve } from "node:path";
  *
  * The catalog source of truth is the `key:` literal that opens each
  * `definition` literal under packages/connectors/src. Feed runtimes use
- * `RuntimeConnectorDefinition` (optionally generic); feedless integrations use
- * `ConnectorDefinition`. Filenames use underscores while keys use dots.
+ * `RuntimeConnectorDefinition` (optionally generic, possibly over several
+ * lines); feedless integrations use `ConnectorDefinition`. Filenames use underscores while keys use dots.
  * Module-level maps and payload shapes also contain `key:` fields, so the match
  * must be anchored to the definition rather than taking the file's first key.
  */
@@ -26,7 +26,7 @@ function catalogKeys(): Set<string> {
     const source = readFileSync(join(CONNECTORS_SRC_DIR, file), "utf-8");
     if (!source.includes("ConnectorDefinition")) continue;
     const match = source.match(
-      /definition:\s*(?:Runtime)?ConnectorDefinition(?:<[^\n]+?>)?\s*=\s*\{\s*key:\s*["']([^"']+)["']/
+      /definition:\s*(?:Runtime)?ConnectorDefinition(?:<[\s\S]+?>)?\s*=\s*\{\s*key:\s*["']([^"']+)["']/
     );
     if (match) keys.add(match[1]);
   }

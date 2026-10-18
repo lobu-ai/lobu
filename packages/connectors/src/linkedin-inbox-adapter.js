@@ -910,10 +910,11 @@ export function linkedInInboxProgram() {
     ].join("-");
   }
   function trackingId() {
+    // 64 symbols, so masking a random byte to 6 bits is unbiased.
     const alphabet =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     return [...crypto.getRandomValues(new Uint8Array(16))]
-      .map((byte) => alphabet[byte % alphabet.length])
+      .map((byte) => alphabet[byte & 63])
       .join("");
   }
   async function send(input) {
