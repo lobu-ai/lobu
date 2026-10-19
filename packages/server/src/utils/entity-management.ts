@@ -551,7 +551,18 @@ export async function patchEntityRows(params: {
       AND deleted_at IS NULL
     RETURNING id
   `;
-	return rows.map((row) => Number(row.id)).sort((a, b) => a - b);
+	const changed = rows.map((row) => Number(row.id)).sort((a, b) => a - b);
+	if (patch.softDelete === true && changed.length > 0) {
+		// Release the live identity keys in the same transaction as the entity
+		// tombstone, so another entity can claim them without losing provenance.
+		await tx`
+      UPDATE entity_identities
+      SET deleted_at = current_timestamp, updated_at = current_timestamp
+      WHERE entity_id = ANY(${pgBigintArray(changed)}::bigint[])
+        AND deleted_at IS NULL
+    `;
+	}
+	return changed;
 }
 
 /** Hard-delete an explicit, bounded set of entity ids on the caller's handle. */
