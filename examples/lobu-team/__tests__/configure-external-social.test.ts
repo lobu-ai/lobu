@@ -173,6 +173,7 @@ test("a verified briefing is delivered within the notification limit without spl
                 run_id: 20,
                 issues: [],
                 verified_findings: 0,
+                verified_graph_candidates: 0,
               },
             },
           },
@@ -191,4 +192,53 @@ test("a verified briefing is delivered within the notification limit without spl
   expect(body.startsWith("x: 1 text posts, read\n\n")).toBe(true);
   expect(body).toHaveLength(979);
   expect(body.endsWith("x")).toBe(true);
+});
+
+test("graph candidates added after preflight do not receive a verified notification", async () => {
+  const send = mock(async (_input: Record<string, unknown>) => ({
+    event_id: 102,
+  }));
+  const result = await deliverExternalSocial(
+    {
+      automation: { id: 10 },
+      window: { run_id: 20 },
+      extracted_data: {
+        findings: [],
+        briefings: [
+          {
+            content: "Unverified graph addition",
+            metadata: {
+              workflow: policy.workflow,
+              run_id: 20,
+              coverage: [
+                {
+                  platform: "x",
+                  posts_read: 0,
+                  recent_posts_read: 0,
+                  status: "blocked",
+                  read_receipts: [],
+                },
+              ],
+              graph_candidates: [{ subject_name: "Added after preflight" }],
+              evidence_verification: {
+                version: 1,
+                run_id: 20,
+                issues: [],
+                verified_findings: 0,
+                verified_graph_candidates: 0,
+              },
+            },
+          },
+        ],
+      },
+    },
+    {
+      query: async () => [{ created_by: "synthetic-owner" }],
+      notifications: { send },
+    },
+    policy
+  );
+  expect(result.evidence_verified).toBe(false);
+  expect(send.mock.calls[0][0].title).toBe("Social research needs evidence");
+  expect(send.mock.calls[0][0].body).not.toContain("Unverified graph addition");
 });

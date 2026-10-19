@@ -6,6 +6,7 @@ import {
   type SocialData,
 } from "../external-social-evidence";
 import { readSocialTimelinePage } from "../social-timeline-reader";
+import { externalSocialReaction } from "../external-social.reaction";
 
 const now = Date.now();
 const policy = {
@@ -197,6 +198,32 @@ test("a receipt cannot be reused for another platform or an ungranted workspace"
   await expect(other.run()).rejects.toThrow("out-of-scope");
 });
 
+test("serialized reaction and preflight share the same briefing boundary", async () => {
+  const h = fixture();
+  await h.run();
+  const script = `${externalSocialReaction(policy).replace("export default", "const reaction =")}\nreaction(ctx, client);`;
+  const react = () =>
+    runInNewContext(script, {
+      ctx: {
+        automation: { id: 1 },
+        window: { run_id: 10 },
+        extracted_data: h.data,
+      },
+      client: {
+        query: async () => [{ created_by: "synthetic-owner" }],
+        notifications: { send: async () => ({ event_id: 100 }) },
+      },
+    });
+  expect((await react()).evidence_verified).toBe(true);
+  h.data.briefings[0]!.metadata.coverage.push({ platform: "outside-policy" });
+  await expect(h.run()).rejects.toThrow(
+    "Coverage must name every configured platform once"
+  );
+  await expect(react()).rejects.toThrow(
+    "Coverage must name every configured platform once"
+  );
+});
+
 test("graph observations require source author and target links, independently of digest selection", async () => {
   const h = fixture();
   h.data.findings = [];
@@ -247,6 +274,24 @@ test("graph observations require source author and target links, independently o
   candidate.claims[0]!.target.profile_url = "https://x.com/guessed";
   await expect(h.run()).rejects.toThrow("target-profile evidence");
   expect(candidate.evidence_verified).toBe(false);
+  candidate.claims[0]!.target.profile_url = "https://x.com/target";
+  candidate.platform = "linkedin";
+  h.source.output.value.platform = "linkedin";
+  // A receipt grant alone must not expand the configured platform scope.
+  await expect(
+    verifySocialEvidence(
+      h.client,
+      {
+        ...policy,
+        receipt_workspaces: {
+          ...policy.receipt_workspaces,
+          linkedin: [policy.workspace],
+        },
+      },
+      10,
+      h.data
+    )
+  ).rejects.toThrow("Invalid graph observation");
 });
 
 test("a verified empty page is distinguishable from missing source evidence", async () => {

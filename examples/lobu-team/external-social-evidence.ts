@@ -20,7 +20,8 @@ type Coverage = {
   recent_posts_read: number;
   read_receipts: Receipt[];
   detail: string;
-  [key: string]: unknown;
+  continuation_pending?: boolean;
+  stop_reason?: string;
 };
 type Draft = {
   title: string;
@@ -52,6 +53,44 @@ type SourceReader = (
   receipt: Receipt
 ) => Promise<SourcePost[]>;
 type ReadingWindow = { ownerId: string; start: number; end: number };
+
+/** Shared by completion preflight and its notification reaction. */
+export function assertBriefingEnvelope(
+  data: SocialData,
+  policy: EvidencePolicy,
+  runId: number
+) {
+  if (
+    !Array.isArray(data.briefings) ||
+    data.briefings.length !== 1 ||
+    !Array.isArray(data.findings)
+  )
+    throw new Error("Expected one briefing and findings array");
+  const m = data.briefings[0]!.metadata;
+  if (m?.workflow !== policy.workflow || m.run_id !== runId)
+    throw new Error("Briefing ownership/run mismatch");
+  const coverage = m.coverage as Coverage[];
+  if (
+    !Array.isArray(coverage) ||
+    coverage.length !== policy.platforms.length ||
+    new Set(coverage.map((c) => c.platform)).size !== policy.platforms.length ||
+    coverage.some((c) => !policy.platforms.includes(c.platform))
+  )
+    throw new Error("Coverage must name every configured platform once");
+  return m;
+}
+
+export function findingHasReceipt(f: Draft, policy: EvidencePolicy) {
+  const m = f.metadata;
+  return (
+    m?.workflow === policy.workflow &&
+    policy.platforms.includes(m.platform) &&
+    m.source_url === f.source_url &&
+    m.review_status === "pending" &&
+    Array.isArray(m.read_receipts) &&
+    m.read_receipts.length > 0
+  );
+}
 
 /** Normalize only the operation shapes accepted by this example. */
 function readPostsFromOperation(
@@ -215,6 +254,7 @@ async function verifyCoverage(
 ) {
   for (const c of coverage) {
     const posts = new Map<string, SourcePost>();
+    const platformIssues: string[] = [];
     let verifiedPages = 0;
     for (const receipt of c.read_receipts ?? []) {
       try {
@@ -231,7 +271,7 @@ async function verifyCoverage(
           posts.set(p.origin_id, p);
         }
       } catch (error) {
-        issues.push(
+        platformIssues.push(
           `${c.platform}: ${error instanceof Error ? error.message : "receipt unavailable"}`
         );
       }
@@ -249,17 +289,45 @@ async function verifyCoverage(
         !p.author ||
         !Number.isFinite(Date.parse(p.occurred_at ?? ""))
     );
-    c.status = !verifiedPages
-      ? "blocked"
-      : incomplete ||
-          c.continuation_pending !== false ||
-          c.stop_reason !== "source_exhausted" ||
-          issues.some((issue) => issue.startsWith(`${c.platform}:`))
-        ? "partial"
-        : "read";
+    if (!verifiedPages) c.status = "blocked";
+    else if (
+      incomplete ||
+      c.continuation_pending !== false ||
+      c.stop_reason !== "source_exhausted" ||
+      platformIssues.length
+    )
+      c.status = "partial";
+    else c.status = "read";
     c.detail =
-      `Verified ${posts.size} unique text posts; ${c.recent_posts_read} dated within seven days. ${incomplete ? "Incomplete text, unknown dates or unread media. " : ""}${c.continuation_pending !== false ? "Continuation remains. " : ""}${issues.filter((issue) => issue.startsWith(`${c.platform}:`)).join("; ")}`.trim();
+      `Verified ${posts.size} unique text posts; ${c.recent_posts_read} dated within seven days. ${incomplete ? "Incomplete text, unknown dates or unread media. " : ""}${c.continuation_pending !== false ? "Continuation remains. " : ""}${platformIssues.join("; ")}`.trim();
+    issues.push(...platformIssues);
   }
+}
+
+async function findSourcePost(
+  read: SourceReader,
+  platform: string,
+  receipts: Receipt[],
+  sourceUrl: string | undefined,
+  originId: string
+) {
+  const posts = (
+    await Promise.all(receipts.map((r) => read(platform, r)))
+  ).flat();
+  return posts.find(
+    (p) => p.source_url === sourceUrl && p.origin_id === originId
+  );
+}
+
+function quoteInBody(body: string, value: unknown) {
+  const quote = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (
+    quote.length > 0 &&
+    quote.length <= 200 &&
+    body.replace(/\s+/g, " ").includes(quote)
+  );
 }
 
 async function verifyFindings(
@@ -270,31 +338,18 @@ async function verifyFindings(
   const seen = new Set<string>();
   for (const f of findings) {
     const fm = f.metadata;
-    if (
-      fm.workflow !== policy.workflow ||
-      fm.source_url !== f.source_url ||
-      fm.review_status !== "pending" ||
-      !Array.isArray(fm.read_receipts) ||
-      !fm.read_receipts.length
-    )
-      throw new Error("Finding lacks its exact source receipt");
-    const candidates: SourcePost[] = (
-      await Promise.all(
-        fm.read_receipts.map((r: Receipt) => read(fm.platform, r))
-      )
-    ).flat();
-    const post = candidates.find(
-      (p) => p.source_url === f.source_url && p.origin_id === fm.origin_id
+    if (!findingHasReceipt(f, policy))
+      throw new Error(
+        "Finding lacks its exact source receipt or uses an out-of-scope platform"
+      );
+    const post = await findSourcePost(
+      read,
+      fm.platform,
+      fm.read_receipts,
+      f.source_url,
+      fm.origin_id
     );
-    const quote = String(fm.evidence_quote ?? "")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (
-      !post ||
-      !quote ||
-      quote.length > 200 ||
-      !post.text.replace(/\s+/g, " ").includes(quote)
-    )
+    if (!post || !quoteInBody(post.text, fm.evidence_quote))
       throw new Error(
         "Finding excerpt is absent from the exact source receipt"
       );
@@ -326,6 +381,7 @@ async function verifyGraphCandidates(
     g.evidence_verified = false;
     if (
       g.workspace !== policy.workspace ||
+      !policy.platforms.includes(g.platform) ||
       typeof g.connection !== "string" ||
       !g.connection ||
       typeof g.summary !== "string" ||
@@ -337,13 +393,12 @@ async function verifyGraphCandidates(
       g.claims.length > 20
     )
       throw new Error("Invalid graph observation");
-    const candidates: SourcePost[] = (
-      await Promise.all(
-        g.read_receipts.map((r: Receipt) => read(g.platform, r))
-      )
-    ).flat();
-    const p = candidates.find(
-      (p) => p.source_url === g.source_url && p.origin_id === g.origin_id
+    const p = await findSourcePost(
+      read,
+      g.platform,
+      g.read_receipts,
+      g.source_url,
+      g.origin_id
     );
     if (
       !p?.author_url ||
@@ -355,13 +410,8 @@ async function verifyGraphCandidates(
     if (graphSeen.has(key)) throw new Error("Duplicate graph observation");
     graphSeen.add(key);
     for (const claim of g.claims) {
-      const quote = String(claim.evidence_quote ?? "")
-        .replace(/\s+/g, " ")
-        .trim();
       if (
-        !quote ||
-        quote.length > 200 ||
-        !p.text.replace(/\s+/g, " ").includes(quote) ||
+        !quoteInBody(p.text, claim.evidence_quote) ||
         !claim.target?.profile_url ||
         !p.mentioned_profiles?.some(
           (url) =>
@@ -386,20 +436,10 @@ export async function verifySocialEvidence(
   runId: number,
   data: SocialData
 ) {
-  if (data.briefings.length !== 1 || data.findings.length > 6)
-    throw new Error("Expected one briefing and at most six findings");
-  const briefing = data.briefings[0]!;
-  const m = briefing.metadata;
-  if (m.workflow !== policy.workflow || m.run_id !== runId)
-    throw new Error("Briefing ownership/run mismatch");
+  const m = assertBriefingEnvelope(data, policy, runId);
+  if (data.findings.length > 6)
+    throw new Error("Expected at most six findings");
   const coverage = m.coverage as Coverage[];
-  if (
-    !Array.isArray(coverage) ||
-    coverage.length !== policy.platforms.length ||
-    new Set(coverage.map((c) => c.platform)).size !== policy.platforms.length ||
-    coverage.some((c) => !policy.platforms.includes(c.platform))
-  )
-    throw new Error("Coverage must name every configured platform once");
   const workspace = await client.org(policy.workspace);
   // getRun answers {error} without a run for an unknown or foreign id.
   const { run: parent } = await workspace.operations.getRun(runId);
@@ -447,6 +487,10 @@ export async function verifySocialEvidence(
 /** The MCP isolate has no imports; include the verifier's explicit dependencies. */
 export function socialEvidenceVerifierSource() {
   return [
+    assertBriefingEnvelope,
+    findingHasReceipt,
+    findSourcePost,
+    quoteInBody,
     readPostsFromOperation,
     loadSourcePosts,
     createSourceReader,

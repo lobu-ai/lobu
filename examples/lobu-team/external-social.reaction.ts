@@ -1,4 +1,8 @@
-import type { EvidencePolicy } from "./external-social-evidence";
+import {
+  assertBriefingEnvelope,
+  findingHasReceipt,
+  type EvidencePolicy,
+} from "./external-social-evidence";
 
 /** Notifications do not inherit the external caller's cross-workspace grant.
  * They report preflight status, and never describe unchecked content as verified. */
@@ -8,30 +12,17 @@ export async function deliverExternalSocial(
   policy: EvidencePolicy
 ) {
   const d = ctx.extracted_data;
-  if (
-    !Array.isArray(d.briefings) ||
-    d.briefings.length !== 1 ||
-    !Array.isArray(d.findings)
-  )
-    throw new Error("Expected one briefing and findings array");
+  const m = assertBriefingEnvelope(d, policy, ctx.window.run_id);
   const b = d.briefings[0];
-  const m = b.metadata;
-  if (m?.workflow !== policy.workflow || m.run_id !== ctx.window.run_id)
-    throw new Error("Briefing ownership/run mismatch");
   const coverage = m.coverage;
-  if (
-    !Array.isArray(coverage) ||
-    coverage.length !== policy.platforms.length ||
-    new Set(coverage.map((c: any) => c.platform)).size !==
-      policy.platforms.length ||
-    coverage.some((c: any) => !policy.platforms.includes(c.platform))
-  )
-    throw new Error("Invalid platform coverage");
   const preflight = m.evidence_verification;
+  // This is the external caller's attestation, not a server-side receipt check.
   const verified =
     preflight?.version === 1 &&
     preflight.run_id === m.run_id &&
     preflight.verified_findings === d.findings.length &&
+    Array.isArray(m.graph_candidates ?? []) &&
+    preflight.verified_graph_candidates === (m.graph_candidates ?? []).length &&
     d.findings.length <= 6 &&
     Array.isArray(preflight.issues) &&
     coverage.every(
@@ -45,15 +36,7 @@ export async function deliverExternalSocial(
         Array.isArray(c.read_receipts) &&
         (c.posts_read === 0 || c.read_receipts.length > 0)
     ) &&
-    d.findings.every(
-      (f: any) =>
-        f.metadata?.workflow === policy.workflow &&
-        policy.platforms.includes(f.metadata.platform) &&
-        f.metadata.source_url === f.source_url &&
-        f.metadata.review_status === "pending" &&
-        Array.isArray(f.metadata.read_receipts) &&
-        f.metadata.read_receipts.length > 0
-    );
+    d.findings.every((f: any) => findingHasReceipt(f, policy));
   const [owner] = await client.query(
     `SELECT created_by FROM automations WHERE id = ${Number(ctx.automation.id)}`
   );
@@ -93,5 +76,5 @@ export async function deliverExternalSocial(
 }
 
 export function externalSocialReaction(policy: EvidencePolicy) {
-  return `${deliverExternalSocial.toString()}\nexport default async (ctx, client) => deliverExternalSocial(ctx, client, ${JSON.stringify(policy)});`;
+  return `${assertBriefingEnvelope.toString()}\n${findingHasReceipt.toString()}\n${deliverExternalSocial.toString()}\nexport default async (ctx, client) => deliverExternalSocial(ctx, client, ${JSON.stringify(policy)});`;
 }
