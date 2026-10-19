@@ -8,7 +8,8 @@
  * row, and hands the turn to the chat bridge. The agent's completion goes out
  * as exactly one `send_message`, keyed on the operation's idempotency key.
  *
- * X has no linkable chat identity, so every sender is answered reply-only.
+ * An X sender linked to a member (`x_chat_user_id`) is answered as that member;
+ * an unlinked sender is answered reply-only and offered a one-time link.
  * Only the operation boundary is faked: the Chrome actions the connector
  * dispatches to the paired browser, and the `send_message` operation.
  */
@@ -16,11 +17,12 @@
 import { EventEmitter } from "node:events";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
-import { CommandRegistry } from "@lobu/core";
+import { CommandRegistry, verifyWorkerToken } from "@lobu/core";
 import { ChatInstanceManager } from "../../../gateway/connections/chat-instance-manager";
 import { ChatResponseBridge } from "../../../gateway/connections/chat-response-bridge";
 import { handleChatSourceIngress } from "../../../gateway/connections/chat-source-ingress";
 import { connectorTransportPlatforms } from "../../../gateway/connections/platforms/index";
+import { mintTurnToken } from "../../../gateway/orchestration/agent-turn-producer";
 import { RunsQueue } from "../../../gateway/infrastructure/queue/runs-queue";
 import type { QueueJob } from "../../../gateway/infrastructure/queue/types";
 import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
@@ -37,6 +39,7 @@ import {
   createTestAgent,
   createTestOrganization,
   createTestUser,
+  linkChatIdentityInGraph,
 } from "../../setup/test-fixtures";
 
 const SELF = "1000000001";
@@ -137,6 +140,15 @@ async function deliver(messages: DeviceMessage | DeviceMessage[], notificationId
     },
   } as any], deviceId, [orgId]);
   expect(receipt.active).toBe(true);
+}
+
+/** The worker token the producer signs for a dispatched turn. */
+async function mintedClaims(payload: Record<string, any>) {
+  const [input] = await sql`INSERT INTO runs (organization_id, run_type, queue_name, status, action_input)
+    VALUES (${payload.organizationId}, 'chat_message', 'messages', 'claimed', ${sql.json(payload)}) RETURNING id`;
+  const claims = verifyWorkerToken(await mintTurnToken(payload as any, Number(input.id)));
+  expect(claims).toBeTruthy();
+  return claims!;
 }
 
 const ingressJobs = () => sql`SELECT id, status, attempts FROM runs
@@ -270,12 +282,13 @@ describe("X source chat", () => {
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0]).toMatchObject({ agentId, platform: "x", messageText: expect.stringContaining("hello bot") });
 
-    // An X sender has no linkable identity: the turn is reply-only, and the
-    // sender is told once, without a link to follow.
+    // An unlinked X sender's turn is reply-only, and the sender is told once,
+    // with a one-time link that proves this X account is theirs.
     expect(sends).toHaveLength(1);
     expect(sends[0].input).toMatchObject({ conversation_id: DM });
     expect(String(sends[0].input.text)).toContain("I can't use this workspace's tools for you");
-    expect(String(sends[0].input.text)).not.toContain("/connect/chat-identity");
+    expect(String(sends[0].input.text)).toContain("/connect/chat-identity?token=");
+    expect(await mintedClaims(enqueued[0])).toMatchObject({ userId: PEER, chatAccess: "reply_only" });
 
     await completeTurns();
     expect(replies()).toHaveLength(1);
@@ -288,6 +301,27 @@ describe("X source chat", () => {
     expect(reply.idempotencyKey).toBeTruthy();
     // Every send carries the key from which the connector derives X's request id.
     for (const send of sends) expect(send.input.idempotency_key).toBe(send.idempotencyKey);
+  }, 60_000);
+
+  it("answers a linked member's X DM as that member, with no notice", async () => {
+    const member = await createTestUser({ email: "x-member@example.test" });
+    await addUserToOrganization(member.id, orgId, "member");
+    await linkChatIdentityInGraph({ organizationId: orgId, userId: member.id, platform: "x", platformUserId: PEER });
+    await insertAutomation("dm-reply", replyTo());
+    const message = { conversation_id: DM, message_id: "5201", text: "what's on my list?" };
+    deviceMessages.push(message);
+
+    await deliver(message);
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(sends).toHaveLength(0);
+    expect(await mintedClaims(enqueued[0])).toMatchObject({
+      userId: PEER, chatAccess: "member", actorUserId: member.id,
+    });
+
+    await completeTurns();
+    expect(sends).toHaveLength(1);
+    expect(sends[0].input).toMatchObject({ conversation_id: DM, text: "Reply from the agent" });
   }, 60_000);
 
   it("answers a message request like any other DM", async () => {

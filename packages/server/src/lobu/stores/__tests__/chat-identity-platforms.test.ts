@@ -236,6 +236,7 @@ describe("chat user key scope contract", () => {
 			gchat: "global",
 			"whatsapp.web": "global",
 			linkedin: "global",
+			x: "global",
 		});
 	});
 
@@ -249,6 +250,7 @@ describe("chat user key scope contract", () => {
 		gchat: "users/110000000000000000001",
 		"whatsapp.web": "15550000001@s.whatsapp.net",
 		linkedin: "ACoAASyntheticMember",
+		x: "1000000002",
 	};
 
 	it("every registered platform has a sample id for the invariant below", () => {
