@@ -222,10 +222,8 @@ describe('operational trail > public-read exclusion', () => {
     expectKnowledgeOnly(await listIds(ctx()));
   });
 
-  // A signed-in non-member is denied entity-scoped reads outright
-  // (requireReadAccess); the anonymous public reader is not.
-  it('anonymous get_content entity list excludes the trail', async () => {
-    expectKnowledgeOnly(await listIds(anonymousCtx(), { entity_id: entity.id }));
+  it.each(publicReaders)('%s get_content entity list excludes the trail', async (_, ctx) => {
+    expectKnowledgeOnly(await listIds(ctx(), { entity_id: entity.id }));
   });
 
   it.each(publicReaders)('%s exact-ID read excludes the trail', async (_, ctx) => {
