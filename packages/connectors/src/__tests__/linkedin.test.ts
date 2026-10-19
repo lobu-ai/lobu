@@ -2126,6 +2126,27 @@ describe("LinkedInConnector home_feed", () => {
     ).rejects.toThrow("invalid encoded post identity");
   });
 
+  test.each([
+    // Real group-post cards: field 3 (tag 26) carries two ZigZag varints,
+    // the group id then the post id. Both permalinks were confirmed live as
+    // https://www.linkedin.com/feed/update/urn:li:groupPost:<group>-<post>/.
+    ["GhAIgsTdARCCgMz07/mH1dAB", "1814785-7517932639912296449"],
+    ["Gg8I+OkLEILAs7ieqZ/V0AE", "96892-7517984031146143745"],
+  ])("reads the encoded group-post identity %s", async (encoded, groupPostId) => {
+    const res = await syncHomeFeedDom(`
+      <div componentkey="expandedgrouppostFeedType_MAIN_FEED_RELEVANCE">
+        <button aria-label="Open control menu for post by Group Author"></button>
+        <p>Group Author • 2nd A group post card with a durable encoded identity</p>
+        <div id="${encoded}-replaceableCommentToolsgrouppost_token"></div>
+      </div>`);
+    expect(res.events).toMatchObject([
+      {
+        origin_id: `li_home_groupPost_${groupPostId}`,
+        source_url: `https://www.linkedin.com/feed/update/urn:li:groupPost:${groupPostId}`,
+      },
+    ]);
+  });
+
   test("rejects duplicate encoded identities despite different recycled card keys", async () => {
     await expect(
       syncHomeFeedDom(
