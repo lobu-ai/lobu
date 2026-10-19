@@ -1,3 +1,5 @@
+import { readSocialTimelinePage } from "./social-timeline-reader";
+
 /** Tenant-owned external processing contract. No platform or storage changes. */
 type Receipt =
   | { workspace: string; run_id: number }
@@ -93,6 +95,25 @@ export function findingHasReceipt(f: Draft, policy: EvidencePolicy) {
   );
 }
 
+/** Reject malformed retained rows before either counting or matching excerpts.
+ * Empty text is valid: the reader returns it for media-only posts. */
+function assertSourcePosts(posts: SourcePost[]): SourcePost[] {
+  if (
+    posts.some(
+      (p) =>
+        !p ||
+        typeof p.text !== "string" ||
+        [p.source_url, p.origin_id].some(
+          (value) => typeof value !== "string" || !value.trim()
+        )
+    )
+  )
+    throw new Error(
+      "Malformed source post: expected source URL, identity and text"
+    );
+  return posts;
+}
+
 /** Normalize only the operation shapes accepted by this example. */
 function readPostsFromOperation(
   run: any,
@@ -133,7 +154,10 @@ function readPostsFromOperation(
   if (platform === "linkedin" && run.operation_key === "read_home_feed") {
     if (policy.company_linkedin_path)
       throw new Error("Member timeline is outside company scope");
-    if (!Array.isArray(run.output?.items))
+    if (
+      !Array.isArray(run.output?.items) ||
+      run.output.items.some((p: any) => !p || typeof p !== "object")
+    )
       throw new Error("Malformed LinkedIn source receipt");
     return run.output.items
       .filter((p: any) => p.type === "post")
@@ -149,6 +173,15 @@ function readPostsFromOperation(
   }
   if (run.operation_key !== "evaluate")
     throw new Error("Unsupported source receipt operation");
+  // Bind the example's supported readers to their retained operation input.
+  // This detects stale/ad-hoc readers; it is not proof against a malicious caller.
+  if (
+    (platform === "x" ||
+      (platform === "linkedin" && policy.company_linkedin_path)) &&
+    (typeof run.input?.expression !== "string" ||
+      !run.input.expression.includes(readSocialTimelinePage.toString()))
+  )
+    throw new Error("Source receipt did not use the supplied timeline reader");
   const value = run.output?.value;
   if (
     platform === "linkedin" &&
@@ -240,7 +273,9 @@ function createSourceReader(
     const key = `${platform}:${receipt.workspace}:${"run_id" in receipt ? "run" : "event"}:${receiptId}`;
     let result = cache.get(key);
     if (!result) {
-      result = loadSourcePosts(client, policy, window, platform, receipt);
+      result = loadSourcePosts(client, policy, window, platform, receipt).then(
+        assertSourcePosts
+      );
       cache.set(key, result);
     }
     return result;
@@ -257,6 +292,7 @@ async function verifyCoverage(
     const posts = new Map<string, SourcePost>();
     const platformIssues: string[] = [];
     let verifiedPages = 0;
+    let textless = false;
     for (const receipt of Array.isArray(c.read_receipts)
       ? c.read_receipts
       : []) {
@@ -264,14 +300,8 @@ async function verifyCoverage(
         const rows = await read(c.platform, receipt);
         verifiedPages++;
         for (const p of rows) {
-          if (
-            !p.source_url ||
-            !p.origin_id ||
-            typeof p.text !== "string" ||
-            !p.text.trim()
-          )
-            continue;
-          posts.set(p.origin_id, p);
+          if (p.text.trim()) posts.set(p.origin_id, p);
+          else textless = true;
         }
       } catch (error) {
         platformIssues.push(
@@ -285,13 +315,15 @@ async function verifyCoverage(
       const t = Date.parse(p.occurred_at ?? "");
       return Number.isFinite(t) && t >= end - 7 * 86400000 && t <= end;
     }).length;
-    const incomplete = [...posts.values()].some(
-      (p) =>
-        p.truncated !== false ||
-        p.media_unread !== false ||
-        !p.author ||
-        !Number.isFinite(Date.parse(p.occurred_at ?? ""))
-    );
+    const incomplete =
+      textless ||
+      [...posts.values()].some(
+        (p) =>
+          p.truncated !== false ||
+          p.media_unread !== false ||
+          !p.author ||
+          !Number.isFinite(Date.parse(p.occurred_at ?? ""))
+      );
     if (!verifiedPages) c.status = "blocked";
     else if (
       incomplete ||
@@ -492,6 +524,8 @@ export async function verifySocialEvidence(
 /** The MCP isolate has no imports; include the verifier's explicit dependencies. */
 export function socialEvidenceVerifierSource() {
   return [
+    readSocialTimelinePage,
+    assertSourcePosts,
     assertBriefingEnvelope,
     findingHasReceipt,
     findSourcePost,

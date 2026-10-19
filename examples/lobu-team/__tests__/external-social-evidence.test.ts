@@ -28,6 +28,9 @@ function fixture() {
   const source = {
     status: "completed",
     operation_key: "evaluate",
+    input: {
+      expression: `(${readSocialTimelinePage.toString()})({platform:"x",account_path:"/synthetic",page_path:"/home"})`,
+    },
     created_by_user_id: "synthetic-owner",
     created_at: new Date(now - 20000).toISOString(),
     completed_at: new Date(now - 10000).toISOString(),
@@ -439,4 +442,150 @@ test("TikTok native inspection verifies its full caption while media stays parti
   await expect(
     verifySocialEvidence(h.client, tiktok, 10, h.data)
   ).rejects.toThrow("TikTok source identity");
+});
+
+test("X and company LinkedIn receipts require the supplied reader in the executed expression", async () => {
+  for (const platform of ["x", "linkedin"]) {
+    const h = fixture();
+    const bound = {
+      ...policy,
+      platforms: [platform],
+      receipt_workspaces: { [platform]: [policy.workspace] },
+      ...(platform === "linkedin"
+        ? { company_linkedin_path: "/company/synthetic/admin/feed/" }
+        : {}),
+    };
+    h.source.output.value.platform = platform;
+    Object.assign(h.source.output.value, {
+      page_url: "https://www.linkedin.com/company/synthetic/admin/feed/",
+    });
+    h.data.briefings[0]!.metadata.coverage[0].platform = platform;
+    h.data.findings[0]!.metadata.platform = platform;
+    h.source.input.expression = `({identity_verified:true,posts:[]})`;
+    await expect(
+      verifySocialEvidence(h.client, bound, 10, h.data)
+    ).rejects.toThrow("supplied timeline reader");
+  }
+});
+
+test("other authorized browser sources retain their own reader contract", async () => {
+  const h = fixture();
+  h.source.input.expression = "readAuthorizedRedditTimeline()";
+  h.source.output.value.platform = "reddit";
+  h.data.briefings[0]!.metadata.coverage[0].platform = "reddit";
+  h.data.findings[0]!.metadata.platform = "reddit";
+  await expect(
+    verifySocialEvidence(
+      h.client,
+      {
+        ...policy,
+        platforms: ["reddit"],
+        receipt_workspaces: { reddit: [policy.workspace] },
+      },
+      10,
+      h.data
+    )
+  ).resolves.toBe(h.data);
+});
+
+test("malformed retained posts are rejected before coverage or excerpt verification", async () => {
+  for (const native of [false, true]) {
+    for (const field of ["text", "source_url", "origin_id"]) {
+      for (const invalid of field === "text"
+        ? [undefined, 42]
+        : [undefined, "", 42]) {
+        const h = fixture();
+        const malformed = { ...post, [field]: invalid };
+        const bound = native
+          ? {
+              ...policy,
+              platforms: ["linkedin"],
+              receipt_workspaces: { linkedin: [policy.workspace] },
+            }
+          : policy;
+        if (native) {
+          h.source.operation_key = "read_home_feed";
+          (h.source as any).output = {
+            items: [
+              {
+                type: "post",
+                text: malformed.text,
+                url: malformed.source_url,
+                id: malformed.origin_id,
+              },
+            ],
+          };
+          h.data.briefings[0]!.metadata.coverage[0].platform = "linkedin";
+          h.data.findings[0]!.metadata.platform = "linkedin";
+        } else {
+          h.source.output.value.posts = [malformed] as (typeof post)[];
+        }
+        await expect(
+          verifySocialEvidence(h.client, bound, 10, h.data)
+        ).rejects.toThrow("Malformed source post");
+        h.data.findings = [];
+        await verifySocialEvidence(h.client, bound, 10, h.data);
+        expect(h.data.briefings[0]!.metadata.coverage[0]).toMatchObject({
+          status: "blocked",
+          posts_read: 0,
+        });
+      }
+    }
+  }
+});
+
+test("native LinkedIn remains partial and cannot substitute for a company Page read", async () => {
+  const h = fixture();
+  const bound = {
+    ...policy,
+    platforms: ["linkedin"],
+    receipt_workspaces: { linkedin: [policy.workspace] },
+  };
+  h.source.operation_key = "read_home_feed";
+  (h.source as any).output = {
+    items: [
+      {
+        type: "post",
+        url: post.source_url,
+        id: post.origin_id,
+        text: post.text,
+        author: post.author,
+      },
+    ],
+  };
+  h.data.briefings[0]!.metadata.coverage[0].platform = "linkedin";
+  h.data.findings[0]!.metadata.platform = "linkedin";
+  await verifySocialEvidence(h.client, bound, 10, h.data);
+  expect(h.data.briefings[0]!.metadata.coverage[0]).toMatchObject({
+    posts_read: 1,
+    status: "partial",
+  });
+  await expect(
+    verifySocialEvidence(
+      h.client,
+      { ...bound, company_linkedin_path: "/company/synthetic/admin/feed/" },
+      10,
+      h.data
+    )
+  ).rejects.toThrow("outside company scope");
+  (h.source as any).output.items = [null];
+  await expect(
+    verifySocialEvidence(h.client, bound, 10, h.data)
+  ).rejects.toThrow("Malformed LinkedIn source receipt");
+});
+
+test("a media-only post leaves its page verified but partial", async () => {
+  const h = fixture();
+  h.source.output.value.posts.push({
+    ...post,
+    source_url: "https://x.com/example/status/124",
+    origin_id: "124",
+    text: "",
+    media_unread: true,
+  });
+  await verifySocialEvidence(h.client, policy, 10, h.data);
+  expect(h.data.briefings[0]!.metadata.coverage[0]).toMatchObject({
+    posts_read: 1,
+    status: "partial",
+  });
 });
