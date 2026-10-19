@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { runInNewContext } from "node:vm";
 import {
   verifySocialEvidence,
+  socialEvidenceVerifierSource,
   type SocialData,
 } from "../external-social-evidence";
 import { readSocialTimelinePage } from "../social-timeline-reader";
@@ -238,7 +239,7 @@ test("graph observations require source author and target links, independently o
   h.data.briefings[0]!.metadata.graph_candidates = [candidate];
   // MCP's V8 sandbox has standard JS globals but no browser URL constructor.
   await runInNewContext(
-    `(${verifySocialEvidence.toString()})(client, policy, 10, data)`,
+    `${socialEvidenceVerifierSource()}\nverifySocialEvidence(client, policy, 10, data)`,
     { client: h.client, policy, data: h.data }
   );
   expect(candidate.evidence_verified).toBe(true);

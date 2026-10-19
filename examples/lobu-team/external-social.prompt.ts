@@ -1,5 +1,5 @@
 import {
-  verifySocialEvidence,
+  socialEvidenceVerifierSource,
   type EvidencePolicy,
 } from "./external-social-evidence";
 import { readSocialTimelinePage } from "./social-timeline-reader";
@@ -34,7 +34,7 @@ Store short graph candidates in platform checkpoints and submit them in briefing
 MANDATORY COMPLETION PREFLIGHT
 Briefing run_id must be the numeric claimed runId, not a string. Coverage status describes reading completeness; older dated posts reduce recent_posts_read without making an otherwise complete read partial. Every read_receipts entry names its workspace: {workspace,run_id}, or for HN {workspace,event_id,origin_id}. Never use [] for a claimed read. Coverage additionally records continuation_pending:boolean and stop_reason. Run the function below with the claimed runId and your proposed extracted_data BEFORE completeWindow, in the same authorized external caller that can read the allowed workspaces. Inspect its returned coverage and issues; only submit its RETURNED data. It computes counts from completed source receipts, rejects unsupported finding excerpts and marks truncated/unread/stalled sources partial. Fix invalid findings by rereading the exact source or removing the unsupported claim; never invent a receipt to pass validation. It does not inspect video audio, prove model comprehension, or grant graph publication permission.
 \`\`\`typescript
-${verifySocialEvidence.toString()}
+${socialEvidenceVerifierSource()}
 const evidencePolicy = ${JSON.stringify(policy)};
 // const verified = await verifySocialEvidence(client, evidencePolicy, runId, extracted_data);
 // await workspace.automations.completeWindow({...originalCompletionArgs, extracted_data: verified});
