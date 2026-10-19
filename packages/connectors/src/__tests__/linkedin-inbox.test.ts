@@ -1469,12 +1469,19 @@ const PAGE_INBOUND = {
   entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-page-inbound)`,
   deliveredAt: 1700000000000,
 };
-/** How a page's own reply may be attributed: the mailbox, the page, or the admin. */
+/** How a page's own reply is attributed: the mailbox or the page, with the sending admin only as actor. */
 const PAGE_REPLIES = [
-  { entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-page-reply-1)`, deliveredAt: 1700000000003, body: { text: "Thanks!" }, sender: { hostIdentityUrn: PAGE } },
-  { entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-page-reply-2)`, deliveredAt: 1700000000002, body: { text: "Following up" }, sender: { hostIdentityUrn: "urn:li:fsd_company:900002", participantType: { organization: { name: { text: "Synthetic Co" } } } } },
-  { entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-page-reply-3)`, deliveredAt: 1700000000001, body: { text: "Admin here" }, sender: { hostIdentityUrn: SELF } },
+  { entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-page-reply-1)`, deliveredAt: 1700000000004, body: { text: "Thanks!" }, sender: { hostIdentityUrn: PAGE }, actor: { hostIdentityUrn: SELF } },
+  { entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-page-reply-2)`, deliveredAt: 1700000000003, body: { text: "Following up" }, sender: { hostIdentityUrn: "urn:li:fsd_company:900002", participantType: { organization: { name: { text: "Synthetic Co" } } } } },
 ];
+/** The signed-in admin messaging the page as themselves: a visitor, not the page. */
+const PAGE_ADMIN_AS_MEMBER = {
+  entityUrn: `urn:li:msg_message:(${PAGE},2-synthetic-admin-as-member)`,
+  deliveredAt: 1700000000002,
+  body: { text: "Admin here" },
+  sender: { hostIdentityUrn: SELF, participantType: { member: { firstName: { text: "Self" }, lastName: { text: "Admin" } } } },
+  actor: { hostIdentityUrn: SELF },
+};
 
 describe("LinkedIn page inboxes", () => {
   test("a page cursor cannot resume after the signed-in member changes", async () => {
@@ -1570,7 +1577,7 @@ describe("LinkedIn page inboxes", () => {
       conversations: [
         { entityUrn: PAGE_DM, groupChat: false, lastActivityAt: 1700000000003, topic: { text: "Other" } },
       ],
-      messages: { [PAGE_DM]: [...PAGE_REPLIES, PAGE_INBOUND] },
+      messages: { [PAGE_DM]: [...PAGE_REPLIES, PAGE_ADMIN_AS_MEMBER, PAGE_INBOUND] },
     });
     try {
       const page = await api.read({ feed: "live_messages", inbox: PAGE, limit: 20 });
@@ -1579,7 +1586,7 @@ describe("LinkedIn page inboxes", () => {
       expect(page.rows.map((row: any) => [row.id, row.from_me])).toEqual([
         [PAGE_REPLIES[0].entityUrn, true],
         [PAGE_REPLIES[1].entityUrn, true],
-        [PAGE_REPLIES[2].entityUrn, true],
+        [PAGE_ADMIN_AS_MEMBER.entityUrn, false],
         [PAGE_INBOUND.entityUrn, false],
       ]);
       expect(page.rows[3]).toMatchObject({

@@ -96,17 +96,14 @@ export function linkedInInboxProgram() {
   }
   // Whether a message was sent from this inbox. A member inbox's own messages
   // carry the member's identity. A page inbox holds conversations between the
-  // page and members, so the page's mailbox, the page as an organization
-  // participant, or the signed-in admin are all the page speaking.
+  // page and members: a page reply's sender is the page's mailbox or the page
+  // as an organization participant, with the admin who sent it only as its
+  // actor. The signed-in admin writing as themselves is a member like any other.
   function fromMe(sender, inbox) {
     const host = sender?.hostIdentityUrn;
     if (typeof host !== "string") return null;
     if (!inbox.page) return host === inbox.mailbox;
-    return (
-      host === inbox.mailbox ||
-      host === inbox.member ||
-      !!sender.participantType?.organization
-    );
+    return host === inbox.mailbox || !!sender.participantType?.organization;
   }
   // A page conversation's visitor-chosen topic, when LinkedIn shows one.
   function topicOf(conversation, inbox) {
