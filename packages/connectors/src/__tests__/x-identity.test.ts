@@ -4,6 +4,7 @@ import {
   normalizeXIdentityValue,
   normalizeXUserId,
   X_IDENTITY,
+  xChatUserIdentity,
   xIdentityModule,
 } from '../x-identity.js';
 
@@ -32,14 +33,35 @@ describe('normalizeXHandle', () => {
 });
 
 describe('normalizeXIdentityValue', () => {
-  it('dispatches the two X namespaces', () => {
+  it('dispatches every X namespace', () => {
     expect(normalizeXIdentityValue(X_IDENTITY.USER_ID, '00123')).toBe('123');
+    expect(normalizeXIdentityValue(X_IDENTITY.CHAT_USER_ID, '00123')).toBe('123');
     expect(normalizeXIdentityValue(X_IDENTITY.HANDLE, '@Alice')).toBe('alice');
   });
   it('returns undefined ("not mine") for a non-X namespace', () => {
     expect(normalizeXIdentityValue('email', 'a@b.com')).toBeUndefined();
     expect(normalizeXIdentityValue('slack_user_id', 'T:U')).toBeUndefined();
   });
+});
+
+describe('xChatUserIdentity', () => {
+  it('uses a separate namespace from contact attribution and a global numeric key', () => {
+    expect(xChatUserIdentity.namespace).toBe(X_IDENTITY.CHAT_USER_ID);
+    expect(xChatUserIdentity.namespace).not.toBe(X_IDENTITY.USER_ID);
+    expect(xChatUserIdentity.userKeyScope(undefined)).toEqual({ kind: 'global' });
+    expect(xChatUserIdentity.buildUserKey(undefined, ' 00123 ')).toBe('123');
+    expect(xChatUserIdentity.buildUserKey('another-team', '123')).toBe('123');
+    expect(xChatUserIdentity.platformUserIdFromKey('123')).toBe('123');
+  });
+
+  it.each(['', ' ', '@alice', '12.3', '123-456'])(
+    'rejects malformed sender %j in every direction',
+    (value) => {
+      expect(xChatUserIdentity.buildUserKey(undefined, value)).toBeNull();
+      expect(xChatUserIdentity.platformUserIdFromKey(value)).toBeNull();
+      expect(normalizeXIdentityValue(X_IDENTITY.CHAT_USER_ID, value)).toBeNull();
+    },
+  );
 });
 
 describe('xIdentityModule', () => {

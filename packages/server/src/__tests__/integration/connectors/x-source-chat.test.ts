@@ -10,14 +10,16 @@
  *
  * An X sender linked to a member (`x_chat_user_id`) is answered as that member;
  * an unlinked sender is answered reply-only and offered a one-time link.
- * Only the operation boundary is faked: the Chrome actions the connector
- * dispatches to the paired browser, and the `send_message` operation.
+ * Chrome actions and `send_message` are faked at the operation boundary;
+ * link redemption injects the signed-in browser session.
  */
 
 import { EventEmitter } from "node:events";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
 import { CommandRegistry, verifyWorkerToken } from "@lobu/core";
+import { sessionCookieName } from "../../../auth/session-cookie-scope";
+import { createChatIdentityRoutes } from "../../../connect/chat-identity-routes";
 import { ChatInstanceManager } from "../../../gateway/connections/chat-instance-manager";
 import { ChatResponseBridge } from "../../../gateway/connections/chat-response-bridge";
 import { handleChatSourceIngress } from "../../../gateway/connections/chat-source-ingress";
@@ -26,6 +28,8 @@ import { mintTurnToken } from "../../../gateway/orchestration/agent-turn-produce
 import { RunsQueue } from "../../../gateway/infrastructure/queue/runs-queue";
 import type { QueueJob } from "../../../gateway/infrastructure/queue/types";
 import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
+import { resolveChatUserIdentity } from "../../../lobu/stores/chat-identity";
+import { readChatIdentityLink } from "../../../lobu/stores/chat-identity-link";
 import { CHAT_SOURCE_INGRESS_QUEUE, type ChatSourceIngressJob } from "../../../runs/chat-ingress-jobs";
 import { receiveFeedNotifications } from "../../../runs/feed-notifications";
 import { sourceFeedScopeKey } from "../../../runs/source-feed-subscriptions";
@@ -39,7 +43,6 @@ import {
   createTestAgent,
   createTestOrganization,
   createTestUser,
-  linkChatIdentityInGraph,
 } from "../../setup/test-fixtures";
 
 const SELF = "1000000001";
@@ -48,6 +51,7 @@ const DM = `${SELF}-${PEER}`;
 const OTHER_DM = `${SELF}-1000000003`;
 const GROUP = "1000000009";
 const BASE_TIME = 1_787_358_200_000;
+const ORIGIN = "https://cloud.example.test";
 
 interface DeviceMessage {
   conversation_id: string;
@@ -192,7 +196,7 @@ function buildManager(): ChatInstanceManager {
   const interactions = new EventEmitter();
   Object.assign(built as unknown as Record<string, unknown>, {
     connectionStore: createPostgresAgentConnectionStore({ connectorTransportPlatforms: connectorTransportPlatforms() }),
-    publicGatewayUrl: "",
+    publicGatewayUrl: ORIGIN,
     services: {
       getAppInstallationStore: () => undefined,
       getSecretStore: () => undefined,
@@ -200,7 +204,7 @@ function buildManager(): ChatInstanceManager {
       getAutomationSubscriptionService: () => undefined,
       getInteractionService: () => interactions,
       getArtifactStore: () => null,
-      getPublicGatewayUrl: () => "",
+      getPublicGatewayUrl: () => ORIGIN,
       getQueueProducer: () => ({ enqueueMessage: async (payload: Record<string, any>) => {
         enqueued.push(payload);
       } }),
@@ -303,15 +307,51 @@ describe("X source chat", () => {
     for (const send of sends) expect(send.input.idempotency_key).toBe(send.idempotencyKey);
   }, 60_000);
 
-  it("answers a linked member's X DM as that member, with no notice", async () => {
+  it("redeems an X DM link and answers the next DM as that workspace's member", async () => {
     const member = await createTestUser({ email: "x-member@example.test" });
     await addUserToOrganization(member.id, orgId, "member");
-    await linkChatIdentityInGraph({ organizationId: orgId, userId: member.id, platform: "x", platformUserId: PEER });
+    const otherOrg = await createTestOrganization({ name: "Other X workspace" });
+    await addUserToOrganization(member.id, otherOrg.id, "member");
     await insertAutomation("dm-reply", replyTo());
-    const message = { conversation_id: DM, message_id: "5201", text: "what's on my list?" };
+    const message = { conversation_id: DM, message_id: "5201", text: "link my account" };
     deviceMessages.push(message);
 
     await deliver(message);
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(await mintedClaims(enqueued[0])).toMatchObject({ userId: PEER, chatAccess: "reply_only" });
+    expect(sends).toHaveLength(1);
+    const token = String(sends[0].input.text).match(/\/connect\/chat-identity\?token=([A-Za-z0-9_-]+)/)?.[1];
+    expect(token).toBeTruthy();
+    expect(await readChatIdentityLink(token!)).toMatchObject({
+      organizationId: orgId, connectionId: String(connectionId), platform: "x", senderId: PEER,
+    });
+    await completeTurns();
+
+    const routes = createChatIdentityRoutes({
+      session: async () => ({ user: member }),
+      origin: () => ORIGIN,
+    });
+    const response = await routes.request(`${ORIGIN}/connect/chat-identity`, {
+      method: "POST",
+      headers: {
+        origin: ORIGIN,
+        cookie: `${sessionCookieName(true)}=synthetic-session`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ token: token! }).toString(),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Chat account linked");
+    expect(await readChatIdentityLink(token!)).toBeNull();
+    expect(await resolveChatUserIdentity("x", undefined, PEER, orgId)).toBe(member.id);
+    expect(await resolveChatUserIdentity("x", undefined, PEER, otherOrg.id)).toBeNull();
+    expect(await resolveChatUserIdentity("x", undefined, PEER)).toBeNull();
+
+    sends.length = 0;
+    const nextMessage = { conversation_id: DM, message_id: "5202", text: "what's on my list?" };
+    deviceMessages.push(nextMessage);
+    await deliver(nextMessage, "after-link");
     await drain();
     expect(enqueued).toHaveLength(1);
     expect(sends).toHaveLength(0);

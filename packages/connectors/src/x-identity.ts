@@ -1,8 +1,8 @@
 /**
  * X (Twitter) connector identity namespaces and normalization.
  *
- * Single source of truth for x_user_id / x_handle rules. The connector and
- * server entity-link ingestion import from here — not from connector-sdk.
+ * Single source of truth for X account, handle and chat identity rules. The
+ * connector and server entity-link ingestion import from here, not connector-sdk.
  * Connector-specific identity knowledge stays in the connector package so
  * core code never names X.
  */
@@ -75,9 +75,8 @@ export const xIdentityModule: ConnectorIdentityModule = {
  * X's direct-message sender model. Numeric user ids are unique across X, so
  * there is no tenant axis: `teamId` is ignored and the scope is global.
  *
- * `providerId` names no sign-in provider Lobu configures, so no web sign-in can
- * ever stamp this namespace; a link comes only from the explicit, sender-proven
- * chat link offered in the direct message.
+ * No login extractor is registered for this descriptor. The chat link offered
+ * in a direct message proves the sender within the workspace that issued it.
  */
 export const xChatUserIdentity: ChatUserIdentity = {
   platform: 'x',
@@ -87,7 +86,6 @@ export const xChatUserIdentity: ChatUserIdentity = {
     return normalizeXUserId(platformUserId);
   },
   userKeyScope: () => ({ kind: 'global' }),
-  // The stored key is the numeric id the adapter puts on a message author.
   platformUserIdFromKey(key) {
     return normalizeXUserId(key);
   },
