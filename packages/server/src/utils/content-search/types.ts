@@ -41,6 +41,12 @@ export interface ContentSearchOptions {
    */
   exclude_workspace_audit?: boolean;
   /**
+   * Hide the operational trail — interactive cards and notifications (see
+   * operationalTrailExclusionSql) — from readers outside a public workspace.
+   * An access boundary: an explicit semantic_type filter does not lift it.
+   */
+  exclude_operational_trail?: boolean;
+  /**
    * Hide tool-invocation audit and config/lifecycle change rows (see
    * INTERNAL_OPS_EXCLUSION_SQL). Used by recall and default non-owner/admin
    * get_content list/search reads. Explicit semantic_type filters override

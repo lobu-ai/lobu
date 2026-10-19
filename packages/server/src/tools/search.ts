@@ -24,7 +24,7 @@ import {
   listLiveGrantedMemberWorkspaces,
   resolveGrantedWorkspaceTarget,
 } from '../auth/oauth/workspace-grants';
-import { isInProcessSystemCall } from './access-control';
+import { isInProcessSystemCall, isPublicReader } from './access-control';
 import { AUDIT_SEMANTIC_TYPE, MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail } from '../utils/member-entity-type';
 import { type AuthzScope, authzScopeFromToolContext } from '../authz/scope';
@@ -909,6 +909,7 @@ async function fetchContentSnippets(
   agentId?: string,
   minSimilarity?: number,
   excludeWorkspaceAudit?: boolean,
+  excludeOperationalTrail?: boolean,
   entityId?: number
 ): Promise<{ snippets: ContentSnippet[]; queryEmbeddingUnavailable: boolean }> {
   const result = await searchContentByText(
@@ -920,6 +921,7 @@ async function fetchContentSnippets(
         strict_organization_scope: true,
       }),
       ...(excludeWorkspaceAudit && { exclude_workspace_audit: true }),
+      ...(excludeOperationalTrail && { exclude_operational_trail: true }),
       // Recall is a memory surface, not an ops console: internal tool-invocation
       // audit rows and config/lifecycle state-change rows only title-match into
       // noise here (duplicate Automation titles, "query_sql completed" for an
@@ -1166,6 +1168,8 @@ export interface RecallContext {
   /** Exclude workspace-identity audit events (metadata.category='workspace')
    * for non-member readers of public workspaces. */
   excludeWorkspaceAudit?: boolean;
+  /** Hide the operational trail from readers outside a public workspace. */
+  excludeOperationalTrail?: boolean;
   /** Conjunctive entity scope for `{ entity_id, query }` recall. */
   entityId?: number;
   /** Workspace provenance attached to every returned local row. */
@@ -1304,6 +1308,7 @@ export async function gatherLocalRecall(
     ctx.contentAgentId,
     ctx.minSimilarity,
     ctx.excludeWorkspaceAudit,
+    ctx.excludeOperationalTrail,
     ctx.entityId
   );
   const conversationPromise = shouldSearchConversation
@@ -1654,6 +1659,7 @@ async function searchWorkspaceImpl(
             ctx.memberRole !== 'owner' &&
             ctx.memberRole !== 'admin' &&
             !isInProcessSystemCall(ctx),
+          excludeOperationalTrail: isPublicReader(ctx),
         })
       : Promise.resolve({});
   // ========================================

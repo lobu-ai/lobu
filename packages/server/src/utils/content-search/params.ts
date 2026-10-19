@@ -4,7 +4,7 @@
  */
 
 import { pgTextArray } from '../../db/client';
-import { INTERNAL_OPS_EXCLUSION_SQL } from './sql-fragments';
+import { INTERNAL_OPS_EXCLUSION_SQL, operationalTrailExclusionSql } from './sql-fragments';
 import type { ContentSearchOptions } from './types';
 
 /**
@@ -166,6 +166,7 @@ export function appendStandardEventFilters(
     | 'client_id'
     | 'mcp_session_ids'
     | 'exclude_workspace_audit'
+    | 'exclude_operational_trail'
     | 'exclude_internal_ops'
   > & { sinceDate?: Date | null; untilDate?: Date | null }
 ): { sinceParam: string | null; untilParam: string | null } {
@@ -211,6 +212,9 @@ export function appendStandardEventFilters(
   }
   if (filters.exclude_workspace_audit) {
     conditions.push(`NOT (${alias}.metadata ? '_lobu_workspace_audit')`);
+  }
+  if (filters.exclude_operational_trail) {
+    conditions.push(operationalTrailExclusionSql(alias));
   }
   // Internal-ops discovery filter. An explicit semantic_type filter wins: a
   // caller asking for 'audit' rows is reading the ops trail on purpose.

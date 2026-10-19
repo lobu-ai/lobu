@@ -12,7 +12,7 @@ import {
   resolveActingPrincipal,
 } from '../../authz/entity-policy';
 import { hasRequiredMcpScope } from '../../auth/tool-access';
-import { isInProcessSystemCall } from '../../tools/access-control';
+import { isInProcessSystemCall, isPublicReader } from '../../tools/access-control';
 import { createDbClientFromEnv, type DbClient, getDb, pgBigintArray } from '../../db/client';
 import { AUTOMATION_RUN_SOURCE } from '../../gateway/automation-run-session';
 import { ArtifactStore } from '../../gateway/files/artifact-store';
@@ -234,6 +234,9 @@ async function getContentImpl(
     ctx.memberRole !== 'owner' &&
     ctx.memberRole !== 'admin' &&
     !isInProcessSystemCall(ctx);
+  // A public workspace publishes its knowledge, not its operational trail
+  // (operation cards, approvals, notifications), to readers outside it.
+  const excludeOperationalTrail = isPublicReader(ctx);
 
   // Dual client: PG for auth, PG for data
   const pgSql = createDbClientFromEnv(env);
@@ -605,6 +608,7 @@ async function getContentImpl(
         organizationId: ctx.organizationId,
         visibilityScope,
         excludeWorkspaceAudit,
+        excludeOperationalTrail,
         limit,
         offset,
       }));
@@ -621,6 +625,7 @@ async function getContentImpl(
         visibilityScope,
         mcpSessionIds,
         excludeWorkspaceAudit,
+        excludeOperationalTrail,
         limit,
         offset,
       }));
@@ -655,6 +660,9 @@ async function getContentImpl(
         ...(args.interaction_status && { interaction_status: args.interaction_status }),
         ...(excludeWorkspaceAudit && {
           exclude_workspace_audit: true,
+        }),
+        ...(excludeOperationalTrail && {
+          exclude_operational_trail: true,
         }),
         visibility_scope: visibilityScope,
       };
@@ -718,6 +726,9 @@ async function getContentImpl(
         // details; anonymous public-workspace readers must never retrieve them.
         ...(excludeWorkspaceAudit && {
           exclude_workspace_audit: true,
+        }),
+        ...(excludeOperationalTrail && {
+          exclude_operational_trail: true,
         }),
         limit,
         offset,
@@ -819,6 +830,7 @@ async function getContentImpl(
         visibilityScope,
         mcpSessionIds,
         excludeWorkspaceAudit,
+        excludeOperationalTrail,
       });
     }
 

@@ -13,6 +13,7 @@ import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { feedLinkedToBusinessEntitySql } from '../authz/channel-about';
 import { entityLinkMatchSql } from '../utils/content-search';
+import { operationalTrailExclusionSql } from '../utils/content-search/sql-fragments';
 import { ToolUserError, toolErrorHttpStatus } from '../utils/errors';
 import { resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type';
 import {
@@ -25,7 +26,12 @@ import { buildDefaultEntityTemplate } from '../utils/default-entity-template';
 import { measureColumns as inferMeasureColumns } from '../utils/infer-measures';
 import { RESERVED_PATHS_SET } from '../utils/reserved';
 import { getWorkspaceProvider } from '../workspace';
-import { isAdminOrOwnerRole, isInProcessSystemCall, requireWorkspaceContext } from './access-control';
+import {
+  isAdminOrOwnerRole,
+  isInProcessSystemCall,
+  isPublicReader,
+  requireWorkspaceContext,
+} from './access-control';
 import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import type { AccountToolContext, ToolContext } from './registry';
 import { withValidatedArgs } from './validate-args';
@@ -410,8 +416,11 @@ async function _resolvePath(
   const roleInResolvedWorkspace = workspaceCtx.memberRole;
   // Workspace-identity audit + template events: owner/admin of THIS workspace
   // (or trusted system) only.
-  const excludeWorkspaceAudit =
-    !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(roleInResolvedWorkspace);
+  const readBoundary: EventReadBoundary = {
+    excludeWorkspaceAudit:
+      !isInProcessSystemCall(ctx) && !isAdminOrOwnerRole(roleInResolvedWorkspace),
+    excludeOperationalTrail: isPublicReader(workspaceCtx),
+  };
 
   const remaining = segments.slice(1);
   let entitySegments: string[];
@@ -419,7 +428,7 @@ async function _resolvePath(
   if (remaining.length === 0) {
     const [bootstrap, counts] = await Promise.all([
       args.include_bootstrap
-        ? fetchBootstrap(sql, workspaceCtx, workspace, null, excludeWorkspaceAudit)
+        ? fetchBootstrap(sql, workspaceCtx, workspace, null, readBoundary)
         : null,
       resolveWorkspaceCounts(sql, workspace, workspaceCtx.userId),
     ]);
@@ -584,7 +593,7 @@ async function _resolvePath(
       [connectionsCount],
       [automationsCount],
     ] = await Promise.all([
-      fetchContentCount(sql, workspace.id, Number(entityRow.id), excludeWorkspaceAudit),
+      fetchContentCount(sql, workspace.id, Number(entityRow.id), readBoundary),
       sql.unsafe<{ cnt: number }>(
         `SELECT COUNT(DISTINCT cn.connector_key) as cnt
          FROM feeds f
@@ -707,7 +716,7 @@ async function _resolvePath(
 
   const [bootstrap, counts] = await Promise.all([
     args.include_bootstrap
-      ? fetchBootstrap(sql, workspaceCtx, workspace, resolvedEntity, excludeWorkspaceAudit)
+      ? fetchBootstrap(sql, workspaceCtx, workspace, resolvedEntity, readBoundary)
       : null,
     resolveWorkspaceCounts(sql, workspace, workspaceCtx.userId),
   ]);
@@ -837,7 +846,7 @@ async function fetchBootstrap(
   ctx: ToolContext,
   workspace: ResolvedWorkspace,
   entity: ResolvedEntityDetails | null,
-  excludeWorkspaceAudit: boolean
+  readBoundary: EventReadBoundary
 ): Promise<ResolvePathBootstrap> {
   if (workspace.type !== 'organization') {
     return {
@@ -853,8 +862,8 @@ async function fetchBootstrap(
     listEntityTypes(sql, ctx),
     entity
       ? Promise.resolve(entity.total_content)
-      : fetchContentCount(sql, workspace.id, null, excludeWorkspaceAudit),
-    fetchRecentContent(sql, workspace.id, entity?.id ?? null, excludeWorkspaceAudit),
+      : fetchContentCount(sql, workspace.id, null, readBoundary),
+    fetchRecentContent(sql, workspace.id, entity?.id ?? null, readBoundary),
     fetchRecentFeeds(sql, workspace.id, entity?.id ?? null),
   ]);
   const connectorDefinitions = await listWorkspaceConnectorDefinitions(
@@ -1017,6 +1026,32 @@ async function fetchWorkspaceCounts(
   };
 }
 
+/** Which event rows a reader of a workspace's bootstrap may see. */
+interface EventReadBoundary {
+  /**
+   * Below owner/admin: hide the internal-ops trail (tool-invocation audit,
+   * config/lifecycle changes) and workspace-identity audit rows, which record
+   * member/invitation lifecycle.
+   */
+  excludeWorkspaceAudit: boolean;
+  /** Outside the workspace: hide operation cards, approvals and notifications. */
+  excludeOperationalTrail: boolean;
+}
+
+/** `AND …` predicates on alias `ev` for a {@link EventReadBoundary}. */
+function readBoundarySql(boundary: EventReadBoundary): string {
+  const clauses: string[] = [];
+  if (boundary.excludeWorkspaceAudit) {
+    clauses.push(
+      `NOT (ev.semantic_type = 'audit' AND COALESCE(ev.origin_type, '') = 'tool_invocation')`,
+      `NOT (ev.semantic_type = 'change' AND COALESCE(ev.metadata->>'category', '') IN ('config', 'lifecycle'))`,
+      `NOT (ev.metadata ? '_lobu_workspace_audit')`
+    );
+  }
+  if (boundary.excludeOperationalTrail) clauses.push(operationalTrailExclusionSql('ev'));
+  return clauses.map((clause) => `AND ${clause}`).join('\n      ');
+}
+
 /**
  * Live event rows in scope. This one aggregates an append-only table, so it
  * is deliberately NOT part of `fetchWorkspaceCounts`. Workspace-wide counts
@@ -1027,7 +1062,7 @@ async function fetchContentCount(
   sql: DbClient,
   organizationId: string,
   entityId: number | null,
-  excludeWorkspaceAudit: boolean
+  readBoundary: EventReadBoundary
 ): Promise<number> {
   const [row] = await sql.unsafe<{ total_content: number }>(`
     SELECT COUNT(*)::int AS total_content
@@ -1035,14 +1070,8 @@ async function fetchContentCount(
     WHERE ev.organization_id = $1
       -- Exclude null-shaped internal events (P1 corrections) from the org content count.
       AND ev.semantic_type <> 'correction'
-      -- Match the default non-owner/admin feed's internal-ops exclusion.
-      ${excludeWorkspaceAudit
-        ? `AND NOT (ev.semantic_type = 'audit' AND COALESCE(ev.origin_type, '') = 'tool_invocation')
-              AND NOT (ev.semantic_type = 'change' AND COALESCE(ev.metadata->>'category', '') IN ('config', 'lifecycle'))`
-        : ''}
-      -- Workspace-identity audit rows record member/invitation lifecycle; only
-      -- owner/admin and trusted system callers may see them.
-      ${excludeWorkspaceAudit ? `AND NOT (ev.metadata ? '_lobu_workspace_audit')` : ''}
+      -- Match fetchRecentContent so bootstrap totals and recent items agree.
+      ${readBoundarySql(readBoundary)}
       ${entityId !== null
         ? `AND ${entityLinkMatchSql(`${Number(entityId)}::bigint`, 'ev')}`
         : ''}
@@ -1054,7 +1083,7 @@ async function fetchRecentContent(
   sql: DbClient,
   organizationId: string,
   entityId: number | null,
-  excludeWorkspaceAudit: boolean
+  readBoundary: EventReadBoundary
 ): Promise<BootstrapContentItem[]> {
   // Inline the entity-link match as raw SQL — this whole query is built as a
   // single sql.unsafe() statement rather than mixing sql.unsafe() fragments
@@ -1096,11 +1125,7 @@ async function fetchRecentContent(
       -- Exclude null-shaped internal events (P1 corrections) from the recent-content list.
       AND ev.semantic_type <> 'correction'
       -- Match fetchContentCount so bootstrap totals and recent items agree.
-      ${excludeWorkspaceAudit ? `AND NOT (ev.semantic_type = 'audit' AND COALESCE(ev.origin_type, '') = 'tool_invocation')
-      AND NOT (ev.semantic_type = 'change' AND COALESCE(ev.metadata->>'category', '') IN ('config', 'lifecycle'))` : ''}
-      -- Workspace-identity audit rows record member/invitation lifecycle; only
-      -- owner/admin and trusted system callers may see them in bootstrap.
-      ${excludeWorkspaceAudit ? `AND NOT (ev.metadata ? '_lobu_workspace_audit')` : ''}
+      ${readBoundarySql(readBoundary)}
       ${entityFilter}
     ORDER BY COALESCE(ev.occurred_at, ev.created_at) DESC
     LIMIT $2

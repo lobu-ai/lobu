@@ -18,6 +18,7 @@ import {
   resolveClassifierIds,
 } from './content-search/classification';
 import { buildSemanticTypeFilterSql } from './content-search/params';
+import { operationalTrailExclusionSql } from './content-search/sql-fragments';
 import type { DbClient } from '../db/client';
 import logger from './logger';
 import { getScoringFormulaSql, resolveStoredScoringProfile } from './scoring-profiles';
@@ -61,6 +62,12 @@ interface NormalizedScoreFilters {
    * public-workspace readers so they never retrieve them.
    */
   exclude_workspace_audit?: boolean;
+  /**
+   * Hide the operational trail — interactive cards and notifications (see
+   * operationalTrailExclusionSql) — from readers outside a public workspace.
+   * An access boundary: an explicit semantic_type filter does not lift it.
+   */
+  exclude_operational_trail?: boolean;
   /**
    * Connection-visibility scope. Folds into the WHERE so events from
    * private connections the caller can't see don't appear in score-sorted
@@ -271,6 +278,9 @@ async function buildFilterConditionsAndJoins(
     filterConditions.push(
       `NOT (f.metadata ? '_lobu_workspace_audit')`
     );
+  }
+  if (filters?.exclude_operational_trail) {
+    filterConditions.push(operationalTrailExclusionSql('f'));
   }
 
   // Classification filters share the single version-ID-aware builder used by

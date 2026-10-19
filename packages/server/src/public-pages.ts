@@ -9,6 +9,7 @@ import {
   type RelationshipColumnSpec,
 } from './utils/entity-management';
 import { entityLinkMatchSql } from './utils/content-search';
+import { ToolUserError } from './utils/errors';
 import { escapeHtml } from './utils/html';
 import {
   getConfiguredPublicOrigin,
@@ -322,8 +323,16 @@ function renderStatList(stats: Array<{ label: string; value: string }>): string 
   `;
 }
 
+/**
+ * Maps a canonical site path (`/{org}/...`) to the path that serves it on the
+ * current host. On an org subdomain the owner segment is implied by the host,
+ * so links drop it instead of taking a 301 per click.
+ */
+type LocalPath = (path: string) => string;
+
 function renderLinkList(
-  items: Array<{ href: string; title: string; meta?: string | null; body?: string | null }>
+  items: Array<{ href: string; title: string; meta?: string | null; body?: string | null }>,
+  localPath: LocalPath
 ): string {
   if (items.length === 0) {
     return '<p class="text-muted-foreground">No public items yet.</p>';
@@ -335,7 +344,7 @@ function renderLinkList(
         .map(
           (item) => `
             <li class="m-0">
-              <a class="block rounded-lg bg-card p-4 text-muted-foreground no-underline transition-colors hover:bg-accent/50 hover:text-foreground" href="${escapeAttribute(item.href)}">
+              <a class="block rounded-lg bg-card p-4 text-muted-foreground no-underline transition-colors hover:bg-accent/50 hover:text-foreground" href="${escapeAttribute(localPath(item.href))}">
                 <strong class="block text-base font-semibold">${escapeHtml(item.title)}</strong>
                 ${item.meta ? `<span class="mt-1.5 block text-sm text-muted-foreground">${escapeHtml(item.meta)}</span>` : ''}
                 ${item.body ? `<span class="mt-2 block leading-relaxed text-muted-foreground">${escapeHtml(item.body)}</span>` : ''}
@@ -353,14 +362,15 @@ function renderPublicShell(
   eyebrow: string,
   description: string,
   sections: Array<{ title: string; html: string }>,
-  breadcrumbs: Array<{ label: string; href?: string }> = []
+  breadcrumbs: Array<{ label: string; href?: string }>,
+  localPath: LocalPath
 ): string {
   const breadcrumbHtml =
     breadcrumbs.length > 0
       ? `<nav class="mb-5 flex flex-wrap gap-2 text-sm text-muted-foreground" aria-label="Breadcrumb">${breadcrumbs
           .map((crumb, index) =>
             crumb.href
-              ? `<a class="text-foreground no-underline hover:underline" href="${escapeAttribute(crumb.href)}">${escapeHtml(crumb.label)}</a>${
+              ? `<a class="text-foreground no-underline hover:underline" href="${escapeAttribute(localPath(crumb.href))}">${escapeHtml(crumb.label)}</a>${
                   index < breadcrumbs.length - 1
                     ? '<span class="text-muted-foreground/60">/</span>'
                     : ''
@@ -525,7 +535,8 @@ async function getPublicEntityTypeList(
 function buildWorkspaceModel(
   organization: PublicOrganization,
   resolvedPath: ResolvePathResult,
-  requestUrl: string
+  requestUrl: string,
+  localPath: LocalPath
 ): PublicPageModel {
   const origin = getPublicOrigin(requestUrl);
   const canonicalPath = `/${organization.slug}`;
@@ -568,7 +579,8 @@ function buildWorkspaceModel(
           title: entityType.name,
           meta: formatCountLabel(entityType.entity_count, 'entity'),
           body: entityType.description ? snippet(entityType.description, 140) : null,
-        }))
+        })),
+        localPath
       ),
     },
     {
@@ -581,7 +593,8 @@ function buildWorkspaceModel(
             .filter(Boolean)
             .join(' • '),
           body: snippet(item.text_content, 180),
-        }))
+        })),
+        localPath
       ),
     },
   ];
@@ -610,7 +623,14 @@ function buildWorkspaceModel(
         url: canonicalUrl,
       },
     ],
-    bodyHtml: renderPublicShell(organization.name, 'Public Workspace', description, sections),
+    bodyHtml: renderPublicShell(
+      organization.name,
+      'Public Workspace',
+      description,
+      sections,
+      [],
+      localPath
+    ),
     bootstrap: {
       path: canonicalPath,
       ownerSlug: organization.slug,
@@ -627,6 +647,7 @@ function buildEntityTypeModel(params: {
   entityList: PublicEntityListResult;
   ownerResolvedPath: ResolvePathResult;
   requestUrl: string;
+  localPath: LocalPath;
 }): PublicPageModel {
   const origin = getPublicOrigin(params.requestUrl);
   const canonicalPath = `/${params.organization.slug}/${params.entityType.slug}`;
@@ -665,7 +686,8 @@ function buildEntityTypeModel(params: {
             findMetadataDescription(entity.metadata) ||
             snippet((entity.metadata?.domain as string | undefined) ?? '', 120) ||
             null,
-        }))
+        })),
+        params.localPath
       ),
     },
   ];
@@ -698,7 +720,8 @@ function buildEntityTypeModel(params: {
       [
         { label: params.organization.name, href: `/${params.organization.slug}` },
         { label: params.entityType.name },
-      ]
+      ],
+      params.localPath
     ),
     bootstrap: {
       path: canonicalPath,
@@ -716,7 +739,8 @@ function buildEntityTypeModel(params: {
 function buildEntityModel(
   organization: PublicOrganization,
   resolvedPath: ResolvePathResult,
-  requestUrl: string
+  requestUrl: string,
+  localPath: LocalPath
 ): PublicPageModel {
   if (!resolvedPath.entity) {
     throw new Error('Entity page requires a resolved entity');
@@ -803,7 +827,8 @@ function buildEntityModel(
             child.content_count > 0
               ? formatCountLabel(child.content_count, 'knowledge item')
               : null,
-        }))
+        })),
+        localPath
       ),
     },
     {
@@ -816,7 +841,8 @@ function buildEntityModel(
             .filter(Boolean)
             .join(' • '),
           body: snippet(item.text_content, 180),
-        }))
+        })),
+        localPath
       ),
     },
   ];
@@ -868,7 +894,8 @@ function buildEntityModel(
           ),
         })),
         { label: entity.name },
-      ]
+      ],
+      localPath
     ),
     bootstrap: {
       path: canonicalPath,
@@ -883,7 +910,8 @@ function buildEntityModel(
 function buildNotFoundModel(
   organization: PublicOrganization,
   requestUrl: string,
-  path: string
+  path: string,
+  localPath: LocalPath
 ): PublicPageModel {
   const origin = getPublicOrigin(requestUrl);
   const canonicalUrl = absoluteUrl(path, origin);
@@ -897,14 +925,21 @@ function buildNotFoundModel(
     robots: 'noindex,nofollow',
     openGraphImage: organization.logo,
     structuredData: [],
-    bodyHtml: renderPublicShell('Page Not Found', '404', description, [
-      {
-        title: 'Next Step',
-        html: `<p><a class="ow-link-card" href="/${escapeAttribute(organization.slug)}">Return to ${escapeHtml(
-          organization.name
-        )}</a></p>`,
-      },
-    ]),
+    bodyHtml: renderPublicShell(
+      'Page Not Found',
+      '404',
+      description,
+      [
+        {
+          title: 'Next Step',
+          html: `<p><a class="ow-link-card" href="${escapeAttribute(
+            localPath(`/${organization.slug}`)
+          )}">Return to ${escapeHtml(organization.name)}</a></p>`,
+        },
+      ],
+      [],
+      localPath
+    ),
     bootstrap: {
       path,
       ownerSlug: organization.slug,
@@ -1027,6 +1062,9 @@ export async function buildPublicPageModel(
   if (!organization) return null;
 
   const toolCtx = buildToolContext(requestUrl, organization.id);
+  // Canonical and structured-data URLs stay absolute on the public origin;
+  // only the links rendered into the page follow the host.
+  const localPath: LocalPath = (target) => stripSubdomainPrefix(target, subdomainOrg);
 
   try {
     if (segments.length === 1) {
@@ -1036,7 +1074,7 @@ export async function buildPublicPageModel(
         toolCtx
       );
       return applyBootstrapStrip(
-        buildWorkspaceModel(organization, resolvedPath, requestUrl),
+        buildWorkspaceModel(organization, resolvedPath, requestUrl, localPath),
         subdomainOrg
       );
     }
@@ -1045,7 +1083,7 @@ export async function buildPublicPageModel(
       const entityTypeDefinition = await getPublicEntityType(organization.id, segments[1]!);
       if (!entityTypeDefinition) {
         return applyBootstrapStrip(
-          buildNotFoundModel(organization, requestUrl, normalizedPath),
+          buildNotFoundModel(organization, requestUrl, normalizedPath, localPath),
           subdomainOrg
         );
       }
@@ -1064,6 +1102,7 @@ export async function buildPublicPageModel(
           entityList,
           ownerResolvedPath,
           requestUrl,
+          localPath,
         }),
         subdomainOrg
       );
@@ -1081,7 +1120,7 @@ export async function buildPublicPageModel(
       // doesn't cover deep paths that contain a system entity type.
       if (isSystemEntityTypeSlug(entitySegments[i])) {
         return applyBootstrapStrip(
-          buildNotFoundModel(organization, requestUrl, normalizedPath),
+          buildNotFoundModel(organization, requestUrl, normalizedPath, localPath),
           subdomainOrg
         );
       }
@@ -1094,20 +1133,26 @@ export async function buildPublicPageModel(
         toolCtx
       );
       return applyBootstrapStrip(
-        buildEntityModel(organization, resolvedPath, requestUrl),
+        buildEntityModel(organization, resolvedPath, requestUrl, localPath),
         subdomainOrg
       );
     }
 
     return applyBootstrapStrip(
-      buildNotFoundModel(organization, requestUrl, normalizedPath),
+      buildNotFoundModel(organization, requestUrl, normalizedPath, localPath),
       subdomainOrg
     );
-  } catch {
-    return applyBootstrapStrip(
-      buildNotFoundModel(organization, requestUrl, normalizedPath),
-      subdomainOrg
-    );
+  } catch (error) {
+    // A path the tools reject (unknown entity, invalid segment) is a real,
+    // cacheable 404. Anything else — a database timeout, a bug — says nothing
+    // about whether the page exists, so it must not be cached as one.
+    if (error instanceof ToolUserError && error.httpStatus < 500) {
+      return applyBootstrapStrip(
+        buildNotFoundModel(organization, requestUrl, normalizedPath, localPath),
+        subdomainOrg
+      );
+    }
+    throw error;
   }
 }
 
@@ -1137,11 +1182,11 @@ export function injectRuntimeConfig(templateHtml: string): string {
 
 export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[]> {
   const sql = getDb();
-  const organizationRows = await sql.unsafe<{ slug: string; updated_at: string | null }>(
+  const organizationRows = await sql.unsafe<{ slug: string; created_at: string | null }>(
     `
       SELECT
         slug,
-        "createdAt"::text AS updated_at
+        "createdAt"::text AS created_at
       FROM "organization"
       WHERE visibility = 'public'
       ORDER BY slug ASC
@@ -1185,7 +1230,7 @@ export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[
           ('/' || o.slug || '/' || et.slug || '/' || e.slug) AS path,
           e.updated_at
         FROM entities e
-        JOIN entity_types et ON et.id = e.entity_type_id
+        JOIN entity_types et ON et.id = e.entity_type_id AND et.deleted_at IS NULL
         JOIN "organization" o ON o.id = e.organization_id
         WHERE o.visibility = 'public'
           AND e.deleted_at IS NULL
@@ -1203,7 +1248,8 @@ export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[
           (entity_paths.path || '/' || et_child.slug || '/' || child.slug) AS path,
           child.updated_at
         FROM entities child
-        JOIN entity_types et_child ON et_child.id = child.entity_type_id
+        JOIN entity_types et_child
+          ON et_child.id = child.entity_type_id AND et_child.deleted_at IS NULL
         JOIN entity_paths ON entity_paths.id = child.parent_id
         WHERE child.deleted_at IS NULL
           AND et_child.slug NOT LIKE '$%'
@@ -1219,10 +1265,20 @@ export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[
     []
   );
 
+  // `organization` has no update timestamp; its page changes when the types and
+  // entities it lists do, so it is as fresh as the newest of those.
+  const latestByOrganization = new Map<string, string>();
+  for (const row of [...typeRows, ...entityRows]) {
+    const current = latestByOrganization.get(row.organization_slug);
+    if (row.updated_at && (!current || new Date(row.updated_at) > new Date(current))) {
+      latestByOrganization.set(row.organization_slug, row.updated_at);
+    }
+  }
+
   return [
     ...organizationRows.map((row) => ({
       loc: absoluteUrl(`/${row.slug}`, origin),
-      lastmod: formatDate(row.updated_at),
+      lastmod: formatDate(latestByOrganization.get(row.slug) ?? row.created_at),
     })),
     ...typeRows.map((row) => ({
       loc: absoluteUrl(`/${row.organization_slug}/${row.entity_type_slug}`, origin),

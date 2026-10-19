@@ -546,15 +546,9 @@ describe('notification list > source attribution', () => {
         allowCrossOrg: false,
       } as ToolContext
     );
-    expect(publicContent.content[0]).toMatchObject({
-      connection_name: null,
-      agent_id: null,
-      agent_name: null,
-      client_id: null,
-      device_worker_id: null,
-      device_label: null,
-      device_platform: null,
-    });
+    // A notification is operational trail, not published knowledge: readers
+    // outside the workspace do not get the row at all, attribution included.
+    expect(publicContent.content).toEqual([]);
 
     const authenticatedNonMemberContent = await getContent(
       { content_ids: [Number(ev.id)], limit: 10 } as never,
@@ -568,15 +562,7 @@ describe('notification list > source attribution', () => {
         scopes: ['mcp:read'],
       } as ToolContext
     );
-    expect(authenticatedNonMemberContent.content[0]).toMatchObject({
-      connection_name: null,
-      agent_id: null,
-      agent_name: null,
-      client_id: null,
-      device_worker_id: null,
-      device_label: null,
-      device_platform: null,
-    });
+    expect(authenticatedNonMemberContent.content).toEqual([]);
 
     const malformedConnectionEvents = await sql`
       INSERT INTO events (

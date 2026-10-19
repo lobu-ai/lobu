@@ -15,6 +15,7 @@ import {
 } from '../../utils/content-search';
 import { buildClassificationOrderSql } from '../../utils/content-search/classification';
 import { buildSemanticTypeFilterSql } from '../../utils/content-search/params';
+import { operationalTrailExclusionSql } from '../../utils/content-search/sql-fragments';
 import logger from '../../utils/logger';
 import { validateNumericId } from '../../utils/sql-validation';
 import {
@@ -250,10 +251,21 @@ export async function fetchByContentIds(opts: {
   organizationId: string;
   visibilityScope: VisibilityScope;
   excludeWorkspaceAudit?: boolean;
+  /** Hide the operational trail from readers outside a public workspace. */
+  excludeOperationalTrail?: boolean;
   limit: number;
   offset: number;
 }): Promise<ListPageResult> {
-  const { args, sql, organizationId, visibilityScope, excludeWorkspaceAudit, limit, offset } = opts;
+  const {
+    args,
+    sql,
+    organizationId,
+    visibilityScope,
+    excludeWorkspaceAudit,
+    excludeOperationalTrail,
+    limit,
+    offset,
+  } = opts;
 
   // typebox validates content_ids as number[] at the tool boundary; the
   // caller only dispatches here when it is non-empty.
@@ -312,7 +324,7 @@ export async function fetchByContentIds(opts: {
     excludeWorkspaceAudit
       ? ` AND NOT (f.metadata ? '_lobu_workspace_audit')`
       : ''
-  }`;
+  }${excludeOperationalTrail ? ` AND ${operationalTrailExclusionSql('f')}` : ''}`;
 
   // Read the full chain from `events` (not the masked view — superseded rows are
   // what we're here for). The list query JOINs resolved_ids so it can order by
@@ -389,6 +401,8 @@ export async function fetchIncludeSuperseded(opts: {
   visibilityScope: VisibilityScope;
   mcpSessionIds: string[] | undefined;
   excludeWorkspaceAudit?: boolean;
+  /** Hide the operational trail from readers outside a public workspace. */
+  excludeOperationalTrail?: boolean;
   limit: number;
   offset: number;
 }): Promise<ListPageResult> {
@@ -404,6 +418,7 @@ export async function fetchIncludeSuperseded(opts: {
     visibilityScope,
     mcpSessionIds,
     excludeWorkspaceAudit,
+    excludeOperationalTrail,
     limit,
     offset,
   } = opts;
@@ -540,6 +555,9 @@ export async function fetchIncludeSuperseded(opts: {
   if (excludeWorkspaceAudit) {
     conditions.push(`NOT (e.metadata ? '_lobu_workspace_audit')`);
   }
+  if (excludeOperationalTrail) {
+    conditions.push(operationalTrailExclusionSql('e'));
+  }
 
   // Visibility: events from connections the caller can't see drop out.
   // The clause is appended as an `AND (…)` fragment so it folds cleanly
@@ -615,6 +633,8 @@ export async function fetchClassificationStats(opts: {
   visibilityScope: VisibilityScope;
   mcpSessionIds: string[] | undefined;
   excludeWorkspaceAudit?: boolean;
+  /** Hide the operational trail from readers outside a public workspace. */
+  excludeOperationalTrail?: boolean;
 }): Promise<NonNullable<GetContentResult['classification_stats']>> {
   const {
     args,
@@ -626,6 +646,7 @@ export async function fetchClassificationStats(opts: {
     visibilityScope,
     mcpSessionIds,
     excludeWorkspaceAudit,
+    excludeOperationalTrail,
   } = opts;
 
   // Build dynamic WHERE conditions using inline SQL
@@ -635,6 +656,9 @@ export async function fetchClassificationStats(opts: {
 
   if (excludeWorkspaceAudit) {
     conditions.push(`NOT (f.metadata ? '_lobu_workspace_audit')`);
+  }
+  if (excludeOperationalTrail) {
+    conditions.push(operationalTrailExclusionSql('f'));
   }
 
   if (args.entity_id) {
