@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 import { runInNewContext } from "node:vm";
 import {
   verifySocialEvidence,
@@ -235,7 +235,10 @@ test("graph observations require source author and target links, independently o
       { ...post },
       {
         author_url: "https://x.com/example",
-        mentioned_profiles: ["https://x.com/target"],
+        mentioned_profiles: [
+          "mailto:example@example.test",
+          "https://x.com/target",
+        ],
       }
     ),
   ];
@@ -274,6 +277,11 @@ test("graph observations require source author and target links, independently o
   );
   expect(candidate.evidence_verified).toBe(true);
   expect(h.data.briefings[0]!.metadata.graph_status).toBe("pending_ingestion");
+  candidate.claims[0]!.target.profile_url = "mailto:example@example.test";
+  await expect(h.run()).rejects.toThrow("Invalid graph profile URL");
+  candidate.claims[0]!.target.profile_url = ["https://x.com/target"] as any;
+  await expect(h.run()).rejects.toThrow("Invalid graph profile URL");
+  candidate.claims[0]!.target.profile_url = "https://x.com/target";
   const claim = candidate.claims[0]!;
   (candidate.claims as unknown[]) = [null];
   await expect(h.run()).rejects.toThrow("Invalid graph observation");
@@ -310,6 +318,38 @@ test("a verified empty page is distinguishable from missing source evidence", as
     status: "read",
     posts_read: 0,
   });
+});
+
+test("malformed source profile lists fail with a named receipt error", async () => {
+  for (const mentioned_profiles of ["https://x.com/target", null, [42]]) {
+    const h = fixture();
+    h.source.output.value.posts = [
+      Object.assign({ ...post }, { mentioned_profiles }),
+    ];
+    await expect(h.run()).rejects.toThrow("Malformed source post");
+  }
+});
+
+test("preflight refuses an invalid Automation identity before querying", async () => {
+  for (const automation_id of [undefined, 0, -1, "invalid"]) {
+    const h = fixture();
+    const query = mock(async () => [{ created_by: "synthetic-owner" }]);
+    h.client.org = async () => ({
+      query,
+      operations: {
+        getRun: async () =>
+          ({
+            run: {
+              automation_id,
+              status: "claimed",
+              created_at: new Date(now - 30000).toISOString(),
+            },
+          }) as any,
+      },
+    });
+    await expect(h.run()).rejects.toThrow("Missing Automation identity");
+    expect(query).not.toHaveBeenCalled();
+  }
 });
 
 test("browser snapshot accepts label whitespace, returns full text and rejects hidden tabs", () => {

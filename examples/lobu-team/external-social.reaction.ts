@@ -1,4 +1,5 @@
 import {
+  automationOwner,
   assertBriefingEnvelope,
   findingHasReceipt,
   type EvidencePolicy,
@@ -13,9 +14,10 @@ export async function deliverExternalSocial(
 ) {
   const d = ctx.extracted_data;
   const m = assertBriefingEnvelope(d, policy, ctx.window.run_id);
-  const automationId = Number(ctx.automation?.id);
-  if (!Number.isSafeInteger(automationId) || automationId <= 0)
-    throw new Error("Missing Automation identity");
+  const { automationId, ownerId } = await automationOwner(
+    client,
+    ctx.automation?.id
+  );
   const b = d.briefings[0];
   const coverage = m.coverage;
   const preflight = m.evidence_verification;
@@ -40,10 +42,6 @@ export async function deliverExternalSocial(
         (c.posts_read === 0 || c.read_receipts.length > 0)
     ) &&
     d.findings.every((f: any) => findingHasReceipt(f, policy));
-  const [owner] = await client.query(
-    `SELECT created_by FROM automations WHERE id = ${automationId}`
-  );
-  if (!owner?.created_by) throw new Error("Automation owner unavailable");
   const summary = verified
     ? coverage
         .map(
@@ -63,7 +61,7 @@ export async function deliverExternalSocial(
       ? "Social research briefing"
       : "Social research needs evidence",
     body,
-    recipients: [owner.created_by],
+    recipients: [ownerId],
     resource_url: `/${policy.workspace}/automations/${automationId}`,
     idempotency_key: `social-briefing:${automationId}:${ctx.window.run_id}`,
     automation_source: {
@@ -79,5 +77,5 @@ export async function deliverExternalSocial(
 }
 
 export function externalSocialReaction(policy: EvidencePolicy) {
-  return `${assertBriefingEnvelope.toString()}\n${findingHasReceipt.toString()}\n${deliverExternalSocial.toString()}\nexport default async (ctx, client) => deliverExternalSocial(ctx, client, ${JSON.stringify(policy)});`;
+  return `${automationOwner.toString()}\n${assertBriefingEnvelope.toString()}\n${findingHasReceipt.toString()}\n${deliverExternalSocial.toString()}\nexport default async (ctx, client) => deliverExternalSocial(ctx, client, ${JSON.stringify(policy)});`;
 }

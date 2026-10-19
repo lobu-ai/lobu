@@ -60,6 +60,21 @@ type SourceReader = (
 ) => Promise<SourcePost[]>;
 type ReadingWindow = { ownerId: string; start: number; end: number };
 
+/** The preflight and notification resolve the same validated Automation owner. */
+export async function automationOwner(
+  client: { query(sql: string): Promise<any[]> },
+  input: unknown
+) {
+  const automationId = Number(input);
+  if (!Number.isSafeInteger(automationId) || automationId <= 0)
+    throw new Error("Missing Automation identity");
+  const [owner] = await client.query(
+    `SELECT created_by FROM automations WHERE id = ${automationId}`
+  );
+  if (!owner?.created_by) throw new Error("Automation owner unavailable");
+  return { automationId, ownerId: owner.created_by };
+}
+
 /** Shared by completion preflight and its notification reaction. */
 export function assertBriefingEnvelope(
   data: SocialData,
@@ -107,13 +122,16 @@ function assertSourcePosts(posts: SourcePost[]): SourcePost[] {
       (p) =>
         !p ||
         typeof p.text !== "string" ||
+        (p.mentioned_profiles !== undefined &&
+          (!Array.isArray(p.mentioned_profiles) ||
+            p.mentioned_profiles.some((url) => typeof url !== "string"))) ||
         [p.source_url, p.origin_id].some(
           (value) => typeof value !== "string" || !value.trim()
         )
     )
   )
     throw new Error(
-      "Malformed source post: expected source URL, identity and text"
+      "Malformed source post: expected source URL, identity, text and optional profile list"
     );
   return posts;
 }
@@ -398,11 +416,17 @@ async function verifyFindings(
   }
 }
 
-function canonicalProfile(url: string) {
+function canonicalProfile(url: string, required = true) {
   // This function is embedded in MCP's V8 sandbox, which has no URL global.
   // Accept only ordinary HTTP(S) profile URLs, without credentials or ports.
-  const parts = /^(https?):\/\/([a-z0-9.-]+)(\/[^?#]*)?(?:[?#].*)?$/i.exec(url);
-  if (!parts) throw new Error("Invalid graph profile URL");
+  const parts =
+    typeof url === "string"
+      ? /^(https?):\/\/([a-z0-9.-]+)(\/[^?#]*)?(?:[?#].*)?$/i.exec(url)
+      : null;
+  if (!parts) {
+    if (required) throw new Error("Invalid graph profile URL");
+    return null;
+  }
   return `${parts[1]}://${parts[2]!.replace(/^www\./i, "")}${(parts[3] || "/").replace(/\/posts\/?$/, "").replace(/\/$/, "")}`.toLowerCase();
 }
 
@@ -455,8 +479,10 @@ async function verifyGraphCandidates(
         !quoteInBody(p.text, claim.evidence_quote) ||
         !claim.target?.profile_url ||
         !p.mentioned_profiles?.some(
+          // Unrelated body links may use mailto: or other non-profile schemes.
           (url) =>
-            canonicalProfile(url) === canonicalProfile(claim.target.profile_url)
+            canonicalProfile(url, false) ===
+            canonicalProfile(claim.target.profile_url)
         )
       )
         throw new Error(
@@ -493,15 +519,9 @@ export async function verifySocialEvidence(
   const end = parent.completed_at
     ? Date.parse(parent.completed_at)
     : Date.now();
-  const automationId = Number(parent.automation_id);
-  if (!Number.isSafeInteger(automationId) || automationId <= 0)
-    throw new Error("Missing Automation identity");
-  const [owner] = await workspace.query(
-    `SELECT created_by FROM automations WHERE id = ${automationId}`
-  );
-  if (!owner?.created_by) throw new Error("Automation owner unavailable");
+  const { ownerId } = await automationOwner(workspace, parent.automation_id);
   const read = createSourceReader(client, policy, {
-    ownerId: owner.created_by,
+    ownerId,
     start,
     end,
   });
@@ -530,6 +550,7 @@ export function socialEvidenceVerifierSource() {
   return (
     `const timelineReaderSource = ${JSON.stringify(timelineReaderSource)};\n` +
     [
+      automationOwner,
       assertSourcePosts,
       assertBriefingEnvelope,
       findingHasReceipt,
