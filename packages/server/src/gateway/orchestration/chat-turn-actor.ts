@@ -264,39 +264,60 @@ function chatSenderWorkspacesText(homeWorkspaceSlug: string): string[] {
   ];
 }
 
+interface ChatTurnSender {
+  name?: string;
+  role: string;
+}
+
 /**
- * The per-turn line naming a linked sender. Conversation-scoped, so it rides
- * the turn's transient context, never the cached system prompt.
+ * The per-turn line naming a linked sender and their role, so "who am I?" is
+ * answerable without a lookup. Conversation-scoped, so it rides the turn's
+ * transient context, never the cached system prompt.
  */
-export function chatTurnSenderContext(name: string): string {
+export function chatTurnSenderContext(sender: ChatTurnSender): string {
+  const role = sender.role === "owner" ? "an owner"
+    : sender.role === "admin" ? "an admin" : "a member";
   // Quoted: the name is user-authored data, never instructions.
-  return `This message is from ${JSON.stringify(name.slice(0, 100))}, a verified member of this workspace.`;
+  const who = sender.name ? JSON.stringify(sender.name.slice(0, 100)) : "a person";
+  return `This message is from ${who}, ${role} of this workspace, verified through their linked chat account.`;
 }
 
 /**
  * A turn's transient context: the caller's context (an Automation preamble the
  * planner admitted at full length) exactly as before, then the sender line
- * when it still fits under `cap`. The name is best-effort; the access section
+ * when it still fits under `cap`. The sender is best-effort; the access section
  * in the system prompt carries the tier either way.
  */
 export function chatTurnContext(
-  senderName: string | undefined,
+  sender: ChatTurnSender | undefined,
   context: string | undefined,
   cap: number,
 ): string | undefined {
   const rest = context?.trim() ? context.slice(0, cap) : "";
-  const sender = senderName ? chatTurnSenderContext(senderName) : "";
-  const withSender = [rest, sender].filter(Boolean).join("\n\n");
+  const line = sender ? chatTurnSenderContext(sender) : "";
+  const withSender = [rest, line].filter(Boolean).join("\n\n");
   return (withSender.length <= cap ? withSender : rest) || undefined;
 }
 
-/** The linked sender's Lobu display name, or undefined when there is none. */
-export async function chatTurnSenderName(actorUserId: string | undefined): Promise<string | undefined> {
+/**
+ * The linked sender's display name and CURRENT role in `organizationId`, or
+ * undefined when they are not (or no longer) a member there.
+ */
+export async function chatTurnSender(
+  actorUserId: string | undefined,
+  organizationId: string,
+): Promise<ChatTurnSender | undefined> {
   if (!actorUserId) return undefined;
-  const [user] = await getDb()<{ name: string | null }>`
-    SELECT name FROM "user" WHERE id = ${actorUserId} LIMIT 1
+  const [row] = await getDb()<{ name: string | null; role: string }>`
+    SELECT u.name, m.role
+    FROM "member" m
+    JOIN "user" u ON u.id = m."userId"
+    WHERE m."userId" = ${actorUserId}
+      AND m."organizationId" = ${organizationId}
+    LIMIT 1
   `;
-  return user?.name?.trim() || undefined;
+  if (!row) return undefined;
+  return { name: row.name?.trim() || undefined, role: row.role };
 }
 
 export async function chatTurnHomeWorkspaceSlug(organizationId: string): Promise<string | undefined> {
