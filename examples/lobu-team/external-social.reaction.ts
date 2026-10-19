@@ -1,7 +1,7 @@
+import { findingHasReceipt } from "./social-observations";
 import {
   automationOwner,
   assertBriefingEnvelope,
-  findingHasReceipt,
   type EvidencePolicy,
 } from "./external-social-evidence";
 

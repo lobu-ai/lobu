@@ -309,6 +309,8 @@ test("built scripts stay portable from a foreign checkout with encoded path char
     for (const file of [
       "scripts/build-external-social.ts",
       "external-social-evidence.ts",
+      "social-receipts.ts",
+      "social-observations.ts",
       "external-social.reaction.ts",
       "social-timeline-reader.ts",
     ]) {

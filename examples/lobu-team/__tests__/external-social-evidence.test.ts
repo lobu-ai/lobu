@@ -630,3 +630,68 @@ test("a media-only post leaves its page verified but partial", async () => {
     status: "partial",
   });
 });
+
+test("stored HN posts may be read in later windows while exact identity and partial coverage remain enforced", async () => {
+  const h = fixture();
+  const event = {
+    id: 33,
+    origin_id: "synthetic-hn-123",
+    connector_key: "hackernews",
+    payload_text: post.text,
+    title: "Synthetic HN post",
+    source_url: "https://news.ycombinator.com/item?id=123",
+    author_name: "Synthetic author",
+    occurred_at: post.occurred_at,
+    created_at: new Date(now - 86400000).toISOString(),
+  };
+  const base = await h.client.org(policy.workspace);
+  const client = {
+    org: async () => ({
+      ...base,
+      query: async (sql: string) =>
+        sql.includes("FROM events")
+          ? [event]
+          : [{ created_by: "synthetic-owner" }],
+    }),
+  };
+  const receipt = {
+    workspace: policy.workspace,
+    event_id: event.id,
+    origin_id: event.origin_id,
+  };
+  const coverage = h.data.briefings[0]!.metadata.coverage[0];
+  Object.assign(coverage, { platform: "hackernews", read_receipts: [receipt] });
+  const finding = h.data.findings[0]!;
+  finding.source_url = event.source_url;
+  Object.assign(finding.metadata, {
+    platform: "hackernews",
+    source_url: event.source_url,
+    origin_id: event.origin_id,
+    read_receipts: [receipt],
+  });
+  const hnPolicy = {
+    ...policy,
+    platforms: ["hackernews"],
+    receipt_workspaces: { hackernews: [policy.workspace] },
+  };
+  await verifySocialEvidence(client, hnPolicy, 10, h.data);
+  expect(coverage).toMatchObject({
+    posts_read: 1,
+    recent_posts_read: 1,
+    status: "partial",
+  });
+  expect(
+    h.data.briefings[0]!.metadata.evidence_verification.verified_findings
+  ).toBe(1);
+  finding.metadata.read_receipts = [
+    { ...receipt, origin_id: "wrong-source-identity" },
+  ];
+  await expect(
+    verifySocialEvidence(client, hnPolicy, 10, h.data)
+  ).rejects.toThrow("Stored source identity mismatch");
+  finding.metadata.read_receipts = [receipt];
+  receipt.origin_id = "wrong-source-identity";
+  await expect(
+    verifySocialEvidence(client, hnPolicy, 10, h.data)
+  ).rejects.toThrow("Stored source identity mismatch");
+});
