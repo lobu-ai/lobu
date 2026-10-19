@@ -487,9 +487,10 @@ const HOME_FEED_POST_IDENTITY_SELECTOR =
   ':is([id*="shareId="], [id*="ugcPostId="], [id*="urn:li:activity:"], [id*="-replaceableCommentTools"]):not([id^="replaceableComment_"]):not([id^="replaceableComment_"] *)';
 
 /** Current comment-tool ids encode a typed post URN, followed by the recycled
- * card key. Decode only the typed prefix: field 1 is activity, field 2 ugcPost;
- * each contains field 1 as a protobuf sint64 (ZigZag). Native comment URNs and
- * the corresponding live post URLs independently confirm those namespaces. */
+ * card key. Decode only the typed prefix: field 1 is activity, field 2 ugcPost,
+ * and field 3 groupPost. Each contains field 1 as a protobuf sint64 (ZigZag);
+ * groupPost contains the group id in field 1 and the post id in field 2.
+ * Native comment URNs and live post URLs confirm those namespaces. */
 function decodeHomeFeedPostIdentity(
   raw: string | undefined
 ): string | undefined {
@@ -509,25 +510,38 @@ function decodeHomeFeedPostIdentity(
   }
   const tag = bytes.charCodeAt(0);
   if (
-    (tag !== 10 && tag !== 18) ||
+    (tag !== 10 && tag !== 18 && tag !== 26) ||
     bytes.length < 4 ||
-    bytes.length > 13 ||
+    bytes.length > (tag === 26 ? 24 : 13) ||
     bytes.charCodeAt(1) !== bytes.length - 2 ||
     bytes.charCodeAt(2) !== 8
   ) {
     throw invalid();
   }
-  let encoded = 0n;
-  for (let i = 3; i < bytes.length; i++) {
-    const byte = bytes.charCodeAt(i);
-    const isLast = i === bytes.length - 1;
-    if (Boolean(byte & 128) === isLast) throw invalid();
-    encoded |= BigInt(byte & 127) << BigInt(7 * (i - 3));
-  }
-  if ((encoded & 1n) !== 0n || encoded >= 1n << 64n || encoded < 200_000n) {
+  let offset = 3;
+  const readId = (minimum: bigint) => {
+    let encoded = 0n;
+    for (let shift = 0; shift < 70 && offset < bytes.length; shift += 7) {
+      const byte = bytes.charCodeAt(offset++);
+      encoded |= BigInt(byte & 127) << BigInt(shift);
+      if (byte & 128) continue;
+      if ((encoded & 1n) !== 0n || encoded >= 1n << 64n || encoded < minimum) {
+        throw invalid();
+      }
+      return encoded >> 1n;
+    }
     throw invalid();
+  };
+  // Group ids can be smaller than post ids, but must still be positive.
+  const firstId = readId(tag === 26 ? 2n : 200_000n);
+  if (tag === 26) {
+    if (bytes.charCodeAt(offset++) !== 16) throw invalid();
+    const postId = readId(200_000n);
+    if (offset !== bytes.length) throw invalid();
+    return `urn:li:groupPost:${firstId}-${postId}`;
   }
-  return `urn:li:${tag === 10 ? "activity" : "ugcPost"}:${encoded >> 1n}`;
+  if (offset !== bytes.length) throw invalid();
+  return `urn:li:${tag === 10 ? "activity" : "ugcPost"}:${firstId}`;
 }
 
 // A fenced dispatch discards every row it collected, so an oversized scrape
@@ -1227,7 +1241,7 @@ interface HomeFeedEngagement {
 
 interface HomeFeedCommentIdentity {
   urn: string;
-  parentNamespace: "activity" | "share" | "ugcPost";
+  parentNamespace: ReturnType<typeof linkedInUrnNamespace>;
   parentId: string;
   commentId: string;
 }
@@ -1246,10 +1260,10 @@ function homeFeedPostIdentityKey(
   for (const raw of [context.postUrl, row.post_identity]) {
     if (!raw) continue;
     const match = raw.match(
-      /(?:(shareId|ugcPostId)=|urn:li:(activity|share|ugcPost):)(\d{6,})/i
+      /(?:(shareId|ugcPostId)=|urn:li:(activity|share|ugcPost):)(\d{6,})|urn:li:(groupPost):(\d+-\d{6,})/i
     );
     if (!match) continue;
-    return `${linkedInUrnNamespace(match[1] ?? match[2] ?? "")}:${match[3]}`;
+    return `${linkedInUrnNamespace(match[1] ?? match[2] ?? match[4] ?? "")}:${match[3] ?? match[5]}`;
   }
   return undefined;
 }
@@ -1517,11 +1531,11 @@ function buildHomeFeedRowContext(row: HomeFeedRow): HomeFeedRowContext {
   }
 
   const embeddedUrn = row.post_identity?.match(
-    /(?:(shareId|ugcPostId)=|urn:li:(activity|share|ugcPost):)(\d{6,})/i
+    /(?:(shareId|ugcPostId)=|urn:li:(activity|share|ugcPost):)(\d{6,})|urn:li:(groupPost):(\d+-\d{6,})/i
   );
-  const embeddedId = embeddedUrn?.[3];
+  const embeddedId = embeddedUrn?.[3] ?? embeddedUrn?.[5];
   const embeddedNamespace = linkedInUrnNamespace(
-    embeddedUrn?.[1] ?? embeddedUrn?.[2] ?? ""
+    embeddedUrn?.[1] ?? embeddedUrn?.[2] ?? embeddedUrn?.[4] ?? ""
   );
   const postUrl = normalizeLinkedInPostUrl(
     row.post_url ??
@@ -1548,7 +1562,7 @@ function isHomeFeedRowNoise(
 /**
  * Map cs_scrape home-feed rows to event envelopes. A scraped permalink still
  * wins when a row carries one, but current cards expose none, so the canonical
- * post identity is normally the activity/share/ugcPost id embedded in
+ * post identity is normally the activity/share/ugcPost/groupPost id embedded in
  * `post_identity`. The scrape-only componentkey never becomes an event origin,
  * and a post without either durable identity is not emitted. Native comments
  * carry their own durable id and point at the stable parent-post origin.
@@ -1721,20 +1735,24 @@ type PrepareCommentResult = {
 
 /**
  * Canonical casing for the LinkedIn URN namespace an id came from. share and
- * ugcPost ids live in different id spaces than activity ids, so the namespace
- * has to survive normalization; /feed/update/ resolves all three.
+ * ugcPost and groupPost ids live in different id spaces than activity ids, so
+ * the namespace has to survive normalization; /feed/update/ resolves them all.
  */
-function linkedInUrnNamespace(token: string): "activity" | "share" | "ugcPost" {
+function linkedInUrnNamespace(
+  token: string
+): "activity" | "share" | "ugcPost" | "groupPost" {
   const normalized = token.toLowerCase();
   if (normalized === "shareid" || normalized === "share") return "share";
   if (normalized === "ugcpostid" || normalized === "ugcpost") return "ugcPost";
+  if (normalized === "grouppost") return "groupPost";
   return "activity";
 }
 
 /**
  * Normalize a post URL or activity id into a linkedin.com update URL.
  * Accepts full URLs, `urn:li:activity:…` / `urn:li:share:…` /
- * `urn:li:ugcPost:…`, bare activity digits, or `/feed/update/…` paths.
+ * `urn:li:ugcPost:…` / `urn:li:groupPost:<group>-<post>`, bare activity digits,
+ * or `/feed/update/…` paths.
  */
 export function normalizeLinkedInPostUrl(input: string): string | null {
   const raw = input.trim();
@@ -1746,12 +1764,13 @@ export function normalizeLinkedInPostUrl(input: string): string | null {
     return `https://www.linkedin.com/feed/update/urn:li:activity:${bareId}`;
   }
 
-  // urn:li:activity:123, urn:li:share:123, urn:li:ugcPost:123, or the bare
-  // `activity:123` shorthand.
-  const urnMatch = raw.match(/(?:urn:li:)?(activity|share|ugcPost):(\d{6,})/i);
+  // Post URNs or shorthand, with a compound id only for groupPost.
+  const urnMatch = raw.match(
+    /(?:urn:li:)?(?:(activity|share|ugcPost):(\d{6,})|(groupPost):(\d+-\d{6,}))/i
+  );
   if (urnMatch && !raw.includes("://") && !raw.startsWith("/")) {
-    const ns = linkedInUrnNamespace(urnMatch[1] ?? "");
-    return `https://www.linkedin.com/feed/update/urn:li:${ns}:${urnMatch[2] ?? ""}`;
+    const ns = linkedInUrnNamespace(urnMatch[1] ?? urnMatch[3] ?? "");
+    return `https://www.linkedin.com/feed/update/urn:li:${ns}:${urnMatch[2] ?? urnMatch[4] ?? ""}`;
   }
 
   try {
@@ -1772,11 +1791,11 @@ export function normalizeLinkedInPostUrl(input: string): string | null {
     // Prefer canonical feed/update URLs when we can extract a post id, keeping
     // whichever URN namespace the source URL used.
     const urnInUrl = `${u.pathname}${u.search}`.match(
-      /(?:urn(?::|%3A)li(?::|%3A))?(activity|share|ugcPost)(?::|%3A|-)(\d{6,})/i
+      /(?:urn(?::|%3A)li(?::|%3A))?(?:(activity|share|ugcPost)(?::|%3A|-)(\d{6,})|(groupPost)(?::|%3A|-)(\d+-\d{6,}))/i
     );
     if (urnInUrl) {
-      const ns = linkedInUrnNamespace(urnInUrl[1] ?? "");
-      return `https://www.linkedin.com/feed/update/urn:li:${ns}:${urnInUrl[2] ?? ""}`;
+      const ns = linkedInUrnNamespace(urnInUrl[1] ?? urnInUrl[3] ?? "");
+      return `https://www.linkedin.com/feed/update/urn:li:${ns}:${urnInUrl[2] ?? urnInUrl[4] ?? ""}`;
     }
     return null;
   } catch {
