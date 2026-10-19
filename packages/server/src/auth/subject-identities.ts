@@ -317,6 +317,25 @@ export async function provisionMemberAndCoreIdentities(
 		{ namespace: "email", identifier: subject.email.toLowerCase() },
 	]);
 
+	// Conflicts can leave the claim on another entity or with an untrusted
+	// source. Member resolution requires both this entity and auth:signup.
+	const [holder] = await sql<{ entity_id: number; source_connector: string | null }>`
+    SELECT entity_id, source_connector FROM entity_identities
+    WHERE organization_id = ${organizationId}
+      AND namespace = 'auth_user_id'
+      AND identifier = ${subject.userId}
+      AND scope_key IS NULL
+      AND deleted_at IS NULL
+  `;
+	if (
+		Number(holder?.entity_id) !== memberEntityId ||
+		holder?.source_connector !== "auth:signup"
+	) {
+		throw new Error(
+			`User ${subject.userId} in org ${organizationId} does not have a trusted login identity on $member ${memberEntityId} (held by entity ${holder?.entity_id ?? "none"}, source ${holder?.source_connector ?? "none"})`,
+		);
+	}
+
 	return { memberEntityId };
 }
 
