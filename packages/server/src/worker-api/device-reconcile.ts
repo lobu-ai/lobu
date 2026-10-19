@@ -570,10 +570,9 @@ async function ensureDeviceConnectorWired(
       const seedConfig = splitConfig.connectionConfig;
 
       // 3. Reuse or create the connection (no-auth, active, private). Match on
-      //    (org, connector, no auth_profile) — the device-connector identity —
-      //    rather than created_by, so orphan rows (created_by IS NULL, or
-      //    created by a different user/token) get adopted and self-healed
-      //    instead of stranded behind a slug-collision insert.
+      //    no-auth rows regardless of creator so NULL owners can be backfilled.
+      //    Team wires also match the device pin and must leave another user's
+      //    connection alone.
       const existingConn = (await tx`
         SELECT id, created_by FROM connections
         WHERE organization_id = ${organizationId}
@@ -581,10 +580,18 @@ async function ensureDeviceConnectorWired(
           AND auth_profile_id IS NULL
           AND app_auth_profile_id IS NULL
           AND deleted_at IS NULL
-          ${connectionIdentity(tx, 'connections')}
+          ${teamPin ? tx`AND device_worker_id = ${teamPin}::uuid` : tx``}
         ORDER BY id ASC
         LIMIT 1
       `) as unknown as Array<{ id: number; created_by: string | null }>;
+      const existingOwner = existingConn[0]?.created_by;
+      if (teamPin && existingOwner != null && existingOwner !== userId) {
+        logger.warn(
+          { userId, organizationId, connectorKey, deviceId: teamPin },
+          '[device-connectors] Declined to wire a device pin owned by another user'
+        );
+        return null;
+      }
       connectionId = existingConn[0]?.id;
       if (connectionId && existingConn[0].created_by == null) {
         // Backfill ownership so future per-user queries (e.g. /api/me/devices)
