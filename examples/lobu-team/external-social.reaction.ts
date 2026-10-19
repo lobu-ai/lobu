@@ -1,8 +1,6 @@
 import {
-  automationOwner,
-  assertBriefingEnvelope,
-  findingHasReceipt,
   type EvidencePolicy,
+  socialBriefing,
 } from "./external-social-evidence";
 
 /** Notifications do not inherit the external caller's cross-workspace grant.
@@ -12,6 +10,8 @@ export async function deliverExternalSocial(
   client: any,
   policy: EvidencePolicy
 ) {
+  const { automationOwner, assertBriefingEnvelope, findingHasReceipt } =
+    socialBriefing();
   const d = ctx.extracted_data;
   const m = assertBriefingEnvelope(d, policy, ctx.window.run_id);
   const { automationId, ownerId } = await automationOwner(
@@ -77,5 +77,5 @@ export async function deliverExternalSocial(
 }
 
 export function externalSocialReaction(policy: EvidencePolicy) {
-  return `${automationOwner.toString()}\n${assertBriefingEnvelope.toString()}\n${findingHasReceipt.toString()}\n${deliverExternalSocial.toString()}\nexport default async (ctx, client) => deliverExternalSocial(ctx, client, ${JSON.stringify(policy)});`;
+  return `${socialBriefing.toString()}\n${deliverExternalSocial.toString()}\nexport default async (ctx, client) => deliverExternalSocial(ctx, client, ${JSON.stringify(policy)});`;
 }

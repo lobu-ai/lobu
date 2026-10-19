@@ -1,12 +1,20 @@
 import { expect, mock, test } from "bun:test";
 import { runInNewContext } from "node:vm";
+import { externalSocialReaction } from "../external-social.reaction";
 import {
-  verifySocialEvidence,
-  socialEvidenceVerifierSource,
   type SocialData,
+  socialEvidenceVerifierSource,
+  type VerifySocialEvidence,
 } from "../external-social-evidence";
 import { readSocialTimelinePage } from "../social-timeline-reader";
-import { externalSocialReaction } from "../external-social.reaction";
+
+// Exercise all receipt paths through the emitted script, without module imports
+// or the host URL global, after the formatting changes made by MCP compilation.
+const verifySocialEvidence: VerifySocialEvidence = runInNewContext(
+  `${new Bun.Transpiler({ loader: "ts", minifyWhitespace: true }).transformSync(
+    socialEvidenceVerifierSource()
+  )}\nverifySocialEvidence;`
+);
 
 const now = Date.now();
 const policy = {
@@ -270,11 +278,7 @@ test("graph observations require source author and target links, independently o
     evidence_verified: false,
   };
   h.data.briefings[0]!.metadata.graph_candidates = [candidate];
-  // MCP's V8 sandbox has standard JS globals but no browser URL constructor.
-  await runInNewContext(
-    `${socialEvidenceVerifierSource()}\nverifySocialEvidence(client, policy, 10, data)`,
-    { client: h.client, policy, data: h.data }
-  );
+  await h.run();
   expect(candidate.evidence_verified).toBe(true);
   expect(h.data.briefings[0]!.metadata.graph_status).toBe("pending_ingestion");
   candidate.claims[0]!.target.profile_url = "mailto:example@example.test";
@@ -628,17 +632,4 @@ test("a media-only post leaves its page verified but partial", async () => {
     posts_read: 1,
     status: "partial",
   });
-});
-
-test("serialized preflight keeps the reader identity through sandbox compilation", async () => {
-  const h = fixture();
-  const compiled = new Bun.Transpiler({
-    loader: "ts",
-    minifyWhitespace: true,
-  }).transformSync(
-    `${socialEvidenceVerifierSource()}\nverifySocialEvidence(client, policy, 10, data);`
-  );
-  await expect(
-    runInNewContext(compiled, { client: h.client, policy, data: h.data })
-  ).resolves.toBe(h.data);
 });
