@@ -1,20 +1,8 @@
 import { expect, mock, test } from "bun:test";
 import { runInNewContext } from "node:vm";
-import { externalSocialReaction } from "../external-social.reaction";
-import {
-  type SocialData,
-  socialEvidenceVerifierSource,
-  type VerifySocialEvidence,
-} from "../external-social-evidence";
+import { buildExternalSocial } from "../scripts/build-external-social";
+import type { SocialData } from "../external-social-evidence";
 import { readSocialTimelinePage } from "../social-timeline-reader";
-
-// Exercise all receipt paths through the emitted script, without module imports
-// or the host URL global, after the formatting changes made by MCP compilation.
-const verifySocialEvidence: VerifySocialEvidence = runInNewContext(
-  `${new Bun.Transpiler({ loader: "ts", minifyWhitespace: true }).transformSync(
-    socialEvidenceVerifierSource()
-  )}\nverifySocialEvidence;`
-);
 
 const now = Date.now();
 const policy = {
@@ -23,6 +11,15 @@ const policy = {
   platforms: ["x"],
   receipt_workspaces: { x: ["synthetic-team"] },
 };
+const scripts = await buildExternalSocial(policy);
+// All receipt paths execute the bundled handoff after sandbox recompilation,
+// without imports or a host URL global.
+const { verifySocialEvidence, timelineReaderSource } = runInNewContext(
+  `${new Bun.Transpiler({ loader: "ts", minifyWhitespace: true }).transformSync(
+    scripts.preflight
+  )}\n({verifySocialEvidence, timelineReaderSource});`
+);
+
 const post = {
   source_url: "https://x.com/example/status/123",
   origin_id: "123",
@@ -37,7 +34,7 @@ function fixture() {
     status: "completed",
     operation_key: "evaluate",
     input: {
-      expression: `(${readSocialTimelinePage.toString()})({platform:"x",account_path:"/synthetic",page_path:"/home"})`,
+      expression: `(${timelineReaderSource})({platform:"x",account_path:"/synthetic",page_path:"/home"})`,
     },
     created_by_user_id: "synthetic-owner",
     created_at: new Date(now - 20000).toISOString(),
@@ -212,7 +209,7 @@ test("a receipt cannot be reused for another platform or an ungranted workspace"
 test("serialized reaction and preflight share the same briefing boundary", async () => {
   const h = fixture();
   await h.run();
-  const script = `${externalSocialReaction(policy).replace("export default", "const reaction =")}\nreaction(ctx, client);`;
+  const script = `${scripts.reaction.replace("export default", "const reaction =")}\nreaction(ctx, client);`;
   const react = () =>
     runInNewContext(script, {
       ctx: {

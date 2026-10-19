@@ -1,5 +1,5 @@
-/** One DOM page, without content clipping. Stringify this function into an
- * existing Chrome evaluate operation after focusing the owned scratch tab.
+/** One DOM page, without content clipping. The example build packages this for
+ * Chrome evaluate after focusing the owned scratch tab.
  * Pagination remains outside the snapshot so each page has its own receipt. */
 export function readSocialTimelinePage(options: {
   platform: "x" | "linkedin";

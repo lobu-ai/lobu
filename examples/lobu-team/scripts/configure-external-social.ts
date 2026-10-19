@@ -1,10 +1,9 @@
 import type { ClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
-import type { EvidencePolicy } from "../external-social-evidence";
 import {
   externalSocialPrompt,
   socialOwnerPrompt,
+  type SocialScripts,
 } from "../external-social.prompt";
-import { externalSocialReaction } from "../external-social.reaction";
 
 /** All live identifiers are explicit operator inputs. Preserve live instructions,
  * outputs, schedule, executor and device bindings; fail on a changed version. */
@@ -12,7 +11,7 @@ export async function configureExternalSocial(
   client: Pick<ClientSDK, "automations">,
   automationId: string,
   expectedVersion: number,
-  policy: EvidencePolicy
+  scripts: SocialScripts
 ) {
   const { automation: a } = (await client.automations.get({
     automation_id: automationId,
@@ -35,8 +34,8 @@ export async function configureExternalSocial(
   // Keep generated code only there, alongside the owner instructions: a
   // worker must receive bindings and preflight together without another fetch.
   const guidanceMarker = "\n\nEXTERNAL SOCIAL WINDOW INSTRUCTIONS v1\n";
-  const guidance = `${(a.reactions_guidance ?? "").split(guidanceMarker)[0]}${guidanceMarker}${externalSocialPrompt(prompt, policy)}`;
-  const reaction = externalSocialReaction(policy);
+  const guidance = `${(a.reactions_guidance ?? "").split(guidanceMarker)[0]}${guidanceMarker}${externalSocialPrompt(prompt, scripts)}`;
+  const reaction = scripts.reaction;
   // setReactionScript is a separate existing mutation. Retry reconciles both
   // values; no scheduled/external processing mode is disabled or replaced.
   if (a.reaction_script !== reaction)

@@ -1,6 +1,11 @@
 import { expect, mock, test } from "bun:test";
+import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { configureExternalSocial } from "../scripts/configure-external-social";
 import { externalSocialPrompt } from "../external-social.prompt";
+import { buildExternalSocial } from "../scripts/build-external-social";
 import { deliverExternalSocial } from "../external-social.reaction";
 
 const policy = {
@@ -9,6 +14,8 @@ const policy = {
   platforms: ["x"],
   receipt_workspaces: { x: ["synthetic-team"] },
 };
+const scripts = await buildExternalSocial(policy);
+
 function fixture() {
   const automation = {
     version: 3,
@@ -41,7 +48,7 @@ function fixture() {
   return {
     automation,
     client,
-    run: () => configureExternalSocial(client as any, "10", 3, policy),
+    run: () => configureExternalSocial(client as any, "10", 3, scripts),
   };
 }
 test("external configuration preserves live owner instructions and output contracts without changing cadence", async () => {
@@ -62,7 +69,7 @@ test("external configuration preserves live owner instructions and output contra
     "Owner guidance: notify the owner."
   );
   expect(h.automation.reactions_guidance).toContain(h.automation.prompt);
-  await configureExternalSocial(h.client as any, "10", 4, policy);
+  await configureExternalSocial(h.client as any, "10", 4, scripts);
   expect(h.client.automations.createVersion).toHaveBeenCalledTimes(1);
   expect(h.client.automations.setReactionScript).toHaveBeenCalledTimes(1);
 });
@@ -79,8 +86,8 @@ test("version drift and active windows stop updates before mutation", async () =
   expect(h.client.automations.setReactionScript).not.toHaveBeenCalled();
 });
 test("prompt upgrade is idempotent and embeds executable functions without local paths", () => {
-  const prompt = externalSocialPrompt("Existing instructions", policy);
-  expect(externalSocialPrompt(prompt, policy)).toBe(prompt);
+  const prompt = externalSocialPrompt("Existing instructions", scripts);
+  expect(externalSocialPrompt(prompt, scripts)).toBe(prompt);
   expect(prompt).not.toContain("/Users/");
   const code = [...prompt.matchAll(/```typescript\n([\s\S]*?)\n```/g)].map(
     (m) => m[1]
@@ -283,13 +290,44 @@ test("reaction refuses an invalid Automation identity before querying or notifyi
 test("upgrading a duplicated contract retains owner policy and moves generated code into window guidance", async () => {
   const h = fixture();
   const owner = h.automation.prompt;
-  h.automation.prompt = externalSocialPrompt(owner, policy);
+  h.automation.prompt = externalSocialPrompt(owner, scripts);
   await h.run();
   expect(h.automation.prompt).toBe(owner);
   expect(h.automation.reactions_guidance).toContain(owner);
   expect(
     h.automation.reactions_guidance.match(/function readSocialTimelinePage/g)
   ).toHaveLength(1);
-  await configureExternalSocial(h.client as any, "10", 4, policy);
+  await configureExternalSocial(h.client as any, "10", 4, scripts);
   expect(h.client.automations.createVersion).toHaveBeenCalledTimes(1);
+});
+
+test("built scripts stay portable from a foreign checkout with encoded path characters", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "social-build-"));
+  const checkout = join(temp, "Users", "synthetic builder", "checkout");
+  try {
+    await mkdir(join(checkout, "scripts"), { recursive: true });
+    for (const file of [
+      "scripts/build-external-social.ts",
+      "external-social-evidence.ts",
+      "external-social.reaction.ts",
+      "social-timeline-reader.ts",
+    ]) {
+      await copyFile(
+        new URL(`../${file}`, import.meta.url),
+        join(checkout, file)
+      );
+    }
+    const { buildExternalSocial: foreignBuild } = await import(
+      pathToFileURL(join(checkout, "scripts/build-external-social.ts")).href
+    );
+    const built = await foreignBuild(policy);
+    for (const source of [built.preflight, built.reaction]) {
+      expect(source).not.toContain(checkout);
+      expect(source).not.toContain(encodeURI(checkout));
+      expect(source).not.toMatch(/\/Users\/|file:\/\//);
+    }
+    expect(built).toEqual(scripts);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
 });

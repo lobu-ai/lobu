@@ -1,7 +1,10 @@
-import {
-  socialEvidenceVerifierSource,
-  type EvidencePolicy,
-} from "./external-social-evidence";
+import type { EvidencePolicy } from "./external-social-evidence";
+
+export type SocialScripts = {
+  policy: EvidencePolicy;
+  preflight: string;
+  reaction: string;
+};
 
 const marker = "\n\nEXTERNAL SOCIAL EVIDENCE CONTRACT v1\n";
 
@@ -13,7 +16,7 @@ export function socialOwnerPrompt(current: string) {
 /** Window instructions: the owner's prompt, retaining account bindings, owner
  * policy and voice preferences, plus this contract. Never reapply an older
  * managed-agent example wholesale. */
-export function externalSocialPrompt(current: string, policy: EvidencePolicy) {
+export function externalSocialPrompt(current: string, scripts: SocialScripts) {
   const base = socialOwnerPrompt(current);
   return `${base}${marker}
 This contract refines reading and completion. Existing account/privacy/no-engagement limits remain authoritative.
@@ -36,8 +39,8 @@ Store short graph candidates in platform checkpoints and submit them in briefing
 MANDATORY COMPLETION PREFLIGHT
 Briefing run_id must be the numeric claimed runId, not a string. Coverage status describes reading completeness; older dated posts reduce recent_posts_read without making an otherwise complete read partial. Every read_receipts entry names its workspace: {workspace,run_id}, or for HN {workspace,event_id,origin_id}. Never use [] for a claimed read. Coverage additionally records continuation_pending:boolean and stop_reason. Run the function below with the claimed runId and your proposed extracted_data BEFORE completeWindow, in the same authorized external caller that can read the allowed workspaces. Inspect its returned coverage and issues; only submit its RETURNED data. It computes counts from completed source receipts, rejects unsupported finding excerpts and marks truncated/unread/stalled sources partial. Fix invalid findings by rereading the exact source or removing the unsupported claim; never invent a receipt to pass validation. It does not inspect video audio, prove model comprehension, or grant graph publication permission.
 \`\`\`typescript
-${socialEvidenceVerifierSource()}
-const evidencePolicy = ${JSON.stringify(policy)};
+${scripts.preflight}
+const evidencePolicy = ${JSON.stringify(scripts.policy)};
 // const verified = await verifySocialEvidence(client, evidencePolicy, runId, extracted_data);
 // await workspace.automations.completeWindow({...originalCompletionArgs, extracted_data: verified});
 \`\`\`
