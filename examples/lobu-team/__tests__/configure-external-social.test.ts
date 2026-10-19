@@ -7,6 +7,10 @@ import { configureExternalSocial } from "../scripts/configure-external-social";
 import { externalSocialPrompt } from "../external-social.prompt";
 import { buildExternalSocial } from "../scripts/build-external-social";
 import { deliverExternalSocial } from "../external-social.reaction";
+import {
+  socialEvidenceShape,
+  type SocialData,
+} from "../external-social-evidence";
 
 const policy = {
   workspace: "synthetic-team",
@@ -159,41 +163,37 @@ test("a verified briefing is delivered within the notification limit without spl
   const send = mock(async (_input: Record<string, unknown>) => ({
     event_id: 101,
   }));
-  const receipt = { workspace: policy.workspace, run_id: 20 };
-  const result = await deliverExternalSocial(
-    {
-      automation: { id: 10 },
-      window: { run_id: 20 },
-      extracted_data: {
-        briefings: [
-          {
-            // Summary (21 units) plus two newlines puts the emoji across the 980 cut.
-            content: `${"x".repeat(956)}😀`,
-            metadata: {
-              workflow: policy.workflow,
-              run_id: 20,
-              coverage: [
-                {
-                  platform: "x",
-                  posts_read: 1,
-                  recent_posts_read: 1,
-                  status: "read",
-                  read_receipts: [receipt],
-                },
-              ],
-              evidence_verification: {
-                version: 1,
-                run_id: 20,
-                issues: [],
-                verified_findings: 0,
-                verified_graph_candidates: 0,
-              },
+  const data: SocialData = {
+    findings: [],
+    briefings: [
+      {
+        title: "Briefing",
+        // Summary (21 units) plus two newlines puts the emoji across the 980 cut.
+        content: `${"x".repeat(956)}😀`,
+        metadata: {
+          workflow: policy.workflow,
+          run_id: 20,
+          coverage: [
+            {
+              platform: "x",
+              posts_read: 1,
+              recent_posts_read: 1,
+              status: "read",
+              read_receipts: [{ workspace: policy.workspace, run_id: 20 }],
             },
-          },
-        ],
-        findings: [],
+          ],
+        },
       },
-    },
+    ],
+  };
+  data.briefings[0]!.metadata.evidence_verification = {
+    version: 2,
+    run_id: 20,
+    issues: [],
+    attested: socialEvidenceShape(data),
+  };
+  const result = await deliverExternalSocial(
+    { automation: { id: 10 }, window: { run_id: 20 }, extracted_data: data },
     {
       query: async () => [{ created_by: "synthetic-owner" }],
       notifications: { send },
@@ -205,55 +205,6 @@ test("a verified briefing is delivered within the notification limit without spl
   expect(body.startsWith("x: 1 text posts, read\n\n")).toBe(true);
   expect(body).toHaveLength(979);
   expect(body.endsWith("x")).toBe(true);
-});
-
-test("graph candidates added after preflight do not receive a verified notification", async () => {
-  const send = mock(async (_input: Record<string, unknown>) => ({
-    event_id: 102,
-  }));
-  const result = await deliverExternalSocial(
-    {
-      automation: { id: 10 },
-      window: { run_id: 20 },
-      extracted_data: {
-        findings: [],
-        briefings: [
-          {
-            content: "Unverified graph addition",
-            metadata: {
-              workflow: policy.workflow,
-              run_id: 20,
-              coverage: [
-                {
-                  platform: "x",
-                  posts_read: 0,
-                  recent_posts_read: 0,
-                  status: "blocked",
-                  read_receipts: [],
-                },
-              ],
-              graph_candidates: [{ subject_name: "Added after preflight" }],
-              evidence_verification: {
-                version: 1,
-                run_id: 20,
-                issues: [],
-                verified_findings: 0,
-                verified_graph_candidates: 0,
-              },
-            },
-          },
-        ],
-      },
-    },
-    {
-      query: async () => [{ created_by: "synthetic-owner" }],
-      notifications: { send },
-    },
-    policy
-  );
-  expect(result.evidence_verified).toBe(false);
-  expect(send.mock.calls[0][0].title).toBe("Social research needs evidence");
-  expect(send.mock.calls[0][0].body).not.toContain("Unverified graph addition");
 });
 
 test("reaction refuses an invalid Automation identity before querying or notifying", async () => {

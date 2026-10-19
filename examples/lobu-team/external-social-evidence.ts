@@ -99,6 +99,29 @@ export function assertBriefingEnvelope(
   return m;
 }
 
+/** Shared snapshot of notification coverage and result identities. Arrays keep
+ * the comparison stable across JSON storage; this is still caller attestation. */
+export function socialEvidenceShape(data: SocialData) {
+  const m = data.briefings[0]!.metadata;
+  return JSON.stringify([
+    (m.coverage as Coverage[]).map((c) => [
+      c.platform,
+      c.status,
+      c.posts_read,
+      c.recent_posts_read,
+      Array.isArray(c.read_receipts) ? c.read_receipts.length : -1,
+    ]),
+    data.findings.map((f) => [f?.metadata?.platform, f?.metadata?.origin_id]),
+    Array.isArray(m.graph_candidates ?? [])
+      ? (m.graph_candidates ?? []).map((g: any) => [
+          g?.platform,
+          g?.origin_id,
+          g?.evidence_verified,
+        ])
+      : null,
+  ]);
+}
+
 /** Verify a claimed or completed window using its owner's retained source receipts. */
 export async function verifySocialEvidence(
   timelineReaderSource: string,
@@ -144,8 +167,9 @@ export async function verifySocialEvidence(
   );
   m.graph_status = graphCount ? "pending_ingestion" : "no_candidates";
   m.evidence_verification = {
-    version: 1,
+    version: 2,
     run_id: runId,
+    attested: socialEvidenceShape(data),
     issues,
     verified_findings: data.findings.length,
     verified_graph_candidates: graphCount,

@@ -100,11 +100,14 @@ function readPostsFromOperation(
   )
     throw new Error("Source receipt did not use the supplied timeline reader");
   const value = run.output?.value;
+  const page =
+    typeof value?.page_url === "string"
+      ? value.page_url.split("#")[0].split("?")[0]
+      : null;
   if (
     platform === "linkedin" &&
     policy.company_linkedin_path &&
-    value?.page_url !==
-      `https://www.linkedin.com${policy.company_linkedin_path}`
+    page !== `https://www.linkedin.com${policy.company_linkedin_path}`
   )
     throw new Error("LinkedIn receipt is outside the authorized company Page");
   if (

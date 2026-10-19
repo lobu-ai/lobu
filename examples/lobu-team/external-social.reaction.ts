@@ -2,6 +2,7 @@ import { findingHasReceipt } from "./social-observations";
 import {
   automationOwner,
   assertBriefingEnvelope,
+  socialEvidenceShape,
   type EvidencePolicy,
 } from "./external-social-evidence";
 
@@ -23,24 +24,10 @@ export async function deliverExternalSocial(
   const preflight = m.evidence_verification;
   // This is the external caller's attestation, not a server-side receipt check.
   const verified =
-    preflight?.version === 1 &&
+    preflight?.version === 2 &&
     preflight.run_id === m.run_id &&
-    preflight.verified_findings === d.findings.length &&
-    Array.isArray(m.graph_candidates ?? []) &&
-    preflight.verified_graph_candidates === (m.graph_candidates ?? []).length &&
-    d.findings.length <= 6 &&
     Array.isArray(preflight.issues) &&
-    coverage.every(
-      (c: any) =>
-        Number.isSafeInteger(c.posts_read) &&
-        c.posts_read >= 0 &&
-        Number.isSafeInteger(c.recent_posts_read) &&
-        c.recent_posts_read >= 0 &&
-        c.recent_posts_read <= c.posts_read &&
-        ["read", "partial", "blocked"].includes(c.status) &&
-        Array.isArray(c.read_receipts) &&
-        (c.posts_read === 0 || c.read_receipts.length > 0)
-    ) &&
+    preflight.attested === socialEvidenceShape(d) &&
     d.findings.every((f: any) => findingHasReceipt(f, policy));
   const summary = verified
     ? coverage

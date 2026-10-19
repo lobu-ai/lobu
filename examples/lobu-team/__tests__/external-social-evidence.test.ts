@@ -206,8 +206,9 @@ test("a receipt cannot be reused for another platform or an ungranted workspace"
   await expect(other.run()).rejects.toThrow("out-of-scope");
 });
 
-test("serialized reaction and preflight share the same briefing boundary", async () => {
+test("serialized reaction preserves preflight coverage and result identities", async () => {
   const h = fixture();
+  h.source.output.value.posts = [{ ...post, media_unread: true }];
   await h.run();
   const script = `${scripts.reaction.replace("export default", "const reaction =")}\nreaction(ctx, client);`;
   const react = () =>
@@ -215,13 +216,24 @@ test("serialized reaction and preflight share the same briefing boundary", async
       ctx: {
         automation: { id: 1 },
         window: { run_id: 10 },
-        extracted_data: h.data,
+        extracted_data: JSON.parse(JSON.stringify(h.data)),
       },
       client: {
         query: async () => [{ created_by: "synthetic-owner" }],
         notifications: { send: async () => ({ event_id: 100 }) },
       },
     });
+  expect((await react()).evidence_verified).toBe(true);
+  const metadata = h.data.briefings[0]!.metadata;
+  metadata.coverage[0].status = "read";
+  expect((await react()).evidence_verified).toBe(false);
+  metadata.coverage[0].status = "partial";
+  metadata.graph_candidates = [{ subject_name: "Added after preflight" }];
+  expect((await react()).evidence_verified).toBe(false);
+  metadata.graph_candidates = [];
+  h.data.findings[0]!.metadata.origin_id = "changed-after-preflight";
+  expect((await react()).evidence_verified).toBe(false);
+  h.data.findings[0]!.metadata.origin_id = post.origin_id;
   expect((await react()).evidence_verified).toBe(true);
   h.data.briefings[0]!.metadata.coverage.push({ platform: "outside-policy" });
   await expect(h.run()).rejects.toThrow(
@@ -527,6 +539,51 @@ test("other authorized browser sources retain their own reader contract", async 
       h.data
     )
   ).resolves.toBe(h.data);
+});
+
+test("company Page receipts ignore query and hash but keep the exact origin and path", async () => {
+  const page = "https://www.linkedin.com/company/synthetic/admin/feed/";
+  const bound = {
+    ...policy,
+    platforms: ["linkedin"],
+    receipt_workspaces: { linkedin: [policy.workspace] },
+    company_linkedin_path: "/company/synthetic/admin/feed/",
+  };
+  for (const pageUrl of [
+    page,
+    `${page}?trk=feed`,
+    `${page}#updates`,
+    `${page}?trk=feed#updates`,
+  ]) {
+    const h = fixture();
+    Object.assign(h.source.output.value, {
+      platform: "linkedin",
+      page_url: pageUrl,
+    });
+    h.data.briefings[0]!.metadata.coverage[0].platform = "linkedin";
+    h.data.findings[0]!.metadata.platform = "linkedin";
+    await expect(
+      verifySocialEvidence(h.client, bound, 10, h.data)
+    ).resolves.toBe(h.data);
+  }
+  for (const pageUrl of [
+    page.replace("synthetic", "another"),
+    page.replace(".com/", ".com.evil/"),
+    `${page}extra`,
+    null,
+    {},
+  ]) {
+    const h = fixture();
+    Object.assign(h.source.output.value, {
+      platform: "linkedin",
+      page_url: pageUrl,
+    });
+    h.data.briefings[0]!.metadata.coverage[0].platform = "linkedin";
+    h.data.findings[0]!.metadata.platform = "linkedin";
+    await expect(
+      verifySocialEvidence(h.client, bound, 10, h.data)
+    ).rejects.toThrow("outside the authorized company Page");
+  }
 });
 
 test("malformed retained posts are rejected before coverage or excerpt verification", async () => {
