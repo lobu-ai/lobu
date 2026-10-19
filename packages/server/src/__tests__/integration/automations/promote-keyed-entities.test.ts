@@ -1514,7 +1514,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       created_at: arrivedJustNow(),
     });
 
-    // Occupy the base slug and all four readable suffixes. Promotion must reach
+    // Occupy the base slug and all nineteen readable suffixes. Promotion must reach
     // the final identifier-derived fallback without poison-pilling the window.
     const collidingSlug = slugify('Stability · App Crashes');
     const [topicType] = (await sql`
@@ -1522,7 +1522,7 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       WHERE organization_id = ${workspace.org.id} AND slug = 'topic'
       LIMIT 1
     `) as Array<{ id: number }>;
-    for (let attempt = 1; attempt <= 5; attempt++) {
+    for (let attempt = 1; attempt <= 20; attempt++) {
       const occupiedSlug = attempt === 1 ? collidingSlug : `${collidingSlug}-${attempt}`;
       await sql`
         INSERT INTO entities (

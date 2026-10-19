@@ -117,11 +117,8 @@ describe('$member entity lifecycle projections', () => {
     expect(retired.map((row) => row.namespace)).toEqual(['auth_user_id', 'email']);
     expect(retired.every((row) => row.deleted_at !== null)).toBe(true);
 
-    // A new name: entity slugs stay unique across tombstones, a separate limit.
-    const second = await provisionMemberAndCoreIdentities(organization.id, {
-      ...subject,
-      name: 'Returning Member Again',
-    });
+    // The same name again: the tombstone still holds the derived slug.
+    const second = await provisionMemberAndCoreIdentities(organization.id, subject);
     expect(second.memberEntityId).not.toBe(first.memberEntityId);
     const resolved = (await resolveMemberOrgsForUser(user.id)).find(
       (org) => org.tenantOrganizationId === organization.id
