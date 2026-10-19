@@ -23,6 +23,7 @@ function fixture() {
     execution_config: { executor: { kind: "external" } },
     automation_run: { status: "completed" },
     reaction_script: "old",
+    reactions_guidance: "Owner guidance: notify the owner.",
   };
   const client = {
     automations: {
@@ -52,6 +53,10 @@ test("external configuration preserves live owner instructions and output contra
     h.automation.outputs
   );
   expect(h.automation.execution_config.executor.kind).toBe("external");
+  expect(h.automation.reactions_guidance).toStartWith(
+    "Owner guidance: notify the owner."
+  );
+  expect(h.automation.reactions_guidance).toContain(h.automation.prompt);
   await configureExternalSocial(h.client as any, "10", 4, policy);
   expect(h.client.automations.createVersion).toHaveBeenCalledTimes(1);
   expect(h.client.automations.setReactionScript).toHaveBeenCalledTimes(1);
@@ -119,16 +124,71 @@ test("reaction reports missing evidence rather than silently delivering unverifi
   expect(send.mock.calls[0][0].title).toBe("Social research needs evidence");
 });
 
-test("public graph handoff is opt-in and keeps private receipts in their source workspace", () => {
-  const enabled = externalSocialPrompt("Preserve policy", {
-    ...policy,
-    public_graph_workspace: "synthetic-market",
-  });
-  expect(enabled).toContain("PUBLIC MARKET HANDOFF");
-  expect(enabled).toContain('credentials:"omit"');
-  expect(enabled).toContain("supersedes_event_id");
-  expect(enabled).toContain("Pending approval, suppressed/queued actions");
-  expect(externalSocialPrompt("Preserve policy", policy)).not.toContain(
-    "PUBLIC MARKET HANDOFF"
+test("reaction requires the same numeric run identity as completion preflight", async () => {
+  await expect(
+    deliverExternalSocial(
+      {
+        window: { run_id: 20 },
+        extracted_data: {
+          briefings: [
+            { metadata: { workflow: policy.workflow, run_id: "20" } },
+          ],
+          findings: [],
+        },
+      },
+      {},
+      policy
+    )
+  ).rejects.toThrow("Briefing ownership/run mismatch");
+});
+
+test("a verified briefing is delivered within the notification limit without splitting an emoji", async () => {
+  const send = mock(async (_input: Record<string, unknown>) => ({
+    event_id: 101,
+  }));
+  const receipt = { workspace: policy.workspace, run_id: 20 };
+  const result = await deliverExternalSocial(
+    {
+      automation: { id: 10 },
+      window: { run_id: 20 },
+      extracted_data: {
+        briefings: [
+          {
+            // Summary (21 units) plus two newlines puts the emoji across the 980 cut.
+            content: `${"x".repeat(956)}😀`,
+            metadata: {
+              workflow: policy.workflow,
+              run_id: 20,
+              coverage: [
+                {
+                  platform: "x",
+                  posts_read: 1,
+                  recent_posts_read: 1,
+                  status: "read",
+                  read_receipts: [receipt],
+                },
+              ],
+              evidence_verification: {
+                version: 1,
+                run_id: 20,
+                issues: [],
+                verified_findings: 0,
+              },
+            },
+          },
+        ],
+        findings: [],
+      },
+    },
+    {
+      query: async () => [{ created_by: "synthetic-owner" }],
+      notifications: { send },
+    },
+    policy
   );
+  expect(result.evidence_verified).toBe(true);
+  const body = send.mock.calls[0][0].body as string;
+  expect(body.startsWith("x: 1 text posts, read\n\n")).toBe(true);
+  expect(body).toHaveLength(979);
+  expect(body.endsWith("x")).toBe(true);
 });

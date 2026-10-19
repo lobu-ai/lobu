@@ -31,7 +31,6 @@ type Draft = {
 export type SocialData = {
   briefings: Draft[];
   findings: Draft[];
-  profiles?: Draft[];
 };
 export type EvidencePolicy = {
   workspace: string;
@@ -40,8 +39,6 @@ export type EvidencePolicy = {
   // Cross-workspace receipt reads are explicit and platform-bound.
   receipt_workspaces: Record<string, string[]>;
   company_linkedin_path?: string;
-  // Opt-in owner configuration, not a platform graph contract.
-  public_graph_workspace?: string;
 };
 type EvidenceClient = {
   org(workspace: string): Promise<{
@@ -258,19 +255,22 @@ export async function verifySocialEvidence(
       return Number.isFinite(t) && t >= end - 7 * 86400000 && t <= end;
     }).length;
     const incomplete = [...posts.values()].some(
-      (p) => p.truncated !== false || p.media_unread !== false || !p.author
+      (p) =>
+        p.truncated !== false ||
+        p.media_unread !== false ||
+        !p.author ||
+        !Number.isFinite(Date.parse(p.occurred_at ?? ""))
     );
     c.status = !verifiedPages
       ? "blocked"
       : incomplete ||
-          c.recent_posts_read !== posts.size ||
           c.continuation_pending !== false ||
           c.stop_reason !== "source_exhausted" ||
           issues.some((issue) => issue.startsWith(`${c.platform}:`))
         ? "partial"
         : "read";
     c.detail =
-      `Verified ${posts.size} unique text posts; ${c.recent_posts_read} dated within seven days. ${incomplete ? "Incomplete text or unread media. " : ""}${c.continuation_pending !== false ? "Continuation remains. " : ""}${issues.filter((issue) => issue.startsWith(`${c.platform}:`)).join("; ")}`.trim();
+      `Verified ${posts.size} unique text posts; ${c.recent_posts_read} dated within seven days. ${incomplete ? "Incomplete text, unknown dates or unread media. " : ""}${c.continuation_pending !== false ? "Continuation remains. " : ""}${issues.filter((issue) => issue.startsWith(`${c.platform}:`)).join("; ")}`.trim();
   }
   const seen = new Set<string>();
   for (const f of data.findings) {

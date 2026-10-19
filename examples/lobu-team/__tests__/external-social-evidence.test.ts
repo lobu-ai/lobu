@@ -174,6 +174,19 @@ test("truncation, undated bodies, media and remaining pagination make coverage p
   expect(h.data.briefings[0]!.metadata.coverage[0].status).toBe("partial");
 });
 
+test("fully read older posts reduce the recent count without making coverage incomplete", async () => {
+  const h = fixture();
+  h.source.output.value.posts = [
+    { ...post, occurred_at: new Date(now - 10 * 86400000).toISOString() },
+  ];
+  await h.run();
+  expect(h.data.briefings[0]!.metadata.coverage[0]).toMatchObject({
+    posts_read: 1,
+    recent_posts_read: 0,
+    status: "read",
+  });
+});
+
 test("a receipt cannot be reused for another platform or an ungranted workspace", async () => {
   const h = fixture();
   h.data.findings[0]!.metadata.read_receipts[0].workspace = "private-other";

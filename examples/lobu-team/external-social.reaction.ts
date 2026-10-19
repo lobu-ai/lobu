@@ -16,10 +16,7 @@ export async function deliverExternalSocial(
     throw new Error("Expected one briefing and findings array");
   const b = d.briefings[0];
   const m = b.metadata;
-  if (
-    m?.workflow !== policy.workflow ||
-    Number(m.run_id) !== Number(ctx.window.run_id)
-  )
+  if (m?.workflow !== policy.workflow || m.run_id !== ctx.window.run_id)
     throw new Error("Briefing ownership/run mismatch");
   const coverage = m.coverage;
   if (
@@ -68,14 +65,18 @@ export async function deliverExternalSocial(
         )
         .join("; ")
     : "Source verification missing. This completed window is not a verified scan; findings require reprocessing.";
+  // The notification validator counts UTF-16 units; never end on a split
+  // surrogate pair.
+  let body = (
+    summary + (verified ? `\n\n${String(b.content || "")}` : "")
+  ).slice(0, 980);
+  const last = body.charCodeAt(body.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) body = body.slice(0, -1);
   const sent = await client.notifications.send({
     title: verified
       ? "Social research briefing"
       : "Social research needs evidence",
-    body: (summary + (verified ? `\n\n${String(b.content || "")}` : "")).slice(
-      0,
-      980
-    ),
+    body,
     recipients: [owner.created_by],
     resource_url: `/${policy.workspace}/automations/${ctx.automation.id}`,
     idempotency_key: `social-briefing:${ctx.automation.id}:${ctx.window.run_id}`,

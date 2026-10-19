@@ -28,6 +28,10 @@ export async function configureExternalSocial(
     return result;
   };
   const prompt = externalSocialPrompt(a.prompt, policy);
+  // The claim response carries pinned reactions_guidance, but not prompt.
+  // Use that existing instruction channel and retain prior owner guidance.
+  const guidanceMarker = "\n\nEXTERNAL SOCIAL WINDOW INSTRUCTIONS v1\n";
+  const guidance = `${(a.reactions_guidance ?? "").split(guidanceMarker)[0]}${guidanceMarker}${prompt}`;
   const reaction = externalSocialReaction(policy);
   // setReactionScript is a separate existing mutation. Retry reconciles both
   // values; no scheduled/external processing mode is disabled or replaced.
@@ -48,13 +52,14 @@ export async function configureExternalSocial(
     throw new Error(
       "Automation changed during configuration; reconcile before creating a version"
     );
-  if (a.prompt !== prompt)
+  if (a.prompt !== prompt || a.reactions_guidance !== guidance)
     check(
       await client.automations.createVersion({
         automation_id: automationId,
         name: a.automation_name,
         description: a.description,
         prompt,
+        reactions_guidance: guidance,
         sources: a.sources,
         outputs: a.outputs,
         set_as_current: true,
