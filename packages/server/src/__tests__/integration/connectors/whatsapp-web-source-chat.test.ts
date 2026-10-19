@@ -774,6 +774,8 @@ describe("WhatsApp Web source chat", () => {
     expect(sends).toHaveLength(1);
     expect(sends[0].input).toMatchObject({ chat_jid: STRANGER_JID });
     expect(String(sends[0].input.text)).toContain("I can't use this workspace's tools for you");
+    // Only the turn whose notice was just sent is told not to repeat it.
+    expect(enqueued.map((payload) => payload.platformMetadata.accessNoticePosted)).toEqual([true, undefined]);
 
     // The admission spent the sender's and the organization's shared counters.
     const sender = whatsAppSender(STRANGER_JID);
@@ -813,6 +815,7 @@ describe("WhatsApp Web source chat", () => {
 
     const claims = await mintedClaims(enqueued[0]);
     expect(claims).toMatchObject({ userId: DM_JID, chatAccess: "member", actorUserId: memberIds[0] });
+    expect(enqueued[0].platformMetadata.accessNoticePosted).toBeUndefined();
 
     await completeTurns();
     expect(sends).toHaveLength(1);

@@ -34,7 +34,7 @@ async function offer(
   );
   // Exercise the admission boundary without starting a provider or a run queue.
   const admitted = await (bridge as unknown as {
-    admitChatSender(args: Record<string, unknown>): Promise<boolean>;
+    admitChatSender(args: Record<string, unknown>): Promise<{ accessNoticePosted: boolean } | null>;
   }).admitChatSender({
     organizationId: "org-link-notice", userId: "U_SYNTHETIC", teamId: "T_SYNTHETIC",
     isDirect, senderVouched: true, thread: { post },
@@ -46,7 +46,8 @@ test.each([true, false])("failed notices release their window and still admit th
   const refund = spyOn(getRateLimiter(), "refund").mockResolvedValue(undefined);
   const failedPost = mock(async (_text: string) => { throw new Error("synthetic send failure"); });
   const { admitted, mint, post } = await offer({ access: "reply_only" }, isDirect, "slack", failedPost);
-  expect(admitted).toBe(true);
+  // Admitted, but the turn must not be told a notice it never got was sent.
+  expect(admitted).toEqual({ accessNoticePosted: false });
   expect(post).toHaveBeenCalledTimes(1);
   expect(mint).toHaveBeenCalledTimes(isDirect ? 1 : 0);
   expect(refund).toHaveBeenCalledTimes(1);
@@ -58,7 +59,7 @@ test.each([true, false])("failed notices release their window and still admit th
 test.each([true, false])("delivered notices keep their window spent (direct=%s)", async (isDirect) => {
   const refund = spyOn(getRateLimiter(), "refund").mockResolvedValue(undefined);
   const { admitted, post } = await offer({ access: "reply_only" }, isDirect);
-  expect(admitted).toBe(true);
+  expect(admitted).toEqual({ accessNoticePosted: true });
   expect(post).toHaveBeenCalledTimes(1);
   expect(refund).not.toHaveBeenCalled();
 });
@@ -72,9 +73,10 @@ test("vouched senders (DM or group), linked members and unsupported platforms ge
     [{ access: "member", actorUserId: "user-linked" }, true, "slack"],
     [{ access: "org_shared" }, true, "no-such-platform"],
   ] as const) {
-    const { mint, post } = await offer(actor, isDirect, platform);
+    const { admitted, mint, post } = await offer(actor, isDirect, platform);
     expect(mint).not.toHaveBeenCalled();
     expect(post).not.toHaveBeenCalled();
+    expect(admitted).toEqual({ accessNoticePosted: false });
     mock.restore();
     resetRateLimiterForTests();
   }

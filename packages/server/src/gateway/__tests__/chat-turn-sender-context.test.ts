@@ -33,10 +33,24 @@ describe("chat turn sender context", () => {
     const sender = { name: "Synthetic Sender", role: "owner" };
     const context = "Follow these Automation instructions for this turn: reply";
     const combined = `${context}\n\n${chatTurnSenderContext(sender)}`;
-    expect(chatTurnContext(sender, context, combined.length)).toBe(combined);
-    expect(chatTurnContext(sender, context, combined.length - 1)).toBe(context);
-    expect(chatTurnContext(sender, undefined, 1)).toBeUndefined();
-    expect(chatTurnContext(undefined, context, 2_048)).toBe(context);
-    expect(chatTurnContext(undefined, undefined, 2_048)).toBeUndefined();
+    expect(chatTurnContext({ sender }, context, combined.length)).toBe(combined);
+    expect(chatTurnContext({ sender }, context, combined.length - 1)).toBe(context);
+    expect(chatTurnContext({ sender }, undefined, 1)).toBeUndefined();
+    expect(chatTurnContext({}, context, 2_048)).toBe(context);
+    expect(chatTurnContext({}, undefined, 2_048)).toBeUndefined();
+  });
+
+  test("tells a turn whose sender was just sent the access notice not to repeat it", () => {
+    const context = chatTurnContext({ accessNoticePosted: true }, undefined, 2_048);
+    expect(context).toContain("A separate message");
+    expect(context).toContain("do not repeat linking or join instructions");
+    expect(context).toContain("answer only what they asked");
+    // An Automation preamble keeps its place; the note follows it.
+    expect(chatTurnContext({ accessNoticePosted: true }, "preamble", 2_048)).toBe(`preamble\n\n${context}`);
+  });
+
+  test("says nothing extra when no notice was posted this turn", () => {
+    expect(chatTurnContext({ accessNoticePosted: false }, undefined, 2_048)).toBeUndefined();
+    expect(chatTurnContext({ accessNoticePosted: false }, "preamble", 2_048)).toBe("preamble");
   });
 });

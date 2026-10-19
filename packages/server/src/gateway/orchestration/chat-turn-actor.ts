@@ -91,6 +91,21 @@ export interface ChatTurnEvidence {
   senderVouched: boolean;
 }
 
+/**
+ * `platformMetadata` key the chat bridge stamps when it delivered the access
+ * notice ({@link chatAccessNotice}) to this turn's sender, from the result of
+ * the post itself. Not authority: it only keeps the turn's reply from
+ * repeating the notice.
+ */
+export const CHAT_ACCESS_NOTICE_POSTED_KEY = "accessNoticePosted";
+
+/** Whether the bridge posted the access notice for this turn; absent is "no". */
+export function chatAccessNoticePostedFrom(
+  platformMetadata: Record<string, unknown> | undefined,
+): boolean {
+  return platformMetadata?.[CHAT_ACCESS_NOTICE_POSTED_KEY] === true;
+}
+
 /** Read the bridge's evidence; anything absent or malformed is "no". */
 export function chatTurnEvidenceFrom(
   platformMetadata: Record<string, unknown> | undefined,
@@ -283,18 +298,29 @@ export function chatTurnSenderContext(sender: ChatTurnSender): string {
 }
 
 /**
+ * The per-turn line for a sender who was just sent the access notice, so the
+ * reply answers their message instead of repeating the notice. The access
+ * section in the cached prompt still describes the tier.
+ */
+const CHAT_ACCESS_NOTICE_POSTED_CONTEXT =
+  "A separate message explaining this person's workspace access was just sent to them; do not repeat linking or join instructions, answer only what they asked.";
+
+/**
  * A turn's transient context: the caller's context (an Automation preamble the
  * planner admitted at full length) exactly as before, then the sender line
- * when it still fits under `cap`. The sender is best-effort; the access section
- * in the system prompt carries the tier either way.
+ * (a linked sender's name and role, or the access-notice note) when it still
+ * fits under `cap`. The line is best-effort; the access section in the system
+ * prompt carries the tier either way.
  */
 export function chatTurnContext(
-  sender: ChatTurnSender | undefined,
+  turn: { sender?: ChatTurnSender; accessNoticePosted?: boolean },
   context: string | undefined,
   cap: number,
 ): string | undefined {
   const rest = context?.trim() ? context.slice(0, cap) : "";
-  const line = sender ? chatTurnSenderContext(sender) : "";
+  const line = turn.sender
+    ? chatTurnSenderContext(turn.sender)
+    : turn.accessNoticePosted ? CHAT_ACCESS_NOTICE_POSTED_CONTEXT : "";
   const withSender = [rest, line].filter(Boolean).join("\n\n");
   return (withSender.length <= cap ? withSender : rest) || undefined;
 }

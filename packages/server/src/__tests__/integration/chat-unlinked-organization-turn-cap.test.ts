@@ -18,7 +18,7 @@ type Admit = (args: {
   isDirect: boolean;
   senderVouched: boolean;
   thread: { post: () => Promise<void> };
-}) => Promise<boolean>;
+}) => Promise<{ accessNoticePosted: boolean } | null>;
 
 function bridgeWithTier(
   organizationId: string,
@@ -48,7 +48,7 @@ function bridgeWithTier(
       isDirect: false,
       senderVouched: false,
       thread: { post },
-    });
+    }).then((admission) => admission !== null);
 }
 
 describe('workspace-wide cap on unlinked chat turns', () => {
