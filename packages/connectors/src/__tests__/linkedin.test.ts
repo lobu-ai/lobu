@@ -3405,7 +3405,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.20.0");
+    expect(c.definition.version).toBe("3.20.1");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
