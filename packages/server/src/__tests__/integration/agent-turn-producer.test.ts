@@ -37,7 +37,7 @@ import { enqueueAgentTurn,
   cancelAgentTurn,
 } from '../../gateway/orchestration/agent-turn-producer';
 import { armTurnTimeout, failTurnIfPending } from '../../gateway/orchestration/turn-liveness';
-import { chatTurnAccessInstructions, chatTurnSenderContext } from '../../gateway/orchestration/chat-turn-actor';
+import { chatTurnAccessInstructions, chatTurnSender, chatTurnSenderContext } from '../../gateway/orchestration/chat-turn-actor';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import { failClaimedWorkerRun } from '../../worker-api/poll';
@@ -1322,7 +1322,57 @@ describe('agent turn producer', () => {
     expect(envelope.turn.system_prompt).toContain(`work in the ${JSON.stringify(org.slug)} workspace by default`);
     // The sender is conversation-scoped, so it rides the per-turn context, never the cached prompt.
     expect(envelope.turn.system_prompt).not.toContain('Synthetic Member');
-    expect(envelope.turn.ephemeral_context).toBe(chatTurnSenderContext('Synthetic Member'));
+    expect(envelope.turn.ephemeral_context).toBe(chatTurnSenderContext({ name: 'Synthetic Member', role: 'member' }));
+  });
+
+  it.each([
+    ['owner', 'Synthetic Owner', '"Synthetic Owner", an owner'],
+    ['admin', 'Synthetic Admin', '"Synthetic Admin", an admin'],
+    ['admin', '   ', 'a person, an admin'],
+  ])('names a linked %s with display name %j', async (role, name, senderDescription) => {
+    await seedSystemEntityTypes();
+    const org = await createTestOrganization();
+    const member = await createTestUser({ email: 'turn-dm-role@example.test', name });
+    const otherOrg = await createTestOrganization();
+    await addUserToOrganization(member.id, otherOrg.id, 'member');
+    await addUserToOrganization(member.id, org.id, role);
+    await linkChatIdentityInGraph({
+      organizationId: org.id, userId: member.id, platform: 'slack', teamId: 'T0DMROLE', platformUserId: 'U0DMROLE',
+    });
+    await enqueueMessage({
+      ...messageFor(org.id),
+      userId: 'U0DMROLE',
+      platform: 'slack',
+      teamId: 'slack:T0DMROLE',
+      platformMetadata: { connectionId: 'conn-slack-1', teamId: 'T0DMROLE', isDirect: true },
+    }, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const { turn } = run.action_input as { turn: { system_prompt: string; ephemeral_context?: string } };
+    expect(turn.ephemeral_context).toBe(
+      `This message is from ${senderDescription} of this workspace, verified through their linked chat account.`,
+    );
+    expect(turn.system_prompt).not.toContain(senderDescription);
+  });
+
+  it('refreshes the sender role and omits senders whose membership was removed', async () => {
+    const org = await createTestOrganization();
+    const member = await createTestUser({ name: 'Synthetic Sender' });
+    await addUserToOrganization(member.id, org.id, 'owner');
+    expect(await chatTurnSender(member.id, org.id)).toEqual({ name: 'Synthetic Sender', role: 'owner' });
+
+    const sql = getTestDb();
+    await sql`UPDATE member SET role = 'member' WHERE "userId" = ${member.id} AND "organizationId" = ${org.id}`;
+    expect(await chatTurnSender(member.id, org.id)).toEqual({ name: 'Synthetic Sender', role: 'member' });
+
+    await sql`DELETE FROM member WHERE "userId" = ${member.id} AND "organizationId" = ${org.id}`;
+    expect(await chatTurnSender(member.id, org.id)).toBeUndefined();
+    expect(await chatTurnSender(undefined, org.id)).toBeUndefined();
   });
 
   it('never cuts an admitted Automation preamble to fit the sender line', async () => {
@@ -1367,7 +1417,7 @@ describe('agent turn producer', () => {
 
     const contexts = (await agentTurnRuns()).map((run) =>
       (run.action_input as { turn: { ephemeral_context?: string } }).turn.ephemeral_context);
-    expect(contexts).toEqual([`${short}\n\n${chatTurnSenderContext('Synthetic Member')}`, full]);
+    expect(contexts).toEqual([`${short}\n\n${chatTurnSenderContext({ name: 'Synthetic Member', role: 'member' })}`, full]);
   });
 
   it('gives a turn with no chat sender no access section and no sender line', async () => {

@@ -68,7 +68,7 @@ import {
   chatTurnContext,
   chatTurnHomeWorkspaceSlug,
   chatTurnReachesSenderWorkspaces,
-  chatTurnSenderName,
+  chatTurnSender,
   isConfinedChatTurn,
   resolveChatTurnActor,
 } from "./chat-turn-actor.js";
@@ -1162,7 +1162,7 @@ export async function enqueueAgentTurn(
         : "";
     // A linked sender is named per turn; the cached prompt stays sender-free.
     const ephemeralContext = chatTurnContext(
-      chatAccess ? await chatTurnSenderName(turnClaims.actorUserId) : undefined,
+      chatAccess ? await chatTurnSender(turnClaims.actorUserId, data.organizationId) : undefined,
       data.ephemeralContext,
       CHAT_TURN_CONTEXT_CHARS,
     );
