@@ -63,6 +63,7 @@ import { CHAT_TURN_CONTEXT_CHARS } from "./chat-turn-limits.js";
 import {
   chatSenderWorkspacesClaim,
   chatTurnAccessOf,
+  chatAccessNoticePostedFrom,
   chatTurnEvidenceFrom,
   chatTurnAccessInstructions,
   chatTurnContext,
@@ -1161,8 +1162,13 @@ export async function enqueueAgentTurn(
         ? data.agentOptions.effort.trim()
         : "";
     // A linked sender is named per turn; the cached prompt stays sender-free.
+    // An unlinked sender who was just sent the access notice is told so, so
+    // the reply does not repeat it.
     const ephemeralContext = chatTurnContext(
-      chatAccess ? await chatTurnSender(turnClaims.actorUserId, data.organizationId) : undefined,
+      {
+        sender: chatAccess ? await chatTurnSender(turnClaims.actorUserId, data.organizationId) : undefined,
+        accessNoticePosted: confined && chatAccessNoticePostedFrom(data.platformMetadata),
+      },
       data.ephemeralContext,
       CHAT_TURN_CONTEXT_CHARS,
     );

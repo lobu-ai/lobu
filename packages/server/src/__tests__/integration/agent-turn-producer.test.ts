@@ -1257,6 +1257,40 @@ describe('agent turn producer', () => {
     expect(envelope.turn.tools?.gateway).not.toContain('send_message');
   });
 
+  it.each([
+    ['public', 'public_visitor', true],
+    ['public', 'public_visitor', false],
+    ['private', 'reply_only', true],
+    ['private', 'reply_only', false],
+  ] as const)('a %s workspace %s turn includes the notice context only when posted=%s', async (visibility, access, posted) => {
+    const org = await createTestOrganization({ visibility });
+    await enqueueMessage({
+      ...messageFor(org.id),
+      userId: 'U0NOTICED',
+      platform: 'slack',
+      platformMetadata: {
+        connectionId: 'conn-slack-1', teamId: 'T0OTHER', isDirect: true,
+        ...(posted ? { accessNoticePosted: true } : {}),
+      },
+    }, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      mcp: mcpFixture().mcp,
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const envelope = run.action_input as { turn: { system_prompt: string; ephemeral_context?: string }; credential: string };
+    expect(verifyWorkerToken(envelope.credential)?.chatAccess).toBe(access);
+    if (posted) {
+      expect(envelope.turn.ephemeral_context).toContain('do not repeat linking or join instructions');
+      // Per-turn only: the cached prompt never carries it.
+      expect(envelope.turn.system_prompt).not.toContain('do not repeat linking');
+    } else {
+      expect(envelope.turn.ephemeral_context).toBeUndefined();
+    }
+  });
+
   it('signs a linked channel sender as org_shared with the member as attribution, and discovers tools', async () => {
     await seedSystemEntityTypes();
     const org = await createTestOrganization();

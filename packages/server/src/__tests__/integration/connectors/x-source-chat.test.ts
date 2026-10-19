@@ -293,6 +293,8 @@ describe("X source chat", () => {
     expect(String(sends[0].input.text)).toContain("I can't use this workspace's tools for you");
     expect(String(sends[0].input.text)).toContain("/connect/chat-identity?token=");
     expect(await mintedClaims(enqueued[0])).toMatchObject({ userId: PEER, chatAccess: "reply_only" });
+    // The turn learns the notice went out, so its reply does not repeat it.
+    expect(enqueued[0].platformMetadata.accessNoticePosted).toBe(true);
 
     await completeTurns();
     expect(replies()).toHaveLength(1);
@@ -358,6 +360,7 @@ describe("X source chat", () => {
     expect(await mintedClaims(enqueued[0])).toMatchObject({
       userId: PEER, chatAccess: "member", actorUserId: member.id,
     });
+    expect(enqueued[0].platformMetadata.accessNoticePosted).toBeUndefined();
 
     await completeTurns();
     expect(sends).toHaveLength(1);
@@ -381,6 +384,8 @@ describe("X source chat", () => {
     expect(enqueued).toHaveLength(1);
     expect(sends).toHaveLength(0);
     expect(failedNotice).toContain("/connect/chat-identity?token=");
+    // The notice never reached the sender, so the turn is not told it did.
+    expect(enqueued[0].platformMetadata.accessNoticePosted).toBeUndefined();
     await completeTurns();
     expect(replies()).toHaveLength(1);
 
@@ -394,6 +399,7 @@ describe("X source chat", () => {
     expect(sends).toHaveLength(1);
     expect(String(sends[0].input.text)).toContain("/connect/chat-identity?token=");
     expect(sends[0].input.text).not.toBe(failedNotice);
+    expect(enqueued[0].platformMetadata.accessNoticePosted).toBe(true);
   }, 60_000);
 
   it("answers a message request like any other DM", async () => {

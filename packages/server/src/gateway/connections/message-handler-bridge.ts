@@ -58,6 +58,7 @@ import {
 } from "../../lobu/stores/chat-identity-link.js";
 import {
   CHAT_ACCESS_NOTICE_WINDOW_SECONDS,
+  CHAT_ACCESS_NOTICE_POSTED_KEY,
   CHAT_TURN_EVIDENCE_KEYS,
   chatAccessNotice,
   chatOrganizationLimitKey,
@@ -1156,19 +1157,16 @@ export class MessageHandlerBridge {
           this.connection,
           message.raw
         ) === true;
-      if (
-        !(await this.admitChatSender({
-          organizationId: target.organizationId,
-          userId,
-          teamId,
-          isDirect: isDirect === true,
-          senderVouched,
-          senderDisplayName: message.author?.fullName,
-          thread,
-        }))
-      ) {
-        continue;
-      }
+      const admission = await this.admitChatSender({
+        organizationId: target.organizationId,
+        userId,
+        teamId,
+        isDirect: isDirect === true,
+        senderVouched,
+        senderDisplayName: message.author?.fullName,
+        thread,
+      });
+      if (!admission) continue;
       await this.enqueueUserTurn({
         agentId: target.agentId,
         organizationId: target.organizationId,
@@ -1209,6 +1207,7 @@ export class MessageHandlerBridge {
           ...(ingestedFiles.length > 0 && { files: ingestedFiles }),
           ...(sessionReset && { sessionReset: true }),
           ...(senderVouched && { [CHAT_TURN_EVIDENCE_KEYS.senderVouched]: true }),
+          ...(admission.accessNoticePosted && { [CHAT_ACCESS_NOTICE_POSTED_KEY]: true }),
         },
         spanName: routing?.spanName ?? "message_received",
         logMessage:
@@ -1238,6 +1237,10 @@ export class MessageHandlerBridge {
    * fixed server-posted notice, at most once per notice window. The mint
    * re-derives the same authority from the same evidence when it signs the
    * turn's token.
+   *
+   * Returns null when the message gets no turn. Otherwise `accessNoticePosted`
+   * says whether the notice was delivered for this turn (the post resolved),
+   * so the turn's reply does not repeat it.
    */
   private async admitChatSender(args: {
     organizationId: string | undefined;
@@ -1247,7 +1250,7 @@ export class MessageHandlerBridge {
     senderVouched: boolean;
     senderDisplayName?: string;
     thread: any;
-  }): Promise<boolean> {
+  }): Promise<{ accessNoticePosted: boolean } | null> {
     const platform = this.connection.platform;
     const actor = await this.resolveTurnActor({
       organizationId: args.organizationId,
@@ -1257,7 +1260,7 @@ export class MessageHandlerBridge {
     });
     // Keyed on the sender being unlinked, not on the tier: a linked member in
     // a group conversation is `org_shared` too, and is never limited.
-    if (!actor || actor.actorUserId) return true;
+    if (!actor || actor.actorUserId) return { accessNoticePosted: false };
 
     const sender = {
       organizationId: args.organizationId,
@@ -1277,9 +1280,10 @@ export class MessageHandlerBridge {
         { platform, organizationId: args.organizationId, connectionId: this.connection.id, access: actor.access },
         "Unlinked chat sender is over its turn limit — no agent turn"
       );
-      return false;
+      return null;
     }
 
+    let accessNoticePosted = false;
     if (actor.access === "reply_only" || actor.access === "public_visitor") {
       // One ceiling for the whole workspace, so many throwaway senders cannot
       // multiply the per-sender limit. Over it the message gets no turn and no
@@ -1294,7 +1298,7 @@ export class MessageHandlerBridge {
             { platform, organizationId: args.organizationId, connectionId: this.connection.id, access: actor.access },
             "Organization is over its unlinked chat turn ceiling — no agent turn"
           );
-          return false;
+          return null;
         }
       }
       const canLink = args.isDirect && !!args.organizationId &&
@@ -1338,6 +1342,7 @@ export class MessageHandlerBridge {
           : null;
         try {
           await args.thread.post(chatAccessNotice(actor.access, joinUrl, linkUrl));
+          accessNoticePosted = true;
           logger.info(
             { platform, organizationId: args.organizationId, connectionId: this.connection.id, access: actor.access },
             "Posted the chat access notice to an unlinked sender"
@@ -1353,7 +1358,7 @@ export class MessageHandlerBridge {
         }
       }
     }
-    return true;
+    return { accessNoticePosted };
   }
 
   /**
