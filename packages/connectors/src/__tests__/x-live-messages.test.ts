@@ -183,7 +183,7 @@ function page(
 	const globals: Record<string, unknown> = {};
 	const replies = new Set<(event: unknown) => void>();
 	const posts: Array<Record<string, any>> = [];
-	const timers: Array<() => void> = [];
+	const timers: Array<() => void | Promise<void>> = [];
 	const window = {
 		postMessage: (data: Record<string, any>) => posts.push(data),
 		addEventListener: (_kind: string, fn: (event: unknown) => void) =>
@@ -200,7 +200,7 @@ function page(
 		crypto: webcrypto,
 		TextEncoder,
 		AbortSignal,
-		setTimeout: (fn: () => void) => {
+		setTimeout: (fn: () => void | Promise<void>) => {
 			timers.push(fn);
 			return timers.length;
 		},
@@ -248,8 +248,8 @@ function page(
 	};
 	const tick = async () => {
 		const due = timers.splice(0);
-		for (const fn of due) fn();
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		// Poll callbacks return promises that include the asynchronous batch digest.
+		await Promise.all(due.map((fn) => fn()));
 	};
 	return {
 		dispatcher,
