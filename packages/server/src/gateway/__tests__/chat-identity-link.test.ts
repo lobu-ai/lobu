@@ -1,8 +1,8 @@
 /**
  * One-click chat identity linking, end to end.
  *
- * The routes are the production Hono routes with only the session reader and
- * origin injected; claims, membership and the identity graph are real
+ * The routes are the production Hono routes with the session reader, sign-out
+ * and origin injected; claims, membership and the identity graph are real
  * Postgres. The end-to-end cases drive a real Google Chat webhook through the
  * assembled bridge (`helpers/chat-bridge-harness.ts`), follow the link the
  * bot posted, and mint the next turn's worker token through the production
@@ -25,12 +25,16 @@ import { Chat, type StateAdapter } from "chat";
 import { createTestAutomationSubscription } from "../../__tests__/setup/automation-subscriptions.js";
 import {
   addUserToOrganization,
+  createTestConnectorDefinition,
+  createTestSession,
   createTestUser,
   insertChatConnectionRow,
   linkChatIdentityInGraph,
   type TestUser,
 } from "../../__tests__/setup/test-fixtures.js";
+import { resolveBaseUrl } from "../../auth/base-url.js";
 import { sessionCookieName } from "../../auth/session-cookie-scope.js";
+import type { Env } from "../../index.js";
 import { SLACK_IDENTITY } from "@lobu/connectors/slack-identity";
 import {
   adoptChatIdentityOntoMember,
@@ -71,6 +75,8 @@ const SENDER = {
   email: "link.sender@example.test",
   type: "HUMAN",
 };
+/** `createTestSession` signs its cookie with this secret. */
+const TEST_AUTH_SECRET_FOR_SESSIONS = "test-auth-secret-for-testing-only";
 const TEST_ENCRYPTION_KEY = Buffer.from("12345678901234567890123456789012").toString("base64");
 const previousEncryptionKey = process.env.ENCRYPTION_KEY;
 
@@ -80,10 +86,18 @@ const browser = {
   "content-type": "application/x-www-form-urlencoded",
 };
 
+/** Sign-outs the routes asked for, with the Set-Cookie each one returned. */
+const signOuts: Request[] = [];
+const SIGNED_OUT_COOKIE = `${sessionCookieName(true)}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`;
+
 /** The production routes, signed in as `user` (or signed out for null). */
 function routesAs(user: TestUser | null) {
   return createChatIdentityRoutes({
     session: async () => (user ? { user: { id: user.id, email: user.email, name: user.name } } : null),
+    signOut: async (request) => {
+      signOuts.push(request);
+      return [SIGNED_OUT_COOKIE];
+    },
     origin: () => ORIGIN,
   });
 }
@@ -96,6 +110,27 @@ function submit(user: TestUser | null, token: string, headers: Record<string, st
     headers,
     body: new URLSearchParams({ token }).toString(),
   });
+}
+
+function submitSwitch(user: TestUser | null, token: string, headers: Record<string, string> = browser) {
+  return routesAs(user).request(`${ORIGIN}/connect/chat-identity`, {
+    method: "POST",
+    headers,
+    body: new URLSearchParams({ token, switch_account: "1" }).toString(),
+  });
+}
+
+/** The account-switch form every page that knows the token must offer. */
+function expectSwitchAccountForm(html: string, token: string): void {
+  expect(html).toContain('name="switch_account" value="1"');
+  expect(html).toContain(`name="token" value="${token}"`);
+}
+
+/** One layout for the whole flow: Lobu card, phone viewport, dark mode. */
+function expectLobuPage(html: string): void {
+  expect(html).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
+  expect(html).toContain("prefers-color-scheme: dark");
+  expect(html).toContain('class="lobu-card"');
 }
 
 function submitJoin(user: TestUser | null, token: string) {
@@ -189,8 +224,15 @@ describe("chat identity link routes", () => {
     expect(html).toContain("bot will then act as you in <strong>Acme Synthetic</strong>");
     expect(html).not.toContain("any workspace");
     expect(html).toContain("Group messages will continue to use only shared workspace access");
-    expect(html).toContain(`gchat: ${SENDER.displayName} (${SENDER.name})`);
+    // A human platform name and the sender's name, not the connector key and
+    // the opaque platform id.
+    expect(html).toContain("Google Chat");
+    expect(html).toContain(SENDER.displayName);
+    expect(html).not.toContain("gchat:");
+    expect(html).not.toContain(SENDER.name);
     expect(html).toContain('method="post"');
+    expectLobuPage(html);
+    expectSwitchAccountForm(html, token);
     expect(await claimCount()).toBe(1);
     expect(await identityRows(ORG_A)).toHaveLength(0);
   });
@@ -225,7 +267,12 @@ describe("chat identity link routes", () => {
     const res = await submit(member, token);
     expect(res.status).toBe(200);
     expect(res.headers.get("referrer-policy")).toBe("strict-origin");
-    expect(await res.text()).toContain("Chat account linked");
+    const linked = await res.text();
+    expect(linked).toContain("Chat account linked");
+    expectLobuPage(linked);
+    // Not a dead end: back to the chat, or on into the workspace.
+    expect(linked).toContain("You can close this tab and go back to your chat");
+    expect(linked).toContain('href="/acme-synthetic"');
     expect(await resolveChatSenderMember("gchat", undefined, SENDER.name, ORG_A)).toEqual({
       userId: member.id,
       role: "member",
@@ -234,7 +281,10 @@ describe("chat identity link routes", () => {
 
     const replay = await submit(member, token);
     expect(replay.status).toBe(410);
-    expect(await replay.text()).toContain("expired or was already used");
+    const expired = await replay.text();
+    expect(expired).toContain("expired or was already used");
+    expect(expired).toContain("Send the bot a direct message again");
+    expectLobuPage(expired);
   });
 
   test("an expired link is refused on GET and POST", async () => {
@@ -366,10 +416,18 @@ describe("chat identity link routes", () => {
     const token = (await mint())!;
     const page = await routesAs(outsider).request(pageUrl(token));
     expect(page.status).toBe(403);
-    expect(await page.text()).toContain("Ask an admin of Acme Synthetic to invite you");
+    const html = await page.text();
+    expect(html).toContain("Ask an admin of Acme Synthetic to invite you");
+    // Signed in with the wrong account is the likeliest cause: say which one,
+    // and offer the switch.
+    expect(html).toContain(outsider.email);
+    expectLobuPage(html);
+    expectSwitchAccountForm(html, token);
     const res = await submit(outsider, token);
     expect(res.status).toBe(403);
-    expect(await res.text()).toContain("Ask an admin of Acme Synthetic to invite you");
+    const posted = await res.text();
+    expect(posted).toContain("Ask an admin of Acme Synthetic to invite you");
+    expectSwitchAccountForm(posted, token);
     expect(await identityRows(ORG_A)).toHaveLength(0);
     expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name)).toBeNull();
   });
@@ -383,6 +441,8 @@ describe("chat identity link routes", () => {
     const html = await page.text();
     expect(html).toContain("Join and link");
     expect(html).toContain('name="join" value="1"');
+    expectLobuPage(html);
+    expectSwitchAccountForm(html, token);
 
     // A plain link submission never joins anyone.
     expect((await submit(outsider, token)).status).toBe(403);
@@ -438,7 +498,11 @@ describe("chat identity link routes", () => {
     const token = (await mint())!;
     const res = await submit(member, token);
     expect(res.status).toBe(409);
-    expect(await res.text()).toContain("already linked to a different Lobu account");
+    const html = await res.text();
+    expect(html).toContain("already linked to a different Lobu account");
+    expectLobuPage(html);
+    // The link survives a conflict, so the other account can still claim it.
+    expectSwitchAccountForm(html, token);
     expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name)).toBe(owner.id);
     expect(await identityRows(ORG_A)).toHaveLength(1);
   });
@@ -451,6 +515,77 @@ describe("chat identity link routes", () => {
     expect((await submit(member, token)).status).toBe(409);
     expect(await identityRows(ORG_A)).toHaveLength(0);
     expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name)).toBe(owner.id);
+  });
+
+  test("an installed connector's own name labels the chat account", async () => {
+    await createTestConnectorDefinition({ key: "gchat", name: "Team Chat (synthetic)", organization_id: ORG_A });
+    const token = (await mint())!;
+    const html = await (await routesAs(member).request(pageUrl(token))).text();
+    expect(html).toContain("Team Chat (synthetic)");
+  });
+
+  test("a sender with no display name is shown by platform id", async () => {
+    const token = (await mintChatIdentityLink({
+      organizationId: ORG_A,
+      connectionId: RUNTIME_CONNECTION_ID,
+      platform: "gchat",
+      teamId: undefined,
+      senderId: SENDER.name,
+    }))!;
+    const html = await (await routesAs(member).request(pageUrl(token))).text();
+    expect(html).toContain(SENDER.name);
+  });
+
+  test("switching accounts signs out and comes back to the same link through login", async () => {
+    signOuts.length = 0;
+    const token = (await mint())!;
+    const res = await submitSwitch(member, token);
+    expect(res.status).toBe(303);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("strict-origin");
+    const location = res.headers.get("location") ?? "";
+    expect(location.startsWith("/auth/login?callbackUrl=")).toBe(true);
+    expect(decodeURIComponent(location)).toContain(pageUrl(token));
+    expect(res.headers.getSetCookie()).toEqual([SIGNED_OUT_COOKIE]);
+    expect(signOuts).toHaveLength(1);
+    // Switching links nothing and keeps the link for the next account.
+    expect(await claimCount()).toBe(1);
+    expect(await identityRows(ORG_A)).toHaveLength(0);
+  });
+
+  test("switching accounts is a same-origin browser form, and a dead link signs nobody out", async () => {
+    signOuts.length = 0;
+    const token = (await mint())!;
+    expect((await submitSwitch(member, token, { ...browser, origin: "https://evil.example" })).status).toBe(403);
+    expect((await submitSwitch(member, token, { ...browser, cookie: "" })).status).toBe(403);
+    expect((await submitSwitch(member, "not-a-token")).status).toBe(410);
+    expect(signOuts).toHaveLength(0);
+    expect(await claimCount()).toBe(1);
+  });
+
+  test("switching accounts ends the real Better Auth session", async () => {
+    const origin = resolveBaseUrl({ request: new Request(pageUrl("x")) });
+    const env = { ...process.env, BETTER_AUTH_SECRET: TEST_AUTH_SECRET_FOR_SESSIONS } as unknown as Env;
+    const session = await createTestSession(member.id);
+    const token = (await mint())!;
+    const routes = createChatIdentityRoutes();
+    const res = await routes.request(
+      `${origin}/connect/chat-identity`,
+      {
+        method: "POST",
+        headers: { origin, cookie: session.cookieHeader, "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token, switch_account: "1" }).toString(),
+      },
+      env,
+    );
+    expect(res.status).toBe(303);
+    const callback = new URL("/connect/chat-identity", origin);
+    callback.searchParams.set("token", token);
+    expect(res.headers.get("location")).toBe(`/auth/login?callbackUrl=${encodeURIComponent(callback.toString())}`);
+    const cleared = res.headers.getSetCookie().find((c) => c.startsWith(`${session.cookieHeader.split("=", 1)[0]}=`));
+    expect(cleared).toMatch(/Max-Age=0/i);
+    expect(await getDb()`SELECT 1 FROM "session" WHERE id = ${session.sessionId}`).toHaveLength(0);
+    expect(await claimCount()).toBe(1);
   });
 
   test("a link offered in org A never links into org B", async () => {

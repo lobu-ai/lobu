@@ -90,7 +90,9 @@ test("the confirmation page preserves form Origin without leaking the token in R
       senderDisplayName: "Synthetic Sender",
     } }])
     .mockResolvedValueOnce([{ name: "Synthetic Workspace" }])
-    .mockResolvedValueOnce([{ role: "member" }]);
+    .mockResolvedValueOnce([{ role: "member" }])
+    // The org's installed connector definition, for the platform's name.
+    .mockResolvedValueOnce([]);
   spyOn(dbClient, "getDb").mockReturnValue(sql as unknown as dbClient.DbClient);
   const origin = "https://cloud.example.test";
   const routes = createChatIdentityRoutes({
@@ -110,7 +112,37 @@ test("the confirmation page preserves form Origin without leaking the token in R
     body: new URLSearchParams({ token: "synthetic-link" }),
   });
   expect(rejected.status).toBe(403);
-  expect(sql).toHaveBeenCalledTimes(3);
+  expect(sql).toHaveBeenCalledTimes(4);
+});
+
+test("failed account switching offers recovery without consuming the link", async () => {
+  const sql = mock();
+  spyOn(dbClient, "getDb").mockReturnValue(sql as unknown as dbClient.DbClient);
+  spyOn(chatLinks, "readChatIdentityLink").mockResolvedValue({
+    organizationId: "org-link-notice", connectionId: "synthetic-chat", platform: "slack",
+    teamId: "T_SYNTHETIC", senderId: "U_SYNTHETIC", identityKey: "T_SYNTHETIC:U_SYNTHETIC",
+  });
+  const consume = spyOn(chatLinks, "deleteChatIdentityLink").mockResolvedValue(undefined);
+  const adopt = spyOn(subjectIdentities, "adoptChatIdentityOntoMember").mockResolvedValue("already-owned");
+  const signOut = mock(async () => { throw new Error("synthetic sign-out failure"); });
+  const origin = "https://cloud.example.test";
+  const routes = createChatIdentityRoutes({ signOut, origin: () => origin });
+  const response = await routes.request(`${origin}/connect/chat-identity`, {
+    method: "POST",
+    headers: { origin, cookie: `${sessionCookieName(true)}=synthetic-session` },
+    body: new URLSearchParams({ token: "synthetic-link", switch_account: "1" }),
+  });
+  expect(response.status).toBe(502);
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(response.headers.get("location")).toBeNull();
+  expect(response.headers.getSetCookie()).toEqual([]);
+  const html = await response.text();
+  expect(html).toContain("Could not switch accounts");
+  expect(html).toContain('href="/"');
+  expect(signOut).toHaveBeenCalledTimes(1);
+  expect(consume).not.toHaveBeenCalled();
+  expect(adopt).not.toHaveBeenCalled();
+  expect(sql).not.toHaveBeenCalled();
 });
 
 test.each(["conflict", "already-owned"] as const)("join completion is disclosed when identity adoption returns %s", async (outcome) => {

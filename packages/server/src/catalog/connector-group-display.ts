@@ -43,3 +43,17 @@ export async function enrichConnectorGroupsWithCatalogDisplay<
       ),
     );
 }
+
+/**
+ * One connector's human name for a page: the org's installed definition name
+ * when the caller has one, else the bundled catalog entry, else the key.
+ */
+export async function connectorDisplayName(
+  connectorKey: string,
+  installedName: string | null = null,
+): Promise<string> {
+  const [display] = await enrichConnectorGroupsWithCatalogDisplay([
+    { connector_key: connectorKey, connector_name: installedName, favicon_domain: null },
+  ]);
+  return display?.connector_name || connectorKey;
+}

@@ -5,11 +5,12 @@ import { resolveSession, sessionCookieCandidates } from '../auth/resolve-session
 import { findExistingPersonalOrg } from '../auth/personal-org-provisioning';
 import { resolveBaseUrl } from '../auth/base-url';
 import { getDb } from '../db/client';
+import { connectorDisplayName } from '../catalog/connector-group-display';
 import { publicSetupOptions } from './setup-options';
 import { resolveManagedAuthConnectorOffer } from '../workspace/managed-auth-discovery';
 import { handleConnectManaged } from '../tools/admin/manage_connections/handlers/connect-managed';
 import { escapeHtml } from '../utils/html';
-import { renderOAuthErrorPage } from '../gateway/auth/oauth-templates';
+import { renderLobuPage, renderOAuthErrorPage } from '../gateway/auth/oauth-templates';
 
 /** Back to the offer the visitor chose, so signing in never dead-ends. */
 function loginContinuation(origin: string, org: string, connector: string): string {
@@ -26,13 +27,6 @@ function errorPage(code: string, title: string, description: string): string {
     actionUrl: '/',
     actionLabel: 'Return to Lobu',
   });
-}
-
-/**
- * Shared layout for connection and chat-identity consent and success pages.
- */
-export function connectPage(title: string, body: string) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{font:16px/1.6 system-ui;margin:0;padding:24px;background:#fafafa;color:#171717;display:grid;place-items:center;min-height:90vh}main{max-width:480px}h1{font-size:24px}a{color:inherit}button{font:inherit;padding:8px 16px;cursor:pointer}code{overflow-wrap:anywhere}</style></head><body><main><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`;
 }
 
 /** GET only advertises public metadata. Consent is an explicit same-origin POST. */
@@ -88,10 +82,10 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
       return c.redirect(loginContinuation(deps.origin(c.req.raw), org, connector), 302);
     }
     return c.html(
-      connectPage(
-        `Connect ${connector}`,
-        `<p>Use the managed app provided by ${escapeHtml(org)}. This creates or reuses a private authorization for your account. It does not sync provider data into this cloud workspace.</p><form method="post"><button type="submit">Continue to account authorization</button></form><p>You can use the authorized connection with your local Lobu runtime after signing its CLI into this cloud.</p>`
-      )
+      renderLobuPage({
+        title: `Connect ${await connectorDisplayName(connector)}`,
+        body: `<p>Use the managed app provided by ${escapeHtml(org)}. This creates or reuses a private authorization for your account. It does not sync provider data into this cloud workspace.</p><form method="post"><button class="btn" type="submit">Continue to account authorization</button></form><p class="note">You can use the authorized connection with your local Lobu runtime after signing its CLI into this cloud.</p>`,
+      })
     );
   });
 
@@ -170,10 +164,10 @@ export function createSetupRoutes(deps: SetupRouteDeps = DEFAULT_DEPS) {
     }
     const slug = 'slug' in result && typeof result.slug === 'string' ? result.slug : null;
     return c.html(
-      connectPage(
-        'Managed connection ready',
-        `<p>Your managed authorization is ready. Provider data has not been synced.</p><p>In your local CLI, use the same cloud login and run:</p><pre><code>${escapeHtml(`lobu init --from-org ${org}`)}</code></pre><p>For an existing project, import the generated managedBy connection without replacing your project.${slug ? ` Grant: ${escapeHtml(slug)}.` : ''}</p>`
-      )
+      renderLobuPage({
+        title: 'Managed connection ready',
+        body: `<p>Your managed authorization is ready. Provider data has not been synced.</p><p>In your local CLI, use the same cloud login and run:</p><pre><code>${escapeHtml(`lobu init --from-org ${org}`)}</code></pre><p>For an existing project, import the generated managedBy connection without replacing your project.${slug ? ` Grant: ${escapeHtml(slug)}.` : ''}</p>`,
+      })
     );
   });
 

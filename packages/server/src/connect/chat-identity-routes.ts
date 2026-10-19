@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env } from '../index';
 import { createAuth } from '../auth';
-import { resolveSession, sessionCookieCandidates } from '../auth/resolve-session';
+import { resolveSession, serveAuthRequest, sessionCookieCandidates } from '../auth/resolve-session';
 import { resolveBaseUrl } from '../auth/base-url';
 import {
   adoptChatIdentityOntoMember,
@@ -17,11 +17,12 @@ import {
   readChatIdentityLink,
 } from '../lobu/stores/chat-identity-link';
 import { runtimeConnectionPredicate } from '../lobu/stores/connections-projection';
-import { renderOAuthErrorPage } from '../gateway/auth/oauth-templates';
+import { getScopedConnectorDefinition } from '../catalog/connector-definitions';
+import { connectorDisplayName } from '../catalog/connector-group-display';
+import { renderLobuPage } from '../gateway/auth/oauth-templates';
 import { escapeHtml } from '../utils/html';
 import logger from '../utils/logger';
 import { joinPublicOrganization } from '../workspace/join-public';
-import { connectPage } from './setup-routes';
 
 /**
  * One-click chat identity linking (see lobu/stores/chat-identity-link.ts).
@@ -37,10 +38,10 @@ import { connectPage } from './setup-routes';
 const PATH = '/connect/chat-identity';
 
 type LinkStatus =
-  | { status: 'linked'; organizationName: string; joined: boolean }
+  | { status: 'linked'; organization: OrganizationInfo; joined: boolean }
   | { status: 'invalid' }
-  | { status: 'not_member'; organizationName: string }
-  | { status: 'conflict'; organizationName: string; joined: boolean };
+  | { status: 'not_member'; organization: OrganizationInfo }
+  | { status: 'conflict'; organization: OrganizationInfo; joined: boolean };
 
 interface SessionUser {
   id: string;
@@ -50,11 +51,36 @@ interface SessionUser {
 
 interface ChatIdentityRouteDeps {
   session(request: Request, env: Env): Promise<{ user: SessionUser } | null>;
+  /** End the browser's Lobu session; returns the `Set-Cookie` values to send. */
+  signOut(request: Request, env: Env): Promise<string[]>;
   origin(request: Request): string;
+}
+
+/**
+ * Better Auth's own sign-out, dispatched through the same chokepoint as
+ * `/api/auth/*` so the cookie jar is collapsed and converged exactly as a
+ * sign-out from the web app would be.
+ */
+async function signOutBrowserSession(request: Request, env: Env): Promise<string[]> {
+  const auth = await createAuth(env, request);
+  const headers = new Headers(request.headers);
+  headers.set('content-type', 'application/json');
+  headers.delete('content-length');
+  const response = await serveAuthRequest(
+    auth,
+    new Request(new URL('/api/auth/sign-out', resolveBaseUrl({ request })), {
+      method: 'POST',
+      headers,
+      body: '{}',
+    })
+  );
+  if (!response.ok) throw new Error(`Sign-out returned ${response.status}`);
+  return response.headers.getSetCookie();
 }
 
 const DEFAULT_DEPS: ChatIdentityRouteDeps = {
   session: async (request, env) => resolveSession(await createAuth(env, request), request.headers),
+  signOut: signOutBrowserSession,
   origin: (request) => resolveBaseUrl({ request }),
 };
 
@@ -64,26 +90,71 @@ function loginContinuation(origin: string, token: string): string {
   return `/auth/login?callbackUrl=${encodeURIComponent(callback.toString())}`;
 }
 
-function errorPage(code: string, title: string, description: string): string {
-  return renderOAuthErrorPage(code, description, {
-    title,
-    actionUrl: '/',
-    actionLabel: 'Return to Lobu',
-  });
+/**
+ * Sign out, then sign in again and land back on this link. Same-origin POST;
+ * the page's strict-origin referrer policy keeps the token out of Referer.
+ */
+function switchAccountForm(token: string): string {
+  return `<form method="post" class="switch">Signed in with the wrong Lobu account? <input type="hidden" name="token" value="${escapeHtml(token)}"><input type="hidden" name="switch_account" value="1"><button class="link-btn" type="submit">Use a different account</button></form>`;
+}
+
+const OPEN_LOBU = '<a class="btn btn-secondary" href="/">Open Lobu</a>';
+
+function errorPage(code: string, title: string, body: string): string {
+  return renderLobuPage({ title, body, details: code });
 }
 
 const INVALID_LINK_PAGE = errorPage(
   'chat_identity_link_invalid',
   'Link expired',
-  'This link has expired or was already used. Message the bot again in a direct message to get a new one.'
+  '<p>This link has expired or was already used, so nothing was linked.</p><p>Send the bot a direct message again to get a new link. Each link works once and expires after a few minutes.</p>' +
+    `<div class="actions">${OPEN_LOBU}</div>`
 );
 
-function notMemberPage(organizationName: string): string {
+const SWITCH_FAILED_PAGE = errorPage(
+  'chat_identity_switch_failed',
+  'Could not switch accounts',
+  '<p>Lobu could not sign you out. Open Lobu, sign out from your account menu, then open the link from your chat again.</p>' +
+    `<div class="actions">${OPEN_LOBU}</div>`
+);
+
+function notMemberPage(org: OrganizationInfo, lobuAccount: string, token: string): string {
+  const name = escapeHtml(org.name);
   return errorPage(
     'chat_identity_not_member',
     'Not a member yet',
-    `Your Lobu account is not a member of ${organizationName}. Ask an admin of ${organizationName} to invite you, then link this chat account again.`
+    `<p>You are signed in as <strong>${escapeHtml(lobuAccount)}</strong>, which is not a member of <strong>${name}</strong>.</p>` +
+      `<p>Ask an admin of ${name} to invite you, then open this link again. If you are a member with another Lobu account, switch to it.</p>` +
+      `<div class="actions">${OPEN_LOBU}</div>` +
+      switchAccountForm(token)
   );
+}
+
+function conflictPage(org: OrganizationInfo, joined: boolean, token: string): string {
+  const name = escapeHtml(org.name);
+  return errorPage(
+    'chat_identity_conflict',
+    'Already linked to someone else',
+    (joined ? `<p>You joined ${name}, but this chat account could not be linked.</p>` : '') +
+      '<p>This chat account is already linked to a different Lobu account. The existing chat account link was not changed.</p>' +
+      `<p>If that other Lobu account is yours, switch to it to use this link. Otherwise, ask an admin of ${name} to check who it belongs to.</p>` +
+      `<div class="actions">${OPEN_LOBU}</div>` +
+      switchAccountForm(token)
+  );
+}
+
+function linkedPage(org: OrganizationInfo, joined: boolean): string {
+  const name = `<strong>${escapeHtml(org.name)}</strong>`;
+  const open = org.slug
+    ? `<div class="actions"><a class="btn btn-secondary" href="/${encodeURIComponent(org.slug)}">Open ${escapeHtml(org.name)} in Lobu</a></div>`
+    : '';
+  return renderLobuPage({
+    title: 'Chat account linked',
+    body:
+      `<p>${joined ? `You joined ${name}, and your` : 'Your'} chat account is linked to your Lobu account in ${name}.</p>` +
+      '<p>You can close this tab and go back to your chat. Message the bot again to continue.</p>' +
+      open,
+  });
 }
 
 interface OrganizationInfo {
@@ -177,7 +248,6 @@ async function redeemChatIdentityLink(token: string, user: SessionUser, join: bo
   const initialKey = claim ? claimKey(claim) : null;
   if (!claim || !initialKey) return { status: 'invalid' };
   const org = await organizationInfo(sql, claim.organizationId);
-  const orgName = org.name;
   let role = await memberRole(sql, user.id, claim.organizationId);
   let joined = false;
   if (!role && join && org.isPublic && org.slug) {
@@ -189,18 +259,18 @@ async function redeemChatIdentityLink(token: string, user: SessionUser, join: bo
       joined = result.status === 'joined';
     }
   }
-  if (!role) return { status: 'not_member', organizationName: orgName };
+  if (!role) return { status: 'not_member', organization: org };
   // Idempotent and outside the transaction: provisioning goes through the
   // entity write path, which owns its own connection.
   const memberEntityId = await memberEntityIdFor(sql, user, claim.organizationId, role);
-  if (memberEntityId === null) return { status: 'not_member', organizationName: orgName };
+  if (memberEntityId === null) return { status: 'not_member', organization: org };
 
   return withChatIdentityLock(initialKey.namespace, initialKey.identityKey, async (tx): Promise<LinkStatus> => {
     const locked = await readChatIdentityLink(token, tx);
     const key = locked ? claimKey(locked) : null;
     if (!locked || !key || locked.organizationId !== claim.organizationId) return { status: 'invalid' };
     if (!(await memberRole(tx, user.id, locked.organizationId))) {
-      return { status: 'not_member', organizationName: orgName };
+      return { status: 'not_member', organization: org };
     }
     if (!(await connectionIsLive(tx, locked))) return { status: 'invalid' };
     const outcome = await adoptChatIdentityOntoMember(
@@ -212,22 +282,48 @@ async function redeemChatIdentityLink(token: string, user: SessionUser, join: bo
       user.id,
       'link'
     );
-    if (outcome === 'conflict') return { status: 'conflict', organizationName: orgName, joined };
+    if (outcome === 'conflict') return { status: 'conflict', organization: org, joined };
     await deleteChatIdentityLink(token, tx);
     logger.info(
       { userId: user.id, organizationId: locked.organizationId, platform: locked.platform, outcome },
       'Linked a chat identity from a chat identity link'
     );
-    return { status: 'linked', organizationName: orgName, joined };
+    return { status: 'linked', organization: org, joined };
   });
 }
 
-function chatAccountLabel(claim: ChatIdentityLinkClaim): string {
-  const who = claim.senderDisplayName ? `${claim.senderDisplayName} (${claim.senderId})` : claim.senderId;
-  return `${claim.platform}: ${who}`;
+/** The platform's human name, preferring the org's installed connector definition. */
+async function platformName(claim: ChatIdentityLinkClaim): Promise<string> {
+  const installed = await getScopedConnectorDefinition({
+    organizationId: claim.organizationId,
+    connectorKey: claim.platform,
+  });
+  return connectorDisplayName(claim.platform, installed?.name ?? null);
 }
 
-export function createChatIdentityRoutes(deps: ChatIdentityRouteDeps = DEFAULT_DEPS) {
+/** The sender's name, or their platform id only when the platform gave no name. */
+async function accountsList(claim: ChatIdentityLinkClaim, lobuAccount: string): Promise<string> {
+  const sender = escapeHtml(claim.senderDisplayName || claim.senderId);
+  return (
+    `<dl><div><dt>${escapeHtml(await platformName(claim))} account</dt><dd>${sender}</dd></div>` +
+    `<div><dt>Lobu account</dt><dd>${escapeHtml(lobuAccount)}</dd></div></dl>`
+  );
+}
+
+function linkForm(token: string, join: boolean, label: string): string {
+  return (
+    `<form method="post"><input type="hidden" name="token" value="${escapeHtml(token)}">` +
+    (join ? '<input type="hidden" name="join" value="1">' : '') +
+    `<button class="btn" type="submit">${escapeHtml(label)}</button></form>`
+  );
+}
+
+function sessionAccount(user: SessionUser): string {
+  return user.email || user.name || user.id;
+}
+
+export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDeps> = {}) {
+  const deps: ChatIdentityRouteDeps = { ...DEFAULT_DEPS, ...overrides };
   const routes = new Hono<{ Bindings: Env }>();
 
   routes.get(PATH, async (c) => {
@@ -241,29 +337,33 @@ export function createChatIdentityRoutes(deps: ChatIdentityRouteDeps = DEFAULT_D
     const session = await deps.session(c.req.raw, c.env);
     if (!session?.user) return c.redirect(loginContinuation(deps.origin(c.req.raw), token), 302);
     const org = await organizationInfo(sql, claim.organizationId);
-    const orgName = org.name;
-    const lobuAccount = session.user.email || session.user.name || session.user.id;
-    const accounts = `<p>Chat account: <code>${escapeHtml(chatAccountLabel(claim))}</code><br>Lobu account: <code>${escapeHtml(lobuAccount)}</code></p>`;
-    if (!(await memberRole(sql, session.user.id, claim.organizationId))) {
-      if (!org.isPublic) return c.html(notMemberPage(orgName), 403);
+    const name = `<strong>${escapeHtml(org.name)}</strong>`;
+    const lobuAccount = sessionAccount(session.user);
+    const isMember = Boolean(await memberRole(sql, session.user.id, claim.organizationId));
+    if (!isMember && !org.isPublic) return c.html(notMemberPage(org, lobuAccount, token), 403);
+    const accounts = await accountsList(claim, lobuAccount);
+    if (!isMember) {
       return c.html(
-        connectPage(
-          'Join and link your chat account',
-          `<p>You are not a member of <strong>${escapeHtml(orgName)}</strong> yet. It is a public workspace, so you can join it as a member and link this chat account in one step. Direct messages you send the bot will then act as you in <strong>${escapeHtml(orgName)}</strong>, with member access. Group messages will continue to use only shared workspace access.</p>` +
+        renderLobuPage({
+          title: 'Join and link your chat account',
+          body:
+            `<p>You are not a member of ${name} yet. It is a public workspace, so you can join it and link this chat account in one step.</p>` +
+            `<p>Direct messages you send the bot will then act as you in ${name}, with member access. Group messages will continue to use only shared workspace access.</p>` +
             accounts +
-            `<form method="post"><input type="hidden" name="token" value="${escapeHtml(token)}"><input type="hidden" name="join" value="1"><button type="submit">Join and link</button></form>` +
-            '<p>Not you? Sign in to Lobu with the right account first.</p>'
-        )
+            linkForm(token, true, 'Join and link') +
+            switchAccountForm(token),
+        })
       );
     }
     return c.html(
-      connectPage(
-        'Link your chat account',
-        `<p>Link this chat account to your Lobu account through <strong>${escapeHtml(orgName)}</strong>. Direct messages you send the bot will then act as you in <strong>${escapeHtml(orgName)}</strong>. Group messages will continue to use only shared workspace access.</p>` +
+      renderLobuPage({
+        title: 'Link your chat account',
+        body:
+          `<p>Link this chat account to your Lobu account through ${name}. Direct messages you send the bot will then act as you in ${name}. Group messages will continue to use only shared workspace access.</p>` +
           accounts +
-          `<form method="post"><input type="hidden" name="token" value="${escapeHtml(token)}"><button type="submit">Link account</button></form>` +
-          '<p>Not you? Sign in to Lobu with the right account first.</p>'
-      )
+          linkForm(token, false, 'Link account') +
+          switchAccountForm(token),
+      })
     );
   });
 
@@ -281,35 +381,33 @@ export function createChatIdentityRoutes(deps: ChatIdentityRouteDeps = DEFAULT_D
       return c.json({ error: 'Use the signed-in browser link page.' }, 403);
     const body = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
     const token = typeof body.token === 'string' ? body.token : '';
+
+    if (body.switch_account === '1') {
+      // A dead link signs nobody out: there would be nothing to come back to.
+      const claim = await readChatIdentityLink(token, getDb());
+      if (!claim || !claimKey(claim)) return c.html(INVALID_LINK_PAGE, 410);
+      let cookies: string[];
+      try {
+        cookies = await deps.signOut(c.req.raw, c.env);
+      } catch (error) {
+        logger.warn({ error }, 'Chat identity link could not sign the browser out to switch accounts');
+        return c.html(SWITCH_FAILED_PAGE, 502);
+      }
+      for (const cookie of cookies) c.header('Set-Cookie', cookie, { append: true });
+      return c.redirect(loginContinuation(origin, token), 303);
+    }
+
     const session = await deps.session(c.req.raw, c.env);
     if (!session?.user) return c.redirect(loginContinuation(origin, token), 303);
 
     const result = await redeemChatIdentityLink(token, session.user, body.join === '1');
     switch (result.status) {
-      case 'linked': {
-        const joinedText =
-          result.joined
-            ? `You joined <strong>${escapeHtml(result.organizationName)}</strong>, and your`
-            : 'Your';
-        return c.html(
-          connectPage(
-            'Chat account linked',
-            `<p>${joinedText} chat account is linked to your Lobu account in <strong>${escapeHtml(result.organizationName)}</strong>. Message the bot again to continue.</p>`
-          )
-        );
-      }
+      case 'linked':
+        return c.html(linkedPage(result.organization, result.joined));
       case 'not_member':
-        return c.html(notMemberPage(result.organizationName), 403);
+        return c.html(notMemberPage(result.organization, sessionAccount(session.user), token), 403);
       case 'conflict':
-        return c.html(
-          errorPage(
-            'chat_identity_conflict',
-            'Already linked to someone else',
-            (result.joined ? `You joined ${result.organizationName}, but this chat account could not be linked. ` : '') +
-              'This chat account is already linked to a different Lobu account. The existing chat account link was not changed. Ask an admin of the workspace to check who it belongs to.'
-          ),
-          409
-        );
+        return c.html(conflictPage(result.organization, result.joined, token), 409);
       default:
         return c.html(INVALID_LINK_PAGE, 410);
     }
