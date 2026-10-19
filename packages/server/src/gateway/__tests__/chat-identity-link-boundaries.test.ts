@@ -5,19 +5,23 @@ import * as dbClient from "../../db/client.js";
 import * as chatLinks from "../../lobu/stores/chat-identity-link.js";
 import { getRateLimiter, resetRateLimiterForTests } from "../../utils/rate-limiter.js";
 import { MessageHandlerBridge } from "../connections/message-handler-bridge.js";
-import type { ChatTurnActor } from "../orchestration/chat-turn-actor.js";
+import { chatSenderLimitKey, type ChatTurnActor } from "../orchestration/chat-turn-actor.js";
 
 afterEach(() => {
   mock.restore();
   resetRateLimiterForTests();
 });
 
-async function offer(actor: ChatTurnActor, isDirect: boolean, platform = "slack") {
+async function offer(
+  actor: ChatTurnActor,
+  isDirect: boolean,
+  platform = "slack",
+  post = mock(async (_text: string) => undefined),
+) {
   spyOn(getRateLimiter(), "consume").mockResolvedValue({
-    allowed: true, count: 1, limit: 1, resetInSeconds: 600,
+    allowed: true, count: 1, limit: 1, resetInSeconds: 600, windowStart: 0, countedInDb: true,
   });
   const mint = spyOn(chatLinks, "mintChatIdentityLink").mockResolvedValue("synthetic-link");
-  const post = mock(async (_text: string) => undefined);
   const bridge = new MessageHandlerBridge(
     { id: "synthetic-chat", platform } as never,
     { getArtifactStore: () => null, getPublicGatewayUrl: () => "https://cloud.example.test" } as never,
@@ -26,14 +30,35 @@ async function offer(actor: ChatTurnActor, isDirect: boolean, platform = "slack"
     async () => actor,
   );
   // Exercise the admission boundary without starting a provider or a run queue.
-  await (bridge as unknown as {
+  const admitted = await (bridge as unknown as {
     admitChatSender(args: Record<string, unknown>): Promise<boolean>;
   }).admitChatSender({
     organizationId: "org-link-notice", userId: "U_SYNTHETIC", teamId: "T_SYNTHETIC",
     isDirect, senderVouched: true, thread: { post },
   });
-  return { mint, post };
+  return { mint, post, admitted };
 }
+
+test.each([true, false])("failed notices release their window and still admit the turn (direct=%s)", async (isDirect) => {
+  const refund = spyOn(getRateLimiter(), "refund").mockResolvedValue(undefined);
+  const failedPost = mock(async (_text: string) => { throw new Error("synthetic send failure"); });
+  const { admitted, mint, post } = await offer({ access: "reply_only" }, isDirect, "slack", failedPost);
+  expect(admitted).toBe(true);
+  expect(post).toHaveBeenCalledTimes(1);
+  expect(mint).toHaveBeenCalledTimes(isDirect ? 1 : 0);
+  expect(refund).toHaveBeenCalledTimes(1);
+  expect(refund).toHaveBeenCalledWith(chatSenderLimitKey(isDirect ? "link" : "notice", {
+    organizationId: "org-link-notice", platform: "slack", teamId: "T_SYNTHETIC", senderId: "U_SYNTHETIC",
+  }), expect.objectContaining({ allowed: true, windowStart: 0, countedInDb: true }));
+});
+
+test.each([true, false])("delivered notices keep their window spent (direct=%s)", async (isDirect) => {
+  const refund = spyOn(getRateLimiter(), "refund").mockResolvedValue(undefined);
+  const { admitted, post } = await offer({ access: "reply_only" }, isDirect);
+  expect(admitted).toBe(true);
+  expect(post).toHaveBeenCalledTimes(1);
+  expect(refund).not.toHaveBeenCalled();
+});
 
 test("vouched senders (DM or group), linked members and unsupported platforms get no link", async () => {
   // A vouched colleague keeps today's silent handling: no new notice in an

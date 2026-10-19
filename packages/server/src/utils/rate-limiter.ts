@@ -60,6 +60,13 @@ interface RateLimitResult {
   errorMessage?: string;
 }
 
+interface ConsumedRateLimitResult extends RateLimitResult {
+  /** Fixed-window start (epoch seconds) this request was counted in; {@link RateLimiter.refund} needs it. */
+  windowStart: number;
+  /** Local fallback admissions must never refund another replica's shared count. */
+  countedInDb: boolean;
+}
+
 interface WindowState {
   /** Fixed-window start (epoch seconds, aligned to windowSeconds). */
   windowStart: number;
@@ -164,16 +171,17 @@ export class RateLimiter {
    * unavailable (error, backoff, missing table) the decision falls back to
    * this request's cached count instead of rejecting solely for the DB error.
    */
-  async consume(key: string, config: RateLimitConfig): Promise<RateLimitResult> {
+  async consume(key: string, config: RateLimitConfig): Promise<ConsumedRateLimitResult> {
     const { state, now } = this.countLocally(key, config);
     // Other requests can increment this window while the DB write is pending.
     const fallbackCount = Math.max(state.localCount, state.sharedCount + 1);
     const shared = await this.incrementShared(key, state.windowStart);
-    if (shared === null) {
-      return this.result(fallbackCount, config, now, state.windowStart);
-    }
-    if (shared > state.sharedCount) state.sharedCount = shared;
-    return this.result(shared, config, now, state.windowStart);
+    if (shared !== null && shared > state.sharedCount) state.sharedCount = shared;
+    return {
+      ...this.result(shared ?? fallbackCount, config, now, state.windowStart),
+      windowStart: state.windowStart,
+      countedInDb: shared !== null,
+    };
   }
 
   /** Count this request in the pod-local window, rolling it over when due. */
@@ -213,6 +221,32 @@ export class RateLimiter {
         ? undefined
         : config.errorMessage || `Rate limit exceeded. Try again in ${resetInSeconds} seconds.`,
     };
+  }
+
+  /**
+   * Give back one admission {@link consume} granted, when the work it admitted
+   * failed. Denied attempts can push the counter above the limit; discard that
+   * excess so it cannot prevent the refunded work from retrying. Targets the
+   * original window and only refunds Postgres when it counted the admission.
+   * Best effort: a DB error can leave the shared count spent.
+   */
+  async refund(key: string, admitted: ConsumedRateLimitResult): Promise<void> {
+    const state = this.windows.get(key);
+    if (state && state.windowStart === admitted.windowStart) {
+      state.localCount = Math.max(0, Math.min(state.localCount, admitted.limit) - 1);
+      if (admitted.countedInDb) {
+        state.sharedCount = Math.max(0, Math.min(state.sharedCount, admitted.limit) - 1);
+      }
+    }
+    if (!admitted.countedInDb || Date.now() < this.dbBackoffUntilMs) return;
+    try {
+      await getDb()`
+        UPDATE rate_limit_counters SET count = GREATEST(LEAST(count, ${admitted.limit}) - 1, 0)
+        WHERE key = ${key} AND window_start = ${new Date(admitted.windowStart * 1000)}
+      `;
+    } catch (err) {
+      this.noteDbFailure(err);
+    }
   }
 
   /**

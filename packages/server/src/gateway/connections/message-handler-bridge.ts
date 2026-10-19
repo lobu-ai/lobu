@@ -1301,7 +1301,8 @@ export class MessageHandlerBridge {
         chatIdentityLinkKey(platform, args.teamId, args.userId) !== null;
       // A group notice must not suppress the private link, and an expired
       // link must be replaceable on the sender's next DM.
-      const notice = await limiter.consume(chatSenderLimitKey(canLink ? "link" : "notice", sender), {
+      const noticeKey = chatSenderLimitKey(canLink ? "link" : "notice", sender);
+      const notice = await limiter.consume(noticeKey, {
         limit: 1,
         windowSeconds: canLink ? CHAT_IDENTITY_LINK_TTL_SECONDS : CHAT_ACCESS_NOTICE_WINDOW_SECONDS,
       });
@@ -1342,7 +1343,9 @@ export class MessageHandlerBridge {
             "Posted the chat access notice to an unlinked sender"
           );
         } catch (error) {
-          // The notice is advice; the turn still answers without it.
+          // The notice is advice; the turn still answers without it. Release
+          // its window so a later message can retry the failed send.
+          await limiter.refund(noticeKey, notice);
           logger.warn(
             { platform, connectionId: this.connection.id, error: String(error) },
             "Failed to post the chat access notice"

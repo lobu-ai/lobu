@@ -12,6 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../__tests__/setup/test-db';
+import * as dbClient from '../../db/client';
 import { getClientIP, getRateLimiter, RateLimiter, resetRateLimiterForTests } from '../rate-limiter';
 
 /** Unique key per test so fixed windows never collide across tests. */
@@ -129,6 +130,78 @@ describe('RateLimiter (Postgres-backed fixed window)', () => {
       podA.destroy();
       podB.destroy();
     }
+  });
+
+  it('refund gives an admission back across replicas even after intervening denials', async () => {
+    const key = uniqueKey('refund');
+    const once = { limit: 1, windowSeconds: 86400 };
+    const podA = new RateLimiter();
+    const podB = new RateLimiter();
+    try {
+      const admitted = await podA.consume(key, once);
+      expect(admitted.allowed).toBe(true);
+      expect((await podB.consume(key, once)).allowed).toBe(false);
+      expect((await podA.consume(key, once)).allowed).toBe(false);
+      await podA.refund(key, admitted);
+      // Another replica sees the window unspent, and spends it.
+      expect((await podB.consume(key, once)).allowed).toBe(true);
+      expect((await podA.consume(key, once)).allowed).toBe(false);
+    } finally {
+      podA.destroy();
+      podB.destroy();
+    }
+  });
+
+  it('refund releases a local fallback admission even after an intervening denial', async () => {
+    const db = getTestDb();
+    await db`ALTER TABLE rate_limit_counters RENAME TO rate_limit_counters_hidden`;
+    try {
+      const key = uniqueKey('refund-fallback');
+      const once = { limit: 1, windowSeconds: 3600 };
+      const admitted = await limiter.consume(key, once);
+      expect(admitted.allowed).toBe(true);
+      expect((await limiter.consume(key, once)).allowed).toBe(false);
+      await limiter.refund(key, admitted);
+      expect((await limiter.consume(key, once)).allowed).toBe(true);
+      expect((await limiter.consume(key, once)).allowed).toBe(false);
+    } finally {
+      await db`ALTER TABLE rate_limit_counters_hidden RENAME TO rate_limit_counters`;
+    }
+  });
+
+  it('a fallback refund after DB recovery cannot release another replica\'s admission', async () => {
+    const key = uniqueKey('refund-recovery');
+    const once = { limit: 1, windowSeconds: 3600 };
+    const startMs = Math.ceil(Date.now() / 3_600_000) * 3_600_000;
+    vi.setSystemTime(startMs);
+    const getDb = vi.spyOn(dbClient, 'getDb').mockImplementationOnce(() => {
+      throw new Error('synthetic database outage');
+    });
+    const podB = new RateLimiter();
+    try {
+      const local = await limiter.consume(key, once);
+      expect(local.allowed).toBe(true);
+      expect(local.countedInDb).toBe(false);
+      expect((await podB.consume(key, once)).allowed).toBe(true);
+      vi.setSystemTime(startMs + 6_000);
+      await limiter.refund(key, local);
+      expect((await podB.consume(key, once)).allowed).toBe(false);
+    } finally {
+      getDb.mockRestore();
+      podB.destroy();
+    }
+  });
+
+  it('a refund after the window rolled over never discounts the next window', async () => {
+    const key = uniqueKey('refund-rollover');
+    const config = { limit: 1, windowSeconds: 60 };
+    const windowStartMs = Math.ceil(Date.now() / 60_000) * 60_000;
+    vi.setSystemTime(windowStartMs);
+    const stale = await limiter.consume(key, config);
+    vi.setSystemTime(windowStartMs + 60_000);
+    expect((await limiter.consume(key, config)).allowed).toBe(true);
+    await limiter.refund(key, stale);
+    expect((await limiter.consume(key, config)).allowed).toBe(false);
   });
 
   it('consume fails open to per-pod enforcement when the counters table is missing', async () => {

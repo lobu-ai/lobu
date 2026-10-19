@@ -364,6 +364,38 @@ describe("X source chat", () => {
     expect(sends[0].input).toMatchObject({ conversation_id: DM, text: "Reply from the agent" });
   }, 60_000);
 
+  it("offers a fresh link on the next DM when the notice could not be sent", async () => {
+    await insertAutomation("dm-reply", replyTo());
+    let failedNotice = "";
+    // X refuses the first send (the notice) with a transient over-capacity error.
+    vi.mocked(executeHandler.handleExecute).mockImplementationOnce(async (args: any) => {
+      failedNotice = String(args.input.text);
+      return {
+        action: "execute", status: "failed", error: "X direct messages: request failed (HTTP 503, X error 130)",
+      } as any;
+    });
+    const first = { conversation_id: DM, message_id: "5301", text: "who am I?" };
+    deviceMessages.push(first);
+    await deliver(first);
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(sends).toHaveLength(0);
+    expect(failedNotice).toContain("/connect/chat-identity?token=");
+    await completeTurns();
+    expect(replies()).toHaveLength(1);
+
+    sends.length = 0;
+    enqueued.length = 0;
+    const second = { conversation_id: DM, message_id: "5302", text: "still there?" };
+    deviceMessages.push(second);
+    await deliver(second, "after-failed-notice");
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(sends).toHaveLength(1);
+    expect(String(sends[0].input.text)).toContain("/connect/chat-identity?token=");
+    expect(sends[0].input.text).not.toBe(failedNotice);
+  }, 60_000);
+
   it("answers a message request like any other DM", async () => {
     await insertAutomation("dm-reply", replyTo());
     const message = { conversation_id: OTHER_DM, message_id: "5101", text: "hi, can you help?", sender_id: "1000000003", is_request: true };
