@@ -34,6 +34,7 @@ import {
 	createTestUser,
 } from "../../__tests__/setup/test-fixtures";
 import { resolveMemberOrgsForUser } from "../../identity/member-orgs";
+import { resolveChatUserIdentity } from "../../lobu/stores/chat-identity";
 import type { PersistLoginChatIdentityDeps } from "../subject-identities";
 import {
 	persistLoginChatIdentity,
@@ -512,5 +513,55 @@ describe("persistLoginChatIdentity", () => {
 			["google_user_id", GOOGLE_SUB],
 			["slack_user_id", `${TEAM}:${USER}`],
 		]);
+	});
+
+	it("stamps the bare x_chat_user_id on X sign-in, so X direct messages resolve to the member", async () => {
+		const { orgId, userId } = await seedMember();
+		const X_USER = "1000000002";
+
+		await persistLoginChatIdentity(
+			// Better Auth's X provider is `twitter`; its account id is the numeric user id.
+			{ providerId: "twitter", userId, accessToken: "x-token", accountId: X_USER },
+			{
+				resolveMemberOrgsForUser,
+				getEnabledLoginProviderConfigs: async () => [],
+				fetchUserInfoWithRaw: async () => {
+					throw new Error("X sign-in must not read userinfo");
+				},
+			},
+		);
+
+		const sql = getTestDb();
+		const rows = await sql<{ identifier: string; source_connector: string }>`
+      SELECT identifier, source_connector FROM entity_identities
+      WHERE organization_id = ${orgId} AND namespace = 'x_chat_user_id'
+        AND deleted_at IS NULL
+    `;
+		expect(rows).toEqual([{ identifier: X_USER, source_connector: "auth:signup" }]);
+		// Provider-proven, so it holds without a workspace-issued link.
+		expect(await resolveChatUserIdentity("x", undefined, X_USER)).toBe(userId);
+		expect(await resolveChatUserIdentity("x", undefined, X_USER, orgId)).toBe(userId);
+	});
+
+	it("refuses an X account id that is not a bare numeric user id", async () => {
+		const { orgId, userId } = await seedMember();
+		// An X connector grant also writes a `twitter` account row, under a
+		// synthetic id; it must never prove a chat identity.
+		for (const accountId of ["connect_1_2", "lobu-connector:org-id:x:1", "@synthetic", ""]) {
+			await persistLoginChatIdentity(
+				{ providerId: "twitter", userId, accessToken: "x-token", accountId },
+				{
+					resolveMemberOrgsForUser,
+					getEnabledLoginProviderConfigs: async () => [],
+					fetchUserInfoWithRaw: async () => ({ raw: null, normalized: null }),
+				},
+			);
+		}
+		const sql = getTestDb();
+		const [{ n }] = await sql<{ n: number }>`
+      SELECT COUNT(*)::int AS n FROM entity_identities
+      WHERE organization_id = ${orgId} AND namespace = 'x_chat_user_id'
+    `;
+		expect(Number(n)).toBe(0);
 	});
 });
