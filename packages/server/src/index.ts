@@ -16,13 +16,11 @@ import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import { LOBU_LOGO_PNG_BASE64 } from "./assets/logo";
 import { createAuth } from "./auth";
-import { resolveBaseUrl } from "./auth/base-url";
 import { getAuthConfig as getAuthConfigFromEnv } from "./auth/config";
 import { mcpAuth } from "./auth/middleware";
 import { oauthRoutes } from "./auth/oauth/routes";
 import { findExistingPersonalOrg } from "./auth/personal-org-provisioning";
 import { credentialRoutes } from "./auth/routes";
-import { convergeResponseCookieScope } from "./auth/session-cookie-scope";
 import { compareWorkerToken } from "./auth/worker-token";
 import {
 	type EntityApprovalPolicy,
@@ -578,43 +576,9 @@ app.on(["GET", "POST"], "/api/auth/*", async (c) => {
 		if (error instanceof HTTPException) return error.getResponse();
 		throw error;
 	}
-	// better-call crashes with "Unexpected end of JSON input" when a POST has
-	// Content-Type: application/json but an empty body. Ensure a valid body.
-	let request = c.req.raw;
-	if (c.req.method === "POST") {
-		const ct = c.req.header("content-type") || "";
-		if (
-			ct.includes("application/json") &&
-			c.req.header("content-length") === "0"
-		) {
-			request = new Request(request.url, {
-				method: request.method,
-				headers: request.headers,
-				body: "{}",
-			});
-		}
-	}
-	// Better Auth reads the raw jar and takes the FIRST session cookie, so a
-	// browser carrying a stale twin gets `null` from /api/auth/get-session — the
-	// call the web app uses to ask whether it is signed in. Hand it a jar already
-	// reduced to the live cookie. Why: auth/resolve-session.ts.
-	const collapsed = await collapseSessionCookies(auth, request.headers);
-	if (collapsed !== request.headers) {
-		request = new Request(request.url, {
-			method: request.method,
-			headers: collapsed,
-			body: request.method === "GET" || request.method === "HEAD"
-				? undefined
-				: await request.blob(),
-		});
-	}
-	const response = await auth.handler(request);
-	// Collapse the cookie jar back to a single scope, so sign-in is authoritative
-	// for every auth method at once. Why: auth/session-cookie-scope.ts.
-	return convergeResponseCookieScope(response, {
-		cookieDomain: process.env.AUTH_COOKIE_DOMAIN,
-		isHttps: resolveBaseUrl({ request: c.req.raw }).startsWith("https://"),
-	});
+	// Empty-JSON guard, cookie-jar collapse and cookie-scope convergence:
+	// auth/resolve-session.ts.
+	return serveAuthRequest(auth, c.req.raw);
 });
 
 /**
@@ -941,7 +905,7 @@ app.post("/api/workers/complete-agent-turn", completeAgentTurnRun);
 import { executeWorkerOperation } from "./worker-api/execute-operation";
 import { dispatchChromeAction } from "./worker-api/dispatch-chrome-action";
 import { stampSlackIdentityForUser } from "./auth/subject-identities";
-import { collapseSessionCookies, resolveSession } from './auth/resolve-session';
+import { resolveSession, serveAuthRequest } from './auth/resolve-session';
 import { organizationLiveSql } from './workspace/deletion-state';
 
 app.post("/api/workers/dispatch-chrome-action", dispatchChromeAction);

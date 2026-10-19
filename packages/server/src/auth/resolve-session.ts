@@ -11,7 +11,8 @@
  * `dead; good` → null, `good; dead` → the session.
  */
 
-import { sessionCookieName } from './session-cookie-scope';
+import { resolveBaseUrl } from './base-url';
+import { convergeResponseCookieScope, sessionCookieName } from './session-cookie-scope';
 
 /** Both spellings coexist: a jar can outlive an http→https switch. */
 const SESSION_COOKIE_NAMES = [sessionCookieName(false), sessionCookieName(true)];
@@ -154,4 +155,37 @@ export async function collapseSessionCookies<A extends SessionReader>(
   if (companions.length > 0) stripped.set('cookie', companions.join('; '));
   else stripped.delete('cookie');
   return stripped;
+}
+
+type AuthHandler = SessionReader & { handler: (request: Request) => Promise<Response> };
+
+/**
+ * Serve one Better Auth request the way `/api/auth/*` does: a JSON POST with an
+ * empty body gets `{}` (better-call crashes on it), the cookie jar is collapsed
+ * to the live session first, and the response's cookies are converged back to
+ * one scope. Server-side callers that sign a browser out go through this too,
+ * so the cookie hygiene is the same no matter which route triggered it.
+ */
+export async function serveAuthRequest(auth: AuthHandler, incoming: Request): Promise<Response> {
+  let request = incoming;
+  if (
+    request.method === 'POST' &&
+    (request.headers.get('content-type') || '').includes('application/json') &&
+    request.headers.get('content-length') === '0'
+  ) {
+    request = new Request(request.url, { method: request.method, headers: request.headers, body: '{}' });
+  }
+  const collapsed = await collapseSessionCookies(auth, request.headers);
+  if (collapsed !== request.headers) {
+    request = new Request(request.url, {
+      method: request.method,
+      headers: collapsed,
+      body: request.method === 'GET' || request.method === 'HEAD' ? undefined : await request.blob(),
+    });
+  }
+  const response = await auth.handler(request);
+  return convergeResponseCookieScope(response, {
+    cookieDomain: process.env.AUTH_COOKIE_DOMAIN,
+    isHttps: resolveBaseUrl({ request: incoming }).startsWith('https://'),
+  });
 }

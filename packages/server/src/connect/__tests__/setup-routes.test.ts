@@ -46,6 +46,15 @@ describe('managed setup browser handoff', () => {
     expect(await res.text()).toContain('Continue to account authorization');
     expect(f.calls()).toBe(0);
   });
+  test('consent names the connector by its catalog name, not its key', async () => {
+    const res = await fixture().app.request(
+      'https://cloud.example/connect/managed?org=public-provider&connector=google.drive'
+    );
+    const html = await res.text();
+    expect(html).toContain('<h1>Connect Google Drive</h1>');
+    expect(html).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
+  });
+
   test('signed-out visitor redirects to login preserving the chosen offer', async () => {
     const f = fixture({ session: async () => null });
     const res = await f.app.request(url);
