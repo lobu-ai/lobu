@@ -66,6 +66,7 @@ import { ToolUserError, toolErrorHttpStatus } from "./errors";
 import { EntityPolicyDenialError } from "./entity-write-denial-audit";
 import { validateAndScopeQuery } from "./execute-data-sources";
 import logger from "./logger";
+import { isUniqueViolation } from "./pg-errors";
 import { requireWriteAccess } from "./organization-access";
 import { RESERVED_ENTITY_TYPE_SLUGS } from "./reserved";
 import {
@@ -503,6 +504,88 @@ export function tryInsertEntityRow(params: {
 	return insertEntityRowWithConflictMode(params, true);
 }
 
+/** Total candidates, including the base, before using a caller's fallback. */
+const DERIVED_SLUG_ATTEMPTS = 20;
+
+interface DerivedSlugScope {
+	organizationId: string;
+	parentId: number | null;
+	baseSlug: string;
+	/**
+	 * A live holder is a duplicate for name-derived slugs, including a suffix
+	 * assigned after a tombstone. Return its slug for the unique index to reject.
+	 * `suffix` skips live holders when a cosmetic slug is not the row's identity.
+	 */
+	liveCollision: "reject" | "suffix";
+}
+
+/**
+ * Find a free candidate or a live collision the caller must reject.
+ * `entities_slug_parent_unique` includes tombstones, so derived slugs skip
+ * them. Null when every readable candidate is taken and may be skipped.
+ */
+async function pickDerivedSlug(
+	tx: DbClient,
+	scope: DerivedSlugScope,
+	from: number,
+	excludeEntityId: number | null,
+): Promise<{ slug: string; attempt: number } | null> {
+	for (let attempt = from; attempt <= DERIVED_SLUG_ATTEMPTS; attempt++) {
+		const slug = attempt === 1 ? scope.baseSlug : `${scope.baseSlug}-${attempt}`;
+		const holder = await tx<{ live: boolean }>`
+      SELECT (deleted_at IS NULL) AS live FROM entities
+      WHERE organization_id = ${scope.organizationId}
+        AND COALESCE(parent_id, 0) = ${scope.parentId ?? 0}
+        AND slug = ${slug}
+        AND id IS DISTINCT FROM ${excludeEntityId}
+    `;
+		if (holder.length === 0) return { slug, attempt };
+		if (holder[0].live && scope.liveCollision === "reject") {
+			return { slug, attempt };
+		}
+	}
+	return null;
+}
+
+/**
+ * Insert an entity whose slug the platform derives (not one a caller chose),
+ * skipping tombstones and, for cosmetic slugs, live holders. The probe is
+ * advisory; the unique index stays the arbiter. Savepoints let cosmetic slugs
+ * retry concurrent collisions without aborting the caller's transaction.
+ * Once readable suffixes run out, `fallbackSlug` is the last attempt;
+ * without one, it fails.
+ */
+export async function insertEntityRowWithDerivedSlug(params: {
+	tx: DbClient;
+	scope: DerivedSlugScope;
+	fallbackSlug?: string;
+	/** Validate the row for one candidate slug, on the savepoint handle. */
+	validate: (tx: DbClient, slug: string) => Promise<ValidatedEntityRowInsert>;
+}): Promise<InsertedEntityRow> {
+	const { tx, scope } = params;
+	const insertWithSlug = (slug: string) =>
+		tx.savepoint(async (sp) =>
+			insertEntityRow({ tx: sp, row: await params.validate(sp, slug) }),
+		);
+	let from = 1;
+	for (;;) {
+		const picked = await pickDerivedSlug(tx, scope, from, null);
+		if (!picked) break;
+		try {
+			return await insertWithSlug(picked.slug);
+		} catch (err) {
+			if (!isUniqueViolation(err, "entities_slug_parent_unique")) throw err;
+			// A concurrent namesake must not create a second live entity.
+			if (scope.liveCollision === "reject") throw err;
+			from = picked.attempt + 1;
+		}
+	}
+	if (params.fallbackSlug) return insertWithSlug(params.fallbackSlug);
+	throw new Error(
+		`No free slug for '${scope.baseSlug}' after ${DERIVED_SLUG_ATTEMPTS} attempts`,
+	);
+}
+
 /**
  * Patch an explicit, bounded set of entity ids using the caller's DB handle.
  * Omitted fields remain unchanged; nullable fields distinguish null from
@@ -886,18 +969,17 @@ export async function createEntity(
 				await preventEntityCycles(null, createData.parent_id, tx);
 			}
 
-			const inserted = await insertEntityRow({
-				tx,
-				// THE create path. Everything a tenant, an agent or the API creates
-				// arrives here, so this is where a rule has to be able to reject a row
-				// born in a state no transition would have reached.
-				row: await validateEntityRowInsertGrantingApprovedFields({
-					tx,
+			// THE create path. Everything a tenant, an agent or the API creates
+			// arrives here, so this is where a rule has to be able to reject a row
+			// born in a state no transition would have reached.
+			const validate = (handle: DbClient, slug: string) =>
+				validateEntityRowInsertGrantingApprovedFields({
+					tx: handle,
 					row: {
 						organizationId: createData.organization_id as string,
 						entityTypeId: typeRow[0].id,
 						name: createData.name.trim(),
-						slug: createData.slug || slugify(createData.name),
+						slug,
 						parentId: createData.parent_id || null,
 						metadata: { ...createData.metadata },
 						createdBy: createData.created_by || "system",
@@ -906,8 +988,20 @@ export async function createEntity(
 						contentHash: createData.content_hash || null,
 					},
 					approvedFields: opts?.approvedFields ?? [],
-				}),
-			});
+				});
+			// An explicit slug is the caller's word: a collision fails loudly.
+			const inserted = createData.slug
+				? await insertEntityRow({ tx, row: await validate(tx, createData.slug) })
+				: await insertEntityRowWithDerivedSlug({
+						tx,
+						scope: {
+							organizationId: createData.organization_id as string,
+							parentId: createData.parent_id || null,
+							baseSlug: slugify(createData.name),
+							liveCollision: "reject",
+						},
+						validate,
+					});
 			return { ...inserted, entity_type: createData.entity_type };
 		});
 
@@ -1237,8 +1331,24 @@ export async function updateEntity(
 		if (applyName && effectiveName !== undefined && effectiveName !== current[0].name) {
 			rowPatch.name = effectiveName;
 		}
-		const slugPatch = opts?.preserveSlug ? null : data.slug ?? (applyName ? newSlug : null);
-		if (slugPatch !== null) rowPatch.slug = slugPatch;
+		if (!opts?.preserveSlug && data.slug != null) {
+			rowPatch.slug = data.slug;
+		} else if (!opts?.preserveSlug && applyName && newSlug !== null) {
+			// A name-derived slug steps past tombstones, exactly as on create.
+			const parentId = applyParent ? data.parent_id ?? null : current[0].parent_id;
+			const picked = await pickDerivedSlug(
+				tx,
+				{
+					organizationId: current[0].organization_id as string,
+					parentId: parentId === null ? null : Number(parentId),
+					baseSlug: newSlug,
+					liveCollision: "reject",
+				},
+				1,
+				entityId,
+			);
+			rowPatch.slug = picked?.slug ?? newSlug;
+		}
 		if (applyParent) rowPatch.parentId = data.parent_id ?? null;
 		if (hasMetadataUpdates && fieldMerge?.applied.length) rowPatch.metadata = mergedMetadata;
 		if (mergedControls !== null) rowPatch.fieldControls = mergedControls;

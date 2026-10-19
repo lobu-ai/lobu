@@ -50,12 +50,11 @@ import type { AppliedChange } from './entity-field-merge';
 import { EntityPolicyDenialError, recordEntityWriteDenial } from './entity-write-denial-audit';
 import {
   hardDeleteEntityRows,
-  insertEntityRow,
+  insertEntityRowWithDerivedSlug,
   updateEntity,
 } from './entity-management';
 import { EntityRowValidationError, validateEntityRowInsert } from '../authz/entity-row-validation';
 import logger from './logger';
-import { isUniqueViolation } from './pg-errors';
 import { resolveEntityCreator } from './resolve-entity-creator';
 import { computeStableKey, formatAutomationEntityIdentity } from './stable-keys';
 
@@ -193,23 +192,15 @@ async function resolveEntityTypeId(
 }
 
 /**
- * How many readable numeric suffixes (`-2`, `-3`, …) to try before falling back
- * to a guaranteed-unique identifier-derived slug. Keeps slugs human-friendly
- * while guaranteeing the insert terminates.
- */
-const SLUG_DISAMBIGUATION_ATTEMPTS = 5;
-
-/**
  * Insert the child entity, tolerating a slug collision on
  * `entities_slug_parent_unique (organization_id, COALESCE(parent_id,0), slug)`.
  * Two keyed rows can slugify to the same base slug, and the slug can clash with
- * a pre-existing sibling. A raw INSERT would then throw 23505 and — because
- * promotion runs inside the window-completion transaction — roll the whole
- * completion back; since the slug is deterministic, every retry re-hits it and
- * the window is permanently poison-pilled. The entity's real identity is its
- * `automation_key` claim, so the slug is cosmetic: retry with `-2`, `-3`, … and
- * finally an identifier-derived suffix (unique per automation+key). Each attempt is
- * savepoint-isolated so a failed INSERT doesn't abort the outer transaction.
+ * a pre-existing sibling or tombstone. A raw INSERT would then throw 23505 and —
+ * because promotion runs inside the window-completion transaction — roll the
+ * whole completion back; since the slug is deterministic, every retry re-hits it
+ * and the window is permanently poison-pilled. The entity's real identity is its
+ * `automation_key` claim, so the slug is cosmetic: step past any holder (`-2`,
+ * `-3`, …) and finally an identifier-derived suffix (unique per automation+key).
  */
 async function insertEntityWithUniqueSlug(params: {
   tx: DbClient;
@@ -222,44 +213,33 @@ async function insertEntityWithUniqueSlug(params: {
   metadata: Record<string, unknown>;
   createdBy: string;
 }): Promise<number> {
-  const { tx } = params;
-  // Automation output promoted into tenant state — the single most important
-  // create to govern, since it is the path an agent's work reaches the table by.
-  // Validation runs INSIDE the savepoint so a rule reads the same snapshot the
-  // insert writes into.
-  const insertWithSlug = (slug: string) =>
-    tx.savepoint(async (sp) =>
-      insertEntityRow({
+  const inserted = await insertEntityRowWithDerivedSlug({
+    tx: params.tx,
+    scope: {
+      organizationId: params.organizationId,
+      parentId: params.parentEntityId,
+      baseSlug: params.baseSlug,
+      liveCollision: 'suffix',
+    },
+    fallbackSlug: `${params.baseSlug}-${slugify(params.identifier)}`,
+    // Automation output promoted into tenant state — the single most important
+    // create to govern, since it is the path an agent's work reaches the table by.
+    // Every candidate is validated INSIDE its savepoint, so a rule reads the same
+    // snapshot the insert writes into and a slug retry never bypasses it.
+    validate: (sp, slug) =>
+      validateEntityRowInsert({
         tx: sp,
-        row: await validateEntityRowInsert({
-          tx: sp,
-          row: {
-            organizationId: params.organizationId,
-            entityTypeId: params.entityTypeId,
-            name: params.name,
-            slug,
-            parentId: params.parentEntityId,
-            metadata: params.metadata,
-            createdBy: params.createdBy,
-          },
-        }),
-      })
-    );
-
-  for (let attempt = 1; attempt <= SLUG_DISAMBIGUATION_ATTEMPTS; attempt++) {
-    const slug = attempt === 1 ? params.baseSlug : `${params.baseSlug}-${attempt}`;
-    try {
-      const inserted = await insertWithSlug(slug);
-      return Number(inserted.id);
-    } catch (err) {
-      if (isUniqueViolation(err, 'entities_slug_parent_unique')) continue;
-      throw err;
-    }
-  }
-  // Readable suffixes exhausted: the identifier is unique per (automation, key), so
-  // this slug is collision-free among promotions (and effectively so against any
-  // sibling). A final failure here propagates to the per-row guard in the loop.
-  const inserted = await insertWithSlug(`${params.baseSlug}-${slugify(params.identifier)}`);
+        row: {
+          organizationId: params.organizationId,
+          entityTypeId: params.entityTypeId,
+          name: params.name,
+          slug,
+          parentId: params.parentEntityId,
+          metadata: params.metadata,
+          createdBy: params.createdBy,
+        },
+      }),
+  });
   return Number(inserted.id);
 }
 
