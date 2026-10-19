@@ -66,22 +66,23 @@ export function assertBriefingEnvelope(
     !Array.isArray(data.findings)
   )
     throw new Error("Expected one briefing and findings array");
-  const m = data.briefings[0]!.metadata;
+  const m = data.briefings[0]?.metadata;
   if (m?.workflow !== policy.workflow || m.run_id !== runId)
     throw new Error("Briefing ownership/run mismatch");
   const coverage = m.coverage as Coverage[];
   if (
     !Array.isArray(coverage) ||
     coverage.length !== policy.platforms.length ||
-    new Set(coverage.map((c) => c.platform)).size !== policy.platforms.length ||
-    coverage.some((c) => !policy.platforms.includes(c.platform))
+    new Set(coverage.map((c) => c?.platform)).size !==
+      policy.platforms.length ||
+    coverage.some((c) => !policy.platforms.includes(c?.platform))
   )
     throw new Error("Coverage must name every configured platform once");
   return m;
 }
 
 export function findingHasReceipt(f: Draft, policy: EvidencePolicy) {
-  const m = f.metadata;
+  const m = f?.metadata;
   return (
     m?.workflow === policy.workflow &&
     policy.platforms.includes(m.platform) &&
@@ -256,7 +257,9 @@ async function verifyCoverage(
     const posts = new Map<string, SourcePost>();
     const platformIssues: string[] = [];
     let verifiedPages = 0;
-    for (const receipt of c.read_receipts ?? []) {
+    for (const receipt of Array.isArray(c.read_receipts)
+      ? c.read_receipts
+      : []) {
       try {
         const rows = await read(c.platform, receipt);
         verifiedPages++;
@@ -337,11 +340,11 @@ async function verifyFindings(
 ) {
   const seen = new Set<string>();
   for (const f of findings) {
-    const fm = f.metadata;
     if (!findingHasReceipt(f, policy))
       throw new Error(
         "Finding lacks its exact source receipt or uses an out-of-scope platform"
       );
+    const fm = f.metadata;
     const post = await findSourcePost(
       read,
       fm.platform,
@@ -410,6 +413,8 @@ async function verifyGraphCandidates(
     if (graphSeen.has(key)) throw new Error("Duplicate graph observation");
     graphSeen.add(key);
     for (const claim of g.claims) {
+      if (!claim || typeof claim !== "object")
+        throw new Error("Invalid graph observation");
       if (
         !quoteInBody(p.text, claim.evidence_quote) ||
         !claim.target?.profile_url ||

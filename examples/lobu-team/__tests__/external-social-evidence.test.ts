@@ -271,6 +271,10 @@ test("graph observations require source author and target links, independently o
   );
   expect(candidate.evidence_verified).toBe(true);
   expect(h.data.briefings[0]!.metadata.graph_status).toBe("pending_ingestion");
+  const claim = candidate.claims[0]!;
+  (candidate.claims as unknown[]) = [null];
+  await expect(h.run()).rejects.toThrow("Invalid graph observation");
+  candidate.claims = [claim];
   candidate.claims[0]!.target.profile_url = "https://x.com/guessed";
   await expect(h.run()).rejects.toThrow("target-profile evidence");
   expect(candidate.evidence_verified).toBe(false);
@@ -377,6 +381,24 @@ test("an unknown window or source run fails with a named error, not a crash", as
     operations: { getRun: async () => ({ error: "Run not found" }) as any },
   });
   await expect(h.run()).rejects.toThrow("Missing claimed processing window");
+});
+
+test("malformed model-written entries fail with named errors, not crashes", async () => {
+  const h = fixture();
+  (h.data.findings as unknown[]) = [null];
+  await expect(h.run()).rejects.toThrow("Finding lacks its exact source");
+  const coverage = fixture();
+  (coverage.data.briefings[0]!.metadata.coverage as unknown[]) = [null];
+  await expect(coverage.run()).rejects.toThrow("Coverage must name");
+  (coverage.data.briefings as unknown[]) = [null];
+  await expect(coverage.run()).rejects.toThrow("Briefing ownership");
+  const receipts = fixture();
+  receipts.data.findings = [];
+  receipts.data.briefings[0]!.metadata.coverage[0].read_receipts = {};
+  await receipts.run();
+  expect(receipts.data.briefings[0]!.metadata.coverage[0].status).toBe(
+    "blocked"
+  );
 });
 
 test("TikTok native inspection verifies its full caption while media stays partial", async () => {
