@@ -23,7 +23,7 @@ export function readSocialTimelinePage(options: {
         String(identity).toLowerCase() === options.account_path.toLowerCase() &&
         [...doc.querySelectorAll('[role="tab"]')].some(
           (t: any) =>
-            t.innerText === "Following" &&
+            t.innerText.trim() === "Following" &&
             t.getAttribute("aria-selected") === "true"
         )
       : loc.origin === "https://www.linkedin.com" &&
@@ -60,7 +60,7 @@ export function readSocialTimelinePage(options: {
       !url ||
       !(
         x
-          ? /^https:\/\/x\.com\/[\w]+\/status\/\d+$/
+          ? /^https:\/\/x\.com\/\w+\/status\/\d+$/
           : /^https:\/\/www\.linkedin\.com\/feed\/update\/urn:li:activity:\d+$/
       ).test(url)
     )

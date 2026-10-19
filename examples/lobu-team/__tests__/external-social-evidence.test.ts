@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import {
   verifySocialEvidence,
   type SocialData,
@@ -222,7 +223,11 @@ test("graph observations require source author and target links, independently o
     evidence_verified: false,
   };
   h.data.briefings[0]!.metadata.graph_candidates = [candidate];
-  await h.run();
+  // MCP's V8 sandbox has standard JS globals but no browser URL constructor.
+  await runInNewContext(
+    `(${verifySocialEvidence.toString()})(client, policy, 10, data)`,
+    { client: h.client, policy, data: h.data }
+  );
   expect(candidate.evidence_verified).toBe(true);
   expect(h.data.briefings[0]!.metadata.graph_status).toBe("pending_ingestion");
   candidate.claims[0]!.target.profile_url = "https://x.com/guessed";
@@ -241,7 +246,7 @@ test("a verified empty page is distinguishable from missing source evidence", as
   });
 });
 
-test("browser snapshot returns long text intact and stops when its scratch tab becomes hidden", () => {
+test("browser snapshot accepts label whitespace, returns full text and rejects hidden tabs", () => {
   const root = globalThis as any;
   const originalDocument = root.document;
   const originalLocation = root.location;
@@ -263,7 +268,7 @@ test("browser snapshot returns long text intact and stops when its scratch tab b
       querySelector: () => ({ getAttribute: () => "/synthetic" }),
       querySelectorAll: (s: string) =>
         s.includes("role")
-          ? [{ innerText: "Following", getAttribute: () => "true" }]
+          ? [{ innerText: "Following ", getAttribute: () => "true" }]
           : [card],
     };
     root.location = {

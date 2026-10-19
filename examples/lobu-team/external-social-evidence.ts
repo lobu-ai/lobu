@@ -269,7 +269,8 @@ export async function verifySocialEvidence(
           issues.some((issue) => issue.startsWith(`${c.platform}:`))
         ? "partial"
         : "read";
-    c.detail = `Verified ${posts.size} unique text posts; ${c.recent_posts_read} dated within seven days. ${incomplete ? "Incomplete text or unread media. " : ""}${c.continuation_pending !== false ? "Continuation remains. " : ""}${issues.filter((issue) => issue.startsWith(`${c.platform}:`)).join("; ")}`;
+    c.detail =
+      `Verified ${posts.size} unique text posts; ${c.recent_posts_read} dated within seven days. ${incomplete ? "Incomplete text or unread media. " : ""}${c.continuation_pending !== false ? "Continuation remains. " : ""}${issues.filter((issue) => issue.startsWith(`${c.platform}:`)).join("; ")}`.trim();
   }
   const seen = new Set<string>();
   for (const f of data.findings) {
@@ -306,18 +307,17 @@ export async function verifySocialEvidence(
     if (seen.has(key)) throw new Error("Duplicate finding");
     seen.add(key);
   }
-  m.evidence_verification = {
-    version: 1,
-    run_id: runId,
-    issues,
-    verified_findings: data.findings.length,
-  };
   const graph = m.graph_candidates ?? [];
   if (!Array.isArray(graph) || graph.length > 100)
     throw new Error("Graph candidates must be a bounded array");
   const canonicalProfile = (url: string) => {
-    const u = new URL(url);
-    return `${u.origin.replace("www.", "")}${u.pathname.replace(/\/posts\/?$/, "").replace(/\/$/, "")}`.toLowerCase();
+    // This function is embedded in MCP's V8 sandbox, which has no URL global.
+    // Accept only ordinary HTTP(S) profile URLs, without credentials or ports.
+    const parts = /^(https?):\/\/([a-z0-9.-]+)(\/[^?#]*)?(?:[?#].*)?$/i.exec(
+      url
+    );
+    if (!parts) throw new Error("Invalid graph profile URL");
+    return `${parts[1]}://${parts[2]!.replace(/^www\./i, "")}${(parts[3] || "/").replace(/\/posts\/?$/, "").replace(/\/$/, "")}`.toLowerCase();
   };
   const graphSeen = new Set<string>();
   for (const g of graph) {
@@ -377,7 +377,13 @@ export async function verifySocialEvidence(
     g.evidence_verified = true;
   }
   m.graph_status = graph.length ? "pending_ingestion" : "no_candidates";
-  m.evidence_verification.verified_graph_candidates = graph.length;
+  m.evidence_verification = {
+    version: 1,
+    run_id: runId,
+    issues,
+    verified_findings: data.findings.length,
+    verified_graph_candidates: graph.length,
+  };
   // Raw text is read above but is never copied into checkpoints or outputs.
   return data;
 }
