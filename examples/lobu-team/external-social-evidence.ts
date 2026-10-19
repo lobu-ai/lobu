@@ -85,10 +85,11 @@ export async function verifySocialEvidence(
   const end = parent.completed_at
     ? Date.parse(parent.completed_at)
     : Date.now();
-  if (!Number.isSafeInteger(Number(parent.automation_id)))
+  const automationId = Number(parent.automation_id);
+  if (!Number.isSafeInteger(automationId) || automationId <= 0)
     throw new Error("Missing Automation identity");
   const [owner] = await workspace.query(
-    `SELECT created_by FROM automations WHERE id = ${Number(parent.automation_id)}`
+    `SELECT created_by FROM automations WHERE id = ${automationId}`
   );
   if (!owner?.created_by) throw new Error("Automation owner unavailable");
   const cache = new Map<string, Promise<SourcePost[]>>();
@@ -148,6 +149,39 @@ export async function verifySocialEvidence(
           throw new Error(
             "Source receipt does not belong to this processing window"
           );
+        if (platform === "tiktok" && run.operation_key === "inspect_post") {
+          const p = run.output?.post;
+          const handle = p?.author?.handle;
+          if (
+            typeof p?.text !== "string" ||
+            typeof handle !== "string" ||
+            !handle ||
+            typeof p.origin_id !== "string" ||
+            !p.origin_id ||
+            !["video", "photo"].some(
+              (kind) =>
+                p.source_url ===
+                `https://www.tiktok.com/@${handle}/${kind}/${p.origin_id}`
+            )
+          )
+            throw new Error(
+              "TikTok source identity is missing or inconsistent"
+            );
+          // The connector returns the source's complete desc, but screenshots
+          // are only samples and never prove that video/audio was understood.
+          return [
+            {
+              source_url: p.source_url,
+              origin_id: p.origin_id,
+              text: p.text,
+              author: p.author.name || handle,
+              author_url: `https://www.tiktok.com/@${handle}`,
+              occurred_at: p.created_at ?? null,
+              truncated: false,
+              media_unread: true,
+            },
+          ];
+        }
         if (platform === "linkedin" && run.operation_key === "read_home_feed") {
           if (policy.company_linkedin_path)
             throw new Error("Member timeline is outside company scope");
@@ -287,6 +321,8 @@ export async function verifySocialEvidence(
   };
   const graphSeen = new Set<string>();
   for (const g of graph) {
+    if (!g || typeof g !== "object")
+      throw new Error("Invalid graph observation");
     g.evidence_verified = false;
     if (
       g.workspace !== policy.workspace ||

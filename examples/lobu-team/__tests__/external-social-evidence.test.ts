@@ -314,3 +314,43 @@ test("an unknown window or source run fails with a named error, not a crash", as
   });
   await expect(h.run()).rejects.toThrow("Missing claimed processing window");
 });
+
+test("TikTok native inspection verifies its full caption while media stays partial", async () => {
+  const h = fixture();
+  const tiktok = {
+    ...policy,
+    platforms: ["tiktok"],
+    receipt_workspaces: { tiktok: [policy.workspace] },
+  };
+  h.source.operation_key = "inspect_post";
+  const url = "https://www.tiktok.com/@example/video/123";
+  (h.source as any).output = {
+    post: {
+      source_url: url,
+      origin_id: "123",
+      text: post.text,
+      author: { handle: "example", name: "Example" },
+      created_at: post.occurred_at,
+    },
+    frames: [{}],
+    audio_inspected: false,
+  };
+  h.data.briefings[0]!.metadata.coverage[0].platform = "tiktok";
+  const f = h.data.findings[0]!;
+  f.source_url = url;
+  Object.assign(f.metadata, { platform: "tiktok", source_url: url });
+  const result = await verifySocialEvidence(h.client, tiktok, 10, h.data);
+  expect(result.briefings[0]!.metadata.coverage[0]).toMatchObject({
+    posts_read: 1,
+    recent_posts_read: 1,
+    status: "partial",
+  });
+  expect(
+    result.briefings[0]!.metadata.evidence_verification.verified_findings
+  ).toBe(1);
+  (h.source as any).output.post.source_url =
+    "https://www.tiktok.com/@other/video/123";
+  await expect(
+    verifySocialEvidence(h.client, tiktok, 10, h.data)
+  ).rejects.toThrow("TikTok source identity");
+});
