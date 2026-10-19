@@ -1,5 +1,9 @@
 import { readSocialTimelinePage } from "./social-timeline-reader";
 
+// Pin this before MCP compiles the verifier; runtime Function.toString() can
+// change when the sandbox combines declarations or reformats the function.
+const timelineReaderSource = readSocialTimelinePage.toString();
+
 /** Tenant-owned external processing contract. No platform or storage changes. */
 type Receipt =
   | { workspace: string; run_id: number }
@@ -179,7 +183,7 @@ function readPostsFromOperation(
     (platform === "x" ||
       (platform === "linkedin" && policy.company_linkedin_path)) &&
     (typeof run.input?.expression !== "string" ||
-      !run.input.expression.includes(readSocialTimelinePage.toString()))
+      !run.input.expression.includes(timelineReaderSource))
   )
     throw new Error("Source receipt did not use the supplied timeline reader");
   const value = run.output?.value;
@@ -523,22 +527,24 @@ export async function verifySocialEvidence(
 
 /** The MCP isolate has no imports; include the verifier's explicit dependencies. */
 export function socialEvidenceVerifierSource() {
-  return [
-    readSocialTimelinePage,
-    assertSourcePosts,
-    assertBriefingEnvelope,
-    findingHasReceipt,
-    findSourcePost,
-    quoteInBody,
-    readPostsFromOperation,
-    loadSourcePosts,
-    createSourceReader,
-    verifyCoverage,
-    verifyFindings,
-    canonicalProfile,
-    verifyGraphCandidates,
-    verifySocialEvidence,
-  ]
-    .map((fn) => fn.toString())
-    .join("\n\n");
+  return (
+    `const timelineReaderSource = ${JSON.stringify(timelineReaderSource)};\n` +
+    [
+      assertSourcePosts,
+      assertBriefingEnvelope,
+      findingHasReceipt,
+      findSourcePost,
+      quoteInBody,
+      readPostsFromOperation,
+      loadSourcePosts,
+      createSourceReader,
+      verifyCoverage,
+      verifyFindings,
+      canonicalProfile,
+      verifyGraphCandidates,
+      verifySocialEvidence,
+    ]
+      .map((fn) => fn.toString())
+      .join("\n\n")
+  );
 }

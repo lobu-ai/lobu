@@ -589,3 +589,16 @@ test("a media-only post leaves its page verified but partial", async () => {
     status: "partial",
   });
 });
+
+test("serialized preflight keeps the reader identity through sandbox compilation", async () => {
+  const h = fixture();
+  const compiled = new Bun.Transpiler({
+    loader: "ts",
+    minifyWhitespace: true,
+  }).transformSync(
+    `${socialEvidenceVerifierSource()}\nverifySocialEvidence(client, policy, 10, data);`
+  );
+  await expect(
+    runInNewContext(compiled, { client: h.client, policy, data: h.data })
+  ).resolves.toBe(h.data);
+});
