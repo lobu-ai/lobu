@@ -291,3 +291,26 @@ test("browser snapshot returns long text intact and stops when its scratch tab b
     root.location = originalLocation;
   }
 });
+
+test("an unknown window or source run fails with a named error, not a crash", async () => {
+  const h = fixture();
+  const org = h.client.org;
+  h.client.org = async (workspace: string) => {
+    const c = await org(workspace);
+    return {
+      ...c,
+      operations: {
+        getRun: async (id: number) =>
+          id === 20
+            ? ({ error: "Run not found" } as any)
+            : c.operations.getRun(id),
+      },
+    };
+  };
+  await expect(h.run()).rejects.toThrow("processing window");
+  h.client.org = async () => ({
+    ...(await org(policy.workspace)),
+    operations: { getRun: async () => ({ error: "Run not found" }) as any },
+  });
+  await expect(h.run()).rejects.toThrow("Missing claimed processing window");
+});

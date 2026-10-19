@@ -118,3 +118,17 @@ test("reaction reports missing evidence rather than silently delivering unverifi
   expect(send.mock.calls[0][0].body).not.toContain("unsupported claim");
   expect(send.mock.calls[0][0].title).toBe("Social research needs evidence");
 });
+
+test("public graph handoff is opt-in and keeps private receipts in their source workspace", () => {
+  const enabled = externalSocialPrompt("Preserve policy", {
+    ...policy,
+    public_graph_workspace: "synthetic-market",
+  });
+  expect(enabled).toContain("PUBLIC MARKET HANDOFF");
+  expect(enabled).toContain('credentials:"omit"');
+  expect(enabled).toContain("supersedes_event_id");
+  expect(enabled).toContain("Pending approval, suppressed/queued actions");
+  expect(externalSocialPrompt("Preserve policy", policy)).not.toContain(
+    "PUBLIC MARKET HANDOFF"
+  );
+});

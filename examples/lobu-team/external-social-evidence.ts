@@ -40,6 +40,8 @@ export type EvidencePolicy = {
   // Cross-workspace receipt reads are explicit and platform-bound.
   receipt_workspaces: Record<string, string[]>;
   company_linkedin_path?: string;
+  // Opt-in owner configuration, not a platform graph contract.
+  public_graph_workspace?: string;
 };
 type EvidenceClient = {
   org(workspace: string): Promise<{
@@ -72,11 +74,12 @@ export async function verifySocialEvidence(
   )
     throw new Error("Coverage must name every configured platform once");
   const workspace = await client.org(policy.workspace);
+  // getRun answers {error} without a run for an unknown or foreign id.
   const { run: parent } = await workspace.operations.getRun(runId);
-  const start = Date.parse(parent.created_at);
+  const start = Date.parse(parent?.created_at);
   if (
     !Number.isFinite(start) ||
-    !["running", "claimed", "completed"].includes(parent.status)
+    !["running", "claimed", "completed"].includes(parent?.status)
   )
     throw new Error("Missing claimed processing window");
   const end = parent.completed_at
@@ -131,10 +134,10 @@ export async function verifySocialEvidence(
           ];
         }
         const { run } = await c.operations.getRun(receipt.run_id);
-        const created = Date.parse(run.created_at);
-        const completed = Date.parse(run.completed_at);
+        const created = Date.parse(run?.created_at);
+        const completed = Date.parse(run?.completed_at);
         if (
-          run.status !== "completed" ||
+          run?.status !== "completed" ||
           run.created_by_user_id !== owner.created_by ||
           !Number.isFinite(created) ||
           !Number.isFinite(completed) ||
