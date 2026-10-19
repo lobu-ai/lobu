@@ -8,22 +8,28 @@
  * row, and hands the turn to the chat bridge. The agent's completion goes out
  * as exactly one `send_message`, keyed on the operation's idempotency key.
  *
- * X has no linkable chat identity, so every sender is answered reply-only.
- * Only the operation boundary is faked: the Chrome actions the connector
- * dispatches to the paired browser, and the `send_message` operation.
+ * An X sender linked to a member (`x_chat_user_id`) is answered as that member;
+ * an unlinked sender is answered reply-only and offered a one-time link.
+ * Chrome actions and `send_message` are faked at the operation boundary;
+ * link redemption injects the signed-in browser session.
  */
 
 import { EventEmitter } from "node:events";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
-import { CommandRegistry } from "@lobu/core";
+import { CommandRegistry, verifyWorkerToken } from "@lobu/core";
+import { sessionCookieName } from "../../../auth/session-cookie-scope";
+import { createChatIdentityRoutes } from "../../../connect/chat-identity-routes";
 import { ChatInstanceManager } from "../../../gateway/connections/chat-instance-manager";
 import { ChatResponseBridge } from "../../../gateway/connections/chat-response-bridge";
 import { handleChatSourceIngress } from "../../../gateway/connections/chat-source-ingress";
 import { connectorTransportPlatforms } from "../../../gateway/connections/platforms/index";
+import { mintTurnToken } from "../../../gateway/orchestration/agent-turn-producer";
 import { RunsQueue } from "../../../gateway/infrastructure/queue/runs-queue";
 import type { QueueJob } from "../../../gateway/infrastructure/queue/types";
 import { createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
+import { resolveChatUserIdentity } from "../../../lobu/stores/chat-identity";
+import { readChatIdentityLink } from "../../../lobu/stores/chat-identity-link";
 import { CHAT_SOURCE_INGRESS_QUEUE, type ChatSourceIngressJob } from "../../../runs/chat-ingress-jobs";
 import { receiveFeedNotifications } from "../../../runs/feed-notifications";
 import { sourceFeedScopeKey } from "../../../runs/source-feed-subscriptions";
@@ -45,6 +51,7 @@ const DM = `${SELF}-${PEER}`;
 const OTHER_DM = `${SELF}-1000000003`;
 const GROUP = "1000000009";
 const BASE_TIME = 1_787_358_200_000;
+const ORIGIN = "https://cloud.example.test";
 
 interface DeviceMessage {
   conversation_id: string;
@@ -139,6 +146,15 @@ async function deliver(messages: DeviceMessage | DeviceMessage[], notificationId
   expect(receipt.active).toBe(true);
 }
 
+/** The worker token the producer signs for a dispatched turn. */
+async function mintedClaims(payload: Record<string, any>) {
+  const [input] = await sql`INSERT INTO runs (organization_id, run_type, queue_name, status, action_input)
+    VALUES (${payload.organizationId}, 'chat_message', 'messages', 'claimed', ${sql.json(payload)}) RETURNING id`;
+  const claims = verifyWorkerToken(await mintTurnToken(payload as any, Number(input.id)));
+  expect(claims).toBeTruthy();
+  return claims!;
+}
+
 const ingressJobs = () => sql`SELECT id, status, attempts FROM runs
   WHERE organization_id = ${orgId} AND queue_name = ${CHAT_SOURCE_INGRESS_QUEUE} ORDER BY id`;
 
@@ -180,7 +196,7 @@ function buildManager(): ChatInstanceManager {
   const interactions = new EventEmitter();
   Object.assign(built as unknown as Record<string, unknown>, {
     connectionStore: createPostgresAgentConnectionStore({ connectorTransportPlatforms: connectorTransportPlatforms() }),
-    publicGatewayUrl: "",
+    publicGatewayUrl: ORIGIN,
     services: {
       getAppInstallationStore: () => undefined,
       getSecretStore: () => undefined,
@@ -188,7 +204,7 @@ function buildManager(): ChatInstanceManager {
       getAutomationSubscriptionService: () => undefined,
       getInteractionService: () => interactions,
       getArtifactStore: () => null,
-      getPublicGatewayUrl: () => "",
+      getPublicGatewayUrl: () => ORIGIN,
       getQueueProducer: () => ({ enqueueMessage: async (payload: Record<string, any>) => {
         enqueued.push(payload);
       } }),
@@ -270,12 +286,13 @@ describe("X source chat", () => {
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0]).toMatchObject({ agentId, platform: "x", messageText: expect.stringContaining("hello bot") });
 
-    // An X sender has no linkable identity: the turn is reply-only, and the
-    // sender is told once, without a link to follow.
+    // An unlinked X sender's turn is reply-only, and the sender is told once,
+    // with a one-time link that proves this X account is theirs.
     expect(sends).toHaveLength(1);
     expect(sends[0].input).toMatchObject({ conversation_id: DM });
     expect(String(sends[0].input.text)).toContain("I can't use this workspace's tools for you");
-    expect(String(sends[0].input.text)).not.toContain("/connect/chat-identity");
+    expect(String(sends[0].input.text)).toContain("/connect/chat-identity?token=");
+    expect(await mintedClaims(enqueued[0])).toMatchObject({ userId: PEER, chatAccess: "reply_only" });
 
     await completeTurns();
     expect(replies()).toHaveLength(1);
@@ -288,6 +305,63 @@ describe("X source chat", () => {
     expect(reply.idempotencyKey).toBeTruthy();
     // Every send carries the key from which the connector derives X's request id.
     for (const send of sends) expect(send.input.idempotency_key).toBe(send.idempotencyKey);
+  }, 60_000);
+
+  it("redeems an X DM link and answers the next DM as that workspace's member", async () => {
+    const member = await createTestUser({ email: "x-member@example.test" });
+    await addUserToOrganization(member.id, orgId, "member");
+    const otherOrg = await createTestOrganization({ name: "Other X workspace" });
+    await addUserToOrganization(member.id, otherOrg.id, "member");
+    await insertAutomation("dm-reply", replyTo());
+    const message = { conversation_id: DM, message_id: "5201", text: "link my account" };
+    deviceMessages.push(message);
+
+    await deliver(message);
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(await mintedClaims(enqueued[0])).toMatchObject({ userId: PEER, chatAccess: "reply_only" });
+    expect(sends).toHaveLength(1);
+    const token = String(sends[0].input.text).match(/\/connect\/chat-identity\?token=([A-Za-z0-9_-]+)/)?.[1];
+    expect(token).toBeTruthy();
+    expect(await readChatIdentityLink(token!)).toMatchObject({
+      organizationId: orgId, connectionId: String(connectionId), platform: "x", senderId: PEER,
+    });
+    await completeTurns();
+
+    const routes = createChatIdentityRoutes({
+      session: async () => ({ user: member }),
+      origin: () => ORIGIN,
+    });
+    const response = await routes.request(`${ORIGIN}/connect/chat-identity`, {
+      method: "POST",
+      headers: {
+        origin: ORIGIN,
+        cookie: `${sessionCookieName(true)}=synthetic-session`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ token: token! }).toString(),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Chat account linked");
+    expect(await readChatIdentityLink(token!)).toBeNull();
+    expect(await resolveChatUserIdentity("x", undefined, PEER, orgId)).toBe(member.id);
+    expect(await resolveChatUserIdentity("x", undefined, PEER, otherOrg.id)).toBeNull();
+    expect(await resolveChatUserIdentity("x", undefined, PEER)).toBeNull();
+
+    sends.length = 0;
+    const nextMessage = { conversation_id: DM, message_id: "5202", text: "what's on my list?" };
+    deviceMessages.push(nextMessage);
+    await deliver(nextMessage, "after-link");
+    await drain();
+    expect(enqueued).toHaveLength(1);
+    expect(sends).toHaveLength(0);
+    expect(await mintedClaims(enqueued[0])).toMatchObject({
+      userId: PEER, chatAccess: "member", actorUserId: member.id,
+    });
+
+    await completeTurns();
+    expect(sends).toHaveLength(1);
+    expect(sends[0].input).toMatchObject({ conversation_id: DM, text: "Reply from the agent" });
   }, 60_000);
 
   it("answers a message request like any other DM", async () => {

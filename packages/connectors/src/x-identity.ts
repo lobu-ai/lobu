@@ -1,12 +1,13 @@
 /**
  * X (Twitter) connector identity namespaces and normalization.
  *
- * Single source of truth for x_user_id / x_handle rules. The connector and
- * server entity-link ingestion import from here — not from connector-sdk.
+ * Single source of truth for X account, handle and chat identity rules. The
+ * connector and server entity-link ingestion import from here, not connector-sdk.
  * Connector-specific identity knowledge stays in the connector package so
  * core code never names X.
  */
 
+import type { ChatUserIdentity } from './chat-user-identity.js';
 import type { ConnectorIdentityModule } from './connector-identity-module.js';
 
 /** Connector-owned identity namespaces (not SDK-global). */
@@ -15,6 +16,13 @@ export const X_IDENTITY = {
   USER_ID: 'x_user_id',
   /** Mutable/reusable @handle — secondary claim, not recall-indexed. */
   HANDLE: 'x_handle',
+  /**
+   * A direct-message sender's numeric user id, linking the sender to a Lobu
+   * member. Distinct from `x_user_id`, the person-entity attribution key, so a
+   * chat link on a `$member` never collides with the contact entity the same
+   * account's posts and messages auto-create.
+   */
+  CHAT_USER_ID: 'x_chat_user_id',
 } as const;
 
 export type XIdentityNamespace = (typeof X_IDENTITY)[keyof typeof X_IDENTITY];
@@ -45,6 +53,7 @@ export function normalizeXIdentityValue(
 ): string | null | undefined {
   switch (namespace) {
     case X_IDENTITY.USER_ID:
+    case X_IDENTITY.CHAT_USER_ID:
       return normalizeXUserId(raw);
     case X_IDENTITY.HANDLE:
       return normalizeXHandle(raw);
@@ -60,4 +69,24 @@ export const xIdentityModule: ConnectorIdentityModule = {
   // secondary claim (see idx_events_metadata_x_user_id — no handle index).
   recallNamespaces: [X_IDENTITY.USER_ID],
   normalize: normalizeXIdentityValue,
+};
+
+/**
+ * X's direct-message sender model. Numeric user ids are unique across X, so
+ * there is no tenant axis: `teamId` is ignored and the scope is global.
+ *
+ * No login extractor is registered for this descriptor. The chat link offered
+ * in a direct message proves the sender within the workspace that issued it.
+ */
+export const xChatUserIdentity: ChatUserIdentity = {
+  platform: 'x',
+  providerId: 'x',
+  namespace: X_IDENTITY.CHAT_USER_ID,
+  buildUserKey(_teamId, platformUserId) {
+    return normalizeXUserId(platformUserId);
+  },
+  userKeyScope: () => ({ kind: 'global' }),
+  platformUserIdFromKey(key) {
+    return normalizeXUserId(key);
+  },
 };

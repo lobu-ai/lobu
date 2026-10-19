@@ -170,6 +170,7 @@ describe("buildSenderIdentity over the chat-identity registry", () => {
     gchat: `users/${GOOGLE_SUB}`,
     "whatsapp.web": PHONE_JID,
     linkedin: "ACoAASyntheticMember",
+    x: "1000000002",
   };
 
   test("every registered platform has a sample author id for the invariants below", () => {
