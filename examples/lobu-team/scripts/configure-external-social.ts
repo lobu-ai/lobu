@@ -1,6 +1,9 @@
 import type { ClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
 import type { EvidencePolicy } from "../external-social-evidence";
-import { externalSocialPrompt } from "../external-social.prompt";
+import {
+  externalSocialPrompt,
+  socialOwnerPrompt,
+} from "../external-social.prompt";
 import { externalSocialReaction } from "../external-social.reaction";
 
 /** All live identifiers are explicit operator inputs. Preserve live instructions,
@@ -27,11 +30,12 @@ export async function configureExternalSocial(
       throw new Error("Configuration awaits policy approval");
     return result;
   };
-  const prompt = externalSocialPrompt(a.prompt, policy);
+  const prompt = socialOwnerPrompt(a.prompt);
   // The claim response carries pinned reactions_guidance, but not prompt.
-  // Use that existing instruction channel and retain prior owner guidance.
+  // Keep generated code only there, alongside the owner instructions: a
+  // worker must receive bindings and preflight together without another fetch.
   const guidanceMarker = "\n\nEXTERNAL SOCIAL WINDOW INSTRUCTIONS v1\n";
-  const guidance = `${(a.reactions_guidance ?? "").split(guidanceMarker)[0]}${guidanceMarker}${prompt}`;
+  const guidance = `${(a.reactions_guidance ?? "").split(guidanceMarker)[0]}${guidanceMarker}${externalSocialPrompt(prompt, policy)}`;
   const reaction = externalSocialReaction(policy);
   // setReactionScript is a separate existing mutation. Retry reconciles both
   // values; no scheduled/external processing mode is disabled or replaced.

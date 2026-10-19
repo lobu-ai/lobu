@@ -2,14 +2,19 @@ import {
   socialEvidenceVerifierSource,
   type EvidencePolicy,
 } from "./external-social-evidence";
-import { readSocialTimelinePage } from "./social-timeline-reader";
 
 const marker = "\n\nEXTERNAL SOCIAL EVIDENCE CONTRACT v1\n";
 
-/** Extend the current version, retaining account bindings, owner policy and
- * voice preferences. Never reapply an older managed-agent example wholesale. */
+/** Strip only this example's generated contract when upgrading an older version. */
+export function socialOwnerPrompt(current: string) {
+  return current.split(marker)[0];
+}
+
+/** Window instructions: the owner's prompt, retaining account bindings, owner
+ * policy and voice preferences, plus this contract. Never reapply an older
+ * managed-agent example wholesale. */
 export function externalSocialPrompt(current: string, policy: EvidencePolicy) {
-  const base = current.split(marker)[0];
+  const base = socialOwnerPrompt(current);
   return `${base}${marker}
 This contract refines reading and completion. Existing account/privacy/no-engagement limits remain authoritative.
 
@@ -18,10 +23,7 @@ At each host check-in select EACH authorized workspace and call operations.listA
 
 READ COMPLETE BODIES; STORE SHORT DISTILLATIONS
 Do not use slice/substring or character limits on source text BEFORE the model has read it. Chunk the returned post ARRAY into small pages (5-10 posts per tool result), not the post bodies. If tool output is truncated, fetch smaller pages before counting those posts as read. Expand visible Show more text within the owned scratch tab and inspect the result. Unexpanded text, missing authors, undated records, unread media and inaccessible threads remain explicit limitations. Keep checkpoints and final outputs short as already required; this restriction never permits reading only a fixed-length prefix of a body.
-Use this snapshot function inside Chrome evaluate for X or company LinkedIn, with page_path/account_path/company_name from the existing bindings. It intentionally returns whole body fields and verifies visibility on EVERY page. Do not replace it with cached body snippets:
-\`\`\`typescript
-${readSocialTimelinePage.toString()}
-\`\`\`
+For X or company LinkedIn, use the timelineReaderSource constant in the executable block below verbatim: pass expression: "(" + timelineReaderSource + ")(" + JSON.stringify(options) + ")" to Chrome evaluate. Supply platform, page_path/account_path/company_name from the existing bindings. The reader returns whole bodies and verifies visibility on EVERY page; do not rewrite it or substitute cached snippets.
 Keep each evaluate run_id and its workspace alongside the returned posts. Native TikTok inspect_post receipts verify the full caption and author but remain partial for video/audio; sampled frames are not full-media understanding. Native LinkedIn read_home_feed receipts are accepted only without a company Page binding, and remain partial because their completeness and dates are not proved. HN stored-event receipts use {workspace,event_id,origin_id}. Other browser sources must return the same envelope {platform,identity_verified,visibility,posts:[{source_url,origin_id,text,author,author_url,mentioned_profiles,occurred_at,truncated,media_unread}]} only after verifying the existing allowed account in that same scratch tab. Never fabricate envelope fields or timestamps. Feed readMany rows are transient: a successful feed operation with output:null is NOT a retained text receipt. Read the exact candidate in a receipt-producing browser operation before creating a finding from it.
 
 CONTINUATION AND RECOVERY

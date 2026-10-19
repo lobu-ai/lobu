@@ -48,7 +48,12 @@ test("external configuration preserves live owner instructions and output contra
   const h = fixture();
   await h.run();
   expect(h.automation.prompt).toContain("Owner policy: no likes");
-  expect(h.automation.prompt).toContain("MANDATORY COMPLETION PREFLIGHT");
+  expect(h.automation.prompt.includes("MANDATORY COMPLETION PREFLIGHT")).toBe(
+    false
+  );
+  expect(h.automation.reactions_guidance).toContain(
+    "MANDATORY COMPLETION PREFLIGHT"
+  );
   expect(h.client.automations.createVersion.mock.calls[0][0].outputs).toEqual(
     h.automation.outputs
   );
@@ -80,7 +85,8 @@ test("prompt upgrade is idempotent and embeds executable functions without local
   const code = [...prompt.matchAll(/```typescript\n([\s\S]*?)\n```/g)].map(
     (m) => m[1]
   );
-  expect(code).toHaveLength(2);
+  expect(code).toHaveLength(1);
+  expect(prompt.match(/function readSocialTimelinePage/g)).toHaveLength(1);
   for (const source of code) expect(() => new Function(source!)).not.toThrow();
 });
 test("reaction reports missing evidence rather than silently delivering unverified findings", async () => {
@@ -241,4 +247,49 @@ test("graph candidates added after preflight do not receive a verified notificat
   expect(result.evidence_verified).toBe(false);
   expect(send.mock.calls[0][0].title).toBe("Social research needs evidence");
   expect(send.mock.calls[0][0].body).not.toContain("Unverified graph addition");
+});
+
+test("reaction refuses an invalid Automation identity before querying or notifying", async () => {
+  for (const id of [undefined, 0, -1, "invalid"]) {
+    const query = mock(async () => [{ created_by: "synthetic-owner" }]);
+    const send = mock(async () => ({ event_id: 100 }));
+    await expect(
+      deliverExternalSocial(
+        {
+          automation: { id },
+          window: { run_id: 20 },
+          extracted_data: {
+            briefings: [
+              {
+                metadata: {
+                  workflow: policy.workflow,
+                  run_id: 20,
+                  coverage: [{ platform: "x" }],
+                },
+              },
+            ],
+            findings: [],
+          },
+        },
+        { query, notifications: { send } },
+        policy
+      )
+    ).rejects.toThrow("Missing Automation identity");
+    expect(query).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  }
+});
+
+test("upgrading a duplicated contract retains owner policy and moves generated code into window guidance", async () => {
+  const h = fixture();
+  const owner = h.automation.prompt;
+  h.automation.prompt = externalSocialPrompt(owner, policy);
+  await h.run();
+  expect(h.automation.prompt).toBe(owner);
+  expect(h.automation.reactions_guidance).toContain(owner);
+  expect(
+    h.automation.reactions_guidance.match(/function readSocialTimelinePage/g)
+  ).toHaveLength(1);
+  await configureExternalSocial(h.client as any, "10", 4, policy);
+  expect(h.client.automations.createVersion).toHaveBeenCalledTimes(1);
 });

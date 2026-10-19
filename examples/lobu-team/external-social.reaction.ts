@@ -13,6 +13,9 @@ export async function deliverExternalSocial(
 ) {
   const d = ctx.extracted_data;
   const m = assertBriefingEnvelope(d, policy, ctx.window.run_id);
+  const automationId = Number(ctx.automation?.id);
+  if (!Number.isSafeInteger(automationId) || automationId <= 0)
+    throw new Error("Missing Automation identity");
   const b = d.briefings[0];
   const coverage = m.coverage;
   const preflight = m.evidence_verification;
@@ -38,7 +41,7 @@ export async function deliverExternalSocial(
     ) &&
     d.findings.every((f: any) => findingHasReceipt(f, policy));
   const [owner] = await client.query(
-    `SELECT created_by FROM automations WHERE id = ${Number(ctx.automation.id)}`
+    `SELECT created_by FROM automations WHERE id = ${automationId}`
   );
   if (!owner?.created_by) throw new Error("Automation owner unavailable");
   const summary = verified
@@ -61,10 +64,10 @@ export async function deliverExternalSocial(
       : "Social research needs evidence",
     body,
     recipients: [owner.created_by],
-    resource_url: `/${policy.workspace}/automations/${ctx.automation.id}`,
-    idempotency_key: `social-briefing:${ctx.automation.id}:${ctx.window.run_id}`,
+    resource_url: `/${policy.workspace}/automations/${automationId}`,
+    idempotency_key: `social-briefing:${automationId}:${ctx.window.run_id}`,
     automation_source: {
-      automation_id: Number(ctx.automation.id),
+      automation_id: automationId,
       run_id: Number(ctx.window.run_id),
     },
   });
