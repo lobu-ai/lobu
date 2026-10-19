@@ -98,6 +98,21 @@ function submit(user: TestUser | null, token: string, headers: Record<string, st
   });
 }
 
+function submitJoin(user: TestUser | null, token: string) {
+  return routesAs(user).request(`${ORIGIN}/connect/chat-identity`, {
+    method: "POST",
+    headers: browser,
+    body: new URLSearchParams({ token, join: "1" }).toString(),
+  });
+}
+
+async function memberRoleOf(userId: string, organizationId: string): Promise<string | null> {
+  const [row] = await getDb()`
+    SELECT role FROM "member" WHERE "userId" = ${userId} AND "organizationId" = ${organizationId} LIMIT 1
+  `;
+  return (row?.role as string | undefined) ?? null;
+}
+
 function mint(organizationId = ORG_A, senderId = SENDER.name, platform = "gchat") {
   return mintChatIdentityLink({
     organizationId,
@@ -357,6 +372,63 @@ describe("chat identity link routes", () => {
     expect(await res.text()).toContain("Ask an admin of Acme Synthetic to invite you");
     expect(await identityRows(ORG_A)).toHaveLength(0);
     expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name)).toBeNull();
+  });
+
+  test("a non-member of a public workspace joins and links in one step, only when they ask to", async () => {
+    await getDb()`UPDATE organization SET visibility = 'public' WHERE id = ${ORG_A}`;
+    const outsider = await createTestUser({});
+    const token = (await mint())!;
+    const page = await routesAs(outsider).request(pageUrl(token));
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("Join and link");
+    expect(html).toContain('name="join" value="1"');
+
+    // A plain link submission never joins anyone.
+    expect((await submit(outsider, token)).status).toBe(403);
+    expect(await memberRoleOf(outsider.id, ORG_A)).toBeNull();
+
+    const res = await submitJoin(outsider, token);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("You joined <strong>Acme Synthetic</strong>");
+    expect(await memberRoleOf(outsider.id, ORG_A)).toBe("member");
+    expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name, ORG_A)).toBe(outsider.id);
+    expect(await claimCount()).toBe(0);
+  });
+
+  test("asking to join a private workspace joins nothing and links nothing", async () => {
+    const outsider = await createTestUser({});
+    const token = (await mint())!;
+    const res = await submitJoin(outsider, token);
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("Ask an admin of Acme Synthetic to invite you");
+    expect(await memberRoleOf(outsider.id, ORG_A)).toBeNull();
+    expect(await identityRows(ORG_A)).toHaveLength(0);
+  });
+
+  test("an expired link never joins a public workspace", async () => {
+    await getDb()`UPDATE organization SET visibility = 'public' WHERE id = ${ORG_A}`;
+    const outsider = await createTestUser({});
+    const token = (await mint())!;
+    await getDb()`UPDATE oauth_states SET expires_at = now() - interval '1 second' WHERE scope = ${CHAT_IDENTITY_LINK_SCOPE}`;
+    expect((await submitJoin(outsider, token)).status).toBe(410);
+    expect(await memberRoleOf(outsider.id, ORG_A)).toBeNull();
+  });
+
+  test("joining reports the new membership when the chat identity belongs to another user", async () => {
+    await getDb()`UPDATE organization SET visibility = 'public' WHERE id = ${ORG_A}`;
+    await linkChatIdentityInGraph({ organizationId: ORG_A, userId: member.id, platform: "gchat", platformUserId: SENDER.name });
+    const outsider = await createTestUser({});
+    const token = (await mint())!;
+    const res = await submitJoin(outsider, token);
+    expect(res.status).toBe(409);
+    const html = await res.text();
+    expect(html).toContain("You joined Acme Synthetic, but this chat account could not be linked");
+    expect(html).not.toContain("Nothing was changed");
+    expect(await memberRoleOf(outsider.id, ORG_A)).toBe("member");
+    expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name, ORG_A)).toBe(member.id);
+    expect(await identityRows(ORG_A)).toHaveLength(1);
+    expect(await claimCount()).toBe(1);
   });
 
   test("an identity already linked to another member is refused and the original link stays", async () => {

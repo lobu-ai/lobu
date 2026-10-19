@@ -1,9 +1,12 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { sessionCookieName } from "../../auth/session-cookie-scope.js";
+import * as subjectIdentities from "../../auth/subject-identities.js";
 import { createChatIdentityRoutes } from "../../connect/chat-identity-routes.js";
 import * as dbClient from "../../db/client.js";
+import * as memberOrgs from "../../identity/member-orgs.js";
 import * as chatLinks from "../../lobu/stores/chat-identity-link.js";
 import { getRateLimiter, resetRateLimiterForTests } from "../../utils/rate-limiter.js";
+import * as publicJoin from "../../workspace/join-public.js";
 import { MessageHandlerBridge } from "../connections/message-handler-bridge.js";
 import { chatSenderLimitKey, type ChatTurnActor } from "../orchestration/chat-turn-actor.js";
 
@@ -106,4 +109,51 @@ test("the confirmation page preserves form Origin without leaking the token in R
   });
   expect(rejected.status).toBe(403);
   expect(sql).toHaveBeenCalledTimes(3);
+});
+
+test.each(["conflict", "already-owned"] as const)("join completion is disclosed when identity adoption returns %s", async (outcome) => {
+  let joined = false;
+  const sql = mock(async (parts: TemplateStringsArray) => {
+    const query = parts.join("?");
+    if (query.includes('FROM "organization"')) {
+      return [{ name: "Synthetic Workspace", slug: "synthetic-workspace", visibility: "public" }];
+    }
+    if (query.includes('FROM "member"')) return joined ? [{ role: "member" }] : [];
+    if (query.includes("FROM connections")) return [{}];
+    return [];
+  });
+  spyOn(dbClient, "getDb").mockReturnValue(sql as unknown as dbClient.DbClient);
+  spyOn(chatLinks, "readChatIdentityLink").mockResolvedValue({
+    organizationId: "org-link-notice", connectionId: "synthetic-chat", platform: "slack",
+    teamId: "T_SYNTHETIC", senderId: "U_SYNTHETIC", identityKey: "T_SYNTHETIC:U_SYNTHETIC",
+    senderDisplayName: "Synthetic Sender",
+  });
+  const join = spyOn(publicJoin, "joinPublicOrganization").mockImplementation(async () => {
+    joined = true;
+    return { status: "joined", organizationId: "org-link-notice", role: "member" };
+  });
+  spyOn(memberOrgs, "resolveMemberOrgsForUser").mockResolvedValue([
+    { tenantOrganizationId: "org-link-notice", memberEntityId: 123 } as never,
+  ]);
+  spyOn(subjectIdentities, "withChatIdentityLock").mockImplementation(async (_namespace, _key, write) => write(sql as never));
+  const adopt = spyOn(subjectIdentities, "adoptChatIdentityOntoMember").mockResolvedValue(outcome);
+  const consume = spyOn(chatLinks, "deleteChatIdentityLink").mockResolvedValue(undefined);
+  const origin = "https://cloud.example.test";
+  const routes = createChatIdentityRoutes({
+    session: async () => ({ user: { id: "user-link-notice" } }),
+    origin: () => origin,
+  });
+  const response = await routes.request(`${origin}/connect/chat-identity`, {
+    method: "POST",
+    headers: { origin, cookie: `${sessionCookieName(true)}=synthetic-session` },
+    body: new URLSearchParams({ token: "synthetic-link", join: "1" }),
+  });
+  expect(response.status).toBe(outcome === "conflict" ? 409 : 200);
+  expect(join).toHaveBeenCalledTimes(1);
+  expect(adopt).toHaveBeenCalledTimes(1);
+  expect(consume).toHaveBeenCalledTimes(outcome === "conflict" ? 0 : 1);
+  const html = await response.text();
+  expect(html).toContain("You joined");
+  expect(html).toContain("Synthetic Workspace");
+  expect(html).not.toContain("Nothing was changed");
 });

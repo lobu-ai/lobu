@@ -20,6 +20,7 @@ import { runtimeConnectionPredicate } from '../lobu/stores/connections-projectio
 import { renderOAuthErrorPage } from '../gateway/auth/oauth-templates';
 import { escapeHtml } from '../utils/html';
 import logger from '../utils/logger';
+import { joinPublicOrganization } from '../workspace/join-public';
 import { connectPage } from './setup-routes';
 
 /**
@@ -36,11 +37,10 @@ import { connectPage } from './setup-routes';
 const PATH = '/connect/chat-identity';
 
 type LinkStatus =
-  | { status: 'linked'; organizationName: string }
-  | { status: 'already_linked'; organizationName: string }
+  | { status: 'linked'; organizationName: string; joined: boolean }
   | { status: 'invalid' }
   | { status: 'not_member'; organizationName: string }
-  | { status: 'conflict' };
+  | { status: 'conflict'; organizationName: string; joined: boolean };
 
 interface SessionUser {
   id: string;
@@ -86,12 +86,22 @@ function notMemberPage(organizationName: string): string {
   );
 }
 
-async function organizationName(sql: DbClient, organizationId: string): Promise<string | null> {
-  const [org] = await sql<{ name: string | null; slug: string | null }>`
-    SELECT name, slug FROM "organization" WHERE id = ${organizationId} LIMIT 1
+interface OrganizationInfo {
+  name: string;
+  slug: string | null;
+  /** Anyone signed in may join a public organization (workspace/join-public.ts). */
+  isPublic: boolean;
+}
+
+async function organizationInfo(sql: DbClient, organizationId: string): Promise<OrganizationInfo> {
+  const [org] = await sql<{ name: string | null; slug: string | null; visibility: string | null }>`
+    SELECT name, slug, visibility FROM "organization" WHERE id = ${organizationId} LIMIT 1
   `;
-  if (!org) return null;
-  return org.name || org.slug || organizationId;
+  return {
+    name: org?.name || org?.slug || 'this workspace',
+    slug: org?.slug ?? null,
+    isPublic: org?.visibility === 'public',
+  };
 }
 
 async function memberRole(sql: DbClient, userId: string, organizationId: string): Promise<string | null> {
@@ -157,14 +167,28 @@ async function memberEntityIdFor(
 /**
  * Redeem a link for the signed-in user. The caller has proven the session;
  * this proves membership of the claim's organization and writes the link.
+ * With `join`, a non-member of a PUBLIC organization first joins it through
+ * the same self-serve path as its public page, so one click both joins and
+ * links; a private organization still needs an invitation.
  */
-async function redeemChatIdentityLink(token: string, user: SessionUser): Promise<LinkStatus> {
+async function redeemChatIdentityLink(token: string, user: SessionUser, join: boolean): Promise<LinkStatus> {
   const sql = getDb();
   const claim = await readChatIdentityLink(token, sql);
   const initialKey = claim ? claimKey(claim) : null;
   if (!claim || !initialKey) return { status: 'invalid' };
-  const orgName = (await organizationName(sql, claim.organizationId)) ?? 'this workspace';
-  const role = await memberRole(sql, user.id, claim.organizationId);
+  const org = await organizationInfo(sql, claim.organizationId);
+  const orgName = org.name;
+  let role = await memberRole(sql, user.id, claim.organizationId);
+  let joined = false;
+  if (!role && join && org.isPublic && org.slug) {
+    // Membership persists independently of the identity-link transaction below.
+    if (!(await connectionIsLive(sql, claim))) return { status: 'invalid' };
+    const result = await joinPublicOrganization({ userId: user.id, orgSlug: org.slug });
+    if (result.status === 'joined' || result.status === 'already_member') {
+      role = result.role;
+      joined = result.status === 'joined';
+    }
+  }
   if (!role) return { status: 'not_member', organizationName: orgName };
   // Idempotent and outside the transaction: provisioning goes through the
   // entity write path, which owns its own connection.
@@ -188,15 +212,13 @@ async function redeemChatIdentityLink(token: string, user: SessionUser): Promise
       user.id,
       'link'
     );
-    if (outcome === 'conflict') return { status: 'conflict' };
+    if (outcome === 'conflict') return { status: 'conflict', organizationName: orgName, joined };
     await deleteChatIdentityLink(token, tx);
     logger.info(
       { userId: user.id, organizationId: locked.organizationId, platform: locked.platform, outcome },
       'Linked a chat identity from a chat identity link'
     );
-    return outcome === 'already-owned'
-      ? { status: 'already_linked', organizationName: orgName }
-      : { status: 'linked', organizationName: orgName };
+    return { status: 'linked', organizationName: orgName, joined };
   });
 }
 
@@ -218,16 +240,27 @@ export function createChatIdentityRoutes(deps: ChatIdentityRouteDeps = DEFAULT_D
     if (!claim || !claimKey(claim)) return c.html(INVALID_LINK_PAGE, 410);
     const session = await deps.session(c.req.raw, c.env);
     if (!session?.user) return c.redirect(loginContinuation(deps.origin(c.req.raw), token), 302);
-    const orgName = (await organizationName(sql, claim.organizationId)) ?? 'this workspace';
-    if (!(await memberRole(sql, session.user.id, claim.organizationId))) {
-      return c.html(notMemberPage(orgName), 403);
-    }
+    const org = await organizationInfo(sql, claim.organizationId);
+    const orgName = org.name;
     const lobuAccount = session.user.email || session.user.name || session.user.id;
+    const accounts = `<p>Chat account: <code>${escapeHtml(chatAccountLabel(claim))}</code><br>Lobu account: <code>${escapeHtml(lobuAccount)}</code></p>`;
+    if (!(await memberRole(sql, session.user.id, claim.organizationId))) {
+      if (!org.isPublic) return c.html(notMemberPage(orgName), 403);
+      return c.html(
+        connectPage(
+          'Join and link your chat account',
+          `<p>You are not a member of <strong>${escapeHtml(orgName)}</strong> yet. It is a public workspace, so you can join it as a member and link this chat account in one step. Direct messages you send the bot will then act as you in <strong>${escapeHtml(orgName)}</strong>, with member access. Group messages will continue to use only shared workspace access.</p>` +
+            accounts +
+            `<form method="post"><input type="hidden" name="token" value="${escapeHtml(token)}"><input type="hidden" name="join" value="1"><button type="submit">Join and link</button></form>` +
+            '<p>Not you? Sign in to Lobu with the right account first.</p>'
+        )
+      );
+    }
     return c.html(
       connectPage(
         'Link your chat account',
         `<p>Link this chat account to your Lobu account through <strong>${escapeHtml(orgName)}</strong>. Direct messages you send the bot will then act as you in <strong>${escapeHtml(orgName)}</strong>. Group messages will continue to use only shared workspace access.</p>` +
-          `<p>Chat account: <code>${escapeHtml(chatAccountLabel(claim))}</code><br>Lobu account: <code>${escapeHtml(lobuAccount)}</code></p>` +
+          accounts +
           `<form method="post"><input type="hidden" name="token" value="${escapeHtml(token)}"><button type="submit">Link account</button></form>` +
           '<p>Not you? Sign in to Lobu with the right account first.</p>'
       )
@@ -251,16 +284,20 @@ export function createChatIdentityRoutes(deps: ChatIdentityRouteDeps = DEFAULT_D
     const session = await deps.session(c.req.raw, c.env);
     if (!session?.user) return c.redirect(loginContinuation(origin, token), 303);
 
-    const result = await redeemChatIdentityLink(token, session.user);
+    const result = await redeemChatIdentityLink(token, session.user, body.join === '1');
     switch (result.status) {
-      case 'linked':
-      case 'already_linked':
+      case 'linked': {
+        const joinedText =
+          result.joined
+            ? `You joined <strong>${escapeHtml(result.organizationName)}</strong>, and your`
+            : 'Your';
         return c.html(
           connectPage(
             'Chat account linked',
-            `<p>Your chat account is linked to your Lobu account in <strong>${escapeHtml(result.organizationName)}</strong>. Message the bot again to continue.</p>`
+            `<p>${joinedText} chat account is linked to your Lobu account in <strong>${escapeHtml(result.organizationName)}</strong>. Message the bot again to continue.</p>`
           )
         );
+      }
       case 'not_member':
         return c.html(notMemberPage(result.organizationName), 403);
       case 'conflict':
@@ -268,7 +305,8 @@ export function createChatIdentityRoutes(deps: ChatIdentityRouteDeps = DEFAULT_D
           errorPage(
             'chat_identity_conflict',
             'Already linked to someone else',
-            'This chat account is already linked to a different Lobu account. Nothing was changed. Ask an admin of the workspace to check who it belongs to.'
+            (result.joined ? `You joined ${result.organizationName}, but this chat account could not be linked. ` : '') +
+              'This chat account is already linked to a different Lobu account. The existing chat account link was not changed. Ask an admin of the workspace to check who it belongs to.'
           ),
           409
         );
