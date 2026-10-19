@@ -75,12 +75,14 @@ export const xIdentityModule: ConnectorIdentityModule = {
  * X's direct-message sender model. Numeric user ids are unique across X, so
  * there is no tenant axis: `teamId` is ignored and the scope is global.
  *
- * No login extractor is registered for this descriptor. The chat link offered
- * in a direct message proves the sender within the workspace that issued it.
+ * Signing in with X proves it: Better Auth's X provider is `twitter`, and the
+ * account id it stores is the same numeric user id a direct message carries.
+ * The chat link offered in a direct message proves it too, within the
+ * workspace that issued it.
  */
 export const xChatUserIdentity: ChatUserIdentity = {
   platform: 'x',
-  providerId: 'x',
+  providerId: 'twitter',
   namespace: X_IDENTITY.CHAT_USER_ID,
   buildUserKey(_teamId, platformUserId) {
     return normalizeXUserId(platformUserId);

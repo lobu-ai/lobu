@@ -18,6 +18,7 @@
 import type { ChatUserIdentity } from "@lobu/connectors/chat-user-identity";
 import { gchatChatUserIdentity } from "@lobu/connectors/google-identity";
 import { slackChatUserIdentity } from "@lobu/connectors/slack-identity";
+import { xChatUserIdentity } from "@lobu/connectors/x-identity";
 import type { fetchUserInfoWithRaw } from "../connect/oauth-providers";
 import type { getEnabledLoginProviderConfigs } from "./config";
 import { decodeJwtClaims } from "./jwt-claims";
@@ -154,10 +155,25 @@ const googleLoginIdentity: ChatLoginIdentity = {
 	},
 };
 
+/**
+ * X: the account id Better Auth stored is the numeric user id from
+ * `/2/users/me`, the same id an X direct message names its sender by. A
+ * connector grant's synthetic account id is not numeric, so the descriptor's
+ * key builder refuses it.
+ */
+const xLoginIdentity: ChatLoginIdentity = {
+	identity: xChatUserIdentity,
+	async extract(account) {
+		if (!account.accountId) return null;
+		return { platformUserId: account.accountId, source: "account_id" };
+	},
+};
+
 /** Every login provider whose sign-in mints a chat identity. */
 export const CHAT_LOGIN_IDENTITIES: readonly ChatLoginIdentity[] = [
 	slackLoginIdentity,
 	googleLoginIdentity,
+	xLoginIdentity,
 ];
 
 const BY_PROVIDER = new Map<string, ChatLoginIdentity>(
