@@ -3,6 +3,7 @@ import {
   renderOAuthErrorPage,
   renderOAuthSuccessPage,
 } from "../auth/oauth-templates.js";
+import { createConnectAuthRoutes } from "../routes/public/connect-auth.js";
 
 describe("OAuth template escaping", () => {
   test("escapes reflected OAuth error params", () => {
@@ -89,5 +90,32 @@ describe("OAuth setup recovery", () => {
     expect(html).not.toContain("<img");
     // A rejected recovery URL must not leave the page with no way forward.
     expect(html).toContain("Return to Lobu to check the connection");
+  });
+});
+
+describe("Lobu page layout", () => {
+  test("renders the success page in the shared Lobu layout", () => {
+    const html = renderOAuthSuccessPage("GitHub", "/agents/foo/config", {
+      title: "GitHub App installed",
+      description: "Your GitHub organization is connected to Lobu.",
+    });
+    expect(html).toContain('class="lobu-card"');
+    expect(html).toContain('name="viewport"');
+    expect(html).toContain("prefers-color-scheme: dark");
+    expect(html).toContain("<title>GitHub App installed</title>");
+    expect(html).toContain('<a class="btn" href="/agents/foo/config">Open Configuration</a>');
+    expect(html).toContain("You can close this tab and return to your chat.");
+    expect(html).not.toContain("linear-gradient");
+  });
+
+  test("renders CLI connect pages in the shared Lobu layout", async () => {
+    const routes = createConnectAuthRoutes({});
+    const res = await routes.request("/connect/oauth/login");
+    expect(res.status).toBe(501);
+    const html = await res.text();
+    expect(html).toContain('class="lobu-card"');
+    expect(html).toContain("<title>OAuth Unavailable</title>");
+    expect(html).toContain("Browser OAuth login is not configured on this gateway.");
+    expect(html).toContain("You can return to the terminal");
   });
 });

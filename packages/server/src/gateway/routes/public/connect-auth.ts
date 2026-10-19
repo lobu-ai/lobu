@@ -3,6 +3,7 @@ import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
 import { getDb } from "../../../db/client.js";
 import { escapeHtml } from "../../../utils/html.js";
+import { renderLobuPage } from "../../auth/oauth-templates.js";
 import type { ExternalAuthClient } from "../../auth/external/client.js";
 import { resolvePublicUrl } from "../../utils/public-url.js";
 import {
@@ -51,64 +52,11 @@ function normalizeReturnUrl(
   return value;
 }
 
-function renderPage(title: string, message: string, tone: "success" | "error") {
-  title = escapeHtml(title);
-  message = escapeHtml(message);
-  const border = tone === "success" ? "#15803d" : "#b91c1c";
-  const bg = tone === "success" ? "#f0fdf4" : "#fef2f2";
-  const fg = tone === "success" ? "#166534" : "#991b1b";
-
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${title}</title>
-    <style>
-      body {
-        margin: 0;
-        font-family: ui-sans-serif, system-ui, sans-serif;
-        background: #f8fafc;
-        color: #0f172a;
-        display: grid;
-        place-items: center;
-        min-height: 100vh;
-      }
-      .card {
-        width: min(34rem, calc(100vw - 2rem));
-        background: white;
-        border: 1px solid #e2e8f0;
-        border-top: 4px solid ${border};
-        border-radius: 0.75rem;
-        padding: 1.25rem;
-        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
-      }
-      .status {
-        margin-top: 0.75rem;
-        padding: 0.875rem 1rem;
-        border-radius: 0.5rem;
-        background: ${bg};
-        color: ${fg};
-        line-height: 1.5;
-      }
-      h1 {
-        margin: 0;
-        font-size: 1.125rem;
-      }
-      p {
-        margin: 0.5rem 0 0;
-        color: #475569;
-      }
-    </style>
-  </head>
-  <body>
-    <main class="card">
-      <h1>${title}</h1>
-      <p>You can return to the terminal after this page updates.</p>
-      <div class="status">${message}</div>
-    </main>
-  </body>
-</html>`;
+function renderPage(title: string, message: string) {
+  return renderLobuPage({
+    title,
+    body: `<p>${escapeHtml(message)}</p><p class="note">You can return to the terminal after this page updates.</p>`,
+  });
 }
 
 async function loadOauthState<T>(
@@ -169,8 +117,7 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
       return c.html(
         renderPage(
           "OAuth Unavailable",
-          "Browser OAuth login is not configured on this gateway.",
-          "error"
+          "Browser OAuth login is not configured on this gateway."
         ),
         501
       );
@@ -181,8 +128,7 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
       return c.html(
         renderPage(
           "OAuth Login Failed",
-          "Missing or invalid returnUrl.",
-          "error"
+          "Missing or invalid returnUrl."
         ),
         400
       );
@@ -218,8 +164,7 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
       return c.html(
         renderPage(
           "OAuth Login Failed",
-          "The gateway could not start the browser OAuth flow.",
-          "error"
+          "The gateway could not start the browser OAuth flow."
         ),
         500
       );
@@ -231,7 +176,7 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
     const agentParam = c.req.query("agent")?.trim();
     if (!claim) {
       return c.html(
-        renderPage("Invalid Link", "Missing claim token.", "error"),
+        renderPage("Invalid Link", "Missing claim token."),
         400
       );
     }
@@ -241,8 +186,7 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
       return c.html(
         renderPage(
           "Link Expired",
-          "This settings link has expired or is invalid. Ask the bot to send a new one.",
-          "error"
+          "This settings link has expired or is invalid. Ask the bot to send a new one."
         ),
         410
       );
@@ -262,8 +206,7 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
       return c.html(
         renderPage(
           "OAuth Unavailable",
-          "Browser OAuth login is not configured on this gateway.",
-          "error"
+          "Browser OAuth login is not configured on this gateway."
         ),
         501
       );
@@ -275,8 +218,7 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
       return c.html(
         renderPage(
           "OAuth Login Failed",
-          "Missing OAuth code or state.",
-          "error"
+          "Missing OAuth code or state."
         ),
         400
       );
@@ -288,8 +230,7 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
       return c.html(
         renderPage(
           "OAuth Login Expired",
-          "This OAuth login request has expired. Start the flow again.",
-          "error"
+          "This OAuth login request has expired. Start the flow again."
         ),
         410
       );
@@ -323,8 +264,7 @@ export function createConnectAuthRoutes(config: ConnectAuthRoutesConfig): Hono {
       return c.html(
         renderPage(
           "OAuth Login Failed",
-          "The gateway could not complete the browser OAuth flow.",
-          "error"
+          "The gateway could not complete the browser OAuth flow."
         ),
         500
       );
