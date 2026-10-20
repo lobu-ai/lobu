@@ -1579,11 +1579,14 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
     // One pass per run: finish an open gap, else read from now down to the
     // newest stored row (the whole history on a first sync or a backfill).
     // Only that head pass moves the high-water mark.
-    const fillingGap = Boolean(checkpoint.gap);
+    // A backfill resumes only its own full-history gap; an incremental gap
+    // stops at an old cutoff, so a fresh full pass replaces it.
+    const gap = backfill && checkpoint.gap?.until ? undefined : checkpoint.gap;
+    const fillingGap = Boolean(gap);
     const segment:
       | RevolutHistoryGap
       | { to: null; until?: string; until_id?: string } =
-      checkpoint.gap ??
+      gap ??
       (backfill
         ? { to: null }
         : {

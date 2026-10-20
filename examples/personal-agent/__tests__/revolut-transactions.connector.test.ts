@@ -1292,6 +1292,34 @@ describe("Revolut resumable history", () => {
     }
   });
 
+  test("a backfill replaces an incremental gap with a full-history pass", async () => {
+    const [older] = olderPages(1);
+    const tab = retailTab([SAMPLE_RESPONSE, older, []]);
+    try {
+      const run = await runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0, backfill: true },
+        checkpoint: {
+          last_transaction_id: "txn-tokyo",
+          last_timestamp: new Date(1_717_300_000_000).toISOString(),
+          gap: {
+            to: 1_717_200_000_000,
+            until: new Date(BOUNDARY).toISOString(),
+            until_id: "txn-whoop-declined",
+          },
+        },
+        browser: tab.dispatcher,
+      } as never);
+      expect(tab.urls[0]).not.toContain("&to=");
+      expect(run.status).toBe("complete");
+      expect(run.checkpoint.gap).toBeUndefined();
+      // Rows older than the incremental gap's cutoff are re-emitted too.
+      expect(run.events).toHaveLength(SAMPLE_RESPONSE.length + older.length);
+    } finally {
+      tab.dom.window.close();
+    }
+  });
+
   test("a resumed inclusive final cursor closes after confirming the repeated boundary", async () => {
     const boundary = [SAMPLE_RESPONSE[0]];
     const tab = retailTab([boundary, boundary]);
