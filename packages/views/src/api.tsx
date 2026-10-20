@@ -20,7 +20,8 @@
  *    that capability keep params local to the frame.
  *
  * Read budget: reads run on a user-facing path, when the host is ready and
- * the query changes or `refetch()` is called.
+ * the query changes, `refetch()` is called, or a live query receives a host
+ * data-change notification.
  * `query_sql` runs in a read-only, org-scoped transaction with a 5 second
  * statement timeout and returns at most 500 rows; `useQuery` reports a hit as
  * `errorCode: "UPSTREAM_TIMEOUT"` or `truncated: true`, so render those
@@ -163,7 +164,7 @@ interface ViewRuntime {
   params: Params;
   setParams: (patch: Partial<Params>) => void;
   theme: "light" | "dark";
-  /** Bumped when the host reports a workspace data change; reads re-run. */
+  /** Bumped when the host reports a workspace data change; live reads re-run. */
   dataVersion: number;
   callTool: (
     name: string,
@@ -368,6 +369,14 @@ export interface QueryState<T> {
   refetch: () => void;
 }
 
+export interface QueryOptions {
+  /** Re-read in the background whenever workspace data changes (default
+   *  true). Pass false for a read that reaches a remote source, such as a
+   *  `feeds.readMany` search: it then runs once per query and again only on
+   *  `refetch()`. */
+  live?: boolean;
+}
+
 /**
  * Run a read through the host. `sql\`…\`` → `query_sql`; a string →
  * `query_sdk` script; `tool(name, args)` → that tool; `null` skips. The first
@@ -375,8 +384,10 @@ export interface QueryState<T> {
  * defaults and double-fetch when the real scope lands.
  */
 export function useQuery<T = unknown>(
-  query: SqlQuery | ToolQuery | string | null
+  query: SqlQuery | ToolQuery | string | null,
+  options: QueryOptions = {}
 ): QueryState<T> {
+  const live = options.live ?? true;
   const rt = useRuntime();
   const [state, setState] = useState<Omit<QueryState<T>, "refetch">>({
     data: null,
@@ -389,9 +400,11 @@ export function useQuery<T = unknown>(
   // A host data change re-reads the same query in the background: the rows
   // already on screen stay until the fresh ones land, so a live view never
   // flashes its loading state on every write.
-  const lastRead = useRef<{ key: string | null; dataVersion: number } | null>(
-    null
-  );
+  const lastRead = useRef<{
+    key: string | null;
+    dataVersion: number;
+    tick: number;
+  } | null>(null);
   // Reads are numbered so a newer read never discards an older one still in
   // flight for the same key: under a steady stream of writes every re-read
   // would be superseded before it answered. Only a key change, or a newer
@@ -416,6 +429,14 @@ export function useQuery<T = unknown>(
     }
     // Queries still wait for the host to seed scope and params.
     if (!rt.ready) return;
+    // A non-live read ignores data changes; a new key or refetch() still reads.
+    if (
+      !live &&
+      lastRead.current?.key === key &&
+      lastRead.current.tick === tick
+    ) {
+      return;
+    }
     const seq = ++readSeq.current;
     const show = (next: Omit<QueryState<T>, "refetch">) => {
       if (lastRead.current?.key !== key || seq < shownSeq.current) return;
@@ -424,8 +445,9 @@ export function useQuery<T = unknown>(
     };
     const background =
       lastRead.current?.key === key &&
+      lastRead.current.tick === tick &&
       lastRead.current.dataVersion !== rt.dataVersion;
-    lastRead.current = { key, dataVersion: rt.dataVersion };
+    lastRead.current = { key, dataVersion: rt.dataVersion, tick };
     if (!background) setState((s) => ({ ...s, loading: true }));
     const q = query as SqlQuery | ToolQuery | string;
     const call =
@@ -451,7 +473,7 @@ export function useQuery<T = unknown>(
           loading: false,
         });
       });
-  }, [key, rt.ready, tick, rt.dataVersion]);
+  }, [key, rt.ready, tick, rt.dataVersion, live]);
   const refetch = useCallback(() => setTick((t) => t + 1), []);
   return { ...state, refetch };
 }

@@ -32,7 +32,7 @@ import {
   markTurnProviderFailed,
 } from "../orchestration/turn-liveness.js";
 import type { SecretStore } from "../secrets/index.js";
-import { getClientIp } from "../utils/rate-limiter.js";
+import { getClientIP } from "../../utils/rate-limiter.js";
 import { classifyProviderHealthStatus } from "./provider-health-status.js";
 
 /**
@@ -1176,16 +1176,13 @@ export class SecretProxy {
       // forwarded headers map above.
       // Throttle key, most-trustworthy first: the validated URL agentId, then
       // the SIGNED worker-token identity (a worker can't forge it), and only as
-      // a last resort the client-controlled forwarding headers. Keying on the
-      // headers alone let a compromised worker rotate `x-forwarded-for` to dodge
-      // the placeholder-enumeration throttle.
+      // a last resort the client address, read through the trusted-proxy hop
+      // count so a rotated `x-forwarded-for` prefix can't dodge the
+      // placeholder-enumeration throttle.
       const source =
         urlAgentId ??
         this.extractWorkerTokenIdentity(c) ??
-        getClientIp({
-          forwardedFor: c.req.header("x-forwarded-for"),
-          realIp: c.req.header("x-real-ip"),
-        });
+        getClientIP(c.req.raw, c.var.peerRemoteAddress);
       const apiKey = c.req.header("x-api-key");
       if (apiKey) {
         headers["x-api-key"] = await this.swap(

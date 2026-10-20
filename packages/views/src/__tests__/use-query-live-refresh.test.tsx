@@ -1,7 +1,7 @@
 /**
  * A host that learns workspace data changed (an event write on any replica)
- * tells the frame with `lobu/notifications/data-changed`; every mounted
- * useQuery re-reads without flashing its loading state.
+ * tells the frame with `lobu/notifications/data-changed`; mounted useQuery
+ * hooks re-read without flashing their loading state unless live is false.
  *
  * Real hook/runtime coverage: actual Provider + ViewBridge + useQuery with a
  * controlled host.
@@ -20,9 +20,17 @@ interface Seen {
 }
 
 let latest: Seen | null = null;
+let refetch: (() => void) | null = null;
 
-function StringProbe({ script }: { script: string }) {
-  const res = useQuery(script);
+function StringProbe({
+  script,
+  live,
+}: {
+  script: string | null;
+  live?: boolean;
+}) {
+  const res = useQuery(script, { live });
+  refetch = res.refetch;
   latest = { loading: res.loading, data: res.data, error: res.error };
   seen.push(latest);
   return null;
@@ -59,8 +67,17 @@ async function tick(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
 }
 
+function renderProbe(script: string | null, live?: boolean): void {
+  root?.render(
+    <Provider def={DEF} bridge={bridge ?? undefined}>
+      <StringProbe script={script} live={live} />
+    </Provider>
+  );
+}
+
 beforeEach(() => {
   latest = null;
+  refetch = null;
   seen.length = 0;
   dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://views.test/",
@@ -97,13 +114,9 @@ afterEach(async () => {
   dom.window.close();
 });
 
-async function ready(): Promise<void> {
+async function ready(live?: boolean): Promise<void> {
   await act(async () => {
-    root?.render(
-      <Provider def={DEF} bridge={bridge ?? undefined}>
-        <StringProbe script="return 1" />
-      </Provider>
-    );
+    renderProbe("return 1", live);
     await tick();
   });
   expect(parent.toolsCalls()).toHaveLength(0);
@@ -250,5 +263,87 @@ describe("useQuery live refresh", () => {
       await tick();
     });
     expect(parent.toolsCalls()).toHaveLength(1);
+  });
+
+  test("a non-live read ignores data changes but still refetches", async () => {
+    await ready(false);
+    await act(async () => {
+      hostSend({
+        jsonrpc: "2.0",
+        method: "lobu/notifications/data-changed",
+        params: {},
+      });
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(1);
+    expect(latest?.loading).toBe(true);
+    await act(async () => {
+      answer(parent.toolsCalls()[0], 1);
+      await tick();
+    });
+    await act(async () => {
+      hostSend({
+        jsonrpc: "2.0",
+        method: "lobu/notifications/data-changed",
+        params: {},
+      });
+      await tick();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(1);
+    expect(latest).toEqual({ loading: false, data: { count: 1 }, error: null });
+
+    await act(async () => {
+      refetch?.();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+    expect(latest?.loading).toBe(true);
+    await act(async () => {
+      answer(parent.toolsCalls()[1], 2);
+      await tick();
+    });
+    expect(latest?.data).toEqual({ count: 2 });
+  });
+
+  test("a non-live read follows query changes and can be skipped and resumed", async () => {
+    await ready(false);
+    await act(async () => {
+      renderProbe("return 2", false);
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+    expect(parent.toolsCalls()[1].params).toEqual({
+      name: "query_sdk",
+      arguments: { script: "return 2" },
+    });
+    await act(async () => {
+      answer(parent.toolsCalls()[0], 1);
+      await tick();
+    });
+    expect(latest).toEqual({ loading: true, data: null, error: null });
+
+    await act(async () => {
+      renderProbe(null, false);
+      await tick();
+    });
+    await act(async () => {
+      answer(parent.toolsCalls()[1], 2);
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(2);
+    expect(latest).toEqual({ loading: false, data: null, error: null });
+
+    await act(async () => {
+      renderProbe("return 2", false);
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(3);
+    expect(latest?.loading).toBe(true);
+    await act(async () => {
+      answer(parent.toolsCalls()[2], 3);
+      await tick();
+    });
+    expect(latest).toEqual({ loading: false, data: { count: 3 }, error: null });
   });
 });

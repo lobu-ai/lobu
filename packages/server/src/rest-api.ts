@@ -50,6 +50,7 @@ import {
 } from "./utils/errors";
 import { buildClassificationOrderSql } from "./utils/content-search/classification";
 import logger from "./utils/logger";
+import { enforcePublicReadLimit, getClientIP } from "./utils/rate-limiter";
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from "./utils/run-statuses";
 import { getRuntimeInfo } from "./utils/runtime-info";
 
@@ -139,6 +140,11 @@ async function withPublicOrg<T>(
 		if (!orgSlug) {
 			return c.json({ error: "Organization slug is required" }, 400);
 		}
+		// These routes always read as an anonymous visitor, so meter per IP.
+		enforcePublicReadLimit({
+			userId: null,
+			clientIP: getClientIP(c.req.raw, c.var.peerRemoteAddress),
+		});
 		const organizationId = await resolvePublicOrganizationId(orgSlug);
 		if (!organizationId) {
 			return c.json({ error: "Not found" }, 404);
