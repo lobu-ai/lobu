@@ -199,6 +199,16 @@ function allowedLiterals(schema: unknown): string[] | null {
 }
 
 /** Resolve the subschema at a TypeBox error `path` (e.g. `/list_scope`, `/kinds/0`). */
+/** An object union names no member in TypeBox's "Expected union value"; its
+ *  own description (the accepted shapes) is the useful message. */
+function unionDescription(schema: unknown): string | null {
+  if (!schema || typeof schema !== 'object') return null;
+  const s = schema as { anyOf?: unknown[]; description?: unknown };
+  return Array.isArray(s.anyOf) && typeof s.description === 'string'
+    ? `Expected ${s.description}`
+    : null;
+}
+
 function subschemaAtPath(schema: TSchema, path: string): unknown {
   const segments = path.split('/').filter(Boolean);
   let current: unknown = schema;
@@ -283,10 +293,11 @@ function checkAgainst(toolName: string, schema: TSchema, args: unknown): unknown
     const key = path.replace(/^\//, '');
     if (unknownSet.has(key)) continue;
     seen.add(path);
-    const literals = allowedLiterals(subschemaAtPath(schema, path));
+    const subschema = subschemaAtPath(schema, path);
+    const literals = allowedLiterals(subschema);
     const message = literals
       ? `Expected one of: ${literals.map((l) => JSON.stringify(l)).join(', ')}`
-      : e.message;
+      : (unionDescription(subschema) ?? e.message);
     errs.push(`${path}: ${message}`);
     if (errs.length >= 3) break;
   }

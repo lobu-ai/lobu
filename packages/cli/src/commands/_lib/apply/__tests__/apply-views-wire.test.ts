@@ -40,7 +40,7 @@ afterEach(() => {
 const VIEW_SOURCE = `import { defineView } from "@lobu/views";
 export const view = defineView({
   key: "pipeline",
-  attach: [{ type: "deal" }],
+  attach: [{ collection: "deal" }],
   params: { by: { type: "string", default: "owner" } },
   actions: { markWon: { emits: "deal.won" } },
 });
@@ -176,7 +176,7 @@ describe("apply views over the wire", () => {
     expect(sets).toHaveLength(1);
     expect(sets[0]?.body).toMatchObject({
       key: "pipeline",
-      attach: [{ type: "deal" }],
+      attach: [{ collection: "deal" }],
       params: { by: { type: "string", default: "owner" } },
       actions: { markWon: { emits: "deal.won" } },
     });
@@ -223,7 +223,7 @@ describe("apply views over the wire", () => {
       {
         name: "pipeline",
         description: "",
-        attach: [{ type: "deal" }],
+        attach: [{ collection: "deal" }],
         params: { by: { type: "string", default: "owner" } },
         actions: { markWon: { emits: "deal.won" } },
       },

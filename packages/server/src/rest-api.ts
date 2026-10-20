@@ -24,7 +24,12 @@ import type { Env } from "./index";
 import { invokeTemplateEventAction } from "./interactions/template-event-actions";
 import { invokeViewAction } from "./interactions/template-event-actions";
 import { resolveRestToolAuthContext } from "./mcp-handler";
-import { getView, isValidViewKey, renderViewShell } from "./views/views";
+import {
+	getView,
+	isValidViewKey,
+	renderViewShell,
+	viewWorkspaceUrl,
+} from "./views/views";
 import { getOperationsSummary } from "./operations/connector-operations";
 import { manageClassifiers } from "./tools/admin/manage_classifiers";
 import { manageAutomations } from "./tools/admin/manage_automations";
@@ -447,7 +452,10 @@ export async function restGetViewShell(c: Context<{ Bindings: Env }>) {
 		if (!view) {
 			throw new ToolUserError(`Unknown view: ${key}`, 404);
 		}
-		const html = renderViewShell(view);
+		const html = renderViewShell(
+			view,
+			await viewWorkspaceUrl(ctx.organizationId, c.req.url)
+		);
 		c.header("Content-Type", "text/plain; charset=utf-8");
 		c.header("Cache-Control", "no-store");
 		c.header("X-Lobu-View-Hash", view.content_hash);

@@ -197,7 +197,7 @@ export class ViewBridge {
     this.startListening();
     const result = (await this.request("ui/initialize", {
       appInfo: this.appInfo,
-      appCapabilities: {},
+      appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
       protocolVersion: PROTOCOL_VERSION,
     })) as Record<string, unknown>;
     const ctx = (result.hostContext ?? {}) as HostContext;
@@ -286,6 +286,15 @@ export class ViewBridge {
 
   openLink(url: string): Promise<ToolResult> {
     return this.request("ui/open-link", { url }) as Promise<ToolResult>;
+  }
+
+  /** Ask the host for `mode`; resolves with the mode it actually set, which
+   *  may differ when the host does not offer the one requested. */
+  async requestDisplayMode(mode: "inline" | "fullscreen"): Promise<string> {
+    const result = (await this.request("ui/request-display-mode", {
+      mode,
+    })) as { mode?: unknown };
+    return typeof result.mode === "string" ? result.mode : mode;
   }
 
   /** Report the document size so the host can fit the frame. Fire-and-forget:

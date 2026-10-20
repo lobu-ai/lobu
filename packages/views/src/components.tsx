@@ -23,7 +23,7 @@
 
 import type { CSSProperties, ReactNode } from "react";
 import { useId } from "react";
-import { useHost } from "./api.js";
+import { resolveViewHref, useHost } from "./api.js";
 
 const FONT_STACK =
   'var(--font, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif)';
@@ -807,10 +807,11 @@ export function Sparkline({
 /* ------------------------------------------------------------------ */
 
 /**
- * A link the host opens: `href="flat/moda-3"` opens that record in the app
- * (workspace-relative, see `useHost().openLink`), a full URL opens a new tab.
- * The sandboxed frame cannot navigate itself, so every click goes through the
- * host, modifier clicks included.
+ * A link the host opens: `href="deal/acme-renewal"` opens that record
+ * (relative links resolve against the workspace root, see
+ * `useHost().openLink`), a full URL opens a new tab. The sandboxed frame
+ * cannot navigate itself, so every click goes through the host, modifier
+ * clicks included; the anchor still shows the resolved address on hover.
  */
 export function Link({
   href,
@@ -822,7 +823,7 @@ export function Link({
   const { openLink } = useHost();
   return (
     <a
-      href={href}
+      href={resolveViewHref(href)}
       onClick={(event) => {
         event.preventDefault();
         openLink(href).catch((error) =>

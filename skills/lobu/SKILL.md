@@ -246,7 +246,7 @@ import {
 
 export const view = defineView({
   key: "pipeline",
-  attach: [{ type: "deal", placement: "tab" }],
+  attach: [{ collection: "deal" }],
   params: { stage: { type: "string", default: "open" } },
   actions: { markWon: { emits: "deal.won" } },
 });
@@ -280,6 +280,8 @@ export default function Pipeline() {
   );
 }
 ```
+
+`attach` lists the pages a view appears on, one per entry: `{ record: "deal" }` is a card on every deal's page above its activity (`{ record: "deal", id: 7 }` pins one record), `{ collection: "deal", when? }` a tab on the deal list page, `{ workspace: true }` a Data hub tab, `{ event: "deal.won", type? }` one event's page. A record card renders with `useHost().displayMode === "inline"` inside `container.maxHeight` (the host clips past it): render a summary there with a "See all" that calls `requestDisplayMode("fullscreen")`, and the full view when `displayMode` is `"fullscreen"` (the peek, a full page, a tab).
 
 Rules that are load-bearing, not style:
 

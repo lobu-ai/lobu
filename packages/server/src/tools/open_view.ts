@@ -3,8 +3,8 @@ import { ViewKeySchema } from "@lobu/core/contracts/tools/manage-views";
 import {
 	hasWorkspaceAttachment,
 	isEventAttachment,
+	matchesCollection,
 	matchesRecord,
-	matchesType,
 } from "@lobu/core/contracts/tools/view-attach";
 import type { Env } from "../index";
 import { ToolUserError } from "../utils/errors";
@@ -114,24 +114,20 @@ function resolveViewParams(
 /**
  * The page that renders `view` for `scope`, chosen from the view's attachments
  * exactly as the web host selects them, so the link never lands on a
- * "no view named …" page: the Data hub mounts workspace views, a type page its
- * type's tabs, a record page its tabs plus Overview cards.
+ * "no view named …" page: the Data hub mounts workspace views, a list page its
+ * collection tabs, and a record view opens full page under its record.
  */
 async function resolveViewPath(
 	view: StoredView,
 	scope: { type?: string; entity?: number; collection?: CollectionSelection },
 	orgSlug: string,
 	organizationId: string
-): Promise<{ pathname: string; card: boolean }> {
+): Promise<string> {
 	const suffix = viewPathSuffix(view.key);
 	const sql = getDb();
 	if (scope.entity !== undefined) {
-		const rows = await sql<{
-			entity_type: string;
-			slug: string;
-			parent_id: number | null;
-		}>`
-      SELECT et.slug AS entity_type, e.slug, e.parent_id
+		const rows = await sql<{ entity_type: string; slug: string }>`
+      SELECT et.slug AS entity_type, e.slug
       FROM entities e
       JOIN entity_types et ON et.id = e.entity_type_id
       WHERE e.id = ${scope.entity}
@@ -143,19 +139,9 @@ async function resolveViewPath(
 		if (!row) {
 			throw new ToolUserError(`Entity ${scope.entity} not found`, 404);
 		}
-		const record = {
-			type: row.entity_type,
-			id: scope.entity,
-			slug: row.slug,
-			parentId: row.parent_id,
-		};
-		const recordPath = `/${orgSlug}/${row.entity_type}/${row.slug}`;
-		if (view.attach.some((a) => matchesRecord(a, record, "tab"))) {
-			return { pathname: `${recordPath}${suffix}`, card: false };
-		}
-		// An Overview card renders on the record page itself, with its defaults.
-		if (view.attach.some((a) => matchesRecord(a, record, "overview"))) {
-			return { pathname: recordPath, card: true };
+		const record = { type: row.entity_type, id: scope.entity };
+		if (view.attach.some((a) => matchesRecord(a, record))) {
+			return `/${orgSlug}/${row.entity_type}/${row.slug}${suffix}`;
 		}
 		throw new ToolUserError(
 			`View '${view.key}' is not attached to entity ${scope.entity}`,
@@ -174,8 +160,8 @@ async function resolveViewPath(
 			throw new ToolUserError(`Entity type '${scope.type}' not found`, 404);
 		}
 		const type = scope.type;
-		if (view.attach.some((a) => matchesType(a, type, "tab", scope.collection))) {
-			return { pathname: `/${orgSlug}/${scope.type}${suffix}`, card: false };
+		if (view.attach.some((a) => matchesCollection(a, type, scope.collection))) {
+			return `/${orgSlug}/${scope.type}${suffix}`;
 		}
 		throw new ToolUserError(
 			`View '${view.key}' is not a tab on type '${scope.type}'`,
@@ -183,22 +169,17 @@ async function resolveViewPath(
 		);
 	}
 	if (hasWorkspaceAttachment(view.attach)) {
-		return { pathname: `/${orgSlug}/data${suffix}`, card: false };
+		return `/${orgSlug}/data${suffix}`;
 	}
-	// A type tab is a useful error hint, never an inferred frame scope.
-	const typeTabs = [
-		...new Set(
-			view.attach.flatMap((a) => {
-				const type = (a as { type?: string }).type;
-				return type !== undefined && matchesType(a, type, "tab") ? [type] : [];
-			})
-		),
+	// A collection tab is a useful error hint, never an inferred frame scope.
+	const collections = [
+		...new Set(view.attach.flatMap((a) => ("collection" in a ? [a.collection] : []))),
 	];
 	throw new ToolUserError(
 		view.attach.every(isEventAttachment) && view.attach.length > 0
 			? `View '${view.key}' renders one event; pass scope.event`
 			: `View '${view.key}' has no page without a scope; pass scope.type or scope.entity${
-					typeTabs.length === 1 ? ` (it is a tab on '${typeTabs[0]}')` : ""
+					collections.length === 1 ? ` (it is a tab on '${collections[0]}')` : ""
 				}`,
 		400
 	);
@@ -230,35 +211,18 @@ async function openViewImpl(
 		);
 	}
 	const event = scope.event === undefined ? null : await resolveEventViewSubject(view, scope.event, env, target);
-	const { pathname, card } =
+	const pathname =
 		scope.event !== undefined
-			? {
-					pathname: `/${orgSlug}/events/${scope.event}${viewPathSuffix(view.key)}`,
-					card: false,
-				}
+			? `/${orgSlug}/events/${scope.event}${viewPathSuffix(view.key)}`
 			: await resolveViewPath(view, scope, orgSlug, target.organizationId);
 	const params = resolveViewParams(view, args.params);
-	if (card) {
-		// The record page mounts a card with its defaults and nothing else, so a
-		// link carrying other values would render something different.
-		const defaults = resolveViewParams(view, undefined);
-		const overridden = Object.keys(params).filter((k) => params[k] !== defaults[k]);
-		if (overridden.length > 0) {
-			throw new ToolUserError(
-				`View '${view.key}' renders as an Overview card on that record, which takes no params (${overridden.join(", ")})`,
-				400
-			);
-		}
-	}
 	const origin = resolvePublicOrigin(
 		ctx.requestUrl ?? ctx.baseUrl ?? "http://127.0.0.1"
 	);
 	// The view is the path; shared collection selection has its own reserved key.
 	const search = new URLSearchParams();
 	if (scope.collection !== undefined) search.set(COLLECTION_QUERY_KEY, JSON.stringify(scope.collection));
-	if (!card) {
-		for (const [k, v] of Object.entries(params)) search.set(k, String(v));
-	}
+	for (const [k, v] of Object.entries(params)) search.set(k, String(v));
 	const query = search.toString();
 	return {
 		view: args.key,

@@ -13,7 +13,7 @@ import {
 
 const DEF = defineView({
   key: "pipeline",
-  attach: [{ type: "deal" }],
+  attach: [{ collection: "deal" }],
   params: {
     by: { type: "string", default: "owner" },
     limit: { type: "number", default: 50 },

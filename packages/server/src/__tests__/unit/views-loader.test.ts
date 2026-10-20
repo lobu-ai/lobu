@@ -283,7 +283,7 @@ describe("view shell theme tokens", () => {
   } as StoredView;
 
   it("derives every kit token from the MCP Apps standard variable, keeping Lobu's palette as the fallback", () => {
-    const html = renderViewShell(view);
+    const html = renderViewShell(view, "https://app.example/acme/");
     for (const token of [
       "--fg:var(--color-text-primary,#0a0a0a)",
       "--muted:var(--color-text-secondary,#6b7280)",
@@ -301,6 +301,15 @@ describe("view shell theme tokens", () => {
     expect(html).toContain("font:13px/1.45 var(--font)");
     // The frame shows the host's surface, never an opaque canvas.
     expect(html).toContain("background:transparent");
+  });
+
+  it("names the workspace a view's relative links resolve against, escaped", () => {
+    expect(renderViewShell(view, "https://app.example/acme/")).toContain(
+      '<meta name="lobu-workspace" content="https://app.example/acme/">'
+    );
+    expect(renderViewShell(view, 'https://app.example/a"<b/')).toContain(
+      'content="https://app.example/a&quot;&lt;b/"'
+    );
   });
 
   it("gives the loader shell the same tokens", () => {

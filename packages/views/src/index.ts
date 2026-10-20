@@ -35,6 +35,8 @@ export {
 export type {
   ActionResult,
   Attachment,
+  Container,
+  DisplayMode,
   MountOptions,
   ParamDef,
   Params,

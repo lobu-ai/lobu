@@ -25,6 +25,7 @@ import { sourceDependencies } from '@lobu/connector-worker/compile';
 import { build, type Plugin } from 'esbuild';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
+import { getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
 
 export type { ViewAttachment };
 
@@ -503,8 +504,26 @@ html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 var(--f
 
 /** One view's shell: the compiled bundle inlined, no relative asset URLs and
  * no `<base href>` (claude.ai hardcodes `base-uri 'self'`, so both 404 there). */
-export function renderViewShell(view: StoredView): string {
+/**
+ * The workspace root a view's relative links resolve against
+ * (`<web origin>/<org slug>/`). The shell carries it, so every host — the web
+ * app, Claude, any MCP Apps host — receives an absolute URL to open.
+ */
+export async function viewWorkspaceUrl(
+  organizationId: string,
+  requestUrl: string
+): Promise<string> {
+  const origin = getPublicWebUrl(requestUrl) ?? new URL(requestUrl).origin;
+  const slug = (await getOrganizationSlug(organizationId)) ?? organizationId;
+  return `${origin}/${encodeURIComponent(slug)}/`;
+}
+
+export function renderViewShell(view: StoredView, workspaceUrl: string): string {
   const script = view.compiled_code.replaceAll('</script', '<\\/script');
+  const workspace = workspaceUrl
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;');
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -512,6 +531,7 @@ export function renderViewShell(view: StoredView): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="lobu-view" content="${view.key}">
 <meta name="lobu-view-hash" content="${view.content_hash}">
+<meta name="lobu-workspace" content="${workspace}">
 <title>Lobu — ${view.name.replaceAll('<', '&lt;')}</title>
 <style>${BASE_CSS}</style>
 </head>

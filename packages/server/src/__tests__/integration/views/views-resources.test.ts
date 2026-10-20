@@ -37,7 +37,7 @@ const TEST_ENV: Env = {
 };
 
 const VIEW_SOURCE = `export default function Board() { return null; }
-export const view = { attach: [{ type: "deal", placement: "tab" }], params: { by: { type: "string", default: "owner" } }, actions: { retry: { emits: "test.poked" } } };
+export const view = { attach: [{ collection: "deal" }], params: { by: { type: "string", default: "owner" } }, actions: { retry: { emits: "test.poked" } } };
 `;
 
 describe('views resources + open_view + invoke_view_action', () => {
@@ -153,7 +153,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 				name: 'Board',
 				description: 'A board view',
 				source_code: VIEW_SOURCE,
-				attach: [{ type: 'company', placement: 'tab' }],
+				attach: [{ collection: 'company' }, { record: 'company' }],
 				params: { by: { type: 'string', default: 'owner' } },
 				actions: { retry: { emits: 'test.poked' } },
 			},
@@ -329,7 +329,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 		const declaration = {
 			action: 'set', key: 'large-accounts', name: 'Large accounts', description: 'Selected accounts',
 			source_code: VIEW_SOURCE,
-			attach: [{ type: 'company', surface: 'collection', when: { tier: 'large' } }],
+			attach: [{ collection: 'company', when: { tier: 'large' } }],
 		};
 		await executeTool('manage_views', declaration, TEST_ENV, ownerCtx);
 		const collection = { filters: [{ field: 'tier', op: 'eq', value: 'large' }] };
@@ -410,7 +410,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 		).pathname;
 
 	it('open_view sends an unscoped workspace view to its Data hub tab', async () => {
-		await setAttachedView('hub', [{ workspace: true }, { type: 'company', placement: 'tab' }]);
+		await setAttachedView('hub', [{ workspace: true }, { collection: 'company' }]);
 		expect(await openPath({ key: 'hub' })).toBe('/views-org/data/-/views/hub');
 		const opened = await rpc('tools/call', { name: 'open_view', arguments: { key: 'hub', scope: {} } });
 		expect(opened.structuredContent.scope).toEqual({});
@@ -418,7 +418,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 
 	it('open_view refuses a link the host would render as a missing view', async () => {
 		// A type page mounts only that type's tabs.
-		await setAttachedView('deals', [{ type: 'deal', placement: 'tab' }]);
+		await setAttachedView('deals', [{ collection: 'deal' }]);
 		await expect(
 			openPath({ key: 'deals', scope: { type: 'company' } })
 		).rejects.toThrow(/not a tab on type 'company'/);
@@ -427,12 +427,12 @@ describe('views resources + open_view + invoke_view_action', () => {
 		).rejects.toThrow(/not attached to entity/);
 		// Two type tabs and no workspace attachment: there is no one page to pick.
 		await setAttachedView('both', [
-			{ type: 'company', placement: 'tab' },
-			{ type: 'deal', placement: 'tab' },
+			{ collection: 'company' },
+			{ collection: 'deal' },
 		]);
 		await expect(openPath({ key: 'both' })).rejects.toThrow(/pass scope.type/);
 		// A record pin has no page of its own without the record.
-		await setAttachedView('pinned', [{ entity: entityId, placement: 'tab' }]);
+		await setAttachedView('pinned', [{ record: 'company', id: entityId }]);
 		await expect(openPath({ key: 'pinned' })).rejects.toThrow('pass scope.type or scope.entity');
 		expect(await openPath({ key: 'pinned', scope: { entity: entityId } })).toMatch(
 			/^\/views-org\/company\/[^/]+\/-\/views\/pinned$/
@@ -440,7 +440,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 	});
 
 	it('open_view requires scope even for missing types and validates explicit types', async () => {
-		await setAttachedView('gone', [{ type: 'deal', placement: 'tab' }]);
+		await setAttachedView('gone', [{ collection: 'deal' }]);
 		await expect(executeTool('open_view', { key: 'gone' }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
 		await expect(openPath({ key: 'gone', scope: { type: 'deal' } })).rejects.toThrow(/Entity type 'deal' not found/);
 		await createTestEntity({
@@ -449,7 +449,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 			organization_id: org.id,
 			created_by: owner.id,
 		});
-		await setAttachedView('retired-tab', [{ type: 'retired', placement: 'tab' }]);
+		await setAttachedView('retired-tab', [{ collection: 'retired' }]);
 		expect(await openPath({ key: 'retired-tab', scope: { type: 'retired' } })).toBe('/views-org/retired/-/views/retired-tab');
 		const sql = getTestDb();
 		await sql`
@@ -462,27 +462,31 @@ describe('views resources + open_view + invoke_view_action', () => {
 		);
 	});
 
-	it('open_view opens an Overview card on the record page itself', async () => {
-		await setAttachedView('card', [{ type: 'company', placement: 'overview' }]);
-		// The card renders with its defaults, so the link carries no query.
+	it('open_view opens a record view full page under its record, with its params', async () => {
+		await setAttachedView('card', [{ record: 'company' }]);
 		const card = await rpc('tools/call', {
 			name: 'open_view',
-			arguments: { key: 'card', scope: { entity: entityId } },
+			arguments: { key: 'card', scope: { entity: entityId }, params: { by: 'stage' } },
 		});
 		const url = new URL(card.structuredContent.url);
-		expect(url.pathname).toMatch(/^\/views-org\/company\/[^/]+$/);
-		expect(url.search).toBe('');
-		expect(card.structuredContent.params).toEqual({ by: 'owner' });
-		// Passing the default is the same card; any other value is not reproducible.
-		expect(
-			await openPath({ key: 'card', scope: { entity: entityId }, params: { by: 'owner' } })
-		).toMatch(/^\/views-org\/company\/[^/]+$/);
-		await expect(
-			openPath({ key: 'card', scope: { entity: entityId }, params: { by: 'stage' } })
-		).rejects.toThrow(/Overview card on that record, which takes no params \(by\)/);
+		expect(url.pathname).toMatch(/^\/views-org\/company\/[^/]+\/-\/views\/card$/);
+		expect(url.searchParams.get('by')).toBe('stage');
 		await expect(
 			openPath({ key: 'card', scope: { type: 'company' } })
 		).rejects.toThrow(/not a tab on type 'company'/);
+	});
+
+	it('manage_views rejects a retired attach shape, naming the accepted ones', async () => {
+		for (const entry of [
+			{ type: 'company', placement: 'tab' },
+			{ type: 'company', surface: 'record' },
+			{ entity: entityId },
+			{ event_kind: 'deal.won' },
+		]) {
+			await expect(setAttachedView('retired-shape', [entry])).rejects.toThrow(
+				/attach\/0: Expected \{ record: "<type>", id\?: <entity id> \}, \{ collection/
+			);
+		}
 	});
 
 	it('open_view 404s an unknown view', async () => {
@@ -494,7 +498,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 	describe('event subjects', () => {
 		// An event attaches by kind AND by the type of an entity it links, so
 		// each case below varies exactly one of the two.
-		const eventAttach = [{ event_kind: 'deal.won', type: 'company' }];
+		const eventAttach = [{ event: 'deal.won', type: 'company' }];
 		async function wonEvent(options: {
 			semantic_type?: string;
 			entity_ids?: number[];
@@ -522,15 +526,15 @@ describe('views resources + open_view + invoke_view_action', () => {
 		});
 
 		it('accepts a kind-only attachment and rejects one with a placement', async () => {
-			await expect(setAttachedView('kind-only-won', [{ event_kind: 'deal.won' }])).resolves.toBeUndefined();
+			await expect(setAttachedView('kind-only-won', [{ event: 'deal.won' }])).resolves.toBeUndefined();
 			await expect(
 				setAttachedView('bad-won', [
-					{ event_kind: 'deal.won', type: 'company', placement: 'tab' },
+					{ event: 'deal.won', type: 'company', placement: 'tab' },
 				])
 			).rejects.toThrow();
 			await expect(
-				setAttachedView('bad-won', [{ event_kind: 'not a kind!', type: 'company' }])
-			).rejects.toThrow(/event-kind name/);
+				setAttachedView('bad-won', [{ event: 'not a kind!', type: 'company' }])
+			).rejects.toThrow(/Expected \{ record/);
 		});
 
 		it("open_view scope.event links to the event's view page with its params", async () => {
@@ -818,7 +822,7 @@ describe('views on a public org stay signed-in-only', () => {
 				action: 'set',
 				key: 'board',
 				source_code: VIEW_SOURCE,
-				attach: [{ type: 'company', placement: 'tab' }],
+				attach: [{ collection: 'company' }],
 				actions: { retry: { emits: 'test.poked' } },
 			},
 			TEST_ENV,

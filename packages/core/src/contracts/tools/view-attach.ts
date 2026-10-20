@@ -4,68 +4,43 @@ import {
 } from "./collection-selection";
 import type { ViewAttachment } from "./manage-views";
 
-type EventAttachment = Extract<ViewAttachment, { event_kind: string }>;
-type ViewPlacement = "tab" | "overview";
+type EventAttachment = Extract<ViewAttachment, { event: string }>;
 
-/** An event's type qualifies its linked entities; it never names a page tab. */
 export function isEventAttachment(
   attachment: ViewAttachment
 ): attachment is EventAttachment {
-  return (
-    "event_kind" in attachment && typeof attachment.event_kind === "string"
-  );
+  return "event" in attachment;
 }
 
-export function isTabAttachment(attachment: ViewAttachment): boolean {
-  return (
-    !isEventAttachment(attachment) && (attachment.placement ?? "tab") === "tab"
-  );
-}
-
-export function matchesType(
+/** A tab on the type's list page, when the list's selection implies `when`. */
+export function matchesCollection(
   attachment: ViewAttachment,
   typeSlug: string,
-  placement: ViewPlacement,
   selection: CollectionSelection = {}
 ): boolean {
   return (
-    !isEventAttachment(attachment) &&
-    "type" in attachment &&
-    attachment.type === typeSlug &&
-    attachment.surface !== "record" &&
-    (!attachment.when || selectionImplies(selection, attachment.when)) &&
-    (attachment.placement ?? "tab") === placement
+    "collection" in attachment &&
+    attachment.collection === typeSlug &&
+    (!attachment.when || selectionImplies(selection, attachment.when))
   );
 }
 
+/** A card on the record's page: every record of the type, or one pinned id. */
 export function matchesRecord(
   attachment: ViewAttachment,
-  record: { type: string; id: number; slug: string; parentId: number | null },
-  placement: ViewPlacement
+  record: { type: string; id: number }
 ): boolean {
-  if (isEventAttachment(attachment)) return false;
-  if ((attachment.placement ?? "tab") !== placement) return false;
-  if ("entity" in attachment) {
-    return typeof attachment.entity === "number"
-      ? attachment.entity === record.id
-      : record.parentId === null && attachment.entity === record.slug;
-  }
   return (
-    "type" in attachment &&
-    attachment.type === record.type &&
-    attachment.surface !== "collection"
+    "record" in attachment &&
+    attachment.record === record.type &&
+    (attachment.id === undefined || attachment.id === record.id)
   );
 }
 
 export function hasWorkspaceAttachment(
   attach: readonly ViewAttachment[]
 ): boolean {
-  return attach.some(
-    (attachment) =>
-      !isEventAttachment(attachment) &&
-      "workspace" in attachment &&
-      attachment.workspace === true
-  );
+  return attach.some((attachment) => "workspace" in attachment);
 }
 
 /** Without a kind, the web host considers every event attachment a candidate. */
@@ -77,6 +52,6 @@ export function eventAttachmentsFor(
     .filter(isEventAttachment)
     .filter(
       (attachment) =>
-        semanticType === undefined || attachment.event_kind === semanticType
+        semanticType === undefined || attachment.event === semanticType
     );
 }

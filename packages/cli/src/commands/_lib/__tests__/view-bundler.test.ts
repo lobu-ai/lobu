@@ -59,7 +59,7 @@ const PIPELINE_SOURCE = `import { defineView, sql, useAction, useParams, useQuer
 
 export const view = defineView({
   key: "pipeline",
-  attach: [{ type: "deal" }],
+  attach: [{ collection: "deal" }],
   params: { by: { type: "string", default: "owner" } },
   actions: { markWon: { emits: "deal.won" } },
 });
@@ -82,7 +82,7 @@ describe("bundleViewFromFile", () => {
     const entry = mkView({ "views/deal/pipeline.tsx": PIPELINE_SOURCE });
     const bundled = await bundleFixture(entry);
     expect(bundled.metadata.key).toBe("pipeline");
-    expect(bundled.metadata.attach).toEqual([{ type: "deal" }]);
+    expect(bundled.metadata.attach).toEqual([{ collection: "deal" }]);
     expect(bundled.metadata.params).toEqual({
       by: { type: "string", default: "owner" },
     });
@@ -106,7 +106,7 @@ describe("bundleViewFromFile", () => {
       {
         "views/deal/cards.tsx": `import { defineView } from "@lobu/views";
 import { Card, DataTable, formatCompact } from "@lobu/views/components";
-export const view = defineView({ key: "cards", attach: [{ type: "deal" }], params: { label: { type: "string", default: formatCompact(1500) } } });
+export const view = defineView({ key: "cards", attach: [{ collection: "deal" }], params: { label: { type: "string", default: formatCompact(1500) } } });
 const ROWS = [{ id: 1 }, { id: 2 }];
 export default function CardsView() {
   return <Card title="t"><DataTable columns={[{ key: "id", header: "ID", sortable: true }]} rows={ROWS} keyOf={(r) => r.id} sort={{ key: "id", dir: "asc" }} /></Card>;
@@ -130,7 +130,7 @@ export default function CardsView() {
       {
         "views/deal/board.tsx": `import { defineView } from "@lobu/views";
 import { Board } from "../_lib/board";
-export const view = defineView({ key: "board", attach: [{ type: "deal" }] });
+export const view = defineView({ key: "board", attach: [{ collection: "deal" }] });
 export default function BoardView() { return Board({}); }
 `,
         "views/_lib/board.tsx": `export function Board(_props: unknown) { return <div>Board</div>; }

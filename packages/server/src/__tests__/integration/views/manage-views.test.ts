@@ -39,7 +39,7 @@ const TEST_ENV: Env = {
 };
 
 const SIMPLE_SOURCE = `export default function Board() { return null; }
-export const view = { attach: [{ type: "deal", placement: "tab" }], params: {}, actions: {} };
+export const view = { attach: [{ collection: "deal" }], params: {}, actions: {} };
 `;
 
 const REACT_SOURCE = `import React from "react";
@@ -115,7 +115,7 @@ describe("manage_views", () => {
 				key: "pipeline",
 				name: "Pipeline",
 				source_code: source,
-				attach: [{ type: "deal", placement: "tab" }],
+				attach: [{ collection: "deal" }],
 				params: { by: { type: "string", default: "owner" } },
 				actions: { markWon: { emits: "deal.won" } },
 				...extra,
@@ -159,7 +159,7 @@ describe("manage_views", () => {
 		expect(set.view.name).toBe("Pipeline");
 		expect(typeof set.view.content_hash).toBe("string");
 		expect((set.view.content_hash as string).length).toBe(16);
-		expect(set.view.attach).toEqual([{ type: "deal", placement: "tab" }]);
+		expect(set.view.attach).toEqual([{ collection: "deal" }]);
 		expect(set.view.actions).toEqual({ markWon: { emits: "deal.won" } });
 		expect(set.view.last_writer).toBe(ownerId);
 		expect(set.view).not.toHaveProperty("source_code");
@@ -283,7 +283,7 @@ mountView(view, V);
 	it("fixed source with changed attach rewrites with written:true", async () => {
 		await setView(SIMPLE_SOURCE);
 		const changed = await setView(SIMPLE_SOURCE, {
-			attach: [{ type: "deal", placement: "overview" }],
+			attach: [{ record: "deal" }],
 		});
 		expect(changed.written).toBe(true);
 		const get = (await executeTool(
@@ -292,10 +292,10 @@ mountView(view, V);
 			TEST_ENV,
 			ownerCtx
 		)) as { view: Record<string, unknown> };
-		expect(get.view.attach).toEqual([{ type: "deal", placement: "overview" }]);
+		expect(get.view.attach).toEqual([{ record: "deal" }]);
 		// Same source AND same metadata is still a no-op.
 		const again = await setView(SIMPLE_SOURCE, {
-			attach: [{ type: "deal", placement: "overview" }],
+			attach: [{ record: "deal" }],
 		});
 		expect(again.written).toBe(false);
 	});
@@ -375,9 +375,9 @@ mountView(view, V);
 		).rejects.toThrow(/reserved/);
 		await expect(
 			setView(SIMPLE_SOURCE, {
-				attach: [{ type: "deal", entity: 1 }],
+				attach: [{ record: "deal", collection: "deal" }],
 			})
-		).rejects.toThrow(/exactly one/);
+		).rejects.toThrow(/attach\/0: Expected \{ record/);
 		await expect(
 			setView(SIMPLE_SOURCE, { actions: { go: { emits: "not a kind!" } } })
 		).rejects.toThrow(/emits/);
@@ -609,7 +609,7 @@ mountView(view, V);
 				{
 					name: "Pipeline",
 					description: "",
-					attach: [{ type: "deal", placement: "tab" }],
+					attach: [{ collection: "deal" }],
 					params: { by: { type: "string", default: "owner" } },
 					actions: { markWon: { emits: "deal.won" } },
 				},
@@ -632,7 +632,7 @@ mountView(view, V);
 		const legacyMeta = {
 			name: "Pipeline",
 			description: "",
-			attach: [{ type: "deal", placement: "tab" }],
+			attach: [{ collection: "deal" }],
 			params: { by: { type: "string", default: "owner" } },
 			actions: { markWon: { emits: "deal.won" } },
 		};
@@ -654,7 +654,7 @@ mountView(view, V);
 			source_code: SIMPLE_SOURCE,
 			compiled_code: compiled,
 			content_hash: legacyHash,
-			attach: [{ type: "deal", placement: "tab" }],
+			attach: [{ collection: "deal" }],
 			params: { by: { type: "string", default: "owner" } },
 			actions: { markWon: { emits: "deal.won" } },
 			last_writer: "migration:view-templates",

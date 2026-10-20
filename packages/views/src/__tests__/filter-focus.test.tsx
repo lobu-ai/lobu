@@ -41,7 +41,7 @@ let refetchFn: (() => void) | null = null;
 
 const DEF = defineView({
   key: "focusprobe",
-  attach: [{ type: "deal" }],
+  attach: [{ collection: "deal" }],
   params: { stage: { type: "string", default: "open" } },
 });
 

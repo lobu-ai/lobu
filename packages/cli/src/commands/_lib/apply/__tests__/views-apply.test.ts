@@ -46,7 +46,7 @@ function mkProject(files: Record<string, string>): string {
 const VIEW_SOURCE = `import { defineView } from "@lobu/views";
 export const view = defineView({
   key: "pipeline",
-  attach: [{ type: "deal" }],
+  attach: [{ collection: "deal" }],
   params: { by: { type: "string", default: "owner" } },
   actions: { markWon: { emits: "deal.won" } },
 });
@@ -107,7 +107,7 @@ describe("view desired state", () => {
     const view = state.views[0];
     expect(view?.key).toBe("pipeline");
     expect(view?.sourceFile).toBe("views/deal/pipeline.tsx");
-    expect(view?.attach).toEqual([{ type: "deal" }]);
+    expect(view?.attach).toEqual([{ collection: "deal" }]);
     expect(view?.compiledCode.length).toBeGreaterThan(10_000);
     // The diff key is what the server will compute: same function, same
     // inputs (name defaults to key, description to empty, plus the digest of
@@ -118,7 +118,7 @@ describe("view desired state", () => {
         {
           name: "pipeline",
           description: "",
-          attach: [{ type: "deal" }],
+          attach: [{ collection: "deal" }],
           params: { by: { type: "string", default: "owner" } },
           actions: { markWon: { emits: "deal.won" } },
         },
@@ -181,7 +181,7 @@ describe("view desired state", () => {
 import { LABEL } from "./label";
 export const view = defineView({
   key: "board",
-  attach: [{ type: "deal" }],
+  attach: [{ collection: "deal" }],
 });
 export default function Board() { return LABEL; }
 `;
@@ -202,7 +202,7 @@ export default function Board() { return LABEL; }
         {
           name: "board",
           description: "",
-          attach: [{ type: "deal" }],
+          attach: [{ collection: "deal" }],
           params: {},
           actions: {},
         },
@@ -220,7 +220,7 @@ export default function Board() { return LABEL; }
         key: "board",
         name: "board",
         content_hash: firstView?.contentHash ?? "",
-        attach: [{ type: "deal" }],
+        attach: [{ collection: "deal" }],
         last_writer: "w",
         updated_at: "t",
       },
@@ -245,7 +245,7 @@ export default function Board() { return LABEL; }
         key: "board",
         name: "board",
         content_hash: secondView?.contentHash ?? "",
-        attach: [{ type: "deal" }],
+        attach: [{ collection: "deal" }],
         last_writer: "w",
         updated_at: "t",
       },
@@ -362,7 +362,7 @@ describe("view client", () => {
       key: "pipeline",
       source_code: "source",
       compiled_code: "bundle",
-      attach: [{ type: "deal" }],
+      attach: [{ collection: "deal" }],
       params: {},
       actions: {},
     });

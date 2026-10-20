@@ -19,7 +19,7 @@ const EVIL_Q = "<!--<script>";
 const SOURCE = `import { defineView, useParams, useScope, useQuery, useAction, tool } from "@lobu/views";
 export const view = defineView({
 	key: "probe",
-	attach: [{ type: "deal" }],
+	attach: [{ record: "deal" }],
 	params: { q: { type: "string", default: "DEFAULT" } },
 	actions: { poke: { emits: "proof.poked" } },
 });
@@ -54,7 +54,7 @@ describe("loader handoff in a real browser", () => {
 			actions: {},
 			last_writer: "probe",
 			updated_at: new Date().toISOString(),
-		});
+		}, "https://app.example/acme/");
 		loaderHtml = renderViewsLoaderShell();
 	}, 120000);
 

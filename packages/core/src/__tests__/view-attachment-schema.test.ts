@@ -5,60 +5,39 @@ import { ViewAttachmentSchema } from "../contracts/tools/manage-views";
 const accepts = (attach: unknown) => Value.Check(ViewAttachmentSchema, attach);
 
 describe("ViewAttachmentSchema", () => {
-  it("accepts collection-only predicates and record-only attachments", () => {
-    expect(
-      accepts({
-        type: "account",
-        surface: "collection",
-        when: { tier: "gold" },
-      })
-    ).toBe(true);
-    expect(
-      accepts({ type: "account", surface: "record", placement: "overview" })
-    ).toBe(true);
-    expect(
-      accepts({ type: "account", surface: "record", when: { tier: "gold" } })
-    ).toBe(false);
-    expect(accepts({ type: "account", when: { tier: "gold" } })).toBe(false);
-    expect(accepts({ entity: 7, surface: "collection" })).toBe(false);
-    expect(
-      accepts({
-        type: "account",
-        surface: "collection",
-        placement: "overview",
-      })
-    ).toBe(false);
-  });
-  it("accepts an event attachment: an event kind plus the linked entity type", () => {
-    expect(accepts({ event_kind: "deal.won", type: "deal" })).toBe(true);
-  });
-
-  it("accepts a kind-only event attachment", () => {
-    expect(accepts({ event_kind: "deal.won" })).toBe(true);
-  });
-
-  it("rejects an event attachment with a placement or another subject", () => {
-    // Without the guard these would validate as a type/entity attachment and
-    // render as a tab on the type or record page.
-    expect(
-      accepts({ event_kind: "deal.won", type: "deal", placement: "tab" })
-    ).toBe(false);
-    expect(
-      accepts({ event_kind: "deal.won", type: "deal", placement: "overview" })
-    ).toBe(false);
-    expect(accepts({ event_kind: "deal.won", type: "deal", entity: 1 })).toBe(
-      false
-    );
-    expect(
-      accepts({ event_kind: "deal.won", type: "deal", workspace: true })
-    ).toBe(false);
-  });
-
-  it("keeps the subject attachments", () => {
-    expect(accepts({ type: "deal", placement: "tab" })).toBe(true);
-    expect(accepts({ entity: 7, placement: "overview" })).toBe(true);
-    expect(accepts({ entity: "acme" })).toBe(true);
+  it("accepts one page per entry", () => {
+    expect(accepts({ record: "deal" })).toBe(true);
+    expect(accepts({ record: "deal", id: 7 })).toBe(true);
+    expect(accepts({ collection: "deal" })).toBe(true);
+    expect(accepts({ collection: "deal", when: { tier: "gold" } })).toBe(true);
     expect(accepts({ workspace: true })).toBe(true);
-    expect(accepts({ event_kind: "", type: "deal" })).toBe(false);
+    expect(accepts({ event: "deal.won" })).toBe(true);
+    expect(accepts({ event: "deal.won", type: "deal" })).toBe(true);
+  });
+
+  it("rejects an entry naming two pages or a key of another page", () => {
+    expect(accepts({ record: "deal", collection: "deal" })).toBe(false);
+    expect(accepts({ record: "deal", when: { tier: "gold" } })).toBe(false);
+    expect(accepts({ collection: "deal", id: 7 })).toBe(false);
+    expect(accepts({ event: "deal.won", record: "deal" })).toBe(false);
+    expect(accepts({ workspace: true, record: "deal" })).toBe(false);
+  });
+
+  it("rejects the retired type/entity/placement/surface/event_kind shapes", () => {
+    expect(accepts({ type: "deal" })).toBe(false);
+    expect(accepts({ type: "deal", placement: "tab" })).toBe(false);
+    expect(accepts({ type: "deal", surface: "record" })).toBe(false);
+    expect(accepts({ entity: 7 })).toBe(false);
+    expect(accepts({ record: "deal", placement: "overview" })).toBe(false);
+    expect(accepts({ workspace: true, placement: "tab" })).toBe(false);
+    expect(accepts({ event_kind: "deal.won" })).toBe(false);
+  });
+
+  it("rejects blank or malformed subjects", () => {
+    expect(accepts({ record: "" })).toBe(false);
+    expect(accepts({ record: "deal", id: 0 })).toBe(false);
+    expect(accepts({ event: "" })).toBe(false);
+    expect(accepts({ event: "not a kind" })).toBe(false);
+    expect(accepts({ workspace: false })).toBe(false);
   });
 });

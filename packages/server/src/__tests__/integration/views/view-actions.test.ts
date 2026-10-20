@@ -129,7 +129,7 @@ describe("view actions", () => {
   it("binds a kind-only view action to its readable event and rejects a changed subject", async () => {
     await executeTool("manage_views", {
       action: "set", key: "event-poke", source_code: VIEW_SOURCE,
-      attach: [{ event_kind: "test.poked" }],
+      attach: [{ event: "test.poked" }],
       actions: { retry: { emits: "test.poked" } },
     }, TEST_ENV, ownerCtx);
     const source = await executeTool("save_memory", {
@@ -183,7 +183,7 @@ describe("view actions", () => {
     `;
     await executeTool("manage_views", {
       action: "set", key: "ballot-form", source_code: VIEW_SOURCE,
-      attach: [{ event_kind: "ballot.opened", type: "ballot" }],
+      attach: [{ event: "ballot.opened", type: "ballot" }],
       actions: { retry: { emits: "ballot.responded" } },
     }, TEST_ENV, ownerCtx);
     const source = await executeTool("save_memory", {
@@ -195,7 +195,7 @@ describe("view actions", () => {
     }, TEST_ENV, ownerCtx) as { event_id: number };
     const [event] = await sql`SELECT to_json(entity_ids) AS entity_ids, semantic_type FROM events WHERE id = ${response.event_id}`;
     expect(event).toMatchObject({ entity_ids: [entity.id], semantic_type: "ballot.responded" });
-    for (const attach of [[], [{ event_kind: "ballot.opened" }], [{ event_kind: "ballot.opened", type: "another-type" }]]) {
+    for (const attach of [[], [{ event: "ballot.opened" }], [{ event: "ballot.opened", type: "another-type" }]]) {
       await expect(executeTool("manage_views", {
         action: "set", key: "unbound-ballot-form", source_code: VIEW_SOURCE, attach,
         actions: { retry: { emits: "ballot.responded" } },

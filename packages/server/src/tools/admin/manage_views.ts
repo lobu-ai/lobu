@@ -97,58 +97,6 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
       422
     );
   }
-  for (const entry of args.attach ?? []) {
-    // An event attachment names a subject of its own (one event) and is the
-    // only variant that carries `type` as a qualifier rather than a target.
-    if ('event_kind' in entry && entry.event_kind !== undefined) {
-      const raw = entry as Record<string, unknown>;
-      const extra = Object.keys(raw).filter(
-        (k) => k !== 'event_kind' && k !== 'type' && raw[k] !== undefined
-      );
-      if (extra.length > 0) {
-        throw new ToolUserError(
-          `An event_kind attach entry takes only event_kind and type (got ${extra.join(', ')})`,
-          400
-        );
-      }
-      if (!EMITS_NAME_RE.test(entry.event_kind)) {
-        throw new ToolUserError(
-          `attach event_kind '${entry.event_kind}' is not an event-kind name`,
-          400
-        );
-      }
-      if (entry.type !== undefined && (typeof entry.type !== 'string' || entry.type.trim() === '')) {
-        throw new ToolUserError(
-          'An event_kind type qualifier must be a non-empty entity type',
-          400
-        );
-      }
-      continue;
-    }
-    const keys = [
-      'type' in entry && entry.type !== undefined,
-      'entity' in entry && entry.entity !== undefined,
-      'workspace' in entry && entry.workspace !== undefined,
-    ].filter(Boolean).length;
-    if (keys !== 1) {
-      throw new ToolUserError(
-        'Each attach entry needs exactly one of type, entity, workspace or event_kind (with an optional type qualifier)',
-        400
-      );
-    }
-    if ('type' in entry && entry.type !== undefined && entry.type.trim() === '') {
-      throw new ToolUserError('attach type must not be blank', 400);
-    }
-    if ('entity' in entry && entry.entity !== undefined) {
-      const entity = entry.entity;
-      if (
-        typeof entity !== 'number' &&
-        (typeof entity !== 'string' || entity.trim() === '')
-      ) {
-        throw new ToolUserError('attach entity must be an id or a slug', 400);
-      }
-    }
-  }
   for (const [name, decl] of Object.entries(args.params ?? {})) {
     if (isShellOwnedParam(name)) {
       throw new ToolUserError(

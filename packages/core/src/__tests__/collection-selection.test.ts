@@ -5,7 +5,7 @@ import {
   parseCollectionSelection,
   selectionImplies,
 } from "../contracts/tools/collection-selection";
-import { matchesRecord, matchesType } from "../contracts/tools/view-attach";
+import { matchesCollection } from "../contracts/tools/view-attach";
 
 describe("shared collection selection", () => {
   test("round trips a combined selection without view presentation params", () => {
@@ -57,22 +57,12 @@ describe("shared collection selection", () => {
     ).toBe(false);
   });
 
-  test("collection and record attachments do not leak into each other", () => {
-    const record = { type: "account", id: 1, slug: "sample", parentId: null };
-    const collection = {
-      type: "account",
-      surface: "collection" as const,
-      when: { tier: "gold" },
-    };
-    const detail = { type: "account", surface: "record" as const };
+  test("a collection attachment's when gates it on the list selection", () => {
+    const collection = { collection: "account", when: { tier: "gold" } };
     const selection = {
       filters: [{ field: "tier", op: "eq" as const, value: "gold" }],
     };
-    expect(matchesType(collection, "account", "tab", selection)).toBe(true);
-    expect(matchesType(collection, "account", "tab", {})).toBe(false);
-    expect(matchesType(detail, "account", "tab", selection)).toBe(false);
-    expect(matchesRecord(collection, record, "tab")).toBe(false);
-    expect(matchesRecord(detail, record, "tab")).toBe(true);
-    expect(matchesRecord({ type: "account" }, record, "tab")).toBe(true);
+    expect(matchesCollection(collection, "account", selection)).toBe(true);
+    expect(matchesCollection(collection, "account", {})).toBe(false);
   });
 });

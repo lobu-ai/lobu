@@ -1,7 +1,8 @@
 /**
  * The frame is sandboxed, so a view can only navigate by asking the host.
- * `Link` sends `ui/open-link` with its href untouched (the host resolves
- * workspace-relative paths) and never lets the iframe follow the anchor.
+ * A relative href resolves against the workspace root the shell names, so
+ * every host (the web app, Claude, any MCP Apps host) receives an absolute
+ * URL; `Link` never lets the iframe follow the anchor itself.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
@@ -82,10 +83,13 @@ async function handshake(scope: Record<string, unknown>): Promise<void> {
 }
 
 beforeEach(() => {
-  dom = new JSDOM("<!doctype html><html><body></body></html>", {
-    url: "https://views.test/",
-    pretendToBeVisual: true,
-  });
+  dom = new JSDOM(
+    '<!doctype html><html><head><meta name="lobu-workspace" content="https://app.example/acme/"></head><body></body></html>',
+    {
+      url: "https://views.test/",
+      pretendToBeVisual: true,
+    }
+  );
   const g = globalThis as unknown as Record<string, unknown>;
   g.window = dom.window;
   g.document = dom.window.document;
@@ -145,10 +149,12 @@ function openRequests(): Array<{ id: number; params: { url: string } }> {
 }
 
 describe("links", () => {
-  test("a Link click asks the host to open its href and stays in the frame", async () => {
+  test("a Link click asks the host to open its workspace URL and stays in the frame", async () => {
     await connect();
     const anchor = container.querySelector("a");
-    expect(anchor?.getAttribute("href")).toBe("flat/moda-3");
+    expect(anchor?.getAttribute("href")).toBe(
+      "https://app.example/acme/flat/moda-3"
+    );
     const click = new dom.window.MouseEvent("click", {
       bubbles: true,
       cancelable: true,
@@ -158,7 +164,9 @@ describe("links", () => {
       await tick();
     });
     expect(click.defaultPrevented).toBe(true);
-    expect(openRequests().map((r) => r.params.url)).toEqual(["flat/moda-3"]);
+    expect(openRequests().map((r) => r.params.url)).toEqual([
+      "https://app.example/acme/flat/moda-3",
+    ]);
   });
 
   test("openLink rejects with the host's reason when it declines", async () => {
@@ -168,7 +176,7 @@ describe("links", () => {
       await tick();
     });
     const [request] = openRequests();
-    expect(request?.params.url).toBe("flat/moda-3");
+    expect(request?.params.url).toBe("https://app.example/acme/flat/moda-3");
     await act(async () => {
       hostSend({
         jsonrpc: "2.0",
