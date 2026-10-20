@@ -1,8 +1,9 @@
 /**
  * Reddit Connector (V1 runtime)
  *
- * Fetches posts and comments from Reddit subreddits or search queries.
- * Supports both authenticated (OAuth) and unauthenticated (public JSON API) modes.
+ * Fetches posts and comments from Reddit subreddits or search queries, and the
+ * connected user's home feed. Supports both authenticated (OAuth) and
+ * unauthenticated (public JSON API) modes.
  */
 
 import {
@@ -79,8 +80,9 @@ export default class RedditConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: 'reddit',
     name: 'Reddit',
-    description: 'Fetches posts and comments from Reddit subreddits or search queries.',
-    version: '1.1.0',
+    description:
+      "Fetches posts and comments from Reddit subreddits or search queries, and the connected user's home feed.",
+    version: '1.2.0',
     faviconDomain: 'reddit.com',
     authSchema: {
       methods: [
@@ -239,6 +241,48 @@ export default class RedditConnector extends ConnectorRuntime {
           },
         },
       },
+      home_feed: {
+        key: 'home_feed',
+        name: 'Home feed',
+        sync: (ctx) => this.syncFeed(ctx),
+        description:
+          "Fetch the connected user's personalized home feed (Best). Requires user OAuth.",
+        displayNameTemplate: 'Reddit home feed',
+        configSchema: {
+          type: 'object',
+          properties: {
+            lookback_days: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 30,
+              default: 7,
+              description: 'Skip home feed posts older than this many days.',
+            },
+          },
+        },
+        eventKinds: {
+          post: {
+            description: "A Reddit post from the connected user's home feed",
+            metadataSchema: {
+              type: 'object',
+              properties: {
+                subreddit: { type: 'string' },
+                score: { type: 'number', description: 'Reddit score (upvotes - downvotes)' },
+                num_comments: { type: 'number' },
+                upvote_ratio: { type: 'number' },
+                is_self: { type: 'boolean' },
+                domain: { type: 'string' },
+                thumbnail: { type: 'string', format: 'uri', description: 'Preview thumbnail URL' },
+                media_url: {
+                  type: 'string',
+                  format: 'uri',
+                  description: 'Linked content URL for non-self posts (image, video, article)',
+                },
+              },
+            },
+          },
+        },
+      },
     },
   };
 
@@ -254,17 +298,20 @@ export default class RedditConnector extends ConnectorRuntime {
     const subreddit = ctx.config.subreddit as string | undefined;
     const searchTerms = ctx.config.search_terms as string | undefined;
     const isUserFeed = ctx.feedKey === 'user_activity';
-    const contentType = isUserFeed ? 'overview' : ctx.feedKey === 'comments' ? 'comment' : 'post';
-    const lookbackDays = (ctx.config.lookback_days as number) ?? 365;
+    // Best is ranked, not chronological: old posts interleave with new ones and
+    // a saved `after` anchor is meaningless once the ranking moves.
+    const isHomeFeed = ctx.feedKey === 'home_feed';
+    const contentType = isUserFeed
+      ? 'overview'
+      : isHomeFeed
+        ? 'home'
+        : ctx.feedKey === 'comments'
+          ? 'comment'
+          : 'post';
+    const lookbackDays = (ctx.config.lookback_days as number) ?? (isHomeFeed ? 7 : 365);
 
     // Resolve access token: user OAuth > app-only OAuth > unauthenticated
     const userAccessToken = ctx.credentials?.accessToken ?? null;
-    let accessToken: string | undefined = userAccessToken ?? undefined;
-    if (!accessToken) {
-      accessToken = await this.getAppOnlyToken(ctx);
-    }
-    const baseUrl = accessToken ? 'https://oauth.reddit.com' : 'https://www.reddit.com';
-
     let username: string | undefined;
     if (isUserFeed) {
       if (!userAccessToken) {
@@ -274,9 +321,18 @@ export default class RedditConnector extends ConnectorRuntime {
       }
       username = await this.resolveUsername(ctx, userAccessToken);
     }
+    if (isHomeFeed && !userAccessToken) {
+      throw new Error('home_feed requires user OAuth. Connect Reddit with the read scope.');
+    }
+
+    let accessToken: string | undefined = userAccessToken ?? undefined;
+    if (!accessToken) {
+      accessToken = await this.getAppOnlyToken(ctx);
+    }
+    const baseUrl = accessToken ? 'https://oauth.reddit.com' : 'https://www.reddit.com';
 
     const previous = (ctx.checkpoint ?? {}) as RedditCheckpoint;
-    const resumeAfter = previous.pagination_token ?? null;
+    const resumeAfter = isHomeFeed ? null : (previous.pagination_token ?? null);
     let cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - lookbackDays);
     // Keep items eligible for the whole bounded sweep, even across sync runs.
@@ -356,6 +412,7 @@ export default class RedditConnector extends ConnectorRuntime {
         const itemDate = new Date(itemData.created_utc * 1000);
 
         if (itemDate < cutoffDate) {
+          if (isHomeFeed) continue;
           reachedCutoff = true;
           break;
         }
@@ -389,8 +446,9 @@ export default class RedditConnector extends ConnectorRuntime {
 
     const checkpoint: RedditCheckpoint = {
       last_timestamp: new Date().toISOString(),
-      pagination_token: !reachedCutoff ? (after ?? undefined) : undefined,
-      pagination_cutoff: !reachedCutoff && after ? cutoffDate.toISOString() : undefined,
+      pagination_token: !reachedCutoff && !isHomeFeed ? (after ?? undefined) : undefined,
+      pagination_cutoff:
+        !reachedCutoff && !isHomeFeed && after ? cutoffDate.toISOString() : undefined,
     };
 
     await ctx.commit(events, checkpoint as Record<string, unknown>);
@@ -497,6 +555,10 @@ export default class RedditConnector extends ConnectorRuntime {
         throw new Error('user_activity feed requires a resolved username.');
       }
       return `${baseUrl}/user/${encodeURIComponent(username)}/overview${jsonSuffix}?limit=100&sort=new${afterParam}`;
+    }
+
+    if (contentType === 'home') {
+      return `${baseUrl}/best${jsonSuffix}?limit=100${afterParam}`;
     }
 
     if (contentType === 'comment') {

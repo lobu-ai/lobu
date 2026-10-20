@@ -397,6 +397,97 @@ describe('RedditConnector runtime', () => {
     expect(result.events).toHaveLength(2);
   });
 
+  // Best is ranked: a stale post mid-page must be skipped, not end the sync,
+  // and a saved anchor from an earlier ranking must never be resumed.
+  test('reads the ranked home feed from the top, skipping posts past the lookback', async () => {
+    const twoWeeksAgo = Date.now() / 1000 - 14 * 24 * 60 * 60;
+    const urls: URL[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+      urls.push(url);
+      return url.searchParams.has('after')
+        ? listing([redditPost('secondpage')])
+        : listing(
+            [redditPost('fresh'), redditPost('stale', twoWeeksAgo), redditPost('trailing')],
+            't3_trailing'
+          );
+    }) as typeof fetch;
+
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    const result = await runSync(connector, {
+      feedKey: 'home_feed',
+      config: {},
+      credentials: { accessToken: 'token' },
+      checkpoint: {
+        pagination_token: 't3_saved',
+        pagination_cutoff: new Date(0).toISOString(),
+      },
+    });
+
+    expect(urls.map((url) => `${url.origin}${url.pathname}`)).toEqual([
+      'https://oauth.reddit.com/best',
+      'https://oauth.reddit.com/best',
+    ]);
+    expect(urls[0].searchParams.get('after')).toBeNull();
+    expect(urls[1].searchParams.get('after')).toBe('t3_trailing');
+    expect(result.events.map((event: { origin_id: string }) => event.origin_id)).toEqual([
+      'reddit_post_t3_fresh',
+      'reddit_post_t3_trailing',
+      'reddit_post_t3_secondpage',
+    ]);
+    expect(result.checkpoint?.pagination_token).toBeUndefined();
+    expect(result.checkpoint?.pagination_cutoff).toBeUndefined();
+  });
+
+  test('restarts a capped home feed at the top on the next sync', async () => {
+    const posts = Array.from({ length: 11 }, (_, i) => redditPost(`${i}`));
+    const urls = mockPostListing(posts, 1);
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    const options = {
+      feedKey: 'home_feed',
+      config: {},
+      credentials: { accessToken: 'token' },
+    };
+    const first = await runSync(connector, { ...options, checkpoint: null });
+
+    expect(urls).toHaveLength(10);
+    expect(first.events).toHaveLength(10);
+    expect(first.checkpoint?.pagination_token).toBeUndefined();
+    expect(first.checkpoint?.pagination_cutoff).toBeUndefined();
+
+    posts.unshift(redditPost('arrived'));
+    urls.length = 0;
+    const second = await runSync(connector, {
+      ...options,
+      checkpoint: JSON.parse(JSON.stringify(first.checkpoint)),
+    });
+    expect(urls).toHaveLength(10);
+    expect(urls[0].searchParams.get('after')).toBeNull();
+    expect(second.events[0].origin_id).toBe('reddit_post_t3_arrived');
+  });
+
+  test.each(['home_feed', 'user_activity'])(
+    'refuses %s without user OAuth before attempting app-only authentication',
+    async (feedKey) => {
+      const fetchMock = mock(async () => {
+        throw new Error('App-only authentication unavailable');
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      for (const config of [
+        {},
+        { REDDIT_CLIENT_ID: 'test-client', REDDIT_CLIENT_SECRET: 'test-secret' },
+      ]) {
+        await expect(
+          runSync(new RedditConnector(), { feedKey, config, checkpoint: {} })
+        ).rejects.toThrow(/requires user OAuth/);
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  );
+
   test('names the subreddit in the error raised for a 404 listing', async () => {
     globalThis.fetch = (async () => new Response('not found', { status: 404 })) as typeof fetch;
 
