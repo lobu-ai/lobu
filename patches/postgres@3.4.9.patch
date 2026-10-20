@@ -1,8 +1,40 @@
 diff --git a/cf/src/connection.js b/cf/src/connection.js
-index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..de7da6a95b7cdb427e15cef3b75b69913f2d459f 100644
+index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..6f9ea35bc6413ac0e8528970859dc0ae8e77714e 100644
 --- a/cf/src/connection.js
 +++ b/cf/src/connection.js
-@@ -566,9 +566,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -159,6 +159,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     if (terminated)
+       return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
+ 
++    if (!socket) {
++      // A stale reservation can execute after closed() clears the socket.
++      // Do not signal backpressure: this connection cannot emit a drain event
++      // to resume queries queued behind the rejected write.
++      queryError(q, Errors.connection('CONNECTION_CLOSED', options))
++      return true
++    }
++
+     if (stream)
+       return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
+ 
+@@ -254,6 +262,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function nextWrite(fn) {
++    if (!socket) {
++      // Cursor and COPY writes can still arrive after closed() clears the
++      // socket. A throw from this timer would be an uncaughtException, so
++      // reject the pending queries instead. Report no backpressure: a closed
++      // socket never emits the drain event that would resume them.
++      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
++      chunk = nextWriteTimer = null
++      error(Errors.connection('CONNECTION_CLOSED', options))
++      return true
++    }
+     const x = socket.write(chunk, fn)
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+@@ -566,9 +584,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
          return fetchArrayTypes()
        }
  
@@ -18,10 +50,42 @@ index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..de7da6a95b7cdb427e15cef3b75b6991
      }
  
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
-index 07f6716702ac888215c86ad6e0071aaf55ae519c..5c776aa77ad296fb7fdca592f7142b81dc31dfe2 100644
+index 07f6716702ac888215c86ad6e0071aaf55ae519c..c4da4ada1ed4008b02ce1dcfb801e1759c540126 100644
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
-@@ -564,9 +564,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -157,6 +157,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     if (terminated)
+       return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
+ 
++    if (!socket) {
++      // A stale reservation can execute after closed() clears the socket.
++      // Do not signal backpressure: this connection cannot emit a drain event
++      // to resume queries queued behind the rejected write.
++      queryError(q, Errors.connection('CONNECTION_CLOSED', options))
++      return true
++    }
++
+     if (stream)
+       return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
+ 
+@@ -252,6 +260,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function nextWrite(fn) {
++    if (!socket) {
++      // Cursor and COPY writes can still arrive after closed() clears the
++      // socket. A throw from this timer would be an uncaughtException, so
++      // reject the pending queries instead. Report no backpressure: a closed
++      // socket never emits the drain event that would resume them.
++      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
++      chunk = nextWriteTimer = null
++      error(Errors.connection('CONNECTION_CLOSED', options))
++      return true
++    }
+     const x = socket.write(chunk, fn)
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+@@ -564,9 +582,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
          return fetchArrayTypes()
        }
  
@@ -37,10 +101,42 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..5c776aa77ad296fb7fdca592f7142b81
      }
  
 diff --git a/src/connection.js b/src/connection.js
-index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..ce4af910f5b8aebcb5766cbf1cd9cb9c4c5bcd47 100644
+index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..9d4a0471efab70ba73263bc79f5d6d92dd880592 100644
 --- a/src/connection.js
 +++ b/src/connection.js
-@@ -564,9 +564,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -157,6 +157,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     if (terminated)
+       return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
+ 
++    if (!socket) {
++      // A stale reservation can execute after closed() clears the socket.
++      // Do not signal backpressure: this connection cannot emit a drain event
++      // to resume queries queued behind the rejected write.
++      queryError(q, Errors.connection('CONNECTION_CLOSED', options))
++      return true
++    }
++
+     if (stream)
+       return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
+ 
+@@ -252,6 +260,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function nextWrite(fn) {
++    if (!socket) {
++      // Cursor and COPY writes can still arrive after closed() clears the
++      // socket. A throw from this timer would be an uncaughtException, so
++      // reject the pending queries instead. Report no backpressure: a closed
++      // socket never emits the drain event that would resume them.
++      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
++      chunk = nextWriteTimer = null
++      error(Errors.connection('CONNECTION_CLOSED', options))
++      return true
++    }
+     const x = socket.write(chunk, fn)
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+@@ -564,9 +582,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
          return fetchArrayTypes()
        }
  
