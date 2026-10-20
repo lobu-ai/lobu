@@ -195,3 +195,17 @@ describe("display modes", () => {
     expect(seen?.displayMode).toBe("inline");
   });
 });
+
+describe("size reporting", () => {
+  // The server's bootstrap mounts Provider directly (not mountView), so the
+  // provider itself must tell the host how tall the view is; otherwise every
+  // frame stays at the host's minimum height and a card never clips.
+  test("a provider mounted directly reports its document size", async () => {
+    await connect({ displayMode: "inline" });
+    const sizes = parent.posted.filter(
+      (m) => m.method === "ui/notifications/size-changed"
+    ) as Array<{ params: { width: number; height: number } }>;
+    expect(sizes.length).toBeGreaterThan(0);
+    expect(typeof sizes[0]?.params.height).toBe("number");
+  });
+});
