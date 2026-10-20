@@ -217,6 +217,7 @@ function cronSeedKey(name: string, tick: Date): string {
 export class TaskScheduler {
   private handlers = new Map<string, TaskRegistration>();
   private started = false;
+  private localTimers = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(private readonly queue: IMessageQueue) {}
 
@@ -322,10 +323,28 @@ export class TaskScheduler {
     attempt(0);
   }
 
+  /** Best-effort work tied to this process's source, not the shared queue.
+   *  Stop cancels pending callbacks; timers never hold the process open. */
+  runOnceAfter(delayMs: number, fn: () => Promise<void>): void {
+    const timer = setTimeout(async () => {
+      this.localTimers.delete(timer);
+      if (!this.started) return;
+      try {
+        await fn();
+      } catch (err) {
+        logger.error({ err }, '[task-scheduler] Local delayed task failed');
+      }
+    }, delayMs);
+    this.localTimers.add(timer);
+    timer.unref();
+  }
+
   /** Stop dispatching. The underlying queue handles in-flight drain on its
-   *  own `stop()`; this just flips the local started flag. */
+   *  own `stop()`; local callbacks already running are not interrupted. */
   stop(): void {
     this.started = false;
+    for (const timer of this.localTimers) clearTimeout(timer);
+    this.localTimers.clear();
   }
 
   hasHandler(name: string): boolean {

@@ -91,6 +91,9 @@ function asDeliveryContext(value: unknown): ScheduledDeliveryContext | null {
   };
 }
 
+// Best-effort repair for deployments that overlap server versions. Elapsed
+// time is not a rollout barrier; the hourly tick remains the backstop.
+const STARTUP_REFRESH_FOLLOWUP_MS = 10 * 60_000;
 
 /**
  * Construct the TaskScheduler, register every periodic task, start dispatch,
@@ -108,19 +111,22 @@ export async function bootTaskScheduler(
 
   // Refresh from this process's bundled source: a shared startup task can be
   // claimed by an outgoing pod during a rolling deploy. Do not await the scan
-  // on the readiness path. An older pod's in-flight refresh can still overwrite
-  // these definitions; the hourly tick repairs that after the rollout settles.
-  void refreshConnectorDefinitions().then(
-    (result) => {
-      logger.info({ ...result }, '[task-scheduler] Startup connector-definition refresh completed');
-    },
-    (err) => {
-      logger.warn(
-        { err },
-        '[task-scheduler] Startup connector-definition refresh failed; hourly tick will cover it',
-      );
-    },
-  );
+  // on the readiness path. Retry locally after a delay to repair overwrites
+  // from an overlapping older process without waiting for the hourly tick.
+  const refreshFromBundledSource = (phase: 'boot' | 'follow-up') =>
+    refreshConnectorDefinitions().then(
+      (result) => {
+        logger.info({ ...result, phase }, '[task-scheduler] Startup connector-definition refresh completed');
+      },
+      (err) => {
+        logger.warn(
+          { err, phase },
+          '[task-scheduler] Startup connector-definition refresh failed; hourly tick will cover it',
+        );
+      },
+    );
+  void refreshFromBundledSource('boot');
+  scheduler.runOnceAfter(STARTUP_REFRESH_FOLLOWUP_MS, () => refreshFromBundledSource('follow-up'));
 
   // AuthProfilesManager.ensureFreshCredential is a no-op until these hooks
   // are wired; during the brief startup window before scheduler.start()
