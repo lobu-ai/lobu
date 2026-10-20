@@ -575,6 +575,16 @@ export const AgentTurnPollPayloadSchema = Type.Object({
        */
       reasoning: Type.Optional(Type.Boolean()),
       /**
+       * pi-ai's `Model.thinkingLevelMap`: the provider's name for each
+       * thinking level, `null` where the model does not serve that level.
+       * gpt-5-mini maps `off` to `null` because it cannot turn reasoning off;
+       * without the map pi-ai sends `effort: "none"` and OpenAI rejects it.
+       * Absent → pi-ai's own defaults.
+       */
+      thinking_level_map: Type.Optional(
+        Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()]))
+      ),
+      /**
        * The modalities this model accepts, in pi-ai's own `Model.input`
        * vocabulary and resolved from pi-ai's model registry — NOT guessed
        * here. pi reads it to decide whether an image survives to the wire: a

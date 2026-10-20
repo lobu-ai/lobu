@@ -3464,6 +3464,37 @@ describe('agent turn producer', () => {
     expect(turn.provider.reasoning).toBe(true);
   });
 
+  // gpt-5-mini cannot turn reasoning off. Without the registry's level map the
+  // guest's pi-ai sends `effort: "none"` for an unconfigured turn, and OpenAI
+  // 400s the turn and its follow-up suggestions request.
+  it("carries the registry's thinking level map", async () => {
+    const org = await createTestOrganization();
+    const message = messageFor(org.id);
+    message.agentOptions = { ...message.agentOptions, model: 'openai/gpt-5-mini' };
+    await enqueueMessage(message, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(
+        claudeModule({
+          providerId: 'openai',
+          sdkCompat: 'openai-responses',
+          getUpstreamConfig: () => ({ slug: 'openai', upstreamBaseUrl: 'https://api.openai.com/v1' }),
+        })
+      ),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const turn = (run?.action_input as {
+      turn: { effort?: string; provider: { thinking_level_map?: Record<string, string | null> } };
+    }).turn;
+    const registryModel = getModel('openai' as never, 'gpt-5-mini' as never) as
+      | { thinkingLevelMap?: Record<string, string | null> }
+      | undefined;
+    expect(registryModel?.thinkingLevelMap?.off).toBeNull();
+    expect(turn.provider.thinking_level_map).toEqual(registryModel?.thinkingLevelMap);
+    expect(turn.effort).toBeUndefined();
+  });
+
   it("preserves explicit effort without inventing capabilities for an unknown model", async () => {
     // `claude-opus-4-8` is not in pi-ai's registry, so there is no ceiling and
     // no reasoning flag to state — and an absent field is how the envelope says

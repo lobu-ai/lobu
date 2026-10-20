@@ -45,6 +45,14 @@ export interface AgentTurnProvider {
    */
   reasoning?: boolean;
   /**
+   * pi-ai's `Model.thinkingLevelMap` from its registry: the provider's name
+   * for each thinking level, `null` where the model does not serve it. pi-ai
+   * reads `off: null` as "send no effort", which is what a model that cannot
+   * turn reasoning off (gpt-5-mini) needs; without it pi-ai sends
+   * `effort: "none"` and the provider rejects the request.
+   */
+  thinkingLevelMap?: Partial<Record<string, string | null>>;
+  /**
    * The modalities the model accepts, in pi-ai's `Model.input` vocabulary. The
    * gateway resolves it from pi-ai's registry; the guest only passes it
    * through, because pi is what enforces it — `transformMessages` replaces

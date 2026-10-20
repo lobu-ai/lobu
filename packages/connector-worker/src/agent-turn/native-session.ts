@@ -73,6 +73,7 @@ export function createNativeSession(
     // For a model absent from the registry, an explicit effort is the user's
     // request to try reasoning; known non-reasoning models are rejected above.
     reasoning: input.provider.reasoning ?? (thinkingLevel !== 'off'),
+    ...(input.provider.thinkingLevelMap ? { thinkingLevelMap: input.provider.thinkingLevelMap } : {}),
     input: input.provider.input ?? ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: input.compaction?.contextWindow ?? 200_000,
