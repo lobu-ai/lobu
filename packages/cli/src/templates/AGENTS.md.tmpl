@@ -172,14 +172,21 @@ const ticket = defineEntityType({
   name: "Ticket",
   required: ["subject"],
   properties: {
-    subject: { type: "string", "x-table-label": "Subject", "x-table-column": true },
-    status: { type: "string", enum: ["open", "closed"], "x-table-label": "Status", "x-table-column": true },
+    subject: { type: "string", title: "Subject", "x-table-label": "Subject", "x-table-column": true },
+    status: { type: "string", title: "Status", enum: ["open", "closed"], "x-table-label": "Status", "x-table-column": true },
+    contacts: {
+      type: "array",
+      title: "Contacts",
+      items: { type: "object", properties: { email: { type: "string", title: "Email" } } },
+    },
   },
 });
 ```
 
 Each property is a JSON Schema fragment. `"x-table-column": true` surfaces it as a
-column in the admin UI.
+column in the admin UI. The same schema renders the record page form: give every
+array `items` and every object `properties` (bare ones render as raw JSON), put the
+label in `title` and help text in `description`, and mark derived fields `readOnly: true`.
 
 ### Connection (a bundled connector — preferred)
 

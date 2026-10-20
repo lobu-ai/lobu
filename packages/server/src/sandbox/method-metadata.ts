@@ -55,6 +55,10 @@ export const RUNTIME_HELPER_METADATA: Record<string, MethodMetadata> = {
 	},
 };
 
+/** Shared by createType/updateType: the schema is also the record page form. */
+const METADATA_SCHEMA_FORM_GUIDANCE =
+	"`metadata_schema` also renders the record page's Data form, so write it for people: give every array `items` and every object `properties` (bare `type: 'array'`/`'object'` renders as a raw JSON textarea; an array of objects with `items.properties` renders as an editable table), put the label in `title` and help text in `description`, mark derived fields `readOnly: true`, and declare every field an Automation writes.";
+
 export const METHOD_METADATA: Record<string, MethodMetadata> = {
 	// organizations
 	"organizations.list": {
@@ -228,15 +232,45 @@ export default async (_ctx, client) => {
 			"const { entity_type } = await client.entitySchema.getType('company'); // null when absent",
 	},
 	"entitySchema.createType": {
-		summary:
-			"Create an entity type through the workspace write policy. The result is applied, pending_approval, or denied. The metadata shape goes in `metadata_schema` (a JSON Schema), NOT top-level `properties`.",
+		summary: `Create an entity type through the workspace write policy. The result is applied, pending_approval, or denied. The metadata shape goes in \`metadata_schema\` (a JSON Schema), NOT top-level \`properties\`. ${METADATA_SCHEMA_FORM_GUIDANCE}`,
 		access: "admin",
 		example:
-			"await client.entitySchema.createType({ slug: 'widget', name: 'Widget', metadata_schema: { type: 'object', properties: { color: { type: 'string' } } } });",
+			"await client.entitySchema.createType({ slug: 'widget', name: 'Widget', metadata_schema: { type: 'object', properties: { color: { type: 'string', title: 'Color' } } } });",
+		usageExample: `export default async (_ctx, client) => {
+  return client.entitySchema.createType({
+    slug: 'listing',
+    name: 'Listing',
+    metadata_schema: {
+      type: 'object',
+      properties: {
+        price_try: { type: 'number', title: 'Price (TL)', description: 'Asking price at the last sync' },
+        address: {
+          type: 'object',
+          title: 'Address',
+          properties: {
+            city: { type: 'string', title: 'City' },
+            district: { type: 'string', title: 'District' },
+          },
+        },
+        photos: {
+          type: 'array',
+          title: 'Photos',
+          items: {
+            type: 'object',
+            properties: {
+              url: { type: 'string', format: 'uri', title: 'URL' },
+              verdict: { type: 'string', title: 'Verdict', enum: ['ok', 'flagged'] },
+            },
+          },
+        },
+        score: { type: 'number', title: 'Score', description: 'Set by the review Automation', readOnly: true },
+      },
+    },
+  });
+};`,
 	},
 	"entitySchema.updateType": {
-		summary:
-			"Update an entity type. An event_kinds object replaces the entire registry; call getType and read-merge-write to preserve existing kinds. Use null to clear or omit to leave unchanged.",
+		summary: `Update an entity type. An event_kinds object replaces the entire registry; call getType and read-merge-write to preserve existing kinds. Use null to clear or omit to leave unchanged. ${METADATA_SCHEMA_FORM_GUIDANCE}`,
 		access: "admin",
 	},
 	"entitySchema.deleteType": {
