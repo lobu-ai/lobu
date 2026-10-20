@@ -8,7 +8,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { materializeDueAutomationRuns } from "../../../automations/automation";
 import { clearAuthCacheForTests, createAuth } from "../../../auth/index";
 import { app, type Env } from "../../../index";
@@ -19,6 +19,7 @@ import { registerScheduledJobsTicker } from "../../../scheduled/scheduled-jobs-s
 import type { TaskScheduler } from "../../../scheduled/task-scheduler";
 import { WORKSPACE_PURGE_TASK } from "../../../scheduled/task-definitions";
 import { getEnvFromProcess } from "../../../utils/env";
+import { initWorkspaceProvider } from "../../../workspace";
 import {
 	getMembershipRole,
 	getOrgBySlug,
@@ -265,6 +266,11 @@ async function claimPurgeTask(taskRunId: number, owner: string): Promise<void> {
 
 describe("workspace purge", () => {
 	const originalSecret = process.env.BETTER_AUTH_SECRET;
+
+	// The public-page assertions resolve paths through the workspace provider.
+	beforeAll(async () => {
+		await initWorkspaceProvider();
+	});
 
 	beforeEach(async () => {
 		await cleanupTestDatabase();

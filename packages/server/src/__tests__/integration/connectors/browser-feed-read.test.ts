@@ -103,8 +103,8 @@ function context(): ToolContext {
   return { organizationId: orgId, userId, memberRole: 'owner', scopes: ['mcp:read', 'mcp:write', 'mcp:admin'] } as ToolContext;
 }
 
-async function read(ctx = context(), query = 'private query'): Promise<Record<string, any>> {
-  return manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query, limit: 2 }], timeout_ms: 5000 }, {} as Env, ctx) as Promise<Record<string, any>>;
+async function read(ctx = context(), query = 'private query', timeoutMs = 5000): Promise<Record<string, any>> {
+  return manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query, limit: 2 }], timeout_ms: timeoutMs }, {} as Env, ctx) as Promise<Record<string, any>>;
 }
 
 /** The real worker poll/complete routes carry observations across DB connections. */
@@ -198,7 +198,10 @@ describe('compiled browser source reads', () => {
     const [automation] = await sql`WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
       INSERT INTO automations (id, automation_group_id, organization_id, created_by, name, slug, triggers)
       SELECT id, id, ${orgId}, ${userId}, 'Scheduled source fixture', 'scheduled-source-fixture', '[]'::jsonb FROM next_id RETURNING id`;
-    const reading = read({ ...context(), userId: null, memberRole: null, actingAutomationId: Number(automation.id) });
+    // The allowed case is the suite's first full browser round trip; on a loaded
+    // CI runner it overran the 5s read budget. Revoked cases cancel early, so
+    // the extra headroom only lets a slow allowed read finish.
+    const reading = read({ ...context(), userId: null, memberRole: null, actingAutomationId: Number(automation.id) }, 'private query', 15_000);
     const child = await waitForChild();
     const revoked = change !== 'auto';
     if (change === 'approval' || change === 'deny') await upsertEntityApprovalPolicy(orgId, { resourceClass: 'connector_action', connectorKey: SOURCE_KEY, operationCategory: 'read', effects: { execute: change } });
