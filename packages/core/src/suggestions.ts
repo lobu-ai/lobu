@@ -67,11 +67,12 @@ export function sanitizeSuggestionPrompts(value: unknown): SuggestedPrompt[] {
  * retained in its current context. Reusing the prefix enables prompt caching.
  */
 export const FOLLOW_UP_SUGGESTIONS_PROMPT = [
-  "Before the user replies: decide whether your last reply needs follow-up action chips.",
-  'Default to {"prompts":[]}. A complete answer does not need suggestions.',
-  "Only offer a concrete next step your reply leaves open and that would help the user proceed.",
-  "Return no suggestions for routine answers, acknowledgements, corrections, completed requests, a question you asked, or a reply that closes the topic, and none at all if the user asked for no suggestions.",
-  "Do not invent extra work, add a generic offer to explore further, or repeat an action you already offered.",
+  "Before the user replies: decide whether your last reply needs follow-up action chips the user can tap.",
+  'Default to {"prompts":[]} when your reply leaves nothing open.',
+  'If your reply offers concrete next steps ("If you want, I can …", "Want me to …?"), turn up to three distinct offers into chips.',
+  "Otherwise offer a chip only for a concrete next step your reply leaves open that would help the user proceed.",
+  "Return no suggestions for routine answers, acknowledgements, corrections, a finished request with nothing left open, a question the user must answer in their own words, or a reply that closes the topic, and none at all if the user asked for no suggestions.",
+  "Do not invent extra work or add a generic offer to explore further.",
   "When useful next steps remain, return 1-3 distinct actions. A single useful action is enough; never pad the list.",
   "",
   'Each item is {"title","message"}:',
