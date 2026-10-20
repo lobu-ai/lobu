@@ -21,9 +21,7 @@ import type { PlatformConnection } from "../connections/types.js";
 import { QueueProducer } from "../infrastructure/queue/queue-producer.js";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import { InteractionService } from "../interactions.js";
-import { buildRunJobToken } from "../orchestration/message-consumer.js";
-import { buildDeploymentWorkerToken } from "../orchestration/deployment-manager.js";
-import { createInteractionRoutes } from "../routes/internal/interactions.js";
+import { interactionTeamId } from "../orchestration/worker-token-claims.js";
 import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 import { blockActionsPayload, buildSignedBlockActionsRequest } from "./fixtures/slack-signing.js";
 import { ensureDbForGatewayTests, resetTestDatabase, seedAgentRow } from "./helpers/db-setup.js";
@@ -160,15 +158,15 @@ describe("platform-neutral chat link-code routing", () => {
     installed.instance.chat = chat;
     const service = new InteractionService();
     disposeInteractions.push(registerInteractionBridge(service, installed.manager as never, installed.connection, chat));
-    const routes = createInteractionRoutes(service);
     return {
-      async post(token: string) {
-        const response = await routes.request("/internal/suggestions/create", {
-          method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-          body: JSON.stringify({ prompts: [{ title: "Continue", message: "Continue this task" }], teamId: "T_UNTRUSTED_BODY" }),
-        });
-        expect(response.status).toBe(200);
-        const { id } = await response.json() as { id: string };
+      // The chips card the chat bridge posts after a reply, routed exactly as
+      // that reply was: from the turn's stored message, never the worker.
+      async post(message: { organizationId: string; userId: string; conversationId: string; channelId: string; teamId?: string; platformMetadata: Record<string, any> }) {
+        const { id } = await service.postSuggestion(
+          message.organizationId, message.userId, message.conversationId, message.channelId,
+          interactionTeamId(message.platformMetadata, message.teamId), message.platformMetadata.connectionId, installed.connection.platform,
+          [{ title: "Continue", message: "Continue this task" }],
+        );
         await waitFor(async () => { expect(await readPendingSuggestion(id, SOURCE_ORG, installed.slug)).not.toBeNull(); });
         await waitFor(async () => { expect(posted.mock.calls.length).toBeGreaterThan(0); });
         return id;
@@ -190,35 +188,27 @@ describe("platform-neutral chat link-code routing", () => {
   }
 
   for (const platform of PLATFORMS) {
-    for (const mint of ["run", "deployment"]) {
-      test(`${platform}: ${mint} token preserves native team through a persisted suggestion click and dispatch`, async () => {
-        const { installed, run } = await linkedChannel(platform);
-        const args = { ...run.action_input, deploymentName: "deployment-chat-code", runId: Number(run.id) };
-        const token = mint === "run" ? buildRunJobToken(args) : buildDeploymentWorkerToken(args);
-        const harness = await suggestionHarness(installed);
-        const id = await harness.post(token);
-        const stored = await readPendingSuggestion(id, SOURCE_ORG, installed.slug);
-        await harness.click(id);
-        await waitFor(async () => {
-          const rows = await getDb()`SELECT action_input FROM runs WHERE run_type = 'chat_message' ORDER BY id`;
-          expect(rows).toHaveLength(2);
-          expect(rows[1].action_input).toMatchObject({ agentId: AGENT_ID, organizationId: TARGET_ORG, messageText: "Continue this task", conversationId: installed.thread.id });
-        });
-        expect(stored?.suggestion.teamId).toBe(platform === "slack" ? "T_CODE_WORKSPACE" : undefined);
+    test(`${platform}: a chips card preserves the native team through a persisted click and dispatch`, async () => {
+      const { installed, run } = await linkedChannel(platform);
+      const harness = await suggestionHarness(installed);
+      const id = await harness.post(run.action_input);
+      const stored = await readPendingSuggestion(id, SOURCE_ORG, installed.slug);
+      await harness.click(id);
+      await waitFor(async () => {
+        const rows = await getDb()`SELECT action_input FROM runs WHERE run_type = 'chat_message' ORDER BY id`;
+        expect(rows).toHaveLength(2);
+        expect(rows[1].action_input).toMatchObject({ agentId: AGENT_ID, organizationId: TARGET_ORG, messageText: "Continue this task", conversationId: installed.thread.id });
       });
-    }
+      expect(stored?.suggestion.teamId).toBe(platform === "slack" ? "T_CODE_WORKSPACE" : undefined);
+    });
 
     test.each(["foreign team", "other installation", "revoked authority", "legacy routing key"])(`${platform}: suggestion rejects %s`, async (boundary) => {
       const { installed, run } = await linkedChannel(platform);
       const metadata = { ...run.action_input.platformMetadata };
       if (boundary === "foreign team") metadata.teamId = "T_OTHER_WORKSPACE";
       if (boundary === "legacy routing key") delete metadata.teamId;
-      const token = buildRunJobToken({
-        ...run.action_input, platformMetadata: metadata,
-        deploymentName: "deployment-chat-code", runId: Number(run.id),
-      });
       const harness = await suggestionHarness(installed);
-      const id = await harness.post(token);
+      const id = await harness.post({ ...run.action_input, platformMetadata: metadata });
       if (boundary === "revoked authority") {
         await getDb()`DELETE FROM member WHERE "userId" = ${ownerId} AND "organizationId" = ${SOURCE_ORG}`;
       }

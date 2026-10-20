@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { sanitizeSuggestionPrompts, SUGGESTION_LIMITS } from "../types";
+import { parseFollowUpSuggestions } from "../suggestions";
 
 describe("sanitizeSuggestionPrompts", () => {
   test("drops malformed entries, trims, and deduplicates valid prompts", () => {
@@ -39,5 +40,42 @@ describe("sanitizeSuggestionPrompts", () => {
     );
     expect(result[0]!.title.endsWith("😀")).toBe(true);
     expect(result[0]!.message).toHaveLength(SUGGESTION_LIMITS.maxMessageChars);
+  });
+});
+
+describe("parseFollowUpSuggestions", () => {
+  test("reads the chips object, with or without a fence or surrounding prose", () => {
+    const chips = {
+      prompts: [
+        { title: "Fix LinkedIn", message: "Reconnect my LinkedIn feed" },
+      ],
+    };
+    expect(parseFollowUpSuggestions(JSON.stringify(chips))).toEqual(
+      chips.prompts
+    );
+    expect(
+      parseFollowUpSuggestions(`\`\`\`json\n${JSON.stringify(chips)}\n\`\`\``)
+    ).toEqual(chips.prompts);
+    expect(
+      parseFollowUpSuggestions(`Here you go: ${JSON.stringify(chips)}`)
+    ).toEqual(chips.prompts);
+  });
+
+  test("an empty set, prose, malformed JSON, or a wrong shape is no chips", () => {
+    expect(parseFollowUpSuggestions('{"prompts":[]}')).toEqual([]);
+    expect(parseFollowUpSuggestions("No suggestions needed.")).toEqual([]);
+    expect(parseFollowUpSuggestions('{"prompts":[{"title":"A"')).toEqual([]);
+    expect(parseFollowUpSuggestions('{"prompts":"Show me"}')).toEqual([]);
+    expect(parseFollowUpSuggestions("")).toEqual([]);
+  });
+
+  test("applies the shared sanitizer to what the model returned", () => {
+    const many = Array.from({ length: 6 }, (_, i) => ({
+      title: `T${i}`,
+      message: `M${i}`,
+    }));
+    expect(
+      parseFollowUpSuggestions(JSON.stringify({ prompts: many }))
+    ).toHaveLength(SUGGESTION_LIMITS.maxPrompts);
   });
 });

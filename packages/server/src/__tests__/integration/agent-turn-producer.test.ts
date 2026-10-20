@@ -20,6 +20,7 @@ import {
   PollResponseSchema,
 } from '@lobu/core/contracts/worker/protocol';
 import { AGENT_ERRORS, AgentErrorCode, mintGatewayMcpToken, parseSessionEntries, type MessagePayload, type ThreadResponsePayload, renderBaselineAgentPolicy, verifyWorkerToken } from '@lobu/core';
+import { FOLLOW_UP_SUGGESTIONS_PROMPT } from '@lobu/core/agent-tooling';
 import { Value } from '@sinclair/typebox/value';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as db from '../../db/client';
@@ -61,6 +62,12 @@ import {
 import { post } from '../setup/test-helpers';
 
 const GATEWAY_URL = 'https://gateway.test.invalid/lobu';
+// The worker's follow-up chips side call: the turn's transcript plus this
+// instruction as the last user message. Mocks scripted per tool step answer it
+// separately so the chips call never shifts their script.
+const isFollowUpChipsRequest = (body: unknown) =>
+  JSON.stringify(body).includes(FOLLOW_UP_SUGGESTIONS_PROMPT.split('\n')[0]!);
+
 const AGENT_ID = 'turn-agent';
 
 /**
@@ -493,7 +500,9 @@ describe('agent turn producer', () => {
       expect(serverErrors).toEqual([]);
       expect(paths.some(path => path.endsWith('/session-context'))).toBe(false);
       expect(result.error).toBeUndefined();
-      expect(requests).toHaveLength(2);
+      // Two turn calls, then the chips side call on the same provider route.
+      expect(requests).toHaveLength(3);
+      expect(requests.map(isFollowUpChipsRequest)).toEqual([false, false, true]);
       if (protocol === 'codex') {
         expect(requests[1].input.some((item: { type: string }) => item.type === 'function_call_output')).toBe(true);
       } else {
@@ -501,6 +510,10 @@ describe('agent turn producer', () => {
         expect(requests[1].messages.some((message: { role: string }) => message.role === 'tool')).toBe(true);
       }
       expect((await runRow(Number(run.id))).status).toBe('completed');
+      // The terminal row names the agent_turn run that produced it, which is
+      // what orders its chips against newer turns of the conversation.
+      const replies = await threadResponsesGlobal();
+      expect(replies.at(-1)).toMatchObject({ turnRunId: Number(run.id) });
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -592,6 +605,7 @@ describe('agent turn producer', () => {
     const providerRequests: Array<{ tools: Array<{ name: string; input_schema: unknown }>; messages: unknown[] }> = [];
     const workerRequests: Array<{ path: string; body: Record<string, any> }> = [];
     const serverErrors: string[] = [];
+    let chipsRequests = 0;
     // Only the external model is scripted. Worker requests cross real HTTP,
     // then the real Hono routes, lease checks, and Postgres writes.
     const server = createServer(async (req, res) => {
@@ -601,8 +615,10 @@ describe('agent turn producer', () => {
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         const path = new URL(req.url!, 'http://localhost').pathname;
         if (path.startsWith('/lobu/api/proxy/anthropic/')) {
-          const step = providerRequests.length;
-          providerRequests.push(body);
+          const chips = isFollowUpChipsRequest(body);
+          if (chips) chipsRequests++;
+          else providerRequests.push(body);
+          const step = chips ? calls.length : providerRequests.length - 1;
           if (step > calls.length) throw new Error('unexpected extra provider request');
           const call = calls[step];
           res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -683,6 +699,7 @@ describe('agent turn producer', () => {
       expect(serverErrors).toEqual([]);
       expect(result.error).toBeUndefined();
       expect(providerRequests).toHaveLength(6);
+      expect(chipsRequests).toBe(1);
       expect(JSON.stringify(providerRequests[0].messages)).toContain('retained-branch-history');
       expect(JSON.stringify(providerRequests[0].messages)).not.toContain('discarded-branch-history');
       expect(providerRequests[0].tools.find((tool) => tool.name === 'edit')?.input_schema).toMatchObject({
@@ -726,6 +743,7 @@ describe('agent turn producer', () => {
     const first = messageFor(org.id);
     const followUp = { ...first, messageId: 'http-follow-up', messageText: 'durable-http-follow-up' };
     const providerRequests: Array<{ messages: unknown[] }> = [];
+    let chipsRequests = 0;
     const completions: Array<Record<string, any>> = [];
     const errors: string[] = [];
     let origin = '';
@@ -755,6 +773,20 @@ describe('agent turn producer', () => {
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         const path = new URL(req.url!, 'http://localhost').pathname;
+        if (path.startsWith('/lobu/api/proxy/anthropic/') && isFollowUpChipsRequest(body)) {
+          chipsRequests++;
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+          send('message_start', { type: 'message_start', message: { id: `chips_${chipsRequests}`, type: 'message', role: 'assistant',
+            model: 'claude-test', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 5, output_tokens: 0 } } });
+          send('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+          send('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '{"prompts":[]}' } });
+          send('content_block_stop', { type: 'content_block_stop', index: 0 });
+          send('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } });
+          send('message_stop', { type: 'message_stop' });
+          res.end();
+          return;
+        }
         if (path.startsWith('/lobu/api/proxy/anthropic/')) {
           const step = providerRequests.length;
           providerRequests.push(body);
@@ -879,6 +911,10 @@ describe('agent turn producer', () => {
         expect(executions).toBe(2);
       }
       expect(providerRequests).toHaveLength(2);
+      // Chips follow each answered turn that consumed no steered input: the
+      // steered (mid) execution answers both inputs and offers none, and a
+      // cancelled owner offers none.
+      expect(chipsRequests).toBe({ mid: 0, late: 2, cancel: 1 }[timing]);
       expect(JSON.stringify(providerRequests[0].messages)).not.toContain(followUp.messageText);
       expect(JSON.stringify(providerRequests[1].messages).split(followUp.messageText)).toHaveLength(2);
       const replies = await sql`SELECT action_input FROM runs WHERE queue_name = 'thread_response' AND action_input->'processedMessageIds' ? 'http-follow-up'`;
@@ -1581,7 +1617,6 @@ describe('agent turn producer', () => {
       'edit_message',
       'delete_message',
       'ask_user',
-      'suggest_actions',
     ]);
     // Every one of them addresses a channel, so the routing travels with them
     // rather than being inferred inside the isolate.
@@ -1590,6 +1625,25 @@ describe('agent turn producer', () => {
       conversation_id: message.conversationId,
       platform: message.platform,
     });
+    // A person sent this message, so the guest asks for follow-up chips.
+    expect((turn.tools as { follow_ups?: true }).follow_ups).toBe(true);
+  });
+
+  it.each([
+    ['a scheduled job', { platformMetadata: { source: 'scheduled-job' } }],
+    ['an internal thread', { platformMetadata: { source: 'internal' } }],
+    ['an Automation run', { platformMetadata: { source: 'automation-run' } }],
+  ])('offers no follow-up chips to %s, which no person is waiting on', async (_label, overrides) => {
+    const org = await createTestOrganization();
+    await enqueueMessage({ ...messageFor(org.id), ...overrides } as MessagePayload, {
+      agentSettings: settingsStore,
+      catalog: catalogFor(tokenEchoingModule()),
+      gatewayUrl: GATEWAY_URL,
+    });
+
+    const [run] = await agentTurnRuns();
+    const turn = run.action_input.turn as { tools?: { follow_ups?: true } };
+    expect(turn.tools?.follow_ups).toBeUndefined();
   });
 
   it('retains workspace tools when MCP is unavailable', async () => {
@@ -3549,7 +3603,7 @@ describe('agent turn completion', () => {
     const response = await postAsFleet('/api/workers/complete-agent-turn', {
       run_id: runId, worker_id: workerId, status: 'completed',
       text: 'the isolate answer', stop_reason: 'stop',
-      session_jsonl: nativeSession(), tools_used: ['query_sdk', 'suggest_actions'],
+      session_jsonl: nativeSession(), tools_used: ['query_sdk', 'send_message'],
       exit_reason: 'ok',
     });
     expect(response.status).toBe(200);
@@ -3557,7 +3611,7 @@ describe('agent turn completion', () => {
       SELECT action_input FROM runs
       WHERE queue_name = 'thread_response' AND action_input->>'messageId' = 'msg-turn'
     ` as unknown as Array<{ action_input: { toolsUsed?: string[] } }>;
-    expect(reply?.action_input.toolsUsed).toEqual(['query_sdk', 'suggest_actions']);
+    expect(reply?.action_input.toolsUsed).toEqual(['query_sdk', 'send_message']);
   });
 
   it('stamps an EMPTY ledger, which is what trips a missing required tool', async () => {
@@ -3581,8 +3635,7 @@ describe('agent turn completion', () => {
 
   it('leaves toolsUsed ABSENT when a worker reports none, rather than inventing []', async () => {
     // A completion with no ledger must not be recorded as "called nothing":
-    // that would trip `requireTool` on a turn we have no evidence about, and
-    // the follow-up bridge skips on absent precisely to avoid a duplicate card.
+    // that would trip `requireTool` on a turn we have no evidence about.
     const workerId = 'fleet-ledger-none';
     const runId = await claimedTurnRun(workerId);
     await postAsFleet('/api/workers/complete-agent-turn', {

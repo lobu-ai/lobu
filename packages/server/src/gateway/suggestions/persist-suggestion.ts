@@ -3,7 +3,7 @@ import {
   sanitizeSuggestionPrompts,
   type SuggestedPrompt,
 } from "@lobu/core";
-import { getDb, pgTextArray } from "../../db/client.js";
+import { getDb } from "../../db/client.js";
 import type { DbClient } from "../../db/client.js";
 import { insertEvent } from "../../utils/insert-event.js";
 
@@ -28,112 +28,6 @@ function suggestionLockKey(conversationId: string): number {
     hash = Math.imul(hash, 0x01000193);
   }
   return hash | 0;
-}
-
-export interface PersistSuggestionArgs {
-  organizationId: string;
-  conversationId: string;
-  prompts: SuggestedPrompt[];
-  /** The per-run token's `messageId` — stamps which turn owns these chips so
-   * completion can tell "this turn's suggestions" from a stale prior set. */
-  turnMessageId?: string;
-  runId?: number | null;
-}
-
-/**
- * Persist the conversation's CURRENT suggestion set as a superseding
- * `interaction_type='suggestion'` event, replacing any prior current row for
- * the same conversation. Returns the new event id.
- *
- * Why explicit-supersede instead of insertEvent's origin-based path: that path
- * bails when `connectionId` is falsy (insert-event.ts findCurrentEventByOrigin),
- * which is exactly the API/Builder case. We take a per-conversation advisory
- * lock (cluster-global, so replica-safe) and pass the prior row's id as
- * `supersedesEventId` — approvals' `supersedeActionEvent` takes no lock and
- * leans on a unique index, but the "both replicas see no live row → two current
- * rows" race is NOT caught by a unique index, so the lock is mandatory here.
- */
-export async function persistSuggestion(
-  args: PersistSuggestionArgs
-): Promise<number> {
-  const {
-    organizationId,
-    conversationId,
-    prompts,
-    turnMessageId,
-    runId,
-  } = args;
-
-  return getDb().begin(async (tx: DbClient) => {
-    // Serialize concurrent writers for this conversation (duplicate queue
-    // redeliveries, parallel tool calls in one turn) across all replicas.
-    await tx`SELECT pg_advisory_xact_lock(${SUGGESTION_LOCK_NAMESPACE}, ${suggestionLockKey(
-      conversationId
-    )})`;
-
-    // Supersede the latest LIVE row whatever its interaction_status, not just a
-    // 'current' one. `current_event_records` defines live as "nothing supersedes
-    // me" and never looks at status, so filtering on status='current' here left
-    // finalize's 'completed' clear markers with nothing pointing at them: they
-    // stayed live in the view forever and every suggest→clear cycle stranded
-    // another one in an append-only table. Matching the view's own definition of
-    // live keeps the lineage a single chain.
-    const priorRows = (await tx`
-      SELECT id, run_id
-      FROM current_event_records
-      WHERE organization_id = ${organizationId}
-        AND interaction_type = 'suggestion'
-        AND origin_id = ${`suggestion:${conversationId}`}
-      ORDER BY id DESC
-    `) as Array<{ id: number; run_id: number | null }>;
-    const prior = priorRows[0];
-
-    // Ordering guard, mirror of finalize's: the caller decided to publish
-    // OUTSIDE this lock, so a delayed agent-tool POST can arrive after a later
-    // turn already ran. If the live row belongs to a LATER run than ours, it is
-    // the set the user is looking at — never supersede it with stale chips.
-    // Detectable only when both sides carry a run id, which is why finalize
-    // stamps its clear markers with the clearing turn's run id.
-    if (runId != null && prior?.run_id != null && Number(prior.run_id) > runId) {
-      logger.info(
-        `Skipping suggestion persist for ${conversationId}: live row run ${prior.run_id} is newer than ${runId}`
-      );
-      return Number(prior.id);
-    }
-    const supersedesEventId = prior?.id ?? null;
-
-    const event = await insertEvent(
-      {
-        entityIds: [],
-        organizationId,
-        // Stable per-conversation origin — useful for lookups; supersession is
-        // driven explicitly by supersedesEventId, not this origin.
-        originId: `suggestion:${conversationId}`,
-        semanticType: "operation",
-        // Keep the search document empty — UI-state suggestions must not
-        // pollute memory search / feeds / retrieval.
-        title: null,
-        content: null,
-        runId: runId ?? null,
-        interactionType: "suggestion",
-        interactionStatus: "current",
-        interactionInput: { prompts },
-        supersedesEventId,
-        metadata: {
-          conversationId,
-          turnMessageId: turnMessageId ?? null,
-        },
-        authorName: "agent",
-      },
-      { sql: tx }
-    );
-
-    logger.info(
-      `Persisted suggestion event ${event.id} for conversation ${conversationId}` +
-        (supersedesEventId ? ` (superseded ${supersedesEventId})` : "")
-    );
-    return Number(event.id);
-  });
 }
 
 /**
@@ -175,127 +69,122 @@ export async function readCurrentSuggestion(
 }
 
 /**
- * The completing turn's run id from `agent_run_input`, keyed by the message ids
- * the turn processed. A row exists for EVERY turn (including one that emitted no
- * suggestion event of its own) and rows are marked 'completed' rather than
- * deleted, so the id is still readable at terminal time. Returns null when no
- * message ids are supplied or none match (older workers, unstamped turns) — the
- * ordering guard that consumes it treats a null run id as "unknown, don't block".
+ * Set the conversation's suggestion set at a turn's terminal boundary: the
+ * chips that turn's model proposed (already output-scanned), or none. The ONE
+ * writer of suggestion state.
  *
- * Always read on the caller's transaction: `finalizeTurnSuggestions` needs the
- * id inside its advisory lock so the value cannot change under the guard.
- */
-async function readTurnRunId(
-  organizationId: string,
-  conversationId: string,
-  turnMessageIds: string[],
-  sql: DbClient
-): Promise<number | null> {
-  const owned = turnMessageIds.filter(Boolean);
-  if (owned.length === 0) return null;
-  const rows = (await sql`
-    SELECT max(run_id) AS run_id
-    FROM public.agent_run_input
-    WHERE organization_id = ${organizationId}
-      AND conversation_id = ${conversationId}
-      AND message_id = ANY(${pgTextArray(owned)}::text[])
-  `) as Array<{ run_id: number | null }>;
-  return rows[0]?.run_id ?? null;
-}
-
-/**
- * Finalize the conversation's suggestion set at a turn's terminal boundary.
+ * Runs on the gateway pod that renders the API terminal row, after the output
+ * scan. The whole read→decide→write is one advisory-locked transaction keyed
+ * on the conversation, so it is race-free across replicas:
  *
- * Runs on the gateway for EVERY terminal row — before the SSE owner-gate, so it
- * executes regardless of which pod (if any) holds the client's socket and is
- * NOT lost when a disconnected client leaves no SSE owner (the failure mode of
- * clearing inside the SSE-gated renderer). The whole read→decide→supersede is
- * one advisory-locked transaction keyed on the conversation, so it is race-free
- * against a concurrent `persistSuggestion` and against an out-of-order terminal
- * of an earlier turn:
+ *  - A LATER turn of this conversation already completed → write nothing. A
+ *    terminal can be rendered late (it waits out SSE-owner re-queues), and the
+ *    user has since seen a newer reply. "Later" is a newer transcript
+ *    snapshot: the completion route commits one with every completed turn, in
+ *    the same transaction as its terminal row, keyed by the turn's agent_turn
+ *    run. Agent and conversation come from that run's own envelope — the
+ *    values the snapshot writer used — so the probe hits the
+ *    `agent_transcript_snapshot_latest` index with the keys it was written by.
+ *  - `prompts` non-empty → they become the current set, superseding the live
+ *    row. A re-delivery of the same terminal finds its own current set and
+ *    writes nothing.
+ *  - `prompts` empty → a visible prior set is cleared, so stale chips never
+ *    trail a reply that offered none; with nothing visible, nothing is
+ *    written.
  *
- *  - The current row is OWNED by this turn (its `turnMessageId` is one this turn
- *    processed) → leave it; the renderer embeds it on `complete`.
- *  - The current row belongs to a DIFFERENT turn → superseded (this turn emitted
- *    none), but ONLY if that turn ran EARLIER. "Different turn" does not imply
- *    "earlier turn": per-conversation serialization orders turns as they RUN,
- *    not as their terminal rows are PROCESSED, so a terminal delayed by a queue
- *    backlog or a retry can arrive after a whole subsequent turn has published.
- *    Clearing then erases chips the user is looking at, in the live payload and
- *    in history replay alike. Ordering comes from `agent_run_input.run_id`,
- *    which exists for EVERY turn keyed by the message ids this function already
- *    receives — including a turn that emitted no suggestions and so has no
- *    suggestion event of its own to compare against.
- *  - No current row → nothing to do.
- *
- * Idempotent: re-running (e.g. the row re-queued to the SSE owner after a
- * non-owning pod already finalized) either re-observes an owned/empty row and
- * no-ops, or the supersede is a no-op because the row is already cleared.
- *
+ * Rows are appended, never updated: each write supersedes the live row, so the
+ * conversation's history stays a single chain in `current_event_records`.
+ * Supersession is explicit rather than insertEvent's origin-based path, which
+ * bails when `connectionId` is falsy — exactly the API/Builder case — and the
+ * lock is mandatory: "both replicas see no live row → two current rows" is not
+ * caught by a unique index.
  */
 export async function finalizeTurnSuggestions(args: {
   organizationId: string;
   conversationId: string;
   /** messageId + processedMessageIds of the completing turn. */
   turnMessageIds: string[];
+  /** The agent_turn `runs.id` that produced this terminal. */
+  turnRunId: number;
+  prompts: SuggestedPrompt[];
 }): Promise<void> {
-  const { organizationId, conversationId, turnMessageIds } = args;
+  const { organizationId, conversationId, turnMessageIds, turnRunId } = args;
   const owned = new Set(turnMessageIds.filter(Boolean));
+  const prompts = sanitizeSuggestionPrompts(args.prompts);
   return getDb().begin(async (tx: DbClient) => {
     await tx`SELECT pg_advisory_xact_lock(${SUGGESTION_LOCK_NAMESPACE}, ${suggestionLockKey(
       conversationId
     )})`;
 
-    // This turn's run id, from `agent_run_input` — it has a row for EVERY turn
-    // keyed by the message ids this finalizer already holds, including a turn
-    // that emitted no suggestions (which leaves no suggestion event of its own
-    // to read a run id from). Read inside the lock on `tx`. Used two ways: the
-    // out-of-order-terminal guard below, and the run stamp on the clear marker.
-    const turnRunId = await readTurnRunId(
-      organizationId,
-      conversationId,
-      [...owned],
-      tx
-    );
-    // Unlike persistSuggestion, this DOES filter on status='current': it asks
-    // "is there a visible set to clear?", and only a 'current' row is visible to
-    // the renderer. Widening this to any live row would make each clear observe
-    // the previous clear marker and supersede it, appending a fresh 'completed'
-    // row on every terminal for the rest of the conversation's life.
+    const newer = await tx`
+      SELECT 1
+      FROM public.runs r
+      JOIN public.agent_transcript_snapshot s
+        ON s.organization_id = r.organization_id
+       AND s.agent_id = r.action_input->'turn'->>'agent_id'
+       AND s.conversation_id = r.action_input->'turn'->>'conversation_id'
+       AND s.run_id > r.id
+      WHERE r.id = ${turnRunId}
+        AND r.organization_id = ${organizationId}
+      LIMIT 1
+    `;
+    if (newer.length > 0) return;
+
+    // The latest LIVE row whatever its status — `current_event_records`
+    // defines live as "nothing supersedes me" — so every write extends the
+    // one chain rather than stranding an earlier clear marker as live forever.
     const rows = (await tx`
-      SELECT id, run_id, metadata
+      SELECT id, interaction_status, metadata
       FROM current_event_records
       WHERE organization_id = ${organizationId}
         AND interaction_type = 'suggestion'
-        AND interaction_status = 'current'
         AND origin_id = ${`suggestion:${conversationId}`}
       ORDER BY id DESC
       LIMIT 1
     `) as Array<{
       id: number;
-      run_id: number | null;
+      interaction_status: string | null;
       metadata: Record<string, unknown> | null;
     }>;
-    const row = rows[0];
-    if (!row) return; // nothing current
-    const turnMessageId =
-      (row.metadata?.turnMessageId as string | null) ?? null;
-    // This turn (re)issued the current set → keep it for the renderer to embed.
-    if (turnMessageId != null && owned.has(turnMessageId)) {
+    const live = rows[0];
+    const visible = live?.interaction_status === "current" ? live : undefined;
+    const visibleTurn =
+      (visible?.metadata?.turnMessageId as string | null | undefined) ?? null;
+
+    if (prompts.length > 0) {
+      if (visibleTurn != null && owned.has(visibleTurn)) return;
+      await insertEvent(
+        {
+          entityIds: [],
+          organizationId,
+          // Stable per-conversation origin — useful for lookups; supersession
+          // is driven explicitly by supersedesEventId, not this origin.
+          originId: `suggestion:${conversationId}`,
+          semanticType: "operation",
+          // Keep the search document empty — UI-state suggestions must not
+          // pollute memory search / feeds / retrieval.
+          title: null,
+          content: null,
+          runId: turnRunId,
+          interactionType: "suggestion",
+          interactionStatus: "current",
+          interactionInput: { prompts },
+          supersedesEventId: live?.id ?? null,
+          metadata: {
+            conversationId,
+            turnMessageId: turnMessageIds.find(Boolean) ?? null,
+          },
+          authorName: "agent",
+        },
+        { sql: tx }
+      );
+      logger.info(
+        `Set ${prompts.length} suggestion(s) for conversation ${conversationId}`
+      );
       return;
     }
 
-    // Ordering guard. "Belongs to a different turn" does NOT imply "belongs to
-    // an EARLIER turn": a terminal row whose processing lags a whole subsequent
-    // turn (queue backlog or retry) arrives after that later turn published.
-    // Clearing then erases chips the user is looking at, in the live payload and
-    // in history replay alike. Only clear a set published by an EARLIER run — a
-    // LATER run's set is the one the user is looking at.
-    if (turnRunId != null && row.run_id != null && row.run_id > turnRunId) {
-      return;
-    }
-
-    // A prior turn's set survived a turn that emitted none — supersede it.
+    if (!visible) return;
     await insertEvent(
       {
         entityIds: [],
@@ -309,10 +198,7 @@ export async function finalizeTurnSuggestions(args: {
         interactionType: "suggestion",
         interactionStatus: "completed",
         interactionInput: { prompts: [] },
-        supersedesEventId: row.id,
-        // Stamped with the CLEARING turn's run id so persistSuggestion's
-        // ordering guard can see "a later run already cleared this" — without
-        // it a delayed persist could resurrect chips over the clear.
+        supersedesEventId: visible.id,
         runId: turnRunId,
         metadata: { conversationId, cleared: true },
         authorName: "system",

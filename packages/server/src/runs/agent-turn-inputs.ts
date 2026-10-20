@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { isExplicitCancelMessage, isSteerableHumanMessage, verifyWorkerToken, type AgentErrorContext, type MessagePayload } from '@lobu/core';
+import { isExplicitCancelMessage, isSteerableHumanMessage, verifyWorkerToken, type AgentErrorContext, type MessagePayload, type SuggestedPrompt } from '@lobu/core';
 import { AGENT_TURN_INPUT_MAX, type AgentTurnPollPayload, type HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
 import { CURRENT_SESSION_VERSION } from '@mariozechner/pi-coding-agent';
 import { getDb, type DbClient } from '../db/client';
@@ -229,6 +229,8 @@ export async function extendHeartbeatedTurnMarker(
 export async function insertAgentTurnResponse(sql: DbClient, run: NativeTurnRun, result: {
   finalText?: string; error?: string; errorCode?: string; errorContext?: AgentErrorContext;
   repliedInBand?: boolean; processedMessageIds?: string[]; toolsUsed?: string[];
+  /** The owner answer's follow-up chips, already sanitized. */
+  suggestions?: SuggestedPrompt[];
   /**
    * The input's first tool error, quoted exactly as the tool returned it.
    * Stored alongside the reply (not merged into it) so history keeps the
@@ -247,7 +249,7 @@ export async function insertAgentTurnResponse(sql: DbClient, run: NativeTurnRun,
     messageId: reply.message_id, channelId: reply.channel_id, conversationId,
     userId: reply.user_id, teamId: reply.team_id ?? 'api', platform: reply.platform,
     organizationId: run.organization_id, platformMetadata: reply.platform_metadata,
-    processedMessageIds: [reply.message_id], ...result, timestamp: Date.now(),
+    processedMessageIds: [reply.message_id], ...result, turnRunId: Number(run.id), timestamp: Date.now(),
   }, run.organization_id);
   // Retire the turn-liveness marker(s) in the SAME transaction as the reply.
   // Both callers set the run terminal before reaching here, so the turn is

@@ -192,10 +192,11 @@ test("interaction cards retain request correlation independently of their queue 
   await svc.postLinkButton(...route, "https://example.test", "Sign in", "oauth", undefined, undefined, "synthetic-request");
   await svc.postSuggestion("synthetic-org", ...route, [{ title: "Next", message: "Continue" }], undefined, "synthetic-request");
   const approval = await svc.postDurableApprovalCard(...route, 123, "create", {}, null, undefined, null, null, "agent", "synthetic-request");
-  expect(ctx.sends).toHaveLength(4);
+  // API chips ride the terminal `complete` payload, so a suggestion posts no card here.
+  expect(ctx.sends).toHaveLength(3);
   for (const { payload } of ctx.sends) {
     expect(payload.messageId).not.toBe("synthetic-request");
     expect(payload.customEvent.data.turnMessageId).toBe("synthetic-request");
   }
-  expect(ctx.sends[3]!.payload.customEvent.data.requestId).toBe(approval.id);
+  expect(ctx.sends[2]!.payload.customEvent.data.requestId).toBe(approval.id);
 });

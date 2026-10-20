@@ -46,7 +46,7 @@ import { getModel, type Model } from "@mariozechner/pi-ai";
 import { SettingsManager } from "@mariozechner/pi-coding-agent";
 import { getDb } from "../../db/client.js";
 import { insertAgentTurnResponse, lockAgentTurnConversation, lockAgentTurnRun, releaseNextAgentTurn } from "../../runs/agent-turn-inputs.js";
-import { resolveAutomationRunContext } from "../automation-run-session.js";
+import { isHeadlessSource, resolveAutomationRunContext } from "../automation-run-session.js";
 import { parseAutomationRunConversationId } from "../permissions/automation-run-intent.js";
 import type { AgentRuntimeSelection } from "../../lobu/stores/sandbox-store.js";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
@@ -184,7 +184,6 @@ const GATEWAY_TOOLS = [
   "edit_message",
   "delete_message",
   "ask_user",
-  "suggest_actions",
 ] as const;
 
 /**
@@ -197,7 +196,6 @@ const CONFINED_GATEWAY_TOOLS: ReadonlySet<string> = new Set([
   "edit_message",
   "delete_message",
   "ask_user",
-  "suggest_actions",
 ]);
 
 /**
@@ -1106,6 +1104,12 @@ export async function enqueueAgentTurn(
         conversation_id: data.conversationId,
         platform: data.platform,
       },
+      // Follow-up chips only where a person is waiting on this reply: never an
+      // Automation run or another server-dispatched (headless) turn.
+      ...(!parseAutomationRunConversationId(data.conversationId) &&
+      !isHeadlessSource(data.platformMetadata?.source)
+        ? { follow_ups: true as const }
+        : {}),
     };
 
     const settings = await agentSettings.getSettings(data.agentId, {

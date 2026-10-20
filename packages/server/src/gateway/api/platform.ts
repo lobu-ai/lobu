@@ -83,19 +83,6 @@ export class ApiPlatform implements PlatformAdapter {
       });
     });
 
-    // Suggested follow-up chips use the same owner-routed queue as every other
-    // API card. The consumer re-reads the durable current set immediately
-    // before broadcasting, so a delayed card cannot replay stale prompts over a
-    // newer turn's terminal state.
-    interactionService.on("suggestion:created", (event: any) => {
-      if (event.platform !== "api") return;
-      // No prompts here on purpose — the consumer fills them from durable state
-      // at broadcast time, so this row carries only routing.
-      this.enqueueInteractionCard(queue, event, "suggestion", {
-        type: "suggestion",
-      });
-    });
-
     // Durable approval card (runs/events-backed — an agent's manage_agents
     // write gate). The owner-gated "tool-approval" thread_response payload
     // carries run_id + action + the proposed-vs-current diff so the SPA

@@ -1,4 +1,5 @@
 import type { SecretRef } from "./secret-refs";
+import type { SuggestedPrompt } from "./suggestions";
 
 /**
  * Unified authentication profile for any model provider.
@@ -280,6 +281,17 @@ export interface ThreadResponsePayload {
    * duplicate of the reply and must always surface.
    */
   repliedInBand?: boolean;
+  /**
+   * Follow-up chips for this reply, proposed by the model that wrote it. Set
+   * only on the COMPLETION row; delivered with the reply once output
+   * guardrails pass.
+   */
+  suggestions?: SuggestedPrompt[];
+  /**
+   * The agent_turn `runs.id` that produced this terminal row. Orders a late
+   * terminal against newer turns of the same conversation.
+   */
+  turnRunId?: number;
   /**
    * Raw error message. When provider context is available, the gateway labels
    * the source and unwraps the common JSON message envelope without rewording

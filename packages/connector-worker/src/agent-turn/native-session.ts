@@ -1,5 +1,5 @@
-import { Agent, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agent-core';
-import { registerApiProvider, streamSimple, type Api, type Model } from '@mariozechner/pi-ai';
+import { Agent, type AgentMessage, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agent-core';
+import { completeSimple, registerApiProvider, streamSimple, type Api, type Model } from '@mariozechner/pi-ai';
 import { streamAnthropic, streamSimpleAnthropic } from '@mariozechner/pi-ai/anthropic';
 import { streamOpenAICompletions, streamSimpleOpenAICompletions } from '@mariozechner/pi-ai/openai-completions';
 import { streamOpenAICodexResponses, streamSimpleOpenAICodexResponses } from '@mariozechner/pi-ai/openai-codex-responses';
@@ -8,6 +8,18 @@ import { AgentSession, SessionManager, SettingsManager, convertToLlm, CURRENT_SE
 import { createLobuResourceLoader, type TransientTurnContextLookup } from '@lobu/plugin-toolkit/pi-resources';
 import { SESSION_PATH, withSessionSnapshot } from './pi-session-fs.js';
 import type { AgentTurnInput } from './types.js';
+
+/**
+ * Keep native custom/summary conversion. Pi stores an empty text block for
+ * image-only prompts; omit it only on the wire, where OpenAI rejects it.
+ */
+function toLlm(messages: AgentMessage[]) {
+  return convertToLlm(messages).map((message) =>
+    message.role === 'user' && Array.isArray(message.content)
+      ? { ...message, content: message.content.filter((part) => part.type !== 'text' || part.text.trim().length > 0) }
+      : message
+  );
+}
 
 /** Pi owns session state and lifecycle; Lobu supplies only admitted host capabilities. */
 export function createNativeSession(
@@ -120,13 +132,7 @@ export function createNativeSession(
   let session: AgentSession;
   const agent = new Agent({
     initialState: { model, messages: context.messages, thinkingLevel },
-    // Keep native custom/summary conversion. Pi stores an empty text block for
-    // image-only prompts; omit it only on the wire, where OpenAI rejects it.
-    convertToLlm: (messages) => convertToLlm(messages).map((message) =>
-      message.role === 'user' && Array.isArray(message.content)
-        ? { ...message, content: message.content.filter((part) => part.type !== 'text' || part.text.trim().length > 0) }
-        : message
-    ),
+    convertToLlm: toLlm,
     transformContext: (messages) => session.extensionRunner.emitContext(messages),
     streamFn: (selected, context, options) => streamSimple(selected, context, {
       ...settings.getProviderRetrySettings(), ...options, apiKey: input.provider.apiKey,
@@ -229,4 +235,30 @@ export async function promptNativeSession(
 export function nativeSessionJsonl(session: AgentSession): string {
   return [session.sessionManager.getHeader(), ...session.sessionManager.getEntries()]
     .map((entry) => JSON.stringify(entry)).join('\n') + '\n';
+}
+
+/**
+ * One side request on the session's own model, system prompt, tools and
+ * history, with `text` as a final user message. Nothing is appended to the
+ * session, so the question and its answer never reach the transcript; sending
+ * the same prefix the turn just sent is what lets the provider's prompt cache
+ * cover it. The side request does not inherit the session's thinking level.
+ * Resolves with the reply's text, '' when it has none.
+ */
+export async function askAside(
+  session: AgentSession,
+  apiKey: string,
+  text: string,
+  options: { maxTokens: number; signal: AbortSignal }
+): Promise<string> {
+  const { model, systemPrompt, tools, messages } = session.agent.state;
+  // Apply transient context before appending the ask: the extension attaches
+  // it to the latest real user message, preserving the answer request's prefix.
+  const contextMessages = await session.extensionRunner.emitContext(messages);
+  const reply = await completeSimple(model, {
+    systemPrompt,
+    tools,
+    messages: toLlm([...contextMessages, { role: 'user', content: [{ type: 'text', text }], timestamp: Date.now() }]),
+  }, { apiKey, maxTokens: options.maxTokens, signal: options.signal });
+  return reply.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('');
 }

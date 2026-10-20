@@ -11,7 +11,7 @@
  *   - toolsUsed **[]** counts as present → miss trips
  *
  * Config: `guardrailsInline` with `kind: "require-tool"` and a manual
- * `tools` array (e.g. `["suggest_actions"]`). No model call.
+ * `tools` array (e.g. `["send_message"]`). No model call.
  *
  * Server-side only: materialised by the aggregator per agent.
  */

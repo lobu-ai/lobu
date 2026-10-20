@@ -1,6 +1,6 @@
 /**
- * The turn's gateway tools: `ask_user`, `send_message`, `suggest_actions` and
- * the rest of `@lobu/plugin-conversations`.
+ * The turn's gateway tools: `ask_user`, `send_message` and the rest of
+ * `@lobu/plugin-conversations`.
  *
  * GUEST code, bundled with the agent entry, so the same portability rules as
  * `workspace.ts` apply: no `node:` import, no host module, no root

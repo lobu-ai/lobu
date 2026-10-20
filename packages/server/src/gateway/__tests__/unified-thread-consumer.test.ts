@@ -125,10 +125,7 @@ describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
 });
 
 describe("UnifiedThreadResponseConsumer interaction card owner-routing", () => {
-  function makeInteractionConsumer(
-    hasActiveConnection: boolean,
-    readSuggestion = mock(async () => null)
-  ) {
+  function makeInteractionConsumer(hasActiveConnection: boolean) {
     const queue = {
       start: mock(async () => undefined),
       stop: mock(async () => undefined),
@@ -151,10 +148,9 @@ describe("UnifiedThreadResponseConsumer interaction card owner-routing", () => {
     const consumer = new UnifiedThreadResponseConsumer(
       queue as any,
       platformRegistry as any,
-      sseManager as any,
-      readSuggestion
+      sseManager as any
     ) as any;
-    return { consumer, broadcast, readSuggestion, sseManager };
+    return { consumer, broadcast, sseManager };
   }
 
   const interactionPayload = {
@@ -228,47 +224,6 @@ describe("UnifiedThreadResponseConsumer interaction card owner-routing", () => {
       messageId: "m-int-1",
       timestamp: 1234,
     });
-  });
-
-  test("refreshes a delayed suggestion card from the durable current set", async () => {
-    const readSuggestion = mock(async () => ({
-      id: 22,
-      prompts: [{ title: "New", message: "Use the newer turn" }],
-      turnMessageId: "m-new",
-    }));
-    const { consumer, broadcast } = makeInteractionConsumer(
-      true,
-      readSuggestion
-    );
-
-    await consumer.handleThreadResponse({
-      id: "job-suggestion",
-      data: {
-        ...interactionPayload,
-        organizationId: "org-1",
-        customEvent: {
-          name: "suggestion",
-          data: {
-            type: "suggestion",
-            suggestionId: "stale-card",
-            prompts: [{ title: "Old", message: "Use the older turn" }],
-          },
-          requireSseOwner: true,
-        },
-      },
-    });
-
-    expect(readSuggestion).toHaveBeenCalledWith("org-1", "api:conv-1");
-    const suggestionBroadcast = broadcast.mock.calls.find(
-      (call: any[]) => call[1] === "suggestion"
-    );
-    expect(suggestionBroadcast?.[2]).toMatchObject({
-      prompts: [{ title: "New", message: "Use the newer turn" }],
-      turnMessageId: "m-new",
-    });
-    // The card carries prompts only, exactly like the terminal `complete`
-    // embed and history replay. A stale enqueued id must not ride along.
-    expect(suggestionBroadcast?.[2]).not.toHaveProperty("suggestionId");
   });
 });
 
@@ -520,6 +475,73 @@ describe("UnifiedThreadResponseConsumer dead-letters instead of silent drops", (
 });
 
 describe("UnifiedThreadResponseConsumer API guardrail bookkeeping", () => {
+  test("includes chip text in the API output scan", async () => {
+    const { consumer } = createConsumer();
+    const scanner = consumer.outputGuardrail;
+    scanner.registry = {};
+    scanner.settingsStore = {};
+    scanner.scanFinal = mock(async () => null);
+    consumer.finalizeSuggestions = mock(async () => undefined);
+    await consumer.handleThreadResponse({
+      id: "job-chips-scan",
+      data: {
+        ...basePayload,
+        platform: "api",
+        teamId: "api",
+        finalText: "Safe reply",
+        suggestions: [{ title: "Private label", message: "Private message" }],
+        platformMetadata: { agentId: "agent-1", organizationId: "org-1" },
+      },
+    });
+    expect(scanner.scanFinal.mock.calls[0][0]).toContain("Private label");
+    expect(scanner.scanFinal.mock.calls[0][0]).toContain("Private message");
+  });
+
+  test("a pod without the SSE owner persists no chips before re-queueing", async () => {
+    const { consumer } = createConsumer();
+    consumer.sseManager.hasActiveConnection = () => false;
+    consumer.finalizeSuggestions = mock(async () => undefined);
+    await expect(consumer.handleThreadResponse({
+      id: "job-chips-owner",
+      data: {
+        ...basePayload,
+        platform: "api",
+        teamId: "api",
+        finalText: "Reply",
+        suggestions: [{ title: "Next", message: "Show it" }],
+        platformMetadata: { agentId: "agent-1", organizationId: "org-1" },
+      },
+    })).rejects.toThrow(/not owned by this gateway instance/);
+    expect(consumer.finalizeSuggestions).not.toHaveBeenCalled();
+  });
+
+  test("persists chips only after the scan, and none when it trips", async () => {
+    const { consumer } = createConsumer();
+    const order: string[] = [];
+    const scanner = consumer.outputGuardrail;
+    scanner.registry = {};
+    scanner.settingsStore = {};
+    scanner.scanFinal = mock(async () => {
+      order.push("scan");
+      return { guardrail: "secret-scan", reason: "secret" };
+    });
+    consumer.finalizeSuggestions = mock(async (_data: unknown, prompts: unknown[]) => {
+      order.push(`persist:${prompts.length}`);
+    });
+    await consumer.handleThreadResponse({
+      id: "job-chips-trip",
+      data: {
+        ...basePayload,
+        platform: "api",
+        teamId: "api",
+        finalText: "Reply",
+        suggestions: [{ title: "Use key", message: "Use AKIAIOSFODNN7EXAMPLE" }],
+        platformMetadata: { agentId: "agent-1", organizationId: "org-1" },
+      },
+    });
+    expect(order).toEqual(["scan", "persist:0"]);
+  });
+
   test("preserves the raw provider error while redacting user-visible output", async () => {
     const handleError = mock(async () => undefined);
     const { consumer } = createConsumer({

@@ -21,12 +21,13 @@
 
 import type { AgentTool, AgentMessage } from '@mariozechner/pi-agent-core';
 import { mcpToolResult, toolImageBudget, type ToolImageBudget, type ToolResult } from '@lobu/plugin-toolkit';
+import { FOLLOW_UP_SUGGESTIONS_PROMPT, parseFollowUpSuggestions, type SuggestedPrompt } from '@lobu/core/agent-tooling';
 import { createGatewayTools } from './gateway-tools.js';
 import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
 import { estimatePromptTokenCost, memoryFlushDue, MEMORY_FLUSH_STATE_CUSTOM_TYPE } from '@lobu/core/memory-flush';
 import { isRetrievalTool, summarizeToolTrace } from '@lobu/core/tool-trace-summary';
-import { createNativeSession, nativeSessionJsonl, promptNativeSession } from './native-session.js';
+import { askAside, createNativeSession, nativeSessionJsonl, promptNativeSession } from './native-session.js';
 import { MAX_TOOL_CALLS_PER_TURN } from './types.js';
 import type { AgentTurnEvent, AgentTurnInput, AgentTurnOutput, AgentTurnTool, AgentTurnSteer, RuntimeExecRequest, RuntimeExecResult } from './types.js';
 import {
@@ -36,6 +37,15 @@ import {
 
 /** Third-party MCP server on the other side of the gateway: generous, never forever. */
 const TOOL_CALL_TIMEOUT_MS = 120_000;
+
+/**
+ * The follow-up chips request. It runs after the answer has streamed and
+ * before the turn completes, so this bounds how much later the reply is
+ * marked done; a slower model simply yields no chips.
+ */
+const FOLLOW_UPS_TIMEOUT_MS = 10_000;
+/** A chips reply is a few short JSON objects. */
+const FOLLOW_UPS_MAX_TOKENS = 400;
 
 /**
  * What of a tool's output the host sees in the event stream.
@@ -520,7 +530,7 @@ export async function runAgentTurn(
   // another request every time and an answer could still follow `ask_user`.
   //
   // `block` keeps its job — a sibling scheduled in the same batch must not
-  // RUN, since `suggest_actions`/`send_message` post to the user — and
+  // RUN, since `send_message` posts to the user — and
   // `agent.abort()` is what ends generation. Pi's own `terminate` hint cannot
   // do it here: `shouldTerminateToolBatch` needs every result in the batch to
   // set it, and a blocked call is short-circuited as `kind:'immediate'`, which
@@ -803,6 +813,28 @@ export async function runAgentTurn(
 
     if (ended) throw new Error(ended);
 
+    // Follow-up chips, asked of the model that just answered. They ride the
+    // result, so the gateway delivers them with the reply: embedded on web's
+    // `complete`, posted after the reply on chat, and dropped if a guardrail
+    // blocks it. Skipped when the turn already handed control back
+    // (`ask_user`), posted its answer in-band, or answered steered follow-ups
+    // as well — each of those inputs completes on its own.
+    let suggestions: SuggestedPrompt[] = [];
+    if (input.tools?.followUps && !askedUser && !repliedInBand && steeredMessages.size === 0 && finalText.trim()) {
+      try {
+        const reply = await askAside(session, credential, FOLLOW_UP_SUGGESTIONS_PROMPT, {
+          maxTokens: FOLLOW_UPS_MAX_TOKENS,
+          signal: AbortSignal.timeout(FOLLOW_UPS_TIMEOUT_MS),
+        });
+        suggestions = parseFollowUpSuggestions(reply);
+      } catch (error) {
+        // Chips are optional: a slow or failed request leaves the answer as is.
+        console.warn('follow-up suggestions failed; the turn completes without them', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
     return {
       // The answer is the last assistant message WITH TEXT after each user
       // message, not the accumulated stream: a model that narrates before a
@@ -850,6 +882,7 @@ export async function runAgentTurn(
         }];
       }),
       ...(repliedInBand ? { repliedInBand: true } : {}),
+      ...(suggestions.length > 0 ? { suggestions } : {}),
     };
   } finally {
     session.dispose();

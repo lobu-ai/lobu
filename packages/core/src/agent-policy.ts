@@ -69,10 +69,6 @@ export const CUSTOM_TOOL_METADATA: Record<string, CustomToolMetadata> = {
     description:
       "Delete a message the bot itself sent, addressed by a conversation or thread handle + message id. Only the bot's own messages can be deleted.",
   },
-  suggest_actions: {
-    description:
-      'Offer optional follow-up actions as tappable chips when the user asks for suggested next steps, or when a concrete choice would help them proceed. Default to a plain text reply: skip routine answers, acknowledgements, corrections, status updates, and requests you already completed, and respect an explicit ask for no suggestions or a closed topic. Do not invent extra work, repeat actions already offered, or defer work you should do now. One useful action is enough and 4 is the ceiling — never pad the list. Call at most once per turn. Each `message` is sent verbatim as the user\'s next turn, so write it in the user\'s voice ("Show me the diff", not "I can show you the diff"). This posts immediately, independently of the final reply, so each suggestion must make sense on its own. Non-blocking; finish your reply normally.',
-  },
 };
 
 /** Every always-on rule, narrowed per turn by `renderAlwaysOnToolPolicyRulesFor`. */

@@ -40,6 +40,30 @@ import { AUTOMATION_RUN_TYPES_PG } from "../runs/run-types.js";
 
 export const AUTOMATION_RUN_SOURCE = "automation-run";
 
+/**
+ * `platformMetadata.source` values for turns dispatched server-side with no
+ * human waiting on the reply and no SSE client on any pod. They bypass the API
+ * owner-gate in routeToRenderer and are never offered follow-up chips.
+ * Producers: routes/public/agent.ts (automation-run/direct-api from session
+ * intent), services/agent-threads.ts (internal default), connectors/
+ * scheduled/jobs.ts.
+ *
+ * KEEP IN LOCKSTEP with `AUTONOMOUS_SOURCES` in authz/entity-policy.ts: every
+ * headless (no-human) source here must also be treated as autonomous by the
+ * write-gate resolver, or a server-dispatched turn would skip an agent's
+ * autonomous-only restrictions.
+ */
+const HEADLESS_SOURCES: ReadonlySet<string> = new Set([
+	AUTOMATION_RUN_SOURCE,
+	"connector-repair",
+	"scheduled-job",
+	"internal",
+]);
+
+export function isHeadlessSource(source: unknown): boolean {
+	return typeof source === "string" && HEADLESS_SOURCES.has(source);
+}
+
 export type AutomationRunSkillResolver = (args: {
 	conversationId: string;
 	organizationId: string | undefined;

@@ -48,11 +48,11 @@ describe("validateGuardrailsInline", () => {
     expect(
       validateGuardrailsInline([
         {
-          name: "require-suggestions",
+          name: "require-send",
           enabled: true,
           stage: "output",
           kind: "require-tool",
-          tools: ["suggest_actions"],
+          tools: ["send_message"],
         },
       ])
     ).toBeNull();
@@ -62,11 +62,11 @@ describe("validateGuardrailsInline", () => {
     expect(
       validateGuardrailsInline([
         {
-          name: "require-suggestions",
+          name: "require-send",
           enabled: true,
           stage: "input",
           kind: "require-tool",
-          tools: ["suggest_actions"],
+          tools: ["send_message"],
         },
       ])
     ).toMatch(/only supports stage "output"/);
@@ -76,7 +76,7 @@ describe("validateGuardrailsInline", () => {
     expect(
       validateGuardrailsInline([
         {
-          name: "require-suggestions",
+          name: "require-send",
           enabled: true,
           stage: "output",
           kind: "require-tool",
@@ -178,11 +178,11 @@ describe("validateGuardrailsInline", () => {
     expect(
       validateGuardrailsInline([
         {
-          name: "must-suggest",
+          name: "must-send",
           enabled: true,
           stage: "output",
           kind: "require-tool",
-          tools: ["suggest_actions"],
+          tools: ["send_message"],
           model: 42,
         },
       ])

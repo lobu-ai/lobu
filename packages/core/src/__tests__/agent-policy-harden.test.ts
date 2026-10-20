@@ -16,7 +16,6 @@ import {
   renderBaselineAgentPolicy,
   TOOL_RULES,
 } from "../agent-policy";
-import { SUGGESTION_LIMITS } from "../suggestions";
 
 // ── renderBaselineAgentPolicy ─────────────────────────────────────────────────
 
@@ -152,29 +151,6 @@ describe("getCustomToolDescription", () => {
   test("returns the registered description for ask_user", () => {
     const desc = getCustomToolDescription("ask_user");
     expect(desc.length).toBeGreaterThan(0);
-  });
-
-  test("describes when and how to use suggest_actions", () => {
-    const desc = getCustomToolDescription("suggest_actions");
-    expect(desc).toContain("follow-up");
-    expect(desc).toContain("user's next turn");
-  });
-
-  test("makes suggest_actions optional and states its real delivery contract", () => {
-    const desc = getCustomToolDescription("suggest_actions");
-    expect(desc).toMatch(/optional/i);
-    expect(desc).toMatch(/skip/i);
-    expect(desc).toMatch(/at most once/i);
-    // The card is posted at tool-call time, not attached to the terminal reply
-    // (see the /internal/suggestions/create route), so the copy must not claim
-    // the chips hang under the reply or that a reply without them is broken.
-    expect(desc).toMatch(/immediately/i);
-    expect(desc).not.toMatch(
-      /always call|every reply|dead end|under your reply/i
-    );
-    // The ceiling in the copy is the one sanitizeSuggestionPrompts enforces —
-    // above it, extra prompts are silently dropped.
-    expect(desc).toContain(`${SUGGESTION_LIMITS.maxPrompts} is the ceiling`);
   });
 
   test("registers the event presentation and scoped follow-up tools", () => {
