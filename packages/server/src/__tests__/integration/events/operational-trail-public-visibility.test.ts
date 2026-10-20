@@ -12,6 +12,7 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
+import { createNotificationForUsers, deleteNotification } from '../../../notifications/service';
 import { buildPublicPageModel } from '../../../public-pages';
 import { getContent } from '../../../tools/get_content';
 import type { ToolContext } from '../../../tools/registry';
@@ -38,6 +39,7 @@ describe('operational trail > public-read exclusion', () => {
   let outsider: Awaited<ReturnType<typeof createTestUser>>;
   let entity: Awaited<ReturnType<typeof createTestEntity>>;
   let knowledgeId: number;
+  let deletedNotificationId: number;
   let operationCardId: number;
   let approvalNoticeId: number;
   let unboundOperationCardId: number;
@@ -165,7 +167,19 @@ describe('operational trail > public-read exclusion', () => {
       })
     ).id;
 
-    trailIds = [operationCardId, approvalNoticeId, unboundOperationCardId];
+    // A notification whose only recipient deleted it: the inbox row is gone,
+    // the event stays (append-only), and it must stay private.
+    const notification = await createNotificationForUsers([alice.id], {
+      organizationId: org.id,
+      type: 'generic',
+      title: 'Warehouse lease renewal reminder',
+      body: 'warehouse lease renewal is due',
+      entityIds: [entity.id],
+    });
+    deletedNotificationId = notification.eventId!;
+    expect(await deleteNotification(org.id, alice.id, deletedNotificationId)).toBe(true);
+
+    trailIds = [operationCardId, approvalNoticeId, unboundOperationCardId, deletedNotificationId];
 
     const sql = getTestDb();
     await sql`
@@ -189,7 +203,7 @@ describe('operational trail > public-read exclusion', () => {
 
     const boot = await bootstrap(memberCtx());
     expect(boot.ids.has(operationCardId)).toBe(true);
-    expect(boot.total).toBe(4);
+    expect(boot.total).toBe(5);
   });
 
   it.each(publicReaders)('%s org-home bootstrap lists and counts knowledge only', async (_, ctx) => {
