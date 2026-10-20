@@ -5,7 +5,7 @@
  * user are not metered.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type AuthContext, checkToolAccess } from '../../../tools/execute';
 import {
   getRateLimiter,
@@ -74,7 +74,13 @@ describe('public read rate limit', () => {
   });
 
   afterAll(() => resetRateLimiterForTests());
-  beforeEach(() => resetRateLimiterForTests());
+  // The limiter's window is clock-aligned; a frozen clock keeps one test from
+  // straddling a minute boundary, where the window would reset mid-test.
+  beforeEach(() => {
+    resetRateLimiterForTests();
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+  });
+  afterEach(() => vi.useRealTimers());
 
   it('refuses a signed-in non-member over MCP once the account is over 300/min', async () => {
     await expect(search()).resolves.toBeDefined();
