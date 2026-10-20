@@ -1895,12 +1895,22 @@ app.get("*", async (c) => {
 		!hasSessionCookie &&
 		isSpaRoute
 	) {
-		const publicPageModel = await buildPublicPageModel(
-			requestPath,
-			c.env,
-			c.req.url,
-			c.get("subdomainOrg"),
-		);
+		let publicPageModel: Awaited<ReturnType<typeof buildPublicPageModel>>;
+		try {
+			publicPageModel = await buildPublicPageModel(
+				requestPath,
+				c.env,
+				c.req.url,
+				c.get("subdomainOrg"),
+			);
+		} catch (error) {
+			// Not a missing page — a transient failure. 503 + no-store tells
+			// crawlers and the CDN to come back, instead of caching a 404.
+			logger.error({ error, path: requestPath }, "[public-pages] render failed");
+			c.header("Cache-Control", "no-store");
+			c.header("Retry-After", "60");
+			return c.text("Temporarily unavailable", 503);
+		}
 		if (publicPageModel) {
 			const template = await loadAnySpaHtmlTemplate();
 			if (template) {

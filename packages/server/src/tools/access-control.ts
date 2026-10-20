@@ -54,6 +54,16 @@ export function isInProcessSystemCall(ctx: AccessControlContext): boolean {
   return isSystemContext(ctx) && ctx.tokenType === 'session';
 }
 
+/**
+ * A reader outside the workspace — anonymous, or signed in without membership —
+ * viewing what a public workspace publishes. Such readers see the workspace's
+ * knowledge, never its operational trail (see
+ * {@link operationalTrailExclusionSql}).
+ */
+export function isPublicReader(ctx: AccessControlContext): boolean {
+  return !isInProcessSystemCall(ctx) && !ctx.memberRole;
+}
+
 /** True when the role grants admin-tier access (owner or admin). */
 export function isAdminOrOwnerRole(memberRole: string | null | undefined): boolean {
   return memberRole === 'owner' || memberRole === 'admin';

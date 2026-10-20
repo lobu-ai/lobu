@@ -43,6 +43,7 @@ import {
   INTERNAL_OPS_EXCLUSION_SQL,
   buildFinalSelect,
   deduplicateWithClassifications,
+  operationalTrailExclusionSql,
 } from './sql-fragments';
 import { buildSemanticTypeFilterSql } from './params';
 import {
@@ -290,6 +291,7 @@ export async function searchContentBySingleQuery(
           ${analyzedClause.sql}
           ${visibilityClause.sql}
           ${options.exclude_workspace_audit ? `AND NOT (f.metadata ? '_lobu_workspace_audit')` : ''}
+          ${options.exclude_operational_trail ? `AND ${operationalTrailExclusionSql('f')}` : ''}
           ${
             // Internal-ops discovery filter (see the option's doc). An
             // explicit semantic_type filter ($9) wins over it: a caller asking

@@ -32,6 +32,32 @@ import {
 export const INTERNAL_OPS_EXCLUSION_SQL = `(NOT (f.semantic_type = 'audit' AND COALESCE(f.origin_type, '') = 'tool_invocation')
            AND NOT (f.semantic_type = 'change' AND COALESCE(f.metadata->>'category', '') IN ('config', 'lifecycle')))`;
 
+/**
+ * Rows a public workspace never publishes to readers outside it: the
+ * operational trail rather than knowledge. Matched on system-written columns
+ * that `save_content` cannot set:
+ *
+ *   - interactive cards — operation runs and their approvals, questions,
+ *     link buttons and UI suggestions all carry an `interaction_type`;
+ *   - notifications — `metadata.notification_type`, which
+ *     `createNotificationForUsers` stamps on every one and which outlives the
+ *     inbox: deleting a notification removes its `notification_targets` row
+ *     but keeps the event. Any event still addressed through
+ *     `notification_targets` is excluded too. A member note that sets the key
+ *     itself only hides that note, never exposes anything.
+ *
+ * Unlike INTERNAL_OPS_EXCLUSION_SQL this is an access boundary: an explicit
+ * semantic_type filter does not lift it.
+ */
+// `interaction_type` is NOT NULL: compare the bare column so the planner uses
+// its statistics. Wrapped in COALESCE it estimated a few hundred matching rows
+// and nested-looped the anti-join (64s for a 300k-event public list read).
+export function operationalTrailExclusionSql(alias: string): string {
+  return `(${alias}.interaction_type = 'none'
+           AND jsonb_typeof(${alias}.metadata->'notification_type') IS DISTINCT FROM 'string'
+           AND NOT EXISTS (SELECT 1 FROM notification_targets nt WHERE nt.event_id = ${alias}.id))`;
+}
+
 const CONTEXT_CASE_SQL = `
         CASE
           WHEN f.origin_parent_id IS NOT NULL

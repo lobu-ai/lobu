@@ -23,6 +23,7 @@ import {
   INTERNAL_OPS_EXCLUSION_SQL,
   buildFinalSelect,
   deduplicateWithClassifications,
+  operationalTrailExclusionSql,
 } from './sql-fragments';
 import {
   buildDateCandidateOrderBy,
@@ -492,6 +493,7 @@ export async function listContentInternal(
         client_id: options.client_id,
         mcp_session_ids: options.mcp_session_ids,
         exclude_workspace_audit: options.exclude_workspace_audit,
+        exclude_operational_trail: options.exclude_operational_trail,
         exclude_internal_ops: options.exclude_internal_ops,
       }
     );
@@ -650,6 +652,7 @@ export async function listContentInternal(
           AND ${feedCondition}
           AND ${runCondition}
           ${options.exclude_workspace_audit ? `AND NOT (f.metadata ? '_lobu_workspace_audit')` : ''}
+          ${options.exclude_operational_trail ? `AND ${operationalTrailExclusionSql('f')}` : ''}
           ${
             // Internal-ops filter. Recall lands here, not on the search path,
             // whenever its query is shorter than three characters and no
