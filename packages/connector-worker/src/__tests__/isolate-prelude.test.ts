@@ -484,6 +484,199 @@ describe('guest ReadableStream reader', () => {
   });
 });
 
+describe('guest ReadableStream.cancel', () => {
+  function instantiateBodyGuest(): { guest: any; reads: () => number; aborted: number[] } {
+    const hostSync = createPreludeHostSync();
+    const aborted: number[] = [];
+    let reads = 0;
+    const guest: any = {
+      __host_sync: {
+        applySync: (_receiver: unknown, args: any[]) => {
+          const [name, ...rest] = args;
+          if (name === 'fetchAbort') {
+            aborted.push(rest[0] as number);
+            return { __lobu: 1, ok: true, value: null };
+          }
+          const fn = hostSync[String(name)];
+          if (!fn) return { __lobu: 1, ok: true, value: null };
+          return { __lobu: 1, ok: true, value: fn(...rest) };
+        },
+      },
+      __host_async: {
+        apply: (_receiver: unknown, args: any[]) => {
+          const [name, ...rest] = args;
+          if (name === 'fetchOpen') {
+            return Promise.resolve({
+              __lobu: 1,
+              ok: true,
+              value: { status: 503, statusText: 'Service Unavailable', url: rest[0].url, redirected: false, headers: [], hasBody: true },
+            });
+          }
+          if (name === 'fetchRead') {
+            reads += 1;
+            return Promise.resolve({ __lobu: 1, ok: true, value: { data: new Uint8Array([0x61]), done: false } });
+          }
+          return Promise.resolve({ __lobu: 1, ok: true, value: null });
+        },
+      },
+      __host_env_json: '{}',
+      atob: (x: string) => Buffer.from(x, 'base64').toString('binary'),
+      btoa: (x: string) => Buffer.from(x, 'binary').toString('base64'),
+      TextEncoder,
+      TextDecoder,
+    };
+    new Function('globalThis', GUEST_PRELUDE)(guest);
+    return { guest, reads: () => reads, aborted };
+  }
+
+  it('cancels an unread fetch body: the upstream is released and the body is used', async () => {
+    const { guest, reads, aborted } = instantiateBodyGuest();
+    const res = await guest.fetch('https://example.test/retry');
+    await expect(res.body.cancel()).resolves.toBeUndefined();
+    expect(aborted).toHaveLength(1);
+    expect(reads()).toBe(0);
+    // As on every other runtime, a cancelled body counts as read.
+    expect(res.bodyUsed).toBe(true);
+    await expect(res.text()).rejects.toThrow(TypeError);
+    // A reader taken after the cancel reports done without pulling the host.
+    expect(await res.body.getReader().read()).toEqual({ value: undefined, done: true });
+    expect(reads()).toBe(0);
+  });
+
+  it('rejects with a TypeError while a reader holds the lock, and cancels once it is released', async () => {
+    const { guest, aborted } = instantiateBodyGuest();
+    const res = await guest.fetch('https://example.test/locked');
+    const reader = res.body.getReader();
+    expect(res.body.locked).toBe(true);
+    expect(() => res.body.getReader()).toThrow(TypeError);
+    await expect(res.body.cancel()).rejects.toThrow(TypeError);
+    expect(aborted).toHaveLength(0);
+    reader.releaseLock();
+    expect(res.body.locked).toBe(false);
+    await res.body.cancel();
+    expect(aborted).toHaveLength(1);
+  });
+
+  it('returns a rejected promise when the source cancel throws', async () => {
+    const guest = instantiateGuest();
+    const failure = new Error('cancel failed');
+    for (const useReader of [false, true]) {
+      const stream = new guest.ReadableStream({ cancel() { throw failure; } });
+      const target = useReader ? stream.getReader() : stream;
+      let result: Promise<void> | undefined;
+      expect(() => { result = target.cancel(); }).not.toThrow();
+      await expect(result).rejects.toBe(failure);
+      await expect(target.cancel()).resolves.toBeUndefined();
+    }
+  });
+
+  it('cancels the source once across reader and stream calls and discards its return value', async () => {
+    const guest = instantiateGuest();
+    const reasons: unknown[] = [];
+    const stream = new guest.ReadableStream({ cancel(reason: unknown) { reasons.push(reason); return 'ignored'; } });
+    const reader = stream.getReader();
+    await expect(reader.cancel('retry')).resolves.toBeUndefined();
+    await reader.cancel('again');
+    reader.releaseLock();
+    await stream.cancel('again');
+    await stream.getReader().cancel('again');
+    expect(reasons).toEqual(['retry']);
+  });
+
+  it('a released reader cannot read, cancel, or unlock a subsequent reader', async () => {
+    const guest = instantiateGuest();
+    const stream = new guest.ReadableStream({});
+    const oldReader = stream.getReader();
+    oldReader.releaseLock();
+    const reader = stream.getReader();
+    oldReader.releaseLock();
+    expect(stream.locked).toBe(true);
+    await expect(oldReader.read()).rejects.toThrow(TypeError);
+    await expect(oldReader.cancel()).rejects.toThrow(TypeError);
+    await expect(stream.cancel()).rejects.toThrow(TypeError);
+    await reader.cancel();
+  });
+
+  it('rejects pending reads on release and drops late chunks after stream cancellation', async () => {
+    const guest = instantiateGuest();
+    let controller: any;
+    const stream = new guest.ReadableStream({ pull(c: any) { controller = c; } });
+    const reader = stream.getReader();
+    const pending = reader.read();
+    reader.releaseLock();
+    await expect(pending).rejects.toThrow(TypeError);
+    await stream.cancel();
+    controller.enqueue('late');
+    expect(await stream.getReader().read()).toEqual({ value: undefined, done: true });
+  });
+
+  it('preserves queued data and source state when the reader releases its lock', async () => {
+    const guest = instantiateGuest();
+    let starts = 0;
+    const stream = new guest.ReadableStream({
+      start(controller: any) {
+        starts++;
+        controller.enqueue('a');
+        controller.enqueue('b');
+        controller.close();
+      },
+    });
+    const first = stream.getReader();
+    expect((await first.read()).value).toBe('a');
+    first.releaseLock();
+    const second = stream.getReader();
+    expect((await second.read()).value).toBe('b');
+    expect(await second.read()).toEqual({ value: undefined, done: true });
+    expect(starts).toBe(1);
+  });
+
+  it('does not restart or cancel a source after EOF, including across reader handoff', async () => {
+    const guest = instantiateGuest();
+    let pulls = 0;
+    let cancels = 0;
+    const stream = new guest.ReadableStream({
+      pull(controller: any) { pulls++; controller.close(); },
+      cancel() { cancels++; },
+    });
+    const reader = stream.getReader();
+    await reader.read();
+    reader.releaseLock();
+    await stream.cancel();
+    expect(await stream.getReader().read()).toEqual({ value: undefined, done: true });
+    expect(pulls).toBe(1);
+    expect(cancels).toBe(0);
+  });
+
+  it('rejects cancellation with the stored stream error without invoking the source', async () => {
+    const guest = instantiateGuest();
+    for (const failure of [new Error('read failed'), undefined]) {
+      let cancels = 0;
+      const stream = new guest.ReadableStream({
+        pull(controller: any) { controller.error(failure); },
+        cancel() { cancels++; },
+      });
+      const reader = stream.getReader();
+      await expect(reader.read()).rejects.toBe(failure);
+      reader.releaseLock();
+      await expect(stream.cancel()).rejects.toBe(failure);
+      expect(cancels).toBe(0);
+    }
+  });
+
+  it('rejects consumption of a locked body without marking it used', async () => {
+    const guest = instantiateGuest();
+    const response = new guest.Response('payload');
+    const reader = response.body.getReader();
+    let result: Promise<string> | undefined;
+    expect(() => { result = response.text(); }).not.toThrow();
+    await expect(result).rejects.toThrow(TypeError);
+    expect(response.bodyUsed).toBe(false);
+    expect(() => response.clone()).toThrow(TypeError);
+    reader.releaseLock();
+    expect(await response.text()).toBe('payload');
+  });
+});
+
 /**
  * `Response.clone()` tees a streamed body on every other runtime; here it
  * throws for one, since nothing bundled clones a network response and a tee
