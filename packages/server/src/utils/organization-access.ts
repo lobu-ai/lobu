@@ -7,6 +7,8 @@
  * Access Rules:
  * - Upstream routing enforces public/private workspace visibility.
  * - Workspace members can read; owners/admins can edit records.
+ * - A public workspace is readable by everyone: a signed-in non-member reads
+ *   exactly what an anonymous visitor does.
  * - No-user contexts: an anonymous public-workspace read passes, but a write
  *   also needs `isAuthenticated` (system/internal calls like reaction scripts).
  */
@@ -40,8 +42,31 @@ export async function getWorkspaceRole(
 }
 
 /**
- * Check if user can read an entity
- * Allowed if entity belongs to the user's organization and user is a member.
+ * Whether the caller may read a workspace it is scoped to: anonymous and
+ * system contexts (upstream routing already gated those to public or trusted
+ * workspaces), members, and any signed-in user when the workspace is public.
+ */
+async function canReadWorkspace(sql: DbClient, orgId: string, ctx: ToolContext): Promise<boolean> {
+  if (!ctx.userId) return true;
+  const rows = await sql`
+    SELECT 1
+    FROM "organization" o
+    WHERE o.id = ${orgId}
+      AND (
+        o.visibility = 'public'
+        OR EXISTS (
+          SELECT 1 FROM "member" m
+          WHERE m."organizationId" = o.id AND m."userId" = ${ctx.userId}
+        )
+      )
+    LIMIT 1
+  `;
+  return rows.length > 0;
+}
+
+/**
+ * Check if the caller can read an entity: it must belong to the caller's
+ * workspace, and the caller must be able to read that workspace.
  */
 async function canReadEntity(sql: DbClient, entityId: number, ctx: ToolContext): Promise<boolean> {
   const entityResult = await sql`
@@ -54,10 +79,7 @@ async function canReadEntity(sql: DbClient, entityId: number, ctx: ToolContext):
 
   const entityOrgId = String(entityResult[0].organization_id);
   if (entityOrgId !== ctx.organizationId) return false;
-  if (!ctx.userId) return true;
-
-  const orgRole = await getWorkspaceRole(sql, entityOrgId, ctx.userId);
-  return orgRole !== null;
+  return canReadWorkspace(sql, entityOrgId, ctx);
 }
 
 /**
@@ -119,24 +141,11 @@ async function canWriteOrg(sql: DbClient, ctx: ToolContext): Promise<boolean> {
 }
 
 /**
- * Check if the caller may read at the organization level (no entity scope).
- * Mirrors entity read automation: once the request is scoped to the organization,
- * anonymous/system contexts are allowed and authenticated users must be members.
- */
-async function canReadOrg(sql: DbClient, ctx: ToolContext): Promise<boolean> {
-  if (!ctx.organizationId) return false;
-  if (!ctx.userId) return true;
-
-  const orgRole = await getWorkspaceRole(sql, ctx.organizationId, ctx.userId);
-  return orgRole !== null;
-}
-
-/**
- * Require organization-level read access or throw.
+ * Require organization-level read access (no entity scope) or throw.
  */
 export async function requireOrgReadAccess(sql: DbClient, ctx: ToolContext): Promise<void> {
   if (!ctx.organizationId) throw new ToolUserError('Select a workspace to view its records.', 403);
-  const ok = await canReadOrg(sql, ctx);
+  const ok = await canReadWorkspace(sql, ctx.organizationId, ctx);
   if (!ok) {
     throw new ToolUserError("You don't have permission to view this workspace. Ask a workspace owner or admin for access.", 403);
   }

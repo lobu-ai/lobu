@@ -26,6 +26,7 @@ import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
+import { enforcePublicReadLimit } from '../utils/rate-limiter';
 import { enforceRoleScopeAccess, requireWorkspaceContext } from './access-control';
 import { recordToolInvocationAudit, recordWorkspaceActivityAudit } from './audit';
 import { getAccountContent } from './get_content';
@@ -250,15 +251,18 @@ export function checkToolAccess(
     return requiredAccess;
   }
 
-  if (!role && !isPublicReadable(toolName, args)) {
-    if (authCtx.userId) {
+  if (!role) {
+    if (!isPublicReadable(toolName, args)) {
+      if (authCtx.userId) {
+        throw new Error(
+          'This public workspace is read-only for your account. Join the workspace to unlock write access.'
+        );
+      }
       throw new Error(
-        'This public workspace is read-only for your account. Join the workspace to unlock write access.'
+        'This public workspace is read-only for anonymous access. Sign in with an OAuth client that has write access.'
       );
     }
-    throw new Error(
-      'This public workspace is read-only for anonymous access. Sign in with an OAuth client that has write access.'
-    );
+    enforcePublicReadLimit(authCtx.userId);
   }
 
   // No `writeRole` message: missing-membership writes are already rejected by
