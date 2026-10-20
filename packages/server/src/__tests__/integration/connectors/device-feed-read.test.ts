@@ -28,6 +28,7 @@ import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
 import type { AuthzScope } from '../../../authz/scope';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { compileConnectorSource } from '../../../utils/connector-compiler';
+import { serveWorkerJobs } from '../../setup/worker-poll';
 import {
   deviceManifestHash,
   type DeviceConnectorManifest,
@@ -56,6 +57,8 @@ const CONNECTOR_KEY = 'local.directory';
 const CONNECTOR_VERSION = '0.3.0';
 const FEED_KEY = 'files';
 const WORKER_ID = 'wk-dir-source-read';
+/** Leave headroom under the suite's 30s test timeout to report a missing job. */
+const DEVICE_JOB_DEADLINE_MS = 20_000;
 const DIRECTORY_MANIFEST: DeviceConnectorManifest = {
   key: CONNECTOR_KEY,
   version: CONNECTOR_VERSION,
@@ -157,28 +160,33 @@ async function readRunRows(): Promise<
 async function respondAsDevice(
   reply: { status: 'success'; action_output: Record<string, unknown> } | { status: 'failed'; error_message: string }
 ): Promise<Record<string, unknown>> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    const response = await post('/api/workers/poll', {
-      body: {
-        worker_id: WORKER_ID,
-        platform: 'macos',
-        app_version: '9.9.0',
-        label: 'Test Mac',
-        capabilities: { local_directory: true },
-      },
-    });
-    expect(response.status).toBe(200);
-    const job = await response.json();
-    if (job?.run_id && job?.operation_key === DEVICE_FEED_READ_ACTION_KEY) {
+  const job = await serveWorkerJobs({
+    deadlineMs: DEVICE_JOB_DEADLINE_MS,
+    intervalMs: 100,
+    poll: async () => {
+      const response = await post('/api/workers/poll', {
+        body: {
+          worker_id: WORKER_ID,
+          platform: 'macos',
+          app_version: '9.9.0',
+          label: 'Test Mac',
+          capabilities: { local_directory: true },
+        },
+      });
+      expect(response.status).toBe(200);
+      return response.json();
+    },
+    handle: async (job) => {
+      if (job.operation_key !== DEVICE_FEED_READ_ACTION_KEY) return undefined;
       const completion = await post('/api/workers/complete-action', {
         body: { run_id: job.run_id, worker_id: WORKER_ID, ...reply },
       });
       expect(completion.status).toBe(200);
-      return job;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error('device never received the feed-read job');
+      return { done: job };
+    },
+  });
+  if (!job) throw new Error('device never received the feed-read job');
+  return job;
 }
 
 describe('device-backed source feed read', () => {
@@ -802,9 +810,12 @@ async function pollPersonalDevice(boundOrgId: string): Promise<Record<string, un
 
 /** Stand in for the Mac: claim the reserved source-read run and answer it. */
 async function respondAsPersonalDevice(boundOrgId: string): Promise<Record<string, unknown>> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    const job = await pollPersonalDevice(boundOrgId);
-    if (job?.run_id && job?.operation_key === DEVICE_FEED_READ_ACTION_KEY) {
+  const job = await serveWorkerJobs({
+    deadlineMs: DEVICE_JOB_DEADLINE_MS,
+    intervalMs: 100,
+    poll: () => pollPersonalDevice(boundOrgId),
+    handle: async (job) => {
+      if (job.operation_key !== DEVICE_FEED_READ_ACTION_KEY) return undefined;
       const completion = await post('/api/workers/complete-action', {
         body: {
           run_id: job.run_id,
@@ -814,11 +825,11 @@ async function respondAsPersonalDevice(boundOrgId: string): Promise<Record<strin
         },
       });
       expect(completion.status).toBe(200);
-      return job;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error('device never received the source-feed read job');
+      return { done: job };
+    },
+  });
+  if (!job) throw new Error('device never received the source-feed read job');
+  return job;
 }
 
 async function countRuns(organizationId: string): Promise<number> {
