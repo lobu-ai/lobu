@@ -17,7 +17,7 @@ export function findingHasReceipt(f: Draft, policy: EvidencePolicy) {
   );
 }
 
-async function findSourcePost(
+async function findSourcePosts(
   read: SourceReader,
   platform: string,
   receipts: Receipt[],
@@ -26,8 +26,8 @@ async function findSourcePost(
 ) {
   const posts = (
     await Promise.all(receipts.map((r) => read(platform, r)))
-  ).flat();
-  return posts.find(
+  ).flatMap((page) => page.posts);
+  return posts.filter(
     (p) => p.source_url === sourceUrl && p.origin_id === originId
   );
 }
@@ -55,14 +55,14 @@ export async function verifyFindings(
         "Finding lacks its exact source receipt or uses an out-of-scope platform"
       );
     const fm = f.metadata;
-    const post = await findSourcePost(
+    const posts = await findSourcePosts(
       read,
       fm.platform,
       fm.read_receipts,
       f.source_url,
       fm.origin_id
     );
-    if (!post || !quoteInBody(post.text, fm.evidence_quote))
+    if (!posts.some((post) => quoteInBody(post.text, fm.evidence_quote)))
       throw new Error(
         "Finding excerpt is absent from the exact source receipt"
       );
@@ -112,18 +112,21 @@ export async function verifyGraphCandidates(
       g.claims.length > 20
     )
       throw new Error("Invalid graph observation");
-    const p = await findSourcePost(
+    const posts = await findSourcePosts(
       read,
       g.platform,
       g.read_receipts,
       g.source_url,
       g.origin_id
     );
-    if (
-      !p?.author_url ||
-      !g.subject?.profile_url ||
-      canonicalProfile(p.author_url) !== canonicalProfile(g.subject.profile_url)
-    )
+    const authored = posts.filter(
+      (p) =>
+        p.author_url &&
+        g.subject?.profile_url &&
+        canonicalProfile(p.author_url) ===
+          canonicalProfile(g.subject.profile_url)
+    );
+    if (!authored.length)
       throw new Error("Graph subject lacks a matching author profile receipt");
     const key = `${g.workspace}:${g.connection}:${g.platform}:${g.origin_id}`;
     if (graphSeen.has(key)) throw new Error("Duplicate graph observation");
@@ -131,20 +134,26 @@ export async function verifyGraphCandidates(
     for (const claim of g.claims) {
       if (!claim || typeof claim !== "object")
         throw new Error("Invalid graph observation");
-      if (
-        !quoteInBody(p.text, claim.evidence_quote) ||
-        !claim.target?.profile_url ||
-        !p.mentioned_profiles?.some(
-          // Unrelated body links may use mailto: or other non-profile schemes.
-          (url) =>
-            canonicalProfile(url, false) ===
-            canonicalProfile(claim.target.profile_url)
-        )
-      )
-        throw new Error(
-          "Graph relationship lacks exact text and target-profile evidence"
-        );
+      canonicalProfile(claim.target?.profile_url);
     }
+    // Expansion can reveal both text and links. All claims must be backed by
+    // one retained snapshot, rather than combining different post versions.
+    const p = authored.find((post) =>
+      g.claims.every(
+        (claim: any) =>
+          quoteInBody(post.text, claim.evidence_quote) &&
+          post.mentioned_profiles?.some(
+            // Unrelated body links may use mailto: or other non-profile schemes.
+            (url) =>
+              canonicalProfile(url, false) ===
+              canonicalProfile(claim.target.profile_url)
+          )
+      )
+    );
+    if (!p)
+      throw new Error(
+        "Graph relationship lacks exact text and target-profile evidence"
+      );
     g.subject.profile_url = canonicalProfile(g.subject.profile_url);
     g.source_time = p.occurred_at;
     g.evidence_verified = true;

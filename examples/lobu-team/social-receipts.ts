@@ -4,6 +4,7 @@ import type {
   EvidencePolicy,
   ReadingWindow,
   Receipt,
+  SourcePage,
   SourcePost,
   SourceReader,
 } from "./external-social-evidence";
@@ -36,7 +37,7 @@ function readPostsFromOperation(
   platform: string,
   policy: EvidencePolicy,
   timelineReaderSource: string
-): SourcePost[] {
+): SourcePage {
   if (platform === "tiktok" && run.operation_key === "inspect_post") {
     const p = run.output?.post;
     const handle = p?.author?.handle;
@@ -55,18 +56,21 @@ function readPostsFromOperation(
       throw new Error("TikTok source identity is missing or inconsistent");
     // The connector returns the source's complete desc, but screenshots
     // are only samples and never prove that video/audio was understood.
-    return [
-      {
-        source_url: p.source_url,
-        origin_id: p.origin_id,
-        text: p.text,
-        author: p.author.name || handle,
-        author_url: `https://www.tiktok.com/@${handle}`,
-        occurred_at: p.created_at ?? null,
-        truncated: false,
-        media_unread: true,
-      },
-    ];
+    return {
+      limitations: [],
+      posts: [
+        {
+          source_url: p.source_url,
+          origin_id: p.origin_id,
+          text: p.text,
+          author: p.author.name || handle,
+          author_url: `https://www.tiktok.com/@${handle}`,
+          occurred_at: p.created_at ?? null,
+          truncated: false,
+          media_unread: true,
+        },
+      ],
+    };
   }
   if (platform === "linkedin" && run.operation_key === "read_home_feed") {
     if (policy.company_linkedin_path)
@@ -76,17 +80,29 @@ function readPostsFromOperation(
       run.output.items.some((p: any) => !p || typeof p !== "object")
     )
       throw new Error("Malformed LinkedIn source receipt");
-    return run.output.items
-      .filter((p: any) => p.type === "post")
-      .map((p: any) => ({
-        source_url: p.url,
-        origin_id: p.id,
-        text: p.text,
-        author: p.author || "",
-        occurred_at: null,
-        truncated: true,
-        media_unread: true,
-      }));
+    const skipped = run.output.skipped;
+    if (
+      skipped !== undefined &&
+      (!Number.isSafeInteger(skipped) || skipped < 0)
+    )
+      throw new Error("Malformed LinkedIn skipped-card count");
+    // Completeness belongs to the receipt, including when no posts survived.
+    return {
+      limitations: [
+        `Native LinkedIn text and dates are incomplete; ${skipped === undefined ? "unknown" : skipped} skipped cards.`,
+      ],
+      posts: run.output.items
+        .filter((p: any) => p.type === "post")
+        .map((p: any) => ({
+          source_url: p.url,
+          origin_id: p.id,
+          text: p.text,
+          author: p.author || "",
+          occurred_at: null,
+          truncated: true,
+          media_unread: true,
+        })),
+    };
   }
   if (run.operation_key !== "evaluate")
     throw new Error("Unsupported source receipt operation");
@@ -120,7 +136,13 @@ function readPostsFromOperation(
     throw new Error(
       "Source receipt lacks a verified visible timeline snapshot"
     );
-  return value.posts as SourcePost[];
+  const skipped = value.skipped ?? 0;
+  if (!Number.isSafeInteger(skipped) || skipped < 0)
+    throw new Error("Malformed browser skipped-card count");
+  return {
+    posts: value.posts as SourcePost[],
+    limitations: skipped ? [`${skipped} skipped browser cards.`] : [],
+  };
 }
 
 async function loadSourcePosts(
@@ -130,7 +152,7 @@ async function loadSourcePosts(
   platform: string,
   receipt: Receipt,
   timelineReaderSource: string
-): Promise<SourcePost[]> {
+): Promise<SourcePage> {
   const c = await client.org(receipt.workspace);
   if (!("run_id" in receipt)) {
     // Stored HN events have no browser-operation run. Keep their exact
@@ -149,17 +171,20 @@ async function loadSourcePosts(
       event.connector_key !== "hackernews"
     )
       throw new Error("Stored source identity mismatch");
-    return [
-      {
-        source_url: event.source_url,
-        origin_id: event.origin_id,
-        text: event.payload_text || event.title || "",
-        author: event.author_name || "",
-        occurred_at: event.occurred_at,
-        truncated: true,
-        media_unread: true,
-      },
-    ];
+    return {
+      limitations: [],
+      posts: [
+        {
+          source_url: event.source_url,
+          origin_id: event.origin_id,
+          text: event.payload_text || event.title || "",
+          author: event.author_name || "",
+          occurred_at: event.occurred_at,
+          truncated: true,
+          media_unread: true,
+        },
+      ],
+    };
   }
   const { run } = await c.operations.getRun(receipt.run_id);
   const created = Date.parse(run?.created_at);
@@ -184,7 +209,7 @@ export function createSourceReader(
   window: ReadingWindow,
   timelineReaderSource: string
 ): SourceReader {
-  const cache = new Map<string, Promise<SourcePost[]>>();
+  const cache = new Map<string, Promise<SourcePage>>();
   return async (platform, receipt) => {
     if (!receipt || typeof receipt !== "object")
       throw new Error("Missing or out-of-scope source receipt");
@@ -212,7 +237,10 @@ export function createSourceReader(
         platform,
         receipt,
         timelineReaderSource
-      ).then(assertSourcePosts);
+      ).then((page) => {
+        assertSourcePosts(page.posts);
+        return page;
+      });
       cache.set(key, result);
     }
     return result;
@@ -234,9 +262,12 @@ export async function verifyCoverage(
       ? c.read_receipts
       : []) {
       try {
-        const rows = await read(c.platform, receipt);
+        const page = await read(c.platform, receipt);
         verifiedPages++;
-        for (const p of rows) {
+        platformIssues.push(
+          ...page.limitations.map((issue) => `${c.platform}: ${issue}`)
+        );
+        for (const p of page.posts) {
           if (p.text.trim()) posts.set(p.origin_id, p);
           else textless = true;
         }

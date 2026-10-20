@@ -51,10 +51,14 @@ export type EvidenceClient = {
   }>;
 };
 
+export type SourcePage = {
+  posts: SourcePost[];
+  limitations: string[];
+};
 export type SourceReader = (
   platform: string,
   receipt: Receipt
-) => Promise<SourcePost[]>;
+) => Promise<SourcePage>;
 export type ReadingWindow = { ownerId: string; start: number; end: number };
 
 /** The preflight and notification resolve the same validated Automation owner. */

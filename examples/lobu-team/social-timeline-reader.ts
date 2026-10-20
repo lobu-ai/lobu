@@ -45,6 +45,7 @@ export function readSocialTimelinePage(options: {
     ),
   ];
   const posts = new Map();
+  let skipped = 0;
   for (const card of cards as any[]) {
     const x = options.platform === "x";
     const body = card.querySelector(
@@ -63,8 +64,10 @@ export function readSocialTimelinePage(options: {
           ? /^https:\/\/x\.com\/\w+\/status\/\d+$/
           : /^https:\/\/www\.linkedin\.com\/feed\/update\/urn:li:activity:\d+$/
       ).test(url)
-    )
+    ) {
+      skipped++;
       continue;
+    }
     const author = card.querySelector(
       x
         ? '[data-testid="User-Name"]'
@@ -107,6 +110,7 @@ export function readSocialTimelinePage(options: {
     visibility: doc.visibilityState,
     page_url: loc.href,
     observed_at: new Date().toISOString(),
+    skipped,
     posts: [...posts.values()],
   };
 }

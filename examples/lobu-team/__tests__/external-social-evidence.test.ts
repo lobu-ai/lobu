@@ -128,6 +128,57 @@ test("derives actual unique counts and verifies exact-source finding before comp
   expect(JSON.stringify(result)).not.toContain(post.text);
 });
 
+test("an earlier collapsed snapshot cannot hide evidence in an expanded receipt", async () => {
+  const h = fixture();
+  const org = h.client.org;
+  h.client.org = async (workspace: string) => {
+    const c = await org(workspace);
+    return {
+      ...c,
+      operations: {
+        getRun: async (id: number) =>
+          id === 21
+            ? {
+                run: {
+                  ...h.source,
+                  output: {
+                    value: {
+                      ...h.source.output.value,
+                      posts: [
+                        {
+                          ...post,
+                          text: "A complete source body",
+                          truncated: true,
+                        },
+                      ],
+                    },
+                  },
+                },
+              }
+            : c.operations.getRun(id),
+      },
+    };
+  };
+  h.data.findings[0]!.metadata.read_receipts.unshift({
+    workspace: policy.workspace,
+    run_id: 21,
+  });
+  await expect(h.run()).resolves.toBe(h.data);
+});
+
+test("skipped browser cards keep an empty snapshot partial", async () => {
+  for (const skipped of [1, 0, -1]) {
+    const h = fixture();
+    h.data.findings = [];
+    h.source.output.value.posts = [];
+    Object.assign(h.source.output.value, { skipped });
+    await h.run();
+    expect(h.data.briefings[0]!.metadata.coverage[0].status).toBe(
+      skipped < 0 ? "blocked" : skipped ? "partial" : "read"
+    );
+  }
+});
+
 test("missing receipts, false quotes, wrong source and another owner's receipt cannot produce findings", async () => {
   for (const change of [
     (h: ReturnType<typeof fixture>) => {
@@ -287,6 +338,35 @@ test("graph observations require source author and target links, independently o
     evidence_verified: false,
   };
   h.data.briefings[0]!.metadata.graph_candidates = [candidate];
+  const org = h.client.org;
+  h.client.org = async (workspace: string) => {
+    const c = await org(workspace);
+    return {
+      ...c,
+      operations: {
+        getRun: async (id: number) =>
+          id === 21
+            ? {
+                run: {
+                  ...h.source,
+                  output: {
+                    value: {
+                      ...h.source.output.value,
+                      posts: [
+                        {
+                          ...h.source.output.value.posts[0],
+                          mentioned_profiles: [],
+                        },
+                      ],
+                    },
+                  },
+                },
+              }
+            : c.operations.getRun(id),
+      },
+    };
+  };
+  candidate.read_receipts.unshift({ workspace: policy.workspace, run_id: 21 });
   await h.run();
   expect(candidate.evidence_verified).toBe(true);
   expect(h.data.briefings[0]!.metadata.graph_status).toBe("pending_ingestion");
@@ -402,6 +482,17 @@ test("browser snapshot accepts label whitespace, returns full text and rejects h
         page_path: "/home",
       }).posts[0].text
     ).toBe(text);
+    root.document.querySelectorAll = (s: string) =>
+      s.includes("role")
+        ? [{ innerText: "Following ", getAttribute: () => "true" }]
+        : [{ querySelector: () => null }];
+    expect(
+      readSocialTimelinePage({
+        platform: "x",
+        account_path: "/synthetic",
+        page_path: "/home",
+      })
+    ).toMatchObject({ posts: [], skipped: 1 });
     root.document.visibilityState = "hidden";
     expect(() =>
       readSocialTimelinePage({
@@ -670,6 +761,54 @@ test("native LinkedIn remains partial and cannot substitute for a company Page r
   await expect(
     verifySocialEvidence(h.client, bound, 10, h.data)
   ).rejects.toThrow("Malformed LinkedIn source receipt");
+});
+
+test("empty native LinkedIn receipts retain skipped-card limitations through notification", async () => {
+  const bound = {
+    ...policy,
+    platforms: ["linkedin"],
+    receipt_workspaces: { linkedin: [policy.workspace] },
+  };
+  const compiled = await buildExternalSocial(bound);
+  for (const skipped of [10, 0, undefined]) {
+    const h = fixture();
+    h.source.operation_key = "read_home_feed";
+    (h.source as any).output = { items: [], skipped };
+    h.data.findings = [];
+    h.data.briefings[0]!.metadata.coverage[0].platform = "linkedin";
+    await verifySocialEvidence(h.client, bound, 10, h.data);
+    const coverage = h.data.briefings[0]!.metadata.coverage[0];
+    expect(coverage).toMatchObject({ posts_read: 0, status: "partial" });
+    expect(coverage.detail).toContain(`${skipped ?? "unknown"} skipped cards`);
+    const send = mock(async (_input: any) => ({ event_id: 100 }));
+    await runInNewContext(
+      `${compiled.reaction.replace("export default", "const reaction =")}\nreaction(ctx, client);`,
+      {
+        ctx: {
+          automation: { id: 1 },
+          window: { run_id: 10 },
+          extracted_data: JSON.parse(JSON.stringify(h.data)),
+        },
+        client: {
+          query: async () => [{ created_by: "synthetic-owner" }],
+          notifications: { send },
+        },
+      }
+    );
+    expect(send.mock.calls[0]![0].body).toContain(
+      "linkedin: 0 text posts, partial"
+    );
+  }
+  const h = fixture();
+  h.source.operation_key = "read_home_feed";
+  (h.source as any).output = { items: [], skipped: -1 };
+  h.data.findings = [];
+  h.data.briefings[0]!.metadata.coverage[0].platform = "linkedin";
+  await verifySocialEvidence(h.client, bound, 10, h.data);
+  expect(h.data.briefings[0]!.metadata.coverage[0]).toMatchObject({
+    status: "blocked",
+    posts_read: 0,
+  });
 });
 
 test("a media-only post leaves its page verified but partial", async () => {
