@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
+import { createAjv } from '@lobu/core/ajv';
 import { connectorSdkMock } from './connector-sdk.mock';
 import { runSync } from './sync-harness';
 
@@ -485,6 +486,91 @@ describe('RedditConnector runtime', () => {
         ).rejects.toThrow(/requires user OAuth/);
       }
       expect(fetchMock).not.toHaveBeenCalled();
+    }
+  );
+
+  test.each([
+    undefined,
+    '',
+    'image',
+    'self',
+    'default',
+    'nsfw',
+    'spoiler',
+    '/r/example/comments/x/',
+    '//example.com/image.jpg',
+    'https://',
+    'ftp://example.com/image.jpg',
+    'javascript:alert(1)',
+    ' https://example.com/image.jpg ',
+    'https://example.com/a b.jpg',
+    'https://example.com/über.jpg',
+    'https://example.com/%',
+    'https://example.com/%GG',
+    'https://example.com/a|b',
+    'https://example.com/a#b#c',
+  ])('omits a thumbnail or media url that is not an HTTP URI (%s)', async (value) => {
+    const post = redditPost('placeholder');
+    Object.assign(post.data, { is_self: false, thumbnail: value, url: value });
+    globalThis.fetch = (async () => listing([post])) as typeof fetch;
+
+    const connector = new RedditConnector();
+    const validate = createAjv({ strict: false, allErrors: false, coerceTypes: true }).compile(
+      connector.definition.feeds.posts.eventKinds.post.metadataSchema
+    );
+    const result = await runSync(connector, {
+      ...syncOptions,
+      checkpoint: {},
+      commit: async (events) => {
+        for (const event of events) expect(validate(event.metadata)).toBe(true);
+      },
+    });
+
+    expect(result.events[0].metadata).not.toHaveProperty('thumbnail');
+    expect(result.events[0].metadata).not.toHaveProperty('media_url');
+  });
+
+  test.each([
+    'http://example.com/image.jpg',
+    'https://b.thumbs.redditmedia.com/a.jpg',
+    'https://example.com/a%20b.jpg?redirect=%2Farticle&size=1#preview',
+    'https://[2001:db8::1]/image.jpg',
+  ])('keeps valid HTTP URI metadata unchanged (%s)', async (value) => {
+    const post = redditPost('linked');
+    Object.assign(post.data, {
+      is_self: false,
+      thumbnail: value,
+      url: 'https://example.com/article',
+    });
+    globalThis.fetch = (async () => listing([post])) as typeof fetch;
+
+    const result = await runSync(new RedditConnector(), { ...syncOptions, checkpoint: {} });
+
+    expect(result.events[0].metadata).toMatchObject({
+      thumbnail: value,
+      media_url: 'https://example.com/article',
+    });
+  });
+
+  test.each(['posts', 'home_feed', 'user_activity'])(
+    'keeps a self-post thumbnail without adding media_url in %s',
+    async (feedKey) => {
+      const post = redditPost('self');
+      Object.assign(post.data, { thumbnail: 'https://example.com/image.jpg' });
+      globalThis.fetch = (async () => listing([post])) as typeof fetch;
+
+      const result = await runSync(new RedditConnector(), {
+        ...syncOptions,
+        feedKey,
+        config: { subreddit: 'example', username: 'example-user' },
+        checkpoint: {},
+      });
+
+      expect(result.events[0].metadata).toHaveProperty(
+        'thumbnail',
+        'https://example.com/image.jpg'
+      );
+      expect(result.events[0].metadata).not.toHaveProperty('media_url');
     }
   );
 
