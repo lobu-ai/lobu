@@ -106,24 +106,21 @@ export async function bootTaskScheduler(
   registerMaintenanceTasks(scheduler, env, coreServices);
   await scheduler.start();
 
-  // Startup convergence — a deploy is the only event that can change the
-  // bundled connector source, so converge once per boot instead of waiting
-  // for the next hourly tick. Idempotency-keyed so N pods racing at rollout
-  // produce one run; a second boot re-spawns after the first settles (terminal
-  // rows leave the partial unique index). Never throws: a boot-time DB hiccup
-  // logs and the hourly tick covers it.
-  try {
-    await scheduler.spawn(
-      'refresh-connector-definitions',
-      {},
-      { idempotencyKey: 'startup:refresh-connector-definitions' },
-    );
-  } catch (err) {
-    logger.warn(
-      { err },
-      '[task-scheduler] Startup connector-definition refresh failed to enqueue; hourly tick will cover it',
-    );
-  }
+  // Refresh from this process's bundled source: a shared startup task can be
+  // claimed by an outgoing pod during a rolling deploy. Do not await the scan
+  // on the readiness path. An older pod's in-flight refresh can still overwrite
+  // these definitions; the hourly tick repairs that after the rollout settles.
+  void refreshConnectorDefinitions().then(
+    (result) => {
+      logger.info({ ...result }, '[task-scheduler] Startup connector-definition refresh completed');
+    },
+    (err) => {
+      logger.warn(
+        { err },
+        '[task-scheduler] Startup connector-definition refresh failed; hourly tick will cover it',
+      );
+    },
+  );
 
   // AuthProfilesManager.ensureFreshCredential is a no-op until these hooks
   // are wired; during the brief startup window before scheduler.start()
@@ -359,9 +356,9 @@ function registerMaintenanceTasks(
   // (e.g. github gaining the app_installation auth method) reach orgs that
   // installed the connector before the change. Idempotent; preserves org config
   // (login_enabled / default_connection_config). Single-claimant per tick.
-  // The startup spawn in bootTaskScheduler converges the fleet right after a
-  // deploy; the hourly tick remains as the backstop (local edits while running,
-  // Atlassian MCP feed repair, overwrites racing across a rollout).
+  // bootTaskScheduler also refreshes in-process at startup; the hourly tick
+  // remains as the backstop for local edits, Atlassian MCP feed repair, and
+  // overwrites racing across a rollout.
   scheduler.register(
     'refresh-connector-definitions',
     async () => {
