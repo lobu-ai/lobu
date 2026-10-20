@@ -2,16 +2,19 @@
  * Integration test: what crawlers get from public workspace pages.
  *
  * - A failure while rendering is not a missing page: it must surface as a
- *   503 with `no-store`, never as a publicly cached 404.
+ *   503 with `no-store`, never as a publicly cached 404. That includes a
+ *   retryable client error such as a rate limit.
  * - The sitemap lists only live types (a soft-deleted type's entities used to
  *   stay listed) and dates each workspace by its newest type or entity.
  * - On an org subdomain (market.lobu.ai) rendered links drop the owner
  *   segment, which the host already implies, so following them takes no 301.
  */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { app } from '../../../index';
 import { buildPublicPageModel, buildSitemapEntries } from '../../../public-pages';
+import * as resolvePathModule from '../../../tools/resolve_path';
+import { ToolUserError } from '../../../utils/errors';
 import { getEnvFromProcess } from '../../../utils/env';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -110,6 +113,36 @@ describe('public pages > crawler-facing responses', () => {
       expect(response.status).toBe(503);
       expect(response.headers.get('cache-control')).toBe('no-store');
       expect(response.headers.get('retry-after')).toBe('60');
+    });
+
+    describe('a retryable rejection (rate limit)', () => {
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      function rateLimitResolution() {
+        vi.spyOn(resolvePathModule, 'resolvePath').mockRejectedValue(
+          new ToolUserError('Public read limit reached.', 429, 'RATE_LIMITED')
+        );
+      }
+
+      it('propagates instead of becoming a 404', async () => {
+        rateLimitResolution();
+        await expect(
+          buildPublicPageModel(liveEntitySlug, env, `${ORIGIN}${liveEntitySlug}`)
+        ).rejects.toMatchObject({ httpStatus: 429, retryable: true });
+      });
+
+      it('the page route answers 503 no-store', async () => {
+        rateLimitResolution();
+        const response = await app.request(
+          liveEntitySlug,
+          { headers: { accept: 'text/html' } },
+          env
+        );
+        expect(response.status).toBe(503);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+      });
     });
   });
 

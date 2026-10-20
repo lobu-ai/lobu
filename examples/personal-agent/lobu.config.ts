@@ -26,6 +26,10 @@ import {
 import type MidasConnector from "./midas.connector.ts";
 import type NetWorthScript from "./net-worth.reaction.ts";
 import type RevolutTransactionsConnector from "./revolut-transactions.connector.ts";
+import type SahibindenAlertsScript from "./sahibinden-alerts.script.ts";
+import type SahibindenConnector from "./sahibinden.connector.ts";
+import { sahibindenReviewPrompt } from "./sahibinden-review.prompt.ts";
+import type SahibindenReviewReaction from "./sahibinden-review.reaction.ts";
 import type SpotifyConnector from "./spotify.connector.ts";
 import { takeoutConfig } from "./takeout-dirs.ts";
 import { taskBuilderPrompt } from "./task-builder.prompt.ts";
@@ -451,6 +455,15 @@ const midasConnection = defineConnection({
   feeds: [{ feed: "assets", config: {} }],
 });
 
+// Listing reads open scratch tabs in the Chrome that is signed in to
+// sahibinden; the device Midas uses gets a sign-in wall on search.
+const sahibindenConnection = defineConnection({
+  slug: "sahibinden",
+  connector: "sahibinden",
+  name: "sahibinden.com",
+  deviceWorkerId: "0727b16f-a1e3-419c-96f5-d47d5c76f0bc",
+});
+
 // A same-workspace execution target for market marks. It has no credentials or
 // feeds: the weekly reaction receives quotes directly from its read-only action
 // without persisting raw quote events.
@@ -632,6 +645,50 @@ const duplicateEntityResolution = defineAutomation({
   ),
 });
 
+// Read alert emails live; the hourly review consumes newly stored snapshots.
+const sahibindenAlerts = defineAutomation({
+  agent: personalAgent,
+  slug: "sahibinden-alerts",
+  name: "sahibinden alerts",
+  description:
+    "Reads sahibinden saved-search alert emails, opens each new listing and stores it as a listing.snapshot.",
+  tags: ["property", "sahibinden"],
+  triggers: [
+    every("40 7 * * *", {
+      timezone: "Europe/Istanbul",
+      skip_if_unchanged: false,
+    }),
+  ],
+  sources: {
+    run_clock: context("SELECT CURRENT_TIMESTAMP AS observed_at"),
+  },
+  executor: scriptFromFile<typeof SahibindenAlertsScript>(
+    "./sahibinden-alerts.script.ts"
+  ),
+  reaction: null,
+});
+
+// The review requests image attachments through fetch_photos.
+const sahibindenListingReview = defineAutomation({
+  agent: personalAgent,
+  slug: "sahibinden-listing-review",
+  name: "sahibinden listing review",
+  description:
+    "Looks at each new listing with its photos, corrects the seller where needed, and writes the asset.",
+  tags: ["property", "sahibinden"],
+  deviceWorkerId: "87b378fc-9bfa-44b1-aba7-84b891439de9",
+  agentKind: "claude-code",
+  triggers: [every("10 * * * *", { timezone: "Europe/Istanbul" })],
+  sources: {
+    listings:
+      "SELECT id, title, source_url, metadata FROM events WHERE semantic_type = 'listing.snapshot' AND metadata->>'portal' = 'sahibinden' AND metadata->>'removed' IS DISTINCT FROM 'true'",
+  },
+  prompt: sahibindenReviewPrompt,
+  reaction: reactionFromFile<typeof SahibindenReviewReaction>(
+    "./sahibinden-review.reaction.ts"
+  ),
+});
+
 // The LinkedIn assistant reads through the paired Chrome extension.
 const linkedInAssistantDevice = {
   deviceWorkerId: "66af4f1d-13c5-4d2d-b848-5b6b5dde7b63",
@@ -730,6 +787,7 @@ export default defineConfig({
     ),
     connectorFromFile<typeof HackerNewsConnector>("./hackernews.connector.ts"),
     connectorFromFile<typeof SpotifyConnector>("./spotify.connector.ts"),
+    connectorFromFile<typeof SahibindenConnector>("./sahibinden.connector.ts"),
     // Reuse installed takeout definitions: the local sources need filesystem
     // access unavailable in the V8 isolate. Referenced connections protect
     // their installed definitions from prune.
@@ -748,6 +806,8 @@ export default defineConfig({
     linkedInInterestProfile,
     linkedInFeedFlagger,
     tiktokPracticalAiResearch,
+    sahibindenAlerts,
+    sahibindenListingReview,
   ],
   authProfiles: [
     gmailAccountAuth,
@@ -759,6 +819,7 @@ export default defineConfig({
   ],
   connections: [
     midasConnection,
+    sahibindenConnection,
     marketQuotesConnection,
     revolutConnection,
     takeoutConnection,

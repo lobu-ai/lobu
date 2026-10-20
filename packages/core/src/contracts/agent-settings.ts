@@ -129,6 +129,17 @@ export const SkillsConfigSchema = Type.Object({
 });
 export type SkillsConfig = Static<typeof SkillsConfigSchema>;
 
+/**
+ * Conversation starters an agent offers on an empty chat (web) and as Slack
+ * assistant thread-start prompts. Same `{title,message}` shape as follow-up
+ * chips; three at most so the empty state stays a short, tappable row.
+ */
+const AGENT_STARTERS_MAX = 3;
+const AgentStarterSchema = Type.Object({
+  title: Type.String({ minLength: 1, maxLength: 72 }),
+  message: Type.String({ minLength: 1, maxLength: 2000 }),
+});
+
 // ── AgentSettingsStored ─────────────────────────────────────────────────────
 
 /**
@@ -154,6 +165,9 @@ export const AgentSettingsStoredSchema = Type.Object({
   sandboxId: Type.Optional(Type.String()),
   verboseLogging: Type.Optional(Type.Boolean()),
   showToolCalls: Type.Optional(Type.Boolean()),
+  starters: Type.Optional(
+    Type.Array(AgentStarterSchema, { maxItems: AGENT_STARTERS_MAX })
+  ),
   updatedAt: Type.Number(),
 });
 export type AgentSettingsStored = Static<typeof AgentSettingsStoredSchema>;

@@ -50,11 +50,14 @@ import {
 import { SlackConnectionCoordinator } from "./slack-connection-coordinator.js";
 import {
   registerSlackAppHome,
+  registerSlackAssistantStarters,
   registerSlackPlatformHandlers,
   type SlackHomeContext,
   type SlackHomeInbox,
 } from "./slack-platform-bridge.js";
 import { createConnectedGatewayStateAdapter } from "./state-adapter.js";
+import { chatMessageSignal, resolveChatRoute } from "./chat-route.js";
+import { planAutomationActivationsForRuntimeConnection } from "../../automations/activation.js";
 import {
   type ConnectionSettings,
   isSecretField,
@@ -1715,6 +1718,47 @@ export class ChatInstanceManager {
         publicGatewayUrl: this.publicGatewayUrl,
         resolveHomeContext: resolveSlackHomeContext,
         resolveUserInbox: resolveSlackHomeUserInbox,
+      });
+
+      registerSlackAssistantStarters(chat, connection, {
+        adapter,
+        // Route a not-yet-sent DM exactly like the first real one will be.
+        resolveAgent: async (thread) => {
+          const signal = chatMessageSignal({
+            platform: connection.platform,
+            connectionId: connection.id,
+            channelId: thread.channelId,
+            conversationId: thread.conversationId,
+            teamId: thread.teamId,
+            userId: thread.userId,
+            messageId: `assistant-thread:${thread.conversationId}`,
+            text: "",
+            isMention: false,
+            occurredAt: new Date().toISOString(),
+          });
+          const plan = connection.organizationId
+            ? await planAutomationActivationsForRuntimeConnection({
+                connectionOrganizationId: connection.organizationId,
+                runtimeConnectionId: connection.id,
+                signal,
+                crossOrganization: connection.settings?.previewMode === true,
+              })
+            : { signal, replyTargets: [], backgroundTargets: [] };
+          return resolveChatRoute({
+            plan,
+            platform: connection.platform,
+            channelId: thread.channelId,
+            connection,
+          });
+        },
+        loadStarters: async (agentId, organizationId) =>
+          (
+            await this.services
+              .getAgentSettingsStore()
+              .getSettings(agentId, {
+                organizationId: organizationId ?? connection.organizationId,
+              })
+          )?.starters,
       });
 
       chat.registerSingleton();

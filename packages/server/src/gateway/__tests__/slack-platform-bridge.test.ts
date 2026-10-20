@@ -5,6 +5,7 @@ import {
   parseSlackTeamJoinEvent,
   postSlackTeamJoinWelcome,
   registerSlackAppHome,
+  registerSlackAssistantStarters,
   registerSlackPlatformHandlers,
 } from "../connections/slack-platform-bridge.js";
 
@@ -518,5 +519,100 @@ describe("Slack platform bridge", () => {
         "application/json",
       ),
     ).toBeNull();
+  });
+});
+
+describe("Slack assistant starters", () => {
+  const starters = [{ title: "Plan videos", message: "Plan this week's videos" }];
+  const connection = (over: Record<string, unknown> = {}) =>
+    ({ id: "conn-1", platform: "slack", agentId: "agent-7", ...over }) as any;
+  const event = {
+    channelId: "D123",
+    threadId: "slack:D123:1700.1",
+    threadTs: "1700.1",
+    userId: "U1",
+    context: { teamId: "T1" },
+  };
+
+  function start(
+    conn: any,
+    deps: {
+      resolveAgent?: (thread: any) => Promise<any>;
+      loadStarters?: (
+        agentId: string,
+        organizationId?: string,
+      ) => Promise<typeof starters | undefined>;
+    } = {},
+  ) {
+    let handler: ((event: any) => Promise<void>) | undefined;
+    const chat = {
+      onAssistantThreadStarted: mock((h: typeof handler) => {
+        handler = h;
+      }),
+    };
+    const setSuggestedPrompts = mock(async () => {});
+    const resolveAgent = mock(
+      deps.resolveAgent ??
+        (async () => ({ agentId: "agent-7", organizationId: "org-1" })),
+    );
+    const loadStarters = mock(deps.loadStarters ?? (async () => starters));
+    registerSlackAssistantStarters(chat, conn, {
+      adapter: { setSuggestedPrompts },
+      resolveAgent,
+      loadStarters,
+    });
+    return {
+      chat,
+      resolveAgent,
+      loadStarters,
+      setSuggestedPrompts,
+      fire: () => handler?.(event),
+    };
+  }
+
+  test("offers the routed agent's starters on a new assistant thread", async () => {
+    const h = start(connection(), {
+      resolveAgent: async () => ({ agentId: "linked-agent", organizationId: "org-2" }),
+    });
+    await h.fire();
+    // The thread is described exactly as its first DM will arrive.
+    expect(h.resolveAgent).toHaveBeenCalledWith({
+      channelId: "slack:D123",
+      conversationId: "slack:D123:1700.1",
+      userId: "U1",
+      teamId: "T1",
+    });
+    expect(h.loadStarters).toHaveBeenCalledWith("linked-agent", "org-2");
+    expect(h.setSuggestedPrompts).toHaveBeenCalledWith("D123", "1700.1", starters);
+  });
+
+  test("offers nothing when no agent answers the thread or it has no starters", async () => {
+    const unrouted = start(connection(), { resolveAgent: async () => null });
+    await unrouted.fire();
+    const device = start(connection(), {
+      resolveAgent: async () => ({ agentId: null }),
+    });
+    await device.fire();
+    const empty = start(connection(), { loadStarters: async () => undefined });
+    await empty.fire();
+    for (const h of [unrouted, device, empty]) {
+      expect(h.setSuggestedPrompts).not.toHaveBeenCalled();
+    }
+  });
+
+  test("does not subscribe off Slack", () => {
+    expect(
+      start(connection({ platform: "telegram" })).chat.onAssistantThreadStarted,
+    ).not.toHaveBeenCalled();
+  });
+
+  test("a failed starters lookup never throws into the Slack handler", async () => {
+    const h = start(connection(), {
+      loadStarters: async () => {
+        throw new Error("db down");
+      },
+    });
+    await expect(h.fire()).resolves.toBeUndefined();
+    expect(h.setSuggestedPrompts).not.toHaveBeenCalled();
   });
 });

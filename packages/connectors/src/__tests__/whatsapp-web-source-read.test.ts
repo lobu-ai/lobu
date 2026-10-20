@@ -2,8 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { whatsAppWebAdapterProgram } from "../whatsapp-web-adapter.js";
 import { WHATSAPP_ADAPTER_VERSION } from "../whatsapp-web-helpers.js";
 
-function sourceRow(rowId: number, body = `message ${rowId}`, group = false) {
-  const remote = group ? "synthetic-group@g.us" : "15550000000@c.us";
+function sourceRow(
+  rowId: number,
+  body = `message ${rowId}`,
+  group = false,
+  remote = group ? "synthetic-group@g.us" : "15550000000@c.us"
+) {
   const serialized = `false_${remote}_synthetic-${rowId}`;
   const key = { id: `synthetic-${rowId}`, remote, fromMe: false, toString: () => serialized };
   return { rowId, id: serialized, model: { id: key, attributes: {
@@ -11,8 +15,14 @@ function sourceRow(rowId: number, body = `message ${rowId}`, group = false) {
   } } };
 }
 
-function install(rows: ReturnType<typeof sourceRow>[], missingDatabase = false) {
+function install(
+  rows: ReturnType<typeof sourceRow>[],
+  missingDatabase = false,
+  chats: string[] = [],
+  lidToPhone: Record<string, string> = {}
+) {
   const requested: string[][] = [];
+  let visited = 0;
   let canceled = false;
   let omit = false;
   let closed = 0;
@@ -32,6 +42,7 @@ function install(rows: ReturnType<typeof sourceRow>[], missingDatabase = false) 
           let offset = 0;
           const advance = () => queueMicrotask(() => {
             const row = selected[offset++];
+            if (row) visited++;
             request.result = row ? { key: row.rowId, value: { id: row.id, rowId: row.rowId, t: row.model.attributes.t, type: row.model.attributes.type }, continue: advance } : null;
             request.onsuccess();
           });
@@ -46,8 +57,9 @@ function install(rows: ReturnType<typeof sourceRow>[], missingDatabase = false) 
     globalThis: globals,
     window: { require: (name: string) => {
       if (name === "WAWebMsgKey") return { fromString: (id: string) => rows.find((row) => row.id === id)!.model.id };
+      if (name === "WAWebLidMigrationUtils") return { toPn: async (id: string) => lidToPhone[id] };
       if (name === "WAWebCollections") return {
-        Chat: { _models: [] }, Contact: { _models: [] }, Msg: {
+        Chat: { _models: chats.map((id) => ({ id })) }, Contact: { _models: [] }, Msg: {
           _models: [],
           getMessagesById: async (ids: string[]) => {
             requested.push(ids);
@@ -75,6 +87,7 @@ function install(rows: ReturnType<typeof sourceRow>[], missingDatabase = false) 
       op: "read_messages", adapter_version: WHATSAPP_ADAPTER_VERSION, input,
     }),
     requested,
+    visited: () => visited,
     observe: (input: Record<string, unknown> = {}) => globals.__owlettoWhatsAppAdapterV1.invoke({
       op: "observe_messages", adapter_version: WHATSAPP_ADAPTER_VERSION, input,
     }),
@@ -177,6 +190,62 @@ describe("WhatsApp source-owned history reads", () => {
     expect(result).toMatchObject({ ok: true, hasMore: false, results: [{ id: "synthetic-1" }] });
     expect(result.nextCursor).toBeUndefined();
     expect(page.requested).toEqual([["false_15550000000@c.us_synthetic-1"]]);
+  });
+
+  it("reads one chat's newest messages across pages without matching text", async () => {
+    const other = "15550000001@c.us";
+    const rows = [sourceRow(1), sourceRow(2, "x", false, other), sourceRow(3), sourceRow(4, "y", false, other)];
+    const page = install(rows, false, ["15550000000@c.us", other]);
+    const first = await page.read({ query: "chat:15550000000@c.us", limit: 1 });
+    expect(first).toMatchObject({ ok: true, hasMore: true, results: [{ id: "synthetic-3" }] });
+    rows.push(sourceRow(5));
+    const last = await page.read({ query: "chat:15550000000@c.us", limit: 1, cursor: first.nextCursor });
+    expect(last).toMatchObject({ ok: true, hasMore: false, results: [{ id: "synthetic-1" }] });
+    expect(page.requested).toEqual([["false_15550000000@c.us_synthetic-3"], ["false_15550000000@c.us_synthetic-1"]]);
+    expect(await page.read({ query: "chat:15559999999@c.us" })).toMatchObject({ ok: false });
+    expect(await page.read({ query: `chat:${other}`, cursor: first.nextCursor })).toMatchObject({ ok: false });
+  });
+
+  it("answers a chat read in one scan and caps how much history it examines", async () => {
+    const other = "15550000001@c.us";
+    const rows = [sourceRow(1), ...Array.from({ length: 20_001 }, (_, i) => sourceRow(i + 2, "x", false, other))];
+    const page = install(rows, false, ["15550000000@c.us"]);
+    const first = await page.read({ query: "chat:15550000000@c.us", limit: 5 });
+    expect(first).toMatchObject({ ok: true, hasMore: true, results: [] });
+    expect(page.visited()).toBe(20_001);
+    expect(page.requested).toEqual([]);
+    const last = await page.read({ query: "chat:15550000000@c.us", limit: 5, cursor: first.nextCursor });
+    expect(last).toMatchObject({ ok: true, hasMore: false, results: [{ id: "synthetic-1" }] });
+  });
+
+  it("matches phone and LID history regardless of the loaded chat's ID form", async () => {
+    const phone = "15550000000@c.us";
+    const canonical = "15550000000@s.whatsapp.net";
+    const lid = "99000000000001@lid";
+    const unrelatedLid = "99000000000002@lid";
+    for (const chat of [phone, canonical, lid]) {
+      for (const query of [phone, canonical, lid]) {
+        const rows = [phone, canonical, lid, unrelatedLid].map((remote, i) => sourceRow(i + 1, "private", false, remote));
+        const page = install(rows, false, [chat], { [lid]: phone });
+        expect(await page.read({ query: `chat:${query}` })).toMatchObject({
+          ok: true, hasMore: false,
+          results: [{ id: "synthetic-3" }, { id: "synthetic-2" }, { id: "synthetic-1" }],
+        });
+        expect(page.requested).toEqual([[rows[2].id, rows[1].id, rows[0].id]]);
+      }
+    }
+  });
+
+  it("keeps unresolved LIDs distinct and applies the feed's group scope", async () => {
+    const lid = "99000000000001@lid";
+    const rows = [sourceRow(1), sourceRow(2, "private", false, lid), sourceRow(3, "group", true)];
+    const page = install(rows, false, ["15550000000@c.us", lid, "synthetic-group@g.us"]);
+    expect(await page.read({ query: `chat:${lid}` })).toMatchObject({ ok: true, results: [{ id: "synthetic-2" }] });
+    expect(await page.read({ query: "chat:synthetic-group@g.us", chat_filter: "group" })).toMatchObject({ ok: true, results: [{ id: "synthetic-3" }] });
+    page.requested.length = 0;
+    expect(await page.read({ query: "chat:synthetic-group@g.us", chat_filter: "individual" })).toMatchObject({ ok: true, results: [] });
+    expect(await page.read({ query: `chat:${lid}`, chat_filter: "group" })).toMatchObject({ ok: true, results: [] });
+    expect(page.requested).toEqual([]);
   });
 
   it("rejects a cursor reused with a different query or scope", async () => {

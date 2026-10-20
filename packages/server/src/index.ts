@@ -123,7 +123,9 @@ import {
 	isAllowedCorsOrigin,
 } from "./utils/cors-origin";
 import { isValidFrameAncestor } from "./utils/csp";
+import { getApplyContext } from "./utils/apply-context";
 import { errorMessage } from "./utils/errors";
+import { insertWorkspaceChangeEventInTransaction } from "./utils/insert-event";
 import logger from "./utils/logger";
 import { readMcpAppAsset, renderMcpAppTemplate } from "./utils/mcp-app-bundle";
 import { generateOpenAPISpec } from "./utils/openapi-generator";
@@ -1389,23 +1391,51 @@ app.patch("/api/:orgSlug/organization/visibility", mcpAuth, async (c) => {
 		);
 	}
 
-	const sql = getDb();
-	const rows = await sql<{
-		id: string;
-		name: string;
-		slug: string;
-		logo: string | null;
-		description: string | null;
-		created_at: string;
-		visibility: "public" | "private";
-	}>`
-    UPDATE "organization"
-    SET visibility = ${visibility}
-    WHERE id = ${organizationId}
-    RETURNING id, name, slug, logo, description, "createdAt" AS created_at, visibility
-  `;
+	// Visibility decides whether anonymous visitors and crawlers can read the
+	// workspace, so the change and its audit row commit together.
+	const { actorSource, createdBy, clientId } = getApplyContext(c);
+	const org = await getDb().begin(async (tx) => {
+		const [before] = await tx<{ visibility: "public" | "private" }>`
+      SELECT visibility FROM "organization" WHERE id = ${organizationId} FOR UPDATE
+    `;
+		if (!before) return null;
+		const [updated] = await tx<
+			{
+				id: string;
+				name: string;
+				slug: string;
+				logo: string | null;
+				description: string | null;
+				created_at: string;
+				visibility: "public" | "private";
+			}
+		>`
+      UPDATE "organization"
+      SET visibility = ${visibility}
+      WHERE id = ${organizationId}
+      RETURNING id, name, slug, logo, description, "createdAt" AS created_at, visibility
+    `;
+		if (updated && before.visibility !== visibility) {
+			await insertWorkspaceChangeEventInTransaction(
+				{
+					organizationId,
+					resourceKind: "organization",
+					resourceId: organizationId,
+					op: "updated",
+					summary: `Workspace visibility set to ${visibility}`,
+					state: { id: updated.id, slug: updated.slug, visibility },
+					before: { visibility: before.visibility },
+					changedFields: ["visibility"],
+					actorSource,
+					createdBy,
+					clientId,
+				},
+				tx,
+			);
+		}
+		return updated ?? null;
+	});
 
-	const org = rows[0];
 	if (!org) {
 		return c.json({ error: "not_found", message: "Workspace not found." }, 404);
 	}

@@ -29,6 +29,21 @@ import { applyCommand } from "../apply-cmd.js";
 const tempDirs: string[] = [];
 const originalWrite = process.stdout.write.bind(process.stdout);
 
+beforeEach(() => {
+  spyOn(process.stdout, "write").mockImplementation(() => true);
+  spyOn(context, "resolveContext").mockResolvedValue({
+    name: "prod",
+    url: "https://app.lobu.ai/api/v1",
+    source: "config",
+  });
+  spyOn(credentials, "getToken").mockResolvedValue("tok");
+  spyOn(context, "getActiveOrg").mockResolvedValue("acme");
+  spyOn(context, "loadContextConfig").mockResolvedValue({
+    currentContext: "prod",
+    contexts: { prod: { url: "https://app.lobu.ai/api/v1" } },
+  });
+});
+
 afterEach(() => {
   mock.restore();
   while (tempDirs.length > 0) {
@@ -179,32 +194,22 @@ export default defineConfig({
 `;
 }
 
-async function runApply(dir: string, fetchImpl: typeof fetch) {
+async function runApply(
+  dir: string,
+  fetchImpl: typeof fetch,
+  only?: "agents" | "memory"
+) {
   await applyCommand({
     cwd: dir,
     yes: true,
     url: "https://app.lobu.ai",
     org: "acme",
     fetchImpl,
+    ...(only ? { only } : {}),
   });
 }
 
 describe("apply wire payloads: undeclared fields are never sent", () => {
-  beforeEach(() => {
-    spyOn(process.stdout, "write").mockImplementation(() => true);
-    spyOn(context, "resolveContext").mockResolvedValue({
-      name: "prod",
-      url: "https://app.lobu.ai/api/v1",
-      source: "config",
-    });
-    spyOn(credentials, "getToken").mockResolvedValue("tok");
-    spyOn(context, "getActiveOrg").mockResolvedValue("acme");
-    spyOn(context, "loadContextConfig").mockResolvedValue({
-      currentContext: "prod",
-      contexts: { prod: { url: "https://app.lobu.ai/api/v1" } },
-    });
-  });
-
   test.each([
     "original-first",
     "duplicate-first",
@@ -355,5 +360,99 @@ describe("apply wire payloads: undeclared fields are never sent", () => {
     });
     expect(writes[0]).not.toHaveProperty("config");
     expect(writes[0]).not.toHaveProperty("replace_config");
+  });
+});
+
+describe("apply --only scopes provider keys to the agents family", () => {
+  function configWithProviderKey(withEntity: boolean): string {
+    return `import { defineAgent, defineConfig, defineEntityType } from "@lobu/cli/config";
+export default defineConfig({
+  agents: [
+    defineAgent({
+      id: "triage",
+      name: "Triage",
+      dir: "./agents/triage",
+      providers: [{ id: "synthetic-provider", model: "synthetic-model", key: "synthetic-key" }],
+    }),
+  ],
+  entities: [${withEntity ? `defineEntityType({ key: "synthetic_thing" })` : ""}],
+});
+`;
+  }
+
+  function providerWrites(calls: WireCall[]): WireCall[] {
+    return calls.filter((c) => c.url.includes("/inference-providers"));
+  }
+
+  test.each([
+    ["an all-noop plan", false],
+    ["a plan with memory work", true],
+  ])("`--only memory` never pushes a provider key (%s)", async (_label, withEntity) => {
+    const dir = mkProject(configWithProviderKey(withEntity));
+    const { fetchStub, calls } = makeFetch([]);
+    await runApply(dir, fetchStub, "memory");
+    expect(providerWrites(calls)).toEqual([]);
+    const entityCreates = calls
+      .filter((c) => c.url.endsWith("/manage_entity_schema"))
+      .map((c) => c.body)
+      .filter((body) => body.action === "create");
+    expect(entityCreates).toEqual(
+      withEntity
+        ? [
+            expect.objectContaining({
+              schema_type: "entity_type",
+              slug: "synthetic-thing",
+            }),
+          ]
+        : []
+    );
+  });
+
+  test.each([
+    ["--only agents", "agents" as const],
+    ["a full apply", undefined],
+  ])("%s still pushes the declared provider key", async (_label, only) => {
+    const dir = mkProject(configWithProviderKey(false));
+    const { fetchStub, calls } = makeFetch([]);
+    await runApply(dir, fetchStub, only);
+    expect(providerWrites(calls)).toEqual([
+      {
+        url: "https://app.lobu.ai/api/acme/agents/inference-providers/synthetic-provider/key",
+        body: { value: "synthetic-key" },
+      },
+    ]);
+  });
+
+  test.each([
+    ["--only agents", "agents" as const],
+    ["a full apply", undefined],
+  ])("%s still rotates a key on an all-noop plan", async (_label, only) => {
+    const dir = mkProject(configWithProviderKey(false));
+    const { fetchStub, calls } = makeFetch([]);
+    const fetchExistingAgent = (async (url, init) => {
+      if (init?.method === "GET") {
+        if (String(url).endsWith("/agents")) {
+          return Response.json({
+            agents: [{ agentId: "triage", name: "Triage" }],
+          });
+        }
+        if (String(url).endsWith("/agents/triage/config")) {
+          return Response.json({
+            models: ["synthetic-provider/synthetic-model"],
+          });
+        }
+      }
+      return fetchStub(url, init);
+    }) as typeof fetch;
+    await runApply(dir, fetchExistingAgent, only);
+    expect(providerWrites(calls)).toEqual([
+      {
+        url: "https://app.lobu.ai/api/acme/agents/inference-providers/synthetic-provider/key",
+        body: { value: "synthetic-key" },
+      },
+    ]);
+    expect(
+      calls.find((c) => c.url.endsWith("/deployments"))?.body.counts
+    ).toMatchObject({ create: 0, update: 0, delete: 0 });
   });
 });
