@@ -222,6 +222,47 @@ The normal MCP surface is intentionally small. Flat administrative tools are not
 
 Search before create to avoid duplicates. Prefer a read or dry run before mutations, never fabricate returned URLs or identifiers, and never delete from `events`; supersede or tombstone instead.
 
+## Custom Views
+
+Views are custom React panels attached to entity types, records, events, or the workspace Data hub. They render in the web app and MCP hosts (Claude and other MCP Apps hosts); chat channels get links to views, not the views themselves. Author them in `views/<type>/<key>.tsx` and ship with `lobu apply` (list them via `viewFromFile` in `defineConfig`), or set single-file sources over MCP with `manage_views` (owner/admin only).
+
+Module shape (the server resolves React, React DOM, `@lobu/views` and `@lobu/views/components`; other dependencies need the CLI path with `node_modules` present):
+
+```tsx
+import { defineView, sql, useQuery, useParams } from "@lobu/views";
+import { Card, DataTable, FilterBar, SearchField, TruncatedNotice } from "@lobu/views/components";
+
+export const view = defineView({
+  key: "pipeline",
+  attach: [{ type: "deal", placement: "tab" }],
+  params: { stage: { type: "string", default: "open" } },
+});
+
+export default function Pipeline() {
+  const [params, setParams] = useParams();
+  const deals = useQuery<{ id: string; title: string }[]>(
+    sql`SELECT id, title FROM deal WHERE stage = ${params.stage}`
+  );
+  if (deals.loading) return <p>Loading…</p>;
+  if (deals.error) return <p>{deals.error} ({deals.errorCode})</p>;
+  return (
+    <Card title="Pipeline">
+      <FilterBar><SearchField label="Stage" value={String(params.stage)} onChange={(v) => setParams({ stage: v })} /></FilterBar>
+      <DataTable columns={[{ key: "title", header: "Title" }]} rows={deals.data ?? []} keyOf={(r) => r.id} />
+      {deals.truncated && <TruncatedNotice shown={deals.data?.length ?? 0} />}
+    </Card>
+  );
+}
+```
+
+Rules that are load-bearing, not style:
+
+- Reads go through `useQuery` (`sql`, a `query_sdk` script string, or a read-only `tool()`). `query_sql` allows 500 rows max with a 5 second timeout — branch on the typed `errorCode` (e.g. `UPSTREAM_TIMEOUT`), never on message text, and render `truncated` honestly instead of passing partial data off as complete.
+- Never aggregate history in a view: no `GROUP BY`, `DISTINCT ON`, per-row regexp, or leading-wildcard `LIKE` over `events` or other growing tables. For "latest state" views, have an Automation maintain keyed event outputs (each run supersedes the previous event with the same key) and read the current head with `read_knowledge`.
+- Writes go only through declared view actions (`useAction` → `invoke_view_action`), which emit the declared event kind and can activate workspace-triggered Automations. Action `value` payloads are capped at 4000 JSON chars — save content first, then pass the id. A subject shown from a superseded event rejects with 409; refetch and ask the user to re-confirm rather than retrying blindly.
+- Views run in a sandboxed frame with no direct network: no fetch, no third-party calls at runtime. Bundle shared code via the CLI path; the MCP `manage_views` path compiles `react` + `@lobu/views` (+components) only.
+- Params sync to the URL on Lobu hosts only; elsewhere they stay frame-local. `refetch()` re-reads on demand; only Lobu hosts push live data-changed refreshes.
+
 ## Connectors, Feeds, and Operations
 
 Connectors are the primary integration path for third-party services. The

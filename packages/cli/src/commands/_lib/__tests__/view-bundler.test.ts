@@ -101,6 +101,30 @@ describe("bundleViewFromFile", () => {
     expect(bundled.compiledCode).not.toContain(entry);
   });
 
+  test("bundles the first-party components kit from node_modules", async () => {
+    const entry = mkView(
+      {
+        "views/deal/cards.tsx": `import { defineView } from "@lobu/views";
+import { Card, DataTable, formatCompact } from "@lobu/views/components";
+export const view = defineView({ key: "cards", attach: [{ type: "deal" }], params: { label: { type: "string", default: formatCompact(1500) } } });
+const ROWS = [{ id: 1 }, { id: 2 }];
+export default function CardsView() {
+  return <Card title="t"><DataTable columns={[{ key: "id", header: "ID", sortable: true }]} rows={ROWS} keyOf={(r) => r.id} sort={{ key: "id", dir: "asc" }} /></Card>;
+}
+`,
+      },
+      "views/deal/cards.tsx"
+    );
+    const bundled = await bundleFixture(entry);
+    expect(bundled.metadata.key).toBe("cards");
+    expect(bundled.metadata.params).toEqual({
+      label: { type: "string", default: "1.5K" },
+    });
+    // Kit content is really inlined (not a stub): the table sort marker survives.
+    expect(bundled.compiledCode).toContain("aria-sort");
+    expect(bundled.compiledCode.length).toBeLessThan(300_000);
+    expect(bundled.compiledCode).not.toContain(entry);
+  });
   test("bundles relative imports into the same artifact", async () => {
     const entry = mkView(
       {

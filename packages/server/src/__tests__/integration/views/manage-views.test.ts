@@ -531,6 +531,20 @@ mountView(view, V);
 		expect((err as ToolUserError).httpStatus).toBe(422);
 	});
 
+	it("compiles the first-party components subpath; rejects unknown subpaths", async () => {
+		const compiled = await compileView(
+			`import { DataTable } from "@lobu/views/components";\nexport default function Board() { return <DataTable columns={[{ key: "id", header: "ID" }]} rows={[{ id: 1 }]} keyOf={(r) => r.id} />; }\n`
+		);
+		expect(compiled.length).toBeGreaterThan(0);
+		// Kit content is really in the bundle (not a stubbed re-export).
+		expect(compiled).toContain("aria-sort");
+		const err = await compileView(
+			`import { x } from "@lobu/views/admin";\nexport default function Board() { return x; }`
+		).catch((e) => e);
+		expect(err).toBeInstanceOf(ToolUserError);
+		expect((err as ToolUserError).httpStatus).toBe(422);
+	});
+
 	it("stored bundles never carry server package content", async () => {
 		// 'invoke_view_action' names a server tool file; it must never appear
 		// in a compiled view bundle, which may only contain the view plus the

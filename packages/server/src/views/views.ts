@@ -261,8 +261,10 @@ export function projectView(view: StoredView): Omit<
  * The ONLY importable specifiers in phase-1 view compilation. A view author is
  * an org owner/admin, but the bundle is served to every viewer of the page —
  * so compilation resolves nothing off disk except these pinned runtime funds:
- * react for rendering and `@lobu/views` for the hooks bridge (params, scope,
- * reads, actions). Relative/absolute imports (which could reach server files)
+ * react for rendering, `@lobu/views` for the hooks bridge (params, scope,
+ * reads, actions), and `@lobu/views/components` for the first-party
+ * presentational kit (tables, filters, charts, query states).
+ * Relative/absolute imports (which could reach server files)
  * and every other bare specifier fail closed; the CLI bundles relative files
  * and npm deps where node_modules exists and ships the bundle beside the
  * source.
@@ -273,10 +275,11 @@ const VIEW_ALLOWED_BARE_SPECIFIERS = new Set([
   'react-dom/client',
   'react/jsx-runtime',
   '@lobu/views',
+  '@lobu/views/components',
 ]);
 /** The server compiler always mounts through these installed runtime packages. */
 export function viewSourceDependencies(): SourceDependencies {
-  return sourceDependencies(['react', 'react-dom/client', '@lobu/views'].map((name) => require.resolve(name)));
+  return sourceDependencies(['react', 'react-dom/client', '@lobu/views', '@lobu/views/components'].map((name) => require.resolve(name)));
 }
 
 /** Virtual specifier carrying the authored source into the bundle. */
@@ -385,7 +388,7 @@ function viewResolvePlugin(): Plugin {
         return {
           errors: [
             {
-              text: `Unknown view import "${args.path}": phase-1 views bundle react and @lobu/views only; relative files and other dependencies ship through lobu apply`,
+              text: `Unknown view import "${args.path}": phase-1 views bundle react, @lobu/views and @lobu/views/components only; relative files and other dependencies ship through lobu apply`,
             },
           ],
         };
