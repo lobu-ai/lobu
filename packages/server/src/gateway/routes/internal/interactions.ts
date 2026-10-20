@@ -1,10 +1,6 @@
 #!/usr/bin/env bun
 
-import {
-	createLogger,
-	getErrorMessage,
-	sanitizeSuggestionPrompts,
-} from "@lobu/core";
+import { createLogger, getErrorMessage } from "@lobu/core";
 import {
 	isApprovalAttribution,
 	isInteractionResourceKind,
@@ -12,7 +8,6 @@ import {
 import { Hono } from "hono";
 import { getDb } from "../../../db/client.js";
 import type { InteractionService } from "../../interactions.js";
-import { persistSuggestion } from "../../suggestions/persist-suggestion.js";
 import { CHAT_SENDER_NOT_LINKED, isConfinedChatTurn } from "../../orchestration/chat-turn-actor.js";
 import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
@@ -169,102 +164,6 @@ export function createInteractionRoutes(
       }
     }
   );
-
-  /**
-   * Create non-blocking suggestions
-   * POST /internal/suggestions/create
-   */
-  router.post("/internal/suggestions/create", authenticateWorker, async (c) => {
-    try {
-      const worker = getVerifiedWorker(c);
-      const {
-        userId,
-        conversationId,
-        channelId,
-        teamId,
-        connectionId,
-        platform,
-        organizationId,
-        messageId,
-        source,
-      } = worker;
-
-      const body = await c.req.json();
-      // The authenticated worker is NOT trusted (it ingests untrusted connector
-      // content). Validate/normalize server-side — never dereference an unshaped
-      // `prompts` (a non-array body would crash on `.length`).
-      const prompts = sanitizeSuggestionPrompts(body?.prompts);
-      if (prompts.length === 0) {
-        return c.json({ success: true, prompts: 0 });
-      }
-
-      // Durable state is tenant-scoped — without an organizationId the current
-      // set can't be persisted, and the web path has nothing to embed on
-      // `complete`. Fail rather than accept-and-drop.
-      if (!organizationId) {
-        logger.warn(
-          `Suggestion for ${conversationId} has no organizationId — cannot persist`
-        );
-        return c.json(
-          { success: false, error: "missing organization context" },
-          400
-        );
-      }
-
-      // After validation: a capture run takes the same empty-prompts and
-      // missing-org paths a live run would, and only the delivery is suppressed.
-      const captured = await captureSideEffect(c, "suggestions.create", {
-        conversationId,
-        prompts,
-      });
-      if (captured) return captured;
-
-      logger.info(
-        `Sending suggestions to conversation ${conversationId} (${prompts.length} prompts)`
-      );
-
-      // Persisted for the web surface only. Both its mid-turn card and terminal
-      // embed re-read this authoritative state before delivery, so delayed queue
-      // rows cannot replay stale prompts. A chat platform renders a card that
-      // stays in channel scrollback and has nothing to rehydrate.
-      if (platform === "api") {
-        await persistSuggestion({
-          organizationId,
-          conversationId,
-          prompts,
-          turnMessageId: messageId,
-          runId: worker.runId ?? null,
-        });
-      }
-
-      // Emit on every platform. The interaction bridge builds a
-      // Card/Actions/Button card for chat platforms — buttons carry only
-      // `suggestion:<id>:<i>` (prompt text + routing live in a pending row,
-      // keeping Telegram's 64-byte callback_data budget), with a numbered-text
-      // fallback where cards are unsupported. The API platform owner-routes the
-      // card and refreshes its prompts from durable state at delivery.
-      const posted = await interactionService.postSuggestion(
-        organizationId,
-        userId,
-        conversationId,
-        channelId,
-        teamId,
-        connectionId,
-        platform || "unknown",
-        prompts,
-        source,
-        messageId
-      );
-
-      return c.json({ success: true, prompts: prompts.length, id: posted.id });
-    } catch (error) {
-      logger.error("Failed to send suggestions", {
-        error: getErrorMessage(error),
-        stack: error instanceof Error ? error.stack : undefined,
-      });
-      return errorResponse(c, "Failed to send suggestions", 500);
-    }
-  });
 
   logger.debug("Internal interaction routes registered");
   return router;

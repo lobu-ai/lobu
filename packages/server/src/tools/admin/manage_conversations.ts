@@ -263,7 +263,7 @@ async function handleSend(
       platformMetadata: {
         agentId: args.agent_id,
         organizationId: ctx.organizationId,
-        // MUST be a HEADLESS_SOURCES value (unified-thread-consumer.ts): an SDK
+        // MUST be a HEADLESS_SOURCES value (automation-run-session.ts): an SDK
         // send opens no SSE stream, so a non-headless source makes the terminal
         // reply requeue-until-fail waiting for an SSE owner that never connects.
         // `internal` is the headless programmatic-turn source (the same default

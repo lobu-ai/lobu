@@ -23,6 +23,8 @@ export {
   renderAlwaysOnToolPolicyRulesFor,
 } from "./agent-policy";
 export {
+  FOLLOW_UP_SUGGESTIONS_PROMPT,
+  parseFollowUpSuggestions,
   sanitizeSuggestionPrompts,
   SUGGESTION_LIMITS,
   type SuggestedPrompt,

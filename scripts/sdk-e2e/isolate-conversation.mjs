@@ -111,7 +111,6 @@ assert.deepEqual(
     ["read", false],
     ["write", false],
     ["read", false],
-    ["suggest_actions", false],
   ]
 );
 // The FIRST read is the skill the gateway seeded before the turn ran. Its token
@@ -124,7 +123,7 @@ assert.ok(
 );
 assert.ok(JSON.stringify(results[2].content).includes(marker));
 console.log(
-  `PASS: public API message ${message.messageId} completed isolate run ${run.id}; seeded skill file read, real write/read, gateway suggestion call and persisted native Pi session verified`
+  `PASS: public API message ${message.messageId} completed isolate run ${run.id}; seeded skill file read, real write/read and persisted native Pi session verified`
 );
 
 const cancelMarker = `ISOLATE_CANCEL_${randomBytes(16).toString("hex")}`;

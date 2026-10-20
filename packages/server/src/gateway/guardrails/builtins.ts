@@ -6,14 +6,12 @@ import type {
   PreToolGuardrailContext,
 } from "@lobu/core";
 import { extractStageText } from "./stage-text.js";
-import { createSuggestFollowupsGuardrail } from "./suggest-followups.js";
 
 /**
  * Built-in guardrails registered by the gateway at startup:
  *  - `secret-scan`       (output, stage-locked)  — credential-shape regex scan
  *  - `pii-scan`          (any stage)             — emails / phones / Luhn PANs
  *  - `forbidden-tools`   (pre-tool, stage-locked) — destructive-tool deny list
- *  - `suggest-followups` (output, enrichment)    — chips when agent skips tool
  */
 
 // -- pii-scan ---------------------------------------------------------------
@@ -183,7 +181,4 @@ export function registerBuiltinGuardrails(registry: GuardrailRegistry): void {
   registry.register(createPiiScanGuardrail("input"));
   registry.register(createPiiScanGuardrail("output"));
   registry.register(createPiiScanGuardrail("pre-tool"));
-  // Enrichment (never trips): chips when the agent skips suggest_actions.
-  // See suggest-followups.ts — generation runs after blocking scans pass.
-  registry.register(createSuggestFollowupsGuardrail());
 }

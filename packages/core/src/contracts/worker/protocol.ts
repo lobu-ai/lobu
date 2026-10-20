@@ -26,6 +26,7 @@
  */
 
 import { type Static, Type } from "@sinclair/typebox";
+import { SUGGESTION_LIMITS } from "../../suggestions";
 import { ConnectorOperationRequestSchema } from "../tools/manage-operations";
 
 export const CONNECTOR_HTTP_AUTH_CAPABILITY = "http_auth";
@@ -639,7 +640,7 @@ export const AgentTurnPollPayloadSchema = Type.Object({
         ),
         /**
          * The gateway tools available for this turn, by NAME only —
-         * `ask_user`, `send_message`, `suggest_actions` and the rest of
+         * `ask_user`, `send_message` and the rest of
          * `@lobu/plugin-conversations`. The guest runs that package's own
          * implementation, so the route, the request body and the schema live
          * there and never on this wire; sending a name the package does not
@@ -673,6 +674,12 @@ export const AgentTurnPollPayloadSchema = Type.Object({
             platform: Type.String({ minLength: 1 }),
           })
         ),
+        /**
+         * Ask the turn's own model for follow-up chips after it answers and
+         * return them with the completion. Set by the gateway only for a
+         * human-facing turn; absent → no chips.
+         */
+        follow_ups: Type.Optional(Type.Literal(true)),
       })
     ),
     /**
@@ -1164,6 +1171,16 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
    * (`chat-response-bridge`) already acts on it.
    */
   replied_in_band: Type.Optional(Type.Boolean()),
+  /**
+   * Follow-up chips for the owner's answer, proposed by the same model after it
+   * answered (`tools.follow_ups`). The worker is untrusted, so the completion
+   * route re-sanitizes them; the gateway delivers them with the reply.
+   */
+  suggestions: Type.Optional(
+    Type.Array(Type.Object({ title: Type.String(), message: Type.String() }), {
+      maxItems: SUGGESTION_LIMITS.maxPrompts,
+    })
+  ),
   /**
    * Tool traces that finished too late to ride a heartbeat, oldest first.
    *

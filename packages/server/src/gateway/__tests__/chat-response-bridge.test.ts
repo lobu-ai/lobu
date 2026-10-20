@@ -5,20 +5,6 @@ import { ConversationStateStore } from "../connections/conversation-state-store.
 import { registerBuiltinGuardrails } from "../guardrails/builtins.js";
 import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 
-/** Poll until `predicate` holds, or throw once `timeoutMs` elapses. */
-async function waitFor(
-  predicate: () => boolean,
-  timeoutMs = 2_000
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) {
-      throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
-
 /**
  * Build a target whose `post(iterable)` drains the AsyncIterable into
  * `collected`. Returns a `drained` promise that resolves when the adapter
@@ -538,76 +524,86 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
     },
   };
 
-  test("suggest-followups posts a chat card after the terminal output passes", async () => {
+  function chipsHarness() {
     const target = createStreamingTarget().target;
-    const slackPostMessage = mock(async () => ({ ts: "1" }));
+    const order: string[] = [];
+    const slackPostMessage = mock(async () => {
+      order.push("reply");
+      return { ts: "1" };
+    });
     const { manager } = createHarness(target, "slack", slackPostMessage, {
       agentId: "agent-1",
       organizationId: "org-1",
       publicGatewayUrl: "",
     });
-    const bridge = new ChatResponseBridge(manager as any, async () => ({
-      baseUrl: "https://example.test/v1",
-      apiKey: "test-key",
-      model: "test-model",
-    }));
+    const bridge = new ChatResponseBridge(manager as any);
+    const postSuggestion = mock(async () => {
+      order.push("chips");
+      return { id: "s_1" };
+    });
+    bridge.setInteractionService({ postSuggestion } as any);
+    return { bridge, postSuggestion, order };
+  }
+
+  const chips = [{ title: "Show details", message: "Show me the details" }];
+  const chipsPayload = {
+    ...slackPayload,
+    finalText: "The connector runs every fifteen minutes.",
+    processedMessageIds: ["m1"],
+    toolsUsed: [],
+    suggestions: chips,
+    platformMetadata: {
+      ...slackPayload.platformMetadata,
+      agentId: "agent-1",
+      organizationId: "org-1",
+      teamId: "T_NATIVE",
+    },
+  };
+
+  test("posts the reply's follow-up chips as a card after the reply", async () => {
+    const { bridge, postSuggestion, order } = chipsHarness();
+    await bridge.handleCompletion({ ...chipsPayload, teamId: "worker-routing-key" }, "s");
+
+    expect(order).toEqual(["reply", "chips"]);
+    expect(postSuggestion).toHaveBeenCalledTimes(1);
+    // Routed with the provider-native team, never the worker routing key.
+    expect(postSuggestion.mock.calls[0]?.[4]).toBe("T_NATIVE");
+    expect(postSuggestion.mock.calls[0]?.[7]).toEqual(chips);
+  });
+
+  test("posts no chips for a reply that carries none or was answered in-band", async () => {
+    const { bridge, postSuggestion } = chipsHarness();
+    await bridge.handleCompletion({ ...chipsPayload, suggestions: undefined }, "s");
+    await bridge.handleCompletion({ ...chipsPayload, repliedInBand: true }, "s");
+    expect(postSuggestion).not.toHaveBeenCalled();
+  });
+
+  test("blocks secrets contained only in follow-up chips", async () => {
+    const { bridge, postSuggestion } = chipsHarness();
     const registry = new GuardrailRegistry();
     registerBuiltinGuardrails(registry);
-    bridge.setGuardrails(
-      registry,
-      {
-        getSettings: async () => ({
-          guardrails: ["suggest-followups"],
-        }),
-      } as any
+    bridge.setGuardrails(registry, {
+      getSettings: async () => ({ guardrails: ["secret-scan"] }),
+    } as any);
+    await bridge.handleCompletion({
+      ...chipsPayload,
+      suggestions: [{ title: "Use key", message: "Use AKIAIOSFODNN7EXAMPLE" }],
+    }, "s");
+    expect(postSuggestion).not.toHaveBeenCalled();
+  });
+
+  test("posts no chips for a reply an output guardrail blocked", async () => {
+    const { bridge, postSuggestion } = chipsHarness();
+    const registry = new GuardrailRegistry();
+    registerBuiltinGuardrails(registry);
+    bridge.setGuardrails(registry, {
+      getSettings: async () => ({ guardrails: ["secret-scan"] }),
+    } as any);
+    await bridge.handleCompletion(
+      { ...chipsPayload, finalText: "here is the key AKIAIOSFODNN7EXAMPLE" },
+      "s"
     );
-    const postSuggestion = mock(async () => ({ id: "s_1" }));
-    bridge.setInteractionService({ postSuggestion } as any);
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(
-        JSON.stringify({
-          choices: [
-            {
-              message: {
-                content:
-                  '{"prompts":[{"title":"Show details","message":"Show me the details"}]}',
-              },
-            },
-          ],
-        })
-      )) as typeof fetch;
-
-    try {
-      await bridge.handleCompletion(
-        {
-          ...slackPayload,
-          finalText:
-            "The connector runs every fifteen minutes and currently has plenty of rate-limit headroom.",
-          processedMessageIds: ["m1"],
-          toolsUsed: [],
-          platformMetadata: {
-            ...slackPayload.platformMetadata,
-            agentId: "agent-1",
-            organizationId: "org-1",
-          },
-        },
-        "s"
-      );
-      // Enrichment is intentionally fire-and-forget (it must not block the
-      // concurrency-1 delivery worker), so handleCompletion returns before the
-      // chip is posted. Wait for the detached chain rather than restoring env
-      // out from under it.
-      await waitFor(() => postSuggestion.mock.calls.length > 0);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-
-    expect(postSuggestion).toHaveBeenCalledTimes(1);
-    expect(postSuggestion.mock.calls[0]?.[7]).toEqual([
-      { title: "Show details", message: "Show me the details" },
-    ]);
+    expect(postSuggestion).not.toHaveBeenCalled();
   });
 
   test("Slack completion with NO local stream posts payload.finalText", async () => {

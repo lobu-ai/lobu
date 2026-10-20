@@ -51,7 +51,7 @@ const CAPTURE_ROUTES = new Set([
   "POST /internal/conversations/send", "POST /internal/conversations/present-event",
   "POST /internal/conversations/schedule-followup", "POST /internal/conversations/react",
   "POST /internal/conversations/edit", "POST /internal/conversations/delete",
-  "POST /internal/interactions/create", "POST /internal/suggestions/create",
+  "POST /internal/interactions/create",
   "POST /internal/files/upload", "POST /internal/files/upload-batch",
   "POST /internal/images/generate", "POST /internal/audio/synthesize",
   "POST /internal/runtime/exec",

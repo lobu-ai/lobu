@@ -54,23 +54,25 @@ function isolateToolReply(messages) {
       name: "read",
       arguments: JSON.stringify({ file_path: "smoke.txt" }),
     };
-  } else if (results.length === 3) {
+  } else {
+    assert.equal(results.length, 3);
     assert.ok(
       JSON.stringify(results[2].content).includes(marker),
       "model did not receive the written file bytes"
     );
-    call = {
-      name: "suggest_actions",
-      arguments: JSON.stringify({
-        prompts: [{ title: "Continue", message: marker }],
-      }),
-    };
-  } else {
-    assert.equal(results.length, 4);
-    assert.match(
-      JSON.stringify(results[3].content),
-      /Posted 1 suggested action/
-    );
+    // The worker's follow-up chips side call reuses the turn's transcript and
+    // appends one instruction as the latest user message.
+    const latest = messages.filter((message) => message.role === "user").at(-1);
+    if (JSON.stringify(latest?.content).includes("follow-up action chips")) {
+      return {
+        delta: {
+          content: JSON.stringify({
+            prompts: [{ title: "Continue", message: marker }],
+          }),
+        },
+        finish: "stop",
+      };
+    }
   }
   return call
     ? {

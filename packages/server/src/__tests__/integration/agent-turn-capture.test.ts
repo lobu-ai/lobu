@@ -155,7 +155,6 @@ describe('native capture over HTTP and Postgres', () => {
   it('captures every internal mutation class without touching delivery, media, workspace or runtime', async () => {
     const cases: Array<[string, unknown, string]> = [
       ['/internal/interactions/create', { interactionType: 'link_button', url: 'https://example.invalid', label: 'test' }, 'interactions.create'],
-      ['/internal/suggestions/create', { prompts: [{ title: 'Next', message: 'Next synthetic step' }] }, 'suggestions.create'],
       ['/internal/images/generate', { prompt: 'synthetic image' }, 'images.generate'],
       ['/internal/audio/synthesize', { text: 'synthetic audio' }, 'audio.synthesize'],
       ['/internal/runtime/exec', { command: 'touch captured.txt' }, 'runtime.exec'],

@@ -420,8 +420,10 @@ export async function executeAgentTurnRun(
                         ...(turn.tools.media && turn.tools.media.length > 0
                           ? { media: turn.tools.media as AgentTurnMediaTool[] }
                           : {}),
+                        ...(turn.tools.follow_ups ? { followUps: true as const } : {}),
                         ...((turn.tools.gateway && turn.tools.gateway.length > 0) ||
-                        (turn.tools.media && turn.tools.media.length > 0)
+                        (turn.tools.media && turn.tools.media.length > 0) ||
+                        turn.tools.follow_ups
                           ? {
                               conversation: {
                                 channelId: turn.tools.conversation.channel_id,
@@ -602,6 +604,7 @@ export async function executeAgentTurnRun(
         ...(input.firstError ? { first_error: input.firstError } : {}),
       })),
       ...(result.turn.repliedInBand ? { replied_in_band: true } : {}),
+      ...(result.turn.suggestions ? { suggestions: result.turn.suggestions } : {}),
       exit_reason: 'ok',
     });
     if (receipt.status !== 'completed') return { itemsCollected: 0, error: `agent turn ${receipt.status}` };

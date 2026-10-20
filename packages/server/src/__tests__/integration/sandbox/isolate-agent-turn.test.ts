@@ -1048,16 +1048,12 @@ describe("agent turn on the isolate lane", () => {
 
 	it("runs the conversation plugin's own tools in the guest, on the same route and the same one credential", async () => {
 		hits = [];
-		internalReply = { status: 200, body: { success: true } };
+		internalReply = { status: 200, body: { messageId: "m_other", deliveredInBand: false } };
 		toolScript = [
-			{
-				id: "toolu_s1",
-				name: "suggest_actions",
-				input: { prompts: [{ title: "Next", message: "What should I do next?" }] },
-			},
+			{ id: "toolu_s1", name: "send_message", input: { target: "some_other_thread", text: "FYI" } },
 		];
 		armFirstDeltaGate();
-		const run = await runTurn(gatewayToolJob(["suggest_actions", "send_message"]));
+		const run = await runTurn(gatewayToolJob(["ask_user", "send_message"]));
 
 		expect(run.output.text).toBe("Hello from the isolate");
 		// The model was offered exactly the two the producer named, with the
@@ -1066,25 +1062,88 @@ describe("agent turn on the isolate lane", () => {
 		// request order: the guest selects out of `createConversationTools`
 		// rather than rebuilding the list, which is what keeps one tool set.
 		const offered = JSON.parse(hits[0]?.body ?? "{}") as { tools?: Array<{ name: string; description: string }> };
-		expect(offered.tools?.map((t) => t.name)).toEqual(["send_message", "suggest_actions"]);
-		expect(offered.tools?.find((t) => t.name === "suggest_actions")?.description).toContain("chip");
+		expect(offered.tools?.map((t) => t.name)).toEqual(["send_message", "ask_user"]);
 
 		// The call went to the gateway's own internal route — the plugin's route,
 		// not the MCP proxy's — under the same bearer the provider hop resolves.
 		expect(hits.map((h) => `${h.method} ${h.url}`)).toEqual([
 			"POST /v1/messages",
-			"POST /lobu/internal/suggestions/create",
+			"POST /lobu/internal/conversations/send",
 			"POST /v1/messages",
 		]);
 		expect(hits[1]?.authorization).toBe(`Bearer ${GATEWAY_PLACEHOLDER}`);
-		expect(JSON.parse(hits[1]?.body ?? "{}")).toEqual({
-			prompts: [{ title: "Next", message: "What should I do next?" }],
-		});
-
-		// And the model got the plugin's own result prose back.
-		const end = run.events.find((e) => e.type === "tool_call_end") as { isError: boolean; output: string } | undefined;
+		const end = run.events.find((e) => e.type === "tool_call_end") as { isError: boolean } | undefined;
 		expect(end?.isError).toBe(false);
-		expect(end?.output).toContain("Posted 1 suggested action(s)");
+	}, 120_000);
+
+	/** A human-facing turn: the gateway asked for follow-up chips. */
+	function followUpJob(overrides: Partial<AgentTurnInput> = {}): ExecutorJob {
+		return turnJob({
+			tools: {
+				gatewayUrl: `http://127.0.0.1:${port}/lobu`,
+				definitions: [],
+				conversation: { channelId: "C_TEST", conversationId: "conv_test", platform: "api" },
+				followUps: true,
+			},
+			...overrides,
+		});
+	}
+	const CHIPS = [{ title: "Fix LinkedIn", message: "Reconnect my LinkedIn feed" }];
+	const isChipsRequest = (body: string) => body.includes("follow-up action chips");
+
+	it("asks the model that answered for follow-up chips, outside the transcript", async () => {
+		hits = [];
+		toolScript = [];
+		providerScript = (body, res) => void writeAnthropicStream(res, isChipsRequest(body)
+			? [JSON.stringify({ prompts: CHIPS })]
+			: ["Hello", " from", " the", " isolate"]);
+		const run = await runTurn(followUpJob({ ephemeralContext: "synthetic turn context" }));
+
+		expect(run.output.text).toBe("Hello from the isolate");
+		expect(run.output.suggestions).toEqual(CHIPS);
+		// One more request, to the same model, under the same one credential,
+		// carrying the conversation the answer was written from plus the ask.
+		expect(hits.map((h) => h.url)).toEqual(["/v1/messages", "/v1/messages"]);
+		expect(hits[1]?.authorization).toBe(hits[0]?.authorization);
+		const [answer, ask] = hits.map((h) => JSON.parse(h.body) as { model: string; system: unknown; messages: Array<{ role: string }> });
+		expect(ask?.model).toBe(answer?.model);
+		expect(ask?.system).toEqual(answer?.system);
+		expect(JSON.stringify(answer?.messages[0])).toContain("synthetic turn context");
+		// Same first message, transient context included; only the provider's
+		// cache breakpoint moves to the ask's own last user message.
+		const texts = (message: unknown) =>
+			((message as { content: Array<{ text?: string }> }).content ?? []).map((block) => block.text);
+		expect(texts(ask?.messages[0])).toEqual(texts(answer?.messages[0]));
+		expect(run.output.sessionJsonl).not.toContain("synthetic turn context");
+		expect(ask?.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+		expect(isChipsRequest(hits[1]?.body ?? "")).toBe(true);
+		// The ask and its answer never enter the conversation.
+		expect(sessionMessages(run.output).map((m) => m.role)).toEqual(["user", "assistant"]);
+		expect(run.output.sessionJsonl).not.toContain("follow-up action chips");
+	}, 120_000);
+
+	it("makes no chips request for a turn the gateway did not ask it for", async () => {
+		hits = [];
+		toolScript = [];
+		const run = await runTurn(gatewayToolJob([]));
+		expect(hits.length).toBe(1);
+		expect(run.output.suggestions).toBeUndefined();
+	}, 120_000);
+
+	it("still delivers the answer when the chips request fails", async () => {
+		hits = [];
+		toolScript = [];
+		providerScript = (body, res) => {
+			if (isChipsRequest(body)) {
+				res.writeHead(500, { "content-type": "application/json" });
+				res.end(JSON.stringify({ type: "error", error: { type: "api_error", message: "synthetic outage" } }));
+				return;
+			}
+			void writeAnthropicStream(res, ["Hello", " from", " the", " isolate"]);
+		};
+		const run = await runTurn(followUpJob());
+		expect(run.output.text).toBe("Hello from the isolate");
+		expect(run.output.suggestions).toBeUndefined();
 	}, 120_000);
 
 	it("reports an in-band reply, so the terminal delivery is not the same answer twice", async () => {
@@ -1130,10 +1189,10 @@ describe("agent turn on the isolate lane", () => {
 		// The model tries to keep working after asking. It must not get to.
 		toolScript = [
 			{ id: "toolu_a1", name: "ask_user", input: { question: "Which one?", options: ["A", "B"] } },
-			{ id: "toolu_a2", name: "suggest_actions", input: { prompts: [{ title: "T", message: "M" }] } },
+			{ id: "toolu_a2", name: "send_message", input: { target: "conv_test", text: "Picking A." } },
 		];
 		armFirstDeltaGate();
-		const run = await runTurn(gatewayToolJob(["ask_user", "suggest_actions"]));
+		const run = await runTurn(gatewayToolJob(["ask_user", "send_message"]));
 
 		expect(hits[1]?.url).toBe("/lobu/internal/interactions/create");
 		expect(JSON.parse(hits[1]?.body ?? "{}")).toEqual({
@@ -1165,7 +1224,7 @@ describe("agent turn on the isolate lane", () => {
 		// as a run failure, so an unsuppressed one would throw here instead.
 		// The blocked sibling is still in the ledger: it was ATTEMPTED, which
 		// is what the retired lane recorded too (it never filtered `isError`).
-		expect(run.output.toolsUsed).toEqual(["ask_user", "suggest_actions"]);
+		expect(run.output.toolsUsed).toEqual(["ask_user", "send_message"]);
 	}, 120_000);
 
 	it("stops the turn when the tool-call budget is spent, not just refuses", async () => {

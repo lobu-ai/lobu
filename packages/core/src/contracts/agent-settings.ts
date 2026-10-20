@@ -91,7 +91,7 @@ export const AgentInlineGuardrailSchema = Type.Object({
   /**
    * For `judge` pre-tool: optional tool-name filter (run only for these tools).
    * For `require-tool`: the tool name(s) that must appear in this turn's
-   * `toolsUsed` (manual, e.g. `["suggest_actions"]`).
+   * `toolsUsed` (manual, e.g. `["send_message"]`).
    */
   tools: Type.Optional(Type.Array(Type.String())),
   domains: Type.Optional(Type.Array(Type.String())),

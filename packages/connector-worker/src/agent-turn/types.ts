@@ -103,8 +103,8 @@ export interface AgentTurnTool {
 export type AgentTurnBuiltinTool = 'bash' | 'read' | 'write' | 'edit' | 'grep' | 'ls' | 'find';
 
 /**
- * A gateway tool the turn may call — `ask_user`, `send_message`,
- * `suggest_actions` and the rest of `@lobu/plugin-conversations`.
+ * A gateway tool the turn may call — `ask_user`, `send_message` and the
+ * rest of `@lobu/plugin-conversations`.
  *
  * The producer names them; the guest runs the plugin package's OWN
  * implementation, bundled in. They are not reimplemented here and not proxied
@@ -122,8 +122,7 @@ export type AgentTurnGatewayTool =
   | 'react'
   | 'edit_message'
   | 'delete_message'
-  | 'ask_user'
-  | 'suggest_actions';
+  | 'ask_user';
 
 /**
  * A media tool the turn may call — `@lobu/plugin-media`'s own.
@@ -170,6 +169,11 @@ export interface AgentTurnTools {
    * whenever `gateway` or `media` is non-empty.
    */
   conversation?: AgentTurnConversation;
+  /**
+   * After the answer, ask the same model for follow-up chips and return them
+   * with the turn result. Set only for a human-facing turn.
+   */
+  followUps?: true;
 }
 
 /**
@@ -390,4 +394,9 @@ export interface AgentTurnOutput {
    * suppression does the rest.
    */
   repliedInBand?: boolean;
+  /**
+   * Follow-up chips the same model proposed for the owner's answer, already
+   * sanitized. Absent when the turn was not offered them or proposed none.
+   */
+  suggestions?: Array<{ title: string; message: string }>;
 }

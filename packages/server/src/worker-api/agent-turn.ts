@@ -16,6 +16,7 @@ import {
 	AgentErrorCode,
 	classifyErrorMessage,
 	createLogger,
+	sanitizeSuggestionPrompts,
 } from "@lobu/core";
 import {
 	type AgentTurnToolEvent,
@@ -765,6 +766,7 @@ function agentTurnCompletionHash(body: CompleteAgentTurnRequest): string {
     tools_used: body.tools_used ?? null,
     first_error: nul(body.first_error ?? null),
     replied_in_band: body.replied_in_band ?? null,
+    suggestions: body.suggestions ?? null,
     turn_tool_events:
       body.turn_tool_events === undefined
         ? null
@@ -982,11 +984,9 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     await insertAgentTurnResponse(tx, run, {
       // `tools_used` is forwarded as sent, NOT defaulted to `[]`. Absent and
       // empty are different claims downstream: `requireTool` passes on absent
-      // (it cannot prove a miss) and trips on empty, and the follow-up bridge
-      // skips on absent to avoid duplicating a card mid-deployment. Turning a
-      // worker that reported nothing into "called nothing" would invent that
-      // claim. The guest always sends the array, so absent means a genuinely
-      // older worker.
+      // (it cannot prove a miss) and trips on empty. Turning a worker that
+      // reported nothing into "called nothing" would invent that claim. The
+      // guest always sends the array, so absent means a genuinely older worker.
       //
       // Per-input workers scope this ledger to the owner input; each steered
       // input's own ledger rides its receipt below. Stamping one execution-wide
@@ -1001,6 +1001,11 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
             // stamping it everywhere would suppress every steered reply on the
             // strength of one in-band post.
             ...(body.replied_in_band ? { repliedInBand: true } : {}),
+            // The owner answer's chips; re-sanitized because the worker is
+            // untrusted. Delivered with the reply by the thread consumer.
+            ...(body.suggestions?.length
+              ? { suggestions: sanitizeSuggestionPrompts(body.suggestions) }
+              : {}),
           }
         : {
             error: error || 'agent turn failed',

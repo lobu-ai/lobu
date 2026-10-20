@@ -62,6 +62,23 @@ function automationRunIdFromIntent(intent: unknown): number | undefined {
 }
 
 /**
+ * The provider-native team an interaction card (ask_user, follow-up chips) is
+ * routed with. Chat payloads use top-level teamId as a worker routing key;
+ * interactions need the provider-native team instead. Explicit null survives
+ * the queued JSON for teamless chats; callers without this metadata retain
+ * their team. The one derivation for the worker token and the chat bridge.
+ */
+export function interactionTeamId(
+	platformMetadata: Record<string, unknown> | undefined,
+	teamId: string | undefined,
+): string | undefined {
+	const native = platformMetadata && Object.hasOwn(platformMetadata, "teamId")
+		? platformMetadata.teamId
+		: teamId;
+	return typeof native === "string" ? native : undefined;
+}
+
+/**
  * The routing claims common to both worker-token mints, in the exact shape the
  * `generateWorkerToken` options object expects. `connectionId`,
  * `responseThreadId`, and `source` are lifted off `platformMetadata`
@@ -99,15 +116,9 @@ export function buildWorkerTokenClaims(args: WorkerTokenClaimsArgs): {
 	// Provider comes solely from the conversation's pinned sandbox; there is
 	// no deployment-wide env-var fallback. Undefined → local just-bash.
 	const runtimeProviderId = args.runtimeProviderId;
-	// Chat payloads use top-level teamId as a worker routing key. Interactions
-	// need the provider-native team instead. Explicit null survives the queued
-	// JSON for teamless chats; callers without this metadata retain their team.
-	const teamId = args.platformMetadata && Object.hasOwn(args.platformMetadata, "teamId")
-		? args.platformMetadata.teamId
-		: args.teamId;
 	return {
 		channelId: args.channelId,
-		teamId: typeof teamId === "string" ? teamId : undefined,
+		teamId: interactionTeamId(args.platformMetadata, args.teamId),
 		agentId: args.agentId,
 		organizationId: args.organizationId,
 		platform: args.platform,

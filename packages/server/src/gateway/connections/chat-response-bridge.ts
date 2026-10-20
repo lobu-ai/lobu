@@ -13,7 +13,11 @@
 
 import { unlink } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createLogger, type GuardrailRegistry } from "@lobu/core";
+import {
+  createLogger,
+  type GuardrailRegistry,
+  type SuggestedPrompt,
+} from "@lobu/core";
 import { toAgentErrorCode } from "@lobu/core";
 import { Actions, Card, CardText, LinkButton } from "chat";
 import { getDb } from "../../db/client.js";
@@ -29,14 +33,13 @@ import {
   providerQuotaResetNotBefore,
 } from "../../automations/schedule-cursor.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import type { InteractionService } from "../interactions.js";
+import { interactionTeamId } from "../orchestration/worker-token-claims.js";
 import {
   OutputGuardrailScanner,
   type OutputGuardrailTrip,
 } from "../guardrails/output-scan.js";
-import { generateSuggestFollowups } from "../guardrails/suggest-followups.js";
-import { resolveCompletionTarget } from "../inference/gateway-completion.js";
 import type { ThreadResponsePayload } from "../infrastructure/queue/index.js";
-import type { InteractionService } from "../interactions.js";
 import {
   buildCtaCardPayload,
   extractSettingsLinkButtons,
@@ -114,10 +117,7 @@ export class ChatResponseBridge implements ResponseRenderer {
    */
   private readonly outputGuardrail = new OutputGuardrailScanner();
 
-  constructor(
-    private manager: ChatInstanceManager,
-    private readonly resolveCompletionTargetFn = resolveCompletionTarget
-  ) {}
+  constructor(private manager: ChatInstanceManager) {}
 
   /**
    * Wire output-stage guardrails. Both must be set for guardrails to run;
@@ -262,61 +262,33 @@ export class ChatResponseBridge implements ResponseRenderer {
     });
   }
 
-  private async maybeEnrichSuggestFollowups(
+  private async postSuggestions(
     payload: ThreadResponsePayload,
     ctx: ResponseContext,
-    replyText: string
+    prompts: SuggestedPrompt[]
   ): Promise<void> {
-    if (!this.interactionService) return;
-    // No `persistSuggestion` here: durable suggestion state exists so the web
-    // client can re-render chips on reload, and only API surfaces read it
-    // (`response-renderer`, `agent-history`). A chat chip is a native platform
-    // card that Slack/Telegram already persist, and its click-routing row is
-    // stashed by the interaction bridge's `suggestion:created` handler
-    // (`storePendingSuggestion`, 24h TTL). Persisting here would mint a second
-    // live row no chat surface reads.
-    //
-    // An old worker cannot distinguish "no tool" from "not reported"; skip to
-    // avoid duplicating a suggest_actions card during a rolling deployment.
-    if (
-      payload.toolsUsed === undefined ||
-      payload.toolsUsed.includes("suggest_actions")
-    ) {
-      return;
-    }
-    const agentId = this.resolveAgentId(payload, ctx);
     const organizationId = this.resolveOrganizationId(payload, ctx);
-    if (!agentId || !organizationId) return;
-
+    if (!this.interactionService || !organizationId) return;
     try {
-      const config = await this.outputGuardrail.getSuggestFollowupsConfig(
-        agentId,
-        organizationId
-      );
-      if (!config) return;
-      const prompts = await generateSuggestFollowups(replyText, organizationId, {
-        model: config.model,
-        resolveTarget: this.resolveCompletionTargetFn,
-      });
-      if (prompts.length === 0) return;
       await this.interactionService.postSuggestion(
         organizationId,
         payload.userId,
         payload.conversationId,
         ctx.channelId,
-        payload.teamId,
+        interactionTeamId(payload.platformMetadata, payload.teamId),
         ctx.connectionId,
         ctx.platform,
         prompts
       );
     } catch (error) {
+      // Chips are optional; the reply is already delivered.
       logger.warn(
         {
           connectionId: ctx.connectionId,
           conversationId: payload.conversationId,
           error: String(error),
         },
-        "suggest-followups chat enrichment failed"
+        "Follow-up suggestions were not posted"
       );
     }
   }
@@ -465,7 +437,10 @@ export class ChatResponseBridge implements ResponseRenderer {
     // post the block message and suppress both delivery and history.
     let blockedAtCompletion = false;
     {
-      const completionText = payload.finalText ?? stream?.buffer ?? "";
+      const completionText = [
+        payload.finalText ?? stream?.buffer ?? "",
+        ...(payload.suggestions ?? []).flatMap((prompt) => [prompt.title, prompt.message]),
+      ].join("\n");
       if (completionText.trim()) {
         const trip = await this.scanTerminalOutput(completionText, payload, ctx);
         if (trip) {
@@ -659,22 +634,17 @@ export class ChatResponseBridge implements ResponseRenderer {
       }
     }
 
+    // The reply's follow-up chips, as their own card AFTER the reply so they
+    // read as its next steps. Not for a blocked reply, a suppressed duplicate
+    // of an in-band answer, or a session reset.
     if (
+      payload.suggestions?.length &&
       !blockedAtCompletion &&
       !suppressedByInBandReply &&
       !completionMd.sessionReset &&
       historyText?.trim()
     ) {
-      // Suppressed turns skip the chips too: `historyText` is the undelivered
-      // report about the in-band message, so chips derived from it would
-      // trail a reply that was never posted.
-      // Fire-and-forget: the `thread_response` worker runs at concurrency 1
-      // (runs-queue.ts DEFAULT_WORKER_CONCURRENCY), so awaiting an up-to-15s
-      // model call here would head-of-line block every other conversation's
-      // delivery on this pod. Nothing below needs the result, the chips are
-      // posted out-of-band as their own card, and the method catches all of
-      // its own errors.
-      void this.maybeEnrichSuggestFollowups(payload, ctx, historyText);
+      await this.postSuggestions(payload, ctx, payload.suggestions);
     }
 
     logger.info(

@@ -34,8 +34,8 @@ export const SUGGESTION_LIMITS = {
  * Normalize an untrusted `prompts` value into at most {@link SUGGESTION_LIMITS}
  * valid `{title,message}` entries. Trims BEFORE capping length (so leading
  * whitespace can't yield an empty displayed title), drops malformed/empty
- * entries, and returns `[]` for any non-array input. Shared by the agent tool
- * and the gateway route so the worker (untrusted) and the server enforce one
+ * entries, and returns `[]` for any non-array input. Shared by the worker
+ * and completion route so the worker (untrusted) and the server enforce one
  * identical contract.
  */
 export function sanitizeSuggestionPrompts(value: unknown): SuggestedPrompt[] {
@@ -58,6 +58,48 @@ export function sanitizeSuggestionPrompts(value: unknown): SuggestedPrompt[] {
     if (out.length >= SUGGESTION_LIMITS.maxPrompts) break;
   }
   return out;
+}
+
+/**
+ * The follow-up question asked after a human-facing turn's reply, on the same
+ * session and model that wrote it. Asked as a side request — never appended to
+ * the conversation — so the model can use the user's language and preferences
+ * retained in its current context. Reusing the prefix enables prompt caching.
+ */
+export const FOLLOW_UP_SUGGESTIONS_PROMPT = [
+  "Before the user replies: decide whether your last reply needs follow-up action chips.",
+  'Default to {"prompts":[]}. A complete answer does not need suggestions.',
+  "Only offer a concrete next step your reply leaves open and that would help the user proceed.",
+  "Return no suggestions for routine answers, acknowledgements, corrections, completed requests, a question you asked, or a reply that closes the topic, and none at all if the user asked for no suggestions.",
+  "Do not invent extra work, add a generic offer to explore further, or repeat an action you already offered.",
+  "When useful next steps remain, return 1-3 distinct actions. A single useful action is enough; never pad the list.",
+  "",
+  'Each item is {"title","message"}:',
+  '- "title": a short tappable label, at most 20 characters.',
+  '- "message": the full message sent verbatim AS THE USER if tapped.',
+  "",
+  "Write both in the language the user writes in. Write `message` in the user's voice, as a request to you:",
+  '  good: "Show me the diff"   bad: "I can show you the diff"',
+  'Do not call any tool. Reply with STRICT JSON {"prompts":[{"title":"...","message":"..."}]} and nothing else.',
+].join("\n");
+
+/**
+ * The chips in a reply to {@link FOLLOW_UP_SUGGESTIONS_PROMPT}, sanitized.
+ * Tolerates a markdown fence or prose around the object by parsing from the
+ * first `{` to the last `}`; anything unparseable is no suggestions.
+ */
+export function parseFollowUpSuggestions(reply: string): SuggestedPrompt[] {
+  const start = reply.indexOf("{");
+  const end = reply.lastIndexOf("}");
+  if (start < 0 || end <= start) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(reply.slice(start, end + 1));
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  return sanitizeSuggestionPrompts((parsed as { prompts?: unknown }).prompts);
 }
 
 /**

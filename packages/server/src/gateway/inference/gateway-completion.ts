@@ -2,7 +2,7 @@
  * Shared gateway-side LLM transport for fail-open enrichment and retrieval
  * features.
  *
- * `suggest-followups` chips and the memory query rewriter are both "prompt in,
+ * The memory query rewriter and the other gateway-side helpers are "prompt in,
  * strict JSON out" features. Routing them through one client avoids separate
  * per-feature credential triples.
  *
