@@ -1373,6 +1373,7 @@ var exports = module.exports;
   });
   Response.prototype._consume = function () {
     if (this.bodyUsed) return Promise.reject(new TypeError('Body is unusable: Body has already been read'));
+    if (this._stream && this._stream.locked) return Promise.reject(new TypeError('Body is unusable: Body is locked'));
     this._bodyUsed = true;
     if (this._stream) return readAllBytes(this._stream);
     return Promise.resolve(this._bytes || new Uint8Array(0));
@@ -1391,6 +1392,7 @@ var exports = module.exports;
   };
   Response.prototype.clone = function () {
     if (this.bodyUsed) throw new TypeError('Response.clone: Body has already been consumed.');
+    if (this._stream && this._stream.locked) throw new TypeError('Response.clone: Body is locked.');
     // Cloning a streamed body means teeing it, which nothing on this lane
     // does; a guest-constructed body still has its bytes to copy.
     if (this._bytes === null && this._stream !== null) throw new TypeError('Response.clone: a streamed body cannot be cloned on the isolate lane');
@@ -1957,26 +1959,31 @@ var exports = module.exports;
   // ---------------------------------------------------------------------------
   function ReadableStream(underlyingSource) {
     this._source = underlyingSource || {};
-    // Set by the first read; Response.bodyUsed reports it.
+    // Set by the first read or a cancel; Response.bodyUsed reports it.
     this._disturbed = false;
-  }
-  ReadableStream.prototype.getReader = function () {
+    this._locked = false;
+    // Source state outlives a reader's lock, including buffered chunks and
+    // terminal outcomes. Reacquiring a reader must not restart the source.
     var self = this;
     var queue = [];
     var waiters = [];
     var isClosed = false;
+    var isErrored = false;
     var streamError = null;
 
     function settleWaiters(result) {
-      while (waiters.length > 0) waiters.shift()(result);
+      while (waiters.length > 0) waiters.shift().resolve(result);
+    }
+    function rejectWaiters(err) {
+      while (waiters.length > 0) waiters.shift().reject(err);
     }
 
     var controller = {
       enqueue: function (chunk) {
-        // A chunk the source still delivers after a close or a cancel is
-        // dropped: every read from that point on already reports done.
-        if (isClosed) return;
-        if (waiters.length > 0) waiters.shift()({ value: chunk, done: false });
+        // A chunk the source still delivers after a close, a cancel or an
+        // error is dropped: every read from that point on already settled.
+        if (isClosed || isErrored) return;
+        if (waiters.length > 0) waiters.shift().resolve({ value: chunk, done: false });
         else queue.push(chunk);
       },
       close: function () {
@@ -1988,53 +1995,95 @@ var exports = module.exports;
         // is dropped, so a read from then on still reports done. The fetch
         // body reaches this when a cancel kills its in-flight pull, which
         // answers with an AbortError only after the cancel has ended the stream.
-        if (isClosed) return;
+        if (isClosed || isErrored) return;
+        isErrored = true;
         streamError = err;
-        if (waiters.length > 0) settleWaiters(Promise.reject(err));
+        queue.length = 0;
+        rejectWaiters(err);
       }
     };
 
-    if (this._source && this._source.start) {
-      this._source.start(controller);
-    }
+    this._read = function () {
+      self._disturbed = true;
+      if (isErrored) return Promise.reject(streamError);
+      if (queue.length > 0) {
+        return Promise.resolve({ value: queue.shift(), done: false });
+      }
+      if (isClosed) {
+        return Promise.resolve({ value: undefined, done: true });
+      }
+      // The waiter is registered BEFORE pull(), because a source that
+      // enqueues synchronously would otherwise push into the queue while no
+      // waiter was registered and leave this read hanging forever. Reads
+      // queue in order: each pull answers the oldest waiter.
+      var waiter = new Promise(function (resolve, reject) {
+        waiters.push({ resolve: resolve, reject: reject });
+      });
+      if (self._source.pull) {
+        try {
+          Promise.resolve(self._source.pull(controller)).catch(controller.error);
+        } catch (err) {
+          controller.error(err);
+        }
+      }
+      return waiter;
+    };
+    this._release = function () {
+      rejectWaiters(new TypeError('ReadableStream reader has been released'));
+    };
+    // Cancelling ends the stream: the queue is dropped and every read from
+    // here on reports done. Without that a later read would pull the source
+    // again -- for a fetch body or a socket, a read on what the cancel just
+    // released. A reader and the stream itself both cancel through here.
+    this._cancel = function (reason) {
+      self._disturbed = true;
+      if (isErrored) return Promise.reject(streamError);
+      if (isClosed && queue.length === 0) return Promise.resolve();
+      isClosed = true;
+      queue.length = 0;
+      settleWaiters({ value: undefined, done: true });
+      try {
+        return Promise.resolve(self._source.cancel ? self._source.cancel(reason) : undefined).then(function () {});
+      } catch (err) {
+        return Promise.reject(err);
+      }
+    };
 
+    if (this._source.start) {
+      Promise.resolve(this._source.start(controller)).catch(controller.error);
+    }
+  }
+  Object.defineProperty(ReadableStream.prototype, 'locked', {
+    get: function () { return this._locked; },
+    enumerable: true
+  });
+  ReadableStream.prototype.getReader = function () {
+    if (this._locked) throw new TypeError('ReadableStream is locked to a reader');
+    this._locked = true;
+    var self = this;
+    var released = false;
     return {
       read: function () {
-        self._disturbed = true;
-        if (streamError) return Promise.reject(streamError);
-        if (queue.length > 0) {
-          return Promise.resolve({ value: queue.shift(), done: false });
-        }
-        if (isClosed) {
-          return Promise.resolve({ value: undefined, done: true });
-        }
-        // The waiter is registered BEFORE pull(), because a source that
-        // enqueues synchronously would otherwise push into the queue while no
-        // waiter was registered and leave this read hanging forever. Reads
-        // queue in order: each pull answers the oldest waiter.
-        var waiter = new Promise(function (resolve) {
-          waiters.push(resolve);
-        });
-        if (self._source && self._source.pull) {
-          self._source.pull(controller);
-        }
-        return waiter;
+        if (released) return Promise.reject(new TypeError('ReadableStream reader has been released'));
+        return self._read();
       },
-      releaseLock: function () {},
-      // Cancelling ends the stream: the queue is dropped and every read from
-      // here on reports done. Without that a later read would pull the source
-      // again -- for a fetch body or a socket, a read on what the cancel just
-      // released.
+      releaseLock: function () {
+        if (released) return;
+        released = true;
+        self._locked = false;
+        self._release();
+      },
       cancel: function (reason) {
-        isClosed = true;
-        queue.length = 0;
-        settleWaiters({ value: undefined, done: true });
-        if (self._source && self._source.cancel) {
-          return Promise.resolve(self._source.cancel(reason));
-        }
-        return Promise.resolve();
+        if (released) return Promise.reject(new TypeError('ReadableStream reader has been released'));
+        return self._cancel(reason);
       }
     };
+  };
+  // "await res.body.cancel()" drops a body nobody will read, a retried 503
+  // for one; refused while a reader holds the lock, as on every runtime.
+  ReadableStream.prototype.cancel = function (reason) {
+    if (this._locked) return Promise.reject(new TypeError('Cannot cancel a ReadableStream that is locked to a reader'));
+    return this._cancel(reason);
   };
   global.ReadableStream = ReadableStream;
 
