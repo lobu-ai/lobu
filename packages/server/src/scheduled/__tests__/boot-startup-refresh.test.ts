@@ -3,7 +3,9 @@
  *
  * Startup uses the booting process's source even if an outgoing pod claims
  * shared queue work. The scan must not block boot, and a rejection after boot
- * must be logged with the hourly refresh still scheduled.
+ * must be logged with the hourly refresh still scheduled. A delayed local
+ * follow-up repairs overwrites from older processes in overlapping deployments;
+ * it does not guarantee that a rollout has finished.
  */
 
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
@@ -11,6 +13,7 @@ import type { CoreServices } from "../../gateway/services/core-services";
 import type { IMessageQueue } from "../../gateway/infrastructure/queue/types";
 import logger from "../../utils/logger";
 import { bootTaskScheduler } from "../jobs";
+import { TaskScheduler } from "../task-scheduler";
 import * as refreshModule from "../refresh-connector-definitions";
 
 interface SentRecord {
@@ -103,7 +106,7 @@ describe("bootTaskScheduler startup refresh", () => {
       rejectRefresh(failure);
       await Promise.resolve();
       expect(warn).toHaveBeenCalledWith(
-        { err: failure },
+        { err: failure, phase: "boot" },
         "[task-scheduler] Startup connector-definition refresh failed; hourly tick will cover it",
       );
       expect(
@@ -111,6 +114,100 @@ describe("bootTaskScheduler startup refresh", () => {
       ).toBe(true);
     } finally {
       warn.mockRestore();
+      scheduler.stop();
+    }
+  });
+
+  test.each([false, true])("refreshes locally after the startup delay (failure: %s)", async (failFollowup) => {
+    const refresh = spyOn(refreshModule, "refreshConnectorDefinitions").mockResolvedValue(EMPTY_RESULT);
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+    const sent: SentRecord[] = [];
+    const delayed: Array<{ delayMs: number; fn: () => Promise<void> }> = [];
+    const runOnceAfter = spyOn(TaskScheduler.prototype, "runOnceAfter").mockImplementation((delayMs, fn) => {
+      delayed.push({ delayMs, fn });
+    });
+    const scheduler = await bootTaskScheduler(
+      makeCoreServices(makeQueueDrainedElsewhere(sent)),
+      { ENVIRONMENT: "test" } as never,
+    );
+    try {
+      expect(delayed).toHaveLength(1);
+      expect(delayed[0].delayMs).toBe(10 * 60_000);
+      expect(refresh).toHaveBeenCalledTimes(1);
+      const failure = new Error("follow-up refresh failed");
+      if (failFollowup) refresh.mockRejectedValueOnce(failure);
+      await delayed[0].fn();
+      expect(refresh).toHaveBeenCalledTimes(2);
+      if (failFollowup) {
+        expect(warn).toHaveBeenCalledWith(
+          { err: failure, phase: "follow-up" },
+          "[task-scheduler] Startup connector-definition refresh failed; hourly tick will cover it",
+        );
+      } else {
+        expect(warn).not.toHaveBeenCalled();
+      }
+      expect(
+        sent.filter((r) => r.name === "refresh-connector-definitions"),
+      ).toEqual([{
+        name: "refresh-connector-definitions",
+        singletonKey: expect.stringMatching(/^cron:refresh-connector-definitions:/),
+      }]);
+    } finally {
+      warn.mockRestore();
+      runOnceAfter.mockRestore();
+      scheduler.stop();
+    }
+  });
+});
+
+describe("TaskScheduler.runOnceAfter", () => {
+  test.each(["throw", "reject"])("contains a callback failure: %s", async (failureMode) => {
+    const scheduler = new TaskScheduler(makeQueueDrainedElsewhere([]));
+    await scheduler.start();
+    let runs = 0;
+    try {
+      scheduler.runOnceAfter(5, () => {
+        runs += 1;
+        const failure = new Error("delayed callback failed");
+        if (failureMode === "throw") throw failure;
+        return Promise.reject(failure);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(runs).toBe(1);
+    } finally {
+      scheduler.stop();
+    }
+  });
+
+  test("does not revive a cancelled callback when restarted", async () => {
+    const scheduler = new TaskScheduler(makeQueueDrainedElsewhere([]));
+    await scheduler.start();
+    let runs = 0;
+    try {
+      scheduler.runOnceAfter(5, async () => { runs += 1; });
+      scheduler.stop();
+      await scheduler.start();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(runs).toBe(0);
+    } finally {
+      scheduler.stop();
+    }
+  });
+
+  test("runs once while the scheduler is started, never after stop", async () => {
+    const scheduler = new TaskScheduler(makeQueueDrainedElsewhere([]));
+    await scheduler.start();
+    let runs = 0;
+    try {
+      scheduler.runOnceAfter(5, async () => { runs += 1; });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(runs).toBe(1);
+
+      scheduler.runOnceAfter(5, async () => { runs += 1; });
+      scheduler.stop();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(runs).toBe(1);
+    } finally {
       scheduler.stop();
     }
   });
