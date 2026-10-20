@@ -9,7 +9,7 @@ import { runSync } from "./sync-harness";
  * completeness checks, stable events, checkpoint closures, and auth failures.
  */
 
-import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { beforeAll, describe, expect, mock, spyOn, test } from "bun:test";
 import { runInNewContext } from "node:vm";
 import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
 import { JSDOM } from "jsdom";
@@ -959,7 +959,6 @@ describe("Revolut retail completeness and sign-in", () => {
     "no_headers",
     "no_progress",
     "missing_stop",
-    "budget",
   ])("refuses partial transaction history after %s", async (stop) => {
     let reads = 0;
     const commit = mock(async () => undefined);
@@ -970,8 +969,8 @@ describe("Revolut retail completeness and sign-in", () => {
         if (reads++ === 0) return { value: { authed: true, captured: true } };
         return {
           value: {
-            done: stop !== "budget",
-            stop: ["budget", "missing_stop"].includes(stop) ? null : stop,
+            done: true,
+            stop: stop === "missing_stop" ? null : stop,
             rows: [
               {
                 id: "synthetic-transaction",
@@ -1098,6 +1097,414 @@ describe("Revolut retail completeness and sign-in", () => {
       }
     } finally {
       dom.window.close();
+    }
+  });
+});
+
+describe("Revolut resumable history", () => {
+  const OLDEST = 1_717_000_000_000;
+  const BOUNDARY = 1_717_150_000_000; // txn-whoop-declined
+
+  // A signed-in retail tab: the setup read is mocked (header capture needs the
+  // live app), every later expression runs against this page and its fetch.
+  function retailTab(pages: unknown[][]) {
+    const dom = new JSDOM("", {
+      url: "https://app.revolut.com/transactions",
+      runScripts: "outside-only",
+    });
+    const urls: string[] = [];
+    Object.assign(dom.window, {
+      __lobuHeaders: { "x-device-id": "synthetic-device" },
+      __lobuSeen: {},
+      __lobuCursor: null,
+      __lobuDone: false,
+      __lobuStop: null,
+      fetch: async (url: string) => {
+        urls.push(url);
+        return { ok: true, status: 200, json: async () => pages.shift() ?? [] };
+      },
+      setTimeout: (callback: () => void, delay: number) => {
+        if (delay <= 6_400) callback();
+        return 0;
+      },
+    });
+    let reads = 0;
+    const dispatcher = {
+      dispatch: async (action: string, input: Record<string, unknown>) => {
+        if (action === "navigate") return { tab_id: 42 };
+        if (action !== "evaluate") return {};
+        if (reads++ === 0) return { value: { authed: true, captured: true } };
+        return { value: await dom.window.eval(input.expression as string) };
+      },
+    };
+    return { dom, urls, dispatcher };
+  }
+
+  // Each page is strictly older than the last.
+  const olderPages = (count: number) =>
+    Array.from({ length: count }, (_, page) =>
+      SAMPLE_RESPONSE.map((row) => ({
+        ...row,
+        id: `${row.id}-p${page}`,
+        startedDate: row.startedDate - (page + 1) * 1_000_000_000,
+      }))
+    );
+
+  test("a first sync over its budget keeps its progress and asks for more", async () => {
+    const tab = retailTab([SAMPLE_RESPONSE, ...olderPages(8)]);
+    try {
+      const run = await runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0, max_scrolls: 1 },
+        checkpoint: {},
+        browser: tab.dispatcher,
+      } as never);
+      expect(run.status).toBe("more");
+      expect(run.commits).toHaveLength(1);
+      expect(run.events.length).toBeGreaterThan(0);
+      // Newest row seen is the high-water; the rest of history is a gap that
+      // resumes below the oldest row fetched and runs to the start.
+      expect(run.checkpoint.last_transaction_id).toBe("txn-tokyo");
+      expect(run.checkpoint.gap.to).toBeLessThan(OLDEST);
+      expect(run.checkpoint.gap.until).toBeUndefined();
+    } finally {
+      tab.dom.window.close();
+    }
+  });
+
+  test("resumes a gap at its cursor and closes it at the stored boundary", async () => {
+    const [older] = olderPages(1);
+    const tab = retailTab([older, olderPages(2)[1]]);
+    const stillStored = new Date(older[2].startedDate).toISOString();
+    try {
+      const run = await runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0 },
+        checkpoint: {
+          last_transaction_id: "txn-tokyo",
+          last_timestamp: new Date(1_717_300_000_000).toISOString(),
+          gap: { to: OLDEST, until: stillStored, until_id: older[2].id },
+        },
+        browser: tab.dispatcher,
+      } as never);
+      expect(tab.urls[0]).toContain(`&to=${OLDEST}`);
+      expect(tab.urls).toHaveLength(1);
+      // History is whole again; the next run reads what arrived meanwhile.
+      expect(run.status).toBe("more");
+      expect(run.checkpoint).toStrictEqual({
+        last_transaction_id: "txn-tokyo",
+        last_timestamp: new Date(1_717_300_000_000).toISOString(),
+      });
+      // Only the rows newer than the stored boundary were missing.
+      expect(run.events.map((e) => e.origin_id).sort()).toEqual(
+        [older[3].id, older[4].id].map((id) => `revolut-${id}`).sort()
+      );
+    } finally {
+      tab.dom.window.close();
+    }
+  });
+
+  test("an incremental sync stops paging at the checkpoint", async () => {
+    const tab = retailTab([SAMPLE_RESPONSE, ...olderPages(3)]);
+    try {
+      const run = await runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0 },
+        checkpoint: {
+          last_transaction_id: "txn-whoop-declined",
+          last_timestamp: new Date(BOUNDARY).toISOString(),
+        },
+        browser: tab.dispatcher,
+      } as never);
+      expect(tab.urls).toHaveLength(1);
+      expect(run.status).toBe("complete");
+      expect(run.events.map((e) => e.origin_id).sort()).toEqual([
+        "revolut-txn-salary",
+        "revolut-txn-tokyo",
+      ]);
+      expect(run.checkpoint).toEqual({
+        last_transaction_id: "txn-tokyo",
+        last_timestamp: new Date(1_717_300_000_000).toISOString(),
+      });
+    } finally {
+      tab.dom.window.close();
+    }
+  });
+
+  test("an incremental sync over its budget records the gap down to the old checkpoint", async () => {
+    // One batch reads four pages, all newer than the stored checkpoint.
+    const newer = Array.from({ length: 4 }, (_, page) =>
+      SAMPLE_RESPONSE.map((row, i) => ({
+        ...row,
+        id: `new-${page}-${i}`,
+        startedDate: 1_800_000_000_000 - page * 1_000 - i,
+      }))
+    );
+    const tab = retailTab([...newer, SAMPLE_RESPONSE]);
+    const previous = new Date(BOUNDARY).toISOString();
+    try {
+      const run = await runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0, max_scrolls: 1 },
+        checkpoint: {
+          last_transaction_id: "txn-whoop-declined",
+          last_timestamp: previous,
+        },
+        browser: tab.dispatcher,
+      } as never);
+      expect(run.status).toBe("more");
+      expect(tab.urls).toHaveLength(4);
+      expect(run.checkpoint.last_transaction_id).toBe("new-0-0");
+      expect(run.checkpoint.gap).toEqual({
+        to: 1_800_000_000_000 - 3_004,
+        until: previous,
+        until_id: "txn-whoop-declined",
+      });
+    } finally {
+      tab.dom.window.close();
+    }
+  });
+
+  test("a backfill completes after resuming its final gap", async () => {
+    const firstTab = retailTab([SAMPLE_RESPONSE, ...olderPages(3)]);
+    const lastTab = retailTab([[]]);
+    const connector = new RevolutTransactionsConnector();
+    const config = { wait_for_data_seconds: 0, max_scrolls: 1, backfill: true };
+    try {
+      const first = await runSync(connector, {
+        feedKey: "transactions",
+        config,
+        checkpoint: {},
+        browser: firstTab.dispatcher,
+      });
+      expect(first.status).toBe("more");
+      const last = await runSync(connector, {
+        feedKey: "transactions",
+        config,
+        checkpoint: first.checkpoint,
+        browser: lastTab.dispatcher,
+      });
+      expect(last.checkpoint.gap).toBeUndefined();
+      expect(last.status).toBe("complete");
+    } finally {
+      firstTab.dom.window.close();
+      lastTab.dom.window.close();
+    }
+  });
+
+  test("a backfill replaces an incremental gap with a full-history pass", async () => {
+    const [older] = olderPages(1);
+    const tab = retailTab([SAMPLE_RESPONSE, older, []]);
+    try {
+      const run = await runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0, backfill: true },
+        checkpoint: {
+          last_transaction_id: "txn-tokyo",
+          last_timestamp: new Date(1_717_300_000_000).toISOString(),
+          gap: {
+            to: 1_717_200_000_000,
+            until: new Date(BOUNDARY).toISOString(),
+            until_id: "txn-whoop-declined",
+          },
+        },
+        browser: tab.dispatcher,
+      } as never);
+      expect(tab.urls[0]).not.toContain("&to=");
+      expect(run.status).toBe("complete");
+      expect(run.checkpoint.gap).toBeUndefined();
+      // Rows older than the incremental gap's cutoff are re-emitted too.
+      expect(run.events).toHaveLength(SAMPLE_RESPONSE.length + older.length);
+    } finally {
+      tab.dom.window.close();
+    }
+  });
+
+  test("a resumed inclusive final cursor closes after confirming the repeated boundary", async () => {
+    const boundary = [SAMPLE_RESPONSE[0]];
+    const tab = retailTab([boundary, boundary]);
+    try {
+      const run = await runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0 },
+        checkpoint: { gap: { to: OLDEST } },
+        browser: tab.dispatcher,
+      });
+      expect(tab.urls).toHaveLength(2);
+      expect(run.checkpoint.gap).toBeUndefined();
+      expect(run.events.map((e) => e.origin_id)).toEqual([
+        "revolut-txn-wholefoods",
+      ]);
+    } finally {
+      tab.dom.window.close();
+    }
+  });
+
+  test("the deadline stops paging within a batch and commits its completed pages", async () => {
+    const tab = retailTab([SAMPLE_RESPONSE, ...olderPages(4)]);
+    let now = Date.now();
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    const pageClock = spyOn(tab.dom.window.Date, "now").mockImplementation(
+      () => now
+    );
+    const fetch = tab.dom.window.fetch;
+    tab.dom.window.fetch = async (
+      ...args: Parameters<typeof globalThis.fetch>
+    ) => {
+      const response = await fetch(...args);
+      now += 70_000;
+      return response;
+    };
+    try {
+      const run = await runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0 },
+        checkpoint: {},
+        browser: tab.dispatcher,
+      });
+      expect(tab.urls).toHaveLength(1);
+      expect(run.status).toBe("more");
+      expect(run.events).toHaveLength(SAMPLE_RESPONSE.length);
+      expect(run.checkpoint.gap).toEqual({ to: OLDEST });
+    } finally {
+      clock.mockRestore();
+      pageClock.mockRestore();
+      tab.dom.window.close();
+    }
+  });
+
+  test("an exhausted setup budget does not claim that an unread gap is complete", async () => {
+    const tab = retailTab([]);
+    let now = Date.now();
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    const dispatch = tab.dispatcher.dispatch;
+    tab.dispatcher.dispatch = async (action, input) => {
+      const result = await dispatch(action, input);
+      if (action === "navigate") now += 70_000;
+      return result;
+    };
+    try {
+      const run = await runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0 },
+        checkpoint: { gap: { to: OLDEST } },
+        browser: tab.dispatcher,
+      });
+      expect(run.status).toBe("more");
+      expect(run.commits).toHaveLength(0);
+      expect(run.metadata?.history_complete).toBe(false);
+    } finally {
+      clock.mockRestore();
+      tab.dom.window.close();
+    }
+  });
+
+  test("sign-in retry waits stop at the configured deadline", async () => {
+    let now = Date.now();
+    const waits: number[] = [];
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((
+      callback: () => void,
+      delay: number
+    ) => {
+      waits.push(delay);
+      now += delay;
+      callback();
+      return 0;
+    }) as never);
+    try {
+      await expect(
+        runSync(new RevolutTransactionsConnector(), {
+          feedKey: "transactions",
+          config: { wait_for_data_seconds: 25 },
+          checkpoint: {},
+          browser: {
+            dispatch: async (action: string) =>
+              action === "navigate"
+                ? { tab_id: 42 }
+                : { value: { authed: false } },
+          },
+        })
+      ).rejects.toThrow(/sign.in|passcode/i);
+      expect(waits).toEqual([10_000, 10_000, 5_000]);
+    } finally {
+      timer.mockRestore();
+      clock.mockRestore();
+    }
+  });
+
+  test.each([
+    "fetch",
+    "body",
+  ])("a deadline abort during %s keeps the preceding page resumable", async (phase) => {
+    const tab = retailTab([SAMPLE_RESPONSE]);
+    let expire: () => void;
+    Object.assign(tab.dom.window, {
+      setTimeout: (callback: () => void, delay: number) => {
+        if (delay <= 80) callback();
+        else expire = callback;
+        return 0;
+      },
+    });
+    const fetch = tab.dom.window.fetch;
+    let reads = 0;
+    tab.dom.window.fetch = async (
+      ...args: Parameters<typeof globalThis.fetch>
+    ) => {
+      if (reads++ === 0) return fetch(...args);
+      const signal = args[1]!.signal!;
+      const stalled = () =>
+        new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason));
+          expire();
+        });
+      if (phase === "fetch") return stalled();
+      return Object.assign(new Response(), { json: stalled });
+    };
+    try {
+      const run = await runSync(new RevolutTransactionsConnector(), {
+        feedKey: "transactions",
+        config: { wait_for_data_seconds: 0 },
+        checkpoint: {},
+        browser: tab.dispatcher,
+      });
+      expect(run.status).toBe("more");
+      expect(run.events).toHaveLength(SAMPLE_RESPONSE.length);
+      expect(run.checkpoint.gap).toEqual({ to: OLDEST });
+      expect(run.metadata?.history_complete).toBe(false);
+    } finally {
+      tab.dom.window.close();
+    }
+  });
+
+  test.each([
+    401, 503,
+  ])("an HTTP %s after a committed batch preserves its checkpoint", async (status) => {
+    const tab = retailTab([SAMPLE_RESPONSE, ...olderPages(3)]);
+    const fetch = tab.dom.window.fetch;
+    let reads = 0;
+    tab.dom.window.fetch = async (
+      ...args: Parameters<typeof globalThis.fetch>
+    ) => (reads++ < 4 ? fetch(...args) : new Response(null, { status }));
+    const commit = mock(async () => undefined);
+    try {
+      await expect(
+        runSync(new RevolutTransactionsConnector(), {
+          feedKey: "transactions",
+          config: { wait_for_data_seconds: 0 },
+          checkpoint: {},
+          browser: tab.dispatcher,
+          commit,
+        })
+      ).rejects.toThrow(status === 401 ? /sign.in|passcode/i : /http_503/);
+      expect(commit).toHaveBeenCalledTimes(1);
+      const [, checkpoint] = commit.mock.calls[0] as unknown as [
+        unknown,
+        { gap: { to: number } },
+      ];
+      expect(checkpoint.gap.to).toBe(OLDEST - 3_000_000_000);
+    } finally {
+      tab.dom.window.close();
     }
   });
 });

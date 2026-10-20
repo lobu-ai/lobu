@@ -6,8 +6,8 @@
  * (`app.revolut.com`) already calls — not by scraping the rendered DOM. It runs
  * inside the user's real signed-in Chrome via the paired Owletto extension:
  * reuse the revolut.com sticky anchor the user signs into once, capture the app's own
- * `transactions/last` request headers, then page the FULL history in-page by
- * walking the `?to=<cursor>` parameter and parsing each
+ * `transactions/last` request headers, then page unread history in-page by
+ * walking the `?to=<cursor>` parameter across resumable runs and parsing each
  * `GET /api/retail/user/current/transactions/last` JSON page.
  *
  * Why replay, not scrape: the previous DOM-scrape path parsed amounts out of
@@ -36,8 +36,8 @@
  * Transaction auth is implicit but two-layered: SSO login ≠ retail-API auth.
  * The app-level passcode (rwa flow) must be entered in app.revolut.com or the
  * retail API 401s (`{code:9001}`) and the page renders skeletons. When that
- * happens — no transactions intercepted — we `notifyRevolutAuthWall` and throw
- * `RevolutAuthWallError` instead of reporting a silently-empty sync.
+ * happens, we `notifyRevolutAuthWall` and throw `RevolutAuthWallError` if
+ * sign-in does not recover within the wait budget. Empty history is valid.
  *
  * The transaction event shape matches the original file-import Revolut
  * connector (`semantic_type: "transaction"`, metadata `{ date, description,
@@ -58,9 +58,22 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * History a paging pass has not read yet: page from `to` down to `until`
+ * (absent = the start of history). Every stored row outside it is complete.
+ */
+interface RevolutHistoryGap {
+  /** `?to=` cursor (epoch ms) where paging resumes. */
+  to: number;
+  until?: string;
+  until_id?: string;
+}
+
 export interface RevolutCheckpoint {
   last_transaction_id?: string;
   last_timestamp?: string;
+  /** Transactions feed: unread history left by a run that hit its budget. */
+  gap?: RevolutHistoryGap;
   /** Investment feed: prior identities used to close vanished holdings. */
   investment_refs?: RevolutInvestmentRef[];
 }
@@ -890,7 +903,9 @@ const INVEST_DOM_EXPR = `(async () => {
 // (`extensionNetworkSync` gaining a `retryWhileEmptyMs`/`onEmptyRetry` option)
 // so any connector can reuse it — kept connector-local for now because the
 // runtime-provided SDK would need a release before a new option takes effect.
+// Sign-in retries share the paging deadline.
 const EMPTY_RETRY_POLL_MS = 10_000;
+const RUN_BUDGET_MS = 70_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -905,8 +920,8 @@ function sleep(ms: number): Promise<void> {
 // in the signed-in sticky anchor. The on-load request fires before our
 // wrappers install, so after wrapping fetch + XHR we force ONE fresh app
 // request by remounting the SPA route (away + back). The captured header set
-// (notably the in-memory `x-device-id` app token) + a paging cursor are stored
-// in page globals consumed by PAGE_BATCH_EXPR.
+// (notably the in-memory `x-device-id` app token) are stored in page globals
+// consumed by pageBatchExpr.
 const SETUP_EXPR = `(async () => {
   const isTx = (u) => typeof u === "string" && u.indexOf("transactions/last") >= 0;
   if (location.host.indexOf("sso.") >= 0 || location.pathname.indexOf("signin") >= 0) {
@@ -943,26 +958,38 @@ const SETUP_EXPR = `(async () => {
   const caps = (window.__lobuHdrs || []).filter((h) => h && h["x-device-id"]);
   if (!caps.length) return { authed: true, captured: false };
   window.__lobuHeaders = caps[caps.length - 1];
-  window.__lobuSeen = {}; window.__lobuCursor = null;
-  window.__lobuDone = false; window.__lobuStop = null;
   return { authed: true, captured: true };
 })()`;
 
 // 2. Page older history in-page using the captured headers and RETURN the raw
-// rows fetched this call (no separate read-out phase — keeps the run well under
-// the device-worker's ~95s budget). Each call walks up to PAGES_PER_BATCH
+// rows fetched this call. Each call walks up to four
 // `?to=<cursor>` pages, dedups against `__lobuSeen`, advances `__lobuCursor` to
 // the oldest `startedDate`, and returns the new rows. `__lobuDone` flips when a
 // page returns nothing new/older (start of history reached) or on an error.
-// PAGES_PER_BATCH is small so each return stays modest (~125 rows/page).
+// The batch is small so each return stays modest (~125 rows/page).
 // `internalPocketId` scopes paging to one account/pocket (omit for the primary
-// account). A short inter-fetch delay + a single 5xx retry avoid Revolut's
+// account). A short inter-fetch delay + bounded 5xx retries avoid Revolut's
 // rate-limit 500s under back-to-back paging.
-const pageBatchExpr = (internalPocketId: string): string => {
+// The first call of a crawl (a new `run` token) starts paging at `segment.to`;
+// a page reaching below `segment.stopBefore` ends it with stop "reached".
+const pageBatchExpr = (
+  internalPocketId: string,
+  run: string,
+  segment: { to: number | null; stopBefore: number | null },
+  budgetMs: number
+): string => {
   const pocket = JSON.stringify(internalPocketId || "");
   return `(async () => {
   if (!window.__lobuHeaders) return { done: true, rows: [], stop: "no_headers" };
+  const fresh = window.__lobuRun !== ${JSON.stringify(run)};
+  if (fresh) {
+    window.__lobuRun = ${JSON.stringify(run)};
+    window.__lobuSeen = {}; window.__lobuCursor = ${JSON.stringify(segment.to)};
+    window.__lobuDone = false; window.__lobuStop = null;
+  }
   if (window.__lobuDone) return { done: true, rows: [], stop: window.__lobuStop };
+  const deadline = Date.now() + ${JSON.stringify(budgetMs)};
+  const stopBefore = ${JSON.stringify(segment.stopBefore)};
   const h = window.__lobuHeaders;
   const pocket = ${pocket};
   const base = "/api/retail/user/current/transactions/last";
@@ -974,13 +1001,25 @@ const pageBatchExpr = (internalPocketId: string): string => {
   const fetchPage = async (url) => {
     let lastErr = "retry_exhausted";
     for (let attempt = 0; attempt < 5; attempt++) {
-      if (attempt > 0) await new Promise(x => setTimeout(x, 400 * attempt * attempt));
-      let r;
-      try { r = await fetch(url, { credentials: "include", headers: h }); }
-      catch (e) { lastErr = "neterr"; continue; }
-      if (r.status >= 500) { lastErr = "http_" + r.status; continue; }
-      if (!r.ok) return { err: "http_" + r.status };
-      try { return { page: await r.json() }; } catch (e) { return { err: "parseerr" }; }
+      if (attempt > 0) {
+        const delay = 400 * attempt * attempt;
+        if (Date.now() + delay >= deadline) return { err: "budget" };
+        await new Promise(x => setTimeout(x, delay));
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { err: "budget" };
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), remaining);
+      try {
+        const r = await fetch(url, { credentials: "include", headers: h, signal: controller.signal });
+        if (r.status >= 500) { lastErr = "http_" + r.status; continue; }
+        if (!r.ok) return { err: "http_" + r.status };
+        try { return { page: await r.json() }; }
+        catch (e) { return { err: controller.signal.aborted ? "budget" : "parseerr" }; }
+      } catch (e) {
+        if (controller.signal.aborted) return { err: "budget" };
+        lastErr = "neterr";
+      } finally { clearTimeout(timer); }
     }
     return { err: lastErr };
   };
@@ -989,6 +1028,9 @@ const pageBatchExpr = (internalPocketId: string): string => {
       + (pocket ? ("&internalPocketId=" + pocket) : "")
       + (window.__lobuCursor ? ("&to=" + window.__lobuCursor) : "");
     const res = await fetchPage(url);
+    if (res.err === "budget") {
+      return { done: false, rows, stop: "budget", cursor: window.__lobuCursor };
+    }
     if (res.err) { window.__lobuDone = true; window.__lobuStop = res.err; break; }
     const page = res.page;
     if (!Array.isArray(page)) { window.__lobuDone = true; window.__lobuStop = "parseerr"; break; }
@@ -1003,8 +1045,16 @@ const pageBatchExpr = (internalPocketId: string): string => {
       if (!window.__lobuSeen[id]) { window.__lobuSeen[id] = 1; rows.push(t); added++; }
     }
     if (window.__lobuDone) break;
+    if (stopBefore !== null && oldest < stopBefore) {
+      window.__lobuDone = true; window.__lobuStop = "reached"; break;
+    }
     const prevCursor = window.__lobuCursor == null ? Infinity : window.__lobuCursor;
     if (!(oldest < prevCursor)) {
+      // A resumed cursor has no in-page seen set yet. Confirm an inclusive
+      // boundary with one more read before calling it the end of history.
+      if (fresh && k === 0 && added > 0 && page.every(t => t.startedDate === prevCursor)) {
+        continue;
+      }
       window.__lobuDone = true;
       // An inclusive cursor may repeat the boundary. Any other stalled page
       // is not evidence that we reached the start of history.
@@ -1015,31 +1065,41 @@ const pageBatchExpr = (internalPocketId: string): string => {
     window.__lobuCursor = oldest;
     await new Promise(x => setTimeout(x, 80));
   }
-  return { done: window.__lobuDone, rows: rows, stop: window.__lobuStop };
+  return { done: window.__lobuDone, rows: rows, stop: window.__lobuStop, cursor: window.__lobuCursor };
 })()`;
 };
 
 /**
- * Crawl the FULL retail transaction history by replaying the `transactions/last`
- * API in-page, walking its `?to=<epoch_ms>` cursor — no scrolling.
+ * Page one stretch of retail transaction history by replaying the
+ * `transactions/last` API in-page, walking its `?to=<epoch_ms>` cursor — no
+ * scrolling.
  *
  * Reuses the revolut.com sticky anchor the user signs into once: a fresh background
  * tab bounces to sso.revolut.com (rwa auth is bound to the signed-in tab), so
  * the sticky anchor is the only context where the retail API authenticates.
- * We capture the app's own request headers there (SETUP_EXPR), then page the
- * whole history in batches that RETURN their raw rows (PAGE_BATCH_EXPR), parsing
- * each batch with the same `parseTransactionsResponse` used for intercepted
- * bodies. Inlining the rows (vs a read-out phase) keeps total dispatch time
- * under the device-worker's ~95s ceiling.
+ * We capture the app's own request headers there (SETUP_EXPR), then page in
+ * batches that RETURN their raw rows (pageBatchExpr), parsing each batch with
+ * the same `parseTransactionsResponse` used for intercepted bodies.
+ *
+ * `onBatch` receives every batch with the cursor paging would resume from, so
+ * the caller commits it before the next one. The crawl ends when the segment
+ * is read ("done"), when `maxBatches` or `deadline` runs out ("budget"), or
+ * when Revolut needs the user to sign in ("auth"). Anything else throws, and
+ * only the batches already handed to `onBatch` are kept.
  */
 async function crawlFetchPaging(
   dispatcher: ChromeActionDispatcher,
   startUrl: string,
-  maxBatches: number,
-  internalPocketId: string
-): Promise<{ items: RevolutTransaction[]; apiCallCount: number }> {
+  internalPocketId: string,
+  segment: { to: number | null; stopBefore: number | null },
+  limits: { maxBatches: number; deadline: number },
+  onBatch: (
+    transactions: RevolutTransaction[],
+    resume: number | null
+  ) => Promise<void>
+): Promise<{ status: "done" | "budget" | "auth"; apiCallCount: number }> {
   const allowed = REVOLUT_ALLOWED_ORIGINS;
-  const PAGE_BATCH_EXPR = pageBatchExpr(internalPocketId);
+  const run = crypto.randomUUID();
   // Open / reuse the site sticky anchor in the BACKGROUND (not focused) so
   // a routine authed sync never pops the window to the foreground. We only
   // surface it below if the run actually needs the user to sign in.
@@ -1053,8 +1113,8 @@ async function crawlFetchPaging(
   const tabId = nav.tab_id;
 
   // Capture headers / auth-check. On a miss (SSO wall / capture fail), FOCUS the
-  // sticky anchor so the user can complete the passcode in place, then return
-  // no items so the upstream wait-poll fires the sign-in notice and retries.
+  // sticky anchor so the user can complete the passcode in place; the caller
+  // fires the sign-in notice and retries.
   const setup = await dispatcher.dispatch<{
     value?: { authed?: boolean; captured?: boolean };
   }>("evaluate", {
@@ -1073,21 +1133,30 @@ async function crawlFetchPaging(
         allowed_origins: allowed,
       })
       .catch(() => undefined);
-    return { items: [], apiCallCount: 0 };
+    return { status: "auth", apiCallCount: 0 };
   }
 
-  // Page the full history in-page, batch by batch, parsing each batch's returned
-  // raw rows inline until done. The cross-batch `seen` set is belt-and-braces;
-  // the in-page `__lobuSeen` already dedups across batches.
-  const items: RevolutTransaction[] = [];
-  const seen = new Set<string>();
   let apiCallCount = 0;
-  for (let batch = 0; batch < maxBatches; batch++) {
+  for (
+    let batch = 0;
+    batch < limits.maxBatches && Date.now() < limits.deadline;
+    batch++
+  ) {
     const b = await dispatcher.dispatch<{
-      value?: { done?: boolean; rows?: unknown; stop?: string | null };
+      value?: {
+        done?: boolean;
+        rows?: unknown;
+        stop?: string | null;
+        cursor?: unknown;
+      };
     }>("evaluate", {
       tab_id: tabId,
-      expression: PAGE_BATCH_EXPR,
+      expression: pageBatchExpr(
+        internalPocketId,
+        run,
+        segment,
+        Math.max(0, limits.deadline - Date.now())
+      ),
       allowed_origins: allowed,
     });
     const v = b.value ?? {};
@@ -1095,42 +1164,45 @@ async function crawlFetchPaging(
       await dispatcher
         .dispatch("focus_tab", { tab_id: tabId })
         .catch(() => undefined);
-      // Discard partial history and use the existing sign-in wait/retry path.
-      return { items: [], apiCallCount: 0 };
+      return { status: "auth", apiCallCount };
     }
     if (
-      (v.stop && !["empty", "no_new"].includes(v.stop)) ||
+      (v.stop && !["empty", "no_new", "reached", "budget"].includes(v.stop)) ||
       (v.done && !v.stop)
     ) {
       throw new Error(
-        `Revolut transaction crawl failed (${v.stop}); no checkpoint was advanced.`
+        `Revolut transaction crawl failed (${v.stop}); this batch was not saved.`
       );
     }
-    if (!Array.isArray(v.rows) || typeof v.done !== "boolean") {
+    const resume =
+      typeof v.cursor === "number" && Number.isFinite(v.cursor)
+        ? v.cursor
+        : null;
+    if (
+      !Array.isArray(v.rows) ||
+      typeof v.done !== "boolean" ||
+      (!v.done &&
+        resume === null &&
+        !(v.stop === "budget" && v.rows.length === 0))
+    ) {
       throw new Error(
-        "Revolut transaction crawl returned an incomplete response; no checkpoint was advanced."
+        "Revolut transaction crawl returned an incomplete response; this batch was not saved."
       );
     }
     const transactions = parseTransactionsResponse(v.rows);
     if (transactions.length !== v.rows.length) {
       throw new Error(
-        "Revolut transaction crawl returned malformed rows; no checkpoint was advanced."
+        "Revolut transaction crawl returned malformed rows; this batch was not saved."
       );
     }
-    if (v.rows.length > 0) {
-      apiCallCount += 1;
-      for (const t of transactions) {
-        if (!seen.has(t.id)) {
-          seen.add(t.id);
-          items.push(t);
-        }
-      }
+    if (v.rows.length > 0) apiCallCount += 1;
+    if (transactions.length > 0 || v.done) {
+      await onBatch(transactions, v.done ? null : resume);
     }
-    if (v.done) return { items, apiCallCount };
+    if (v.stop === "budget") return { status: "budget", apiCallCount };
+    if (v.done) return { status: "done", apiCallCount };
   }
-  throw new Error(
-    "Revolut transaction history is incomplete: crawl budget exhausted; no checkpoint was advanced."
-  );
+  return { status: "budget", apiCallCount };
 }
 
 const configSchema = {
@@ -1158,13 +1230,13 @@ const configSchema = {
       maximum: 200,
       default: 20,
       description:
-        "Maximum paging batches (each fetches up to 4 `?to=` cursor pages of ~125 rows). 20 covers normal incremental syncs; raise it (e.g. 200) for a deep first backfill spanning years of history. (Name kept for config compatibility; the connector no longer scrolls.)",
+        "Maximum paging batches per run (each fetches up to 4 `?to=` cursor pages of ~125 rows). A run also stops after ~70s; history it could not reach is saved as a gap and the next run resumes there. (Name kept for config compatibility; the connector no longer scrolls.)",
     },
     backfill: {
       type: "boolean",
       default: false,
       description:
-        "One-time historical backfill: ignore the checkpoint and re-emit EVERY fetched transaction (the gateway dedups by id, so re-emitting is safe). Pair with a high max_scrolls to re-ingest years of history with correct amounts, then set back to false for normal incremental syncs.",
+        "One-time historical backfill: ignore the checkpoint and re-read the whole history, re-emitting every transaction (the gateway dedups by id, so re-emitting is safe). It spans as many runs as it needs; set back to false once the backfill completes.",
     },
     wait_for_data_seconds: {
       type: "integer",
@@ -1172,7 +1244,7 @@ const configSchema = {
       maximum: 80,
       default: 30,
       description:
-        "If the crawl returns no data, keep retrying every 10s for this many seconds before failing. For Revolut the empty result means the passcode/sign-in wall (the sign-in notification fires once), so a run triggered before sign-in still completes once you authenticate. Capped at 80s because the device worker has a hard ~95s per-run budget. 0 = fail fast.",
+        "If Revolut asks for the passcode or sign-in, keep retrying every 10s for this many seconds before failing (the sign-in notification fires once), so a run triggered before sign-in still completes once you authenticate. The wait counts toward the run's ~70s paging budget. 0 = fail fast.",
     },
   },
 };
@@ -1217,7 +1289,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
     name: "Revolut",
     description:
       "Syncs exact Revolut transactions and current Invest balances through your paired Owletto Chrome session, with no separate connector login.",
-    version: "4.8.2",
+    version: "4.9.0",
     faviconDomain: "app.revolut.com",
     browser: {
       origins: [
@@ -1483,104 +1555,165 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
       config.internal_pocket_id.trim()
         ? config.internal_pocket_id.trim()
         : "";
-    // Each "batch" pages up to 8 `?to=` cursor pages (~125 rows each), so the
-    // default 20 covers ~20k rows; a deep backfill raises it for full history.
+    // Each "batch" pages up to 4 `?to=` cursor pages (~125 rows each).
     const maxBatches = Math.max(
       1,
       Math.min(200, Number(config.max_scrolls ?? 20) || 20)
     );
-    // Backfill mode ignores the checkpoint and re-emits every fetched row (the
-    // gateway dedups by origin_id), so historical transactions older than the
-    // checkpoint are re-ingested with correct amounts.
+    // Backfill mode re-reads the whole history and re-emits every row (the
+    // gateway dedups by origin_id), so older transactions are re-ingested with
+    // correct amounts.
     const backfill = config.backfill === true;
 
+    // Stay below the extension's 80s awaited-evaluation timeout, leaving
+    // unread history as a gap for the next run.
+    const runDeadline = Date.now() + RUN_BUDGET_MS;
     // How long to wait for the user to enter their passcode before giving up.
-    // The device worker has a HARD ~95s per-run budget, so the wait MUST stay
-    // short — a long wait gets the whole run killed mid-paging. We fire the
-    // sign-in notification and retry the crawl every `EMPTY_RETRY_POLL_MS`; for a
-    // reliable backfill the user should sign in BEFORE triggering (then the first
-    // attempt is authed and no wait is consumed). 0 disables the wait (fail fast).
+    // We fire the sign-in notification and retry the crawl every
+    // `EMPTY_RETRY_POLL_MS`; the wait spends the same run budget, so the user
+    // should sign in BEFORE triggering a long read. 0 disables the wait.
     const dataWaitMs =
       Math.max(0, Math.min(80, Number(config.wait_for_data_seconds ?? 30))) *
       1000;
 
-    // One crawl attempt: capture headers in the persistent signed-in window and
-    // page the full history in-page via the `?to=` cursor (see crawlFetchPaging).
+    // One pass per run: finish an open gap, else read from now down to the
+    // newest stored row (the whole history on a first sync or a backfill).
+    // Only that head pass moves the high-water mark.
+    // A backfill resumes only its own full-history gap; an incremental gap
+    // stops at an old cutoff, so a fresh full pass replaces it.
+    const gap = backfill && checkpoint.gap?.until ? undefined : checkpoint.gap;
+    const fillingGap = Boolean(gap);
+    const segment:
+      | RevolutHistoryGap
+      | { to: null; until?: string; until_id?: string } =
+      gap ??
+      (backfill
+        ? { to: null }
+        : {
+            to: null,
+            until: checkpoint.last_timestamp,
+            until_id: checkpoint.last_transaction_id,
+          });
+    const untilTs = segment.until ? new Date(segment.until).getTime() : null;
+    if (untilTs !== null && !Number.isFinite(untilTs)) {
+      throw new Error(
+        `Revolut checkpoint has an invalid time: ${segment.until}`
+      );
+    }
+
+    let state: RevolutCheckpoint = { ...checkpoint };
+    let resumeFrom = segment.to;
+    const seen = new Set<string>();
+    let itemsFound = 0;
+    let itemsScraped = 0;
+
+    const commitBatch = async (
+      fetched: RevolutTransaction[],
+      resume: number | null
+    ) => {
+      itemsScraped += fetched.length;
+      let transactions = filterTransactionsSinceCheckpoint(fetched, {
+        last_timestamp: segment.until,
+        last_transaction_id: segment.until_id,
+      }).filter((t) => !seen.has(t.id));
+      for (const t of transactions) seen.add(t.id);
+      if (currencyFilter) {
+        transactions = transactions.filter(
+          (t) => t.currency === currencyFilter
+        );
+      }
+      transactions.sort(
+        (a, b) => b.occurredAt.getTime() - a.occurredAt.getTime()
+      );
+
+      // Monotonic high-water mark: the newest row the head pass saw, over the
+      // whole batch rather than the filtered slice, never moving backwards.
+      let high = state;
+      if (!fillingGap) {
+        for (const t of fetched) {
+          const ts = t.occurredAt.getTime();
+          const highTs = high.last_timestamp
+            ? new Date(high.last_timestamp).getTime()
+            : Number.NEGATIVE_INFINITY;
+          if (Number.isFinite(ts) && ts > highTs) {
+            high = {
+              last_transaction_id: t.id,
+              last_timestamp: t.occurredAt.toISOString(),
+            };
+          }
+        }
+      }
+      resumeFrom = resume;
+      state = {
+        ...(high.last_transaction_id
+          ? { last_transaction_id: high.last_transaction_id }
+          : {}),
+        ...(high.last_timestamp ? { last_timestamp: high.last_timestamp } : {}),
+        ...(resume === null
+          ? {}
+          : {
+              gap: {
+                to: resume,
+                ...(segment.until ? { until: segment.until } : {}),
+                ...(segment.until_id ? { until_id: segment.until_id } : {}),
+              },
+            }),
+      };
+      itemsFound += transactions.length;
+      await ctx.commit(
+        transactions.map(transactionToEvent),
+        state as unknown as Record<string, unknown>
+      );
+    };
+
+    // One crawl attempt, resuming wherever the last committed batch left off.
     const runCrawl = () =>
-      crawlFetchPaging(dispatcher, startUrl, maxBatches, internalPocketId);
+      crawlFetchPaging(
+        dispatcher,
+        startUrl,
+        internalPocketId,
+        { to: resumeFrom, stopBefore: untilTs },
+        { maxBatches, deadline: runDeadline },
+        commitBatch
+      );
 
     let result = await runCrawl();
 
-    // Auth-wait poll. Zero intercepted transactions means the passcode/SSO wall
-    // (401 `{code:9001}`, an sso.revolut.com redirect, or skeleton rows that
-    // never fire the fetch). Notify once, then re-run the crawl every
-    // EMPTY_RETRY_POLL_MS until the user signs in or the wait window elapses, so a run
-    // triggered before sign-in still completes once they authenticate.
-    if (result.items.length === 0 && dataWaitMs > 0) {
+    // Auth-wait poll: the passcode/SSO wall (no captured app headers, an
+    // sso.revolut.com page, or a 401 `{code:9001}`). Notify once, then re-run
+    // the crawl every EMPTY_RETRY_POLL_MS until the user signs in or the wait
+    // window elapses, so a run triggered before sign-in still completes.
+    if (result.status === "auth" && dataWaitMs > 0) {
       await notifyRevolutAuthWall(dispatcher, startUrl);
-      const deadline = Date.now() + dataWaitMs;
-      while (result.items.length === 0 && Date.now() < deadline) {
-        await sleep(EMPTY_RETRY_POLL_MS);
+      const deadline = Math.min(Date.now() + dataWaitMs, runDeadline);
+      while (result.status === "auth" && Date.now() < deadline) {
+        await sleep(Math.min(EMPTY_RETRY_POLL_MS, deadline - Date.now()));
+        if (Date.now() >= deadline) break;
         result = await runCrawl();
       }
     }
 
-    // Fail closed: still nothing after the wait → leave the checkpoint untouched
-    // and surface the typed auth-wall error (don't report a silent empty sync).
-    if (result.items.length === 0) {
+    // Fail closed: committed batches stay, the rest of the pass waits for a
+    // signed-in run.
+    if (result.status === "auth") {
       await notifyRevolutAuthWall(dispatcher, startUrl);
       throw new RevolutAuthWallError(startUrl);
     }
 
-    const all = result.items;
-    // A null checkpoint makes the filter dedup-only (emit everything) — that IS
-    // backfill mode; otherwise drop rows at/older than the checkpoint.
-    let transactions = filterTransactionsSinceCheckpoint(
-      all,
-      backfill ? null : checkpoint
-    );
-    if (currencyFilter) {
-      transactions = transactions.filter((t) => t.currency === currencyFilter);
-    }
-    transactions.sort(
-      (a, b) => b.occurredAt.getTime() - a.occurredAt.getTime()
-    );
-
-    const events: EventEnvelope[] = transactions.map(transactionToEvent);
-
-    // Monotonic high-water mark: advance to the newest transaction we actually
-    // saw, but NEVER move the checkpoint backwards in time. `newestSeen` is the
-    // max over the FULL intercept, not just the post-checkpoint slice.
-    const newestSeen = all.reduce<RevolutTransaction | null>(
-      (max, t) =>
-        !max || t.occurredAt.getTime() > max.occurredAt.getTime() ? t : max,
-      null
-    );
-    const prevTs = checkpoint?.last_timestamp
-      ? new Date(checkpoint.last_timestamp).getTime()
-      : Number.NEGATIVE_INFINITY;
-    const newCheckpoint: RevolutCheckpoint =
-      newestSeen &&
-      Number.isFinite(newestSeen.occurredAt.getTime()) &&
-      newestSeen.occurredAt.getTime() > prevTs
-        ? {
-            last_transaction_id: newestSeen.id,
-            last_timestamp: newestSeen.occurredAt.toISOString(),
-          }
-        : checkpoint;
-
-    await ctx.commit(
-      events,
-      newCheckpoint as unknown as Record<string, unknown>
-    );
     return {
-      status: "complete",
+      // An incremental gap owes a head pass. A backfill must finish here:
+      // another run with backfill enabled would start the full history again.
+      status:
+        result.status === "budget" || (fillingGap && !backfill)
+          ? "more"
+          : "complete",
       metadata: {
-        items_found: events.length,
-        items_scraped: all.length,
+        items_found: itemsFound,
+        items_scraped: itemsScraped,
         api_calls: result.apiCallCount,
         backend: "extension-network",
-        mode: backfill ? "backfill" : "incremental",
+        mode: fillingGap ? "gap" : backfill ? "backfill" : "incremental",
+        history_complete: result.status === "done" && !state.gap,
         ...(currencyFilter ? { currency_filter: currencyFilter } : {}),
       },
     };
