@@ -29,7 +29,6 @@ import { sourceDependencies } from '@lobu/connector-worker/compile';
 import { build, type Plugin, transform } from 'esbuild';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
-import { getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
 
 export type { ViewAttachment };
 
@@ -527,20 +526,6 @@ html.dark{color-scheme:dark;--fg:var(--color-text-primary,#fafafa);--muted:var(-
 html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 var(--font)}
 *{box-sizing:border-box}
 `;
-
-/**
- * The workspace root a view's relative links resolve against
- * (`<web origin>/<org slug>/`). The shell carries it, so every host — the web
- * app, Claude, any MCP Apps host — receives an absolute URL to open.
- */
-export async function viewWorkspaceUrl(
-  organizationId: string,
-  requestUrl: string
-): Promise<string> {
-  const origin = getPublicWebUrl(requestUrl) ?? new URL(requestUrl).origin;
-  const slug = (await getOrganizationSlug(organizationId)) ?? organizationId;
-  return `${origin}/${encodeURIComponent(slug)}/`;
-}
 
 /** One view's shell: the compiled bundle inlined, no relative asset URLs and
  * no `<base href>` (claude.ai hardcodes `base-uri 'self'`, so both 404 there). */

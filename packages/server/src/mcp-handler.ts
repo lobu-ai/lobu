@@ -71,11 +71,11 @@ import { getMcpTools, getTool, isAuthorizationReadOnly } from './tools/registry'
 import { toMcpPublicSdkScriptResult } from './tools/sdk_run';
 import { validateToolResult } from './tools/validate-args';
 import { renderMcpAppTemplate } from './utils/mcp-app-bundle';
+import { viewWorkspaceUrl } from './utils/url-builder';
 import {
   LOBU_VIEWS_RESOURCE_URI,
   getView,
   renderViewShell,
-  viewWorkspaceUrl,
   renderViewsLoaderShell,
   viewKeyFromResourceUri,
   viewResourceMeta,

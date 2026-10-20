@@ -28,8 +28,8 @@ import {
 	getView,
 	isValidViewKey,
 	renderViewShell,
-	viewWorkspaceUrl,
 } from "./views/views";
+import { viewWorkspaceUrl } from "./utils/url-builder";
 import { getOperationsSummary } from "./operations/connector-operations";
 import { manageClassifiers } from "./tools/admin/manage_classifiers";
 import { manageAutomations } from "./tools/admin/manage_automations";

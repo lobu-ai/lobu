@@ -78,6 +78,20 @@ export async function getOrganizationSlug(
 }
 
 /**
+ * The workspace root a view's relative links resolve against
+ * (`<web origin>/<org slug>/`). The shell carries it, so every host — the web
+ * app, Claude, any MCP Apps host — receives an absolute URL to open.
+ */
+export async function viewWorkspaceUrl(
+  organizationId: string,
+  requestUrl: string
+): Promise<string> {
+  const origin = getPublicWebUrl(requestUrl) ?? new URL(requestUrl).origin;
+  const slug = (await getOrganizationSlug(organizationId)) ?? organizationId;
+  return `${origin}/${encodeURIComponent(slug)}/`;
+}
+
+/**
  * Build the agent's model/provider settings URL —
  * `<webOrigin>/<orgSlug>/agents/<agentId>/settings` — the CTA target for
  * provider/model errors (connect a provider, choose a model, reconnect
