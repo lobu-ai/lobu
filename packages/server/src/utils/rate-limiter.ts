@@ -404,11 +404,12 @@ export class RateLimiter {
  * Predefined rate limit configurations (only those actively used)
  */
 export const RateLimitPresets = {
-  /** API requests per IP: 60/minute */
-  API_PER_IP_MINUTE: {
+  /** Public-workspace reads by an anonymous visitor: 60/minute per IP */
+  PUBLIC_READ_PER_IP_MINUTE: {
     limit: 60,
     windowSeconds: 60,
-    errorMessage: 'API rate limit exceeded. Maximum 60 requests per minute.',
+    errorMessage:
+      'Public read limit reached: 60 requests per minute. Sign in for a higher limit, or join the workspace to lift it.',
   } as RateLimitConfig,
 
   /** Public-workspace reads by a signed-in non-member: 300/minute per user */
@@ -476,16 +477,26 @@ export function getRateLimiter(): RateLimiter {
 }
 
 /**
- * Meter one read of a public workspace by a signed-in user outside it, per
- * account. Members are never metered, and neither are callers without a user
- * (anonymous visitors and internal calls).
+ * Meter one read of a public workspace by a caller outside it (members are
+ * never metered): signed-in users per account, anonymous visitors per IP.
+ * Only HTTP callers carry a `clientIP`, so anonymous internal calls are not
+ * metered; nor is an anonymous IP of `'unknown'`, since every such caller
+ * would share one bucket.
  */
-export function enforcePublicReadLimit(userId: string | null): void {
-  if (!userId) return;
-  const result = getRateLimiter().checkLimit(
-    `rate:public-read:user:${userId}`,
-    RateLimitPresets.PUBLIC_READ_PER_USER_MINUTE
-  );
+export function enforcePublicReadLimit(caller: {
+  userId: string | null;
+  clientIP?: string | null;
+}): void {
+  if (!caller.userId && (!caller.clientIP || caller.clientIP === 'unknown')) return;
+  const result = caller.userId
+    ? getRateLimiter().checkLimit(
+        `rate:public-read:user:${caller.userId}`,
+        RateLimitPresets.PUBLIC_READ_PER_USER_MINUTE
+      )
+    : getRateLimiter().checkLimit(
+        `rate:public-read:ip:${caller.clientIP}`,
+        RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE
+      );
   if (!result.allowed) {
     throw new ToolUserError(
       `${result.errorMessage} Try again in ${Math.max(1, result.resetInSeconds)}s.`,
@@ -501,13 +512,25 @@ export function resetRateLimiterForTests(): void {
   _rateLimiter = null;
 }
 
+/** `TRUSTED_PROXY` as a hop count: `true` is one proxy, a positive integer is that many. */
+function trustedProxyHops(value: string | undefined): number {
+  if (value === 'true') return 1;
+  const hops = Number(value);
+  return Number.isInteger(hops) && hops > 0 ? hops : 0;
+}
+
 /**
  * Get client IP from request.
  *
- * When `TRUSTED_PROXY` is set, the rightmost `X-Forwarded-For` entry (the address
- * the trusted proxy actually observed, not client-controllable) is used, falling
- * back to `CF-Connecting-IP` / `X-Real-IP`. This is the abuse-resistant mode and
- * operators behind a tunnel/reverse-proxy should set it.
+ * `TRUSTED_PROXY` is the number of proxies in front of the app (`true` means
+ * one). Each proxy appends the address it received the request from to
+ * `X-Forwarded-For`, so with N trusted proxies the visitor is the Nth entry
+ * from the right: the one the outermost trusted proxy appended. Taking the
+ * rightmost entry with two proxies (an edge and an ingress, say) would key
+ * every visitor on the edge's address. Entries left of that are client
+ * controlled and never used. Without `X-Forwarded-For`, `CF-Connecting-IP` /
+ * `X-Real-IP` are the fallback. This is the abuse-resistant mode and operators
+ * behind a tunnel/reverse-proxy should set it.
  *
  * Without `TRUSTED_PROXY` we key on the *socket peer address* (`peerAddress`,
  * stashed from the Node adapter's `socket.remoteAddress`). Forwarded headers are
@@ -520,13 +543,14 @@ export function resetRateLimiterForTests(): void {
  * adapter, e.g. unit tests via `app.request()`).
  */
 export function getClientIP(request: Request, peerAddress?: string | null): string {
-  const trustForwarded = process.env.TRUSTED_PROXY === 'true' || process.env.TRUSTED_PROXY === '1';
-  if (trustForwarded) {
+  const trustedHops = trustedProxyHops(process.env.TRUSTED_PROXY);
+  if (trustedHops > 0) {
     const xff = request.headers.get('X-Forwarded-For');
     if (xff) {
       const parts = xff.split(',').map((p) => p.trim()).filter(Boolean);
-      // Rightmost entry = the address the trusted proxy actually observed.
-      if (parts.length > 0) return parts[parts.length - 1]!;
+      // Fewer entries than trusted hops: the request skipped an outer proxy,
+      // so the leftmost entry is the furthest address any proxy observed.
+      if (parts.length > 0) return parts[Math.max(0, parts.length - trustedHops)]!;
     }
     const cf = request.headers.get('CF-Connecting-IP');
     if (cf) return cf.trim();
