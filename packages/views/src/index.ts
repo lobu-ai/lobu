@@ -39,6 +39,7 @@ export type {
   ParamDef,
   Params,
   ParamValue,
+  QueryOptions,
   QueryState,
   Scope,
   SqlQuery,
