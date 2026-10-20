@@ -458,6 +458,15 @@ describe('automation arm e2e', () => {
     expect(readArgsLog().split('---INVOCATION---').length - 1).toBe(1);
   });
 
+  test('a CLI that exits before the first heartbeat interval still beats once', async () => {
+    completions = [];
+    script = [{ status: 'completed' }];
+    await executeAutomationRun(client(), automationJob(), cfg());
+
+    // cfg() beats every 60s, so only the start beat can account for this.
+    expect(heartbeatRequests).toBe(1);
+  });
+
   test("a granted resume re-spawns the CLI with the server's nudge in the prompt", async () => {
     completions = [];
     script = [

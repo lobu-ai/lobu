@@ -123,7 +123,10 @@ function monitorDeviceAgentRun(
   cfg.shutdownSignal?.addEventListener('abort', onShutdown, { once: true });
   if (cfg.shutdownSignal?.aborted) onShutdown();
 
-  const heartbeat = setInterval(() => {
+  // Beat once at start: the server's fast stale reaper only covers a run that
+  // has beaten since its claim, and a CLI that exits before the first interval
+  // would otherwise wait out the coarse TTL if its exit report is lost.
+  const beat = () =>
     client.heartbeat(runId).catch((error) => {
       if (error instanceof WorkerHttpError && error.status === 409) {
         if (!abortController.signal.aborted) {
@@ -138,7 +141,8 @@ function monitorDeviceAgentRun(
       }
       log.debug(`[executor] ${label} heartbeat failed:`, error);
     });
-  }, cfg.heartbeatIntervalMs ?? 30_000);
+  const heartbeat = setInterval(beat, cfg.heartbeatIntervalMs ?? 30_000);
+  void beat();
 
   return {
     abortController,
@@ -181,7 +185,9 @@ export const DEFAULT_DEVICE_AGENT_TIMEOUT_MS = 600_000;
 /** Cap on the CLI-output tail folded into `runs.error_message`. */
 const DETAIL_TAIL_CHARS = 500;
 const LOCAL_MAX_ROUNDS = 8;
-const EXIT_REPORT_DELIVERY_ATTEMPTS = 3;
+/** Backoff doubles from 2s, so retries span ~1 min, outlasting a heartbeat
+ *  interval and a brief gateway outage. */
+const EXIT_REPORT_DELIVERY_ATTEMPTS = 6;
 const EXIT_REPORT_RETRY_DELAY_MS = 2000;
 const TRANSCRIPT_DELIVERY_ATTEMPTS = 3;
 const TRANSCRIPT_RETRY_DELAY_MS = 250;
@@ -1081,7 +1087,7 @@ export async function deliverExitReport(
       );
       if (!retriable) return null;
       if (attempt + 1 < EXIT_REPORT_DELIVERY_ATTEMPTS) {
-        await sleep(EXIT_REPORT_RETRY_DELAY_MS * (attempt + 1));
+        await sleep(EXIT_REPORT_RETRY_DELAY_MS * 2 ** attempt);
       }
     }
   }
