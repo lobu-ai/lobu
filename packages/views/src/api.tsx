@@ -54,6 +54,7 @@
 import type { CollectionSelection } from "@lobu/core/contracts/tools/collection-selection";
 import type { ViewAttachment } from "@lobu/core/contracts/tools/manage-views";
 import {
+  Component,
   createContext,
   type ReactNode,
   useCallback,
@@ -628,6 +629,46 @@ function applyTheme(theme: "light" | "dark"): void {
 }
 
 /**
+ * Contains a render error to the view so the Provider (which owns the host
+ * handshake) stays mounted: an uncaught error would unmount it before its
+ * effect connects, leaving the host a blank frame with no size and no error.
+ * `resetKey` changes when the host delivers scope/params or data changes, so
+ * a render that only failed for lack of scope retries once it arrives.
+ */
+class RenderBoundary extends Component<
+  { resetKey: string; children: ReactNode },
+  { error: Error | null; resetKey: string }
+> {
+  state = { error: null as Error | null, resetKey: this.props.resetKey };
+
+  static getDerivedStateFromError(error: unknown) {
+    return { error: error instanceof Error ? error : new Error(String(error)) };
+  }
+
+  static getDerivedStateFromProps(
+    props: { resetKey: string },
+    state: { error: Error | null; resetKey: string }
+  ) {
+    return props.resetKey === state.resetKey
+      ? null
+      : { error: null, resetKey: props.resetKey };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error("[lobu-views] view failed to render", error);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div role="alert" style={{ padding: 12, color: "var(--fg)" }}>
+        This view failed to render: {this.state.error.message}
+      </div>
+    );
+  }
+}
+
+/**
  * Host bridge provider: seeds scope/params from the first tool-input,
  * exposes reads/actions over tools/call, mirrors params through
  * update-model-context. The server bootstrap renders this around the view's
@@ -776,7 +817,11 @@ export function Provider({
   // keep the iframe mounted while delivering the opening result.
   return (
     <Ctx.Provider key={scope.event ?? "unbound"} value={value}>
-      {children}
+      <RenderBoundary
+        resetKey={`${ready}:${JSON.stringify(scope)}:${JSON.stringify(params)}:${dataVersion}`}
+      >
+        {children}
+      </RenderBoundary>
     </Ctx.Provider>
   );
 }
