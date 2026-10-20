@@ -120,6 +120,22 @@ describe("secret-proxy placeholder TTL", () => {
 });
 
 describe("secret-proxy failed-resolution throttle", () => {
+  // Production runs behind Cloudflare and Traefik: the visitor is the second
+  // X-Forwarded-For entry from the right, after any client-supplied prefix.
+  const prevTrustedProxy = process.env.TRUSTED_PROXY;
+  beforeAll(() => {
+    process.env.TRUSTED_PROXY = "2";
+  });
+  afterAll(() => {
+    if (prevTrustedProxy === undefined) delete process.env.TRUSTED_PROXY;
+    else process.env.TRUSTED_PROXY = prevTrustedProxy;
+  });
+  const via = (client: string, forged?: string) => ({
+    "x-forwarded-for": [forged, client, "172.69.0.1"]
+      .filter(Boolean)
+      .join(", "),
+  });
+
   it("throttles a source after repeated bad placeholders, even for a later valid one", async () => {
     const proxy = makeProxy("real-secret");
     const source = "203.0.113.7";
@@ -130,7 +146,7 @@ describe("secret-proxy failed-resolution throttle", () => {
         proxy,
         "/v1/thing",
         `${PLACEHOLDER_PREFIX}${crypto.randomUUID()}`,
-        { "x-forwarded-for": source }
+        via(source)
       );
     }
     // Now register a genuinely valid placeholder...
@@ -141,17 +157,13 @@ describe("secret-proxy failed-resolution throttle", () => {
       "d"
     );
     // ...and call from the throttled source: still fails closed (empty auth).
-    await callProxy(proxy, "/v1/thing", placeholder, {
-      "x-forwarded-for": source,
-    });
+    await callProxy(proxy, "/v1/thing", placeholder, via(source));
     expect(captured[captured.length - 1]!.headers.authorization).toBe(
       "Bearer "
     );
 
     // A different source with the same valid placeholder still works.
-    await callProxy(proxy, "/v1/thing", placeholder, {
-      "x-forwarded-for": "198.51.100.2",
-    });
+    await callProxy(proxy, "/v1/thing", placeholder, via("198.51.100.2"));
     expect(captured[captured.length - 1]!.headers.authorization).toBe(
       "Bearer real-secret"
     );
@@ -166,12 +178,36 @@ describe("secret-proxy failed-resolution throttle", () => {
       "d"
     );
     for (let i = 0; i < 50; i++) {
-      await callProxy(proxy, "/v1/thing", placeholder, {
-        "x-forwarded-for": "203.0.113.99",
-      });
+      await callProxy(proxy, "/v1/thing", placeholder, via("203.0.113.99"));
     }
     expect(captured[captured.length - 1]!.headers.authorization).toBe(
       "Bearer real-secret"
+    );
+  });
+  it("a forged X-Forwarded-For prefix can't open a fresh bucket", async () => {
+    const proxy = makeProxy("real-secret");
+    for (let i = 0; i < 20; i++) {
+      await callProxy(
+        proxy,
+        "/v1/thing",
+        `${PLACEHOLDER_PREFIX}${crypto.randomUUID()}`,
+        via("203.0.113.8", `10.0.0.${i}`)
+      );
+    }
+    const placeholder = generatePlaceholder(
+      "agent-a",
+      "MY_TOKEN",
+      "builtin:deployments/d/agent-a/MY_TOKEN",
+      "d"
+    );
+    await callProxy(
+      proxy,
+      "/v1/thing",
+      placeholder,
+      via("203.0.113.8", "10.0.0.250")
+    );
+    expect(captured[captured.length - 1]!.headers.authorization).toBe(
+      "Bearer "
     );
   });
 });
