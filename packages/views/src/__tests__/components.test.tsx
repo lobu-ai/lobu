@@ -317,6 +317,118 @@ describe("charts", () => {
     expect(el.querySelector("polyline")).toBeTruthy();
   });
 
+  // A large level with small movement: from zero the line is flat at the top.
+  const level = [
+    { label: "W1", value: 2_600_000 },
+    { label: "W2", value: 2_700_000 },
+  ];
+  const ys = () =>
+    [...el.querySelectorAll("circle")].map((c) => Number(c.getAttribute("cy")));
+
+  test("line chart baseline auto spreads a narrow range over the plot", () => {
+    render(<LineChart data={level} height={180} baseline="auto" />);
+    const points = ys();
+    expect(points).toHaveLength(2);
+    const [a, b] = points;
+    // 180 tall, 6 top + 22 bottom padding: 152px of plot; 10% headroom each side.
+    expect(Math.abs(a! - b!)).toBeGreaterThan(100);
+    expect(el.textContent).toContain("2590000");
+  });
+
+  test("line chart defaults to a zero baseline", () => {
+    render(<LineChart data={level} height={180} />);
+    const points = ys();
+    expect(points).toHaveLength(2);
+    const [a, b] = points;
+    expect(Math.abs(a! - b!)).toBeLessThan(40);
+  });
+
+  test.each([
+    BarChart,
+    LineChart,
+  ])("%p uses content width and cleans up its observer", (Chart) => {
+    const g = globalThis as unknown as Record<string, unknown>;
+    const original = Object.getOwnPropertyDescriptor(g, "ResizeObserver");
+    let resize: (width: number) => void = () => undefined;
+    let observed: Element | undefined;
+    let disconnected = false;
+    g.ResizeObserver = class {
+      constructor(cb: ResizeObserverCallback) {
+        resize = (width) =>
+          cb(
+            [
+              {
+                contentRect: new dom.window.DOMRect(0, 0, width, 120),
+              } as ResizeObserverEntry,
+            ],
+            this as unknown as ResizeObserver
+          );
+      }
+      observe(target: Element) {
+        observed = target;
+      }
+      disconnect() {
+        disconnected = true;
+      }
+    };
+    try {
+      render(<Chart data={data} height={120} />);
+      expect(el.querySelector("svg")?.getAttribute("viewBox")).toBe(
+        "0 0 320 120"
+      );
+      const figure = el.querySelector("figure") as HTMLElement;
+      expect(observed).toBe(figure);
+      // Transforms change outer bounds without changing the SVG's layout width.
+      figure.getBoundingClientRect = () =>
+        new dom.window.DOMRect(0, 0, 400, 120);
+      for (const width of [800, 200, 640]) {
+        act(() => resize(width));
+        const svg = el.querySelector("svg");
+        expect(svg?.getAttribute("viewBox")).toBe(`0 0 ${width} 120`);
+        expect(svg?.querySelectorAll("line")[1]?.getAttribute("x2")).toBe(
+          String(width - 8)
+        );
+      }
+      act(() => resize(0));
+      expect(el.querySelector("svg")?.getAttribute("viewBox")).toBe(
+        "0 0 640 120"
+      );
+      render(null);
+      expect(disconnected).toBe(true);
+    } finally {
+      if (original) Object.defineProperty(g, "ResizeObserver", original);
+      else delete g.ResizeObserver;
+    }
+  });
+
+  test.each([
+    [],
+    [0],
+    [20],
+    [-20, -20],
+    [-20, -10],
+    [-10, 20],
+  ])("line chart auto bounds contain %j", (...values) => {
+    const formatted: number[] = [];
+    render(
+      <LineChart
+        data={values.map((value, i) => ({ label: String(i), value }))}
+        baseline="auto"
+        formatValue={(value) => {
+          formatted.push(value);
+          return `value=${value}`;
+        }}
+      />
+    );
+    expect(ys()).toHaveLength(values.length);
+    for (const y of ys()) {
+      expect(y).toBeGreaterThan(6);
+      expect(y).toBeLessThan(158);
+    }
+    expect(formatted.every(Number.isFinite)).toBe(true);
+    expect(el.textContent).toContain("value=");
+  });
+
   test.each([
     [-10, 20],
     [-10, -20],

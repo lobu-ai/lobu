@@ -21,8 +21,8 @@
  * through `lobu apply`, which bundles the project's own `node_modules`.
  */
 
-import type { CSSProperties, MouseEvent, ReactNode } from "react";
-import { useId } from "react";
+import type { CSSProperties, MouseEvent, ReactNode, RefObject } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { resolveViewHref, useHost } from "./api.js";
 
 const FONT_STACK =
@@ -442,19 +442,43 @@ function niceMax(value: number): number {
   return nice * power;
 }
 
+const CHART_FALLBACK_WIDTH = 320;
+
+/** Width of the chart's own box, so the SVG draws at its real size instead of
+ *  letterboxing a fixed viewBox inside a wider card. */
+function useChartWidth(): [RefObject<HTMLElement | null>, number] {
+  const ref = useRef<HTMLElement | null>(null);
+  const [width, setWidth] = useState(CHART_FALLBACK_WIDTH);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => {
+      const next = Math.round(entry.contentRect.width);
+      if (next > 0) setWidth(next);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  return [ref, width];
+}
+
 function ChartFrame({
   title,
+  width,
   height,
+  frameRef,
   children,
   labelledBy,
 }: {
   title?: string;
+  width: number;
   height: number;
+  frameRef: RefObject<HTMLElement | null>;
   children: ReactNode;
   labelledBy?: string;
 }) {
   return (
-    <figure style={{ ...INK, margin: 0 }}>
+    <figure ref={frameRef} style={{ ...INK, margin: 0 }}>
       {title && (
         <figcaption
           id={labelledBy}
@@ -467,7 +491,7 @@ function ChartFrame({
         role="img"
         aria-labelledby={title ? labelledBy : undefined}
         aria-label={title ? undefined : "Chart"}
-        viewBox={`0 0 320 ${height}`}
+        viewBox={`0 0 ${width} ${height}`}
         width="100%"
         height={height}
         style={{ display: "block" }}
@@ -491,19 +515,26 @@ export function BarChart({
   formatValue?: (v: number) => string;
 }) {
   const id = useId();
+  const [frameRef, width] = useChartWidth();
   const max = niceMax(Math.max(0, ...data.map((d) => d.value)));
   const min = Math.min(0, ...data.map((d) => d.value));
   const padL = 44;
   const padB = 22;
   const padT = 6;
-  const w = 320 - padL - 8;
+  const w = width - padL - 8;
   const h = height - padT - padB;
   const y = (value: number) => padT + h - ((value - min) / (max - min)) * h;
   const zero = y(0);
   const slot = data.length > 0 ? w / data.length : w;
   const bw = Math.max(2, Math.min(28, slot * 0.6));
   return (
-    <ChartFrame title={title} height={height} labelledBy={id}>
+    <ChartFrame
+      title={title}
+      width={width}
+      height={height}
+      frameRef={frameRef}
+      labelledBy={id}
+    >
       <line x1={padL} y1={padT} x2={padL} y2={padT + h} stroke={CHART_GRID} />
       <line x1={padL} y1={zero} x2={padL + w} y2={zero} stroke={CHART_GRID} />
       <text
@@ -556,26 +587,47 @@ export function BarChart({
   );
 }
 
+/** Y-axis bounds for a line: include zero by default; `auto` fits the data's
+ *  own range, for a series whose movement is small next to its level. */
+function lineBounds(
+  values: number[],
+  baseline: "zero" | "auto"
+): { min: number; max: number } {
+  if (baseline === "zero" || values.length === 0) {
+    return {
+      min: Math.min(0, ...values),
+      max: niceMax(Math.max(0, ...values)),
+    };
+  }
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+  const pad = (hi - lo) * 0.1 || Math.abs(hi) * 0.05 || 1;
+  return { min: lo - pad, max: hi + pad };
+}
+
 /** Single-series line over ordered labels. */
 export function LineChart({
   data,
   title,
   height = 180,
+  baseline = "zero",
   formatValue = (v: number) => String(v),
 }: {
   data: ChartDatum[];
   title?: string;
   height?: number;
+  /** `zero` (default) includes 0; `auto` fits the data's range. */
+  baseline?: "zero" | "auto";
   formatValue?: (v: number) => string;
 }) {
   const id = useId();
+  const [frameRef, width] = useChartWidth();
   const values = data.map((d) => d.value);
-  const max = niceMax(Math.max(0, ...values));
-  const min = Math.min(0, ...values);
+  const { min, max } = lineBounds(values, baseline);
   const padL = 44;
   const padB = 22;
   const padT = 6;
-  const w = 320 - padL - 8;
+  const w = width - padL - 8;
   const h = height - padT - padB;
   const span = max - min || 1;
   const x = (i: number) =>
@@ -583,7 +635,13 @@ export function LineChart({
   const y = (v: number) => padT + h - ((v - min) / span) * h;
   const points = data.map((d, i) => `${x(i)},${y(d.value)}`).join(" ");
   return (
-    <ChartFrame title={title} height={height} labelledBy={id}>
+    <ChartFrame
+      title={title}
+      width={width}
+      height={height}
+      frameRef={frameRef}
+      labelledBy={id}
+    >
       <line x1={padL} y1={padT} x2={padL} y2={padT + h} stroke={CHART_GRID} />
       <line
         x1={padL}
@@ -601,6 +659,17 @@ export function LineChart({
       >
         {formatValue(max)}
       </text>
+      {min !== 0 && (
+        <text
+          x={padL - 4}
+          y={padT + h}
+          textAnchor="end"
+          fontSize={9}
+          fill={CHART_TEXT}
+        >
+          {formatValue(min)}
+        </text>
+      )}
       {data.length > 0 && (
         <polyline
           points={points}
