@@ -62,6 +62,7 @@ const AGENT_SETTINGS_FIELD_POLICY = {
   sandboxId: "unsupported",
   verboseLogging: "unsupported",
   showToolCalls: "unsupported",
+  starters: "mapped",
 } as const satisfies Record<
   Exclude<keyof AgentSettingsStored, "updatedAt" | "authProfiles">,
   "mapped" | "post-load" | "unsupported"
@@ -353,6 +354,13 @@ function mapAgent(
     settings.nixConfig = { packages: [...new Set(agent.nixPackages)] };
   }
 
+  if (agent.starters !== undefined) {
+    settings.starters = agent.starters.map(({ title, message }) => ({
+      title,
+      message,
+    }));
+  }
+
   const providerKeys: { providerId: string; value: string }[] = [];
   for (const provider of agent.providers ?? []) {
     if (provider.key === undefined) continue;
@@ -402,6 +410,7 @@ function mapAgent(
     sandboxId: settings.sandboxId,
     verboseLogging: settings.verboseLogging,
     showToolCalls: settings.showToolCalls,
+    starters: settings.starters,
   };
   void _exhaustive;
 

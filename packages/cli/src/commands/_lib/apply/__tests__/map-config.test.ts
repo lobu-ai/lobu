@@ -1452,6 +1452,18 @@ describe("mapProjectToDesiredState", () => {
     expect(settings?.nixConfig).toEqual({ packages: ["ffmpeg", "python311"] });
   });
 
+  test("maps starters, and leaves them undeclared when absent", () => {
+    const starters = [
+      { title: "Plan videos", message: "Plan this week's videos" },
+    ];
+    const map = (agent: ReturnType<typeof defineAgent>) =>
+      mapProjectToDesiredState(defineConfig({ agents: [agent] }), env).agents[0]
+        ?.settings;
+    expect(map(defineAgent({ id: "a", starters }))?.starters).toEqual(starters);
+    expect(map(defineAgent({ id: "a", starters: [] }))?.starters).toEqual([]);
+    expect(map(defineAgent({ id: "a" }))).not.toHaveProperty("starters");
+  });
+
   test("maps org metadata into memory", () => {
     const state = mapProjectToDesiredState(
       defineConfig({

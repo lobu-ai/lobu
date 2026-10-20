@@ -87,6 +87,21 @@ describe('PostgresAgentConfigStore — apply-fields round-trip', () => {
     });
   });
 
+  it('round-trips starters and clears them on deleteSettings', async () => {
+    const store = createPostgresAgentConfigStore();
+    const starters = [
+      { title: 'Plan videos', message: "Plan this week's videos" },
+    ];
+
+    await orgContext.run({ organizationId: orgId }, async () => {
+      await store.saveSettings(agentId, { starters, updatedAt: Date.now() });
+      expect((await store.getSettings(agentId))?.starters).toEqual(starters);
+
+      await store.deleteSettings(agentId);
+      expect((await store.getSettings(agentId))?.starters).toEqual([]);
+    });
+  });
+
   it('deleteSettings resets the apply-fields to their defaults', async () => {
     const store = createPostgresAgentConfigStore();
     const now = Date.now();
