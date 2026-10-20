@@ -190,3 +190,14 @@ export function chatLoginIdentityFor(
 	if (!providerId) return null;
 	return BY_PROVIDER.get(providerId.trim().toLowerCase()) ?? null;
 }
+
+/**
+ * The login provider whose sign-in proves an identity on this chat platform
+ * (`gchat` → `google`), or null when none does (WhatsApp, LinkedIn, …).
+ */
+export function loginProviderForChatPlatform(platform: string): string | null {
+	return (
+		CHAT_LOGIN_IDENTITIES.find((e) => e.identity.platform === platform)
+			?.identity.providerId ?? null
+	);
+}

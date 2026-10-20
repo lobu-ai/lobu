@@ -3,6 +3,7 @@ import type { Env } from '../index';
 import { createAuth } from '../auth';
 import { resolveSession, serveAuthRequest, sessionCookieCandidates } from '../auth/resolve-session';
 import { resolveBaseUrl } from '../auth/base-url';
+import { loginProviderForChatPlatform } from '../auth/chat-login-identities';
 import {
   adoptChatIdentityOntoMember,
   provisionMemberAndCoreIdentities,
@@ -85,10 +86,16 @@ const DEFAULT_DEPS: ChatIdentityRouteDeps = {
   origin: (request) => resolveBaseUrl({ request }),
 };
 
-function loginContinuation(origin: string, token: string): string {
+/**
+ * Sign in, then land back on this link. With `provider`, the login page starts
+ * that provider's sign-in straight away (it falls back to the normal page when
+ * the provider is not enabled).
+ */
+function loginContinuation(origin: string, token: string, provider?: string | null): string {
   const callback = new URL(PATH, origin);
   callback.searchParams.set('token', token);
-  return `/auth/login?callbackUrl=${encodeURIComponent(callback.toString())}`;
+  const query = new URLSearchParams({ ...(provider && { provider }), callbackUrl: callback.toString() });
+  return `/auth/login?${query}`;
 }
 
 /**
@@ -359,7 +366,12 @@ export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDep
     const claim = await readChatIdentityLink(token, sql);
     if (!claim || !claimKey(claim)) return c.html(INVALID_LINK_PAGE, 410);
     const session = await deps.session(c.req.raw, c.env);
-    if (!session?.user) return c.redirect(loginContinuation(deps.origin(c.req.raw), token), 302);
+    // Signed out: sign in with the chat platform's own login where it has one,
+    // which also proves the chat identity this link is for.
+    if (!session?.user) {
+      const provider = loginProviderForChatPlatform(claim.platform);
+      return c.redirect(loginContinuation(deps.origin(c.req.raw), token, provider), 302);
+    }
     const org = await organizationInfo(sql, claim.organizationId);
     const name = `<strong>${escapeHtml(org.name)}</strong>`;
     const lobuAccount = sessionAccount(session.user);
