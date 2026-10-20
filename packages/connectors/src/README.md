@@ -559,7 +559,7 @@ For source-backed bundled connectors, the worker recompiles a `.ts` file after i
 | `linkedin` | browser/none | notifications, inbox messages, home feed, company updates, jobs; Data Export requires an injected CSV reader | send direct-message replies; like; prepare message/post/comment drafts |
 | `market.quotes` | none | - | quote (read-only, quotes returned to the caller, never persisted) |
 | `producthunt` | env_keys | posts & comments | - |
-| `reddit` | oauth/none | posts, comments, user activity | - |
+| `reddit` | oauth/none | posts, comments, user activity, home feed | - |
 | `rss` | none | articles | - |
 | `x` | browser/oauth | tweets, own posts, likes, bookmarks, DMs, home timeline | prepare reply |
 | `youtube` | oauth (Google) | liked videos, playlists, subscriptions, videos | search, get_video, search_liked_videos, list_playlists, get_playlist |
