@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { createNativeSession, promptNativeSession } from '../agent-turn/native-session.js';
+import { askAside, createNativeSession, promptNativeSession } from '../agent-turn/native-session.js';
 import type { AgentTurnInput } from '../agent-turn/types.js';
 
 const originalFetch = globalThis.fetch;
@@ -83,6 +83,30 @@ describe('native session provider compatibility', () => {
       await promptNativeSession(session, input.userMessage);
       expect(requests).toHaveLength(1);
       lane.assert(requests[0] ?? {});
+    } finally { session.dispose(); }
+  });
+
+  // gpt-5-mini cannot turn reasoning off; with no effort configured, the turn
+  // and the side request on it must leave the provider's default in place
+  // instead of asking for `effort: "none"`, which OpenAI 400s.
+  test('sends no reasoning effort for a model whose registry has no off level', async () => {
+    const requests: Record<string, any>[] = [];
+    globalThis.fetch = (async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      return new Response(responsesStream(), { headers: { 'content-type': 'text/event-stream' } });
+    }) as typeof fetch;
+    const input = {
+      provider: { api: 'openai-responses', provider: 'openai', modelId: 'reasoning-model',
+        baseUrl: 'https://gateway.example.test/proxy/reasoning', apiKey: 'synthetic-credential', reasoning: true,
+        thinkingLevelMap: { off: null } },
+      systemPrompt: 'Be brief.', sessionJsonl: '', userMessage: 'Say done.',
+    } as AgentTurnInput;
+    const session = createNativeSession(input, [], () => undefined);
+    try {
+      await promptNativeSession(session, input.userMessage);
+      await askAside(session, 'synthetic-credential', 'Suggest a follow-up.', { maxTokens: 64, signal: new AbortController().signal });
+      expect(requests).toHaveLength(2);
+      for (const request of requests) expect(request.reasoning).toBeUndefined();
     } finally { session.dispose(); }
   });
 

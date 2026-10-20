@@ -356,6 +356,7 @@ export async function executeAgentTurnRun(
             baseUrl: turn.provider.base_url,
             ...(turn.provider.max_tokens !== undefined ? { maxTokens: turn.provider.max_tokens } : {}),
             ...(turn.provider.reasoning !== undefined ? { reasoning: turn.provider.reasoning } : {}),
+            ...(turn.provider.thinking_level_map ? { thinkingLevelMap: turn.provider.thinking_level_map } : {}),
             // pi-ai's own `Model.input`, resolved by the gateway from pi-ai's
             // model registry. Passed through untouched: pi is what enforces it.
             ...(turn.provider.input ? { input: turn.provider.input } : {}),

@@ -451,6 +451,8 @@ interface TurnProvider {
   maxTokens: number | null;
   /** Registry reasoning support; undefined means the model is unknown. */
   reasoning: boolean | undefined;
+  /** pi-ai's `Model.thinkingLevelMap`; undefined when the registry has none. */
+  thinkingLevelMap: Model<never>["thinkingLevelMap"];
 }
 
 /**
@@ -518,7 +520,7 @@ function resolveModelMetadata(
   known: boolean;
   metadata: Pick<
     TurnProvider,
-    "input" | "contextWindow" | "maxTokens" | "reasoning"
+    "input" | "contextWindow" | "maxTokens" | "reasoning" | "thinkingLevelMap"
   >;
 } {
   // `getModel` is typed over pi-ai's static registry and cannot take the
@@ -544,6 +546,7 @@ function resolveModelMetadata(
           ? model.maxTokens
           : null,
       reasoning: model?.reasoning,
+      thinkingLevelMap: model?.thinkingLevelMap,
     },
   };
 }
@@ -1251,6 +1254,9 @@ export async function enqueueAgentTurn(
         // value as "no registry answer" and lets an explicit effort decide,
         // rather than asserting a capability nothing here knows.
         ...(provider.reasoning !== undefined ? { reasoning: provider.reasoning } : {}),
+        ...(provider.thinkingLevelMap
+          ? { thinking_level_map: provider.thinkingLevelMap }
+          : {}),
         ...(provider.compat ? { compat: provider.compat } : {}),
       },
       tools,
