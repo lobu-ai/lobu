@@ -3,7 +3,7 @@ import {
 	createLogger,
 	getErrorMessage,
 } from "@lobu/core";
-import { getDb } from "../../../db/client.js";
+import { type DbClient, getDb } from "../../../db/client.js";
 import {
   deleteSecretsByPrefix,
   type WritableSecretStore,
@@ -173,6 +173,49 @@ export class UserAuthProfileStore {
         updated_at = now()
     `;
     return next;
+  }
+
+  /**
+   * Atomically flag one stored profile's refresh grant as dead.
+   *
+   * Uses the refresh job's existing transaction. The row lock protects the
+   * metadata update; a profile replaced or removed before the lock is acquired
+   * is left alone. Stored secrets and their refs are preserved.
+   */
+  async suspendRefresh(
+    userId: string,
+    agentId: string,
+    profileId: string,
+    reason: { code: string; at: number },
+    tx: DbClient
+  ): Promise<"suspended" | "already-suspended" | "missing"> {
+    const rows = await tx`
+      SELECT profiles
+      FROM user_auth_profiles
+      WHERE user_id = ${userId} AND agent_id = ${agentId}
+      FOR UPDATE
+    `;
+    if (rows.length === 0) return "missing";
+    const profiles = rows[0].profiles as AuthProfile[];
+    if (!Array.isArray(profiles)) return "missing";
+    const idx = profiles.findIndex((profile) => profile.id === profileId);
+    if (idx < 0) return "missing";
+    const current = profiles[idx]!;
+    if (current.metadata?.refreshSuspended) return "already-suspended";
+    const next = [...profiles];
+    next[idx] = {
+      ...current,
+      metadata: {
+        ...current.metadata,
+        refreshSuspended: { ...reason },
+      },
+    };
+    await tx`
+      UPDATE user_auth_profiles
+      SET profiles = ${tx.json(next)}, updated_at = now()
+      WHERE user_id = ${userId} AND agent_id = ${agentId}
+    `;
+    return "suspended";
   }
 
   async remove(

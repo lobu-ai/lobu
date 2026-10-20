@@ -2,6 +2,7 @@ import {
 	type AuthProfile,
 	createLogger,
 	getErrorMessage,
+	isRefreshSuspended,
 } from "@lobu/core";
 import { orgContext, tryGetOrgId } from "../../../lobu/stores/org-context.js";
 import type {
@@ -192,6 +193,7 @@ export class AuthProfilesManager {
    *
    * If LazyRefreshHooks aren't wired (boot order, tests), returns
    * `profile.credential` unchanged — periodic safety-net catches it later.
+   * Suspended profiles return no credential, including after inline refresh.
    *
    * Refresh targets the row the profile was READ from, not `ctx`. Under the
    * agent-owner fallback `ctx` is the synthetic run principal, which owns no
@@ -204,6 +206,8 @@ export class AuthProfilesManager {
     const credential = profile.credential;
     if (!credential) return credential;
     if (!REFRESHABLE_AUTH_TYPES.has(profile.authType)) return credential;
+    // Reconnect clears the suspension; do not send a known-dead credential.
+    if (isRefreshSuspended(profile)) return undefined;
     if (!this.lazyRefreshHooks) return credential;
 
     const expiresAt = profile.metadata?.expiresAt ?? 0;
@@ -259,6 +263,7 @@ export class AuthProfilesManager {
           );
       const row = rows.find((p) => p.id === profile.id);
       if (!row) return credential;
+      if (isRefreshSuspended(row)) return undefined;
       // `listStoredProfiles` hands back stored rows; only the
       // `getProviderProfiles` path has already resolved credential refs.
       const fresh = source ? await this.resolveProfile(row) : row;
@@ -557,6 +562,7 @@ export class AuthProfilesManager {
         const source = profileSource(profile);
         const expiresAt = profile.metadata?.expiresAt;
         if (!source || !expiresAt || expiresAt > lapsedAt) continue;
+        if (isRefreshSuspended(profile)) continue;
         if (!REFRESHABLE_AUTH_TYPES.has(profile.authType)) continue;
         await this.ensureFreshCredential(profile, source);
         rotated = true;
@@ -572,6 +578,7 @@ export class AuthProfilesManager {
 
     const now = Date.now();
     const validProfiles = providerProfiles.filter((profile) => {
+      if (isRefreshSuspended(profile)) return false;
       const expiresAt = profile.metadata?.expiresAt;
       return !expiresAt || expiresAt > now;
     });
@@ -579,7 +586,7 @@ export class AuthProfilesManager {
     if (validProfiles.length === 0) {
       logger.warn(
         { agentId, provider, profileCount: providerProfiles.length },
-        "All auth profiles for provider are expired"
+        "All auth profiles for provider are expired or suspended"
       );
       return null;
     }
@@ -767,9 +774,8 @@ export class AuthProfilesManager {
    * pass user profiles before ephemeral and declared so the persisted
    * per-user choice always wins.
    *
-   * Within a scope, a non-expired profile beats an expired one regardless
-   * of order — this keeps a stale user OAuth token from masking a valid
-   * declared/ephemeral fallback for the same scope.
+   * Within a scope, unsuspended profiles win first, then non-expired ones.
+   * This keeps an unusable user token from masking a fallback for the scope.
    */
   private dedupeByScope(profiles: AuthProfile[]): AuthProfile[] {
     const now = Date.now();
@@ -787,7 +793,13 @@ export class AuthProfilesManager {
         continue;
       }
       if (existing.id === profile.id) continue;
-      if (isExpired(existing) && !isExpired(profile)) {
+      const existingSuspended = isRefreshSuspended(existing);
+      const candidateSuspended = isRefreshSuspended(profile);
+      if (
+        (existingSuspended && !candidateSuspended) ||
+        (existingSuspended === candidateSuspended &&
+          isExpired(existing) && !isExpired(profile))
+      ) {
         chosen.set(scope, profile);
       }
     }

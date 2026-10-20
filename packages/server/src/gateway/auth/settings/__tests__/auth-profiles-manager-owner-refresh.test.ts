@@ -60,11 +60,14 @@ function makeManager(opts: {
   expiresAt: number;
   authType: "oauth" | "device-code";
   bucket?: boolean;
+  suspended?: boolean;
+  suspendOnRefresh?: boolean;
 }) {
   const storageAgentId =
     opts.bucket === false ? AGENT_ID : orgBucketAgentId(ORG_ID);
   let credential = STORED_TOKEN;
   let expiresAt = opts.expiresAt;
+  let suspended = opts.suspended ?? false;
   const list = mock(async (userId: string, agentId: string) =>
     userId === OWNER_ID && agentId === storageAgentId
       ? [
@@ -75,7 +78,12 @@ function makeManager(opts: {
             authType: opts.authType,
             credential,
             createdAt: 0,
-            metadata: { expiresAt },
+            metadata: {
+              expiresAt,
+              ...(suspended
+                ? { refreshSuspended: { code: "invalid_grant", at: 1 } }
+                : {}),
+            },
           },
         ]
       : []
@@ -101,6 +109,10 @@ function makeManager(opts: {
   });
   const refreshNow = mock(async (userId: string, agentId: string) => {
     record(userId, agentId);
+    if (opts.suspendOnRefresh) {
+      suspended = true;
+      return;
+    }
     credential = REFRESHED_TOKEN;
     expiresAt = Date.now() + HOUR_MS;
   });
@@ -114,6 +126,61 @@ const ownerStorage = (agentId: string): RefreshTarget[] => [
 ];
 
 describe("owner subscription credentials for cloud Automations", () => {
+  test("does not return or refresh a suspended credential", async () => {
+    const { manager, refreshTargets } = makeManager({
+      expiresAt: Date.now() + SOON_MS,
+      authType: "oauth",
+      suspended: true,
+    });
+    const [profile] = await manager.getProviderProfiles(AGENT_ID, "chatgpt");
+
+    expect(await manager.ensureFreshCredential(profile!, {
+      userId: RUN_USER_ID,
+      agentId: AGENT_ID,
+    })).toBeUndefined();
+    expect(await manager.getBestProfile(AGENT_ID, "chatgpt")).toBeNull();
+    expect(refreshTargets).toEqual([]);
+  });
+
+  test("does not return a credential suspended by inline refresh", async () => {
+    const { manager, refreshNow } = makeManager({
+      expiresAt: Date.now() - HOUR_MS,
+      authType: "device-code",
+      suspendOnRefresh: true,
+    });
+    const [profile] = await manager.getProviderProfiles(AGENT_ID, "chatgpt");
+
+    expect(await manager.ensureFreshCredential(profile!, {
+      userId: RUN_USER_ID,
+      agentId: AGENT_ID,
+    })).toBeUndefined();
+    expect(refreshNow).toHaveBeenCalledTimes(1);
+  });
+
+  test("a suspended per-agent profile does not mask a usable org profile", async () => {
+    const { manager, list } = makeManager({
+      expiresAt: Date.now() + SOON_MS,
+      authType: "oauth",
+    });
+    const [active] = await list(OWNER_ID, orgBucketAgentId(ORG_ID));
+    list.mockImplementation(async (userId, agentId) => {
+      if (userId !== OWNER_ID) return [];
+      if (agentId === orgBucketAgentId(ORG_ID)) return [active!];
+      if (agentId !== AGENT_ID) return [];
+      return [{
+        ...active!,
+        id: "suspended-agent-profile",
+        metadata: {
+          expiresAt: Date.now() + HOUR_MS,
+          refreshSuspended: { code: "invalid_grant", at: 1 },
+        },
+      }];
+    });
+
+    expect((await manager.getBestProfile(AGENT_ID, "chatgpt"))?.id)
+      .toBe(PROFILE_ID);
+  });
+
   test("resolves the owner's org subscription for a synthetic run", async () => {
     const { manager } = makeManager({
       expiresAt: Date.now() + HOUR_MS,

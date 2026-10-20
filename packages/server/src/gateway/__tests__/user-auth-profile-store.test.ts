@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { getDb } from "../../db/client.js";
 import { PostgresSecretStore } from "../../lobu/stores/postgres-secret-store.js";
 import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store.js";
 import {
@@ -23,6 +24,52 @@ beforeEach(async () => {
 });
 
 describe("UserAuthProfileStore", () => {
+  test("suspension is idempotent, preserves secrets, and cannot overwrite a reconnect", async () => {
+    const stored = await store.upsert("u1", "agent-1", {
+      id: "oauth-old",
+      provider: "claude",
+      credential: "test-access",
+      authType: "oauth",
+      label: "test",
+      model: "*",
+      createdAt: 0,
+      metadata: { refreshToken: "test-refresh", expiresAt: 1 },
+    });
+    const suspend = (profileId: string) => getDb().begin((tx) =>
+      store.suspendRefresh("u1", "agent-1", profileId, {
+        code: "invalid_grant",
+        at: 123,
+      }, tx)
+    );
+
+    expect(await suspend(stored.id)).toBe("suspended");
+    expect(await suspend(stored.id)).toBe("already-suspended");
+    expect(await store.list("u1", "agent-1")).toEqual([{
+      ...stored,
+      metadata: {
+        ...stored.metadata,
+        refreshSuspended: { code: "invalid_grant", at: 123 },
+      },
+    }]);
+    expect(await secretStore.get(stored.credentialRef!)).toBe("test-access");
+    expect(await secretStore.get(stored.metadata!.refreshTokenRef!))
+      .toBe("test-refresh");
+
+    const reconnected = await store.upsert("u1", "agent-1", {
+      ...stored,
+      id: "oauth-new",
+      credential: "new-access",
+      metadata: { refreshToken: "new-refresh", expiresAt: Date.now() + 3600_000 },
+    });
+    expect(await suspend(stored.id)).toBe("missing");
+    expect(await store.list("u1", "agent-1")).toEqual([reconnected]);
+    expect(reconnected.metadata?.refreshSuspended).toBeUndefined();
+
+    await store.remove("u1", "agent-1", { provider: "claude" });
+    expect(await suspend(reconnected.id)).toBe("missing");
+    expect(await store.list("u1", "agent-1")).toEqual([]);
+  });
+
   test("upsert stores profile under (userId, agentId) and replaces credential with ref", async () => {
     const stored = await store.upsert("u1", "agent-1", {
       id: "p1",

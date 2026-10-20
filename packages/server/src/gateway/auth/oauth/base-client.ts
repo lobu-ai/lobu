@@ -5,6 +5,38 @@ import {
 } from "../../../utils/pkce.js";
 
 /**
+ * Structured OAuth token-endpoint failure. Carries the HTTP status plus the
+ * parsed RFC 6749 `error` code when the provider sent one, so callers can
+ * classify on structure (e.g. a dead `invalid_grant`) instead of matching
+ * the rendered message string.
+ */
+export class OAuthTokenError extends Error {
+  readonly status?: number;
+  readonly code?: string;
+
+  constructor(
+    message: string,
+    options: { status?: number; code?: string } = {}
+  ) {
+    super(message);
+    this.name = "OAuthTokenError";
+    this.status = options.status;
+    this.code = options.code;
+  }
+
+  /** True only for a definitively dead grant (RFC 6749 §5.2). */
+  isGrantDead(): boolean {
+    return this.code === "invalid_grant";
+  }
+}
+
+function parseOAuthErrorCode(body: unknown): string | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const code = (body as Record<string, unknown>).error;
+  return typeof code === "string" && code.length > 0 ? code : undefined;
+}
+
+/**
  * Base OAuth2 client with shared token exchange and refresh logic
  * Supports standard OAuth 2.0 flows including PKCE (RFC 7636)
  * Subclasses customize authorization URL building and request formatting
@@ -130,8 +162,15 @@ export abstract class BaseOAuth2Client {
         this.logger.error(`${opts.failPrefix}: ${response.status}`, {
           errorText,
         });
-        throw new Error(
-          `${opts.failPrefix}: ${response.status} ${response.statusText}`
+        let code: string | undefined;
+        try {
+          code = parseOAuthErrorCode(JSON.parse(errorText));
+        } catch {
+          code = undefined;
+        }
+        throw new OAuthTokenError(
+          `${opts.failPrefix}: ${response.status} ${response.statusText}`,
+          { status: response.status, code }
         );
       }
 
@@ -158,8 +197,10 @@ export abstract class BaseOAuth2Client {
       }
 
       if ("error" in tokenData) {
-        throw new Error(
-          `OAuth error: ${tokenData.error} - ${tokenData.error_description || ""}`
+        const code = parseOAuthErrorCode(tokenData);
+        throw new OAuthTokenError(
+          `OAuth error: ${tokenData.error} - ${tokenData.error_description || ""}`,
+          { status: response.status, code }
         );
       }
 

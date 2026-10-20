@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { OAuthTokenError } from "../base-client.js";
 import { OAuthClient } from "../client.js";
 import type { OAuthProviderConfig } from "../providers.js";
 import { TEST_CLAUDE_OAUTH } from "./fixtures.js";
@@ -46,6 +47,29 @@ afterEach(() => {
 });
 
 describe("OAuthClient token-request encoding", () => {
+  for (const { status, body, code } of [
+    { status: 400, body: '{"error":"invalid_grant"}', code: "invalid_grant" },
+    { status: 200, body: '{"error":"invalid_grant"}', code: "invalid_grant" },
+    { status: 401, body: '{"error":"invalid_client"}', code: "invalid_client" },
+    { status: 429, body: '{"error":"temporarily_unavailable"}', code: "temporarily_unavailable" },
+    { status: 503, body: "<html>unavailable</html>", code: undefined },
+    { status: 400, body: '{"error":{"code":"invalid_grant"}}', code: undefined },
+  ]) {
+    test(`preserves structured refresh errors (${status}, ${code ?? "unknown"})`, async () => {
+      globalThis.fetch = (async () => new Response(body, {
+        status,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+      const client = new OAuthClient(TEST_CLAUDE_OAUTH);
+      const error = await client.refreshToken("test-refresh").catch((err) => err);
+
+      expect(error).toBeInstanceOf(OAuthTokenError);
+      expect(error.status).toBe(status);
+      expect(error.code).toBe(code);
+      expect(error.isGrantDead()).toBe(code === "invalid_grant");
+    });
+  }
+
   test("Claude exchange POSTs form-encoded body with the genuine field set", async () => {
     const client = new OAuthClient(TEST_CLAUDE_OAUTH);
 

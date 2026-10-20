@@ -32,8 +32,25 @@ export interface AuthProfile {
     /** Durable secret reference for the refresh token. */
     refreshTokenRef?: SecretRef;
     accountId?: string;
+    /**
+     * Refresh suspension set by the token-refresh job when the provider
+     * reports the grant itself is dead (`invalid_grant`). Suspended profiles
+     * are excluded from token refresh and credential selection until the user
+     * reconnects, which writes fresh metadata without this field.
+     */
+    refreshSuspended?: {
+      /** Provider OAuth error code that killed the grant. */
+      code: string;
+      /** Epoch ms when the suspension was recorded. */
+      at: number;
+    };
   };
   createdAt: number;
+}
+
+/** True when the token-refresh job suspended this profile's grant as dead. */
+export function isRefreshSuspended(profile: AuthProfile): boolean {
+  return Boolean(profile.metadata?.refreshSuspended);
 }
 
 /** True if the profile has any credential source (resolved or ref). */
