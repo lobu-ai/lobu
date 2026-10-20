@@ -660,8 +660,8 @@ describe("readiness over the generic chrome bridge", () => {
     }
   });
 
-  it("bumps the WhatsApp connector version for the mention-carrying definition", () => {
-    expect(connector.definition.version).toBe("2.1.0");
+  it("bumps the WhatsApp connector version for chat-scoped source reads", () => {
+    expect(connector.definition.version).toBe("2.2.0");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {

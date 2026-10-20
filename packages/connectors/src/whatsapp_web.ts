@@ -354,7 +354,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read live from WhatsApp Web in the paired Owletto Chrome without importing message history. Automations react to new-message references and read content on demand. Search, draft, send, edit, react to, and revoke messages.",
-    version: "2.1.0",
+    version: "2.2.0",
     faviconDomain: "whatsapp.com",
     authSchema: { methods: [{ type: "browser", mode: "live" }] },
     browser: {
@@ -392,7 +392,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         key: "live_messages",
         name: "Live messages",
         description:
-          "Read messages directly from WhatsApp Web without importing history, using literal text search or id:<message ID>. Active Automations can subscribe to new-message references. Requires the paired browser to be online and signed in; reconnects replay messages still available in WhatsApp's local history.",
+          "Read messages directly from WhatsApp Web without importing history, using literal text search, id:<message ID>, or chat:<chat JID> for one chat's messages in reverse storage order. Follow cursors even after an empty filtered page. Active Automations can subscribe to new-message references. Requires the paired browser to be online and signed in; reconnects replay messages still available in WhatsApp's local history.",
         read: (ctx) => this.readMessages(ctx),
         observe: (ctx) => this.observeMessages(ctx),
         webhook: { mode: "trigger", events: ["message.created"] },

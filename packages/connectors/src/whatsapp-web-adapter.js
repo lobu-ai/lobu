@@ -33,8 +33,11 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 25;
+  const ADAPTER_VERSION = 26;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
+  // Storage rows one `chat:` read examines; a whole personal history is
+  // usually under this, so one read answers.
+  const CHAT_SCAN_ROWS = 20_000;
   const MAX_RECORD_BYTES = 128 * 1024;
   const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
   const MAX_BUFFER_ENTRIES = 10_000;
@@ -945,6 +948,11 @@ export function whatsAppWebAdapterProgram() {
     }
     const keyModule = requireFirst(["WAWebMsgKey"]);
     const exactId = query.startsWith("id:") ? query.slice(3) : null;
+    let chatJid = null;
+    if (query.startsWith("chat:")) {
+      const chat = await resolveChat(requireFirst(["WAWebCollections"]), { chat_jid: query.slice(5) });
+      chatJid = (await canonicalJid(modelData(chat).id ?? chat?.id)).jid;
+    }
     const database = await new Promise((resolve, reject) => {
       const request = indexedDB.open("model-storage");
       // Never create an empty replacement database when WhatsApp changes its
@@ -980,24 +988,46 @@ export function whatsAppWebAdapterProgram() {
             return;
           }
           rows.push({ position: cursor.key, id: cursor.value.id });
-          if (rows.length > limit) resolve(rows);
+          if (rows.length > (chatJid === null ? limit : CHAT_SCAN_ROWS)) resolve(rows);
           else cursor.continue();
         };
       });
     } finally {
       database.close();
     }
-    const hasMore = sourceRows.length > limit;
-    const page = sourceRows.slice(0, limit);
+    let hasMore = sourceRows.length > limit;
+    let page = sourceRows.slice(0, limit);
+    let last = page[page.length - 1];
+    if (chatJid !== null) {
+      // A chat read scans one large storage page, then keeps that chat's rows.
+      // Matching happens after the transaction closes because LID conversion
+      // awaits, and history can key a chat by phone or by LID.
+      const examined = sourceRows.slice(0, CHAT_SCAN_ROWS);
+      const canonical = new Map();
+      const matches = [];
+      for (const row of examined) {
+        const remote = keyModule.fromString(row.id).remote;
+        const raw = widString(remote);
+        if (!canonical.has(raw)) canonical.set(raw, (await canonicalJid(remote)).jid);
+        if (canonical.get(raw) !== chatJid) continue;
+        matches.push(row);
+        if (matches.length > limit) break;
+      }
+      page = matches.slice(0, limit);
+      hasMore = matches.length > limit || sourceRows.length > CHAT_SCAN_ROWS;
+      last = matches.length > limit ? page[page.length - 1] : examined[examined.length - 1];
+    }
     const collections = requireFirst(["WAWebCollections"]);
-    const selected = page.filter((row) => {
+    const selected = [];
+    for (const row of page) {
       const key = keyModule.fromString(row.id);
-      if (exactId !== null && key.id !== exactId) return false;
+      if (exactId !== null && key.id !== exactId) continue;
       const remote = widString(key.remote);
-      if (remote === "status@broadcast" || remote.endsWith("@newsletter")) return false;
+      if (remote === "status@broadcast" || remote.endsWith("@newsletter")) continue;
       const isGroup = remote.endsWith("@g.us");
-      return !(chatFilter === "group" && !isGroup) && !(chatFilter === "individual" && isGroup);
-    });
+      if ((chatFilter === "group" && !isGroup) || (chatFilter === "individual" && isGroup)) continue;
+      selected.push(row);
+    }
     const results = [];
     if (selected.length) {
       const loaded = await collections.Msg.getMessagesById(selected.map((row) => row.id));
@@ -1014,14 +1044,14 @@ export function whatsAppWebAdapterProgram() {
         // Skip them like search does; throwing would pin every later read to
         // the same cursor.
         if (!message || message.timestamp <= 0) continue;
-        if (exactId === null && query && !`${message.body}\n${message.caption}`.toLowerCase().includes(query.toLowerCase())) continue;
+        if (exactId === null && chatJid === null && query && !`${message.body}\n${message.caption}`.toLowerCase().includes(query.toLowerCase())) continue;
         results.push(message);
       }
     }
     return {
       results,
       hasMore,
-      ...(hasMore ? { nextCursor: JSON.stringify({ v: 1, before: page[page.length - 1].position, query, chat_filter: chatFilter }) } : {}),
+      ...(hasMore ? { nextCursor: JSON.stringify({ v: 1, before: last.position, query, chat_filter: chatFilter }) } : {}),
     };
   }
 
