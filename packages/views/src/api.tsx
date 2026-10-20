@@ -697,6 +697,29 @@ export function Provider({
     };
   }, [def]);
 
+  // Report the document height so the host can fit the frame. This lives in
+  // the provider, not `mountView`: the server bootstrap renders the provider
+  // directly, and a frame that never hears a size stays at its minimum height.
+  useEffect(() => {
+    const b = bridgeRef.current;
+    if (!b) return;
+    const reportSize = () => {
+      const doc = document.documentElement;
+      doc.setAttribute("data-mounted", "true");
+      const prev = doc.style.height;
+      doc.style.height = "max-content";
+      const height = Math.ceil(doc.getBoundingClientRect().height);
+      doc.style.height = prev;
+      b.notifySize(Math.ceil(window.innerWidth), height);
+    };
+    reportSize();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(reportSize);
+    observer.observe(document.documentElement);
+    observer.observe(document.body);
+    return () => observer.disconnect();
+  }, []);
+
   const setParams = useCallback(
     (patch: Partial<Params>) => {
       setParamsState((prev) => {
@@ -773,29 +796,9 @@ export function mountView(
   const valid = defineView(def);
   const el = document.getElementById("root");
   if (!el) throw new Error("#root missing in view shell");
-  const bridge = opts?.bridge ?? new ViewBridge();
-  let reported = false;
-  const reportSize = () => {
-    if (!reported) {
-      reported = true;
-      document.documentElement.setAttribute("data-mounted", "true");
-    }
-    const doc = document.documentElement;
-    const prev = doc.style.height;
-    doc.style.height = "max-content";
-    const height = Math.ceil(doc.getBoundingClientRect().height);
-    doc.style.height = prev;
-    bridge.notifySize(Math.ceil(window.innerWidth), height);
-  };
   createRoot(el).render(
-    <Provider def={valid} bridge={bridge}>
+    <Provider def={valid} bridge={opts?.bridge}>
       <Component />
     </Provider>
   );
-  if (typeof ResizeObserver !== "undefined") {
-    const observer = new ResizeObserver(reportSize);
-    observer.observe(document.documentElement);
-    observer.observe(document.body);
-  }
-  reportSize();
 }
