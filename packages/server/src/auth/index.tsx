@@ -4,6 +4,7 @@ import { APIError, betterAuth } from "better-auth";
 import { magicLink, organization, phoneNumber } from "better-auth/plugins";
 import { bearer } from "better-auth/plugins/bearer";
 import { genericOAuth } from "better-auth/plugins/generic-oauth";
+import { getBuiltinProviderConfig, getSharedOAuthCallbackUrl } from "../connect/oauth-providers";
 import { getAuthDialect, getDb } from "../db/client";
 import { sendTransactionalEmail } from "../email/send";
 import {
@@ -120,6 +121,7 @@ export async function createAuth(
 			clientSecret: string;
 			scope: string[];
 			disableDefaultScope: true;
+			redirectURI?: string;
 		}
 	> = {};
 	const genericOAuthConfigs: GenericOAuthEntry[] = [];
@@ -158,6 +160,9 @@ export async function createAuth(
 			clientSecret,
 			scope: row.loginScopes,
 			disableDefaultScope: true,
+			...(getBuiltinProviderConfig(provider)?.sharedLoginCallback ? {
+				redirectURI: getSharedOAuthCallbackUrl(resolveBaseUrl({ request })),
+			} : {}),
 		};
 	}
 

@@ -23,6 +23,8 @@ interface OAuthProviderConfig {
   /** Extra params to include in the authorization URL */
   authParams?: Record<string, string>;
   tokenEndpointAuthMethod?: OAuthTokenEndpointAuthMethod;
+  /** Providers with one registered redirect reuse the connect callback for login. */
+  sharedLoginCallback?: boolean;
 }
 
 /**
@@ -66,6 +68,7 @@ const providers: Record<string, OAuthProviderConfig> = {
     tokenEndpointAuthMethod: 'client_secret_post',
   },
   reddit: {
+    sharedLoginCallback: true,
     authorizationUrl: 'https://www.reddit.com/api/v1/authorize',
     tokenUrl: 'https://www.reddit.com/api/v1/access_token',
     userinfoUrl: 'https://oauth.reddit.com/api/v1/me',
@@ -79,6 +82,10 @@ const providers: Record<string, OAuthProviderConfig> = {
 
 export function getBuiltinProviderConfig(provider: string): OAuthProviderConfig | null {
   return providers[provider] ?? null;
+}
+
+export function getSharedOAuthCallbackUrl(baseUrl: string): string {
+  return `${baseUrl}/connect/oauth/callback`;
 }
 
 function resolveProviderConfig(params: {

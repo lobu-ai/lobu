@@ -21,6 +21,7 @@ import {
 } from '../utils/pkce';
 import { createMiddleware } from 'hono/factory';
 import { createAuth } from '../auth';
+import { resolveSharedOAuthCallbackRequest } from '../auth/oauth-organization-context';
 import { getDb } from '../db/client';
 import { feedBackoff, shouldHardPauseFeed } from '../connectors/feed-backoff';
 import { resumeFeedsForRecoveredConnections } from '../feeds/auth-readiness-feeds';
@@ -64,8 +65,9 @@ import {
   exchangeCodeForTokens,
   fetchUserInfoWithRaw,
   normalizeUserInfo,
+  getSharedOAuthCallbackUrl,
 } from './oauth-providers';
-import { resolveSession } from '../auth/resolve-session';
+import { resolveSession, serveAuthRequest } from '../auth/resolve-session';
 
 interface OAuthAuthConfig {
   appAuthProfileId?: number;
@@ -621,7 +623,7 @@ connectRoutes.get('/:token/oauth/start', requireConnectToken, async (c) => {
   }
 
   const baseUrl = getBaseUrl(c);
-  const redirectUri = `${baseUrl}/connect/oauth/callback`;
+  const redirectUri = getSharedOAuthCallbackUrl(baseUrl);
   // Reusing a pending URL must send the challenge for the verifier saved on
   // that token; generating a new unsaved verifier makes the callback fail.
   let pkceCodeVerifier = authConfig.usePkce
@@ -699,6 +701,9 @@ connectRoutes.get('/:token/oauth/start', requireConnectToken, async (c) => {
  * This lets users register a single redirect URI with their OAuth provider.
  */
 connectRoutes.get('/oauth/callback', async (c) => {
+  if (new URL(c.req.url).searchParams.getAll('state').length > 1) {
+    return c.json({ error: 'Invalid OAuth state' }, 400);
+  }
   const token = c.req.query('state');
   const code = c.req.query('code');
   const error = c.req.query('error');
@@ -709,6 +714,13 @@ connectRoutes.get('/oauth/callback', async (c) => {
 
   const tokenRow = await resolveConnectToken(token);
   if (!tokenRow) {
+    // The provider and workspace come from Better Auth's stored state. Its
+    // handler still verifies the signed browser cookie and consumes that state.
+    const loginRequest = await resolveSharedOAuthCallbackRequest(c.req.raw);
+    if (loginRequest) {
+      const auth = await createAuth(c.env, loginRequest);
+      return serveAuthRequest(auth, loginRequest);
+    }
     return c.json({ error: 'Invalid or expired connect token' }, 404);
   }
 
@@ -732,7 +744,7 @@ connectRoutes.get('/oauth/callback', async (c) => {
     c,
     tokenRow,
     code,
-    authConfig?.redirectUri || `${baseUrl}/connect/oauth/callback`
+    authConfig?.redirectUri || getSharedOAuthCallbackUrl(baseUrl)
   );
 });
 
