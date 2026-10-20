@@ -510,6 +510,10 @@ describe('agent turn producer', () => {
         expect(requests[1].messages.some((message: { role: string }) => message.role === 'tool')).toBe(true);
       }
       expect((await runRow(Number(run.id))).status).toBe('completed');
+      // The terminal row names the agent_turn run that produced it, which is
+      // what orders its chips against newer turns of the conversation.
+      const replies = await threadResponsesGlobal();
+      expect(replies.at(-1)).toMatchObject({ turnRunId: Number(run.id) });
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

@@ -127,8 +127,8 @@ export class ApiResponseRenderer implements ResponseRenderer {
   /**
    * READ-ONLY: resolve the chips to embed on this turn's `complete` payload.
    * The durable set is already finalized before this runs — the consumer calls
-   * `finalizeTurnSuggestions` at the terminal boundary (BEFORE the SSE
-   * owner-gate), which supersedes a stale prior set or keeps this turn's own.
+   * `finalizeTurnSuggestions` on this pod after the output scan, just before
+   * rendering, which supersedes a stale prior set or keeps this turn's own.
    * So the current row here is the authoritative post-turn state; this method
    * never mutates it, it only decides what the SPA renders:
    *  - errored turn → undefined ("no change").

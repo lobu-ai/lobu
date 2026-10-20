@@ -497,6 +497,51 @@ describe("UnifiedThreadResponseConsumer API guardrail bookkeeping", () => {
     expect(scanner.scanFinal.mock.calls[0][0]).toContain("Private message");
   });
 
+  test("a pod without the SSE owner persists no chips before re-queueing", async () => {
+    const { consumer } = createConsumer();
+    consumer.sseManager.hasActiveConnection = () => false;
+    consumer.finalizeSuggestions = mock(async () => undefined);
+    await expect(consumer.handleThreadResponse({
+      id: "job-chips-owner",
+      data: {
+        ...basePayload,
+        platform: "api",
+        teamId: "api",
+        finalText: "Reply",
+        suggestions: [{ title: "Next", message: "Show it" }],
+        platformMetadata: { agentId: "agent-1", organizationId: "org-1" },
+      },
+    })).rejects.toThrow(/not owned by this gateway instance/);
+    expect(consumer.finalizeSuggestions).not.toHaveBeenCalled();
+  });
+
+  test("persists chips only after the scan, and none when it trips", async () => {
+    const { consumer } = createConsumer();
+    const order: string[] = [];
+    const scanner = consumer.outputGuardrail;
+    scanner.registry = {};
+    scanner.settingsStore = {};
+    scanner.scanFinal = mock(async () => {
+      order.push("scan");
+      return { guardrail: "secret-scan", reason: "secret" };
+    });
+    consumer.finalizeSuggestions = mock(async (_data: unknown, prompts: unknown[]) => {
+      order.push(`persist:${prompts.length}`);
+    });
+    await consumer.handleThreadResponse({
+      id: "job-chips-trip",
+      data: {
+        ...basePayload,
+        platform: "api",
+        teamId: "api",
+        finalText: "Reply",
+        suggestions: [{ title: "Use key", message: "Use AKIAIOSFODNN7EXAMPLE" }],
+        platformMetadata: { agentId: "agent-1", organizationId: "org-1" },
+      },
+    });
+    expect(order).toEqual(["scan", "persist:0"]);
+  });
+
   test("preserves the raw provider error while redacting user-visible output", async () => {
     const handleError = mock(async () => undefined);
     const { consumer } = createConsumer({

@@ -3,7 +3,7 @@ import {
   sanitizeSuggestionPrompts,
   type SuggestedPrompt,
 } from "@lobu/core";
-import { getDb, pgTextArray } from "../../db/client.js";
+import { getDb } from "../../db/client.js";
 import type { DbClient } from "../../db/client.js";
 import { insertEvent } from "../../utils/insert-event.js";
 
@@ -69,56 +69,28 @@ export async function readCurrentSuggestion(
 }
 
 /**
- * The completing turn's run id from `agent_run_input`, keyed by the message ids
- * the turn processed. A row exists for EVERY turn (including one that emitted no
- * suggestion event of its own) and rows are marked 'completed' rather than
- * deleted, so the id is still readable at terminal time. Returns null when no
- * message ids are supplied or none match (older workers, unstamped turns) — the
- * ordering guard that consumes it treats a null run id as "unknown, don't block".
- *
- * Always read on the caller's transaction: `finalizeTurnSuggestions` needs the
- * id inside its advisory lock so the value cannot change under the guard.
- */
-async function readTurnRunId(
-  organizationId: string,
-  conversationId: string,
-  turnMessageIds: string[],
-  sql: DbClient
-): Promise<number | null> {
-  const owned = turnMessageIds.filter(Boolean);
-  if (owned.length === 0) return null;
-  const rows = (await sql`
-    SELECT max(run_id) AS run_id
-    FROM public.agent_run_input
-    WHERE organization_id = ${organizationId}
-      AND conversation_id = ${conversationId}
-      AND message_id = ANY(${pgTextArray(owned)}::text[])
-  `) as Array<{ run_id: number | null }>;
-  return rows[0]?.run_id ?? null;
-}
-
-/**
  * Set the conversation's suggestion set at a turn's terminal boundary: the
- * chips that turn's model proposed, or none. The ONE writer of suggestion
- * state.
+ * chips that turn's model proposed (already output-scanned), or none. The ONE
+ * writer of suggestion state.
  *
- * Runs on the gateway for EVERY completed API terminal row — before the SSE
- * owner-gate, so it executes regardless of which pod (if any) holds the
- * client's socket and is NOT lost when a disconnected client leaves no SSE
- * owner. The whole read→decide→write is one advisory-locked transaction keyed
- * on the conversation, so it is race-free across replicas and against an
- * out-of-order terminal of an earlier turn:
+ * Runs on the gateway pod that renders the API terminal row, after the output
+ * scan. The whole read→decide→write is one advisory-locked transaction keyed
+ * on the conversation, so it is race-free across replicas:
  *
- *  - A LATER turn already set the conversation's chips (its run id is higher)
- *    → leave them; this terminal is late, and the user is looking at the newer
- *    set. Ordering comes from `agent_run_input.run_id`, which exists for EVERY
- *    turn keyed by the message ids this function receives.
+ *  - A LATER turn of this conversation already completed → write nothing. A
+ *    terminal can be rendered late (it waits out SSE-owner re-queues), and the
+ *    user has since seen a newer reply. "Later" is a newer transcript
+ *    snapshot: the completion route commits one with every completed turn, in
+ *    the same transaction as its terminal row, keyed by the turn's agent_turn
+ *    run. Agent and conversation come from that run's own envelope — the
+ *    values the snapshot writer used — so the probe hits the
+ *    `agent_transcript_snapshot_latest` index with the keys it was written by.
  *  - `prompts` non-empty → they become the current set, superseding the live
- *    row. A re-delivery of the same terminal (the row re-queued to the SSE
- *    owner) finds its own current set and writes nothing.
+ *    row. A re-delivery of the same terminal finds its own current set and
+ *    writes nothing.
  *  - `prompts` empty → a visible prior set is cleared, so stale chips never
- *    trail a reply that offered none — including this turn's own set when a
- *    guardrail blocked the reply after it was written.
+ *    trail a reply that offered none; with nothing visible, nothing is
+ *    written.
  *
  * Rows are appended, never updated: each write supersedes the live row, so the
  * conversation's history stays a single chain in `current_event_records`.
@@ -132,9 +104,11 @@ export async function finalizeTurnSuggestions(args: {
   conversationId: string;
   /** messageId + processedMessageIds of the completing turn. */
   turnMessageIds: string[];
+  /** The agent_turn `runs.id` that produced this terminal. */
+  turnRunId: number;
   prompts: SuggestedPrompt[];
 }): Promise<void> {
-  const { organizationId, conversationId, turnMessageIds } = args;
+  const { organizationId, conversationId, turnMessageIds, turnRunId } = args;
   const owned = new Set(turnMessageIds.filter(Boolean));
   const prompts = sanitizeSuggestionPrompts(args.prompts);
   return getDb().begin(async (tx: DbClient) => {
@@ -142,18 +116,25 @@ export async function finalizeTurnSuggestions(args: {
       conversationId
     )})`;
 
-    // Read inside the lock on `tx`, so the value cannot change under the guard.
-    const turnRunId = await readTurnRunId(
-      organizationId,
-      conversationId,
-      [...owned],
-      tx
-    );
+    const newer = await tx`
+      SELECT 1
+      FROM public.runs r
+      JOIN public.agent_transcript_snapshot s
+        ON s.organization_id = r.organization_id
+       AND s.agent_id = r.action_input->'turn'->>'agent_id'
+       AND s.conversation_id = r.action_input->'turn'->>'conversation_id'
+       AND s.run_id > r.id
+      WHERE r.id = ${turnRunId}
+        AND r.organization_id = ${organizationId}
+      LIMIT 1
+    `;
+    if (newer.length > 0) return;
+
     // The latest LIVE row whatever its status — `current_event_records`
     // defines live as "nothing supersedes me" — so every write extends the
     // one chain rather than stranding an earlier clear marker as live forever.
     const rows = (await tx`
-      SELECT id, run_id, interaction_status, metadata
+      SELECT id, interaction_status, metadata
       FROM current_event_records
       WHERE organization_id = ${organizationId}
         AND interaction_type = 'suggestion'
@@ -162,19 +143,10 @@ export async function finalizeTurnSuggestions(args: {
       LIMIT 1
     `) as Array<{
       id: number;
-      run_id: number | null;
       interaction_status: string | null;
       metadata: Record<string, unknown> | null;
     }>;
     const live = rows[0];
-    if (
-      live &&
-      turnRunId != null &&
-      live.run_id != null &&
-      Number(live.run_id) > turnRunId
-    ) {
-      return;
-    }
     const visible = live?.interaction_status === "current" ? live : undefined;
     const visibleTurn =
       (visible?.metadata?.turnMessageId as string | null | undefined) ?? null;
@@ -212,11 +184,6 @@ export async function finalizeTurnSuggestions(args: {
       return;
     }
 
-    // Nothing visible → nothing to clear, and no row is appended: a clear
-    // marker per chip-less turn would grow `events` on most turns. The one
-    // case this leaves open — an EARLIER turn's terminal first processed after
-    // a later chip-less one — cannot arise in order, since a conversation's
-    // turns run one at a time and each terminal commits with its turn.
     if (!visible) return;
     await insertEvent(
       {
@@ -232,9 +199,6 @@ export async function finalizeTurnSuggestions(args: {
         interactionStatus: "completed",
         interactionInput: { prompts: [] },
         supersedesEventId: visible.id,
-        // Stamped with the CLEARING turn's run id so the ordering guard above
-        // sees "a later run already cleared this" — without it a delayed
-        // terminal could resurrect chips over the clear.
         runId: turnRunId,
         metadata: { conversationId, cleared: true },
         authorName: "system",

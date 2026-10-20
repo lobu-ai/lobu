@@ -97,7 +97,8 @@ export class UnifiedThreadResponseConsumer {
       (typeof data.platformMetadata?.organizationId === "string"
         ? data.platformMetadata.organizationId
         : undefined);
-    if (!organizationId) return;
+    // Without its turn's run a terminal cannot be ordered against newer turns.
+    if (!organizationId || data.turnRunId == null) return;
     try {
       await finalizeTurnSuggestions({
         organizationId,
@@ -106,6 +107,7 @@ export class UnifiedThreadResponseConsumer {
           ...(data.messageId ? [data.messageId] : []),
           ...(data.processedMessageIds ?? []),
         ],
+        turnRunId: data.turnRunId,
         prompts,
       });
     } catch (err) {
@@ -435,17 +437,6 @@ export class UnifiedThreadResponseConsumer {
       data = { ...data, bookkeepingError: data.error };
     }
 
-    // Set the conversation's suggestion set at the terminal boundary — this
-    // reply's chips, or none — BEFORE the SSE owner-gate below. This must run
-    // whether or not any pod holds the client's socket (a disconnected client
-    // leaves no owner, and the owner-gate would otherwise re-queue →
-    // dead-letter, dropping the write and replaying stale chips on reload
-    // forever). Idempotent under the re-queue-to-owner retry. Skipped on error
-    // turns so they do not alter durable suggestion state.
-    if (isApiRow && !data.error && data.processedMessageIds?.length) {
-      await this.finalizeSuggestions(data, data.suggestions ?? []);
-    }
-
     if (isApiRow) {
       const isTerminal = !!(
         data.error ||
@@ -572,12 +563,19 @@ export class UnifiedThreadResponseConsumer {
                 error: data.error != null ? blockMsg : data.error,
                 suggestions: [],
               };
-              // The chips were written for the reply that was just blocked.
-              if (!data.error) await this.finalizeSuggestions(data, []);
             }
           }
         }
       }
+    }
+
+    // Set the conversation's suggestion set at the terminal boundary — this
+    // reply's scanned chips, or none — on the pod that renders it: the SSE
+    // owner, or any pod on the row's final attempt, so every terminal gets
+    // here exactly when its output scan has run. Before the renderer, which
+    // embeds the current set on `complete`. Error turns leave the set alone.
+    if (isApiRow && !data.error && data.processedMessageIds?.length) {
+      await this.finalizeSuggestions(data, data.suggestions ?? []);
     }
 
     if (data.customEvent) {

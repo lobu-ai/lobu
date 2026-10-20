@@ -249,7 +249,7 @@ export async function insertAgentTurnResponse(sql: DbClient, run: NativeTurnRun,
     messageId: reply.message_id, channelId: reply.channel_id, conversationId,
     userId: reply.user_id, teamId: reply.team_id ?? 'api', platform: reply.platform,
     organizationId: run.organization_id, platformMetadata: reply.platform_metadata,
-    processedMessageIds: [reply.message_id], ...result, timestamp: Date.now(),
+    processedMessageIds: [reply.message_id], ...result, turnRunId: Number(run.id), timestamp: Date.now(),
   }, run.organization_id);
   // Retire the turn-liveness marker(s) in the SAME transaction as the reply.
   // Both callers set the run terminal before reaching here, so the turn is

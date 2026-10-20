@@ -288,6 +288,11 @@ export interface ThreadResponsePayload {
    */
   suggestions?: SuggestedPrompt[];
   /**
+   * The agent_turn `runs.id` that produced this terminal row. Orders a late
+   * terminal against newer turns of the same conversation.
+   */
+  turnRunId?: number;
+  /**
    * Raw error message. When provider context is available, the gateway labels
    * the source and unwraps the common JSON message envelope without rewording
    * the provider's sentence; `errorCode` selects the CTA link.
