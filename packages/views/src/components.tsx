@@ -243,36 +243,37 @@ export function DataTable<T>({
       {!loading && !error && rows.length === 0 && (
         <EmptyState title={emptyText} />
       )}
-      {pagination && (pageCount == null || pageCount > 1) && (
-        <nav
-          aria-label="Table pages"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            marginTop: 8,
-          }}
-        >
-          <PageButton
-            disabled={pagination.page <= 1}
-            onClick={() => pagination.onPage(pagination.page - 1)}
-            label="Previous page"
-          />
-          <span style={{ color: "var(--muted, #6b7280)" }}>
-            Page {pagination.page}
-            {pageCount != null ? ` of ${pageCount}` : ""}
-          </span>
-          <PageButton
-            disabled={
-              pageCount == null
-                ? rows.length < pagination.pageSize
-                : pagination.page >= pageCount
-            }
-            onClick={() => pagination.onPage(pagination.page + 1)}
-            label="Next page"
-          />
-        </nav>
-      )}
+      {pagination &&
+        (pageCount == null || pageCount > 1 || pagination.page > 1) && (
+          <nav
+            aria-label="Table pages"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginTop: 8,
+            }}
+          >
+            <PageButton
+              disabled={pagination.page <= 1}
+              onClick={() => pagination.onPage(pagination.page - 1)}
+              label="Previous page"
+            />
+            <span style={{ color: "var(--muted, #6b7280)" }}>
+              Page {pagination.page}
+              {pageCount != null ? ` of ${pageCount}` : ""}
+            </span>
+            <PageButton
+              disabled={
+                pageCount == null
+                  ? rows.length < pagination.pageSize
+                  : pagination.page >= pageCount
+              }
+              onClick={() => pagination.onPage(pagination.page + 1)}
+              label="Next page"
+            />
+          </nav>
+        )}
     </div>
   );
 }

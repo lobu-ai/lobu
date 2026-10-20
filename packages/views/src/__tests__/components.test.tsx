@@ -171,6 +171,35 @@ describe("DataTable", () => {
     expect(pages).toEqual([2]);
   });
 
+  test("shrinking total keeps pagination so the user can navigate back", async () => {
+    const pages: number[] = [];
+    render(
+      <DataTable
+        columns={[{ key: "id", header: "ID" }]}
+        rows={[]}
+        keyOf={(_, i) => i}
+        emptyText="No rows on this page."
+        pagination={{
+          page: 2,
+          pageSize: 10,
+          total: 5,
+          onPage: (p) => pages.push(p),
+        }}
+      />
+    );
+    // Total shrank 15 -> 5 while the view sat on page 2: the rows are gone
+    // but Previous must stay reachable.
+    expect(await shown()).toContain("No rows on this page.");
+    expect(await shown()).toContain("Page 2 of 1");
+    const [prev, next] = [...el.querySelectorAll("nav button")];
+    expect((prev as HTMLButtonElement).disabled).toBe(false);
+    expect((next as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {
+      prev.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(pages).toEqual([1]);
+  });
+
   test("loading, error with retry, and empty states", async () => {
     let retried = 0;
     render(
