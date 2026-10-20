@@ -18,8 +18,13 @@ export async function configureSocialResearch(
       slug: string;
       prompt: string;
       automation_run?: { status?: string };
+      execution_config?: { executor?: { kind?: string } };
     };
   };
+  if (automation.execution_config?.executor?.kind === "external")
+    throw new Error(
+      "Use the external processor configuration; managed setup must not replace its policy or cadence"
+    );
   if (automation.slug !== "x-market-scan")
     throw new Error("Expected the existing X market scan Automation");
   const script = automation.prompt.match(/```typescript\n([\s\S]*?)\n```/)?.[1];

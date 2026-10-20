@@ -90,3 +90,12 @@ test("a changed or missing source reader fails before configuration changes", as
     expect(h.calls).toEqual([]);
   }
 });
+
+test("legacy managed setup cannot replace a live external processor or its scope", async () => {
+  const h = harness();
+  Object.assign(h.automation, {
+    execution_config: { executor: { kind: "external" } },
+  });
+  await expect(h.run()).rejects.toThrow("external");
+  expect(h.calls).toEqual([]);
+});
