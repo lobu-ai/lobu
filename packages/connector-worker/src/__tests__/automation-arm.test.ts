@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { type ChildProcess, spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -393,6 +393,31 @@ describe('deliverExitReport (delivery retry + classification)', () => {
     const outcome = await deliverExitReport(client, 7, okResult(), 0);
     expect(outcome).toBeNull();
     expect(calls).toEqual([0]);
+  });
+
+  test.each([
+    ['recovers on the last attempt', { status: 'resume', attempt: 4, nudge: 'finalize' }],
+    ['leaves the outcome unknown when every attempt fails', new WorkerHttpError(503, '/x', 'upstream')],
+  ] as const)('%s after a minute of delivery retries', async (_name, lastResponse) => {
+    const { client, calls } = fakeClient([
+      ...Array.from({ length: 5 }, () => new WorkerHttpError(503, '/x', 'upstream')),
+      lastResponse,
+    ]);
+    const delays: number[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((handler, delay, ...args) => {
+      delays.push(delay ?? 0);
+      return realSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout);
+
+    try {
+      const report = await deliverExitReport(client, 7, okResult(), 3);
+      expect(report).toEqual(lastResponse instanceof Error ? null : lastResponse);
+      expect(calls).toEqual([3, 3, 3, 3, 3, 3]);
+      expect(delays).toEqual([2000, 4000, 8000, 16000, 32000]);
+    } finally {
+      timer.mockRestore();
+    }
   });
 });
 
