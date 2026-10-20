@@ -512,20 +512,25 @@ export function resetRateLimiterForTests(): void {
   _rateLimiter = null;
 }
 
+/** `TRUSTED_PROXY` as a hop count: `true` is one proxy, a positive integer is that many. */
+function trustedProxyHops(value: string | undefined): number {
+  if (value === 'true') return 1;
+  const hops = Number(value);
+  return Number.isInteger(hops) && hops > 0 ? hops : 0;
+}
+
 /**
  * Get client IP from request.
  *
- * When `TRUSTED_PROXY` is set, the rightmost `X-Forwarded-For` entry (the address
- * the trusted proxy actually observed, not client-controllable) is used, falling
- * back to `CF-Connecting-IP` / `X-Real-IP`. This is the abuse-resistant mode and
- * operators behind a tunnel/reverse-proxy should set it.
- *
- * `TRUSTED_PROXY=cloudflare` is for origins reachable only through Cloudflare
- * (a tunnel, or a firewall admitting only Cloudflare). There the rightmost
- * `X-Forwarded-For` entry is the edge or tunnel address, which many visitors
- * share, while Cloudflare overwrites `CF-Connecting-IP` with the visitor's own
- * address — so that header wins. Elsewhere a client could forge it, which is
- * why it needs this explicit mode.
+ * `TRUSTED_PROXY` is the number of proxies in front of the app (`true` means
+ * one). Each proxy appends the address it received the request from to
+ * `X-Forwarded-For`, so with N trusted proxies the visitor is the Nth entry
+ * from the right: the one the outermost trusted proxy appended. Taking the
+ * rightmost entry with two proxies (an edge and an ingress, say) would key
+ * every visitor on the edge's address. Entries left of that are client
+ * controlled and never used. Without `X-Forwarded-For`, `CF-Connecting-IP` /
+ * `X-Real-IP` are the fallback. This is the abuse-resistant mode and operators
+ * behind a tunnel/reverse-proxy should set it.
  *
  * Without `TRUSTED_PROXY` we key on the *socket peer address* (`peerAddress`,
  * stashed from the Node adapter's `socket.remoteAddress`). Forwarded headers are
@@ -538,18 +543,14 @@ export function resetRateLimiterForTests(): void {
  * adapter, e.g. unit tests via `app.request()`).
  */
 export function getClientIP(request: Request, peerAddress?: string | null): string {
-  const trustedProxy = process.env.TRUSTED_PROXY;
-  if (trustedProxy === 'cloudflare') {
-    const cf = request.headers.get('CF-Connecting-IP')?.trim();
-    if (cf) return cf;
-  }
-  const trustForwarded = trustedProxy === 'true' || trustedProxy === '1' || trustedProxy === 'cloudflare';
-  if (trustForwarded) {
+  const trustedHops = trustedProxyHops(process.env.TRUSTED_PROXY);
+  if (trustedHops > 0) {
     const xff = request.headers.get('X-Forwarded-For');
     if (xff) {
       const parts = xff.split(',').map((p) => p.trim()).filter(Boolean);
-      // Rightmost entry = the address the trusted proxy actually observed.
-      if (parts.length > 0) return parts[parts.length - 1]!;
+      // Fewer entries than trusted hops: the request skipped an outer proxy,
+      // so the leftmost entry is the furthest address any proxy observed.
+      if (parts.length > 0) return parts[Math.max(0, parts.length - trustedHops)]!;
     }
     const cf = request.headers.get('CF-Connecting-IP');
     if (cf) return cf.trim();

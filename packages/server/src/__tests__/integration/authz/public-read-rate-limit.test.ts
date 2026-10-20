@@ -67,7 +67,7 @@ describe('public read rate limit', () => {
     }
   };
 
-  const fromIP = (ip: string) => ({ 'CF-Connecting-IP': ip });
+  const fromIP = (ip: string) => ({ 'X-Forwarded-For': ip });
 
   const publicRest = (ip: string) =>
     get(`/api/${org.slug}/public/knowledge/search?query=rents`, { headers: fromIP(ip) }).then(
@@ -139,7 +139,7 @@ describe('public read rate limit', () => {
   const previousTrustedProxy = process.env.TRUSTED_PROXY;
 
   beforeAll(async () => {
-    process.env.TRUSTED_PROXY = 'cloudflare';
+    process.env.TRUSTED_PROXY = '1';
     await cleanupTestDatabase();
     org = await createTestOrganization({ name: 'Rate Limited Public Org', visibility: 'public' });
     outsider = await createTestUser({ email: 'rate-limit-outsider@example.com' });
