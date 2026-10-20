@@ -1,5 +1,66 @@
 # Changelog
 
+## [24.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v23.0.0...lobu-v24.0.0) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **views:** `manage_views set` no longer accepts `key`, `name`, `attach`, `params` or `actions`; they are read from the module's `defineView({...})`, and unknown arguments are rejected with 400. `lobu apply` from @lobu/cli 23.0.0 or older fails against an upgraded server, so upgrade the CLI with the server. View `attach` entries use `{ record }`, `{ collection }`, `{ workspace: true }` or `{ event }` instead of `{ type, surface, placement }`; stored attachments are migrated, but view sources with the old entries fail validation on their next save until edited.
+
+### Features
+
+* **access:** rate-limit anonymous public reads per IP (needs the prod proxy hop count) ([#4235](https://github.com/lobu-ai/lobu/issues/4235)) ([ce1ead6](https://github.com/lobu-ai/lobu/commit/ce1ead60dc39bd80ed483e161e984d690219eef7))
+* **agents:** ask the answering model for follow-up chips on every human-facing turn ([#4236](https://github.com/lobu-ai/lobu/issues/4236)) ([ab19ce2](https://github.com/lobu-ai/lobu/commit/ab19ce2b12c4d77f8f7611005cdefcfb2c971445))
+* **agents:** per-agent conversation starters on web and Slack ([#4251](https://github.com/lobu-ai/lobu/issues/4251)) ([ee22e9a](https://github.com/lobu-ai/lobu/commit/ee22e9a7010bbb17bf8f7b6e8400c08b9da7cfcb))
+* **audit:** record who changes a workspace's visibility, name or slug ([#4249](https://github.com/lobu-ai/lobu/issues/4249)) ([5d58b84](https://github.com/lobu-ai/lobu/commit/5d58b84dbac9c01b57f0527b76aad6c722ea0208))
+* **auth:** enable Reddit sign-in with shared OAuth callback ([#4237](https://github.com/lobu-ai/lobu/issues/4237)) ([5f1519a](https://github.com/lobu-ai/lobu/commit/5f1519a596309627844124e237d5d400e00281bb))
+* **chat:** join a public workspace and link a chat account in one step ([#4223](https://github.com/lobu-ai/lobu/issues/4223)) ([1233731](https://github.com/lobu-ai/lobu/commit/1233731c228afe90d47d9e9c42786b81222aef5a))
+* **chat:** link page signs in with the chat platform's own login ([#4267](https://github.com/lobu-ai/lobu/issues/4267)) ([91dcc76](https://github.com/lobu-ai/lobu/commit/91dcc768d410e7c06570ee5fd7973e3b99984610))
+* **connectors:** read the connected user's Reddit home feed ([#4241](https://github.com/lobu-ai/lobu/issues/4241)) ([4f7490f](https://github.com/lobu-ai/lobu/commit/4f7490f7c2bf16f80475e4eda0a81dcb7e3c6ba0))
+* **entity-schema:** teach that metadata_schema renders the record form ([#4256](https://github.com/lobu-ai/lobu/issues/4256)) ([82ade45](https://github.com/lobu-ai/lobu/commit/82ade45e83f6d42fa40945367c5affa86cca5fdd))
+* **personal-agent:** read sahibinden alert listings and review them with their photos ([#4253](https://github.com/lobu-ai/lobu/issues/4253)) ([fbeb9c8](https://github.com/lobu-ai/lobu/commit/fbeb9c81e80fc7511a50d53ba0db608274131fe7))
+* **views:** charts draw at their measured width; LineChart baseline auto ([#4274](https://github.com/lobu-ai/lobu/issues/4274)) ([b07fb09](https://github.com/lobu-ai/lobu/commit/b07fb099b9fd096ca7fcf7309591468a7bf5ba4b))
+* **views:** defineView is the only view declaration; attach by page and display modes ([aafa73b](https://github.com/lobu-ai/lobu/commit/aafa73bbab3c3a08d76ebfabf43ce683f8b8d6fd))
+* **views:** first-party @lobu/views/components kit + agent docs ([#4252](https://github.com/lobu-ai/lobu/issues/4252)) ([aa08b53](https://github.com/lobu-ai/lobu/commit/aa08b535e11b90badddd5f908ff4757502ec0369))
+* **views:** let useQuery skip re-reads on workspace data changes ([#4242](https://github.com/lobu-ai/lobu/issues/4242)) ([703edc9](https://github.com/lobu-ai/lobu/commit/703edc94ca33cdc5318937b5e2c0d36edee5e1df))
+* **whatsapp:** read one chat's newest messages with chat:&lt;jid&gt; ([#4244](https://github.com/lobu-ai/lobu/issues/4244)) ([2442f36](https://github.com/lobu-ai/lobu/commit/2442f3698b377944379165389243281187465295))
+* **x:** signing in with X links that X account's direct messages ([#4222](https://github.com/lobu-ai/lobu/issues/4222)) ([4caaf86](https://github.com/lobu-ai/lobu/commit/4caaf86eaeb36f94569ee49c45a945e5e0d2b590))
+
+
+### Bug Fixes
+
+* **access:** signed-in non-members read public workspaces like anonymous visitors; per-account read limit ([#4234](https://github.com/lobu-ai/lobu/issues/4234)) ([8cf267f](https://github.com/lobu-ai/lobu/commit/8cf267fc33e14dfda7ea9e00eed81260e616b499))
+* **agent-turn:** carry pi-ai's thinking level map so gpt-5-mini turns stop sending effort none ([#4266](https://github.com/lobu-ai/lobu/issues/4266)) ([09e075b](https://github.com/lobu-ai/lobu/commit/09e075b8335d3d3b6460fe5e55f684f9c8db7c5b))
+* **chat:** a chat link needs the sender's own platform sign-in where one exists ([#4275](https://github.com/lobu-ai/lobu/issues/4275)) ([2b6b90b](https://github.com/lobu-ai/lobu/commit/2b6b90bf9d46ac6ceec98a23c921b57f56493c4e))
+* **chat:** a failed access notice no longer spends its window ([#4219](https://github.com/lobu-ai/lobu/issues/4219)) ([d65d0ae](https://github.com/lobu-ai/lobu/commit/d65d0ae0c59f97fafc3905dca409981e23afa1f5))
+* **chat:** clear conversation history on reset and on deleting a running connection ([#4265](https://github.com/lobu-ai/lobu/issues/4265)) ([4d11285](https://github.com/lobu-ai/lobu/commit/4d11285e36ad4e1b82883da3cfb8f2eeaed7d70b))
+* **chat:** keep the reply from repeating the access notice just posted ([#4229](https://github.com/lobu-ai/lobu/issues/4229)) ([e99a767](https://github.com/lobu-ai/lobu/commit/e99a767003fe31d3076e5bccdd2795030ffa30ab))
+* **chat:** name a linked sender's workspace role on every turn ([#4221](https://github.com/lobu-ai/lobu/issues/4221)) ([124c87c](https://github.com/lobu-ai/lobu/commit/124c87c080dc8cf0f84646012d10aaa692bf4155))
+* **chat:** one linking notice for unlinked senders, confirm in chat after linking ([#4264](https://github.com/lobu-ai/lobu/issues/4264)) ([be405e7](https://github.com/lobu-ai/lobu/commit/be405e7da56e7502be381141372cb22fd8cfbeac))
+* **cli:** keep provider keys out of lobu apply --only memory ([#4246](https://github.com/lobu-ai/lobu/issues/4246)) ([8190f8b](https://github.com/lobu-ai/lobu/commit/8190f8b20628df9012c10161549a6b00db06222d))
+* **connector-worker:** support ReadableStream.cancel in the isolate ([#4255](https://github.com/lobu-ai/lobu/issues/4255)) ([b3be394](https://github.com/lobu-ai/lobu/commit/b3be394d912785946e7e6ac9df52760a9c51b6c8))
+* **connectors:** drop Reddit thumbnail and media URLs the metadata schema rejects ([#4247](https://github.com/lobu-ai/lobu/issues/4247)) ([2598d2f](https://github.com/lobu-ai/lobu/commit/2598d2fd7e52a4d707e5512f004e7e426e898dad))
+* **db:** reject queries on a closed postgres connection instead of crashing ([#4278](https://github.com/lobu-ai/lobu/issues/4278)) ([5b52085](https://github.com/lobu-ai/lobu/commit/5b52085657d18c1f9db6a08e146bb423fe7d70bf))
+* **entities:** let a derived slug step past tombstones ([#4230](https://github.com/lobu-ai/lobu/issues/4230)) ([5df2461](https://github.com/lobu-ai/lobu/commit/5df2461a9edacc067ad915d418b5d988a8e00998))
+* **entities:** let a tombstone release its metadata.domain ([#4245](https://github.com/lobu-ai/lobu/issues/4245)) ([356508e](https://github.com/lobu-ai/lobu/commit/356508e5339ee51e021cc3d2efd2b554e60e4128))
+* **entities:** retire an entity's identities when it is deleted ([#4225](https://github.com/lobu-ai/lobu/issues/4225)) ([746c875](https://github.com/lobu-ai/lobu/commit/746c87538b84928d8ab98e3ec48290e206a2566c))
+* **events:** report a linked kind's metadata error instead of 'Invalid kind' ([#4263](https://github.com/lobu-ai/lobu/issues/4263)) ([1e09e3c](https://github.com/lobu-ai/lobu/commit/1e09e3c670aada29bb597c5069750b8de77652c0))
+* **examples:** deliver complete external social handoffs ([#4224](https://github.com/lobu-ai/lobu/issues/4224)) ([d9dbf0c](https://github.com/lobu-ai/lobu/commit/d9dbf0ce314804c8d0a7865f8aee29358792c4b0))
+* **linkedin:** answer a page admin writing to the page as themselves ([#4228](https://github.com/lobu-ai/lobu/issues/4228)) ([8f01f2a](https://github.com/lobu-ai/lobu/commit/8f01f2a286c5ae8cc5f8cd1829ac6d454ac9c986))
+* **linkedin:** decode group-post identities in home feed ([#4227](https://github.com/lobu-ai/lobu/issues/4227)) ([dc9ef2d](https://github.com/lobu-ai/lobu/commit/dc9ef2d2ab0126babd81dac3cab917102f120e2b))
+* **mac:** readable computer-use indicator and a tray switch to turn it off ([#4238](https://github.com/lobu-ai/lobu/issues/4238)) ([11aebc2](https://github.com/lobu-ai/lobu/commit/11aebc2cb25f2f0bc2c7407a03ae3fc572c0e935))
+* **personal-agent:** resume Revolut transaction history across runs ([#4261](https://github.com/lobu-ai/lobu/issues/4261)) ([79eba6b](https://github.com/lobu-ai/lobu/commit/79eba6bb8c9e52d360f9aa741a0359f2b79d817c))
+* **public-pages:** keep the operational trail off public workspaces and stop caching failures as 404s ([#4233](https://github.com/lobu-ai/lobu/issues/4233)) ([073eb9d](https://github.com/lobu-ai/lobu/commit/073eb9d01bd91c5be2687e51eae2c795df0e8d90))
+* **server:** make the chat account link pages a working Lobu flow ([#4231](https://github.com/lobu-ai/lobu/issues/4231)) ([442a5a6](https://github.com/lobu-ai/lobu/commit/442a5a67c531813985137eb2186228dff67a2db2))
+* **server:** refresh connector definitions again after a rollout settles ([#4260](https://github.com/lobu-ai/lobu/issues/4260)) ([3a69cba](https://github.com/lobu-ai/lobu/commit/3a69cbafda1dfa1709985522ef25797b29f932b1))
+* **server:** render OAuth and CLI connect result pages in the Lobu layout ([#4232](https://github.com/lobu-ai/lobu/issues/4232)) ([a873fe4](https://github.com/lobu-ai/lobu/commit/a873fe47aaae6b75d7e8a85a3ce9cfc7ca09ea01))
+* **server:** run the startup connector-definition refresh on the booting pod ([#4254](https://github.com/lobu-ai/lobu/issues/4254)) ([5a9ae84](https://github.com/lobu-ai/lobu/commit/5a9ae848f1e4e49c49f4c41ea8c8935c308dbe3e))
+* **server:** stop team device wire logging a pin collision on every poll ([#4226](https://github.com/lobu-ai/lobu/issues/4226)) ([031ba40](https://github.com/lobu-ai/lobu/commit/031ba40ee9bfc8be1c287317fc49de5fd31ec7e1))
+* **server:** suspend OAuth refresh for dead grants instead of retrying forever ([#4259](https://github.com/lobu-ai/lobu/issues/4259)) ([a2400c8](https://github.com/lobu-ai/lobu/commit/a2400c81319d294d771348c4234d4969e2267419))
+* **suggestions:** turn the reply's own offers into follow-up chips ([#4239](https://github.com/lobu-ai/lobu/issues/4239)) ([738027d](https://github.com/lobu-ai/lobu/commit/738027d5c7cfd728acd969475d9aba726dcffe64))
+* **views:** keep LineChart edge labels inside the frame ([#4277](https://github.com/lobu-ai/lobu/issues/4277)) ([842522b](https://github.com/lobu-ai/lobu/commit/842522babaa1c8f90ed64fb8fa1a5eec376e5fdd))
+* **views:** report view height from the provider so server-built views fit their frame ([#4269](https://github.com/lobu-ai/lobu/issues/4269)) ([d860775](https://github.com/lobu-ai/lobu/commit/d860775802e585a37e73dce19ad7881425831c27))
+
 ## [23.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v22.0.0...lobu-v23.0.0) (2026-10-19)
 
 
