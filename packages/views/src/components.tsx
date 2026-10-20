@@ -605,6 +605,14 @@ function lineBounds(
   return { min: lo - pad, max: hi + pad };
 }
 
+/** The end points sit on the plot's edges, so a centred label there spills
+ *  past the frame; anchor the first and last labels inward instead. */
+function edgeAnchor(i: number, count: number): "start" | "middle" | "end" {
+  if (count < 2) return "middle";
+  if (i === 0) return "start";
+  return i === count - 1 ? "end" : "middle";
+}
+
 /** Single-series line over ordered labels. */
 export function LineChart({
   data,
@@ -688,7 +696,7 @@ export function LineChart({
             <text
               x={x(i)}
               y={padT + h + 12}
-              textAnchor="middle"
+              textAnchor={edgeAnchor(i, data.length)}
               fontSize={9}
               fill={CHART_TEXT}
             >
