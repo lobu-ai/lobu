@@ -9,9 +9,10 @@
  * `.error`, `.errorCode`, `.truncated`) that `useQuery` reports.
  *
  * Styling follows the shell's theme tokens (`--fg`, `--muted`, `--border`,
- * `--accent`, flipped by the host's `.dark` class), so kit output tracks the
- * host theme without configuration. Theme tokens carry light-mode fallbacks;
- * pie series and error accents use fixed colors.
+ * `--accent`, `--font`, `--radius`, `--radius-lg`), which derive from the
+ * host's MCP Apps style variables and flip with its `.dark` class, so kit
+ * output takes the host's look without configuration. Theme tokens carry
+ * light-mode fallbacks; pie series and error accents use fixed colors.
  *
  * Server-side compile allowlist: this module is pinned beside `react` and
  * `@lobu/views` in the view compiler funds, so MCP/tool-path views may
@@ -23,7 +24,8 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useId } from "react";
 
-const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const FONT_STACK =
+  'var(--font, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif)';
 
 const INK: CSSProperties = {
   color: "var(--fg, #0a0a0a)",
@@ -50,7 +52,7 @@ export function Card({ title, description, actions, children }: CardProps) {
       style={{
         ...INK,
         border: "1px solid var(--border, #e5e7eb)",
-        borderRadius: 8,
+        borderRadius: "var(--radius-lg, 8px)",
         padding: "12px 14px",
         background: "transparent",
       }}
@@ -297,7 +299,7 @@ function PageButton({
         cursor: disabled ? "default" : "pointer",
         opacity: disabled ? 0.45 : 1,
         border: "1px solid var(--border, #e5e7eb)",
-        borderRadius: 6,
+        borderRadius: "var(--radius, 6px)",
         background: "transparent",
         color: "var(--fg, #0a0a0a)",
         padding: "2px 10px",
@@ -339,7 +341,7 @@ const FIELD_LABEL: CSSProperties = {
 
 const FIELD_BOX: CSSProperties = {
   border: "1px solid var(--border, #e5e7eb)",
-  borderRadius: 6,
+  borderRadius: "var(--radius, 6px)",
   background: "transparent",
   color: "var(--fg, #0a0a0a)",
   padding: "4px 8px",
@@ -836,7 +838,7 @@ export function ErrorState({
       style={{
         ...INK,
         border: "1px solid var(--border, #e5e7eb)",
-        borderRadius: 6,
+        borderRadius: "var(--radius, 6px)",
         padding: "8px 10px",
       }}
     >
@@ -859,7 +861,7 @@ export function ErrorState({
           style={{
             cursor: "pointer",
             border: "1px solid var(--border, #e5e7eb)",
-            borderRadius: 6,
+            borderRadius: "var(--radius, 6px)",
             background: "transparent",
             color: "var(--fg, #0a0a0a)",
             padding: "2px 10px",

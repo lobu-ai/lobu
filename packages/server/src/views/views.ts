@@ -489,11 +489,15 @@ export function viewResourceMeta(view: StoredView): {
   };
 }
 
-// Minimal theme tokens; the host's `theme` flips `.dark` on <html>.
+// Theme tokens the view kit reads. Each derives from the MCP Apps standard
+// style variable the host sends in `hostContext.styles.variables` (the guest
+// writes them onto <html>), falling back to Lobu's own palette when a host
+// sends none; the host's `theme` flips `.dark` on <html>. The background stays
+// transparent so the frame shows the host's surface.
 const BASE_CSS = `
-:root{color-scheme:light;--fg:#0a0a0a;--muted:#6b7280;--border:#e5e7eb;--accent:#2563eb}
-html.dark{color-scheme:dark;--fg:#fafafa;--muted:#9ca3af;--border:#27272a;--accent:#60a5fa}
-html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+:root{color-scheme:light;--fg:var(--color-text-primary,#0a0a0a);--muted:var(--color-text-secondary,#6b7280);--border:var(--color-border-primary,#e5e7eb);--accent:var(--color-text-info,#2563eb);--font:var(--font-sans,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif);--radius:var(--border-radius-md,6px);--radius-lg:var(--border-radius-lg,8px)}
+html.dark{color-scheme:dark;--fg:var(--color-text-primary,#fafafa);--muted:var(--color-text-secondary,#9ca3af);--border:var(--color-border-primary,#27272a);--accent:var(--color-text-info,#60a5fa)}
+html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 var(--font)}
 *{box-sizing:border-box}
 `;
 

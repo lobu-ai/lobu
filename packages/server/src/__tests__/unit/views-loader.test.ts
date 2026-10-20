@@ -3,7 +3,11 @@
  * gate, proven with fake host frames.
  */
 import { describe, expect, it } from "bun:test";
-import { renderViewsLoaderShell } from "../../views/views";
+import {
+  renderViewShell,
+  renderViewsLoaderShell,
+  type StoredView,
+} from "../../views/views";
 
 function runLoader() {
   const html = renderViewsLoaderShell();
@@ -267,5 +271,41 @@ describe("views loader shell", () => {
     expect(written).toHaveLength(1);
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     expect((written[0] as string)).toContain('"theme":"dark"');
+  });
+});
+
+describe("view shell theme tokens", () => {
+  const view = {
+    key: "health",
+    name: "Health",
+    content_hash: "hash-1",
+    compiled_code: "",
+  } as StoredView;
+
+  it("derives every kit token from the MCP Apps standard variable, keeping Lobu's palette as the fallback", () => {
+    const html = renderViewShell(view);
+    for (const token of [
+      "--fg:var(--color-text-primary,#0a0a0a)",
+      "--muted:var(--color-text-secondary,#6b7280)",
+      "--border:var(--color-border-primary,#e5e7eb)",
+      "--accent:var(--color-text-info,#2563eb)",
+      "--font:var(--font-sans,system-ui,",
+      "--radius:var(--border-radius-md,6px)",
+      "--radius-lg:var(--border-radius-lg,8px)",
+      // Dark fallbacks still flip with the host's theme class.
+      "--fg:var(--color-text-primary,#fafafa)",
+      "--border:var(--color-border-primary,#27272a)",
+    ]) {
+      expect(html).toContain(token);
+    }
+    expect(html).toContain("font:13px/1.45 var(--font)");
+    // The frame shows the host's surface, never an opaque canvas.
+    expect(html).toContain("background:transparent");
+  });
+
+  it("gives the loader shell the same tokens", () => {
+    expect(renderViewsLoaderShell()).toContain(
+      "--fg:var(--color-text-primary,#0a0a0a)"
+    );
   });
 });

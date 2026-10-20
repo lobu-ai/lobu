@@ -629,6 +629,58 @@ function applyTheme(theme: "light" | "dark"): void {
 }
 
 /**
+ * The MCP Apps standard style variables (`McpUiStyleVariableKey`, protocol
+ * `2026-01-26`). A host sends any subset in `hostContext.styles.variables`;
+ * the shell's tokens (`--fg`, `--muted`, `--border`, `--accent`, the font and
+ * radii) derive from them, so a view takes the host's look. Built from the
+ * spec's own axes rather than imported: the guest carries no ext-apps code.
+ */
+const SEMANTIC = ["primary", "secondary", "tertiary", "inverse", "ghost"];
+const STATUS = ["info", "danger", "success", "warning"];
+const HEADINGS = ["xs", "sm", "md", "lg", "xl", "2xl", "3xl"];
+const HOST_STYLE_KEYS: ReadonlySet<string> = new Set([
+  ...["background", "text", "border"].flatMap((part) =>
+    [...SEMANTIC, ...STATUS, "disabled"].map((v) => `--color-${part}-${v}`)
+  ),
+  ...["primary", "secondary", "inverse", ...STATUS].map(
+    (v) => `--color-ring-${v}`
+  ),
+  "--font-sans",
+  "--font-mono",
+  ...["normal", "medium", "semibold", "bold"].map((w) => `--font-weight-${w}`),
+  ...["size", "line-height"].flatMap((m) => [
+    ...["xs", "sm", "md", "lg"].map((s) => `--font-text-${s}-${m}`),
+    ...HEADINGS.map((s) => `--font-heading-${s}-${m}`),
+  ]),
+  ...["xs", "sm", "md", "lg", "xl", "full"].map((r) => `--border-radius-${r}`),
+  "--border-width-regular",
+  ...["hairline", "sm", "md", "lg"].map((s) => `--shadow-${s}`),
+]);
+
+/**
+ * Apply the host's standard style variables to the document root. Every
+ * standard key is set or cleared from the current context, so a variable a
+ * theme switch drops does not linger; anything outside the standard list is
+ * ignored, never written.
+ */
+function applyHostStyles(ctx: HostContext): void {
+  const styles = ctx.styles as { variables?: unknown } | undefined;
+  const variables =
+    styles && typeof styles.variables === "object" && styles.variables
+      ? (styles.variables as Record<string, unknown>)
+      : {};
+  const root = document.documentElement.style;
+  for (const key of HOST_STYLE_KEYS) {
+    const value = variables[key];
+    if (typeof value === "string" && value.trim()) {
+      root.setProperty(key, value);
+    } else {
+      root.removeProperty(key);
+    }
+  }
+}
+
+/**
  * Contains a render error to the view so the Provider (which owns the host
  * handshake) stays mounted: an uncaught error would unmount it before its
  * effect connects, leaving the host a blank frame with no size and no error.
@@ -718,6 +770,7 @@ export function Provider({
       const next = themeFromContext(ctx);
       setTheme(next);
       applyTheme(next);
+      applyHostStyles(ctx);
     });
     const offData = b.onDataChanged(() => setDataVersion((v) => v + 1));
     b.connect()
@@ -725,6 +778,7 @@ export function Provider({
         const next = themeFromContext(ctx);
         setTheme(next);
         applyTheme(next);
+        applyHostStyles(ctx);
         setConnected(true);
         setReady(b.hasToolInput());
         document.documentElement.setAttribute("data-ready", "true");
