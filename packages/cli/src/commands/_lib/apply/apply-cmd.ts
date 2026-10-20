@@ -835,23 +835,18 @@ export async function executePlan(
     }
   }
 
-  // 2b) Views — shipped from the load-time bundle (source + browser bundle +
-  //     metadata extracted from the module itself, hashed with the server's
-  //     function). No re-bundling here: the diff already compared the exact
-  //     hash the server will compute.
+  // 2b) Views — shipped from the load-time bundle (source + browser bundle,
+  //     hashed with the server's function; the server reads the declaration
+  //     from the source). No re-bundling here: the diff already compared the
+  //     exact hash the server will compute.
   for (const row of rowsByKind("view")) {
     if (row.kind !== "view") continue;
     if (!row.desired) continue;
     const result = await ctx.client.setView({
-      key: row.id,
-      name: row.desired.key,
       source_code: row.desired.sourceCode,
       compiled_code: row.desired.compiledCode,
       source_files: row.desired.sourceFiles,
       dependencies: row.desired.dependencies,
-      attach: row.desired.attach,
-      params: row.desired.params,
-      actions: row.desired.actions,
     });
     const kb = (
       Buffer.byteLength(row.desired.compiledCode, "utf8") / 1024

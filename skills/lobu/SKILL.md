@@ -246,7 +246,7 @@ import {
 
 export const view = defineView({
   key: "pipeline",
-  attach: [{ type: "deal", placement: "tab" }],
+  attach: [{ collection: "deal" }],
   params: { stage: { type: "string", default: "open" } },
   actions: { markWon: { emits: "deal.won" } },
 });
@@ -281,11 +281,16 @@ export default function Pipeline() {
 }
 ```
 
+`defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params` and `actions` are read from it, never passed separately, so `manage_views` `set` takes just the source. Write it out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
+
+`attach` lists the pages a view appears on, one per entry: `{ record: "deal" }` is a card on every deal's page above its activity (`{ record: "deal", id: 7 }` pins one record), `{ collection: "deal", when? }` a tab on the deal list page, `{ workspace: true }` a Data hub tab, `{ event: "deal.won", type? }` one event's page. One view can list several pages and branch on `useScope()` when it answers the same question at each scale. A record card renders with `useHost().displayMode === "inline"` inside `container.maxHeight` (the host clips past it): render a summary there with a "See all" that calls `requestDisplayMode("fullscreen")`, and the full view when `displayMode` is `"fullscreen"` (the peek, a full page, a tab).
+
 Rules that are load-bearing, not style:
 
 - Reads go through `useQuery` (`sql`, a `query_sdk` script string, or a read-only `tool()`). `query_sql` allows 500 rows max with a 5 second timeout — branch on the typed `errorCode` (e.g. `UPSTREAM_TIMEOUT`), never on message text, and render `truncated` honestly instead of passing partial data off as complete.
 - Never aggregate history in a view: no `GROUP BY`, `DISTINCT ON`, per-row regexp, or leading-wildcard `LIKE` over `events` or other growing tables. For "latest state" views, have an Automation maintain keyed event outputs (each run supersedes the previous event with the same key) and read the current head with `read_knowledge`.
 - Writes go only through declared view actions (`useAction` → `invoke_view_action`), which emit the declared event kind and can activate workspace-triggered Automations. Action `value` payloads are capped at 4000 JSON chars — save content first, then pass the id. A subject shown from a superseded event rejects with 409; refetch and ask the user to re-confirm rather than retrying blindly.
+- Link with `Link` from `@lobu/views/components` (or `useHost().openLink`): `href="<type>/<slug>"` opens that record in the workspace, a full URL opens a new tab. A plain `<a href>` goes nowhere inside the sandboxed frame.
 - Views run in a sandboxed frame with no direct network: no fetch, no third-party calls at runtime. Bundle shared code via the CLI path; the MCP `manage_views` path compiles `react` + `@lobu/views` (+components) only.
 - Never early-return the whole view on loading/error: each filter keystroke re-queries, so an early return unmounts the focused input mid-typing. Keep filters mounted and render query states inline in the results area.
 - Params sync to the URL on Lobu hosts only; elsewhere they stay frame-local. `refetch()` re-reads on demand; only Lobu hosts push live data-changed refreshes.

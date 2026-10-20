@@ -291,10 +291,6 @@ export interface DesiredView extends RetainedSource {
   sourceFile: string;
   /** Browser IIFE bundle (react, bridge, relative files, view npm deps). */
   compiledCode: string;
-  /** Metadata extracted from the module itself. */
-  attach: Array<Record<string, unknown>>;
-  params: Record<string, unknown>;
-  actions: Record<string, { emits: string }>;
 }
 
 export interface DesiredAgent {
@@ -1067,30 +1063,19 @@ async function resolveViewSources(
     }
     const bundled = await bundleViewFromFile(abs, baseDir);
     sourceCode = bundled.sourceFiles.files[bundled.sourceFiles.entrypoint]!;
-    const key = bundled.metadata.key;
+    const { key, name, description, attach, params, actions } =
+      bundled.definition;
     if (seen.has(key)) {
       throw new ValidationError(
         `duplicate view key "${key}" in lobu.config.ts — each viewFromFile must resolve to a unique key`
       );
     }
     seen.add(key);
-    // Hash EXACTLY what the server will store: name defaults to the key,
-    // description defaults to empty, metadata JSON-round-tripped (the wire
-    // drops undefined, so hash post-round-trip or equivalent declarations
-    // compare differently), plus the digest of the bundle produced above
-    // (which carries the relative imports the entry source alone omits).
-    // Same function, same inputs: same hash.
-    const name = key;
-    const description = "";
-    const attach = JSON.parse(JSON.stringify(bundled.metadata.attach)) as Array<
-      Record<string, unknown>
-    >;
-    const params = JSON.parse(
-      JSON.stringify(bundled.metadata.params)
-    ) as Record<string, unknown>;
-    const actions = JSON.parse(
-      JSON.stringify(bundled.metadata.actions)
-    ) as Record<string, { emits: string }>;
+    // Hash EXACTLY what the server will store: the declaration comes from
+    // the same reader the server runs on save (defaults applied there), plus
+    // the digest of the bundle produced above (which carries the relative
+    // imports the entry source alone omits). Same function, same inputs:
+    // same hash.
     views.push({
       key,
       sourcePath: abs,
@@ -1114,9 +1099,6 @@ async function resolveViewSources(
       compiledCode: bundled.compiledCode,
       sourceFiles: bundled.sourceFiles,
       dependencies: bundled.dependencies,
-      attach,
-      params,
-      actions,
     });
   }
   return views.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));

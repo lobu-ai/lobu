@@ -19,90 +19,73 @@ export const ViewKeySchema = Type.String({
   description: "View key, e.g. 'pipeline'.",
 });
 
-// Where a view appears. The attach line lives in the module source; there are
-// no attach/detach verbs — changing placement means re-saving the view.
-const ViewPlacementSchema = Type.Optional(
-  Type.Union([Type.Literal("tab"), Type.Literal("overview")], {
-    description:
-      "Type-attached views render as a full tab or an Overview card.",
-  })
-);
+// Where a view appears: one page per entry, named by its key. The attach line
+// lives in the module source; there are no attach/detach verbs — changing it
+// means re-saving the view. How the view renders there is the view's own
+// choice, from the host's display mode (an inline card or fullscreen).
+const EntityTypeSlug = (description: string) =>
+  Type.String({ minLength: 1, maxLength: 120, description });
 
-// `event_kind` belongs to the event variant alone. The subject variants stay
-// open objects (the handler reports a mixed entry itself), so each one forbids
-// the key: otherwise `{ event_kind, type, placement }` would validate as a
-// type attachment and render as a type tab.
-const NoEventKind = Type.Optional(Type.Never());
-const TypeSubject = {
-  type: Type.String({
-    minLength: 1,
-    maxLength: 120,
-    description: "Entity-type slug this view attaches to.",
-  }),
-  placement: ViewPlacementSchema,
-  event_kind: NoEventKind,
-};
-
-export const ViewAttachmentSchema = Type.Union([
-  // Existing type declarations continue to appear on collections and records.
-  Type.Object({
-    ...TypeSubject,
-    surface: Type.Optional(Type.Never()),
-    when: Type.Optional(Type.Never()),
-  }),
-  Type.Object({
-    ...TypeSubject,
-    surface: Type.Literal("record"),
-    when: Type.Optional(Type.Never()),
-  }),
-  Type.Object({
-    ...TypeSubject,
-    surface: Type.Literal("collection"),
-    placement: Type.Optional(Type.Literal("tab")),
-    when: Type.Optional(CollectionWhenSchema),
-  }),
-  Type.Object({
-    entity: Type.Union([Type.Integer(), Type.String()], {
-      description: "Entity id (number) or slug (string) this view attaches to.",
-    }),
-    placement: ViewPlacementSchema,
-    event_kind: NoEventKind,
-    surface: Type.Optional(Type.Never()),
-    when: Type.Optional(Type.Never()),
-  }),
-  Type.Object({
-    workspace: Type.Literal(true, {
-      description: "A tab on the Data hub, at /data/-/views/<key>.",
-    }),
-    placement: ViewPlacementSchema,
-    event_kind: NoEventKind,
-    surface: Type.Optional(Type.Never()),
-    when: Type.Optional(Type.Never()),
-  }),
-  // An event subject: the view renders one event (scope.event) on the event's
-  // own page, /events/<id>/-/views/<key>. It matches an event whose kind is
-  // `event_kind`, optionally qualified by a linked entity of `type`. Closed, and no
-  // placement: the event page has one layout.
-  Type.Object(
-    {
-      event_kind: Type.String({
-        minLength: 1,
-        maxLength: 128,
-        description:
-          "Event kind (semantic_type) this view renders, e.g. 'deal.won'.",
-      }),
-      type: Type.Optional(
-        Type.String({
+export const ViewAttachmentSchema = Type.Union(
+  [
+    // A record page: an inline card above the record's activity, opening
+    // fullscreen in the peek. `id` pins it to one record of the type.
+    Type.Object(
+      {
+        record: EntityTypeSlug(
+          "Entity type whose record pages show this view."
+        ),
+        id: Type.Optional(
+          Type.Integer({
+            minimum: 1,
+            description: "Show it on this one record of the type only.",
+          })
+        ),
+      },
+      { additionalProperties: false }
+    ),
+    // A type's list page: a tab beside the records, at /<type>/-/views/<key>.
+    Type.Object(
+      {
+        collection: EntityTypeSlug(
+          "Entity type whose list page shows this view as a tab."
+        ),
+        when: Type.Optional(CollectionWhenSchema),
+      },
+      { additionalProperties: false }
+    ),
+    // The Data hub: a tab at /data/-/views/<key>.
+    Type.Object(
+      {
+        workspace: Type.Literal(true, {
+          description: "A tab on the Data hub, at /data/-/views/<key>.",
+        }),
+      },
+      { additionalProperties: false }
+    ),
+    // One event's page, /events/<id>/-/views/<key>: matches an event of kind
+    // `event`, optionally only when it links an entity of `type`.
+    Type.Object(
+      {
+        event: Type.String({
           minLength: 1,
-          maxLength: 120,
+          maxLength: 128,
+          pattern: "^[A-Za-z][A-Za-z0-9._-]{0,127}$",
           description:
-            "Optional linked entity-type qualifier. Omit to match the event kind alone.",
-        })
-      ),
-    },
-    { additionalProperties: false }
-  ),
-]);
+            "Event kind (semantic_type) this view renders, e.g. 'deal.won'.",
+        }),
+        type: Type.Optional(
+          EntityTypeSlug("Only events linking an entity of this type.")
+        ),
+      },
+      { additionalProperties: false }
+    ),
+  ],
+  {
+    description:
+      '{ record: "<type>", id?: <entity id> }, { collection: "<type>", when? }, { workspace: true } or { event: "<kind>", type?: "<type>" }',
+  }
+);
 export type ViewAttachment = Static<typeof ViewAttachmentSchema>;
 
 // Declared, typed URL params. Unknown params are ignored; `$collection`,
@@ -159,6 +142,40 @@ export const ViewActionDeclSchema = Type.Object({
 });
 export type ViewActionDecl = Static<typeof ViewActionDeclSchema>;
 
+// Everything a view declares about itself, read from its module's
+// `export const view = defineView({...})`. The module is the only place these
+// live: `set` takes the source and the server reads this out of it.
+export const ViewDefinitionSchema = Type.Object(
+  {
+    key: ViewKeySchema,
+    name: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: 120,
+        description: "Display name; defaults to the key.",
+      })
+    ),
+    description: Type.Optional(
+      Type.String({ maxLength: 500, description: "What the view shows." })
+    ),
+    attach: Type.Array(ViewAttachmentSchema, {
+      description: "Where the view appears.",
+    }),
+    params: Type.Optional(
+      Type.Record(Type.String(), ViewParamDeclSchema, {
+        description: "Declared URL params.",
+      })
+    ),
+    actions: Type.Optional(
+      Type.Record(Type.String(), ViewActionDeclSchema, {
+        description: "Declared actions and the event kind each emits.",
+      })
+    ),
+  },
+  { additionalProperties: false }
+);
+export type ViewDefinitionDecl = Static<typeof ViewDefinitionSchema>;
+
 // Public projection of a stored view: metadata only, never the bundle. The
 // bundle travels over the view resource / shell route; the source over get.
 export const ViewRowSchema = Type.Object({
@@ -191,22 +208,14 @@ export type ViewRow = Static<typeof ViewRowSchema>;
 
 export const SetViewAction = Type.Object({
   action: Type.Literal("set", {
-    description: "Store a view: compile source_code and upsert by key.",
+    description:
+      "Store a view: read its key, name, description, attach, params and actions from the module's `export const view = defineView({...})`, compile it, and upsert by that key.",
   }),
-  key: ViewKeySchema,
-  name: Type.Optional(
-    Type.String({
-      maxLength: 120,
-      description: "[set] Display name; defaults to key.",
-    })
-  ),
-  description: Type.Optional(
-    Type.String({ maxLength: 500, description: "[set] What the view shows." })
-  ),
   source_code: Type.String({
     minLength: 1,
     maxLength: 1_000_000,
-    description: "[set] The view module source (TSX). Compiled server-side.",
+    description:
+      "[set] The view module source (TSX). Its `defineView({...})` argument must be a literal; it is the only place the view's key, name, description, attach, params and actions are declared.",
   }),
   compiled_code: Type.Optional(
     Type.String({
@@ -217,22 +226,6 @@ export const SetViewAction = Type.Object({
   ),
   source_files: Type.Optional(SourceFilesSchema),
   dependencies: Type.Optional(SourceDependenciesSchema),
-  attach: Type.Optional(
-    Type.Array(ViewAttachmentSchema, {
-      description:
-        "[set] Where the view appears; extracted from the module by the caller.",
-    })
-  ),
-  params: Type.Optional(
-    Type.Record(Type.String(), ViewParamDeclSchema, {
-      description: "[set] Declared URL params.",
-    })
-  ),
-  actions: Type.Optional(
-    Type.Record(Type.String(), ViewActionDeclSchema, {
-      description: "[set] Declared actions and the event kind each emits.",
-    })
-  ),
   last_writer: Type.Optional(
     Type.String({
       maxLength: 200,

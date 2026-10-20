@@ -21,6 +21,8 @@ import type {
   SourceFiles,
   SourceDependencies,
 } from "@lobu/core/contracts/tools/source-files";
+import { readViewDefinition } from "@lobu/core/contracts/tools/view-definition";
+import { transform } from "esbuild";
 import * as context from "../../../../internal/context.js";
 import * as credentials from "../../../../internal/credentials.js";
 import { applyCommand } from "../apply-cmd.js";
@@ -40,7 +42,7 @@ afterEach(() => {
 const VIEW_SOURCE = `import { defineView } from "@lobu/views";
 export const view = defineView({
   key: "pipeline",
-  attach: [{ type: "deal" }],
+  attach: [{ collection: "deal" }],
   params: { by: { type: "string", default: "owner" } },
   actions: { markWon: { emits: "deal.won" } },
 });
@@ -102,20 +104,29 @@ function makeFetch(store: { views: Array<Record<string, unknown>> }) {
     if (urlStr.includes("/manage_views")) {
       if (body.action === "list") return json({ views: store.views });
       if (body.action === "set") {
+        // The server reads the declaration out of the module, as here.
+        const def = readViewDefinition(
+          (
+            await transform(body.source_code as string, {
+              loader: "tsx",
+              jsx: "automatic",
+            })
+          ).code
+        );
         const row = {
-          key: body.key,
-          name: body.key,
-          description: "",
+          key: def.key,
+          name: def.name,
+          description: def.description,
           content_hash: "aaaaaaaaaaaaaaaa",
-          attach: body.attach,
-          params: body.params,
-          actions: body.actions,
+          attach: def.attach,
+          params: def.params,
+          actions: def.actions,
           last_writer: "apply:test",
           updated_at: new Date().toISOString(),
           compiled_bytes: 10,
           source_bytes: 10,
         };
-        const i = store.views.findIndex((v) => v.key === body.key);
+        const i = store.views.findIndex((v) => v.key === def.key);
         if (i >= 0) store.views[i] = row;
         else store.views.push(row);
         return json({ action: "set", view: row, written: true });
@@ -166,7 +177,7 @@ describe("apply views over the wire", () => {
     });
   });
 
-  test("a new view ships source + bundle + module metadata", async () => {
+  test("a new view ships its module and bundle, never a separate declaration", async () => {
     const dir = mkProject();
     const { fetchStub, calls } = makeFetch({ views: [] });
     await runApply(dir, fetchStub);
@@ -174,12 +185,13 @@ describe("apply views over the wire", () => {
       (c) => c.url.includes("/manage_views") && c.body.action === "set"
     );
     expect(sets).toHaveLength(1);
-    expect(sets[0]?.body).toMatchObject({
-      key: "pipeline",
-      attach: [{ type: "deal" }],
-      params: { by: { type: "string", default: "owner" } },
-      actions: { markWon: { emits: "deal.won" } },
-    });
+    expect(Object.keys(sets[0]?.body ?? {}).sort()).toEqual([
+      "action",
+      "compiled_code",
+      "dependencies",
+      "source_code",
+      "source_files",
+    ]);
     const compiled = sets[0]?.body.compiled_code;
     expect(typeof compiled).toBe("string");
     expect((compiled as string).length).toBeGreaterThan(10_000);
@@ -223,7 +235,7 @@ describe("apply views over the wire", () => {
       {
         name: "pipeline",
         description: "",
-        attach: [{ type: "deal" }],
+        attach: [{ collection: "deal" }],
         params: { by: { type: "string", default: "owner" } },
         actions: { markWon: { emits: "deal.won" } },
       },

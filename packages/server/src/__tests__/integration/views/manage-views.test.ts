@@ -22,6 +22,7 @@ import { ToolUserError } from "../../../utils/errors";
 import { compileView, viewSourceDependencies, setView as storeView } from "../../../views/views";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
+import { viewModule } from "./view-module";
 import {
 	addUserToOrganization,
 	createTestEntity,
@@ -38,9 +39,18 @@ const TEST_ENV: Env = {
 	RATE_LIMIT_ENABLED: "false",
 };
 
-const SIMPLE_SOURCE = `export default function Board() { return null; }
-export const view = { attach: [{ type: "deal", placement: "tab" }], params: {}, actions: {} };
-`;
+const SIMPLE_SOURCE = "export default function Board() { return null; }";
+
+const DEFAULT_DEF = {
+	key: "pipeline",
+	name: "Pipeline",
+	attach: [{ collection: "deal" }],
+	params: { by: { type: "string", default: "owner" } },
+	actions: { markWon: { emits: "deal.won" } },
+};
+const SIMPLE_MODULE = viewModule(DEFAULT_DEF, SIMPLE_SOURCE);
+/** The keys a module declares; anything else in `extra` is a set argument. */
+const DECLARED = new Set(["key", "name", "description", "attach", "params", "actions"]);
 
 const REACT_SOURCE = `import React from "react";
 export default function Board() { return React.createElement("div", null, "hi"); }
@@ -103,23 +113,21 @@ describe("manage_views", () => {
 		]);
 	});
 
+	/** Save a module of `body` declaring DEFAULT_DEF, with `extra`'s declared
+	 *  keys overriding it and the rest passed as set arguments. */
 	async function setView(
-		source: string,
+		body: string,
 		extra: Record<string, unknown> = {},
 		ctx: AuthContext = ownerCtx
 	) {
+		const def: Record<string, unknown> = { ...DEFAULT_DEF };
+		const args: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(extra)) {
+			(DECLARED.has(key) ? def : args)[key] = value;
+		}
 		return (await executeTool(
 			"manage_views",
-			{
-				action: "set",
-				key: "pipeline",
-				name: "Pipeline",
-				source_code: source,
-				attach: [{ type: "deal", placement: "tab" }],
-				params: { by: { type: "string", default: "owner" } },
-				actions: { markWon: { emits: "deal.won" } },
-				...extra,
-			},
+			{ action: "set", source_code: viewModule(def, body), ...args },
 			TEST_ENV,
 			ctx
 		)) as {
@@ -151,6 +159,59 @@ describe("manage_views", () => {
 		});
 	});
 
+	it("rewrites every retired attach shape to a page, and replays in either direction", async () => {
+		const dir = resolve(import.meta.dirname, "../../../../../../db/migrations");
+		const file = "20261020140000_view_attachments_by_page.sql";
+		const up = loadMigrationUpSection(dir, file);
+		const down = loadMigrationDownSection(dir, file);
+		const deal = await createTestEntity({ name: "Acme Deal", entity_type: "deal", organization_id: orgId });
+		const compiled = await compileView(SIMPLE_MODULE);
+		const legacy: Record<string, unknown[]> = {
+			both: [{ type: "deal" }],
+			overview: [{ type: "deal", placement: "overview" }],
+			record: [{ type: "deal", surface: "record" }],
+			collection: [{ type: "deal", surface: "collection", when: { stage: "open" } }],
+			"pin-id": [{ entity: deal.id }],
+			"pin-slug": [{ entity: "acme-deal", placement: "overview" }],
+			"pin-gone": [{ entity: 999999999 }],
+			workspace: [{ workspace: true, placement: "overview" }],
+			event: [{ event_kind: "deal.won", type: "deal" }],
+		};
+		const sql = getTestDb();
+		for (const [key, attach] of Object.entries(legacy)) {
+			await storeView(orgId, {
+				key, name: key, description: "", source_code: SIMPLE_MODULE, compiled_code: compiled,
+				content_hash: key, attach: [], params: {}, actions: {}, last_writer: "test",
+			});
+			await sql`UPDATE views SET attach = ${sql.json(attach)} WHERE organization_id = ${orgId} AND key = ${key}`;
+		}
+		const read = async () =>
+			Object.fromEntries(
+				(await sql<{ key: string; attach: unknown }[]>`SELECT key, attach FROM views WHERE organization_id = ${orgId}`)
+					.map((row) => [row.key, row.attach])
+			);
+		const expected = {
+			both: [{ collection: "deal" }, { record: "deal" }],
+			overview: [{ record: "deal" }],
+			record: [{ record: "deal" }],
+			collection: [{ collection: "deal", when: { stage: "open" } }],
+			"pin-id": [{ record: "deal", id: deal.id }],
+			"pin-slug": [{ record: "deal", id: deal.id }],
+			"pin-gone": [],
+			workspace: [{ workspace: true }],
+			event: [{ event: "deal.won", type: "deal" }],
+		};
+		await sql.unsafe(up);
+		expect(await read()).toEqual(expected);
+		await sql.unsafe(up);
+		expect(await read()).toEqual(expected);
+		await sql.unsafe(down);
+		expect((await read()).overview).toEqual([{ type: "deal", surface: "record", placement: "overview" }]);
+		await sql.unsafe(down);
+		await sql.unsafe(up);
+		expect(await read()).toEqual(expected);
+	});
+
 	it("set compiles and stores; get returns source; list returns metadata only", async () => {
 		const set = await setView(SIMPLE_SOURCE);
 		expect(set.action).toBe("set");
@@ -159,7 +220,7 @@ describe("manage_views", () => {
 		expect(set.view.name).toBe("Pipeline");
 		expect(typeof set.view.content_hash).toBe("string");
 		expect((set.view.content_hash as string).length).toBe(16);
-		expect(set.view.attach).toEqual([{ type: "deal", placement: "tab" }]);
+		expect(set.view.attach).toEqual([{ collection: "deal" }]);
 		expect(set.view.actions).toEqual({ markWon: { emits: "deal.won" } });
 		expect(set.view.last_writer).toBe(ownerId);
 		expect(set.view).not.toHaveProperty("source_code");
@@ -173,12 +234,12 @@ describe("manage_views", () => {
 			ownerCtx
 		)) as { action: string; view: Record<string, unknown>; source_code: string };
 		expect(get.view.key).toBe("pipeline");
-		expect(get.source_code).toBe(SIMPLE_SOURCE);
+		expect(get.source_code).toBe(SIMPLE_MODULE);
 		expect(get).toMatchObject({
 			source_complete: true,
 			source_files: {
 				entrypoint: "index.tsx",
-				files: { "index.tsx": SIMPLE_SOURCE },
+				files: { "index.tsx": SIMPLE_MODULE },
 			},
 		});
 
@@ -196,7 +257,7 @@ describe("manage_views", () => {
 	});
 
 	it("retains imported source changes even when the compiled artifact is unchanged; rejects invalid source atomically", async () => {
-		const files = { entrypoint: "views/index.tsx", files: { "views/index.tsx": SIMPLE_SOURCE, "lib/value.ts": "// first\nexport const value = 1;" } };
+		const files = { entrypoint: "views/index.tsx", files: { "views/index.tsx": SIMPLE_MODULE, "lib/value.ts": "// first\nexport const value = 1;" } };
 		const payload = { compiled_code: "globalThis.sourceProbe = 1;", source_files: files, dependencies: {} };
 		const first = await setView(SIMPLE_SOURCE, payload);
 		files.files["lib/value.ts"] = "// second\nexport const value = 1;";
@@ -210,7 +271,7 @@ describe("manage_views", () => {
 		expect(await get()).toMatchObject({ source_complete: true, source_files: files });
 		// An MCP edit replaces the retained set rather than leaving stale CLI imports.
 		await setView(SIMPLE_SOURCE + "\n// edited through MCP");
-		expect(await get()).toMatchObject({ source_complete: true, source_files: { entrypoint: "index.tsx", files: { "index.tsx": SIMPLE_SOURCE + "\n// edited through MCP" } } });
+		expect(await get()).toMatchObject({ source_complete: true, source_files: { entrypoint: "index.tsx", files: { "index.tsx": viewModule(DEFAULT_DEF, SIMPLE_SOURCE + "\n// edited through MCP") } } });
 	});
 
 	it("does not invent original files for a legacy compiled upload", async () => {
@@ -231,7 +292,12 @@ export const view = defineView({ key: "pipeline", attach: [] });
 export default function V() { return null; }
 mountView(view, V);
 `;
-		const set = await setView(source);
+		const set = (await executeTool(
+			"manage_views",
+			{ action: "set", source_code: source },
+			TEST_ENV,
+			ownerCtx
+		)) as { written: boolean; view: Record<string, unknown> };
 		expect(set.written).toBe(true);
 		expect(set.view.compiled_bytes as number).toBeGreaterThan(1_000);
 	});
@@ -283,7 +349,7 @@ mountView(view, V);
 	it("fixed source with changed attach rewrites with written:true", async () => {
 		await setView(SIMPLE_SOURCE);
 		const changed = await setView(SIMPLE_SOURCE, {
-			attach: [{ type: "deal", placement: "overview" }],
+			attach: [{ record: "deal" }],
 		});
 		expect(changed.written).toBe(true);
 		const get = (await executeTool(
@@ -292,10 +358,10 @@ mountView(view, V);
 			TEST_ENV,
 			ownerCtx
 		)) as { view: Record<string, unknown> };
-		expect(get.view.attach).toEqual([{ type: "deal", placement: "overview" }]);
+		expect(get.view.attach).toEqual([{ record: "deal" }]);
 		// Same source AND same metadata is still a no-op.
 		const again = await setView(SIMPLE_SOURCE, {
-			attach: [{ type: "deal", placement: "overview" }],
+			attach: [{ record: "deal" }],
 		});
 		expect(again.written).toBe(false);
 	});
@@ -375,12 +441,62 @@ mountView(view, V);
 		).rejects.toThrow(/reserved/);
 		await expect(
 			setView(SIMPLE_SOURCE, {
-				attach: [{ type: "deal", entity: 1 }],
+				attach: [{ record: "deal", collection: "deal" }],
 			})
-		).rejects.toThrow(/exactly one/);
+		).rejects.toThrow(/defineView\.attach\.0: Expected \{ record/);
 		await expect(
 			setView(SIMPLE_SOURCE, { actions: { go: { emits: "not a kind!" } } })
 		).rejects.toThrow(/emits/);
+	});
+
+	it("reads the view's declaration from its source, never from arguments", async () => {
+		const set = await setView(SIMPLE_SOURCE, {
+			key: "deal-board",
+			name: "Deal board",
+			description: "Open deals by stage",
+			attach: [{ record: "deal" }],
+		});
+		expect(set.view).toMatchObject({
+			key: "deal-board",
+			name: "Deal board",
+			description: "Open deals by stage",
+			attach: [{ record: "deal" }],
+		});
+		// The retired arguments are not part of set any more.
+		for (const retired of [
+			{ key: "pipeline" },
+			{ attach: [{ collection: "deal" }] },
+		]) {
+			await expect(
+				executeTool(
+					"manage_views",
+					{ action: "set", source_code: SIMPLE_MODULE, ...retired },
+					TEST_ENV,
+					ownerCtx
+				)
+			).rejects.toBeInstanceOf(ToolUserError);
+		}
+		// Declared in code the server would have to run: rejected by name.
+		const computed = `import { defineView } from "@lobu/views";
+const TYPE = "deal";
+export const view = defineView({ key: "computed", attach: [{ collection: TYPE }] });
+export default function V() { return null; }`;
+		await expect(
+			executeTool(
+				"manage_views",
+				{ action: "set", source_code: computed },
+				TEST_ENV,
+				ownerCtx
+			)
+		).rejects.toThrow(/attach\[0\]\.collection must be written out as a literal/);
+		await expect(
+			executeTool(
+				"manage_views",
+				{ action: "set", source_code: SIMPLE_SOURCE },
+				TEST_ENV,
+				ownerCtx
+			)
+		).rejects.toThrow(/must export const view = defineView/);
 	});
 
 	it("rejects uninvokable action names at authoring", async () => {
@@ -605,11 +721,11 @@ mountView(view, V);
 		// derives from the same source, normalized metadata and artifact bytes.
 		expect(second.view.content_hash).toBe(
 			contentHash(
-				SIMPLE_SOURCE,
+				SIMPLE_MODULE,
 				{
 					name: "Pipeline",
 					description: "",
-					attach: [{ type: "deal", placement: "tab" }],
+					attach: [{ collection: "deal" }],
 					params: { by: { type: "string", default: "owner" } },
 					actions: { markWon: { emits: "deal.won" } },
 				},
@@ -632,29 +748,29 @@ mountView(view, V);
 		const legacyMeta = {
 			name: "Pipeline",
 			description: "",
-			attach: [{ type: "deal", placement: "tab" }],
+			attach: [{ collection: "deal" }],
 			params: { by: { type: "string", default: "owner" } },
 			actions: { markWon: { emits: "deal.won" } },
 		};
-		const compiled = await compileView(SIMPLE_SOURCE);
+		const compiled = await compileView(SIMPLE_MODULE);
 		// The pre-F1 identity: source plus declared metadata only.
 		const legacyHash = createHash("sha256")
-			.update(SIMPLE_SOURCE)
+			.update(SIMPLE_MODULE)
 			.update("\n")
 			.update(stableStringify(legacyMeta))
 			.digest("hex")
 			.slice(0, 16);
 		expect(legacyHash).not.toBe(
-			contentHash(SIMPLE_SOURCE, legacyMeta, compiled)
+			contentHash(SIMPLE_MODULE, legacyMeta, compiled)
 		);
 		await storeView(orgId, {
 			key: "pipeline",
 			name: "Pipeline",
 			description: "",
-			source_code: SIMPLE_SOURCE,
+			source_code: SIMPLE_MODULE,
 			compiled_code: compiled,
 			content_hash: legacyHash,
-			attach: [{ type: "deal", placement: "tab" }],
+			attach: [{ collection: "deal" }],
 			params: { by: { type: "string", default: "owner" } },
 			actions: { markWon: { emits: "deal.won" } },
 			last_writer: "migration:view-templates",
@@ -663,7 +779,7 @@ mountView(view, V);
 		const refresh = await setView(SIMPLE_SOURCE);
 		expect(refresh.written).toBe(true);
 		expect(refresh.view.content_hash).toBe(
-			contentHash(SIMPLE_SOURCE, legacyMeta, compiled, { sourceFiles: { entrypoint: "index.tsx", files: { "index.tsx": SIMPLE_SOURCE } }, dependencies: viewSourceDependencies() })
+			contentHash(SIMPLE_MODULE, legacyMeta, compiled, { sourceFiles: { entrypoint: "index.tsx", files: { "index.tsx": SIMPLE_MODULE } }, dependencies: viewSourceDependencies() })
 		);
 		const again = await setView(SIMPLE_SOURCE);
 		expect(again.written).toBe(false);

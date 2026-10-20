@@ -37,7 +37,7 @@ describe("view reapply Node in-flight same-path identity (F12)", () => {
           `const { startViewReapplyLoop, bundleViewFromFile } = await import(pathToFileURL(scratch + "/f12-runtime.mjs").href);`,
           `const sleep = (ms) => new Promise((r) => setTimeout(r, ms));`,
           `const sha = (s) => createHash("sha256").update(s).digest("hex");`,
-          `const source = (revision) => 'export const view={key:"probe",attach:[]};export default function V(){return ' + JSON.stringify(revision) + ';}';`,
+          `const source = (revision) => 'import {defineView} from "@lobu/views";export const view=defineView({key:"probe",attach:[]});export default function V(){return ' + JSON.stringify(revision) + ';}';`,
           `const fail = (msg, extra) => { console.error("F12-FAIL: " + msg + (extra ? " " + JSON.stringify(extra).slice(0, 2000) : "")); process.exit(1); };`,
           `async function until(test, label, budget = 15000) { const end = Date.now() + budget; while (!test()) { if (Date.now() > end) fail("timed out waiting for " + label); await sleep(100); } }`,
           `for (const kind of ["valid", "invalid"]) {`,

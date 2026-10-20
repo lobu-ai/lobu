@@ -261,6 +261,12 @@
       "import": "./dist/contracts/tools/view-attach.js",
       "require": "./dist/contracts/tools/view-attach.js"
     },
+    "./contracts/tools/view-definition": {
+      "types": "./dist/contracts/tools/view-definition.d.ts",
+      "bun": "./src/contracts/tools/view-definition.ts",
+      "import": "./dist/contracts/tools/view-definition.js",
+      "require": "./dist/contracts/tools/view-definition.js"
+    },
     "./contracts/tools/view-path": {
       "types": "./dist/contracts/tools/view-path.d.ts",
       "bun": "./src/contracts/tools/view-path.ts",
@@ -281,14 +287,15 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.41",
-    "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/sdk-trace-node": "^2.11.0",
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.222.0",
     "@opentelemetry/resources": "^2.11.0",
+    "@opentelemetry/sdk-trace-node": "^2.11.0",
     "@opentelemetry/semantic-conventions": "^1.28.0",
+    "@sinclair/typebox": "^0.34.41",
+    "acorn": "^8.16.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
     "winston": "^3.17.0"
   },
   "devDependencies": {

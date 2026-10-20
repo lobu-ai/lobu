@@ -22,6 +22,7 @@ import { ensureMemberEntityType } from "../../../utils/member-entity-type";
 import { primeMemberEventKinds } from "../../../utils/event-kind-validation";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
+import { viewModule } from "./view-module";
 import {
 	addUserToOrganization,
 	createTestOrganization,
@@ -38,9 +39,7 @@ const TEST_ENV: Env = {
 	RATE_LIMIT_ENABLED: "false",
 };
 
-const VIEW_SOURCE = `export default function Retry() { return null; }
-export const view = { attach: [], params: {}, actions: { retry: { emits: "test.poked" } } };
-`;
+const VIEW_SOURCE = "export default function Retry() { return null; }";
 
 function actor(userId: string): TrustedTemplateActor {
 	return { platform: "lobu", platformUserId: userId, userId };
@@ -77,7 +76,10 @@ describe("view actions", () => {
 	) {
 		return (await executeTool(
 			"manage_views",
-			{ action: "set", key, source_code: source, actions },
+			{
+				action: "set",
+				source_code: viewModule({ key, attach: [], actions }, source),
+			},
 			TEST_ENV,
 			ownerCtx
 		)) as { written: boolean };
@@ -128,9 +130,12 @@ describe("view actions", () => {
 
   it("binds a kind-only view action to its readable event and rejects a changed subject", async () => {
     await executeTool("manage_views", {
-      action: "set", key: "event-poke", source_code: VIEW_SOURCE,
-      attach: [{ event_kind: "test.poked" }],
-      actions: { retry: { emits: "test.poked" } },
+      action: "set",
+      source_code: viewModule({
+        key: "event-poke",
+        attach: [{ event: "test.poked" }],
+        actions: { retry: { emits: "test.poked" } },
+      }, VIEW_SOURCE),
     }, TEST_ENV, ownerCtx);
     const source = await executeTool("save_memory", {
       content: "Action source", semantic_type: "test.poked",
@@ -182,9 +187,12 @@ describe("view actions", () => {
       WHERE organization_id = ${orgId} AND slug = 'ballot'
     `;
     await executeTool("manage_views", {
-      action: "set", key: "ballot-form", source_code: VIEW_SOURCE,
-      attach: [{ event_kind: "ballot.opened", type: "ballot" }],
-      actions: { retry: { emits: "ballot.responded" } },
+      action: "set",
+      source_code: viewModule({
+        key: "ballot-form",
+        attach: [{ event: "ballot.opened", type: "ballot" }],
+        actions: { retry: { emits: "ballot.responded" } },
+      }, VIEW_SOURCE),
     }, TEST_ENV, ownerCtx);
     const source = await executeTool("save_memory", {
       content: "Choose an option", semantic_type: "ballot.opened", entity_ids: [entity.id],
@@ -195,10 +203,14 @@ describe("view actions", () => {
     }, TEST_ENV, ownerCtx) as { event_id: number };
     const [event] = await sql`SELECT to_json(entity_ids) AS entity_ids, semantic_type FROM events WHERE id = ${response.event_id}`;
     expect(event).toMatchObject({ entity_ids: [entity.id], semantic_type: "ballot.responded" });
-    for (const attach of [[], [{ event_kind: "ballot.opened" }], [{ event_kind: "ballot.opened", type: "another-type" }]]) {
+    for (const attach of [[], [{ event: "ballot.opened" }], [{ event: "ballot.opened", type: "another-type" }]]) {
       await expect(executeTool("manage_views", {
-        action: "set", key: "unbound-ballot-form", source_code: VIEW_SOURCE, attach,
-        actions: { retry: { emits: "ballot.responded" } },
+        action: "set",
+        source_code: viewModule({
+          key: "unbound-ballot-form",
+          attach,
+          actions: { retry: { emits: "ballot.responded" } },
+        }, VIEW_SOURCE),
       }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 422 });
     }
   });

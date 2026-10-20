@@ -1,6 +1,6 @@
 /**
- * `view-bundler` coverage: metadata comes from the module's own `view`
- * export, the browser bundle mounts it through a synthetic entry, and
+ * `view-bundler` coverage: the declaration is read from the module's own
+ * `defineView({...})` literal (never by running it), the browser bundle mounts it through a synthetic entry, and
  * anything else fails loud at apply time.
  *
  * Fixtures live next to this test so the view bundle's `@lobu/views` +
@@ -29,7 +29,6 @@ afterEach(() => {
     const d = tempDirs.pop();
     if (d) rmSync(d, { recursive: true, force: true });
   }
-  delete (globalThis as Record<string, unknown>).__lobuViewDefinition;
 });
 
 function mkView(
@@ -59,7 +58,7 @@ const PIPELINE_SOURCE = `import { defineView, sql, useAction, useParams, useQuer
 
 export const view = defineView({
   key: "pipeline",
-  attach: [{ type: "deal" }],
+  attach: [{ collection: "deal" }],
   params: { by: { type: "string", default: "owner" } },
   actions: { markWon: { emits: "deal.won" } },
 });
@@ -81,12 +80,12 @@ describe("bundleViewFromFile", () => {
   test("extracts metadata and bundles react + bridge with no SDK chain", async () => {
     const entry = mkView({ "views/deal/pipeline.tsx": PIPELINE_SOURCE });
     const bundled = await bundleFixture(entry);
-    expect(bundled.metadata.key).toBe("pipeline");
-    expect(bundled.metadata.attach).toEqual([{ type: "deal" }]);
-    expect(bundled.metadata.params).toEqual({
+    expect(bundled.definition.key).toBe("pipeline");
+    expect(bundled.definition.attach).toEqual([{ collection: "deal" }]);
+    expect(bundled.definition.params).toEqual({
       by: { type: "string", default: "owner" },
     });
-    expect(bundled.metadata.actions).toEqual({
+    expect(bundled.definition.actions).toEqual({
       markWon: { emits: "deal.won" },
     });
     expect(bundled.compiledCode.length).toBeGreaterThan(10_000);
@@ -106,18 +105,18 @@ describe("bundleViewFromFile", () => {
       {
         "views/deal/cards.tsx": `import { defineView } from "@lobu/views";
 import { Card, DataTable, formatCompact } from "@lobu/views/components";
-export const view = defineView({ key: "cards", attach: [{ type: "deal" }], params: { label: { type: "string", default: formatCompact(1500) } } });
+export const view = defineView({ key: "cards", attach: [{ collection: "deal" }], params: { label: { type: "string", default: "1.5K" } } });
 const ROWS = [{ id: 1 }, { id: 2 }];
 export default function CardsView() {
-  return <Card title="t"><DataTable columns={[{ key: "id", header: "ID", sortable: true }]} rows={ROWS} keyOf={(r) => r.id} sort={{ key: "id", dir: "asc" }} /></Card>;
+  return <Card title={formatCompact(1500)}><DataTable columns={[{ key: "id", header: "ID", sortable: true }]} rows={ROWS} keyOf={(r) => r.id} sort={{ key: "id", dir: "asc" }} /></Card>;
 }
 `,
       },
       "views/deal/cards.tsx"
     );
     const bundled = await bundleFixture(entry);
-    expect(bundled.metadata.key).toBe("cards");
-    expect(bundled.metadata.params).toEqual({
+    expect(bundled.definition.key).toBe("cards");
+    expect(bundled.definition.params).toEqual({
       label: { type: "string", default: "1.5K" },
     });
     // Kit content is really inlined (not a stub): the table sort marker survives.
@@ -130,7 +129,7 @@ export default function CardsView() {
       {
         "views/deal/board.tsx": `import { defineView } from "@lobu/views";
 import { Board } from "../_lib/board";
-export const view = defineView({ key: "board", attach: [{ type: "deal" }] });
+export const view = defineView({ key: "board", attach: [{ collection: "deal" }] });
 export default function BoardView() { return Board({}); }
 `,
         "views/_lib/board.tsx": `export function Board(_props: unknown) { return <div>Board</div>; }
@@ -139,7 +138,7 @@ export default function BoardView() { return Board({}); }
       "views/deal/board.tsx"
     );
     const bundled = await bundleFixture(entry);
-    expect(bundled.metadata.key).toBe("board");
+    expect(bundled.definition.key).toBe("board");
     expect(bundled.sourceFiles.entrypoint).toBe("views/deal/board.tsx");
     expect(Object.keys(bundled.sourceFiles.files).sort()).toEqual([
       "views/_lib/board.tsx",
@@ -206,6 +205,22 @@ export const view = defineView({ key: "nodefault", attach: [] });
     );
   });
 
+  test("a declaration that would have to run fails loud, naming the field", async () => {
+    const entry = mkView(
+      {
+        "views/deal/computed.tsx": `import { defineView } from "@lobu/views";
+import { formatCompact } from "@lobu/views/components";
+export const view = defineView({ key: "computed", attach: [], params: { label: { type: "string", default: formatCompact(1500) } } });
+export default function Computed() { return null; }
+`,
+      },
+      "views/deal/computed.tsx"
+    );
+    await expect(bundleFixture(entry)).rejects.toThrow(
+      "defineView.params.label.default must be written out as a literal"
+    );
+  });
+
   test("an invalid key fails loud", async () => {
     const entry = mkView(
       {
@@ -216,7 +231,7 @@ export default function Bad() { return null; }
       },
       "views/deal/bad.tsx"
     );
-    await expect(bundleFixture(entry)).rejects.toThrow("must match");
+    await expect(bundleFixture(entry)).rejects.toThrow(/defineView\.key: /);
   });
 });
 

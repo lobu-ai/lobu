@@ -54,6 +54,7 @@
 import type { CollectionSelection } from "@lobu/core/contracts/tools/collection-selection";
 import type { ViewAttachment } from "@lobu/core/contracts/tools/manage-views";
 import {
+  Component,
   createContext,
   type ReactNode,
   useCallback,
@@ -82,7 +83,7 @@ export type Params = Record<string, ParamValue>;
  * ```tsx
  * export const view = defineView({
  *   key: "deal-won",
- *   attach: [{ event_kind: "deal.won", type: "deal" }],
+ *   attach: [{ event: "deal.won", type: "deal" }],
  * });
  *
  * export default function DealWon() {
@@ -119,21 +120,41 @@ export interface ParamDef {
 }
 
 /**
- * Where a view appears: exactly one subject per entry. `{ type }`,
- * `{ entity }` and `{ workspace: true }` take a `placement`. Type attachments
- * may declare surface: "collection" (tab only) or "record" (tab/overview).
- * Collection `when` equalities must all be present in scope.collection.filters;
- * they control discoverability, never authorization. Omitted surface preserves
- * legacy collection and record matching. An event
- * attachment `{ event_kind, type? }` matches that kind, optionally qualified by
- * a linked entity type. It renders on the event page without a placement.
+ * Where a view appears: one page per entry.
+ *
+ * - `{ record: "deal" }` — a card on every deal's page, above its activity;
+ *   `{ record: "deal", id: 7 }` pins it to one record. The card renders
+ *   `inline`; "See all" (`requestDisplayMode("fullscreen")`) or the card's
+ *   Open shows the same view fullscreen in the peek.
+ * - `{ collection: "deal", when? }` — a tab on the deal list page. `when`
+ *   equalities must all be present in scope.collection.filters; they control
+ *   discoverability, never authorization.
+ * - `{ workspace: true }` — a tab on the Data hub.
+ * - `{ event: "deal.won", type? }` — one event's page, optionally only when
+ *   the event links an entity of `type`.
  */
 export type Attachment = ViewAttachment;
+
+/** How the host is showing the view: a card in a page (`inline`) or the
+ *  view's own surface (`fullscreen`: the peek, a full page, a tab). */
+export type DisplayMode = "inline" | "fullscreen";
+
+/** The space the host gives the frame. Width is fixed or capped; an inline
+ *  card's `maxHeight` is the height budget past which the host clips. */
+export interface Container {
+  width?: number;
+  maxWidth?: number;
+  height?: number;
+  maxHeight?: number;
+}
 
 export interface ViewDefinition {
   /** View key: the single namespace of keys (no `custom:` prefix). Required —
    *  it is the identity `invoke_view_action` and the shell route key on. */
   key: string;
+  /** Display name; defaults to the key when the view is saved. */
+  name?: string;
+  description?: string;
   /** Where the view appears. The attach line lives in the module; there are
    *  no attach/detach verbs. */
   attach: Attachment[];
@@ -170,6 +191,10 @@ interface ViewRuntime {
     name: string,
     args: Record<string, unknown>
   ) => Promise<ToolResult>;
+  openLink: (url: string) => Promise<void>;
+  displayMode: DisplayMode;
+  container: Container;
+  requestDisplayMode: (mode: DisplayMode) => Promise<DisplayMode>;
 }
 
 const Ctx = createContext<ViewRuntime | null>(null);
@@ -196,9 +221,46 @@ export function useHost(): {
   connected: boolean;
   ready: boolean;
   theme: "light" | "dark";
+  /**
+   * Ask the host to open `url`. A relative URL (`"deal/acme-renewal"`, a
+   * record's `<type>/<slug>`) resolves against the workspace root, so the same
+   * link works on every page and in every host; a full URL opens outside the
+   * app. The frame is sandboxed, so this is the only way a view navigates;
+   * rejects when the host declines.
+   */
+  openLink: (url: string) => Promise<void>;
+  /** `inline` as a card on a page, `fullscreen` as the view's own surface.
+   *  Render a summary inline and the full view fullscreen. */
+  displayMode: DisplayMode;
+  container: Container;
+  /** Ask the host for another mode ("See all" → `"fullscreen"`). Resolves with
+   *  the mode the host set, which stays the current one when it declines. */
+  requestDisplayMode: (mode: DisplayMode) => Promise<DisplayMode>;
 } {
   const rt = useRuntime();
-  return { connected: rt.connected, ready: rt.ready, theme: rt.theme };
+  return {
+    connected: rt.connected,
+    ready: rt.ready,
+    theme: rt.theme,
+    openLink: rt.openLink,
+    displayMode: rt.displayMode,
+    container: rt.container,
+    requestDisplayMode: rt.requestDisplayMode,
+  };
+}
+
+/** The workspace root relative links resolve against: the shell's
+ *  `lobu-workspace` meta, absent outside a server-rendered shell. */
+export function resolveViewHref(href: string): string {
+  const base = document
+    .querySelector('meta[name="lobu-workspace"]')
+    ?.getAttribute("content");
+  if (!base) return href;
+  try {
+    return new URL(href, base).href;
+  } catch {
+    return href;
+  }
 }
 
 function resultError(result: ToolResult): string | null {
@@ -622,9 +684,117 @@ function themeFromContext(ctx: HostContext): "light" | "dark" {
   return ctx.theme === "dark" ? "dark" : "light";
 }
 
+/** `pip` and unknown modes render like a card; only fullscreen is the full view. */
+function displayModeFromContext(ctx: HostContext): DisplayMode {
+  return ctx.displayMode === "fullscreen" ? "fullscreen" : "inline";
+}
+
+function containerFromContext(ctx: HostContext): Container {
+  const raw = ctx.containerDimensions;
+  if (!raw || typeof raw !== "object") return {};
+  const out: Container = {};
+  for (const key of ["width", "maxWidth", "height", "maxHeight"] as const) {
+    const value = (raw as Record<string, unknown>)[key];
+    if (typeof value === "number" && Number.isFinite(value)) out[key] = value;
+  }
+  return out;
+}
+
 function applyTheme(theme: "light" | "dark"): void {
   document.documentElement.classList.toggle("dark", theme === "dark");
   document.documentElement.style.colorScheme = theme;
+}
+
+/**
+ * The MCP Apps standard style variables (`McpUiStyleVariableKey`, protocol
+ * `2026-01-26`). A host sends any subset in `hostContext.styles.variables`;
+ * the shell's tokens (`--fg`, `--muted`, `--border`, `--accent`, the font and
+ * radii) derive from them, so a view takes the host's look. Built from the
+ * spec's own axes rather than imported: the guest carries no ext-apps code.
+ */
+const SEMANTIC = ["primary", "secondary", "tertiary", "inverse", "ghost"];
+const STATUS = ["info", "danger", "success", "warning"];
+const HEADINGS = ["xs", "sm", "md", "lg", "xl", "2xl", "3xl"];
+const HOST_STYLE_KEYS: ReadonlySet<string> = new Set([
+  ...["background", "text", "border"].flatMap((part) =>
+    [...SEMANTIC, ...STATUS, "disabled"].map((v) => `--color-${part}-${v}`)
+  ),
+  ...["primary", "secondary", "inverse", ...STATUS].map(
+    (v) => `--color-ring-${v}`
+  ),
+  "--font-sans",
+  "--font-mono",
+  ...["normal", "medium", "semibold", "bold"].map((w) => `--font-weight-${w}`),
+  ...["size", "line-height"].flatMap((m) => [
+    ...["xs", "sm", "md", "lg"].map((s) => `--font-text-${s}-${m}`),
+    ...HEADINGS.map((s) => `--font-heading-${s}-${m}`),
+  ]),
+  ...["xs", "sm", "md", "lg", "xl", "full"].map((r) => `--border-radius-${r}`),
+  "--border-width-regular",
+  ...["hairline", "sm", "md", "lg"].map((s) => `--shadow-${s}`),
+]);
+
+/**
+ * Apply the host's standard style variables to the document root. Every
+ * standard key is set or cleared from the current context, so a variable a
+ * theme switch drops does not linger; anything outside the standard list is
+ * ignored, never written.
+ */
+function applyHostStyles(ctx: HostContext): void {
+  const styles = ctx.styles as { variables?: unknown } | undefined;
+  const variables =
+    styles && typeof styles.variables === "object" && styles.variables
+      ? (styles.variables as Record<string, unknown>)
+      : {};
+  const root = document.documentElement.style;
+  for (const key of HOST_STYLE_KEYS) {
+    const value = variables[key];
+    if (typeof value === "string" && value.trim()) {
+      root.setProperty(key, value);
+    } else {
+      root.removeProperty(key);
+    }
+  }
+}
+
+/**
+ * Contains a render error to the view so the Provider (which owns the host
+ * handshake) stays mounted: an uncaught error would unmount it before its
+ * effect connects, leaving the host a blank frame with no size and no error.
+ * `resetKey` changes when the host delivers scope/params or data changes, so
+ * a render that only failed for lack of scope retries once it arrives.
+ */
+class RenderBoundary extends Component<
+  { resetKey: string; children: ReactNode },
+  { error: Error | null; resetKey: string }
+> {
+  state = { error: null as Error | null, resetKey: this.props.resetKey };
+
+  static getDerivedStateFromError(error: unknown) {
+    return { error: error instanceof Error ? error : new Error(String(error)) };
+  }
+
+  static getDerivedStateFromProps(
+    props: { resetKey: string },
+    state: { error: Error | null; resetKey: string }
+  ) {
+    return props.resetKey === state.resetKey
+      ? null
+      : { error: null, resetKey: props.resetKey };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error("[lobu-views] view failed to render", error);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div role="alert" style={{ padding: 12, color: "var(--fg)" }}>
+        This view failed to render: {this.state.error.message}
+      </div>
+    );
+  }
 }
 
 /**
@@ -647,6 +817,8 @@ export function Provider({
   const [scope, setScope] = useState<Scope>({});
   const [params, setParamsState] = useState<Params>(() => defaultsFor(def));
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("inline");
+  const [container, setContainer] = useState<Container>({});
   const [dataVersion, setDataVersion] = useState(0);
   const bridgeRef = useRef<ViewBridge | null>(bridge ?? null);
   if (bridge) bridgeRef.current = bridge;
@@ -673,17 +845,19 @@ export function Provider({
         setScope(coerceScope(resolved.scope));
       }
     });
-    const offCtx = b.onHostContext((ctx) => {
+    const adoptContext = (ctx: HostContext) => {
       const next = themeFromContext(ctx);
       setTheme(next);
       applyTheme(next);
-    });
+      applyHostStyles(ctx);
+      setDisplayMode(displayModeFromContext(ctx));
+      setContainer(containerFromContext(ctx));
+    };
+    const offCtx = b.onHostContext(adoptContext);
     const offData = b.onDataChanged(() => setDataVersion((v) => v + 1));
     b.connect()
       .then((ctx) => {
-        const next = themeFromContext(ctx);
-        setTheme(next);
-        applyTheme(next);
+        adoptContext(ctx);
         setConnected(true);
         setReady(b.hasToolInput());
         document.documentElement.setAttribute("data-ready", "true");
@@ -748,6 +922,20 @@ export function Provider({
     []
   );
 
+  const openLink = useCallback(async (url: string) => {
+    const b = bridgeRef.current;
+    if (!b?.isConnected()) throw new Error("Not connected to a host");
+    const error = resultError(await b.openLink(resolveViewHref(url)));
+    if (error) throw new Error(error);
+  }, []);
+
+  const requestDisplayMode = useCallback(async (mode: DisplayMode) => {
+    const b = bridgeRef.current;
+    if (!b?.isConnected()) throw new Error("Not connected to a host");
+    const granted = await b.requestDisplayMode(mode);
+    return granted === "fullscreen" ? "fullscreen" : "inline";
+  }, []);
+
   const value = useMemo<ViewRuntime>(
     () => ({
       def,
@@ -759,6 +947,10 @@ export function Provider({
       theme,
       dataVersion,
       callTool,
+      openLink,
+      displayMode,
+      container,
+      requestDisplayMode,
     }),
     [
       def,
@@ -770,13 +962,21 @@ export function Provider({
       theme,
       dataVersion,
       callTool,
+      openLink,
+      displayMode,
+      container,
+      requestDisplayMode,
     ]
   );
   // A host-resolved replacement is a new form, including in MCP hosts that
   // keep the iframe mounted while delivering the opening result.
   return (
     <Ctx.Provider key={scope.event ?? "unbound"} value={value}>
-      {children}
+      <RenderBoundary
+        resetKey={`${ready}:${JSON.stringify(scope)}:${JSON.stringify(params)}:${dataVersion}`}
+      >
+        {children}
+      </RenderBoundary>
     </Ctx.Provider>
   );
 }

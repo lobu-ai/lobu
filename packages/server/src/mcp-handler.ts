@@ -71,6 +71,7 @@ import { getMcpTools, getTool, isAuthorizationReadOnly } from './tools/registry'
 import { toMcpPublicSdkScriptResult } from './tools/sdk_run';
 import { validateToolResult } from './tools/validate-args';
 import { renderMcpAppTemplate } from './utils/mcp-app-bundle';
+import { viewWorkspaceUrl } from './utils/url-builder';
 import {
   LOBU_VIEWS_RESOURCE_URI,
   getView,
@@ -582,7 +583,10 @@ function createServerForContext(
             {
               uri,
               mimeType: MCP_APP_MIME_TYPE,
-              text: renderViewShell(storedView),
+              text: renderViewShell(
+                storedView,
+                await viewWorkspaceUrl(authCtx.organizationId, authCtx.requestUrl)
+              ),
               _meta: mcpAppResourceMeta(authCtx, meta),
             },
           ],

@@ -21,8 +21,12 @@ import {
   COLLECTION_TABLE_QUERY_KEY,
 } from '@lobu/core/contracts/tools/collection-presentation';
 import type { SourceFiles, SourceDependencies } from '@lobu/core/contracts/tools/source-files';
+import {
+  readViewDefinition,
+  type ViewDefinitionRecord,
+} from '@lobu/core/contracts/tools/view-definition';
 import { sourceDependencies } from '@lobu/connector-worker/compile';
-import { build, type Plugin } from 'esbuild';
+import { build, type Plugin, transform } from 'esbuild';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
 
@@ -427,6 +431,28 @@ function inertResolveDir(): string {
 }
 
 /**
+ * The view's own declaration, read from its module's `defineView({...})`
+ * without running it: esbuild strips TypeScript and JSX, then the literal is
+ * read off the syntax tree. The module is the only place a view declares its
+ * key, name, description, attach, params and actions.
+ */
+export async function readViewModule(source: string): Promise<ViewDefinitionRecord> {
+  let js: string;
+  try {
+    js = (await transform(source, { loader: 'tsx', jsx: 'automatic', logLevel: 'silent' })).code;
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message.split('\n').slice(0, 5).join('\n') : String(err);
+    throw new ToolUserError(`View source failed to compile: ${message}`, 422);
+  }
+  try {
+    return readViewDefinition(js);
+  } catch (err) {
+    throw new ToolUserError((err as Error).message, 400);
+  }
+}
+
+/**
  * Compile a view module to a minified browser IIFE with the bundle inlined by
  * the shell. Pure text transform — the module is never imported or executed.
  * Throws ToolUserError(422) on diagnostics or when the bundle exceeds the cap.
@@ -489,18 +515,26 @@ export function viewResourceMeta(view: StoredView): {
   };
 }
 
-// Minimal theme tokens; the host's `theme` flips `.dark` on <html>.
+// Theme tokens the view kit reads. Each derives from the MCP Apps standard
+// style variable the host sends in `hostContext.styles.variables` (the guest
+// writes them onto <html>), falling back to Lobu's own palette when a host
+// sends none; the host's `theme` flips `.dark` on <html>. The background stays
+// transparent so the frame shows the host's surface.
 const BASE_CSS = `
-:root{color-scheme:light;--fg:#0a0a0a;--muted:#6b7280;--border:#e5e7eb;--accent:#2563eb}
-html.dark{color-scheme:dark;--fg:#fafafa;--muted:#9ca3af;--border:#27272a;--accent:#60a5fa}
-html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+:root{color-scheme:light;--fg:var(--color-text-primary,#0a0a0a);--muted:var(--color-text-secondary,#6b7280);--border:var(--color-border-primary,#e5e7eb);--accent:var(--color-text-info,#2563eb);--font:var(--font-sans,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif);--radius:var(--border-radius-md,6px);--radius-lg:var(--border-radius-lg,8px)}
+html.dark{color-scheme:dark;--fg:var(--color-text-primary,#fafafa);--muted:var(--color-text-secondary,#9ca3af);--border:var(--color-border-primary,#27272a);--accent:var(--color-text-info,#60a5fa)}
+html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 var(--font)}
 *{box-sizing:border-box}
 `;
 
 /** One view's shell: the compiled bundle inlined, no relative asset URLs and
  * no `<base href>` (claude.ai hardcodes `base-uri 'self'`, so both 404 there). */
-export function renderViewShell(view: StoredView): string {
+export function renderViewShell(view: StoredView, workspaceUrl: string): string {
   const script = view.compiled_code.replaceAll('</script', '<\\/script');
+  const workspace = workspaceUrl
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;');
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -508,6 +542,7 @@ export function renderViewShell(view: StoredView): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="lobu-view" content="${view.key}">
 <meta name="lobu-view-hash" content="${view.content_hash}">
+<meta name="lobu-workspace" content="${workspace}">
 <title>Lobu — ${view.name.replaceAll('<', '&lt;')}</title>
 <style>${BASE_CSS}</style>
 </head>

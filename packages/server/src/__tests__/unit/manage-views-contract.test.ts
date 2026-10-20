@@ -1,8 +1,8 @@
 /**
  * `manage_views` is a union of per-action variants, so the schema — not the
  * handler — decides what each action requires and accepts. These pin what the
- * flat contract could not express: `source_code` is required only by `set`,
- * `key` only by the actions that name a view, a field that belongs to another
+ * flat contract could not express: `set` takes only source (the module
+ * declares the view), `key` belongs to the actions that name a stored view, a field that belongs to another
  * action is an error instead of a silent no-op, and the registry's per-action
  * access filtering keeps the write actions out of a read-scope listing.
  */
@@ -26,31 +26,28 @@ function messageOf(fn: () => unknown): string {
 }
 
 describe("manage_views union contract", () => {
-	it("accepts a param filter and rejects an unknown filter key", () => {
-		const set = (filter: unknown) =>
-			validate({
-				action: "set",
-				key: "pipeline",
-				source_code: "export default () => null;",
-				params: { region: { type: "string", filter } },
-			});
-		expect(() =>
-			set({ label: "Region", options: [{ value: "EMEA", label: "Europe" }] })
-		).not.toThrow();
-		expect(() => set({ label: "Region", multiple: true })).toThrow(ToolUserError);
-		expect(() => set({ label: "" })).toThrow(ToolUserError);
+	it("set takes the source only: the module declares the view", () => {
+		for (const retired of ["key", "name", "description", "attach", "params", "actions"]) {
+			expect(
+				messageOf(() =>
+					validate({
+						action: "set",
+						source_code: "export default () => null;",
+						[retired]: retired === "key" ? "pipeline" : {},
+					})
+				)
+			).toMatch(new RegExp(`unknown argument\\(s\\): ${retired}`));
+		}
 	});
 
 	it("requires source_code for set and key for get/remove, at the schema", () => {
-		expect(messageOf(() => validate({ action: "set", key: "pipeline" }))).toMatch(
-			/source_code/
-		);
+		expect(messageOf(() => validate({ action: "set" }))).toMatch(/source_code/);
 		expect(messageOf(() => validate({ action: "get" }))).toMatch(/key/);
 		expect(messageOf(() => validate({ action: "remove" }))).toMatch(/key/);
 	});
 
 	it("rejects a field another action takes instead of ignoring it", () => {
-		// `key` belongs to set/get/remove but not to list: passing it there is
+		// `key` belongs to get/remove but not to list: passing it there is
 		// an error, not a silent no-op.
 		const list = messageOf(() => validate({ action: "list", key: "pipeline" }));
 		expect(list).toMatch(/unknown argument\(s\): key/);
@@ -63,14 +60,11 @@ describe("manage_views union contract", () => {
 		expect(
 			validate({
 				action: "set",
-				key: "pipeline",
 				source_code: "export default function P() { return null; }",
-				name: "Pipeline",
-				attach: [{ type: "deal", placement: "tab" }],
-				params: { by: { type: "string", default: "owner" } },
-				actions: { markWon: { emits: "deal.won" } },
+				compiled_code: "console.log(1);",
+				last_writer: "apply:1",
 			}),
-		).toMatchObject({ key: "pipeline", name: "Pipeline" });
+		).toMatchObject({ action: "set", last_writer: "apply:1" });
 		expect(validate({ action: "get", key: "pipeline" })).toEqual({
 			action: "get",
 			key: "pipeline",
@@ -112,7 +106,7 @@ describe("manage_views wire schema", () => {
 			listedFor("admin")?.inputSchema.properties.action.description ?? "";
 		const lineFor = (action: string) =>
 			description.split("\n").find((line) => line.startsWith(`- ${action}:`));
-		expect(lineFor("set")).toContain("Required: key, source_code.");
+		expect(lineFor("set")).toContain("Required: source_code.");
 		expect(lineFor("get")).toContain("Required: key.");
 		expect(lineFor("list")).not.toContain("Required:");
 		expect(lineFor("remove")).toContain("Required: key.");

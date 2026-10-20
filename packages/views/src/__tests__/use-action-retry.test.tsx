@@ -12,7 +12,7 @@ function Probe() {
 }
 const def = defineView({
   key: "event-vote",
-  attach: [{ event_kind: "test.poll", type: "test_record" }],
+  attach: [{ event: "test.poll", type: "test_record" }],
   actions: { vote: { emits: "test.vote" } },
 });
 let dom: JSDOM;

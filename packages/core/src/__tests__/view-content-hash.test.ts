@@ -20,7 +20,7 @@ function meta(
   return {
     name: "pipeline",
     description: "",
-    attach: [{ type: "deal" }],
+    attach: [{ record: "deal" }],
     params: {},
     actions: {},
     ...overrides,
@@ -48,7 +48,7 @@ describe("contentHash", () => {
     const before = contentHash(SOURCE, meta(), COMPILED);
     const after = contentHash(
       SOURCE,
-      meta({ attach: [{ type: "deal", placement: "tab" }] }),
+      meta({ attach: [{ collection: "deal" }] }),
       COMPILED
     );
     expect(after).not.toBe(before);
@@ -61,7 +61,7 @@ describe("contentHash", () => {
       COMPILED
     );
     const reordered = JSON.parse(
-      '{"params":{"x":{"type":"string"}},"name":"pipeline","description":"","attach":[{"type":"deal"}],"actions":{}}'
+      '{"params":{"x":{"type":"string"}},"name":"pipeline","description":"","attach":[{"record":"deal"}],"actions":{}}'
     ) as ViewContentMetadata;
     expect(contentHash(SOURCE, reordered, COMPILED)).toBe(a);
   });

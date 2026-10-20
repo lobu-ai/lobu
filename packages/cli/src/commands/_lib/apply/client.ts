@@ -153,16 +153,10 @@ export interface RemoteView {
 }
 
 export interface SetViewPayload {
-  key: string;
-  name?: string;
-  description?: string;
   source_code: string;
   compiled_code?: string;
   source_files?: SourceFiles;
   dependencies?: SourceDependencies;
-  attach: Array<Record<string, unknown>>;
-  params: Record<string, unknown>;
-  actions: Record<string, { emits: string }>;
 }
 
 export interface RemoteAutomation {
@@ -730,9 +724,9 @@ export class ApplyClient {
   }
 
   /**
-   * Store a view: source + CLI-bundled browser bundle + metadata extracted
-   * from the module itself. Returns whether a write happened (same
-   * executable artifact is a server-side no-op).
+   * Store a view: source + CLI-bundled browser bundle. The server reads the
+   * view's key, attach, params and actions from the source. Returns whether a
+   * write happened (same executable artifact is a server-side no-op).
    */
   async setView(
     payload: SetViewPayload

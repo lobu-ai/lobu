@@ -9,9 +9,10 @@
  * `.error`, `.errorCode`, `.truncated`) that `useQuery` reports.
  *
  * Styling follows the shell's theme tokens (`--fg`, `--muted`, `--border`,
- * `--accent`, flipped by the host's `.dark` class), so kit output tracks the
- * host theme without configuration. Theme tokens carry light-mode fallbacks;
- * pie series and error accents use fixed colors.
+ * `--accent`, `--font`, `--radius`, `--radius-lg`), which derive from the
+ * host's MCP Apps style variables and flip with its `.dark` class, so kit
+ * output takes the host's look without configuration. Theme tokens carry
+ * light-mode fallbacks; pie series and error accents use fixed colors.
  *
  * Server-side compile allowlist: this module is pinned beside `react` and
  * `@lobu/views` in the view compiler funds, so MCP/tool-path views may
@@ -20,10 +21,12 @@
  * through `lobu apply`, which bundles the project's own `node_modules`.
  */
 
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, MouseEvent, ReactNode } from "react";
 import { useId } from "react";
+import { resolveViewHref, useHost } from "./api.js";
 
-const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const FONT_STACK =
+  'var(--font, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif)';
 
 const INK: CSSProperties = {
   color: "var(--fg, #0a0a0a)",
@@ -50,7 +53,7 @@ export function Card({ title, description, actions, children }: CardProps) {
       style={{
         ...INK,
         border: "1px solid var(--border, #e5e7eb)",
-        borderRadius: 8,
+        borderRadius: "var(--radius-lg, 8px)",
         padding: "12px 14px",
         background: "transparent",
       }}
@@ -297,7 +300,7 @@ function PageButton({
         cursor: disabled ? "default" : "pointer",
         opacity: disabled ? 0.45 : 1,
         border: "1px solid var(--border, #e5e7eb)",
-        borderRadius: 6,
+        borderRadius: "var(--radius, 6px)",
         background: "transparent",
         color: "var(--fg, #0a0a0a)",
         padding: "2px 10px",
@@ -339,7 +342,7 @@ const FIELD_LABEL: CSSProperties = {
 
 const FIELD_BOX: CSSProperties = {
   border: "1px solid var(--border, #e5e7eb)",
-  borderRadius: 6,
+  borderRadius: "var(--radius, 6px)",
   background: "transparent",
   color: "var(--fg, #0a0a0a)",
   padding: "4px 8px",
@@ -800,6 +803,45 @@ export function Sparkline({
 }
 
 /* ------------------------------------------------------------------ */
+/* Link                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A link the host opens: `href="deal/acme-renewal"` opens that record
+ * (relative links resolve against the workspace root, see
+ * `useHost().openLink`), a full URL opens a new tab. The sandboxed frame
+ * cannot navigate itself, so every click goes through the host, modifier
+ * clicks included; the anchor still shows the resolved address on hover.
+ */
+export function Link({
+  href,
+  children,
+}: {
+  href: string;
+  children: ReactNode;
+}) {
+  const { openLink } = useHost();
+  const open = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    openLink(href).catch((error) =>
+      console.error("[lobu-views] link not opened", error)
+    );
+  };
+  return (
+    <a
+      href={resolveViewHref(href)}
+      onClick={open}
+      onAuxClick={(event) => {
+        if (event.button === 1) open(event);
+      }}
+      style={{ color: "var(--accent, #2563eb)", textDecoration: "none" }}
+    >
+      {children}
+    </a>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Query states — render `useQuery` honestly                            */
 /* ------------------------------------------------------------------ */
 
@@ -836,7 +878,7 @@ export function ErrorState({
       style={{
         ...INK,
         border: "1px solid var(--border, #e5e7eb)",
-        borderRadius: 6,
+        borderRadius: "var(--radius, 6px)",
         padding: "8px 10px",
       }}
     >
@@ -859,7 +901,7 @@ export function ErrorState({
           style={{
             cursor: "pointer",
             border: "1px solid var(--border, #e5e7eb)",
-            borderRadius: 6,
+            borderRadius: "var(--radius, 6px)",
             background: "transparent",
             color: "var(--fg, #0a0a0a)",
             padding: "2px 10px",
