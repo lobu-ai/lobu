@@ -56,6 +56,8 @@ import {
   type SlackHomeInbox,
 } from "./slack-platform-bridge.js";
 import { createConnectedGatewayStateAdapter } from "./state-adapter.js";
+import { chatMessageSignal, resolveChatRoute } from "./chat-route.js";
+import { planAutomationActivationsForRuntimeConnection } from "../../automations/activation.js";
 import {
   type ConnectionSettings,
   isSecretField,
@@ -1720,12 +1722,41 @@ export class ChatInstanceManager {
 
       registerSlackAssistantStarters(chat, connection, {
         adapter,
-        loadStarters: async (agentId) =>
+        // Route a not-yet-sent DM exactly like the first real one will be.
+        resolveAgent: async (thread) => {
+          const signal = chatMessageSignal({
+            platform: connection.platform,
+            connectionId: connection.id,
+            channelId: thread.channelId,
+            conversationId: thread.conversationId,
+            teamId: thread.teamId,
+            userId: thread.userId,
+            messageId: `assistant-thread:${thread.conversationId}`,
+            text: "",
+            isMention: false,
+            occurredAt: new Date().toISOString(),
+          });
+          const plan = connection.organizationId
+            ? await planAutomationActivationsForRuntimeConnection({
+                connectionOrganizationId: connection.organizationId,
+                runtimeConnectionId: connection.id,
+                signal,
+                crossOrganization: connection.settings?.previewMode === true,
+              })
+            : { signal, replyTargets: [], backgroundTargets: [] };
+          return resolveChatRoute({
+            plan,
+            platform: connection.platform,
+            channelId: thread.channelId,
+            connection,
+          });
+        },
+        loadStarters: async (agentId, organizationId) =>
           (
             await this.services
               .getAgentSettingsStore()
               .getSettings(agentId, {
-                organizationId: connection.organizationId,
+                organizationId: organizationId ?? connection.organizationId,
               })
           )?.starters,
       });

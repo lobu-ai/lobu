@@ -29,7 +29,6 @@ import { ingestAttachments, type AttachmentSource } from "../files/attachment-in
 import type { CoreServices } from "../platform.js";
 import {
   buildMessagePayload,
-  resolveAgentId,
   resolveAgentOptions,
 } from "../services/platform-helpers.js";
 import {
@@ -68,7 +67,7 @@ import {
   UNLINKED_SENDER_TURNS_PER_HOUR,
 } from "../orchestration/chat-turn-actor.js";
 import { buildCtaCardPayload } from "../platform/link-buttons.js";
-import { stripPlatformPrefix } from "../channels/bound-channels.js";
+import { chatMessageSignal, resolveChatRoute } from "./chat-route.js";
 import { buildConversationUrl } from "./conversation-url.js";
 import { captureChannelMessage } from "./channel-transcript.js";
 import type { ConversationStateStore } from "./conversation-state-store.js";
@@ -580,31 +579,21 @@ export class MessageHandlerBridge {
     // `/lobu link <code>` creates one under the claim's org, not this
     // connection's), so plan org-agnostically and route by the Automation's org.
     const isPreview = this.connection.settings?.previewMode === true;
-    const normalizedChannelId = stripPlatformPrefix(platform, channelId);
-    const automationSignal = {
-      connector_key: platform,
-      resource_type: "channel",
-      resource_ref: teamId
-        ? `${platform}:channel:${teamId}:${normalizedChannelId}`
-        : `${platform}:channel:${normalizedChannelId}`,
-      event_type: "message.created",
-      delivery_id: `chat:${this.connection.id}:${messageId}`,
-      label: `${platform} message in ${normalizedChannelId}`,
-      input_text: typeof message.text === "string" ? message.text : "",
-      occurred_at:
+    const automationSignal = chatMessageSignal({
+      platform,
+      connectionId: this.connection.id,
+      channelId,
+      conversationId,
+      teamId,
+      userId,
+      messageId,
+      text: typeof message.text === "string" ? message.text : "",
+      isMention: source === "mention" || message.isMention === true,
+      occurredAt:
         message.metadata?.dateSent instanceof Date
           ? message.metadata.dateSent.toISOString()
           : new Date().toISOString(),
-      attributes: {
-        channel_id: normalizedChannelId,
-        channel_key: channelId,
-        user_id: userId,
-        is_mention: source === "mention" || message.isMention === true,
-        mention_only: source === "mention" || message.isMention === true,
-        ...(teamId ? { team_id: teamId } : {}),
-        ...(conversationId !== channelId ? { thread_id: conversationId } : {}),
-      },
-    };
+    });
     const automationPlan = admitted ?? (this.connection.organizationId
       ? await this.automationPlanner({
           connectionOrganizationId: this.connection.organizationId,
@@ -622,28 +611,12 @@ export class MessageHandlerBridge {
     // An admitted message answers only through its admitted Automations: no
     // owner-agent fallback, unrouted commands, or unlinked notice.
     if (admitted && replyAutomations.length === 0) return;
-    const automation = replyAutomations[0] ?? backgroundAutomations[0];
-    // The planner above is the only Automation routing decision because it
-    // evaluates the complete trigger predicate. A channel-only subscription
-    // lookup here would re-select Automations rejected by mention/team filters.
-    const fallbackResolved = automation
-      ? null
-      : await resolveAgentId({
-          platform,
-          channelId,
-          agentId: this.connection.agentId,
-          organizationId: this.connection.organizationId,
-        });
-    const resolved = automation
-      ? {
-          agentId: automation.agentId,
-          source: "automation" as const,
-          organizationId: automation.organizationId,
-          model: automation.model ?? undefined,
-          instructions: automation.instructions,
-          automationId: automation.automationId,
-        }
-      : fallbackResolved;
+    const resolved = await resolveChatRoute({
+      plan: automationPlan,
+      platform,
+      channelId,
+      connection: this.connection,
+    });
     if (!resolved) {
       // App-level commands still work when no Automation matches. Keep this
       // early path to commands whose complete implementation lives in the

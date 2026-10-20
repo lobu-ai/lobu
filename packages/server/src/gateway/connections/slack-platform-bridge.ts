@@ -546,21 +546,39 @@ interface SlackAssistantStartersAdapter {
 interface SlackAssistantThreadStartedEvent {
   adapter?: SlackAssistantStartersAdapter;
   channelId: string;
+  threadId: string;
   threadTs: string;
+  userId: string;
+  context?: { teamId?: string };
+}
+
+/** The thread a user's first assistant-thread message will arrive on. */
+export interface SlackAssistantThread {
+  /** Chat SDK channel id, `slack:<channel>`. */
+  channelId: string;
+  /** Chat SDK thread id, `slack:<channel>:<thread_ts>`. */
+  conversationId: string;
+  userId: string;
+  teamId?: string;
 }
 
 /**
- * Offer the connection agent's conversation starters when a user opens a new
- * Slack assistant thread. An agent without starters gets no prompts, leaving
- * Slack's default empty thread.
+ * Offer conversation starters when a user opens a new Slack assistant thread.
+ * The starters come from whichever agent that thread's first message will
+ * reach (`resolveAgent` runs the same routing as an inbound message); an agent
+ * without starters leaves Slack's default empty thread.
  */
 export function registerSlackAssistantStarters(
   chat: any,
   connection: PlatformConnection,
   deps: {
     adapter?: SlackAssistantStartersAdapter;
+    resolveAgent: (
+      thread: SlackAssistantThread,
+    ) => Promise<{ agentId: string | null; organizationId?: string } | null>;
     loadStarters: (
       agentId: string,
+      organizationId: string | undefined,
     ) => Promise<Array<{ title: string; message: string }> | undefined>;
   },
 ): void {
@@ -568,12 +586,20 @@ export function registerSlackAssistantStarters(
 
   chat.onAssistantThreadStarted(
     async (event: SlackAssistantThreadStartedEvent) => {
-      const agentId = connection.agentId;
-      if (!agentId) return;
       const adapter = deps.adapter ?? event.adapter;
       if (typeof adapter?.setSuggestedPrompts !== "function") return;
       try {
-        const starters = await deps.loadStarters(agentId);
+        const route = await deps.resolveAgent({
+          channelId: `slack:${event.channelId}`,
+          conversationId: event.threadId,
+          userId: event.userId,
+          teamId: event.context?.teamId,
+        });
+        if (!route?.agentId) return;
+        const starters = await deps.loadStarters(
+          route.agentId,
+          route.organizationId,
+        );
         if (!starters?.length) return;
         // Called as a method: see publishHome for the `this`-binding trap.
         await adapter.setSuggestedPrompts(
