@@ -21,8 +21,12 @@ import {
   COLLECTION_TABLE_QUERY_KEY,
 } from '@lobu/core/contracts/tools/collection-presentation';
 import type { SourceFiles, SourceDependencies } from '@lobu/core/contracts/tools/source-files';
+import {
+  readViewDefinition,
+  type ViewDefinitionRecord,
+} from '@lobu/core/contracts/tools/view-definition';
 import { sourceDependencies } from '@lobu/connector-worker/compile';
-import { build, type Plugin } from 'esbuild';
+import { build, type Plugin, transform } from 'esbuild';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
 import { getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
@@ -432,6 +436,28 @@ function inertResolveDir(): string {
  * the shell. Pure text transform — the module is never imported or executed.
  * Throws ToolUserError(422) on diagnostics or when the bundle exceeds the cap.
  */
+/**
+ * The view's own declaration, read from its module's `defineView({...})`
+ * without running it: esbuild strips TypeScript and JSX, then the literal is
+ * read off the syntax tree. The module is the only place a view declares its
+ * key, name, description, attach, params and actions.
+ */
+export async function readViewModule(source: string): Promise<ViewDefinitionRecord> {
+  let js: string;
+  try {
+    js = (await transform(source, { loader: 'tsx', jsx: 'automatic', logLevel: 'silent' })).code;
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message.split('\n').slice(0, 5).join('\n') : String(err);
+    throw new ToolUserError(`View source failed to compile: ${message}`, 422);
+  }
+  try {
+    return readViewDefinition(js);
+  } catch (err) {
+    throw new ToolUserError((err as Error).message, 400);
+  }
+}
+
 export async function compileView(
   source: string,
   opts?: { maxBytes?: number }

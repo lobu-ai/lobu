@@ -3,7 +3,7 @@
  *
  * The module shape is exactly one: `export const view = defineView({ key,
  * attach, … })` plus a default-export component (hooks inside, no document
- * access). Two esbuild passes over the same module:
+ * access). One esbuild pass, plus a read of the declaration:
  *  1. browser IIFE bundle of a SYNTHETIC entry that mounts the two exports
  *     (`mountView(view, Default)`) — what the server stores as
  *     `compiled_code` and inlines into the view shell. Bundled here, where
@@ -11,96 +11,26 @@
  *     use), because the server has no file context for relative imports or
  *     view npm deps. The server compiles plain sources itself through the
  *     same mount on its own bootstrap.
- *  2. a node bundle of the module in which `@lobu/views` is replaced by a
- *     stub, imported only to read the `view` export — so `key`/`attach`/
- *     `params`/`actions` come from the module itself. The attach line lives
- *     in the file, never in the config.
+ *  2. the entry's `defineView({...})` literal, read without running the module
+ *     by the same `readViewDefinition` the server uses on save, so the CLI's
+ *     plan hashes exactly what the server stores. The declaration lives in the
+ *     file, never in the config.
  *
- * Anything else (no `view` export, no default component, bad key) fails loud
- * here rather than rendering a blank frame in prod.
+ * Anything else (no `view` export, no default component, a non-literal
+ * declaration) fails loud here rather than rendering a blank frame in prod.
  */
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { basename, dirname, resolve } from "node:path";
 import type { RetainedSource } from "@lobu/core/contracts/tools/source-files";
-import { build, type Metafile, type Plugin } from "esbuild";
+import {
+  readViewDefinition,
+  type ViewDefinitionRecord,
+} from "@lobu/core/contracts/tools/view-definition";
+import { build, type Metafile, transform } from "esbuild";
 import { createSourceCapture } from "../../internal/connector-compiler.js";
-
-export interface ViewMetadata {
-  key: string;
-  attach: Array<Record<string, unknown>>;
-  params: Record<string, unknown>;
-  actions: Record<string, { emits: string }>;
-}
 
 export interface BundledView extends RetainedSource {
   compiledCode: string;
-  metadata: ViewMetadata;
-}
-
-const VIEW_KEY_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-
-const RUNTIME_MODULE_RE = /(^|\/)lobu-views(\.tsx?)?$|^@lobu\/views$/;
-
-const metadataStub: Plugin = {
-  name: "lobu-views-metadata-stub",
-  setup(b) {
-    b.onResolve({ filter: RUNTIME_MODULE_RE }, () => ({
-      path: "lobu-views-stub",
-      namespace: "lobu-views-stub",
-    }));
-    b.onLoad({ filter: /.*/, namespace: "lobu-views-stub" }, () => ({
-      loader: "js",
-      contents: `
-        export function defineView(def) {
-          if (!def || typeof def.key !== "string" || !def.key) {
-            throw new Error("defineView({ key, attach, ... }) requires a non-empty key");
-          }
-          return def;
-        }
-        export function mountView() { throw new Error("mountView is not called by view modules: export const view = defineView({ ... }) plus a default-export component"); }
-        const noHook = () => { throw new Error("hooks are not available at metadata-extraction time"); };
-        export const useParams = noHook, useScope = noHook, useHost = noHook,
-          useQuery = noHook, useAction = noHook;
-        export function Provider() { throw new Error("not available at metadata-extraction time"); }
-        export function sql(strings, ...values) { return { kind: "sql", text: String(strings[0] ?? "") }; }
-        export function tool(name, args = {}) { return { kind: "tool", name, args }; }
-        export function escapeLiteral(value) { return String(value); }
-        export const defaultsFor = () => ({}), coerceParams = (_def, raw) => raw ?? {};
-      `,
-    }));
-  },
-};
-
-interface ViewModuleNamespace {
-  view?: Partial<ViewMetadata>;
-  default?: unknown;
-}
-
-function readViewExport(
-  ns: unknown,
-  entry: string
-): {
-  view: Omit<Partial<ViewMetadata>, "key"> & { key: string };
-  hasDefault: boolean;
-} {
-  const view = (ns as ViewModuleNamespace)?.view;
-  if (!view || typeof view !== "object") {
-    throw new Error(
-      `${entry}: the module must export const view = defineView({ key, attach, ... })`
-    );
-  }
-  const { key } = view;
-  if (typeof key !== "string" || !key) {
-    throw new Error(
-      `${entry}: defineView({ key, attach, ... }) requires a non-empty key`
-    );
-  }
-  return {
-    view: { ...view, key },
-    hasDefault: typeof (ns as ViewModuleNamespace)?.default === "function",
-  };
+  definition: ViewDefinitionRecord;
 }
 
 /**
@@ -140,54 +70,23 @@ export async function bundleViewFromFile(
   }
   assertBundlePortable(compiledCode, entry);
 
-  const node = await build({
-    entryPoints: [entry],
-    bundle: true,
-    write: false,
-    format: "esm",
-    platform: "node",
-    target: ["node22"],
-    jsx: "automatic",
-    plugins: [capture.plugin, metadataStub],
-    define: { "process.env.NODE_ENV": '"production"' },
-    logLevel: "silent",
-  });
-  const tmp = await mkdtemp(join(tmpdir(), "lobu-view-meta-"));
-  try {
-    const file = join(tmp, "view.mjs");
-    await writeFile(file, node.outputFiles?.[0]?.text ?? "");
-    // A fresh temp path per call, so the ESM cache never returns a stale module.
-    const ns: unknown = await import(pathToFileURL(file).href);
-    const { view: def, hasDefault } = readViewExport(ns, entry);
-    if (!hasDefault) {
-      throw new Error(
-        `${entry}: the module must have a default-export component`
-      );
-    }
-    if (!VIEW_KEY_RE.test(def.key)) {
-      throw new Error(
-        `${entry}: defineView key ${JSON.stringify(def.key)} must match /^[a-z0-9][a-z0-9-]{0,63}$/`
-      );
-    }
-    return {
-      compiledCode,
-      ...capture.source(),
-      metadata: {
-        key: def.key,
-        attach: Array.isArray(def.attach) ? def.attach : [],
-        params:
-          def.params && typeof def.params === "object"
-            ? (def.params as Record<string, unknown>)
-            : {},
-        actions:
-          def.actions && typeof def.actions === "object"
-            ? (def.actions as Record<string, { emits: string }>)
-            : {},
-      },
-    };
-  } finally {
-    await rm(tmp, { recursive: true, force: true });
+  const source = capture.source();
+  const entrySource = source.sourceFiles.files[source.sourceFiles.entrypoint];
+  if (entrySource === undefined) {
+    throw new Error(`${entry}: the view entry was not captured`);
   }
+  let definition: ViewDefinitionRecord;
+  try {
+    const { code } = await transform(entrySource, {
+      loader: "tsx",
+      jsx: "automatic",
+      logLevel: "silent",
+    });
+    definition = readViewDefinition(code);
+  } catch (error) {
+    throw new Error(`${entry}: ${(error as Error).message}`);
+  }
+  return { compiledCode, ...source, definition };
 }
 
 /**

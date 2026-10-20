@@ -6520,23 +6520,11 @@ export type ManageViewsData = {
   body:
     | {
         /**
-         * Store a view: compile source_code and upsert by key.
+         * Store a view: read its key, name, description, attach, params and actions from the module's `export const view = defineView({...})`, compile it, and upsert by that key.
          */
         action: "set";
         /**
-         * View key, e.g. 'pipeline'.
-         */
-        key: string;
-        /**
-         * [set] Display name; defaults to key.
-         */
-        name?: string;
-        /**
-         * [set] What the view shows.
-         */
-        description?: string;
-        /**
-         * [set] The view module source (TSX). Compiled server-side.
+         * [set] The view module source (TSX). Its `defineView({...})` argument must be a literal; it is the only place the view's key, name, description, attach, params and actions are declared.
          */
         source_code: string;
         /**
@@ -6557,126 +6545,6 @@ export type ManageViewsData = {
          */
         dependencies?: {
           [key: string]: unknown | string;
-        };
-        /**
-         * [set] Where the view appears; extracted from the module by the caller.
-         */
-        attach?: Array<
-          | {
-              /**
-               * Entity-type slug this view attaches to.
-               */
-              type: string;
-              /**
-               * Type-attached views render as a full tab or an Overview card.
-               */
-              placement?: "tab" | "overview";
-              event_kind?: unknown;
-              surface?: unknown;
-              when?: unknown;
-            }
-          | {
-              /**
-               * Entity-type slug this view attaches to.
-               */
-              type: string;
-              /**
-               * Type-attached views render as a full tab or an Overview card.
-               */
-              placement?: "tab" | "overview";
-              event_kind?: unknown;
-              surface: "record";
-              when?: unknown;
-            }
-          | {
-              /**
-               * Entity-type slug this view attaches to.
-               */
-              type: string;
-              placement?: "tab";
-              event_kind?: unknown;
-              surface: "collection";
-              when?: {
-                [key: string]: string | number | boolean | null;
-              };
-            }
-          | {
-              /**
-               * Entity id (number) or slug (string) this view attaches to.
-               */
-              entity: number | string;
-              /**
-               * Type-attached views render as a full tab or an Overview card.
-               */
-              placement?: "tab" | "overview";
-              event_kind?: unknown;
-              surface?: unknown;
-              when?: unknown;
-            }
-          | {
-              /**
-               * A tab on the Data hub, at /data/-/views/<key>.
-               */
-              workspace: true;
-              /**
-               * Type-attached views render as a full tab or an Overview card.
-               */
-              placement?: "tab" | "overview";
-              event_kind?: unknown;
-              surface?: unknown;
-              when?: unknown;
-            }
-          | {
-              /**
-               * Event kind (semantic_type) this view renders, e.g. 'deal.won'.
-               */
-              event_kind: string;
-              /**
-               * Optional linked entity-type qualifier. Omit to match the event kind alone.
-               */
-              type?: string;
-            }
-        >;
-        /**
-         * [set] Declared URL params.
-         */
-        params?: {
-          [key: string]:
-            | unknown
-            | {
-                /**
-                 * Param type used to validate the URL value.
-                 */
-                type: "string" | "number" | "boolean";
-                /**
-                 * Default when the URL omits the param.
-                 */
-                default?: unknown;
-                description?: string;
-                /**
-                 * Offer this param in the host's filter bar: an applied value shows as a chip above the view. Options make it a pick list; without them the host asks for a value of the param's type.
-                 */
-                filter?: {
-                  label: string;
-                  options?: Array<{
-                    value: string | number | boolean;
-                    label: string;
-                  }>;
-                };
-              };
-        };
-        /**
-         * [set] Declared actions and the event kind each emits.
-         */
-        actions?: {
-          [key: string]:
-            | unknown
-            | {
-                /**
-                 * Event kind appended when the action fires, e.g. 'deal.won'.
-                 */
-                emits: string;
-              };
         };
         /**
          * [set] Provenance; defaults to the caller.
@@ -6754,78 +6622,42 @@ export type ManageViewsResponses = {
            * First 16 hex of sha256(source, declared metadata, compiled artifact digest, retained source files and dependencies). Identical content means no write.
            */
           content_hash: string;
+          /**
+           * { record: "<type>", id?: <entity id> }, { collection: "<type>", when? }, { workspace: true } or { event: "<kind>", type?: "<type>" }
+           */
           attach: Array<
             | {
                 /**
-                 * Entity-type slug this view attaches to.
+                 * Entity type whose record pages show this view.
                  */
-                type: string;
+                record: string;
                 /**
-                 * Type-attached views render as a full tab or an Overview card.
+                 * Show it on this one record of the type only.
                  */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface?: unknown;
-                when?: unknown;
+                id?: number;
               }
             | {
                 /**
-                 * Entity-type slug this view attaches to.
+                 * Entity type whose list page shows this view as a tab.
                  */
-                type: string;
-                /**
-                 * Type-attached views render as a full tab or an Overview card.
-                 */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface: "record";
-                when?: unknown;
-              }
-            | {
-                /**
-                 * Entity-type slug this view attaches to.
-                 */
-                type: string;
-                placement?: "tab";
-                event_kind?: unknown;
-                surface: "collection";
+                collection: string;
                 when?: {
                   [key: string]: string | number | boolean | null;
                 };
               }
             | {
                 /**
-                 * Entity id (number) or slug (string) this view attaches to.
-                 */
-                entity: number | string;
-                /**
-                 * Type-attached views render as a full tab or an Overview card.
-                 */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface?: unknown;
-                when?: unknown;
-              }
-            | {
-                /**
                  * A tab on the Data hub, at /data/-/views/<key>.
                  */
                 workspace: true;
-                /**
-                 * Type-attached views render as a full tab or an Overview card.
-                 */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface?: unknown;
-                when?: unknown;
               }
             | {
                 /**
                  * Event kind (semantic_type) this view renders, e.g. 'deal.won'.
                  */
-                event_kind: string;
+                event: string;
                 /**
-                 * Optional linked entity-type qualifier. Omit to match the event kind alone.
+                 * Only events linking an entity of this type.
                  */
                 type?: string;
               }
@@ -6891,78 +6723,42 @@ export type ManageViewsResponses = {
            * First 16 hex of sha256(source, declared metadata, compiled artifact digest, retained source files and dependencies). Identical content means no write.
            */
           content_hash: string;
+          /**
+           * { record: "<type>", id?: <entity id> }, { collection: "<type>", when? }, { workspace: true } or { event: "<kind>", type?: "<type>" }
+           */
           attach: Array<
             | {
                 /**
-                 * Entity-type slug this view attaches to.
+                 * Entity type whose record pages show this view.
                  */
-                type: string;
+                record: string;
                 /**
-                 * Type-attached views render as a full tab or an Overview card.
+                 * Show it on this one record of the type only.
                  */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface?: unknown;
-                when?: unknown;
+                id?: number;
               }
             | {
                 /**
-                 * Entity-type slug this view attaches to.
+                 * Entity type whose list page shows this view as a tab.
                  */
-                type: string;
-                /**
-                 * Type-attached views render as a full tab or an Overview card.
-                 */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface: "record";
-                when?: unknown;
-              }
-            | {
-                /**
-                 * Entity-type slug this view attaches to.
-                 */
-                type: string;
-                placement?: "tab";
-                event_kind?: unknown;
-                surface: "collection";
+                collection: string;
                 when?: {
                   [key: string]: string | number | boolean | null;
                 };
               }
             | {
                 /**
-                 * Entity id (number) or slug (string) this view attaches to.
-                 */
-                entity: number | string;
-                /**
-                 * Type-attached views render as a full tab or an Overview card.
-                 */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface?: unknown;
-                when?: unknown;
-              }
-            | {
-                /**
                  * A tab on the Data hub, at /data/-/views/<key>.
                  */
                 workspace: true;
-                /**
-                 * Type-attached views render as a full tab or an Overview card.
-                 */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface?: unknown;
-                when?: unknown;
               }
             | {
                 /**
                  * Event kind (semantic_type) this view renders, e.g. 'deal.won'.
                  */
-                event_kind: string;
+                event: string;
                 /**
-                 * Optional linked entity-type qualifier. Omit to match the event kind alone.
+                 * Only events linking an entity of this type.
                  */
                 type?: string;
               }
@@ -7035,78 +6831,42 @@ export type ManageViewsResponses = {
            * First 16 hex of sha256(source, declared metadata, compiled artifact digest, retained source files and dependencies). Identical content means no write.
            */
           content_hash: string;
+          /**
+           * { record: "<type>", id?: <entity id> }, { collection: "<type>", when? }, { workspace: true } or { event: "<kind>", type?: "<type>" }
+           */
           attach: Array<
             | {
                 /**
-                 * Entity-type slug this view attaches to.
+                 * Entity type whose record pages show this view.
                  */
-                type: string;
+                record: string;
                 /**
-                 * Type-attached views render as a full tab or an Overview card.
+                 * Show it on this one record of the type only.
                  */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface?: unknown;
-                when?: unknown;
+                id?: number;
               }
             | {
                 /**
-                 * Entity-type slug this view attaches to.
+                 * Entity type whose list page shows this view as a tab.
                  */
-                type: string;
-                /**
-                 * Type-attached views render as a full tab or an Overview card.
-                 */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface: "record";
-                when?: unknown;
-              }
-            | {
-                /**
-                 * Entity-type slug this view attaches to.
-                 */
-                type: string;
-                placement?: "tab";
-                event_kind?: unknown;
-                surface: "collection";
+                collection: string;
                 when?: {
                   [key: string]: string | number | boolean | null;
                 };
               }
             | {
                 /**
-                 * Entity id (number) or slug (string) this view attaches to.
-                 */
-                entity: number | string;
-                /**
-                 * Type-attached views render as a full tab or an Overview card.
-                 */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface?: unknown;
-                when?: unknown;
-              }
-            | {
-                /**
                  * A tab on the Data hub, at /data/-/views/<key>.
                  */
                 workspace: true;
-                /**
-                 * Type-attached views render as a full tab or an Overview card.
-                 */
-                placement?: "tab" | "overview";
-                event_kind?: unknown;
-                surface?: unknown;
-                when?: unknown;
               }
             | {
                 /**
                  * Event kind (semantic_type) this view renders, e.g. 'deal.won'.
                  */
-                event_kind: string;
+                event: string;
                 /**
-                 * Optional linked entity-type qualifier. Omit to match the event kind alone.
+                 * Only events linking an entity of this type.
                  */
                 type?: string;
               }

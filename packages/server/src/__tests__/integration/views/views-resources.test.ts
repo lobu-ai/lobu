@@ -16,6 +16,7 @@ import { ensureMemberEntityType } from '../../../utils/member-entity-type';
 import { LOBU_VIEWS_RESOURCE_URI } from '../../../views/views';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
+import { viewModule } from './view-module';
 import {
 	addUserToOrganization,
 	createTestAccessToken,
@@ -36,9 +37,7 @@ const TEST_ENV: Env = {
 	RATE_LIMIT_ENABLED: 'false',
 };
 
-const VIEW_SOURCE = `export default function Board() { return null; }
-export const view = { attach: [{ collection: "deal" }], params: { by: { type: "string", default: "owner" } }, actions: { retry: { emits: "test.poked" } } };
-`;
+const VIEW_SOURCE = 'export default function Board() { return null; }';
 
 describe('views resources + open_view + invoke_view_action', () => {
 	let org: Awaited<ReturnType<typeof createTestOrganization>>;
@@ -149,13 +148,17 @@ describe('views resources + open_view + invoke_view_action', () => {
 			'manage_views',
 			{
 				action: 'set',
-				key: 'board',
-				name: 'Board',
-				description: 'A board view',
-				source_code: VIEW_SOURCE,
-				attach: [{ collection: 'company' }, { record: 'company' }],
-				params: { by: { type: 'string', default: 'owner' } },
-				actions: { retry: { emits: 'test.poked' } },
+				source_code: viewModule(
+					{
+						key: 'board',
+						name: 'Board',
+						description: 'A board view',
+						attach: [{ collection: 'company' }, { record: 'company' }],
+						params: { by: { type: 'string', default: 'owner' } },
+						actions: { retry: { emits: 'test.poked' } },
+					},
+					VIEW_SOURCE
+				),
 			},
 			TEST_ENV,
 			ownerCtx
@@ -327,11 +330,10 @@ describe('views resources + open_view + invoke_view_action', () => {
 
 	it('honors conditional collection attachments and reserves the shared query key', async () => {
 		const declaration = {
-			action: 'set', key: 'large-accounts', name: 'Large accounts', description: 'Selected accounts',
-			source_code: VIEW_SOURCE,
+			key: 'large-accounts', name: 'Large accounts', description: 'Selected accounts',
 			attach: [{ collection: 'company', when: { tier: 'large' } }],
 		};
-		await executeTool('manage_views', declaration, TEST_ENV, ownerCtx);
+		await executeTool('manage_views', { action: 'set', source_code: viewModule(declaration, VIEW_SOURCE) }, TEST_ENV, ownerCtx);
 		const collection = { filters: [{ field: 'tier', op: 'eq', value: 'large' }] };
 		const matching = await rpc('tools/call', {
 			name: 'open_view', arguments: { key: 'large-accounts', scope: { type: 'company', collection } },
@@ -340,7 +342,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 		for (const scope of [{ type: 'company' }, { entity: entityId }]) {
 			await expect(executeTool('open_view', { key: 'large-accounts', scope }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 400 });
 		}
-		await expect(executeTool('manage_views', { ...declaration, params: { '$collection': { type: 'string' } } }, TEST_ENV, ownerCtx)).rejects.toThrow(/reserved/);
+		await expect(executeTool('manage_views', { action: 'set', source_code: viewModule({ ...declaration, params: { '$collection': { type: 'string' } } }, VIEW_SOURCE) }, TEST_ENV, ownerCtx)).rejects.toThrow(/reserved/);
 		await executeTool('manage_views', { action: 'remove', key: 'large-accounts' }, TEST_ENV, ownerCtx);
 	});
 
@@ -388,10 +390,10 @@ describe('views resources + open_view + invoke_view_action', () => {
 			'manage_views',
 			{
 				action: 'set',
-				key,
-				source_code: VIEW_SOURCE,
-				attach,
-				params: { by: { type: 'string', default: 'owner' } },
+				source_code: viewModule(
+					{ key, attach, params: { by: { type: 'string', default: 'owner' } } },
+					VIEW_SOURCE
+				),
 			},
 			TEST_ENV,
 			ownerCtx
@@ -484,7 +486,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 			{ event_kind: 'deal.won' },
 		]) {
 			await expect(setAttachedView('retired-shape', [entry])).rejects.toThrow(
-				/attach\/0: Expected \{ record: "<type>", id\?: <entity id> \}, \{ collection/
+				/defineView\.attach\.0: Expected \{ record: "<type>", id\?: <entity id> \}, \{ collection/
 			);
 		}
 	});
@@ -700,10 +702,8 @@ describe('views resources + open_view + invoke_view_action', () => {
 			'manage_views',
 			{
 				action: 'set',
-				key: 'cli-bundle',
-				source_code: 'export default function V() { return null; }\n',
+				source_code: viewModule({ key: 'cli-bundle', attach: [] }),
 				compiled_code: `${sentinel}console.log(1);`,
-				attach: [],
 			},
 			TEST_ENV,
 			ownerCtx
@@ -741,9 +741,10 @@ describe('views resources + open_view + invoke_view_action', () => {
 			'manage_views',
 			{
 				action: 'set',
-				key: 'pipeline2',
-				source_code: VIEW_SOURCE,
-				actions: { markWon: { emits: 'test.poked' } },
+				source_code: viewModule(
+					{ key: 'pipeline2', attach: [], actions: { markWon: { emits: 'test.poked' } } },
+					VIEW_SOURCE
+				),
 			},
 			TEST_ENV,
 			ownerCtx
@@ -820,10 +821,10 @@ describe('views on a public org stay signed-in-only', () => {
 			'manage_views',
 			{
 				action: 'set',
-				key: 'board',
-				source_code: VIEW_SOURCE,
-				attach: [{ collection: 'company' }],
-				actions: { retry: { emits: 'test.poked' } },
+				source_code: viewModule(
+					{ key: 'board', attach: [{ collection: 'company' }], actions: { retry: { emits: 'test.poked' } } },
+					VIEW_SOURCE
+				),
 			},
 			TEST_ENV,
 			pubCtx

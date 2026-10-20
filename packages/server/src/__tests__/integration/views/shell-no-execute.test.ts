@@ -25,6 +25,7 @@ import {
 	createTestUser,
 } from "../../setup/test-fixtures";
 import { get } from "../../setup/test-helpers";
+import { viewModule } from "./view-module";
 
 const TEST_ENV: Env = {
 	ENVIRONMENT: "test",
@@ -93,13 +94,19 @@ describe("view shell never executes on direct navigation", () => {
 		};
 		await executeTool(
 			"manage_views",
-			{ action: "set", key: "marker", source_code: MARKER_SOURCE },
+			{
+				action: "set",
+				source_code: viewModule({ key: "marker", attach: [] }, MARKER_SOURCE),
+			},
 			TEST_ENV,
 			ownerCtx
 		);
 		await executeTool(
 			"manage_views",
-			{ action: "set", key: "mounted", source_code: BOARD_SOURCE },
+			{
+				action: "set",
+				source_code: viewModule({ key: "mounted", attach: [] }, BOARD_SOURCE),
+			},
 			TEST_ENV,
 			ownerCtx
 		);

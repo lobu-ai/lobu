@@ -38,7 +38,7 @@ describe("view reapply Node atomic-save recovery (F11)", () => {
           `const entry = project + "/views/probe.ts";`,
           `const config = project + "/lobu.config.ts";`,
           `const conf = 'import {defineConfig,defineAgent,viewFromFile} from "@lobu/cli/config";export default defineConfig({agents:[defineAgent({id:"triage",name:"Triage"})],views:[viewFromFile("./views/probe.ts")]});';`,
-          `const source = (revision) => 'export const view={key:"probe",attach:[]};export default function V(){return ' + JSON.stringify(revision) + ';}';`,
+          `const source = (revision) => 'import {defineView} from "@lobu/views";export const view=defineView({key:"probe",attach:[]});export default function V(){return ' + JSON.stringify(revision) + ';}';`,
           `writeFileSync(config, conf);`,
           `writeFileSync(entry, source("INITIAL"));`,
           `const sleep = (ms) => new Promise((r) => setTimeout(r, ms));`,

@@ -39,6 +39,7 @@ import {
 	createTestOrganization,
 	createTestUser,
 } from "../../setup/test-fixtures";
+import { viewModule } from "../views/view-module";
 
 const TEST_ENV: Env = {
 	ENVIRONMENT: "test",
@@ -361,10 +362,8 @@ describe("all agent MCP tools — registry-driven e2e (model-free)", () => {
 			"manage_views",
 			{
 				action: "set",
-				key: "coverage-board",
-				source_code: "export default function B() { return null; }",
 				// A Data hub tab, so the unscoped open resolves to a page.
-				attach: [{ workspace: true }],
+				source_code: viewModule({ key: "coverage-board", attach: [{ workspace: true }] }),
 			},
 			TEST_ENV,
 			authCtx

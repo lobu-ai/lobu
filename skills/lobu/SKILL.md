@@ -281,7 +281,9 @@ export default function Pipeline() {
 }
 ```
 
-`attach` lists the pages a view appears on, one per entry: `{ record: "deal" }` is a card on every deal's page above its activity (`{ record: "deal", id: 7 }` pins one record), `{ collection: "deal", when? }` a tab on the deal list page, `{ workspace: true }` a Data hub tab, `{ event: "deal.won", type? }` one event's page. A record card renders with `useHost().displayMode === "inline"` inside `container.maxHeight` (the host clips past it): render a summary there with a "See all" that calls `requestDisplayMode("fullscreen")`, and the full view when `displayMode` is `"fullscreen"` (the peek, a full page, a tab).
+`defineView` is the view's only declaration: `key`, optional `name` (defaults to the key) and `description`, `attach`, `params` and `actions` are read from it, never passed separately, so `manage_views` `set` takes just the source. Write it out as a literal (no variables, spreads or `${}` templates): the server reads it without running the module.
+
+`attach` lists the pages a view appears on, one per entry: `{ record: "deal" }` is a card on every deal's page above its activity (`{ record: "deal", id: 7 }` pins one record), `{ collection: "deal", when? }` a tab on the deal list page, `{ workspace: true }` a Data hub tab, `{ event: "deal.won", type? }` one event's page. One view can list several pages and branch on `useScope()` when it answers the same question at each scale. A record card renders with `useHost().displayMode === "inline"` inside `container.maxHeight` (the host clips past it): render a summary there with a "See all" that calls `requestDisplayMode("fullscreen")`, and the full view when `displayMode` is `"fullscreen"` (the peek, a full page, a tab).
 
 Rules that are load-bearing, not style:
 

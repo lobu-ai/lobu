@@ -26,6 +26,7 @@ import type { Static } from '@sinclair/typebox';
 import { emit } from '../../events/emitter';
 import { getDb, pgTextArray } from '../../db/client';
 import { isEventAttachment } from '@lobu/core/contracts/tools/view-attach';
+import type { ViewDefinitionRecord } from '@lobu/core/contracts/tools/view-definition';
 import { ToolUserError } from '../../utils/errors';
 import {
   refreshMemberEventKinds,
@@ -40,9 +41,9 @@ import {
   viewSourceDependencies,
   contentHash,
   getView,
-  isValidViewKey,
   listViews,
   projectView,
+  readViewModule,
   removeView,
   setView,
   type SetViewInput,
@@ -77,17 +78,8 @@ function requireWriter(ctx: ToolContext): void {
 // `assertActionKindsRegistered`.
 const EMITS_NAME_RE = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
 
-/**
- * Validate the caller-declared metadata (`lobu apply` extracts attach/params/
- * actions from the module file; direct callers declare them). Shape only: the
- * server does not execute the module to re-derive them.
- */
-function validateViewMetadata(args: Static<typeof SetViewAction>): void {
-  if (!isValidViewKey(args.key)) {
-    throw new ToolUserError(
-      `Invalid view key '${args.key}': use 1-64 lowercase letters, digits and dashes`
-    );
-  }
+/** The source size cap, before anything parses it. */
+function validateViewSource(args: Static<typeof SetViewAction>): void {
   if (typeof args.source_code !== 'string' || args.source_code.length === 0) {
     throw new ToolUserError('set requires source_code', 400);
   }
@@ -97,7 +89,14 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
       422
     );
   }
-  for (const [name, decl] of Object.entries(args.params ?? {})) {
+}
+
+/**
+ * Rules the definition's schema cannot say: reserved param names, defaults
+ * and filter options of the declared type, action and event-kind names.
+ */
+function validateViewDefinition(def: ViewDefinitionRecord): void {
+  for (const [name, decl] of Object.entries(def.params)) {
     if (isShellOwnedParam(name)) {
       throw new ToolUserError(
         `Param '${name}' is reserved for the web shell's collection selection or peek pane`,
@@ -137,7 +136,7 @@ function validateViewMetadata(args: Static<typeof SetViewAction>): void {
       seen.add(option.value);
     }
   }
-  for (const [name, decl] of Object.entries(args.actions ?? {})) {
+  for (const [name, decl] of Object.entries(def.actions)) {
     if (!VIEW_ACTION_NAME_RE.test(name)) {
       throw new ToolUserError(
         `Action '${name}' must start with a letter and contain only letters, digits, underscores or dashes (1-64 characters)`,
@@ -199,15 +198,12 @@ async function handleSet(
   ctx: ToolContext
 ): Promise<ManageViewsResult> {
   requireWriter(ctx);
-  validateViewMetadata(args);
-
-  // Normalize BEFORE hashing: the comparison must see exactly what the row
-  // would store, or equivalent declarations compare differently.
-  const name = args.name?.trim() ? args.name : args.key;
-  const description = args.description ?? '';
-  const attach = (args.attach ?? []) as SetViewInput['attach'];
-  const params = (args.params ?? {}) as SetViewInput['params'];
-  const actions = (args.actions ?? {}) as SetViewInput['actions'];
+  validateViewSource(args);
+  // The module declares the view; defaults are applied by the same reader the
+  // CLI hashes with, so both compare exactly what the row would store.
+  const def = await readViewModule(args.source_code);
+  validateViewDefinition(def);
+  const { key, name, description, attach, params, actions } = def;
   await assertActionKindsRegistered(ctx.organizationId, actions, attach);
   // Resolve the executable artifact BEFORE the identity: a supplied bundle is
   // validated (non-empty, under the cap) and source-only input is compiled,
@@ -245,13 +241,13 @@ async function handleSet(
   // Same source AND same metadata AND same executable bundle: no write.
   // A legacy row (source/metadata-only hash) never matches, so it refreshes
   // exactly once on the next set and is a no-op after that.
-  const current = await getView(ctx.organizationId, args.key);
+  const current = await getView(ctx.organizationId, key);
   if (current && current.content_hash === hash) {
     return { action: 'set', view: projectView(current), written: false };
   }
 
   const { view, written } = await setView(ctx.organizationId, {
-    key: args.key,
+    key,
     name,
     description,
     source_code: args.source_code,
@@ -270,7 +266,7 @@ async function handleSet(
   // phase 1, and `last_writer` (apply_id | user) carries the provenance.
   // A no-op set changes nothing, so it invalidates nothing.
   if (written) {
-    emit(ctx.organizationId, { keys: [`view:${args.key}`] });
+    emit(ctx.organizationId, { keys: [`view:${key}`] });
   }
 
   return { action: 'set', view: projectView(view), written };

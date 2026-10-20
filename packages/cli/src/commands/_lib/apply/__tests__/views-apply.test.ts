@@ -107,7 +107,6 @@ describe("view desired state", () => {
     const view = state.views[0];
     expect(view?.key).toBe("pipeline");
     expect(view?.sourceFile).toBe("views/deal/pipeline.tsx");
-    expect(view?.attach).toEqual([{ collection: "deal" }]);
     expect(view?.compiledCode.length).toBeGreaterThan(10_000);
     // The diff key is what the server will compute: same function, same
     // inputs (name defaults to key, description to empty, plus the digest of

@@ -142,6 +142,40 @@ export const ViewActionDeclSchema = Type.Object({
 });
 export type ViewActionDecl = Static<typeof ViewActionDeclSchema>;
 
+// Everything a view declares about itself, read from its module's
+// `export const view = defineView({...})`. The module is the only place these
+// live: `set` takes the source and the server reads this out of it.
+export const ViewDefinitionSchema = Type.Object(
+  {
+    key: ViewKeySchema,
+    name: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: 120,
+        description: "Display name; defaults to the key.",
+      })
+    ),
+    description: Type.Optional(
+      Type.String({ maxLength: 500, description: "What the view shows." })
+    ),
+    attach: Type.Array(ViewAttachmentSchema, {
+      description: "Where the view appears.",
+    }),
+    params: Type.Optional(
+      Type.Record(Type.String(), ViewParamDeclSchema, {
+        description: "Declared URL params.",
+      })
+    ),
+    actions: Type.Optional(
+      Type.Record(Type.String(), ViewActionDeclSchema, {
+        description: "Declared actions and the event kind each emits.",
+      })
+    ),
+  },
+  { additionalProperties: false }
+);
+export type ViewDefinitionDecl = Static<typeof ViewDefinitionSchema>;
+
 // Public projection of a stored view: metadata only, never the bundle. The
 // bundle travels over the view resource / shell route; the source over get.
 export const ViewRowSchema = Type.Object({
@@ -174,22 +208,14 @@ export type ViewRow = Static<typeof ViewRowSchema>;
 
 export const SetViewAction = Type.Object({
   action: Type.Literal("set", {
-    description: "Store a view: compile source_code and upsert by key.",
+    description:
+      "Store a view: read its key, name, description, attach, params and actions from the module's `export const view = defineView({...})`, compile it, and upsert by that key.",
   }),
-  key: ViewKeySchema,
-  name: Type.Optional(
-    Type.String({
-      maxLength: 120,
-      description: "[set] Display name; defaults to key.",
-    })
-  ),
-  description: Type.Optional(
-    Type.String({ maxLength: 500, description: "[set] What the view shows." })
-  ),
   source_code: Type.String({
     minLength: 1,
     maxLength: 1_000_000,
-    description: "[set] The view module source (TSX). Compiled server-side.",
+    description:
+      "[set] The view module source (TSX). Its `defineView({...})` argument must be a literal; it is the only place the view's key, name, description, attach, params and actions are declared.",
   }),
   compiled_code: Type.Optional(
     Type.String({
@@ -200,22 +226,6 @@ export const SetViewAction = Type.Object({
   ),
   source_files: Type.Optional(SourceFilesSchema),
   dependencies: Type.Optional(SourceDependenciesSchema),
-  attach: Type.Optional(
-    Type.Array(ViewAttachmentSchema, {
-      description:
-        "[set] Where the view appears; extracted from the module by the caller.",
-    })
-  ),
-  params: Type.Optional(
-    Type.Record(Type.String(), ViewParamDeclSchema, {
-      description: "[set] Declared URL params.",
-    })
-  ),
-  actions: Type.Optional(
-    Type.Record(Type.String(), ViewActionDeclSchema, {
-      description: "[set] Declared actions and the event kind each emits.",
-    })
-  ),
   last_writer: Type.Optional(
     Type.String({
       maxLength: 200,

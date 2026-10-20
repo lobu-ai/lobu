@@ -135,6 +135,7 @@
         "@opentelemetry/sdk-trace-node": "^2.11.0",
         "@opentelemetry/semantic-conventions": "^1.28.0",
         "@sinclair/typebox": "^0.34.41",
+        "acorn": "^8.16.0",
         "ajv": "^8.17.1",
         "ajv-formats": "^3.0.1",
         "winston": "^3.17.0",
