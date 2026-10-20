@@ -57,29 +57,6 @@ async function tick(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
 }
 
-async function handshake(scope: Record<string, unknown>): Promise<void> {
-  const init = parent.posted.find((m) => m.method === "ui/initialize") as
-    | { id: number }
-    | undefined;
-  expect(init).toBeDefined();
-  await act(async () => {
-    hostSend({
-      jsonrpc: "2.0",
-      id: init?.id,
-      result: { hostContext: { theme: "light" } },
-    });
-    await tick();
-  });
-  await act(async () => {
-    hostSend({
-      jsonrpc: "2.0",
-      method: "ui/notifications/tool-input",
-      params: { arguments: { scope, params: {} } },
-    });
-    await tick();
-  });
-}
-
 beforeEach(() => {
   dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "https://views.test/",

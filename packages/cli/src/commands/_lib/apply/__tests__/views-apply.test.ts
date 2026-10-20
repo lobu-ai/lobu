@@ -352,26 +352,21 @@ describe("view client", () => {
     return { client, calls };
   }
 
-  test("setView posts action:set with source + bundle + metadata", async () => {
+  test("setView posts action:set with the module source and bundle", async () => {
     const { client, calls } = stubClient(() => ({
       written: true,
       view: { content_hash: "aaaaaaaaaaaaaaaa" },
     }));
     const result = await client.setView({
-      key: "pipeline",
-      source_code: "source",
+      source_code: VIEW_SOURCE,
       compiled_code: "bundle",
-      attach: [{ collection: "deal" }],
-      params: {},
-      actions: {},
     });
     expect(result).toEqual({ written: true, content_hash: "aaaaaaaaaaaaaaaa" });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.path).toContain("/api/acme/manage_views");
-    expect(calls[0]?.body).toMatchObject({
+    expect(calls[0]?.body).toEqual({
       action: "set",
-      key: "pipeline",
-      source_code: "source",
+      source_code: VIEW_SOURCE,
       compiled_code: "bundle",
     });
   });

@@ -59,29 +59,6 @@ async function tick(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
 }
 
-async function handshake(scope: Record<string, unknown>): Promise<void> {
-  const init = parent.posted.find((m) => m.method === "ui/initialize") as
-    | { id: number }
-    | undefined;
-  expect(init).toBeDefined();
-  await act(async () => {
-    hostSend({
-      jsonrpc: "2.0",
-      id: init?.id,
-      result: { hostContext: { theme: "light" } },
-    });
-    await tick();
-  });
-  await act(async () => {
-    hostSend({
-      jsonrpc: "2.0",
-      method: "ui/notifications/tool-input",
-      params: { arguments: { scope, params: {} } },
-    });
-    await tick();
-  });
-}
-
 beforeEach(() => {
   dom = new JSDOM(
     '<!doctype html><html><head><meta name="lobu-workspace" content="https://app.example/acme/"></head><body></body></html>',
@@ -149,6 +126,28 @@ function openRequests(): Array<{ id: number; params: { url: string } }> {
 }
 
 describe("links", () => {
+  test("a middle click opens through the host instead of navigating the sandbox", async () => {
+    await connect();
+    const click = new dom.window.MouseEvent("auxclick", {
+      button: 1,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      container.querySelector("a")?.dispatchEvent(click);
+      await tick();
+    });
+    expect(click.defaultPrevented).toBe(true);
+    expect(openRequests().map((r) => r.params.url)).toEqual([
+      "https://app.example/acme/flat/moda-3",
+    ]);
+    const [request] = openRequests();
+    await act(async () => {
+      hostSend({ jsonrpc: "2.0", id: request?.id, result: {} });
+      await tick();
+    });
+  });
+
   test("a Link click asks the host to open its workspace URL and stays in the frame", async () => {
     await connect();
     const anchor = container.querySelector("a");
@@ -167,6 +166,11 @@ describe("links", () => {
     expect(openRequests().map((r) => r.params.url)).toEqual([
       "https://app.example/acme/flat/moda-3",
     ]);
+    const [request] = openRequests();
+    await act(async () => {
+      hostSend({ jsonrpc: "2.0", id: request?.id, result: {} });
+      await tick();
+    });
   });
 
   test("openLink rejects with the host's reason when it declines", async () => {

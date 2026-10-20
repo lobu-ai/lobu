@@ -21,7 +21,7 @@
  * through `lobu apply`, which bundles the project's own `node_modules`.
  */
 
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, MouseEvent, ReactNode } from "react";
 import { useId } from "react";
 import { resolveViewHref, useHost } from "./api.js";
 
@@ -821,14 +821,18 @@ export function Link({
   children: ReactNode;
 }) {
   const { openLink } = useHost();
+  const open = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    openLink(href).catch((error) =>
+      console.error("[lobu-views] link not opened", error)
+    );
+  };
   return (
     <a
       href={resolveViewHref(href)}
-      onClick={(event) => {
-        event.preventDefault();
-        openLink(href).catch((error) =>
-          console.error("[lobu-views] link not opened", error)
-        );
+      onClick={open}
+      onAuxClick={(event) => {
+        if (event.button === 1) open(event);
       }}
       style={{ color: "var(--accent, #2563eb)", textDecoration: "none" }}
     >

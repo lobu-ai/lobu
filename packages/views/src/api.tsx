@@ -83,7 +83,7 @@ export type Params = Record<string, ParamValue>;
  * ```tsx
  * export const view = defineView({
  *   key: "deal-won",
- *   attach: [{ event_kind: "deal.won", type: "deal" }],
+ *   attach: [{ event: "deal.won", type: "deal" }],
  * });
  *
  * export default function DealWon() {
@@ -152,6 +152,9 @@ export interface ViewDefinition {
   /** View key: the single namespace of keys (no `custom:` prefix). Required —
    *  it is the identity `invoke_view_action` and the shell route key on. */
   key: string;
+  /** Display name; defaults to the key when the view is saved. */
+  name?: string;
+  description?: string;
   /** Where the view appears. The attach line lives in the module; there are
    *  no attach/detach verbs. */
   attach: Attachment[];

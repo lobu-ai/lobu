@@ -47,7 +47,7 @@ describe("manage_views union contract", () => {
 	});
 
 	it("rejects a field another action takes instead of ignoring it", () => {
-		// `key` belongs to set/get/remove but not to list: passing it there is
+		// `key` belongs to get/remove but not to list: passing it there is
 		// an error, not a silent no-op.
 		const list = messageOf(() => validate({ action: "list", key: "pipeline" }));
 		expect(list).toMatch(/unknown argument\(s\): key/);

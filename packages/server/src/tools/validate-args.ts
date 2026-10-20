@@ -198,7 +198,6 @@ function allowedLiterals(schema: unknown): string[] | null {
   return null;
 }
 
-/** Resolve the subschema at a TypeBox error `path` (e.g. `/list_scope`, `/kinds/0`). */
 /** An object union names no member in TypeBox's "Expected union value"; its
  *  own description (the accepted shapes) is the useful message. */
 function unionDescription(schema: unknown): string | null {
@@ -209,6 +208,7 @@ function unionDescription(schema: unknown): string | null {
     : null;
 }
 
+/** Resolve the subschema at a TypeBox error `path` (e.g. `/list_scope`, `/kinds/0`). */
 function subschemaAtPath(schema: TSchema, path: string): unknown {
   const segments = path.split('/').filter(Boolean);
   let current: unknown = schema;

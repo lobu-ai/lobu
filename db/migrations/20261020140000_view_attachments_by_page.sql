@@ -10,7 +10,7 @@
 --     (a pin whose record no longer exists is dropped: it rendered nowhere)
 --   { workspace: true, placement? }      -> { workspace: true }
 --   { event_kind, type? }       -> { event, type? }
--- Lock safety: `views` holds one row per authored view (9 on prod, 2026-10-20).
+-- Lock safety: `views` holds one row per authored view, not per render or event.
 UPDATE public.views v
 SET attach = COALESCE((
   SELECT jsonb_agg(m.entry ORDER BY a.ord, m.sub)

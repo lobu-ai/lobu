@@ -432,11 +432,6 @@ function inertResolveDir(): string {
 }
 
 /**
- * Compile a view module to a minified browser IIFE with the bundle inlined by
- * the shell. Pure text transform — the module is never imported or executed.
- * Throws ToolUserError(422) on diagnostics or when the bundle exceeds the cap.
- */
-/**
  * The view's own declaration, read from its module's `defineView({...})`
  * without running it: esbuild strips TypeScript and JSX, then the literal is
  * read off the syntax tree. The module is the only place a view declares its
@@ -458,6 +453,11 @@ export async function readViewModule(source: string): Promise<ViewDefinitionReco
   }
 }
 
+/**
+ * Compile a view module to a minified browser IIFE with the bundle inlined by
+ * the shell. Pure text transform — the module is never imported or executed.
+ * Throws ToolUserError(422) on diagnostics or when the bundle exceeds the cap.
+ */
 export async function compileView(
   source: string,
   opts?: { maxBytes?: number }
@@ -528,8 +528,6 @@ html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 var(--f
 *{box-sizing:border-box}
 `;
 
-/** One view's shell: the compiled bundle inlined, no relative asset URLs and
- * no `<base href>` (claude.ai hardcodes `base-uri 'self'`, so both 404 there). */
 /**
  * The workspace root a view's relative links resolve against
  * (`<web origin>/<org slug>/`). The shell carries it, so every host — the web
@@ -544,6 +542,8 @@ export async function viewWorkspaceUrl(
   return `${origin}/${encodeURIComponent(slug)}/`;
 }
 
+/** One view's shell: the compiled bundle inlined, no relative asset URLs and
+ * no `<base href>` (claude.ai hardcodes `base-uri 'self'`, so both 404 there). */
 export function renderViewShell(view: StoredView, workspaceUrl: string): string {
   const script = view.compiled_code.replaceAll('</script', '<\\/script');
   const workspace = workspaceUrl
