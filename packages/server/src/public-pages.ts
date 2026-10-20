@@ -1144,9 +1144,10 @@ export async function buildPublicPageModel(
     );
   } catch (error) {
     // A path the tools reject (unknown entity, invalid segment) is a real,
-    // cacheable 404. Anything else — a database timeout, a bug — says nothing
-    // about whether the page exists, so it must not be cached as one.
-    if (error instanceof ToolUserError && error.httpStatus < 500) {
+    // cacheable 404. Anything else — a database timeout, a rate limit, a bug —
+    // says nothing about whether the page exists, so it must not be cached as
+    // one.
+    if (error instanceof ToolUserError && error.httpStatus < 500 && !error.retryable) {
       return applyBootstrapStrip(
         buildNotFoundModel(organization, requestUrl, normalizedPath, localPath),
         subdomainOrg
