@@ -1,6 +1,7 @@
-import { createLogger } from "@lobu/core";
+import { createLogger, isRefreshSuspended } from "@lobu/core";
 import { type DbClient, getDb } from "../../db/client.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
+import { OAuthTokenError } from "../auth/oauth/base-client.js";
 import type { OAuthCredentials } from "../auth/oauth/credentials.js";
 import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
 import {
@@ -148,6 +149,7 @@ export class TokenRefreshJob {
       const oauthProfile = profiles.find(
         (profile) =>
           REFRESHABLE_AUTH_TYPES.has(profile.authType) &&
+          !isRefreshSuspended(profile) &&
           !!profile.metadata?.refreshToken
       );
 
@@ -211,6 +213,36 @@ export class TokenRefreshJob {
         return;
       }
 
+      // A reconnect lands as a NEW profile id for the same provider. If a
+      // sibling with a fresh expiry is present, the grant moved on: refreshing
+      // and writing back under the stale id would delete the reconnected
+      // profile via upsert's provider+model replace. Skip; the next tick
+      // scans the new profile by its own expiry.
+      // Same scope only: upsert's replace rule keys on provider+model, so a
+      // sibling for another model owns a different grant and must not block
+      // this refresh.
+      const successor = profiles.find(
+        (profile) =>
+          profile.id !== profileId &&
+          profile.provider === oauthProfile.provider &&
+          profile.model === oauthProfile.model &&
+          !isRefreshSuspended(profile) &&
+          (profile.metadata?.expiresAt ?? 0) > Date.now() + EXPIRY_BUFFER_MS
+      );
+      if (successor) {
+        logger.info(
+          `Skipping ${providerId} refresh for user ${userId} agent ${agentId}: profile ${successor.id} reconnected since`,
+          { staleProfileId: profileId }
+        );
+        return;
+      }
+
+      // Suspended by an earlier tick's definitive provider verdict (or a
+      // racing replica): stay quiet until the user reconnects.
+      if (isRefreshSuspended(oauthProfile)) {
+        return;
+      }
+
       const expiresAt = oauthProfile.metadata.expiresAt || 0;
       if (expiresAt > Date.now() + EXPIRY_BUFFER_MS) {
         logger.debug(
@@ -225,9 +257,34 @@ export class TokenRefreshJob {
         { expiresAt: new Date(expiresAt).toISOString() }
       );
 
-      const newCredentials = await refresher.refreshToken(
-        oauthProfile.metadata.refreshToken
-      );
+      let newCredentials: OAuthCredentials;
+      try {
+        newCredentials = await refresher.refreshToken(
+          oauthProfile.metadata.refreshToken
+        );
+      } catch (error) {
+        // A definitive dead grant suspends the profile: log once, never
+        // retry. Other OAuth codes, transport failures, and unstructured
+        // responses stay retryable through the doRefresh catch.
+        if (error instanceof OAuthTokenError && error.isGrantDead()) {
+          const outcome = await this.authProfilesManager
+            .getUserAuthProfileStore()
+            .suspendRefresh(
+              userId,
+              agentId,
+              profileId,
+              { code: error.code ?? "invalid_grant", at: Date.now() },
+              tx
+            );
+          if (outcome === "suspended") {
+            logger.info(
+              `Suspended ${providerId} refresh for user ${userId} agent ${agentId}: grant is dead (invalid_grant); reconnect to resume`
+            );
+          }
+          return;
+        }
+        throw error;
+      }
 
       await this.authProfilesManager.upsertProfile({
         agentId,
