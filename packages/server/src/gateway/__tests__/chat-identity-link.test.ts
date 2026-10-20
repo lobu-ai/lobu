@@ -721,7 +721,7 @@ describe("Google Chat DM -> chat identity link -> member turn", () => {
     expect(await deliver(directMessage("dm-1", "hello?"))).toBe(200);
     await waitFor(() => expect(created).toHaveLength(1));
     const notice = String(created[0]?.requestBody?.text);
-    expect(notice).toContain("Ask an admin of this workspace to invite you");
+    expect(notice).toContain("If you're a member, connect your Lobu account: ");
     const match = notice.match(/https:\/\/gateway\.example\.test\/connect\/chat-identity\?token=([^\s]+)/);
     expect(match).not.toBeNull();
     const token = decodeURIComponent(match![1]!);

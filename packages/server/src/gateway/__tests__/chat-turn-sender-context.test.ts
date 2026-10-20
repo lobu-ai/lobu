@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { chatTurnContext, chatTurnSenderContext } from "../orchestration/chat-turn-actor.js";
+import {
+  chatAccessNotice,
+  chatTurnAccessInstructions,
+  chatTurnContext,
+  chatTurnSenderContext,
+  chatTurnUnlinkedSenderContext,
+} from "../orchestration/chat-turn-actor.js";
 
 describe("chat turn sender context", () => {
   test.each([
@@ -40,17 +46,49 @@ describe("chat turn sender context", () => {
     expect(chatTurnContext({}, undefined, 2_048)).toBeUndefined();
   });
 
-  test("tells a turn whose sender was just sent the access notice not to repeat it", () => {
-    const context = chatTurnContext({ accessNoticePosted: true }, undefined, 2_048);
-    expect(context).toContain("A separate message");
-    expect(context).toContain("do not repeat linking or join instructions");
-    expect(context).toContain("answer only what they asked");
-    // An Automation preamble keeps its place; the note follows it.
-    expect(chatTurnContext({ accessNoticePosted: true }, "preamble", 2_048)).toBe(`preamble\n\n${context}`);
+  test("names an unlinked sender by their unverified platform profile name", () => {
+    const name = `Synthetic "Visitor"\n${"x".repeat(100)}`;
+    expect(chatTurnUnlinkedSenderContext(name)).toBe(
+      `This message is from ${JSON.stringify(name.slice(0, 100))} (the name on their chat profile, not verified), who is not a linked member of this workspace.`,
+    );
+    const context = chatTurnContext({ unlinkedSenderName: "Synthetic Visitor" }, "preamble", 2_048);
+    expect(context).toBe(`preamble\n\n${chatTurnUnlinkedSenderContext("Synthetic Visitor")}`);
   });
 
-  test("says nothing extra when no notice was posted this turn", () => {
-    expect(chatTurnContext({ accessNoticePosted: false }, undefined, 2_048)).toBeUndefined();
-    expect(chatTurnContext({ accessNoticePosted: false }, "preamble", 2_048)).toBe("preamble");
+  test("a linked sender wins over an unlinked name, and a blank name adds nothing", () => {
+    const sender = { name: "Synthetic Sender", role: "member" };
+    expect(chatTurnContext({ sender, unlinkedSenderName: "Other" }, undefined, 2_048)).toBe(chatTurnSenderContext(sender));
+    expect(chatTurnContext({ unlinkedSenderName: "  " }, undefined, 2_048)).toBeUndefined();
+  });
+});
+
+describe("unlinked sender access", () => {
+  test.each(["public_visitor", "reply_only"] as const)(
+    "the %s prompt leaves linking and joining to the platform notice",
+    (access) => {
+      const text = chatTurnAccessInstructions(access);
+      expect(text).toContain("do not give linking or joining instructions");
+      expect(text).not.toMatch(/tell them/i);
+    },
+  );
+
+  test("the notice carries one URL: the link when there is one, else the public page", () => {
+    const link = "https://lobu.test/connect/chat-identity?token=t";
+    const join = "https://lobu.test/acme";
+    expect(chatAccessNotice("public_visitor", join, link)).toBe(
+      `I can only use this workspace's public knowledge for you. Connect your Lobu account to do more: ${link}`,
+    );
+    expect(chatAccessNotice("public_visitor", join, null)).toBe(
+      `I can only use this workspace's public knowledge for you. Join the workspace to do more: ${join}`,
+    );
+    expect(chatAccessNotice("public_visitor", null, null)).toBe(
+      "I can only use this workspace's public knowledge for you.",
+    );
+    expect(chatAccessNotice("reply_only", null, link)).toBe(
+      `I can't use this workspace's tools for you yet. If you're a member, connect your Lobu account: ${link}`,
+    );
+    expect(chatAccessNotice("reply_only", null, null)).toBe(
+      "I can't use this workspace's tools for you yet. Ask an admin of this workspace to invite you.",
+    );
   });
 });

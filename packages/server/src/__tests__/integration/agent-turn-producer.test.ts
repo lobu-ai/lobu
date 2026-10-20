@@ -38,7 +38,7 @@ import { enqueueAgentTurn,
   cancelAgentTurn,
 } from '../../gateway/orchestration/agent-turn-producer';
 import { armTurnTimeout, failTurnIfPending } from '../../gateway/orchestration/turn-liveness';
-import { chatTurnAccessInstructions, chatTurnSender, chatTurnSenderContext } from '../../gateway/orchestration/chat-turn-actor';
+import { chatTurnAccessInstructions, chatTurnSender, chatTurnSenderContext, chatTurnUnlinkedSenderContext } from '../../gateway/orchestration/chat-turn-actor';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import { failClaimedWorkerRun } from '../../worker-api/poll';
@@ -1294,19 +1294,17 @@ describe('agent turn producer', () => {
   });
 
   it.each([
-    ['public', 'public_visitor', true],
-    ['public', 'public_visitor', false],
-    ['private', 'reply_only', true],
-    ['private', 'reply_only', false],
-  ] as const)('a %s workspace %s turn includes the notice context only when posted=%s', async (visibility, access, posted) => {
+    ['public', 'public_visitor'],
+    ['private', 'reply_only'],
+  ] as const)('a %s workspace %s turn names its unlinked sender per turn, never in the cached prompt', async (visibility, access) => {
     const org = await createTestOrganization({ visibility });
     await enqueueMessage({
       ...messageFor(org.id),
-      userId: 'U0NOTICED',
+      userId: 'U0UNLINKED',
       platform: 'slack',
       platformMetadata: {
         connectionId: 'conn-slack-1', teamId: 'T0OTHER', isDirect: true,
-        ...(posted ? { accessNoticePosted: true } : {}),
+        senderDisplayName: 'Synthetic Visitor',
       },
     }, {
       agentSettings: settingsStore,
@@ -1318,13 +1316,9 @@ describe('agent turn producer', () => {
     const [run] = await agentTurnRuns();
     const envelope = run.action_input as { turn: { system_prompt: string; ephemeral_context?: string }; credential: string };
     expect(verifyWorkerToken(envelope.credential)?.chatAccess).toBe(access);
-    if (posted) {
-      expect(envelope.turn.ephemeral_context).toContain('do not repeat linking or join instructions');
-      // Per-turn only: the cached prompt never carries it.
-      expect(envelope.turn.system_prompt).not.toContain('do not repeat linking');
-    } else {
-      expect(envelope.turn.ephemeral_context).toBeUndefined();
-    }
+    expect(envelope.turn.ephemeral_context).toBe(chatTurnUnlinkedSenderContext('Synthetic Visitor'));
+    expect(envelope.turn.system_prompt).not.toContain('Synthetic Visitor');
+    expect(envelope.turn.system_prompt).toContain('do not give linking or joining instructions');
   });
 
   it('signs a linked channel sender as org_shared with the member as attribution, and discovers tools', async () => {

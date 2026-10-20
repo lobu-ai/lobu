@@ -25,7 +25,6 @@
 import type { ChatTurnAccess } from "@lobu/core";
 import { getDb } from "../../db/client.js";
 import { resolveChatSenderMember } from "../../lobu/stores/chat-identity.js";
-import { CHAT_IDENTITY_LINK_TTL_SECONDS } from "../../lobu/stores/chat-identity-link.js";
 
 /** The server's refusal for a chat turn that may not use workspace tools. */
 export const CHAT_SENDER_NOT_LINKED =
@@ -89,21 +88,6 @@ export const CHAT_TURN_EVIDENCE_KEYS = {
 export interface ChatTurnEvidence {
   isDirectMessage: boolean;
   senderVouched: boolean;
-}
-
-/**
- * `platformMetadata` key the chat bridge stamps when it delivered the access
- * notice ({@link chatAccessNotice}) to this turn's sender, from the result of
- * the post itself. Not authority: it only keeps the turn's reply from
- * repeating the notice.
- */
-export const CHAT_ACCESS_NOTICE_POSTED_KEY = "accessNoticePosted";
-
-/** Whether the bridge posted the access notice for this turn; absent is "no". */
-export function chatAccessNoticePostedFrom(
-  platformMetadata: Record<string, unknown> | undefined,
-): boolean {
-  return platformMetadata?.[CHAT_ACCESS_NOTICE_POSTED_KEY] === true;
 }
 
 /** Read the bridge's evidence; anything absent or malformed is "no". */
@@ -226,6 +210,13 @@ export function isConfinedChatTurn(claims: Parameters<typeof chatTurnAccessOf>[0
   return access === "reply_only" || access === "public_visitor";
 }
 
+/**
+ * The platform posts the access notice (with the one link) itself, so a
+ * confined reply never adds its own linking or joining instructions on top.
+ */
+const LINKING_LEFT_TO_PLATFORM =
+  "The platform sends this person any account-linking instructions itself; do not give linking or joining instructions.";
+
 const CHAT_TURN_ACCESS_TEXT: Record<ChatTurnAccess, string[]> = {
   member: [
     "The person messaging you is a verified member of this workspace who linked this chat account, writing to you directly.",
@@ -239,12 +230,12 @@ const CHAT_TURN_ACCESS_TEXT: Record<ChatTurnAccess, string[]> = {
   public_visitor: [
     "The person messaging you is not linked to a member of this workspace.",
     "Your tools can read only this workspace's public knowledge; do not claim access to anything else.",
-    "If they need more, tell them they can join the workspace, or link this chat account if they are already a member.",
+    LINKING_LEFT_TO_PLATFORM,
   ],
   reply_only: [
     "The person messaging you is not linked to a member of this workspace, so this turn has no workspace tools: no memory, connections, or operations.",
     "Answer from the conversation alone, and do not claim to have looked anything up or changed anything in the workspace.",
-    "If they need workspace data or actions, tell them to ask an admin of this workspace to invite them, or to link this chat account if they are already a member.",
+    LINKING_LEFT_TO_PLATFORM,
   ],
 };
 
@@ -298,29 +289,31 @@ export function chatTurnSenderContext(sender: ChatTurnSender): string {
 }
 
 /**
- * The per-turn line for a sender who was just sent the access notice, so the
- * reply answers their message instead of repeating the notice. The access
- * section in the cached prompt still describes the tier.
+ * The per-turn line naming an unlinked sender by the display name their chat
+ * platform reported, so the reply can address them. Unverified profile data,
+ * quoted like a linked sender's name, never instructions.
  */
-const CHAT_ACCESS_NOTICE_POSTED_CONTEXT =
-  "A separate message explaining this person's workspace access was just sent to them; do not repeat linking or join instructions, answer only what they asked.";
+export function chatTurnUnlinkedSenderContext(name: string): string {
+  return `This message is from ${JSON.stringify(name.slice(0, 100))} (the name on their chat profile, not verified), who is not a linked member of this workspace.`;
+}
 
 /**
  * A turn's transient context: the caller's context (an Automation preamble the
  * planner admitted at full length) exactly as before, then the sender line
- * (a linked sender's name and role, or the access-notice note) when it still
- * fits under `cap`. The line is best-effort; the access section in the system
- * prompt carries the tier either way.
+ * (a linked sender's name and role, else an unlinked sender's profile name)
+ * when it still fits under `cap`. The line is best-effort; the access section
+ * in the system prompt carries the tier either way.
  */
 export function chatTurnContext(
-  turn: { sender?: ChatTurnSender; accessNoticePosted?: boolean },
+  turn: { sender?: ChatTurnSender; unlinkedSenderName?: string },
   context: string | undefined,
   cap: number,
 ): string | undefined {
   const rest = context?.trim() ? context.slice(0, cap) : "";
+  const unlinkedName = turn.unlinkedSenderName?.trim();
   const line = turn.sender
     ? chatTurnSenderContext(turn.sender)
-    : turn.accessNoticePosted ? CHAT_ACCESS_NOTICE_POSTED_CONTEXT : "";
+    : unlinkedName ? chatTurnUnlinkedSenderContext(unlinkedName) : "";
   const withSender = [rest, line].filter(Boolean).join("\n\n");
   return (withSender.length <= cap ? withSender : rest) || undefined;
 }
@@ -355,25 +348,25 @@ export async function chatTurnHomeWorkspaceSlug(organizationId: string): Promise
 
 /**
  * The notice the chat bridge posts to a sender whose turns cannot use the
- * workspace. DM links can be offered again after their expiry window; other
+ * workspace. It carries one URL at most: in a direct message, `linkUrl` is a
+ * single-use link (connect/chat-identity-routes.ts) whose page both links a
+ * member and lets a stranger join a public workspace; a group conversation
+ * never gets one, so a public workspace's notice falls back to its public
+ * page. DM links can be offered again after their expiry window; other
  * notices use {@link CHAT_ACCESS_NOTICE_WINDOW_SECONDS}.
- * A public organization's stranger also gets a link to its
- * public page, where the existing join flow lives. In a direct message only,
- * `linkUrl` is a single-use link a member signs in through to link this chat
- * account (connect/chat-identity-routes.ts); a group conversation never gets
- * one.
  */
 export function chatAccessNotice(
   access: "reply_only" | "public_visitor",
   joinUrl: string | null,
   linkUrl: string | null,
 ): string {
-  const link = linkUrl
-    ? ` Already a member? Link this chat account to your Lobu account (expires in ${CHAT_IDENTITY_LINK_TTL_SECONDS / 60} minutes): ${linkUrl}`
-    : "";
   if (access === "public_visitor") {
-    const join = joinUrl ? ` To do more, join the workspace: ${joinUrl}` : "";
-    return `I can answer here, but for you I can only read this workspace's public knowledge.${join}${link}`;
+    const lead = "I can only use this workspace's public knowledge for you.";
+    if (linkUrl) return `${lead} Connect your Lobu account to do more: ${linkUrl}`;
+    return joinUrl ? `${lead} Join the workspace to do more: ${joinUrl}` : lead;
   }
-  return `I can answer here, but I can't use this workspace's tools for you until you're a member. Ask an admin of this workspace to invite you.${link}`;
+  const lead = "I can't use this workspace's tools for you yet.";
+  return linkUrl
+    ? `${lead} If you're a member, connect your Lobu account: ${linkUrl}`
+    : `${lead} Ask an admin of this workspace to invite you.`;
 }

@@ -20,6 +20,7 @@ import { runtimeConnectionPredicate } from '../lobu/stores/connections-projectio
 import { getScopedConnectorDefinition } from '../catalog/connector-definitions';
 import { connectorDisplayName } from '../catalog/connector-group-display';
 import { renderLobuPage } from '../gateway/auth/oauth-templates';
+import { getChatInstanceManager } from '../lobu/gateway';
 import { escapeHtml } from '../utils/html';
 import logger from '../utils/logger';
 import { joinPublicOrganization } from '../workspace/join-public';
@@ -38,7 +39,7 @@ import { joinPublicOrganization } from '../workspace/join-public';
 const PATH = '/connect/chat-identity';
 
 type LinkStatus =
-  | { status: 'linked'; organization: OrganizationInfo; joined: boolean }
+  | { status: 'linked'; organization: OrganizationInfo; joined: boolean; claim: ChatIdentityLinkClaim }
   | { status: 'invalid' }
   | { status: 'not_member'; organization: OrganizationInfo }
   | { status: 'conflict'; organization: OrganizationInfo; joined: boolean };
@@ -288,7 +289,30 @@ async function redeemChatIdentityLink(token: string, user: SessionUser, join: bo
       { userId: user.id, organizationId: locked.organizationId, platform: locked.platform, outcome },
       'Linked a chat identity from a chat identity link'
     );
-    return { status: 'linked', organization: org, joined };
+    return { status: 'linked', organization: org, joined, claim: locked };
+  });
+}
+
+/**
+ * Tell the chat the link worked, in the conversation it was offered in, through
+ * the connection that delivered it. Best-effort and after the link committed:
+ * the link stands whether or not this lands, and a crash before it loses only
+ * the message. A claim minted without a target has nowhere to confirm.
+ */
+async function confirmLinkInChat(claim: ChatIdentityLinkClaim, org: OrganizationInfo): Promise<void> {
+  const target = claim.replyTarget;
+  if (!target) return;
+  const manager = getChatInstanceManager();
+  if (!manager) {
+    logger.warn({ platform: claim.platform }, 'Chat gateway unavailable; skipped the chat link confirmation');
+    return;
+  }
+  await manager.postToConversation(claim.connectionId, {
+    platform: claim.platform,
+    channelKey: `${claim.platform}:${target.channelId}`,
+    channelId: target.channelId,
+    threadId: target.threadId,
+    content: `You're connected. Messages you send me here now act as you in ${org.name}.`,
   });
 }
 
@@ -403,6 +427,14 @@ export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDep
     const result = await redeemChatIdentityLink(token, session.user, body.join === '1');
     switch (result.status) {
       case 'linked':
+        // Not awaited: a connector transport can take a while to send, and the
+        // page must not wait on the chat.
+        void confirmLinkInChat(result.claim, result.organization).catch((error) =>
+          logger.warn(
+            { platform: result.claim.platform, error: String(error) },
+            'Failed to post the chat link confirmation'
+          )
+        );
         return c.html(linkedPage(result.organization, result.joined));
       case 'not_member':
         return c.html(notMemberPage(result.organization, sessionAccount(session.user), token), 403);
