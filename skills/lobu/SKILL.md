@@ -150,6 +150,7 @@ const ticket = defineEntityType({
   properties: {
     subject: {
       type: "string",
+      title: "Subject",
       "x-table-label": "Subject",
       "x-table-column": true,
     },
@@ -163,6 +164,8 @@ export default defineConfig({
   entities: [ticket],
 });
 ```
+
+The entity schema also renders the record page form. Give every array `items` and every object `properties` (bare ones render as raw JSON), put the label in `title` and help text in `description`, mark derived fields `readOnly: true`, and declare every field an Automation writes.
 
 Seed data records still live as YAML under `./data`. Then seed or operate the memory workspace with:
 
