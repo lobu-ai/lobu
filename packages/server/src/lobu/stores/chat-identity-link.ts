@@ -6,9 +6,11 @@ import { chatUserIdentityFor } from "./chat-identity-sources.js";
  * One-click chat identity link claims.
  *
  * A chat sender who is not linked to a Lobu user is offered, in a direct
- * message only, a link to `/connect/chat-identity`. Holding that link is the
- * proof the chat account controls the DM it was posted into; the signed-in
- * browser session that redeems it is the proof of the Lobu account. The claim
+ * message only, a link to `/connect/chat-identity`. The signed-in browser
+ * session proves the Lobu account. Where the platform has a login that
+ * proves its accounts, the redeeming user's own sign-in must name the sender:
+ * the inbox's operator can also read the DM. Other platforms rely on possession
+ * of the link, trusted only within the organization that offered it. The claim
  * binds the exact sender (platform + canonical identity key from the
  * platform's own descriptor), the organization it was offered in, and the
  * connection that delivered it.

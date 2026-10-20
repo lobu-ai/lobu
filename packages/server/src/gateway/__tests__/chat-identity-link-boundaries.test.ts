@@ -104,6 +104,7 @@ test("the confirmation page preserves form Origin without leaking the token in R
     // The org's installed connector definition, for the platform's name.
     .mockResolvedValueOnce([]);
   spyOn(dbClient, "getDb").mockReturnValue(sql as unknown as dbClient.DbClient);
+  spyOn(subjectIdentities, "signInProvesChatIdentity").mockResolvedValue(true);
   const origin = "https://cloud.example.test";
   const routes = createChatIdentityRoutes({
     session: async () => ({ user: { id: "user-link-notice" } }),
@@ -205,6 +206,7 @@ test.each([
     committed = true;
     return result;
   });
+  spyOn(subjectIdentities, "signInProvesChatIdentity").mockResolvedValue(true);
   const adopt = spyOn(subjectIdentities, "adoptChatIdentityOntoMember").mockResolvedValue(outcome);
   const consume = spyOn(chatLinks, "deleteChatIdentityLink").mockResolvedValue(undefined);
   const origin = "https://cloud.example.test";

@@ -151,6 +151,21 @@ async function memberRoleOf(userId: string, organizationId: string): Promise<str
   return (row?.role as string | undefined) ?? null;
 }
 
+/** A second Google Chat sender, for users who must not hold `SENDER`'s Google account. */
+const OTHER_SENDER = "users/100000000000000000022";
+
+/**
+ * The user's own Google sign-in, which proves the Google Chat sender with that
+ * account id. A Google account belongs to one Lobu user, so this moves it.
+ */
+async function signedInWithGoogle(user: TestUser, sender = SENDER.name): Promise<void> {
+  await getDb()`
+    INSERT INTO account (id, "accountId", "providerId", "userId", "createdAt", "updatedAt")
+    VALUES (${`acct_${sender.slice("users/".length)}`}, ${sender.slice("users/".length)}, 'google', ${user.id}, now(), now())
+    ON CONFLICT ("providerId", "accountId") DO UPDATE SET "userId" = EXCLUDED."userId"
+  `;
+}
+
 function mint(organizationId = ORG_A, senderId = SENDER.name, platform = "gchat") {
   return mintChatIdentityLink({
     organizationId,
@@ -208,6 +223,7 @@ describe("chat identity link routes", () => {
     // redemption provisions it.
     member = await createTestUser({});
     await addUserToOrganization(member.id, ORG_A, "member");
+    await signedInWithGoogle(member);
   });
 
   test("a platform with no identity registry entry gets no link", async () => {
@@ -365,18 +381,29 @@ describe("chat identity link routes", () => {
   });
 
   test("links redeemed in two orgs by two users each stay inside their own org", async () => {
+    // WhatsApp has no login that proves its accounts, so a link is all either
+    // org can offer, and each stays inside its own org.
     const other = await createTestUser({});
     await addUserToOrganization(other.id, ORG_B, "member");
+    const senderJid = "15550002222@s.whatsapp.net";
+    const tokens: string[] = [];
     for (const [user, org] of [[member, ORG_A], [other, ORG_B]] as const) {
       await provisionMemberAndCoreIdentities(org, { userId: user.id, email: user.email, role: "member" });
+      const [row] = await getDb()`INSERT INTO connections (organization_id, connector_key, slug, status, visibility)
+        VALUES (${org}, 'whatsapp.web', 'whatsapp-web', 'active', 'private') RETURNING id`;
+      tokens.push((await mintChatIdentityLink({
+        organizationId: org,
+        connectionId: String(row.id),
+        platform: "whatsapp.web",
+        teamId: undefined,
+        senderId: senderJid,
+      }))!);
     }
-    const tokenA = (await mint(ORG_A))!;
-    const tokenB = (await mint(ORG_B))!;
-    const responses = await Promise.all([submit(member, tokenA), submit(other, tokenB)]);
+    const responses = await Promise.all([submit(member, tokens[0]), submit(other, tokens[1])]);
     expect(responses.map((res) => res.status)).toEqual([200, 200]);
-    expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name, ORG_A)).toBe(member.id);
-    expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name, ORG_B)).toBe(other.id);
-    expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name)).toBeNull();
+    expect(await resolveChatUserIdentity("whatsapp.web", undefined, senderJid, ORG_A)).toBe(member.id);
+    expect(await resolveChatUserIdentity("whatsapp.web", undefined, senderJid, ORG_B)).toBe(other.id);
+    expect(await resolveChatUserIdentity("whatsapp.web", undefined, senderJid)).toBeNull();
   });
 
   test("a link squatted in one org never blocks the provider-proven owner elsewhere", async () => {
@@ -428,7 +455,8 @@ describe("chat identity link routes", () => {
 
   test("a non-member is told to ask an admin and nothing is linked", async () => {
     const outsider = await createTestUser({});
-    const token = (await mint())!;
+    await signedInWithGoogle(outsider, OTHER_SENDER);
+    const token = (await mint(ORG_A, OTHER_SENDER))!;
     const page = await routesAs(outsider).request(pageUrl(token));
     expect(page.status).toBe(403);
     const html = await page.text();
@@ -444,13 +472,14 @@ describe("chat identity link routes", () => {
     expect(posted).toContain("Ask an admin of Acme Synthetic to invite you");
     expectSwitchAccountForm(posted, token);
     expect(await identityRows(ORG_A)).toHaveLength(0);
-    expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name)).toBeNull();
+    expect(await resolveChatUserIdentity("gchat", undefined, OTHER_SENDER)).toBeNull();
   });
 
   test("a non-member of a public workspace joins and links in one step, only when they ask to", async () => {
     await getDb()`UPDATE organization SET visibility = 'public' WHERE id = ${ORG_A}`;
     const outsider = await createTestUser({});
-    const token = (await mint())!;
+    await signedInWithGoogle(outsider, OTHER_SENDER);
+    const token = (await mint(ORG_A, OTHER_SENDER))!;
     const page = await routesAs(outsider).request(pageUrl(token));
     expect(page.status).toBe(200);
     const html = await page.text();
@@ -467,13 +496,14 @@ describe("chat identity link routes", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("You joined <strong>Acme Synthetic</strong>");
     expect(await memberRoleOf(outsider.id, ORG_A)).toBe("member");
-    expect(await resolveChatUserIdentity("gchat", undefined, SENDER.name, ORG_A)).toBe(outsider.id);
+    expect(await resolveChatUserIdentity("gchat", undefined, OTHER_SENDER, ORG_A)).toBe(outsider.id);
     expect(await claimCount()).toBe(0);
   });
 
   test("asking to join a private workspace joins nothing and links nothing", async () => {
     const outsider = await createTestUser({});
-    const token = (await mint())!;
+    await signedInWithGoogle(outsider, OTHER_SENDER);
+    const token = (await mint(ORG_A, OTHER_SENDER))!;
     const res = await submitJoin(outsider, token);
     expect(res.status).toBe(403);
     expect(await res.text()).toContain("Ask an admin of Acme Synthetic to invite you");
@@ -494,6 +524,7 @@ describe("chat identity link routes", () => {
     await getDb()`UPDATE organization SET visibility = 'public' WHERE id = ${ORG_A}`;
     await linkChatIdentityInGraph({ organizationId: ORG_A, userId: member.id, platform: "gchat", platformUserId: SENDER.name });
     const outsider = await createTestUser({});
+    await signedInWithGoogle(outsider);
     const token = (await mint())!;
     const res = await submitJoin(outsider, token);
     expect(res.status).toBe(409);
@@ -559,7 +590,8 @@ describe("chat identity link routes", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("referrer-policy")).toBe("strict-origin");
     const location = res.headers.get("location") ?? "";
-    expect(location.startsWith("/auth/login?callbackUrl=")).toBe(true);
+    // Back through the chat platform's own login, which proves the account.
+    expect(location.startsWith("/auth/login?provider=google&callbackUrl=")).toBe(true);
     expect(decodeURIComponent(location)).toContain(pageUrl(token));
     expect(res.headers.getSetCookie()).toEqual([SIGNED_OUT_COOKIE]);
     expect(signOuts).toHaveLength(1);
@@ -596,20 +628,98 @@ describe("chat identity link routes", () => {
     expect(res.status).toBe(303);
     const callback = new URL("/connect/chat-identity", origin);
     callback.searchParams.set("token", token);
-    expect(res.headers.get("location")).toBe(`/auth/login?callbackUrl=${encodeURIComponent(callback.toString())}`);
+    expect(res.headers.get("location")).toBe(`/auth/login?provider=google&callbackUrl=${encodeURIComponent(callback.toString())}`);
     const cleared = res.headers.getSetCookie().find((c) => c.startsWith(`${session.cookieHeader.split("=", 1)[0]}=`));
     expect(cleared).toMatch(/Max-Age=0/i);
     expect(await getDb()`SELECT 1 FROM "session" WHERE id = ${session.sessionId}`).toHaveLength(0);
     expect(await claimCount()).toBe(1);
   });
 
+  test("someone who reads the link but never signed in with the sender's account cannot redeem it", async () => {
+    // A device connector's operator sees every DM the bot sends, links included.
+    const reader = await createTestUser({});
+    await addUserToOrganization(reader.id, ORG_A, "owner");
+    const token = (await mint())!;
+    const page = await routesAs(reader).request(pageUrl(token));
+    expect(page.status).toBe(403);
+    const html = await page.text();
+    expect(html).toContain("Show this Google Chat account is yours");
+    expect(html).toContain(SENDER.displayName);
+    expect(html).toContain(reader.email);
+    expect(html).not.toContain("Link account");
+    expectLobuPage(html);
+    expectSwitchAccountForm(html, token);
+    for (const res of [await submit(reader, token), await submitJoin(reader, token)]) {
+      expect(res.status).toBe(403);
+      expect(await res.text()).toContain("nothing was linked");
+    }
+    expect(await identityRows(ORG_A)).toHaveLength(0);
+    expect(await claimCount()).toBe(1);
+
+    // The sender, signed in with that account, still links it.
+    expect((await submit(member, token)).status).toBe(200);
+    expect(await resolveChatSenderMember("gchat", undefined, SENDER.name, ORG_A)).toEqual({
+      userId: member.id,
+      role: "member",
+    });
+  });
+
+  test("an X link needs the X sign-in that names the sender", async () => {
+    const xSender = "1234567890123";
+    const token = (await mintChatIdentityLink({
+      organizationId: ORG_A,
+      connectionId: "x-chat-link",
+      platform: "x",
+      teamId: undefined,
+      senderId: xSender,
+      senderDisplayName: "X Sender",
+    }))!;
+    expect((await routesAs(member).request(pageUrl(token))).status).toBe(403);
+    await getDb()`
+      INSERT INTO account (id, "accountId", "providerId", "userId", "createdAt", "updatedAt")
+      VALUES ('acct_x_other', '999', 'twitter', ${member.id}, now(), now())
+    `;
+    expect((await routesAs(member).request(pageUrl(token))).status).toBe(403);
+    await getDb()`
+      INSERT INTO account (id, "accountId", "providerId", "userId", "createdAt", "updatedAt")
+      VALUES ('acct_x_sender', ${xSender}, 'twitter', ${member.id}, now(), now())
+    `;
+    const page = await routesAs(member).request(pageUrl(token));
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("Link account");
+  });
+
+  test("a Slack link needs a Slack sign-in in the sender's own workspace", async () => {
+    const token = (await mintChatIdentityLink({
+      organizationId: ORG_A,
+      connectionId: "slack-chat-link",
+      platform: "slack",
+      teamId: "TLINKTEAM",
+      senderId: "ULINKUSER",
+      senderDisplayName: "Slack Sender",
+    }))!;
+    const idToken = (teamId: string) =>
+      `e30.${Buffer.from(JSON.stringify({ "https://slack.com/team_id": teamId, sub: "ULINKUSER" })).toString("base64url")}.sig`;
+    // The same bare user id in another workspace is someone else.
+    await getDb()`
+      INSERT INTO account (id, "accountId", "providerId", "userId", "accessToken", "idToken", "createdAt", "updatedAt")
+      VALUES ('acct_slack_other', 'ULINKUSER', 'slack', ${member.id}, 'synthetic', ${idToken("TOTHERTEAM")}, now(), now())
+    `;
+    expect((await routesAs(member).request(pageUrl(token))).status).toBe(403);
+    await getDb()`UPDATE account SET "idToken" = ${idToken("TLINKTEAM")} WHERE id = 'acct_slack_other'`;
+    expect((await routesAs(member).request(pageUrl(token))).status).toBe(200);
+  });
+
   test("a link offered in org A never links into org B", async () => {
     const bOnly = await createTestUser({});
     await addUserToOrganization(bOnly.id, ORG_B, "member");
-    const token = (await mint(ORG_A))!;
-    expect((await submit(bOnly, token)).status).toBe(403);
+    await signedInWithGoogle(bOnly, OTHER_SENDER);
+    const bOnlyRes = await submit(bOnly, (await mint(ORG_A, OTHER_SENDER))!);
+    expect(bOnlyRes.status).toBe(403);
+    expect(await bOnlyRes.text()).toContain("Ask an admin of Acme Synthetic to invite you");
     expect(await identityRows(ORG_A)).toHaveLength(0);
     expect(await identityRows(ORG_B)).toHaveLength(0);
+    const token = (await mint(ORG_A))!;
 
     // A member of both orgs links only where the link was offered.
     await addUserToOrganization(member.id, ORG_B, "member");
@@ -692,6 +802,7 @@ describe("Google Chat DM -> chat identity link -> member turn", () => {
     await seedOrgs();
     member = await createTestUser({});
     await addUserToOrganization(member.id, ORG_A, "member");
+    await signedInWithGoogle(member);
 
     state = await createConnectedGatewayStateAdapter();
     const adapter: any = await gchatPlatform.createAdapter({

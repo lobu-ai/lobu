@@ -26,6 +26,7 @@ import {
 	resolveMemberSchemaFields,
 } from "../utils/member-entity";
 import {
+	CHAT_LOGIN_IDENTITIES,
 	type ChatLoginIdentityDeps,
 	chatLoginIdentityFor,
 	type LoginAccountForChatIdentity,
@@ -360,6 +361,42 @@ const defaultPersistDeps: PersistLoginChatIdentityDeps = {
 	getEnabledLoginProviderConfigs,
 	fetchUserInfoWithRaw,
 };
+
+/**
+ * Whether one of the user's own provider sign-ins proves `identifier` in
+ * `namespace`: the same extraction `persistLoginChatIdentity` writes from,
+ * read back from the user's stored Better Auth accounts.
+ */
+export async function signInProvesChatIdentity(
+	sql: Sql,
+	userId: string,
+	namespace: string,
+	identifier: string,
+	deps: ChatLoginIdentityDeps = defaultPersistDeps,
+): Promise<boolean> {
+	for (const entry of CHAT_LOGIN_IDENTITIES) {
+		if (entry.identity.namespace !== namespace) continue;
+		const providerId = entry.identity.providerId;
+		const accounts = await sql<{
+			accountId: string | null;
+			accessToken: string | null;
+			idToken: string | null;
+		}>`
+      SELECT "accountId", "accessToken", "idToken" FROM account
+      WHERE "userId" = ${userId} AND "providerId" = ${providerId}
+    `;
+		for (const account of accounts) {
+			const principal = await entry
+				.extract({ providerId, userId, ...account }, deps)
+				.catch(() => null);
+			const key = principal
+				? entry.identity.buildUserKey(principal.teamId, principal.platformUserId)
+				: null;
+			if (key === identifier) return true;
+		}
+	}
+	return false;
+}
 
 /**
  * On sign-in with a provider that proves a chat identity, write that identity
