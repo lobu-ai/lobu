@@ -322,6 +322,7 @@ export async function validateSaveContentSemanticType(
 
   // An event can be linked to several entity types. Accept a custom kind when
   // any linked type declares it; array order must not change authorability.
+  let declaredMismatch: KindValidationResult | null = null;
   if (entityIds && entityIds.length > 0) {
     for (const entityId of entityIds) {
       const entityTypeKinds = await getEntityTypeEventKinds(orgId, entityId);
@@ -329,10 +330,17 @@ export async function validateSaveContentSemanticType(
       // Try entity type kinds first (more specific)
       const entityResult = validateKindAgainstDefinitions(semanticType, metadata, entityTypeKinds);
       if (entityResult.valid) return entityResult;
+      if (!declaredMismatch && entityTypeKinds[semanticType]) declaredMismatch = entityResult;
     }
   }
 
-  return validateKindAgainstDefinitions(semanticType, metadata, memberKinds);
+  const memberResult = validateKindAgainstDefinitions(semanticType, metadata, memberKinds);
+  // If $member does not declare the kind, preserve a linked type's metadata
+  // error instead of the fallback's unknown-kind error.
+  if (!memberResult.valid && declaredMismatch && !memberKinds?.[semanticType]) {
+    return declaredMismatch;
+  }
+  return memberResult;
 }
 
 /**
