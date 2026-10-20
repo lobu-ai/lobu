@@ -36,6 +36,7 @@
  */
 
 import { type DbClient, getDb } from '../db/client';
+import { ToolUserError } from './errors';
 import logger from './logger';
 
 interface RateLimitConfig {
@@ -410,6 +411,14 @@ export const RateLimitPresets = {
     errorMessage: 'API rate limit exceeded. Maximum 60 requests per minute.',
   } as RateLimitConfig,
 
+  /** Public-workspace reads by a signed-in non-member: 300/minute per user */
+  PUBLIC_READ_PER_USER_MINUTE: {
+    limit: 300,
+    windowSeconds: 60,
+    errorMessage:
+      'Public read limit reached: 300 requests per minute. Join the workspace to lift it.',
+  } as RateLimitConfig,
+
   /** Discovery: 5/hour per IP (expensive operation) */
   DISCOVERY_PER_IP_HOUR: {
     limit: 5,
@@ -464,6 +473,26 @@ export function getRateLimiter(): RateLimiter {
     _rateLimiter = new RateLimiter();
   }
   return _rateLimiter;
+}
+
+/**
+ * Meter one read of a public workspace by a signed-in user outside it, per
+ * account. Members are never metered, and neither are callers without a user
+ * (anonymous visitors and internal calls).
+ */
+export function enforcePublicReadLimit(userId: string | null): void {
+  if (!userId) return;
+  const result = getRateLimiter().checkLimit(
+    `rate:public-read:user:${userId}`,
+    RateLimitPresets.PUBLIC_READ_PER_USER_MINUTE
+  );
+  if (!result.allowed) {
+    throw new ToolUserError(
+      `${result.errorMessage} Try again in ${Math.max(1, result.resetInSeconds)}s.`,
+      429,
+      'RATE_LIMITED'
+    );
+  }
 }
 
 /** Destroy and reset the singleton. Test hook. */
