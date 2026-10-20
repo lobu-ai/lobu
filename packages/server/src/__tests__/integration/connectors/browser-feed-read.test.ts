@@ -34,6 +34,7 @@ import { deviceManifestHash, type DeviceConnectorManifest } from '../../../worke
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { addUserToOrganization, createTestAgent, createTestOrganization, createTestUser } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
+import { serveWorkerJobs } from '../../setup/worker-poll';
 import * as sourceListeners from '../../../runs/source-feed-listener';
 import * as sourceNotifications from '../../../runs/feed-notifications';
 import * as cloudCredentials from '../../../connect/cloud-credential';
@@ -92,6 +93,8 @@ const CHROME: DeviceConnectorManifest = {
 };
 const CHROME_HASH = deviceManifestHash(CHROME);
 const ROWS = [{ id: 'source-item', text: 'private browser source result' }];
+/** Read budget, and the deadline for the worker loop that serves the read. */
+const READ_TIMEOUT_MS = 15_000;
 let orgId: string;
 let userId: string;
 let deviceId: string;
@@ -103,36 +106,36 @@ function context(): ToolContext {
   return { organizationId: orgId, userId, memberRole: 'owner', scopes: ['mcp:read', 'mcp:write', 'mcp:admin'] } as ToolContext;
 }
 
-async function read(ctx = context(), query = 'private query', timeoutMs = 5000): Promise<Record<string, any>> {
-  return manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query, limit: 2 }], timeout_ms: timeoutMs }, {} as Env, ctx) as Promise<Record<string, any>>;
+async function read(ctx = context(), query = 'private query'): Promise<Record<string, any>> {
+  return manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query, limit: 2 }], timeout_ms: READ_TIMEOUT_MS }, {} as Env, ctx) as Promise<Record<string, any>>;
+}
+
+function pollBrowser(appVersion = '9.9.0'): Promise<Record<string, any> | null> {
+  return post('/api/workers/poll', { body: {
+    worker_id: WORKER_ID, platform: 'chrome-extension', app_version: appVersion,
+    capabilities: { 'browser.debugger': true, 'browser.tabs': true },
+  } }).then((response) => {
+    expect(response.status).toBe(200);
+    return response.json();
+  });
 }
 
 /** The real worker poll/complete routes carry observations across DB connections. */
 async function answerBrowser(reading: Promise<Record<string, any>>, answer = true, identity: string | null = 'fixture-account'): Promise<number | undefined> {
-  let finished = false;
-  reading.finally(() => { finished = true; }).catch(() => {});
-  for (let attempt = 0; attempt < 70 && !finished; attempt += 1) {
-    const response = await post('/api/workers/poll', { body: {
-      worker_id: WORKER_ID, platform: 'chrome-extension', app_version: '9.9.0',
-      capabilities: { 'browser.debugger': true, 'browser.tabs': true },
+  return serveWorkerJobs<number>({ until: reading, deadlineMs: READ_TIMEOUT_MS, poll: () => pollBrowser(), handle: async (job) => {
+    if (!['evaluate', 'navigate', 'focus_tab'].includes(job.operation_key)) return undefined;
+    const probe = job.operation_key !== 'evaluate' || job.action_input.expression === 'self_probe';
+    if (job.operation_key === 'focus_tab') expect(job.action_input).toMatchObject({ tab_id: 77, draw_attention: true });
+    if (!probe) expect(job.action_input).toMatchObject({ expression: 'private query' });
+    if (!answer) return { done: job.run_id };
+    const completion = await post('/api/workers/complete-action', { body: {
+      run_id: job.run_id, worker_id: WORKER_ID, status: 'success', action_output: job.operation_key === 'navigate' ? {tab_id: 77} : job.operation_key === 'focus_tab' ? {focused: true, tab_id: 77} : probe ? {value: identity ? {accountId: identity} : null} : {
+        rows: ROWS, attachments: [{ filename: 'private.txt', data: Buffer.from('private bytes').toString('base64'), mime_type: 'text/plain' }],
+      },
     } });
-    expect(response.status).toBe(200);
-    const job = await response.json();
-    if (job?.run_id && ['evaluate', 'navigate', 'focus_tab'].includes(job.operation_key)) {
-      const probe = job.operation_key !== 'evaluate' || job.action_input.expression === 'self_probe';
-      if (job.operation_key === 'focus_tab') expect(job.action_input).toMatchObject({ tab_id: 77, draw_attention: true });
-      if (!probe) expect(job.action_input).toMatchObject({ expression: 'private query' });
-      if (!answer) return job.run_id;
-      const completion = await post('/api/workers/complete-action', { body: {
-        run_id: job.run_id, worker_id: WORKER_ID, status: 'success', action_output: job.operation_key === 'navigate' ? {tab_id: 77} : job.operation_key === 'focus_tab' ? {focused: true, tab_id: 77} : probe ? {value: identity ? {accountId: identity} : null} : {
-          rows: ROWS, attachments: [{ filename: 'private.txt', data: Buffer.from('private bytes').toString('base64'), mime_type: 'text/plain' }],
-        },
-      } });
-      expect(completion.status).toBe(200);
-      if (!probe) return job.run_id;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+    expect(completion.status).toBe(200);
+    return probe ? undefined : { done: job.run_id };
+  } });
 }
 
 async function waitForChild() {
@@ -198,10 +201,7 @@ describe('compiled browser source reads', () => {
     const [automation] = await sql`WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
       INSERT INTO automations (id, automation_group_id, organization_id, created_by, name, slug, triggers)
       SELECT id, id, ${orgId}, ${userId}, 'Scheduled source fixture', 'scheduled-source-fixture', '[]'::jsonb FROM next_id RETURNING id`;
-    // The allowed case is the suite's first full browser round trip; on a loaded
-    // CI runner it overran the 5s read budget. Revoked cases cancel early, so
-    // the extra headroom only lets a slow allowed read finish.
-    const reading = read({ ...context(), userId: null, memberRole: null, actingAutomationId: Number(automation.id) }, 'private query', 15_000);
+    const reading = read({ ...context(), userId: null, memberRole: null, actingAutomationId: Number(automation.id) });
     const child = await waitForChild();
     const revoked = change !== 'auto';
     if (change === 'approval' || change === 'deny') await upsertEntityApprovalPolicy(orgId, { resourceClass: 'connector_action', connectorKey: SOURCE_KEY, operationCategory: 'read', effects: { execute: change } });
@@ -298,25 +298,16 @@ describe('compiled browser source reads', () => {
       return resolveCode(...args);
     });
     const observed = sourceListeners.runSourceFeedListener({ organizationId: orgId, feedId });
-    let finished = false;
-    observed.finally(() => { finished = true; }).catch(() => {});
     if (editDuringSetup) {
       await expect.poll(async () => (await sql`SELECT id FROM runs
         WHERE organization_id = ${orgId} AND action_key = 'feed_listen'`).length).toBe(1);
       const updated = await manageFeeds({ action: 'update_feed', feed_id: feedId, config: { scope: 'new' } }, {} as Env, context());
       expect(updated).not.toHaveProperty('error');
     }
-    let answered = false;
     let scopeKey = '';
     const ack = { binding_id: 'synthetic-observation-binding', epoch: 'synthetic-epoch', records: [{ id: 'source-item', revision: 1 }] };
-    for (let attempt = 0; attempt < 70 && !finished; attempt++) {
-      const response = await post('/api/workers/poll', { body: {
-        worker_id: WORKER_ID, platform: 'chrome-extension', app_version: '9.9.0',
-        capabilities: { 'browser.debugger': true, 'browser.tabs': true },
-      } });
-      expect(response.status).toBe(200);
-      const job = await response.json();
-      if (job?.run_id && job.operation_key === 'feed_listen') {
+    const answered = await serveWorkerJobs<boolean>({ until: observed, deadlineMs: READ_TIMEOUT_MS, poll: () => pollBrowser(), handle: async (job) => {
+      if (job.operation_key === 'feed_listen') {
         expect(job.feed_context).toMatchObject({ feed_id: feedId, connection_id: connectionId, dry_run: false });
         scopeKey = job.feed_context.subscription.scope_key;
         expect.soft(scopeKey).toBe(sourceFeedScopeKey({}, VERSION));
@@ -338,11 +329,10 @@ describe('compiled browser source reads', () => {
           },
         } });
         expect(completed.status).toBe(200);
-        answered = true;
-        break;
+        return { done: true };
       }
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
+      return undefined;
+    } });
     expect(startedBeforeResolution).toEqual([true]);
     if (cleanupFails) {
       await expect(observed).rejects.toThrow('Synthetic settlement failure');
@@ -1090,7 +1080,7 @@ describe('compiled browser source reads', () => {
   const recoveryContext = () => ({ ...context(), mcpSessionId: 'synthetic-recovery-session', clientId: 'synthetic-recovery-client' });
   const recoveryFlow = () => deriveBrowserActionContext(recoveryContext())!.flow_id;
   async function recoveryRead(recovery_id?: string, query = 'private query') {
-    return manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query, limit: 2, ...(recovery_id ? { recovery_id } : {}) }], timeout_ms: 5000 }, {} as Env, recoveryContext()) as Promise<Record<string, any>>;
+    return manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query, limit: 2, ...(recovery_id ? { recovery_id } : {}) }], timeout_ms: READ_TIMEOUT_MS }, {} as Env, recoveryContext()) as Promise<Record<string, any>>;
   }
   async function serveRecovery(reading: Promise<unknown>, options: {
     navigationFails?: boolean;
@@ -1105,39 +1095,33 @@ describe('compiled browser source reads', () => {
     appVersion?: string;
     afterCleanup?: () => void;
   } = {}) {
-    let finished = false;
     let probes = 0;
-    reading.finally(() => { finished = true; }).catch(() => {});
     const jobs: Record<string, any>[] = [];
-    for (let i = 0; i < 70 && !finished; i++) {
-      const response = await post('/api/workers/poll', { body: { worker_id: WORKER_ID, platform: 'chrome-extension', app_version: options.appVersion ?? '9.9.0', capabilities: { 'browser.debugger': true, 'browser.tabs': true } } });
-      const job = await response.json();
-      if (job.run_id) {
-        jobs.push(job);
-        const probe = job.operation_key === 'evaluate' && job.action_input.expression === 'self_probe';
-        if (probe) probes++;
-        const challenge = (options.challenge === 'probe' && probe) || (options.challenge === 'late' && job.operation_key === 'evaluate' && !probe);
-        const output = job.operation_key === 'navigate' ? { tab_id: 77,
-          ...(!options.missingTabIdentity ? { browser_tab: { tab_id: 77, target_id: 'synthetic-target', window_id: 3 } } : {}) }
-          : challenge ? { value: { __lobu_browser_interruption: { reason: 'challenge_required', message: 'Synthetic visible verification' } } }
-          : probe ? { value: options.missingIdentityAfter !== undefined && probes > options.missingIdentityAfter ? null
-            : { accountId: options.changedAccount && probes > 1 ? 'changed-account' : 'fixture-account' } }
-          : job.operation_key === 'close_tab' ? { cleanup_ack: !options.cleanupFails, closed: true,
-            ...(options.cleanupMarker ? { value: { __lobu_browser_interruption: { reason: 'account_mismatch', message: 'Synthetic cleanup mismatch' } } } : {}) }
-          : { rows: ROWS };
-        const navigationFailed = options.navigationFails && job.operation_key === 'navigate';
-        if (navigationFailed) Object.assign(output, { value: { __lobu_browser_interruption: { reason: 'loading_failure', message: 'Synthetic navigation failure' } } });
-        if (options.loseOwnershipOnCleanup && job.operation_key === 'close_tab') {
-          const sql = getTestDb();
-          await sql`UPDATE auth_profiles SET metadata = metadata || ${sql.json({ browser_recovery: { run_id: 2147483000, expires_at: new Date(Date.now() + 60_000).toISOString() } })}
-            WHERE id = (SELECT auth_profile_id FROM connections WHERE id = ${connectionId})`;
-        }
-        const completion = await post('/api/workers/complete-action', { body: { run_id: job.run_id, worker_id: WORKER_ID, status: navigationFailed ? 'failed' : 'success', ...(navigationFailed ? { error_message: 'Synthetic navigation failure' } : {}), action_output: output } });
-        expect(completion.status).toBe(200);
-        if (job.operation_key === 'close_tab') options.afterCleanup?.();
+    await serveWorkerJobs({ until: reading, deadlineMs: READ_TIMEOUT_MS, poll: () => pollBrowser(options.appVersion), handle: async (job) => {
+      jobs.push(job);
+      const probe = job.operation_key === 'evaluate' && job.action_input.expression === 'self_probe';
+      if (probe) probes++;
+      const challenge = (options.challenge === 'probe' && probe) || (options.challenge === 'late' && job.operation_key === 'evaluate' && !probe);
+      const output = job.operation_key === 'navigate' ? { tab_id: 77,
+        ...(!options.missingTabIdentity ? { browser_tab: { tab_id: 77, target_id: 'synthetic-target', window_id: 3 } } : {}) }
+        : challenge ? { value: { __lobu_browser_interruption: { reason: 'challenge_required', message: 'Synthetic visible verification' } } }
+        : probe ? { value: options.missingIdentityAfter !== undefined && probes > options.missingIdentityAfter ? null
+          : { accountId: options.changedAccount && probes > 1 ? 'changed-account' : 'fixture-account' } }
+        : job.operation_key === 'close_tab' ? { cleanup_ack: !options.cleanupFails, closed: true,
+          ...(options.cleanupMarker ? { value: { __lobu_browser_interruption: { reason: 'account_mismatch', message: 'Synthetic cleanup mismatch' } } } : {}) }
+        : { rows: ROWS };
+      const navigationFailed = options.navigationFails && job.operation_key === 'navigate';
+      if (navigationFailed) Object.assign(output, { value: { __lobu_browser_interruption: { reason: 'loading_failure', message: 'Synthetic navigation failure' } } });
+      if (options.loseOwnershipOnCleanup && job.operation_key === 'close_tab') {
+        const sql = getTestDb();
+        await sql`UPDATE auth_profiles SET metadata = metadata || ${sql.json({ browser_recovery: { run_id: 2147483000, expires_at: new Date(Date.now() + 60_000).toISOString() } })}
+          WHERE id = (SELECT auth_profile_id FROM connections WHERE id = ${connectionId})`;
       }
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
+      const completion = await post('/api/workers/complete-action', { body: { run_id: job.run_id, worker_id: WORKER_ID, status: navigationFailed ? 'failed' : 'success', ...(navigationFailed ? { error_message: 'Synthetic navigation failure' } : {}), action_output: output } });
+      expect(completion.status).toBe(200);
+      if (job.operation_key === 'close_tab') options.afterCleanup?.();
+      return undefined;
+    } });
     await reading;
     return jobs;
   }
