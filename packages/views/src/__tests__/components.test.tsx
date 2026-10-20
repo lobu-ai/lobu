@@ -335,6 +335,50 @@ describe("charts", () => {
     expect(el.textContent).toContain("2590000");
   });
 
+  test.each([
+    { count: 0, anchors: [] },
+    { count: 1, anchors: ["middle"] },
+    { count: 2, anchors: ["start", "end"] },
+    { count: 3, anchors: ["start", "middle", "end"] },
+    {
+      count: 8,
+      anchors: [
+        "start",
+        "middle",
+        "middle",
+        "middle",
+        "middle",
+        "middle",
+        "middle",
+        "end",
+      ],
+    },
+    { count: 9, anchors: [] },
+  ])("line chart positions and anchors labels for $count points", ({
+    count,
+    anchors,
+  }) => {
+    render(
+      <LineChart
+        data={Array.from({ length: count }, (_, i) => ({
+          label: `2026-01-${String(i + 1).padStart(2, "0")}`,
+          value: i,
+        }))}
+      />
+    );
+    const labels = [...el.querySelectorAll("g > text")];
+    expect(labels.map((t) => t.getAttribute("text-anchor"))).toEqual(anchors);
+    const axis = el.querySelectorAll("line")[1]!;
+    const left = Number(axis.getAttribute("x1"));
+    const right = Number(axis.getAttribute("x2"));
+    if (count === 1) {
+      expect(Number(labels[0]!.getAttribute("x"))).toBe((left + right) / 2);
+    } else if (labels.length > 1) {
+      expect(Number(labels[0]!.getAttribute("x"))).toBe(left);
+      expect(Number(labels.at(-1)!.getAttribute("x"))).toBe(right);
+    }
+  });
+
   test("line chart defaults to a zero baseline", () => {
     render(<LineChart data={level} height={180} />);
     const points = ys();
