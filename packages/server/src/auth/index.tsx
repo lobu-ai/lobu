@@ -392,6 +392,27 @@ export async function createAuth(
 							);
 						}
 					},
+					// Name, slug, logo and metadata edits go through Better Auth's
+					// update endpoint. `user` is the acting session user. Visibility has
+					// its own route, which audits inside the same transaction.
+					afterUpdateOrganization: async ({ organization: org, user }) => {
+						if (!org) return;
+						recordWorkspaceChangeEvent({
+							organizationId: org.id,
+							resourceKind: "organization",
+							resourceId: org.id,
+							op: "updated",
+							summary: `Organization "${org.name}" updated`,
+							state: {
+								id: org.id,
+								name: org.name,
+								slug: org.slug,
+								visibility: org.visibility ?? null,
+							},
+							actorSource: "ui",
+							createdBy: user.id,
+						});
+					},
 					afterAddMember: async ({ member, user, organization: org }) => {
 						// The member row is already committed when this hook fires.
 						// Emit the audit trail BEFORE the fallible $member projection so
