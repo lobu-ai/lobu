@@ -91,6 +91,7 @@ function rowToSettings(row: Record<string, any>): AgentSettings {
 		skillsConfig: row.skills_config ?? undefined,
 		verboseLogging: row.verbose_logging ?? undefined,
 		showToolCalls: row.show_tool_calls ?? undefined,
+		starters: row.starters ?? undefined,
 		guardrails: row.guardrails ?? undefined,
 		guardrailsInline: row.guardrails_inline ?? undefined,
 		sandboxId: row.sandbox_id ?? undefined,
@@ -149,7 +150,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
                  network_config, nix_config,
                  soul_md, user_md, identity_md,
                  skills_config,
-                 verbose_logging, show_tool_calls,
+                 verbose_logging, show_tool_calls, starters,
                  guardrails, guardrails_inline,
                  sandbox_id, updated_at
           FROM agents
@@ -173,6 +174,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
           skills_config = ${sql.json(settings.skillsConfig ?? { skills: [] })},
           verbose_logging = ${settings.verboseLogging ?? false},
           show_tool_calls = ${settings.showToolCalls ?? false},
+          starters = ${sql.json(settings.starters ?? [])},
           guardrails = ${sql.json(settings.guardrails ?? [])},
           guardrails_inline = ${sql.json(settings.guardrailsInline ?? [])},
           sandbox_id = ${settings.sandboxId ?? null},
@@ -200,6 +202,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
           skills_config = '{"skills": []}',
           verbose_logging = false,
           show_tool_calls = false,
+          starters = '[]',
           guardrails = '[]', guardrails_inline = '[]',
           sandbox_id = NULL,
           updated_at = now()

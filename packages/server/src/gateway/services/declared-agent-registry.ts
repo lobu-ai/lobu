@@ -141,6 +141,7 @@ export function entryFromAgentConfig(agent: AgentConfig): DeclaredAgentEntry {
     sandboxId: settings.sandboxId,
     verboseLogging: settings.verboseLogging,
     showToolCalls: settings.showToolCalls,
+    starters: settings.starters,
   };
   void _exhaustive;
 

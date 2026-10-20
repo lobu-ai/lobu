@@ -596,6 +596,7 @@ const SETTINGS_FIELDS: Array<keyof AgentSettings> = [
   "soulMd",
   "userMd",
   "identityMd",
+  "starters",
 ];
 
 function diffSettings(

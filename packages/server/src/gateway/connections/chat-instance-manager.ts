@@ -50,6 +50,7 @@ import {
 import { SlackConnectionCoordinator } from "./slack-connection-coordinator.js";
 import {
   registerSlackAppHome,
+  registerSlackAssistantStarters,
   registerSlackPlatformHandlers,
   type SlackHomeContext,
   type SlackHomeInbox,
@@ -1715,6 +1716,18 @@ export class ChatInstanceManager {
         publicGatewayUrl: this.publicGatewayUrl,
         resolveHomeContext: resolveSlackHomeContext,
         resolveUserInbox: resolveSlackHomeUserInbox,
+      });
+
+      registerSlackAssistantStarters(chat, connection, {
+        adapter,
+        loadStarters: async (agentId) =>
+          (
+            await this.services
+              .getAgentSettingsStore()
+              .getSettings(agentId, {
+                organizationId: connection.organizationId,
+              })
+          )?.starters,
       });
 
       chat.registerSingleton();

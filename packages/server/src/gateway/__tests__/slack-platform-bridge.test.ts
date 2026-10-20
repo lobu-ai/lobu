@@ -5,6 +5,7 @@ import {
   parseSlackTeamJoinEvent,
   postSlackTeamJoinWelcome,
   registerSlackAppHome,
+  registerSlackAssistantStarters,
   registerSlackPlatformHandlers,
 } from "../connections/slack-platform-bridge.js";
 
@@ -518,5 +519,66 @@ describe("Slack platform bridge", () => {
         "application/json",
       ),
     ).toBeNull();
+  });
+});
+
+describe("Slack assistant starters", () => {
+  const starters = [{ title: "Plan videos", message: "Plan this week's videos" }];
+  const connection = (over: Record<string, unknown> = {}) =>
+    ({ id: "conn-1", platform: "slack", agentId: "agent-7", ...over }) as any;
+
+  function start(
+    conn: any,
+    loadStarters: (agentId: string) => Promise<typeof starters | undefined>,
+  ) {
+    let handler: ((event: any) => Promise<void>) | undefined;
+    const chat = {
+      onAssistantThreadStarted: mock((h: typeof handler) => {
+        handler = h;
+      }),
+    };
+    const setSuggestedPrompts = mock(async () => {});
+    registerSlackAssistantStarters(chat, conn, {
+      adapter: { setSuggestedPrompts },
+      loadStarters,
+    });
+    return {
+      chat,
+      setSuggestedPrompts,
+      fire: () => handler?.({ channelId: "D123", threadTs: "1700.1" }),
+    };
+  }
+
+  test("offers the connection agent's starters on a new assistant thread", async () => {
+    const loadStarters = mock(async () => starters);
+    const h = start(connection(), loadStarters);
+    await h.fire();
+    expect(loadStarters).toHaveBeenCalledWith("agent-7");
+    expect(h.setSuggestedPrompts).toHaveBeenCalledWith("D123", "1700.1", starters);
+  });
+
+  test("leaves the thread alone when the agent has no starters", async () => {
+    const h = start(connection(), async () => undefined);
+    await h.fire();
+    expect(h.setSuggestedPrompts).not.toHaveBeenCalled();
+  });
+
+  test("does not subscribe without a connection agent or off Slack", () => {
+    expect(
+      start(connection({ agentId: undefined }), async () => starters).chat
+        .onAssistantThreadStarted,
+    ).not.toHaveBeenCalled();
+    expect(
+      start(connection({ platform: "telegram" }), async () => starters).chat
+        .onAssistantThreadStarted,
+    ).not.toHaveBeenCalled();
+  });
+
+  test("a failed starters lookup never throws into the Slack handler", async () => {
+    const h = start(connection(), async () => {
+      throw new Error("db down");
+    });
+    await expect(h.fire()).resolves.toBeUndefined();
+    expect(h.setSuggestedPrompts).not.toHaveBeenCalled();
   });
 });

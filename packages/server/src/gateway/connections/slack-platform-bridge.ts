@@ -535,6 +535,60 @@ export function registerSlackAppHome(
   });
 }
 
+interface SlackAssistantStartersAdapter {
+  setSuggestedPrompts?: (
+    channelId: string,
+    threadTs: string | undefined,
+    prompts: Array<{ title: string; message: string }>,
+  ) => Promise<void>;
+}
+
+interface SlackAssistantThreadStartedEvent {
+  adapter?: SlackAssistantStartersAdapter;
+  channelId: string;
+  threadTs: string;
+}
+
+/**
+ * Offer the connection agent's conversation starters when a user opens a new
+ * Slack assistant thread. An agent without starters gets no prompts, leaving
+ * Slack's default empty thread.
+ */
+export function registerSlackAssistantStarters(
+  chat: any,
+  connection: PlatformConnection,
+  deps: {
+    adapter?: SlackAssistantStartersAdapter;
+    loadStarters: (
+      agentId: string,
+    ) => Promise<Array<{ title: string; message: string }> | undefined>;
+  },
+): void {
+  if (connection.platform !== "slack" || !connection.agentId) return;
+  const agentId = connection.agentId;
+
+  chat.onAssistantThreadStarted(
+    async (event: SlackAssistantThreadStartedEvent) => {
+      const adapter = deps.adapter ?? event.adapter;
+      if (typeof adapter?.setSuggestedPrompts !== "function") return;
+      try {
+        const starters = await deps.loadStarters(agentId);
+        if (!starters?.length) return;
+        // Called as a method: see publishHome for the `this`-binding trap.
+        await adapter.setSuggestedPrompts(
+          event.channelId,
+          event.threadTs,
+          starters,
+        );
+      } catch (error) {
+        logger.warn(
+          `Failed to set Slack assistant starters (conn=${connection.id}): ${JSON.stringify(errorDetail(error))}`,
+        );
+      }
+    },
+  );
+}
+
 export function parseSlackTeamJoinEvent(
   body: string,
 	contentType: string,

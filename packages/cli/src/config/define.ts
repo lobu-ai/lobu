@@ -1038,6 +1038,11 @@ export interface Agent {
   guardrails?: string[];
   /** Nix packages provisioned into the worker environment. */
   nixPackages?: string[];
+  /**
+   * Up to three conversation starters, shown on an empty web chat and as
+   * Slack assistant thread-start prompts. `message` is sent as the user.
+   */
+  starters?: Array<{ title: string; message: string }>;
   // NOTE: the memory schema (entity/relationship types) and connections —
   // including chat connections (slack/telegram, `credentialMode: "byo" |
   // "hosted"`) — are declared at the PROJECT level (`defineConfig({ entities,

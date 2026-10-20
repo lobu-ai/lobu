@@ -37,6 +37,17 @@ describe("validateSettingsPatch", () => {
     );
   });
 
+  test("accepts up to three starters and rejects more or blank ones", () => {
+    const starter = { title: "Plan videos", message: "Plan this week's videos" };
+    expect(validateSettingsPatch({ starters: [starter] })).toBeNull();
+    expect(
+      validateSettingsPatch({ starters: [starter, starter, starter, starter] })
+    ).toMatch(/^starters/);
+    expect(
+      validateSettingsPatch({ starters: [{ title: "", message: "x" }] })
+    ).toMatch(/^starters/);
+  });
+
   test("rejects a non-string persona field", () => {
     expect(validateSettingsPatch({ soulMd: 42 })).toMatch(/^soulMd/);
   });
