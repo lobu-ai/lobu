@@ -563,11 +563,26 @@ describe("Slack assistant starters", () => {
     expect(h.setSuggestedPrompts).not.toHaveBeenCalled();
   });
 
-  test("does not subscribe without a connection agent or off Slack", () => {
-    expect(
-      start(connection({ agentId: undefined }), async () => starters).chat
-        .onAssistantThreadStarted,
-    ).not.toHaveBeenCalled();
+  test("uses the current agent after a warm connection is bound, reassigned, or unbound", async () => {
+    const conn = connection({ agentId: undefined });
+    const loadStarters = mock(async () => starters);
+    const h = start(conn, loadStarters);
+    await h.fire();
+    expect(loadStarters).not.toHaveBeenCalled();
+
+    conn.agentId = "agent-8";
+    await h.fire();
+    expect(loadStarters).toHaveBeenLastCalledWith("agent-8");
+    conn.agentId = "agent-9";
+    await h.fire();
+    expect(loadStarters).toHaveBeenLastCalledWith("agent-9");
+    delete conn.agentId;
+    await h.fire();
+    expect(loadStarters).toHaveBeenCalledTimes(2);
+    expect(h.setSuggestedPrompts).toHaveBeenCalledTimes(2);
+  });
+
+  test("does not subscribe off Slack", () => {
     expect(
       start(connection({ platform: "telegram" }), async () => starters).chat
         .onAssistantThreadStarted,

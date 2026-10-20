@@ -1460,6 +1460,7 @@ describe("mapProjectToDesiredState", () => {
       mapProjectToDesiredState(defineConfig({ agents: [agent] }), env).agents[0]
         ?.settings;
     expect(map(defineAgent({ id: "a", starters }))?.starters).toEqual(starters);
+    expect(map(defineAgent({ id: "a", starters: [] }))?.starters).toEqual([]);
     expect(map(defineAgent({ id: "a" }))).not.toHaveProperty("starters");
   });
 

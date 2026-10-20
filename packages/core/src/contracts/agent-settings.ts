@@ -134,8 +134,8 @@ export type SkillsConfig = Static<typeof SkillsConfigSchema>;
  * assistant thread-start prompts. Same `{title,message}` shape as follow-up
  * chips; three at most so the empty state stays a short, tappable row.
  */
-export const AGENT_STARTERS_MAX = 3;
-export const AgentStarterSchema = Type.Object({
+const AGENT_STARTERS_MAX = 3;
+const AgentStarterSchema = Type.Object({
   title: Type.String({ minLength: 1, maxLength: 72 }),
   message: Type.String({ minLength: 1, maxLength: 2000 }),
 });

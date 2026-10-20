@@ -354,7 +354,7 @@ function mapAgent(
     settings.nixConfig = { packages: [...new Set(agent.nixPackages)] };
   }
 
-  if (agent.starters?.length) {
+  if (agent.starters !== undefined) {
     settings.starters = agent.starters.map(({ title, message }) => ({
       title,
       message,

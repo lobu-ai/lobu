@@ -564,11 +564,12 @@ export function registerSlackAssistantStarters(
     ) => Promise<Array<{ title: string; message: string }> | undefined>;
   },
 ): void {
-  if (connection.platform !== "slack" || !connection.agentId) return;
-  const agentId = connection.agentId;
+  if (connection.platform !== "slack") return;
 
   chat.onAssistantThreadStarted(
     async (event: SlackAssistantThreadStartedEvent) => {
+      const agentId = connection.agentId;
+      if (!agentId) return;
       const adapter = deps.adapter ?? event.adapter;
       if (typeof adapter?.setSuggestedPrompts !== "function") return;
       try {
