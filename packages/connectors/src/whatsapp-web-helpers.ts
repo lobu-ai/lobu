@@ -14,7 +14,7 @@ import {
   WHATSAPP_PHONE_SERVER,
 } from "./whatsapp-web-identity.js";
 
-export const WHATSAPP_ADAPTER_VERSION = 25;
+export const WHATSAPP_ADAPTER_VERSION = 26;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 
 export type ChatFilter = "all" | "individual" | "group";
