@@ -4,7 +4,7 @@
  * typing (each keystroke updates params and re-queries); the test drives the
  * identical loading → response cycle through refetch, which jsdom cannot
  * distinguish from a param change. An early return on loading/error unmounts
- * the input mid-cycle and loses focus — this test pins the mounted behavior.
+ * the input mid-cycle and loses focus — this test pins the mounted-input contract instead.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
