@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@lobu/connector-sdk": "workspace:*",
+    "ajv-formats": "^3.0.1",
     "postgres": "^3.4.7",
     "turndown": "7.2.2"
   },

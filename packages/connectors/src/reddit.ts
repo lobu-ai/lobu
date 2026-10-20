@@ -17,6 +17,7 @@ import {
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
+import addFormats from 'ajv-formats';
 
 // ---------------------------------------------------------------------------
 // Reddit API types
@@ -72,6 +73,16 @@ interface RedditCheckpoint {
   pagination_cutoff?: string;
 }
 
+// Use the gateway's URI format check: WHATWG URL parsing also accepts non-URI characters.
+const isUri = addFormats.get('uri') as (value: string) => boolean;
+
+/** Metadata declares these fields `format: uri`; one bad value rejects the whole batch. */
+function httpUrl(value: string | undefined): string | undefined {
+  if (!value || !isUri(value) || !URL.canParse(value)) return undefined;
+  const { protocol } = new URL(value);
+  return protocol === 'http:' || protocol === 'https:' ? value : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Connector
 // ---------------------------------------------------------------------------
@@ -82,7 +93,7 @@ export default class RedditConnector extends ConnectorRuntime {
     name: 'Reddit',
     description:
       "Fetches posts and comments from Reddit subreddits or search queries, and the connected user's home feed.",
-    version: '1.2.0',
+    version: '1.2.1',
     faviconDomain: 'reddit.com',
     authSchema: {
       methods: [
@@ -604,11 +615,9 @@ export default class RedditConnector extends ConnectorRuntime {
     });
 
     // For non-self posts, the Reddit `url` field points to the linked content (image, article, etc.)
-    const mediaUrl = !post.is_self ? post.url : undefined;
-    const thumbnail =
-      post.thumbnail && !['self', 'default', 'nsfw', 'spoiler', ''].includes(post.thumbnail)
-        ? post.thumbnail
-        : undefined;
+    const mediaUrl = !post.is_self ? httpUrl(post.url) : undefined;
+    // `thumbnail` also carries placeholder words ("self", "image", "nsfw", ...).
+    const thumbnail = httpUrl(post.thumbnail);
 
     return {
       origin_id: `reddit_post_${post.name}`,
