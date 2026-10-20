@@ -8,13 +8,14 @@
  * it does not guarantee that a rollout has finished.
  */
 
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { CoreServices } from "../../gateway/services/core-services";
 import type { IMessageQueue } from "../../gateway/infrastructure/queue/types";
 import logger from "../../utils/logger";
 import { bootTaskScheduler } from "../jobs";
 import { TaskScheduler } from "../task-scheduler";
 import * as refreshModule from "../refresh-connector-definitions";
+import * as viewRefreshModule from "../refresh-compiled-views";
 
 interface SentRecord {
   name: string;
@@ -41,9 +42,63 @@ function makeCoreServices(queue: IMessageQueue): CoreServices {
 
 const EMPTY_RESULT = { scanned: 0, refreshed: 0, skippedNoSource: 0, errored: 0 };
 
+const EMPTY_VIEW_RESULT = { scanned: 0, refreshed: 0, errored: 0 };
+
 describe("bootTaskScheduler startup refresh", () => {
+  beforeEach(() => {
+    spyOn(viewRefreshModule, "refreshCompiledViews").mockResolvedValue(EMPTY_VIEW_RESULT);
+  });
+
   afterEach(() => {
     spyOn(refreshModule, "refreshConnectorDefinitions").mockRestore();
+    spyOn(viewRefreshModule, "refreshCompiledViews").mockRestore();
+  });
+
+  test("rebuilds compiled views at boot and on the follow-up, with an hourly backstop", async () => {
+    spyOn(refreshModule, "refreshConnectorDefinitions").mockResolvedValue(EMPTY_RESULT);
+    const views = spyOn(viewRefreshModule, "refreshCompiledViews").mockResolvedValue(EMPTY_VIEW_RESULT);
+    const delayed: Array<() => Promise<void>> = [];
+    const runOnceAfter = spyOn(TaskScheduler.prototype, "runOnceAfter").mockImplementation((_delayMs, fn) => {
+      delayed.push(fn);
+    });
+    const sent: SentRecord[] = [];
+    const scheduler = await bootTaskScheduler(
+      makeCoreServices(makeQueueDrainedElsewhere(sent)),
+      { ENVIRONMENT: "test" } as never,
+    );
+    try {
+      expect(views).toHaveBeenCalledTimes(1);
+      await delayed[0]();
+      expect(views).toHaveBeenCalledTimes(2);
+      expect(scheduler.hasHandler("refresh-compiled-views")).toBe(true);
+      expect(
+        sent.some((r) => r.singletonKey?.startsWith("cron:refresh-compiled-views:")),
+      ).toBe(true);
+    } finally {
+      runOnceAfter.mockRestore();
+      scheduler.stop();
+    }
+  });
+
+  test("a compiled-view refresh failure is logged and does not crash boot", async () => {
+    spyOn(refreshModule, "refreshConnectorDefinitions").mockResolvedValue(EMPTY_RESULT);
+    const failure = new Error("compile failed");
+    spyOn(viewRefreshModule, "refreshCompiledViews").mockRejectedValue(failure);
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+    const scheduler = await bootTaskScheduler(
+      makeCoreServices(makeQueueDrainedElsewhere([])),
+      { ENVIRONMENT: "test" } as never,
+    );
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(warn).toHaveBeenCalledWith(
+        { err: failure, phase: "boot" },
+        "[task-scheduler] Startup compiled-view refresh failed; hourly tick will cover it",
+      );
+    } finally {
+      warn.mockRestore();
+      scheduler.stop();
+    }
   });
 
   test("refreshes locally without waiting for the scan or a shared queue worker", async () => {

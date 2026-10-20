@@ -30,6 +30,7 @@ import { runSourceFeedListener, type SourceFeedListenerTask } from '../runs/sour
 import { checkStalledExecutions } from './check-stalled-executions';
 import { runConnectorHealthCheck } from '../connectors/connector-health';
 import { retryPendingFeedAutoPausedSignals } from '../automations/platform-events';
+import { refreshCompiledViews } from './refresh-compiled-views';
 import { refreshConnectorDefinitions } from './refresh-connector-definitions';
 import {
   isDeliverableChatPlatform,
@@ -113,18 +114,33 @@ export async function bootTaskScheduler(
   // claimed by an outgoing pod during a rolling deploy. Do not await the scan
   // on the readiness path. Retry locally after a delay to repair overwrites
   // from an overlapping older process without waiting for the hourly tick.
-  const refreshFromBundledSource = (phase: 'boot' | 'follow-up') =>
-    refreshConnectorDefinitions().then(
-      (result) => {
-        logger.info({ ...result, phase }, '[task-scheduler] Startup connector-definition refresh completed');
-      },
-      (err) => {
-        logger.warn(
-          { err, phase },
-          '[task-scheduler] Startup connector-definition refresh failed; hourly tick will cover it',
-        );
-      },
-    );
+  // Compiled views inline this process's `@lobu/views` runtime the same way.
+  const refreshFromBundledSource = async (phase: 'boot' | 'follow-up'): Promise<void> => {
+    await Promise.all([
+      refreshConnectorDefinitions().then(
+        (result) => {
+          logger.info({ ...result, phase }, '[task-scheduler] Startup connector-definition refresh completed');
+        },
+        (err) => {
+          logger.warn(
+            { err, phase },
+            '[task-scheduler] Startup connector-definition refresh failed; hourly tick will cover it',
+          );
+        },
+      ),
+      refreshCompiledViews().then(
+        (result) => {
+          logger.info({ ...result, phase }, '[task-scheduler] Startup compiled-view refresh completed');
+        },
+        (err) => {
+          logger.warn(
+            { err, phase },
+            '[task-scheduler] Startup compiled-view refresh failed; hourly tick will cover it',
+          );
+        },
+      ),
+    ]);
+  };
   void refreshFromBundledSource('boot');
   scheduler.runOnceAfter(STARTUP_REFRESH_FOLLOWUP_MS, () => refreshFromBundledSource('follow-up'));
 
@@ -371,6 +387,21 @@ function registerMaintenanceTasks(
       const result = await refreshConnectorDefinitions();
       if (result.refreshed > 0 || result.errored > 0) {
         logger.info({ ...result }, '[task] refresh-connector-definitions completed');
+      }
+    },
+    { cron: '0 * * * *' },
+  );
+
+  // Compiled-view refresh — rebuilds retained single-module bundles with
+  // this process's `@lobu/views` runtime, so runtime fixes reach views saved
+  // before them. Idempotent: an unchanged bundle is never rewritten. Same boot
+  // + follow-up + hourly backstop shape as the connector-definition refresh.
+  scheduler.register(
+    'refresh-compiled-views',
+    async () => {
+      const result = await refreshCompiledViews();
+      if (result.refreshed > 0 || result.errored > 0) {
+        logger.info({ ...result }, '[task] refresh-compiled-views completed');
       }
     },
     { cron: '0 * * * *' },
