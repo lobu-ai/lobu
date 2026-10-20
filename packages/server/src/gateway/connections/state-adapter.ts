@@ -253,11 +253,20 @@ class LobuStateAdapter implements StateAdapter {
     return rows.length > 0;
   }
 
+  /**
+   * Remove the key whatever it holds, a cached value or a list, the way a
+   * single-keyspace backend (Redis `DEL`) does. Conversation history is a list,
+   * so a cache-only delete left it in place on reset and connection delete.
+   */
   async delete(key: string): Promise<void> {
     this.ensureConnected();
     await this.sql`
-      DELETE FROM chat_state_cache
-      WHERE key_prefix = ${this.keyPrefix} AND cache_key = ${key}
+      WITH cache AS (
+        DELETE FROM chat_state_cache
+        WHERE key_prefix = ${this.keyPrefix} AND cache_key = ${key}
+      )
+      DELETE FROM chat_state_lists
+      WHERE key_prefix = ${this.keyPrefix} AND list_key = ${key}
     `;
   }
 

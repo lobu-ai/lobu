@@ -571,11 +571,11 @@ export class ChatInstanceManager {
     id: string,
     opts?: { skipTombstone?: boolean },
   ): Promise<void> {
-    const instance = await this.stopInstance(id);
+    await this.stopInstance(id);
 
-    const conversationState =
-      instance?.conversationState ??
-      new ConversationStateStore(await this.createStateAdapter());
+    // Always a fresh store: stopping a running instance shuts its Chat down,
+    // which disconnects the state adapter that instance's store wraps.
+    const conversationState = new ConversationStateStore(await this.createStateAdapter());
 
     // Cascade cleanups first, then drop the row last so a cleanup failure
     // leaves the row in place for an operator-driven retry rather than
@@ -1602,17 +1602,15 @@ export class ChatInstanceManager {
   /**
    * Tear down a running managed instance (interaction bridge + chat shutdown)
    * and drop it from the registry. No-op if no instance is tracked for `id`.
-   * Returns the instance that was removed, if any, so callers can reuse its
-   * conversation-state store.
+   * Its state adapter is disconnected afterwards, so nothing may reuse it.
    */
-  private async stopInstance(id: string): Promise<ManagedInstance | undefined> {
+  private async stopInstance(id: string): Promise<void> {
     const instance = this.instances.get(id);
     if (instance) {
       instance.interactionCleanup?.();
       await instance.cleanup?.();
       this.instances.delete(id);
     }
-    return instance;
   }
 
   private async startInstance(connection: PlatformConnection): Promise<void> {
