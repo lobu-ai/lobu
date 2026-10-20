@@ -1,8 +1,9 @@
 /**
- * Integration test: a signed-in user reading a public workspace they are not a
- * member of (over MCP, the only route open to them) is metered per account at
- * 300/min and refused with RATE_LIMITED past it. Members and callers without a
- * user are not metered.
+ * Integration test: reads of a public workspace by callers outside it are
+ * metered and refused with RATE_LIMITED past the limit — signed-in non-members
+ * per account (300/min, over MCP, the only route open to them), anonymous
+ * visitors per IP (60/min, over MCP and the public REST API). Members,
+ * internal calls and unknown IPs are never metered.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,7 +20,8 @@ import {
   createTestOrganization,
   createTestUser,
 } from '../../setup/test-fixtures';
-import { mcpToolsCall } from '../../setup/test-helpers';
+import { MCP_PROTOCOL_VERSION } from '@lobu/core';
+import { get, mcpToolsCall, post } from '../../setup/test-helpers';
 
 describe('public read rate limit', () => {
   let org: Awaited<ReturnType<typeof createTestOrganization>>;
@@ -57,10 +59,71 @@ describe('public read rate limit', () => {
     }
   };
 
+  const exhaustIP = (ip: string) => {
+    for (let i = 0; i < RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE.limit; i++) {
+      getRateLimiter().checkLimit(`rate:public-read:ip:${ip}`, RateLimitPresets.PUBLIC_READ_PER_IP_MINUTE);
+    }
+  };
+
+  const fromIP = (ip: string) => ({ 'CF-Connecting-IP': ip });
+
+  const publicRest = (ip: string) =>
+    get(`/api/${org.slug}/public/knowledge/search?query=rents`, { headers: fromIP(ip) }).then(
+      (r) => r.status
+    );
+
+  /** One anonymous MCP session, opened from `ip`. */
+  async function anonymousSession(ip: string): Promise<string> {
+    const init = await post(`/mcp/${org.slug}`, {
+      body: {
+        jsonrpc: '2.0',
+        id: 'init',
+        method: 'initialize',
+        params: {
+          protocolVersion: MCP_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: 'rate-limit-test', version: '1.0' },
+        },
+      },
+      headers: fromIP(ip),
+    });
+    const sessionId = init.headers.get('mcp-session-id');
+    if (!sessionId) throw new Error(`initialize failed: ${init.status}`);
+    await post(`/mcp/${org.slug}`, {
+      body: { jsonrpc: '2.0', method: 'notifications/initialized' },
+      headers: { ...fromIP(ip), 'mcp-session-id': sessionId, 'mcp-protocol-version': MCP_PROTOCOL_VERSION },
+    });
+    return sessionId;
+  }
+
+  /** The tool error text of an anonymous search on `sessionId` from `ip`, or null on success. */
+  async function anonymousSearchError(sessionId: string, ip: string): Promise<string | null> {
+    const res = await post(`/mcp/${org.slug}`, {
+      body: {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search_memory', arguments: { query: 'rents' } },
+      },
+      headers: {
+        ...fromIP(ip),
+        'X-MCP-Format': 'json',
+        'mcp-session-id': sessionId,
+        'mcp-protocol-version': MCP_PROTOCOL_VERSION,
+      },
+    });
+    const json = await res.json();
+    if (json.error) return json.error.message;
+    return json.result?.isError ? (json.result.content?.[0]?.text ?? 'error') : null;
+  }
+
   const search = () =>
     mcpToolsCall('search_memory', { query: 'rents' }, { token, orgSlug: org.slug });
 
+  const previousTrustedProxy = process.env.TRUSTED_PROXY;
+
   beforeAll(async () => {
+    process.env.TRUSTED_PROXY = 'cloudflare';
     await cleanupTestDatabase();
     org = await createTestOrganization({ name: 'Rate Limited Public Org', visibility: 'public' });
     outsider = await createTestUser({ email: 'rate-limit-outsider@example.com' });
@@ -73,7 +136,11 @@ describe('public read rate limit', () => {
     ).token;
   });
 
-  afterAll(() => resetRateLimiterForTests());
+  afterAll(() => {
+    if (previousTrustedProxy === undefined) delete process.env.TRUSTED_PROXY;
+    else process.env.TRUSTED_PROXY = previousTrustedProxy;
+    resetRateLimiterForTests();
+  });
   // The limiter's window is clock-aligned; a frozen clock keeps one test from
   // straddling a minute boundary, where the window would reset mid-test.
   beforeEach(() => {
@@ -95,8 +162,24 @@ describe('public read rate limit', () => {
     );
   });
 
-  it('never meters members or callers without a user', () => {
+  it('meters anonymous public REST reads per IP, at 60/min', async () => {
+    for (let i = 0; i < 60; i++) expect(await publicRest('203.0.113.7')).toBe(200);
+    expect(await publicRest('203.0.113.7')).toBe(429);
+    expect(await publicRest('203.0.113.8')).toBe(200);
+  });
+
+  it('charges an anonymous MCP session to the IP of each request, not the one it opened from', async () => {
+    const sessionId = await anonymousSession('198.51.100.1');
+    expect(await anonymousSearchError(sessionId, '198.51.100.1')).toBeNull();
+    exhaustIP('198.51.100.2');
+    expect(await anonymousSearchError(sessionId, '198.51.100.2')).toMatch(/Public read limit reached: 60/);
+    expect(await anonymousSearchError(sessionId, '198.51.100.1')).toBeNull();
+  });
+
+  it('never meters members, internal calls, or an unknown anonymous IP', () => {
+    const anonymous = { userId: null, isAuthenticated: false, tokenType: 'anonymous' } as const;
     readTimes(callerIn({ memberRole: 'member' }), 400);
-    readTimes(callerIn({ userId: null, isAuthenticated: false, tokenType: 'anonymous' }), 400);
+    readTimes(callerIn({ ...anonymous, clientIP: null }), 400);
+    readTimes(callerIn({ ...anonymous, clientIP: 'unknown' }), 400);
   });
 });

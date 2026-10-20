@@ -84,6 +84,7 @@ import { ToolUserError } from './utils/errors';
 import { buildWorkspaceInstructions, DIRECT_MCP_INSTRUCTIONS } from './utils/workspace-instructions';
 import { listLiveGrantedMemberWorkspaces } from './auth/oauth/workspace-grants';
 import logger from './utils/logger';
+import { getClientIP } from './utils/rate-limiter';
 import { organizationIdLiveSql } from './workspace/deletion-state';
 
 // ---------------------------------------------------------------------------
@@ -218,6 +219,8 @@ export async function revokeInMemoryMcpSessionsForClient(
 const mcpRequestContext = new AsyncLocalStorage<{
   rawJson: boolean;
   signal: AbortSignal;
+  /** This request's caller IP: a session can move between addresses. */
+  clientIP: string;
   renewActivity?: () => Promise<boolean>;
 }>();
 
@@ -623,6 +626,8 @@ function createServerForContext(
         : args;
     const callAuthCtx = {
       ...authCtx,
+      // Rate limits key on this request's address, not the session's first.
+      clientIP: mcpRequestContext.getStore()?.clientIP ?? authCtx.clientIP,
       mcpAppsSupported,
       mcpConversationId: hostConversationIdFromMeta(request.params._meta),
       mcpAppApprovalCapability:
@@ -1390,11 +1395,13 @@ async function withRequestActivity<T>(signal: AbortSignal, handler: () => T | Pr
 // POST responses are JSON; only the standalone GET notification stream is SSE.
 async function handleTransportRequest(
   transport: WebStandardStreamableHTTPServerTransport,
-  req: Request
+  req: Request,
+  clientIP: string
 ): Promise<Response> {
   const response = await mcpRequestContext.run({
     rawJson: req.headers.get('x-mcp-format')?.toLowerCase() === 'json',
     signal: req.signal,
+    clientIP,
     // Initialization has no persisted row yet and must not create one here.
     renewActivity: req.method === 'POST' && transport.sessionId
       ? () => refreshTransportActivity(transport) : undefined,
@@ -1542,6 +1549,7 @@ async function initializeRecoveredSession(
 
 export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response> {
   const req = normalizeAcceptHeader(c.req.raw);
+  const clientIP = getClientIP(c.req.raw, c.var.peerRemoteAddress);
   const sessionId = req.headers.get('mcp-session-id') ?? undefined;
   const requestAuth = extractAuthContext(c);
   if (requestAuth.tokenType === 'oauth' && !requestAuth.scopedToOrg &&
@@ -1769,7 +1777,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       }
     }
 
-    return handleTransportRequest(session.transport, req);
+    return handleTransportRequest(session.transport, req, clientIP);
   }
 
   // Stale session ID with non-initialize request → require a fresh initialize.
@@ -1815,7 +1823,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
             );
           }
           await recordMcpClientActivity(c.env, recoveredAuthCtx, req);
-          return handleTransportRequest(transport, req);
+          return handleTransportRequest(transport, req, clientIP);
         }
 
         await deletePersistedSession(sessionId);
@@ -1881,7 +1889,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       () => randomUUID()
     );
     await server.connect(transport);
-    const response = await handleTransportRequest(transport, req);
+    const response = await handleTransportRequest(transport, req, clientIP);
     await persistSessionState(transport.sessionId, authCtx);
     return response;
   }

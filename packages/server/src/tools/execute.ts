@@ -26,7 +26,7 @@ import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
-import { enforcePublicReadLimit } from '../utils/rate-limiter';
+import { enforcePublicReadLimit, getClientIP } from '../utils/rate-limiter';
 import { enforceRoleScopeAccess, requireWorkspaceContext } from './access-control';
 import { recordToolInvocationAudit, recordWorkspaceActivityAudit } from './audit';
 import { getAccountContent } from './get_content';
@@ -60,6 +60,8 @@ export interface AuthContext {
   sourceContext?: ToolSourceContext | null;
   isAuthenticated: boolean;
   clientId: string | null;
+  /** Caller IP of the current HTTP request; unset for internal calls. */
+  clientIP?: string | null;
   scopes?: string[] | null;
   tokenType: TokenType;
   requestUrl: string;
@@ -164,6 +166,7 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     sourceContext: mcpAuthInfo?.sourceContext ?? null,
     isAuthenticated: c.var.mcpIsAuthenticated || false,
     clientId: mcpAuthInfo?.clientId ?? null,
+    clientIP: getClientIP(c.req.raw, c.var.peerRemoteAddress),
     // Token callers (oauth/pat) carry real MCP scopes — pass them straight
     // through so `hasRequiredMcpScope` gates on the actual grant. Session and
     // anonymous callers have no scope dimension (they're gated by member role
@@ -262,7 +265,7 @@ export function checkToolAccess(
         'This public workspace is read-only for anonymous access. Sign in with an OAuth client that has write access.'
       );
     }
-    enforcePublicReadLimit(authCtx.userId);
+    enforcePublicReadLimit(authCtx);
   }
 
   // No `writeRole` message: missing-membership writes are already rejected by
