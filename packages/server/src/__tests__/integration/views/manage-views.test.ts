@@ -159,6 +159,59 @@ describe("manage_views", () => {
 		});
 	});
 
+	it("rewrites every retired attach shape to a page, and replays in either direction", async () => {
+		const dir = resolve(import.meta.dirname, "../../../../../../db/migrations");
+		const file = "20261020140000_view_attachments_by_page.sql";
+		const up = loadMigrationUpSection(dir, file);
+		const down = loadMigrationDownSection(dir, file);
+		const deal = await createTestEntity({ name: "Acme Deal", entity_type: "deal", organization_id: orgId });
+		const compiled = await compileView(SIMPLE_MODULE);
+		const legacy: Record<string, unknown[]> = {
+			both: [{ type: "deal" }],
+			overview: [{ type: "deal", placement: "overview" }],
+			record: [{ type: "deal", surface: "record" }],
+			collection: [{ type: "deal", surface: "collection", when: { stage: "open" } }],
+			"pin-id": [{ entity: deal.id }],
+			"pin-slug": [{ entity: "acme-deal", placement: "overview" }],
+			"pin-gone": [{ entity: 999999999 }],
+			workspace: [{ workspace: true, placement: "overview" }],
+			event: [{ event_kind: "deal.won", type: "deal" }],
+		};
+		const sql = getTestDb();
+		for (const [key, attach] of Object.entries(legacy)) {
+			await storeView(orgId, {
+				key, name: key, description: "", source_code: SIMPLE_MODULE, compiled_code: compiled,
+				content_hash: key, attach: [], params: {}, actions: {}, last_writer: "test",
+			});
+			await sql`UPDATE views SET attach = ${sql.json(attach)} WHERE organization_id = ${orgId} AND key = ${key}`;
+		}
+		const read = async () =>
+			Object.fromEntries(
+				(await sql<{ key: string; attach: unknown }[]>`SELECT key, attach FROM views WHERE organization_id = ${orgId}`)
+					.map((row) => [row.key, row.attach])
+			);
+		const expected = {
+			both: [{ collection: "deal" }, { record: "deal" }],
+			overview: [{ record: "deal" }],
+			record: [{ record: "deal" }],
+			collection: [{ collection: "deal", when: { stage: "open" } }],
+			"pin-id": [{ record: "deal", id: deal.id }],
+			"pin-slug": [{ record: "deal", id: deal.id }],
+			"pin-gone": [],
+			workspace: [{ workspace: true }],
+			event: [{ event: "deal.won", type: "deal" }],
+		};
+		await sql.unsafe(up);
+		expect(await read()).toEqual(expected);
+		await sql.unsafe(up);
+		expect(await read()).toEqual(expected);
+		await sql.unsafe(down);
+		expect((await read()).overview).toEqual([{ type: "deal", surface: "record", placement: "overview" }]);
+		await sql.unsafe(down);
+		await sql.unsafe(up);
+		expect(await read()).toEqual(expected);
+	});
+
 	it("set compiles and stores; get returns source; list returns metadata only", async () => {
 		const set = await setView(SIMPLE_SOURCE);
 		expect(set.action).toBe("set");

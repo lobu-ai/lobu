@@ -4,6 +4,7 @@
 -- { workspace: true } and { event, type? }. Placement is gone: a record view
 -- renders as a card on the record page and opens fullscreen from there.
 --   { type }                    -> { collection } and { record } (it showed on both)
+--   { type, placement: overview } -> { record } (collections only showed tabs)
 --   { type, surface: record }   -> { record }
 --   { type, surface: collection, when? } -> { collection, when? }
 --   { entity: <id or top-level slug> }   -> { record: <its type>, id }
@@ -26,6 +27,7 @@ SET attach = COALESCE((
     SELECT 1, jsonb_strip_nulls(jsonb_build_object('collection', a.x->'type', 'when', a.x->'when'))
     WHERE a.x ? 'type' AND NOT a.x ? 'event_kind'
       AND COALESCE(a.x->>'surface', '') <> 'record'
+      AND COALESCE(a.x->>'placement', 'tab') = 'tab'
     UNION ALL
     SELECT 2, jsonb_build_object('record', a.x->'type')
     WHERE a.x ? 'type' AND NOT a.x ? 'event_kind'
