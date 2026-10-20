@@ -1244,7 +1244,7 @@ describe('compiled browser source reads', () => {
     await recoverySetup();
     const controller = new AbortController();
     const reading = manageFeeds({
-      action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2 }], timeout_ms: 5000,
+      action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2 }], timeout_ms: READ_TIMEOUT_MS,
     }, {} as Env, { ...recoveryContext(), abortSignal: controller.signal }) as Promise<Record<string, any>>;
     await serveRecovery(reading, { challenge: 'late', afterCleanup: () => controller.abort() });
 
@@ -1328,7 +1328,7 @@ describe('compiled browser source reads', () => {
     const reads = [feedId, Number(otherFeed.id)].map(id => ({
       feed_id: id, query: 'private query', limit: 2,
     }));
-    const reading = manageFeeds({ action: 'read_feeds', reads, timeout_ms: 5000 },
+    const reading = manageFeeds({ action: 'read_feeds', reads, timeout_ms: READ_TIMEOUT_MS },
       {} as Env, recoveryContext()) as Promise<Record<string, any>>;
     const jobs = await serveRecovery(reading);
     const results = (await reading).results;
@@ -1343,7 +1343,7 @@ describe('compiled browser source reads', () => {
     expect(jobs.filter(job => job.operation_key === 'navigate')).toHaveLength(1);
 
     const next = manageFeeds({
-      action: 'read_feeds', reads: reads.filter(read => read.feed_id === blocked.feed_id), timeout_ms: 5000,
+      action: 'read_feeds', reads: reads.filter(read => read.feed_id === blocked.feed_id), timeout_ms: READ_TIMEOUT_MS,
     }, {} as Env, recoveryContext()) as Promise<Record<string, any>>;
     await serveRecovery(next);
     expect((await next).results[0]).toMatchObject({ ok: true, rows: ROWS });
@@ -1433,7 +1433,7 @@ describe('compiled browser source reads', () => {
     const interrupted = recoveryRead(); await serveRecovery(interrupted, { challenge: 'late' });
     const id = (await interrupted).results[0].interruption.recovery.recovery_id;
     const controller = new AbortController();
-    const resumed = manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2, recovery_id: id }], timeout_ms: 5000 },
+    const resumed = manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2, recovery_id: id }], timeout_ms: READ_TIMEOUT_MS },
       {} as Env, { ...recoveryContext(), abortSignal: controller.signal }) as Promise<Record<string, any>>;
     if (point === 'before_dispatch') {
       await expect.poll(async () => (await getTestDb()`SELECT EXISTS (SELECT 1 FROM runs
@@ -1467,7 +1467,7 @@ describe('compiled browser source reads', () => {
   });
   it('an opted-in recovery read cancels without a retry or handoff', async () => {
     await recoverySetup(); const controller = new AbortController();
-    const reading = manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2 }], timeout_ms: 5000 }, {} as Env, { ...recoveryContext(), abortSignal: controller.signal }) as Promise<Record<string, any>>;
+    const reading = manageFeeds({ action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2 }], timeout_ms: READ_TIMEOUT_MS }, {} as Env, { ...recoveryContext(), abortSignal: controller.signal }) as Promise<Record<string, any>>;
     expect(await answerBrowser(reading, false)).toBeDefined(); controller.abort();
     const failure = (await reading).results[0];
     expect(failure).toMatchObject({ ok: false, error_code: 'BROWSER_INTERRUPTED', retryable: false, interruption: { reason: 'timeout' } });
@@ -1521,7 +1521,7 @@ describe('compiled browser source reads', () => {
   it('recovery accepts the same source sort with reordered JSON keys', async () => {
     await recoverySetup();
     const read = (sort: { column: string; order: 'desc' }, recovery_id?: string) => manageFeeds({
-      action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2, sort, recovery_id }], timeout_ms: 5000,
+      action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2, sort, recovery_id }], timeout_ms: READ_TIMEOUT_MS,
     }, {} as Env, recoveryContext()) as Promise<Record<string, any>>;
     const interrupted = read({ column: 'id', order: 'desc' });
     await serveRecovery(interrupted, { challenge: 'late' });
