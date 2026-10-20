@@ -224,6 +224,16 @@ const mcpRequestContext = new AsyncLocalStorage<{
   renewActivity?: () => Promise<boolean>;
 }>();
 
+/**
+ * The session's auth context as of this request. Rate limits key on the
+ * caller's address, and a session can move between addresses, so every path
+ * that runs a tool takes this request's IP rather than the session's first.
+ */
+function forThisRequest<T extends AuthContext>(authCtx: T): T {
+  const clientIP = mcpRequestContext.getStore()?.clientIP;
+  return clientIP ? { ...authCtx, clientIP } : authCtx;
+}
+
 class SessionServer extends Server {
   override setRequestHandler<T extends AnyObjectSchema>(
     schema: T,
@@ -526,7 +536,7 @@ function createServerForContext(
   // resources/read — return the built bundle HTML for a `ui://` app resource.
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const uri = request.params.uri;
-    const mediaResource = await readMcpAttachmentResource(uri, env, authCtx);
+    const mediaResource = await readMcpAttachmentResource(uri, env, forThisRequest(authCtx));
     if (mediaResource) return mediaResource;
     const skill = MCP_SKILL_RESOURCES[uri];
     if (skill) {
@@ -625,9 +635,7 @@ function createServerForContext(
         ? stripCapabilityCompatMeta(args)
         : args;
     const callAuthCtx = {
-      ...authCtx,
-      // Rate limits key on this request's address, not the session's first.
-      clientIP: mcpRequestContext.getStore()?.clientIP ?? authCtx.clientIP,
+      ...forThisRequest(authCtx),
       mcpAppsSupported,
       mcpConversationId: hostConversationIdFromMeta(request.params._meta),
       mcpAppApprovalCapability:

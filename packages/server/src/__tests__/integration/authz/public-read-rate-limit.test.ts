@@ -16,6 +16,7 @@ import {
 import { cleanupTestDatabase } from '../../setup/test-db';
 import {
   createTestAccessToken,
+  createTestEvent,
   createTestOAuthClient,
   createTestOrganization,
   createTestUser,
@@ -27,6 +28,7 @@ describe('public read rate limit', () => {
   let org: Awaited<ReturnType<typeof createTestOrganization>>;
   let outsider: Awaited<ReturnType<typeof createTestUser>>;
   let token: string;
+  let eventId: number;
 
   const callerIn = (overrides: Partial<AuthContext>): AuthContext =>
     ({
@@ -96,6 +98,20 @@ describe('public read rate limit', () => {
     return sessionId;
   }
 
+  /** The error text of an anonymous attachment read on `sessionId` from `ip`. */
+  async function anonymousResourceError(sessionId: string, ip: string): Promise<string> {
+    const res = await post(`/mcp/${org.slug}`, {
+      body: {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'resources/read',
+        params: { uri: `lobu://event/${eventId}/attachment/0` },
+      },
+      headers: { ...fromIP(ip), 'mcp-session-id': sessionId, 'mcp-protocol-version': MCP_PROTOCOL_VERSION },
+    });
+    return (await res.json()).error?.message ?? '';
+  }
+
   /** The tool error text of an anonymous search on `sessionId` from `ip`, or null on success. */
   async function anonymousSearchError(sessionId: string, ip: string): Promise<string | null> {
     const res = await post(`/mcp/${org.slug}`, {
@@ -127,6 +143,7 @@ describe('public read rate limit', () => {
     await cleanupTestDatabase();
     org = await createTestOrganization({ name: 'Rate Limited Public Org', visibility: 'public' });
     outsider = await createTestUser({ email: 'rate-limit-outsider@example.com' });
+    eventId = (await createTestEvent({ organization_id: org.id, content: 'Rents rose 4%' })).id;
     const client = await createTestOAuthClient();
     token = (
       await createTestAccessToken(outsider.id, org.id, client.client_id, {
@@ -174,6 +191,11 @@ describe('public read rate limit', () => {
     exhaustIP('198.51.100.2');
     expect(await anonymousSearchError(sessionId, '198.51.100.2')).toMatch(/Public read limit reached: 60/);
     expect(await anonymousSearchError(sessionId, '198.51.100.1')).toBeNull();
+
+    // Attachment reads run read_knowledge too, so they follow the same IP.
+    // The event has no attachment: an admitted read reports it unknown.
+    expect(await anonymousResourceError(sessionId, '198.51.100.2')).toMatch(/Public read limit reached: 60/);
+    expect(await anonymousResourceError(sessionId, '198.51.100.1')).toMatch(/Unknown resource/);
   });
 
   it('never meters members, internal calls, or an unknown anonymous IP', () => {
