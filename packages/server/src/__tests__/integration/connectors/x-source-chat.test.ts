@@ -312,6 +312,11 @@ describe("X source chat", () => {
   it("redeems an X DM link and answers the next DM as that workspace's member", async () => {
     const member = await createTestUser({ email: "x-member@example.test" });
     await addUserToOrganization(member.id, orgId, "member");
+    // The member's own X sign-in names the DM sender, which redeeming the link requires.
+    await sql`
+      INSERT INTO account (id, "accountId", "providerId", "userId", "createdAt", "updatedAt")
+      VALUES ('x-member-account', ${PEER}, 'twitter', ${member.id}, now(), now())
+    `;
     const otherOrg = await createTestOrganization({ name: "Other X workspace" });
     await addUserToOrganization(member.id, otherOrg.id, "member");
     await insertAutomation("dm-reply", replyTo());

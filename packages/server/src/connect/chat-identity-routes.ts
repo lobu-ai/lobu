@@ -7,6 +7,7 @@ import { loginProviderForChatPlatform } from '../auth/chat-login-identities';
 import {
   adoptChatIdentityOntoMember,
   provisionMemberAndCoreIdentities,
+  signInProvesChatIdentity,
   withChatIdentityLock,
 } from '../auth/subject-identities';
 import { type DbClient, getDb } from '../db/client';
@@ -42,6 +43,7 @@ const PATH = '/connect/chat-identity';
 type LinkStatus =
   | { status: 'linked'; organization: OrganizationInfo; joined: boolean; claim: ChatIdentityLinkClaim }
   | { status: 'invalid' }
+  | { status: 'unproven'; claim: ChatIdentityLinkClaim }
   | { status: 'not_member'; organization: OrganizationInfo }
   | { status: 'conflict'; organization: OrganizationInfo; joined: boolean };
 
@@ -88,8 +90,7 @@ const DEFAULT_DEPS: ChatIdentityRouteDeps = {
 
 /**
  * Sign in, then land back on this link. With `provider`, the login page starts
- * that provider's sign-in straight away (it falls back to the normal page when
- * the provider is not enabled).
+ * that provider's sign-in straight away.
  */
 function loginContinuation(origin: string, token: string, provider?: string | null): string {
   const callback = new URL(PATH, origin);
@@ -219,6 +220,18 @@ function claimKey(claim: ChatIdentityLinkClaim): { namespace: string; identityKe
   return key && key.identityKey === claim.identityKey ? key : null;
 }
 
+/**
+ * Where the chat platform has a login that proves its accounts, the link must be
+ * redeemed by a Lobu user whose own sign-in with that login proves this one.
+ * The link travels through an inbox others may read (a device connector's
+ * operator sees every DM it sends), so holding the link is not proof.
+ */
+async function signInProvesClaim(sql: DbClient, userId: string, claim: ChatIdentityLinkClaim): Promise<boolean> {
+  if (!loginProviderForChatPlatform(claim.platform)) return true;
+  const key = claimKey(claim);
+  return key !== null && signInProvesChatIdentity(sql, userId, key.namespace, key.identityKey);
+}
+
 /** The `$member` entity the user has in the org, provisioning it if missing. */
 async function memberEntityIdFor(
   sql: DbClient,
@@ -255,6 +268,7 @@ async function redeemChatIdentityLink(token: string, user: SessionUser, join: bo
   const claim = await readChatIdentityLink(token, sql);
   const initialKey = claim ? claimKey(claim) : null;
   if (!claim || !initialKey) return { status: 'invalid' };
+  if (!(await signInProvesClaim(sql, user.id, claim))) return { status: 'unproven', claim };
   const org = await organizationInfo(sql, claim.organizationId);
   let role = await memberRole(sql, user.id, claim.organizationId);
   let joined = false;
@@ -349,6 +363,21 @@ function linkForm(token: string, join: boolean, label: string): string {
   );
 }
 
+/** The signed-in user has not proven the chat account with its platform's login. */
+async function unprovenPage(claim: ChatIdentityLinkClaim, lobuAccount: string, token: string): Promise<string> {
+  const platform = await platformName(claim);
+  const name = escapeHtml(platform);
+  return errorPage(
+    'chat_identity_unproven',
+    `Show this ${platform} account is yours`,
+    `<p>This link is for the ${name} account <strong>${escapeHtml(claim.senderDisplayName || claim.senderId)}</strong>. ` +
+      `You are signed in as <strong>${escapeHtml(lobuAccount)}</strong>, which has not signed in with that ${name} account, so nothing was linked.</p>` +
+      `<p>Sign in to Lobu with that ${name} account, and you will come back here to link it.</p>` +
+      `<form method="post"><input type="hidden" name="token" value="${escapeHtml(token)}"><input type="hidden" name="switch_account" value="1">` +
+      `<button class="btn" type="submit">Sign in with ${name}</button></form>`
+  );
+}
+
 function sessionAccount(user: SessionUser): string {
   return user.email || user.name || user.id;
 }
@@ -372,9 +401,12 @@ export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDep
       const provider = loginProviderForChatPlatform(claim.platform);
       return c.redirect(loginContinuation(deps.origin(c.req.raw), token, provider), 302);
     }
+    const lobuAccount = sessionAccount(session.user);
+    if (!(await signInProvesClaim(sql, session.user.id, claim))) {
+      return c.html(await unprovenPage(claim, lobuAccount, token), 403);
+    }
     const org = await organizationInfo(sql, claim.organizationId);
     const name = `<strong>${escapeHtml(org.name)}</strong>`;
-    const lobuAccount = sessionAccount(session.user);
     const isMember = Boolean(await memberRole(sql, session.user.id, claim.organizationId));
     if (!isMember && !org.isPublic) return c.html(notMemberPage(org, lobuAccount, token), 403);
     const accounts = await accountsList(claim, lobuAccount);
@@ -430,7 +462,7 @@ export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDep
         return c.html(SWITCH_FAILED_PAGE, 502);
       }
       for (const cookie of cookies) c.header('Set-Cookie', cookie, { append: true });
-      return c.redirect(loginContinuation(origin, token), 303);
+      return c.redirect(loginContinuation(origin, token, loginProviderForChatPlatform(claim.platform)), 303);
     }
 
     const session = await deps.session(c.req.raw, c.env);
@@ -448,6 +480,8 @@ export function createChatIdentityRoutes(overrides: Partial<ChatIdentityRouteDep
           )
         );
         return c.html(linkedPage(result.organization, result.joined));
+      case 'unproven':
+        return c.html(await unprovenPage(result.claim, sessionAccount(session.user), token), 403);
       case 'not_member':
         return c.html(notMemberPage(result.organization, sessionAccount(session.user), token), 403);
       case 'conflict':
