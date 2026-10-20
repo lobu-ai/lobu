@@ -171,6 +171,7 @@ interface ViewRuntime {
     name: string,
     args: Record<string, unknown>
   ) => Promise<ToolResult>;
+  openLink: (url: string) => Promise<void>;
 }
 
 const Ctx = createContext<ViewRuntime | null>(null);
@@ -197,9 +198,22 @@ export function useHost(): {
   connected: boolean;
   ready: boolean;
   theme: "light" | "dark";
+  /**
+   * Ask the host to open `url`. A path without a leading slash
+   * (`"flat/moda-3"`, a record's `<type>/<slug>`) is relative to the
+   * workspace root, a leading slash is relative to the host origin, and a
+   * full URL opens outside the app. The frame is sandboxed, so this is the
+   * only way a view navigates; rejects when the host declines.
+   */
+  openLink: (url: string) => Promise<void>;
 } {
   const rt = useRuntime();
-  return { connected: rt.connected, ready: rt.ready, theme: rt.theme };
+  return {
+    connected: rt.connected,
+    ready: rt.ready,
+    theme: rt.theme,
+    openLink: rt.openLink,
+  };
 }
 
 function resultError(result: ToolResult): string | null {
@@ -843,6 +857,13 @@ export function Provider({
     []
   );
 
+  const openLink = useCallback(async (url: string) => {
+    const b = bridgeRef.current;
+    if (!b?.isConnected()) throw new Error("Not connected to a host");
+    const error = resultError(await b.openLink(url));
+    if (error) throw new Error(error);
+  }, []);
+
   const value = useMemo<ViewRuntime>(
     () => ({
       def,
@@ -854,6 +875,7 @@ export function Provider({
       theme,
       dataVersion,
       callTool,
+      openLink,
     }),
     [
       def,
@@ -865,6 +887,7 @@ export function Provider({
       theme,
       dataVersion,
       callTool,
+      openLink,
     ]
   );
   // A host-resolved replacement is a new form, including in MCP hosts that

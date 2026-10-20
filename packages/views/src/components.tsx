@@ -23,6 +23,7 @@
 
 import type { CSSProperties, ReactNode } from "react";
 import { useId } from "react";
+import { useHost } from "./api.js";
 
 const FONT_STACK =
   'var(--font, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif)';
@@ -798,6 +799,40 @@ export function Sparkline({
         />
       )}
     </svg>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Link                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A link the host opens: `href="flat/moda-3"` opens that record in the app
+ * (workspace-relative, see `useHost().openLink`), a full URL opens a new tab.
+ * The sandboxed frame cannot navigate itself, so every click goes through the
+ * host, modifier clicks included.
+ */
+export function Link({
+  href,
+  children,
+}: {
+  href: string;
+  children: ReactNode;
+}) {
+  const { openLink } = useHost();
+  return (
+    <a
+      href={href}
+      onClick={(event) => {
+        event.preventDefault();
+        openLink(href).catch((error) =>
+          console.error("[lobu-views] link not opened", error)
+        );
+      }}
+      style={{ color: "var(--accent, #2563eb)", textDecoration: "none" }}
+    >
+      {children}
+    </a>
   );
 }
 
