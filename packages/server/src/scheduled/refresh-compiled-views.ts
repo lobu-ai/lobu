@@ -57,6 +57,10 @@ function hasSingleModuleSource(row: ViewRow): row is ViewRow & { source_files: S
 export async function refreshCompiledViews(): Promise<RefreshResult> {
   const sql = getDb();
   // The digest is computed in Postgres so the scan never pulls every bundle.
+  // `lobu apply` is the only client that ships its own bundle, and every apply
+  // write carries an `apply:` writer. If another client compiler appears, store
+  // compiler provenance on the row instead, as connectors do with
+  // `connector_versions.compile_config_hash`.
   const rows = (await sql`
     SELECT organization_id, key, name, description, source_code, source_files,
       attach, params, actions, content_hash,
