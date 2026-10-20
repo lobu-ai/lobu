@@ -82,6 +82,33 @@ describe("review persistence", () => {
     expect(created[0]?.metadata.location.precision).toBe("approximate");
   });
 
+  test("gives same-named listings distinct slugs", async () => {
+    const created: Array<Record<string, any>> = [];
+    const second = {
+      ...snapshot,
+      id: 102,
+      metadata: { ...snapshot.metadata, listing_no: "1000000002" },
+    };
+    const client = {
+      query: async (sql: string) =>
+        sql.includes("FROM events") ? [snapshot, second] : [],
+      entities: {
+        create: async (input: Record<string, any>) => {
+          created.push(input);
+          return { entity: { id: 300 + created.length } };
+        },
+      },
+    } as unknown as ReactionClient;
+    await storeReviews(
+      context([reviewItem, { ...reviewItem, listing_no: "1000000002" }]),
+      client
+    );
+    expect(created.map((c) => c.slug)).toEqual([
+      "sahibinden-1000000001",
+      "sahibinden-1000000002",
+    ]);
+  });
+
   test("preserves other listing links and matches IDs within their portal", async () => {
     const other = {
       portal: "other",

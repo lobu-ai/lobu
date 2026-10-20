@@ -240,6 +240,9 @@ export default async function storeListingReviews(
       await client.entities.create({
         entity_type: "asset",
         name: review.name,
+        // Names repeat across listings ("2+1 flat, Andifli – Kaş"); the
+        // listing number keeps the slug unique.
+        slug: `sahibinden-${review.listing_no}`,
         metadata: {
           ...judged,
           stage: "new",
