@@ -47,6 +47,7 @@ import {
   NOTIFICATION_DELIVERY_TASK,
   INTERACTIVE_EVENT_CARD_REFRESH_TASK,
   WORKSPACE_EVENT_ACTIVATION_TASK,
+  REFRESH_COMPILED_VIEWS_TASK,
   WORKSPACE_PURGE_TASK,
 } from './task-definitions';
 import { triggerEmbedBackfill } from './trigger-embed-backfill';
@@ -397,7 +398,7 @@ function registerMaintenanceTasks(
   // before them. Idempotent: an unchanged bundle is never rewritten. Same boot
   // + follow-up + hourly backstop shape as the connector-definition refresh.
   scheduler.register(
-    'refresh-compiled-views',
+    REFRESH_COMPILED_VIEWS_TASK,
     async () => {
       const result = await refreshCompiledViews();
       if (result.refreshed > 0 || result.errored > 0) {

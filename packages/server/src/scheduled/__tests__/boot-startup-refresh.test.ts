@@ -18,6 +18,7 @@ import * as refreshModule from "../refresh-connector-definitions";
 import * as viewRefreshModule from "../refresh-compiled-views";
 
 interface SentRecord {
+  queueName?: string;
   name: string;
   singletonKey?: string;
 }
@@ -25,8 +26,8 @@ interface SentRecord {
 /** Simulates another process claiming all shared queue work. */
 function makeQueueDrainedElsewhere(sent: SentRecord[]): IMessageQueue {
   return {
-    send: (async (_queueName: string, data: unknown, opts?: { singletonKey?: string }) => {
-      sent.push({ name: (data as { name?: string })?.name ?? "", singletonKey: opts?.singletonKey });
+    send: (async (queueName: string, data: unknown, opts?: { singletonKey?: string }) => {
+      sent.push({ queueName, name: (data as { name?: string })?.name ?? "", singletonKey: opts?.singletonKey });
       return String(sent.length);
     }) as IMessageQueue["send"],
     work: (async () => {}) as IMessageQueue["work"],
@@ -71,9 +72,11 @@ describe("bootTaskScheduler startup refresh", () => {
       await delayed[0]();
       expect(views).toHaveBeenCalledTimes(2);
       expect(scheduler.hasHandler("refresh-compiled-views")).toBe(true);
+      // Its own lane: an older replica working the shared `task` lane during a
+      // rollout must not claim a handler it does not have.
       expect(
-        sent.some((r) => r.singletonKey?.startsWith("cron:refresh-compiled-views:")),
-      ).toBe(true);
+        sent.filter((r) => r.singletonKey?.startsWith("cron:refresh-compiled-views:")).map((r) => r.queueName),
+      ).toEqual(["task:refresh-compiled-views"]);
     } finally {
       runOnceAfter.mockRestore();
       scheduler.stop();
@@ -117,6 +120,7 @@ describe("bootTaskScheduler startup refresh", () => {
       expect(
         sent.filter((r) => r.name === "refresh-connector-definitions"),
       ).toEqual([{
+        queueName: "task",
         name: "refresh-connector-definitions",
         singletonKey: expect.stringMatching(/^cron:refresh-connector-definitions:/),
       }]);
@@ -204,6 +208,7 @@ describe("bootTaskScheduler startup refresh", () => {
       expect(
         sent.filter((r) => r.name === "refresh-connector-definitions"),
       ).toEqual([{
+        queueName: "task",
         name: "refresh-connector-definitions",
         singletonKey: expect.stringMatching(/^cron:refresh-connector-definitions:/),
       }]);

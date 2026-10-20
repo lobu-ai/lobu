@@ -18,6 +18,8 @@ export const AUTOMATION_SCRIPT_TASK = 'automation-script';
 export const SOURCE_FEED_LISTENER_TASK = 'source-feed-listener';
 export const WORKSPACE_PURGE_TASK = 'workspace-purge';
 const WORKSPACE_PURGE_TASK_QUEUE = `task:${WORKSPACE_PURGE_TASK}`;
+export const REFRESH_COMPILED_VIEWS_TASK = 'refresh-compiled-views';
+const REFRESH_COMPILED_VIEWS_TASK_QUEUE = `task:${REFRESH_COMPILED_VIEWS_TASK}`;
 const SOURCE_FEED_LISTENER_TASK_QUEUE = `task:${SOURCE_FEED_LISTENER_TASK}`;
 export const AUTOMATION_REACTION_TASK_QUEUE =
   `task:${AUTOMATION_REACTION_TASK}`;
@@ -47,6 +49,9 @@ export function taskQueueName(name: string): string {
   }
   if (name === WORKSPACE_PURGE_TASK) {
     return WORKSPACE_PURGE_TASK_QUEUE;
+  }
+  if (name === REFRESH_COMPILED_VIEWS_TASK) {
+    return REFRESH_COMPILED_VIEWS_TASK_QUEUE;
   }
   return name === AUTOMATION_REACTION_TASK
     ? AUTOMATION_REACTION_TASK_QUEUE
