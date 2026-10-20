@@ -80,7 +80,7 @@ export default class RedditConnector extends ConnectorRuntime {
     key: 'reddit',
     name: 'Reddit',
     description: 'Fetches posts and comments from Reddit subreddits or search queries.',
-    version: '1.0.0',
+    version: '1.1.0',
     faviconDomain: 'reddit.com',
     authSchema: {
       methods: [
@@ -88,6 +88,7 @@ export default class RedditConnector extends ConnectorRuntime {
           type: 'oauth',
           provider: 'reddit',
           requiredScopes: ['identity', 'read', 'history'],
+          loginScopes: ['identity'],
           setupInstructions:
             'Create a Reddit app at https://www.reddit.com/prefs/apps — choose "web app" as the type. Set the redirect URI to {{redirect_uri}}, then copy the client ID and secret below.',
         },

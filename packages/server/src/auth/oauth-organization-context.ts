@@ -1,5 +1,6 @@
 import { HTTPException } from "hono/http-exception";
 import { getDb } from "../db/client";
+import { getBuiltinProviderConfig } from "../connect/oauth-providers";
 
 const CONTEXT_KEY = "lobuOAuthContext";
 
@@ -48,6 +49,24 @@ export async function resolveOAuthCallbackOrganization(
 
   let provider: string;
   try { provider = decodeURIComponent(match[1]); } catch { return invalidState(); }
+  const context = await readOAuthCallbackContext(request, provider);
+  return context ? context.organizationId : invalidState();
+}
+
+/** Reuse the registered connect callback without trusting a query-supplied provider. */
+export async function resolveSharedOAuthCallbackRequest(request: Request): Promise<Request | null> {
+  const context = await readOAuthCallbackContext(request);
+  if (!context || !getBuiltinProviderConfig(context.provider)?.sharedLoginCallback) return null;
+  const url = new URL(request.url);
+  url.pathname = `/api/auth/callback/${encodeURIComponent(context.provider)}`;
+  return new Request(url, request);
+}
+
+async function readOAuthCallbackContext(
+  request: Request,
+  expectedProvider?: string,
+): Promise<{ organizationId: string | null; provider: string } | null> {
+  const url = new URL(request.url);
   // Better Auth's built-in POST callback redirects to GET, with query overriding body.
   const states = url.searchParams.getAll("state");
   if (states.length > 1) return invalidState();
@@ -73,7 +92,7 @@ export async function resolveOAuthCallbackOrganization(
     WHERE identifier = ${state} AND "expiresAt" > NOW()
     ORDER BY "createdAt" DESC LIMIT 1
   `;
-  if (!verification) return invalidState();
+  if (!verification) return null;
   let payload;
   try { payload = JSON.parse(verification.value); } catch { return invalidState(); }
   const context = payload?.[CONTEXT_KEY];
@@ -81,7 +100,8 @@ export async function resolveOAuthCallbackOrganization(
     !payload || payload.oauthState !== state ||
     typeof payload.expiresAt !== "number" || !Number.isFinite(payload.expiresAt) ||
     payload.expiresAt <= Date.now() ||
-    !context || context.provider !== provider ||
+    !context || typeof context.provider !== "string" || !context.provider ||
+    (expectedProvider !== undefined && context.provider !== expectedProvider) ||
     !(context.organizationId === null || (typeof context.organizationId === "string" && context.organizationId))
   ) return invalidState();
 
@@ -91,5 +111,5 @@ export async function resolveOAuthCallbackOrganization(
   }
   // Do not consume state here. Better Auth still verifies the signed state cookie
   // and consumes the verification before exchanging the authorization code.
-  return context.organizationId;
+  return context;
 }
