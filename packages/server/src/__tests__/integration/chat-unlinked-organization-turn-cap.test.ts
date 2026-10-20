@@ -13,12 +13,13 @@ import { createTestOrganization } from '../setup/test-fixtures';
 
 type Admit = (args: {
   organizationId: string | undefined;
+  channelId: string;
   userId: string;
   teamId: string | undefined;
   isDirect: boolean;
   senderVouched: boolean;
   thread: { post: () => Promise<void> };
-}) => Promise<{ accessNoticePosted: boolean } | null>;
+}) => Promise<boolean>;
 
 function bridgeWithTier(
   organizationId: string,
@@ -43,12 +44,13 @@ function bridgeWithTier(
   return (senderId: string) =>
     admit({
       organizationId,
+      channelId: 'C0SYNTHCAP',
       userId: senderId,
       teamId: 'T0SYNTHCAP',
       isDirect: false,
       senderVouched: false,
       thread: { post },
-    }).then((admission) => admission !== null);
+    });
 }
 
 describe('workspace-wide cap on unlinked chat turns', () => {

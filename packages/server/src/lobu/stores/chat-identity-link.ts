@@ -36,6 +36,17 @@ export interface ChatIdentityLinkClaim {
 	identityKey: string;
 	/** Platform display name, shown on the confirmation page only. */
 	senderDisplayName: string | null;
+	/**
+	 * The conversation the link was offered in, where the redeem route posts
+	 * its confirmation. Absent on a claim that has nowhere to confirm.
+	 */
+	replyTarget?: ChatIdentityLinkReplyTarget;
+}
+
+/** A chat conversation on the claim's connection, as the chat bridge saw it. */
+interface ChatIdentityLinkReplyTarget {
+	channelId: string;
+	threadId?: string;
 }
 
 function chatIdentityLinkTokenHash(token: string): string {
@@ -70,6 +81,7 @@ export async function mintChatIdentityLink(
 		teamId: string | undefined;
 		senderId: string;
 		senderDisplayName?: string;
+		replyTarget?: ChatIdentityLinkReplyTarget;
 	},
 	sql: DbClient = getDb(),
 ): Promise<string | null> {
@@ -84,6 +96,7 @@ export async function mintChatIdentityLink(
 		senderId: args.senderId,
 		identityKey: key.identityKey,
 		senderDisplayName: args.senderDisplayName?.slice(0, 200) || null,
+		...(args.replyTarget && { replyTarget: args.replyTarget }),
 	};
 	const expiresAt = new Date(Date.now() + CHAT_IDENTITY_LINK_TTL_SECONDS * 1000);
 	await sql`

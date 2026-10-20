@@ -20,6 +20,7 @@ import { upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
 import { CommandRegistry, verifyWorkerToken } from "@lobu/core";
 import { sessionCookieName } from "../../../auth/session-cookie-scope";
 import { createChatIdentityRoutes } from "../../../connect/chat-identity-routes";
+import { __setChatInstanceManagerForTests } from "../../../lobu/gateway";
 import { ChatInstanceManager } from "../../../gateway/connections/chat-instance-manager";
 import { ChatResponseBridge } from "../../../gateway/connections/chat-response-bridge";
 import { handleChatSourceIngress } from "../../../gateway/connections/chat-source-ingress";
@@ -265,6 +266,7 @@ describe("X source chat", () => {
   afterEach(async () => {
     await queue?.stop();
     queue = null;
+    __setChatInstanceManagerForTests(undefined);
     resetRateLimiterForTests();
     vi.restoreAllMocks();
   });
@@ -293,8 +295,6 @@ describe("X source chat", () => {
     expect(String(sends[0].input.text)).toContain("I can't use this workspace's tools for you");
     expect(String(sends[0].input.text)).toContain("/connect/chat-identity?token=");
     expect(await mintedClaims(enqueued[0])).toMatchObject({ userId: PEER, chatAccess: "reply_only" });
-    // The turn learns the notice went out, so its reply does not repeat it.
-    expect(enqueued[0].platformMetadata.accessNoticePosted).toBe(true);
 
     await completeTurns();
     expect(replies()).toHaveLength(1);
@@ -323,12 +323,15 @@ describe("X source chat", () => {
     expect(enqueued).toHaveLength(1);
     expect(await mintedClaims(enqueued[0])).toMatchObject({ userId: PEER, chatAccess: "reply_only" });
     expect(sends).toHaveLength(1);
+    expect(sends[0].input.text).toMatch(/^I can't use this workspace's tools for you yet\. If you're a member, connect your Lobu account: /);
     const token = String(sends[0].input.text).match(/\/connect\/chat-identity\?token=([A-Za-z0-9_-]+)/)?.[1];
     expect(token).toBeTruthy();
     expect(await readChatIdentityLink(token!)).toMatchObject({
       organizationId: orgId, connectionId: String(connectionId), platform: "x", senderId: PEER,
     });
     await completeTurns();
+    sends.length = 0;
+    __setChatInstanceManagerForTests(manager);
 
     const routes = createChatIdentityRoutes({
       session: async () => ({ user: member }),
@@ -346,6 +349,13 @@ describe("X source chat", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toContain("Chat account linked");
     expect(await readChatIdentityLink(token!)).toBeNull();
+    // The chat hears it too, in the DM the link was offered in, through the
+    // same connection's send.
+    await expect.poll(() => sends.length, { timeout: 10_000, interval: 50 }).toBe(1);
+    expect(sends[0].input).toMatchObject({
+      conversation_id: DM,
+      text: "You're connected. Messages you send me here now act as you in X source chat.",
+    });
     expect(await resolveChatUserIdentity("x", undefined, PEER, orgId)).toBe(member.id);
     expect(await resolveChatUserIdentity("x", undefined, PEER, otherOrg.id)).toBeNull();
     expect(await resolveChatUserIdentity("x", undefined, PEER)).toBeNull();
@@ -360,7 +370,6 @@ describe("X source chat", () => {
     expect(await mintedClaims(enqueued[0])).toMatchObject({
       userId: PEER, chatAccess: "member", actorUserId: member.id,
     });
-    expect(enqueued[0].platformMetadata.accessNoticePosted).toBeUndefined();
 
     await completeTurns();
     expect(sends).toHaveLength(1);
@@ -384,8 +393,6 @@ describe("X source chat", () => {
     expect(enqueued).toHaveLength(1);
     expect(sends).toHaveLength(0);
     expect(failedNotice).toContain("/connect/chat-identity?token=");
-    // The notice never reached the sender, so the turn is not told it did.
-    expect(enqueued[0].platformMetadata.accessNoticePosted).toBeUndefined();
     await completeTurns();
     expect(replies()).toHaveLength(1);
 
@@ -399,7 +406,6 @@ describe("X source chat", () => {
     expect(sends).toHaveLength(1);
     expect(String(sends[0].input.text)).toContain("/connect/chat-identity?token=");
     expect(sends[0].input.text).not.toBe(failedNotice);
-    expect(enqueued[0].platformMetadata.accessNoticePosted).toBe(true);
   }, 60_000);
 
   it("answers a message request like any other DM", async () => {

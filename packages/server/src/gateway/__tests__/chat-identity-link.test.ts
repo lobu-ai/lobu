@@ -52,6 +52,8 @@ import {
 import { CHAT_IDENTITY_LINK_SCOPE, CHAT_IDENTITY_LINK_TTL_SECONDS, mintChatIdentityLink } from "../../lobu/stores/chat-identity-link.js";
 import { resolveMemberOrgsForUser } from "../../identity/member-orgs.js";
 import { resetRateLimiterForTests } from "../../utils/rate-limiter.js";
+import { __setChatInstanceManagerForTests } from "../../lobu/gateway.js";
+import { ChatInstanceManager } from "../connections/chat-instance-manager.js";
 import { gchatPlatform } from "../connections/platforms/gchat.js";
 import { resolveClaimingUserSlackIdentities } from "../connections/slack-claim-identities.js";
 import { createConnectedGatewayStateAdapter } from "../connections/state-adapter.js";
@@ -711,9 +713,15 @@ describe("Google Chat DM -> chat identity link -> member turn", () => {
       updatedAt: 1,
     };
     bridge = await startAssembledChatBridge(chat, state, connection);
+    // The production post path, on an instance this "replica" already runs.
+    __setChatInstanceManagerForTests(Object.assign(Object.create(ChatInstanceManager.prototype), {
+      ensureConnectionRunning: async () => true,
+      instances: new Map([[RUNTIME_CONNECTION_ID, { chat, connection }]]),
+    }));
   });
 
   afterEach(async () => {
+    __setChatInstanceManagerForTests(undefined);
     await bridge?.stop();
   });
 
@@ -721,7 +729,7 @@ describe("Google Chat DM -> chat identity link -> member turn", () => {
     expect(await deliver(directMessage("dm-1", "hello?"))).toBe(200);
     await waitFor(() => expect(created).toHaveLength(1));
     const notice = String(created[0]?.requestBody?.text);
-    expect(notice).toContain("Ask an admin of this workspace to invite you");
+    expect(notice).toContain("If you're a member, connect your Lobu account: ");
     const match = notice.match(/https:\/\/gateway\.example\.test\/connect\/chat-identity\?token=([^\s]+)/);
     expect(match).not.toBeNull();
     const token = decodeURIComponent(match![1]!);
@@ -734,6 +742,12 @@ describe("Google Chat DM -> chat identity link -> member turn", () => {
 
     expect((await routesAs(member).request(pageUrl(token))).status).toBe(200);
     expect((await submit(member, token)).status).toBe(200);
+    // The DM the link was offered in hears that it worked.
+    await waitFor(() => expect(created).toHaveLength(2));
+    expect(created[1]?.parent).toBe(DM_SPACE);
+    expect(created[1]?.requestBody?.text).toBe(
+      "You're connected. Messages you send me here now act as you in Acme Synthetic.",
+    );
 
     expect(await deliver(directMessage("dm-2", "now what's on my plate?"))).toBe(200);
     await waitFor(async () => {
@@ -741,7 +755,7 @@ describe("Google Chat DM -> chat identity link -> member turn", () => {
     });
     expect(await mintNewestTurn()).toMatchObject({ chatAccess: "member", actorUserId: member.id });
     // A linked member gets no further notices.
-    expect(created).toHaveLength(1);
+    expect(created).toHaveLength(2);
   });
 
   test("a group notice contains no link and does not suppress the next DM link", async () => {
