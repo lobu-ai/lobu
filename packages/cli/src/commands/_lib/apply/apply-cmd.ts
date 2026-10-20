@@ -1745,8 +1745,12 @@ async function applyProject(
   // Provider API keys live outside the resource diff (the secret value isn't
   // serialized into any plan row), so a key-only `.env` change produces an
   // all-noop plan. Detect declared keys so the apply isn't short-circuited and
-  // the keys aren't silently dropped.
-  const hasProviderKeys = state.agents.some((a) => a.providerKeys.length > 0);
+  // the keys aren't silently dropped. Keys are declared on agents, so they
+  // belong to the agents family: `--only memory` must never push one (a push
+  // can create the org provider row).
+  const hasProviderKeys =
+    opts.only !== "memory" &&
+    state.agents.some((a) => a.providerKeys.length > 0);
 
   if (
     plan.counts.create === 0 &&
