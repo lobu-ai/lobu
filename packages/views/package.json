@@ -15,6 +15,16 @@
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
       }
+    },
+    "./components": {
+      "import": {
+        "types": "./dist/components.d.ts",
+        "default": "./dist/components.js"
+      },
+      "require": {
+        "types": "./dist/components.d.ts",
+        "default": "./dist/components.js"
+      }
     }
   },
   "files": [
