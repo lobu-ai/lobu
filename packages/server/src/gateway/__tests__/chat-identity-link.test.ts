@@ -23,6 +23,7 @@ import {
 import { verifyWorkerToken } from "@lobu/core";
 import { Chat, type StateAdapter } from "chat";
 import { createTestAutomationSubscription } from "../../__tests__/setup/automation-subscriptions.js";
+import { loginProviderForChatPlatform } from "../../auth/chat-login-identities.js";
 import {
   addUserToOrganization,
   createTestConnectorDefinition,
@@ -239,14 +240,26 @@ describe("chat identity link routes", () => {
     expect(await identityRows(ORG_A)).toHaveLength(0);
   });
 
-  test("GET signed out goes through login and comes back to the same link", async () => {
+  test("GET signed out signs in with the chat platform's own login and comes back to the same link", async () => {
     const token = (await mint())!;
     const res = await routesAs(null).request(pageUrl(token));
     expect(res.status).toBe(302);
-    const location = res.headers.get("location") ?? "";
-    expect(location.startsWith("/auth/login?callbackUrl=")).toBe(true);
-    expect(decodeURIComponent(location)).toContain(pageUrl(token));
+    const location = new URL(res.headers.get("location") ?? "", "https://lobu.example");
+    expect(location.pathname).toBe("/auth/login");
+    // Google Chat's login provider: signing in with it also proves the chat identity.
+    expect(location.searchParams.get("provider")).toBe("google");
+    expect(location.searchParams.get("callbackUrl")).toContain(pageUrl(token));
     expect(await claimCount()).toBe(1);
+  });
+
+  test.each([
+    ["slack", "slack"],
+    ["gchat", "google"],
+    ["x", "twitter"],
+    ["whatsapp.web", null],
+    ["linkedin", null],
+  ])("a %s link signs in with login provider %s", (platform, provider) => {
+    expect(loginProviderForChatPlatform(platform)).toBe(provider);
   });
 
   test("POST without the same-origin browser session is refused and links nothing", async () => {
