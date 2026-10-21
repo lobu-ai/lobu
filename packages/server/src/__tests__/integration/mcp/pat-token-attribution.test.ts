@@ -178,6 +178,28 @@ describe('PAT calls name their token in the feed', () => {
     expect((await auditRowFor(org.id, firstSql)).metadata.token_name).toBe('before-rename');
   });
 
+  it.each(['pat', 'oauth'] as const)('attributes a %s save_memory without an FK retry', async (tokenType) => {
+    const warn = vi.spyOn(logger, 'warn');
+    const response = await post(`/api/${org.slug}/save_memory`, {
+      token: tokenType === 'oauth' ? oauthToken : patToken,
+      body: { content: `Synthetic ${tokenType} note for client id coverage`, semantic_type: 'note' },
+    });
+    const body = (await response.json()) as { id?: number | string };
+    expect(response.status, JSON.stringify(body)).toBe(200);
+    const [saved] = await getDb()<{ client_id: string | null; created_by: string | null }[]>`
+      SELECT client_id, created_by FROM events WHERE id = ${Number(body.id)}
+    `;
+    expect(saved).toEqual({
+      client_id: tokenType === 'oauth' ? oauthClientId : null,
+      created_by: ownerId,
+    });
+    expect(
+      warn.mock.calls.some((call) =>
+        call.some((part) => typeof part === 'string' && part.includes('retrying insert with client_id NULL'))
+      )
+    ).toBe(false);
+  });
+
   it('leaves OAuth audit rows on their registered client', async () => {
     const sqlText = 'SELECT 1 AS oauth_probe';
     const response = await post(`/api/${org.slug}/query_sql`, {

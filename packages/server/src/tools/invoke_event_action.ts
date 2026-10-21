@@ -8,6 +8,7 @@ import { requireWorkspaceContext } from "./access-control";
 import type { AccountToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
 import { assertTemplateActionCapability } from "../interactions/template-action-capability";
+import { eventClientId } from "../auth/event-client-id";
 
 export const InvokeEventActionSchema = Type.Object(
 	{
@@ -60,7 +61,7 @@ async function invokeEventActionImpl(
 			platformUserId: ctx.userId,
 			userId: ctx.userId,
 		},
-		source: { clientId: ctx.clientId ?? null },
+		source: { clientId: eventClientId(ctx) },
 	});
 	recordWorkspaceActivity(ctx, target.organizationId, "invoke_event_action");
 	return {

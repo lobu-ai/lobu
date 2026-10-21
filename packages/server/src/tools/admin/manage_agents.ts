@@ -78,6 +78,7 @@ import type { ToolContext } from '../registry';
 import { validateToolArgs } from '../validate-args';
 import { getOrgUrlContext } from '../view-urls';
 import { action, defineActionTool } from './action-tool';
+import { eventClientId } from '../../auth/event-client-id';
 
 export { ManageAgentsSchema };
 export type { ManageAgentsProposal };
@@ -755,7 +756,7 @@ async function queueWriteForApproval(
           ...currentMcpActivityEventMetadata(ctx),
         },
         authorName: ctx.clientId ?? 'agent',
-        clientId: ctx.tokenType === 'oauth' ? (ctx.clientId ?? null) : null,
+        clientId: eventClientId(ctx),
       },
       { sql: tx },
     );

@@ -7,6 +7,7 @@ import logger from '../utils/logger';
 import { sanitizeAuditArgs } from './audit-args';
 import { AUDIT_SEMANTIC_TYPE } from './constants';
 import { getTool, type ToolContext } from './registry';
+import { eventClientId } from '../auth/event-client-id';
 
 const MAX_PREVIEW_CHARS = 500;
 const MAX_REQUEST_BYTES = 256 * 1024;
@@ -316,16 +317,6 @@ function patTokenNameMetadata(
   return name ? { token_name: name } : {};
 }
 
-/**
- * `events.client_id` references `oauth_clients`, so only an OAuth caller's
- * client id belongs there. A PAT's `pat_<id>` and the worker lane's
- * `lobu-worker` have no row: writing them fails the foreign key and the insert
- * retries with NULL on every call.
- */
-function auditClientId(ctx: ToolInvocationAuditParams['ctx']): string | null {
-  return ctx.tokenType === 'oauth' ? (ctx.clientId ?? null) : null;
-}
-
 export async function recordToolInvocationAudit(
   params: ToolInvocationAuditParams
 ): Promise<void> {
@@ -368,7 +359,7 @@ export async function recordToolInvocationAudit(
         ...currentMcpActivityEventMetadata(params.ctx),
       },
       createdBy: params.ctx.userId ?? null,
-      clientId: auditClientId(params.ctx),
+      clientId: eventClientId(params.ctx),
     }, {
       // Reads are tool calls too; invalidating content for their audit row
       // would make each client refetch trigger the next one.
@@ -419,7 +410,7 @@ export async function recordWorkspaceActivityAudit(params: {
           ...currentMcpActivityEventMetadata(params.ctx),
         },
         createdBy: params.ctx.userId ?? null,
-        clientId: auditClientId(params.ctx),
+        clientId: eventClientId(params.ctx),
       }, { notifyContentChange: false });
     } catch (auditError) {
       logger.warn(

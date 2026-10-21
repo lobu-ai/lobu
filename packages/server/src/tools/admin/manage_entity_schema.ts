@@ -85,6 +85,7 @@ import { withValidatedArgs } from '../validate-args';
 import { getOrgUrlContext } from '../view-urls';
 import { resolveApprovalChatOrigin } from './approval-delivery';
 import { defineFlatActionTool, flatAction } from './action-tool';
+import { eventClientId } from '../../auth/event-client-id';
 
 export { ManageEntitySchemaResultSchema, ManageEntitySchemaSchema };
 
@@ -801,7 +802,7 @@ async function governEntitySchemaMutation(
           ...currentMcpActivityEventMetadata(ctx),
         },
         authorName: ctx.clientId ?? 'MCP client',
-        clientId: ctx.tokenType === 'oauth' ? (ctx.clientId ?? null) : null,
+        clientId: eventClientId(ctx),
       },
       { sql: tx }
     );

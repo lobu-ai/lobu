@@ -59,6 +59,7 @@ import logger from "./utils/logger";
 import { enforcePublicReadLimit, getClientIP } from "./utils/rate-limiter";
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from "./utils/run-statuses";
 import { getRuntimeInfo } from "./utils/runtime-info";
+import { eventClientId } from "./auth/event-client-id";
 
 type GetAutomationArgs = Parameters<typeof getAutomation>[0];
 
@@ -411,7 +412,7 @@ export async function restInvokeEventAction(c: Context<{ Bindings: Env }>) {
 				platformUserId: ctx.userId,
 				userId: ctx.userId,
 			},
-			source: { clientId: ctx.clientId ?? null },
+			source: { clientId: eventClientId(ctx) },
 		});
 		return c.json(
 			toJsonSafe({
@@ -529,7 +530,7 @@ export async function restInvokeViewAction(c: Context<{ Bindings: Env }>) {
 				platformUserId: ctx.userId,
 				userId: ctx.userId,
 			},
-			source: { clientId: ctx.clientId ?? null },
+			source: { clientId: eventClientId(ctx) },
 		});
 		return c.json(
 			toJsonSafe({

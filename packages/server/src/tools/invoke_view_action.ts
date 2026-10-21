@@ -9,6 +9,7 @@ import { ToolUserError } from "../utils/errors";
 import {
 	InvokeEventActionResultSchema,
 } from "./invoke_event_action";
+import { eventClientId } from "../auth/event-client-id";
 
 export const ViewActionScopeSchema = Type.Object({
 	event: Type.Integer({ minimum: 1, description: "Exact stored event version shown by the view." }),
@@ -58,7 +59,7 @@ async function invokeViewActionImpl(
 			platformUserId: ctx.userId,
 			userId: ctx.userId,
 		},
-		source: { clientId: ctx.clientId ?? null },
+		source: { clientId: eventClientId(ctx) },
 	});
 	return {
 		created: result.created,

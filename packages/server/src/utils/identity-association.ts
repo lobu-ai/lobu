@@ -11,6 +11,7 @@ import { insertEdgeChangeEventInTransaction, stableJson } from './insert-event';
 import { requireWriteAccess } from './organization-access';
 import { assertManualRelationshipClaim, assertNoReservedRelationshipMetadata, lockOrganizationForRelationshipClaims, IDENTITY_DECISION_METADATA_KEY } from './relationship-claims';
 import { lockIdentityOrganization, validateTypeRule, withIdentityPrivilege } from './relationship-validation';
+import { eventClientId } from '../auth/event-client-id';
 
 const SUPPORT_VERSION = 1;
 const digest = (value: unknown) => createHash('sha256').update(stableJson(value)).digest('hex');
@@ -446,7 +447,7 @@ export async function decideIdentityAssociation(db: DbClient, input: IdentityAss
     relationshipTypeSlug: input.relationship_type_slug, op: input.operation,
     changes: [{ field: 'exists', old: input.operation === 'unlink', new: input.operation === 'link' },
       { field: IDENTITY_DECISION_METADATA_KEY, old: existing?.metadata[IDENTITY_DECISION_METADATA_KEY] ?? null, new: decision }],
-    createdBy: ctx.userId, clientId: ctx.clientId }, db);
+    createdBy: ctx.userId, clientId: eventClientId(ctx) }, db);
   return { outcome: 'apply', reason, relationshipId };
 }
 

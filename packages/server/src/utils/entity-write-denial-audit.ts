@@ -9,6 +9,7 @@ import { insertConnectionlessAuditEvent } from "./insert-event";
 import logger from "./logger";
 import { isUniqueViolation } from "./pg-errors";
 import { stripNul } from "./strip-nul";
+import { eventClientId } from "../auth/event-client-id";
 
 export interface EntityWriteDenialDescription {
 	denialSource: "policy" | "rule";
@@ -80,7 +81,7 @@ export async function recordEntityWriteDenial(
 	} = params;
 	const runId = params.runId ?? ctx?.actingRunId ?? null;
 	const createdBy = params.createdBy ?? ctx?.userId ?? null;
-	const clientId = params.clientId ?? ctx?.clientId ?? null;
+	const clientId = params.clientId ?? (ctx ? eventClientId(ctx) : null);
 	const sameOrgEntityIds =
 		entityId !== null && entityOrganizationId === organizationId
 			? [entityId]
