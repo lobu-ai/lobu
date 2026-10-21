@@ -446,7 +446,7 @@ function isSemanticallyEqual(
     // place by applyVolatileState instead of minting a new stored version.
     durableMetadataState(existing.metadata) === durableMetadataState(params.metadata) &&
     // Compare the value a supersede would WRITE: a null parentOriginId copies
-    // the predecessor's parent (loadEventLineage), so only a caller-supplied
+    // the predecessor's parent (EVENT_SUPERSEDE_RULES), so only a caller-supplied
     // parent can differ. Comparing the raw param would re-supersede a
     // copied-parent head on every parentless re-sync, forever.
     (params.parentOriginId == null ||
@@ -558,77 +558,119 @@ async function upsertEmbedding(
   }
 }
 
-type EventLineage = {
-  connectorKey: string | null;
-  connectionId: number | null;
-  feedKey: string | null;
-  feedId: number | null;
-  runId: number | null;
-  automationId: number | null;
-  automationVersionId: number | null;
-  parentOriginId: string | null;
-  identityNs: string | null;
-  identityKey: string | null;
-};
+/**
+ * What a new stored version takes from the row it supersedes, for every
+ * `events` column:
+ * - `chain`: always the predecessor's. Source and identity belong to the
+ *   chain; identity cannot first appear on a successor because uniqueness is
+ *   rooted at supersedes_event_id NULL.
+ * - `lineage`: the caller's value, else the predecessor's. Omit or null cannot
+ *   drop it; a later value restamps this version (new run, prompt version, or
+ *   the client that wrote it). Browser containment may redact the inherited
+ *   parent before insertion.
+ * - `version`: this write's own value, or one the insert derives.
+ *
+ * Every column is listed so that a new one is a decision rather than a silent
+ * drop; `insert-event-lineage.test.ts` compares this map with the live table.
+ */
+export const EVENT_SUPERSEDE_RULES = {
+  id: 'version',
+  organization_id: 'version',
+  entity_ids: 'version',
+  origin_id: 'version',
+  title: 'version',
+  payload_type: 'version',
+  payload_text: 'version',
+  payload_data: 'version',
+  payload_template: 'version',
+  attachments: 'version',
+  metadata: 'version',
+  score: 'version',
+  author_name: 'version',
+  source_url: 'version',
+  occurred_at: 'version',
+  created_at: 'version',
+  origin_parent_id: 'lineage',
+  origin_type: 'version',
+  connector_key: 'chain',
+  connection_id: 'chain',
+  feed_key: 'chain',
+  feed_id: 'chain',
+  run_id: 'lineage',
+  automation_id: 'lineage',
+  automation_version_id: 'lineage',
+  semantic_type: 'version',
+  client_id: 'lineage',
+  created_by: 'version',
+  interaction_type: 'version',
+  interaction_status: 'version',
+  interaction_input_schema: 'version',
+  interaction_input: 'version',
+  interaction_output: 'version',
+  interaction_error: 'version',
+  supersedes_event_id: 'version',
+  superseded_by: 'version',
+  content_length: 'version',
+  search_tsv: 'version',
+  identity_ns: 'chain',
+  identity_key: 'chain',
+  linked_org_ids: 'version',
+} as const satisfies Record<string, 'chain' | 'lineage' | 'version'>;
 
-function nullableNumber(value: number | string | null): number | null {
-  return value == null ? null : Number(value);
+type SupersedeRules = typeof EVENT_SUPERSEDE_RULES;
+type InheritedColumn = {
+  [C in keyof SupersedeRules]: SupersedeRules[C] extends 'version' ? never : C;
+}[keyof SupersedeRules];
+type EventLineage = Record<InheritedColumn, string | number | null>;
+
+const INHERITED_COLUMNS = (Object.keys(EVENT_SUPERSEDE_RULES) as Array<keyof SupersedeRules>)
+  .filter((column): column is InheritedColumn => EVENT_SUPERSEDE_RULES[column] !== 'version');
+
+function requestedLineage(params: InsertEventParams): EventLineage {
+  return {
+    origin_parent_id: params.parentOriginId ?? null,
+    connector_key: params.connectorKey ?? null,
+    connection_id: params.connectionId ?? null,
+    feed_key: params.feedKey ?? null,
+    feed_id: params.feedId ?? null,
+    run_id: params.runId ?? null,
+    automation_id: params.automationId ?? null,
+    automation_version_id: params.automationVersionId ?? null,
+    client_id: params.clientId ?? null,
+    identity_ns: params.identity?.ns ?? null,
+    identity_key: params.identity?.key ?? null,
+  };
 }
 
-/**
- * Resolve lineage for a new stored version. Connector/feed and identity belong
- * to the chain and are always copied. Producer, run, and parent copy unless
- * the caller supplies a replacement value — null cannot clear them; browser
- * containment may redact the inherited parent before insertion. Identity
- * cannot first appear on a successor: uniqueness is rooted at
- * supersedes_event_id NULL.
- */
-async function loadEventLineage(
+async function loadPredecessorLineage(
   sql: DbClient,
   supersedesEventId: number,
-  params: InsertEventParams
+  organizationId: string | null
 ): Promise<EventLineage> {
-  const rows = await sql`
-    SELECT connector_key, connection_id, feed_key, feed_id, run_id,
-           automation_id, automation_version_id, origin_parent_id,
-           identity_ns, identity_key
-    FROM events
-    WHERE id = ${supersedesEventId}
-      AND organization_id = ${params.organizationId}
-    LIMIT 1
-  `;
-  const prior = rows[0] as
-    | {
-        connector_key: string | null;
-        connection_id: number | string | null;
-        feed_key: string | null;
-        feed_id: number | string | null;
-        run_id: number | string | null;
-        automation_id: number | string | null;
-        automation_version_id: number | string | null;
-        origin_parent_id: string | null;
-        identity_ns: string | null;
-        identity_key: string | null;
-      }
-    | undefined;
-  if (!prior) {
+  // The column list is the fixed INHERITED_COLUMNS constant, never input.
+  const rows = (await sql.unsafe(
+    `SELECT ${INHERITED_COLUMNS.join(', ')} FROM events
+     WHERE id = $1 AND organization_id = $2
+     LIMIT 1`,
+    [supersedesEventId, organizationId]
+  )) as EventLineage[];
+  if (!rows[0]) {
     throw new Error(
-      `insertEvent: cannot supersede event ${supersedesEventId} — not found in organization ${params.organizationId}`
+      `insertEvent: cannot supersede event ${supersedesEventId} — not found in organization ${organizationId}`
     );
   }
-  return {
-    connectorKey: prior.connector_key ?? null,
-    connectionId: nullableNumber(prior.connection_id),
-    feedKey: prior.feed_key ?? null,
-    feedId: nullableNumber(prior.feed_id),
-    runId: params.runId ?? nullableNumber(prior.run_id),
-    automationId: params.automationId ?? nullableNumber(prior.automation_id),
-    automationVersionId:
-      params.automationVersionId ?? nullableNumber(prior.automation_version_id),
-    parentOriginId: params.parentOriginId ?? prior.origin_parent_id ?? null,
-    identityNs: prior.identity_ns ?? null,
-    identityKey: prior.identity_key ?? null,
-  };
+  return rows[0];
+}
+
+function successorLineage(prior: EventLineage, requested: EventLineage): EventLineage {
+  return Object.fromEntries(
+    INHERITED_COLUMNS.map((column) => [
+      column,
+      EVENT_SUPERSEDE_RULES[column] === 'chain'
+        ? prior[column]
+        : (requested[column] ?? prior[column]),
+    ])
+  ) as EventLineage;
 }
 
 function isEventsClientIdForeignKeyViolation(error: unknown): boolean {
@@ -762,8 +804,6 @@ export async function insertEvent(
 
   const entityIdsValue = params.entityIds.length > 0 ? `{${params.entityIds.join(',')}}` : null;
 
-  const requestedClientId = params.clientId ?? null;
-
   // Core find→decide→insert, parameterized on the active SQL handle so it can
   // run either directly on the singleton pool or inside the dedup transaction
   // below (which holds an advisory lock for the duration).
@@ -853,25 +893,19 @@ export async function insertEvent(
     supersedesEventId: number | null,
     previousOccurredAt: string | null | undefined
   ): Promise<InsertedEvent> => {
-    let lineage: EventLineage =
-      supersedesEventId != null
-        ? await loadEventLineage(sql, supersedesEventId, params)
-        : {
-            connectorKey: params.connectorKey ?? null,
-            connectionId: params.connectionId ?? null,
-            feedKey: params.feedKey ?? null,
-            feedId: params.feedId ?? null,
-            runId: params.runId ?? null,
-            automationId: params.automationId ?? null,
-            automationVersionId: params.automationVersionId ?? null,
-            parentOriginId: params.parentOriginId ?? null,
-            identityNs: params.identity?.ns ?? null,
-            identityKey: params.identity?.key ?? null,
-          };
+    const requested = requestedLineage(params);
+    let lineage =
+      supersedesEventId == null
+        ? requested
+        : successorLineage(
+            await loadPredecessorLineage(sql, supersedesEventId, params.organizationId),
+            requested
+          );
     if (browserConnector) {
       lineage = {
         ...lineage,
-        parentOriginId: sanitizeBrowserText(lineage.parentOriginId) ?? null,
+        origin_parent_id:
+          sanitizeBrowserText(lineage.origin_parent_id as string | null) ?? null,
       };
     }
 
@@ -902,15 +936,15 @@ export async function insertEvent(
       ${params.authorName ?? null},
       ${params.sourceUrl ?? null},
       ${params.occurredAt ?? new Date()},
-      ${lineage.parentOriginId},
+      ${lineage.origin_parent_id},
       ${params.originType ?? null},
-      ${lineage.connectorKey},
-      ${lineage.connectionId},
-      ${lineage.feedKey},
-      ${lineage.feedId},
-      ${lineage.runId},
-      ${lineage.automationId},
-      ${lineage.automationVersionId},
+      ${lineage.connector_key},
+      ${lineage.connection_id},
+      ${lineage.feed_key},
+      ${lineage.feed_id},
+      ${lineage.run_id},
+      ${lineage.automation_id},
+      ${lineage.automation_version_id},
       ${params.semanticType},
       ${clientId},
       ${params.createdBy ?? null},
@@ -921,8 +955,8 @@ export async function insertEvent(
       ${params.interactionOutput ? sql.json(params.interactionOutput) : null},
       ${params.interactionError ?? null},
       ${supersedesEventId},
-      ${lineage.identityNs},
-      ${lineage.identityKey},
+      ${lineage.identity_ns},
+      ${lineage.identity_key},
       (
         SELECT COALESCE(array_agg(DISTINCT x.o), '{}'::text[])
         FROM (
@@ -932,7 +966,7 @@ export async function insertEvent(
           UNION ALL
           SELECT c.organization_id AS o
           FROM public.connections c
-          WHERE c.id = ${lineage.connectionId}
+          WHERE c.id = ${lineage.connection_id}
         ) x
         WHERE x.o IS NOT NULL
           AND (x.o <> ${params.organizationId}::text OR ${params.organizationId}::text IS NULL)
@@ -950,18 +984,19 @@ export async function insertEvent(
   // back cleanly so the NULL retry runs against a live transaction. On the
   // plain pool handle there is no transaction to abort, so no savepoint is
   // needed.
+  const clientId = lineage.client_id as string | null;
   let result: Awaited<ReturnType<typeof insertWithClientId>>;
   const inTransaction = typeof sql.savepoint === 'function';
   try {
     result = inTransaction
-      ? await sql.savepoint((sp) => insertWithClientId(sp, requestedClientId))
-      : await insertWithClientId(sql, requestedClientId);
+      ? await sql.savepoint((sp) => insertWithClientId(sp, clientId))
+      : await insertWithClientId(sql, clientId);
   } catch (error) {
-    if (!requestedClientId || !isEventsClientIdForeignKeyViolation(error)) {
+    if (!clientId || !isEventsClientIdForeignKeyViolation(error)) {
       throw error;
     }
     logger.warn(
-      { clientId: requestedClientId },
+      { clientId },
       '[insert-event] retrying insert with client_id NULL — referenced oauth_clients row no longer exists'
     );
     result = await insertWithClientId(sql, null);

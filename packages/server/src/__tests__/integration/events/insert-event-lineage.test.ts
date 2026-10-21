@@ -6,13 +6,14 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { getDb, parsePgNumberArray } from '../../../db/client';
+import { type DbClient, getDb, parsePgNumberArray } from '../../../db/client';
 import { supersedeActionEvent } from '../../../tools/admin/approval-events';
-import { insertEvent } from '../../../utils/insert-event';
+import { EVENT_SUPERSEDE_RULES, insertEvent } from '../../../utils/insert-event';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   createTestConnection,
   createTestEntity,
+  createTestOAuthClient,
   createTestOrganization,
   createTestUser,
 } from '../../setup/test-fixtures';
@@ -82,10 +83,11 @@ async function lineageOf(eventId: number): Promise<{
   identity_ns: string | null;
   identity_key: string | null;
   origin_parent_id: string | null;
+  client_id: string | null;
 }> {
   const [row] = await getDb()`
     SELECT automation_id, automation_version_id, run_id, connection_id, connector_key,
-           feed_id, feed_key, identity_ns, identity_key, origin_parent_id
+           feed_id, feed_key, identity_ns, identity_key, origin_parent_id, client_id
     FROM events WHERE id = ${eventId}
   `;
   const r = row as Record<string, unknown>;
@@ -101,6 +103,7 @@ async function lineageOf(eventId: number): Promise<{
     identity_ns: (r.identity_ns as string | null) ?? null,
     identity_key: (r.identity_key as string | null) ?? null,
     origin_parent_id: (r.origin_parent_id as string | null) ?? null,
+    client_id: (r.client_id as string | null) ?? null,
   };
 }
 
@@ -190,6 +193,7 @@ describe('insertEvent lineage on supersede', () => {
       identity_ns: 'test.lineage',
       identity_key: 'thing-1',
       origin_parent_id: 'parent-origin',
+      client_id: null,
     });
   });
 
@@ -252,6 +256,7 @@ describe('insertEvent lineage on supersede', () => {
       identity_ns: 'test.lineage',
       identity_key: 'thing-nulls',
       origin_parent_id: 'parent-origin',
+      client_id: null,
     });
   });
 
@@ -452,4 +457,112 @@ describe('insertEvent lineage on supersede', () => {
     });
   });
 
+  it('decides every events column: a new one cannot be dropped by omission', async () => {
+    const rows = await getDb()`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'events'
+    `;
+    const columns = rows.map((row) => (row as { column_name: string }).column_name).sort();
+    expect(Object.keys(EVENT_SUPERSEDE_RULES).sort()).toEqual(columns);
+  });
+
+  it('keeps the requesting client through approval decisions and plain supersedes', async () => {
+    const org = await createTestOrganization();
+    const reviewer = await createTestUser({ name: 'Ada Approver' });
+    const requester = await createTestOAuthClient();
+    const runId = await insertRun(org.id);
+
+    await insertEvent({
+      entityIds: [],
+      organizationId: org.id,
+      originId: `run_${runId}_pending`,
+      title: 'send_email — pending approval',
+      semanticType: 'operation',
+      runId,
+      clientId: requester.client_id,
+      authorName: requester.client_id,
+      interactionType: 'approval',
+      interactionStatus: 'pending',
+      metadata: { status: 'pending_approval' },
+    });
+
+    const rejectedId = await supersedeActionEvent(
+      runId,
+      org.id,
+      'rejected',
+      'send_email — rejected',
+      'Operation rejected',
+      {},
+      { userId: reviewer.id, name: reviewer.name }
+    );
+    expect((await lineageOf(rejectedId!)).client_id).toBe(requester.client_id);
+
+    const nulled = await insertEvent({
+      entityIds: [],
+      organizationId: org.id,
+      originId: `run_${runId}_note`,
+      semanticType: 'operation',
+      clientId: null,
+      supersedesEventId: rejectedId!,
+    });
+    expect((await lineageOf(nulled.id)).client_id).toBe(requester.client_id);
+
+    const editor = await createTestOAuthClient();
+    const edited = await insertEvent({
+      entityIds: [],
+      organizationId: org.id,
+      originId: `run_${runId}_edit`,
+      semanticType: 'operation',
+      clientId: editor.client_id,
+      supersedesEventId: nulled.id,
+    });
+    expect((await lineageOf(edited.id)).client_id).toBe(editor.client_id);
+  });
+
+  it('reads lineage inside the write transaction after a source feed is removed', async () => {
+    const org = await createTestOrganization();
+    const connection = await createTestConnection({
+      organization_id: org.id,
+      connector_key: 'test.lineage',
+    });
+    const feedId = await insertFeed(org.id, Number(connection.id), 'items');
+    const prior = await insertEvent({
+      entityIds: [],
+      organizationId: org.id,
+      originId: 'feed-removal-root',
+      semanticType: 'observation',
+      connectionId: Number(connection.id),
+      connectorKey: 'test.lineage',
+      feedId,
+      feedKey: 'items',
+    });
+
+    // Simulate a concurrent deletion after the sanitizer's predecessor read,
+    // before the supersede transaction starts. The FK clears events.feed_id.
+    const sql = getDb();
+    const deleteFeedBeforeBegin = new Proxy(sql, {
+      get(target, property, receiver) {
+        if (property === 'begin') {
+          return async (fn: (tx: DbClient) => Promise<unknown>) => {
+            await sql`DELETE FROM feeds WHERE id = ${feedId}`;
+            return target.begin(fn);
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const next = await insertEvent({
+      entityIds: [],
+      organizationId: org.id,
+      originId: 'feed-removal-successor',
+      semanticType: 'observation',
+      supersedesEventId: prior.id,
+    }, { sql: deleteFeedBeforeBegin });
+
+    expect(await lineageOf(next.id)).toMatchObject({
+      connection_id: Number(connection.id),
+      feed_id: null,
+      feed_key: 'items',
+    });
+  });
 });
