@@ -288,9 +288,14 @@ describe("view shell runtime", () => {
       compiled_code: "globalThis.viewReact = globalThis.__lobuViews.react;",
     } as StoredView, "https://app.example/acme/", runtime);
     const context = createContext({});
-    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+    // Inlined code never contains a closing tag (the shell escapes it), so
+    // each one ends a script; the runtime may itself contain "<script>".
+    const scripts = html
+      .split("</script>")
+      .slice(0, -1)
+      .map((chunk) => chunk.slice(chunk.indexOf("<script>") + "<script>".length));
     expect(scripts).toHaveLength(2);
-    for (const [, code] of scripts) runInContext(code!, context);
+    for (const code of scripts) runInContext(code, context);
     const modules = context.__lobuViews;
     expect(context.viewReact).toBe(modules.react);
     expect(Object.isFrozen(modules)).toBe(true);
