@@ -371,5 +371,18 @@ describe('agent-facing content read bounds', () => {
     expect(result.rows[0].payload_data).toEqual({ _truncated: true, bytes: expect.any(Number) });
     expect(result.rows[0].attachments).toBeNull();
     expect(result.rows[0].attachments_truncated).toBe(true);
+    expect(result.truncated_columns).toEqual(['attachments', 'payload_data', 'payload_text']);
+  });
+
+  it('leaves truncated_columns off a query_sql result whose cells all fit', async () => {
+    const result = await querySql(
+      { sql: `SELECT id, title FROM events WHERE id = ${hugeEventId}`, limit: 10 },
+      {},
+      ownerCtx
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.rows).toHaveLength(1);
+    expect(result).not.toHaveProperty('truncated_columns');
   });
 });

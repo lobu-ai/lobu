@@ -145,6 +145,7 @@ describe("queryResult", () => {
       error: "Unknown table 'entity_types'",
       errorCode: null,
       truncated: false,
+      truncatedColumns: [],
     });
   });
 
@@ -156,6 +157,7 @@ describe("queryResult", () => {
       error: null,
       errorCode: null,
       truncated: false,
+      truncatedColumns: [],
     });
   });
 
@@ -167,12 +169,24 @@ describe("queryResult", () => {
           error: { name: "E", message: "boom" },
         },
       })
-    ).toEqual({ data: null, error: "boom", errorCode: null, truncated: false });
+    ).toEqual({
+      data: null,
+      error: "boom",
+      errorCode: null,
+      truncated: false,
+      truncatedColumns: [],
+    });
     expect(
       queryResult("sdk", {
         structuredContent: { success: true, return_value: 3 },
       })
-    ).toEqual({ data: 3, error: null, errorCode: null, truncated: false });
+    ).toEqual({
+      data: 3,
+      error: null,
+      errorCode: null,
+      truncated: false,
+      truncatedColumns: [],
+    });
   });
 
   test("a named tool's body is data, even one with an error field", () => {
@@ -182,6 +196,7 @@ describe("queryResult", () => {
       error: null,
       errorCode: null,
       truncated: false,
+      truncatedColumns: [],
     });
   });
 
@@ -196,6 +211,7 @@ describe("queryResult", () => {
       error: "denied",
       errorCode: null,
       truncated: false,
+      truncatedColumns: [],
     });
   });
 });
@@ -210,6 +226,25 @@ describe("queryResult guardrails", () => {
     expect(out.data).toEqual(rows);
     expect(out.truncated).toBe(true);
     expect(out.errorCode).toBeNull();
+  });
+
+  test("a query_sql page names the columns whose cells were bounded", () => {
+    const out = queryResult("sql", {
+      structuredContent: {
+        rows: [{ id: 1, metadata: { _truncated: true, bytes: 55000 } }],
+        has_more: false,
+        truncated_columns: ["metadata"],
+      },
+    });
+    expect(out.truncated).toBe(false);
+    expect(out.truncatedColumns).toEqual(["metadata"]);
+  });
+
+  test("a query_sql page whose cells all fit names no columns", () => {
+    const out = queryResult("sql", {
+      structuredContent: { rows: [{ id: 1 }], has_more: false },
+    });
+    expect(out.truncatedColumns).toEqual([]);
   });
 
   test("a complete query_sql page is not truncated", () => {
@@ -233,6 +268,7 @@ describe("queryResult guardrails", () => {
       error: "Query exceeded the 5 second timeout.",
       errorCode: "UPSTREAM_TIMEOUT",
       truncated: false,
+      truncatedColumns: [],
     });
   });
 
@@ -259,6 +295,7 @@ describe("queryResult guardrails", () => {
         error: "slow",
         errorCode: "UPSTREAM_TIMEOUT",
         truncated: false,
+        truncatedColumns: [],
       });
     }
   });
@@ -279,6 +316,7 @@ describe("queryResult guardrails", () => {
       error: "denied",
       errorCode: "FORBIDDEN",
       truncated: false,
+      truncatedColumns: [],
     });
   });
 

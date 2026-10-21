@@ -25,10 +25,12 @@
  * `query_sql` runs in a read-only, org-scoped transaction with a 5 second
  * statement timeout and returns at most 500 rows; `useQuery` reports a hit as
  * `errorCode: "UPSTREAM_TIMEOUT"` or `truncated: true`, so render those
- * states instead of an empty or partial table. Never aggregate history in a
- * view: no `GROUP BY`, `DISTINCT ON`, per-row regexp, or leading-wildcard
- * `LIKE` over `events` (or any other table that grows with history). History
- * grows; the answer a view shows does not.
+ * states instead of an empty or partial table. Each cell is bounded too
+ * (strings to a 4,000-code-point head plus a suffix, JSON values to 16 KiB);
+ * `truncatedColumns` names the columns where a returned cell was cut.
+ * Never aggregate history in a view: no `GROUP BY`, `DISTINCT ON`, per-row
+ * regexp, or leading-wildcard `LIKE` over `events` (or any other table that
+ * grows with history). History grows; the answer a view shows does not.
  *
  * For "latest state" views, compute state at write time. One event-based
  * pattern is an Automation bound to the entity declaring a keyed event output
@@ -356,12 +358,16 @@ function parseTextJson(result: ToolResult): unknown {
  * reports a thrown script as `success: false` — both would otherwise render as
  * "no rows". The server's typed code rides along as `errorCode`, and a capped
  * result (`query_sql`'s `has_more`, `query_sdk`'s `return_truncated`) is
- * flagged `truncated` instead of passing as the whole answer.
+ * flagged `truncated` instead of passing as the whole answer, and a
+ * `query_sql` cell bounded by its size limits is named in `truncatedColumns`.
  */
 export function queryResult<T>(
   kind: "sql" | "sdk" | "tool",
   result: ToolResult
-): Pick<QueryState<T>, "data" | "error" | "errorCode" | "truncated"> {
+): Pick<
+  QueryState<T>,
+  "data" | "error" | "errorCode" | "truncated" | "truncatedColumns"
+> {
   // structuredContent when the tool declares an outputSchema (query_sql,
   // query_sdk, every read tool on MCP hosts); otherwise the text body.
   const sc = (result.structuredContent ??
@@ -373,6 +379,7 @@ export function queryResult<T>(
       error: sc.error,
       errorCode: typeof sc.error_code === "string" ? sc.error_code : null,
       truncated: false,
+      truncatedColumns: [],
     };
   if (kind === "sdk" && sc.success === false) {
     const e = sc.error as
@@ -389,6 +396,7 @@ export function queryResult<T>(
           : "Query script failed",
       errorCode: typeof code === "string" ? code : null,
       truncated: false,
+      truncatedColumns: [],
     };
   }
   // MCP also marks resolved SQL/SDK failures isError; decode their envelopes
@@ -402,6 +410,7 @@ export function queryResult<T>(
       error: err,
       errorCode: typeof code === "string" ? code : null,
       truncated: false,
+      truncatedColumns: [],
     };
   }
   // query_sdk → { success, return_value }, query_sql → { rows }, a named
@@ -413,7 +422,17 @@ export function queryResult<T>(
     kind === "sql"
       ? sc.has_more === true
       : kind === "sdk" && sc.return_truncated != null;
-  return { data: data ?? null, error: null, errorCode: null, truncated };
+  const truncatedColumns =
+    kind === "sql" && Array.isArray(sc.truncated_columns)
+      ? sc.truncated_columns.filter((c): c is string => typeof c === "string")
+      : [];
+  return {
+    data: data ?? null,
+    error: null,
+    errorCode: null,
+    truncated,
+    truncatedColumns,
+  };
 }
 
 export interface QueryState<T> {
@@ -427,6 +446,13 @@ export interface QueryState<T> {
    *  rows (fewer past its response-size ceiling) and `query_sdk` drops an
    *  oversized return value. `data` is then not the whole result. */
   truncated: boolean;
+  /** `query_sql` columns where a returned cell was bounded: a string cut to
+   *  its first 4,000 Unicode code points plus "… [truncated]", or a JSON value
+   *  over 16 KiB replaced by `{ _truncated: true, bytes }` (attachments become
+   *  null with attachments_truncated). Show those cells as too large, or select
+   *  smaller elements or fields, e.g. `jsonb_array_elements(metadata->'items')`.
+   *  Paginate as needed; each returned cell is still subject to these limits. */
+  truncatedColumns: string[];
   loading: boolean;
   refetch: () => void;
 }
@@ -456,6 +482,7 @@ export function useQuery<T = unknown>(
     error: null,
     errorCode: null,
     truncated: false,
+    truncatedColumns: [],
     loading: query !== null,
   });
   const [tick, setTick] = useState(0);
@@ -532,6 +559,7 @@ export function useQuery<T = unknown>(
           error: e instanceof Error ? e.message : String(e),
           errorCode: null,
           truncated: false,
+          truncatedColumns: [],
           loading: false,
         });
       });

@@ -66,6 +66,26 @@ describe('finalizeDynamicQueryRows', () => {
     expect(result.rows[0].payload_truncated).toBe(true);
   });
 
+  it('names every column with a bounded cell among the kept rows', () => {
+    const result = finalizeDynamicQueryRows([
+      { id: 1, title: 'fits', body: 'x'.repeat(CONTENT_TEXT_HEAD_CHARS + 1) },
+      { id: 2, title: 'fits', metadata: { items: 'm'.repeat(CONTENT_JSON_MAX_BYTES) } },
+      { id: 3, title: 'fits', body: 'short', metadata: { items: [] } },
+    ]);
+
+    expect(result.truncatedColumns).toEqual(['body', 'metadata']);
+    expect(finalizeDynamicQueryRows([{ id: 1, title: 'fits' }]).truncatedColumns).toEqual([]);
+  });
+
+  it('does not name a column bounded only in a row the size cap omitted', () => {
+    const big = { title: 't'.repeat(CONTENT_TEXT_HEAD_CHARS + 1) };
+    const result = finalizeDynamicQueryRows([{ id: 1 }, big], JSON.stringify([{ id: 1 }]).length);
+
+    expect(result.rows).toEqual([{ id: 1 }]);
+    expect(result.omittedRows).toBe(1);
+    expect(result.truncatedColumns).toEqual([]);
+  });
+
   it('enforces a hard serialized row-list cap after per-cell bounding', () => {
     const rows = Array.from({ length: 500 }, (_, id) => ({
       id,

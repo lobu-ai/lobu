@@ -93,6 +93,8 @@ interface FinalizedDynamicRows {
   rows: Record<string, unknown>[];
   omittedRows: number;
   sidecarCollisions: string[];
+  /** Columns with at least one shortened or replaced cell among the kept rows. */
+  truncatedColumns: string[];
 }
 
 function assignGeneratedSidecar(
@@ -123,16 +125,19 @@ export function finalizeDynamicQueryRows(
 ): FinalizedDynamicRows {
   const boundedRows: Record<string, unknown>[] = [];
   const sidecarCollisions = new Set<string>();
+  const truncatedColumns = new Set<string>();
   let serializedBytes = 2; // []
 
   for (const input of inputRows) {
     const row = { ...input };
+    const rowTruncated: string[] = [];
     for (const key of Object.keys(row)) {
       const value = row[key];
       if (typeof value === 'string') {
         const bounded = truncateByCodePoint(value);
         if (!bounded.truncated) continue;
         row[key] = bounded.value;
+        rowTruncated.push(key);
         if (key === 'payload_text' || key === 'text_content') {
           assignGeneratedSidecar(input, row, 'content_length', bounded.length, sidecarCollisions);
           assignGeneratedSidecar(input, row, 'payload_truncated', true, sidecarCollisions);
@@ -143,6 +148,7 @@ export function finalizeDynamicQueryRows(
       if (value === null || typeof value !== 'object') continue;
       const bytes = jsonBytes(value);
       if (bytes <= CONTENT_JSON_MAX_BYTES) continue;
+      rowTruncated.push(key);
       if (key === 'attachments') {
         row.attachments = null;
         assignGeneratedSidecar(input, row, 'attachments_truncated', true, sidecarCollisions);
@@ -167,11 +173,13 @@ export function finalizeDynamicQueryRows(
     if (serializedBytes + separatorBytes + rowBytes > maxSerializedBytes) break;
     boundedRows.push(row);
     serializedBytes += separatorBytes + rowBytes;
+    for (const key of rowTruncated) truncatedColumns.add(key);
   }
 
   return {
     rows: boundedRows,
     omittedRows: inputRows.length - boundedRows.length,
     sidecarCollisions: [...sidecarCollisions].sort(),
+    truncatedColumns: [...truncatedColumns].sort(),
   };
 }
