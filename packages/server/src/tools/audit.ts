@@ -312,7 +312,14 @@ export async function recordToolInvocationAudit(
     const payload = buildPayload(params);
     if (!payload) return;
     const request = captureRequest(params);
-    if (request) Object.assign(payload, request);
+    if (request) {
+      Object.assign(payload, request);
+      // Keep a redacted heading on list rows, where the author-only request is omitted.
+      payload.title =
+        typeof params.args?.title === 'string'
+          ? redactPreview(params.args.title.trim()) || null
+          : null;
+    }
     const success = payload.success === true;
     const identity =
       params.toolName === 'manage_automations'

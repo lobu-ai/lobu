@@ -347,6 +347,52 @@ describe('tool invocation audit coverage', () => {
     expect(rows).toHaveLength(1);
   });
 
+  it('lists the caller title on run_sdk, query_sdk and query_sql rows, redacted', async () => {
+    const script = 'export default async () => 1;';
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ['run_sdk', { script, title: '  Mark stale password=hunter2 read ' }],
+      ['query_sdk', { script, title: 'Failing feeds' }],
+      ['query_sql', { sql: 'SELECT 1 AS n', title: 'Feed health' }],
+    ];
+    const ids: string[] = [];
+    for (const [tool, args] of calls) {
+      await executeTool(tool, args, {} as Env, authCtxFor('pat'));
+      ids.push(String((await latestAuditRow(orgId, tool))!.id));
+    }
+    await executeTool('query_sdk', { script }, {} as Env, authCtxFor('pat'));
+    const untitled = String((await latestAuditRow(orgId, 'query_sdk'))!.id);
+
+    const result = (await executeTool(
+      'read_knowledge',
+      { semantic_type: 'audit', sort_by: 'date', sort_order: 'desc', limit: 100 },
+      {} as Env,
+      authCtxFor('session')
+    )) as {
+      content: Array<{ id: string | number; payload_data: Record<string, unknown> }>;
+    };
+    const titleOf = (id: string) =>
+      result.content.find((item) => String(item.id) === id)?.payload_data.title;
+    expect(ids.map(titleOf)).toEqual([
+      'Mark stale password=[redacted] read',
+      'Failing feeds',
+      'Feed health',
+    ]);
+    expect(titleOf(untitled)).toBeNull();
+  });
+
+  it.each([null, undefined])('audits query_sdk with %s arguments without a title', async (args) => {
+    const before = await latestAuditRow(orgId, 'query_sdk');
+    await expect(
+      executeTool('query_sdk', args as unknown as Record<string, unknown>, {} as Env, authCtxFor('pat'))
+    ).rejects.toThrow();
+
+    const row = await latestAuditRow(orgId, 'query_sdk');
+    expect(row).not.toBeNull();
+    expect(row!.id).not.toBe(before?.id);
+    expect(row!.payload_data.success).toBe(false);
+    expect(row!.payload_data.title).toBeNull();
+  });
+
   it('retains query_sdk requests for browser-session callers', async () => {
     const script = 'export default async () => ({ answer: 42 });';
     const result = (await executeTool(
