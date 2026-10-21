@@ -154,6 +154,13 @@ export const QuerySqlResultSchema = Type.Object({
         'Rows fetched for this page but omitted by the serialized response-size ceiling. When rows are present, continue from offset + rows.length rather than offset + limit. If no bounded row fits, query_sql returns a VALIDATION error and the projection must be narrowed.',
     })
   ),
+  truncated_columns: Type.Optional(
+    Type.Array(Type.String(), {
+      minItems: 1,
+      description:
+        'Columns where at least one returned cell was bounded: a string cut to its first 4,000 Unicode code points plus "… [truncated]", or a JSON value over 16 KiB replaced by {"_truncated": true, "bytes": n} (attachments: null plus attachments_truncated). Select smaller elements or fields, for example jsonb_array_elements(metadata->\'items\'), and paginate as needed; each returned cell is still subject to these limits.',
+    })
+  ),
   execution_time_ms: Type.Number(),
   error: Type.Optional(Type.String()),
   error_code: Type.Optional(Type.String()),
@@ -168,6 +175,7 @@ interface QuerySqlResult {
   total_count: number;
   has_more: boolean;
   omitted_rows?: number;
+  truncated_columns?: string[];
   execution_time_ms: number;
   error?: string;
   /** Structured error code (lobu#2051 Item 2), set alongside `error`. */
@@ -202,14 +210,19 @@ function finalizeQuerySqlResult(
   }
 
   // Reserve the complete response envelope before admitting rows. The
-  // possible sidecars and omitted_rows are deliberately pessimistic; the
+  // possible sidecars, omitted_rows and truncated_columns are pessimistic; the
   // actual response can only be smaller than this budget calculation.
   const envelope = {
     ...result,
     rows: [],
     columns: possibleColumns,
     has_more: false,
-    ...(result.rows.length > 0 ? { omitted_rows: result.rows.length } : {}),
+    ...(result.rows.length > 0
+      ? {
+          omitted_rows: result.rows.length,
+          truncated_columns: possibleColumns.map((column) => column.name),
+        }
+      : {}),
   };
   const envelopeBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8') - 2; // []
   const maxSerializedRowsBytes = maxSerializedResultBytes - envelopeBytes;
@@ -267,6 +280,9 @@ function finalizeQuerySqlResult(
     columns,
     has_more: result.has_more || finalized.omittedRows > 0,
     ...(finalized.omittedRows > 0 ? { omitted_rows: finalized.omittedRows } : {}),
+    ...(finalized.truncatedColumns.length > 0
+      ? { truncated_columns: finalized.truncatedColumns }
+      : {}),
   };
   if (Buffer.byteLength(JSON.stringify(response), 'utf8') > maxSerializedResultBytes) {
     return resultTooLarge(

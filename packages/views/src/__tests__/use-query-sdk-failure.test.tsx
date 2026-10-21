@@ -20,6 +20,7 @@ interface Seen {
   error: unknown;
   errorCode: string | null;
   truncated: boolean;
+  truncatedColumns: string[];
 }
 
 let latest: Seen | null = null;
@@ -208,6 +209,7 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       error: "SDK_BOOM",
       errorCode: "INTERNAL",
       truncated: false,
+      truncatedColumns: [],
     });
   });
 
@@ -231,6 +233,7 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       error: null,
       errorCode: null,
       truncated: false,
+      truncatedColumns: [],
     });
   });
 
@@ -254,6 +257,7 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       error: "Query script failed",
       errorCode: null,
       truncated: false,
+      truncatedColumns: [],
     });
   });
 
@@ -284,6 +288,7 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       error: "TEXT_JSON_BOOM",
       errorCode: null,
       truncated: false,
+      truncatedColumns: [],
     });
   });
 
@@ -329,6 +334,7 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       error: null,
       errorCode: null,
       truncated: false,
+      truncatedColumns: [],
     });
   });
 
@@ -352,6 +358,7 @@ describe("useQuery string-mode query_sdk failure envelope (F14)", () => {
       error: null,
       errorCode: null,
       truncated: false,
+      truncatedColumns: [],
     });
   });
 });
@@ -368,6 +375,7 @@ describe("useQuery guardrails through the host bridge", () => {
       error: null,
       errorCode: null,
       truncated: false,
+      truncatedColumns: [],
     });
     expect(parent.toolsCalls()[0]?.params).toEqual({
       name: kind === "sql" ? "query_sql" : "query_sdk",
@@ -394,13 +402,18 @@ describe("useQuery guardrails through the host bridge", () => {
           error: "slow",
           errorCode: "UPSTREAM_TIMEOUT",
           truncated: false,
+          truncatedColumns: [],
         },
       },
       {
         result: {
           structuredContent:
             kind === "sql"
-              ? { rows: [{ n: 1 }], has_more: true }
+              ? {
+                  rows: [{ metadata: { _truncated: true, bytes: 55000 } }],
+                  has_more: true,
+                  truncated_columns: ["metadata"],
+                }
               : {
                   success: true,
                   return_value_preview: "[",
@@ -408,10 +421,14 @@ describe("useQuery guardrails through the host bridge", () => {
                 },
         },
         expected: {
-          data: kind === "sql" ? [{ n: 1 }] : null,
+          data:
+            kind === "sql"
+              ? [{ metadata: { _truncated: true, bytes: 55000 } }]
+              : null,
           error: null,
           errorCode: null,
           truncated: true,
+          truncatedColumns: kind === "sql" ? ["metadata"] : [],
         },
       },
       {
@@ -421,6 +438,7 @@ describe("useQuery guardrails through the host bridge", () => {
           error: "Host unavailable",
           errorCode: null,
           truncated: false,
+          truncatedColumns: [],
         },
       },
       {
@@ -435,6 +453,7 @@ describe("useQuery guardrails through the host bridge", () => {
           error: null,
           errorCode: null,
           truncated: false,
+          truncatedColumns: [],
         },
       },
     ];
