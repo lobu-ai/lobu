@@ -191,6 +191,8 @@ export interface ToolContext {
   isAuthenticated: boolean;
   /** OAuth client ID that created this request (null for session/anonymous) */
   clientId?: string | null;
+  /** The personal access token's name on a PAT call; null otherwise. */
+  tokenName?: string | null;
   /** OAuth scopes granted to this MCP/tool session, when applicable. */
   scopes?: string[] | null;
   tokenType: TokenType;

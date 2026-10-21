@@ -221,6 +221,8 @@ export interface AuthInfo {
   /** Issuing OAuth flow; absent on PATs and legacy OAuth rows. */
   authorizationGrantType?: 'authorization_code' | 'device_code' | null;
   clientId: string;
+  /** The personal access token's own name; set only on a PAT. */
+  tokenName?: string;
   scopes: string[];
   expiresAt: number; // Unix timestamp
   /** Verified agent context for worker direct-auth sessions. */

@@ -40,7 +40,7 @@ interface ToolInvocationAuditParams {
   result?: unknown;
   error?: unknown;
   durationMs: number;
-  ctx: Pick<ToolContext, 'userId' | 'tokenType' | 'clientId' | 'agentId' |
+  ctx: Pick<ToolContext, 'userId' | 'tokenType' | 'clientId' | 'tokenName' | 'agentId' |
     'mcpSessionId' | 'mcpConversationId'> & { organizationId: string | null };
 }
 
@@ -305,6 +305,27 @@ function buildPayload(params: ToolInvocationAuditParams): Record<string, unknown
   };
 }
 
+/** The heading the feed names a PAT call by, capped like other audit labels. */
+const MAX_TOKEN_NAME_CHARS = 120;
+
+function patTokenNameMetadata(
+  ctx: ToolInvocationAuditParams['ctx']
+): { token_name: string } | Record<string, never> {
+  if (ctx.tokenType !== 'pat' || !ctx.tokenName) return {};
+  const name = redactPreview(ctx.tokenName.trim()).slice(0, MAX_TOKEN_NAME_CHARS);
+  return name ? { token_name: name } : {};
+}
+
+/**
+ * `events.client_id` references `oauth_clients`, so only an OAuth caller's
+ * client id belongs there. A PAT's `pat_<id>` and the worker lane's
+ * `lobu-worker` have no row: writing them fails the foreign key and the insert
+ * retries with NULL on every call.
+ */
+function auditClientId(ctx: ToolInvocationAuditParams['ctx']): string | null {
+  return ctx.tokenType === 'oauth' ? (ctx.clientId ?? null) : null;
+}
+
 export async function recordToolInvocationAudit(
   params: ToolInvocationAuditParams
 ): Promise<void> {
@@ -340,13 +361,14 @@ export async function recordToolInvocationAudit(
         tool_name: params.toolName,
         token_type: params.ctx.tokenType,
         agent_id: params.ctx.agentId ?? null,
+        ...patTokenNameMetadata(params.ctx),
         ...(identity?.action ? { action: identity.action } : {}),
         ...(identity?.automation_id ? { automation_id: identity.automation_id } : {}),
         ...(identity && identity.automation_ids.length > 0 ? { automation_ids: identity.automation_ids } : {}),
         ...currentMcpActivityEventMetadata(params.ctx),
       },
       createdBy: params.ctx.userId ?? null,
-      clientId: params.ctx.clientId ?? null,
+      clientId: auditClientId(params.ctx),
     }, {
       // Reads are tool calls too; invalidating content for their audit row
       // would make each client refetch trigger the next one.
@@ -393,10 +415,11 @@ export async function recordWorkspaceActivityAudit(params: {
           tool_name: params.toolName,
           token_type: params.ctx.tokenType,
           agent_id: params.ctx.agentId ?? null,
+          ...patTokenNameMetadata(params.ctx),
           ...currentMcpActivityEventMetadata(params.ctx),
         },
         createdBy: params.ctx.userId ?? null,
-        clientId: params.ctx.clientId ?? null,
+        clientId: auditClientId(params.ctx),
       }, { notifyContentChange: false });
     } catch (auditError) {
       logger.warn(

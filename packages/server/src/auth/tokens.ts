@@ -153,6 +153,7 @@ export class PersonalAccessTokenService {
         ? Math.floor(new Date(pat.expires_at).getTime() / 1000)
         : Number.MAX_SAFE_INTEGER,
       tokenType: 'pat',
+      tokenName: pat.name,
       workerId: (pat as unknown as { worker_id?: string | null }).worker_id ?? null,
     };
   }

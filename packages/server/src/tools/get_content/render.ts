@@ -161,6 +161,12 @@ export async function hydrateToolInvocationRequests(opts: {
   }
 }
 
+function withoutTokenName(metadata: Record<string, unknown>): Record<string, unknown> {
+  if (!('token_name' in metadata)) return metadata;
+  const { token_name: _tokenName, ...rest } = metadata;
+  return rest;
+}
+
 /**
  * Map raw query rows to the canonical content item shape used across the app,
  * batch-resolving client_name and parent_context first.
@@ -289,6 +295,10 @@ export async function buildContentItems(opts: {
     const metadata = parseJsonObject(f.metadata);
     const classifications = parseJsonObject(f.classifications);
     const attribution = attributionMap.get(Number(f.id));
+    const isPatInvocation =
+      f.semantic_type === AUDIT_SEMANTIC_TYPE &&
+      f.origin_type === 'tool_invocation' &&
+      metadata.token_type === 'pat';
 
     return {
       id: f.id,
@@ -312,7 +322,12 @@ export async function buildContentItems(opts: {
       client_id: includePrivateAttribution
         ? (f.client_id ?? attribution?.client_id ?? null)
         : null,
-      client_name: f.client_name ?? attribution?.client_name ?? null,
+      client_name:
+        f.client_name ??
+        attribution?.client_name ??
+        (isPatInvocation && includePrivateAttribution && typeof metadata.token_name === 'string'
+          ? metadata.token_name
+          : null),
       connection_id: f.connection_id == null ? null : Number(f.connection_id),
       connection_name: includePrivateAttribution
         ? (f.connection_name ?? attribution?.connection_name ?? null)
@@ -342,7 +357,8 @@ export async function buildContentItems(opts: {
       rating: (metadata.rating as string) || null,
       source_url: f.source_url ?? null,
       score: toNullableScore(f.score),
-      metadata,
+      // A PAT's name is private attribution, like the client id above.
+      metadata: isPatInvocation && !includePrivateAttribution ? withoutTokenName(metadata) : metadata,
       classifications,
       created_at: f.created_at,
       occurred_at: f.occurred_at || f.created_at,

@@ -60,6 +60,8 @@ export interface AuthContext {
   sourceContext?: ToolSourceContext | null;
   isAuthenticated: boolean;
   clientId: string | null;
+  /** The personal access token's name on a PAT call; null otherwise. */
+  tokenName?: string | null;
   /** Caller IP of the current HTTP request; unset for internal calls. */
   clientIP?: string | null;
   scopes?: string[] | null;
@@ -166,6 +168,7 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     sourceContext: mcpAuthInfo?.sourceContext ?? null,
     isAuthenticated: c.var.mcpIsAuthenticated || false,
     clientId: mcpAuthInfo?.clientId ?? null,
+    tokenName: mcpAuthInfo?.tokenName ?? null,
     clientIP: getClientIP(c.req.raw, c.var.peerRemoteAddress),
     // Token callers (oauth/pat) carry real MCP scopes — pass them straight
     // through so `hasRequiredMcpScope` gates on the actual grant. Session and
@@ -525,6 +528,7 @@ export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
     sourceContext: authCtx.sourceContext ?? null,
     isAuthenticated: authCtx.isAuthenticated,
     clientId: authCtx.clientId,
+    tokenName: authCtx.tokenName ?? null,
     scopes: authCtx.scopes,
     tokenType: authCtx.tokenType,
     scopedToOrg: authCtx.scopedToOrg,
