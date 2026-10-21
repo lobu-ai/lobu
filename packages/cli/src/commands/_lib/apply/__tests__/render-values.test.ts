@@ -162,3 +162,13 @@ describe("blocked report shows both sides of the disagreement", () => {
     expect(out).toContain("config: (not declared)");
   });
 });
+
+describe("plan renders every row kind", () => {
+  test("a view row gets its own section, not only a count in the summary", () => {
+    const out = renderPlan(
+      planOf([{ kind: "view", verb: "update", id: "pipeline" }])
+    );
+    expect(out).toContain("  views:");
+    expect(out).toContain("~ view pipeline");
+  });
+});
