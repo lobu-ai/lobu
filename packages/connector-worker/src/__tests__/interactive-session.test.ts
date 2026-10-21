@@ -44,7 +44,8 @@ function runHelper(
       stderr += chunk;
     });
     child.once('error', reject);
-    child.once('exit', (code, signal) => {
+    // Wait for stdio to drain; 'exit' can fire before the stderr data arrives.
+    child.once('close', (code, signal) => {
       if (code === 0 && signal == null) resolve();
       else reject(new Error(stderr.trim() || `helper exited with ${signal ?? code}`));
     });
