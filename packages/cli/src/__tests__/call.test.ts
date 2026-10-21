@@ -288,7 +288,11 @@ describe("callCommand", () => {
 
   test("missing org slug surfaces a ValidationError", async () => {
     spyOn(memoryAuth, "resolveOrg").mockResolvedValue(undefined);
-    expect(callCommand("manage_feeds", {})).rejects.toThrow(ValidationError);
+    // An explicit --arg keeps buildArgs off process stdin, which bun:test
+    // shares across every test in the file.
+    await expect(
+      callCommand("manage_feeds", { arg: ["action=list"] })
+    ).rejects.toThrow(ValidationError);
   });
 
   test("404 on missing tool propagates as an ApiError", async () => {
@@ -299,7 +303,7 @@ describe("callCommand", () => {
         headers: { "Content-Type": "application/json" },
       })) as unknown as typeof fetch;
 
-    expect(callCommand("bogus", { arg: [] })).rejects.toThrow(
+    await expect(callCommand("bogus", { arg: ["x=1"] })).rejects.toThrow(
       /Tool not found: bogus/
     );
   });
