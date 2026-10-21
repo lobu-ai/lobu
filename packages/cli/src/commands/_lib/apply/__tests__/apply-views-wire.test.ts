@@ -194,7 +194,9 @@ describe("apply views over the wire", () => {
     ]);
     const compiled = sets[0]?.body.compiled_code;
     expect(typeof compiled).toBe("string");
-    expect((compiled as string).length).toBeGreaterThan(10_000);
+    // A real bundle that reads React and @lobu/views from the shell runtime.
+    expect(compiled as string).toContain("__lobuViews");
+    expect((compiled as string).length).toBeLessThan(8 * 1024);
     // Portable bytes: the fixture dir leaked nowhere into the bundle.
     expect(compiled as string).not.toContain("views-wire-fixture-");
     expect(typeof sets[0]?.body.source_code).toBe("string");

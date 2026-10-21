@@ -6,11 +6,12 @@
  * access). One esbuild pass, plus a read of the declaration:
  *  1. browser IIFE bundle of a SYNTHETIC entry that mounts the two exports
  *     (`mountView(view, Default)`) — what the server stores as
- *     `compiled_code` and inlines into the view shell. Bundled here, where
- *     the project's node_modules exists (the same path custom connectors
- *     use), because the server has no file context for relative imports or
- *     view npm deps. The server compiles plain sources itself through the
- *     same mount on its own bootstrap.
+ *     `compiled_code` and inlines into the view shell after its runtime
+ *     script. React and `@lobu/views` come from that runtime, never the
+ *     bundle (`@lobu/core/contracts/tools/view-runtime`), and the entry,
+ *     options and runtime plugin are shared with the server. Bundled here,
+ *     where the project's node_modules exists, so a view can also bundle npm
+ *     deps the server cannot build.
  *  2. the entry's `defineView({...})` literal, read without running the module
  *     by the same `readViewDefinition` the server uses on save, so the CLI's
  *     plan hashes exactly what the server stores. The declaration lives in the
@@ -25,6 +26,12 @@ import {
   readViewDefinition,
   type ViewDefinitionRecord,
 } from "@lobu/core/contracts/tools/view-definition";
+import {
+  VIEW_BUILD_OPTIONS,
+  VIEW_RUNTIME_MODULES,
+  viewMountEntry,
+  viewRuntimePlugin,
+} from "@lobu/core/contracts/tools/view-runtime";
 import { build, type Metafile, transform } from "esbuild";
 import { createSourceCapture } from "../../internal/connector-compiler.js";
 
@@ -46,23 +53,9 @@ export async function bundleViewFromFile(
   const rel = `./${basename(entry)}`;
   const capture = createSourceCapture(entry, projectRoot);
   const browser = await build({
-    plugins: [capture.plugin],
-    stdin: {
-      contents: `import { mountView } from "@lobu/views";\nimport * as mod from ${JSON.stringify(rel)};\nmountView(mod.view, mod.default);\n`,
-      loader: "tsx",
-      resolveDir: dir,
-    },
-    bundle: true,
-    write: false,
-    format: "iife",
-    platform: "browser",
-    target: ["es2022"],
-    jsx: "automatic",
-    minify: true,
-    sourcemap: false,
-    legalComments: "none",
-    define: { "process.env.NODE_ENV": '"production"' },
-    logLevel: "silent",
+    ...VIEW_BUILD_OPTIONS,
+    plugins: [capture.plugin, viewRuntimePlugin()],
+    stdin: { contents: viewMountEntry(rel), loader: "js", resolveDir: dir },
   });
   const compiledCode = browser.outputFiles?.[0]?.text ?? "";
   if (!compiledCode) {
@@ -108,6 +101,7 @@ export async function collectViewWatchFiles(entry: string): Promise<string[]> {
     write: false,
     format: "esm",
     platform: "browser",
+    external: [...VIEW_RUNTIME_MODULES],
     jsx: "automatic",
     metafile: true,
     logLevel: "silent",

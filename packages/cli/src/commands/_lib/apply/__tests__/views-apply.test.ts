@@ -107,7 +107,8 @@ describe("view desired state", () => {
     const view = state.views[0];
     expect(view?.key).toBe("pipeline");
     expect(view?.sourceFile).toBe("views/deal/pipeline.tsx");
-    expect(view?.compiledCode.length).toBeGreaterThan(10_000);
+    expect(view?.compiledCode).toContain("__lobuViews");
+    expect(view?.compiledCode.length).toBeLessThan(8 * 1024);
     // The diff key is what the server will compute: same function, same
     // inputs (name defaults to key, description to empty, plus the digest of
     // the bundle produced above).

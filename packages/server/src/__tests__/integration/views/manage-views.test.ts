@@ -19,7 +19,7 @@ import {
 import type { Env } from "../../../index";
 import { executeTool, type AuthContext } from "../../../tools/execute";
 import { ToolUserError } from "../../../utils/errors";
-import { compileView, viewSourceDependencies, setView as storeView } from "../../../views/views";
+import { compileView, setView as storeView, getView, viewRuntimeScript } from "../../../views/views";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { viewModule } from "./view-module";
@@ -40,6 +40,7 @@ const TEST_ENV: Env = {
 };
 
 const SIMPLE_SOURCE = "export default function Board() { return null; }";
+const entryFiles = (source: string) => ({ entrypoint: "index.tsx", files: { "index.tsx": source } });
 
 const DEFAULT_DEF = {
 	key: "pipeline",
@@ -165,7 +166,7 @@ describe("manage_views", () => {
 		const up = loadMigrationUpSection(dir, file);
 		const down = loadMigrationDownSection(dir, file);
 		const deal = await createTestEntity({ name: "Acme Deal", entity_type: "deal", organization_id: orgId });
-		const compiled = await compileView(SIMPLE_MODULE);
+		const compiled = await compileView(entryFiles(SIMPLE_MODULE));
 		const legacy: Record<string, unknown[]> = {
 			both: [{ type: "deal" }],
 			overview: [{ type: "deal", placement: "overview" }],
@@ -280,10 +281,10 @@ describe("manage_views", () => {
 		expect(get).toMatchObject({ source_complete: false, source_files: null, dependencies: null });
 	});
 
-	it("bundles react for modules that import it", async () => {
+	it("reads react from the shell runtime instead of bundling it", async () => {
 		const set = await setView(REACT_SOURCE);
 		expect(set.written).toBe(true);
-		expect(set.view.compiled_bytes as number).toBeGreaterThan(1_000);
+		expect(set.view.compiled_bytes as number).toBeLessThan(8 * 1024);
 	});
 
 	it("compiles source that imports @lobu/views (the chat-agent path)", async () => {
@@ -299,7 +300,7 @@ mountView(view, V);
 			ownerCtx
 		)) as { written: boolean; view: Record<string, unknown> };
 		expect(set.written).toBe(true);
-		expect(set.view.compiled_bytes as number).toBeGreaterThan(1_000);
+		expect(set.view.compiled_bytes as number).toBeLessThan(8 * 1024);
 	});
 
 	it("set with compiled_code stores the CLI bundle without compiling", async () => {
@@ -647,15 +648,17 @@ export default function V() { return null; }`;
 		expect((err as ToolUserError).httpStatus).toBe(422);
 	});
 
-	it("compiles the first-party components subpath; rejects unknown subpaths", async () => {
+	it("reads the first-party components subpath from the shell runtime; rejects unknown subpaths", async () => {
 		const compiled = await compileView(
-			`import { DataTable } from "@lobu/views/components";\nexport default function Board() { return <DataTable columns={[{ key: "id", header: "ID" }]} rows={[{ id: 1 }]} keyOf={(r) => r.id} />; }\n`
+			entryFiles(`import { defineView } from "@lobu/views";\nimport { DataTable } from "@lobu/views/components";\nexport const view = defineView({ key: "board", attach: [] });\nexport default function Board() { return <DataTable columns={[{ key: "id", header: "ID" }]} rows={[{ id: 1 }]} keyOf={(r) => r.id} />; }\n`)
 		);
-		expect(compiled.length).toBeGreaterThan(0);
-		// Kit content is really in the bundle (not a stubbed re-export).
-		expect(compiled).toContain("aria-sort");
+		// The kit (and React) ship once, in the shell runtime, never per view.
+		expect(compiled).toContain("__lobuViews");
+		expect(compiled).not.toContain("aria-sort");
+		expect(Buffer.byteLength(compiled, "utf8")).toBeLessThan(8 * 1024);
+		expect(await viewRuntimeScript()).toContain("aria-sort");
 		const err = await compileView(
-			`import { x } from "@lobu/views/admin";\nexport default function Board() { return x; }`
+			entryFiles(`import { x } from "@lobu/views/admin";\nexport default function Board() { return x; }`)
 		).catch((e) => e);
 		expect(err).toBeInstanceOf(ToolUserError);
 		expect((err as ToolUserError).httpStatus).toBe(422);
@@ -663,9 +666,8 @@ export default function V() { return null; }`;
 
 	it("stored bundles never carry server package content", async () => {
 		// 'invoke_view_action' names a server tool file; it must never appear
-		// in a compiled view bundle, which may only contain the view plus the
-		// phase-1 react allowlist.
-		const compiled = await compileView(REACT_SOURCE);
+		// in a compiled view bundle, which reads the runtime from the shell.
+		const compiled = await compileView(entryFiles(REACT_SOURCE));
 		expect(compiled).not.toContain("invoke_view_action");
 		expect(compiled).not.toContain("manage_view_templates");
 		const set = await setView(REACT_SOURCE);
@@ -680,11 +682,11 @@ export default function V() { return null; }`;
 
 		// The enforcement branch itself, through the real compiler: a tiny
 		// maxBytes rejects an ordinary bundle for the claimed reason.
-		await expect(compileView(SIMPLE_SOURCE, { maxBytes: 10 })).rejects.toThrow(
+		await expect(compileView(entryFiles(SIMPLE_SOURCE), { maxBytes: 10 })).rejects.toThrow(
 			/over the 10 byte cap/
 		);
 		// …and the default cap accepts it.
-		const compiled = await compileView(SIMPLE_SOURCE);
+		const compiled = await compileView(entryFiles(SIMPLE_SOURCE));
 		expect(compiled.length).toBeGreaterThan(0);
 	});
 
@@ -752,7 +754,7 @@ export default function V() { return null; }`;
 			params: { by: { type: "string", default: "owner" } },
 			actions: { markWon: { emits: "deal.won" } },
 		};
-		const compiled = await compileView(SIMPLE_MODULE);
+		const compiled = await compileView(entryFiles(SIMPLE_MODULE));
 		// The pre-F1 identity: source plus declared metadata only.
 		const legacyHash = createHash("sha256")
 			.update(SIMPLE_MODULE)
@@ -779,9 +781,49 @@ export default function V() { return null; }`;
 		const refresh = await setView(SIMPLE_SOURCE);
 		expect(refresh.written).toBe(true);
 		expect(refresh.view.content_hash).toBe(
-			contentHash(SIMPLE_MODULE, legacyMeta, compiled, { sourceFiles: { entrypoint: "index.tsx", files: { "index.tsx": SIMPLE_MODULE } }, dependencies: viewSourceDependencies() })
+			contentHash(SIMPLE_MODULE, legacyMeta, compiled, { sourceFiles: { entrypoint: "index.tsx", files: { "index.tsx": SIMPLE_MODULE } }, dependencies: {} })
 		);
 		const again = await setView(SIMPLE_SOURCE);
 		expect(again.written).toBe(false);
+	});
+	it("builds a retained multi-file source the shell runtime covers, without a bundle", async () => {
+		const body = `import { label } from "../lib/label";\nexport default function Board() { return label("won"); }`;
+		const entry = viewModule(DEFAULT_DEF, body);
+		const set = await setView(body, {
+			source_files: {
+				entrypoint: "views/board.view.tsx",
+				files: {
+					"views/board.view.tsx": entry,
+					"lib/label.ts": `export function label(s: string) { return s.toUpperCase(); }`,
+				},
+			},
+			dependencies: { "@lobu/views": "24.0.0" },
+		});
+		expect(set.written).toBe(true);
+		const stored = await getView(orgId, "pipeline");
+		expect(stored?.source_complete).toBe(true);
+		expect(stored?.compiled_code).toContain("toUpperCase");
+		expect(stored?.compiled_code).toContain("__lobuViews");
+	});
+
+	it("rejects a bundle-less save it cannot build: npm dependencies or a missing file", async () => {
+		const entry = viewModule(DEFAULT_DEF, SIMPLE_SOURCE);
+		const npm = await setView(SIMPLE_SOURCE, {
+			source_files: { entrypoint: "index.tsx", files: { "index.tsx": entry } },
+			dependencies: { "chart.js": "4.4.0" },
+		}).catch((e) => e);
+		expect(npm).toBeInstanceOf(ToolUserError);
+		expect((npm as ToolUserError).httpStatus).toBe(400);
+		expect((npm as ToolUserError).message).toContain("chart.js");
+
+		const missingBody = `import { x } from "./gone";\nexport default function Board() { return x; }`;
+		const missing = viewModule(DEFAULT_DEF, missingBody);
+		const err = await setView(missingBody, {
+			source_files: { entrypoint: "index.tsx", files: { "index.tsx": missing } },
+			dependencies: {},
+		}).catch((e) => e);
+		expect(err).toBeInstanceOf(ToolUserError);
+		expect((err as ToolUserError).httpStatus).toBe(422);
+		expect((err as ToolUserError).message).toContain("not among the view's source files");
 	});
 });

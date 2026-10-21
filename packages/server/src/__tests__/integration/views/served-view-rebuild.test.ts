@@ -10,7 +10,13 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { Env } from "../../../index";
 import { executeTool, type AuthContext } from "../../../tools/execute";
 import logger from "../../../utils/logger";
-import { getServedView, getView, serverCompileStamp, servedContentHash } from "../../../views/views";
+import {
+	compileView,
+	getServedView,
+	getView,
+	serverCompileStamp,
+	servedContentHash,
+} from "../../../views/views";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { addUserToOrganization, createTestOrganization, createTestUser } from "../../setup/test-fixtures";
@@ -78,7 +84,9 @@ describe("getServedView", () => {
 		await sql`
 			UPDATE views SET compiled_code = '/*stale-bundle*/',
 				compile_config_hash = ${serverCompileStamp("/*stale-bundle*/", "older-compiler")},
-				source_code = COALESCE(${sourceCode ?? null}, source_code)
+				source_code = COALESCE(${sourceCode ?? null}, source_code),
+				source_files = CASE WHEN ${sourceCode ?? null}::text IS NULL THEN source_files
+					ELSE jsonb_build_object('entrypoint', 'index.tsx', 'files', jsonb_build_object('index.tsx', ${sourceCode ?? null}::text)) END
 			WHERE organization_id = ${orgId} AND key = 'board'
 		`;
 	}
@@ -150,6 +158,28 @@ describe("getServedView", () => {
 		const served = await getServedView(orgId, "board");
 
 		expect(served?.compiled_code).toBe("/*cli-bundle*/");
+		expect(served && servedContentHash(served)).toBe(served?.content_hash);
+	});
+
+	it("rebuilds a stale server build from all of its retained source files", async () => {
+		const files = {
+			entrypoint: "views/board.tsx",
+			files: {
+				"views/board.tsx": viewModule(
+					{ key: "board", attach: [] },
+					'import { label } from "../lib/label";\nexport default function Board() { return label; }'
+				),
+				"lib/label.ts": 'export const label = "won";\n',
+			},
+		};
+		await set({ source_code: files.files["views/board.tsx"], source_files: files, dependencies: {} });
+		await makeStale();
+
+		const served = await getServedView(orgId, "board");
+
+		expect(served?.compiled_code).toBe(await compileView(files));
+		expect(served?.compiled_code).toContain("__lobuViews");
+		expect(served?.compile_config_hash).toBe(serverCompileStamp(served?.compiled_code ?? ""));
 		expect(served && servedContentHash(served)).toBe(served?.content_hash);
 	});
 
