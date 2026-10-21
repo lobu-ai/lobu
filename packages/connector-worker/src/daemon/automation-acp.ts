@@ -136,12 +136,7 @@ export class AcpTranscript {
             type: 'tool_use',
             id: event.tool.toolCallId,
             name: event.tool.name ?? event.tool.title,
-            input: cappedJsonValue({
-              title: event.tool.title,
-              kind: event.tool.kind,
-              status: event.tool.status,
-              rawInput: event.tool.rawInput,
-            }),
+            input: cappedJsonValue(event.tool.rawInput ?? {}),
           },
         ]);
         continue;
@@ -296,17 +291,26 @@ export async function runAcpTurn(
         if (prior?.kind === 'assistant' && prior.messageId === messageId) prior.text += text;
         else events.push({ kind: 'assistant', messageId, text });
       } else if (update.sessionUpdate === 'tool_call') {
-        tools.set(update.toolCallId, update);
-        events.push({ kind: 'tool', tool: update });
-      } else if (
-        update.sessionUpdate === 'tool_call_update' &&
-        (update.status === 'completed' || update.status === 'failed')
-      ) {
+        const tool = { ...update };
+        tools.set(update.toolCallId, tool);
+        events.push({ kind: 'tool', tool });
+      } else if (update.sessionUpdate === 'tool_call_update') {
+        // A call opens before its input has streamed; later updates carry the
+        // arguments and a final title, so fold them into the recorded call.
+        const tool = tools.get(update.toolCallId);
+        if (tool) {
+          if (update.name != null) tool.name = update.name;
+          if (update.title != null) tool.title = update.title;
+          if (update.content != null) tool.content = update.content;
+          if (update.rawInput !== undefined) tool.rawInput = update.rawInput;
+          if (update.rawOutput !== undefined) tool.rawOutput = update.rawOutput;
+        }
+        if (update.status !== 'completed' && update.status !== 'failed') return;
         events.push({
           kind: 'tool-result',
           toolCallId: update.toolCallId,
           failed: update.status === 'failed',
-          output: update.rawOutput ?? update.content ?? tools.get(update.toolCallId)?.rawOutput ?? null,
+          output: update.rawOutput ?? update.content ?? tool?.rawOutput ?? tool?.content ?? null,
         });
       }
       // Deliberately do not persist agent_thought_chunk: ACP exposes public
