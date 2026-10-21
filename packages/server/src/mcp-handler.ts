@@ -74,7 +74,7 @@ import { renderMcpAppTemplate } from './utils/mcp-app-bundle';
 import { viewWorkspaceUrl } from './utils/url-builder';
 import {
   LOBU_VIEWS_RESOURCE_URI,
-  getView,
+  getServedView,
   renderViewShell,
   renderViewsLoaderShell,
   viewKeyFromResourceUri,
@@ -575,7 +575,7 @@ function createServerForContext(
       if (!hasRequiredMcpScope('read', authCtx.scopes)) {
         throw new Error('Reading views requires an MCP session with read access.');
       }
-      const storedView = await getView(authCtx.organizationId, viewKey);
+      const storedView = await getServedView(authCtx.organizationId, viewKey);
       if (storedView) {
         const meta = viewResourceMeta(storedView);
         return {

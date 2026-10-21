@@ -38,6 +38,7 @@ import {
   VIEW_COMPILED_MAX_BYTES,
   VIEW_SOURCE_MAX_CHARS,
   compileView,
+  viewCompileFingerprint,
   viewSourceDependencies,
   contentHash,
   getView,
@@ -238,11 +239,15 @@ async function handleSet(
     compiled,
     retained
   );
-  // Same source AND same metadata AND same executable bundle: no write.
-  // A legacy row (source/metadata-only hash) never matches, so it refreshes
-  // exactly once on the next set and is a no-op after that.
+  // Only a bundle this server compiled may be rebuilt later; a supplied one
+  // is the caller's and stays as sent.
+  const compileConfigHash = args.compiled_code ? null : viewCompileFingerprint();
+  // Same source AND same metadata AND same executable bundle AND same
+  // compiler provenance: no write. A legacy row (source/metadata-only hash)
+  // never matches, so it refreshes exactly once on the next set and is a
+  // no-op after that.
   const current = await getView(ctx.organizationId, key);
-  if (current && current.content_hash === hash) {
+  if (current && current.content_hash === hash && current.compile_config_hash === compileConfigHash) {
     return { action: 'set', view: projectView(current), written: false };
   }
 
@@ -255,6 +260,7 @@ async function handleSet(
     source_files: retained?.sourceFiles ?? null,
     dependencies: retained?.dependencies ?? null,
     source_complete: retained !== undefined,
+    compile_config_hash: compileConfigHash,
     content_hash: hash,
     attach,
     params,

@@ -10,10 +10,11 @@
  * back over the MCP resource or the shell route and mounted `srcdoc` into the
  * sandboxed frame the MCP apps already use.
  */
-import { existsSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, posix } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import type { ViewAttachment, ViewParamDecl } from '@lobu/core/contracts/tools/manage-views';
 import { COLLECTION_QUERY_KEY } from '@lobu/core/contracts/tools/collection-selection';
 import {
@@ -25,10 +26,12 @@ import {
   readViewDefinition,
   type ViewDefinitionRecord,
 } from '@lobu/core/contracts/tools/view-definition';
+import { contentHash } from '@lobu/core/contracts/tools/view-content-hash';
 import { sourceDependencies } from '@lobu/connector-worker/compile';
-import { build, type Plugin, transform } from 'esbuild';
+import { build, type Plugin, transform, version as esbuildVersion } from 'esbuild';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
+import logger from '../utils/logger';
 
 export type { ViewAttachment };
 
@@ -93,6 +96,8 @@ export interface StoredView {
   source_files: SourceFiles | null;
   dependencies: SourceDependencies | null;
   source_complete: boolean;
+  /** The server compiler fingerprint that built `compiled_code`; null when the caller supplied the bundle. */
+  compile_config_hash: string | null;
   attach: ViewAttachment[];
   params: Record<string, ViewParamDecl>;
   actions: Record<string, ViewActionDecl>;
@@ -110,6 +115,8 @@ export interface SetViewInput {
   source_files?: SourceFiles | null;
   dependencies?: SourceDependencies | null;
   source_complete?: boolean;
+  /** Set only when the server compiled `compiled_code`; omitted means never rebuilt. */
+  compile_config_hash?: string | null;
   attach: ViewAttachment[];
   params: StoredView['params'];
   actions: StoredView['actions'];
@@ -126,6 +133,7 @@ interface ViewRow {
   source_files: SourceFiles | null;
   dependencies: SourceDependencies | null;
   source_complete: boolean | null;
+  compile_config_hash: string | null;
   attach: unknown;
   params: unknown;
   actions: unknown;
@@ -144,6 +152,7 @@ function mapViewRow(row: ViewRow): StoredView {
     source_files: row.source_files ?? null,
     dependencies: row.dependencies ?? null,
     source_complete: row.source_complete === true,
+    compile_config_hash: row.compile_config_hash ?? null,
     attach: (row.attach ?? []) as ViewAttachment[],
     params: (row.params ?? {}) as StoredView['params'],
     actions: (row.actions ?? {}) as StoredView['actions'],
@@ -162,7 +171,7 @@ export async function getView(
   const sql = getDb();
   const rows = await sql<ViewRow>`
     SELECT key, name, description, source_code, compiled_code, content_hash,
-      source_files, dependencies, source_complete,
+      source_files, dependencies, source_complete, compile_config_hash,
       attach, params, actions, last_writer, updated_at
     FROM views
     WHERE organization_id = ${organizationId} AND key = ${key}
@@ -175,7 +184,7 @@ export async function listViews(organizationId: string): Promise<StoredView[]> {
   const sql = getDb();
   const rows = await sql<ViewRow>`
     SELECT key, name, description, source_code, compiled_code, content_hash,
-      source_files, dependencies, source_complete,
+      source_files, dependencies, source_complete, compile_config_hash,
       attach, params, actions, last_writer, updated_at
     FROM views
     WHERE organization_id = ${organizationId}
@@ -198,19 +207,22 @@ export async function setView(
   if (
     existing &&
     existing.content_hash === input.content_hash &&
-    existing.compiled_code === input.compiled_code
+    existing.compiled_code === input.compiled_code &&
+    existing.compile_config_hash === (input.compile_config_hash ?? null)
   ) {
     return { view: existing, written: false };
   }
   const rows = await sql<ViewRow>`
     INSERT INTO views (
       organization_id, key, name, description, source_code, compiled_code,
-      content_hash, source_files, dependencies, source_complete, attach, params, actions, last_writer, updated_at
+      content_hash, source_files, dependencies, source_complete, compile_config_hash,
+      attach, params, actions, last_writer, updated_at
     ) VALUES (
       ${organizationId}, ${input.key}, ${input.name}, ${input.description},
       ${input.source_code}, ${input.compiled_code}, ${input.content_hash},
       ${input.source_files ? sql.json(input.source_files) : null},
       ${input.dependencies ? sql.json(input.dependencies) : null}, ${input.source_complete ?? false},
+      ${input.compile_config_hash ?? null},
       ${sql.json(input.attach)}, ${sql.json(input.params)},
       ${sql.json(input.actions)}, ${input.last_writer}, NOW()
     )
@@ -223,13 +235,14 @@ export async function setView(
       source_files = EXCLUDED.source_files,
       dependencies = EXCLUDED.dependencies,
       source_complete = EXCLUDED.source_complete,
+      compile_config_hash = EXCLUDED.compile_config_hash,
       attach = EXCLUDED.attach,
       params = EXCLUDED.params,
       actions = EXCLUDED.actions,
       last_writer = EXCLUDED.last_writer,
       updated_at = NOW()
     RETURNING key, name, description, source_code, compiled_code, content_hash,
-      source_files, dependencies, source_complete,
+      source_files, dependencies, source_complete, compile_config_hash,
       attach, params, actions, last_writer, updated_at
   `;
   return { view: mapViewRow(rows[0]), written: true };
@@ -248,14 +261,27 @@ export async function removeView(
   return rows.length > 0;
 }
 
-/** Public projection: metadata only, never source or bundle. */
+/**
+ * Public projection: metadata only, never source or bundle. The hash is the
+ * one the view will be served with, so a client cache keyed on it misses for
+ * a bundle the server is about to rebuild.
+ */
 export function projectView(view: StoredView): Omit<
   StoredView,
-  'compiled_code' | 'source_code' | 'source_files' | 'dependencies' | 'source_complete'
+  'compiled_code' | 'source_code' | 'source_files' | 'dependencies' | 'source_complete' | 'compile_config_hash'
 > & { compiled_bytes: number; source_bytes: number } {
-  const { compiled_code, source_code, source_files: _files, dependencies: _deps, source_complete: _complete, ...rest } = view;
+  const {
+    compiled_code,
+    source_code,
+    source_files: _files,
+    dependencies: _deps,
+    source_complete: _complete,
+    compile_config_hash: _compiler,
+    ...rest
+  } = view;
   return {
     ...rest,
+    content_hash: servedContentHash(view),
     compiled_bytes: Buffer.byteLength(compiled_code, 'utf8'),
     source_bytes: Buffer.byteLength(source_code, 'utf8'),
   };
@@ -496,6 +522,137 @@ export async function compileView(
     );
   }
   return compiled;
+}
+
+/**
+ * Bump when the compile pipeline (resolve rules, esbuild options) changes in
+ * a way the fingerprint's other inputs do not capture.
+ */
+const VIEW_COMPILE_PIPELINE_VERSION = 1;
+
+let compileFingerprint: string | undefined;
+
+/**
+ * Fingerprint of everything the server compiler bundles into a view besides
+ * its source: the pipeline, the bootstrap, esbuild, the pinned package
+ * versions, and the bytes of the `@lobu/views` runtime, whose version does not
+ * move when its code does.
+ */
+export function viewCompileFingerprint(): string {
+  if (compileFingerprint) return compileFingerprint;
+  const hash = createHash('sha256');
+  hash.update(
+    JSON.stringify({
+      pipeline: VIEW_COMPILE_PIPELINE_VERSION,
+      esbuild: esbuildVersion,
+      dependencies: viewSourceDependencies(),
+      bootstrap: VIEW_BOOTSTRAP_SOURCE,
+    })
+  );
+  const runtimeDir = dirname(require.resolve('@lobu/views'));
+  for (const file of readdirSync(runtimeDir).filter((name) => name.endsWith('.js')).sort()) {
+    hash.update(`\0${file}\0`);
+    hash.update(readFileSync(join(runtimeDir, file)));
+  }
+  compileFingerprint = hash.digest('hex');
+  return compileFingerprint;
+}
+
+/** A bundle this server's compiler built, under a compiler that has since changed. */
+function isStaleServerBuild(view: StoredView): boolean {
+  return (
+    view.compile_config_hash !== null &&
+    view.source_files !== null &&
+    view.compile_config_hash !== viewCompileFingerprint()
+  );
+}
+
+/** The hash a view is served under: a stale server build reports a new one before it is rebuilt. */
+export function servedContentHash(view: StoredView): string {
+  if (!isStaleServerBuild(view)) return view.content_hash;
+  return createHash('sha256')
+    .update(`${view.content_hash}\0${viewCompileFingerprint()}`)
+    .digest('hex')
+    .slice(0, view.content_hash.length || 16);
+}
+
+/** Rebuilds that failed for this exact source and compiler, so a view that no longer compiles is not retried per request. */
+const failedRebuilds = new Set<string>();
+const inflightRebuilds = new Map<string, Promise<StoredView | null>>();
+
+/**
+ * The view as it should be served. A bundle the server compiled under an
+ * older compiler is rebuilt from its stored source and saved, so runtime
+ * fixes reach every server-built view the first time it is opened. A bundle
+ * the caller supplied is never rebuilt. A rebuild that fails keeps serving the
+ * stored bundle. The save is compare-and-set on the hash and compiler that
+ * were read, so a concurrent save always wins.
+ */
+export async function getServedView(
+  organizationId: string,
+  key: string
+): Promise<StoredView | null> {
+  const view = await getView(organizationId, key);
+  if (!view || !isStaleServerBuild(view)) return view;
+  const fingerprint = viewCompileFingerprint();
+  const attempt = `${organizationId}\0${key}\0${view.content_hash}\0${fingerprint}`;
+  if (failedRebuilds.has(attempt)) return view;
+  let rebuild = inflightRebuilds.get(attempt);
+  if (!rebuild) {
+    rebuild = rebuildView(organizationId, view, fingerprint, attempt).finally(() =>
+      inflightRebuilds.delete(attempt)
+    );
+    inflightRebuilds.set(attempt, rebuild);
+  }
+  return rebuild;
+}
+
+async function rebuildView(
+  organizationId: string,
+  view: StoredView,
+  fingerprint: string,
+  attempt: string
+): Promise<StoredView | null> {
+  let compiled: string;
+  try {
+    compiled = await compileView(view.source_code);
+  } catch (err) {
+    failedRebuilds.add(attempt);
+    logger.warn(
+      { organization_id: organizationId, view_key: view.key, err },
+      '[views] Stale view bundle failed to rebuild; serving the stored bundle'
+    );
+    return view;
+  }
+  const dependencies = viewSourceDependencies();
+  const hash = contentHash(
+    view.source_code,
+    {
+      name: view.name,
+      description: view.description,
+      attach: view.attach,
+      params: view.params,
+      actions: view.actions,
+    },
+    compiled,
+    { sourceFiles: view.source_files as SourceFiles, dependencies }
+  );
+  const sql = getDb();
+  const rows = await sql<ViewRow>`
+    UPDATE views SET
+      compiled_code = ${compiled},
+      content_hash = ${hash},
+      dependencies = ${sql.json(dependencies)},
+      compile_config_hash = ${fingerprint},
+      updated_at = NOW()
+    WHERE organization_id = ${organizationId} AND key = ${view.key}
+      AND content_hash = ${view.content_hash}
+      AND compile_config_hash = ${view.compile_config_hash}
+    RETURNING key, name, description, source_code, compiled_code, content_hash,
+      source_files, dependencies, source_complete, compile_config_hash,
+      attach, params, actions, last_writer, updated_at
+  `;
+  return rows.length > 0 ? mapViewRow(rows[0]) : getView(organizationId, view.key);
 }
 
 /** Registry entry shaped like `MCP_APP_RESOURCES` so `mcpAppResourceMeta` applies unchanged. */
