@@ -1,10 +1,9 @@
 /**
- * Serving a view rebuilds, from its retained source files, any buildable view
- * whose bundle the current compiler did not build: an older compiler's build,
- * a caller-supplied bundle, a row saved before compiler provenance existed. A
- * view with other npm dependencies or no retained source is served as stored,
- * a rebuild that fails keeps the stored bundle without retrying per request,
- * and a save that lands while a rebuild is in flight is never overwritten.
+ * Serving a view rebuilds a bundle the server compiled under an older
+ * compiler, and nothing else: a caller-supplied bundle and a row saved before
+ * compiler provenance existed are served as stored, a rebuild that fails keeps
+ * the stored bundle without retrying per request, and a save that lands while
+ * a rebuild is in flight is never overwritten.
  */
 import postgres from "postgres";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,7 +12,6 @@ import { executeTool, type AuthContext } from "../../../tools/execute";
 import logger from "../../../utils/logger";
 import {
 	compileView,
-	contentHash,
 	getServedView,
 	getView,
 	serverCompileStamp,
@@ -35,7 +33,6 @@ const TEST_ENV: Env = {
 
 const BODY = "export default function Board() { return null; }";
 const SOURCE = viewModule({ key: "board", attach: [] }, BODY);
-const FILES = { entrypoint: "index.tsx", files: { "index.tsx": SOURCE } };
 const UNRESOLVABLE = viewModule(
 	{ key: "board", attach: [] },
 	'import { wat } from "no-such-package-xyz";\nexport default function Board() { return wat; }'
@@ -122,36 +119,18 @@ describe("getServedView", () => {
 		expect(served?.compiled_code).toBe(before?.compiled_code);
 	});
 
-	it("rebuilds a caller-supplied bundle from its retained source, keeping its record", async () => {
-		await set({ source_code: SOURCE, compiled_code: "/*client-bundle*/console.log(1);", source_files: FILES, dependencies: {} });
-		const stored = await getView(orgId, "board");
-		expect(stored && servedContentHash(stored)).not.toBe(stored?.content_hash);
+	it("never rebuilds a caller-supplied bundle", async () => {
+		const files = { entrypoint: "index.tsx", files: { "index.tsx": SOURCE } };
+		await set({ source_code: SOURCE, compiled_code: "/*client-bundle*/console.log(1);", source_files: files, dependencies: {} });
 
 		const served = await getServedView(orgId, "board");
 
-		const compiled = await compileView(FILES);
-		expect(served?.compiled_code).toBe(compiled);
-		expect(served?.compile_config_hash).toBe(serverCompileStamp(compiled));
-		expect(served?.content_hash).toBe(
-			contentHash(
-				SOURCE,
-				{
-					name: stored?.name ?? "",
-					description: stored?.description ?? "",
-					attach: stored?.attach ?? [],
-					params: stored?.params ?? {},
-					actions: stored?.actions ?? {},
-				},
-				compiled,
-				{ sourceFiles: FILES, dependencies: {} }
-			)
-		);
-		expect(served?.dependencies).toEqual({});
-		expect(served?.last_writer).toBe(stored?.last_writer);
+		expect(served?.compiled_code).toBe("/*client-bundle*/console.log(1);");
+		expect(served?.compile_config_hash).toBeNull();
 		expect(served && servedContentHash(served)).toBe(served?.content_hash);
 	});
 
-	it("rebuilds a row saved before compiler provenance existed", async () => {
+	it("never rebuilds a row saved before compiler provenance existed", async () => {
 		await set({ source_code: SOURCE });
 		const sql = getTestDb();
 		await sql`
@@ -160,30 +139,48 @@ describe("getServedView", () => {
 		`;
 
 		const served = await getServedView(orgId, "board");
-
-		expect(served?.compiled_code).toBe(await compileView(FILES));
-		expect(served?.compile_config_hash).toBe(serverCompileStamp(served?.compiled_code ?? ""));
+		expect(served?.compiled_code).toBe("/*legacy-bundle*/");
+		expect(served && servedContentHash(served)).toBe(served?.content_hash);
 	});
 
-	it("never rebuilds a view with other npm dependencies or without retained source", async () => {
-		await set({
-			source_code: SOURCE,
-			compiled_code: "/*apply-bundle*/console.log(1);",
-			source_files: FILES,
-			dependencies: { "chart.js": "4.4.0" },
-		});
-		const npm = await getServedView(orgId, "board");
-		expect(npm?.compiled_code).toBe("/*apply-bundle*/console.log(1);");
-		expect(npm && servedContentHash(npm)).toBe(npm?.content_hash);
-
+	it("never rebuilds a bundle an older writer replaced without restamping", async () => {
+		await set({ source_code: SOURCE });
+		const built = await getView(orgId, "board");
 		const sql = getTestDb();
+		// Code from before the column upserts a CLI bundle and leaves the stamp;
+		// the compiler has since changed.
 		await sql`
-			UPDATE views SET source_files = NULL, dependencies = NULL
+			UPDATE views SET compiled_code = '/*cli-bundle*/',
+				compile_config_hash = ${serverCompileStamp(built?.compiled_code ?? "", "older-compiler")}
 			WHERE organization_id = ${orgId} AND key = 'board'
 		`;
-		const legacy = await getServedView(orgId, "board");
-		expect(legacy?.compiled_code).toBe("/*apply-bundle*/console.log(1);");
-		expect(legacy && servedContentHash(legacy)).toBe(legacy?.content_hash);
+
+		const served = await getServedView(orgId, "board");
+
+		expect(served?.compiled_code).toBe("/*cli-bundle*/");
+		expect(served && servedContentHash(served)).toBe(served?.content_hash);
+	});
+
+	it("rebuilds a stale server build from all of its retained source files", async () => {
+		const files = {
+			entrypoint: "views/board.tsx",
+			files: {
+				"views/board.tsx": viewModule(
+					{ key: "board", attach: [] },
+					'import { label } from "../lib/label";\nexport default function Board() { return label; }'
+				),
+				"lib/label.ts": 'export const label = "won";\n',
+			},
+		};
+		await set({ source_code: files.files["views/board.tsx"], source_files: files, dependencies: {} });
+		await makeStale();
+
+		const served = await getServedView(orgId, "board");
+
+		expect(served?.compiled_code).toBe(await compileView(files));
+		expect(served?.compiled_code).toContain("__lobuViews");
+		expect(served?.compile_config_hash).toBe(serverCompileStamp(served?.compiled_code ?? ""));
+		expect(served && servedContentHash(served)).toBe(served?.content_hash);
 	});
 
 	it("keeps the stored bundle when the rebuild fails, and does not retry it per request", async () => {

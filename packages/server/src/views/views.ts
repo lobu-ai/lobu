@@ -9,9 +9,10 @@
  * then the view's bundle inlined, read back over the MCP resource or the shell
  * route and mounted `srcdoc` into the sandboxed frame the MCP apps already
  * use. Newly compiled bundles read the shell runtime
- * (`@lobu/core/contracts/tools/view-runtime`); a buildable view this compiler
- * did not build is rebuilt from its retained source when served
- * (`getServedView`), and a bundle with other npm dependencies keeps its own.
+ * (`@lobu/core/contracts/tools/view-runtime`); a bundle the server built
+ * under an older compiler is rebuilt from its retained source when served
+ * (`getServedView`). A supplied bundle from before the contract keeps its own
+ * runtime until it is saved again.
  */
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
@@ -126,7 +127,7 @@ export interface SetViewInput {
   source_files?: SourceFiles | null;
   dependencies?: SourceDependencies | null;
   source_complete?: boolean;
-  /** Set only when the server compiled `compiled_code`; omitted means a buildable view is rebuilt when served. */
+  /** Set only when the server compiled `compiled_code`; omitted means never rebuilt. */
   compile_config_hash?: string | null;
   attach: ViewAttachment[];
   params: StoredView['params'];
@@ -567,9 +568,9 @@ export function viewCompileFingerprint(): string {
 
 /**
  * The provenance stamp for a bundle the server compiled: the compiler
- * fingerprint plus a digest of the exact bytes it produced. A bundle written
- * without a current stamp (supplied by the caller, compiled by an older
- * server, or replaced without restamping) reads as not built by this compiler.
+ * fingerprint plus a digest of the exact bytes it produced. A writer that
+ * replaces the bundle without restamping leaves a digest that no longer
+ * matches, so that bundle reads as caller-owned.
  */
 export function serverCompileStamp(
   compiled: string,
@@ -580,15 +581,18 @@ export function serverCompileStamp(
 }
 
 /**
- * A view the server can build from its retained source whose bundle this
- * compiler did not build. `lobu apply` builds through the same pieces, so the
- * rebuild of a supplied bundle is the same program under the current
- * contract. A view with other npm dependencies keeps its supplied bundle.
+ * A bundle this server's compiler built, under a compiler that has since
+ * changed. A caller-supplied bundle is never rebuilt: `lobu apply` builds
+ * under the author's tsconfig, which the retained source does not carry, so
+ * a server rebuild is not provably the same program.
  */
 function isStaleServerBuild(view: StoredView): boolean {
-  if (view.source_files === null || view.dependencies === null) return false;
-  if (!isServerBuildable(view.dependencies)) return false;
-  return view.compile_config_hash !== serverCompileStamp(view.compiled_code);
+  if (view.compile_config_hash === null || view.source_files === null) return false;
+  const separator = view.compile_config_hash.lastIndexOf(':');
+  if (separator < 0) return false;
+  const fingerprint = view.compile_config_hash.slice(0, separator);
+  if (fingerprint === viewCompileFingerprint()) return false;
+  return view.compile_config_hash === serverCompileStamp(view.compiled_code, fingerprint);
 }
 
 /** Cache invalidation token for a stale build; otherwise the stored content hash. */
@@ -606,12 +610,12 @@ const failedRebuilds = new Set<string>();
 const inflightRebuilds = new Map<string, Promise<StoredView | null>>();
 
 /**
- * The view as it should be served. A buildable view whose bundle this
- * compiler did not build is rebuilt from its retained source files and saved,
- * so a change to the bundle contract reaches every buildable view the first
- * time it is opened. A rebuild that fails keeps serving the stored bundle.
- * The save is compare-and-set on the hash and stamp that were read, so a
- * concurrent save always wins.
+ * The view as it should be served. A bundle the server compiled under an
+ * older compiler is rebuilt from its retained source files and saved, so a
+ * change to the bundle contract reaches server-built views the first time
+ * they are opened. A bundle the caller supplied is never rebuilt. A rebuild
+ * that fails keeps serving the stored bundle. The save is compare-and-set on
+ * the hash and stamp that were read, so a concurrent save always wins.
  */
 export async function getServedView(
   organizationId: string,
@@ -673,7 +677,7 @@ async function rebuildView(
       updated_at = NOW()
     WHERE organization_id = ${organizationId} AND key = ${view.key}
       AND content_hash = ${view.content_hash}
-      AND compile_config_hash IS NOT DISTINCT FROM ${view.compile_config_hash}
+      AND compile_config_hash = ${view.compile_config_hash}
     RETURNING key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
       attach, params, actions, last_writer, updated_at

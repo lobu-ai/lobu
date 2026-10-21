@@ -5,8 +5,8 @@
  * bundle as `globalThis[VIEW_RUNTIME_GLOBAL]`; each view bundle reads its
  * runtime imports off that global. A runtime fix reaches views using this
  * contract on the next deploy, without re-saving them. A self-contained
- * bundle from before the contract is rebuilt from its retained source the
- * first time it is served (`getServedView`), or keeps running as is.
+ * bundle from before the contract keeps running on its own runtime until it
+ * is saved again; one the server built is rebuilt when served.
  *
  * Every view compiler builds through these pieces — the server on save and on
  * a served rebuild, and `lobu apply` in the author's checkout — so the same

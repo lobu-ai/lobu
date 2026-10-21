@@ -245,8 +245,8 @@ async function handleSet(
     compiled,
     retained
   );
-  // Stamp only a bundle this server compiled. A supplied one is stored as
-  // sent; if its source is server-buildable it is rebuilt when served.
+  // Only a bundle this server compiled may be rebuilt later; a supplied one
+  // is the caller's and stays as sent.
   const compileConfigHash = args.compiled_code ? null : serverCompileStamp(compiled);
   // Same source AND same metadata AND same executable bundle AND same
   // compiler provenance: no write. A legacy row (source/metadata-only hash)

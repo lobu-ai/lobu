@@ -27,10 +27,10 @@ export default function Board() {
 `;
 
 /**
- * `lobu apply` bundles a view in the author's checkout and the server rebuilds
- * stored views from the retained files when served. Both must produce the same
- * bytes, or every deploy rewrites the view `lobu apply` just stored and every
- * apply rewrites it back.
+ * `lobu apply` bundles a view in the author's checkout; the server compiles
+ * the same retained files on a source-only save. Both build through the one
+ * view runtime contract, so under default compiler settings the same source
+ * is the same bundle wherever it is built.
  */
 describe("view compilers agree", () => {
   test.each([
