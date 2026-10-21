@@ -224,10 +224,11 @@ describe('views resources + open_view + invoke_view_action', () => {
 		expect(html).toContain('name="lobu-view" content="board"');
 		expect(html).toContain('name="lobu-view-hash"');
 		expect(html).toContain('<div id="root"></div>');
-		// The inlined bundle is view code plus the react allowlist only: no
-		// server tool names may leak into a served shell.
-		expect(html).not.toContain('invoke_view_action');
+		// The shell inlines the runtime (react, @lobu/views) and the view code
+		// only: no server module may leak into a served shell.
+		expect(html).toContain('__lobuViews');
 		expect(html).not.toContain('manage_view_templates');
+		expect(html).not.toContain('serverCompileStamp');
 		// No relative asset URLs and no <base href>: claude.ai hardcodes
 		// base-uri 'self', so both would 404 there.
 		expect(html).not.toMatch(/src="\.\//);

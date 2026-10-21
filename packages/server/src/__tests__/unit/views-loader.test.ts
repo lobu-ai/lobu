@@ -3,10 +3,12 @@
  * gate, proven with fake host frames.
  */
 import { describe, expect, it } from "bun:test";
+import { createContext, runInContext } from "node:vm";
 import {
   renderViewShell,
   renderViewsLoaderShell,
   type StoredView,
+  viewRuntimeScript,
 } from "../../views/views";
 
 function runLoader() {
@@ -274,6 +276,76 @@ describe("views loader shell", () => {
   });
 });
 
+describe("view shell runtime", () => {
+  it("publishes the installed runtime before executing the view bundle", async () => {
+    const pending = viewRuntimeScript();
+    expect(viewRuntimeScript()).toBe(pending);
+    const runtime = await pending;
+    const html = renderViewShell({
+      key: "probe",
+      name: "Probe",
+      content_hash: "test",
+      compiled_code: "globalThis.viewReact = globalThis.__lobuViews.react;",
+    } as StoredView, "https://app.example/acme/", runtime);
+    const context = createContext({});
+    // Inlined code never contains a closing tag (the shell escapes it), so
+    // each one ends a script; the runtime may itself contain "<script>".
+    const scripts = html
+      .split("</script>")
+      .slice(0, -1)
+      .map((chunk) => chunk.slice(chunk.indexOf("<script>") + "<script>".length));
+    expect(scripts).toHaveLength(2);
+    for (const code of scripts) runInContext(code, context);
+    const modules = context.__lobuViews;
+    expect(context.viewReact).toBe(modules.react);
+    expect(Object.isFrozen(modules)).toBe(true);
+    expect(typeof modules.react.useState).toBe("function");
+    expect(typeof modules["react/jsx-runtime"].jsx).toBe("function");
+    expect(typeof modules["react-dom"].createPortal).toBe("function");
+    expect(typeof modules["react-dom/client"].createRoot).toBe("function");
+    expect(typeof modules["@lobu/views"].mountView).toBe("function");
+    expect(typeof modules["@lobu/views/components"].DataTable).toBe("function");
+    expect(runtime).not.toMatch(/(?:\/Users\/|\/home\/|file:\/\/|file%3A%2F%2F)/i);
+  });
+
+  it("keeps a successful retry cached after concurrent callers see a failed build", async () => {
+    // Isolate the esbuild mock from other suites sharing Bun's module registry.
+    const child = Bun.spawn([process.execPath, "-e", `
+      import { mock } from "bun:test";
+      import * as esbuild from "esbuild";
+      const original = { ...esbuild };
+      let builds = 0;
+      let fail;
+      mock.module("esbuild", () => ({ ...original, build: () => {
+        builds++;
+        return builds === 1
+          ? new Promise((_, reject) => { fail = reject; })
+          : Promise.resolve({ outputFiles: [{ text: "runtime" }] });
+      } }));
+      const { viewRuntimeScript } = await import(${JSON.stringify(new URL("../../views/views.ts", import.meta.url).href)});
+      const first = viewRuntimeScript();
+      const retry = first.catch(() => viewRuntimeScript());
+      const concurrent = viewRuntimeScript();
+      fail(new Error("first build failed"));
+      const results = await Promise.allSettled([retry, concurrent]);
+      const cached = await viewRuntimeScript();
+      console.log(JSON.stringify({ builds, results, cached }));
+    `], { stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+    const result = JSON.parse(stdout);
+    expect(result.builds).toBe(2);
+    expect(result.results[0]).toEqual({ status: "fulfilled", value: "runtime" });
+    expect(result.results[1].status).toBe("rejected");
+    expect(result.cached).toBe("runtime");
+  });
+});
+
 describe("view shell theme tokens", () => {
   const view = {
     key: "health",
@@ -283,7 +355,7 @@ describe("view shell theme tokens", () => {
   } as StoredView;
 
   it("derives every kit token from the MCP Apps standard variable, keeping Lobu's palette as the fallback", () => {
-    const html = renderViewShell(view, "https://app.example/acme/");
+    const html = renderViewShell(view, "https://app.example/acme/", "");
     for (const token of [
       "--fg:var(--color-text-primary,#0a0a0a)",
       "--muted:var(--color-text-secondary,#6b7280)",
@@ -304,10 +376,10 @@ describe("view shell theme tokens", () => {
   });
 
   it("names the workspace a view's relative links resolve against, escaped", () => {
-    expect(renderViewShell(view, "https://app.example/acme/")).toContain(
+    expect(renderViewShell(view, "https://app.example/acme/", "")).toContain(
       '<meta name="lobu-workspace" content="https://app.example/acme/">'
     );
-    expect(renderViewShell(view, 'https://app.example/a"<b/')).toContain(
+    expect(renderViewShell(view, 'https://app.example/a"<b/', "")).toContain(
       'content="https://app.example/a&quot;&lt;b/"'
     );
   });

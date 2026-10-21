@@ -27,6 +27,7 @@ import {
   type ViewDefinitionRecord,
 } from '@lobu/core/contracts/tools/view-definition';
 import { contentHash } from '@lobu/core/contracts/tools/view-content-hash';
+import { VIEW_BUILD_OPTIONS, VIEW_RUNTIME_MODULES, viewRuntimeEntry } from '@lobu/core/contracts/tools/view-runtime';
 import { sourceDependencies } from '@lobu/connector-worker/compile';
 import { build, type Plugin, transform, version as esbuildVersion } from 'esbuild';
 import { getDb } from '../db/client';
@@ -299,14 +300,7 @@ export function projectView(view: StoredView): Omit<
  * and npm deps where node_modules exists and ships the bundle beside the
  * source.
  */
-const VIEW_ALLOWED_BARE_SPECIFIERS = new Set([
-  'react',
-  'react-dom',
-  'react-dom/client',
-  'react/jsx-runtime',
-  '@lobu/views',
-  '@lobu/views/components',
-]);
+const VIEW_ALLOWED_BARE_SPECIFIERS = new Set(VIEW_RUNTIME_MODULES);
 /** The server compiler always mounts through these installed runtime packages. */
 export function viewSourceDependencies(): SourceDependencies {
   return sourceDependencies(['react', 'react-dom/client', '@lobu/views', '@lobu/views/components'].map((name) => require.resolve(name)));
@@ -454,6 +448,30 @@ function inertResolveDir(): string {
   const dir = join(tmpdir(), 'lobu-views-inert-resolve');
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+let runtimeScript: Promise<string> | null = null;
+
+/**
+ * The shell runtime script: every runtime module from the server's own
+ * installation, assigned to the runtime global ahead of the view bundle, once
+ * per process. Bundles that still inline their own runtime ignore it; bundles
+ * built against the runtime contract read their imports from it.
+ */
+export function viewRuntimeScript(): Promise<string> {
+  runtimeScript ??= build({
+    ...VIEW_BUILD_OPTIONS,
+    stdin: { contents: viewRuntimeEntry(), loader: 'js', resolveDir: inertResolveDir() },
+    plugins: [viewResolvePlugin()],
+  }).then((result) => {
+    const code = result.outputFiles?.[0]?.text ?? '';
+    if (!code) throw new Error('View runtime compiled to an empty bundle');
+    return code;
+  }).catch((error) => {
+    runtimeScript = null;
+    throw error;
+  });
+  return runtimeScript;
 }
 
 /**
@@ -702,10 +720,15 @@ html,body{margin:0;background:transparent;color:var(--fg);font:13px/1.45 var(--f
 *{box-sizing:border-box}
 `;
 
-/** One view's shell: the compiled bundle inlined, no relative asset URLs and
- * no `<base href>` (claude.ai hardcodes `base-uri 'self'`, so both 404 there). */
-export function renderViewShell(view: StoredView, workspaceUrl: string): string {
-  const script = view.compiled_code.replaceAll('</script', '<\\/script');
+/** One view's shell: the runtime script (`viewRuntimeScript`) then the
+ * compiled bundle, both inlined, no relative asset URLs and no `<base href>`
+ * (claude.ai hardcodes `base-uri 'self'`, so both 404 there). */
+export function renderViewShell(
+  view: StoredView,
+  workspaceUrl: string,
+  runtime: string
+): string {
+  const inline = (code: string) => code.replaceAll('</script', '<\\/script');
   const workspace = workspaceUrl
     .replaceAll('&', '&amp;')
     .replaceAll('"', '&quot;')
@@ -723,7 +746,8 @@ export function renderViewShell(view: StoredView, workspaceUrl: string): string 
 </head>
 <body>
 <div id="root"></div>
-<script>${script}</script>
+<script>${inline(runtime)}</script>
+<script>${inline(view.compiled_code)}</script>
 </body>
 </html>`;
 }
@@ -731,7 +755,7 @@ export function renderViewShell(view: StoredView, workspaceUrl: string): string 
 /**
  * The generic loader shell every `open_view` binds. Hand-written postMessage —
  * no `@modelcontextprotocol/ext-apps`, no React, no framework — so it stays a
- * few kilobytes while per-view bundles carry the React guest. It runs the
+ * few kilobytes while per-view shells carry the React runtime. It runs the
  * standard `ui/initialize` handshake, then renders the per-view bundle from
  * whichever delivery the host uses: the standard `sandbox-resource-ready`
  * push (Claude), a `resources/read` of `ui://lobu/views/<key>` for the key in

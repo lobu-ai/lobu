@@ -76,6 +76,7 @@ import {
   LOBU_VIEWS_RESOURCE_URI,
   getServedView,
   renderViewShell,
+  viewRuntimeScript,
   renderViewsLoaderShell,
   viewKeyFromResourceUri,
   viewResourceMeta,
@@ -585,7 +586,8 @@ function createServerForContext(
               mimeType: MCP_APP_MIME_TYPE,
               text: renderViewShell(
                 storedView,
-                await viewWorkspaceUrl(authCtx.organizationId, authCtx.requestUrl)
+                await viewWorkspaceUrl(authCtx.organizationId, authCtx.requestUrl),
+                await viewRuntimeScript()
               ),
               _meta: mcpAppResourceMeta(authCtx, meta),
             },

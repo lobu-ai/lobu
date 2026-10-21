@@ -28,6 +28,7 @@ import {
 	getServedView,
 	isValidViewKey,
 	renderViewShell,
+	viewRuntimeScript,
 } from "./views/views";
 import { viewWorkspaceUrl } from "./utils/url-builder";
 import { getOperationsSummary } from "./operations/connector-operations";
@@ -454,7 +455,8 @@ export async function restGetViewShell(c: Context<{ Bindings: Env }>) {
 		}
 		const html = renderViewShell(
 			view,
-			await viewWorkspaceUrl(ctx.organizationId, c.req.url)
+			await viewWorkspaceUrl(ctx.organizationId, c.req.url),
+			await viewRuntimeScript()
 		);
 		c.header("Content-Type", "text/plain; charset=utf-8");
 		c.header("Cache-Control", "no-store");
