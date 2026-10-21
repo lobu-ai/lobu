@@ -605,7 +605,7 @@ interface TestPAT {
 export async function createTestPAT(
   userId: string,
   organizationId: string,
-  options?: { scope?: string },
+  options?: { scope?: string; name?: string },
 ): Promise<TestPAT> {
   const sql = getTestDb();
   const token = `owl_pat_${generateSecureToken(24)}`;
@@ -616,7 +616,7 @@ export async function createTestPAT(
     INSERT INTO personal_access_tokens (
       token_hash, token_prefix, user_id, organization_id, name, scope, created_at, updated_at
     ) VALUES (
-      ${tokenHash}, ${tokenPrefix}, ${userId}, ${organizationId}, 'Test PAT', ${options?.scope ?? null}, NOW(), NOW()
+      ${tokenHash}, ${tokenPrefix}, ${userId}, ${organizationId}, ${options?.name ?? 'Test PAT'}, ${options?.scope ?? null}, NOW(), NOW()
     )
   `;
 
