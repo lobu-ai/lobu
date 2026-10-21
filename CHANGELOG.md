@@ -1,5 +1,13 @@
 # Changelog
 
+## [24.1.1](https://github.com/lobu-ai/lobu/compare/lobu-v24.1.0...lobu-v24.1.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **cli:** print view rows in the apply plan ([#4295](https://github.com/lobu-ai/lobu/issues/4295)) ([04a72cf](https://github.com/lobu-ai/lobu/commit/04a72cf5be9476988aebffa89d812df6bdcea997))
+* **server:** decide every events column on supersede and keep client_id ([#4291](https://github.com/lobu-ai/lobu/issues/4291)) ([4678d97](https://github.com/lobu-ai/lobu/commit/4678d971edeb6c2b9c5814cac94b3a058d41b1cc))
+
 ## [24.1.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.0.0...lobu-v24.1.0) (2026-10-21)
 
 
