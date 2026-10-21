@@ -1613,13 +1613,17 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
  * Prompt appended to the re-spawned CLI when a device Automation exited without
  * calling completeWindow. Module-level so a granted resume and its idempotent
  * replay hand the device byte-identical instructions.
+ *
+ * It names no CLI command: the device builds the completion contract above it
+ * from its own release, so only that contract knows which command its bundled
+ * `lobu` CLI runs.
  */
 const MISSING_COMPLETE_WINDOW_NUDGE =
 	"Device CLI exited without calling completeWindow. Re-run the Automation task and " +
-	"finalize via the lobu skill + CLI (preferred): " +
-	"`lobu memory exec` with client.knowledge.read({ automation_id }) then " +
+	"finalize exactly as the completion contract in this prompt says: " +
+	"client.knowledge.read({ automation_id }) then " +
 	"client.automations.completeWindow({ window_token, extracted_data, run_id }). " +
-	"MCP query_sdk/run_sdk is also fine if wired. Do not only print a summary.";
+	"Do not only print a summary.";
 
 /**
  * POST /api/workers/me/runs/:runId/complete-automation
@@ -1630,7 +1634,7 @@ const MISSING_COMPLETE_WINDOW_NUDGE =
  *
  * The agent is expected to complete window Automations itself — via Lobu MCP
  * tools (`query_sdk` / `run_sdk` → `completeWindow`) and/or the local
- * `lobu` CLI (`lobu memory exec` with the same ClientSDK calls). This
+ * `lobu` CLI, as the device-built completion contract instructs. This
  * endpoint records process exit metadata and enforces the finalize contract:
  *
  * - body.error set → the subprocess crashed/timed out → run failed.
@@ -2163,8 +2167,8 @@ export async function completeAutomationRun(c: Context<{ Bindings: Env }>) {
 		(budget > 0
 			? `after ${budget + 1} attempt(s)`
 			: "(finalize nudges disabled)") +
-		". Use the lobu skill + `lobu memory exec` (knowledge.read → completeWindow) " +
-		"or MCP query_sdk/run_sdk. Check lobu CLI login/org, gateway reachability, " +
+		". Follow the completion contract in the Automation prompt (knowledge.read → completeWindow). " +
+		"Check lobu CLI login/org, gateway reachability, " +
 		"and that the device token has mcp:write if using MCP.";
 	const transitioned = await failRun(reason);
 	if (!transitioned) {

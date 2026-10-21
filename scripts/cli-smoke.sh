@@ -509,9 +509,12 @@ expect_grep "lobu memory seed --dry-run" "Dry run" "$SEEDPROJ" memory seed --dry
 expect_grep_absent "lobu memory seed skips platform-owned member_of" \
   "relationship_type: mentions" "relationship_type: member_of" \
   "$SEEDPROJ" memory seed --dry-run -c local
-# memory exec -- run a trivial ClientSDK script.
-echo 'export default async () => "cli-smoke-exec-ok";' > "$RUN_DIR/exec.ts"
-expect_ok "lobu memory exec (ClientSDK script)" "$PROJ" memory exec "$RUN_DIR/exec.ts" -c local
+# call run_sdk -- run a trivial titled ClientSDK script; untitled is refused.
+expect_ok "lobu call run_sdk (ClientSDK script)" "$PROJ" call run_sdk \
+  --arg "title=CLI smoke script" \
+  --arg 'script=export default async () => "cli-smoke-exec-ok";' -c local
+expect_fail_grep "lobu call run_sdk without a title" "requires a non-empty" "$PROJ" \
+  call run_sdk --arg 'script=export default async () => 1;' -c local
 # connect -- wire a local MCP client to the memory MCP URL. Cursor's config is
 # a deterministic file write under the isolated HOME, with no external process
 # or browser handoff. Authentication belongs to the client on first use.

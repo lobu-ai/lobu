@@ -45,8 +45,8 @@ prove Slack, Telegram, or another platform works.
 Discover the live ids and current state instead of copying ids from config:
 
 ```bash
-npx @lobu/cli@latest memory exec \
-  'export default async (_ctx, client) => ({ connections: await client.connections.list(), feeds: await client.feeds.list() });' \
+npx @lobu/cli@latest call query_sdk --arg title='List connections and feeds' \
+  --arg script='export default async (_ctx, client) => ({ connections: await client.connections.list(), feeds: await client.feeds.list() });' \
   --context local
 ```
 
@@ -62,8 +62,8 @@ After the user explicitly approves provider-data access, dry-run a collected
 feed server-side first:
 
 ```bash
-npx @lobu/cli@latest memory exec \
-  'export default async (_ctx, client) => client.feeds.trigger({ feed_id: Number("<feed-id>"), dry_run: true });' \
+npx @lobu/cli@latest call run_sdk --arg title='Dry-run feed' \
+  --arg script='export default async (_ctx, client) => client.feeds.trigger({ feed_id: Number("<feed-id>"), dry_run: true });' \
   --context local
 ```
 
@@ -86,12 +86,12 @@ List configured Automations, then trigger each selected Automation by its return
 id:
 
 ```bash
-npx @lobu/cli@latest memory exec \
-  'export default async (_ctx, client) => client.automations.list();' \
+npx @lobu/cli@latest call query_sdk --arg title='List Automations' \
+  --arg script='export default async (_ctx, client) => client.automations.list();' \
   --context local
 
-npx @lobu/cli@latest memory exec \
-  'export default async (_ctx, client) => client.automations.trigger({ automation_id: "<automation-id>" });' \
+npx @lobu/cli@latest call run_sdk --arg title='Trigger Automation' \
+  --arg script='export default async (_ctx, client) => client.automations.trigger({ automation_id: "<automation-id>" });' \
   --context local
 ```
 

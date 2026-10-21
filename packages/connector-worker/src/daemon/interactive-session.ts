@@ -432,6 +432,23 @@ function readCompletionInput() {
   return { output: Buffer.concat(chunks), truncated };
 }
 
+// The run bearer must only reach this run's MCP URL, so the helper accepts one
+// shape: \`call <tool> --arg <entry>...\`. Any other flag (--url, --org,
+// --input-file, ...) could redirect or widen the call and is refused.
+const callTools = new Set(['run_sdk', 'query_sdk', 'query_sql']);
+function constrainedCallArgs(argv) {
+  if (argv[0] !== 'call' || !callTools.has(argv[1])) return null;
+  const rest = argv.slice(2);
+  if (rest.length === 0 || rest.length % 2 !== 0) return null;
+  for (let i = 0; i < rest.length; i += 2) {
+    const entry = rest[i + 1];
+    if (rest[i] !== '--arg' || entry.startsWith('-') || entry.indexOf('=') <= 0) {
+      return null;
+    }
+  }
+  return argv;
+}
+
 async function main() {
   const operation = process.argv[2];
   if (operation === 'complete' && process.argv.length === 3) {
@@ -443,8 +460,11 @@ async function main() {
     });
     return;
   }
-  if (operation !== 'exec' || process.argv.length !== 4) {
-    throw new Error('usage: <helper> exec <module-source> | <helper> complete < result.txt');
+  const callArgs = constrainedCallArgs(process.argv.slice(2));
+  if (!callArgs) {
+    throw new Error(
+      "usage: <helper> call run_sdk|query_sdk|query_sql --arg key=value [--arg key:=<json> ...] | <helper> complete < result.txt"
+    );
   }
   const access = await request({ op: 'credentials' });
   if (typeof access.token !== 'string' || typeof access.memory_url !== 'string') {
@@ -464,10 +484,11 @@ async function main() {
     'LOBU_OPENCODE_BRIDGE_TOKEN',
     'CODEX_THREAD_ID',
     'CODEX_SESSION_ID',
+    'LOBU_MEMORY_ORG',
   ]) delete childEnv[key];
   childEnv.LOBU_API_TOKEN = access.token;
   childEnv.LOBU_MEMORY_URL = access.memory_url;
-  const child = spawn(config.nodeExecutable, [...config.cliArgs, 'memory', 'exec', process.argv[3]], {
+  const child = spawn(config.nodeExecutable, [...config.cliArgs, ...callArgs], {
     env: childEnv,
     stdio: 'inherit',
   });
@@ -495,7 +516,7 @@ function attributedPrompt(
 ): string {
   const helperCommand = shellQuote(helperPath);
   const helperPrompt = prompt
-    .replaceAll('lobu memory exec', `${helperCommand} exec`)
+    .replaceAll('lobu call ', `${helperCommand} call `)
     .replaceAll(
       'Prefer the local `lobu` CLI (same login as the Owletto menubar — credentials in ~/.config/lobu; no extra auth setup).',
       'Use the run-specific helper above for all Lobu access.'
@@ -515,7 +536,7 @@ function attributedPrompt(
   return (
     '[Lobu Automation handoff — this is not a human-authored message]\n' +
     sessionNotice +
-    `Use \`${helperCommand} exec '<module-source>'\` for every Lobu read and completeWindow call below. The helper privately applies this run's assigned-agent credential; do not use bare \`lobu memory exec\` or ambient Lobu MCP.\n` +
+    `Use \`${helperCommand} call run_sdk --arg title='<short title>' --arg script='<module-source>'\` for every Lobu read and completeWindow call below; it accepts only \`call run_sdk|query_sdk|query_sql\` with \`--arg\` entries. The helper privately applies this run's assigned-agent credential; do not use bare \`lobu call\` or ambient Lobu MCP.\n` +
     `When all work is finished, pass the final user-visible result on stdin to this attempt-specific command (maximum ${RESULT_CAP_BYTES / (1024 * 1024)} MiB):\n\n${helperCommand} complete <<'LOBU_RESULT'\n<final result for the user>\nLOBU_RESULT\n\nFor a window Automation, do this only after completeWindow. For an event turn, do not call completeWindow, but still run this explicit completion command. Do not reuse a helper from an earlier Automation message.\n\n` +
     helperPrompt
   );

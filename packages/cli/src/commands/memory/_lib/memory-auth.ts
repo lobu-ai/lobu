@@ -114,6 +114,18 @@ export async function resolveServerUrl(
 }
 
 /**
+ * True when the process was handed a self-contained runtime credential: an
+ * explicit bearer plus the MCP URL it is valid for (a device Automation run's
+ * worker access). That URL already names the org, and a worker token is only
+ * accepted on MCP routes, so callers must dispatch to it as-is.
+ */
+export function hasRuntimeMcpAccess(): boolean {
+  return Boolean(
+    process.env.LOBU_API_TOKEN?.trim() && process.env.LOBU_MEMORY_URL?.trim()
+  );
+}
+
+/**
  * Resolve which org to use.
  * Priority: explicit org arg > LOBU_MEMORY_ORG > session > context preference.
  */
@@ -125,8 +137,7 @@ export async function resolveOrg(
   if (orgFlag) return orgFlag;
   if (process.env.LOBU_MEMORY_ORG) return process.env.LOBU_MEMORY_ORG;
   // Explicit runtime bearer + MCP URL is self-contained; do not rewrite a mounted endpoint with ambient org state.
-  if (process.env.LOBU_API_TOKEN?.trim() && process.env.LOBU_MEMORY_URL?.trim())
-    return undefined;
+  if (hasRuntimeMcpAccess()) return undefined;
   if (session?.org) return session.org;
   return getActiveOrg(context);
 }

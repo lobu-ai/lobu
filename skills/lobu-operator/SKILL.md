@@ -61,7 +61,7 @@ Never bypass a check that has not reported. For a production-visible change, wai
 
 ## Data Integration & Knowledge Ingestion
 
-- Discover the current ClientSDK with `search_sdk`; use `query_sdk` for reads and `run_sdk` / `lobu memory exec` for writes.
+- Discover the current ClientSDK with `search_sdk`; use `query_sdk` for reads and `run_sdk` / `lobu call run_sdk` (with a `title` arg) for writes.
 - Connectors plus feeds are the normal integration path. Use `connections.connect`, follow any `setup_required` continuation, then create and trigger a feed with `feeds.create` and `feeds.trigger`.
 - Find connector actions with `operations.listAvailable` and execute the returned target with `operations.execute`; do not guess operation or connection identifiers.
 - Use `knowledge.save` for schema-less semantic history and `entities.create` / `entities.update` for strict structured records. Chunk bulk work and use `Promise.allSettled` so conflicts are explicit.

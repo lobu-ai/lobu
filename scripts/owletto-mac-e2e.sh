@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTEXT="${CONTEXT:-lobu}"
 : "${ORG:?Set ORG to the organization slug to test}"
 : "${CONN_ID:?Set CONN_ID to the Owletto connection ID to test}"
-# CONN_ID is interpolated into the `lobu memory exec` script body below, so it
+# CONN_ID is interpolated into the `lobu call run_sdk` script body below, so it
 # must be a bare integer literal rather than arbitrary text.
 [[ "$CONN_ID" =~ ^[0-9]+$ ]] || { echo "error: CONN_ID must be numeric (got '$CONN_ID')" >&2; exit 1; }
 
@@ -38,7 +38,7 @@ probe() {
       echo "   retry $attempt/$max_attempts (server or device may still be waking)..."
       sleep 10
     fi
-    if lobu memory exec "export default async (_ctx, client) => {
+    if lobu call run_sdk --arg "title=Owletto e2e probe: ${op}" --arg "script=export default async (_ctx, client) => {
       return await client.operations.execute({
         connection_id: ${CONN_ID}, operation_key: \"${op}\", input: {},
       });
