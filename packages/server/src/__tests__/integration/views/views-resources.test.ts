@@ -13,7 +13,7 @@ import { executeTool, type AuthContext } from '../../../tools/execute';
 import type { Env } from '../../../index';
 import { primeMemberEventKinds } from '../../../utils/event-kind-validation';
 import { ensureMemberEntityType } from '../../../utils/member-entity-type';
-import { LOBU_VIEWS_RESOURCE_URI } from '../../../views/views';
+import { LOBU_VIEWS_RESOURCE_URI, serverCompileStamp } from '../../../views/views';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { viewModule } from './view-module';
@@ -687,6 +687,52 @@ describe('views resources + open_view + invoke_view_action', () => {
 
 		const missing = await get(`/api/${org.slug}/views/gone/shell`, { token });
 		expect(missing.status).toBe(404);
+	});
+
+	/** Mark board's bundle as built by an older server compiler. */
+	async function staleBoard() {
+		const sql = getTestDb();
+		const [stored] = await sql<{ content_hash: string; compiled_code: string }[]>`
+			SELECT content_hash, compiled_code FROM views WHERE organization_id = ${org.id} AND key = 'board'
+		`;
+		await sql`
+			UPDATE views SET compiled_code = '/*stale-bundle*/',
+				compile_config_hash = ${serverCompileStamp('/*stale-bundle*/', 'older-compiler')}
+			WHERE organization_id = ${org.id} AND key = 'board'
+		`;
+		const read = async () =>
+			(await sql<{ compiled_code: string; compile_config_hash: string | null }[]>`
+				SELECT compiled_code, compile_config_hash FROM views WHERE organization_id = ${org.id} AND key = 'board'
+			`)[0];
+		return { stored, read };
+	}
+
+	async function listedBoardHash(): Promise<string> {
+		const list = await rpc('tools/call', { name: 'manage_views', arguments: { action: 'list' } });
+		return list.structuredContent.views.find((v: { key: string }) => v.key === 'board').content_hash;
+	}
+
+	it('rebuilds a stale server-built bundle when the shell route serves it', async () => {
+		const { stored, read } = await staleBoard();
+		// The list reports a new hash first, so a client cache keyed on it fetches the shell.
+		expect(await listedBoardHash()).not.toBe(stored.content_hash);
+
+		const response = await get(`/api/${org.slug}/views/board/shell`, { token });
+		expect(response.status).toBe(200);
+		expect(await response.text()).not.toContain('stale-bundle');
+		expect(response.headers.get('x-lobu-view-hash')).toBe(stored.content_hash);
+		expect(await read()).toEqual({
+			compiled_code: stored.compiled_code,
+			compile_config_hash: serverCompileStamp(stored.compiled_code),
+		});
+		expect(await listedBoardHash()).toBe(stored.content_hash);
+	});
+
+	it('rebuilds a stale server-built bundle when the MCP resource serves it', async () => {
+		const { stored, read } = await staleBoard();
+		const result = await rpc('resources/read', { uri: 'ui://lobu/views/board' });
+		expect(result.contents[0].text).not.toContain('stale-bundle');
+		expect((await read()).compiled_code).toBe(stored.compiled_code);
 	});
 
 	it('rejects the shell route without read scope', async () => {

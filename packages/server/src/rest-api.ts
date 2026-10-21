@@ -25,7 +25,7 @@ import { invokeTemplateEventAction } from "./interactions/template-event-actions
 import { invokeViewAction } from "./interactions/template-event-actions";
 import { resolveRestToolAuthContext } from "./mcp-handler";
 import {
-	getView,
+	getServedView,
 	isValidViewKey,
 	renderViewShell,
 } from "./views/views";
@@ -448,7 +448,7 @@ export async function restGetViewShell(c: Context<{ Bindings: Env }>) {
 		if (!isValidViewKey(key)) {
 			throw new ToolUserError("Invalid view key", 400);
 		}
-		const view = await getView(ctx.organizationId, key);
+		const view = await getServedView(ctx.organizationId, key);
 		if (!view) {
 			throw new ToolUserError(`Unknown view: ${key}`, 404);
 		}
