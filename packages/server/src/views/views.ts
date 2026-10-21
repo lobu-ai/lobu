@@ -2,19 +2,22 @@
  * Lobu views, server side (phase 1).
  *
  * A view is an ordinary React module stored in the `views` table with its
- * current source, compiled browser bundle, content hash and the
- * attach/params/actions metadata extracted from the module by the saver
- * (`lobu apply` extracts them from the file; direct tool callers declare
- * them). The server compiles with esbuild at save and NEVER executes view
- * code: each view is served as one HTML shell with the bundle inlined, read
- * back over the MCP resource or the shell route and mounted `srcdoc` into the
- * sandboxed frame the MCP apps already use.
+ * current source, retained source files, compiled browser bundle, content
+ * hash and the attach/params/actions metadata read from its `defineView`.
+ * The server compiles with esbuild and NEVER executes view code: each view is
+ * served as one HTML shell with the shell runtime (React, `@lobu/views`) and
+ * then the view's bundle inlined, read back over the MCP resource or the shell
+ * route and mounted `srcdoc` into the sandboxed frame the MCP apps already
+ * use. Newly compiled bundles read the shell runtime
+ * (`@lobu/core/contracts/tools/view-runtime`); a buildable view this compiler
+ * did not build is rebuilt from its retained source when served
+ * (`getServedView`), and a bundle with other npm dependencies keeps its own.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join, posix } from 'node:path';
+import { join, posix } from 'node:path';
 import type { ViewAttachment, ViewParamDecl } from '@lobu/core/contracts/tools/manage-views';
 import { COLLECTION_QUERY_KEY } from '@lobu/core/contracts/tools/collection-selection';
 import {
@@ -27,9 +30,16 @@ import {
   type ViewDefinitionRecord,
 } from '@lobu/core/contracts/tools/view-definition';
 import { contentHash } from '@lobu/core/contracts/tools/view-content-hash';
-import { VIEW_BUILD_OPTIONS, VIEW_RUNTIME_MODULES, viewRuntimeEntry } from '@lobu/core/contracts/tools/view-runtime';
-import { sourceDependencies } from '@lobu/connector-worker/compile';
-import { build, type Plugin, transform, version as esbuildVersion } from 'esbuild';
+import {
+  VIEW_BUILD_OPTIONS,
+  VIEW_RUNTIME_GLOBAL,
+  VIEW_RUNTIME_MODULES,
+  VIEW_RUNTIME_PACKAGES,
+  viewMountEntry,
+  viewRuntimeEntry,
+  viewRuntimePlugin,
+} from '@lobu/core/contracts/tools/view-runtime';
+import { build, type Loader, type Plugin, transform, version as esbuildVersion } from 'esbuild';
 import { getDb } from '../db/client';
 import { ToolUserError } from '../utils/errors';
 import logger from '../utils/logger';
@@ -116,7 +126,7 @@ export interface SetViewInput {
   source_files?: SourceFiles | null;
   dependencies?: SourceDependencies | null;
   source_complete?: boolean;
-  /** Set only when the server compiled `compiled_code`; omitted means never rebuilt. */
+  /** Set only when the server compiled `compiled_code`; omitted means a buildable view is rebuilt when served. */
   compile_config_hash?: string | null;
   attach: ViewAttachment[];
   params: StoredView['params'];
@@ -289,25 +299,22 @@ export function projectView(view: StoredView): Omit<
 }
 
 /**
- * The ONLY importable specifiers in phase-1 view compilation. A view author is
- * an org owner/admin, but the bundle is served to every viewer of the page —
- * so compilation resolves nothing off disk except these pinned runtime funds:
- * react for rendering, `@lobu/views` for the hooks bridge (params, scope,
- * reads, actions), and `@lobu/views/components` for the first-party
- * presentational kit (tables, filters, charts, query states).
- * Relative/absolute imports (which could reach server files)
- * and every other bare specifier fail closed; the CLI bundles relative files
- * and npm deps where node_modules exists and ships the bundle beside the
- * source.
+ * Where the shell runtime's modules live: the server's own installation. Only
+ * the runtime script resolves anything off disk; a view bundle resolves the
+ * runtime modules to the shell global and everything else from its own
+ * retained source files.
  */
-const VIEW_ALLOWED_BARE_SPECIFIERS = new Set(VIEW_RUNTIME_MODULES);
-/** The server compiler always mounts through these installed runtime packages. */
-export function viewSourceDependencies(): SourceDependencies {
-  return sourceDependencies(['react', 'react-dom/client', '@lobu/views', '@lobu/views/components'].map((name) => require.resolve(name)));
+function runtimeFunds(): Record<string, string> {
+  const funds: Record<string, string> = {};
+  for (const specifier of VIEW_RUNTIME_MODULES) {
+    try {
+      funds[specifier] = require.resolve(specifier);
+    } catch {
+      // left absent — esbuild reports the unresolvable import instead
+    }
+  }
+  return funds;
 }
-
-/** Virtual specifier carrying the authored source into the bundle. */
-const VIEW_SOURCE_SPECIFIER = 'lobu-view-source';
 
 /**
  * The package directory a resolved fund file lives in: the gate lets imports
@@ -330,54 +337,17 @@ function fundPackageDir(file: string): string | null {
   return null;
 }
 
-/**
- * Server-owned mounting bootstrap. The authored module is bundled as a
- * separate virtual module; this entry renders its default export inside the
- * `@lobu/views` provider (params, scope, reads, actions) and mounts it into
- * #root. Authors write `export const view = defineView({ key, attach, … })`
- * plus an ordinary default-export component and never touch the document
- * themselves; a module without a `view` export still renders, with params
- * defaulted and actions unavailable.
- */
-const VIEW_BOOTSTRAP_SOURCE = `import React from "react";
-import { createRoot } from "react-dom/client";
-import { Provider as LobuViewProvider } from "@lobu/views";
-import * as viewModule from "${VIEW_SOURCE_SPECIFIER}";
-const View = viewModule.default;
-const viewDef = viewModule.view ?? { key: "", attach: [] };
-const mountNode = document.getElementById("root");
-if (mountNode && View) {
-  createRoot(mountNode).render(
-    React.createElement(LobuViewProvider, { def: viewDef }, React.createElement(View))
-  );
-}
-`;
-
-/** Resolve the allowed runtime funds inside the server's own installation, so
- * source compiled from stdin (no file context) still bundles the runtime. */
-function viewResolvePlugin(): Plugin {
-  const funds: Record<string, string> = {};
-  for (const specifier of VIEW_ALLOWED_BARE_SPECIFIERS) {
-    try {
-      funds[specifier] = require.resolve(specifier);
-    } catch {
-      // left absent — esbuild reports the unresolvable import instead
-    }
-  }
-  // Package directories the allowed funds live in. Imports FROM files in
-  // these trees (react's own `./cjs/...` internals, the scheduler react-dom
-  // pulls in bare, `@lobu/views`'s own sibling modules) resolve by default
-  // node resolution — the gate applies to the view source's imports, not the
-  // pinned installation content they reach. A view author cannot trigger this
-  // path: authored imports always arrive with the stdin/virtual importer,
-  // which lives in no fund package.
+/** Resolve the runtime modules inside the server's installation for the
+ *  runtime script, which is compiled from stdin with no file context. */
+function runtimeResolvePlugin(): Plugin {
+  const funds = runtimeFunds();
   const fundDirs = new Set<string>();
   for (const file of Object.values(funds)) {
     const dir = fundPackageDir(file);
     if (dir) fundDirs.add(dir);
   }
   return {
-    name: 'lobu-view-resolve',
+    name: 'lobu-view-runtime-resolve',
     setup(b) {
       b.onResolve({ filter: /.*/ }, (args) => {
         // Normalize first: esbuild hands over unresolved paths (react-dom
@@ -386,63 +356,21 @@ function viewResolvePlugin(): Plugin {
         const importer = args.importer ? posix.normalize(args.importer) : null;
         if (
           importer &&
-          [...fundDirs].some(
-            (root) => importer === root || importer.startsWith(`${root}/`)
-          )
+          [...fundDirs].some((root) => importer === root || importer.startsWith(`${root}/`))
         ) {
           return undefined;
         }
-        // The bootstrap's own import of the virtual authored module.
-        if (args.path === VIEW_SOURCE_SPECIFIER) {
-          return { path: args.path, namespace: 'lobu-view-source' };
-        }
-        if (args.path.startsWith('.') || args.path.startsWith('/')) {
-          return {
-            errors: [
-              {
-                text: `View imports must be bare package specifiers: relative and absolute imports are not supported (got "${args.path}")`,
-              },
-            ],
-          };
-        }
-        if (VIEW_ALLOWED_BARE_SPECIFIERS.has(args.path)) {
-          const resolved = funds[args.path];
-          return resolved ? { path: resolved } : null;
-        }
-        return {
-          errors: [
-            {
-              text: `Unknown view import "${args.path}": phase-1 views bundle react, @lobu/views and @lobu/views/components only; relative files and other dependencies ship through lobu apply`,
-            },
-          ],
-        };
+        const resolved = funds[args.path];
+        return resolved ? { path: resolved } : null;
       });
     },
   };
 }
 
 /**
- * Serves the authored source to the bundler as a virtual TSX module. The
- * module is never imported or executed server-side — it only reaches the
- * browser bundle through the bootstrap entry above.
- */
-function viewSourcePlugin(source: string): Plugin {
-  return {
-    name: 'lobu-view-source',
-    setup(b) {
-      b.onLoad(
-        { filter: /.*/, namespace: 'lobu-view-source' },
-        () => ({ contents: source, loader: 'tsx' })
-      );
-    },
-  };
-}
-
-/**
- * Inert resolution base for stdin compilation. The resolve plugin above
- * rejects every relative/absolute path before the filesystem is consulted, so
- * this directory is never read — it exists only so esbuild never falls back
- * to the process working directory (which could resolve server files).
+ * Explicit stdin resolution base, away from the process working directory.
+ * The source-files plugin resolves authored imports exclusively in memory;
+ * only the shell runtime's installed modules use filesystem resolution.
  */
 function inertResolveDir(): string {
   const dir = join(tmpdir(), 'lobu-views-inert-resolve');
@@ -453,16 +381,16 @@ function inertResolveDir(): string {
 let runtimeScript: Promise<string> | null = null;
 
 /**
- * The shell runtime script: every runtime module from the server's own
- * installation, assigned to the runtime global ahead of the view bundle, once
- * per process. Bundles that still inline their own runtime ignore it; bundles
- * built against the runtime contract read their imports from it.
+ * The shell runtime script: React, React DOM, `@lobu/views` and its component
+ * kit from this server's installation, assigned to the runtime global. Built
+ * once per process and inlined ahead of every view bundle. Bundles compiled
+ * against the shell global use this deploy's runtime.
  */
 export function viewRuntimeScript(): Promise<string> {
   runtimeScript ??= build({
     ...VIEW_BUILD_OPTIONS,
     stdin: { contents: viewRuntimeEntry(), loader: 'js', resolveDir: inertResolveDir() },
-    plugins: [viewResolvePlugin()],
+    plugins: [runtimeResolvePlugin()],
   }).then((result) => {
     const code = result.outputFiles?.[0]?.text ?? '';
     if (!code) throw new Error('View runtime compiled to an empty bundle');
@@ -472,6 +400,77 @@ export function viewRuntimeScript(): Promise<string> {
     throw error;
   });
   return runtimeScript;
+}
+
+const VIEW_SOURCE_NAMESPACE = 'lobu-view-source';
+const VIEW_SOURCE_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.json'];
+const VIEW_SOURCE_LOADERS: Record<string, Loader> = {
+  tsx: 'tsx', ts: 'ts', mts: 'ts', cts: 'ts', jsx: 'jsx', js: 'js', mjs: 'js', cjs: 'js', json: 'json',
+};
+
+/**
+ * Serves a view's retained source files to the bundler. Relative imports
+ * resolve inside the file map only; the runtime modules come from the shell
+ * (`viewRuntimePlugin`, ahead of this one); every other import fails, because
+ * the server never reads author code or packages off disk. A view with other
+ * npm dependencies ships the bundle `lobu apply` built in its checkout.
+ */
+function viewSourceFilesPlugin(sourceFiles: SourceFiles): Plugin {
+  const files = sourceFiles.files;
+  return {
+    name: 'lobu-view-source',
+    setup(b) {
+      b.onResolve({ filter: /.*/ }, (args) => {
+        // The mount entry's own import of the view module.
+        if (args.namespace !== VIEW_SOURCE_NAMESPACE && args.path === VIEW_SOURCE_NAMESPACE) {
+          return { path: sourceFiles.entrypoint, namespace: VIEW_SOURCE_NAMESPACE };
+        }
+        if (
+          args.namespace !== VIEW_SOURCE_NAMESPACE ||
+          (!args.path.startsWith('./') && !args.path.startsWith('../'))
+        ) {
+          return {
+            errors: [
+              {
+                text: `Unknown view import "${args.path}": the server builds a view from its own source files and the shell runtime (${VIEW_RUNTIME_MODULES.join(', ')}); other dependencies ship through lobu apply`,
+              },
+            ],
+          };
+        }
+        const base = posix.normalize(posix.join(posix.dirname(args.importer), args.path));
+        const extension = posix.extname(base);
+        // Match esbuild's TypeScript substitution for explicit JS imports.
+        const substitutions = extension === '.js' || extension === '.jsx'
+          ? ['.ts', '.tsx'] : extension === '.mjs' ? ['.mts'] : extension === '.cjs' ? ['.cts'] : [];
+        const candidates = [
+          base,
+          ...VIEW_SOURCE_EXTENSIONS.map((ext) => `${base}${ext}`),
+          ...substitutions.map((ext) => `${base.slice(0, -extension.length)}${ext}`),
+          ...VIEW_SOURCE_EXTENSIONS.map((ext) => `${base}/index${ext}`),
+        ];
+        const found = candidates.find((path) =>
+          Object.hasOwn(files, path)
+        );
+        if (!found) {
+          return { errors: [{ text: `View import "${args.path}" is not among the view's source files` }] };
+        }
+        return { path: found, namespace: VIEW_SOURCE_NAMESPACE };
+      });
+      b.onLoad({ filter: /.*/, namespace: VIEW_SOURCE_NAMESPACE }, (args) => {
+        const loader = VIEW_SOURCE_LOADERS[posix.extname(args.path).slice(1)];
+        if (!loader) {
+          return { errors: [{ text: `View source file "${args.path}" has an unsupported extension` }] };
+        }
+        return { contents: files[args.path], loader };
+      });
+    },
+  };
+}
+
+/** Whether the server can build a view from its retained source alone: every
+ *  dependency it records is a shell runtime package. */
+export function isServerBuildable(dependencies: SourceDependencies): boolean {
+  return Object.keys(dependencies).every((name) => VIEW_RUNTIME_PACKAGES.includes(name));
 }
 
 /**
@@ -497,30 +496,25 @@ export async function readViewModule(source: string): Promise<ViewDefinitionReco
 }
 
 /**
- * Compile a view module to a minified browser IIFE with the bundle inlined by
- * the shell. Pure text transform — the module is never imported or executed.
- * Throws ToolUserError(422) on diagnostics or when the bundle exceeds the cap.
+ * Compile a view's source files to a minified browser IIFE that mounts its
+ * entry through the shell runtime. Pure text transform — the module is never
+ * imported or executed. Throws ToolUserError(422) on diagnostics or when the
+ * bundle exceeds the cap.
  */
 export async function compileView(
-  source: string,
+  sourceFiles: SourceFiles,
   opts?: { maxBytes?: number }
 ): Promise<string> {
   let compiled: string;
   try {
     const result = await build({
+      ...VIEW_BUILD_OPTIONS,
       stdin: {
-        contents: VIEW_BOOTSTRAP_SOURCE,
-        loader: 'tsx',
+        contents: viewMountEntry(VIEW_SOURCE_NAMESPACE),
+        loader: 'js',
         resolveDir: inertResolveDir(),
       },
-      bundle: true,
-      platform: 'browser',
-      format: 'iife',
-      minify: true,
-      jsx: 'automatic',
-      logLevel: 'silent',
-      write: false,
-      plugins: [viewResolvePlugin(), viewSourcePlugin(source)],
+      plugins: [viewRuntimePlugin(), viewSourceFilesPlugin(sourceFiles)],
     });
     compiled = result.outputFiles?.[0]?.text ?? '';
   } catch (err) {
@@ -543,43 +537,39 @@ export async function compileView(
 }
 
 /**
- * Bump when the compile pipeline (resolve rules, esbuild options) changes in
- * a way the fingerprint's other inputs do not capture.
+ * Bump when the compile pipeline (resolve rules) changes in a way the
+ * fingerprint's other inputs do not capture.
  */
-const VIEW_COMPILE_PIPELINE_VERSION = 1;
+const VIEW_COMPILE_PIPELINE_VERSION = 2;
 
 let compileFingerprint: string | undefined;
 
 /**
- * Fingerprint of the server's pipeline, bootstrap, esbuild, direct package
- * versions, and the bytes of the `@lobu/views` runtime, whose code can change
- * without a version bump.
+ * Fingerprint of everything that shapes a view bundle: the pipeline, the
+ * mount entry, the shared build options, the runtime contract and esbuild.
+ * The runtime itself is not an input: bundles read it from the shell, so a
+ * runtime fix needs no rebuild.
  */
 export function viewCompileFingerprint(): string {
-  if (compileFingerprint) return compileFingerprint;
-  const hash = createHash('sha256');
-  hash.update(
-    JSON.stringify({
-      pipeline: VIEW_COMPILE_PIPELINE_VERSION,
-      esbuild: esbuildVersion,
-      dependencies: viewSourceDependencies(),
-      bootstrap: VIEW_BOOTSTRAP_SOURCE,
-    })
-  );
-  const runtimeDir = dirname(require.resolve('@lobu/views'));
-  for (const file of readdirSync(runtimeDir).filter((name) => name.endsWith('.js')).sort()) {
-    hash.update(`\0${file}\0`);
-    hash.update(readFileSync(join(runtimeDir, file)));
-  }
-  compileFingerprint = hash.digest('hex');
+  compileFingerprint ??= createHash('sha256')
+    .update(
+      JSON.stringify({
+        pipeline: VIEW_COMPILE_PIPELINE_VERSION,
+        esbuild: esbuildVersion,
+        entry: viewMountEntry(VIEW_SOURCE_NAMESPACE),
+        options: VIEW_BUILD_OPTIONS,
+        runtime: [VIEW_RUNTIME_GLOBAL, ...VIEW_RUNTIME_MODULES],
+      })
+    )
+    .digest('hex');
   return compileFingerprint;
 }
 
 /**
  * The provenance stamp for a bundle the server compiled: the compiler
- * fingerprint plus a digest of the exact bytes it produced. A writer that
- * replaces the bundle without restamping (code from before this column) leaves
- * a digest that no longer matches, so that bundle reads as caller-owned.
+ * fingerprint plus a digest of the exact bytes it produced. A bundle written
+ * without a current stamp (supplied by the caller, compiled by an older
+ * server, or replaced without restamping) reads as not built by this compiler.
  */
 export function serverCompileStamp(
   compiled: string,
@@ -589,14 +579,16 @@ export function serverCompileStamp(
   return `${fingerprint}:${digest}`;
 }
 
-/** A bundle this server's compiler built, under a compiler that has since changed. */
+/**
+ * A view the server can build from its retained source whose bundle this
+ * compiler did not build. `lobu apply` builds through the same pieces, so the
+ * rebuild of a supplied bundle is the same program under the current
+ * contract. A view with other npm dependencies keeps its supplied bundle.
+ */
 function isStaleServerBuild(view: StoredView): boolean {
-  if (view.compile_config_hash === null || view.source_files === null) return false;
-  const separator = view.compile_config_hash.lastIndexOf(':');
-  if (separator < 0) return false;
-  const fingerprint = view.compile_config_hash.slice(0, separator);
-  if (fingerprint === viewCompileFingerprint()) return false;
-  return view.compile_config_hash === serverCompileStamp(view.compiled_code, fingerprint);
+  if (view.source_files === null || view.dependencies === null) return false;
+  if (!isServerBuildable(view.dependencies)) return false;
+  return view.compile_config_hash !== serverCompileStamp(view.compiled_code);
 }
 
 /** Cache invalidation token for a stale build; otherwise the stored content hash. */
@@ -614,12 +606,12 @@ const failedRebuilds = new Set<string>();
 const inflightRebuilds = new Map<string, Promise<StoredView | null>>();
 
 /**
- * The view as it should be served. A bundle the server compiled under an
- * older compiler is rebuilt from its stored source and saved, so runtime
- * fixes reach tracked server-built views the first time they are opened. A bundle
- * the caller supplied is never rebuilt. A rebuild that fails keeps serving the
- * stored bundle. The save is compare-and-set on the hash and compiler that
- * were read, so a concurrent save always wins.
+ * The view as it should be served. A buildable view whose bundle this
+ * compiler did not build is rebuilt from its retained source files and saved,
+ * so a change to the bundle contract reaches every buildable view the first
+ * time it is opened. A rebuild that fails keeps serving the stored bundle.
+ * The save is compare-and-set on the hash and stamp that were read, so a
+ * concurrent save always wins.
  */
 export async function getServedView(
   organizationId: string,
@@ -648,7 +640,7 @@ async function rebuildView(
 ): Promise<StoredView | null> {
   let compiled: string;
   try {
-    compiled = await compileView(view.source_code);
+    compiled = await compileView(view.source_files as SourceFiles);
   } catch (err) {
     failedRebuilds.add(attempt);
     if (failedRebuilds.size > MAX_FAILED_REBUILDS) {
@@ -660,7 +652,6 @@ async function rebuildView(
     );
     return view;
   }
-  const dependencies = viewSourceDependencies();
   const hash = contentHash(
     view.source_code,
     {
@@ -671,19 +662,18 @@ async function rebuildView(
       actions: view.actions,
     },
     compiled,
-    { sourceFiles: view.source_files as SourceFiles, dependencies }
+    { sourceFiles: view.source_files as SourceFiles, dependencies: view.dependencies as SourceDependencies }
   );
   const sql = getDb();
   const rows = await sql<ViewRow>`
     UPDATE views SET
       compiled_code = ${compiled},
       content_hash = ${hash},
-      dependencies = ${sql.json(dependencies)},
       compile_config_hash = ${serverCompileStamp(compiled, fingerprint)},
       updated_at = NOW()
     WHERE organization_id = ${organizationId} AND key = ${view.key}
       AND content_hash = ${view.content_hash}
-      AND compile_config_hash = ${view.compile_config_hash}
+      AND compile_config_hash IS NOT DISTINCT FROM ${view.compile_config_hash}
     RETURNING key, name, description, source_code, compiled_code, content_hash,
       source_files, dependencies, source_complete, compile_config_hash,
       attach, params, actions, last_writer, updated_at

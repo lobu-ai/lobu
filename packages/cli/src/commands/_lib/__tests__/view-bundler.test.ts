@@ -3,9 +3,7 @@
  * `defineView({...})` literal (never by running it), the browser bundle mounts it through a synthetic entry, and
  * anything else fails loud at apply time.
  *
- * Fixtures live next to this test so the view bundle's `@lobu/views` +
- * `react` imports resolve from the worktree's node_modules (the same
- * walk-up a real project install provides).
+ * Fixtures have no installed runtime packages: the shell supplies them.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -15,6 +13,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assertBundlePortable,
@@ -35,10 +34,7 @@ function mkView(
   files: Record<string, string>,
   entry = "views/deal/pipeline.tsx"
 ): string {
-  // Fixtures live next to this test so the view bundle's `@lobu/views` +
-  // `react` imports resolve from the worktree's node_modules (the same
-  // walk-up a real project install provides). Removed in afterEach.
-  const dir = mkdtempSync(join(import.meta.dir, "view-fixture-"));
+  const dir = mkdtempSync(join(tmpdir(), "view-fixture-"));
   tempDirs.push(dir);
   for (const [rel, content] of Object.entries(files)) {
     const abs = join(dir, rel);
@@ -77,7 +73,7 @@ export default function Pipeline() {
 `;
 
 describe("bundleViewFromFile", () => {
-  test("extracts metadata and bundles react + bridge with no SDK chain", async () => {
+  test("extracts metadata and reads react + bridge from the shell runtime", async () => {
     const entry = mkView({ "views/deal/pipeline.tsx": PIPELINE_SOURCE });
     const bundled = await bundleFixture(entry);
     expect(bundled.definition.key).toBe("pipeline");
@@ -88,7 +84,11 @@ describe("bundleViewFromFile", () => {
     expect(bundled.definition.actions).toEqual({
       markWon: { emits: "deal.won" },
     });
-    expect(bundled.compiledCode.length).toBeGreaterThan(10_000);
+    // React and the bridge come from the shell runtime, never the bundle.
+    expect(bundled.compiledCode).toContain(
+      'globalThis.__lobuViews["@lobu/views"]'
+    );
+    expect(bundled.compiledCode.length).toBeLessThan(8 * 1024);
     // The hand-written bridge ships no ext-apps/zod chain (spike: 378 KB).
     expect(bundled.compiledCode).not.toContain("ext-apps");
     expect(bundled.compiledCode).not.toContain("@modelcontextprotocol");
@@ -100,7 +100,7 @@ describe("bundleViewFromFile", () => {
     expect(bundled.compiledCode).not.toContain(entry);
   });
 
-  test("bundles the first-party components kit from node_modules", async () => {
+  test("reads the first-party components kit from the shell runtime", async () => {
     const entry = mkView(
       {
         "views/deal/cards.tsx": `import { defineView } from "@lobu/views";
@@ -119,8 +119,11 @@ export default function CardsView() {
     expect(bundled.definition.params).toEqual({
       label: { type: "string", default: "1.5K" },
     });
-    // Kit content is really inlined (not a stub): the table sort marker survives.
-    expect(bundled.compiledCode).toContain("aria-sort");
+    // The shell supplies the kit; its implementation stays out of the view.
+    expect(bundled.compiledCode).toContain(
+      'globalThis.__lobuViews["@lobu/views/components"]'
+    );
+    expect(bundled.compiledCode).not.toContain("aria-sort");
     expect(bundled.compiledCode.length).toBeLessThan(300_000);
     expect(bundled.compiledCode).not.toContain(entry);
   });
@@ -144,9 +147,9 @@ export default function BoardView() { return Board({}); }
       "views/_lib/board.tsx",
       "views/deal/board.tsx",
     ]);
-    expect(bundled.dependencies["@lobu/views"]).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(bundled.dependencies.react).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(bundled.compiledCode.length).toBeGreaterThan(10_000);
+    // The shell supplies the runtime packages, so a view importing only them
+    // retains no dependencies and the server can rebuild it from its files.
+    expect(bundled.dependencies).toEqual({});
   });
 
   test.each([
@@ -270,6 +273,21 @@ describe("assertBundlePortable", () => {
 });
 
 describe("collectViewWatchFiles", () => {
+  test("watches a shell-runtime view without installing the runtime locally", async () => {
+    const entry = mkView({
+      "views/deal/pipeline.tsx": `import { defineView } from "@lobu/views";
+import { Card } from "@lobu/views/components";
+import { label } from "./label";
+export const view = defineView({ key: "pipeline", attach: [] });
+export default function Pipeline() { return <Card title={label} />; }`,
+      "views/deal/label.ts": 'export const label = "Pipeline";',
+    });
+    await bundleFixture(entry);
+    expect(await collectViewWatchFiles(entry)).toEqual(
+      [entry, join(entry, "..", "label.ts")].sort()
+    );
+  });
+
   test("returns exactly the canonical entry plus its relative imports", async () => {
     const entry = mkView(
       {

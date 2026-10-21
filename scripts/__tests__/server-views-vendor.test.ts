@@ -32,7 +32,7 @@ export default function Board() { return <div>REVIEW_VIEW_RENDERED</div>; }
 
 /**
  * The installable server runtime must vendor the real @lobu/views package:
- * the server-owned compile bootstrap imports its Provider unconditionally,
+ * the shell runtime script bundles it (and React) for every view,
  * and the release composer used to delete every @lobu dependency except core
  * and connector-sdk. Without the vendored copy, source-only views fail with
  * `Could not resolve "@lobu/views"` on the installed server while workspace
@@ -120,7 +120,7 @@ describe("composed server runtime vendors @lobu/views", () => {
     });
     await writeFile(
       join(scratch, "runner.mjs"),
-      `import { compileView } from "./compiler.mjs";\ntry {\n  const out = await compileView(${JSON.stringify(PROBE_SOURCE)});\n  console.log(JSON.stringify({ ok: true, bytes: out.length, marker: out.includes("REVIEW_VIEW_RENDERED") }));\n} catch (err) {\n  console.log(JSON.stringify({ ok: false, message: String(err?.message ?? err).split("\\n").slice(0, 4).join(" | ") }));\n}\n`
+      `import { compileView, viewRuntimeScript } from "./compiler.mjs";\ntry {\n  const out = await compileView({ entrypoint: "index.tsx", files: { "index.tsx": ${JSON.stringify(PROBE_SOURCE)} } });\n  const runtime = await viewRuntimeScript();\n  console.log(JSON.stringify({ ok: true, bytes: out.length, marker: out.includes("REVIEW_VIEW_RENDERED"), runtimeBytes: runtime.length, runtimeMountsViews: runtime.includes("__lobuViews") }));\n} catch (err) {\n  console.log(JSON.stringify({ ok: false, message: String(err?.message ?? err).split("\\n").slice(0, 4).join(" | ") }));\n}\n`
     );
     const run = spawnSync(process.execPath, ["runner.mjs"], {
       cwd: scratch,
@@ -128,7 +128,13 @@ describe("composed server runtime vendors @lobu/views", () => {
     });
     expect(run.status, run.stderr).toBe(0);
     const result = JSON.parse(run.stdout.trim().split("\n").pop() ?? "{}");
-    expect(result).toMatchObject({ ok: true, marker: true });
-    expect(result.bytes).toBeGreaterThan(100000);
+    expect(result).toMatchObject({
+      ok: true,
+      marker: true,
+      runtimeMountsViews: true,
+    });
+    // React and the vendored SDK resolve into the shell runtime, not the view.
+    expect(result.runtimeBytes).toBeGreaterThan(100000);
+    expect(result.bytes).toBeLessThan(8 * 1024);
   }, 600000);
 });

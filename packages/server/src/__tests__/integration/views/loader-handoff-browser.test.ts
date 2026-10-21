@@ -42,7 +42,7 @@ describe("loader handoff in a real browser", () => {
 
 	beforeAll(async () => {
 		browser = await chromium.launch({ headless: true });
-		const compiled = await compileView(SOURCE);
+		const compiled = await compileView({ entrypoint: "index.tsx", files: { "index.tsx": SOURCE } });
 		shell = renderViewShell({
 			key: "probe",
 			name: "probe",

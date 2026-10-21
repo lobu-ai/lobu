@@ -12,7 +12,11 @@
  * and no write. The server never executes view code.
  */
 
-import { validateRetainedSource } from '@lobu/core/contracts/tools/source-files';
+import {
+  type SourceDependencies,
+  type SourceFiles,
+  validateRetainedSource,
+} from '@lobu/core/contracts/tools/source-files';
 import {
   GetViewAction,
   ListViewsAction,
@@ -39,8 +43,8 @@ import {
   VIEW_SOURCE_MAX_CHARS,
   compileView,
   serverCompileStamp,
-  viewSourceDependencies,
   contentHash,
+  isServerBuildable,
   getView,
   listViews,
   projectView,
@@ -218,7 +222,9 @@ async function handleSet(
     ? { sourceFiles: args.source_files, dependencies: args.dependencies! }
     : args.compiled_code ? undefined : {
       sourceFiles: { entrypoint: 'index.tsx', files: { 'index.tsx': args.source_code } },
-      dependencies: viewSourceDependencies(),
+      // The runtime comes from the shell, so a source-only view bundles
+      // nothing but its own file.
+      dependencies: {},
     };
   if (retained) {
     try { validateRetainedSource(args.source_code, retained.sourceFiles, retained.dependencies); }
@@ -226,7 +232,7 @@ async function handleSet(
   }
   const compiled = args.compiled_code
     ? checkCompiledCode(args.compiled_code)
-    : await compileView(args.source_code);
+    : await compileRetained(retained!);
   const hash = contentHash(
     args.source_code,
     {
@@ -239,8 +245,8 @@ async function handleSet(
     compiled,
     retained
   );
-  // Only a bundle this server compiled may be rebuilt later; a supplied one
-  // is the caller's and stays as sent.
+  // Stamp only a bundle this server compiled. A supplied one is stored as
+  // sent; if its source is server-buildable it is rebuilt when served.
   const compileConfigHash = args.compiled_code ? null : serverCompileStamp(compiled);
   // Same source AND same metadata AND same executable bundle AND same
   // compiler provenance: no write. A legacy row (source/metadata-only hash)
@@ -276,6 +282,21 @@ async function handleSet(
   }
 
   return { action: 'set', view: projectView(view), written };
+}
+
+/** Build a bundle-less save from its retained source; only a view whose
+ *  dependencies are all shell runtime packages can be built here. */
+async function compileRetained(retained: {
+  sourceFiles: SourceFiles;
+  dependencies: SourceDependencies;
+}): Promise<string> {
+  if (!isServerBuildable(retained.dependencies)) {
+    throw new ToolUserError(
+      `View depends on ${Object.keys(retained.dependencies).join(', ')}; save it with lobu apply, which bundles npm dependencies`,
+      400
+    );
+  }
+  return compileView(retained.sourceFiles);
 }
 
 /**
