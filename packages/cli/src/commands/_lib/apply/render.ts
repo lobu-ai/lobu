@@ -161,20 +161,10 @@ export function renderPlan(plan: DiffPlan): string {
   const lines: string[] = [];
   lines.push(chalk.bold("\nPlan:"));
 
-  // Group rows by kind so the output order is deterministic and readable.
-  const order: DiffRow["kind"][] = [
-    "agent",
-    "settings",
-    "entity-type",
-    "relationship-type",
-    "automation",
-    "connector-definition",
-    "auth-profile",
-    "connection",
-    "feed",
-    "inference-provider",
-  ];
-  for (const kind of order) {
+  // Group rows by kind so the output order is deterministic and readable. The
+  // order is KIND_HEADING's, whose type requires every kind, so a new kind
+  // can never be counted in the summary without its section.
+  for (const kind of Object.keys(KIND_HEADING) as DiffRow["kind"][]) {
     const rowsForKind = plan.rows.filter((row) => row.kind === kind);
     if (rowsForKind.length === 0) continue;
     lines.push("");
