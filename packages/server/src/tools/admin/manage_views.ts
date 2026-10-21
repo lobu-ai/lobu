@@ -38,7 +38,7 @@ import {
   VIEW_COMPILED_MAX_BYTES,
   VIEW_SOURCE_MAX_CHARS,
   compileView,
-  viewCompileFingerprint,
+  serverCompileStamp,
   viewSourceDependencies,
   contentHash,
   getView,
@@ -241,7 +241,7 @@ async function handleSet(
   );
   // Only a bundle this server compiled may be rebuilt later; a supplied one
   // is the caller's and stays as sent.
-  const compileConfigHash = args.compiled_code ? null : viewCompileFingerprint();
+  const compileConfigHash = args.compiled_code ? null : serverCompileStamp(compiled);
   // Same source AND same metadata AND same executable bundle AND same
   // compiler provenance: no write. A legacy row (source/metadata-only hash)
   // never matches, so it refreshes exactly once on the next set and is a

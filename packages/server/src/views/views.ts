@@ -557,13 +557,28 @@ export function viewCompileFingerprint(): string {
   return compileFingerprint;
 }
 
+/**
+ * The provenance stamp for a bundle the server compiled: the compiler
+ * fingerprint plus a digest of the exact bytes it produced. A writer that
+ * replaces the bundle without restamping (code from before this column) leaves
+ * a digest that no longer matches, so that bundle reads as caller-owned.
+ */
+export function serverCompileStamp(
+  compiled: string,
+  fingerprint: string = viewCompileFingerprint()
+): string {
+  const digest = createHash('sha256').update(compiled).digest('hex').slice(0, 32);
+  return `${fingerprint}:${digest}`;
+}
+
 /** A bundle this server's compiler built, under a compiler that has since changed. */
 function isStaleServerBuild(view: StoredView): boolean {
-  return (
-    view.compile_config_hash !== null &&
-    view.source_files !== null &&
-    view.compile_config_hash !== viewCompileFingerprint()
-  );
+  if (view.compile_config_hash === null || view.source_files === null) return false;
+  const separator = view.compile_config_hash.lastIndexOf(':');
+  if (separator < 0) return false;
+  const fingerprint = view.compile_config_hash.slice(0, separator);
+  if (fingerprint === viewCompileFingerprint()) return false;
+  return view.compile_config_hash === serverCompileStamp(view.compiled_code, fingerprint);
 }
 
 /** Cache invalidation token for a stale build; otherwise the stored content hash. */
@@ -646,7 +661,7 @@ async function rebuildView(
       compiled_code = ${compiled},
       content_hash = ${hash},
       dependencies = ${sql.json(dependencies)},
-      compile_config_hash = ${fingerprint},
+      compile_config_hash = ${serverCompileStamp(compiled, fingerprint)},
       updated_at = NOW()
     WHERE organization_id = ${organizationId} AND key = ${view.key}
       AND content_hash = ${view.content_hash}

@@ -10,7 +10,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { Env } from "../../../index";
 import { executeTool, type AuthContext } from "../../../tools/execute";
 import logger from "../../../utils/logger";
-import { getServedView, getView, servedContentHash, viewCompileFingerprint } from "../../../views/views";
+import { getServedView, getView, serverCompileStamp, servedContentHash } from "../../../views/views";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { addUserToOrganization, createTestOrganization, createTestUser } from "../../setup/test-fixtures";
@@ -76,7 +76,8 @@ describe("getServedView", () => {
 	async function makeStale(sourceCode?: string) {
 		const sql = getTestDb();
 		await sql`
-			UPDATE views SET compiled_code = '/*stale-bundle*/', compile_config_hash = 'older-compiler',
+			UPDATE views SET compiled_code = '/*stale-bundle*/',
+				compile_config_hash = ${serverCompileStamp("/*stale-bundle*/", "older-compiler")},
 				source_code = COALESCE(${sourceCode ?? null}, source_code)
 			WHERE organization_id = ${orgId} AND key = 'board'
 		`;
@@ -84,7 +85,8 @@ describe("getServedView", () => {
 
 	it("stamps the compiler only on bundles the server compiled", async () => {
 		await set({ source_code: SOURCE });
-		expect((await getView(orgId, "board"))?.compile_config_hash).toBe(viewCompileFingerprint());
+		const built = await getView(orgId, "board");
+		expect(built?.compile_config_hash).toBe(serverCompileStamp(built?.compiled_code ?? ""));
 
 		await set({ source_code: SOURCE, compiled_code: "/*client-bundle*/console.log(1);" });
 		expect((await getView(orgId, "board"))?.compile_config_hash).toBeNull();
@@ -133,6 +135,24 @@ describe("getServedView", () => {
 		expect(served && servedContentHash(served)).toBe(served?.content_hash);
 	});
 
+	it("never rebuilds a bundle an older writer replaced without restamping", async () => {
+		await set({ source_code: SOURCE });
+		const built = await getView(orgId, "board");
+		const sql = getTestDb();
+		// Code from before the column upserts a CLI bundle and leaves the stamp;
+		// the compiler has since changed.
+		await sql`
+			UPDATE views SET compiled_code = '/*cli-bundle*/',
+				compile_config_hash = ${serverCompileStamp(built?.compiled_code ?? "", "older-compiler")}
+			WHERE organization_id = ${orgId} AND key = 'board'
+		`;
+
+		const served = await getServedView(orgId, "board");
+
+		expect(served?.compiled_code).toBe("/*cli-bundle*/");
+		expect(served && servedContentHash(served)).toBe(served?.content_hash);
+	});
+
 	it("keeps the stored bundle when the rebuild fails, and does not retry it per request", async () => {
 		await set({ source_code: SOURCE });
 		await makeStale(UNRESOLVABLE);
@@ -143,7 +163,9 @@ describe("getServedView", () => {
 
 		expect(first?.compiled_code).toBe("/*stale-bundle*/");
 		expect(second?.compiled_code).toBe("/*stale-bundle*/");
-		expect((await getView(orgId, "board"))?.compile_config_hash).toBe("older-compiler");
+		expect((await getView(orgId, "board"))?.compile_config_hash).toBe(
+			serverCompileStamp("/*stale-bundle*/", "older-compiler")
+		);
 		expect(warn.mock.calls.filter(([, message]) => String(message).includes("failed to rebuild"))).toHaveLength(1);
 	});
 
@@ -154,7 +176,7 @@ describe("getServedView", () => {
 		const [a, b] = await Promise.all([getServedView(orgId, "board"), getServedView(orgId, "board")]);
 
 		expect(a).toEqual(b);
-		expect(a?.compile_config_hash).toBe(viewCompileFingerprint());
+		expect(a?.compile_config_hash).toBe(serverCompileStamp(a?.compiled_code ?? ""));
 	});
 
 	it("never overwrites a save that lands while a rebuild is in flight", async () => {

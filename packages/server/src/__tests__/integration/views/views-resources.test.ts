@@ -13,7 +13,7 @@ import { executeTool, type AuthContext } from '../../../tools/execute';
 import type { Env } from '../../../index';
 import { primeMemberEventKinds } from '../../../utils/event-kind-validation';
 import { ensureMemberEntityType } from '../../../utils/member-entity-type';
-import { LOBU_VIEWS_RESOURCE_URI, viewCompileFingerprint } from '../../../views/views';
+import { LOBU_VIEWS_RESOURCE_URI, serverCompileStamp } from '../../../views/views';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { viewModule } from './view-module';
@@ -696,7 +696,8 @@ describe('views resources + open_view + invoke_view_action', () => {
 			SELECT content_hash, compiled_code FROM views WHERE organization_id = ${org.id} AND key = 'board'
 		`;
 		await sql`
-			UPDATE views SET compiled_code = '/*stale-bundle*/', compile_config_hash = 'older-compiler'
+			UPDATE views SET compiled_code = '/*stale-bundle*/',
+				compile_config_hash = ${serverCompileStamp('/*stale-bundle*/', 'older-compiler')}
 			WHERE organization_id = ${org.id} AND key = 'board'
 		`;
 		const read = async () =>
@@ -722,7 +723,7 @@ describe('views resources + open_view + invoke_view_action', () => {
 		expect(response.headers.get('x-lobu-view-hash')).toBe(stored.content_hash);
 		expect(await read()).toEqual({
 			compiled_code: stored.compiled_code,
-			compile_config_hash: viewCompileFingerprint(),
+			compile_config_hash: serverCompileStamp(stored.compiled_code),
 		});
 		expect(await listedBoardHash()).toBe(stored.content_hash);
 	});
