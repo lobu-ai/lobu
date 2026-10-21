@@ -243,10 +243,11 @@ export interface DesiredConnectorDefinition {
   key: string | null;
   /**
    * Best-effort static `definition.key` parsed from `sourceCode` WITHOUT a
-   * compile. Used only to widen the pre-diff schema-skip set so re-applying a
+   * compile. Used to widen the pre-diff schema-skip set so re-applying a
    * local connector whose feed set changed doesn't validate the connection
-   * against the stale server schema. NOT used for diffing/pruning — `key`
-   * stays the authoritative (server-compiled) value there.
+   * against the stale server schema, and to label the plan row update vs
+   * create. NOT used for pruning — `key` stays the authoritative
+   * (server-compiled) value there.
    */
   declaredKeyHint?: string;
   /** Local `.ts` path (absolute) — mutually exclusive with `sourceUrl`. */
@@ -912,7 +913,8 @@ interface LoadDesiredStateOptions {
  * key: "linkedin", ...`. Returns `null` when the shape can't be matched with
  * confidence, preserving the prior null-key semantics (the server remains the
  * authoritative source of the compiled key; this hint only affects which
- * connectors the pre-diff pass treats as locally-declared).
+ * connectors the pre-diff pass treats as locally-declared, and the plan's
+ * update/create label).
  */
 export function extractDeclaredConnectorKey(sourceCode: string): string | null {
   // Anchor on the `definition` assignment so we don't pick up an unrelated
@@ -975,8 +977,9 @@ function resolveConnectorSources(
       // `key` stays null: the server compiles the source and is the
       // authoritative source of the real key, and null-ness gates the diff /
       // prune logic (see diff.ts `hasUnnamedLocalDefs`). We keep a separate
-      // best-effort static hint (no compile) purely to widen the pre-diff
-      // schema-skip set — see `localConnectorKeyHints` in apply-cmd. Without it,
+      // best-effort static hint (no compile) to widen the pre-diff
+      // schema-skip set (see `localConnectorKeyHints` in apply-cmd) and to label
+      // the plan row (diff.ts `diffConnectorDefinition`). Without it,
       // re-applying a connector whose feed set changed (e.g. folding takeout
       // feeds into `linkedin`) validates the connection against the STALE
       // server schema and rejects the new feeds.
