@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { defineAgent, defineAutomation, defineConfig } from "@lobu/cli/config";
 import type { AgentSettings } from "@lobu/core";
 import chalk from "chalk";
-import type { DesiredAgent, DesiredState } from "../desired-state.js";
+import {
+  type DesiredAgent,
+  type DesiredState,
+  extractDeclaredConnectorKey,
+} from "../desired-state.js";
 import {
   type Baseline,
   computeDiff,
@@ -1685,6 +1689,44 @@ describe("apply diff — connectors", () => {
       (r) => r.kind === "connector-definition" && r.id?.startsWith("acme")
     );
     expect(row?.verb).toBe("update");
+  });
+
+  test.each([
+    { key: null, hint: true, installed: true, verb: "update" },
+    { key: null, hint: true, installed: false, verb: "create" },
+    { key: null, hint: false, installed: true, verb: "create" },
+    { key: "other", hint: true, installed: true, verb: "create" },
+  ])("local connector plan label: %j", ({ key, hint, installed, verb }) => {
+    const sourceCode = 'export default class { definition = { key: "acme" }; }';
+    const state = buildState([], {
+      connectors: {
+        definitions: [
+          {
+            key,
+            declaredKeyHint: hint
+              ? (extractDeclaredConnectorKey(sourceCode) ?? undefined)
+              : undefined,
+            sourcePath: "/proj/connectors/acme.connector.ts",
+            sourceCode,
+            sourceFile: "connectors/acme.connector.ts",
+          },
+        ],
+        authProfiles: [],
+        connections: [],
+      },
+    });
+    const plan = computeDiff(state, {
+      ...emptyRemote(),
+      connectorDefinitions: [
+        { key: "acme", installed, installable: !installed },
+      ],
+    });
+    const row = plan.rows.find((r) => r.kind === "connector-definition");
+    expect(row?.verb).toBe(verb);
+    expect(row?.installedRemotely).toBe(verb === "update");
+    expect(renderPlan(plan)).toContain(
+      `${verb === "update" ? "~" : "+"} connector-definition ${key ? `${key} (from connectors/acme.connector.ts)` : "connectors/acme.connector.ts"}`
+    );
   });
 
   // ── round-4 ──────────────────────────────────────────────────────────────

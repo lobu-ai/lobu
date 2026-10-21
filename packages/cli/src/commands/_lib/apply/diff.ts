@@ -1732,9 +1732,10 @@ function diffConnectorDefinition(
   // hash is of the *compiled* output) — so we always emit a "sync" row;
   // `install_connector` is idempotent and reports `updated:false` on apply
   // when the code is byte-identical, so this never churns remote state.
-  const installedRemotely = desired.key
-    ? installedKeys.has(desired.key)
-    : false;
+  // Local files have no resolved key during planning; the static hint lets
+  // the plan recognise an installed definition without compiling the source.
+  const key = desired.key ?? desired.declaredKeyHint;
+  const installedRemotely = key ? installedKeys.has(key) : false;
   return {
     kind: "connector-definition",
     // "update" (re-push) when already installed; `install_connector` is
