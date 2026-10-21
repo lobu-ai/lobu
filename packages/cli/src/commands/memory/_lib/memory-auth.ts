@@ -69,31 +69,11 @@ export async function getActiveSession(context?: string): Promise<{
   session: MemorySession | null;
   key: string | null;
 }> {
-  const base = await resolveServerUrl(undefined, context);
-  const org = await resolveOrg(undefined, undefined, context);
-  const key = org ? mcpUrlForOrg(base, org) : base;
+  const { url: key, org } = await resolveToolMcpUrl({ context });
   return {
     session: {
       mcpUrl: key,
       org,
-      tokenType: "Bearer",
-      updatedAt: new Date().toISOString(),
-    },
-    key,
-  };
-}
-
-export async function getSessionForOrg(
-  orgSlug: string,
-  context?: string,
-  urlFlag?: string
-): Promise<{ session: MemorySession; key: string } | null> {
-  const base = await resolveServerUrl(urlFlag, context);
-  const key = mcpUrlForOrg(base, orgSlug);
-  return {
-    session: {
-      mcpUrl: key,
-      org: orgSlug,
       tokenType: "Bearer",
       updatedAt: new Date().toISOString(),
     },
@@ -140,6 +120,21 @@ export async function resolveOrg(
   if (hasRuntimeMcpAccess()) return undefined;
   if (session?.org) return session.org;
   return getActiveOrg(context);
+}
+
+/**
+ * The MCP URL a tool call goes to: the server URL scoped to the resolved org,
+ * or the server URL as given when no org resolves (a runtime credential's URL
+ * already names its org; see `resolveOrg`).
+ */
+export async function resolveToolMcpUrl(options: {
+  url?: string;
+  org?: string;
+  context?: string;
+}): Promise<{ url: string; org: string | undefined }> {
+  const org = await resolveOrg(options.org, undefined, options.context);
+  const base = await resolveServerUrl(options.url, options.context);
+  return { url: org ? mcpUrlForOrg(base, org) : base, org };
 }
 
 /**

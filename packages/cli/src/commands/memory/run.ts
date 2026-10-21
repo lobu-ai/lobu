@@ -1,11 +1,6 @@
-import { ValidationError, isFailedToolPayload } from "./_lib/errors.js";
-import { mcpRpc, resolveMcpEndpoint } from "./_lib/mcp.js";
-import {
-  getSessionForOrg,
-  mcpUrlForOrg,
-  resolveOrg,
-  resolveServerUrl,
-} from "./_lib/memory-auth.js";
+import { isFailedToolPayload } from "./_lib/errors.js";
+import { mcpRpc } from "./_lib/mcp.js";
+import { resolveToolMcpUrl } from "./_lib/memory-auth.js";
 import { printText } from "../../internal/output.js";
 
 interface RunOptions {
@@ -19,35 +14,7 @@ export async function memoryRunCommand(
   params: string | undefined,
   options: RunOptions = {}
 ): Promise<void> {
-  const org = await resolveOrg(options.org, undefined, options.context);
-  let mcpUrl: string;
-
-  if (org) {
-    const orgSession = await getSessionForOrg(
-      org,
-      options.context,
-      options.url
-    );
-    if (orgSession) {
-      mcpUrl = orgSession.key;
-    } else {
-      const serverUrl = await resolveServerUrl(options.url, options.context);
-      const base = serverUrl || (await resolveMcpEndpoint());
-      if (!base)
-        throw new ValidationError(
-          "Server URL required. Pass --url or set LOBU_MEMORY_URL."
-        );
-      mcpUrl = mcpUrlForOrg(base, org);
-    }
-  } else {
-    const serverUrl = await resolveServerUrl(options.url, options.context);
-    const resolved = serverUrl || (await resolveMcpEndpoint());
-    if (!resolved)
-      throw new ValidationError(
-        "Server URL required. Pass --url or set LOBU_MEMORY_URL."
-      );
-    mcpUrl = resolved;
-  }
+  const { url: mcpUrl } = await resolveToolMcpUrl(options);
 
   if (!tool) {
     const result = await mcpRpc(

@@ -2,11 +2,7 @@ import { MCP_PROTOCOL_VERSION } from "@lobu/core";
 import { toolApiOriginForMcpUrl } from "../../../internal/context.js";
 import { extractApiError } from "../../../internal/http.js";
 import { ApiError } from "./errors.js";
-import {
-  getUsableToken,
-  orgFromMcpUrl,
-  resolveServerUrl,
-} from "./memory-auth.js";
+import { getUsableToken, orgFromMcpUrl } from "./memory-auth.js";
 
 const JSON_MCP_ACCEPT = "application/json";
 
@@ -76,34 +72,6 @@ type JsonRpcResponse<T = unknown> = {
   result?: T;
   error?: JsonRpcError;
 };
-
-/**
- * Resolve the MCP endpoint URL.
- * Priority: explicit config > LOBU_MEMORY_URL env > saved memory server > default cloud server.
- */
-export async function resolveMcpEndpoint(config?: {
-  mcpUrl?: unknown;
-  url?: unknown;
-  apiUrl?: unknown;
-}): Promise<string | null> {
-  // Explicit config should win over ambient auth/session state so callers can
-  // deterministically target a specific server.
-  if (config) {
-    if (typeof config.mcpUrl === "string" && config.mcpUrl.trim().length > 0) {
-      return config.mcpUrl;
-    }
-    if (typeof config.url === "string" && config.url.trim().length > 0) {
-      const url = config.url as string;
-      return url.includes("/mcp") ? url : `${url.replace(/\/+$/, "")}/mcp`;
-    }
-    if (typeof config.apiUrl === "string" && config.apiUrl.trim().length > 0) {
-      return `${(config.apiUrl as string).replace(/\/+$/, "")}/mcp`;
-    }
-  }
-
-  // Fall back to auth store / env when no explicit target was provided.
-  return resolveServerUrl();
-}
 
 async function mcpFetch(
   mcpUrl: string,

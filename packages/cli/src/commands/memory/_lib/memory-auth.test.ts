@@ -3,12 +3,7 @@ import { MCP_PROTOCOL_VERSION } from "@lobu/core";
 import * as internal from "../../../internal/index.js";
 import { memoryRunCommand } from "../run.js";
 import { mcpRpc, restToolCall } from "./mcp.js";
-import {
-  getSessionForOrg,
-  getUsableToken,
-  normalizeMcpUrl,
-  resolveOrg,
-} from "./memory-auth.js";
+import { getUsableToken, normalizeMcpUrl, resolveOrg } from "./memory-auth.js";
 
 const CLOUD_MCP_URL = "https://lobu.ai/mcp";
 
@@ -50,15 +45,6 @@ describe("memory auth URL resolution", () => {
     process.env.LOBU_MEMORY_URL = "https://gateway.test/lobu/mcp/lobu-memory";
     expect(await resolveOrg()).toBeUndefined();
     expect(internal.getActiveOrg).not.toHaveBeenCalled();
-  });
-
-  test("getSessionForOrg honors an explicit --url", async () => {
-    const session = await getSessionForOrg(
-      "dev",
-      undefined,
-      "http://localhost:8801"
-    );
-    expect(session?.key).toBe("http://localhost:8801/mcp/dev");
   });
 
   test("getUsableToken keeps the active context when memory URL matches", async () => {

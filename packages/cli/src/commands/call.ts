@@ -35,11 +35,8 @@ import {
 } from "./memory/_lib/errors.js";
 import { mcpRpc, restToolCall } from "./memory/_lib/mcp.js";
 import {
-  getSessionForOrg,
   hasRuntimeMcpAccess,
-  mcpUrlForOrg,
-  resolveOrg,
-  resolveServerUrl,
+  resolveToolMcpUrl,
 } from "./memory/_lib/memory-auth.js";
 
 interface CallOptions {
@@ -174,36 +171,6 @@ export function assertCallTitle(
   );
 }
 
-/** Resolve the MCP URL for the requested org (mirrors `memory run`'s chain). */
-async function resolveCallEndpoint(options: CallOptions): Promise<string> {
-  const org = await resolveOrg(options.org, undefined, options.context);
-  if (!org) {
-    throw new ValidationError(
-      "Cannot resolve org slug. Pass --org or run `lobu context use <name>` / `lobu org set <slug>`."
-    );
-  }
-  const orgSession = await getSessionForOrg(org, options.context, options.url);
-  if (orgSession) return orgSession.key;
-
-  const base = await resolveServerUrl(options.url, options.context);
-  if (!base) {
-    throw new ValidationError(
-      "Server URL required. Pass --url or configure a context with `lobu context add`."
-    );
-  }
-  return mcpUrlForOrg(base, org);
-}
-
-/**
- * The runtime MCP URL as given (it already names the org), re-scoped only by an
- * explicit `--org` / LOBU_MEMORY_ORG — the same chain as `memory run`.
- */
-async function resolveRuntimeMcpUrl(options: CallOptions): Promise<string> {
-  const base = await resolveServerUrl(options.url, options.context);
-  const org = await resolveOrg(options.org, undefined, options.context);
-  return org ? mcpUrlForOrg(base, org) : base;
-}
-
 function printToolList(
   tools: ToolListEntry[],
   options: { json: boolean; raw: boolean; includeInternal: boolean }
@@ -238,31 +205,27 @@ export async function callCommand(
   const json = options.json === true;
   const raw = options.raw === true;
   const runtimeMcp = hasRuntimeMcpAccess();
-  if ((options.list || !tool) && runtimeMcp) {
-    const result = (await mcpRpc(
-      await resolveRuntimeMcpUrl(options),
-      "tools/list",
-      undefined,
-      options.context
-    )) as { tools?: ToolListEntry[] } | undefined;
-    printToolList(Array.isArray(result?.tools) ? result.tools : [], {
-      json,
-      raw,
-      includeInternal: options.all === true,
-    });
-    return;
-  }
   if (options.list || !tool) {
-    const { client, orgSlug } = await resolveApiClient({
-      context: options.context,
-      org: options.org,
-      apiUrl: options.url,
-    });
-    const result = await client.get<{ tools: ToolListEntry[] }>(
-      `/api/${encodeURIComponent(orgSlug)}/tools`
-    );
-    const tools = Array.isArray(result?.tools) ? result.tools : [];
-    printToolList(tools, {
+    let result: { tools?: ToolListEntry[] } | undefined;
+    if (runtimeMcp) {
+      const { url } = await resolveToolMcpUrl(options);
+      result = (await mcpRpc(
+        url,
+        "tools/list",
+        undefined,
+        options.context
+      )) as typeof result;
+    } else {
+      const { client, orgSlug } = await resolveApiClient({
+        context: options.context,
+        org: options.org,
+        apiUrl: options.url,
+      });
+      result = await client.get<{ tools: ToolListEntry[] }>(
+        `/api/${encodeURIComponent(orgSlug)}/tools`
+      );
+    }
+    printToolList(Array.isArray(result?.tools) ? result.tools : [], {
       json,
       raw,
       includeInternal: options.all === true,
@@ -272,17 +235,20 @@ export async function callCommand(
 
   const args = await buildArgs(options);
   assertCallTitle(tool, args);
-  const endpoint = runtimeMcp
-    ? await resolveRuntimeMcpUrl(options)
-    : await resolveCallEndpoint(options);
+  const endpoint = await resolveToolMcpUrl(options);
+  if (!runtimeMcp && !endpoint.org) {
+    throw new ValidationError(
+      "Cannot resolve org slug. Pass --org or run `lobu context use <name>` / `lobu org set <slug>`."
+    );
+  }
   const result = runtimeMcp
     ? await mcpRpc(
-        endpoint,
+        endpoint.url,
         "tools/call",
         { name: tool, arguments: args },
         options.context
       )
-    : await restToolCall<unknown>(endpoint, tool, args, options.context);
+    : await restToolCall<unknown>(endpoint.url, tool, args, options.context);
   printJson(result, raw);
   // Same contract as `memory run`: the printed JSON stays parseable, but a
   // reported failure must fail the shell or CI gates pass silently.
