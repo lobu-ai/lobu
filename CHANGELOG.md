@@ -1,5 +1,21 @@
 # Changelog
 
+## [24.1.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.0.0...lobu-v24.1.0) (2026-10-21)
+
+
+### Features
+
+* **audit:** keep the caller's title on tool invocation list rows ([#4285](https://github.com/lobu-ai/lobu/issues/4285)) ([c858289](https://github.com/lobu-ai/lobu/commit/c858289bdc61a31b37161a24f04d31fea2fdccd9))
+* **views:** rebuild a stale server-built view bundle when it is served ([#4283](https://github.com/lobu-ai/lobu/issues/4283)) ([0c298e5](https://github.com/lobu-ai/lobu/commit/0c298e57961e459a71fd9371b87851367b527d3c))
+* **views:** the view shell carries the React and @lobu/views runtime ([#4287](https://github.com/lobu-ai/lobu/issues/4287)) ([1311322](https://github.com/lobu-ai/lobu/commit/1311322408ba40214c5127d0e218133a81366d29))
+* **views:** view bundles read React and @lobu/views from the shell runtime ([#4288](https://github.com/lobu-ai/lobu/issues/4288)) ([6063976](https://github.com/lobu-ai/lobu/commit/60639766be9557dfd53200508159e7256508526c))
+
+
+### Bug Fixes
+
+* **acp:** record the real tool arguments in Automation transcripts ([#4289](https://github.com/lobu-ai/lobu/issues/4289)) ([c107a1e](https://github.com/lobu-ai/lobu/commit/c107a1e5b12b3b55bc15ce704214a10c0c548462))
+* **connectors:** resend an X DM under the same request id while X is over capacity ([#4284](https://github.com/lobu-ai/lobu/issues/4284)) ([7dd0994](https://github.com/lobu-ai/lobu/commit/7dd099423712bf75f43d4345227f495dbcd1ba4c))
+
 ## [24.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v23.0.0...lobu-v24.0.0) (2026-10-20)
 
 
