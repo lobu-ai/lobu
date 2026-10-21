@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { beforeAll, describe, expect, mock, spyOn, test } from "bun:test";
 import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { xDirectMessagesProgram } from "../x-dm-adapter.js";
@@ -41,6 +41,10 @@ function fakeX(
 	let delivered = 0;
 	let stampRequestIds = true;
 	let hideSends = false;
+	// Sends X refuses with 503 / error 130 before accepting one, and whether a
+	// refused send was delivered anyway.
+	let unavailableSends = 0;
+	let deliverUnavailable = false;
 	const users = {
 		[SELF]: {
 			id_str: SELF,
@@ -147,6 +151,15 @@ function fakeX(
 		}
 		if (url.pathname === "/i/api/1.1/dm/new2.json") {
 			const body = JSON.parse(String(init?.body));
+			const unavailable = unavailableSends > 0;
+			if (unavailable) unavailableSends--;
+			if (unavailable && !deliverUnavailable) {
+				return {
+					ok: false,
+					status: 503,
+					json: async () => ({ errors: [{ code: 130 }] }),
+				};
+			}
 			delivered++;
 			const message: FakeMessage = {
 				id: String(9000 + delivered),
@@ -157,6 +170,13 @@ function fakeX(
 				...(stampRequestIds ? { request_id: body.request_id } : {}),
 			};
 			messages.push(message);
+			if (unavailable) {
+				return {
+					ok: false,
+					status: 503,
+					json: async () => ({ errors: [{ code: 130 }] }),
+				};
+			}
 			return ok({ entries: [entry(message)], users });
 		}
 		return { ok: false, status: 404, json: async () => ({}) };
@@ -171,6 +191,10 @@ function fakeX(
 		},
 		hidingSends: () => {
 			hideSends = true;
+		},
+		refusingSends: (count: number, { delivered = false } = {}) => {
+			unavailableSends = count;
+			deliverUnavailable = delivered;
 		},
 	};
 }
@@ -290,6 +314,27 @@ function seed(x: ReturnType<typeof fakeX>) {
 			time: Date.parse("2026-10-01T10:02:00.000Z"),
 		},
 	);
+}
+
+/** Await a page call that waits on page timers, firing them as they are set. */
+async function settled<T>(
+	browser: ReturnType<typeof page>,
+	pending: Promise<T>,
+) {
+	let done = false;
+	pending.then(
+		() => {
+			done = true;
+		},
+		() => {
+			done = true;
+		},
+	);
+	while (!done) {
+		await browser.tick();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+	return pending;
 }
 
 function connector() {
@@ -795,6 +840,194 @@ describe("X send_message", () => {
 		// A different key is a different send.
 		await send(dispatcher, { ...input, idempotency_key: "synthetic-op-3" });
 		expect(x.sends()).toHaveLength(2);
+	});
+
+	test("sends the same request again while X is over capacity", async () => {
+		const x = fakeX();
+		seed(x);
+		x.refusingSends(2);
+		const browser = page(x);
+		const result = await settled(
+			browser,
+			send(browser.dispatcher, {
+				conversation_id: DM,
+				text: "join here https://example.com/link",
+				idempotency_key: "synthetic-over-capacity",
+			}),
+		);
+		expect(result).toMatchObject({
+			success: true,
+			output: { sent: true, deduplicated: false, message_id: "9001" },
+		});
+		const requestIds = x
+			.sends()
+			.map((send) => JSON.parse(String(send.init?.body)).request_id);
+		expect(requestIds).toHaveLength(3);
+		expect(new Set(requestIds).size).toBe(1);
+		expect(x.messages.filter((m) => m.sender_id === SELF)).toHaveLength(2);
+	});
+
+	test.each([
+		0, 2,
+	])("recognises delivery despite a 503 after %i failed attempts", async (failures) => {
+		const x = fakeX((body) => {
+			if (x.sends().length === failures)
+				x.refusingSends(1, { delivered: true });
+			return body;
+		});
+		seed(x);
+		x.refusingSends(failures);
+		const browser = page(x);
+		const result = await settled(
+			browser,
+			send(browser.dispatcher, {
+				conversation_id: DM,
+				text: "join here https://example.com/link",
+				idempotency_key: "synthetic-over-capacity-landed",
+			}),
+		);
+		expect(result).toMatchObject({
+			success: true,
+			output: { sent: true, deduplicated: true, message_id: "9001" },
+		});
+		expect(x.sends()).toHaveLength(failures + 1);
+	});
+
+	test("stops before reading another account during retry backoff", async () => {
+		const x = fakeX();
+		seed(x);
+		x.refusingSends(1, { delivered: true });
+		const fetch = x.fetch;
+		x.fetch = async (path, init) => {
+			const result = await fetch(path, init);
+			if (path.endsWith("/new2.json")) browser.setAccount(PEER);
+			return result;
+		};
+		const browser = page(x);
+		const result = await settled(
+			browser,
+			send(browser.dispatcher, {
+				conversation_id: DM,
+				text: "synthetic reply",
+				idempotency_key: "synthetic-retry-account-switch",
+			}),
+		);
+		expect(result.success).toBe(false);
+		expect(result.error).toContain("account changed");
+		expect(x.requests).toHaveLength(2);
+	});
+
+	test.each([
+		"send",
+		"reconciliation",
+	])("cancels an expired budget after %s", async (phase) => {
+		const controller = new AbortController();
+		const nativeTimeout = AbortSignal.timeout;
+		const timeout = spyOn(AbortSignal, "timeout").mockImplementation((ms) =>
+			ms === 70_000 ? controller.signal : nativeTimeout(ms),
+		);
+		try {
+			const x = fakeX();
+			seed(x);
+			x.refusingSends(2);
+			const fetch = x.fetch;
+			x.fetch = async (path, init) => {
+				init?.signal?.throwIfAborted();
+				const result = await fetch(path, init);
+				if (
+					x.sends().length > 0 &&
+					(phase === "send"
+						? path.endsWith("/new2.json")
+						: path.includes("/conversation/"))
+				)
+					controller.abort(new Error("synthetic send deadline"));
+				return result;
+			};
+			const browser = page(x);
+			const result = await settled(
+				browser,
+				send(browser.dispatcher, {
+					conversation_id: DM,
+					text: "synthetic reply",
+					idempotency_key: "synthetic-retry-deadline",
+				}),
+			);
+			expect(result.success).toBe(false);
+			expect(result.error).toContain("synthetic send deadline");
+			expect(x.sends()).toHaveLength(1);
+		} finally {
+			timeout.mockRestore();
+		}
+	});
+
+	test.each([401, 403, 429, 500])("does not retry HTTP %i", async (status) => {
+		const x = fakeX();
+		x.refusingSends(3);
+		const fetch = x.fetch;
+		x.fetch = async (path, init) => {
+			const result = await fetch(path, init);
+			return path.endsWith("/new2.json") ? { ...result, status } : result;
+		};
+		const browser = page(x);
+		const result = await settled(
+			browser,
+			send(browser.dispatcher, {
+				conversation_id: DM,
+				text: "synthetic reply",
+				idempotency_key: "synthetic-non-retryable",
+			}),
+		);
+		expect(result.success).toBe(false);
+		expect(result.error).toContain(`HTTP ${status}`);
+		expect(x.sends()).toHaveLength(1);
+	});
+
+	test.each([
+		"missing request id",
+		"failed read",
+	])("does not retry with uncertain delivery: %s", async (failure) => {
+		const x = fakeX((body) => {
+			if (failure === "failed read" && x.sends().length > 0)
+				throw new Error("synthetic reconciliation failure");
+			return body;
+		});
+		x.refusingSends(1, { delivered: true });
+		x.withoutRequestIds();
+		const browser = page(x);
+		const result = await settled(
+			browser,
+			send(browser.dispatcher, {
+				conversation_id: DM,
+				text: "synthetic reply",
+				idempotency_key: "synthetic-uncertain-delivery",
+			}),
+		);
+		expect(result.success).toBe(false);
+		expect(result.error).toContain(
+			failure === "failed read"
+				? "synthetic reconciliation failure"
+				: "cannot identify",
+		);
+		expect(x.sends()).toHaveLength(1);
+	});
+
+	test("fails after X stays over capacity, with nothing delivered", async () => {
+		const x = fakeX();
+		seed(x);
+		x.refusingSends(3);
+		const browser = page(x);
+		const result = await settled(
+			browser,
+			send(browser.dispatcher, {
+				conversation_id: DM,
+				text: "join here https://example.com/link",
+				idempotency_key: "synthetic-over-capacity-exhausted",
+			}),
+		);
+		expect(result.success).toBe(false);
+		expect(result.error).toContain("HTTP 503, X error 130");
+		expect(x.sends()).toHaveLength(3);
+		expect(x.messages.filter((m) => m.sender_id === SELF)).toHaveLength(1);
 	});
 
 	test("refuses to send after the preflight changes accounts", async () => {

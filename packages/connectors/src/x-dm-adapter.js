@@ -31,10 +31,16 @@ export function xDirectMessagesProgram() {
 	const UPDATE_PAGES_PER_PASS = 10;
 	// Matching recent text without a request id is ambiguous, not delivery proof.
 	const RESEND_WINDOW_MS = 10 * 60 * 1000;
+	// Reconcile 503 responses before retrying: a failed response can still land.
+	const UNAVAILABLE_SEND_RETRY_DELAYS_MS = [3000, 7000];
+	// Abort network work before Chrome's 80s awaited-evaluation deadline.
+	const SEND_TIMEOUT_MS = 70000;
 	const BATCH_EVENTS = 500;
 	const BATCH_BYTES = 128 * 1024;
-	function fail(message) {
-		throw new Error(`X direct messages: ${message}`);
+	function fail(message, status) {
+		const error = new Error(`X direct messages: ${message}`);
+		if (status !== undefined) error.status = status;
+		throw error;
 	}
 	function cookie(name) {
 		const raw = document.cookie
@@ -49,13 +55,16 @@ export function xDirectMessagesProgram() {
 		return match[1];
 	}
 	async function request(path, init = {}) {
+		init.signal?.throwIfAborted();
 		const self = account();
 		const csrf = cookie("ct0");
 		if (!csrf) fail("Sign in to X in the paired browser");
 		const response = await fetch(path, {
 			credentials: "include",
-			signal: AbortSignal.timeout(20000),
 			...init,
+			signal: init.signal
+				? AbortSignal.any([init.signal, AbortSignal.timeout(20000)])
+				: AbortSignal.timeout(20000),
 			headers: {
 				authorization: WEB_CLIENT_BEARER,
 				"x-csrf-token": csrf,
@@ -73,6 +82,7 @@ export function xDirectMessagesProgram() {
 			}
 			fail(
 				`request failed (HTTP ${response.status}${code === null ? "" : `, X error ${code}`})`,
+				response.status,
 			);
 		}
 		const body = await response.json();
@@ -85,10 +95,11 @@ export function xDirectMessagesProgram() {
 		);
 		return body?.inbox_initial_state ?? fail("Inbox state is unavailable");
 	}
-	async function conversation(conversationId, maxId) {
+	async function conversation(conversationId, maxId, signal) {
 		const page = maxId ? `&max_id=${encodeURIComponent(maxId)}` : "";
 		const body = await request(
 			`${DM_API}/conversation/${conversationId}.json?context=FETCH_DM_CONVERSATION&${DM_PARAMS}${page}`,
+			signal ? { signal } : {},
 		);
 		return body?.conversation_timeline ?? fail("Conversation is unavailable");
 	}
@@ -294,6 +305,7 @@ export function xDirectMessagesProgram() {
 	}
 	async function send(input) {
 		const self = account();
+		const signal = AbortSignal.timeout(SEND_TIMEOUT_MS);
 		const conversationId = String(input.conversation_id ?? "");
 		if (!CONVERSATION_ID.test(conversationId))
 			fail("conversation_id must be an exact X DM conversation id");
@@ -308,41 +320,64 @@ export function xDirectMessagesProgram() {
 			typeof input.idempotency_key === "string" ? input.idempotency_key : "";
 		if (!idempotencyKey) fail("idempotency_key is required");
 		const requestId = await requestIdOf(self, conversationId, idempotencyKey);
-		// Only an existing conversation the account can read is a send target.
-		const before = await conversation(conversationId);
-		const prior = earlierAttempt(before, self, requestId, text);
-		if (prior) {
-			return {
-				sent: true,
-				deduplicated: true,
-				id: prior.id,
-				message_id: prior.message_id,
-				conversation_id: conversationId,
-				occurred_at: prior.occurred_at,
-			};
-		}
-		if (account() !== self) fail("X account changed before the send");
-		const response = await request(`${DM_API}/new2.json`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				conversation_id: conversationId,
-				recipient_ids: false,
-				request_id: requestId,
-				text,
-				cards_platform: "Web-12",
-				include_cards: 1,
-				include_quote_count: true,
-				dm_users: false,
-			}),
+		const delivered = (prior) => ({
+			sent: true,
+			deduplicated: true,
+			id: prior.id,
+			message_id: prior.message_id,
+			conversation_id: conversationId,
+			occurred_at: prior.occurred_at,
 		});
+		const readConversation = () => {
+			if (account() !== self) fail("X account changed before the send read");
+			return conversation(conversationId, undefined, signal);
+		};
+		// Only an existing conversation the account can read is a send target.
+		const before = await readConversation();
+		const prior = earlierAttempt(before, self, requestId, text);
+		if (prior) return delivered(prior);
+		let response;
+		for (const delay of [...UNAVAILABLE_SEND_RETRY_DELAYS_MS, null]) {
+			if (account() !== self) fail("X account changed before the send");
+			try {
+				response = await request(`${DM_API}/new2.json`, {
+					method: "POST",
+					signal,
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						conversation_id: conversationId,
+						recipient_ids: false,
+						request_id: requestId,
+						text,
+						cards_platform: "Web-12",
+						include_cards: 1,
+						include_quote_count: true,
+						dm_users: false,
+					}),
+				});
+				break;
+			} catch (error) {
+				if (error?.status !== 503) throw error;
+				signal.throwIfAborted();
+				if (delay !== null)
+					await new Promise((resolve) => setTimeout(resolve, delay));
+				const landed = earlierAttempt(
+					await readConversation(),
+					self,
+					requestId,
+					text,
+				);
+				if (landed) return delivered(landed);
+				if (delay === null) throw error;
+			}
+		}
 		const created = messagesOf(response).find(
 			(message) => String(message.conversation_id) === conversationId,
 		);
 		const messageId = created ? String(created.id ?? "") : "";
 		if (!/^[0-9]+$/.test(messageId))
 			fail("X accepted the send but returned no message id");
-		const after = await conversation(conversationId);
+		const after = await readConversation();
 		const landed = rowsOf(after, self).find(
 			(row) => row.message_id === messageId && row.from_me,
 		);
