@@ -119,12 +119,11 @@ Cloud:
   providers <subcmd>       Manage org model providers (create, set-key, ...)
   sandbox <subcmd>         Manage sandboxes (runtime providers)
   clients <subcmd>         List / revoke connected clients (MCP, messaging)
-  call [tool]              Invoke an admin REST tool by name (--list to discover)
+  call [tool]              Invoke a tool by name (run_sdk/query_sdk/query_sql need --arg title=)
   token [create]           Print or mint personal access tokens
 
 Memory:
   memory run [tool]        Invoke a memory MCP tool
-  memory exec <script>     Run a ClientSDK script
   memory health            Validate login + MCP connectivity
   memory seed [path]       Provision a memory workspace
 `
@@ -416,6 +415,10 @@ Memory:
       "--wait-for-approval",
       "Keep polling for browser approval when supervised without a TTY"
     )
+    .option(
+      "--client-name <name>",
+      'Register this login as its own OAuth client name (default "Lobu CLI"); the activity feed attributes the context\'s calls to it'
+    )
     .action(
       async (options: {
         token?: string;
@@ -424,6 +427,7 @@ Memory:
         quiet?: boolean;
         email?: string;
         waitForApproval?: boolean;
+        clientName?: string;
       }) => {
         const { loginCommand } = await import("./commands/login.js");
         await loginCommand({ ...options, cliVersion: version });
@@ -1074,7 +1078,7 @@ Memory:
     program
       .command("call [tool]")
       .description(
-        "Invoke an admin REST tool by name (POST /api/<org>/<tool>). Run with --list or no args to discover."
+        "Invoke a tool by name (POST /api/<org>/<tool>; MCP tools/call when LOBU_API_TOKEN + LOBU_MEMORY_URL are set). run_sdk, query_sdk and query_sql require --arg title=<heading>. Run with --list or no args to discover."
       )
       .option(
         "--list",

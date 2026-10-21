@@ -10,19 +10,25 @@ const cli =
   process.env.LOBU_TEST_CLI ?? resolve(import.meta.dir, "../../bin/lobu.js");
 
 describe("device-code login under Node", () => {
-  for (const { columns, approvalDelayMs } of [
+  for (const { columns, approvalDelayMs, clientName } of [
     { columns: 0, approvalDelayMs: 0 },
     { columns: 80, approvalDelayMs: 0 },
     { columns: 80, approvalDelayMs: 6 * 60 * 1000 },
+    {
+      columns: 80,
+      approvalDelayMs: 0,
+      clientName: "Market pipeline supervisor",
+    },
   ]) {
-    test(`saves credentials with ${columns} columns and ${approvalDelayMs}ms approval delay`, async () => {
+    test(`saves credentials with ${columns} columns, ${approvalDelayMs}ms approval delay and client name ${clientName ?? "(default)"}`, async () => {
       const scratch = await mkdtemp(join(tmpdir(), "lobu-login-"));
       const calls: string[] = [];
+      const registeredNames: unknown[] = [];
       let polls = 0;
       const server = Bun.serve({
         hostname: "127.0.0.1",
         port: 0,
-        fetch(request) {
+        async fetch(request) {
           const { origin, pathname } = new URL(request.url);
           calls.push(pathname);
           switch (pathname) {
@@ -38,6 +44,10 @@ describe("device-code login under Node", () => {
                 ],
               });
             case "/register":
+              registeredNames.push(
+                ((await request.json()) as { client_name?: unknown })
+                  .client_name
+              );
               return Response.json({ client_id: "test-client" });
             case "/device":
               return Response.json({
@@ -99,7 +109,13 @@ describe("device-code login under Node", () => {
         );
         const child = spawn(
           "node",
-          ["--import", pathToFileURL(preload).href, cli, "login"],
+          [
+            "--import",
+            pathToFileURL(preload).href,
+            cli,
+            "login",
+            ...(clientName ? ["--client-name", clientName] : []),
+          ],
           {
             stdio: ["ignore", "pipe", "pipe"],
             env: {
@@ -143,6 +159,7 @@ describe("device-code login under Node", () => {
             "/userinfo",
           ],
         });
+        expect(registeredNames).toEqual([clientName ?? "Lobu CLI"]);
         expect(stdout + stderr).toContain("Logged in to lobu.");
         expect(stderr).toContain("Waiting for authorization...");
         const saved = JSON.parse(

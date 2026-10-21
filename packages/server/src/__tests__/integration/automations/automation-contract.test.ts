@@ -893,6 +893,10 @@ describe("automation contract", () => {
 			expect(json.attempt).toBe(1);
 			expect(String(json.nudge ?? json.error ?? "")).toMatch(/completeWindow/i);
 			expect(String(json.nudge ?? json.error ?? "")).toContain("automation_id");
+			// Old devices bundle an older `lobu` CLI, so the nudge defers to the
+			// device-built completion contract instead of naming a command.
+			expect(String(json.nudge)).toContain("completion contract");
+			expect(String(json.nudge)).not.toMatch(/lobu (memory|call)\b/);
 
 			const [runAfterResume] = await sql`
         SELECT status, error_message, action_output, output_tail,
@@ -933,6 +937,8 @@ describe("automation contract", () => {
       `;
 			expect(String(run.status)).toBe("failed");
 			expect(String(run.error_message)).toMatch(/completeWindow/);
+			expect(String(run.error_message)).toContain("completion contract");
+			expect(String(run.error_message)).not.toMatch(/lobu (memory|call)\b/);
 			expect(run.action_output).toBeNull();
 
 			// Schedule must still advance so the automation doesn't re-fire forever.

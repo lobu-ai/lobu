@@ -9,6 +9,16 @@
  *   --arg key=value         flat string field (top-level only)
  *   --arg key:=<jsonvalue>  JSON-parsed field (httpie-style)
  *
+ * `run_sdk`, `query_sdk` and `query_sql` require a non-empty `title` arg: it is
+ * the heading the activity feed shows for the call. The check runs before any
+ * request.
+ *
+ * Transport: REST by default. A runtime credential (LOBU_API_TOKEN +
+ * LOBU_MEMORY_URL, e.g. a device Automation run's worker access) is valid only
+ * on MCP routes, so that case sends the same call as MCP `tools/call` to
+ * LOBU_MEMORY_URL, which already names the org; the printed result is then the
+ * MCP tool result.
+ *
  * Output is pretty JSON by default; `--raw` switches to compact JSON for piping.
  * Errors go to stderr with exit code 1 (ApiError) / 2 (validation). A tool
  * that reports failure inside a 200 payload still prints its JSON, then exits 1.
@@ -23,9 +33,10 @@ import {
   parseJsonObject,
   ValidationError,
 } from "./memory/_lib/errors.js";
-import { restToolCall } from "./memory/_lib/mcp.js";
+import { mcpRpc, restToolCall } from "./memory/_lib/mcp.js";
 import {
   getSessionForOrg,
+  hasRuntimeMcpAccess,
   mcpUrlForOrg,
   resolveOrg,
   resolveServerUrl,
@@ -143,6 +154,26 @@ export async function buildArgs(
   return {};
 }
 
+/** Tools whose calls the activity feed heads with the caller's `title`. */
+const TITLED_TOOLS = new Set(["run_sdk", "query_sdk", "query_sql"]);
+
+/** Refuse an untitled run_sdk / query_sdk / query_sql call before any request. */
+export function assertCallTitle(
+  tool: string,
+  args: Record<string, unknown>
+): void {
+  if (!TITLED_TOOLS.has(tool)) return;
+  const title = args.title;
+  if (typeof title === "string" && title.trim()) return;
+  const body =
+    tool === "query_sql" ? "--arg sql='SELECT ...'" : "--arg script='...'";
+  throw new ValidationError(
+    `${tool} requires a non-empty \`title\` arg; it names this call in the activity feed. Add one, e.g.:\n` +
+      `  lobu call ${tool} --arg title='Recent support tickets' ${body}\n` +
+      `(or a "title" field in the --input-file / stdin JSON).`
+  );
+}
+
 /** Resolve the MCP URL for the requested org (mirrors `memory run`'s chain). */
 async function resolveCallEndpoint(options: CallOptions): Promise<string> {
   const org = await resolveOrg(options.org, undefined, options.context);
@@ -161,6 +192,16 @@ async function resolveCallEndpoint(options: CallOptions): Promise<string> {
     );
   }
   return mcpUrlForOrg(base, org);
+}
+
+/**
+ * The runtime MCP URL as given (it already names the org), re-scoped only by an
+ * explicit `--org` / LOBU_MEMORY_ORG — the same chain as `memory run`.
+ */
+async function resolveRuntimeMcpUrl(options: CallOptions): Promise<string> {
+  const base = await resolveServerUrl(options.url, options.context);
+  const org = await resolveOrg(options.org, undefined, options.context);
+  return org ? mcpUrlForOrg(base, org) : base;
 }
 
 function printToolList(
@@ -196,6 +237,21 @@ export async function callCommand(
 ): Promise<void> {
   const json = options.json === true;
   const raw = options.raw === true;
+  const runtimeMcp = hasRuntimeMcpAccess();
+  if ((options.list || !tool) && runtimeMcp) {
+    const result = (await mcpRpc(
+      await resolveRuntimeMcpUrl(options),
+      "tools/list",
+      undefined,
+      options.context
+    )) as { tools?: ToolListEntry[] } | undefined;
+    printToolList(Array.isArray(result?.tools) ? result.tools : [], {
+      json,
+      raw,
+      includeInternal: options.all === true,
+    });
+    return;
+  }
   if (options.list || !tool) {
     const { client, orgSlug } = await resolveApiClient({
       context: options.context,
@@ -214,14 +270,19 @@ export async function callCommand(
     return;
   }
 
-  const mcpUrl = await resolveCallEndpoint(options);
   const args = await buildArgs(options);
-  const result = await restToolCall<unknown>(
-    mcpUrl,
-    tool,
-    args,
-    options.context
-  );
+  assertCallTitle(tool, args);
+  const endpoint = runtimeMcp
+    ? await resolveRuntimeMcpUrl(options)
+    : await resolveCallEndpoint(options);
+  const result = runtimeMcp
+    ? await mcpRpc(
+        endpoint,
+        "tools/call",
+        { name: tool, arguments: args },
+        options.context
+      )
+    : await restToolCall<unknown>(endpoint, tool, args, options.context);
   printJson(result, raw);
   // Same contract as `memory run`: the printed JSON stays parseable, but a
   // reported failure must fail the shell or CI gates pass silently.

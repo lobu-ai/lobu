@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildArgs, callCommand, parseArgEntry } from "../commands/call";
+import {
+  assertCallTitle,
+  buildArgs,
+  callCommand,
+  parseArgEntry,
+} from "../commands/call";
 import { ValidationError } from "../commands/memory/_lib/errors";
 import * as memoryAuth from "../commands/memory/_lib/memory-auth";
 import * as apiClient from "../internal/api-client";
@@ -314,7 +319,9 @@ describe("callCommand", () => {
     const captured = captureStdout();
     let code: number | undefined;
     try {
-      await callCommand("query_sql", { arg: ["query=SELECT 1"] });
+      await callCommand("query_sql", {
+        arg: ["title=Soft error probe", "sql=SELECT 1"],
+      });
       code = process.exitCode;
     } finally {
       captured.restore();
@@ -347,5 +354,195 @@ describe("callCommand", () => {
       process.exitCode = priorExitCode;
     }
     expect(code).toBe(0);
+  });
+});
+
+describe("titled SDK/SQL calls", () => {
+  test.each([
+    "run_sdk",
+    "query_sdk",
+    "query_sql",
+  ])("%s without a title is refused with the exact fix", (tool) => {
+    for (const args of [{}, { title: "" }, { title: "   " }, { title: 7 }]) {
+      expect(() => assertCallTitle(tool, args)).toThrow(ValidationError);
+    }
+    expect(() => assertCallTitle(tool, {})).toThrow(
+      `lobu call ${tool} --arg title='Recent support tickets'`
+    );
+    expect(() =>
+      assertCallTitle(tool, { title: "Recent support tickets" })
+    ).not.toThrow();
+  });
+
+  test("other tools need no title", () => {
+    expect(() => assertCallTitle("manage_feeds", {})).not.toThrow();
+  });
+
+  test("an untitled run_sdk call never reaches the network", async () => {
+    spyOn(memoryAuth, "resolveOrg").mockResolvedValue("acme");
+    const fetchMock = mock(async () => new Response("{}", { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await expect(
+      callCommand("run_sdk", { arg: ["script=export default async () => 1"] })
+    ).rejects.toThrow(/requires a non-empty `title` arg/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    "run_sdk",
+    "query_sdk",
+    "query_sql",
+  ])("%s reports a missing title before resolving a workspace", async (tool) => {
+    const resolveOrg = spyOn(memoryAuth, "resolveOrg").mockResolvedValue(
+      undefined
+    );
+    await expect(callCommand(tool, { arg: ["sql=SELECT 1"] })).rejects.toThrow(
+      /requires a non-empty `title` arg/
+    );
+    expect(resolveOrg).not.toHaveBeenCalled();
+  });
+
+  test("a title from --input-file satisfies the check", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lobu-call-"));
+    const path = join(dir, "args.json");
+    writeFileSync(
+      path,
+      JSON.stringify({ title: "From file", sql: "SELECT 1" })
+    );
+    try {
+      const args = await buildArgs({ inputFile: path });
+      expect(() => assertCallTitle("query_sql", args)).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runtime MCP credential (LOBU_API_TOKEN + LOBU_MEMORY_URL)", () => {
+  const RUNTIME_URL = "https://runtime.example.test/mcp/team-org";
+  const saved = {
+    token: process.env.LOBU_API_TOKEN,
+    url: process.env.LOBU_MEMORY_URL,
+    org: process.env.LOBU_MEMORY_ORG,
+  };
+
+  function restoreEnv(key: string, value: string | undefined) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+
+  afterEach(() => {
+    restoreEnv("LOBU_API_TOKEN", saved.token);
+    restoreEnv("LOBU_MEMORY_URL", saved.url);
+    restoreEnv("LOBU_MEMORY_ORG", saved.org);
+  });
+
+  function stubRuntimeMcp(toolResult: unknown) {
+    process.env.LOBU_API_TOKEN = "runtime-worker-token";
+    process.env.LOBU_MEMORY_URL = RUNTIME_URL;
+    delete process.env.LOBU_MEMORY_ORG;
+    spyOn(memoryAuth, "getUsableToken").mockResolvedValue({
+      token: "runtime-worker-token",
+      contextName: "default",
+      session: { mcpUrl: RUNTIME_URL, tokenType: "Bearer" },
+    });
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchMock = mock(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push({ url, body });
+      expect((init?.headers as Record<string, string>).Authorization).toBe(
+        "Bearer runtime-worker-token"
+      );
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({ result: { protocolVersion: "2025-03-26" } }),
+          { status: 200, headers: { "mcp-session-id": "s-1" } }
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response("", { status: 202 });
+      }
+      return new Response(JSON.stringify({ result: toolResult }), {
+        status: 200,
+      });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    return requests;
+  }
+
+  test("dispatches the tool over MCP tools/call to LOBU_MEMORY_URL, never REST", async () => {
+    const requests = stubRuntimeMcp({
+      content: [{ type: "text", text: "ok" }],
+    });
+    const captured = captureStdout();
+    try {
+      await callCommand("run_sdk", {
+        arg: [
+          "title=Read window input",
+          "script=export default async (_ctx, client) => 1",
+        ],
+      });
+    } finally {
+      captured.restore();
+    }
+    expect(requests.every((r) => r.url === RUNTIME_URL)).toBe(true);
+    expect(requests.map((r) => r.body.method)).toEqual([
+      "initialize",
+      "notifications/initialized",
+      "tools/call",
+    ]);
+    expect(requests[2]?.body.params).toEqual({
+      name: "run_sdk",
+      arguments: {
+        title: "Read window input",
+        script: "export default async (_ctx, client) => 1",
+      },
+    });
+    expect(JSON.parse(captured.chunks.join(""))).toEqual({
+      content: [{ type: "text", text: "ok" }],
+    });
+  });
+
+  test("an MCP isError result prints and exits non-zero", async () => {
+    stubRuntimeMcp({
+      content: [{ type: "text", text: "boom" }],
+      isError: true,
+    });
+    const priorExitCode = process.exitCode ?? 0;
+    process.exitCode = 0;
+    const captured = captureStdout();
+    let code: number | undefined;
+    try {
+      await callCommand("run_sdk", {
+        arg: ["title=Failing script", "script=export default async () => 1"],
+      });
+      code = process.exitCode;
+    } finally {
+      captured.restore();
+      process.exitCode = priorExitCode;
+    }
+    expect(code).toBe(1);
+  });
+
+  test("the title check also guards the MCP transport", async () => {
+    const requests = stubRuntimeMcp({});
+    await expect(
+      callCommand("query_sdk", { arg: ["script=export default async () => 1"] })
+    ).rejects.toThrow(ValidationError);
+    expect(requests).toHaveLength(0);
+  });
+
+  test("--list reads tools/list over MCP", async () => {
+    const requests = stubRuntimeMcp({
+      tools: [{ name: "run_sdk", description: "Run SDK" }],
+    });
+    const captured = captureStdout();
+    try {
+      await callCommand(undefined, { list: true });
+    } finally {
+      captured.restore();
+    }
+    expect(requests.at(-1)?.body.method).toBe("tools/list");
+    expect(captured.chunks.join("")).toContain("run_sdk");
   });
 });

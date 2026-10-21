@@ -185,8 +185,8 @@ The same governed data and operations are available without an agent:
 ```bash
 npx @lobu/cli@latest memory run                     # list the memory tools
 npx @lobu/cli@latest memory run search_memory '{"query":"onboarding"}'
-npx @lobu/cli@latest memory exec \
-  'export default async (_ctx, client) => client.entities.list({ limit: 5 })'
+npx @lobu/cli@latest call run_sdk --arg title='List recent entities' \
+  --arg script='export default async (_ctx, client) => client.entities.list({ limit: 5 })'
 ```
 
 Or from Node and TypeScript:
@@ -205,7 +205,7 @@ const hits = await searchMemory({
 });
 ```
 
-Mint a token with `lobu token create`. The MCP tools and typed SDK operations share the server-side tool registry and access rules; `lobu memory run` and `lobu memory exec` dispatch through the MCP endpoint.
+Mint a token with `lobu token create`. The MCP tools and typed SDK operations share the server-side tool registry and access rules; `lobu memory run` dispatches through the MCP endpoint, and `lobu call` through the REST tool route by default (MCP when `LOBU_API_TOKEN` and `LOBU_MEMORY_URL` are set). `lobu call run_sdk`, `query_sdk`, and `query_sql` require a `title` arg, which names the call in the activity feed.
 
 ## Core concepts
 
@@ -227,7 +227,7 @@ Specialists use role files for identity and instructions: `IDENTITY.md`, `SOUL.m
 
 External agents do not ask users to write delegation code. They pass scripts like these to Lobu's `query_sdk` and `run_sdk` MCP tools:
 
-Scripts must default-export an async function. Lobu passes the execution context as the first argument and the ClientSDK as the second; keep `await` and `return` inside that function. A bare top-level `await` or `return` fails compilation. The same function format works with `lobu memory exec`.
+Scripts must default-export an async function. Lobu passes the execution context as the first argument and the ClientSDK as the second; keep `await` and `return` inside that function. A bare top-level `await` or `return` fails compilation. The same function format works with `lobu call run_sdk --arg title='…' --arg script='…'`.
 
 ```ts
 // Discover specialists through query_sdk.

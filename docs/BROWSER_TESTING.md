@@ -61,7 +61,7 @@ Pick the `chrome` connector with `status: active` on the machine whose browser y
 Multi-step verifications are one `run_sdk` script (the tab id threads through every call):
 
 ```bash
-lobu call run_sdk --arg script='
+lobu call run_sdk --arg title='Browser verification' --arg script='
 export default async (ctx, client) => {
   const CHROME = <chrome-connection-id>;
   const COOKIE = "<SIGNED>";

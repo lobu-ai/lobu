@@ -88,6 +88,7 @@ describe("classifyRunOutcome", () => {
 	const PROD_AGENT_MESSAGES = [
 		"Agent reply finished without calling run_sdk (client.automations.completeWindow) after 2 attempt(s). No active tool approval was found, so check that the assigned agent has the lobu-memory MCP attached.",
 		"Device CLI exited without calling completeWindow after 2 attempt(s). Use the lobu skill + `lobu memory exec` (knowledge.read → completeWindow) or MCP query_sdk/run_sdk.",
+		"Device CLI exited without calling completeWindow after 2 attempt(s). Follow the completion contract in the Automation prompt (knowledge.read → completeWindow). Check lobu CLI login/org, gateway reachability, and that the device token has mcp:write if using MCP.",
 		"claude exited with non-zero status 1",
 	];
 

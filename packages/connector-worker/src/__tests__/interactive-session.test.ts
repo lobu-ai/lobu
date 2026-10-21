@@ -545,17 +545,16 @@ describe('handoffToInteractiveSession', () => {
     const deliveredPrompt = messageFrame.message.content as string;
     const helperDir = path.dirname(delivery.helperPath);
     const helperSocket = path.join(helperDir, 'helper.sock');
-    expect(deliveredPrompt).toContain(`'${delivery.helperPath}' exec`);
+    expect(deliveredPrompt).toContain(`'${delivery.helperPath}' call run_sdk --arg title=`);
     expect(deliveredPrompt).toContain(`'${delivery.helperPath}' complete`);
     expect(deliveredPrompt).toContain('final user-visible result on stdin');
     expect(deliveredPrompt).toContain('Do not reuse a helper from an earlier Automation message.');
     expect(deliveredPrompt).toContain('For a window Automation');
     expect(deliveredPrompt).toContain('For an event turn');
-    expect(deliveredPrompt).toContain('do not use bare `lobu memory exec` or ambient Lobu MCP');
+    expect(deliveredPrompt).toContain('do not use bare `lobu call` or ambient Lobu MCP');
+    expect(deliveredPrompt).not.toContain('  lobu call ');
     expect(deliveredPrompt).toContain('Use the run-specific helper above for all Lobu access.');
     expect(deliveredPrompt).not.toContain('MCP is also fine if already wired');
-    expect(deliveredPrompt).not.toContain('query_sdk');
-    expect(deliveredPrompt).not.toContain('run_sdk');
     expect(deliveredPrompt).not.toContain('Finalize via lobu CLI or MCP');
     expect(deliveredPrompt).not.toContain('same login as the Owletto menubar');
     expect(deliveredPrompt).not.toContain('~/.config/lobu');
@@ -566,7 +565,15 @@ describe('handoffToInteractiveSession', () => {
     expect(lstatSync(helperSocket).mode & 0o077).toBe(0);
 
     const moduleSource = 'export default async () => ({ ok: true })';
-    await execFileAsync(delivery.helperPath, ['exec', moduleSource], {
+    const callArgs = [
+      'call',
+      'run_sdk',
+      '--arg',
+      'title=Read Automation window input',
+      '--arg',
+      `script=${moduleSource}`,
+    ];
+    await execFileAsync(delivery.helperPath, callArgs, {
       env: {
         ...process.env,
         PATH: '',
@@ -599,7 +606,7 @@ describe('handoffToInteractiveSession', () => {
       openCodeToken: null,
       codexThread: null,
       codexSession: null,
-      args: ['memory', 'exec', moduleSource],
+      args: callArgs,
     });
 
     await runHelper(
@@ -613,6 +620,52 @@ describe('handoffToInteractiveSession', () => {
       output: 'final result for ChatGPT; bearer=[REDACTED]',
     });
     expect(existsSync(helperDir)).toBe(false);
+  });
+
+  test('refuses every helper call shape except `call <sdk tool> --arg <entry>...`', async () => {
+    const fixture = await parentFixture();
+    const marker = path.join(fixture.dir, 'cli-launched');
+    const delivery = await handoffToInteractiveSession({
+      session: fixture.session,
+      runId: 81,
+      prompt: 'Do work',
+      token: 'run-secret',
+      memoryUrl: 'https://gateway.test/mcp/test',
+      timeoutMs: 10_000,
+      disconnectCheckIntervalMs: 10_000,
+      cliLaunch: {
+        command: process.execPath,
+        args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.argv.slice(1).join(' '))`],
+      },
+    });
+    expect(delivery.kind).toBe('handed-off');
+    if (delivery.kind !== 'handed-off') throw new Error(delivery.reason);
+
+    const title = ['--arg', 'title=Probe'];
+    const rejected: Array<[string, string[]]> = [
+      ['--url', ['call', 'run_sdk', ...title, '--url', 'https://attacker.test/mcp']],
+      ['--org', ['call', 'run_sdk', ...title, '--org', 'other-org']],
+      ['--input-file', ['call', 'run_sdk', '--input-file', '/tmp/args.json']],
+      ['--context', ['call', 'run_sdk', ...title, '--context', 'cloud']],
+      ['--arg=<entry>', ['call', 'run_sdk', '--arg=title=Probe']],
+      ['a flag smuggled as an --arg entry', ['call', 'run_sdk', '--arg', '--url=https://attacker.test']],
+      ['an --arg entry without a key', ['call', 'run_sdk', '--arg', '=x']],
+      ['a stray positional', ['call', 'run_sdk', ...title, 'extra']],
+      ['a non-SDK tool', ['call', 'manage_feeds', '--arg', 'action=list']],
+      ['no --arg entries', ['call', 'run_sdk']],
+      ['the retired exec form', ['exec', 'export default async () => 1']],
+    ];
+    for (const [label, args] of rejected) {
+      await expect(runHelper(delivery.helperPath, args, ''), label).rejects.toThrow(
+        /usage: <helper> call run_sdk\|query_sdk\|query_sql/
+      );
+    }
+    expect(existsSync(marker)).toBe(false);
+
+    await runHelper(delivery.helperPath, ['call', 'query_sql', ...title, '--arg', 'sql=SELECT 1'], '');
+    expect(readFileSync(marker, 'utf8')).toBe('call query_sql --arg title=Probe --arg sql=SELECT 1');
+    await runHelper(delivery.helperPath, ['complete'], 'done');
+    expect(await delivery.completion).toMatchObject({ kind: 'completed' });
   });
 
   test('caps completion stdin, preserves truncation evidence, and works without PATH', async () => {

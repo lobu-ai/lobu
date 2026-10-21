@@ -52,7 +52,7 @@ If the user gave permission to research and has a public domain, research the co
 
 Check Node is 22-24 or 26+ (only Node 25 is unsupported), then run `lobu context list` and identify the named Lobu Cloud context; do not assume the active context still points to cloud after a local run. If a managed or cloud connector was chosen and there is no session, ask for the login email at that point, explain that Lobu will email an approval link, and run `lobu login --email <confirmed-address> --context <cloud-name>`. The person approving must sign in with that same email; knowing an address never grants access. After a successful login, an empty organization membership list is a tenancy/discovery result, not an authentication failure: call `client.organizations.list()` and explain the result. Never revoke or repeat login with `--force` unless the user separately approves that re-authentication.
 
-Use ClientSDK through Lobu MCP or `lobu memory exec` with the explicit cloud context. Call `client.organizations.list()` to find public organizations offering managed connections. Call `client.catalog.listInstalled({ kinds: ["connectors"] })`; if the connector is not installed, call `client.catalog.listCatalog({ kinds: ["connectors"] })`. Inspect the selected entry's `detail.auth_schema`, `detail.options_schema`, `detail.feeds_schema`, and `detail.automation_events` instead of guessing field names. On account-scoped `/mcp`, select an authorized home workspace first with `const home = await client.org(homeSlug)` and call `home.connections.connectManaged`; put the public provider org in `managed_by_org`, rather than selecting that provider org with `client.org`. This call runs against cloud, not the embedded runtime. If a matching live managed offer exists, explain it and call `client.connections.connectManaged` only after consent. Complete the returned user authorization, then run `lobu context use <cloud-name>` immediately before executing its `local_bootstrap_command` from the parent directory where the new project should be created; use `--here` only after entering an empty directory, and do not create a blank Lobu scaffold first. Ask for bring-your-own OAuth credentials only if no managed offer exists or the user prefers their own app.
+Use ClientSDK through Lobu MCP with the explicit cloud context. From the CLI, account discovery works before selecting an active org with `lobu memory run query_sdk '{"title":"Find managed connection providers","script":"export default async (_ctx, client) => client.organizations.list()"}'`; `lobu call` over REST requires an active org. Call `client.organizations.list()` to find public organizations offering managed connections. Call `client.catalog.listInstalled({ kinds: ["connectors"] })`; if the connector is not installed, call `client.catalog.listCatalog({ kinds: ["connectors"] })`. Inspect the selected entry's `detail.auth_schema`, `detail.options_schema`, `detail.feeds_schema`, and `detail.automation_events` instead of guessing field names. On account-scoped `/mcp`, select an authorized home workspace first with `const home = await client.org(homeSlug)` and call `home.connections.connectManaged`; put the public provider org in `managed_by_org`, rather than selecting that provider org with `client.org`. This call runs against cloud, not the embedded runtime. If a matching live managed offer exists, explain it and call `client.connections.connectManaged` only after consent. Complete the returned user authorization, then run `lobu context use <cloud-name>` immediately before executing its `local_bootstrap_command` from the parent directory where the new project should be created; use `--here` only after entering an empty directory, and do not create a blank Lobu scaffold first. Ask for bring-your-own OAuth credentials only if no managed offer exists or the user prefers their own app.
 
 **If no connector in the catalog matches the data source, do not report "no integration exists"** — author a custom connector: write `connectors/<name>.connector.ts` in the project, register it with `connectorFromFile("./connectors/<name>.connector.ts")`, and model it on the [npm downloads example](https://github.com/lobu-ai/lobu/blob/main/examples/lobu-crm/npm-downloads.connector.ts). See [Connector authoring](https://github.com/lobu-ai/lobu/blob/main/docs/connector-authoring.md) for the full contract; the end-to-end entity/event/Automation model is in [Lobu concepts](https://github.com/lobu-ai/lobu/blob/main/docs/CONCEPTS.md).
 
@@ -210,7 +210,7 @@ capture are no longer supported.
 
 To test a configured feed without writing ingested data, discover the current
 feed methods with `search_sdk`, then use `client.feeds.trigger({ feed_id, dry_run: true })`
-through `run_sdk` or `lobu memory exec`. Inspect `client.feeds.get({ feed_id })`
+through `run_sdk` or `lobu call run_sdk` (with a `title` arg). Inspect `client.feeds.get({ feed_id })`
 for the completed run's preview. The dry run uses normal device routing and
 authorization checks and may access the upstream provider, so obtain consent first.
 
@@ -221,7 +221,7 @@ The normal MCP surface is intentionally small. Flat administrative tools are not
 - `search_memory` and `save_memory` for direct knowledge recall and persistence.
 - `search_sdk` to discover current ClientSDK methods, signatures, connector feed keys, operations, access requirements, and examples. Pass `mode: "read"` when you only need methods safe for `query_sdk`.
 - `query_sdk` for read-only TypeScript and `query_sql` for governed, paginated SQL reads.
-- `run_sdk` for mutations and external operations. Use `lobu memory exec` from the CLI for the same ClientSDK scripting workflow.
+- `run_sdk` for mutations and external operations. Use `lobu call run_sdk --arg title='…' --arg script='…'` from the CLI for the same ClientSDK scripting workflow; `run_sdk`, `query_sdk`, and `query_sql` calls need a short `title` naming them in the activity feed.
 
 Search before create to avoid duplicates. Prefer a read or dry run before mutations, never fabricate returned URLs or identifiers, and never delete from `events`; supersede or tombstone instead.
 
@@ -314,7 +314,7 @@ Source-backed feeds query the provider only through an explicit `client.feeds.re
 - Use `lobu memory seed` for small declarative YAML datasets under `./data`; it processes records sequentially and is not a bulk-backfill path.
 - Use `client.knowledge.save` for schema-less semantic history such as messages, notes, observations, and content. Pass `supersedes_event_id` when replacing an existing fact.
 - Use `client.entities.create` / `client.entities.update` only for strict structured records that match declared entity schemas.
-- For large backfills, send bounded chunks through `run_sdk` / `lobu memory exec` and use `Promise.allSettled` so conflicts and partial failures remain visible.
+- For large backfills, send bounded chunks through `run_sdk` / `lobu call run_sdk` and use `Promise.allSettled` so conflicts and partial failures remain visible.
 
 ```ts
 export default async (_ctx, client) => {

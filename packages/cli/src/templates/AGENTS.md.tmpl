@@ -248,7 +248,9 @@ choices cover configured install flows; Telegram uses the link-code flow above.
 `cloud_status: "unavailable"` means discovery failed; retry before concluding
 that no managed option exists. Offers are not connected accounts. In an
 authenticated cloud context, use ClientSDK through Lobu MCP or
-`lobu memory exec`. Call `client.organizations.list()` to find organizations
+`lobu memory run query_sdk '{"title":"Find managed connection providers","script":"export default async (_ctx, client) => client.organizations.list()"}'`.
+This account discovery works before an active org is selected; `lobu call` over REST requires one.
+Call `client.organizations.list()` to find organizations
 that offer managed connections. On account-scoped `/mcp`, first select an
 authorized home workspace with `const home = await client.org(homeSlug)` and use
 that client for `home.connections.connectManaged`. The public provider

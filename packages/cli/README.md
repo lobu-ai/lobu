@@ -40,9 +40,9 @@ and `extensionDomScrape`. The standalone browser SDK, external CDP endpoints,
 `lobu memory browser-auth`, and local `lobu connector run` have been removed.
 For connector tests, discover the feed with `search_sdk`, then use the gateway's
 existing dry-run path with its returned id:
-`lobu memory exec 'export default async (_ctx, client) => client.feeds.trigger({ feed_id: 123, dry_run: true });'`.
+`lobu call run_sdk --arg title='Dry-run feed 123' --arg script='export default async (_ctx, client) => client.feeds.trigger({ feed_id: 123, dry_run: true });'`.
 The run uses the feed's configured runtime, including its paired extension;
-inspect the preview with `client.feeds.get({ feed_id: 123 })` through `lobu memory exec`.
+inspect the preview with `client.feeds.get({ feed_id: 123 })` through `lobu call query_sdk` (with a `title`).
 A dry run may access the upstream provider, so obtain consent first.
 
 Lobu boots as a single Node process with embedded Postgres (including pgvector)
@@ -82,7 +82,7 @@ linked records keep their own IDs and metadata.
 
 ### Cloud
 
-- `lobu login` — OAuth device-code login. Flags: `--token <pat>` (CI/CD), `-f` / `--force` (re-authenticate, revoking the existing session), `-q` / `--quiet` (suppress the spinner; bail immediately when non-interactive), `--email <address>` (headless login on a user's behalf: the server emails them an approval link), `--wait-for-approval` (keep polling for browser approval when supervised without a TTY). `lobu logout` clears stored credentials.
+- `lobu login` — OAuth device-code login. Flags: `--token <pat>` (CI/CD), `-f` / `--force` (re-authenticate, revoking the existing session), `-q` / `--quiet` (suppress the spinner; bail immediately when non-interactive), `--email <address>` (headless login on a user's behalf: the server emails them an approval link), `--wait-for-approval` (keep polling for browser approval when supervised without a TTY), `--client-name <name>` (register the login as its own OAuth client, default `Lobu CLI`; the activity feed attributes the context's calls to that name, so give each app or script its own context, e.g. `lobu login --context market-supervisor --client-name "Market pipeline supervisor"`). `lobu logout` clears stored credentials.
 - `lobu whoami` — current user and linked agent. `--json` emits the machine-readable session contract the Owletto Mac app reads.
 - `lobu status` — agent status from the active org.
 - `lobu context {list,current,add,use,rm}` — manage named API contexts. `context add <name>` requires `--url` and accepts `--cwd` / `--lifecycle managed|external`; `context rm` is idempotent.
@@ -94,7 +94,7 @@ linked records keep their own IDs and metadata.
 - `lobu providers {list,catalog,create,update,set-key,set-capability,set-default,delete}` — manage org model providers. Secret-bearing flags (`--key`) accept `$ENV_VAR` references.
 - `lobu sandbox {list,create,set-credential,delete}` — manage sandboxes (runtime providers). (`lobu environment` is the retired name and exits with a pointer to `lobu sandbox`.)
 - `lobu clients {list,revoke}` — list connected clients (MCP apps, messaging) and revoke a client's tokens and sessions.
-- `lobu call [tool]` — invoke an admin REST tool by name (`POST /api/<org>/<tool>`). Bare or `--list` discovers tools (`--all` includes internal/admin-only ones); pass args with repeated `--arg key=value` / `--arg key:=<json>` or `--input-file`; `--raw` compacts the JSON.
+- `lobu call [tool]` — invoke an admin REST tool by name (`POST /api/<org>/<tool>`). Bare or `--list` discovers tools (`--all` includes internal/admin-only ones); pass args with repeated `--arg key=value` / `--arg key:=<json>` or `--input-file`; `--raw` compacts the JSON. `run_sdk`, `query_sdk`, and `query_sql` are refused without a non-empty `title` arg (the call's heading in the activity feed), e.g. `lobu call run_sdk --arg title='Recent support tickets' --arg script='export default async (_ctx, client) => …'`. With `LOBU_API_TOKEN` + `LOBU_MEMORY_URL` set (a device Automation run's credential, valid only on MCP routes), the call goes over MCP `tools/call` to `LOBU_MEMORY_URL` instead of REST.
 - `lobu token` — print the stored session token (`--raw` for the token only).
 - `lobu token create` — mint an org-scoped personal access token for servers/CI. Flags: `--name` (default `lobu-cli-YYYY-MM-DD`), `--description`, `--scope` (default `mcp:read mcp:write`), `--expires-in-days`, `--raw`, `--json`.
 - `lobu token revoke <jti>` — revoke a worker/settings token by its `jti` on a **self-hosted** gateway. It writes a row to that gateway's own Postgres (`revoked_tokens`), so `DATABASE_URL` must point at the same database the gateway uses; the command refuses to run without it and has no effect on Lobu Cloud. `--expires-at <iso>` records the token's original expiry so the revocation row is garbage-collected once the token would be dead anyway (default: 24h from now). Tokens minted by `lobu token create` against Lobu Cloud are not affected by this command.
@@ -112,7 +112,6 @@ PATs (`owl_pat_*`) authenticate CLI and CI calls, but they are narrower than an 
 ### Memory
 
 - `lobu memory run [tool] [params]` — invoke a memory MCP tool (bare lists the tools).
-- `lobu memory exec <script>` — run a TypeScript ClientSDK script via the memory MCP.
 - `lobu memory health` — validate Lobu login + MCP connectivity.
 - `lobu memory seed [path]` — provision a memory workspace from `lobu.config.ts` + optional `./data` records; `--dry-run` logs what would be created.
 - `lobu memory org {current,set}` — active org for memory MCP.
