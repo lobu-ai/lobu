@@ -9,7 +9,6 @@ import { loadDesiredStateFromConfig } from "../../_lib/apply/desired-state.js";
 import { isPlatformOwnedRelationshipSlug } from "../../_lib/platform-owned-types.js";
 import { ApiError, ValidationError } from "./errors.js";
 import {
-  getSessionForOrg,
   getUsableToken,
   mcpUrlForOrg,
   orgFromMcpUrl,
@@ -450,22 +449,10 @@ async function resolveAuth(
   const org = await resolveOrg(orgFlag, undefined, context);
 
   if (org) {
-    const orgSession = await getSessionForOrg(org, context, urlFlag);
-    if (orgSession) {
-      const result = await getUsableToken(orgSession.key, context);
-      if (result) {
-        return { token: result.token, mcpUrl: orgSession.key, orgSlug: org };
-      }
-    }
-    const serverUrl = await resolveServerUrl(urlFlag, context);
-    if (serverUrl) {
-      const orgUrl = mcpUrlForOrg(serverUrl, org);
-      const result = await getUsableToken(orgUrl, context);
-      if (result) {
-        return { token: result.token, mcpUrl: orgUrl, orgSlug: org };
-      }
-    }
-    throw new ValidationError("Not logged in. Run: lobu login");
+    const mcpUrl = mcpUrlForOrg(await resolveServerUrl(urlFlag, context), org);
+    const result = await getUsableToken(mcpUrl, context);
+    if (!result) throw new ValidationError("Not logged in. Run: lobu login");
+    return { token: result.token, mcpUrl, orgSlug: org };
   }
 
   const serverUrl = await resolveServerUrl(urlFlag, context);

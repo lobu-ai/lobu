@@ -11,6 +11,7 @@ import {
 } from "../commands/call";
 import { ValidationError } from "../commands/memory/_lib/errors";
 import * as memoryAuth from "../commands/memory/_lib/memory-auth";
+import { memoryRunCommand } from "../commands/memory/run";
 import * as apiClient from "../internal/api-client";
 
 const originalFetch = globalThis.fetch;
@@ -121,14 +122,9 @@ describe("buildArgs", () => {
 describe("callCommand", () => {
   function stubAuth() {
     spyOn(memoryAuth, "resolveOrg").mockResolvedValue("acme");
-    spyOn(memoryAuth, "getSessionForOrg").mockResolvedValue({
-      session: {
-        mcpUrl: "https://example.test/mcp/acme",
-        org: "acme",
-        tokenType: "Bearer",
-      },
-      key: "https://example.test/mcp/acme",
-    });
+    spyOn(memoryAuth, "resolveServerUrl").mockResolvedValue(
+      "https://example.test/mcp"
+    );
     spyOn(apiClient, "resolveApiClient").mockResolvedValue({
       client: new apiClient.ApiClient("https://example.test", "test-token", ((
         input,
@@ -505,6 +501,50 @@ describe("runtime MCP credential (LOBU_API_TOKEN + LOBU_MEMORY_URL)", () => {
     expect(JSON.parse(captured.chunks.join(""))).toEqual({
       content: [{ type: "text", text: "ok" }],
     });
+  });
+
+  test.each([
+    {
+      name: "preserves a mounted endpoint without an org override",
+      options: {},
+      envOrg: undefined,
+      expected: "https://runtime.example.test/lobu/mcp/lobu-memory",
+    },
+    {
+      name: "applies an environment org override",
+      options: {},
+      envOrg: "env-org",
+      expected: "https://runtime.example.test/mcp/env-org",
+    },
+    {
+      name: "prefers an explicit org over the environment",
+      options: { org: "flag-org" },
+      envOrg: "env-org",
+      expected: "https://runtime.example.test/mcp/flag-org",
+    },
+    {
+      name: "prefers an explicit URL over the runtime URL",
+      options: { url: "https://override.example.test/lobu/mcp/named" },
+      envOrg: undefined,
+      expected: "https://override.example.test/lobu/mcp/named",
+    },
+  ])("call and memory run: $name", async ({ options, envOrg, expected }) => {
+    const requests = stubRuntimeMcp({ content: [] });
+    process.env.LOBU_MEMORY_URL =
+      "https://runtime.example.test/lobu/mcp/lobu-memory";
+    restoreEnv("LOBU_MEMORY_ORG", envOrg);
+    const captured = captureStdout();
+    try {
+      await callCommand("search_memory", { ...options, arg: ["query=test"] });
+      await memoryRunCommand("search_memory", '{"query":"test"}', options);
+    } finally {
+      captured.restore();
+    }
+    expect(requests).toHaveLength(6);
+    expect(requests.map((request) => request.url)).toEqual(
+      Array(6).fill(expected)
+    );
+    expect(requests[2]?.body.params).toEqual(requests[5]?.body.params);
   });
 
   test("an MCP isError result prints and exits non-zero", async () => {
