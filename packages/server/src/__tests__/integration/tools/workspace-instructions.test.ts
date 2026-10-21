@@ -352,6 +352,15 @@ describe('buildWorkspaceInstructions render fixes', () => {
     expect(out).toContain('refresh discovery instead of inventing a key');
   });
 
+  it('asks direct MCP clients to title every run_sdk, query_sdk, and query_sql call', async () => {
+    const directOrg = await createTestOrganization({ name: 'Call Title Org' });
+    const out = await buildWorkspaceInstructions(directOrg.id, { audience: 'direct-mcp' });
+
+    expect(out).toContain(
+      '- Pass `title`, a short human-friendly heading for the result (e.g. "Companies missing a domain"), on every `run_sdk`, `query_sdk`, and `query_sql` call.'
+    );
+  });
+
   it('documents the search_memory workspace narrowing argument to the direct MCP audience', async () => {
     // The managed-agent text explains the singular `workspace` argument in a
     // sentence addressed to "a direct bare OAuth connection" — precisely the
