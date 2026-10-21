@@ -12,6 +12,7 @@ import {
 	compileView,
 	renderViewsLoaderShell,
 	renderViewShell,
+	viewRuntimeScript,
 } from "../../../views/views";
 
 const EVIL_Q = "<!--<script>";
@@ -54,7 +55,7 @@ describe("loader handoff in a real browser", () => {
 			actions: {},
 			last_writer: "probe",
 			updated_at: new Date().toISOString(),
-		}, "https://app.example/acme/");
+		}, "https://app.example/acme/", await viewRuntimeScript());
 		loaderHtml = renderViewsLoaderShell();
 	}, 120000);
 

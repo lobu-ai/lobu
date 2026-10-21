@@ -267,6 +267,12 @@
       "import": "./dist/contracts/tools/view-definition.js",
       "require": "./dist/contracts/tools/view-definition.js"
     },
+    "./contracts/tools/view-runtime": {
+      "types": "./dist/contracts/tools/view-runtime.d.ts",
+      "bun": "./src/contracts/tools/view-runtime.ts",
+      "import": "./dist/contracts/tools/view-runtime.js",
+      "require": "./dist/contracts/tools/view-runtime.js"
+    },
     "./contracts/tools/view-path": {
       "types": "./dist/contracts/tools/view-path.d.ts",
       "bun": "./src/contracts/tools/view-path.ts",
