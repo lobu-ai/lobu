@@ -2,13 +2,14 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import type { SessionUpdate, ToolCallContent } from '@agentclientprotocol/sdk';
 import { parseSessionEntries } from '@lobu/core';
 import type { PollResponse } from '@lobu/core/contracts/worker/protocol';
 import { executeAutomationRun } from '../daemon/automation.js';
 import { type ExecutorClient, WorkerClient } from '../daemon/client.js';
 import { AcpTranscript, runAcpTurn } from '../daemon/automation-acp.js';
 
-function fakeAcpAgent(dir: string): { script: string; trace: string } {
+function fakeAcpAgent(dir: string, toolUpdates?: SessionUpdate[]): { script: string; trace: string } {
   const script = path.join(dir, 'fake-acp-agent.mjs');
   const trace = path.join(dir, 'trace.jsonl');
   writeFileSync(
@@ -67,8 +68,12 @@ for await (const line of input) {
       continue;
     }
     update(sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'private chain of thought' }, messageId: 'thought-1' });
-    update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'tool-1', title: 'Read run context', kind: 'read', status: 'in_progress', rawInput: { run_id: 99 } });
+    // Like the Claude ACP adapter: the call opens before its input has
+    // streamed, and the arguments arrive on a later update.
+    update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'tool-1', title: 'Read run context', kind: 'read', status: 'pending', rawInput: {} });
+    update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'tool-1', status: 'in_progress', rawInput: { run_id: 99, title: 'Run context' } });
     update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'tool-1', status: 'completed', rawOutput: { ok: true } });
+    for (const value of ${JSON.stringify(toolUpdates ?? [])}) update(sessionId, value);
     update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ACP ' }, messageId: 'answer-1' });
     update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'finished' }, messageId: 'answer-1' });
     response(message.id, { stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } });
@@ -387,7 +392,57 @@ describe('Automation ACP turn', () => {
       expect(parsed.sessionId).toBe('acp-new-session');
       expect(JSON.stringify(parsed.entries)).not.toContain('private chain of thought');
       expect(JSON.stringify(parsed.entries)).toContain('Read run context');
+      const toolUse = result.transcriptJsonl
+        .split('\n')
+        .filter(Boolean)
+        .flatMap((line) => JSON.parse(line).message?.content ?? [])
+        .find((block: { type?: string }) => block.type === 'tool_use');
+      expect(toolUse).toMatchObject({ name: 'Read run context', input: { run_id: 99, title: 'Run context' } });
       expect(JSON.stringify(parsed.entries)).toContain('ACP finished');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test('folds late tool identity and content into the transcript through terminal updates', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'lobu-acp-tool-updates-'));
+    const content: ToolCallContent[] = [{ type: 'content', content: { type: 'text', text: 'Tool output' } }];
+    const { script, trace } = fakeAcpAgent(dir, [
+      { sessionUpdate: 'tool_call', toolCallId: 'late-name', title: 'Preparing', status: 'pending' },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'late-name', name: 'query_sdk', title: 'Read context', rawInput: { title: 'Context' }, content },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'late-name', name: null, title: null, content: null, status: 'failed' },
+      { sessionUpdate: 'tool_call', toolCallId: 'late-title', title: 'Preparing', status: 'pending' },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'late-title', title: 'Read context', rawInput: { title: 'Context' }, rawOutput: { ok: true } },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'late-title', status: 'completed' },
+    ]);
+    try {
+      const result = await runAcpTurn({
+        agentKind: 'codex',
+        adapter: { command: process.execPath, args: [script], env: { FAKE_ACP_TRACE: trace } },
+        cwd: dir,
+        prompt: 'Use tools',
+        mcp: { url: 'https://lobu.test/mcp/team', bearer: 'run-token' },
+        timeoutMs: 5_000,
+        onSessionReady: async () => {},
+      });
+      expect(result.exitReason).toBe('ok');
+      const blocks = result.transcriptJsonl
+        .split('\n')
+        .filter(Boolean)
+        .flatMap((line) => JSON.parse(line).message?.content ?? []);
+      expect(blocks).toContainEqual({
+        type: 'tool_use', id: 'late-name', name: 'query_sdk', input: { title: 'Context' },
+      });
+      const failedResult = blocks.find((block) => block.tool_use_id === 'late-name');
+      expect(failedResult).toMatchObject({ type: 'tool_result', is_error: true });
+      expect(JSON.parse(failedResult.content[0].text)).toEqual(content);
+      expect(blocks).toContainEqual({
+        type: 'tool_use', id: 'late-title', name: 'Read context', input: { title: 'Context' },
+      });
+      expect(blocks).toContainEqual({
+        type: 'tool_result', tool_use_id: 'late-title', is_error: false,
+        content: [{ type: 'text', text: JSON.stringify({ ok: true }) }],
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

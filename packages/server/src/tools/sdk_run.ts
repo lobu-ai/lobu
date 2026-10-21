@@ -45,7 +45,7 @@ const SCRIPT_FIELDS = {
   title: Type.Optional(
     Type.String({
       description:
-        'Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.',
+        'Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI shows it above the execution status and on this call in the activity feed; without it the result card has no subject line and the feed reads only the tool name. Set it whenever a person will read the result.',
       maxLength: 200,
     }),
   ),

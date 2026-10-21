@@ -34,7 +34,7 @@ export const QuerySqlSchema = Type.Object({
   title: Type.Optional(
     Type.String({
       description:
-        'Optional human-friendly heading for this result (e.g. "Recent support tickets"). When set, the UI renders it in the query result summary.',
+        'Human-friendly heading for this result (e.g. "Recent support tickets"). The UI shows it on the result summary and on this call in the activity feed. Set it whenever a person will read the result.',
       maxLength: 200,
     })
   ),

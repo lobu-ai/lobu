@@ -522,7 +522,7 @@ export type QuerySdkData = {
      */
     timeout_ms?: number;
     /**
-     * Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
+     * Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI shows it above the execution status and on this call in the activity feed; without it the result card has no subject line and the feed reads only the tool name. Set it whenever a person will read the result.
      */
     title?: string;
   };
@@ -648,7 +648,7 @@ export type QuerySdkResponse = QuerySdkResponses[keyof QuerySdkResponses];
 export type QuerySqlData = {
   body: {
     /**
-     * Optional human-friendly heading for this result (e.g. "Recent support tickets"). When set, the UI renders it in the query result summary.
+     * Human-friendly heading for this result (e.g. "Recent support tickets"). The UI shows it on the result summary and on this call in the activity feed. Set it whenever a person will read the result.
      */
     title?: string;
     /**
@@ -748,6 +748,10 @@ export type QuerySqlResponses = {
      * Rows fetched for this page but omitted by the serialized response-size ceiling. When rows are present, continue from offset + rows.length rather than offset + limit. If no bounded row fits, query_sql returns a VALIDATION error and the projection must be narrowed.
      */
     omitted_rows?: number;
+    /**
+     * Columns where at least one returned cell was bounded: a string cut to its first 4,000 Unicode code points plus "… [truncated]", or a JSON value over 16 KiB replaced by {"_truncated": true, "bytes": n} (attachments: null plus attachments_truncated). Select smaller elements or fields, for example jsonb_array_elements(metadata->'items'), and paginate as needed; each returned cell is still subject to these limits.
+     */
+    truncated_columns?: Array<string>;
     execution_time_ms: number;
     error?: string;
     error_code?: string;
@@ -768,7 +772,7 @@ export type RunSdkData = {
      */
     timeout_ms?: number;
     /**
-     * Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI renders it above the execution status; without it the result card has no subject line. Set it whenever a person will read the result.
+     * Human-friendly heading for this result (e.g. "Companies missing a domain"). In run_sdk, it also labels browser tab groups opened by the script. The UI shows it above the execution status and on this call in the activity feed; without it the result card has no subject line and the feed reads only the tool name. Set it whenever a person will read the result.
      */
     title?: string;
     /**
