@@ -1,5 +1,7 @@
 -- migrate:up
--- lobu:no-quiesce adds a nullable column that old code never reads or writes
+-- lobu:no-quiesce old code never reads the column; the one gap is an old pod
+-- storing a CLI-built bundle over a row a new pod stamped during the same
+-- rollout, which a later serve would rebuild from the same source
 -- Fingerprint of the server view compiler (bootstrap, bundled @lobu/views
 -- runtime, pinned package versions, esbuild) that produced compiled_code.
 -- Set only when the server compiled the bundle itself; NULL for a bundle the

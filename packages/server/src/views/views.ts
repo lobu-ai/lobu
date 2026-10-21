@@ -96,7 +96,7 @@ export interface StoredView {
   source_files: SourceFiles | null;
   dependencies: SourceDependencies | null;
   source_complete: boolean;
-  /** The server compiler fingerprint that built `compiled_code`; null when the caller supplied the bundle. */
+  /** The server compiler fingerprint that built `compiled_code`; null for caller-supplied or legacy bundles. */
   compile_config_hash: string | null;
   attach: ViewAttachment[];
   params: Record<string, ViewParamDecl>;
@@ -262,9 +262,9 @@ export async function removeView(
 }
 
 /**
- * Public projection: metadata only, never source or bundle. The hash is the
- * one the view will be served with, so a client cache keyed on it misses for
- * a bundle the server is about to rebuild.
+ * Public projection: metadata only, never source or bundle. A stale build's
+ * hash invalidates the client cache before the shell is fetched; after a
+ * rebuild, the stored content hash identifies the resulting bytes.
  */
 export function projectView(view: StoredView): Omit<
   StoredView,
@@ -533,10 +533,9 @@ const VIEW_COMPILE_PIPELINE_VERSION = 1;
 let compileFingerprint: string | undefined;
 
 /**
- * Fingerprint of everything the server compiler bundles into a view besides
- * its source: the pipeline, the bootstrap, esbuild, the pinned package
- * versions, and the bytes of the `@lobu/views` runtime, whose version does not
- * move when its code does.
+ * Fingerprint of the server's pipeline, bootstrap, esbuild, direct package
+ * versions, and the bytes of the `@lobu/views` runtime, whose code can change
+ * without a version bump.
  */
 export function viewCompileFingerprint(): string {
   if (compileFingerprint) return compileFingerprint;
@@ -567,7 +566,7 @@ function isStaleServerBuild(view: StoredView): boolean {
   );
 }
 
-/** The hash a view is served under: a stale server build reports a new one before it is rebuilt. */
+/** Cache invalidation token for a stale build; otherwise the stored content hash. */
 export function servedContentHash(view: StoredView): string {
   if (!isStaleServerBuild(view)) return view.content_hash;
   return createHash('sha256')
@@ -576,14 +575,15 @@ export function servedContentHash(view: StoredView): string {
     .slice(0, view.content_hash.length || 16);
 }
 
-/** Rebuilds that failed for this exact source and compiler, so a view that no longer compiles is not retried per request. */
+/** Bounded, process-local suppression of repeated failures for the same source and compiler. */
+const MAX_FAILED_REBUILDS = 256;
 const failedRebuilds = new Set<string>();
 const inflightRebuilds = new Map<string, Promise<StoredView | null>>();
 
 /**
  * The view as it should be served. A bundle the server compiled under an
  * older compiler is rebuilt from its stored source and saved, so runtime
- * fixes reach every server-built view the first time it is opened. A bundle
+ * fixes reach tracked server-built views the first time they are opened. A bundle
  * the caller supplied is never rebuilt. A rebuild that fails keeps serving the
  * stored bundle. The save is compare-and-set on the hash and compiler that
  * were read, so a concurrent save always wins.
@@ -618,6 +618,9 @@ async function rebuildView(
     compiled = await compileView(view.source_code);
   } catch (err) {
     failedRebuilds.add(attempt);
+    if (failedRebuilds.size > MAX_FAILED_REBUILDS) {
+      failedRebuilds.delete(failedRebuilds.values().next().value!);
+    }
     logger.warn(
       { organization_id: organizationId, view_key: view.key, err },
       '[views] Stale view bundle failed to rebuild; serving the stored bundle'

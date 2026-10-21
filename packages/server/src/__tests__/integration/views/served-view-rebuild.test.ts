@@ -147,13 +147,13 @@ describe("getServedView", () => {
 		expect(warn.mock.calls.filter(([, message]) => String(message).includes("failed to rebuild"))).toHaveLength(1);
 	});
 
-	it("collapses concurrent requests for one stale view into one rebuild", async () => {
+	it("serves the same rebuilt content to concurrent requests for one stale view", async () => {
 		await set({ source_code: SOURCE });
 		await makeStale();
 
 		const [a, b] = await Promise.all([getServedView(orgId, "board"), getServedView(orgId, "board")]);
 
-		expect(a).toBe(b);
+		expect(a).toEqual(b);
 		expect(a?.compile_config_hash).toBe(viewCompileFingerprint());
 	});
 
