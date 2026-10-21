@@ -86,6 +86,7 @@ import {
 } from './manage_automations/feedback';
 import { handleGetComponentReference } from './manage_automations/reference';
 import { handleList } from './manage_automations/list';
+import { eventClientId } from '../../auth/event-client-id';
 
 export {
   ListAutomationsResultSchema,
@@ -777,7 +778,7 @@ async function queueAutomationWriteForApproval(
           ...currentMcpActivityEventMetadata(ctx),
         },
         authorName: ctx.clientId ?? 'agent',
-        clientId: ctx.tokenType === 'oauth' ? (ctx.clientId ?? null) : null,
+        clientId: eventClientId(ctx),
       },
       { sql: tx },
     );

@@ -126,6 +126,7 @@ import {
 } from "../view-urls";
 import { action, defineActionTool } from "./action-tool";
 import { proposeEntityChange, proposeEntityDelete } from "./entity-field-approval";
+import { eventClientId } from "../../auth/event-client-id";
 
 export { ManageEntityResultSchema, ManageEntitySchema };
 
@@ -755,7 +756,7 @@ async function handleUpdate(
 					content: `Entity "${after.name}" (id: ${entityId}) updated:\n${contentLines.join("\n")}`,
 					metadata: { changes },
 					createdBy: ctx.userId ?? null,
-					clientId: ctx.clientId ?? null,
+					clientId: eventClientId(ctx),
 				},
 				tx,
 			);
@@ -1598,7 +1599,7 @@ async function handleLink(
 					{ field: "source", old: null, new: source },
 				],
 				createdBy: ctx.userId,
-				clientId: ctx.clientId,
+				clientId: eventClientId(ctx),
 			},
 			tx,
 		);
@@ -1729,7 +1730,7 @@ async function handleUnlink(
 						{ field: "source", old: edge.source, new: null },
 					],
 					createdBy: ctx.userId,
-					clientId: ctx.clientId,
+					clientId: eventClientId(ctx),
 				},
 				tx,
 			);
@@ -1827,7 +1828,7 @@ async function handleUpdateLink(
 					op: "update_link",
 					changes,
 					createdBy: ctx.userId,
-					clientId: ctx.clientId,
+					clientId: eventClientId(ctx),
 				},
 				tx,
 			);

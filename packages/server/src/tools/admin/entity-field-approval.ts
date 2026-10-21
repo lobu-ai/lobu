@@ -62,6 +62,7 @@ import { resolveRunInitiator, runPermalinkResource } from "../initiator";
 import type { ToolContext } from "../registry";
 import { getOrgUrlContext } from "../view-urls";
 import { ENTITY_CHANGE_ACTION_KEY, ENTITY_FIELD_CHANGE_ACTION_KEY } from "./run-decider";
+import { eventClientId } from "../../auth/event-client-id";
 
 /**
  * Internal signal: an escalated (atomic) card had at least one stale field, so
@@ -560,7 +561,7 @@ export async function proposeEntityChange(
 					...currentMcpActivityEventMetadata(ctx),
 				},
 				authorName: attribution,
-				clientId: ctx.tokenType === "oauth" ? (ctx.clientId ?? null) : null,
+				clientId: eventClientId(ctx),
 			},
 			{ sql: db },
 		);

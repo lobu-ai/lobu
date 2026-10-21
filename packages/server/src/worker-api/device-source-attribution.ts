@@ -1,15 +1,17 @@
 import type { SourceAttribution } from '@lobu/core/contracts/worker/protocol';
 import type { DbClient } from '../db/client';
 import type { ToolContext } from '../tools/registry';
+import { eventClientId } from '../auth/event-client-id';
 
 /** Only authenticated context supplies identity; tool arguments are deliberately absent. */
 export function requestSourceAttribution(
   ctx: Pick<ToolContext, 'isAuthenticated' | 'agentId' | 'clientId' | 'tokenType'>,
 ): Pick<SourceAttribution, 'agent_id' | 'client_id'> {
   if (!ctx.isAuthenticated) return {};
+  const clientId = eventClientId(ctx);
   return {
     ...(ctx.agentId ? { agent_id: ctx.agentId } : {}),
-    ...(ctx.tokenType === 'oauth' && ctx.clientId ? { client_id: ctx.clientId } : {}),
+    ...(clientId ? { client_id: clientId } : {}),
   };
 }
 

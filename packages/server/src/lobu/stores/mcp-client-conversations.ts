@@ -1,6 +1,7 @@
 import { createLogger } from "@lobu/core";
 import { getDb, pgTextArray } from "../../db/client.js";
 import type { ToolContext } from "../../tools/registry.js";
+import { eventClientId } from "../../auth/event-client-id";
 
 const logger = createLogger("mcp-client-conversations");
 const MAX_TITLE_LENGTH = 200;
@@ -37,7 +38,7 @@ export function currentMcpActivityAttribution(
 	if (!activityId) return null;
 	return {
 		clientIdentity: ctx.clientId?.trim() || "",
-		clientId: oauthClientId(ctx),
+		clientId: eventClientId(ctx),
 		activityId,
 		activityKind: isConversation ? "conversation" : "session",
 		transportSessionId,
@@ -54,10 +55,6 @@ export function currentMcpActivityEventMetadata(ctx: McpActivityContext): {
 		mcp_session_id: attribution?.transportSessionId ?? null,
 		mcp_conversation_id: attribution?.hostConversationId ?? null,
 	};
-}
-
-function oauthClientId(ctx: McpActivityContext): string | null {
-	return ctx.tokenType === "oauth" ? (ctx.clientId ?? null) : null;
 }
 
 function transportSessionIds(ctx: McpActivityContext): string[] {
@@ -105,7 +102,7 @@ export async function recordMcpConversationActivity(args: {
 		// backfill writes. `displayAction` on the read path is the single
 		// formatting point, so live and backfilled rows always render alike.
 		const label = args.toolName;
-		const clientId = oauthClientId(args.ctx);
+		const clientId = eventClientId(args.ctx);
 		const sessionIds = transportSessionIds(args.ctx);
 		const userId = args.ctx.userId;
 		const workspaceIds = attributedWorkspaceIds(args.ctx);
@@ -168,7 +165,7 @@ export async function setCurrentMcpConversationTitle(
 	const title = normalizeMcpConversationTitle(value);
 	if (!title) throw new Error("Conversation title must not be empty.");
 	const sql = getDb();
-	const clientId = oauthClientId(ctx);
+	const clientId = eventClientId(ctx);
 	const sessionIds = transportSessionIds(ctx);
 	// A title can be set before the conversation's first call lands (the activity
 	// row is written after the tool returns), so this seeds the row. `last_action`

@@ -43,6 +43,7 @@ import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import type { ToolContext } from './registry';
 import { withValidatedArgs } from './validate-args';
 import { buildEventViewUrl } from './view-urls';
+import { eventClientId } from '../auth/event-client-id';
 
 // Leave headroom below the 512 KiB MCP App snapshot ceiling for the receipt,
 // tool name, and snapshot envelope. Larger events remain exactly readable by
@@ -598,7 +599,7 @@ async function saveContentImpl(
         metadata: eventMetadata,
         parentOriginId,
         createdBy: ctx.userId,
-        clientId: ctx.clientId,
+        clientId: eventClientId(ctx),
         supersedesEventId: args.supersedes_event_id ?? null,
       }, insertOptions);
     } catch (error) {

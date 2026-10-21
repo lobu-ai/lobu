@@ -1,4 +1,5 @@
 import type { Context } from 'hono';
+import { eventClientId } from '../auth/event-client-id';
 
 /**
  * `x-lobu-apply-id` groups the mutations of one `lobu apply` run into a
@@ -64,6 +65,6 @@ export function getApplyContext(c: Context): ApplyContext {
     applyId,
     actorSource,
     createdBy: user?.id ?? authInfo?.userId ?? null,
-    clientId: authInfo?.clientId ?? null,
+    clientId: eventClientId({ tokenType: authSource, clientId: authInfo?.clientId }),
   };
 }

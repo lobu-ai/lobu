@@ -88,6 +88,7 @@ import { listLiveGrantedMemberWorkspaces } from './auth/oauth/workspace-grants';
 import logger from './utils/logger';
 import { getClientIP } from './utils/rate-limiter';
 import { organizationIdLiveSql } from './workspace/deletion-state';
+import { eventClientId } from './auth/event-client-id';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -936,7 +937,7 @@ function buildPersistedSession(
     userId: authCtx.userId,
     // `mcp_sessions.client_id` references oauth_clients(id). PAT sessions are
     // authenticated, but their synthetic `pat_<id>` client id has no oauth row.
-    clientId: authCtx.tokenType === 'oauth' ? authCtx.clientId : null,
+    clientId: eventClientId(authCtx),
     organizationId: authCtx.organizationId,
     memberRole: authCtx.memberRole,
     requestedAgentId: authCtx.requestedAgentId,

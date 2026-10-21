@@ -5,6 +5,7 @@
  * this module only owns the existing run/event approval rail.
  */
 
+import { eventClientId } from "../auth/event-client-id";
 import { getDb } from "../db/client";
 import { currentMcpActivityEventMetadata } from "../lobu/stores/mcp-client-conversations";
 import { resolveRunInitiator } from "../tools/initiator";
@@ -120,10 +121,7 @@ export async function queueAgentAsk(params: {
 				authorName: params.ctx.clientId ?? "agent",
 				// Interaction events are deliberately not connection-scoped. Authorization
 				// treats them as reviewable workflow records, not connector-synced content.
-				clientId:
-					params.ctx.tokenType === "oauth"
-						? (params.ctx.clientId ?? null)
-						: null,
+				clientId: eventClientId(params.ctx),
 			},
 			{ sql: tx },
 		);

@@ -73,6 +73,7 @@ import {
 	type ConnectionRow,
 	type InlineExecutionResult,
 } from "./shared";
+import { eventClientId } from "../../../../auth/event-client-id";
 // Update the run to failed status and return the error result in one call.
 // When `deferTerminalWrite` is set the runs write is skipped — the caller
 // (approve's phase 2) persists the terminal state AND the card event in one
@@ -916,7 +917,7 @@ export async function handleExecute(
 					...currentMcpActivityEventMetadata(ctx),
 				},
 				authorName: ctx.clientId ?? "agent",
-				clientId: ctx.tokenType === "oauth" ? (ctx.clientId ?? null) : null,
+				clientId: eventClientId(ctx),
 			},
 				{ sql: tx },
 			);
@@ -1050,7 +1051,7 @@ export async function handleExecute(
 					...currentMcpActivityEventMetadata(ctx),
 				},
 				authorName: ctx.clientId ?? "agent",
-				clientId: ctx.tokenType === "oauth" ? (ctx.clientId ?? null) : null,
+				clientId: eventClientId(ctx),
 			},
 			{ sql: tx },
 		);

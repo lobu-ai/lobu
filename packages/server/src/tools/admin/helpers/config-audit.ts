@@ -16,6 +16,7 @@ import {
   recordConfigChangeEvent,
 } from '../../../utils/insert-event';
 import type { ToolContext } from '../../registry';
+import { eventClientId } from '../../../auth/event-client-id';
 
 interface ToolConfigChangeParams {
   /**
@@ -63,7 +64,7 @@ function toolConfigChangeEvent(
     applyId: ctx.applyId ?? null,
     actorSource: deriveToolActorSource(ctx),
     createdBy: ctx.userId ?? null,
-    clientId: ctx.clientId ?? null,
+    clientId: eventClientId(ctx),
     agentId: ctx.agentId ?? null,
     actingAutomationId: ctx.actingAutomationId ?? null,
     actingRunId: ctx.actingRunId ?? null,

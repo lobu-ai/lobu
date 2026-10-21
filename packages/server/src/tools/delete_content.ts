@@ -28,6 +28,7 @@ import { isSystemContext } from './access-control';
 import { TOMBSTONE_SEMANTIC_TYPE } from './constants';
 import type { ToolContext } from './registry';
 import { withValidatedArgs } from './validate-args';
+import { eventClientId } from '../auth/event-client-id';
 
 interface DeleteContentResult {
   deleted_ids: number[];
@@ -108,7 +109,7 @@ async function deleteContentImpl(
       },
       supersedesEventId: targetId,
       createdBy: ctx.userId,
-      clientId: ctx.clientId,
+      clientId: eventClientId(ctx),
     });
     tombstoneIds.push(Number(tombstone.id));
   }
