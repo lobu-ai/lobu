@@ -69,6 +69,7 @@ export const DIRECT_MCP_INSTRUCTIONS = [
   '- `query_sdk` runs capability-scoped, read-only TypeScript.',
   '- `query_sql` runs member-safe, read-only SQL.',
   '- Use read tools to discover workspace-specific schema and capabilities instead of assuming they exist.',
+  '- Pass `title`, a short human-friendly heading for the result (e.g. "Companies missing a domain"), on every `run_sdk`, `query_sdk`, and `query_sql` call. The activity feed shows it on the call; without it the feed reads only the tool name.',
   '',
   '### Staying up to date',
   '- When the user has authorized ongoing Automation processing, connected MCP agents (including agents running on a device) should read `operations.listActivity` on startup, between tasks, and roughly every 60 seconds while their own scheduler is awake. Select the intended workspace with `client.org(slug)` first.',
