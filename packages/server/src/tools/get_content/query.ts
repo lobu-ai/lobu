@@ -45,6 +45,64 @@ interface ListPageResult {
   pageInfo: GetContentResult['page'];
 }
 
+/** Shared row-visibility predicates for exact-id reads and event-view probes.
+ * Callers use event alias `f`, connection alias `c`, and bind from baseParamIndex.
+ * MCP scopes and entity read policy remain the handler's responsibility. */
+export async function buildExactIdScopeWhere(
+  sql: DbClient,
+  opts: {
+    organizationId: string;
+    visibilityScope: VisibilityScope;
+    /** Narrows to one entity's identity bridges; omit for the unscoped probe. */
+    entityId?: number | null;
+    excludeWorkspaceAudit: boolean | undefined;
+    excludeOperationalTrail: boolean | undefined;
+    baseParamIndex: number;
+  }
+): Promise<{ sql: string; params: Array<string | number | null> }> {
+  const params: Array<string | number | null> = [];
+  const orgScope = buildOrgScopeWhere({
+    organization_id: opts.organizationId,
+    strict_organization_scope: true,
+    baseParamIndex: opts.baseParamIndex + params.length,
+  });
+  params.push(...orgScope.params);
+
+  let entityFilter = '';
+  if (opts.entityId) {
+    // Use the trimmed entity-link UNION when we know the entity id —
+    // skips namespaces this entity doesn't claim. Identifier values are
+    // bound params; entity id is inlined as a literal so the planner
+    // sees the actual selectivity.
+    const validatedId = validateNumericId(opts.entityId, 'entity_id');
+    const scopes = await fetchEntityIdentityScopes(sql, validatedId);
+    const link = buildEntityLinkUnion({
+      entityIdLiteral: validatedId,
+      scopes,
+      alias: 'f',
+      baseParamIndex: opts.baseParamIndex + params.length,
+    });
+    entityFilter = ` AND ${link.sql}`;
+    params.push(...link.params);
+  }
+
+  const visibility = buildConnectionVisibilityClause({
+    organizationId: opts.visibilityScope.organizationId,
+    userId: opts.visibilityScope.userId,
+    baseParamIndex: opts.baseParamIndex + params.length,
+  });
+  params.push(...visibility.params);
+
+  return {
+    sql: `${orgScope.sql}${entityFilter} ${visibility.sql}${
+      opts.excludeWorkspaceAudit
+        ? ` AND NOT (f.metadata ? '_lobu_workspace_audit')`
+        : ''
+    }${opts.excludeOperationalTrail ? ` AND ${operationalTrailExclusionSql('f')}` : ''}`,
+    params,
+  };
+}
+
 /**
  * Build the common SELECT columns, JOINs, and classification subquery
  * used by both the content_ids and include_superseded query branches.
@@ -285,46 +343,19 @@ export async function fetchByContentIds(opts: {
   // authorization precheck (which already accepted those bridges), causing a
   // permitted exact event to disappear after policy validation. An explicit
   // organization id is always supplied, so this can never degrade to an
-  // unscoped read.
-  const orgScope = buildOrgScopeWhere({
-    organization_id: organizationId,
-    strict_organization_scope: true,
+  // unscoped read. Shared with the event-subject fast probe so the two agree
+  // row-for-row on visibility.
+  const scope = await buildExactIdScopeWhere(sql, {
+    organizationId,
+    visibilityScope,
+    entityId: args.entity_id as number | null | undefined,
+    excludeWorkspaceAudit,
+    excludeOperationalTrail,
     baseParamIndex: queryParams.length + 1,
   });
-  queryParams.push(...orgScope.params);
+  queryParams.push(...scope.params);
 
-  let entityFilter = '';
-  if (args.entity_id) {
-    // Use the trimmed entity-link UNION when we know the entity id —
-    // skips namespaces this entity doesn't claim. Identifier values are
-    // bound params; entity id is inlined as a literal so the planner
-    // sees the actual selectivity.
-    const validatedId = validateNumericId(args.entity_id as number, 'entity_id');
-    const scopes = await fetchEntityIdentityScopes(sql, validatedId);
-    const link = buildEntityLinkUnion({
-      entityIdLiteral: validatedId,
-      scopes,
-      alias: 'f',
-      baseParamIndex: queryParams.length + 1,
-    });
-    entityFilter = ` AND ${link.sql}`;
-    queryParams.push(...link.params);
-  }
-
-  // Visibility: hide events from connections the caller can't see. Inline,
-  // shared with the count below.
-  const visibility = buildConnectionVisibilityClause({
-    organizationId: visibilityScope.organizationId,
-    userId: visibilityScope.userId,
-    baseParamIndex: queryParams.length + 1,
-  });
-  queryParams.push(...visibility.params);
-
-  const where = `${idFilter} ${orgScope.sql}${entityFilter} ${visibility.sql}${
-    excludeWorkspaceAudit
-      ? ` AND NOT (f.metadata ? '_lobu_workspace_audit')`
-      : ''
-  }${excludeOperationalTrail ? ` AND ${operationalTrailExclusionSql('f')}` : ''}`;
+  const where = `${idFilter} ${scope.sql}`;
 
   // Read the full chain from `events` (not the masked view — superseded rows are
   // what we're here for). The list query JOINs resolved_ids so it can order by
