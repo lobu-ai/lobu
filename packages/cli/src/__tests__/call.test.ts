@@ -528,6 +528,30 @@ describe("runtime MCP credential (LOBU_API_TOKEN + LOBU_MEMORY_URL)", () => {
     expect(code).toBe(1);
   });
 
+  test("a failed run_sdk script inside structuredContent exits non-zero", async () => {
+    stubRuntimeMcp({
+      content: [{ type: "text", text: "script failed" }],
+      structuredContent: { success: false, error: "boom", title: "Failing" },
+    });
+    const priorExitCode = process.exitCode ?? 0;
+    process.exitCode = 0;
+    const captured = captureStdout();
+    let code: number | undefined;
+    try {
+      await callCommand("run_sdk", {
+        arg: ["title=Failing", "script=export default async () => 1"],
+      });
+      code = process.exitCode;
+    } finally {
+      captured.restore();
+      process.exitCode = priorExitCode;
+    }
+    expect(JSON.parse(captured.chunks.join("")).structuredContent.success).toBe(
+      false
+    );
+    expect(code).toBe(1);
+  });
+
   test("the title check also guards the MCP transport", async () => {
     const requests = stubRuntimeMcp({});
     await expect(

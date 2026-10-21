@@ -30,7 +30,10 @@ export class ApiError extends CliError {
  * True when an already-printed tool result payload reports failure, so the
  * command can exit non-zero without changing its stdout contract (the JSON
  * still parses — `gh`/`kubectl -o json` semantics, not curl's). Three shapes:
- * - MCP `tools/call` failures, marked `isError` at the protocol boundary;
+ * - MCP `tools/call` failures, marked `isError` at the protocol boundary, or
+ *   reported inside the result's `structuredContent` (a failed `run_sdk`
+ *   script is a successful tool call whose structured result has
+ *   `success: false`);
  * - `run_sdk` script failures, reported as data (`success` is a required
  *   field of the script result) — the tool ran fine, the script did not;
  * - REST-proxy soft failures, a top-level `error` string. This mirrors the
@@ -46,8 +49,16 @@ export function isFailedToolPayload(
     isError?: unknown;
     success?: unknown;
     error?: unknown;
+    structuredContent?: unknown;
   };
   if (payload.isError === true) return true;
+  if (
+    typeof payload.structuredContent === "object" &&
+    payload.structuredContent !== null &&
+    isFailedToolPayload(tool, payload.structuredContent)
+  ) {
+    return true;
+  }
   if (tool === "run_sdk" && payload.success === false) return true;
   return typeof payload.error === "string" && payload.error.length > 0;
 }
