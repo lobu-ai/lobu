@@ -847,8 +847,13 @@ jobs:
       # The gateway integration suite includes real extension profiles talking
       # to the production HTTP handlers and Postgres. Vitest owns sharding, so
       # provision the browser on every shard rather than guessing file placement.
+      # No `--with-deps`: the ubuntu-24.04 image already ships Chromium's shared
+      # libraries, and the extra fonts/xvfb packages it adds are only for headed
+      # runs (every integration launch is headless). Those apt fetches from the
+      # Azure mirror stalled for 7-9 minutes on some runs and pushed shards past
+      # the 15-minute job timeout; a missing library fails the launch loudly.
       - name: Install Chromium for gateway-extension integration
-        run: node node_modules/playwright-vanilla/cli.js install --with-deps chromium
+        run: node node_modules/playwright-vanilla/cli.js install chromium
 
       - name: server integration suite shard ${{ matrix.shard }}/3 (vitest under Node)
         working-directory: packages/server
@@ -864,6 +869,17 @@ jobs:
             --coverage.enabled --coverage.provider=v8 --coverage.reporter=lcov --coverage.reportsDirectory=coverage
           mv coverage/lcov.info coverage/vitest-shard-${{ matrix.shard }}.lcov.info
           node ../../scripts/assert-vitest-report-clean.mjs "$RUNNER_TEMP/vitest-report.json"
+
+      # Per-file durations feed packages/server/scripts/update-shard-timings.mjs,
+      # which refreshes the table the shard sequencer balances on.
+      - name: Upload vitest report shard ${{ matrix.shard }}/3
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vitest-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/vitest-report.json
+          retention-days: 14
+          if-no-files-found: ignore
 
       - name: Upload server integration coverage shard ${{ matrix.shard }}/3
         if: always()
