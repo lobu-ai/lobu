@@ -10,7 +10,11 @@ import { seedOwnerContext } from '../setup/test-fixtures';
 const WORKER_ID = 'poll-retry-worker';
 const OLD_HEARTBEAT = new Date('2020-01-01T00:00:00Z');
 
-async function pollWithWriteFailure(error: Error, failures: number) {
+async function pollWithWriteFailure(
+  error: Error,
+  failures: number,
+  options: { commitBeforeFailing?: boolean } = {}
+) {
   const sql = getTestDb();
   const { org, user } = await seedOwnerContext();
   await sql`
@@ -23,7 +27,15 @@ async function pollWithWriteFailure(error: Error, failures: number) {
     apply(target, thisArg, args) {
       if (Array.isArray(args[0]) && args[0].join('').includes('INSERT INTO device_workers')) {
         writes += 1;
-        if (writes <= failures) return Promise.reject(error);
+        if (writes <= failures) {
+          // A drop that reports after the write already committed.
+          if (options.commitBeforeFailing) {
+            return Promise.resolve(Reflect.apply(target, thisArg, args)).then(() => {
+              throw error;
+            });
+          }
+          return Promise.reject(error);
+        }
       }
       return Reflect.apply(target, thisArg, args);
     },
@@ -79,6 +91,34 @@ describe('worker poll heartbeat retry', () => {
     expect(lastSeenAt.getTime()).toBeGreaterThan(OLD_HEARTBEAT.getTime());
     expect(writes).toBe(2);
     expect(logged).not.toHaveBeenCalled();
+  });
+
+  it('logs and counts the heartbeat retry', async () => {
+    const warned = vi.spyOn(logger, 'warn');
+    const error = Object.assign(new Error('write CONNECTION_CLOSED test-pooler:5432'), {
+      code: 'CONNECTION_CLOSED',
+    });
+    const { response, writes } = await pollWithWriteFailure(error, 1);
+
+    expect(response.status).toBe(200);
+    expect(writes).toBe(2);
+    expect(warned).toHaveBeenCalledWith(
+      expect.objectContaining({ op: 'poll.device_upsert', attempt: 1 }),
+      expect.stringContaining('retrying query on a fresh connection')
+    );
+  });
+
+  it('keeps the heartbeat when the first write committed before the drop', async () => {
+    const error = Object.assign(new Error('write CONNECTION_CLOSED test-pooler:5432'), {
+      code: 'CONNECTION_CLOSED',
+    });
+    const { response, writes, lastSeenAt } = await pollWithWriteFailure(error, 1, {
+      commitBeforeFailing: true,
+    });
+
+    expect(response.status).toBe(200);
+    expect(writes).toBe(2);
+    expect(lastSeenAt.getTime()).toBeGreaterThan(OLD_HEARTBEAT.getTime());
   });
 
   it.each([
