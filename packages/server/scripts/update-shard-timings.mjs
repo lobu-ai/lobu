@@ -6,7 +6,7 @@
  * artifact. Pull all shards of one run and feed them in together:
  *
  *   gh run download <run-id> --pattern 'vitest-report-*' --dir /tmp/reports
- *   node packages/server/scripts/update-shard-timings.mjs /tmp/reports/{*}/vitest-report.json
+ *   node packages/server/scripts/update-shard-timings.mjs /tmp/reports/*/vitest-report.json
  *
  * Only files at or above MIN_LISTED_MS are listed; everything else weighs the
  * mean of the unlisted files. Durations are rounded to 100ms so a refresh

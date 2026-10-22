@@ -853,7 +853,7 @@ jobs:
       # Azure mirror stalled for 7-9 minutes on some runs and pushed shards past
       # the 15-minute job timeout; a missing library fails the launch loudly.
       - name: Install Chromium for gateway-extension integration
-        run: node node_modules/playwright-vanilla/cli.js install --with-deps chromium
+        run: node node_modules/playwright-vanilla/cli.js install chromium
 
       - name: server integration suite shard ${{ matrix.shard }}/3 (vitest under Node)
         working-directory: packages/server

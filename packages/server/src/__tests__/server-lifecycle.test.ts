@@ -22,7 +22,7 @@ import http from "node:http";
 import net from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // --- heavy collaborators of createServerLifecycle, replaced so the spine
 // --- boots in-process against a real ephemeral HTTP server.
@@ -487,10 +487,28 @@ describe("createServerLifecycle (source-level contract)", () => {
 });
 
 describe("shutdown ordering (live drain)", () => {
+	// The integration suite shares one module graph (`isolate: false`), so a
+	// real SIGTERM here would leave the process-wide shutdown flag and the
+	// `process.exit` spy in place for every later file in the shard. A leaked
+	// flag makes `/api/workers/poll` stop holding and answer
+	// `next_poll_seconds: 10`, turning each device action in a later browser
+	// test into a ~10s wait.
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it(
 		"refuses new work and drains the in-flight request before gateway/db teardown",
 		async () => {
 			const events: string[] = [];
+			const lifecycleState = await import("../lifecycle-state");
+			let shuttingDown = false;
+			vi.spyOn(lifecycleState, "markShuttingDown").mockImplementation(() => {
+				shuttingDown = true;
+			});
+			vi.spyOn(lifecycleState, "isShuttingDown").mockImplementation(
+				() => shuttingDown,
+			);
 			const { closeDbSingleton } = await import("../db/client");
 			const { stopLobuGateway } = await import("../lobu/gateway");
 			vi.mocked(closeDbSingleton).mockImplementation(async () => {
@@ -658,6 +676,9 @@ describe("shutdown ordering (live drain)", () => {
 				indexOfEvent("extra-teardown"),
 			);
 			expect(events[events.length - 1]).toBe("exit");
+			expect(shuttingDown).toBe(true);
+			vi.restoreAllMocks();
+			expect(lifecycleState.isShuttingDown()).toBe(false);
 		},
 		20_000,
 	);
