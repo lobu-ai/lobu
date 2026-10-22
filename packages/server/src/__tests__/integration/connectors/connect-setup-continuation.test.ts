@@ -658,16 +658,19 @@ describe("connections.connect — setup_required continuation", () => {
 				message: string;
 				code?: string;
 				retryable?: boolean;
+				details?: unknown;
 			};
 		}>(
 			`export default async (_ctx, client) => client.connections.connect({ connector_key: "missing-continuation-connector" });`,
 		);
 		expect(failed.success).toBe(false);
+		// An uncaught SDK action failure keeps its structured result as details,
+		// so the agent reads it as data rather than parsing the message.
 		expect(failed.error).toMatchObject({
 			name: "ClientSdkActionError",
 			message: expect.stringMatching(/connector.*not found/i),
+			details: { error: expect.stringMatching(/connector.*not found/i) },
 		});
-		expect(failed.error).not.toHaveProperty("details");
 		expect(failed.error).not.toHaveProperty("stack");
 		expect(failed.error?.message).not.toContain('{"');
 	});
