@@ -12,10 +12,12 @@
 
 import type { Context } from 'hono';
 import postgres from 'postgres';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DbClient } from '../../../db/client';
 import type { Env } from '../../../index';
 import { insertEvent, lockEventDedupIdentity } from '../../../utils/insert-event';
+import * as eventWriter from '../../../utils/insert-event';
+import logger from '../../../utils/logger';
 import { streamContent } from '../../../worker-api';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createTestOrganization } from '../../setup/test-fixtures';
@@ -134,7 +136,76 @@ describe('feed page commit', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all(extraClients.splice(0).map((client) => client.end({ timeout: 5 })));
+  });
+
+  it.each([
+    ['CONNECTION_CLOSED', true, false],
+    ['CONNECTION_CLOSED', false, false],
+    ['CONNECTION_ENDED', true, false],
+    ['CONNECTION_ENDED', false, false],
+    ['CONNECTION_CLOSED', true, true],
+  ])('retries a dropped insert once without logging an error (%s, code=%s, dry=%s)', async (code, withCode, dryRun) => {
+    const { connectionId, feedId, runId } = await seed();
+    if (dryRun) await getTestDb()`UPDATE runs SET dry_run = true WHERE id = ${runId}`;
+    const error = new Error(`write ${code} pooler.example.test:5432`);
+    if (withCode) Object.assign(error, { code });
+    const realInsert = eventWriter.insertEvent;
+    const insert = vi.spyOn(eventWriter, 'insertEvent')
+      .mockImplementationOnce(realInsert)
+      .mockRejectedValueOnce(error);
+    const logged = vi.spyOn(logger, 'error');
+    const consoleError = vi.spyOn(console, 'error');
+    const batch = {
+      run_id: runId, worker_id: WORKER_ID, checkpoint: { cursor: 'page-1' },
+      items: [item('first'), item('second')],
+    };
+    const { ctx, result } = mockWorkerCtx(batch);
+
+    await streamContent(ctx);
+
+    expect(result().status).toBe(200);
+    expect(result().body).toMatchObject({ total_items: 2 });
+    expect(await currentOriginIds(connectionId)).toEqual(dryRun ? [] : ['first', 'second']);
+    expect(await feedCheckpoint(feedId)).toEqual(dryRun ? OLD_CHECKPOINT : batch.checkpoint);
+    if (dryRun) {
+      const [run] = await getTestDb()`SELECT dry_run_preview FROM runs WHERE id = ${runId}`;
+      expect(run.dry_run_preview).toMatchObject({
+        total: 2, items: [{ origin_id: 'first' }, { origin_id: 'second' }],
+      });
+    }
+    expect(insert).toHaveBeenCalledTimes(4);
+    // Replay the whole page on a fresh transaction, never its broken handle.
+    expect(insert.mock.calls[2][1]?.sql).not.toBe(insert.mock.calls[0][1]?.sql);
+    expect(logged).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['CONNECTION_CLOSED', 2],
+    ['CONNECTION_ENDED', 2],
+    ['23505', 1],
+  ])('logs and fails after the allowed insert attempts (%s)', async (code, attempts) => {
+    const { connectionId, feedId, runId } = await seed();
+    const error = Object.assign(new Error(`write ${code} pooler.example.test:5432`), { code });
+    const insert = vi.spyOn(eventWriter, 'insertEvent').mockRejectedValue(error);
+    const logged = vi.spyOn(logger, 'error');
+    const { ctx, result } = mockWorkerCtx({
+      run_id: runId, worker_id: WORKER_ID, checkpoint: { cursor: 'page-1' },
+      items: [item('first')],
+    });
+
+    await streamContent(ctx);
+
+    expect(result().status).toBe(500);
+    expect(insert).toHaveBeenCalledTimes(attempts);
+    expect(await currentOriginIds(connectionId)).toEqual([]);
+    expect(await feedCheckpoint(feedId)).toEqual(OLD_CHECKPOINT);
+    expect(logged).toHaveBeenCalledWith(
+      expect.objectContaining({ origin_id: 'first', err: error }),
+      '[stream] Insert failed for item'
+    );
   });
 
   it.each([
