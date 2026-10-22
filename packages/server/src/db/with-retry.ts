@@ -59,6 +59,14 @@ export function isTransientDbError(error: unknown): boolean {
  * stale-socket drops — alert on
  * `rate(lobu_db_conn_retry_total{outcome="exhausted"}[5m])` (those still 500).
  */
+export function noteDbConnRetry(op: string, attempt: number, error: Error): void {
+  incrementCounter('lobu_db_conn_retry_total', { op, outcome: 'retried' });
+  logger.warn(
+    { op, attempt, err: error.message },
+    'transient DB connection drop — retrying query on a fresh connection'
+  );
+}
+
 export async function withDbRetry<T>(
   op: string,
   fn: () => Promise<T>
@@ -69,13 +77,7 @@ export async function withDbRetry<T>(
       baseDelay: 50,
       maxDelay: 250,
       shouldRetry: (error) => isTransientDbError(error),
-      onRetry: (attempt, error) => {
-        incrementCounter('lobu_db_conn_retry_total', { op, outcome: 'retried' });
-        logger.warn(
-          { op, attempt, err: error.message },
-          'transient DB connection drop — retrying query on a fresh connection'
-        );
-      },
+      onRetry: (attempt, error) => noteDbConnRetry(op, attempt, error),
     });
   } catch (error) {
     if (isTransientDbError(error)) {
