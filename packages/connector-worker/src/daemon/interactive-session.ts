@@ -623,7 +623,9 @@ function queueCodexMessage(
           : { kind: 'not-delivered', reason: 'Codex queue command was unavailable' }
       );
     });
-    child.once('exit', (code, signal) => {
+    // 'close', not 'exit': 'exit' can fire before stdout is fully drained, which
+    // would drop the acknowledgement line and downgrade a delivered message.
+    child.once('close', (code, signal) => {
       const acknowledgement = stdout
         .toString('utf8')
         .split(/\r?\n/)

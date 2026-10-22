@@ -433,6 +433,30 @@ describe('handoffToInteractiveSession', () => {
     });
   });
 
+  test('reads the Codex acknowledgement even when the process exits before stdout drains', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'lobu-codex-queue-late-'));
+    cleanupDirs.push(dir);
+    const command = path.join(dir, 'codex');
+    // The parent exits at once; a child that inherits stdout writes the ack later.
+    writeFileSync(
+      command,
+      `#!${process.execPath}\nconst {spawn}=require('node:child_process');const args=process.argv.slice(2);spawn(process.execPath,['-e',"setTimeout(()=>console.log('Queued message late for thread '+process.argv[1]+'.'),300)",args[2]],{stdio:['ignore','inherit','ignore'],detached:true}).unref();\n`,
+      { mode: 0o700 }
+    );
+    const delivery = await handoffToInteractiveSession({
+      session: { kind: 'codex', sessionId: 'thread-late', threadId: 'thread-late' },
+      runId: 72,
+      prompt: 'Do bounded work',
+      token: 'run-scoped-secret',
+      memoryUrl: 'https://gateway.test/mcp/test',
+      timeoutMs: 10_000,
+      codexCommand: command,
+    });
+    expect(delivery.kind).toBe('handed-off');
+    if (delivery.kind !== 'handed-off') throw new Error(delivery.reason);
+    expect(delivery.certainty).toBe('acknowledged');
+  });
+
   test('missing Codex binary is unambiguously not delivered', async () => {
     const delivery = await handoffToInteractiveSession({
       session: { kind: 'codex', sessionId: 'thread-exact', threadId: 'thread-exact' },
