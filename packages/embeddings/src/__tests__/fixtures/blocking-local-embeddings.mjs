@@ -6,7 +6,11 @@
 // thread stops only that thread, not the service).
 export async function batchGenerateLocalEmbeddings(texts) {
 	if (texts.includes("fail")) throw new Error("component failed");
-	if (texts.includes("crash")) process.exit(1);
+	if (texts.includes("crash")) {
+		process.exit(1);
+		// Bun may finish the current task before the thread stops; never answer.
+		return new Promise(() => {});
+	}
 	return texts.map((text) => {
 		if (text.startsWith("block:")) {
 			const until = Date.now() + Number(text.slice("block:".length));
