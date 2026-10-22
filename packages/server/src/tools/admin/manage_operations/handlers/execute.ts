@@ -574,7 +574,16 @@ async function replayExistingOperationRun(
 		error_message:
 			claim.errorMessage ??
 			`Run ${claim.runId} ended with status '${claim.status}'.`,
+		...reportedOutput(claim.actionOutput),
 	};
+}
+
+// The device waiter defaults missing output to {}. Omit that sentinel so a
+// bare failure keeps its old shape.
+function reportedOutput(output: unknown): { output?: unknown } {
+	if (output == null) return {};
+	if (typeof output === "object" && !Array.isArray(output) && Object.keys(output).length === 0) return {};
+	return { output };
 }
 
 // Device-bound execution inserts a pending run and waits for the device worker
@@ -1117,6 +1126,7 @@ export async function handleExecute(
 			run_id: runId,
 			status: "failed",
 			error_message: result.error_message ?? "Device action run failed.",
+			...reportedOutput(result.output),
 		};
 	}
 
@@ -1157,5 +1167,6 @@ export async function handleExecute(
 		run_id: runId,
 		status: "failed",
 		error_message: result.error_message,
+		...reportedOutput(result.output),
 	};
 }

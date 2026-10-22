@@ -4643,6 +4643,7 @@ export type ManageOperationsResponses = {
         run_id: number;
         status: "failed";
         error_message: string;
+        output?: unknown;
       }
     | {
         action: "execute";

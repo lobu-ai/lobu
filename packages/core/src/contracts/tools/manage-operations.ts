@@ -477,6 +477,8 @@ export const ManageOperationsResultSchema = Type.Union([
     run_id: Type.Integer(),
     status: Type.Literal("failed"),
     error_message: Type.String(),
+    // Failure details (such as an open browser dialog) may be needed to recover.
+    output: Type.Optional(Type.Unknown()),
   }),
   Type.Object({
     action: Type.Literal("execute"),
