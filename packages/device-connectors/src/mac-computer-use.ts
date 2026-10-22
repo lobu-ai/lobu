@@ -38,6 +38,23 @@ const element = {
   snapshot_id: { ...text, description: "Opaque snapshot_id from observe." },
   target: { ...text, description: "Exact element id from that observation." },
 };
+/** Exact-window selectors. All given selectors must name the same window. */
+export const windowSelectorFields = {
+  window_id: { type: "integer", description: "CoreGraphics window id." },
+  window_title: {
+    ...text,
+    description: "Substring of target window title.",
+  },
+  window_index: {
+    type: "integer",
+    description: "0-based window index within app.",
+  },
+};
+const windowSelector = { app, ...windowSelectorFields };
+/** Window mutations never default to whatever happens to be frontmost. */
+const namesAWindow = {
+  anyOf: [{ required: ["app"] }, { required: ["window_id"] }],
+};
 const position = { x: number, y: number };
 const point = {
   type: "object",
@@ -57,7 +74,8 @@ function action(
   key: string,
   description: string,
   properties: Schema,
-  required: string[]
+  required: string[],
+  constraints: Schema = {}
 ): Actions[string] {
   return {
     key,
@@ -74,6 +92,7 @@ function action(
       properties,
       required,
       additionalProperties: false,
+      ...constraints,
     },
     outputSchema: { type: "object", additionalProperties: true },
   };
@@ -92,6 +111,38 @@ export const macComputerUseActions: Actions = Object.fromEntries(
         modifiers: text,
       },
       ["from", "to"]
+    ),
+    action(
+      "set_window_frame",
+      "Move and/or resize one exact window through Accessibility without raising it. Omitted fields keep their current value. Returns the frame read back afterwards; frame_result is changed_but_differs when the app clamped the request.",
+      {
+        ...windowSelector,
+        x: number,
+        y: number,
+        width: { type: "number", exclusiveMinimum: 0 },
+        height: { type: "number", exclusiveMinimum: 0 },
+      },
+      [],
+      {
+        allOf: [
+          namesAWindow,
+          {
+            anyOf: ["x", "y", "width", "height"].map((key) => ({
+              required: [key],
+            })),
+          },
+        ],
+      }
+    ),
+    action(
+      "window_action",
+      "Close, minimize, maximize, or restore one exact window through Accessibility without raising it. When closing opens a sheet (for example an unsaved-changes prompt) the window stays open and the sheet's buttons are returned for a follow-up click.",
+      {
+        ...windowSelector,
+        action: { enum: ["close", "minimize", "maximize", "restore"] },
+      },
+      ["action"],
+      namesAWindow
     ),
     action(
       "set_value",
