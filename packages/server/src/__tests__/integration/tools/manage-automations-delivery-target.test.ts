@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
+import { AutomationSubscriptionService } from "../../../gateway/channels/automation-subscription-service";
 import type { Env } from "../../../index";
 import type { AuthContext } from "../../../tools/execute";
 import { executeTool } from "../../../tools/execute";
@@ -24,6 +25,7 @@ const TEST_ENV: Env = {
 
 describe("manage_automations delivery_target", () => {
 	let ownerCtx: AuthContext;
+	let ownerUserId: string;
 	let organizationId: string;
 	let agentId: string;
 	let otherAgentId: string;
@@ -36,6 +38,7 @@ describe("manage_automations delivery_target", () => {
 		organizationId = org.id;
 		const owner = await createTestUser({ email: "delivery-owner@test.com" });
 		await addUserToOrganization(owner.id, org.id, "owner");
+		ownerUserId = owner.id;
 		ownerCtx = {
 			organizationId: org.id,
 			tokenOrganizationId: org.id,
@@ -184,5 +187,129 @@ describe("manage_automations delivery_target", () => {
 			SELECT delivery_target FROM automations WHERE id = ${created.automation_id}
 		`;
 		expect(afterClear.delivery_target).toBeNull();
+	});
+
+	it("accepts a bound Discord channel exactly as manage_feeds lists it, without running", async () => {
+		const sql = getTestDb();
+		await insertChatConnectionRow({
+			id: "discord-delivery",
+			organizationId,
+			agentId: null,
+			platform: "discord",
+		});
+		const [connection] = await sql<{ id: number }>`
+			SELECT id FROM connections
+			WHERE organization_id = ${organizationId}
+			  AND slug = 'agentconn-discord-delivery'
+		`;
+		const discordConnectionId = Number(connection.id);
+		// The real link path materializes the channel's feed, which is what the
+		// Automation editor lists as a delivery destination.
+		await new AutomationSubscriptionService().createChatAutomation(
+			agentId,
+			"discord",
+			"discord:111:222",
+			undefined,
+			{
+				organizationId,
+				connectionId: discordConnectionId,
+				configuredBy: ownerUserId,
+			},
+		);
+
+		const listFeeds = async () => {
+			const { feeds } = (await executeTool(
+				"manage_feeds",
+				{ action: "list_feeds" },
+				TEST_ENV,
+				ownerCtx,
+			)) as { feeds: Array<Record<string, unknown>> };
+			const feed = feeds.find(
+				(row) => Number(row.connection_id) === discordConnectionId,
+			);
+			if (!feed) throw new Error("Discord channel feed was not listed");
+			return feed;
+		};
+		const feed = await listFeeds();
+		expect(feed).toMatchObject({
+			store: "channel_messages",
+			connector_key: "discord",
+			connection_status: "active",
+			target_agent_id: agentId,
+		});
+		// The editor submits the listed connection and feed key verbatim.
+		const deliveryTarget = {
+			connection_id: Number(feed.connection_id),
+			channel_id: String(feed.feed_key),
+		};
+
+		const created = (await executeTool(
+			"manage_automations",
+			{
+				action: "create",
+				slug: "discord-delivery-targeted",
+				name: "Discord delivery targeted",
+				prompt: "Send a concise update.",
+				managed_agent_id: agentId,
+				triggers: [],
+				delivery_target: deliveryTarget,
+			},
+			TEST_ENV,
+			ownerCtx,
+		)) as { automation_id: string };
+		const listed = (await executeTool(
+			"manage_automations",
+			{ action: "list", status: "active" },
+			TEST_ENV,
+			ownerCtx,
+		)) as { automations: Array<Record<string, unknown>> };
+		expect(
+			listed.automations.find((row) => row.automation_id === created.automation_id),
+		).toMatchObject({ delivery_target: deliveryTarget });
+		// Creating this Automation must not queue a run.
+		const [runs] = await sql<{ n: number }>`
+			SELECT COUNT(*)::int AS n FROM runs WHERE automation_id = ${created.automation_id}
+		`;
+		expect(runs.n).toBe(0);
+
+		// Another agent cannot address this agent's Discord channel.
+		await expect(
+			executeTool(
+				"manage_automations",
+				{
+					action: "create",
+					slug: "discord-delivery-other-agent",
+					name: "Discord delivery other agent",
+					prompt: "Send a concise update.",
+					managed_agent_id: otherAgentId,
+					triggers: [],
+					delivery_target: deliveryTarget,
+				},
+				TEST_ENV,
+				ownerCtx,
+			),
+		).rejects.toThrow(/must be an active chat channel already bound to the same agent/);
+
+		// An inactive connection is listed as such and rejected as a target.
+		await sql`
+			UPDATE connections SET status = 'paused' WHERE id = ${discordConnectionId}
+		`;
+		expect((await listFeeds()).connection_status).toBe("paused");
+		await expect(
+			executeTool(
+				"manage_automations",
+				{
+					action: "create",
+					slug: "discord-delivery-paused",
+					name: "Discord delivery paused",
+					prompt: "Send a concise update.",
+					managed_agent_id: agentId,
+					triggers: [],
+					delivery_target: deliveryTarget,
+				},
+				TEST_ENV,
+				ownerCtx,
+			),
+		).rejects.toThrow(/must be an active chat channel already bound to the same agent/);
 	});
 });
