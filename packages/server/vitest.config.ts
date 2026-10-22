@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+import { DurationShardSequencer } from "./src/__tests__/setup/shard-sequencer";
 
 const PACKAGE_ROOT = fileURLToPath(new URL(".", import.meta.url));
 
@@ -105,5 +106,8 @@ export default defineConfig({
     // clients already" error. Sharing the module graph (`isolate: false`)
     // keeps the singleton truly singleton across the whole run.
     isolate: false,
+    // CI splits this suite with `--shard`; balance the split by measured file
+    // durations instead of Vitest's equal-count hash split (see the sequencer).
+    sequence: { sequencer: DurationShardSequencer },
   },
 });
