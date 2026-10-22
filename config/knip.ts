@@ -95,7 +95,14 @@ const config: KnipConfig = {
       // main points at dist/; the source entries are index and the standalone
       // embeddings server. openai/embedding-utils are reached transitively from
       // those, so they don't need explicit entries.
-      entry: ["src/index.ts", "src/server.ts", "src/**/*.test.ts"],
+      entry: [
+        "src/index.ts",
+        "src/server.ts",
+        "src/**/*.test.ts",
+        // Fake local-model component the server tests load by path through
+        // LOBU_RUNTIME_EMBEDDINGS_ENTRY, so knip can't see it via imports.
+        "src/__tests__/fixtures/*.mjs",
+      ],
     },
     "packages/server": {
       entry: [

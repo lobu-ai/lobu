@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { isMainThread } from "node:worker_threads";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { validateEmbeddingDimensions } from "./embedding-utils.js";
@@ -7,7 +8,10 @@ import {
 	DEFAULT_DIMENSIONS,
 	getLocalModelName,
 } from "./metadata.js";
-import { loadLocalEmbeddings } from "./local-runtime.js";
+import {
+	generateLocalEmbeddingsOffThread,
+	runInferenceWorker,
+} from "./inference-worker.js";
 import { scrubSecrets } from "./internal/scrub-secrets.js";
 import {
 	generateOpenAIEmbeddings,
@@ -185,8 +189,8 @@ app.post("/api/embeddings", async (c) => {
 			process.env.EMBEDDINGS_BATCH_SIZE,
 			DEFAULT_BATCH_SIZE,
 		);
-		const { batchGenerateLocalEmbeddings } = await loadLocalEmbeddings();
-		const embeddings = await batchGenerateLocalEmbeddings(
+		const embeddings = await generateLocalEmbeddingsOffThread(
+			new URL(import.meta.url),
 			parsed.texts,
 			batchSize,
 		);
@@ -217,25 +221,32 @@ app.post("/api/embeddings", async (c) => {
 	}
 });
 
-// When forked by the embedded runtime (startEmbeddings), exit if the parent
-// dies without a graceful teardown — otherwise the child is orphaned and leaks
-// until killed by hand. Standalone `npm start` has no IPC channel, so
-// process.send is undefined and this never fires.
-//
-// Register the listener BEFORE checking process.connected: Node does not
-// replay a 'disconnect' emitted before a listener exists, and the parent can
-// die mid-module-load (imports run before this line). Register-then-check is
-// gap-free — no event can be processed between two synchronous statements.
-if (process.send) {
-	process.on("disconnect", () => process.exit(143));
-	if (!process.connected) process.exit(143);
+function startHttpServer(): void {
+	// When forked by the embedded runtime (startEmbeddings), exit if the parent
+	// dies without a graceful teardown — otherwise the child is orphaned and leaks
+	// until killed by hand. Standalone `npm start` has no IPC channel, so
+	// process.send is undefined and this never fires.
+	//
+	// Register the listener BEFORE checking process.connected: Node does not
+	// replay a 'disconnect' emitted before a listener exists, and the parent can
+	// die mid-module-load (imports run before this line). Register-then-check is
+	// gap-free — no event can be processed between two synchronous statements.
+	if (process.send) {
+		process.on("disconnect", () => process.exit(143));
+		if (!process.connected) process.exit(143);
+	}
+
+	const port = Number.parseInt(process.env.PORT || String(DEFAULT_PORT), 10);
+
+	serve({
+		fetch: app.fetch,
+		port,
+	});
+
+	console.log(`[EmbeddingsService] Listening on port ${port}`);
 }
 
-const port = Number.parseInt(process.env.PORT || String(DEFAULT_PORT), 10);
-
-serve({
-	fetch: app.fetch,
-	port,
-});
-
-console.log(`[EmbeddingsService] Listening on port ${port}`);
+// This module is also the local inference worker's entry (see
+// inference-worker.ts), so only the main thread serves HTTP.
+if (isMainThread) startHttpServer();
+else runInferenceWorker();
