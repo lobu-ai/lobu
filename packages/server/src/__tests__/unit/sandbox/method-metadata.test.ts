@@ -229,6 +229,14 @@ describe("method-metadata", () => {
 		expect(linkExample).toContain("relationship_type_exists");
 	});
 
+	it("points a failed operations.execute at error.details.output, not the message", () => {
+		// A failed run's result (and any output it reported, such as a browser
+		// dialog that blocked it) rides on the thrown error's details.
+		const execute = METHOD_METADATA["operations.execute"];
+		expect(execute.summary).toContain("error.details.output");
+		expect(execute.summary).toContain("instead of parsing the message");
+	});
+
 	it("teaches the connect→feed two-hop so setup actually collects data", () => {
 		// connections.connect alone syncs nothing — the agent must then create a
 		// feed on the returned connection_id. This is the connect-website eval gap:

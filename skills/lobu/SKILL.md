@@ -208,6 +208,14 @@ and sign in on the source site in that browser. Browser operations run through
 that paired device; external remote-debugging endpoints and CLI browser-auth
 capture are no longer supported.
 
+Nothing answers a JS dialog (alert, confirm, prompt, beforeunload) on the
+agent's behalf. A browser action it blocks fails, and the failed result's
+`output` carries `tab_id` and `dialog` (`dialog_id`, `type`, `message`). In
+`run_sdk`, catch the `operations.execute` error and read `error.details.output`
+rather than parsing the error text (a background run's `operations.getRun`
+returns the same `output`), then answer with the connection's `handle_dialog`
+operation. An unanswered dialog is handed to the user after two minutes.
+
 To test a configured feed without writing ingested data, discover the current
 feed methods with `search_sdk`, then use `client.feeds.trigger({ feed_id, dry_run: true })`
 through `run_sdk` or `lobu call run_sdk` (with a `title` arg). Inspect `client.feeds.get({ feed_id })`

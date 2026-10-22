@@ -89,6 +89,11 @@ describe("lobu operator skill", () => {
     expect(description?.length).toBeLessThanOrEqual(200);
   });
 
+  it("reads a blocked browser action's dialog from the error details", () => {
+    expect(LOBU_SKILL_MARKDOWN).toContain("error.details.output");
+    expect(LOBU_SKILL_MARKDOWN).toContain("handle_dialog");
+  });
+
   it("indexes the required contributor workflow", () => {
     expect(operatorSkill).toContain("make task-setup");
     expect(operatorSkill).toContain("red→fix→green");
