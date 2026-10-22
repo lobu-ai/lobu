@@ -48,6 +48,7 @@ import {
 } from "../connectors/feed-sync-failure";
 import { parseDependencyUnavailableError } from "../connectors/dependency-unavailable";
 import { getDb, parsePgNumberArray } from "../db/client";
+import { isTransientDbError } from "../db/with-retry";
 import {
 	pauseFeedsForInactiveConnections,
 	resumeFeedsForRecoveredConnections,
@@ -619,7 +620,9 @@ export async function ingestConnectorItems(
 	// and the checkpoint, written in the one transaction that also holds the
 	// run's lease (feed-page-commit.ts). State is local to one call because a
 	// deadlock victim runs it again from the start.
+	let connectionRetried = false;
 	const writePage = async (db: DbClient) => {
+		dryPreview.length = 0;
 		let totalItems = 0;
 		const activations: AutomationActivationResult[] = [];
 		const pendingTranscriptions: Parameters<
@@ -901,6 +904,8 @@ export async function ingestConnectorItems(
 					});
 				}
 			} catch (err) {
+				// The first connection failure is retried with a fresh page transaction.
+				if (!connectionRetried && isTransientDbError(err)) throw err;
 				logger.error(
 					{
 						run_id: target.runId,
@@ -967,18 +972,28 @@ export async function ingestConnectorItems(
 	const DRY_RUN_ROLLBACK = Symbol("dry-run-rollback");
 	let outcome: Awaited<ReturnType<typeof writePage>> | null = null;
 	try {
-		if (isDry) {
+		for (;;) {
 			try {
-				await sql.begin(async (tx) => {
-					await lockFeedPage(tx, page);
-					outcome = await writePage(tx);
-					throw DRY_RUN_ROLLBACK;
-				});
+				if (isDry) {
+					try {
+						await sql.begin(async (tx) => {
+							await lockFeedPage(tx, page);
+							outcome = await writePage(tx);
+							throw DRY_RUN_ROLLBACK;
+						});
+					} catch (err) {
+						if (err !== DRY_RUN_ROLLBACK) throw err;
+					}
+				} else {
+					outcome = await withFeedPageTransaction(sql, page, writePage);
+				}
+				break;
 			} catch (err) {
-				if (err !== DRY_RUN_ROLLBACK) throw err;
+				if (connectionRetried || !isTransientDbError(err)) throw err;
+				// Retry the whole page once on a fresh connection. withDbRetry
+				// allows two retries; external effects still wait for commit.
+				connectionRetried = true;
 			}
-		} else {
-			outcome = await withFeedPageTransaction(sql, page, writePage);
 		}
 	} catch (err) {
 		await deleteMaterializedArtifacts(
