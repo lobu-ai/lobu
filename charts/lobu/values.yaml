@@ -244,17 +244,18 @@ embeddings:
 
   resources:
     requests:
-      # Bumped from 500m: the local embedding model is CPU-bound and 500m starved
-      # it (prod backfill -> slow batches -> failed embeddings).
+      # Bumped from 500m: the local embedding model runs CPU-bound and inline, so
+      # 500m starved it — batches blocked the event loop long enough to trip the
+      # liveness probe (prod backfill -> SIGKILL -> failed embeddings + restart loop).
       cpu: 1000m
       memory: 1Gi
     limits:
       memory: 3Gi
 
-  # The model runs on an inference worker thread, so /health answers while a batch
-  # computes. Liveness must still detect a DEAD process, not a BUSY one: a node
-  # saturated by other pods slows every response, so the embeddings service keeps
-  # its own tolerant probe rather than the app's shared one (3s timeout x3).
+  # The embeddings service runs the model INLINE on a single-threaded event loop, so
+  # a heavy batch blocks /health. The app's shared probe (3s timeout x3) killed a
+  # busy-but-healthy service mid-request in prod. Liveness must detect a DEAD process,
+  # not a BUSY one, so the embeddings service gets its own tolerant probe.
   healthCheck:
     readinessProbe:
       initialDelaySeconds: 10
