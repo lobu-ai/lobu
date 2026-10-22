@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+// Load the registry before sdk_run: the registry imports sdk_run, and sdk_run's
+// own import graph reaches the registry, so entering that cycle at sdk_run
+// leaves its exports uninitialized when the registry evaluates and breaks a
+// standalone run of this file.
+import "../../tools/registry";
 import { boundScriptErrorText } from "../../sandbox/run-script";
 import {
 	classifySdkScriptError,
@@ -93,7 +98,6 @@ describe("SDK MCP public result", () => {
 			'"logs"',
 			'"ts"',
 			'"stack"',
-			'"details"',
 			'"duration_ms"',
 			'"sdk_calls"',
 			'"sdk_call_trace"',
@@ -101,6 +105,22 @@ describe("SDK MCP public result", () => {
 		]) {
 			expect(schema).not.toContain(forbidden);
 		}
+	});
+
+	test("replaces oversized SDK action details with a truncation marker", () => {
+		const publicResult = toMcpPublicSdkScriptResult({
+			success: false,
+			error: {
+				name: "ClientSdkActionError",
+				message: "failed",
+				details: { output: { blob: "x".repeat(40_000) } },
+			},
+			skipped_calls: 0,
+			side_effect_preview: [],
+			dry_run: false,
+		}) as { error: { details?: Record<string, unknown> } };
+		expect(publicResult.error.details).toMatchObject({ truncated: true });
+		expect(JSON.stringify(publicResult).length).toBeLessThan(1_000);
 	});
 
 	test("normalizes the bounded dry-run preview contract", () => {

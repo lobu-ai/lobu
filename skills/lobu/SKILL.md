@@ -212,9 +212,10 @@ Nothing answers a JS dialog (alert, confirm, prompt, beforeunload) on the
 agent's behalf. A browser action it blocks fails, and the failed result's
 `output` carries `tab_id` and `dialog` (`dialog_id`, `type`, `message`). In
 `run_sdk`, catch the `operations.execute` error and read `error.details.output`
-rather than parsing the error text (a background run's `operations.getRun`
-returns the same `output`), then answer with the connection's `handle_dialog`
-operation. An unanswered dialog is handed to the user after two minutes.
+rather than parsing the error text (an uncaught failure returns the same value
+as the `run_sdk` result's `error.details`, and a background run's
+`operations.getRun` returns the same `output`), then answer with the
+connection's `handle_dialog` operation. An unanswered dialog is handed to the user after two minutes.
 
 To test a configured feed without writing ingested data, discover the current
 feed methods with `search_sdk`, then use `client.feeds.trigger({ feed_id, dry_run: true })`
