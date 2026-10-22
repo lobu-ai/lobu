@@ -1386,22 +1386,22 @@ describe("operations.execute backend lifecycle", () => {
 		expect(run.action_output).toEqual({ body: { nulkey: "valuewith-nul" } });
 	});
 
-	it("strips NUL from failed HTTP operation output and error", async () => {
-		const result = await manageOperations(
-			{
-				action: "execute",
-				connection_id: httpConnectionId,
-				operation_key: "create_item",
-				input: { body: { value: "nul-failure" } },
-			},
-			{} as Env,
-			ctx,
-		);
+	it("preserves sanitized failed HTTP output in initial and replayed responses", async () => {
+		const args = {
+			action: "execute" as const,
+			connection_id: httpConnectionId,
+			operation_key: "create_item",
+			input: { body: { value: "nul-failure" } },
+			idempotency_key: "synthetic-failed-http-output",
+		};
+		const result = await manageOperations(args, {} as Env, ctx);
 		expect(result).toMatchObject({
 			action: "execute",
 			status: "failed",
 			error_message: "upstreamfailed",
+			output: { body: "upstreamfailed" },
 		});
+		expect(await manageOperations(args, {} as Env, ctx)).toEqual(result);
 		const [run] = await getTestDb()`
 			SELECT action_output, error_message FROM runs
 			WHERE id = ${(result as { run_id: number }).run_id}

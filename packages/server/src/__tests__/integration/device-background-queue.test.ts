@@ -132,6 +132,23 @@ describe('public device operation queue deadlines', () => {
     expect(await execute()).toMatchObject({ run_id: queued.run_id, status: 'completed', output: { done: true } });
   });
 
+  it('returns what a failed device action reported, live and on replay', async () => {
+    // A browser action interrupted by a JS dialog fails, and the dialog it
+    // reports is what the caller must answer: it has to arrive as data.
+    const dialog = { dialog_id: 'synthetic-dialog', type: 'confirm', message: 'Proceed?' };
+    const waiting = execute(false, 'synthetic-failed-output');
+    let claimed: { run_id?: number } = {};
+    for (let i = 0; i < 50 && !claimed.run_id; i++) claimed = await poll();
+    expect(claimed.run_id).toBeDefined();
+    const failed = await post('/api/workers/complete-action', { body: {
+      run_id: claimed.run_id, worker_id: SELECTED_WORKER, status: 'failed',
+      error_message: 'A confirm dialog is open', action_output: { dialog },
+    } });
+    expect(failed.status).toBe(200);
+    expect(await waiting).toMatchObject({ status: 'failed', output: { dialog } });
+    expect(await execute(false, 'synthetic-failed-output')).toMatchObject({ status: 'failed', output: { dialog } });
+  });
+
   it('replays without renewing expiry or changing the original background intent', async () => {
     const queued = await execute();
     const sql = getTestDb();
