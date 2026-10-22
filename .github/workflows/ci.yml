@@ -673,13 +673,19 @@ jobs:
       - name: Install Playwright Chromium (extension smoke)
         # channel "chromium" needs the Playwright browser build on disk; the
         # runner's google-chrome-stable cannot host extension service workers in
-        # headless mode. --with-deps pulls the shared libs the Ubuntu image lacks.
+        # headless mode. No --with-deps: the ubuntu-24.04 image already ships
+        # Chromium's shared libraries, and the ~20MB of fonts it adds came from
+        # an Azure apt mirror that intermittently served 26-60 kB/s and ran this
+        # job into its 25-minute timeout.
         if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
-        run: node node_modules/playwright-vanilla/cli.js install --with-deps chromium
+        run: node node_modules/playwright-vanilla/cli.js install chromium
 
       - name: Install window manager for Chrome lifecycle tests
+        # --no-install-recommends: openbox otherwise recommends ghostscript,
+        # poppler-data and several font packages (~20MB) the smoke never uses,
+        # all fetched from the same slow mirror.
         if: steps.submodule.outputs.stubbed != 'true' && needs.paths.outputs.chromeExt == 'true'
-        run: sudo apt-get update -qq && sudo apt-get install -y xvfb openbox xauth
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends xvfb openbox xauth
 
       - name: Chrome extension smoke (real Chromium, --load-extension)
         # Loads apps/chrome into headed Chromium against a loopback gateway
