@@ -133,7 +133,9 @@ lobu call manage_operations --org <org-slug> --arg action=execute \
   --arg input:='{"url":"https://app.lobu.ai/<path>","wait_for_load":true,"new_tab":true}' --raw
 ```
 
-Chrome ops: `navigate` (reuses an agent tab on the same site, `new_tab`, an existing `tab_id`, or the site's `persistent` warm tab; optional `group`), `list_tabs`, `evaluate`, `get_accessibility_tree` (`filter: interactive|visible|all`), `wait_for_selector`, `click_ref`, `type_ref`, `screenshot`, `show_notification`, `network_intercept_*`, `close_tab`.
+Chrome ops: `navigate` (reuses an agent tab on the same site, `new_tab`, an existing `tab_id`, or the site's `persistent` warm tab; optional `group`), `list_tabs`, `evaluate`, `get_accessibility_tree` (`filter: interactive|visible|all`), `wait_for_selector`, `click_ref`, `type_ref`, `press_key`, `hover_ref`, `scroll`, `select_option`, `handle_dialog`, `screenshot`, `show_notification`, `network_intercept_*`, `close_tab`.
+
+Successful `click_ref`, `type_ref`, `press_key`, `hover_ref`, `scroll`, and `select_option` results carry `outcome` (`confirmed`, `no_change` or `unverifiable`) based on what the extension observes after the action. Read operations such as `list_tabs` and `get_accessibility_tree` do not carry it. A JS dialog intercepted by the extension is never answered automatically: the interrupted action fails with its `dialog_id` (the run's `output.dialog` holds the type and message; read it with `operations.getRun`). Answer it with `handle_dialog`, passing the reported `tab_id`, `dialog_id`, and `accept` choice. An unanswered dialog is handed to the user after two minutes.
 
 ## Driving the paired Owletto extension (connector debugging)
 
