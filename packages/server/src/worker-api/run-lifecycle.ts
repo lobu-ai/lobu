@@ -1015,9 +1015,15 @@ export async function ingestConnectorItems(
 			}
 		}
 	} catch (err) {
-		await deleteMaterializedArtifacts(
-			stagedItems.flatMap((staged) => staged.publishedArtifactIds)
-		);
+		// Once writePage has returned, a failure (a connection drop during COMMIT)
+		// is ambiguous: the page may be durable and reference these artifacts.
+		// Deleting them would silently destroy committed data, so keep them. A
+		// leaked orphan is recoverable; a deleted referenced artifact is not.
+		if (isDry || !pageWritten) {
+			await deleteMaterializedArtifacts(
+				stagedItems.flatMap((staged) => staged.publishedArtifactIds)
+			);
+		}
 		if (err instanceof FeedPageUnavailableError) {
 			// Reaped, cancelled or re-claimed after this request was authorized.
 			// A deleted feed/connection reaches the same fence. Nothing was written.

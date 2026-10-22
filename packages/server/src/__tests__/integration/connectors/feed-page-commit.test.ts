@@ -18,6 +18,7 @@ import type { Env } from '../../../index';
 import { insertEvent, lockEventDedupIdentity } from '../../../utils/insert-event';
 import * as feedPageCommit from '../../../connectors/feed-page-commit';
 import * as eventWriter from '../../../utils/insert-event';
+import * as inlineAttachments from '../../../utils/inline-attachments';
 import logger from '../../../utils/logger';
 import { streamContent } from '../../../worker-api';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -197,6 +198,7 @@ describe('feed page commit', () => {
         throw error;
       });
     const insert = vi.spyOn(eventWriter, 'insertEvent');
+    const cleanup = vi.spyOn(inlineAttachments, 'deleteMaterializedArtifacts');
     const { ctx, result } = mockWorkerCtx({
       run_id: runId, worker_id: WORKER_ID, checkpoint: { cursor: 'page-1' },
       items: [item('first'), item('second')],
@@ -205,6 +207,8 @@ describe('feed page commit', () => {
     await streamContent(ctx);
 
     expect(result().status).toBe(500);
+    // The page may be durable, so its artifacts must not be deleted.
+    expect(cleanup).not.toHaveBeenCalled();
     expect(commit).toHaveBeenCalledTimes(1);
     expect(insert).toHaveBeenCalledTimes(2);
     expect(await currentOriginIds(connectionId)).toEqual(['first', 'second']);
