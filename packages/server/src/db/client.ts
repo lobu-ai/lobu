@@ -297,6 +297,86 @@ export async function closeDbSingleton(): Promise<void> {
     await lockDbSingleton.end();
     lockDbSingleton = null;
   }
+  if (readinessDbSingleton) {
+    const readiness = readinessDbSingleton;
+    readinessDbSingleton = null;
+    await readiness.end({ timeout: 0 });
+  }
+}
+
+// =========================================================
+// Dedicated readiness-probe connection
+// =========================================================
+
+let readinessDbSingleton: Sql | null = null;
+
+/**
+ * Budget for one readiness check, connect included. It stays under the
+ * chart's readinessProbe.timeoutSeconds (3s) so an unreachable database
+ * surfaces as a 503 the kubelet reads, not as a probe timeout.
+ */
+const READINESS_CHECK_TIMEOUT_MS = 2000;
+
+/**
+ * One connection reserved for `/health/ready`, kept apart from the main pool.
+ *
+ * Readiness answers "can this pod reach Postgres", not "is the main pool idle".
+ * On the main pool the probe's `SELECT 1` queued behind whatever saturated it,
+ * timed out on a healthy pod, and with a single replica k8s pulled the only
+ * Service endpoint, so the ingress answered `503 no available server` to every
+ * client. Same separation `getLockDb()` uses for advisory locks.
+ */
+function getReadinessDb(): Sql {
+  if (!readinessDbSingleton) {
+    const url = process.env.DATABASE_URL;
+    if (!url) {
+      throw new Error('DATABASE_URL is required');
+    }
+    readinessDbSingleton = postgres(url, {
+      max: 1,
+      // Keep the one connection warm between probes; only the first probe
+      // after a connect or a max_lifetime recycle pays the handshake.
+      idle_timeout: 0,
+      max_lifetime: 60 * 30,
+      connect_timeout: READINESS_CHECK_TIMEOUT_MS / 1000,
+      // No statement_timeout startup GUC: PgBouncer rejects unsupported startup
+      // parameters (see getLockDb). checkDatabaseReadiness bounds the round
+      // trip client-side instead.
+      connection: {
+        application_name: 'server-readiness',
+      },
+    });
+  }
+  return readinessDbSingleton;
+}
+
+/**
+ * Round-trip `SELECT 1` on the readiness connection, bounded by
+ * READINESS_CHECK_TIMEOUT_MS. Rejects on a refused, failed, or hung
+ * connection. A failed check discards the connection so a wedged socket
+ * cannot pin every later probe; the next check dials fresh.
+ */
+export async function checkDatabaseReadiness(): Promise<void> {
+  const sql = getReadinessDb();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(`readiness SELECT 1 timed out after ${READINESS_CHECK_TIMEOUT_MS}ms`)
+        ),
+      READINESS_CHECK_TIMEOUT_MS
+    );
+  });
+  try {
+    await Promise.race([sql`SELECT 1`, deadline]);
+  } catch (err) {
+    if (readinessDbSingleton === sql) readinessDbSingleton = null;
+    sql.end({ timeout: 0 }).catch(() => undefined);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // =========================================================

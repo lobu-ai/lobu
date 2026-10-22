@@ -39,7 +39,7 @@ import { connectionTokenRoutes } from "./connect/connection-token-route";
 import { setupRoutes } from "./connect/setup-routes";
 import { chatIdentityRoutes } from "./connect/chat-identity-routes";
 import { connectRoutes } from "./connect/routes";
-import { getDb } from "./db/client";
+import { checkDatabaseReadiness, getDb } from "./db/client";
 import * as invalidationEmitter from "./events/emitter";
 import { streamInvalidationEvents } from "./events/sse";
 import { invalidationSseAuth } from "./events/sse-invalidation-auth";
@@ -494,7 +494,9 @@ app.get("/health", (c) => {
 /**
  * Readiness probe — process is up AND can talk to the database. Failing
  * this drops the pod from the Service's endpoint set without restarting
- * it, which is the right semantic for transient DB unavailability.
+ * it, which is the right semantic for transient DB unavailability. The
+ * check runs on its own connection, so a saturated main pool never makes
+ * a healthy pod look unready.
  */
 app.get("/health/ready", async (c) => {
 	// Once shutdown has begun, report unready so the LB drains this pod's
@@ -503,8 +505,7 @@ app.get("/health/ready", async (c) => {
 		return c.json({ status: "draining", service: "lobu-api" }, 503);
 	}
 	try {
-		const sql = getDb();
-		await sql`SELECT 1`;
+		await checkDatabaseReadiness();
 		return c.json({ status: "ok", service: "lobu-api" });
 	} catch (error) {
 		return c.json(
