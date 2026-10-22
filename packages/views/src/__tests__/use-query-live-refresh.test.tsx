@@ -186,7 +186,7 @@ describe("useQuery live refresh", () => {
     expect(latest).toEqual({ loading: false, data: { count: 2 }, error: null });
   });
 
-  test("a steady stream of data changes still lands each newer read", async () => {
+  test("a burst of data changes during a re-read costs one follow-up read", async () => {
     await ready();
     await act(async () => {
       answer(parent.toolsCalls()[0], 1);
@@ -205,38 +205,47 @@ describe("useQuery live refresh", () => {
     };
     await changed();
     await changed();
-    expect(parent.toolsCalls()).toHaveLength(3);
-    // The second change arrived before the first re-read answered; that
-    // answer is still newer than what is on screen, so it lands.
+    await changed();
+    // The re-read is still answering: later changes wait for it.
+    expect(parent.toolsCalls()).toHaveLength(2);
     await act(async () => {
       answer(parent.toolsCalls()[1], 2);
       await tick();
+      await tick();
     });
+    // That answer lands, and one more read covers the changes it may predate.
     expect(latest?.data).toEqual({ count: 2 });
+    expect(parent.toolsCalls()).toHaveLength(3);
+    expect(seen.every((s) => s.data === null || !s.loading)).toBe(true);
     await act(async () => {
       answer(parent.toolsCalls()[2], 3);
       await tick();
+      await tick();
     });
-    expect(latest?.data).toEqual({ count: 3 });
+    expect(latest).toEqual({ loading: false, data: { count: 3 }, error: null });
+    expect(parent.toolsCalls()).toHaveLength(3);
   });
 
-  test("an older re-read answering last does not replace a newer one", async () => {
+  test("an older read answering last does not replace a newer one", async () => {
     await ready();
     await act(async () => {
       answer(parent.toolsCalls()[0], 1);
       await tick();
     });
-    for (let i = 0; i < 2; i++) {
-      await act(async () => {
-        hostSend({
-          jsonrpc: "2.0",
-          method: "lobu/notifications/data-changed",
-          params: {},
-        });
-        await tick();
-        await tick();
+    await act(async () => {
+      hostSend({
+        jsonrpc: "2.0",
+        method: "lobu/notifications/data-changed",
+        params: {},
       });
-    }
+      await tick();
+      await tick();
+    });
+    await act(async () => {
+      refetch?.();
+      await tick();
+    });
+    expect(parent.toolsCalls()).toHaveLength(3);
     await act(async () => {
       answer(parent.toolsCalls()[2], 3);
       await tick();
@@ -244,8 +253,10 @@ describe("useQuery live refresh", () => {
     await act(async () => {
       answer(parent.toolsCalls()[1], 2);
       await tick();
+      await tick();
     });
     expect(latest?.data).toEqual({ count: 3 });
+    expect(parent.toolsCalls()).toHaveLength(3);
   });
 
   test("unrelated host notifications do not re-read", async () => {

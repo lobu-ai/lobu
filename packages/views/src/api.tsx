@@ -493,6 +493,7 @@ export function useQuery<T = unknown>(
     key: string | null;
     dataVersion: number;
     tick: number;
+    followUp: number;
   } | null>(null);
   // Reads are numbered so a newer read never discards an older one still in
   // flight for the same key: under a steady stream of writes every re-read
@@ -500,6 +501,12 @@ export function useQuery<T = unknown>(
   // answer already on screen, drops a result.
   const readSeq = useRef(0);
   const shownSeq = useRef(0);
+  // A data change while a read is still answering waits for it and then reads
+  // once more, so a burst of writes costs one follow-up read instead of one
+  // concurrent read per write.
+  const reading = useRef(0);
+  const owed = useRef(false);
+  const [followUp, setFollowUp] = useState(0);
   const key =
     query === null
       ? null
@@ -508,11 +515,12 @@ export function useQuery<T = unknown>(
         : query.kind === "tool"
           ? `tool:${query.name}:${JSON.stringify(query.args)}`
           : `sql:${query.text}`;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: key is the stable identity of query (listing query itself refetches every render); rt.callTool is stable; tick and rt.dataVersion are the intentional refetch triggers.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: key is the stable identity of query (listing query itself refetches every render); rt.callTool is stable; tick, rt.dataVersion and followUp are the intentional refetch triggers.
   useEffect(() => {
     // A skipped query is idle, even when the previous request is in flight.
     if (key === null) {
       lastRead.current = null;
+      owed.current = false;
       setState((s) => (s.loading ? { ...s, loading: false } : s));
       return;
     }
@@ -526,17 +534,32 @@ export function useQuery<T = unknown>(
     ) {
       return;
     }
+    const last = lastRead.current;
+    const background =
+      last?.key === key &&
+      last.tick === tick &&
+      (last.dataVersion !== rt.dataVersion || last.followUp !== followUp);
+    lastRead.current = { key, dataVersion: rt.dataVersion, tick, followUp };
+    if (background && reading.current !== 0) {
+      owed.current = true;
+      return;
+    }
     const seq = ++readSeq.current;
+    reading.current = seq;
+    owed.current = false;
     const show = (next: Omit<QueryState<T>, "refetch">) => {
       if (lastRead.current?.key !== key || seq < shownSeq.current) return;
       shownSeq.current = seq;
       setState(next);
     };
-    const background =
-      lastRead.current?.key === key &&
-      lastRead.current.tick === tick &&
-      lastRead.current.dataVersion !== rt.dataVersion;
-    lastRead.current = { key, dataVersion: rt.dataVersion, tick };
+    const settle = () => {
+      if (reading.current !== seq) return;
+      reading.current = 0;
+      if (owed.current && lastRead.current?.key === key) {
+        owed.current = false;
+        setFollowUp((n) => n + 1);
+      }
+    };
     if (!background) setState((s) => ({ ...s, loading: true }));
     const q = query as SqlQuery | ToolQuery | string;
     const call =
@@ -562,8 +585,9 @@ export function useQuery<T = unknown>(
           truncatedColumns: [],
           loading: false,
         });
-      });
-  }, [key, rt.ready, tick, rt.dataVersion, live]);
+      })
+      .finally(settle);
+  }, [key, rt.ready, tick, rt.dataVersion, followUp, live]);
   const refetch = useCallback(() => setTick((t) => t + 1), []);
   return { ...state, refetch };
 }
