@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
 
 // Capture the fetch handler that server.ts hands to `serve(...)`.
@@ -10,19 +11,15 @@ mock.module('@hono/node-server', () => ({
   }),
 }));
 
-// Mock @xenova/transformers so importing ../embeddings (transitively from server)
-// does not try to download a real model or pull native ONNX bindings.
-// Mirrors the real pipeline contract: a string input → [768] tensor, an array
-// of N inputs → flat [N*768] tensor with `dims = [N, 768]`.
-const fakeExtractor = mock(async (input: string | string[], _opts: unknown) => {
-  const n = Array.isArray(input) ? input.length : 1;
-  const data = new Float32Array(768 * n).fill(0.001);
-  return Array.isArray(input) ? { data, dims: [n, 768] } : { data };
-});
-mock.module('@xenova/transformers', () => ({
-  pipeline: mock(async () => fakeExtractor),
-  env: { cacheDir: '', backends: { onnx: { wasm: { numThreads: 1 } } } },
-}));
+// Local inference runs on a worker thread that re-loads server.ts, where
+// module mocks do not reach. Point the runtime at a fake component instead
+// (768-dim vectors, no model download or native ONNX bindings).
+const originalRuntimeEntry = process.env.LOBU_RUNTIME_EMBEDDINGS_ENTRY;
+process.env.LOBU_RUNTIME_EMBEDDINGS_ENTRY = join(
+  import.meta.dir,
+  'fixtures',
+  'blocking-local-embeddings.mjs'
+);
 
 // Snapshot env so we can restore between tests.
 const ENV_KEYS = [
@@ -44,7 +41,7 @@ for (const key of ENV_KEYS) {
   delete process.env[key];
 }
 // Local backend by default, with a small expected dimension we can satisfy
-// from our fake extractor.
+// from the fake component.
 process.env.EMBEDDINGS_DIMENSIONS = '768';
 
 const originalFetch = globalThis.fetch;
@@ -65,6 +62,11 @@ afterAll(() => {
     } else {
       process.env[key] = originalEnv[key];
     }
+  }
+  if (originalRuntimeEntry === undefined) {
+    delete process.env.LOBU_RUNTIME_EMBEDDINGS_ENTRY;
+  } else {
+    process.env.LOBU_RUNTIME_EMBEDDINGS_ENTRY = originalRuntimeEntry;
   }
   globalThis.fetch = originalFetch;
 });
@@ -232,6 +234,27 @@ describe('POST /api/embeddings — local backend', () => {
     expect(body.error).toContain('Local embeddings response');
     expect(body.error).toContain('768');
     expect(body.error).toContain('999');
+  });
+});
+
+describe('POST /api/embeddings — local inference worker', () => {
+  test('returns 500 with the component error message', async () => {
+    const res = await postJson({ texts: ['fail'] });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('component failed');
+  });
+
+  test('fails the in-flight request and recovers on the next one when the worker dies', async () => {
+    const crashed = await postJson({ texts: ['crash'] });
+    expect(crashed.status).toBe(500);
+    const crashBody = (await crashed.json()) as { error: string };
+    expect(crashBody.error).toContain('worker exited');
+
+    const res = await postJson({ texts: ['hello'] });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { embeddings: number[][] };
+    expect(body.embeddings[0]).toHaveLength(768);
   });
 });
 
