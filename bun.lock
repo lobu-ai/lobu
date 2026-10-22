@@ -17,7 +17,7 @@
     },
     "packages/cli": {
       "name": "@lobu/cli",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "bin": {
         "lobu": "bin/lobu.js",
       },
@@ -52,7 +52,7 @@
     },
     "packages/client": {
       "name": "@lobu/client",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "devDependencies": {
         "@hey-api/client-fetch": "^0.13.1",
         "@hey-api/openapi-ts": "^0.99.0",
@@ -61,7 +61,7 @@
     },
     "packages/connector-sdk": {
       "name": "@lobu/connector-sdk",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "dependencies": {
         "@lobu/core": "workspace:*",
         "@sinclair/typebox": "^0.34.41",
@@ -77,7 +77,7 @@
     },
     "packages/connector-worker": {
       "name": "@lobu/connector-worker",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "bin": {
         "connector-worker": "./dist/bin.js",
       },
@@ -127,7 +127,7 @@
     },
     "packages/core": {
       "name": "@lobu/core",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "dependencies": {
         "@opentelemetry/api": "^1.9.0",
         "@opentelemetry/exporter-trace-otlp-grpc": "^0.222.0",
@@ -159,7 +159,7 @@
     },
     "packages/embeddings": {
       "name": "@lobu/embeddings",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "dependencies": {
         "@hono/node-server": "^2.0.11",
         "@xenova/transformers": "^2.17.2",
@@ -262,7 +262,7 @@
     },
     "packages/pgvector-embedded": {
       "name": "@lobu/pgvector-embedded",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "devDependencies": {
         "@types/node": "20.19.9",
         "typescript": "^5.7.2",
@@ -270,7 +270,7 @@
     },
     "packages/plugin-api": {
       "name": "@lobu/plugin-api",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "dependencies": {
         "@sinclair/typebox": "^0.34.41",
       },
@@ -296,7 +296,7 @@
     },
     "packages/plugin-host": {
       "name": "@lobu/plugin-host",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "dependencies": {
         "@lobu/plugin-api": "workspace:*",
       },
@@ -363,7 +363,7 @@
     },
     "packages/promptfoo-provider": {
       "name": "@lobu/promptfoo-provider",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "devDependencies": {
         "@types/node": "^20.10.0",
         "typescript": "^5.3.3",
@@ -439,7 +439,7 @@
     },
     "packages/views": {
       "name": "@lobu/views",
-      "version": "24.1.1",
+      "version": "21.2.1",
       "dependencies": {
         "@lobu/core": "workspace:*",
       },
@@ -1764,6 +1764,12 @@
 
     "@types/chai": ["@types/chai@5.2.3", "", { "dependencies": { "@types/deep-eql": "*", "assertion-error": "^2.0.1" } }, "sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA=="],
 
+
+
+
+
+
+
     "@types/debug": ["@types/debug@4.1.13", "", { "dependencies": { "@types/ms": "*" } }, "sha512-KSVgmQmzMwPlmtljOomayoR89W4FynCAi3E8PPs7vmDVPe84hT+vGPKkJfThkmXs0x0jAaa9U8uW8bbfyS2fWw=="],
 
     "@types/deep-eql": ["@types/deep-eql@4.0.2", "", {}, "sha512-c9h9dVVMigMPc4bwTvC5dxqtqJZwQPePsWjPlpSOnojbor6pGqdk541lfA7AqFQr5pB1BRdq0juY9db81BwyFw=="],
@@ -1847,6 +1853,8 @@
     "@workflow/serde": ["@workflow/serde@4.1.0-beta.2", "", {}, "sha512-8kkeoQKLDaKXefjV5dbhBj2aErfKp1Mc4pb6tj8144cF+Em5SPbyMbyLCHp+BVrFfFVCBluCtMx+jjvaFVZGww=="],
 
     "@xenova/transformers": ["@xenova/transformers@2.17.2", "", { "dependencies": { "@huggingface/jinja": "^0.2.2", "onnxruntime-web": "1.14.0", "sharp": "^0.32.0" }, "optionalDependencies": { "onnxruntime-node": "1.14.0" } }, "sha512-lZmHqzrVIkSvZdKZEx7IYY51TK0WDrC8eR0c5IMnBsO8di8are1zzw8BlLhyO2TklZKLN5UffNGs1IJwT6oOqQ=="],
+
+
 
     "abort-controller": ["abort-controller@3.0.0", "", { "dependencies": { "event-target-shim": "^5.0.0" } }, "sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg=="],
 
@@ -2010,6 +2018,7 @@
 
     "class-variance-authority": ["class-variance-authority@0.7.1", "", { "dependencies": { "clsx": "^2.1.1" } }, "sha512-Ka+9Trutv7G8M6WT6SeiRWz792K5qEqIGEGzXKhAE6xOWAY6pPH8U+9IY3oCMv6kqTmLsv7Xh/2w2RigkePMsg=="],
 
+
     "clean-git-ref": ["clean-git-ref@2.0.1", "", {}, "sha512-bLSptAy2P0s6hU4PzuIMKmMJJSE6gLXGH1cntDu7bWJUksvuM+7ReOK61mozULErYvP6a15rnYl0zFDef+pyPw=="],
 
     "cli-cursor": ["cli-cursor@5.0.0", "", { "dependencies": { "restore-cursor": "^5.0.0" } }, "sha512-aCj4O5wKyszjMmDT4tZj93kxyydN/K5zPWSCe6/0AV/AA1pqe5ZBIw0a2ZfPQV7lL5/yb5HsUreJ6UFAF1tEQw=="],
@@ -2085,6 +2094,15 @@
     "css.escape": ["css.escape@1.5.1", "", {}, "sha512-YUifsXXuknHlUsmlgyY0PKzgPOr7/FjCePfHNt0jxm83wHZi44VDMQ7/fGNkjY3/jV1MC+1CmZbaHzugyeRtpg=="],
 
     "csstype": ["csstype@3.2.3", "", {}, "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ=="],
+
+
+
+
+
+
+
+
+
 
     "data-uri-to-buffer": ["data-uri-to-buffer@6.0.2", "", {}, "sha512-7hvf7/GW8e86rW0ptuwS3OcBGDjIi6SZva7hCyWC0yYry2cOPmLIjXAUHI6DK2HsnwJd9ifmt57i8eV2n4YNpw=="],
 
@@ -3531,6 +3549,7 @@
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
 
     "zrender": ["zrender@6.1.0", "", { "dependencies": { "tslib": "2.3.0" } }, "sha512-oEGMDB6pOP2S6OwRR4PdVv610zrjnA3Bh+JnSG12fYJlBKjtNAoEb5fSUoCOOINlH96I2fU38/A2UpRKs67xYQ=="],
+
 
     "zwitch": ["zwitch@2.0.4", "", {}, "sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A=="],
 

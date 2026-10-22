@@ -1,6 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
 import { deviceManifestHash } from "@lobu/connector-sdk/device-manifest-hash";
+import { validateOperationInput } from "../../../server/src/operations/input-validation";
+import type { OperationDescriptor } from "../../../server/src/operations/types";
 import { validateDeviceConnectorManifests } from "../../../server/src/worker-api/device-manifests";
 import { headlessDeviceConnectorManifests } from "../headless.js";
 import {
@@ -26,6 +28,8 @@ const pinnedManifestHashes: Record<string, string> = {
     "a1c1b8eb1bb0fe249f9e66e485833750b75beb1c6b4df9839796cb74e2e6e8a4",
   "apple.computer_use@0.2.2":
     "3e9bd95c39e1f3c85d6fd19db5e8a2e5be5896a582716bdd05748d3c4d46ab2d",
+  "apple.computer_use@0.3.0":
+    "ab30e0d2f19254fc2cb41f04dd1c7d1ec0ac4097fcd7998c60879210d3c371c3",
   "apple.health@0.2.0":
     "95d01cbd942d6af5f201656e2b6ed320e3e6559723ad3f9de619b524451f70e4",
   "apple.photos@0.1.1":
@@ -202,6 +206,74 @@ describe("Mac device connector registry", () => {
       expect(
         actions[key]?.inputSchema?.properties?.expected?.properties
       ).toHaveProperty("completed");
+    }
+  });
+
+  test("apple.computer_use@0.3.0 accepts window selectors and window changes at the server", () => {
+    const computerUse = macDeviceConnectorManifests.find(
+      (manifest) =>
+        manifest.key === "apple.computer_use" && manifest.version === "0.3.0"
+    );
+    const actions = computerUse?.actions_schema ?? {};
+    const check = (action: string, input: Record<string, unknown>) =>
+      validateOperationInput(
+        { input_schema: actions[action]?.inputSchema } as OperationDescriptor,
+        input
+      );
+    const app = "com.example.editor";
+    for (const action of [
+      "click",
+      "type_text",
+      "paste_text",
+      "hotkey",
+      "scroll",
+    ]) {
+      expect(actions[action]?.inputSchema?.properties).toHaveProperty(
+        "window_id"
+      );
+      expect(actions[action]?.inputSchema?.properties).toHaveProperty(
+        "window_title"
+      );
+      expect(actions[action]?.inputSchema?.properties).toHaveProperty(
+        "window_index"
+      );
+    }
+    for (const [action, input] of [
+      [
+        "click",
+        { app, window_title: "Draft", snapshot_id: "s", element_id: "e" },
+      ],
+      ["hotkey", { app, window_index: 1, snapshot_id: "s", keys: "cmd,s" }],
+      ["paste_text", { app, window_id: 42, snapshot_id: "s", text: "hi" }],
+      [
+        "type_text",
+        { app, window_title: "Draft", snapshot_id: "s", text: "hi" },
+      ],
+      [
+        "scroll",
+        {
+          app,
+          window_title: "Draft",
+          snapshot_id: "s",
+          target: "e",
+          direction: "down",
+        },
+      ],
+      ["set_window_frame", { app, window_title: "Draft", width: 800 }],
+      ["set_window_frame", { window_id: 42, x: 0, y: 30 }],
+      ["window_action", { app, action: "minimize" }],
+      ["window_action", { window_id: 42, action: "close" }],
+    ] as const) {
+      expect(check(action, input)).toBeNull();
+    }
+    for (const [action, input] of [
+      ["set_window_frame", { window_title: "Draft", width: 800 }],
+      ["set_window_frame", { app }],
+      ["set_window_frame", { app, width: 0 }],
+      ["window_action", { window_title: "Draft", action: "close" }],
+      ["window_action", { app, action: "fullscreen" }],
+    ] as const) {
+      expect(check(action, input)).not.toBeNull();
     }
   });
 

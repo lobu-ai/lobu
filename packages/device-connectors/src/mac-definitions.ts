@@ -1,6 +1,7 @@
 import type { DeviceConnectorSpec } from "@lobu/connector-sdk";
 import {
   macComputerUseActions,
+  windowSelectorFields,
   withComputerUseStatus,
 } from "./mac-computer-use.js";
 
@@ -671,7 +672,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
   },
   {
     key: "apple.computer_use",
-    version: "0.2.2",
+    version: "0.3.0",
     name: "Mac Computer Use",
     description:
       "Observe and control this Mac through Lobu for Mac. Uses native macOS Screen Recording and Accessibility APIs in-process. Screenshots/UI trees stay on-device until an explicit action returns them.",
@@ -903,9 +904,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
               description:
                 "Application name, bundle id, or PID:<pid>. Defaults to the frontmost app/window when omitted.",
             },
-            window_id: {
-              type: "integer",
-            },
+            ...windowSelectorFields,
             foreground: {
               type: "boolean",
               default: false,
@@ -960,6 +959,7 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
               description:
                 "Application name, bundle id, or PID:<pid>. Defaults to the frontmost app/window when omitted.",
             },
+            ...windowSelectorFields,
             clear_existing: {
               type: "boolean",
               default: false,
@@ -1008,6 +1008,12 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
               description:
                 "Application name, bundle id, or PID:<pid>. Defaults to the frontmost app/window when omitted.",
             },
+            ...windowSelectorFields,
+            snapshot_id: {
+              type: "string",
+              description:
+                "Snapshot id returned by observe/screenshot/inspect. Use this with element ids like elem_12.",
+            },
             restore_delay_ms: {
               type: "integer",
               minimum: 0,
@@ -1047,6 +1053,12 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
               type: "string",
               description:
                 "Application name, bundle id, or PID:<pid>. Defaults to the frontmost app/window when omitted.",
+            },
+            ...windowSelectorFields,
+            snapshot_id: {
+              type: "string",
+              description:
+                "Snapshot id returned by observe/screenshot/inspect. Use this with element ids like elem_12.",
             },
             hold_ms: {
               type: "integer",
@@ -1124,12 +1136,20 @@ export const macDeviceConnectorSpecs: readonly DeviceConnectorSpec[] = [
             },
             target: {
               type: "string",
+              description:
+                "Element id from that observation. Uses background scrolling when supported; otherwise may raise the target and move the pointer, then restore the previous frontmost app.",
             },
             snapshot_id: {
               type: "string",
               description:
                 "Snapshot id returned by observe/screenshot/inspect. Use this with element ids like elem_12.",
             },
+            app: {
+              type: "string",
+              description:
+                "Application name, bundle id, or PID:<pid>. Defaults to the frontmost app/window when omitted.",
+            },
+            ...windowSelectorFields,
           },
           additionalProperties: false,
         },
