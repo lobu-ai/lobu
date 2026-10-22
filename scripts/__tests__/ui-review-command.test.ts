@@ -130,6 +130,13 @@ if (endpoint.startsWith("repos/lobu-ai/lobu/compare/")) {
       : process.env.MOCK_HEAD_POINTER;
   output({ type: "submodule", sha });
 } else if (endpoint.includes("/commits/") && endpoint.endsWith("/pulls")) {
+  const allowedFailures = Number(process.env.MOCK_PULLS_FAILURES || "0");
+  state.pullsFailures = (state.pullsFailures || 0) + 1;
+  if (state.pullsFailures <= allowedFailures) {
+    await writeState();
+    console.error("unexpected end of JSON input");
+    process.exit(1);
+  }
   const candidate = endpoint.split("/commits/")[1].split("/pulls")[0];
   const squash = process.env.MOCK_FLUX_TAIL === "1"
     ? process.env.MOCK_PRODUCT_POINTER
@@ -250,6 +257,7 @@ function runUiReview(
       // falls straight to "proof missing" instead of spawning a real
       // reviewer CLI mid test-run. Tests of the agent path override this.
       UI_REVIEW_AGENT: "0",
+      UI_REVIEW_GH_RETRY_MS: "0",
       ...environment,
     },
     stdout: "pipe",
@@ -845,5 +853,36 @@ describe("ui-review command", () => {
     expect(proof?.body).toContain(
       "https://claude.ai/code/artifact/flux-tail-proof"
     );
+  });
+  it("retries a transient GitHub 5xx on the commit pulls lookup", () => {
+    const fixture = createFixture();
+    const result = runUiReview(fixture, {
+      ARTIFACT: "https://claude.ai/code/artifact/retry-proof",
+      MOCK_PULLS_FAILURES: "2",
+    });
+
+    expectExit(result, 0);
+    const state = readState(fixture.stateFile);
+    const lookups = state.calls.filter((call) =>
+      call.endpoint.endsWith("/pulls")
+    );
+    expect(lookups.length).toBe(3);
+  });
+
+  it("gives up with the GitHub error after bounded retries", () => {
+    const fixture = createFixture();
+    const result = runUiReview(fixture, {
+      ARTIFACT: "https://claude.ai/code/artifact/retry-proof",
+      MOCK_PULLS_FAILURES: "99",
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(new TextDecoder().decode(result.stderr)).toContain(
+      "unexpected end of JSON input"
+    );
+    const state = readState(fixture.stateFile);
+    expect(
+      state.calls.filter((call) => call.endpoint.endsWith("/pulls")).length
+    ).toBe(6);
   });
 });

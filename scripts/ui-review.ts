@@ -65,6 +65,10 @@ function jsonCommand<T>(command: string, args: string[], input?: string): T {
   }
 }
 
+const GH_READ_ATTEMPTS = 6;
+const TRANSIENT_GH_ERROR =
+  /unexpected end of JSON input|HTTP 5\d\d|timed out|ECONNRESET|EOF/i;
+
 function ghApi<T>(endpoint: string, method = "GET", payload?: unknown): T {
   const args = ["api"];
   let input: string | undefined;
@@ -74,7 +78,25 @@ function ghApi<T>(endpoint: string, method = "GET", payload?: unknown): T {
     args.push("--input", "-");
     input = JSON.stringify(payload);
   }
-  return jsonCommand<T>("gh", args, input);
+  // GitHub intermittently answers read endpoints with an empty HTTP 500, which
+  // gh surfaces as "unexpected end of JSON input". Retry reads a bounded number
+  // of times; writes are never retried.
+  const retryDelayMs = Number(process.env.UI_REVIEW_GH_RETRY_MS ?? "500");
+  const attempts = method === "GET" ? GH_READ_ATTEMPTS : 1;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return jsonCommand<T>("gh", args, input);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= attempts || !TRANSIENT_GH_ERROR.test(message)) throw error;
+      Atomics.wait(
+        new Int32Array(new SharedArrayBuffer(4)),
+        0,
+        0,
+        retryDelayMs * attempt
+      );
+    }
+  }
 }
 
 function ghApiPages<T>(endpoint: string): T[] {
