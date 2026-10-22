@@ -40,7 +40,7 @@ import { resolveOperationFiles } from '../operations/file-inputs';
 import { applyRunConnectorPolicyAtClaim } from '../authz/operation-run-policy';
 import type { Outputs } from '../types/automations';
 import { deriveAutomationExtractionSchema } from '../utils/automation-extraction-schema';
-import { withDbRetry } from '../db/with-retry';
+import { isTransientDbError, withDbRetry } from '../db/with-retry';
 import { incrementCounter, setGauge } from '../gateway/metrics/prometheus';
 import { notifyThreadResponse } from '../gateway/orchestration/turn-liveness';
 import type { Env } from '../index';
@@ -488,7 +488,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       // `xmax = 0` on the RETURNING row distinguishes a brand-new device
       // registration from a routine poll-update so we only emit the
       // `device:created` lifecycle event once per device.
-      const upserted = (await sql`
+      const upsertDevice = () => sql`
         INSERT INTO device_workers (user_id, worker_id, platform, app_version, capabilities, label, organization_id, connector_manifests, agent_kinds)
         VALUES (
           ${registrationUserId}, ${worker_id}, ${platform}, ${app_version},
@@ -543,7 +543,13 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           agent_kinds = COALESCE(EXCLUDED.agent_kinds, device_workers.agent_kinds),
           last_seen_at = now()
         RETURNING id, organization_id, (xmax = 0) AS inserted
-      `) as unknown as Array<{
+      `;
+      const upserted = (await upsertDevice().catch((err) => {
+        if (!isTransientDbError(err)) throw err;
+        // Recreate the idempotent heartbeat write once on a fresh connection.
+        // withDbRetry allows two retries; keep this path to a single retry.
+        return upsertDevice();
+      })) as unknown as Array<{
         id: string;
         organization_id: string | null;
         inserted: boolean;
