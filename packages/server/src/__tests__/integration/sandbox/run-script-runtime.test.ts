@@ -27,7 +27,14 @@ import {
   runScript,
 } from "../../../sandbox/run-script";
 import { createValidatedSdkMethod } from "../../../sandbox/sdk-preflight";
-import { withValidatedArgs } from "../../../tools/validate-args";
+import {
+  SdkScriptResultSchema,
+  toMcpPublicSdkScriptResult,
+} from "../../../tools/sdk_run";
+import {
+  validateToolResult,
+  withValidatedArgs,
+} from "../../../tools/validate-args";
 import { ToolUserError } from "../../../utils/errors";
 
 const StubArgsSchema = Type.Object({ args: Type.Array(Type.Unknown()) });
@@ -438,6 +445,62 @@ describe("sandbox runtime", () => {
       retryable: true,
       details: { error_code: "NETWORK", retryable: true },
     });
+  });
+
+  it("returns an uncaught operation failure's details in the public result", async () => {
+    // A browser action blocked by a JS dialog fails with the dialog in the
+    // run's output. A script that does not catch the error must still hand
+    // the agent the dialog it has to answer, without credentials.
+    const failedRun = {
+      action: "execute",
+      run_id: 42,
+      status: "failed",
+      error_message: "a confirm dialog is open on tab 7",
+      access_token: "secret-token-value",
+      output: {
+        tab_id: 7,
+        dialog: { dialog_id: "dlg-1", type: "confirm", message: "Proceed?" },
+      },
+    };
+    const sdk = stubSDK({
+      operations: {
+        execute: async () => {
+          throw new ClientSdkActionError(
+            "execute",
+            failedRun.error_message,
+            failedRun,
+          );
+        },
+      } as never,
+    });
+    const run = await runScript({
+      source:
+        "export default async (_ctx, client) => client.operations.execute({ connection_id: 1, operation_key: 'click_ref', input: {} });",
+      sdk,
+    });
+
+    const publicResult = toMcpPublicSdkScriptResult({
+      success: run.success,
+      error: run.error,
+      skipped_calls: run.skippedCalls,
+      side_effect_preview: run.sideEffectPreview,
+      dry_run: false,
+    }) as { success: boolean; error: Record<string, unknown> };
+
+    expect(validateToolResult(SdkScriptResultSchema, publicResult)).not.toBeNull();
+    expect(publicResult.success).toBe(false);
+    expect(publicResult.error).toMatchObject({
+      name: "ClientSdkActionError",
+      details: {
+        run_id: 42,
+        access_token: "[redacted]",
+        output: {
+          tab_id: 7,
+          dialog: { dialog_id: "dlg-1", type: "confirm", message: "Proceed?" },
+        },
+      },
+    });
+    expect(JSON.stringify(publicResult)).not.toContain("secret-token-value");
   });
 
   it("rejects inherited object keys as ClientSdkActionError codes", async () => {

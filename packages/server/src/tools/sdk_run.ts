@@ -18,6 +18,7 @@ import {
   MAX_SCRIPT_ERROR_NAME_BYTES,
   MAX_SCRIPT_TIMEOUT_MS,
   runScript,
+  safeErrorDetails,
 } from "../sandbox/run-script";
 import type { AccountToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
@@ -162,6 +163,12 @@ export const SdkScriptResultSchema = Type.Object({
         message: Type.String({ maxLength: MAX_SCRIPT_ERROR_MESSAGE_BYTES }),
         code: Type.Optional(Type.String()),
         retryable: Type.Optional(Type.Boolean()),
+        details: Type.Optional(
+          Type.Unknown({
+            description:
+              "Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.",
+          }),
+        ),
       },
       { description: "Concise script failure information, without stack traces or internal diagnostics." },
     ),
@@ -332,6 +339,12 @@ export function toMcpPublicSdkScriptResult(result: unknown): unknown {
         ),
         ...(typeof error.code === "string" ? { code: error.code } : {}),
         ...(typeof error.retryable === "boolean" ? { retryable: error.retryable } : {}),
+        // Only a typed SDK failure carries agent-facing details; the sandbox
+        // already redacted and bounded them, and re-bounding here keeps the
+        // public contract independent of the internal producer.
+        ...(error.name === "ClientSdkActionError" && error.details !== undefined
+          ? { details: safeErrorDetails(error.details) }
+          : {}),
       };
     }
   }

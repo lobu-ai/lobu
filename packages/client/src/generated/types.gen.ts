@@ -589,6 +589,10 @@ export type QuerySdkResponses = {
       message: string;
       code?: string;
       retryable?: boolean;
+      /**
+       * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
+       */
+      details?: unknown;
     };
     /**
      * Number of write/admin/external calls skipped by dry-run.
@@ -856,6 +860,10 @@ export type RunSdkResponses = {
       message: string;
       code?: string;
       retryable?: boolean;
+      /**
+       * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
+       */
+      details?: unknown;
     };
     /**
      * Number of write/admin/external calls skipped by dry-run.
