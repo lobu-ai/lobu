@@ -352,13 +352,15 @@ export interface EntityInfo {
 /**
  * Build URL to view an entity
  * Pattern: /{ownerSlug}/{type}/{slug}/[{type}/{slug}]
+ * Slugs are percent-encoded: `resolve_path` decodes each segment, so a source
+ * key containing `/` or `%` must arrive encoded to keep its identity.
  */
 export function buildEntityUrl(info: EntityInfo, baseUrl?: string): string {
   const segments: string[] = [];
   if (info.parentType && info.parentSlug) {
-    segments.push(`${info.parentType}/${info.parentSlug}`);
+    segments.push(`${info.parentType}/${encodeURIComponent(info.parentSlug)}`);
   }
-  segments.push(`${info.entityType}/${info.slug}`);
+  segments.push(`${info.entityType}/${encodeURIComponent(info.slug)}`);
   return withBaseUrl(normalizeBaseUrl(baseUrl), `/${info.ownerSlug}/${segments.join('/')}`);
 }
 

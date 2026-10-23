@@ -309,10 +309,13 @@ async function _resolvePath(
   ctx: AccountToolContext
 ): Promise<ResolvePathResult> {
   const { path: normalized } = parsePathAndQuery(args.path);
-  const segments = normalized
-    .replace(/^\/+|\/+$/g, '')
-    .split('/')
-    .filter(Boolean);
+  // Split before decoding: a source key's %2F is part of its identity, not hierarchy.
+  let segments: string[];
+  try {
+    segments = normalized.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean).map(decodeURIComponent);
+  } catch {
+    throw new ToolUserError('Invalid path encoding', 400, 'VALIDATION');
+  }
 
   if (segments.length === 0) {
     throw new ToolUserError('Path must include an owner', 400);

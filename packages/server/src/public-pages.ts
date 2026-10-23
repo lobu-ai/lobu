@@ -277,7 +277,9 @@ function buildEntityUrl(
   ownerSlug: string,
   segments: Array<{ entity_type: string; slug: string }>
 ): string {
-  const entityPath = segments.flatMap((segment) => [segment.entity_type, segment.slug]).join('/');
+  const entityPath = segments
+    .flatMap((segment) => [segment.entity_type, encodeURIComponent(segment.slug)])
+    .join('/');
   return `/${ownerSlug}/${entityPath}`;
 }
 

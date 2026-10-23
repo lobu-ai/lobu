@@ -47,6 +47,19 @@ describe('external derived record lookup', () => {
       slug: 'source-record', name: 'Source record',
       backing: { sql: SOURCE_SQL, connection: 'record-source' },
     });
+    await api.entity_schema.createType({
+      slug: 'encoded-source-record', name: 'Encoded source record',
+      backing: {
+        // `chr(58)` spells the colon: the pushdown guard rejects a literal
+        // `:name` in backing SQL as a bind parameter.
+        sql: `SELECT 'catalog' || chr(58) || 'vendor/model' AS slug, 'Model' AS name
+          UNION ALL SELECT 'literal%2Fsequence', 'Literal percent'
+          UNION ALL SELECT 'question?hash#percent%', 'Punctuation'
+          UNION ALL SELECT 'café modèle', 'Unicode'
+          UNION ALL SELECT 'catalog' || chr(58) || '/-/views/detail', 'Marker in key'`,
+        connection: 'record-source',
+      },
+    });
   }, 120_000);
 
   function lookup(sql: string, slug: string) {
@@ -80,6 +93,21 @@ describe('external derived record lookup', () => {
     expect(result.entity).toMatchObject({ slug: 'source-20001', name: 'Row 20001', is_derived: true });
     const rows = await getTestDb()`SELECT id FROM entities WHERE organization_id = ${orgId} AND slug = 'source-20001'`;
     expect(rows).toHaveLength(0);
+  });
+
+  it.each([
+    'catalog:vendor/model',
+    'literal%2Fsequence',
+    'question?hash#percent%',
+    'café modèle',
+    'catalog:/-/views/detail',
+  ])('resolves one encoded source-key segment: %s', async (slug) => {
+    const result = await resolvePath(
+      { path: `/${orgSlug}/encoded-source-record/${encodeURIComponent(slug)}` },
+      {},
+      ownerToolContext(orgId, userId)
+    );
+    expect(result.entity).toMatchObject({ slug, is_derived: true });
   });
 
   it.each([
