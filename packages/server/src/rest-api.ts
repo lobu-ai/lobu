@@ -59,6 +59,7 @@ import logger from "./utils/logger";
 import { enforcePublicReadLimit, getClientIP } from "./utils/rate-limiter";
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from "./utils/run-statuses";
 import { getRuntimeInfo } from "./utils/runtime-info";
+import { asReadTimeout } from "./utils/bounded-read";
 import { eventClientId } from "./auth/event-client-id";
 
 type GetAutomationArgs = Parameters<typeof getAutomation>[0];
@@ -182,8 +183,9 @@ function toolUserErrorBody(error: ToolUserError): Record<string, unknown> {
 
 function restErrorResponse(
 	c: Context<{ Bindings: Env }>,
-	error: unknown
+	thrown: unknown
 ): Response {
+	const error = asReadTimeout(thrown);
 	if (error instanceof ToolUserError) {
 		return c.json(
 			toolUserErrorBody(error),
@@ -352,7 +354,7 @@ export async function restToolProxy(
 		}
 		const args: Record<string, unknown> = explicitArgs ?? (await c.req.json());
 		const authCtx = await resolveRestToolAuthContext(c);
-		const result = await executeTool(toolName, args, c.env, authCtx);
+		const result = await executeTool(toolName, args, c.env, authCtx, c.req.raw.signal);
 		return c.json(toJsonSafe(toRestPublicToolResult(toolName, result)));
 	} catch (error) {
 		if (error instanceof ToolNotRegisteredError) {
@@ -746,22 +748,26 @@ export async function restSearchKnowledge(c: Context<{ Bindings: Env }>) {
 			return c.json({ error: "Query must be at least 3 characters" }, 400);
 		}
 
-		const ctx = toToolContext(extractAuthContext(c));
+		const ctx = {
+			...toToolContext(extractAuthContext(c)),
+			abortSignal: c.req.raw.signal,
+		};
 		const result = await getContent(params as any, c.env, ctx);
 		return c.json(toJsonSafe(result));
 	} catch (error) {
-		logger.error({ error }, "[REST API] Knowledge search error");
+		if (!c.req.raw.signal.aborted) {
+			logger.error({ error }, "[REST API] Knowledge search error");
+		}
 		return restErrorResponse(c, error);
 	}
 }
 
 export async function publicRestSearchKnowledge(c: Context<{ Bindings: Env }>) {
 	return withPublicOrg(c, async (organizationId) =>
-		getContent(
-			parseKnowledgeSearchQuery(c) as any,
-			c.env,
-			publicToolContext(c.req.url, organizationId)
-		)
+		getContent(parseKnowledgeSearchQuery(c) as any, c.env, {
+			...publicToolContext(c.req.url, organizationId),
+			abortSignal: c.req.raw.signal,
+		})
 	);
 }
 

@@ -13,6 +13,16 @@ export const QUERY_SQL_RESULT_MAX_BYTES = 1_048_576;
 /** Whole Automation envelope, matching the script-output cap and below the SDK bridge cap. */
 export const AUTOMATION_READ_MAX_BYTES = 1_048_576;
 
+/**
+ * Per-statement time caps, enforced by Postgres (`utils/bounded-read.ts`).
+ *
+ * Exact content reads (feed page, exact COUNT, classification stats) share a
+ * 15s cap; caller cancellation can stop them sooner. Caller SQL (`query_sql`,
+ * `client.query`) keeps its 5s contract.
+ */
+export const CONTENT_READ_STATEMENT_TIMEOUT_MS = 15_000;
+export const QUERY_SQL_STATEMENT_TIMEOUT_MS = 5_000;
+
 const TRUNCATION_SUFFIX = '… [truncated]';
 const SAFE_SQL_REF = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 

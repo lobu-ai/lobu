@@ -23,14 +23,17 @@ export function captureServerError(
   markErrorReported(c);
 }
 
-/** Expected tool faults are returned to the caller; operational failures are logged. */
+/**
+ * Expected tool faults are returned to the caller; operational failures are
+ * logged. A caller that left (`signal` aborted) is neither.
+ */
 export async function trackMCPToolCall<T>(
-  toolName: string, handler: () => Promise<T>
+  toolName: string, handler: () => Promise<T>, signal?: AbortSignal
 ): Promise<T> {
   try {
     return await handler();
   } catch (error) {
-    if (!(error instanceof ToolUserError)) {
+    if (!(error instanceof ToolUserError) && !signal?.aborted) {
       logger.error({ error, tool_name: toolName, source: 'mcp_tool' }, 'MCP tool failed');
     }
     throw error;

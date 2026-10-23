@@ -41,7 +41,14 @@ function capturingClient(inner: ReturnType<typeof getTestDb>, captured: Captured
           };
         }
         if (prop === 'begin') {
-          return <T>(fn: (tx: DbClient) => Promise<T>) => target.begin((tx) => fn(wrap(tx)));
+          // `begin(fn)` or `begin(mode, fn)`: the callback is always last.
+          return (...args: unknown[]) => {
+            const fn = args.pop() as (tx: DbClient) => Promise<unknown>;
+            return (target.begin as (...a: unknown[]) => Promise<unknown>)(
+              ...args,
+              (tx: DbClient) => fn(wrap(tx))
+            );
+          };
         }
         return Reflect.get(target, prop, receiver);
       },

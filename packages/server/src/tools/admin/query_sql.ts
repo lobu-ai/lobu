@@ -17,7 +17,8 @@ import { resolveWindowQueryContext } from '../../automations/window-read-context
 import { classifyPushdownFailure, runConnectorQuery } from '../../lib/connector-pushdown';
 import { validateAndScopeQuery } from '../../utils/execute-data-sources';
 import logger from '../../utils/logger';
-import { raceAbort } from '../../utils/race-abort';
+import { boundedRead, cancellable } from '../../utils/bounded-read';
+import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from '../../utils/content-read-bounds';
 import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table-schema';
 import type { ToolContext } from '../registry';
 import { withValidatedArgs } from '../validate-args';
@@ -578,15 +579,14 @@ export async function querySqlImpl(
   const plainDataSql = `SELECT * FROM (${scopedSql}) AS _t ${searchWhere} ${orderBy} LIMIT ${limit} OFFSET ${offset}`;
 
   try {
-    const sql = getDb();
-    // Race the DB transaction against the sandbox abort signal so the handler
-    // returns promptly when the script times out. The 5s `statement_timeout`
-    // is the actual hard cap on the postgres side (postgres.js doesn't expose
-    // an AbortSignal hook); raceAbort just unblocks the awaiting caller.
-    const txPromise = sql.begin(async (tx: typeof sql) => {
-      await tx`SET TRANSACTION READ ONLY`;
-      await tx`SET LOCAL statement_timeout = '5s'`;
-      const data = await tx.unsafe(dataSql, params);
+    const signal = ctx.abortSignal;
+    // Postgres caps each statement at 5s, and the caller's abort (a closed
+    // request, a script timeout) cancels whichever one is running.
+    const result = await boundedRead(getDb(), {
+      signal,
+      statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+    }, async (tx) => {
+      const data = await cancellable(tx.unsafe(dataSql, params), signal);
       const rows = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [];
       // Duplicate TOTAL_COL in the result columns means the caller's query
       // itself projects that name — fall back to the classic two-query shape
@@ -601,10 +601,10 @@ export async function querySqlImpl(
         return { rows, columns: (data as any)?.columns, totalCount: 0, columnsHaveWindowCol: true };
       }
       if (rows.length === 0 || aliasCollision) {
-        const cnt = await tx.unsafe(countSql, params);
+        const cnt = await cancellable(tx.unsafe(countSql, params), signal);
         const totalCount = Number(cnt[0]?.c ?? 0);
         if (aliasCollision) {
-          const plain = await tx.unsafe(plainDataSql, params);
+          const plain = await cancellable(tx.unsafe(plainDataSql, params), signal);
           return {
             rows: plain,
             columns: (plain as any)?.columns,
@@ -624,7 +624,6 @@ export async function querySqlImpl(
         columnsHaveWindowCol: true,
       };
     });
-    const result = await raceAbort(txPromise, ctx.abortSignal);
 
     const rawRows = result.rows as Array<Record<string, unknown>>;
     const totalCount = result.totalCount;
@@ -672,7 +671,8 @@ export async function querySqlImpl(
     );
   } catch (error) {
     const msg = getErrorMessage(error);
-    logger.error({ error }, 'query_sql error');
+    // A caller that left is not a query failure.
+    if (!ctx.abortSignal?.aborted) logger.error({ error }, 'query_sql error');
 
     // Classify via SQLSTATE where available (57014 = statement timeout), falling
     // back to message matching. The `error_code`/`retryable` fields let the agent

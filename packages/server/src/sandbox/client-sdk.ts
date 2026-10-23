@@ -16,7 +16,8 @@ import {
 import type { AccountToolContext, ToolContext } from "../tools/registry";
 import type { ChatSenderReach } from "../auth/oauth/types";
 import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace, formatUngrantedMemberMessage } from "../auth/oauth/workspace-grants";
-import { raceAbort } from "../utils/race-abort";
+import { boundedQuery } from "../utils/bounded-read";
+import { QUERY_SQL_STATEMENT_TIMEOUT_MS } from "../utils/content-read-bounds";
 import { METHOD_METADATA } from "./method-metadata";
 import { bindClientContext } from "./workspace-activity";
 import type { SDKMode } from "./sdk-manifest";
@@ -222,9 +223,9 @@ interface BuildClientSDKOptions {
 	allowCrossOrg?: boolean;
 	/**
 	 * Forwarded onto every handler's `ToolContext.abortSignal`. Handlers that
-	 * opt in (e.g. `query_sql` / `client.query`) race their work against this
-	 * signal so the awaiting caller unblocks immediately on script timeout.
-	 * The underlying postgres connection isn't cancelled — see
+	 * opt in (e.g. `query_sql` / `client.query`) stop their work on this
+	 * signal, so the awaiting caller unblocks immediately on script timeout and
+	 * a bounded read's running statement is cancelled on Postgres — see
 	 * `ToolContext.abortSignal` for the full caveat.
 	 */
 	abortSignal?: AbortSignal;
@@ -339,14 +340,10 @@ export function buildClientSDK(
 			// Outer LIMIT caps rows at the source so a broad SELECT can't
 			// materialize an unbounded result set host-side.
 			const boundedSql = `SELECT * FROM (${scoped.sql.replace(/;\s*$/, "")}) AS __q LIMIT ${CLIENT_QUERY_MAX_ROWS}`;
-			const rows = await raceAbort(
-				getDb().begin(async (tx) => {
-					await tx.unsafe("SET TRANSACTION READ ONLY");
-					await tx.unsafe("SET LOCAL statement_timeout = '5000'");
-					return tx.unsafe(boundedSql, scoped.params as unknown[]);
-				}),
-				workspaceCtx.abortSignal
-			);
+			const rows = await boundedQuery(getDb(), boundedSql, scoped.params as unknown[], {
+				signal: workspaceCtx.abortSignal,
+				statementTimeoutMs: QUERY_SQL_STATEMENT_TIMEOUT_MS,
+			});
 			return rows.map((r: Record<string, unknown>) => ({ ...r }));
 		},
 

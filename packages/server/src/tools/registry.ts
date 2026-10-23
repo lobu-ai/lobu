@@ -209,10 +209,12 @@ export interface ToolContext {
   directSearchFederation: boolean;
   /**
    * Host cancellation scope. The sandbox aborts it at its deadline, caller
-   * cancellation, or scope exit (including success), so opted-in handlers can
+   * cancellation, or scope exit (including success); a read-tier REST or MCP
+   * call carries its request's lifetime (`executeTool`). Opted-in handlers
    * stop waiting and release resources. This is not a transaction boundary:
-   * committed writes remain committed, and a promise race does not cancel the
-   * underlying postgres query — `statement_timeout` remains its server-side cap.
+   * committed writes remain committed. A bounded read (`utils/bounded-read.ts`)
+   * cancels its running statement on Postgres. Handlers using only a promise
+   * race stop waiting without cancelling the underlying work.
    */
   abortSignal?: AbortSignal;
   /** Original request URL, used to derive public-facing origin for URL generation */

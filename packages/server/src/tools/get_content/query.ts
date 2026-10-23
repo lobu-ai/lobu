@@ -18,7 +18,9 @@ import { buildSemanticTypeFilterSql } from '../../utils/content-search/params';
 import { operationalTrailExclusionSql } from '../../utils/content-search/sql-fragments';
 import logger from '../../utils/logger';
 import { validateNumericId } from '../../utils/sql-validation';
+import { boundedQuery } from '../../utils/bounded-read';
 import {
+  CONTENT_READ_STATEMENT_TIMEOUT_MS,
   boundedAttachmentsSql,
   boundedJsonSql,
   boundedPayloadTextSql,
@@ -313,6 +315,8 @@ export async function fetchByContentIds(opts: {
   excludeOperationalTrail?: boolean;
   limit: number;
   offset: number;
+  /** The caller's lifetime. Its abort cancels these statements on Postgres. */
+  signal?: AbortSignal;
 }): Promise<ListPageResult> {
   const {
     args,
@@ -324,6 +328,7 @@ export async function fetchByContentIds(opts: {
     limit,
     offset,
   } = opts;
+  const read = { signal: opts.signal, statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS };
 
   // typebox validates content_ids as number[] at the tool boundary; the
   // caller only dispatches here when it is non-empty.
@@ -361,7 +366,8 @@ export async function fetchByContentIds(opts: {
   // what we're here for). The list query JOINs resolved_ids so it can order by
   // the resolver's stable `chain_key`: lineages never interleave, and within a
   // chain rows read pending→completed top-to-bottom by occurred_at.
-  const result = await sql.unsafe(
+  const result = await boundedQuery(
+    sql,
     `
     WITH ${RESOLVED_IDS_CTE}
     ${buildContentQuery({
@@ -375,7 +381,8 @@ export async function fetchByContentIds(opts: {
       boundAgentContent: false,
     })}
   `,
-    queryParams
+    queryParams,
+    read
   );
 
   // `total` counts the returned ROWS, not chains: a chain expands to its whole
@@ -386,7 +393,8 @@ export async function fetchByContentIds(opts: {
   // callers that want "how many things did my ids resolve to". Both re-apply the
   // same org/entity/visibility WHERE via the resolved_ids join, so neither can
   // drift from the list above.
-  const countResult = await sql.unsafe(
+  const countResult = await boundedQuery(
+    sql,
     `
     WITH ${RESOLVED_IDS_CTE}
     SELECT
@@ -397,7 +405,8 @@ export async function fetchByContentIds(opts: {
     LEFT JOIN connections c ON c.id = f.connection_id
     WHERE ${where}
   `,
-    queryParams
+    queryParams,
+    read
   );
 
   const rawContent = result as unknown as ContentRow[];
@@ -436,6 +445,8 @@ export async function fetchIncludeSuperseded(opts: {
   excludeOperationalTrail?: boolean;
   limit: number;
   offset: number;
+  /** The caller's lifetime. Its abort cancels these statements on Postgres. */
+  signal?: AbortSignal;
 }): Promise<ListPageResult> {
   const {
     args,
@@ -453,6 +464,7 @@ export async function fetchIncludeSuperseded(opts: {
     limit,
     offset,
   } = opts;
+  const read = { signal: opts.signal, statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS };
 
   logger.info('[get_content] Listing content including superseded history');
 
@@ -612,7 +624,8 @@ export async function fetchIncludeSuperseded(opts: {
   const orderDirection = args.sort_order === 'asc' ? 'ASC' : 'DESC';
   const orderBySql = `e.occurred_at ${orderDirection} NULLS LAST, e.id ${orderDirection}`;
 
-  const result = await sql.unsafe(
+  const result = await boundedQuery(
+    sql,
     buildContentQuery({
       table: 'events',
       alias: 'e',
@@ -621,17 +634,20 @@ export async function fetchIncludeSuperseded(opts: {
       limit,
       offset,
     }),
-    queryParams
+    queryParams,
+    read
   );
 
-  const countResult = await sql.unsafe(
+  const countResult = await boundedQuery(
+    sql,
     `
     SELECT COUNT(*) as total
     FROM events e
     LEFT JOIN connections c ON c.id = e.connection_id
     WHERE ${conditions.join(' AND ')}
   `,
-    queryParams
+    queryParams,
+    read
   );
 
   const rawContent = result as unknown as ContentRow[];
@@ -666,6 +682,8 @@ export async function fetchClassificationStats(opts: {
   excludeWorkspaceAudit?: boolean;
   /** Hide the operational trail from readers outside a public workspace. */
   excludeOperationalTrail?: boolean;
+  /** The caller's lifetime. Its abort cancels these statements on Postgres. */
+  signal?: AbortSignal;
 }): Promise<NonNullable<GetContentResult['classification_stats']>> {
   const {
     args,
@@ -679,6 +697,7 @@ export async function fetchClassificationStats(opts: {
     excludeWorkspaceAudit,
     excludeOperationalTrail,
   } = opts;
+  const read = { signal: opts.signal, statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS };
 
   // Build dynamic WHERE conditions using inline SQL
   const conditions: string[] = ['1=1'];
@@ -800,7 +819,8 @@ export async function fetchClassificationStats(opts: {
   }
 
   // Stats query WITHOUT classification filters (to show full distribution)
-  const statsQueryResult = await sql.unsafe(
+  const statsQueryResult = await boundedQuery(
+    sql,
     `
     WITH matching_content AS (
       SELECT f.id
@@ -839,7 +859,8 @@ export async function fetchClassificationStats(opts: {
     GROUP BY fcl.slug, fcl.attribute_key, value
     ORDER BY fcl.slug, count DESC
   `,
-    params
+    params,
+    read
   );
 
   // Transform to nested object structure: { classifier_slug: { value: count } }

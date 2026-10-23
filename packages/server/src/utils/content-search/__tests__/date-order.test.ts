@@ -149,9 +149,12 @@ describe('chronological search SQL', () => {
     const queries: string[] = [];
     const sql = {
       unsafe: async (query: string) => {
+        if (query.startsWith('SET LOCAL ')) return [];
         queries.push(query);
         return [];
       },
+      // A bounded read runs in `begin(mode, fn)`; the callback is always last.
+      begin: async (...args: unknown[]) => (args.at(-1) as (tx: DbClient) => Promise<unknown>)(sql),
     } as unknown as DbClient;
     await searchContentBySingleQuery(sql, 'fixture marker', {
       organization_id: 'fixture-org',
