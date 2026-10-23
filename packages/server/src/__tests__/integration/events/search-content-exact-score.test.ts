@@ -6,7 +6,9 @@
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { searchContentByText } from '../../../utils/content-search';
-import { cleanupTestDatabase } from '../../setup/test-db';
+import type { DbClient } from '../../../db/client';
+import { searchContentBySingleQuery } from '../../../utils/content-search/search-path';
+import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
   createTestConnection,
@@ -48,6 +50,65 @@ describe('searchContentByText > exact org-wide score semantics', () => {
   beforeAll(async () => {
     await cleanupTestDatabase();
     await seedSystemEntityTypes();
+  });
+
+  it('scores each event embedding once while preserving exact semantic totals', async () => {
+    const { org, entity, connection } = await createOrgFixture('Single Semantic Score Org');
+    const sql = getTestDb();
+    for (let i = 0; i < 24; i++) {
+      await createTestEvent({
+        entity_id: entity.id,
+        connection_id: connection.id,
+        organization_id: org.id,
+        content: `synthetic vector record ${i}`,
+        embedding: axisVec(0),
+      });
+    }
+    // Capture the search statement as it runs inside the bounded read-only
+    // transaction so EXPLAIN ANALYZE can count per-event embedding lookups.
+    let captured: { query: string; params: unknown[] } | undefined;
+    const wrap = (db: DbClient): DbClient =>
+      new Proxy(db, {
+        get(target, key) {
+          if (key === 'begin') {
+            return (...args: any[]) => {
+              const callback = args.pop();
+              return (target.begin as any)(...args, (tx: DbClient) => callback(wrap(tx)));
+            };
+          }
+          if (key === 'unsafe') {
+            return (query: string, params: unknown[]) => {
+              if (query.includes('filtered_ids AS')) captured = { query, params };
+              return target.unsafe(query, params);
+            };
+          }
+          return Reflect.get(target, key);
+        },
+      });
+    const result = await searchContentBySingleQuery(wrap(sql), 'unmatchedsyntheticneedle', {
+      organization_id: org.id,
+      query_embedding: axisVec(0),
+      min_similarity: 0.9,
+      limit: 5,
+      sort_by: 'score',
+    });
+    expect(result.total).toBe(24);
+    expect(result.content).toHaveLength(5);
+    if (!captured) throw new Error('search statement was not captured');
+
+    type PlanNode = { 'Relation Name'?: string; 'Actual Loops': number; Plans?: PlanNode[] };
+    const plan = await sql.unsafe(`EXPLAIN (ANALYZE, FORMAT JSON) ${captured.query}`, captured.params);
+    let embeddingLookups = 0;
+    const visit = (node: PlanNode) => {
+      if (node['Relation Name'] === 'event_embeddings') embeddingLookups += node['Actual Loops'];
+      for (const child of node.Plans ?? []) visit(child);
+    };
+    visit(plan[0]['QUERY PLAN'][0].Plan);
+    const [count] = await sql`SELECT COUNT(*)::int AS n FROM current_event_records WHERE organization_id = ${org.id}`;
+    // One best-chunk aggregate per scoped event; the WHERE/SELECT scalar
+    // subquery pair scored every event twice (2N lookups).
+    expect(embeddingLookups).toBeGreaterThan(0);
+    expect(embeddingLookups).toBeLessThanOrEqual(Number(count.n));
   });
 
   it('keeps exact title-only matches on the default path', async () => {
