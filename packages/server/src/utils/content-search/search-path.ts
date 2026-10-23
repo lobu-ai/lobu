@@ -317,7 +317,8 @@ export async function searchContentBySingleQuery(
   // Guard ILIKE/tsquery on non-empty $1 so an embedding-only call (trimmedQuery='')
   // doesn't degenerate to ILIKE '%%' (matches everything) — we want the vector
   // branch to be the sole filter in that case.
-  const textMatchExpr = `(LENGTH($1) > 0 AND (f.payload_text ILIKE '%' || $1 || '%' OR COALESCE(${textDocumentExpr} @@ ${TSQUERY_SQL}, false)))`;
+  const substringMatchExpr = hasEmbedding ? 'text_match.substring_match' : `f.payload_text ILIKE '%' || $1 || '%'`;
+  const textMatchExpr = `(LENGTH($1) > 0 AND (${substringMatchExpr} OR COALESCE(${textDocumentExpr} @@ ${TSQUERY_SQL}, false)))`;
   const vecParam = vectorParamIdx ? `$${vectorParamIdx}::vector` : 'NULL::vector';
   const minSimilarityParam = `$${minSimilarityParamIdx}::numeric`;
   // Vector-space integrity: only compare against rows stamped with the EXACT
@@ -329,23 +330,27 @@ export async function searchContentBySingleQuery(
   // literal (`<alias>` substituted per CTE).
   const modelLiteral = embeddingModelSqlLiteral(embeddingModel);
   const modelScopeFor = (alias: string) => `${alias}.embedding_model = ${modelLiteral}`;
-  // Best-chunk-per-event similarity (multi-vector). current_event_records no
-  // longer carries an embedding (an event has N chunk vectors, not one), so
-  // vector scoring correlates into event_embeddings and takes the closest chunk
-  // — "retrieve on the best-matching slice, score the event by it." Scoped to the
-  // configured model (other-model rows are an incompatible space). NULL when the
-  // event has no comparable chunk, so it never out-ranks a real match. This is
-  // the single place the chunk→event collapse lives; both query paths use it.
-  const bestChunkSimExpr = (alias: string) =>
-    `(SELECT MAX(1 - (emb.embedding <=> ${vecParam})) FROM event_embeddings emb
-      WHERE emb.event_id = ${alias}.id AND emb.embedding_model = ${modelLiteral})`;
+  // A lateral aggregate computes the best chunk once per scoped event. A
+  // scalar subquery in both WHERE and SELECT produces two independent scans.
+  // Reuse the substring predicate too: hybrid search otherwise decompresses
+  // and scans the same payload once for matching and again for ranking.
+  // OFFSET 0 keeps that cheap lateral projection from being flattened back
+  // into its consumers. Text-only searches keep their indexable predicate.
+  const scoringJoins = hasEmbedding ? `
+        CROSS JOIN LATERAL (
+          SELECT MAX(1 - (emb.embedding <=> ${vecParam})) AS best_sim
+          FROM event_embeddings emb
+          WHERE emb.event_id = f.id AND ${modelScopeFor('emb')}
+        ) chunk_score
+        CROSS JOIN LATERAL (
+          SELECT (LENGTH($1) > 0 AND f.payload_text ILIKE '%' || $1 || '%') AS substring_match
+          OFFSET 0
+        ) text_match` : '';
+  const bestSimSelect = hasEmbedding ? 'chunk_score.best_sim' : 'NULL';
+  const substringMatchSelect = hasEmbedding ? 'text_match.substring_match' : 'NULL';
   const matchCondition = hasEmbedding
-    ? `(${textMatchExpr} OR (${bestChunkSimExpr('f')}) >= ${minSimilarityParam})`
+    ? `(${textMatchExpr} OR ${bestSimSelect} >= ${minSimilarityParam})`
     : textMatchExpr;
-  // filtered_ids carries the per-event best-chunk similarity so downstream
-  // scoring is a column read, not a repeated correlated subquery. NULL when the
-  // query has no embedding (text-only search).
-  const bestSimSelect = hasEmbedding ? `${bestChunkSimExpr('f')}` : 'NULL';
 
   const searchWhereFor = (orgScopeSql: string) => `${matchCondition}
           AND ${standardFiltersFor(orgScopeSql)}`;
@@ -353,8 +358,9 @@ export async function searchContentBySingleQuery(
   // Text relevance in [0, 1]: half substring match, half full-text rank.
   // Normalization 32 maps rank to rank / (rank + 1), so repeated terms
   // cannot overwhelm cosine similarity (which ranges from -1 to 1).
+  const rankedSubstringMatch = hasEmbedding ? 'fi.substring_match' : `fi.payload_text ILIKE '%' || $1 || '%'`;
   const textRankExpr = `
-    (CASE WHEN LENGTH($1) > 0 AND fi.payload_text ILIKE '%' || $1 || '%' THEN 0.5 ELSE 0.0 END)
+    (CASE WHEN LENGTH($1) > 0 AND ${rankedSubstringMatch} THEN 0.5 ELSE 0.0 END)
     + CASE WHEN LENGTH($1) > 0 THEN 0.5 * COALESCE(ts_rank_cd(${resultDocumentExpr}, ${TSQUERY_SQL}, 32), 0) ELSE 0 END
   `;
   let similarityExpr: string;
@@ -536,9 +542,10 @@ export async function searchContentBySingleQuery(
       `;
   }
 
-  const filteredIdsSelect = (whereSql: string, candidateJoin = '') => `SELECT f.id, f.score, f.occurred_at, f.created_at, f.title, f.payload_text, ${bestSimSelect} AS best_sim, f.search_tsv
+  const filteredIdsSelect = (whereSql: string, candidateJoin = '') => `SELECT f.id, f.score, f.occurred_at, f.created_at, f.title, f.payload_text, ${bestSimSelect} AS best_sim, ${substringMatchSelect} AS substring_match, f.search_tsv
         FROM current_event_records f
         ${candidateJoin}
+        ${scoringJoins}
         LEFT JOIN connections c ON c.id = f.connection_id
         LEFT JOIN automation_run_events iwf
           ON iwf.event_id = f.id
@@ -587,7 +594,7 @@ export async function searchContentBySingleQuery(
   const collapsePoolLimit = Math.min(validatedLimit * COLLAPSE_POOL_FACTOR, COLLAPSE_POOL_MAX);
   const collapsedIdsCteSql = collapseIdentical
     ? `collapsed_ids AS (
-        SELECT pool.id, pool.score, pool.occurred_at, pool.created_at, pool.title, pool.payload_text, pool.best_sim, pool.search_tsv
+        SELECT pool.id, pool.score, pool.occurred_at, pool.created_at, pool.title, pool.payload_text, pool.best_sim, pool.substring_match, pool.search_tsv
         FROM (
           SELECT ranked.*, ROW_NUMBER() OVER (
             PARTITION BY ranked.title, ranked.payload_text,
