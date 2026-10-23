@@ -24,6 +24,7 @@ import { recordMcpConversationActivity } from '../lobu/stores/mcp-client-convers
 import { trackMCPToolCall } from '../diagnostics';
 import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
+import { asReadTimeout } from '../utils/bounded-read';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { enforcePublicReadLimit, getClientIP } from '../utils/rate-limiter';
@@ -294,12 +295,18 @@ export function checkToolAccess(
  * with `withValidatedArgs` at its definition (`tools/validate-args.ts`), so
  * direct REST calls and the sandbox SDK namespaces get the same coerce +
  * validate automation as this path (lobu#1137).
+ *
+ * `callerSignal` is the request's lifetime. A read-tier call gets it as
+ * `ToolContext.abortSignal`, so a caller that disconnects stops its reads on
+ * Postgres. Write-tier calls never see it: a write the caller abandons still
+ * finishes rather than stopping halfway.
  */
 export async function executeTool(
   toolName: string,
   args: Record<string, unknown>,
   env: Env,
-  authCtx: AuthContext
+  authCtx: AuthContext,
+  callerSignal?: AbortSignal
 ): Promise<unknown> {
   const startTime = Date.now();
 
@@ -349,7 +356,11 @@ export async function executeTool(
       };
     }
     const requiredAccess = checkToolAccess(toolName, args, authCtx);
-    toolContext = { ...toAccountToolContext(authCtx), workspaceActivity };
+    toolContext = {
+      ...toAccountToolContext(authCtx),
+      workspaceActivity,
+      ...(requiredAccess === 'read' && callerSignal && { abortSignal: callerSignal }),
+    };
 
     // A capture run records the effect it WOULD have had instead of performing
     // it. SDK capture and eval-window finalization enforce their own
@@ -412,7 +423,8 @@ export async function executeTool(
               ? getAccountContent(args, env, authCtx)
               : tool.scope === 'account'
               ? tool.handler(args, env, toolContext)
-              : tool.handler(args, env, requireWorkspaceContext(toolContext))
+              : tool.handler(args, env, requireWorkspaceContext(toolContext)),
+            toolContext.abortSignal
           )
       );
     // Auto-retry (lobu#2051 Item 2): only transient thrown ToolErrors, and only
@@ -440,7 +452,8 @@ export async function executeTool(
     await recordWorkspaceActivityAudit({ ctx: toolContext, toolName, failed });
     await recordMcpConversationActivity({ ctx: toolContext, toolName, failed });
     return result;
-  } catch (error) {
+  } catch (thrown) {
+    const error = asReadTimeout(thrown);
     // Stamp the correlation id onto typed errors so the response boundaries can
     // surface `call_id` alongside the structured `code`/`retryable`.
     if (error instanceof ToolError || error instanceof ToolUserError) {

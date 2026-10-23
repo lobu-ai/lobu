@@ -627,7 +627,7 @@ function createServerForContext(
   });
 
   // tools/call — access control + execution + formatting
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
     const compatApprovalCapability =
       name === 'resolve_approval'
@@ -675,7 +675,10 @@ function createServerForContext(
       : undefined;
     // Regular tool execution
     try {
-      const result = await executeTool(name, callArgs ?? {}, env, callAuthCtx);
+      // The call ends when the client cancels it or its HTTP request closes.
+      const httpSignal = mcpRequestContext.getStore()?.signal;
+      const callerSignal = httpSignal ? AbortSignal.any([extra.signal, httpSignal]) : extra.signal;
+      const result = await executeTool(name, callArgs ?? {}, env, callAuthCtx, callerSignal);
 
       if (authCtx.agentId && authCtx.organizationId) {
         await touchAgentLastUsed(authCtx.organizationId, authCtx.agentId);

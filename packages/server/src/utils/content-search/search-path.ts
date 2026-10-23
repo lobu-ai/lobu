@@ -6,6 +6,8 @@ import postgres from 'postgres';
 import type { Env } from '../../index';
 import { type DbClient, pgTextArray } from '../../db/client';
 import { incrementCounter } from '../../gateway/metrics/prometheus';
+import { boundedQuery, boundedRead, cancellable } from '../bounded-read';
+import { CONTENT_READ_STATEMENT_TIMEOUT_MS } from '../content-read-bounds';
 import {
   buildConnectionFilter,
   buildFeedFilter,
@@ -68,23 +70,29 @@ import {
 
 /**
  * Run a recall query inside its own transaction with the recall budget applied
- * via `SET LOCAL`. Database failures (including their SQLSTATE) propagate so
- * recall can report partial coverage instead of claiming a successful empty
- * search.
+ * via `SET LOCAL`, cancelled with the caller. Database failures (including
+ * their SQLSTATE) propagate so recall can report partial coverage instead of
+ * claiming a successful empty search.
  */
 export async function runBoundedRecallQuery(
   sql: DbClient,
   querySQL: string,
-  queryParams: unknown[]
+  queryParams: unknown[],
+  signal?: AbortSignal
 ): Promise<any[]> {
   try {
-    return (await sql.begin(async (tx: DbClient) => {
-      await tx.unsafe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
-      await tx.unsafe(`SET LOCAL ivfflat.probes = ${CANDIDATE_IVFFLAT_PROBES}`);
-      await tx.unsafe('SET LOCAL ivfflat.iterative_scan = off');
-      return await tx.unsafe(querySQL, queryParams);
-    })) as any[];
+    return await boundedRead(
+      sql,
+      { signal, statementTimeoutMs: CANDIDATE_QUERY_TIMEOUT_MS },
+      async (tx: DbClient) => {
+        await tx.unsafe(`SET LOCAL ivfflat.probes = ${CANDIDATE_IVFFLAT_PROBES}`);
+        await tx.unsafe('SET LOCAL ivfflat.iterative_scan = off');
+        return await cancellable(tx.unsafe(querySQL, queryParams), signal);
+      }
+    );
   } catch (error) {
+    // A caller that left is not a recall failure.
+    if (signal?.aborted) throw error;
     incrementCounter('lobu_recall_query_failures_total', {
       sqlstate: error instanceof postgres.PostgresError ? error.code : 'unknown',
     });
@@ -728,10 +736,11 @@ export async function searchContentBySingleQuery(
   let rawRows: any[];
   // Recall opted into a bounded answer. Without a query embedding it cannot use
   // the candidate path, but it still must not outlast the candidate budget.
+  const exactRead = { signal: options.signal, statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS };
   if (options.approximate_candidate_search === true) {
-    rawRows = await runBoundedRecallQuery(sql, querySQL, queryParams);
+    rawRows = await runBoundedRecallQuery(sql, querySQL, queryParams, options.signal);
   } else {
-    rawRows = (await sql.unsafe(querySQL, queryParams)) as any[];
+    rawRows = await boundedQuery(sql, querySQL, queryParams, exactRead);
   }
 
   let emptyPageTotal: number | null = null;
@@ -743,7 +752,7 @@ export async function searchContentBySingleQuery(
       WITH RECURSIVE ${nonDateFilteredIdsCteSql}
       SELECT COUNT(*) as total_count FROM filtered_ids`;
     const countParams = queryParams.slice(0, cursorBaseParamIdx - 1);
-    const countRows = (await sql.unsafe(countSQL, countParams)) as any[];
+    const countRows = await boundedQuery(sql, countSQL, countParams, exactRead);
     emptyPageTotal = parseInt(String(countRows[0]?.total_count ?? '0'), 10);
   }
 

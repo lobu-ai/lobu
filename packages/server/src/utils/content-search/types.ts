@@ -145,6 +145,9 @@ export interface ContentSearchOptions {
    * Ignored for date-ordered, cursor, and offset reads.
    */
   collapse_identical_content?: boolean;
+
+  /** The caller's lifetime. Its abort cancels the read's statements on Postgres. */
+  signal?: AbortSignal;
 }
 
 /**

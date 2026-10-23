@@ -989,20 +989,34 @@ describe('getContent > empty-entity short-circuit (perf regression guard)', () =
     result: T;
     queries: string[];
   }> {
-    const sql = getDb() as unknown as {
+    type Client = {
       unsafe: (...args: unknown[]) => Promise<unknown>;
+      begin: (...args: unknown[]) => Promise<unknown>;
     };
+    const sql = getDb() as unknown as Client;
     const original = sql.unsafe.bind(sql);
+    const originalBegin = sql.begin.bind(sql);
     const queries: string[] = [];
-    sql.unsafe = ((query: string, ...rest: unknown[]) => {
-      queries.push(query);
-      return original(query, ...rest);
-    }) as typeof sql.unsafe;
+    const recording = (run: Client['unsafe']) =>
+      ((query: string, ...rest: unknown[]) => {
+        queries.push(query);
+        return run(query, ...rest);
+      }) as Client['unsafe'];
+    sql.unsafe = recording(original);
+    // A bounded read issues its statements on the transaction's own client.
+    sql.begin = (...args: unknown[]) => {
+      const run = args.pop() as (tx: Client) => Promise<unknown>;
+      return originalBegin(...args, (tx: Client) => {
+        tx.unsafe = recording(tx.unsafe.bind(tx));
+        return run(tx);
+      });
+    };
     try {
       const result = await fn();
       return { result, queries };
     } finally {
       sql.unsafe = original;
+      sql.begin = originalBegin;
     }
   }
 

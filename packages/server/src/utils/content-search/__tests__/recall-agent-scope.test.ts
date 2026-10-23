@@ -16,7 +16,7 @@ function capturingSql(queries: string[]): DbClient {
     },
   } as unknown as DbClient;
   return {
-    begin: async (fn: (tx: DbClient) => Promise<unknown>) => fn(tx),
+    begin: async (...args: unknown[]) => (args.at(-1) as (tx: DbClient) => Promise<unknown>)(tx),
   } as unknown as DbClient;
 }
 
@@ -73,7 +73,7 @@ describe('recall candidate routing', () => {
       }),
     } as unknown as DbClient;
     const sql = {
-      begin: async (fn: (tx: DbClient) => Promise<unknown>) => fn(tx),
+      begin: async (...args: unknown[]) => (args.at(-1) as (tx: DbClient) => Promise<unknown>)(tx),
     } as unknown as DbClient;
     await expect(searchContentBySingleQuery(sql, 'fixture recall', {
       organization_id: 'fixture-org',

@@ -82,10 +82,15 @@ describe.each(['list', 'text search', 'vector search'] as const)('%s entity filt
       const queries: Array<{ query: string; params: unknown[] }> = [];
       const unsafe = async (query: string, params: unknown[]) => {
         if (query.includes('SELECT identity.namespace')) return identities;
+        if (query.startsWith('SET LOCAL ')) return [];
         queries.push({ query, params });
         return query.startsWith('SELECT COUNT(*)') ? [{ total: 1 }] : [];
       };
-      const sql = { unsafe } as unknown as DbClient;
+      const sql = {
+        unsafe,
+        // A bounded read runs in `begin(mode, fn)`; the callback is always last.
+        begin: async (...args: unknown[]) => (args.at(-1) as (tx: DbClient) => Promise<unknown>)(sql),
+      } as unknown as DbClient;
       const options = {
         entity_id: entityId,
         organization_id: 'test-org',

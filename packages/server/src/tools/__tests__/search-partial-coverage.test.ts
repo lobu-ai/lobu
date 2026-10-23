@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as workspaceGrants from '../../auth/oauth/workspace-grants';
 import * as db from '../../db/client';
 import { getMetricsText } from '../../gateway/metrics/prometheus';
 import type { Env } from '../../index';
@@ -79,13 +80,34 @@ describe('search_memory without a query embedding', () => {
   function mockEmptyDatabase() {
     const sql = {
       unsafe: vi.fn(async () => []),
-      begin: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(sql)),
+      begin: vi.fn(async (...args: unknown[]) => (args.at(-1) as (tx: unknown) => Promise<unknown>)(sql)),
     } as unknown as db.DbClient;
     vi.spyOn(db, 'getDb').mockReturnValue(sql);
     vi.spyOn(workspace, 'getWorkspaceProvider').mockReturnValue({
       getOrgSlug: async () => 'synthetic-workspace',
     } as ReturnType<typeof workspace.getWorkspaceProvider>);
   }
+
+  it.each([false, true])('preserves recall cancellation (federated=%s)', async (federated) => {
+    mockEmptyDatabase();
+    vi.spyOn(workspaceGrants, 'listLiveGrantedMemberWorkspaces').mockResolvedValue([
+      { id: 'synthetic-org', slug: 'synthetic-workspace', name: 'Synthetic Workspace', role: 'owner', personal: false },
+    ]);
+    const caller = new AbortController();
+    const reason = new Error('synthetic caller cancellation');
+    const recall = vi.spyOn(contentSearch, 'searchContentByText').mockImplementation(async (_query, options) => {
+      expect(options.signal).toBe(caller.signal);
+      caller.abort(reason);
+      throw reason;
+    });
+
+    await expect(search(
+      { query: 'synthetic recall', query_embedding: [1, 0, 0] },
+      env,
+      { ...ctx, directSearchFederation: federated, abortSignal: caller.signal }
+    )).rejects.toBe(reason);
+    expect(recall).toHaveBeenCalledOnce();
+  });
 
   it.each(['network', 'http', 'invalid_embedding'] as const)(
     'reports text-only recall as partial coverage after an embedding %s failure',

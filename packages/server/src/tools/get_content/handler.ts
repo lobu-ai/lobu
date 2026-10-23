@@ -611,6 +611,7 @@ async function getContentImpl(
         excludeOperationalTrail,
         limit,
         offset,
+        signal: ctx.abortSignal,
       }));
     } else if (args.include_superseded) {
       ({ rawContent, total, pageInfo } = await fetchIncludeSuperseded({
@@ -628,6 +629,7 @@ async function getContentImpl(
         excludeOperationalTrail,
         limit,
         offset,
+        signal: ctx.abortSignal,
       }));
     } else if (!args.query && args.sort_by === 'score' && entityId) {
       logger.info('[get_content] Using sophisticated multi-signal score ranking');
@@ -665,6 +667,7 @@ async function getContentImpl(
           exclude_operational_trail: true,
         }),
         visibility_scope: visibilityScope,
+        signal: ctx.abortSignal,
       };
 
       if (includeTotal) {
@@ -744,6 +747,7 @@ async function getContentImpl(
         after_occurred_at: args.after_occurred_at,
         after_id: args.after_id,
         ...(!includeTotal && { include_total: false }),
+        signal: ctx.abortSignal,
       };
 
       // Primary single-query search. A capable agent already phrases its own
@@ -831,6 +835,7 @@ async function getContentImpl(
         mcpSessionIds,
         excludeWorkspaceAudit,
         excludeOperationalTrail,
+        signal: ctx.abortSignal,
       });
     }
 
@@ -963,7 +968,8 @@ async function getContentImpl(
     }
     return result;
   } catch (error) {
-    logger.error({ err: error }, 'get_content error:');
+    // A caller that left is not a read failure.
+    if (!ctx.abortSignal?.aborted) logger.error({ err: error }, 'get_content error:');
     throw error;
   }
 }

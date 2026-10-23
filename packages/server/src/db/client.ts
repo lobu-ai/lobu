@@ -21,6 +21,8 @@ export interface DbClient {
   array<T extends string | number>(values: T[], type?: string): unknown;
   json(value: unknown): unknown;
   begin<T>(fn: (sql: DbClient) => Promise<T>): Promise<T>;
+  /** `BEGIN <options>`, e.g. `'read only'`. */
+  begin<T>(options: string, fn: (sql: DbClient) => Promise<T>): Promise<T>;
   /**
    * Run `fn` inside a SAVEPOINT. A statement that errors inside `fn` rolls back
    * only to the savepoint instead of aborting the whole transaction, so callers

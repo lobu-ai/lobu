@@ -151,3 +151,33 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..9d4a0471efab70ba73263bc79f5d6d92
        return
      }
  
+diff --git a/src/query.js b/src/query.js
+--- a/src/query.js
++++ b/src/query.js
+@@ -52,3 +52,5 @@
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    // Cancellation uses a separate connection and is best effort. Its failure
++    // must not escape as an unhandled rejection; the statement settles itself.
++    return this.canceller && (this.canceller(this).catch(() => {}), this.canceller = null)
+   }
+diff --git a/cjs/src/query.js b/cjs/src/query.js
+--- a/cjs/src/query.js
++++ b/cjs/src/query.js
+@@ -52,3 +52,5 @@
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    // Cancellation uses a separate connection and is best effort. Its failure
++    // must not escape as an unhandled rejection; the statement settles itself.
++    return this.canceller && (this.canceller(this).catch(() => {}), this.canceller = null)
+   }
+diff --git a/cf/src/query.js b/cf/src/query.js
+--- a/cf/src/query.js
++++ b/cf/src/query.js
+@@ -52,3 +52,5 @@
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    // Cancellation uses a separate connection and is best effort. Its failure
++    // must not escape as an unhandled rejection; the statement settles itself.
++    return this.canceller && (this.canceller(this).catch(() => {}), this.canceller = null)
+   }

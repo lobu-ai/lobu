@@ -3,6 +3,8 @@
  */
 
 import { type DbClient } from '../../db/client';
+import { boundedQuery } from '../bounded-read';
+import { CONTENT_READ_STATEMENT_TIMEOUT_MS } from '../content-read-bounds';
 import {
   buildConnectionFilter,
   buildFeedFilter,
@@ -89,8 +91,15 @@ async function executeListQuery(args: {
   effectiveOffset: number;
   fetchLimit: number;
   includeTotal: boolean;
+  signal?: AbortSignal;
 }): Promise<ContentSearchResponse> {
   const { sql, joinSql, countParams, includeTotal } = args;
+  // Capped by Postgres and cancelled with the caller (utils/bounded-read.ts).
+  const read = (text: string, params: unknown[], signal = args.signal) =>
+    boundedQuery(sql, text, params, {
+      signal,
+      statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS,
+    });
   const whereExpr = `${args.whereExpr} ${args.orgScope.sql}`;
 
   const countFrom = (scopeSql: string) => `FROM current_event_records f
@@ -223,7 +232,7 @@ async function executeListQuery(args: {
     // Opted out of the exact count: one query, and an empty page is simply an
     // empty page. has_more comes from the overfetch, never from a count.
     total = null;
-    rawRows = (await args.sql.unsafe(querySQL, queryParams)) as any[];
+    rawRows = await read(querySQL, queryParams);
     if (rawRows.length === 0) return emptyResponse();
   } else if (args.entityId == null) {
     // Org-wide listing (the activity feed). The exact count still evaluates
@@ -231,9 +240,17 @@ async function executeListQuery(args: {
     // The total stays exact on every page (cursor pages included):
     // ContentSearchResponse.total is part of the
     // read_knowledge contract and callers rely on it unless they opt out.
+    // Either half failing makes the other useless, so it cancels it.
+    const sibling = new AbortController();
+    const signal = args.signal ? AbortSignal.any([args.signal, sibling.signal]) : sibling.signal;
+    const failFast = <T>(pending: Promise<T>) =>
+      pending.catch((error: unknown) => {
+        sibling.abort(error);
+        throw error;
+      });
     const [countResult, rows] = await Promise.all([
-      sql.unsafe<{ total: number | string }>(countSql, countParams),
-      args.sql.unsafe(querySQL, queryParams) as Promise<any[]>,
+      failFast(read(countSql, countParams, signal)),
+      failFast(read(querySQL, queryParams, signal)),
     ]);
     total = parseInt(String(countResult[0]?.total ?? '0'), 10);
     rawRows = rows;
@@ -245,10 +262,10 @@ async function executeListQuery(args: {
     // large events table even when result_set is empty server-side. Entities
     // can legitimately have zero content, and callers rely on exact totals
     // across cursor pages, so keep both semantics here.
-    const countResult = await sql.unsafe<{ total: number | string }>(countSql, countParams);
+    const countResult = await read(countSql, countParams);
     total = parseInt(String(countResult[0]?.total ?? '0'), 10);
     if (total === 0) return emptyResponse();
-    rawRows = (await args.sql.unsafe(querySQL, queryParams)) as any[];
+    rawRows = await read(querySQL, queryParams);
   }
 
   const content = args.needClassifications
@@ -562,6 +579,7 @@ export async function listContentInternal(
       effectiveOffset,
       fetchLimit,
       includeTotal,
+      signal: options.signal,
     });
   }
 
@@ -686,5 +704,6 @@ export async function listContentInternal(
     effectiveOffset,
     fetchLimit,
     includeTotal,
+    signal: options.signal,
   });
 }

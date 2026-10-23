@@ -23,13 +23,17 @@ import type { DbClient } from '../db/client';
 import logger from './logger';
 import { getScoringFormulaSql, resolveStoredScoringProfile } from './scoring-profiles';
 import { validateAndFormatIds, validateNumericId } from './sql-validation';
+import { boundedQuery } from './bounded-read';
 import {
+  CONTENT_READ_STATEMENT_TIMEOUT_MS,
   boundedAttachmentsSql,
   boundedJsonSql,
   boundedPayloadTextSql,
 } from './content-read-bounds';
 
 interface NormalizedScoreFilters {
+  /** The caller's lifetime. Its abort cancels these statements on Postgres. */
+  signal?: AbortSignal;
   connection_ids?: number[];
   feed_ids?: number[];
   run_ids?: number[];
@@ -399,7 +403,9 @@ export async function getNormalizedScoreContent(
     }
   }
 
-  const sources = await sql.unsafe(
+  const read = { signal: filters?.signal, statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS };
+  const sources = await boundedQuery(
+    sql,
     `
     SELECT DISTINCT
       s.id,
@@ -409,7 +415,8 @@ export async function getNormalizedScoreContent(
     LEFT JOIN connections s ON f.connection_id = s.id
     WHERE ${conditions.join(' AND ')}
   `,
-    params
+    params,
+    read
   );
 
   if (sources.length === 0) {
@@ -554,10 +561,12 @@ export async function getNormalizedScoreContent(
   logger.debug({ query: query.substring(0, 500) }, 'Executing normalized score query');
 
   try {
-    const result = await sql.unsafe(query, filterParams);
+    const result = await boundedQuery(sql, query, filterParams, read);
     return result as NormalizedScoreContent[];
   } catch (error) {
-    logger.error({ error, query: query.substring(0, 1000) }, 'Normalized score query failed');
+    if (!filters?.signal?.aborted) {
+      logger.error({ error, query: query.substring(0, 1000) }, 'Normalized score query failed');
+    }
     throw error;
   }
 }
@@ -599,10 +608,13 @@ export async function getNormalizedScoreContentCount(
   `;
 
   try {
-    const result = await sql.unsafe(countQuery, filterParams);
+    const result = await boundedQuery(sql, countQuery, filterParams, {
+      signal: filters?.signal,
+      statementTimeoutMs: CONTENT_READ_STATEMENT_TIMEOUT_MS,
+    });
     return Number(result[0]?.total || 0);
   } catch (error) {
-    logger.error({ error }, 'Normalized score count query failed');
+    if (!filters?.signal?.aborted) logger.error({ error }, 'Normalized score count query failed');
     throw error;
   }
 }

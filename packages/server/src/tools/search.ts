@@ -910,12 +910,14 @@ async function fetchContentSnippets(
   minSimilarity?: number,
   excludeWorkspaceAudit?: boolean,
   excludeOperationalTrail?: boolean,
-  entityId?: number
+  entityId?: number,
+  signal?: AbortSignal
 ): Promise<{ snippets: ContentSnippet[]; queryEmbeddingUnavailable: boolean }> {
   const result = await searchContentByText(
     query,
     {
       organization_id: gate.organizationId,
+      signal,
       ...(entityId != null && {
         entity_id: entityId,
         strict_organization_scope: true,
@@ -1153,6 +1155,7 @@ async function fetchConversationSnippets(
 
 export interface RecallContext {
   query: string | null;
+  signal?: AbortSignal;
   /** Memory-scope filter for events content — the caller-supplied agent_id arg.
    * This is a CONTENT filter (which agent's memory), NOT a gate field; the
    * tenant/principal/calling-agent identity travels on the {@link AuthzScope}. */
@@ -1309,7 +1312,8 @@ export async function gatherLocalRecall(
     ctx.minSimilarity,
     ctx.excludeWorkspaceAudit,
     ctx.excludeOperationalTrail,
-    ctx.entityId
+    ctx.entityId,
+    ctx.signal
   );
   const conversationPromise = shouldSearchConversation
     ? fetchConversationSnippets(gate, ctx.workspaceSlug, ctx.query as string, ctx.contentLimit)
@@ -1320,6 +1324,7 @@ export async function gatherLocalRecall(
     conversationPromise,
     coveragePromise,
   ]);
+  ctx.signal?.throwIfAborted();
 
   const result: Partial<UnifiedSearchResult> = {};
   const local_sources: SearchCoverage['local_sources'] = [];
@@ -1480,6 +1485,7 @@ async function searchImpl(
         }
       )
   );
+  ctx.abortSignal?.throwIfAborted();
 
   settled.forEach((item, index) => {
     // Recent lists a federated search only in the workspaces it found
@@ -1636,6 +1642,7 @@ async function searchWorkspaceImpl(
     includeContent && hasContentSignal
       ? gatherLocalRecall(connectionScope, {
           query: args.query ?? null,
+          signal: ctx.abortSignal,
           contentAgentId: agentIdScope,
           contentLimit,
           // Federation owns the single embedding attempt. When it already ran
