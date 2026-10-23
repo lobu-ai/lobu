@@ -54,6 +54,11 @@ export const MAC_DEVICE_CAPABILITIES = [
   "photos",
   "calendar",
   "reminders",
+  // Advertised only by Mac builds released before native meeting recording was
+  // retired (owletto #1211); they still send the `apple.system_audio` manifest,
+  // and one disallowed capability rejects the whole manifest payload. Drop this
+  // once MIN_CLIENT_VERSION excludes those builds.
+  "system_audio",
   "computer_use",
 ] as const;
 

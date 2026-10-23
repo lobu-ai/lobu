@@ -80,4 +80,17 @@ describe("platform allowlist lookups ignore inherited keys", () => {
       "os.notifications",
     ]);
   });
+
+  test("released Mac clients retain their legacy audio capability", () => {
+    expect(authorizeCapabilities("macos", ["system_audio"])).toEqual({
+      authorized: ["system_audio"],
+      dropped: [],
+    });
+    for (const platform of ["headless", "ios", "chrome-extension"]) {
+      expect(authorizeCapabilities(platform, ["system_audio"])).toEqual({
+        authorized: [],
+        dropped: ["system_audio"],
+      });
+    }
+  });
 });

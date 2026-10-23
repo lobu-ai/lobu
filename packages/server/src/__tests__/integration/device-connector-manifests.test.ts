@@ -12,6 +12,7 @@ import { TestApiClient } from '../setup/test-mcp-client';
 import {
   deviceManifestHash,
   getDeviceManifestClaimAuthorizationsForDevice,
+  validateDeviceConnectorManifests,
   type DeviceConnectorManifest,
 } from '../../worker-api/device-manifests';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
@@ -402,6 +403,21 @@ describe('device connector manifests', () => {
   });
   afterEach(async () => {
     await cleanupTestDatabase();
+  });
+
+  it('accepts a released Mac audio manifest alongside current manifests', () => {
+    const current = manifest();
+    const legacy = manifest({
+      key: 'apple.system_audio',
+      required_capability: 'system_audio',
+    });
+    const result = validateDeviceConnectorManifests({
+      platform: 'macos',
+      capabilities: ['system_audio', 'screentime'],
+      manifests: [legacy, current],
+    });
+    expect(result.accepted).toBe(true);
+    expect(result.manifests.map(({ manifest }) => manifest.key)).toEqual(['apple.system_audio', CONNECTOR_KEY]);
   });
 
   it('durably suppresses an explicitly deleted auto-wired connection until reconnect', async () => {
