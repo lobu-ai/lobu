@@ -291,6 +291,12 @@ describe('buildProviderManagementUrl', () => {
 });
 
 describe('buildEntityUrl', () => {
+  it('keeps source keys in one segment for parent and leaf links', () => {
+    const url = buildEntityUrl({ ownerSlug: 'acme', entityType: 'source-record', slug: 'catalog:vendor/model%2F?x#y', parentType: 'source-record', parentSlug: 'parent/50%' });
+    expect(url).toBe('/acme/source-record/parent%2F50%25/source-record/catalog%3Avendor%2Fmodel%252F%3Fx%23y');
+    expect(url.split('/').slice(2).map(decodeURIComponent)).toEqual(['source-record', 'parent/50%', 'source-record', 'catalog:vendor/model%2F?x#y']);
+  });
+
   it('builds URL with provided baseUrl', () => {
     const url = buildEntityUrl(
       { ownerSlug: 'acme', entityType: 'topic', slug: 'test-topic' },
