@@ -37,6 +37,45 @@ const ROWS_PER_FEED = 3;
 /** What the caller asks for. Below ROWS_PER_FEED on purpose. */
 const PAGE_LIMIT = 2;
 
+type SourcesRead = {
+	sources: Record<string, unknown[]>;
+	sources_page?: Record<
+		string,
+		{ returned: number; limit: number; has_more: boolean }
+	>;
+};
+
+/**
+ * Read an automation's window, retrying while a source is still empty.
+ *
+ * The arrival horizon never passes the start of the oldest transaction open on
+ * the database (see \`automationArrivalHorizon\`), so a row seeded a moment ago
+ * is invisible to a windowed read for as long as ANY other connection holds an
+ * older transaction open. That is correct in production (the window is only
+ * delayed) but made these tests flake when a co-running writer was open at the
+ * wrong instant. Wait for the horizon to pass the seeded rows instead of
+ * asserting on the first read.
+ */
+async function readSettled(
+	owner: TestApiClient,
+	args: { automation_id: string; limit: number },
+	sourceNames: string[],
+): Promise<SourcesRead> {
+	const deadline = Date.now() + 15_000;
+	for (;;) {
+		const result = (await owner.knowledge.read({
+			...args,
+			since: "today",
+			until: "today",
+		})) as SourcesRead;
+		const settled = sourceNames.every(
+			(name) => (result.sources[name]?.length ?? 0) > 0,
+		);
+		if (settled || Date.now() > deadline) return result;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+}
+
 describe("automation-mode limit bounds every SQL-backed source", () => {
 	let owner: TestApiClient;
 	let orgId: string;
@@ -120,18 +159,11 @@ describe("automation-mode limit bounds every SQL-backed source", () => {
 			],
 		})) as { automation_id: string };
 
-		const result = (await owner.knowledge.read({
-			automation_id: created.automation_id,
-			since: "today",
-			until: "today",
-			limit: PAGE_LIMIT,
-		})) as {
-			sources: Record<string, unknown[]>;
-			sources_page?: Record<
-				string,
-				{ returned: number; limit: number; has_more: boolean }
-			>;
-		};
+		const result = await readSettled(
+			owner,
+			{ automation_id: created.automation_id, limit: PAGE_LIMIT },
+			["content", "secondary"],
+		);
 
 		// The primary source was always bounded — assert it to prove the fixture
 		// really did seed more rows than the limit, so the secondary assertion
@@ -182,15 +214,11 @@ describe("automation-mode limit bounds every SQL-backed source", () => {
 			});
 		}
 
-		const result = (await owner.knowledge.read({
-			automation_id: created.automation_id,
-			since: "today",
-			until: "today",
-			limit: PAGE_LIMIT,
-		})) as {
-			sources: Record<string, unknown[]>;
-			sources_page?: Record<string, { returned: number; limit: number; has_more: boolean }>;
-		};
+		const result = await readSettled(
+			owner,
+			{ automation_id: created.automation_id, limit: PAGE_LIMIT },
+			["content", "context_rows"],
+		);
 
 		expect(result.sources.context_rows).toHaveLength(PAGE_LIMIT);
 		expect(result.sources_page?.context_rows).toEqual({
@@ -214,18 +242,11 @@ describe("automation-mode limit bounds every SQL-backed source", () => {
 		})) as { automation_id: string };
 
 		const roomy = ROWS_PER_FEED + 1;
-		const result = (await owner.knowledge.read({
-			automation_id: created.automation_id,
-			since: "today",
-			until: "today",
-			limit: roomy,
-		})) as {
-			sources: Record<string, unknown[]>;
-			sources_page?: Record<
-				string,
-				{ returned: number; limit: number; has_more: boolean }
-			>;
-		};
+		const result = await readSettled(
+			owner,
+			{ automation_id: created.automation_id, limit: roomy },
+			["content", "secondary"],
+		);
 
 		expect(result.sources.secondary).toHaveLength(ROWS_PER_FEED);
 		expect(result.sources_page?.secondary).toEqual({
@@ -233,5 +254,41 @@ describe("automation-mode limit bounds every SQL-backed source", () => {
 			limit: roomy,
 			has_more: false,
 		});
+	});
+	it("an open writer delays the window instead of dropping its rows", async () => {
+		const sql = getTestDb();
+		const held = await sql.reserve();
+		let released = false;
+		try {
+			// An older transaction on another connection pins the arrival horizon
+			// behind rows seeded after it began.
+			await held`BEGIN`;
+			const lateFeedId = await seedFeed("late-source-limit", "late");
+			const created = (await owner.automations.create({
+				entity_id: entityId,
+				slug: "open-writer-delay",
+				name: "Open Writer Delay",
+				prompt: "Summarize {{content}}.",
+				managed_agent_id: agentId,
+				sources: [{ name: "content", query: `@feed:${lateFeedId}` }],
+			})) as { automation_id: string };
+			const args = {
+				automation_id: created.automation_id,
+				since: "today",
+				until: "today",
+				limit: ROWS_PER_FEED + 1,
+			};
+
+			const during = (await owner.knowledge.read(args)) as SourcesRead;
+			expect(during.sources.content).toHaveLength(0);
+
+			await held`COMMIT`;
+			released = true;
+			const after = (await owner.knowledge.read(args)) as SourcesRead;
+			expect(after.sources.content).toHaveLength(ROWS_PER_FEED);
+		} finally {
+			if (!released) await held`ROLLBACK`;
+			held.release();
+		}
 	});
 });
