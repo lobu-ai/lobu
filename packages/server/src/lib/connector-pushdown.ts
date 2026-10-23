@@ -17,6 +17,7 @@ import { stableJson } from '../utils/insert-event';
 import {
   classifyToolError,
   getErrorMessage,
+  isRetryable,
   ToolError,
   type ToolErrorCode,
 } from '@lobu/core';
@@ -83,6 +84,9 @@ interface ConnectorQueryResult {
  */
 export const PUSHDOWN_QUERY_TIMEOUT_MS = 30_000;
 
+/** Pause before the one transient-failure retry; it never extends the deadline. */
+const PUSHDOWN_RETRY_BACKOFF_MS = 250;
+
 /**
  * The budget one pushdown gets: the cap, or whatever is left of the caller's
  * deadline when that is sooner. Throws when the deadline has already passed, so
@@ -101,7 +105,7 @@ export function resolvePushdownTimeoutMs(deadlineAt?: number): number {
 
 export async function runConnectorQuery(p: ConnectorQueryParams): Promise<ConnectorQueryResult> {
   // Resolved before any work so an already-expired deadline costs nothing.
-  const timeoutMs = resolvePushdownTimeoutMs(p.deadlineAt);
+  const deadlineAt = Date.now() + resolvePushdownTimeoutMs(p.deadlineAt);
   const sql = getDb();
   // Resolve org-scoped + active, enforcing the same visibility as manage_connections:
   // owner/admin callers reach every connection; everyone else gets the shared
@@ -138,7 +142,7 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
     p.scope.organizationId
   );
 
-  const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } = await resolveExecutionAuth({
+  const authParams = {
     organizationId: p.scope.organizationId,
     connectionId: conn.id,
     authProfileId: Number(conn.auth_profile_id) || null,
@@ -146,40 +150,68 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
     credentialDb: getDb(),
     logContext: { connection: p.connectionSlug },
     logMessage: 'Failed to resolve connector query credentials',
-  });
+  };
+  let auth = await resolveExecutionAuth(authParams);
 
-  const result = await executeCompiledConnector({
-    compiledCode,
-    job: {
-      mode: 'query',
-      query: p.query,
-      exactMatch: p.exactMatch,
-      selection: p.selection,
-      // Same merge as feed-sync / worker poll: connection.config under
-      // credentials + caller overrides (any connector-level config).
-      // ONLY the connection's own credentials reach ctx.config — deliberately NOT
-      // the gateway's process.env, so a connection missing DATABASE_URL fails
-      // cleanly instead of falling back to Lobu's own DB. The egress policy is
-      // the one non-credential we inject: under cloud mode a DB connector must reject
-      // internal/metadata hosts (block-private); self-hosted reaches its own
-      // private DB (allow-private). The egress policy rides on both config and env
-      // so the isolate's socketOpen and hostFetch enforce it. Injected LAST so
-      // neither caller config nor credentials can override this security control.
-      config: {
-        ...mergeExecutionConfig(conn.config, connectionCredentials, p.config),
-        ...dbEgressConfig(),
+  const execute = async (resolved: typeof auth) => {
+    const { credentials, connectionCredentials, sessionState, httpAuth, onHttpFetch } = resolved;
+    return executeCompiledConnector({
+      compiledCode,
+      job: {
+        mode: 'query',
+        query: p.query,
+        exactMatch: p.exactMatch,
+        selection: p.selection,
+        // Same merge as feed-sync / worker poll: connection.config under
+        // credentials + caller overrides (any connector-level config).
+        // ONLY the connection's own credentials reach ctx.config — deliberately NOT
+        // the gateway's process.env, so a connection missing DATABASE_URL fails
+        // cleanly instead of falling back to Lobu's own DB. The egress policy is
+        // the one non-credential we inject: under cloud mode a DB connector must reject
+        // internal/metadata hosts (block-private); self-hosted reaches its own
+        // private DB (allow-private). The egress policy rides on both config and env
+        // so the isolate's socketOpen and hostFetch enforce it. Injected LAST so
+        // neither caller config nor credentials can override this security control.
+        config: {
+          ...mergeExecutionConfig(conn.config, connectionCredentials, p.config),
+          ...dbEgressConfig(),
+        },
+        env: dbEgressConfig(),
+        sessionState,
+        credentials,
+        httpAuth,
+        limit: p.limit,
+        offset: p.offset,
+        sort: p.sort,
       },
-      env: dbEgressConfig(),
-      sessionState,
-      credentials,
-      httpAuth,
-      limit: p.limit,
-      offset: p.offset,
-      sort: p.sort,
-    },
-    hooks: { onHttpFetch },
-    timeoutMs,
-  });
+      hooks: { onHttpFetch },
+      timeoutMs: resolvePushdownTimeoutMs(deadlineAt),
+    });
+  };
+
+  let result: Awaited<ReturnType<typeof execute>>;
+  try {
+    result = await execute(auth);
+  } catch (error) {
+    // Only read-only queries reach this seam. A typed rejection can refresh the
+    // exact token the provider refused; the credential service serializes token
+    // rotation across replicas and reuses a concurrent refresh.
+    const status = (error as { httpStatus?: unknown } | null)?.httpStatus;
+    if (status === 401 && auth.credentials?.accessToken) {
+      const rejectedAccessToken = auth.credentials.accessToken;
+      auth = await resolveExecutionAuth({ ...authParams, rejectedAccessToken });
+      if (!auth.credentials?.accessToken || auth.credentials.accessToken === rejectedAccessToken) throw error;
+    } else {
+      // Opaque connector errors and permanent refusals are never evidence that
+      // another request will help. Preserve the structured HTTP taxonomy.
+      if (typeof status !== 'number' || !isRetryable(classifyToolError({ httpStatus: status }))) throw error;
+      if (deadlineAt - Date.now() <= PUSHDOWN_RETRY_BACKOFF_MS) throw error;
+      await new Promise(resolve => setTimeout(resolve, PUSHDOWN_RETRY_BACKOFF_MS));
+    }
+    // One retry, sharing the original deadline rather than a fresh 30s budget.
+    if (deadlineAt <= Date.now()) throw error;
+    result = await execute(auth);
+  }
 
   if (result.mode !== 'query') {
     throw new Error(`Expected query result, got mode=${result.mode}`);
