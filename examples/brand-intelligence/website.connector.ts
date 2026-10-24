@@ -32,38 +32,13 @@ interface PageSection {
   anchor: string;
 }
 
-const COOKIE_BANNER_PATTERNS = [
-  /\bcookie(s)?\b/i,
-  /\bconsent\b/i,
-  /\baccept all\b/i,
-  /\breject all\b/i,
-  /\bmanage (my )?preferences\b/i,
-  /\bprivacy preferences\b/i,
-  /\bmarketing\b/i,
-  /\bmeasurement\b/i,
-  /\bnecessary\b/i,
-];
-
-function countPatternMatches(text: string, patterns: RegExp[]): number {
-  return patterns.reduce(
-    (count, pattern) => count + (pattern.test(text) ? 1 : 0),
-    0
-  );
-}
-
-function shouldSkipCookieBannerText(text: string): boolean {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return false;
-  return countPatternMatches(normalized, COOKIE_BANNER_PATTERNS) >= 3;
-}
-
 export default class WebsiteConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: "website",
     name: "Website",
     description:
       "Fetches web pages over HTTP. Supports sitemap.xml for auto-discovery. Converts to markdown sections and tracks changes.",
-    version: "2.1.0",
+    version: "2.1.1",
     faviconDomain: "google.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -148,6 +123,23 @@ export default class WebsiteConnector extends ConnectorRuntime {
       headingStyle: "atx",
       codeBlockStyle: "fenced",
     });
+    // Remove the consent UI itself. Cookie or marketing vocabulary in the
+    // surrounding page is business content, not evidence that the page is a banner.
+    this.turndown.addRule("cookieConsent", {
+      filter: (node) => {
+        if (!["DIV", "SECTION", "FORM"].includes(node.nodeName)) return false;
+        const role = node.getAttribute("role")?.toLowerCase();
+        const label = node.getAttribute("aria-label")?.trim() ?? "";
+        return (
+          (["dialog", "alertdialog", "region"].includes(role ?? "") &&
+            /^cookies? (consent|preferences|notice|settings)$/i.test(label)) ||
+          /^(onetrust-(consent|banner)-sdk|CybotCookiebotDialog|cookie[-_]?banner)$/i.test(
+            node.id
+          )
+        );
+      },
+      replacement: () => "",
+    });
   }
 
   private async syncFeed(ctx: SyncContext): Promise<SyncResult> {
@@ -187,12 +179,7 @@ export default class WebsiteConnector extends ConnectorRuntime {
         const markdown = this.deduplicateMarkdown(
           this.turndown.turndown(cleanHtml).trim()
         );
-        if (
-          !markdown ||
-          shouldSkipCookieBannerText(`${meta.title ?? ""}\n${markdown}`)
-        ) {
-          continue;
-        }
+        if (!markdown) continue;
         const contentHash = this.hash(markdown);
 
         if (previousHashes[url] === contentHash) {
@@ -213,14 +200,6 @@ export default class WebsiteConnector extends ConnectorRuntime {
               continue;
             }
             newHashes[sectionKey] = sectionHash;
-            if (
-              shouldSkipCookieBannerText(
-                `${section.heading}\n${section.content}`
-              )
-            ) {
-              continue;
-            }
-
             const parentKey = section.parentAnchor
               ? `${url}#${section.parentAnchor}`
               : undefined;
