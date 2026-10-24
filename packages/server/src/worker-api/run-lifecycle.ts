@@ -48,7 +48,7 @@ import {
 } from "../connectors/feed-sync-failure";
 import { parseDependencyUnavailableError } from "../connectors/dependency-unavailable";
 import { getDb, parsePgNumberArray } from "../db/client";
-import { isTransientDbError } from "../db/with-retry";
+import { isTransientDbError, noteDbConnRetry } from "../db/with-retry";
 import {
 	pauseFeedsForInactiveConnections,
 	resumeFeedsForRecoveredConnections,
@@ -621,6 +621,11 @@ export async function ingestConnectorItems(
 	// run's lease (feed-page-commit.ts). State is local to one call because a
 	// deadlock victim runs it again from the start.
 	let connectionRetried = false;
+	// Set once writePage has returned inside the transaction. After that only
+	// COMMIT is left, and a connection drop there may have landed the commit,
+	// so replaying the page would see every row as unchanged and then delete
+	// the artifacts the committed rows reference.
+	let pageWritten = false;
 	const writePage = async (db: DbClient) => {
 		dryPreview.length = 0;
 		let totalItems = 0;
@@ -952,6 +957,12 @@ export async function ingestConnectorItems(
 			referencedArtifactIds,
 		};
 	};
+	const writePageTracked = async (db: DbClient) => {
+		pageWritten = false;
+		const written = await writePage(db);
+		pageWritten = true;
+		return written;
+	};
 
 	const page = {
 		runId: target.runId,
@@ -978,27 +989,36 @@ export async function ingestConnectorItems(
 					try {
 						await sql.begin(async (tx) => {
 							await lockFeedPage(tx, page);
-							outcome = await writePage(tx);
+							outcome = await writePageTracked(tx);
 							throw DRY_RUN_ROLLBACK;
 						});
 					} catch (err) {
 						if (err !== DRY_RUN_ROLLBACK) throw err;
 					}
 				} else {
-					outcome = await withFeedPageTransaction(sql, page, writePage);
+					outcome = await withFeedPageTransaction(sql, page, writePageTracked);
 				}
 				break;
 			} catch (err) {
-				if (connectionRetried || !isTransientDbError(err)) throw err;
+				if (connectionRetried || pageWritten || !isTransientDbError(err)) {
+					throw err;
+				}
 				// Retry the whole page once on a fresh connection. withDbRetry
 				// allows two retries; external effects still wait for commit.
 				connectionRetried = true;
+				noteDbConnRetry("stream.page", 1, err as Error);
 			}
 		}
 	} catch (err) {
-		await deleteMaterializedArtifacts(
-			stagedItems.flatMap((staged) => staged.publishedArtifactIds)
-		);
+		// Once writePage has returned, a failure (a connection drop during COMMIT)
+		// is ambiguous: the page may be durable and reference these artifacts.
+		// Deleting them would silently destroy committed data, so keep them. A
+		// leaked orphan is recoverable; a deleted referenced artifact is not.
+		if (isDry || !pageWritten) {
+			await deleteMaterializedArtifacts(
+				stagedItems.flatMap((staged) => staged.publishedArtifactIds)
+			);
+		}
 		if (err instanceof FeedPageUnavailableError) {
 			// Reaped, cancelled or re-claimed after this request was authorized.
 			// A deleted feed/connection reaches the same fence. Nothing was written.
