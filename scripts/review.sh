@@ -51,8 +51,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/review-skip.sh"
 # shellcheck source=scripts/lib/review-cache.sh
 . "$SCRIPT_DIR/lib/review-cache.sh"
-# shellcheck source=scripts/lib/remote-ci.sh
-. "$SCRIPT_DIR/lib/remote-ci.sh"
 
 # --- preflight --------------------------------------------------------------
 

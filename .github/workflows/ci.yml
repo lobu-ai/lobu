@@ -24,8 +24,8 @@ permissions:
 # the machine behind these jobs, not their names, events, secrets, or checks.
 # CI_K8S_RUNNER (e.g. "k8s-ci", an ARC self-hosted runner group) opts into the
 # self-hosted Kubernetes backend, gated to real pull_requests by a trusted
-# author (TRUSTED_AUTHORS, whitespace-separated). Pushes, workflow_dispatch,
-# and the `make pr-full` Depot gate are never routed to it.
+# author (TRUSTED_AUTHORS, whitespace-separated). Pushes and workflow_dispatch
+# are never routed to it. `make pr-full` selects its provider independently.
 #
 # Pull requests share a per-ref group and cancel obsolete revisions. EVERY OTHER
 # execution gets its own run-id group, so it neither cancels nor is cancelled.
@@ -47,14 +47,6 @@ permissions:
 # nobody validated is worse than a PR check that waits — but if the pool starts
 # starving, revisit here rather than reinstating blanket cancellation.
 #
-# The run-id group is also load-bearing for `depot ci run`, which `make pr-full`
-# uses to execute this file against a local staged tree. That path supplies no
-# ref, so `github.ref` expanded empty and every local dispatch in the org
-# collapsed into one group literally named `ci-`; the newest gate anywhere
-# killed whatever was running — a different branch, worktree, or person — and
-# the victim saw only "Cancelled due to the workflow concurrency policy", which
-# names THIS block rather than any Depot-side limit. Two dispatchers that each
-# retry on cancellation then deadlock, neither ever attesting.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -63,8 +55,7 @@ jobs:
   # Resolve the Linux runner backend from the PR author. Trusted authors
   # (TRUSTED_AUTHORS) may use the self-hosted Kubernetes runner when
   # CI_K8S_RUNNER is set; every other event and author resolves to
-  # CI_LINUX_RUNNER (the A/B override) or GitHub-hosted ubuntu-24.04, so the
-  # `make pr-full` Depot gate never depends on a self-hosted runner.
+  # CI_LINUX_RUNNER (the A/B override) or GitHub-hosted ubuntu-24.04.
   check-author:
     name: Resolve CI backend
     runs-on: ubuntu-24.04
@@ -1371,12 +1362,10 @@ jobs:
         run: sh scripts/lib/__tests__/kubeconfig-preflight.test.sh
 
       - name: Remote CI wrapper guards
-        # Depot rewrites .github/actions paths to .depot/actions for local runs.
-        # Pin the duplicate action and the fail-closed run-status parser so a
-        # failed remote job can never be reported as a successful preflight.
+        # Exercise exact staged payloads, provider dispatch and remote failures.
         run: |
-          cmp -s .github/actions/setup-submodule/action.yml .depot/actions/setup-submodule/action.yml
           bash scripts/lib/__tests__/remote-ci.test.sh
+          bash scripts/lib/__tests__/boat-remote-ci.test.sh
 
       - name: Submodule drift policy tests
         run: |

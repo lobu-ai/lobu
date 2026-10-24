@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provisions a Daytona ephemeral sandbox with the Lobu CI toolchain.
+# Provisions a Boat/Daytona ephemeral sandbox with the Lobu CI toolchain.
 #
 # Runs ONLY inside the sandbox (gate-runner.sh sources this when
 # GATE_PROVISION=1). Installs the toolchain ci.yml jobs expect, starts a

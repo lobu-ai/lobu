@@ -390,11 +390,12 @@ pre-pr:
 	@echo "✅ pre-pr gates clean. NOTE: confirm your fix is in 'git show HEAD:<file>',"
 	@echo "   not just the working tree — a fix that isn't committed won't reach CI."
 
-# OPTIONAL full-gate runner (GitHub CI is canonical). Default provider auto:
-# a Daytona ephemeral sandbox when the CLI is available, otherwise the SAME
-# jobs run on this machine — the command never hard-depends on Daytona.
-# REMOTE_CI_PROVIDER=depot|local forces a provider; REMOTE_JOBS narrows the
-# job list. Stage intended files first: the sandbox only sees staged content.
+# OPTIONAL full-gate runner (GitHub CI is canonical). Auto prefers Boat, then
+# Daytona, then local when CLIs are absent; installed faulty CLIs fail closed.
+# REMOTE_CI_PROVIDER=boat|daytona|local forces a provider; REMOTE_JOBS narrows
+# the job list. Stage intended files first: remote runs use the exact index.
+# Boat: authenticated CLI; BOAT_TYPE=default, optional BOAT_SNAPSHOT=<name>.
+# REMOTE_CI_TIMEOUT_SECONDS=2700 bounds Boat's command runtime.
 REMOTE_FAST_JOBS := unit frontend server-integration-vitest server-integration-bun integration format-lint typecheck migrations
 
 # Optional broad iteration gate: the required Linux merge graph without the

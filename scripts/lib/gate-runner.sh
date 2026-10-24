@@ -2,8 +2,8 @@
 # Runs the Lobu Linux CI graph (ci.yml) jobs as local commands.
 #
 # This is the shared payload behind `make pr-full` / `make pr-fast`: the same
-# script executes inside a Daytona ephemeral sandbox (after provision) and as
-# the local fallback when Daytona is unavailable. GitHub CI remains the
+# script executes inside a Boat/Daytona ephemeral sandbox (after provision) and as
+# the local fallback when remote CLIs are absent. GitHub CI remains the
 # canonical gate; this runner is a convenience preflight.
 #
 # Contract:
@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-# Keep in sync with DEFAULT_JOBS in scripts/run-remote-ci.sh (depot path).
+# Keep in sync with DEFAULT_JOBS in scripts/run-remote-ci.sh.
 GATE_JOBS=(
   unit
   frontend
@@ -179,8 +179,8 @@ gate_format_lint() {
   bash scripts/lib/__tests__/process-cleanup.test.sh || return 1
   bash scripts/lib/__tests__/guest-bundle-expectation.test.sh || return 1
   sh scripts/lib/__tests__/kubeconfig-preflight.test.sh || return 1
-  cmp -s .github/actions/setup-submodule/action.yml .depot/actions/setup-submodule/action.yml || return 1
   bash scripts/lib/__tests__/remote-ci.test.sh || return 1
+  bash scripts/lib/__tests__/boat-remote-ci.test.sh || return 1
   bash scripts/lib/__tests__/submodule-drift.test.sh || return 1
   bash scripts/lib/__tests__/submodule-bump.test.sh || return 1
 }
@@ -387,7 +387,7 @@ gate_run() {
   [ "$GATE_FAIL" -eq 0 ]
 }
 
-# provision (Daytona sandbox only) — source gate-provision.sh when asked
+# provision (remote sandbox only) — source gate-provision.sh when asked
 if [ "${GATE_PROVISION:-0}" = "1" ]; then
   # shellcheck source=scripts/lib/gate-provision.sh
   . "$SCRIPT_DIR/gate-provision.sh"
