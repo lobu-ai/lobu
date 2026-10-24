@@ -32,6 +32,52 @@ async function sync(html: string, parseSections = false, checkpoint: any = {}) {
 }
 
 for (const parseSections of [false, true]) {
+  test(`recognizes consent containers beyond div and section (sections=${parseSections})`, async () => {
+    for (const [tag, attributes] of [
+      ["article", 'role="dialog" aria-label="Cookie preferences"'],
+      ["article", 'role="region" aria-label="Cookie consent"'],
+      ["fieldset", 'id="cookie-banner"'],
+    ]) {
+      const consent = `<${tag} ${attributes}><p>We use necessary cookies with your consent.</p><button>Accept all</button></${tag}>`;
+      const onlyBanner = await sync(document(consent), parseSections);
+      expect(onlyBanner.events).toEqual([]);
+      expect(onlyBanner.checkpoint.hashes).toEqual({});
+      const withBusiness = await sync(
+        document(`<main><h1>Reporting</h1><p>${business}</p></main>${consent}`),
+        parseSections
+      );
+      expect(withBusiness.events).toHaveLength(1);
+      expect(withBusiness.events[0].payload_text).toContain(business);
+      expect(withBusiness.events[0].payload_text).not.toContain(
+        "necessary cookies"
+      );
+    }
+  });
+
+  test(`resolves consent labels before removing surrounding chrome (sections=${parseSections})`, async () => {
+    for (const tag of ["header", "footer", "nav", "aside"]) {
+      for (const role of ["dialog", "alertdialog", "region"]) {
+        const consent = `<div role="${role}" aria-labelledby="consent-heading">
+          <${tag}><h2 id="consent-heading">Cookie preferences</h2><button>Accept all</button></${tag}>
+          <p>We use necessary cookies with your consent.</p></div>`;
+        const onlyBanner = await sync(document(consent), parseSections);
+        expect(onlyBanner.events).toEqual([]);
+        expect(onlyBanner.checkpoint.hashes).toEqual({});
+        const withBusiness = await sync(
+          document(
+            `<main><h1>Reporting</h1><p>${business}</p></main>${consent}`
+          ),
+          parseSections
+        );
+        expect(withBusiness.events).toHaveLength(1);
+        expect(withBusiness.events[0].payload_text).toContain(business);
+        expect(withBusiness.events[0].payload_text).not.toContain(
+          "necessary cookies"
+        );
+      }
+    }
+  });
+
   test(`retains business content beside a consent banner (sections=${parseSections})`, async () => {
     const result = await sync(
       `<main><h1>Analytics platform</h1><p>${business}</p></main>${banner()}`,
@@ -157,16 +203,32 @@ for (const parseSections of [false, true]) {
   });
 
   test(`retains non-consent labelled content (sections=${parseSections})`, async () => {
-    const result = await sync(
-      `<div role="region" aria-label="Cookie consent" aria-labelledby="product-label">
-        <h1 id="product-label">Privacy platform</h1><p>${business}</p>
-      </div>`,
-      parseSections
-    );
-    expect(result.events).toHaveLength(1);
-    expect(result.events[0].payload_text).toContain(business);
+    for (const heading of [
+      '<h1 id="product-label">Privacy platform</h1>',
+      '<header><h1 id="product-label">Privacy platform</h1></header>',
+    ]) {
+      const result = await sync(
+        `<div role="region" aria-label="Cookie consent" aria-labelledby="product-label">
+          ${heading}<p>${business}</p><button>Accept all</button>
+        </div>`,
+        parseSections
+      );
+      expect(result.events).toHaveLength(1);
+      expect(result.events[0].payload_text).toContain(business);
+    }
   });
 }
+
+test("omits nested page chrome and non-content nodes while preserving business content", async () => {
+  const result = await sync(
+    document(`<header><nav><div>Navigation</div></nav></header>
+    <main><p>${business}</p><script>window.tracking = true</script>
+    <style>.tracking {display:block}</style><input value="Hidden value"></main>
+    <footer><aside>Footer links</aside></footer>`)
+  );
+  expect(result.events).toHaveLength(1);
+  expect(result.events[0].payload_text).toBe(business);
+});
 
 test("a consent banner alone supplies no company evidence or successful content hash", async () => {
   const result = await sync(banner());

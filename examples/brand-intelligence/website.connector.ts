@@ -123,11 +123,36 @@ export default class WebsiteConnector extends ConnectorRuntime {
       headingStyle: "atx",
       codeBlockStyle: "fenced",
     });
+    // Apply removals during DOM traversal so referenced labels and controls
+    // remain available when the enclosing consent container is classified.
+    this.turndown.remove([
+      "head",
+      "title",
+      "script",
+      "style",
+      "noscript",
+      "nav",
+      "header",
+      "footer",
+      "aside",
+      "iframe",
+      "svg",
+      "canvas",
+      "video",
+      "audio",
+      "menu",
+      "dialog",
+      "embed",
+      "object",
+      "applet",
+      "input",
+      "link",
+      "meta",
+    ]);
     // Remove the consent UI itself. Cookie or marketing vocabulary in the
     // surrounding page is business content, not evidence that the page is a banner.
     this.turndown.addRule("cookieConsent", {
       filter: (node) => {
-        if (!["DIV", "SECTION", "FORM"].includes(node.nodeName)) return false;
         const role = node.getAttribute("role")?.toLowerCase();
         const label =
           node
@@ -210,9 +235,8 @@ export default class WebsiteConnector extends ConnectorRuntime {
         validatePublicUrl(url);
         const { html, finalUrl } = await this.fetchPage(url);
         const meta = this.extractMeta(html);
-        const cleanHtml = this.stripNonContent(html);
         const markdown = this.deduplicateMarkdown(
-          this.turndown.turndown(cleanHtml).trim()
+          this.turndown.turndown(html).trim()
         );
         if (!markdown) continue;
         const contentHash = this.hash(markdown);
@@ -430,39 +454,6 @@ export default class WebsiteConnector extends ConnectorRuntime {
       description: descMatch?.[1]?.trim(),
       ogImage: ogMatch?.[1]?.trim(),
     };
-  }
-
-  private stripNonContent(html: string): string {
-    const tags = [
-      "head",
-      "script",
-      "style",
-      "noscript",
-      "nav",
-      "header",
-      "footer",
-      "aside",
-      "iframe",
-      "svg",
-      "canvas",
-      "video",
-      "audio",
-      "menu",
-      "dialog",
-      "embed",
-      "object",
-      "applet",
-    ];
-    let cleaned = html;
-    for (const tag of tags) {
-      cleaned = cleaned.replace(
-        new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, "gi"),
-        ""
-      );
-    }
-    // Keep inputs until consent detection; Turndown omits them from markdown.
-    cleaned = cleaned.replace(/<(link|meta)\b[^>]*\/?>/gi, "");
-    return cleaned;
   }
 
   private parseSections(
