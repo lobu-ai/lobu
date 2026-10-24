@@ -1503,8 +1503,8 @@ describe('applyEventAttributions', () => {
  * rule — not a hand-built test rule — so a regression in the connector's
  * declared gate (e.g. flipping autoCreate back on ungated) fails here, at the
  * pipeline level where the raw-sender person flood would actually re-appear.
- * The gate is `metadata.person_relevant` (replied in default mode; stricter
- * counterparty selection under human_senders_only).
+ * The gate is an explicit positive `metadata.person_relevant` verdict;
+ * legacy replied-only payloads cannot bypass a missing or negative verdict.
  */
 describe('gmail promote-on-interaction (real connector rule)', () => {
   const GMAIL_KEY = 'google.gmail';
@@ -1639,15 +1639,42 @@ describe('gmail promote-on-interaction (real connector rule)', () => {
     const people = await personRows(sql, org.id);
     expect(people.map((p) => p.name)).toEqual(['Alice']);
     expect((later.metadata as Record<string, unknown>).email).toBe('alice@example.com');
+    const legacy = thread({
+      from_email: 'alice@example.com',
+      from_name: 'Alice',
+      replied: true,
+    });
+    await applyEventAttributions({
+      connectorKey: GMAIL_KEY,
+      feedKey: GMAIL_FEED,
+      orgId: org.id,
+      items: [legacy],
+    });
+    expect((legacy.metadata as Record<string, unknown>).email).toBe('alice@example.com');
+    expect(await personRows(sql, org.id)).toHaveLength(1);
   });
 
-  it('a legacy v1.0.3 {replied:true} payload still mints a person under the new definition', async () => {
+  it('an explicit negative person verdict is not overridden by a replied legacy gate', async () => {
+    const { org, sql } = await setupGmailOrg();
+    await applyEventAttributions({
+      connectorKey: GMAIL_KEY,
+      feedKey: GMAIL_FEED,
+      orgId: org.id,
+      items: [thread({
+        from_email: 'support@synthetic.example',
+        from_name: 'Synthetic Support',
+        replied: true,
+        person_relevant: false,
+      })],
+    });
+    expect(await personRows(sql, org.id)).toHaveLength(0);
+  });
+
+  it('a legacy replied-only payload cannot mint a person without a classification verdict', async () => {
     const { org, sql } = await setupGmailOrg();
 
-    // Pre-refresh run payloads carry `replied` but not `person_relevant`. The
-    // server loads the current definition by connector key, so the legacy rule
-    // must keep minting during a rolling deploy — otherwise in-flight old runs
-    // silently skip person creation.
+    // Older runs lack the current classification verdict. Retain the event
+    // without creating an unclassified contact during a rolling deployment.
     await applyEventAttributions({
       connectorKey: GMAIL_KEY,
       feedKey: GMAIL_FEED,
@@ -1662,6 +1689,6 @@ describe('gmail promote-on-interaction (real connector rule)', () => {
     });
 
     const people = await personRows(sql, org.id);
-    expect(people.map((p) => p.name)).toEqual(['Alice']);
+    expect(people).toHaveLength(0);
   });
 });
