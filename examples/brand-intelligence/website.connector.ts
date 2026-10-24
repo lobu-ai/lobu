@@ -129,10 +129,23 @@ export default class WebsiteConnector extends ConnectorRuntime {
       filter: (node) => {
         if (!["DIV", "SECTION", "FORM"].includes(node.nodeName)) return false;
         const role = node.getAttribute("role")?.toLowerCase();
-        const label = node.getAttribute("aria-label")?.trim() ?? "";
+        const label =
+          node
+            .getAttribute("aria-labelledby")
+            ?.trim()
+            .split(/\s+/)
+            .map(
+              (id) => node.ownerDocument.getElementById(id)?.textContent ?? ""
+            )
+            .join(" ")
+            .trim() ||
+          node.getAttribute("aria-label")?.trim() ||
+          "";
         return (
           (["dialog", "alertdialog", "region"].includes(role ?? "") &&
-            /^cookies? (consent|preferences|notice|settings)$/i.test(label)) ||
+            /^cookies?\s+(consent|preferences|notice|settings)$/i.test(
+              label
+            )) ||
           /^(onetrust-(consent|banner)-sdk|CybotCookiebotDialog|cookie[-_]?banner)$/i.test(
             node.id
           )
@@ -399,6 +412,7 @@ export default class WebsiteConnector extends ConnectorRuntime {
 
   private stripNonContent(html: string): string {
     const tags = [
+      "head",
       "script",
       "style",
       "noscript",

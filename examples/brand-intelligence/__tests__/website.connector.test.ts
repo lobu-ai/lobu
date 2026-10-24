@@ -18,6 +18,9 @@ const banner = (
   <p>We use necessary cookies with your consent for marketing measurement.</p>
   <button>${label}</button><button>Reject all</button></div>`;
 
+const document = (body: string) =>
+  `<!doctype html><html><head><title>Analytics platform</title></head><body>${body}</body></html>`;
+
 async function sync(html: string, parseSections = false, checkpoint: any = {}) {
   const connector = new WebsiteConnector();
   connector.fetchPage = async () => ({ html, finalUrl: url });
@@ -51,6 +54,52 @@ for (const parseSections of [false, true]) {
     expect(result.events).toHaveLength(1);
     expect(result.events[0].payload_text).toContain(description);
   });
+
+  test(`a full document containing only consent UI supplies no evidence (sections=${parseSections})`, async () => {
+    const result = await sync(document(banner()), parseSections);
+    expect(result.events).toEqual([]);
+    expect(result.checkpoint.hashes).toEqual({});
+  });
+
+  test(`document titles stay in metadata instead of page evidence (sections=${parseSections})`, async () => {
+    const result = await sync(
+      document(`<main><h1>Reporting</h1><p>${business}</p></main>${banner()}`),
+      parseSections
+    );
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0].payload_text).not.toContain("Analytics platform");
+    expect(result.events[0].payload_text).toContain(business);
+    if (!parseSections) {
+      expect(result.events[0].title).toBe("Analytics platform");
+      expect(result.events[0].metadata?.meta_title).toBe("Analytics platform");
+    }
+  });
+
+  test(`recognizes consent dialogs labelled by heading references (sections=${parseSections})`, async () => {
+    const result = await sync(
+      `<main><h1>Analytics platform</h1><p>${business}</p></main>
+      <div role="dialog" aria-labelledby="cookie-label preference-label">
+        <h2><span id="cookie-label">Cookie</span> <span id="preference-label">preferences</span></h2>
+        <p>We use necessary cookies with your consent for marketing measurement.</p>
+        <button>Accept all</button>
+      </div>`,
+      parseSections
+    );
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0].payload_text).toContain(business);
+    expect(result.events[0].payload_text).not.toContain("necessary cookies");
+  });
+
+  test(`retains non-consent labelled content (sections=${parseSections})`, async () => {
+    const result = await sync(
+      `<div role="region" aria-label="Cookie consent" aria-labelledby="product-label">
+        <h1 id="product-label">Privacy platform</h1><p>${business}</p>
+      </div>`,
+      parseSections
+    );
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0].payload_text).toContain(business);
+  });
 }
 
 test("a consent banner alone supplies no company evidence or successful content hash", async () => {
@@ -62,6 +111,7 @@ test("a consent banner alone supplies no company evidence or successful content 
 test("recognizes consent dialogs and conventional banner containers without inspecting business vocabulary", async () => {
   const containers = [
     '<div role="dialog" aria-label="Cookie preferences">',
+    '<div role="dialog" aria-label="Cookie preferences" aria-labelledby="missing-label">',
     '<section role="alertdialog" aria-label="Cookie settings">',
     '<div id="onetrust-consent-sdk">',
     '<div id="onetrust-banner-sdk">',
