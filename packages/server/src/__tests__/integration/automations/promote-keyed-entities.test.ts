@@ -16,7 +16,11 @@
  */
 
 import { slugify } from '@lobu/core';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fieldApproval from '../../../tools/admin/entity-field-approval';
+import * as notificationTriggers from '../../../notifications/triggers';
+import * as taskScheduler from '../../../scheduled/task-scheduler';
+import { runEntityApprovalTask, type EntityApprovalTaskPayload } from '../../../authz/deferred-approval-task';
 import type { DbClient } from '../../../db/client';
 import type { Env } from '../../../index';
 import type { AuthContext } from '../../../tools/execute';
@@ -1060,6 +1064,173 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
       `;
       expect(finalCard.action_input.fields).toEqual({ name: 'Monitor the deployed fix', $name: 'Monitor the deployed fix' });
     }
+  });
+
+  it('rolls completion back when its approval task cannot commit, then safely retries', async () => {
+    const ctx = await setupKeyedAutomation();
+    const first = await nextCompletion(ctx);
+    await completeWithToken(ctx, first.token, first.runId, {
+      problems: [
+        { category: 'Stability', name: 'App Crashes', severity: 'low' },
+      ],
+    });
+    const identity = topicIdentity(ctx.automationId, APP_CRASHES_KEY);
+    const [created] = await ctx.sql`
+      SELECT entity_id FROM entity_identities
+      WHERE organization_id = ${ctx.workspace.org.id}
+        AND namespace = 'automation_key' AND identifier = ${identity}
+    `;
+    const entityId = Number(created.entity_id);
+    await ctx.workspace.owner.entities.update({
+      entity_id: entityId,
+      metadata: { severity: 'high' },
+      field_note: 'synthetic human correction',
+    });
+    const next = await nextCompletion(ctx);
+    const args = {
+      automation_id: String(ctx.automationId),
+      run_id: next.runId,
+      window_token: next.token,
+      extracted_data: {
+        problems: [
+          { category: 'Stability', name: 'App Crashes', severity: 'critical' },
+        ],
+      },
+    };
+    const failure = vi
+      .spyOn(taskScheduler, 'enqueueTasksInTransaction')
+      .mockRejectedValueOnce(new Error('synthetic handoff insert unavailable'));
+    try {
+      await expect(ctx.api.automations.completeWindow(args)).rejects.toThrow(
+        'synthetic handoff insert unavailable',
+      );
+    } finally {
+      failure.mockRestore();
+    }
+    const [uncommitted] =
+      await ctx.sql`SELECT status FROM runs WHERE id = ${next.runId}`;
+    expect(uncommitted.status).not.toBe('completed');
+    const tasksBeforeRetry =
+      await ctx.sql`SELECT id FROM runs WHERE action_key = 'entity-approval' AND parent_run_id = ${next.runId}`;
+    expect(tasksBeforeRetry).toHaveLength(0);
+    const retried = await ctx.api.automations.completeWindow(args);
+    expect(retried.completed_now).toBe(true);
+    const tasks =
+      await ctx.sql`SELECT id FROM runs WHERE action_key = 'entity-approval' AND parent_run_id = ${next.runId}`;
+    expect(tasks).toHaveLength(1);
+    const proposals =
+      await ctx.sql`SELECT id FROM runs WHERE action_key = 'entity_field_change' AND parent_run_id = ${next.runId}`;
+    expect(proposals).toHaveLength(1);
+  });
+
+  it('recovers an owned-field proposal when approval delivery fails after completion', async () => {
+    const ctx = await setupKeyedAutomation();
+    const first = await nextCompletion(ctx);
+    await completeWithToken(ctx, first.token, first.runId, {
+      problems: [
+        { category: 'Stability', name: 'App Crashes', severity: 'low' },
+      ],
+    });
+    const identity = topicIdentity(ctx.automationId, APP_CRASHES_KEY);
+    const [created] = await ctx.sql`
+      SELECT entity_id FROM entity_identities
+      WHERE organization_id = ${ctx.workspace.org.id}
+        AND namespace = 'automation_key' AND identifier = ${identity}
+    `;
+    const entityId = Number(created.entity_id);
+    await ctx.workspace.owner.entities.update({
+      entity_id: entityId,
+      metadata: { severity: 'high' },
+      field_note: 'synthetic human correction',
+    });
+    const next = await nextCompletion(ctx);
+    const args = {
+      automation_id: String(ctx.automationId),
+      run_id: next.runId,
+      window_token: next.token,
+      extracted_data: {
+        problems: [
+          { category: 'Stability', name: 'App Crashes', severity: 'critical' },
+        ],
+      },
+    };
+    const failApproval = vi
+      .spyOn(notificationTriggers, 'notifyActionApprovalNeeded')
+      .mockRejectedValueOnce(
+        new Error('synthetic approval delivery unavailable'),
+      );
+    try {
+      const committed = await ctx.api.automations.completeWindow(args);
+      expect(committed.completed_now).toBe(true);
+      expect(failApproval).toHaveBeenCalledTimes(1);
+    } finally {
+      failApproval.mockRestore();
+    }
+    const [run] =
+      await ctx.sql`SELECT status FROM runs WHERE id = ${next.runId}`;
+    expect(run.status).toBe('completed');
+    const [held] =
+      await ctx.sql`SELECT metadata FROM entities WHERE id = ${entityId}`;
+    expect(held.metadata.severity).toBe('high');
+    const failedProposals =
+      await ctx.sql`SELECT id FROM runs WHERE action_key = 'entity_field_change' AND parent_run_id = ${next.runId}`;
+    expect(failedProposals).toHaveLength(0);
+
+    const replayed = await ctx.api.automations.completeWindow(args);
+    expect(replayed.completed_now).toBe(false);
+    const tasks = await ctx.sql`
+      SELECT id, action_input FROM runs
+      WHERE organization_id = ${ctx.workspace.org.id}
+        AND action_key = 'entity-approval' AND parent_run_id = ${next.runId}
+    `;
+    expect(tasks).toHaveLength(1);
+    const payload = tasks[0].action_input.payload as EntityApprovalTaskPayload;
+    expect(payload.context).not.toHaveProperty('scopes');
+    expect(payload.context).not.toHaveProperty('mcpAppApprovalCapability');
+    await expect(
+      runEntityApprovalTask(
+        { ...payload, sourceRunId: first.runId },
+        Number(tasks[0].id),
+      ),
+    ).rejects.toThrow('does not match a committed source run');
+    const retryFailure = vi
+      .spyOn(fieldApproval, 'proposeEntityFieldChange')
+      .mockRejectedValueOnce(new Error('synthetic task delivery unavailable'));
+    try {
+      await expect(
+        runEntityApprovalTask(payload, Number(tasks[0].id)),
+      ).rejects.toThrow('synthetic task delivery unavailable');
+    } finally {
+      retryFailure.mockRestore();
+    }
+    await runEntityApprovalTask(payload, Number(tasks[0].id));
+    await runEntityApprovalTask(
+      tasks[0].action_input.payload as EntityApprovalTaskPayload,
+      Number(tasks[0].id),
+    );
+    const proposals = await ctx.sql`
+      SELECT id FROM runs
+      WHERE organization_id = ${ctx.workspace.org.id}
+        AND action_key = 'entity_field_change' AND approval_status = 'pending'
+    `;
+    expect(proposals).toHaveLength(1);
+    const deliveries = await ctx.sql`
+      SELECT task.id FROM runs task
+      JOIN events notification ON notification.id = (task.action_input->'payload'->>'eventId')::bigint
+      JOIN events approval ON notification.metadata->>'resource_id' = approval.id::text
+      WHERE task.action_key = 'deliver-notification'
+        AND notification.metadata->>'notification_type' = 'action_approval_needed'
+        AND approval.run_id = ${proposals[0].id}
+    `;
+    expect(deliveries).toHaveLength(1);
+    await ctx.sql`UPDATE runs SET status = 'completed', approval_status = 'approved' WHERE id = ${proposals[0].id}`;
+    await runEntityApprovalTask(
+      tasks[0].action_input.payload as EntityApprovalTaskPayload,
+      Number(tasks[0].id),
+    );
+    const settled =
+      await ctx.sql`SELECT id FROM runs WHERE parent_run_id = ${next.runId} AND action_key = 'entity_field_change'`;
+    expect(settled).toHaveLength(1);
   });
 
   it('syncs extracted fields into entities and respects a human-owned field on re-run, queuing an approval', async () => {
@@ -2397,7 +2568,22 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
         'severity',
       ]);
 
+      const approvalTasks = await ctx.sql`
+        SELECT id, action_input FROM runs WHERE parent_run_id = ${runId} AND action_key = 'entity-approval'
+      `;
+      expect(approvalTasks).toHaveLength(1);
       await approve(ctx, Number(cards[0].id));
+      await Promise.all(
+        Array.from({ length: 3 }, () =>
+          runEntityApprovalTask(
+            approvalTasks[0].action_input.payload as EntityApprovalTaskPayload,
+            Number(approvalTasks[0].id),
+          ),
+        ),
+      );
+      const allCards =
+        await ctx.sql`SELECT id FROM runs WHERE parent_run_id = ${runId} AND action_key = 'entity_change'`;
+      expect(allCards).toHaveLength(1);
       const created = await findEntity(ctx, APP_CRASHES_KEY);
       expect(created.length).toBe(1);
       expect(created[0].metadata as Record<string, unknown>).toMatchObject({

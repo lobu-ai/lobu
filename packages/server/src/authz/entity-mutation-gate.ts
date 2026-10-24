@@ -16,9 +16,10 @@
  *  - update: any `deny` on a field wins immediately; otherwise the per-field
  *    `requireApproval` sets are UNION-ed across all interceptors (empty ⇒ allow).
  *
- * A `defer` never writes on the caller's transaction. The interceptor hands back
- * a `DeferredMutation` whose `queue()` closure the CORE runs strictly POST-COMMIT
- * (repo invariant: approvals + their events never ride the caller's tx).
+ * A `defer` returns closures rather than writing during policy evaluation.
+ * Automation completion calls `enqueue()` on its transaction so the approval
+ * intent survives a crash. `queue()` persists the approval and its notification
+ * after commit; the durable task retries that step if needed.
  *
  * Import-cycle note: the static edge chain is gate → approval-interceptor →
  * entity-field-approval → entity-management → gate (circular). This is safe
@@ -135,13 +136,14 @@ export type EntityMutationRequest =
 	| UpdateMutationRequest;
 
 /**
- * A mutation an interceptor held back. `queue()` is called POST-COMMIT by the
- * core to durably record the approval (run + event + notification) and returns
- * the ids/url the call site folds into its "approval queued" result. `display`
- * carries whatever the call site needs to assemble that result without knowing
- * how the approval was built.
+ * A mutation an interceptor held back. Automation completion must persist its
+ * `enqueue()` handoff before committing. `queue()` records the approval after
+ * commit and returns the ids/url for the caller's "approval queued" result.
+ * `display` carries the proposal without exposing its persistence details.
  */
 export interface DeferredMutation {
+	/** Atomically persist the post-commit handoff when the caller owns a transaction. */
+	enqueue?: (tx: DbClient, ctx: ToolContext) => Promise<void>;
 	queue: (
 		ctx: ToolContext,
 		env: Env,
