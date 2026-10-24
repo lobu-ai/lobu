@@ -55,6 +55,72 @@ for (const parseSections of [false, true]) {
     expect(result.events[0].payload_text).toContain(description);
   });
 
+  test(`recognizes consent choices across control types (sections=${parseSections})`, async () => {
+    for (const control of [
+      '<input type="button" value="Accept all">',
+      '<input type="submit" value="Reject all">',
+      '<button value="accept">Accept all</button>',
+      '<button value="1">Accept all</button>',
+      '<a role="button" aria-label="Reject all">No thanks</a>',
+    ]) {
+      const consent = `<div role="region" aria-label="Cookie consent"><p>We use necessary cookies with your consent.</p>${control}</div>`;
+      const onlyBanner = await sync(document(consent), parseSections);
+      expect(onlyBanner.events).toEqual([]);
+      expect(onlyBanner.checkpoint.hashes).toEqual({});
+
+      const withBusiness = await sync(
+        document(`<main><h1>Reporting</h1><p>${business}</p></main>${consent}`),
+        parseSections
+      );
+      expect(withBusiness.events).toHaveLength(1);
+      expect(withBusiness.events[0].payload_text).toContain(business);
+      expect(withBusiness.events[0].payload_text).not.toContain(
+        "necessary cookies"
+      );
+    }
+  });
+
+  test(`retains a product region titled Cookie consent (sections=${parseSections})`, async () => {
+    for (const controls of [
+      "",
+      "<button>Explore features</button>",
+      '<input type="button" value="Explore features">',
+      '<button value="accept">Explore features</button>',
+    ]) {
+      const description = "Our platform helps teams manage privacy choices.";
+      const result = await sync(
+        `<section role="region" aria-labelledby="product-heading">
+          <h1 id="product-heading">Cookie consent</h1><p>${description}</p>${controls}
+        </section>`,
+        parseSections
+      );
+      expect(result.events).toHaveLength(1);
+      expect(result.events[0].payload_text).toContain(description);
+    }
+  });
+
+  test(`removes conventional banner class tokens (sections=${parseSections})`, async () => {
+    for (const className of [
+      "cookie-banner",
+      "visible cookie_banner overlay",
+    ]) {
+      const consent = `<div class="${className}"><p>We use necessary cookies with your consent.</p><button>Accept all</button></div>`;
+      const onlyBanner = await sync(document(consent), parseSections);
+      expect(onlyBanner.events).toEqual([]);
+      expect(onlyBanner.checkpoint.hashes).toEqual({});
+
+      const withBusiness = await sync(
+        document(`<main><h1>Reporting</h1><p>${business}</p></main>${consent}`),
+        parseSections
+      );
+      expect(withBusiness.events).toHaveLength(1);
+      expect(withBusiness.events[0].payload_text).toContain(business);
+      expect(withBusiness.events[0].payload_text).not.toContain(
+        "necessary cookies"
+      );
+    }
+  });
+
   test(`a full document containing only consent UI supplies no evidence (sections=${parseSections})`, async () => {
     const result = await sync(document(banner()), parseSections);
     expect(result.events).toEqual([]);

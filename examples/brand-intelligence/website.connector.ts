@@ -141,13 +141,35 @@ export default class WebsiteConnector extends ConnectorRuntime {
             .trim() ||
           node.getAttribute("aria-label")?.trim() ||
           "";
+        const consentRegion =
+          role === "region" &&
+          Array.from(
+            node.querySelectorAll(
+              'button, input[type="button"], input[type="submit"], [role="button"]'
+            )
+          ).some((control) =>
+            /^(accept|allow|reject|deny)( all)?( cookies)?$/i.test(
+              (
+                control.getAttribute("aria-label") ||
+                (control.nodeName === "INPUT"
+                  ? control.getAttribute("value")
+                  : control.textContent) ||
+                ""
+              )
+                .replace(/\s+/g, " ")
+                .trim()
+            )
+          );
         return (
-          (["dialog", "alertdialog", "region"].includes(role ?? "") &&
+          ((["dialog", "alertdialog"].includes(role ?? "") || consentRegion) &&
             /^cookies?\s+(consent|preferences|notice|settings)$/i.test(
               label
             )) ||
-          /^(onetrust-(consent|banner)-sdk|CybotCookiebotDialog|cookie[-_]?banner)$/i.test(
-            node.id
+          [node.id, ...(node.getAttribute("class") ?? "").split(/\s+/)].some(
+            (token) =>
+              /^(onetrust-(consent|banner)-sdk|CybotCookiebotDialog|cookie[-_]?banner)$/i.test(
+                token
+              )
           )
         );
       },
@@ -438,8 +460,8 @@ export default class WebsiteConnector extends ConnectorRuntime {
         ""
       );
     }
-    // Remove self-closing / void elements that add noise
-    cleaned = cleaned.replace(/<(link|meta|input)\b[^>]*\/?>/gi, "");
+    // Keep inputs until consent detection; Turndown omits them from markdown.
+    cleaned = cleaned.replace(/<(link|meta)\b[^>]*\/?>/gi, "");
     return cleaned;
   }
 
