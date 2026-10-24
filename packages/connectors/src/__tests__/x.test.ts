@@ -877,6 +877,7 @@ describe("XConnector definition", () => {
 			"liked_tweets",
 			"live_messages",
 			"my_tweets",
+			"notifications",
 			"tweets",
 		]);
 		expect(def.feeds.direct_messages.requiredScopes).toBeUndefined();
@@ -2138,7 +2139,7 @@ describe("isReplySubmitLabel", () => {
 
 describe("prepare_reply action contract", () => {
 	test("pins the connector version for catalog upgrades", () => {
-		expect(new XConnector().definition.version).toBe("3.15.0");
+		expect(new XConnector().definition.version).toBe("3.16.0");
 	});
 
 	test("classifies staging a reply as a write for org policy", () => {

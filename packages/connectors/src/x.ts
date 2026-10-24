@@ -23,6 +23,7 @@
  *   - live_messages:    DMs read live from the signed-in browser without importing
  *                    history; Automations subscribe to `message.created` and can
  *                    answer through `send_message`
+ *   - notifications:   signed-in All timeline; metadata-only sync, explicit source reads
  *   - following_timeline: live chronological Following timeline (OAuth API,
  *                    source reads only; does not import tweet events)
  *   - home_feed:        personalized x.com home timeline (extension only — the
@@ -3150,7 +3151,7 @@ async function readyXLiveTab(
 async function invokeXDirectMessages<T>(
 	dispatcher: ChromeActionDispatcher,
 	tabId: number,
-	op: "read" | "listen" | "send",
+	op: "read" | "listen" | "send" | "readNotifications",
 	input: Record<string, unknown>,
 ): Promise<T> {
 	const result = await dispatcher.dispatch<{
@@ -3231,6 +3232,106 @@ async function observeXLiveMessages(ctx: FeedObserveContext): Promise<void> {
 	});
 }
 
+async function readXNotifications(
+	ctx: FeedReadContext,
+): Promise<FeedReadResult> {
+	const message =
+		"X notifications support source cursor pagination only; queries, windows, offsets, matching and sorting are unsupported";
+	assertNoOffsetPaging(ctx, message);
+	assertNoSort(ctx, message);
+	assertNoWindow(ctx, message);
+	assertNoMatch(ctx, message);
+	if (ctx.query) throw new Error(message);
+	const browser = requireXBrowser(ctx);
+	const result = await invokeXDirectMessages<FeedReadResult>(
+		browser,
+		await readyXLiveTab(browser),
+		"readNotifications",
+		{ cursor: ctx.cursor, limit: ctx.limit },
+	);
+	return {
+		rows: result.rows,
+		nextCursor: result.nextCursor,
+		hasMore: result.hasMore,
+	};
+}
+
+async function syncXNotifications(ctx: SyncContext): Promise<SyncResult> {
+	const browser = requireXBrowser(ctx);
+	const tab = await readyXLiveTab(browser);
+	const saved = ctx.checkpoint?.notifications_cursor as
+		| string
+		| null
+		| undefined;
+	let cursor: string | undefined;
+	let account: string | undefined;
+	let cursorReset = false;
+	const seenCursors = new Set<string>();
+	const seenItems = new Set<string>();
+	const events: EventEnvelope[] = [];
+	for (let page = 0; page < 10; page++) {
+		if (cursor) seenCursors.add(cursor);
+		const result = await invokeXDirectMessages<
+			FeedReadResult & { account_id: string; expired?: boolean }
+		>(browser, tab, "readNotifications", {
+			cursor,
+			limit: 100,
+			restartExpired: !cursorReset,
+		});
+		account = result.account_id;
+		if (
+			ctx.checkpoint?.notifications_account &&
+			ctx.checkpoint.notifications_account !== account
+		)
+			throw new Error("X notification checkpoint belongs to another account");
+		if (result.expired) {
+			cursorReset = true;
+			cursor = undefined;
+			seenCursors.clear();
+			continue;
+		}
+		for (const row of result.rows) {
+			if (seenItems.has(String(row.id))) continue;
+			seenItems.add(String(row.id));
+			events.push({
+				origin_id: `x_notification_${row.id}`,
+				origin_type: "notification",
+				payload_text: "",
+				title: "X notification reference",
+				source_url: String(row.url),
+				occurred_at: new Date(String(row.occurred_at)),
+				metadata: {
+					account_id: row.account_id,
+					entry_id: row.entry_id,
+					notification_id: row.notification_id,
+					kind: row.kind,
+					actor_ids: row.actor_ids,
+					tweet_ids: row.tweet_ids,
+					revision: row.revision,
+					timestamp_basis: row.timestamp_basis,
+				},
+			});
+		}
+		cursor = result.nextCursor;
+		// Capture arrivals at the head before continuing an unfinished history pass.
+		if (page === 0 && cursor && saved) cursor = saved;
+		if (!cursor) break;
+		if (seenCursors.has(cursor))
+			throw new Error("X notification cursor did not advance");
+	}
+	await ctx.commit(events, {
+		notifications_cursor: cursor ?? null,
+		notifications_account: account,
+	});
+	return {
+		status: cursor ? "more" : "complete",
+		metadata: {
+			items_found: events.length,
+			...(cursorReset ? { cursor_reset: true } : {}),
+		},
+	};
+}
+
 // ── Connector ──────────────────────────────────────────────────
 
 export default class XConnector extends ConnectorRuntime {
@@ -3238,8 +3339,8 @@ export default class XConnector extends ConnectorRuntime {
 		key: "x",
 		name: "X (Twitter)",
 		description:
-			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, reads the chronological Following timeline live through the X API, and reads and answers DMs live in the paired browser. Links social actors into the person graph.",
-		version: "3.15.0",
+			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, reads the chronological Following timeline live through the X API, captures notification references, and reads and answers DMs live in the paired browser. Links social actors into the person graph.",
+		version: "3.16.0",
 		faviconDomain: "x.com",
 		browser: {
 			origins: ["https://x.com", "https://twitter.com"],
@@ -3324,8 +3425,23 @@ export default class XConnector extends ConnectorRuntime {
 			{ key: "liked_tweet", label: "Liked Tweet" },
 			{ key: "bookmark", label: "Bookmark" },
 			{ key: "dm_message", label: "DM Message" },
+			{ key: "notification", label: "Notification" },
 		],
 		feeds: {
+			notifications: {
+				key: "notifications",
+				name: "Notifications",
+				description:
+					"Read the signed-in account's retained All notifications timeline and capture metadata-only references without opening the notification panel or marking items seen. Includes source-exposed grouped reactions/follows and post entries; source icon categories are retained. History is limited by X. For post entries the source date is post creation time, not an invented notification time. Requires browser authentication; this is not OS push interception.",
+				read: readXNotifications,
+				sync: syncXNotifications,
+				eventKinds: {
+					notification: {
+						description:
+							"A metadata-only reference to an X notification timeline item",
+					},
+				},
+			},
 			live_messages: {
 				key: "live_messages",
 				name: "Live messages",

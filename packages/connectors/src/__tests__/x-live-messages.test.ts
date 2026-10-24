@@ -364,7 +364,7 @@ function send(dispatcher: unknown, input: Record<string, unknown>) {
 
 describe("X live_messages contract", () => {
 	test("bumps the connector version", () => {
-		expect(connector().definition.version).toBe("3.15.0");
+		expect(connector().definition.version).toBe("3.16.0");
 	});
 
 	test("declares message.created as a reply-to-source Automation event and keeps every feed kind", () => {
