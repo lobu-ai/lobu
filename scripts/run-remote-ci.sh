@@ -244,7 +244,7 @@ run_boat() {
   # auto-stop erases the VM if the launcher dies. Never pass --keep.
   # No tee/parser: retain the CLI's remote exit code, including timeout (124).
   boat "${args[@]}" -- bash -lc \
-    "mkdir -p repo && tar -xzf repo.tar.gz -C repo && cd repo && GATE_PROVISION=1 bash scripts/lib/gate-runner.sh $job_args"
+    "workdir=\$(mktemp -d) && tar -xzf repo.tar.gz -C \"\$workdir\" && cd \"\$workdir\" && GATE_PROVISION=1 bash scripts/lib/gate-runner.sh $job_args"
 }
 
 # ── dispatch ───────────────────────────────────────────────────────────────

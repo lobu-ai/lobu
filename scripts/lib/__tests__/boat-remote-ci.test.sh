@@ -7,7 +7,7 @@ trap 'rm -rf "$base"' EXIT
 mkdir -p "$base/repo/scripts/lib" "$base/bin" "$base/repo/packages/owletto"
 cp "$SCRIPT_DIR/../../run-remote-ci.sh" "$base/repo/scripts/"
 cp "$SCRIPT_DIR/../remote-ci.sh" "$base/repo/scripts/lib/"
-printf 'exit 91\n' > "$base/repo/scripts/lib/gate-runner.sh"
+printf '[ ! -e stale.txt ] || exit 89\nexit 91\n' > "$base/repo/scripts/lib/gate-runner.sh"
 printf 'staged\n' > "$base/repo/input.txt"
 printf 'private local secret\n' > "$base/repo/.env"
 printf '.env\n' > "$base/repo/.gitignore"
@@ -19,10 +19,18 @@ case "$1" in
  run)
   if [ "${2:-}" = --help ]; then exit "${BOAT_HELP_RC:-0}"; fi
   printf '%s\n' "$@" > "$BOAT_CALL_LOG"
-  while [ "$#" -gt 0 ]; do
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
    if [ "$1" = --push ]; then cp "$2/repo.tar.gz" "$BOAT_ARCHIVE"; fi
    shift
   done
+  if [ -n "${BOAT_MOCK_REMOTE:-}" ]; then
+   shift
+   cp "$BOAT_ARCHIVE" "$BOAT_MOCK_REMOTE/repo.tar.gz"
+   cd "$BOAT_MOCK_REMOTE"
+   export TMPDIR="$BOAT_MOCK_REMOTE/tmp"
+   mkdir -p "$TMPDIR"
+   exec "$@"
+  fi
   echo 'remote output'
   exit "${BOAT_RUN_RC:-0}" ;;
  *) exit 99 ;;
@@ -64,6 +72,13 @@ grep -qx synthetic-ci-base "$BOAT_CALL_LOG" || fail 'snapshot missing'
 unset BOAT_TYPE BOAT_SNAPSHOT
 [ "$(run_rc)" = 0 ] || fail 'default job graph rejected'
 grep -q 'sdk-cli-e2e' "$BOAT_CALL_LOG" || fail 'default graph incomplete'
+# A saved snapshot may contain a previous workspace. Execute the actual
+# remote command against that state and require a fresh extraction directory.
+mkdir -p "$base/remote/repo"
+printf 'old snapshot file\n' > "$base/remote/repo/stale.txt"
+export BOAT_MOCK_REMOTE="$base/remote"
+[ "$(run_rc unit)" = 91 ] || fail 'remote command retained stale snapshot files'
+unset BOAT_MOCK_REMOTE
 export REMOTE_CI_PROVIDER=depot
 [ "$(run_rc unit)" = 2 ] || fail 'removed Depot provider accepted'
 export REMOTE_CI_PROVIDER=boat
