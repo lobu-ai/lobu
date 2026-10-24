@@ -3147,19 +3147,32 @@ async function readyXLiveTab(
 	return nav.tab_id;
 }
 
+/** Bind source access to the account saved by the connection's browser probe. */
+function requireXAccount(ctx: {
+	sessionState?: Record<string, unknown> | null;
+}): string {
+	const account = ctx.sessionState?.account_id;
+	if (typeof account !== "string" || !/^[0-9]{1,20}$/.test(account))
+		throw new Error(
+			"X saved account identity is unavailable; reconnect this connection",
+		);
+	return account;
+}
+
 /** One call into the page program, installing it first when absent or stale. */
 async function invokeXDirectMessages<T>(
 	dispatcher: ChromeActionDispatcher,
 	tabId: number,
 	op: "read" | "listen" | "send" | "readNotifications",
 	input: Record<string, unknown>,
+	accountId: string,
 ): Promise<T> {
 	const result = await dispatcher.dispatch<{
 		value?: T;
 		exception?: { description?: string } | unknown;
 	}>("evaluate", {
 		tab_id: tabId,
-		expression: `(() => { (${xDirectMessagesProgram.toString()})(); return globalThis.__lobuXDirectMessagesV1.${op}(${xScriptArgument(input)}); })()`,
+		expression: `(() => { (${xDirectMessagesProgram.toString()})(); return globalThis.__lobuXDirectMessagesV1.${op}(${xScriptArgument({ ...input, account_id: accountId })}); })()`,
 		await_promise: true,
 	});
 	if (result.exception || !result.value) {
@@ -3185,16 +3198,23 @@ async function readXLiveMessages(
 	assertNoWindow(ctx, message);
 	assertNoMatch(ctx, message);
 	const dispatcher = requireXBrowser(ctx);
+	const accountId = requireXAccount(ctx);
 	const tabId = await readyXLiveTab(dispatcher);
 	const page = await invokeXDirectMessages<{
 		rows: Array<Record<string, unknown>>;
 		nextCursor?: string;
 		hasMore: boolean;
-	}>(dispatcher, tabId, "read", {
-		query: ctx.query,
-		cursor: ctx.cursor,
-		limit: ctx.limit,
-	});
+	}>(
+		dispatcher,
+		tabId,
+		"read",
+		{
+			query: ctx.query,
+			cursor: ctx.cursor,
+			limit: ctx.limit,
+		},
+		accountId,
+	);
 	return {
 		rows: page.rows,
 		columns: X_LIVE_MESSAGE_COLUMNS,
@@ -3210,6 +3230,7 @@ async function readXLiveMessages(
  */
 async function observeXLiveMessages(ctx: FeedObserveContext): Promise<void> {
 	const dispatcher = requireXBrowser(ctx);
+	const accountId = requireXAccount(ctx);
 	const tabId = await readyXLiveTab(dispatcher);
 	const binding = await dispatcher.dispatch<{
 		bridge_id?: string;
@@ -3225,11 +3246,17 @@ async function observeXLiveMessages(ctx: FeedObserveContext): Promise<void> {
 	) {
 		throw new Error("The paired browser must support source subscriptions");
 	}
-	await invokeXDirectMessages(dispatcher, tabId, "listen", {
-		checkpoint: ctx.checkpoint ?? null,
-		bridge_id: binding.bridge_id,
-		token: binding.token,
-	});
+	await invokeXDirectMessages(
+		dispatcher,
+		tabId,
+		"listen",
+		{
+			checkpoint: ctx.checkpoint ?? null,
+			bridge_id: binding.bridge_id,
+			token: binding.token,
+		},
+		accountId,
+	);
 }
 
 async function readXNotifications(
@@ -3243,11 +3270,13 @@ async function readXNotifications(
 	assertNoMatch(ctx, message);
 	if (ctx.query) throw new Error(message);
 	const browser = requireXBrowser(ctx);
+	const accountId = requireXAccount(ctx);
 	const result = await invokeXDirectMessages<FeedReadResult>(
 		browser,
 		await readyXLiveTab(browser),
 		"readNotifications",
 		{ cursor: ctx.cursor, limit: ctx.limit },
+		accountId,
 	);
 	return {
 		rows: result.rows,
@@ -3258,11 +3287,20 @@ async function readXNotifications(
 
 async function syncXNotifications(ctx: SyncContext): Promise<SyncResult> {
 	const browser = requireXBrowser(ctx);
+	const accountId = requireXAccount(ctx);
+	if (
+		ctx.checkpoint?.notifications_account &&
+		ctx.checkpoint.notifications_account !== accountId
+	)
+		throw new Error("X notification checkpoint belongs to another account");
 	const tab = await readyXLiveTab(browser);
 	const saved = ctx.checkpoint?.notifications_cursor as
 		| string
 		| null
 		| undefined;
+	const previousHead = ctx.checkpoint?.notifications_head_revision;
+	let head: string | undefined;
+	let catchingUp = !!saved;
 	let cursor: string | undefined;
 	let account: string | undefined;
 	let cursorReset = false;
@@ -3273,11 +3311,18 @@ async function syncXNotifications(ctx: SyncContext): Promise<SyncResult> {
 		if (cursor) seenCursors.add(cursor);
 		const result = await invokeXDirectMessages<
 			FeedReadResult & { account_id: string; expired?: boolean }
-		>(browser, tab, "readNotifications", {
-			cursor,
-			limit: 100,
-			restartExpired: !cursorReset,
-		});
+		>(
+			browser,
+			tab,
+			"readNotifications",
+			{
+				cursor,
+				limit: 100,
+				restartExpired: !cursorReset,
+				metadataOnly: true,
+			},
+			accountId,
+		);
 		account = result.account_id;
 		if (
 			ctx.checkpoint?.notifications_account &&
@@ -3285,11 +3330,16 @@ async function syncXNotifications(ctx: SyncContext): Promise<SyncResult> {
 		)
 			throw new Error("X notification checkpoint belongs to another account");
 		if (result.expired) {
+			if (page === 9)
+				throw new Error(
+					"X notification cursor restart exceeds the page budget; retry without committing",
+				);
 			cursorReset = true;
 			cursor = undefined;
 			seenCursors.clear();
 			continue;
 		}
+		head ??= result.rows[0]?.revision as string | undefined;
 		for (const row of result.rows) {
 			if (seenItems.has(String(row.id))) continue;
 			seenItems.add(String(row.id));
@@ -3313,8 +3363,15 @@ async function syncXNotifications(ctx: SyncContext): Promise<SyncResult> {
 			});
 		}
 		cursor = result.nextCursor;
-		// Capture arrivals at the head before continuing an unfinished history pass.
-		if (page === 0 && cursor && saved) cursor = saved;
+		// Do not skip arrivals spanning multiple pages before resuming history.
+		// A missing head boundary falls back to a full sweep from this position.
+		if (
+			catchingUp &&
+			result.rows.some((row) => row.revision === previousHead)
+		) {
+			catchingUp = false;
+			if (cursor && saved) cursor = saved;
+		}
 		if (!cursor) break;
 		if (seenCursors.has(cursor))
 			throw new Error("X notification cursor did not advance");
@@ -3322,6 +3379,7 @@ async function syncXNotifications(ctx: SyncContext): Promise<SyncResult> {
 	await ctx.commit(events, {
 		notifications_cursor: cursor ?? null,
 		notifications_account: account,
+		notifications_head_revision: head ?? null,
 	});
 	return {
 		status: cursor ? "more" : "complete",
@@ -3701,6 +3759,7 @@ export default class XConnector extends ConnectorRuntime {
 		try {
 			if (ctx.actionKey === "send_message") {
 				const dispatcher = requireXBrowser(ctx);
+				const accountId = requireXAccount(ctx);
 				const tabId = await readyXLiveTab(dispatcher);
 				const output = await invokeXDirectMessages<Record<string, unknown>>(
 					dispatcher,
@@ -3711,6 +3770,7 @@ export default class XConnector extends ConnectorRuntime {
 						text: ctx.input.text,
 						idempotency_key: ctx.input.idempotency_key,
 					},
+					accountId,
 				);
 				return { success: true, output };
 			}

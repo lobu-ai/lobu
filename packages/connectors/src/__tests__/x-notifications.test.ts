@@ -70,6 +70,7 @@ function browser(response: (url: URL) => unknown = () => listing()) {
 	let cookie = "twid=u%3D1000; ct0=synthetic-csrf";
 	const requests: URL[] = [];
 	const paths: string[] = [];
+	const outputs: unknown[] = [];
 	const scope = {
 		globalThis: {},
 		window: { addEventListener() {}, removeEventListener() {} },
@@ -105,12 +106,12 @@ function browser(response: (url: URL) => unknown = () => listing()) {
 			}
 			if (action === "evaluate") {
 				try {
-					return {
-						value: await new Function(
-							...Object.keys(scope),
-							`return ${input.expression}`,
-						)(...Object.values(scope)),
-					};
+					const value = await new Function(
+						...Object.keys(scope),
+						`return ${input.expression}`,
+					)(...Object.values(scope));
+					outputs.push(value);
+					return { value };
 				} catch (error) {
 					return { exception: { description: String(error) } };
 				}
@@ -122,6 +123,7 @@ function browser(response: (url: URL) => unknown = () => listing()) {
 		dispatcher,
 		requests,
 		paths,
+		outputs,
 		changeAccount() {
 			cookie = "twid=u%3D9000; ct0=synthetic-csrf";
 		},
@@ -130,6 +132,7 @@ function browser(response: (url: URL) => unknown = () => listing()) {
 
 const readOptions = (b: ReturnType<typeof browser>, extra = {}) => ({
 	feedKey: "notifications",
+	sessionState: { account_id: "1000" },
 	config: {},
 	credentials: {},
 	browser: b.dispatcher,
@@ -138,6 +141,116 @@ const readOptions = (b: ReturnType<typeof browser>, extra = {}) => ({
 });
 
 describe("X notifications source", () => {
+	test("removes notification bodies before sync results cross the browser dispatch boundary", async () => {
+		const b = browser(() => listing(["one"], null));
+		const result = await runSync(new XConnector(), {
+			...readOptions(b),
+			checkpoint: null,
+		});
+		expect(JSON.stringify(b.outputs)).not.toContain(
+			"Private source notification",
+		);
+		expect(JSON.stringify(b.outputs)).not.toContain('"text"');
+		const source = browser(() => listing(["one"], null));
+		const read = await new XConnector().read(readOptions(source));
+		expect(read.rows[0].text).toBe("Private source notification");
+		expect(result.events[0].metadata.revision).toBe(read.rows[0].revision);
+	});
+
+	test.each([
+		undefined,
+		{},
+		{ account_id: "invalid" },
+		{ account_id: "9000" },
+	])("binds first notification reads and syncs to saved account %j", async (sessionState) => {
+		for (const sync of [false, true]) {
+			const b = browser(() => listing(["one"], null));
+			let commits = 0;
+			const ctx = {
+				...readOptions(b),
+				sessionState,
+				checkpoint: null,
+				commit: async () => {
+					commits++;
+				},
+			};
+			await expect(
+				sync ? runSync(new XConnector(), ctx) : new XConnector().read(ctx),
+			).rejects.toThrow(/account/);
+			expect(b.requests).toHaveLength(0);
+			expect(commits).toBe(0);
+		}
+	});
+
+	test.each([
+		200, 404,
+	])("does not accept account changes on notification HTTP %s", async (status) => {
+		let n = 0;
+		const b = browser(() => {
+			if (++n === 2) {
+				b.changeAccount();
+				return status === 404
+					? new Response("expired", { status })
+					: listing(["switched"], null);
+			}
+			return listing(["one"], "older");
+		});
+		let commits = 0;
+		await expect(
+			runSync(new XConnector(), {
+				...readOptions(b),
+				checkpoint: null,
+				commit: async () => {
+					commits++;
+				},
+			}),
+		).rejects.toThrow(/account/);
+		expect(commits).toBe(0);
+		expect(b.requests).toHaveLength(2);
+	});
+
+	test("does not report completion when cursor expiry exhausts the page budget", async () => {
+		let n = 0;
+		const b = browser(() =>
+			++n === 10
+				? new Response("expired", { status: 404 })
+				: listing([`item${n}`], `page${n}`),
+		);
+		let commits = 0;
+		await expect(
+			runSync(new XConnector(), {
+				...readOptions(b),
+				checkpoint: null,
+				commit: async () => {
+					commits++;
+				},
+			}),
+		).rejects.toThrow(/restart|budget/);
+		expect(commits).toBe(0);
+	});
+
+	test.each([
+		"notification-one",
+		"notification-replacement",
+	])("applies replacement instructions before projecting %s", async (entryId) => {
+		const body = listing(["one", "two"], null);
+		const replacement = structuredClone(
+			body.timeline.instructions[0].addEntries.entries[1],
+		);
+		replacement.entryId = entryId;
+		body.timeline.instructions.push({
+			replaceEntry: {
+				entryIdToReplace: "notification-one",
+				entry: replacement,
+			},
+		} as any);
+		const b = browser(() => body);
+		const result = await new XConnector().read(readOptions(b));
+		expect(result.rows).toHaveLength(2);
+		expect(result.rows.every((r) => r.notification_id === "two")).toBe(true);
+		expect(result.rows.some((r) => r.entry_id === entryId)).toBe(true);
+	});
+
 	test("reads account-scoped references through a neutral route and preserves provider continuation", async () => {
 		const b = browser();
 		const page = await new XConnector().read(readOptions(b));
@@ -284,6 +397,77 @@ describe("X notifications source", () => {
 		expect(second.status).toBe("complete");
 	});
 
+	test.each([
+		2, 12,
+	])("captures all %s new pages before resuming saved history", async (newPages) => {
+		let arrivals = false;
+		const b = browser((url) => {
+			const cursor = url.searchParams.get("cursor");
+			if (arrivals && (!cursor || cursor.startsWith("new"))) {
+				const page = cursor ? Number(cursor.slice(3)) : 0;
+				return listing(
+					[`new${page}`],
+					page + 1 < newPages ? `new${page + 1}` : "0",
+				);
+			}
+			const page = Number(cursor ?? 0);
+			return listing([`old${page}`], page < 12 ? String(page + 1) : null);
+		});
+		const connector = new XConnector();
+		let result = await runSync(connector, {
+			...readOptions(b),
+			checkpoint: null,
+		});
+		const ids = new Set(result.events.map((event) => event.origin_id));
+		arrivals = true;
+		for (let run = 0; run < 5; run++) {
+			const before = b.requests.length;
+			result = await runSync(connector, {
+				...readOptions(b),
+				checkpoint: result.checkpoint,
+			});
+			expect(b.requests.length - before).toBeLessThanOrEqual(10);
+			for (const event of result.events) ids.add(event.origin_id);
+			if (result.status === "complete") break;
+		}
+		expect(result.status).toBe("complete");
+		for (let page = 0; page < newPages; page++)
+			expect(ids.has(`x_notification_1000:notification-new${page}`)).toBe(true);
+		for (let page = 0; page <= 12; page++)
+			expect(ids.has(`x_notification_1000:notification-old${page}`)).toBe(true);
+	});
+
+	test("does not skip arrivals behind a revised head notification", async () => {
+		let arrivals = false;
+		const b = browser((url) => {
+			const cursor = url.searchParams.get("cursor");
+			if (arrivals && !cursor) {
+				const body = listing(["old0"], "new");
+				body.globalObjects.notifications.old0.message.text =
+					"Updated reaction group";
+				return body;
+			}
+			if (cursor === "new") return listing(["new"], "1");
+			const page = Number(cursor ?? 0);
+			return listing([`old${page}`], page < 12 ? String(page + 1) : null);
+		});
+		const connector = new XConnector();
+		const first = await runSync(connector, {
+			...readOptions(b),
+			checkpoint: null,
+		});
+		arrivals = true;
+		const second = await runSync(connector, {
+			...readOptions(b),
+			checkpoint: first.checkpoint,
+		});
+		expect(
+			second.events.some((event) =>
+				event.origin_id.endsWith("notification-new"),
+			),
+		).toBe(true);
+	});
+
 	test("keeps source identities and revisions stable on an unchanged rerun", async () => {
 		const b = browser(() => listing(["one"], null));
 		const connector = new XConnector();
@@ -320,6 +504,9 @@ describe("X notifications source", () => {
 			checkpoint: {
 				notifications_cursor: cursor,
 				notifications_account: "1000",
+				notifications_head_revision: (
+					await new XConnector().read(readOptions(b))
+				).rows[0].revision,
 			},
 		});
 		expect(result.metadata?.cursor_reset).toBe(true);
