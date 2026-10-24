@@ -193,6 +193,15 @@ function sessionKey(orgId: string, connectorKey: string, connectionId?: number):
 // ---------------------------------------------------------------------------
 const toolCache = new TtlCache<DiscoveredTool[]>(TOOL_CACHE_TTL_MS);
 
+/**
+ * In-flight discovery attempts, keyed exactly like the tool cache. Concurrent
+ * requests for the same org/connector/connection share one upstream discovery
+ * instead of each opening their own session + tools/list against an upstream
+ * that may already be timing out. Entries are removed as soon as the attempt
+ * settles, so nothing stale or failed is ever served from this map.
+ */
+const inflightDiscoveries = new Map<string, Promise<DiscoveredTool[]>>();
+
 // ---------------------------------------------------------------------------
 // Upstream communication
 // ---------------------------------------------------------------------------
@@ -368,6 +377,32 @@ export async function discoverTools(
   const cached = toolCache.get(cacheKey) ?? null;
   if (cached) return cached;
 
+  // Single-flight: share one in-flight discovery per cache key so a burst of
+  // concurrent requests does not each open its own session + tools/list against
+  // a struggling upstream. Fail-closed semantics are unchanged: every waiter
+  // receives the shared attempt's rejection, the entry is always removed when
+  // the attempt settles, and the next request starts a fresh discovery.
+  const inflight = inflightDiscoveries.get(cacheKey);
+  if (inflight) return inflight;
+
+  const attempt = runDiscovery(connectorKey, config, orgId, connectionId, cacheKey);
+  inflightDiscoveries.set(cacheKey, attempt);
+  try {
+    return await attempt;
+  } finally {
+    if (inflightDiscoveries.get(cacheKey) === attempt) {
+      inflightDiscoveries.delete(cacheKey);
+    }
+  }
+}
+
+async function runDiscovery(
+  connectorKey: string,
+  config: McpProxyConfig,
+  orgId: string,
+  connectionId: number | undefined,
+  cacheKey: string
+): Promise<DiscoveredTool[]> {
   let credentials =
     connectionId === undefined
       ? null
