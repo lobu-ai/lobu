@@ -32,29 +32,18 @@ interface PageSection {
   anchor: string;
 }
 
-const COOKIE_BANNER_PATTERNS = [
-  /\bcookie(s)?\b/i,
-  /\bconsent\b/i,
-  /\baccept all\b/i,
-  /\breject all\b/i,
-  /\bmanage (my )?preferences\b/i,
-  /\bprivacy preferences\b/i,
-  /\bmarketing\b/i,
-  /\bmeasurement\b/i,
-  /\bnecessary\b/i,
-];
-
-function countPatternMatches(text: string, patterns: RegExp[]): number {
-  return patterns.reduce(
-    (count, pattern) => count + (pattern.test(text) ? 1 : 0),
-    0
+function ariaLabel(node: Element): string {
+  return (
+    node
+      .getAttribute("aria-labelledby")
+      ?.trim()
+      .split(/\s+/)
+      .map((id) => node.ownerDocument.getElementById(id)?.textContent ?? "")
+      .join(" ")
+      .trim() ||
+    node.getAttribute("aria-label")?.trim() ||
+    ""
   );
-}
-
-function shouldSkipCookieBannerText(text: string): boolean {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return false;
-  return countPatternMatches(normalized, COOKIE_BANNER_PATTERNS) >= 3;
 }
 
 export default class WebsiteConnector extends ConnectorRuntime {
@@ -63,7 +52,7 @@ export default class WebsiteConnector extends ConnectorRuntime {
     name: "Website",
     description:
       "Fetches web pages over HTTP. Supports sitemap.xml for auto-discovery. Converts to markdown sections and tracks changes.",
-    version: "2.1.0",
+    version: "2.1.1",
     faviconDomain: "google.com",
     authSchema: {
       methods: [{ type: "none" }],
@@ -148,6 +137,75 @@ export default class WebsiteConnector extends ConnectorRuntime {
       headingStyle: "atx",
       codeBlockStyle: "fenced",
     });
+    // Apply removals during DOM traversal so referenced labels and controls
+    // remain available when the enclosing consent container is classified.
+    const nonContentTags = new Set([
+      "head",
+      "title",
+      "script",
+      "style",
+      "noscript",
+      "nav",
+      "header",
+      "footer",
+      "aside",
+      "iframe",
+      "svg",
+      "canvas",
+      "video",
+      "audio",
+      "menu",
+      "dialog",
+      "embed",
+      "object",
+      "applet",
+      "input",
+      "link",
+      "meta",
+    ]);
+    this.turndown.remove((node) =>
+      nonContentTags.has(node.nodeName.toLowerCase())
+    );
+    // Remove the consent UI itself. Cookie or marketing vocabulary in the
+    // surrounding page is business content, not evidence that the page is a banner.
+    this.turndown.addRule("cookieConsent", {
+      filter: (node) => {
+        const role = node.getAttribute("role")?.toLowerCase();
+        const label = ariaLabel(node);
+        const consentRegion =
+          role === "region" &&
+          Array.from(
+            node.querySelectorAll(
+              'button, input[type="button"], input[type="submit"], [role="button"]'
+            )
+          ).some((control) =>
+            /^(accept|allow|reject|deny)( all)?( cookies)?$/i.test(
+              (
+                ariaLabel(control) ||
+                (control.nodeName === "INPUT"
+                  ? control.getAttribute("value")
+                  : control.textContent) ||
+                ""
+              )
+                .replace(/\s+/g, " ")
+                .trim()
+            )
+          );
+        return (
+          ((["dialog", "alertdialog"].includes(role ?? "") || consentRegion) &&
+            /^cookies?\s+(consent|preferences|notice|settings)$/i.test(
+              label
+            )) ||
+          [node.id, ...(node.getAttribute("class") ?? "").split(/\s+/)].some(
+            (token) =>
+              /^(onetrust-(consent|banner)-sdk|CybotCookiebotDialog|cookie[-_]?banner)$/i.test(
+                token
+              )
+          )
+        );
+      },
+      replacement: () => "",
+    });
   }
 
   private async syncFeed(ctx: SyncContext): Promise<SyncResult> {
@@ -183,16 +241,10 @@ export default class WebsiteConnector extends ConnectorRuntime {
         validatePublicUrl(url);
         const { html, finalUrl } = await this.fetchPage(url);
         const meta = this.extractMeta(html);
-        const cleanHtml = this.stripNonContent(html);
         const markdown = this.deduplicateMarkdown(
-          this.turndown.turndown(cleanHtml).trim()
+          this.turndown.turndown(html).trim()
         );
-        if (
-          !markdown ||
-          shouldSkipCookieBannerText(`${meta.title ?? ""}\n${markdown}`)
-        ) {
-          continue;
-        }
+        if (!markdown) continue;
         const contentHash = this.hash(markdown);
 
         if (previousHashes[url] === contentHash) {
@@ -213,14 +265,6 @@ export default class WebsiteConnector extends ConnectorRuntime {
               continue;
             }
             newHashes[sectionKey] = sectionHash;
-            if (
-              shouldSkipCookieBannerText(
-                `${section.heading}\n${section.content}`
-              )
-            ) {
-              continue;
-            }
-
             const parentKey = section.parentAnchor
               ? `${url}#${section.parentAnchor}`
               : undefined;
@@ -416,38 +460,6 @@ export default class WebsiteConnector extends ConnectorRuntime {
       description: descMatch?.[1]?.trim(),
       ogImage: ogMatch?.[1]?.trim(),
     };
-  }
-
-  private stripNonContent(html: string): string {
-    const tags = [
-      "script",
-      "style",
-      "noscript",
-      "nav",
-      "header",
-      "footer",
-      "aside",
-      "iframe",
-      "svg",
-      "canvas",
-      "video",
-      "audio",
-      "menu",
-      "dialog",
-      "embed",
-      "object",
-      "applet",
-    ];
-    let cleaned = html;
-    for (const tag of tags) {
-      cleaned = cleaned.replace(
-        new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, "gi"),
-        ""
-      );
-    }
-    // Remove self-closing / void elements that add noise
-    cleaned = cleaned.replace(/<(link|meta|input)\b[^>]*\/?>/gi, "");
-    return cleaned;
   }
 
   private parseSections(

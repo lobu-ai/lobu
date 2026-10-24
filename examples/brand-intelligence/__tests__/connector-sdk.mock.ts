@@ -130,6 +130,8 @@ export function connectorSdkMock() {
     // per-feed handlers and inherit these entry points in production.
     ConnectorRuntime: MockConnectorRuntime,
     calculateEngagementScore: () => 0,
+    // URL policy has its own SDK tests; website fixtures never make a network request.
+    validatePublicUrl: (_url: string) => undefined,
     sleep: async (_ms: number) => undefined,
     filterByCheckpoint: (
       events: Array<{ occurred_at: Date }>,
