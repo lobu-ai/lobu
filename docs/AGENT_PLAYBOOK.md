@@ -63,6 +63,8 @@ The macOS app lane stays on GitHub/Mac hardware. A fresh full `make review` requ
 
 **GitHub CI cancels per-ref.** A new push to a PR cancels its in-flight CI run (superseded runs die); each branch/PR has its own group, so runs across PRs are independent.
 
+**Private repositories without branch protection.** Adding a payment method does not enable branch protection on a Free organization's private repos. Use `make land N=<pr> SUBMODULE=<registered path> REQUIRED_CHECKS='ci,pi-review'` from the parent worktree when the child repository has no Makefile, naming every required CI/review context for that repository. Omit `SUBMODULE` for the current repository. The helper verifies that an explicit fallback targets a private branch with no branch-protection rule and no repository or inherited rulesets; failed or partial policy discovery refuses the merge. In protected repos, explicit names add to GitHub's required contexts. Requirements are refreshed before merging, all named checks must have reported satisfying results, and the merge locks the exact local/remote PR head without admin bypass. `CHECK_ONLY=1` performs the same checks without merging.
+
 **Knowing when every required check has reported.** `gh pr checks <n> --required` prints only contexts GitHub has returned for the pull request. Lobu's required `integration` fan-in waits on the `integration-vitest` shards and `integration-bun`, and GitHub does not return it until it starts. Early on it is therefore absent rather than `pending`. A wait loop that counts `pending` rows exits successfully while that required check is still missing, and the merge fails with `Required status check "integration" is expected.`
 
 Diff the branch-protection list against the merge-satisfying results instead:

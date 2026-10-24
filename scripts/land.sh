@@ -10,6 +10,8 @@
 #
 #   make land N=3012              wait for green, then squash-merge
 #   make land N=3012 CHECK_ONLY=1 wait and report, never merge
+#   make land N=42 SUBMODULE=packages/frontend REQUIRED_CHECKS='ci,pi-review'
+#     Explicit requirements for a verified unprotected private repository.
 #
 # TIMEOUT_MIN caps the wait (default 25).
 set -uo pipefail
@@ -17,8 +19,38 @@ set -uo pipefail
 PR="${N:-}"
 CHECK_ONLY="${CHECK_ONLY:-0}"
 TIMEOUT_MIN="${TIMEOUT_MIN:-25}"
+REQUIRED_CHECKS="${REQUIRED_CHECKS:-}"
+SUBMODULE="${SUBMODULE:-}"
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 1
+if [ -n "$SUBMODULE" ]; then
+  if ! git config -f .gitmodules --get-regexp '^submodule\..*\.path$' \
+    | cut -d' ' -f2- | grep -Fxq -- "$SUBMODULE"; then
+    echo "Not a registered submodule: $SUBMODULE" >&2
+    exit 1
+  fi
+  cd "$SUBMODULE" || exit 1
+  if [ ! -e .git ]; then
+    echo "Submodule is not initialized: $SUBMODULE" >&2
+    exit 1
+  fi
+fi
+
+explicit_required=""
+if [ -n "$REQUIRED_CHECKS" ]; then
+  case "$REQUIRED_CHECKS" in
+    *$'\n'* | *$'\r'*) echo "REQUIRED_CHECKS must be one comma-separated list" >&2; exit 1 ;;
+  esac
+  if ! explicit_required="$(printf '%s\n' "$REQUIRED_CHECKS" | awk -F, '
+    { for (i=1; i<=NF; i++) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+      if ($i == "") exit 1
+      print $i
+    } }' | sort -u)"; then
+    echo "REQUIRED_CHECKS contains an empty check name" >&2
+    exit 1
+  fi
+fi
 
 case "$CHECK_ONLY" in
   0 | 1) ;;
@@ -51,23 +83,71 @@ if [ -z "$PR" ]; then
   echo "resolved PR #$PR from branch $branch"
 fi
 
+EXPECTED_HEAD="$(git rev-parse HEAD)" || exit 1
+BASE_REF=""
 verify_pr_head() {
-  local head_sha local_sha
-  if ! head_sha="$(gh pr view "$PR" --json headRefOid --jq .headRefOid)" || [ -z "$head_sha" ]; then
+  local pr_state head_sha base_ref local_sha
+  if ! pr_state="$(gh pr view "$PR" --json headRefOid,baseRefName \
+    --jq '[.headRefOid,.baseRefName]|@tsv')"; then
     echo "!! could not read PR #$PR head; refusing to merge blind." >&2
     return 1
   fi
+  IFS=$'\t' read -r head_sha base_ref <<<"$pr_state"
+  if [ -z "$head_sha" ] || [ -z "$base_ref" ]; then
+    echo "!! missing PR head or target branch; refusing to merge blind." >&2
+    return 1
+  fi
   local_sha="$(git rev-parse HEAD)"
+  if [ "$local_sha" != "$EXPECTED_HEAD" ]; then
+    echo "!! local HEAD changed during the wait; rerun the guard." >&2
+    return 1
+  fi
   if [ "$head_sha" != "$local_sha" ]; then
     echo "!! local HEAD ($(git rev-parse --short HEAD)) != PR #$PR head (${head_sha:0:7})." >&2
     echo "   Push first so the reviewed local commit is the PR head." >&2
     return 1
   fi
+  if [ -n "$BASE_REF" ] && [ "$BASE_REF" != "$base_ref" ]; then
+    echo "!! PR target changed from $BASE_REF to $base_ref; rerun the guard." >&2
+    return 1
+  fi
+  BASE_REF="$base_ref"
+}
+
+verified_unprotected_private_repo() {
+  local repo policy
+  repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" || return 1
+  # GraphQL variables are passed separately; keep the query literal.
+  # shellcheck disable=SC2016
+  policy="$(gh api graphql -f owner="${repo%/*}" -f name="${repo#*/}" \
+    -f ref="refs/heads/$BASE_REF" -f query='
+      query($owner:String!,$name:String!,$ref:String!) {
+        repository(owner:$owner,name:$name) {
+          isPrivate
+          ref(qualifiedName:$ref) { branchProtectionRule { id } }
+          rulesets(first:1,includeParents:true) { totalCount }
+        }
+      }')" || return 1
+  # A failed/partial discovery, missing branch, public repo, or inherited rule
+  # is not permission to replace GitHub policy with caller-supplied checks.
+  jq -e '.errors == null and .data.repository.isPrivate == true
+    and (.data.repository.ref | type) == "object"
+    and .data.repository.ref.branchProtectionRule == null
+    and .data.repository.rulesets.totalCount == 0' <<<"$policy" >/dev/null
 }
 
 read_required() {
-  gh api "repos/:owner/:repo/branches/main/protection/required_status_checks" \
-    --jq '.contexts[]?' | sort -u
+  local protected_required branch
+  branch="$(jq -rn --arg value "$BASE_REF" '$value|@uri')" || return 1
+  if protected_required="$(gh api "repos/:owner/:repo/branches/$branch/protection/required_status_checks" \
+    --jq '[.contexts[]?,.checks[]?.context]|unique[]')" && [ -n "$protected_required" ]; then
+    printf '%s\n%s\n' "$protected_required" "$explicit_required" | sed '/^$/d' | sort -u
+  elif [ -n "$explicit_required" ] && verified_unprotected_private_repo; then
+    echo "Using explicit checks for a verified unprotected private repository." >&2
+    printf '%s\n' "$explicit_required"
+  else
+    return 1
+  fi
 }
 
 verify_pr_head || exit 1
@@ -83,8 +163,16 @@ echo
 echo ">> waiting for checks on #$PR (timeout ${TIMEOUT_MIN}m)..."
 deadline=$(($(date +%s) + TIMEOUT_MIN * 60))
 while :; do
-  rollup="$(gh pr checks "$PR" --required --json name,bucket,link \
+  all_checks="$(gh pr checks "$PR" --json name,bucket,link \
     --jq '.[] | "\(.name)\t\(.bucket)\t\(.link)"' 2>/dev/null)"
+  # --required is empty for an unprotected private repo. Read the reported
+  # checks, then filter by the complete policy established above.
+  rollup="$(awk -F'\t' 'NR==FNR {required[$0]=1;next} $1 in required' \
+    <(printf '%s\n' "$required") <(printf '%s\n' "$all_checks"))"
+  # Rulesets can require additional checks outside classic branch protection.
+  github_required="$(gh pr checks "$PR" --required --json name,bucket,link \
+    --jq '.[] | "\(.name)\t\(.bucket)\t\(.link)"' 2>/dev/null)"
+  rollup="$(printf '%s\n%s\n' "$rollup" "$github_required" | sed '/^$/d' | sort -u)"
   reported="$(printf '%s\n' "$rollup" | cut -f1 | sed '/^$/d' | sort -u)"
   satisfied="$(printf '%s\n' "$rollup" \
     | awk -F'\t' '$2=="pass" || $2=="skipping" {print $1}' | sort -u)"
@@ -154,10 +242,15 @@ if [ "$CHECK_ONLY" = "1" ]; then
 fi
 
 echo ">> squash-merging #$PR"
-gh pr merge "$PR" --squash --admin || exit $?
+gh pr merge "$PR" --squash --match-head-commit "$EXPECTED_HEAD" || exit $?
 
-merge_sha="$(gh pr view "$PR" --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null)"
-echo "merged. squash commit: ${merge_sha:-unknown}"
+if ! merge_sha="$(gh pr view "$PR" --json mergeCommit --jq '.mergeCommit.oid // empty' 2>/dev/null)" \
+  || [ -z "$merge_sha" ]; then
+  echo "!! merge requested, but no merge commit could be confirmed." >&2
+  echo "   Check PR #$PR state (it may be queued) before rollout or cleanup." >&2
+  exit 1
+fi
+echo "merged. squash commit: $merge_sha"
 
 # Merging is the only event that retires a task worktree, and nothing is wired
 # to it: `task-clean` exists but only ever runs when someone types it, so a
@@ -191,5 +284,5 @@ report_cleanup() {
 report_cleanup
 echo
 echo "Prod-visible? Gate rollout on the SQUASH commit, not your branch head:"
-echo "  git merge-base --is-ancestor ${merge_sha:-<sha>} \"\$DEPLOYED_SHA\""
+echo "  git merge-base --is-ancestor $merge_sha \"\$DEPLOYED_SHA\""
 exit 0
