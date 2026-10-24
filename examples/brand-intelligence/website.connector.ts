@@ -32,6 +32,20 @@ interface PageSection {
   anchor: string;
 }
 
+function ariaLabel(node: Element): string {
+  return (
+    node
+      .getAttribute("aria-labelledby")
+      ?.trim()
+      .split(/\s+/)
+      .map((id) => node.ownerDocument.getElementById(id)?.textContent ?? "")
+      .join(" ")
+      .trim() ||
+    node.getAttribute("aria-label")?.trim() ||
+    ""
+  );
+}
+
 export default class WebsiteConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: "website",
@@ -125,7 +139,7 @@ export default class WebsiteConnector extends ConnectorRuntime {
     });
     // Apply removals during DOM traversal so referenced labels and controls
     // remain available when the enclosing consent container is classified.
-    this.turndown.remove([
+    const nonContentTags = new Set([
       "head",
       "title",
       "script",
@@ -149,23 +163,15 @@ export default class WebsiteConnector extends ConnectorRuntime {
       "link",
       "meta",
     ]);
+    this.turndown.remove((node) =>
+      nonContentTags.has(node.nodeName.toLowerCase())
+    );
     // Remove the consent UI itself. Cookie or marketing vocabulary in the
     // surrounding page is business content, not evidence that the page is a banner.
     this.turndown.addRule("cookieConsent", {
       filter: (node) => {
         const role = node.getAttribute("role")?.toLowerCase();
-        const label =
-          node
-            .getAttribute("aria-labelledby")
-            ?.trim()
-            .split(/\s+/)
-            .map(
-              (id) => node.ownerDocument.getElementById(id)?.textContent ?? ""
-            )
-            .join(" ")
-            .trim() ||
-          node.getAttribute("aria-label")?.trim() ||
-          "";
+        const label = ariaLabel(node);
         const consentRegion =
           role === "region" &&
           Array.from(
@@ -175,7 +181,7 @@ export default class WebsiteConnector extends ConnectorRuntime {
           ).some((control) =>
             /^(accept|allow|reject|deny)( all)?( cookies)?$/i.test(
               (
-                control.getAttribute("aria-label") ||
+                ariaLabel(control) ||
                 (control.nodeName === "INPUT"
                   ? control.getAttribute("value")
                   : control.textContent) ||

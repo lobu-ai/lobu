@@ -108,6 +108,8 @@ for (const parseSections of [false, true]) {
       '<button value="accept">Accept all</button>',
       '<button value="1">Accept all</button>',
       '<a role="button" aria-label="Reject all">No thanks</a>',
+      '<footer><span id="choice-label">Accept all</span></footer><button aria-labelledby="choice-label" aria-label="Continue">Continue</button>',
+      '<footer><span id="choice-label">Reject all</span></footer><input type="button" aria-labelledby="choice-label" value="Continue">',
     ]) {
       const consent = `<div role="region" aria-label="Cookie consent"><p>We use necessary cookies with your consent.</p>${control}</div>`;
       const onlyBanner = await sync(document(consent), parseSections);
@@ -132,6 +134,7 @@ for (const parseSections of [false, true]) {
       "<button>Explore features</button>",
       '<input type="button" value="Explore features">',
       '<button value="accept">Explore features</button>',
+      '<footer><span id="choice-label">Explore features</span></footer><button aria-labelledby="choice-label" aria-label="Accept all">Accept all</button>',
     ]) {
       const description = "Our platform helps teams manage privacy choices.";
       const result = await sync(
