@@ -4743,13 +4743,21 @@ export type ManageOperationsResponses = {
           feed_name?: string;
           automation_id?: number;
           automation_name?: string;
-          next_action?: {
-            method: "automations.claimNextWindow";
-            input: {
-              automation_id: string;
-              run_id?: number;
-            };
-          };
+          next_action?:
+            | {
+                method: "automations.claimNextWindow";
+                input: {
+                  automation_id: string;
+                  run_id?: number;
+                };
+              }
+            | {
+                method: "knowledge.read";
+                input: {
+                  automation_id: number;
+                  view: "changes";
+                };
+              };
           agent_id?: string;
           agent_name?: string;
           client_id?: string;
@@ -5191,6 +5199,10 @@ export type ManageAutomationsData = {
           connector_key: string;
           connection_id?: number;
           event_types: Array<string>;
+          /**
+           * Authorize continuous retention of source change references from declared source-only observers while this Automation is active. Supports resource_ref/resource_type matching only. Does not retain bodies or start an external executor.
+           */
+          capture?: "references";
           /**
            * Connector-normalized exact-match fields such as resource_ref or channel_id.
            */
@@ -5845,6 +5857,10 @@ export type GetAutomationResponses = {
             connection_id?: number;
             event_types: Array<string>;
             /**
+             * Authorize continuous retention of source change references from declared source-only observers while this Automation is active. Supports resource_ref/resource_type matching only. Does not retain bodies or start an external executor.
+             */
+            capture?: "references";
+            /**
              * Connector-normalized exact-match fields such as resource_ref or channel_id.
              */
             match?: {
@@ -6073,6 +6089,14 @@ export type GetAutomationResponse =
 export type ReadKnowledgeData = {
   body: {
     /**
+     * Read retained source-reference observations for an Automation with capture=references, without a run or processing checkpoint. Without cursor, starts at retained history; drain next_cursor, then poll resume_cursor. No source bodies or live provider scan.
+     */
+    view?: "changes";
+    /**
+     * Opaque next_cursor or resume_cursor from view=changes. Keep the same Automation and caller; permissions are rechecked on every page.
+     */
+    cursor?: string;
+    /**
      * Search query text (min 3 characters). If provided, performs semantic/full-text search. If omitted, lists content ordered by date.
      */
     query?: string;
@@ -6098,7 +6122,7 @@ export type ReadKnowledgeData = {
      */
     record_cursor?: string;
     /**
-     * Persisted Automation ID (`automation_id`) to fetch content for. With run_id, uses that run's queued version/window; otherwise computes the Automation's pending window. Returns window_token for complete_window action.
+     * Persisted Automation ID (`automation_id`) to fetch content for. With run_id, uses that run's queued version/window; otherwise computes the Automation's pending window. Returns window_token for complete_window action, except view=changes which uses independent read cursors.
      */
     automation_id?: number;
     /**
@@ -6285,6 +6309,8 @@ export type ReadKnowledgeResponses = {
    * Successful response
    */
   200: {
+    next_cursor?: string;
+    resume_cursor?: string;
     content: Array<unknown>;
     total: number | null;
     chain_total?: number;
