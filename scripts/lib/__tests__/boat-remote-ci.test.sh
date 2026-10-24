@@ -88,7 +88,7 @@ rm -f "$BOAT_CALL_LOG"
 )
 # Exercise auto fallback with a controlled PATH: no host-installed provider.
 mkdir -p "$base/fallback-bin"
-for tool in bash dirname git mkdir mktemp tar awk rm grep tail; do
+for tool in bash dirname git mkdir mktemp tar gzip awk rm grep tail; do
  ln -s "$(command -v "$tool")" "$base/fallback-bin/$tool"
 done
 export REMOTE_CI_PROVIDER=auto
@@ -101,7 +101,7 @@ if command -v jq >/dev/null; then
 exit 1
 DAYTONA
  chmod +x "$base/fallback-bin/daytona"
- [ "$(PATH="$base/fallback-bin" GATE_SKIP_SETTLED_CHECK=1 run_rc unit)" = 1 ] || fail 'Daytona fallback did not fail on create'
+ [ "$(PATH="$base/fallback-bin" GATE_SKIP_SETTLED_CHECK=1 run_rc unit)" = 1 ] || fail "Daytona fallback did not fail on create: $(cat "$base/output")"
  grep -q 'provider: daytona' "$base/output" || fail 'auto did not select available Daytona'
 fi
 echo 'ok - Boat dispatch, exact staged archive, secrets, failure and timeout guards'
