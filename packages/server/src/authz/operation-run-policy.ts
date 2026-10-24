@@ -2,7 +2,7 @@ import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
 import { resolveAutomationConnectionVisibilityUserId } from './automation-connection-visibility';
 import { connectionBrowserGrant } from '../connectors/browser-resource';
 import { type DbClient, getDb } from '../db/client';
-import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, isSourceFeedRead } from '../lib/device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, isSourceFeedRead } from '../lib/device-feed-read-protocol';
 import { sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
 import { getOperationForConnection } from '../operations/connector-operations';
 import { supersedeActionEvent } from '../tools/admin/approval-events';
@@ -184,7 +184,18 @@ export async function applyRunConnectorPolicyAtClaim(params: {
       expires_at = CASE WHEN activation_kind IS NOT NULL OR ${blocked} THEN expires_at ELSE NULL END,
       claimed_by = ${blocked ? sql`claimed_by` : null},
       claimed_at = ${blocked ? sql`claimed_at` : null},
-      last_heartbeat_at = ${blocked ? sql`last_heartbeat_at` : null}
+      last_heartbeat_at = ${blocked ? sql`last_heartbeat_at` : null},
+      action_output = CASE
+        WHEN ${blocked} AND (action_key = ${DEVICE_FEED_READ_ACTION_KEY}
+          OR run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true')
+          THEN NULL
+        ELSE action_output END,
+      action_input = CASE
+        WHEN ${blocked} AND run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true'
+          THEN '{"scrubbed":true}'::jsonb
+        WHEN ${blocked} AND action_key = ${DEVICE_FEED_READ_ACTION_KEY}
+          THEN jsonb_build_object('scrubbed', true, 'feed_key', action_input->>'feed_key')
+        ELSE action_input END
     WHERE id = ${runId} AND organization_id = ${organizationId}
       AND status = ${run.status} AND approval_status IN ('auto', 'approved')
     RETURNING id
