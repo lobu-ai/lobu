@@ -245,28 +245,61 @@ describe('Gmail replied signal (promote-on-interaction)', () => {
   });
 });
 
-describe('Gmail person attribution rule', () => {
-  test('bumps the connector version for the changed sync contract', () => {
-    expect(new GmailConnector().definition.version).toBe('1.0.7');
+describe('Gmail default person admission', () => {
+  test.each(['support', 'noreply', 'hello', 'notifications'])('replying to %s does not classify the mailbox as a person', async (local) => {
+    const events = await syncThreads([
+      {
+        id: 'role-reply',
+        messages: [
+          { id: 'incoming', from: `Synthetic Support <${local}@synthetic.example>`, labelIds: ['INBOX'] },
+          { id: 'sent', from: 'Owner <owner@synthetic.example>', to: `${local}@synthetic.example`, labelIds: ['SENT'] },
+        ],
+      },
+    ]);
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata.replied).toBe(true);
+    expect(events[0].metadata.person_relevant).toBe(false);
+    expect(events[0].metadata.from_email).toBe(`${local}@synthetic.example`);
   });
 
-  test('autoCreate is gated on person_relevant, with a legacy replied rule for pre-refresh payloads', () => {
+  test.each([
+    { listId: '<synthetic-list.example>' },
+    { precedence: 'bulk' },
+    { precedence: 'list' },
+    { precedence: 'junk' },
+  ])('replying to list or bulk mail does not mint a person: %j', async (headers) => {
+    const events = await syncThreads([
+      {
+        id: 'list-reply',
+        messages: [
+          { id: 'incoming', from: 'Alice Smith <alice@synthetic.example>', labelIds: ['INBOX'], ...headers },
+          { id: 'sent', from: 'Owner <owner@synthetic.example>', labelIds: ['SENT'] },
+        ],
+      },
+    ]);
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata.replied).toBe(true);
+    expect(events[0].metadata.person_relevant).toBe(false);
+  });
+});
+
+describe('Gmail person attribution rule', () => {
+  test('bumps the connector version for the changed sync contract', () => {
+    expect(new GmailConnector().definition.version).toBe('1.0.8');
+  });
+
+  test('autoCreate requires an explicit positive person verdict without a replied-only fallback', () => {
     const connector = new GmailConnector();
     const rules = connector.definition.feeds.threads.eventKinds.thread.attributions;
-    expect(rules).toHaveLength(2);
-    const byGate = Object.fromEntries(
-      rules.map((rule) => [JSON.stringify(rule.target.createWhen), rule])
-    );
-    expect(byGate['{"path":"metadata.person_relevant","equals":true}']).toBeDefined();
-    expect(byGate['{"path":"metadata.replied","equals":true}']).toBeDefined();
-    for (const rule of rules) {
-      expect(rule.role).toBe('authored_by');
-      expect(rule.autoCreate).toBe(true);
-      expect(rule.target.entityType).toBe('person');
-      expect(rule.target.identities).toEqual([
-        { namespace: 'email', eventPath: 'metadata.from_email' },
-      ]);
-    }
+    expect(rules).toHaveLength(1);
+    const [rule] = rules;
+    expect(rule.target.createWhen).toEqual({ path: 'metadata.person_relevant', equals: true });
+    expect(rule.role).toBe('authored_by');
+    expect(rule.autoCreate).toBe(true);
+    expect(rule.target.entityType).toBe('person');
+    expect(rule.target.identities).toEqual([
+      { namespace: 'email', eventPath: 'metadata.from_email' },
+    ]);
   });
 });
 
@@ -519,7 +552,7 @@ describe('Gmail human_senders_only sync mode', () => {
     expect(events).toHaveLength(0);
   });
 
-  test('default mode keeps replied semantics and stamps person_relevant = replied', async () => {
+  test('default mode promotes a replied non-role counterparty', async () => {
     const events = await syncThreads([
       {
         id: 't-alice',

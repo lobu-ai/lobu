@@ -173,7 +173,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     name: 'Gmail',
     description:
       'Syncs Gmail threads, live-reads matching messages, and supports sending, drafts, and replies.',
-    version: '1.0.7',
+    version: '1.0.8',
     faviconDomain: 'mail.google.com',
     authSchema: {
       methods: [
@@ -270,45 +270,16 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
             attributions: [
               {
                 role: 'authored_by',
-                // Promote on interaction, never on receipt alone. Every from-address
-                // is a sender — overwhelmingly brands, newsletters, and no-reply
-                // system addresses, all of which carry a from_name — so receipt
-                // alone must not mint a contact. The gate is `person_relevant`,
-                // computed by the connector: it is `replied` by default; the
-                // human_senders_only mode additionally admits human-looking
-                // unreplied counterparties and rejects role/list/broadcast noise.
-                // Only person-relevant senders materialize a `person`; everything
-                // else still links to an existing contact on identity match.
+                // Default mode requires interaction with a non-role counterparty;
+                // human_senders_only also admits unreplied heuristic matches.
+                // Both reject list/bulk threads for person creation.
+                // Missing verdicts from older runs fail closed for creation;
+                // a replied-only fallback would override explicit rejections.
+                // Rejected or unclassified senders still link to existing contacts.
                 autoCreate: true,
                 target: {
                   entityType: 'person',
                   createWhen: { path: 'metadata.person_relevant', equals: true },
-                  titlePath: 'metadata.from_name',
-                  identities: [{ namespace: 'email', eventPath: 'metadata.from_email' }],
-                },
-                traits: {
-                  from_name: {
-                    eventPath: 'metadata.from_name',
-                    mergeStrategy: 'prefer_non_empty',
-                  },
-                  last_email_at: {
-                    eventPath: 'occurred_at',
-                    mergeStrategy: 'overwrite',
-                  },
-                },
-              },
-              {
-                role: 'authored_by',
-                // Legacy gate for v1.0.3 run payloads, which carry `replied` but
-                // not `person_relevant`. Keep it until old in-flight runs/caches
-                // drain: the server loads the current definition by connector key,
-                // so a rolling deploy would otherwise silently skip person creation
-                // for a pre-refresh event. Both rules share the email identity, so
-                // the pipeline's first-writer-wins dedupes them for new payloads.
-                autoCreate: true,
-                target: {
-                  entityType: 'person',
-                  createWhen: { path: 'metadata.replied', equals: true },
                   titlePath: 'metadata.from_name',
                   identities: [{ namespace: 'email', eventPath: 'metadata.from_email' }],
                 },
@@ -1156,7 +1127,10 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         !this.isListThread(messages) &&
         (replied ||
           this.externalRecipientCount(selectedSentMessage, isSelf) <= BROADCAST_RECIPIENT_CAP)
-      : replied;
+      : replied &&
+        !!selected &&
+        isPersonRelevantSender(selected.email, selected.name, true) &&
+        !this.isListThread(messages);
 
     return {
       replied,
@@ -1497,10 +1471,10 @@ const CONSUMER_MAIL_DOMAINS = new Set([
 const HUMAN_NAME_RE = /^[A-ZÀ-Ý][a-zà-ÿ]+(?:[ '\u2019-][A-ZÀ-Ý][a-zà-ÿ]+)+$/;
 
 /**
- * Whether a thread's counterparty is eligible for person minting under
- * `human_senders_only`. Role/system mailboxes never qualify. A replied
- * non-role address qualifies directly; an unreplied address additionally needs
- * a consumer-mail domain or a human-looking display name.
+ * Address eligibility for person minting in both feed modes. Role/system
+ * mailboxes never qualify. A replied non-role address qualifies directly;
+ * human_senders_only also admits unreplied addresses with a consumer-mail
+ * domain or a human-looking display name. Thread-level gates apply separately.
  */
 export function isPersonRelevantSender(
   email: string | null | undefined,
