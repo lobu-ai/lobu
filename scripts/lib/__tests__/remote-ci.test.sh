@@ -198,13 +198,19 @@ fi
 # ── provider dispatch (scripts/run-remote-ci.sh) ──────────────────────────
 # The dispatcher is exercised with a mocked daytona binary so no sandbox is
 # ever provisioned. A settled (staged, no untracked) tree is required first.
+# Copy it into the fixture: remote payloads have no parent .git directory.
+mkdir -p "$repo/scripts/lib"
+cp "$SCRIPT_DIR/../../run-remote-ci.sh" "$repo/scripts/"
+cp "$SCRIPT_DIR/../remote-ci.sh" "$SCRIPT_DIR/../gate-runner.sh" "$repo/scripts/lib/"
+git -C "$repo" add -- scripts
+runner="$repo/scripts/run-remote-ci.sh"
 
 ( cd "$repo"
-  if REMOTE_CI_PROVIDER=bogus bash "$SCRIPT_DIR/../../run-remote-ci.sh" unit >/dev/null 2>&1; then
+  if REMOTE_CI_PROVIDER=bogus bash "$runner" unit >/dev/null 2>&1; then
     fail "unknown provider was accepted"
   fi
 
-  if REMOTE_CI_PROVIDER=local bash "$SCRIPT_DIR/../../run-remote-ci.sh" nosuchjob >/dev/null 2>&1; then
+  if REMOTE_CI_PROVIDER=local GATE_PROVISION=0 bash "$runner" nosuchjob >/dev/null 2>&1; then
     fail "unknown job in the local fallback was accepted"
   fi
 
@@ -225,8 +231,8 @@ esac
 MOCK
   chmod +x "$tmpbin/daytona"
   call_log="$(mktemp "${TMPDIR:-/tmp}/lobu-daytona-call.XXXXXX")"
-  if PATH="$tmpbin:$PATH" DAYTONA_CALL_LOG="$call_log" REMOTE_CI_PROVIDER=daytona GATE_SKIP_SETTLED_CHECK=1 \
-      bash "$SCRIPT_DIR/../../run-remote-ci.sh" unit >/dev/null 2>&1; then
+  if PATH="$tmpbin:$PATH" DAYTONA_CALL_LOG="$call_log" REMOTE_CI_PROVIDER=daytona \
+      bash "$runner" unit >/dev/null 2>&1; then
     fail "mocked daytona create failure was accepted"
   fi
   grep -q -- '--memory' "$call_log" || fail "daytona create was not invoked"
@@ -245,12 +251,12 @@ MOCK
 exit 1
 MOCK_FAULTY
   chmod +x "$tmpbin/daytona"
-  if PATH="$tmpbin:$PATH" REMOTE_CI_PROVIDER=daytona GATE_SKIP_SETTLED_CHECK=1 \
-      bash "$SCRIPT_DIR/../../run-remote-ci.sh" unit 2>/dev/null; then
+  if PATH="$tmpbin:$PATH" REMOTE_CI_PROVIDER=daytona \
+      bash "$runner" unit 2>/dev/null; then
     fail "faulty (not logged in) daytona CLI was accepted"
   fi
-  out="$(PATH="$tmpbin:$PATH" REMOTE_CI_PROVIDER=daytona GATE_SKIP_SETTLED_CHECK=1 \
-      bash "$SCRIPT_DIR/../../run-remote-ci.sh" unit 2>&1 || true)"
+  out="$(PATH="$tmpbin:$PATH" REMOTE_CI_PROVIDER=daytona \
+      bash "$runner" unit 2>&1 || true)"
   case "$out" in
     *"not available or not logged in"*) ;;
     *) fail "faulty Daytona CLI did not fail closed with a clear message: $out" ;;
@@ -301,7 +307,7 @@ MOCK2
   name_file="$(mktemp "${TMPDIR:-/tmp}/lobu-daytona-name.XXXXXX")"
   del_flag="$(mktemp "${TMPDIR:-/tmp}/lobu-daytona-del.XXXXXX")"
   if ! PATH="$tmpbin:$PATH" DAYTONA_NAME_FILE="$name_file" DAYTONA_DELETE_FLAG="$del_flag" \
-      REMOTE_CI_PROVIDER=daytona GATE_SKIP_SETTLED_CHECK=1 bash "$SCRIPT_DIR/../../run-remote-ci.sh" dead-code-report >/dev/null 2>&1; then
+      REMOTE_CI_PROVIDER=daytona bash "$runner" dead-code-report >/dev/null 2>&1; then
     fail "mocked successful daytona run was rejected"
   fi
   # The success path also proves the GATE_REMOTE_EXIT sentinel was parsed:
