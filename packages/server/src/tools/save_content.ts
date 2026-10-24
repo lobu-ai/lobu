@@ -90,11 +90,14 @@ async function findIdempotentEvent(
   organizationId: string,
   idempotencyKey: string
 ): Promise<
-  | (Awaited<ReturnType<typeof insertEvent>> & { metadata: Record<string, unknown> })
+  | (Awaited<ReturnType<typeof insertEvent>> & {
+      metadata: Record<string, unknown>;
+      supersedes_event_id: number | null;
+    })
   | undefined
 > {
   const rows = await sql`
-    SELECT id, entity_ids, origin_id, title, semantic_type, created_at, metadata
+    SELECT id, entity_ids, origin_id, title, semantic_type, created_at, metadata, supersedes_event_id
     FROM events
     WHERE organization_id = ${organizationId}
       AND metadata ? '_lobu_idempotency_key'
@@ -111,6 +114,7 @@ async function findIdempotentEvent(
     semantic_type: String(row.semantic_type),
     created_at: String(row.created_at),
     change: 'unchanged',
+    supersedes_event_id: row.supersedes_event_id == null ? null : Number(row.supersedes_event_id),
     metadata: (row.metadata ?? {}) as Record<string, unknown>,
   };
 }
@@ -388,6 +392,7 @@ async function saveContentImpl(
   }
 
   // 5. Validate supersedes target exists and belongs to this org
+  let supersedingEventId: number | undefined;
   if (args.supersedes_event_id) {
     // Superseding a `guidance` target stamps its superseded_by, removing it
     // from every prompt — the same effect as delete_knowledge. Authorship is
@@ -416,12 +421,20 @@ async function saveContentImpl(
       WHERE supersedes_event_id = ${args.supersedes_event_id}
       LIMIT 1
     `;
-    if (superseding.length > 0) {
-      throw new ToolUserError(
-        `Cannot supersede event ${args.supersedes_event_id}: already superseded by event ${superseding[0].id}`,
-        409
-      );
-    }
+    supersedingEventId = superseding.length > 0 ? Number(superseding[0].id) : undefined;
+  }
+
+  // Read the receipt AFTER the successor: a concurrent commit between these
+  // reads must be replayed, not rejected using an earlier missing receipt.
+  // Commits after both reads are reconciled by the unique-violation handler.
+  const prior = args.idempotency_key
+    ? await findIdempotentEvent(sql, ctx.organizationId, args.idempotency_key)
+    : undefined;
+  if (supersedingEventId !== undefined && supersedingEventId !== prior?.id) {
+    throw new ToolUserError(
+      `Cannot supersede event ${args.supersedes_event_id}: already superseded by event ${supersedingEventId}`,
+      409
+    );
   }
 
   // 5b. Resolve the source event for a first-class reply. `origin_parent_id`
@@ -495,13 +508,16 @@ async function saveContentImpl(
   let row: Awaited<ReturnType<typeof insertEvent>>;
   let inserted = true;
   let persistedMetadata = eventMetadata;
-  const prior = args.idempotency_key
-    ? await findIdempotentEvent(sql, ctx.organizationId, args.idempotency_key)
-    : undefined;
   if (prior) {
     if (prior.semantic_type !== semanticType) {
       throw new ToolUserError(
         `Idempotency key '${args.idempotency_key}' already belongs to semantic type '${prior.semantic_type}'`,
+        409
+      );
+    }
+    if (prior.supersedes_event_id !== (args.supersedes_event_id ?? null)) {
+      throw new ToolUserError(
+        `Idempotency key '${args.idempotency_key}' already belongs to a different supersede target`,
         409
       );
     }
@@ -611,17 +627,32 @@ async function saveContentImpl(
       // lock; the loser resolves and returns the winner's durable event.
       if (
         args.idempotency_key &&
-        isUniqueViolation(error, 'idx_events_org_idempotency_key')
+        (isUniqueViolation(error, 'idx_events_org_idempotency_key') ||
+          (args.supersedes_event_id && isSupersededByUniqueViolation(error)))
       ) {
         const winner = await findIdempotentEvent(
           sql,
           ctx.organizationId,
           args.idempotency_key
         );
-        if (!winner) throw error;
+        if (!winner) {
+          if (args.supersedes_event_id && isSupersededByUniqueViolation(error)) {
+            throw new ToolUserError(
+              `Cannot supersede event ${args.supersedes_event_id}: already superseded by a concurrent write`,
+              409
+            );
+          }
+          throw error;
+        }
         if (winner.semantic_type !== semanticType) {
           throw new ToolUserError(
             `Idempotency key '${args.idempotency_key}' already belongs to semantic type '${winner.semantic_type}'`,
+            409
+          );
+        }
+        if (winner.supersedes_event_id !== (args.supersedes_event_id ?? null)) {
+          throw new ToolUserError(
+            `Idempotency key '${args.idempotency_key}' already belongs to a different supersede target`,
             409
           );
         }

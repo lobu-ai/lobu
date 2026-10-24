@@ -14,17 +14,16 @@
  * though no data is lost — the unique index correctly protects the invariant.
  *
  * Pinned contract after the fix:
- *   - Concurrent supersede race: the loser gets a clean ToolUserError (409),
- *     not a raw 23505. Exactly one supersede succeeds.
- *   - A stale supersede target (already superseded, or not found in the org)
- *     throws ToolUserError — a user fault, not an infra error — so it doesn't
- *     fire a Sentry alert.
- *
- * Vitest CI gap note (mirrors neighbors): runs locally / in the CI integration
- * job against the pgvector DB via DATABASE_URL.
+ *   - Concurrent supersedes without a shared idempotency key: the loser gets
+ *     a clean ToolUserError (409), not a raw 23505. Exactly one succeeds.
+ *   - Identical keyed supersedes return the same durable event, including
+ *     when a concurrent commit lands between the preflight reads.
+ *   - An already-superseded target throws ToolUserError unless the key
+ *     identifies its own replacement. Missing or wrong-org targets fail.
  */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import * as dbClient from '../../../db/client';
 import { saveContent } from '../../../tools/save_content';
 import type { ToolContext } from '../../../tools/registry';
 import { ToolUserError } from '../../../utils/errors';
@@ -175,5 +174,214 @@ describe('saveContent > supersession robustness', () => {
     expect(err).toBeInstanceOf(ToolUserError);
     expect((err as ToolUserError).httpStatus).toBe(404);
     expect((err as ToolUserError).message).toMatch(/not found/i);
+  });
+
+  it('replays a superseding save after its successful response was lost', async () => {
+    const target = await createTestEvent({
+      organization_id: org.id,
+      content: 'synthetic fact v1',
+      semantic_type: 'content',
+    });
+    const args = {
+      content: 'synthetic fact v2',
+      semantic_type: 'content',
+      metadata: {},
+      supersedes_event_id: target.id,
+      idempotency_key: 'synthetic-supersede-lost-response',
+    };
+    const committed = await saveContent(args as never, {} as never, ctx);
+    const replayed = await saveContent(args as never, {} as never, ctx);
+    expect(replayed.id).toBe(committed.id);
+    const sql = getTestDb();
+    const successors = await sql`
+      SELECT id FROM events WHERE supersedes_event_id = ${target.id}
+    `;
+    expect(successors).toHaveLength(1);
+  });
+
+  it.each([
+    ['successor', true],
+    ['successor', false],
+    ['receipt', true],
+    ['receipt', false],
+  ] as const)(
+    'reconciles a commit after the %s read (matching key: %s)',
+    async (read, matchingKey) => {
+      const target = await createTestEvent({
+        organization_id: org.id,
+        content: 'before',
+        semantic_type: 'content',
+      });
+      const args = {
+        content: 'after',
+        semantic_type: 'content',
+        metadata: {},
+        supersedes_event_id: target.id,
+        idempotency_key: `synthetic-read-race-${read}-${matchingKey}`,
+      };
+      let committedId: number | undefined;
+      let injected = false;
+      const sql = dbClient.getDb();
+      const racingSql = new Proxy(sql, {
+        apply(query, thisArg, parameters) {
+          const result = Reflect.apply(query, thisArg, parameters);
+          const text = Array.isArray(parameters[0])
+            ? parameters[0].join(' ').replace(/\s+/g, ' ').trim()
+            : '';
+          const matchesRead = read === 'receipt'
+            ? text.includes("metadata->>'_lobu_idempotency_key'")
+            : text.startsWith('SELECT id FROM events WHERE supersedes_event_id');
+          if (!injected && matchesRead) {
+            injected = true;
+            return Promise.resolve(result).then(async (rows) => {
+              const committed = await saveContent({
+                ...args,
+                idempotency_key: matchingKey ? args.idempotency_key : `${args.idempotency_key}-other`,
+              } as never, {} as never, ctx);
+              committedId = committed.id;
+              return rows;
+            });
+          }
+          return result;
+        },
+      });
+      const spy = vi.spyOn(dbClient, 'getDb').mockReturnValue(racingSql);
+      try {
+        const replay = saveContent(args as never, {} as never, ctx);
+        if (matchingKey) {
+          const result = await replay;
+          expect(result.id).toBe(committedId);
+          expect(result.created).toBe(false);
+        } else {
+          await expect(replay).rejects.toMatchObject({ httpStatus: 409 });
+        }
+        expect(injected).toBe(true);
+        const successors = await sql`
+          SELECT id FROM events WHERE supersedes_event_id = ${target.id}
+        `;
+        expect(successors).toHaveLength(1);
+        expect(Number(successors[0].id)).toBe(committedId);
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  );
+
+  it('reconciles concurrent identical keyed supersedes to one committed event', async () => {
+    const target = await createTestEvent({
+      organization_id: org.id,
+      content: 'before',
+      semantic_type: 'content',
+    });
+    const args = {
+      content: 'after',
+      semantic_type: 'content',
+      metadata: {},
+      supersedes_event_id: target.id,
+      idempotency_key: 'synthetic-concurrent-supersede',
+    };
+    const results = await Promise.allSettled(
+      Array.from({ length: 6 }, () => saveContent(args as never, {} as never, ctx))
+    );
+    const saved = results.map((result) => {
+      if (result.status === 'rejected') throw result.reason;
+      return result.value;
+    });
+    expect(new Set(saved.map((result) => result.id)).size).toBe(1);
+    expect(saved.filter((result) => result.created)).toHaveLength(1);
+    const rows = await getTestDb()`
+      SELECT id FROM events WHERE supersedes_event_id = ${target.id}
+    `;
+    expect(rows).toHaveLength(1);
+  });
+
+  it('rejects reuse of a supersede key for another target or an ordinary save', async () => {
+    const target = await createTestEvent({
+      organization_id: org.id, content: 'before', semantic_type: 'content',
+    });
+    const other = await createTestEvent({
+      organization_id: org.id, content: 'other', semantic_type: 'content',
+    });
+    const args = {
+      content: 'after',
+      semantic_type: 'content',
+      metadata: {},
+      supersedes_event_id: target.id,
+      idempotency_key: 'synthetic-target-conflict',
+    };
+    const saved = await saveContent(args as never, {} as never, ctx);
+    for (const supersedes_event_id of [other.id, undefined]) {
+      await expect(
+        saveContent({ ...args, supersedes_event_id } as never, {} as never, ctx)
+      ).rejects.toMatchObject({ httpStatus: 409 });
+    }
+    const rows = await getTestDb()`SELECT id FROM events WHERE supersedes_event_id = ${other.id}`;
+    expect(rows).toHaveLength(0);
+    await expect(
+      saveContent({ ...args, semantic_type: 'guidance' } as never, {} as never, ctx)
+    ).rejects.toMatchObject({ httpStatus: 409 });
+    const replay = await saveContent(args as never, {} as never, ctx);
+    expect(replay.id).toBe(saved.id);
+  });
+
+  it('rejects using an ordinary save key to supersede a target', async () => {
+    const args = {
+      content: 'ordinary',
+      semantic_type: 'content',
+      metadata: {},
+      idempotency_key: 'synthetic-ordinary-key',
+    };
+    await saveContent(args as never, {} as never, ctx);
+    const target = await createTestEvent({
+      organization_id: org.id, content: 'before', semantic_type: 'content',
+    });
+    await expect(
+      saveContent({ ...args, supersedes_event_id: target.id } as never, {} as never, ctx)
+    ).rejects.toMatchObject({ httpStatus: 409 });
+  });
+
+  it('rechecks current write scope and guidance removal permission on replay', async () => {
+    const target = await saveContent(
+      { content: 'instructions', semantic_type: 'guidance', metadata: {} } as never,
+      {} as never,
+      ctx
+    );
+    const args = {
+      content: 'replacement',
+      semantic_type: 'content',
+      metadata: {},
+      supersedes_event_id: target.id,
+      idempotency_key: 'synthetic-authorized-replay',
+    };
+    await saveContent(args as never, {} as never, ctx);
+    await expect(
+      saveContent(args as never, {} as never, { ...ctx, scopes: ['mcp:read'] })
+    ).rejects.toMatchObject({ httpStatus: 403 });
+    await expect(
+      saveContent(args as never, {} as never, { ...ctx, memberRole: 'member' })
+    ).rejects.toMatchObject({ httpStatus: 403 });
+  });
+
+  it('returns the original receipt even when its replacement was later superseded', async () => {
+    const target = await createTestEvent({
+      organization_id: org.id, content: 'v1', semantic_type: 'content',
+    });
+    const args = {
+      content: 'v2',
+      semantic_type: 'content',
+      metadata: {},
+      supersedes_event_id: target.id,
+      idempotency_key: 'synthetic-later-version',
+    };
+    const original = await saveContent(args as never, {} as never, ctx);
+    await saveContent({
+      content: 'v3',
+      semantic_type: 'content',
+      metadata: {},
+      supersedes_event_id: original.id,
+    } as never, {} as never, ctx);
+    const replay = await saveContent(args as never, {} as never, ctx);
+    expect(replay.id).toBe(original.id);
+    expect(replay.created).toBe(false);
   });
 });
