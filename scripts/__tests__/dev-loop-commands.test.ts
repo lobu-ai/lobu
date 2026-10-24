@@ -69,16 +69,16 @@ case "$1 $2" in
     ;;
   "pr view")
     if [ "\${MOCK_VIEW_FAIL:-0}" = "1" ]; then exit 1; fi
-    if [[ " $* " == *" headRefOid "* ]]; then
+    if [[ " $* " == *"headRefOid"* ]]; then
       count_file="$MOCK_GH_LOG.head-count"
       count=0
       [ -f "$count_file" ] && count="$(cat "$count_file")"
       count=$((count + 1))
       printf '%s' "$count" > "$count_file"
       if [ "$count" -gt 1 ] && [ -n "\${MOCK_SECOND_HEAD_SHA:-}" ]; then
-        printf '%s\\n' "$MOCK_SECOND_HEAD_SHA"
+        printf '%s\\tmain\\n' "$MOCK_SECOND_HEAD_SHA"
       else
-        printf '%s\\n' "$MOCK_HEAD_SHA"
+        printf '%s\\tmain\\n' "$MOCK_HEAD_SHA"
       fi
     else
       printf '%s\\n' deadbeef
@@ -121,7 +121,7 @@ describe("land.sh", () => {
     expect(result.exitCode).toBe(0);
     expect(existsSync(mergedFile)).toBeTrue();
     expect(readFileSync(join(fixtureRoot, "gh.log"), "utf8")).toContain(
-      "pr merge 42 --squash --admin"
+      `pr merge 42 --squash --match-head-commit ${headSha}`
     );
   });
 
@@ -154,7 +154,7 @@ describe("land.sh", () => {
       "required checks are merge-satisfying"
     );
     expect(readFileSync(join(fixtureRoot, "gh.log"), "utf8")).toContain(
-      "pr checks 42 --required"
+      "pr checks 42 --json"
     );
   });
 

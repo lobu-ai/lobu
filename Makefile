@@ -7,6 +7,7 @@ help:
 	@echo "Available commands:"
 	@echo "  make ctx [BASE=<ref>] [NOFETCH=1]          - One-call worktree context: branch, tree, changed-vs-base file list, commits, submodule, PR + required-check gaps"
 	@echo "  make land [N=<pr>] [CHECK_ONLY=1]          - Wait for CI, verify the FULL branch-protection required list, then squash-merge (refuses while a required check has not reported)"
+	@echo "    [SUBMODULE=<registered path>] [REQUIRED_CHECKS='ci,pi-review'] - Explicit check floor for verified unprotected private repos; adds to protected requirements"
 	@echo "  make setup                                 - Setup development environment (run once)"
 	@echo "  make dev [NAME=<x>] [FROM=<db>] [OPEN=1]   - Local dev (brew Postgres@18); prints App URL; OPEN=1 opens it in the system browser after boot"
 	@echo "  make dev-embedded                          - Dev against the zero-dependency embedded per-worktree Postgres (the lobu run / CI runtime); == LOBU_EMBEDDED=1 make dev"
