@@ -6,6 +6,7 @@
  * Omit `query` to list all content with filters.
  */
 
+import { resolveAutomationConnectionVisibilityUserId } from '../../authz/automation-connection-visibility';
 import { entityReadRestrictions, filterEntityReadRows } from '../../authz/entity-read-policy';
 import type { ContentItem } from '@lobu/connector-sdk';
 import {
@@ -58,6 +59,7 @@ import {
 import { GetContentSchema, type GetContentArgs, getIncludeSupersededValidationErrors } from './schema';
 import type { ContentRow, GetContentResult, IdRow } from './types';
 import { handleAutomationMode } from './automation-mode';
+import { readAutomationChanges } from './changes';
 import { resolveMcpActivitySessionIds } from './mcp-activity-filter';
 import { withValidatedArgs } from '../validate-args';
 
@@ -242,6 +244,24 @@ async function getContentImpl(
   const pgSql = createDbClientFromEnv(env);
   const sql = getDb();
   const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
+
+  if (args.view === 'changes') {
+    if (ctx.memberRole === null && !isInProcessSystemCall(ctx)) {
+      throw new ToolUserError('Change reads require workspace membership.', 403);
+    }
+    await requireOrgReadAccess(pgSql, ctx);
+    const visibilityUserId = resolveAutomationVisibilityUserId(ctx, args.automation_id ?? 0);
+    const actingAutomationId = ctx.sourceContext?.source === AUTOMATION_RUN_SOURCE ? args.automation_id : ctx.actingAutomationId;
+    if (actingAutomationId != null && actingAutomationId !== args.automation_id) {
+      throw new ToolUserError('An Automation run may only read changes for its own automation_id.', 403);
+    }
+    const principal = await resolveAutomationConnectionVisibilityUserId({
+      ...ctx, userId: visibilityUserId, actingAutomationId,
+    }, sql);
+    return readAutomationChanges(sql, args, env, { ...ctx, userId: visibilityUserId,
+      automationReadPrincipalId: principal, actingAutomationId });
+  }
+  if (args.cursor) throw new ToolUserError('cursor requires view=changes.', 400);
 
   if (args.record_cursor && !args.record) {
     throw new ToolUserError('record_cursor requires record.', 400);

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { deliverConnectorWebhook } from '../../connectors/webhook-delivery';
 import { receiveFeedNotifications, requestFeedSync, sourceFeedContextForRun } from '../../runs/feed-notifications';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
-import { addUserToOrganization, createTestAgent, createTestOrganization, createTestUser } from '../setup/test-fixtures';
+import { addUserToOrganization, createTestAgent, createTestOrganization, createTestUser, createTestAccessToken, createTestOAuthClient } from '../setup/test-fixtures';
 import { enqueueSourceFeedListener, reconcileSourceFeedListeners, runSourceFeedListener } from '../../runs/source-feed-listener';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from '../../runs/source-feed-subscriptions';
 import * as subscriptions from '../../runs/source-feed-subscriptions';
@@ -15,6 +15,13 @@ import { manageFeeds } from '../../tools/admin/manage_feeds';
 import type { Env } from '../../index';
 import type { ToolContext } from '../../tools/registry';
 import { feedBackoff } from '../../connectors/feed-backoff';
+import { getContent } from '../../tools/get_content';
+import { AUTOMATION_RUN_SOURCE } from '../../gateway/automation-run-session';
+import { verifyWindowToken } from '../../utils/jwt';
+import { TestApiClient, TestMcpClient } from '../setup/test-mcp-client';
+import { readAutomationChanges } from '../../tools/get_content/changes';
+import { persistSourceReference } from '../../runs/source-reference-events';
+import { handleListActivity } from '../../tools/admin/manage_operations/handlers/runs';
 
 async function fixture() {
   const sql = getTestDb();
@@ -78,8 +85,427 @@ function referenceDelivery() {
   };
 }
 
+async function externalFixture() {
+  const fixtureData = await subscribedFixture();
+  const { sql, org, user, automationId, notice } = fixtureData;
+  await sql`UPDATE automations SET managed_agent_id = NULL,
+    execution_config = ${sql.json({ executor: { kind: 'external' } })},
+    triggers = ${sql.json([{ kind: 'event', connector_key: 'synthetic.source',
+      connection_id: notice.connection_id, event_types: ['message.created'], capture: 'references' }])}
+    WHERE id = ${automationId}`;
+  const ctx = { organizationId: org.id, userId: user.id, memberRole: 'owner',
+    scopes: ['mcp:read'], tokenType: 'pat', clientId: null } as ToolContext;
+  const env = { JWT_SECRET: 'synthetic-source-changes-secret' } as Env;
+  const read = (cursor?: string, limit = 1, caller = ctx) => getContent({ automation_id: automationId,
+    view: 'changes', ...(cursor ? { cursor } : {}), limit }, env, caller);
+  const deliver = (id: string, after: number, resourceRef = 'source-1') => receiveFeedNotifications(sql, [{ ...notice,
+    subscription: { ...referenceDelivery(), records: [{ revision: after, payload: {
+      id: `batch-${after}`, events: [{ id, event_type: 'message.created', resource_ref: resourceRef }],
+      checkpoint: { previous: after === 1 ? null : { after: after - 1 }, next: { after } },
+    } }] },
+  }], fixtureData.device.id, [org.id]);
+  return { ...fixtureData, ctx, env, read, deliver };
+}
+
 describe('source feed notifications', () => {
   beforeEach(cleanupTestDatabase);
+
+  it('creates the subscription through the SDK and polls it through authenticated MCP without creating an Automation run', async () => {
+    const { sql, org, user, device, notice, automationId } = await subscribedFixture();
+    await sql`UPDATE automations SET status = 'archived' WHERE id = ${automationId}`;
+    const api = await TestApiClient.for({ organizationId: org.id, userId: user.id, memberRole: 'owner' });
+    const created = await api.automations.create({ slug: 'synthetic-sdk-source', name: 'SDK source',
+      execution_config: { executor: { kind: 'external' } },
+      triggers: [{ kind: 'event', connector_key: 'synthetic.source', connection_id: notice.connection_id,
+        event_types: ['message.created'], capture: 'references' }],
+    }) as { automation_id: string };
+    const client = await createTestOAuthClient();
+    const { token } = await createTestAccessToken(user.id, org.id, client.client_id, { scope: 'mcp:read' });
+    const mcp = new TestMcpClient({ token, orgSlug: org.slug });
+    const beforeResponse = await mcp.querySdk<any>(`export default async (_ctx, client) => client.knowledge.read({automation_id:${Number(created.automation_id)},view:"changes"});`);
+    expect(beforeResponse).toMatchObject({ success: true });
+    const before = beforeResponse.return_value;
+    expect(before.content).toEqual([]);
+    await receiveFeedNotifications(sql, [{ ...notice, subscription: referenceDelivery() }], device.id, [org.id]);
+    await sql`SELECT pg_sleep(0.003)`;
+    const afterResponse = await mcp.querySdk<any>(`export default async (_ctx, client) => client.knowledge.read({automation_id:${Number(created.automation_id)},view:"changes",cursor:${JSON.stringify(before.resume_cursor)}});`);
+    expect(afterResponse).toMatchObject({ success: true });
+    const after = afterResponse.return_value;
+    expect(after.content).toHaveLength(1);
+    expect(after.content[0].metadata.observation_id).toBe('message-1');
+    expect(after).not.toHaveProperty('window_token');
+    expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(0);
+  });
+
+  it('keeps a late-committing observation ahead of the resume boundary', async () => {
+    const { sql, org, user, notice, read } = await externalFixture();
+    let release!: () => void;
+    let ready!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { ready = resolve; });
+    const writer = sql.begin(async tx => {
+      await persistSourceReference(tx, { organizationId: org.id, connectorKey: 'synthetic.source',
+        notice: { ...notice, subscription: referenceDelivery() }, principal: user.id,
+        event: { id: 'late-commit', event_type: 'message.created', resource_ref: 'synthetic-late' } });
+      ready();
+      await held;
+    });
+    let before: Awaited<ReturnType<typeof read>>;
+    try {
+      await entered;
+      before = await read();
+      expect(before.content).toEqual([]);
+    } finally { release(); await writer; }
+    await sql`SELECT pg_sleep(0.003)`;
+    const after = await read(before!.resume_cursor);
+    expect(after.content).toHaveLength(1);
+    expect((after.content[0] as any).metadata.observation_id).toBe('late-commit');
+  });
+
+  it('rolls reference persistence and checkpoint back together on activation failure', async () => {
+    const { sql, org, notice, deliver } = await externalFixture();
+    const failure = vi.spyOn(activation, 'queueAutomationActivations').mockRejectedValueOnce(new Error('Synthetic capture failure'));
+    try { expect(await deliver('retryable', 1)).toEqual([]); } finally { failure.mockRestore(); }
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(0);
+    expect((await sql`SELECT checkpoint FROM feeds WHERE id = ${notice.feed_id}`)[0].checkpoint).toBeNull();
+    expect((await deliver('retryable', 1))[0].active).toBe(true);
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(1);
+  });
+
+  it('uses a bounded arrival index scan despite large unrelated source history', async () => {
+    const { sql, org, connection, automationId, ctx, env, deliver } = await externalFixture();
+    await deliver('visible', 1);
+    await sql`UPDATE events SET created_at = '2020-01-01'::timestamptz WHERE organization_id = ${org.id}`;
+    await sql`INSERT INTO events (organization_id, connection_id, connector_key, origin_type, semantic_type, origin_id,
+      payload_type, created_at) SELECT ${org.id}, ${connection.id}, 'synthetic.source', 'source_reference',
+      'unrelated.changed', 'synthetic-history-' || n, 'empty', '2020-01-01'::timestamptz FROM generate_series(1, 20000) n`;
+    await sql`ANALYZE events`;
+    const spy = vi.spyOn(sql, 'unsafe');
+    await readAutomationChanges(sql, { automation_id: automationId, view: 'changes', limit: 1 }, env, ctx);
+    const call = spy.mock.calls.find(([query]) => query.includes('WITH sources AS MATERIALIZED'))!;
+    spy.mockRestore();
+    const [result] = await sql.unsafe('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' + call[0], call[1]);
+    const plan = result['QUERY PLAN'][0].Plan;
+    const nodes: any[] = [];
+    const visit = (node: any) => { nodes.push(node); node.Plans?.forEach(visit); };
+    visit(plan);
+    const arrival = nodes.find(node => node['Index Name'] === 'idx_events_source_reference_arrival');
+    expect(arrival).toBeTruthy();
+    expect(arrival['Actual Rows']).toBeLessThanOrEqual(2);
+    expect(arrival['Rows Removed by Filter'] ?? 0).toBe(0);
+  });
+
+  it('revokes divergent checkpoint branches without retaining their observations, then rebinds from committed progress', async () => {
+    const { sql, org, notice, deliver } = await externalFixture();
+    await deliver('accepted-first', 1);
+    await deliver('accepted-second', 2);
+    const [stale] = await deliver('unknown-old-branch', 2);
+    expect(stale.active).toBe(false);
+    expect(stale).not.toHaveProperty('ack');
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(2);
+    const [feed] = await sql`SELECT checkpoint, last_error, next_run_at > now() AS deferred FROM feeds WHERE id = ${notice.feed_id}`;
+    expect(feed.checkpoint.cursor).toEqual({ after: 2 });
+    expect(feed.last_error).toContain('rebinding');
+    expect(feed.deferred).toBe(true);
+    expect((await deliver('resumed-third', 3))[0].active).toBe(true);
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(3);
+  });
+
+  it('does not expose private or ACL-graphed arrival counts through pagination', async () => {
+    const { sql, org, connection, deliver, read } = await externalFixture();
+    for (let index = 1; index <= 4; index++) await deliver(`hidden-${index}`, index);
+    await sql`UPDATE events SET created_at = '2020-01-01'::timestamptz WHERE organization_id = ${org.id}`;
+    await sql`UPDATE connections SET visibility = 'private', created_by = NULL WHERE id = ${connection.id}`;
+    const privateRead = await read();
+    expect(privateRead.content).toEqual([]);
+    expect(privateRead.page.has_more).toBe(false);
+    expect(privateRead.next_cursor).toBeUndefined();
+    await sql`UPDATE connections SET visibility = 'org' WHERE id = ${connection.id}`;
+    await sql`INSERT INTO authz_source_acl_state (organization_id, connection_id, acl_support, freshness_state, last_synced_at)
+      VALUES (${org.id}, ${String(connection.id)}, 'full', 'fresh', now())`;
+    const graphedRead = await read();
+    expect(graphedRead.content).toEqual([]);
+    expect(graphedRead.page.has_more).toBe(false);
+    expect(graphedRead.next_cursor).toBeUndefined();
+  });
+
+  it('continues reading retained history while its feed is paused but stops further capture', async () => {
+    const { sql, org, automationId, deliver, read } = await externalFixture();
+    await deliver('before-pause', 1);
+    await sql`UPDATE events SET created_at = '2020-01-01'::timestamptz WHERE organization_id = ${org.id}`;
+    await sql`UPDATE feeds SET status = 'paused' WHERE organization_id = ${org.id}`;
+    expect((await deliver('after-pause', 2))[0].active).toBe(false);
+    expect((await read()).content).toHaveLength(1);
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(1);
+  });
+
+  it('retains references with mixed managed/external subscribers and activates the managed subscriber once', async () => {
+    const { sql, org, user, device, notice, automationId } = await subscribedFixture();
+    const [sequence] = await sql`SELECT nextval('automations_id_seq') AS id`;
+    const [external] = await sql`INSERT INTO automations
+      (id, automation_group_id, organization_id, slug, name, status, created_by, execution_config, triggers)
+      VALUES (${sequence.id}, ${sequence.id}, ${org.id}, 'synthetic-external-observer', 'External observer', 'active', ${user.id},
+        ${sql.json({ executor: { kind: 'external' } })},
+        ${sql.json([{ kind: 'event', connector_key: 'synthetic.source', event_types: ['message.created'], capture: 'references' }])}) RETURNING id`;
+    const [version] = await sql`INSERT INTO automation_versions (automation_id, version, name, prompt, created_by)
+      VALUES (${external.id}, 1, 'External observer', 'Inspect references', ${user.id}) RETURNING id`;
+    await sql`UPDATE automations SET current_version_id = ${version.id} WHERE id = ${external.id}`;
+    const deliver = () => receiveFeedNotifications(sql, [{ ...notice, subscription: referenceDelivery() }], device.id, [org.id]);
+    await deliver();
+    await deliver();
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id} AND origin_type = 'source_reference'`).toHaveLength(1);
+    const runs = await sql`SELECT automation_id FROM runs WHERE run_type = 'automation'`;
+    expect(runs).toHaveLength(1);
+    expect(Number(runs[0].automation_id)).toBe(automationId);
+    expect(Number(runs[0].automation_id)).not.toBe(Number(external.id));
+  });
+
+  it('retains repeated transitions immutably, suppresses stale replay and serializes concurrent deliveries', async () => {
+    const { sql, org, deliver } = await externalFixture();
+    await Promise.all([deliver('A-1', 1), deliver('A-1', 1)]);
+    await deliver('B-2', 2);
+    await deliver('A-3', 3);
+    await deliver('B-4', 4);
+    await deliver('A-1', 1);
+    const rows = await sql`SELECT supersedes_event_id, metadata FROM events WHERE organization_id = ${org.id} ORDER BY id`;
+    expect(rows).toHaveLength(4);
+    expect(rows.every(row => row.supersedes_event_id === null)).toBe(true);
+    expect(rows.map(row => row.metadata.observation_id)).toEqual(['A-1', 'B-2', 'A-3', 'B-4']);
+    expect((await sql`SELECT checkpoint FROM feeds ORDER BY id LIMIT 1`)[0].checkpoint.cursor).toEqual({ after: 4 });
+  });
+
+  it('does not acknowledge or advance progress when an observation identity changes its resource', async () => {
+    const { sql, org, deliver } = await externalFixture();
+    await deliver('immutable-message', 1);
+    expect(await deliver('immutable-message', 2, 'different-resource')).toEqual([]);
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(1);
+    expect((await sql`SELECT checkpoint FROM feeds ORDER BY id LIMIT 1`)[0].checkpoint.cursor).toEqual({ after: 1 });
+  });
+
+  it('deduplicates immutable message references across overlapping feeds on the same connection', async () => {
+    const { sql, org, device, notice, feeds } = await externalFixture();
+    await sql`UPDATE feeds SET config = '{"syntheticScope":"overlap"}'::jsonb WHERE id = ${feeds[1].id}`;
+    const receipts = await Promise.all(feeds.map((feed, index) => receiveFeedNotifications(sql, [{ ...notice, feed_id: Number(feed.id),
+      subscription: { ...referenceDelivery(), scope_key: sourceFeedScopeKey(index ? { syntheticScope: 'overlap' } : {}, '1.0.0') } }], device.id, [org.id])));
+    expect(receipts.every(([receipt]) => receipt.active)).toBe(true);
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(1);
+  });
+
+  it.each(['connector', 'connection', 'event'])('preserves legacy observers when capture targets an unrelated %s', async (target) => {
+    const { sql, org, automationId, notice, feeds, device } = await subscribedFixture();
+    const [automation] = await sql`SELECT triggers FROM automations WHERE id = ${automationId}`;
+    await sql`UPDATE automations SET triggers = ${sql.json([...automation.triggers, {
+      kind: 'event', connector_key: target === 'connector' ? 'synthetic.other' : 'synthetic.source',
+      connection_id: target === 'connection' ? notice.connection_id + 1 : notice.connection_id,
+      event_types: [target === 'event' ? 'other.changed' : 'message.created'], capture: 'references',
+    }])} WHERE id = ${automationId}`;
+    for (const feed of feeds) expect(await sourceFeedSubscriptions(sql, org.id, Number(feed.id))).toHaveLength(1);
+    const delivery = { ...notice, subscription: referenceDelivery() };
+    await receiveFeedNotifications(sql, [delivery], device.id, [org.id]);
+    const [replayed] = await receiveFeedNotifications(sql, [delivery], device.id, [org.id]);
+    expect(replayed.active).toBe(true);
+    expect(replayed.ack).toBeDefined();
+    expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(1);
+  });
+
+  it('does not let a denied capture subscription alter authorized legacy observer selection', async () => {
+    const { sql, org, user, automationId, feeds } = await subscribedFixture();
+    const [{ id }] = await sql`SELECT nextval('automations_id_seq') AS id`;
+    await sql`INSERT INTO automations (id, automation_group_id, organization_id, slug, name, status, created_by, execution_config, triggers)
+      SELECT ${id}, ${id}, organization_id, 'synthetic-denied-capture', 'Denied capture', 'active', created_by,
+        '{"executor":{"kind":"external"}}'::jsonb, jsonb_set(triggers, '{0,capture}', '"references"'::jsonb)
+      FROM automations WHERE id = ${automationId}`;
+    const [version] = await sql`INSERT INTO automation_versions (automation_id, version, name, prompt, created_by)
+      VALUES (${id}, 1, 'Denied capture', 'Inspect references', ${user.id}) RETURNING id`;
+    await sql`UPDATE automations SET current_version_id = ${version.id} WHERE id = ${id}`;
+    const principal = await entityPolicy.resolveActingPrincipal(sql, { organizationId: org.id, sessionAutomationId: Number(id) });
+    await entityPolicy.upsertEntityApprovalPolicy(org.id, { resourceClass: 'connector_action', connectorKey: 'synthetic.source',
+      operationCategory: 'read', principalKind: 'automation', principalId: principal.id, effects: { execute: 'deny' } });
+    for (const feed of feeds) {
+      const subscriptions = await sourceFeedSubscriptions(sql, org.id, Number(feed.id));
+      expect(subscriptions.map(subscription => subscription.automationId)).toEqual([automationId]);
+    }
+  });
+
+  it('canonicalizes equivalent resolved versions and separates them after a connector upgrade', async () => {
+    const { sql, org, feeds } = await externalFixture();
+    await sql`UPDATE feeds SET pinned_version = '1.0.0' WHERE id = ${feeds[1].id}`;
+    expect(await sourceFeedSubscriptions(sql, org.id, Number(feeds[1].id))).toHaveLength(0);
+    await sql`UPDATE connector_definitions SET status = 'archived' WHERE organization_id = ${org.id}`;
+    await sql`INSERT INTO connector_definitions (organization_id, key, name, version, status, feeds_schema, auth_schema, automation_events)
+      SELECT organization_id, key, name, '2.0.0', 'active', feeds_schema, auth_schema, automation_events
+      FROM connector_definitions WHERE organization_id = ${org.id} AND version = '1.0.0'`;
+    expect(await sourceFeedSubscriptions(sql, org.id, Number(feeds[0].id))).toHaveLength(1);
+    expect(await sourceFeedSubscriptions(sql, org.id, Number(feeds[1].id))).toHaveLength(1);
+    await sql`UPDATE feeds SET pinned_version = '2.0.0' WHERE id = ${feeds[1].id}`;
+    expect(await sourceFeedSubscriptions(sql, org.id, Number(feeds[1].id))).toHaveLength(0);
+  });
+
+  it('shares one observer for identical feeds and permits failover when it pauses', async () => {
+    const { sql, org, feeds } = await externalFixture();
+    expect(await sourceFeedSubscriptions(sql, org.id, Number(feeds[0].id))).toHaveLength(1);
+    expect(await sourceFeedSubscriptions(sql, org.id, Number(feeds[1].id))).toHaveLength(0);
+    await sql`UPDATE feeds SET status = 'paused' WHERE id = ${feeds[0].id}`;
+    expect(await sourceFeedSubscriptions(sql, org.id, Number(feeds[1].id))).toHaveLength(1);
+  });
+
+  it('restarts history when a source becomes readable instead of skipping it behind a cursor', async () => {
+    const { sql, org, connection, read, deliver } = await externalFixture();
+    await deliver('historical', 1);
+    await sql`UPDATE events SET created_at = '2020-01-01'::timestamptz WHERE organization_id = ${org.id}`;
+    await sql`UPDATE connections SET visibility = 'private', created_by = NULL WHERE id = ${connection.id}`;
+    const hidden = await read();
+    expect(hidden.content).toEqual([]);
+    await sql`UPDATE connections SET visibility = 'org' WHERE id = ${connection.id}`;
+    await expect(read(hidden.resume_cursor)).rejects.toThrow(/scope/);
+    expect((await read()).content).toHaveLength(1);
+  });
+
+  it('uses the verified Automation author for its private source and rejects a foreign Automation', async () => {
+    const { sql, org, user, connection, automationId, ctx, env, read, deliver } = await externalFixture();
+    await deliver('private', 1);
+    await sql`UPDATE events SET created_at = '2020-01-01'::timestamptz WHERE organization_id = ${org.id}`;
+    await sql`UPDATE connections SET visibility = 'private', created_by = ${user.id} WHERE id = ${connection.id}`;
+    const other = await createTestUser();
+    await addUserToOrganization(other.id, org.id, 'admin');
+    const runContext = { ...ctx, userId: other.id, actingAutomationId: automationId,
+      sourceContext: { source: AUTOMATION_RUN_SOURCE, conversationId: `synthetic_automation_${automationId}_run_99` } } as ToolContext;
+    expect((await read(undefined, 1, { ...ctx, userId: other.id })).content).toEqual([]);
+    const own = await read(undefined, 1, runContext);
+    expect(own.content).toHaveLength(1);
+    await expect(read(own.resume_cursor)).rejects.toThrow(/scope/);
+    await expect(getContent({ automation_id: automationId + 1, view: 'changes' }, env, runContext)).rejects.toThrow(/own automation_id/);
+  });
+
+  it('revokes a stale branch whose unknown reference no longer matches capture consent', async () => {
+    const { sql, org, automationId, deliver } = await externalFixture();
+    await deliver('accepted', 1, 'wanted');
+    await deliver('second', 2, 'wanted');
+    await sql`UPDATE automations SET triggers = jsonb_set(triggers, '{0,match}', '{"resource_ref":"wanted"}'::jsonb)
+      WHERE id = ${automationId}`;
+    const [receipt] = await deliver('unknown-filtered', 2, 'other');
+    expect(receipt.active).toBe(false);
+    expect(receipt).not.toHaveProperty('ack');
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(2);
+  });
+
+  it('excludes stamped or body-bearing rows and projects only reference metadata', async () => {
+    const { sql, org, read, deliver } = await externalFixture();
+    await deliver('valid', 1);
+    await deliver('stamped', 2);
+    await deliver('body', 3);
+    await sql`UPDATE events SET created_at = '2020-01-01'::timestamptz,
+      metadata = metadata || '{"syntheticSecret":"hidden"}'::jsonb WHERE organization_id = ${org.id}`;
+    await sql`UPDATE events SET entity_ids = ARRAY[123456789]::bigint[] WHERE metadata->>'observation_id' = 'stamped'`;
+    await sql`UPDATE events SET payload_type = 'text' WHERE metadata->>'observation_id' = 'body'`;
+    const result = await read(undefined, 10);
+    expect(result.content).toHaveLength(1);
+    expect((result.content[0] as any).metadata.observation_id).toBe('valid');
+    expect((result.content[0] as any).metadata).not.toHaveProperty('syntheticSecret');
+    expect(result.page.has_more).toBe(false);
+  });
+
+  it('paginates sub-millisecond arrivals without repetitions and excludes arrivals beyond a pinned boundary', async () => {
+    const { sql, org, read, deliver, env } = await externalFixture();
+    await deliver('one', 1);
+    await deliver('two', 2);
+    await sql`UPDATE events SET created_at = '2020-01-01 00:00:00.000123+00'::timestamptz
+      + (id % 100)::int * interval '1 microsecond' WHERE organization_id = ${org.id}`;
+    const first = await read();
+    expect(first.content).toHaveLength(1);
+    expect(first.next_cursor).toBeTruthy();
+    await expect(verifyWindowToken(first.next_cursor!, env)).rejects.toThrow();
+    await deliver('three', 3);
+    const second = await read(first.next_cursor);
+    expect(second.content).toHaveLength(1);
+    expect((second.content[0] as any).id).not.toBe((first.content[0] as any).id);
+    expect(second.page.has_more).toBe(false);
+    await sql`SELECT pg_sleep(0.003)`;
+    const third = await read(second.resume_cursor);
+    expect(third.content).toHaveLength(1);
+    expect((third.content[0] as any).metadata.observation_id).toBe('three');
+    expect((third.content[0] as any).metadata.source_occurred_at).toBeNull();
+  });
+
+  it('advances bounded empty pages through sparse matches and rechecks private access between pages', async () => {
+    const { sql, org, automationId, connection, read, deliver } = await externalFixture();
+    for (let index = 1; index <= 6; index++) await deliver(`message-${index}`, index, index === 6 ? 'wanted' : 'other');
+    await sql`UPDATE events SET created_at = '2020-01-01'::timestamptz WHERE organization_id = ${org.id}`;
+    await sql`UPDATE automations SET triggers = jsonb_set(triggers, '{0,match}', '{"resource_ref":"wanted"}'::jsonb)
+      WHERE id = ${automationId}`;
+    const first = await read(undefined, 2);
+    expect(first.content).toHaveLength(0);
+    expect(first.page.has_more).toBe(true);
+    const second = await read(first.next_cursor, 2);
+    expect(second.content).toHaveLength(0);
+    expect(second.page.has_more).toBe(true);
+    await sql`UPDATE connections SET visibility = 'private', created_by = NULL WHERE id = ${connection.id}`;
+    await expect(read(second.next_cursor, 2)).rejects.toThrow(/scope/);
+    expect((await read()).content).toEqual([]);
+  });
+
+  it('invalidates changed/deleted subscription cursors and rejects incompatible read arguments', async () => {
+    const { sql, automationId, read, deliver, ctx, env } = await externalFixture();
+    await deliver('one', 1);
+    await deliver('two', 2);
+    await sql`UPDATE events SET created_at = '2020-01-01'::timestamptz`;
+    const first = await read();
+    await expect(read(first.next_cursor, 1, { ...ctx, clientId: 'synthetic-other-client' })).rejects.toThrow(/scope/);
+    await expect(read(first.next_cursor!.slice(0, -4) + 'AAAA')).rejects.toThrow(/cursor/);
+    await expect(getContent({ automation_id: automationId, view: 'changes', run_id: 123 }, env, ctx)).rejects.toThrow(/only/);
+    await sql`UPDATE automations SET current_version_id = NULL WHERE id = ${automationId}`;
+    await expect(read(first.next_cursor)).rejects.toThrow(/configuration/);
+    await sql`UPDATE automations SET status = 'archived' WHERE id = ${automationId}`;
+    await expect(read()).rejects.toThrow(/deleted/);
+  });
+
+  it('discovers source subscriptions without claiming work or presenting a shared unread count', async () => {
+    const { sql, ctx, automationId } = await externalFixture();
+    const result = await handleListActivity({ action: 'list_activity', kinds: ['source_changes'] }, ctx);
+    expect(result).toMatchObject({ items: [{ kind: 'source_changes', status: 'available',
+      next_action: { method: 'knowledge.read', input: { automation_id: automationId, view: 'changes' } } }] });
+    expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(0);
+  });
+
+  it('captures external subscriptions without executions and lets independent clients resume changes', async () => {
+    const { sql, org, user, device, notice, automationId } = await subscribedFixture();
+    await sql`UPDATE automations SET managed_agent_id = NULL,
+      execution_config = ${sql.json({ executor: { kind: 'external' } })},
+      triggers = ${sql.json([{ kind: 'event', connector_key: 'synthetic.source',
+        connection_id: notice.connection_id, event_types: ['message.created'], capture: 'references' }])}
+      WHERE id = ${automationId}`;
+    const delivery = referenceDelivery();
+    const [receipt] = await receiveFeedNotifications(sql, [{ ...notice, subscription: delivery }], device.id, [org.id]);
+    expect(receipt.active).toBe(true);
+    expect(receipt.ack).toBeTruthy();
+    const rows = await sql`SELECT id, metadata FROM events WHERE organization_id = ${org.id}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata).toMatchObject({ resource_ref: 'source-1' });
+    expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(0);
+    const context = { organizationId: org.id, userId: user.id, memberRole: 'owner',
+      scopes: ['mcp:read'], tokenType: 'pat', clientId: null } as ToolContext;
+    const env = { JWT_SECRET: 'synthetic-source-changes-secret' } as Env;
+    const read = (cursor?: string) => getContent({ automation_id: automationId, view: 'changes',
+      ...(cursor ? { cursor } : {}), limit: 1 }, env, context);
+    const first = await read();
+    const independent = await read();
+    expect(first.content.map((item: any) => item.id)).toEqual(independent.content.map((item: any) => item.id));
+    expect(first.content).toHaveLength(1);
+    expect(first).not.toHaveProperty('window_token');
+    expect(first.resume_cursor).toBeTruthy();
+    await receiveFeedNotifications(sql, [{ ...notice, subscription: delivery }], device.id, [org.id]);
+    expect((await read(first.resume_cursor)).content).toHaveLength(0);
+    expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(0);
+  });
+
+  it('requires explicit capture consent for an external source observer', async () => {
+    const { sql, org, device, notice, automationId } = await subscribedFixture();
+    await sql`UPDATE automations SET managed_agent_id = NULL,
+      execution_config = ${sql.json({ executor: { kind: 'external' } })} WHERE id = ${automationId}`;
+    expect(await sourceFeedSubscriptions(sql, org.id, notice.feed_id)).toEqual([]);
+    expect((await receiveFeedNotifications(sql, [{ ...notice, subscription: referenceDelivery() }], device.id, [org.id]))[0].active).toBe(false);
+    expect(await sql`SELECT id FROM events WHERE organization_id = ${org.id}`).toHaveLength(0);
+  });
 
   it.each(['setup', 'reconciliation'])('backs off %s when subscription lookup fails before browser dispatch', async (stage) => {
     const { sql, notice, task, org, device } = await subscribedFixture();

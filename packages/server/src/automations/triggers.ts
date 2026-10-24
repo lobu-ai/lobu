@@ -9,6 +9,7 @@ import {
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { DbClient } from "../db/client";
 import { listCatalogEntries } from "../catalog/load";
+import { feedTriggerEligibilitySql } from "../connectors/feed-health-semantics";
 import { validateSchedule, validateTimezone } from "../utils/cron";
 import { ToolUserError } from "../utils/errors";
 import {
@@ -43,6 +44,7 @@ interface ConnectorAutomationEventCatalog {
 	 * connector that HAS a feed to pause, so zero declared events plus zero
 	 * feeds means no event can reach this Automation. */
 	feedCount: number;
+	captureEvents: string[];
 }
 
 /** `feeds_schema` is an object keyed by feed key (`{}` for connectors that
@@ -105,6 +107,14 @@ async function getConnectorAutomationEventCatalog(
 	const feedsForCount = useBundledFallback
 		? row?.feeds_schema ?? catalog?.detail.feeds_schema
 		: row?.feeds_schema;
+	const captureRows = await sql`
+    SELECT declared.event_type FROM (SELECT ${sql.json(feedsForCount ?? {})}::jsonb AS feeds_schema) d
+    CROSS JOIN LATERAL jsonb_object_keys(d.feeds_schema) f(feed_key)
+    CROSS JOIN LATERAL jsonb_array_elements_text(CASE
+      WHEN jsonb_typeof(d.feeds_schema->f.feed_key->'webhook'->'events') = 'array'
+      THEN d.feeds_schema->f.feed_key->'webhook'->'events' ELSE '[]'::jsonb END) declared(event_type)
+    WHERE ${sql.unsafe(feedTriggerEligibilitySql('d', 'f', 'source-only'))}
+  `;
 	return {
 		name: row?.name ?? catalog?.name ?? connectorKey,
 		events: withPlatformAutomationEvents(
@@ -112,6 +122,7 @@ async function getConnectorAutomationEventCatalog(
 		) as AutomationEventDefinition[],
 		declaredCount: resolved.length,
 		feedCount: countDeclaredFeeds(feedsForCount),
+	captureEvents: captureRows.map(row => String(row.event_type)),
 	};
 }
 
@@ -372,6 +383,9 @@ export async function assertAutomationTriggerConnections(
 					`${catalog.name} does not support Automation event '${eventType}'.`
 				);
 			}
+			if (trigger.capture === "references" && !catalog.captureEvents.includes(eventType)) {
+        throw new ToolUserError(`${catalog.name} event '${eventType}' does not declare a source-only reference observer.`, 422);
+      }
 			if (trigger.active_run === "steer" && !event.capabilities?.steering) {
 				throw new ToolUserError(
 					`${catalog.name} event '${eventType}' does not support steering.`

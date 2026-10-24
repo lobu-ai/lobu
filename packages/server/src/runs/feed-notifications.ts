@@ -13,6 +13,10 @@ import { enqueueChatSourceIngress } from './chat-ingress-jobs';
 import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, SOURCE_FEED_SCOPE_METADATA_KEY } from '../lib/device-feed-read-protocol';
 import { findMatchingAutomationActivations, needsSourceMessage, planAutomationActivations, queueAutomationActivations, dispatchAutomationRunsBestEffort } from '../automations/activation';
 import logger from '../utils/logger';
+import { lockFeedPage } from '../connectors/feed-page-commit';
+import { persistSourceReference, referenceCaptureSubscriptions, sourceReferenceOriginId, StaleSourceCheckpoint } from './source-reference-events';
+import { lockEventDedupIdentities } from '../utils/insert-event';
+import { referenceCaptureTriggers } from '../automations/event-trigger';
 
 type ReceivedNotification = {
   active: boolean;
@@ -33,6 +37,7 @@ type NotificationFeed = {
   automation_events: Array<{ key: string; capabilities?: { replyToSource?: boolean } }> | null;
   event_types: string[] | null;
   source_only: boolean;
+  config: Record<string, unknown> | null;
 };
 
 /** Called under the feed lock; references and replay progress commit together. */
@@ -66,13 +71,48 @@ async function receiveSourceReferenceDelivery(
   await tx`UPDATE feeds SET next_run_at = NULL, consecutive_failures = 0
     WHERE id = ${notice.feed_id} AND organization_id = ${feed.organization_id}
       AND last_error IS NULL AND next_run_at > now()`;
-  const allowed = new Set(subscriptions.map(subscription => subscription.automationId));
+  // External subscriptions authorize reference retention, never chat-body
+  // hydration or execution, even when the Automation has an owning agent.
+  const executionSubscriptions = subscriptions.filter(subscription => subscription.executorKind !== 'external');
+  const allowed = new Set(executionSubscriptions.map(subscription => subscription.automationId));
   // Events whose messages the chat ingress can read (`chat-source-ingress.ts`).
   const readable = new Set((feed.automation_events ?? [])
     .filter(event => event.capabilities?.replyToSource).map(event => event.key));
+  const capturesReferences = subscriptions.some(subscription => referenceCaptureTriggers(subscription.triggers).some(trigger =>
+    trigger.connector_key === feed.connector_key
+    && (trigger.connection_id === undefined || trigger.connection_id === notice.connection_id)
+    && trigger.event_types.some(eventType => eventTypes.has(eventType))));
   const queued: Array<{ runId: number; status: string }> = [];
-  for (const { payload } of delivery.records) {
+  await lockEventDedupIdentities(tx, notice.connection_id,
+    delivery.records.flatMap(record => record.payload.events.filter(event =>
+      referenceCaptureSubscriptions(subscriptions, feed.connector_key, notice.connection_id, event).length > 0
+    ).map(sourceReferenceOriginId)));
+  for (const { payload } of [...delivery.records].sort((a, b) => a.revision - b.revision)) {
+    if (payload.checkpoint && capturesReferences) {
+      const [position] = await tx`SELECT checkpoint->'cursor' IS NOT DISTINCT FROM
+        ${payload.checkpoint.previous === null ? null : tx.json(payload.checkpoint.previous)}::jsonb AS matches
+        FROM feeds WHERE id = ${notice.feed_id} AND organization_id = ${feed.organization_id}`;
+      if (!position.matches) {
+        // A reconnect may produce a different branch from an old predecessor.
+        // Only canonical observations already committed may be ACKed as a
+        // no-op. Unknown observations must never be inserted on that branch.
+        for (const event of payload.events) {
+          const capture = referenceCaptureSubscriptions(subscriptions, feed.connector_key, notice.connection_id, event);
+          if (!capture.length) throw new StaleSourceCheckpoint(feed.organization_id, config);
+          await persistSourceReference(tx, {
+            organizationId: feed.organization_id, connectorKey: feed.connector_key, notice, event,
+            principal: capture[0].principal, requireExisting: true, config,
+          });
+        }
+        continue;
+      }
+    }
     for (const event of payload.events) {
+      const capture = referenceCaptureSubscriptions(subscriptions, feed.connector_key, notice.connection_id, event);
+      if (capture.length) await persistSourceReference(tx, {
+        organizationId: feed.organization_id, connectorKey: feed.connector_key, notice, event,
+        principal: capture[0].principal,
+      });
       const deliveryId = createHash('sha256').update(JSON.stringify([
         feed.organization_id, notice.connection_id, event.event_type, event.id,
       ])).digest('hex');
@@ -91,7 +131,7 @@ async function receiveSourceReferenceDelivery(
       // filter needs the message, which only the ingress worker reads. So
       // such an Automation is routed there, all of its triggers at once.
       const automationIds = readable.has(event.event_type)
-        ? subscriptions
+        ? executionSubscriptions
           .filter(subscription => needsSourceMessage(subscription.triggers, signal))
           .map(subscription => subscription.automationId)
         : [];
@@ -163,7 +203,7 @@ export async function receiveFeedNotifications(
     // notification, its receipt means committed scheduling, not ingestion.
     const received = await sql.begin(async (tx): Promise<ReceivedNotification> => {
       const rows = await tx<NotificationFeed>`
-        SELECT f.organization_id, c.connector_key,
+        SELECT f.organization_id, f.config, c.connector_key,
           COALESCE(f.pinned_version, d.version) AS version,
           d.automation_events,
           d.feeds_schema->f.feed_key->'webhook'->'events' AS event_types,
@@ -181,10 +221,15 @@ export async function receiveFeedNotifications(
       `;
       if (rows.length === 0) return { active: false };
       const feed = rows[0];
+      if (feed.source_only) await lockFeedPage(tx, {
+        organizationId: feed.organization_id, connectionId: notice.connection_id, feedId: notice.feed_id,
+        runId: null, workerId: null, originIds: [],
+        liveRecord: { feedKey: notice.feed_key, config: feed.config },
+      });
       const subscriptions = feed.source_only ? await sourceFeedSubscriptions(tx, feed.organization_id, notice.feed_id) : [];
       if (feed.source_only && !subscriptions.length) return { active: false };
-      // Resolve subscription authority before locking the checkpoint. Only this
-      // feed's scheduling/ack mutation needs serialization, not its connection.
+      // The source-page lock order above serializes authority and capture with
+      // connection/feed changes before evaluating current subscriptions.
       const [locked] = await tx`SELECT checkpoint, config FROM feeds WHERE id = ${notice.feed_id}
         AND organization_id = ${feed.organization_id} AND status = 'active' AND deleted_at IS NULL FOR UPDATE`;
       if (!locked) return { active: false };
@@ -205,6 +250,16 @@ export async function receiveFeedNotifications(
         `);
       }
       return { active: true, ack: savedSourceAck(locked.checkpoint) };
+    }).catch(async error => {
+      if (error instanceof StaleSourceCheckpoint) {
+        // Roll back the complete delivery, then revoke this browser binding.
+        // Merely withholding an ACK would keep its stale buffer retrying
+        // forever; reconciliation rebinds from committed progress after backoff.
+        await recordSourceFeedFailure(sql, { organizationId: error.organizationId, feedId: notice.feed_id },
+          error.config ?? {}, 'Source checkpoint diverged; rebinding from committed progress.');
+        return { active: false } as ReceivedNotification;
+      }
+      throw error;
     }).catch(error => {
       // No receipt: this binding keeps its batch for retry. Other bindings on
       // the device must still make progress, including already-committed ones.

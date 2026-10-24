@@ -22,6 +22,8 @@ export type { ContentItem };
  * total, pagination, automation-mode flags) is precise.
  */
 export const GetContentResultSchema = Type.Object({
+  next_cursor: Type.Optional(Type.String()),
+  resume_cursor: Type.Optional(Type.String()),
   content: Type.Array(Type.Unknown()),
   /**
    * Reported match count (account activity reports page size; query rewrites

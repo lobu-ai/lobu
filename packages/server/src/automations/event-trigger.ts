@@ -1,7 +1,13 @@
 import type {
   AutomationEventTrigger,
+  AutomationTrigger,
 } from '@lobu/core/contracts/tools/manage-automations';
 import type { ConnectorTriggerSignal } from '@lobu/connector-sdk';
+
+export function referenceCaptureTriggers(triggers: AutomationTrigger[]): AutomationEventTrigger[] {
+  return triggers.filter((trigger): trigger is AutomationEventTrigger => trigger.kind === 'event'
+    && trigger.source !== 'workspace' && trigger.capture === 'references');
+}
 
 /**
  * Connector-neutral signal after webhook/chat authentication and normalization.

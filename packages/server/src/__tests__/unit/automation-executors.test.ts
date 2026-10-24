@@ -82,6 +82,33 @@ describe("assertAutomationExecutorsResolve", () => {
 	});
 });
 
+describe('reference capture executors', () => {
+  const trigger = { kind: 'event', connector_key: 'synthetic.source', event_types: ['message.created'], capture: 'references' } as const;
+  const capture = () => ({ ...trigger, event_types: [...trigger.event_types] });
+  const external = { executionConfig: { executor: { kind: 'external' as const } } };
+  test('accepts silent external capture without an agent or device', () => {
+    expect(() => assertAutomationExecutorsResolve([capture()], external)).not.toThrow();
+  });
+  test.each([{ agentId: 'synthetic-agent' }, external])('rejects body-only capture match fields for every executor', defaults => {
+    expect(() => assertAutomationExecutorsResolve([{ ...capture(), match: { channel_id: 'synthetic-channel' } }], defaults))
+      .toThrow(/resource_ref\/resource_type/);
+  });
+  test('rejects non-capture external event execution and external replies', () => {
+    expect(() => assertAutomationExecutorsResolve([eventTrigger()], external)).toThrow(/reference-capture/);
+    expect(() => assertAutomationExecutorsResolve([{ ...capture(), output: 'reply_to_source' }], external)).toThrow(/silent capture/);
+  });
+  test('serves the capture and change-read fields through the real tool schemas', () => {
+    const create = validateToolArgs('manage_automations', getTool('manage_automations')!.inputSchema, {
+      action: 'create', slug: 'synthetic-source', name: 'Synthetic source', execution_config: external.executionConfig,
+      triggers: [capture()],
+    });
+    expect((create as any).triggers[0].capture).toBe('references');
+    const read = validateToolArgs('read_knowledge', getTool('read_knowledge')!.inputSchema,
+      { automation_id: 123, view: 'changes', cursor: 'synthetic-opaque-cursor', limit: 25 });
+    expect(read).toMatchObject({ view: 'changes', cursor: 'synthetic-opaque-cursor' });
+  });
+});
+
 // `agent_kind` names the local CLI the device spawns. It was a free-text
 // column with no FK and a free-text schema, so an unknown value wrote an
 // Automation that resolved to no executor on the device and failed at dispatch

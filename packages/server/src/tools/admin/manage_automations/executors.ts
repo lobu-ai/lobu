@@ -93,15 +93,28 @@ export function assertAutomationExecutorsResolve(
   triggers: AutomationTriggerInput[] | null | undefined,
   defaults: AutomationExecutorDefaults
 ): void {
+  for (const trigger of triggers ?? []) {
+    if (trigger.kind !== 'event' || trigger.source === 'workspace' || trigger.capture !== 'references') continue;
+    if (Object.keys(trigger.match ?? {}).some(key => key !== 'resource_ref' && key !== 'resource_type')) {
+      throw new ToolUserError('Reference capture supports resource_ref/resource_type matching only.', 422);
+    }
+  }
   if (resolveAutomationExecutor(defaults)?.kind === "external") {
     const config = defaults.executionConfig as AutomationExecutionConfig;
     if (defaults.deviceWorkerId || defaults.agentKind ||
-        (triggers ?? []).some((trigger) => trigger.kind !== "schedule") ||
+        (triggers ?? []).some((trigger) => trigger.kind !== "schedule" &&
+          !(trigger.kind === 'event' && trigger.source !== 'workspace' && trigger.capture === 'references')) ||
         Object.keys(config).some((key) => key !== "executor")) {
       throw new ToolUserError(
-        "An external executor supports manual or scheduled windows only; device pins, event triggers, and hosted/CLI execution settings do not apply.",
+        "An external executor supports manual, scheduled, or reference-capture connector subscriptions; device pins and hosted/CLI settings do not apply.",
         422
       );
+    }
+    for (const trigger of triggers ?? []) {
+      if (trigger.kind !== 'event' || trigger.source === 'workspace') continue;
+      if (trigger.output === 'reply_to_source' || trigger.active_run === 'steer') {
+        throw new ToolUserError('External reference subscriptions support silent capture, not replies or steering agent turns.', 422);
+      }
     }
     return;
   }

@@ -57,6 +57,14 @@ export function linkedInInboxProgram() {
       fail("Account identity is unavailable");
     return urn.replace("fs_miniProfile", "fsd_profile");
   }
+  async function boundAccount(expected) {
+    if (typeof expected !== "string" || !/^urn:li:fs_miniProfile:.+$/.test(expected))
+      fail("Source requires the connection's saved account; reconnect this source");
+    const member = await account();
+    if (expected.replace(/^urn:li:fs_miniProfile:/, "urn:li:fsd_profile:") !== member)
+      fail("Source does not match the connection's saved account; reconnect this source");
+    return member;
+  }
   const PAGE_MAILBOX = /^urn:li:fsd_pageMailbox:[0-9]+$/;
   const NOT_ADMIN =
     "The signed-in LinkedIn account does not administer this page inbox";
@@ -83,8 +91,8 @@ export function linkedInInboxProgram() {
   // The inbox one feed reads: the signed-in member's own ("me", the default),
   // or a company page's mailbox the member administers. `member` is the
   // signed-in account, which must not change while the inbox is in use.
-  async function inboxOf(selected) {
-    const member = await account();
+  async function inboxOf(selected, expected) {
+    const member = await boundAccount(expected);
     if (selected === undefined || selected === null || selected === "me")
       return { mailbox: member, member, page: false };
     if (typeof selected !== "string" || !PAGE_MAILBOX.test(selected))
@@ -656,7 +664,7 @@ export function linkedInInboxProgram() {
   }
   async function read(input) {
     const inbox = await inboxOf(
-      input.feed === "live_messages" ? input.inbox : undefined
+      input.feed === "live_messages" ? input.inbox : undefined, input.expected_account
     );
     const mailbox = inbox.mailbox;
     const cursor = cursorOf(input.cursor, input.feed, inbox);
@@ -713,6 +721,17 @@ export function linkedInInboxProgram() {
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
   }
+  // Keep SHA-256 fingerprints losslessly in base64url inside checkpoints.
+  // Batch checkpoints carry both predecessor and successor, so hex would
+  // exhaust the transport budget before a large interrupted pass can resume.
+  function compactHash(value) {
+    if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) return value;
+    return btoa(String.fromCharCode(...value.match(/../g).map(byte => parseInt(byte, 16))))
+      .replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+  }
+  function compactSeen(seen) {
+    return Object.fromEntries(Object.entries(seen ?? {}).map(([key, value]) => [compactHash(key), Array.isArray(value) ? [compactHash(value[0]), value[1]] : compactHash(value)]));
+  }
   // One observation pass is bounded source work. Message catch-up resumes from
   // its checkpoint; notifications reorder at the top and report a gap instead.
   const NOTIFICATION_PAGES_PER_PASS = 10;
@@ -753,7 +772,7 @@ export function linkedInInboxProgram() {
       }
       payload = next;
     }
-    // `seen` is the whole position: an unchanged inbox repeats its checkpoint.
+    // `seen` records source position; the delivery layer also carries a monotonic generation.
     return {};
   }
   async function catchUpConversation(
@@ -844,14 +863,19 @@ export function linkedInInboxProgram() {
   async function snapshot(feed, previous, inbox) {
     const observedAt = Date.now();
     const observed = new Map();
+    const previousSeen = compactSeen(previous?.seen);
     const events = [];
     // Returns whether the previous checkpoint already held this identity.
     async function observe(row, eventType, resourceType, revisionText) {
       const identity = await digest(row.id);
       const revision =
         revisionText === undefined ? identity : await digest(revisionText);
-      const prior = previous?.seen[identity];
-      if (previous && prior !== revision && !observed.has(identity)) {
+      const key = compactHash(identity);
+      const fingerprint = revisionText === undefined ? "1" : compactHash(revision);
+      const stored = previousSeen[key];
+      const prior = Array.isArray(stored) ? stored[0] : stored;
+      const unchanged = prior === fingerprint || (revisionText === undefined && prior === key);
+      if (previous && !unchanged && !observed.has(key)) {
         events.push({
           id: `${identity}:${revision}`,
           event_type: eventType,
@@ -860,8 +884,12 @@ export function linkedInInboxProgram() {
           occurred_at: row.occurred_at ?? new Date(observedAt).toISOString(),
         });
       }
-      observed.set(identity, revision);
-      return prior !== undefined;
+      // Overlapping pages must checkpoint the same revision we emitted first.
+      if (!observed.has(key)) observed.set(key, fingerprint);
+      // Accepted chunks suppress repeats, but newly accepted items are not
+      // the original catch-up boundary. Otherwise a rebind stops on page one
+      // before reaching unfinished provider pages.
+      return Array.isArray(stored) ? stored[1] === true : prior !== undefined;
     }
     // The provider cannot show what lies beyond this position. Report it once
     // per position and advance, rather than retrying or claiming completeness.
@@ -890,41 +918,84 @@ export function linkedInInboxProgram() {
       seen: Object.fromEntries(
         [
           ...observed,
-          ...Object.entries(previous?.seen ?? {}).filter(
+          ...Object.entries(previousSeen).filter(
             ([identity]) => !observed.has(identity)
           ),
-        ].slice(0, SEEN_LIMIT)
+        ].slice(0, feed === "notifications" ? Math.max(SEEN_LIMIT, observed.size) : SEEN_LIMIT).map(([key, value]) => [key, Array.isArray(value) ? value[0] : value])
       ),
     };
-    return { checkpoint, events, more };
+    return { checkpoint, events, more, observed };
   }
-  // Ordered batches of at most 500 references and 128 KiB. Only the final
-  // batch carries the checkpoint, so an interruption cannot skip references.
+  // Each accepted chunk commits only its own seen identities. Source position
+  // advances on the final chunk; a rebind can safely rescan the unfinished page.
   async function batchesOf(feed, previous, result) {
-    const next = { linkedin_inbox: result.checkpoint };
     const { events } = result;
-    const base = `${feed}:${await digest(JSON.stringify([previous, next, events]))}`;
-    const size = (batch) =>
-      new TextEncoder().encode(JSON.stringify(batch)).length;
+    const prior = previous?.linkedin_inbox;
+    const epoch = prior?.observation_epoch ?? (prior
+      ? await digest(JSON.stringify(["legacy-observation", prior]))
+      : crypto.randomUUID());
+    let generation = prior?.observation_generation ?? 0;
+    if (!Number.isSafeInteger(generation) || generation < 0)
+      fail("Invalid observation generation");
+    const size = (batch) => new TextEncoder().encode(JSON.stringify(batch)).length;
     const batches = [];
+    let cursor = previous;
     for (let offset = 0; ; ) {
-      const through = (end) => ({
-        id: `${base}:${offset}`,
-        events: events.slice(offset, end),
-        ...(end === events.length
-          ? { checkpoint: { previous, next }, more: result.more }
-          : {}),
-      });
+      const nextGeneration = events.length || !prior?.observation_epoch ? generation + 1 : generation;
+      if (!Number.isSafeInteger(nextGeneration)) fail("Observation generation exhausted");
+      const observedEvents = await Promise.all(events.slice(offset, offset + BATCH_EVENTS).map(async (event) => ({
+        ...event,
+        id: event.event_type === "notification.changed"
+          ? await digest(JSON.stringify([epoch, nextGeneration, event.id])) : event.id,
+      })));
+      const through = async (end) => {
+        const final = end === events.length;
+        let seen = compactSeen(cursor?.linkedin_inbox?.seen);
+        for (const event of events.slice(offset, end)) {
+          const identity = compactHash(await digest(event.resource_ref));
+          if (result.observed.has(identity)) {
+            const prior = seen[identity];
+            const anchor = Array.isArray(prior) ? prior[1] : prior !== undefined;
+            seen[identity] = [result.observed.get(identity), anchor];
+          }
+        }
+        // Keep the prior completed pass's bounded anchors until this pass ends.
+        // Only provisional message IDs can be evicted safely: native-ID replay
+        // dedupes, while evicting an original anchor invents a new source gap.
+        // Mutable notification fingerprints survive the entire unfinished pass.
+        if (feed === "live_messages") {
+          const entries = Object.entries(seen);
+          const original = ([, value]) => !Array.isArray(value) || value[1] === true;
+          seen = Object.fromEntries([
+            ...entries.filter(original),
+            ...entries.filter((entry) => !original(entry)).slice(-SEEN_LIMIT),
+          ]);
+        }
+        const next = { linkedin_inbox: {
+          ...(final ? result.checkpoint : { ...prior, seen }),
+          observation_epoch: epoch,
+          observation_generation: nextGeneration,
+        } };
+        const slice = observedEvents.slice(0, end - offset);
+        return {
+          id: `${feed}:${epoch}:${nextGeneration}:${await digest(JSON.stringify([cursor, next, slice]))}`,
+          events: slice,
+          checkpoint: { previous: cursor, next },
+          ...(final ? { more: result.more } : {}),
+        };
+      };
       let end = Math.min(offset + BATCH_EVENTS, events.length);
-      let batch = through(end);
+      let batch = await through(end);
       while (size(batch) > BATCH_BYTES && end - offset > 1) {
         end = offset + Math.floor((end - offset) / 2);
-        batch = through(end);
+        batch = await through(end);
       }
       if (size(batch) > BATCH_BYTES)
         fail("Source reference batch exceeds the browser record limit");
       batches.push(batch);
       if (end === events.length) return batches;
+      cursor = batch.checkpoint.next;
+      generation++;
       offset = end;
     }
   }
@@ -1010,11 +1081,11 @@ export function linkedInInboxProgram() {
         "LinkedIn source delivery was rejected; reattach from the durable checkpoint"
       );
     if (event.data.ok && listener.batches.length) {
-      // Receipt means the browser durably buffered the batch. Only the server
-      // commits the final batch's checkpoint; a reattach starts from that value.
+      // The page receipt means buffered, not committed. A reattach uses the
+      // server's durable per-chunk checkpoint; observation identities survive replay.
       const done = listener.batches.shift();
       if (done.checkpoint) listener.checkpoint = done.checkpoint.next;
-      else post(listener, listener.batches[0]);
+      if (listener.batches.length) post(listener, listener.batches[0]);
     }
   }
   // Direct send, approved ONLY for replying to direct messages on accounts the
@@ -1046,9 +1117,9 @@ export function linkedInInboxProgram() {
   // `conversation_id` is a thread id of the member's own inbox, or a full
   // conversation URN whose mailbox names the inbox the reply leaves from: the
   // member's own or a page the member administers.
-  async function sendTarget(given) {
+  async function sendTarget(given, expected) {
     if (typeof given === "string" && /^[A-Za-z0-9_-]+=*$/.test(given)) {
-      const member = await account();
+      const member = await boundAccount(expected);
       return { inbox: { mailbox: member, member, page: false }, thread: given };
     }
     const match =
@@ -1061,14 +1132,14 @@ export function linkedInInboxProgram() {
         "conversation_id must be a LinkedIn conversation thread id or conversation URN"
       );
     if (PAGE_MAILBOX.test(match[1]))
-      return { inbox: await inboxOf(match[1]), thread: match[2] };
-    const member = await account();
+      return { inbox: await inboxOf(match[1], expected), thread: match[2] };
+    const member = await boundAccount(expected);
     if (match[1] !== member)
       fail("The conversation belongs to another LinkedIn account; not sending");
     return { inbox: { mailbox: member, member, page: false }, thread: match[2] };
   }
   async function send(input) {
-    const { inbox, thread } = await sendTarget(input.conversation_id);
+    const { inbox, thread } = await sendTarget(input.conversation_id, input.expected_account);
     const mailbox = inbox.mailbox;
     const text = typeof input.text === "string" ? input.text.trim() : "";
     if (!text || text.length > 3000)
@@ -1145,7 +1216,7 @@ export function linkedInInboxProgram() {
     if (!input.bridge_id || !input.token)
       fail("Source subscription binding is required");
     const inbox = await inboxOf(
-      input.feed === "live_messages" ? input.inbox : undefined
+      input.feed === "live_messages" ? input.inbox : undefined, input.expected_account
     );
     const previous = input.checkpoint?.linkedin_inbox;
     // A mailbox change restarts the baseline, but never permits a changed sign-in.
@@ -1164,7 +1235,7 @@ export function linkedInInboxProgram() {
       inbox,
       // The last posted record; only its receipt may advance delivery.
       sequence: 0,
-      // The checkpoint the next snapshot starts from, set by the final batch's receipt.
+      // The checkpoint the next snapshot starts from, set by each batch receipt.
       checkpoint: input.checkpoint ?? null,
       // Undelivered batches of the current snapshot, in order.
       batches: [],

@@ -97,7 +97,7 @@ scheduled processing by an external MCP client. Keep cadence and timezone on
 the normal schedule trigger. Lobu leaves due work on `next_run_at` until the
 client claims it; it never launches a hosted agent or device CLI for this mode.
 An optional `managed_agent_id` remains the permission and delivery principal.
-Event triggers, device pins, and hosted/CLI execution settings are incompatible.
+Ordinary event execution, device pins, and hosted/CLI settings are incompatible. Connector event triggers with explicit `capture: "references"` may instead authorize continuous reference capture by a declared source-only observer.
 The native `skip_if_unchanged` optimization does not apply: the external client
 examines each due window and decides whether it merits any output.
 
@@ -117,6 +117,75 @@ claim, renew a lease, mark notifications read, or send messages. Claim before
 processing, renew before lease expiry, and complete even quiet windows with
 empty output. On a claim conflict, refresh activity. Existing reactions decide
 whether completion should send a notification.
+
+### Source capture and independent polling
+
+An external executor can own an active connector subscription without starting
+an agent or creating an Automation run. Observer setup still uses queued tasks:
+
+```ts
+await workspace.automations.create({
+  slug: "source-monitor", name: "Source monitor",
+  execution_config: { executor: { kind: "external" } },
+  triggers: [{ kind: "event", connector_key: connectorKey,
+    connection_id: connectionId, event_types: [eventType], capture: "references" }],
+});
+```
+
+Capture is explicit consent to retain metadata-only references, independent of
+body retention or execution. It supports declared source-only observer events
+and exact `resource_ref` / `resource_type` matches. Ordinary sync/provider-webhook
+events cannot opt into this path. Silent managed subscriptions can also capture
+references while their existing activation path runs once. External capture
+rejects replies and steering; execution/batching settings do not dispatch work.
+Current connection visibility and Auto read policy govern capture. Pausing a
+feed stops capture while its retained history remains readable; archiving the
+Automation stops capture and invalidates its change-read cursors.
+
+Discover subscriptions explicitly with `operations.listActivity({ kinds:
+["source_changes"] })`, then follow its `knowledge.read` action. These cards
+mean configured subscriptions, not new arrivals or a shared unread count. They
+do not displace claimed/due work in default activity. To enumerate more than
+an activity page, list Automations and inspect their capture triggers.
+
+```ts
+const page = await workspace.knowledge.read({ automation_id: automationId,
+  view: "changes", cursor: savedCursor, limit: 100 });
+// Drain next_cursor (even when content is empty); once drained, persist
+// resume_cursor and use it for the next poll.
+```
+
+Each client stores its own opaque cursor; reads do not claim work, mark anything
+read, advance the Automation's processing checkpoint, or return completion
+tokens. The first read starts at retained observation history. Each traversal
+has a fixed safe arrival boundary, lossless `(created_at,id)` pagination, and
+bounded index scans per authorized connection/event type. A transaction still
+committing cannot fall behind the resume position. Exact resource matching may
+yield empty pages with `has_more:true` inside an authorized source; continue
+until `resume_cursor`. Other private or ACL-graphed sources do not influence
+page counts. Permissions are rechecked for every page. Changing the caller,
+readable source set, Automation version, or capture triggers invalidates its
+cursor; restart without one and dedupe already processed observation identities.
+
+The stream includes accepted `source_reference` observations only. An initial
+source scan still uses existing bounded feed reads; establishing an observer
+baseline does not import the provider's entire history. Providers and connectors
+may report gaps. References preserve connection, source resource and observation
+identity, not message bodies or inferred entity merges. References currently
+have no entity/resource attribution, so ACL-graphed connections fail closed.
+Native immutable message IDs dedupe across overlapping feeds. Mutable LinkedIn
+notifications identify accepted observations within one observer checkpoint
+stream; independent observers do not imply a global provider revision identity.
+Identical active feeds with the same connection, feed key, configuration and
+effective connector version share the lowest-ID observer; pausing it permits failover. Different
+scopes remain independent. Before enabling LinkedIn notification capture, upgrade
+and rebind its feed to connector version 3.20.2 or later; an older pinned adapter
+does not provide the required reconnect checkpoint guarantees.
+
+Existing `claimNextWindow` / renew / complete operations remain available for
+explicit processing Automations. Polling source references needs none of them.
+A client that maintains an entity graph chooses when to read the referenced
+source and applies the existing schema's identity rules and approval policies.
 
 ## Window recovery and external processors
 

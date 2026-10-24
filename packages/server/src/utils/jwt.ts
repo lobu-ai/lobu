@@ -88,7 +88,7 @@ async function verifySignature(data: string, signature: string, secret: string):
 /**
  * Get JWT secret from environment
  */
-function getJwtSecret(env: Env): string {
+export function getJwtSecret(env: Env): string {
   // JWT_SECRET is set for every embedded/local install by server.ts (derived
   // from ENCRYPTION_KEY via deriveJwtSecret) and explicitly in prod; legacy
   // installs may still use INSIGHTS_API_KEY. Throw only if truly absent (a
