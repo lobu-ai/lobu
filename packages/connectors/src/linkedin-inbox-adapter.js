@@ -956,13 +956,21 @@ export function linkedInInboxProgram() {
           if (result.observed.has(identity)) {
             const prior = seen[identity];
             const anchor = Array.isArray(prior) ? prior[1] : prior !== undefined;
-            seen[identity] = feed === "notifications" ? [result.observed.get(identity), anchor] : result.observed.get(identity);
+            seen[identity] = [result.observed.get(identity), anchor];
           }
         }
-        // Native message IDs remain immutable across replay, so their bounded
-        // seen cache is an optimization. Mutable notification fingerprints
-        // must survive the entire unfinished pass to prevent false transitions.
-        if (feed === "live_messages") seen = Object.fromEntries(Object.entries(seen).slice(-SEEN_LIMIT));
+        // Keep the prior completed pass's bounded anchors until this pass ends.
+        // Only provisional message IDs can be evicted safely: native-ID replay
+        // dedupes, while evicting an original anchor invents a new source gap.
+        // Mutable notification fingerprints survive the entire unfinished pass.
+        if (feed === "live_messages") {
+          const entries = Object.entries(seen);
+          const original = ([, value]) => !Array.isArray(value) || value[1] === true;
+          seen = Object.fromEntries([
+            ...entries.filter(original),
+            ...entries.filter((entry) => !original(entry)).slice(-SEEN_LIMIT),
+          ]);
+        }
         const next = { linkedin_inbox: {
           ...(final ? result.checkpoint : { ...prior, seen }),
           observation_epoch: epoch,

@@ -110,7 +110,7 @@ async function externalFixture() {
 describe('source feed notifications', () => {
   beforeEach(cleanupTestDatabase);
 
-  it('creates the subscription through the SDK and polls it through authenticated MCP without creating a run', async () => {
+  it('creates the subscription through the SDK and polls it through authenticated MCP without creating an Automation run', async () => {
     const { sql, org, user, device, notice, automationId } = await subscribedFixture();
     await sql`UPDATE automations SET status = 'archived' WHERE id = ${automationId}`;
     const api = await TestApiClient.for({ organizationId: org.id, userId: user.id, memberRole: 'owner' });

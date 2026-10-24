@@ -356,7 +356,7 @@ describe("LinkedIn source adapter", () => {
     }
   });
 
-  test("message catch-up resumes in bounded passes through ordered, size-limited batches", async () => {
+  test.each(["empty", "scalar", "tuple"])("message catch-up resumes in bounded batches with %s history anchors", async (anchorKind) => {
     const now = Date.now();
     const mailbox = "urn:li:fsd_profile:synthetic-self";
     const threadUrn = (n: number) =>
@@ -438,13 +438,16 @@ describe("LinkedIn source adapter", () => {
           },
         })
       );
+    const anchor = Buffer.from(await webcrypto.subtle.digest("SHA-256", new TextEncoder().encode(
+      `urn:li:msg_message:(${mailbox},synthetic-thread-0-message-0)`
+    ))).toString("base64url");
     const start = {
       linkedin_inbox: {
         feed: "live_messages",
         account: mailbox,
         started_at: now - 120000,
         after: now - 90000,
-        seen: {},
+        seen: anchorKind === "empty" ? {} : { [anchor]: anchorKind === "tuple" ? ["1", true] : "1" },
       },
     };
     const bind = (checkpoint: unknown) =>
@@ -481,6 +484,9 @@ describe("LinkedIn source adapter", () => {
       expect(first.length).toBeGreaterThan(2);
       for (const batch of first) {
         expect(batch.events.length).toBeLessThanOrEqual(500);
+        expect(Object.keys(batch.checkpoint.next.linkedin_inbox.seen).length).toBeLessThanOrEqual(512);
+        if (anchorKind !== "empty" && batch.more === undefined)
+          expect(batch.checkpoint.next.linkedin_inbox.seen[anchor]).toBeDefined();
         expect(
           new TextEncoder().encode(JSON.stringify(batch)).length
         ).toBeLessThanOrEqual(128 * 1024);
@@ -495,10 +501,10 @@ describe("LinkedIn source adapter", () => {
       const events = first.flatMap((batch) => batch.events);
       expect(
         events.filter((e: any) => e.event_type === "message.created")
-      ).toHaveLength(800);
+      ).toHaveLength(anchorKind === "empty" ? 800 : 799);
       expect(
         events.filter((e: any) => e.event_type === "source.gap")
-      ).toHaveLength(40);
+      ).toHaveLength(anchorKind === "empty" ? 40 : 39);
       const last = first.at(-1);
       expect(last.more).toBe(true);
       expect(first[0].checkpoint.previous).toEqual(start);
@@ -508,6 +514,23 @@ describe("LinkedIn source adapter", () => {
       expect(resumed.after).toBe(start.linkedin_inbox.after);
       expect(resumed.round.cursor).toBe("c3");
       expect(Object.keys(resumed.seen)).toHaveLength(256);
+
+      // Accepted references from an unfinished pass are not its original
+      // catch-up boundary. Reconnect at each chunk boundary, including one
+      // between a conversation's messages and its unaccepted gap warning.
+      const gapIds = (rows: any[]) => [...new Set(rows.filter((event) =>
+        event.event_type === "source.gap").map((event) => event.id))].sort();
+      const eventIds = (rows: any[]) => [...new Set(rows.map((event) => event.id))].sort();
+      for (let accepted = 1; accepted < first.length; accepted++) {
+        sent.length = 0;
+        await bind(first[accepted - 1].checkpoint.next);
+        const recovered = [
+          ...first.slice(0, accepted).flatMap((batch) => batch.events),
+          ...drain().flatMap((batch) => batch.events),
+        ];
+        expect(gapIds(recovered)).toEqual(gapIds(events));
+        expect(eventIds(recovered)).toEqual(eventIds(events));
+      }
 
       // A rebind from the same server checkpoint replays the same references in order.
       sent.length = 0;
@@ -1581,7 +1604,7 @@ describe("LinkedIn direct messages", () => {
       expect(retry).toMatchObject({ already_sent: true, message_id: first.message_id });
       expect(posts).toHaveLength(1);
       // A different key is a different reply.
-      await api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", ...input, idempotency_key: "chat-post:1:turn-2:def" });
+      await api.send({ ...input, idempotency_key: "chat-post:1:turn-2:def" });
       expect(posts).toHaveLength(2);
     } finally {
       dom.window.close();
@@ -1602,7 +1625,7 @@ describe("LinkedIn direct messages", () => {
       };
       const first = await api.send(input);
       expect(await api.send(input)).toMatchObject({ message_id: first.message_id });
-      const second = await api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", ...input, idempotency_key: "k2" });
+      const second = await api.send({ ...input, idempotency_key: "k2" });
       expect(second.message_id).not.toBe(first.message_id);
       expect(posts.every((post) => post.dedupeByClientGeneratedToken === true)).toBe(true);
     } finally {

@@ -121,7 +121,7 @@ whether completion should send a notification.
 ### Source capture and independent polling
 
 An external executor can own an active connector subscription without starting
-an agent or creating a run:
+an agent or creating an Automation run. Observer setup still uses queued tasks:
 
 ```ts
 await workspace.automations.create({
