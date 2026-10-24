@@ -8,7 +8,7 @@ import {
 import type { Env } from '../../../index';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
 import { getOperationForConnection } from '../../../operations/connector-operations';
-import { DEVICE_FEED_READ_ACTION_KEY } from '../../../lib/device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY } from '../../../lib/device-feed-read-protocol';
 import { __setChatInstanceManagerForTests } from '../../../lobu/gateway';
 import { deliverNotificationTask } from '../../../notifications/service';
 import { createConnectorOperationRun } from '../../../runs/queue-service';
@@ -119,6 +119,86 @@ describe('operation policy at durable dispatch', () => {
     expect(await sql`SELECT id FROM runs WHERE organization_id = ${organizationId}
       AND action_key = ${NOTIFICATION_DELIVERY_TASK}
       AND action_input->'payload'->>'eventId' = ${String(notifications[0].id)}`).toHaveLength(1);
+  });
+
+  it.each([
+    { kind: 'device feed read', operation: DEVICE_FEED_READ_ACTION_KEY, sourceRead: false,
+      expectedInput: { scrubbed: true, feed_key: 'files' } },
+    { kind: 'metadata source read', operation: 'perform', sourceRead: true,
+      expectedInput: { scrubbed: true } },
+    { kind: 'ordinary action', operation: 'perform', sourceRead: false, expectedInput: null },
+  ])('atomically handles source-read payload on policy Block for $kind', async ({ operation, sourceRead, expectedInput }) => {
+    // As in the reserved-name policy regression below, declare the operation
+    // so the real policy evaluator reaches the explicit Block rule.
+    await sql`UPDATE connector_definitions SET actions_schema = actions_schema || ${sql.json({
+      [operation]: { name: 'Read fixture', kind: 'write' },
+    })}::jsonb WHERE organization_id = ${organizationId} AND key = ${connectorKey}`;
+    await rule('deny', operation);
+    const actionInput = { feed_key: 'files', query: 'private caller query', limit: 10 };
+    const actionOutput = { rows: [{ name: 'private source row' }] };
+    const id = await run({ operation, metadata: { [SOURCE_FEED_READ_METADATA_KEY]: sourceRead } });
+    await sql`UPDATE runs SET action_input = ${sql.json(actionInput)}, action_output = ${sql.json(actionOutput)} WHERE id = ${id}`;
+
+    expect(await decision(id)).toMatchObject({ effect: 'deny' });
+    // Reject an unscrubbed terminal UPDATE immediately, even if a second
+    // statement would scrub before admit() commits or returns.
+    await sql.unsafe(`CREATE FUNCTION test_require_policy_veto_scrub() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF OLD.status IS DISTINCT FROM NEW.status
+           AND NEW.status IN ('completed', 'failed', 'cancelled', 'timeout')
+           AND (OLD.action_key = '${DEVICE_FEED_READ_ACTION_KEY}'
+             OR OLD.run_metadata->>'${SOURCE_FEED_READ_METADATA_KEY}' = 'true')
+           AND (NEW.action_output IS NOT NULL OR NEW.action_input IS DISTINCT FROM
+             CASE WHEN OLD.run_metadata->>'${SOURCE_FEED_READ_METADATA_KEY}' = 'true'
+               THEN '{"scrubbed":true}'::jsonb
+               ELSE jsonb_build_object('scrubbed', true, 'feed_key', OLD.action_input->>'feed_key') END) THEN
+          RAISE EXCEPTION 'source-read terminal UPDATE must scrub input and SQL-null output';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER test_require_policy_veto_scrub_trg BEFORE UPDATE ON runs
+      FOR EACH ROW EXECUTE FUNCTION test_require_policy_veto_scrub();`);
+    try {
+      if (expectedInput) {
+        await expect(sql`UPDATE runs SET status = 'cancelled' WHERE id = ${id}`)
+          .rejects.toThrow('source-read terminal UPDATE must scrub input and SQL-null output');
+      }
+      expect(await admit(id)).toBe(false);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER test_require_policy_veto_scrub_trg ON runs;
+        DROP FUNCTION test_require_policy_veto_scrub();`);
+    }
+    const [row] = await sql`SELECT status, approval_status, action_input, action_output FROM runs WHERE id = ${id}`;
+    expect(row).toEqual({
+      status: 'cancelled', approval_status: 'rejected',
+      action_input: expectedInput ?? actionInput,
+      action_output: expectedInput ? null : actionOutput,
+    });
+  });
+
+  it.each([
+    { kind: 'device feed read', operation: DEVICE_FEED_READ_ACTION_KEY, sourceRead: false },
+    { kind: 'metadata source read', operation: 'perform', sourceRead: true },
+  ])('retains source-read payload on policy Ask for $kind until approved', async ({ operation, sourceRead }) => {
+    await sql`UPDATE connector_definitions SET actions_schema = actions_schema || ${sql.json({
+      [operation]: { name: 'Read fixture', kind: 'write' },
+    })}::jsonb WHERE organization_id = ${organizationId} AND key = ${connectorKey}`;
+    await rule('approval', operation);
+    const actionInput = { feed_key: 'files', query: 'private caller query', limit: 10 };
+    const actionOutput = { rows: [{ name: 'private source row' }] };
+    const id = await run({ operation, metadata: { [SOURCE_FEED_READ_METADATA_KEY]: sourceRead } });
+    await sql`UPDATE runs SET action_input = ${sql.json(actionInput)}, action_output = ${sql.json(actionOutput)} WHERE id = ${id}`;
+
+    expect(await decision(id)).toMatchObject({ effect: 'approval' });
+    expect(await admit(id)).toBe(false);
+    const [parked] = await sql`SELECT status, approval_status, action_input, action_output FROM runs WHERE id = ${id}`;
+    expect(parked).toEqual({
+      status: 'pending', approval_status: 'pending', action_input: actionInput, action_output: actionOutput,
+    });
+    await sql`UPDATE runs SET approval_status = 'approved' WHERE id = ${id}`;
+    expect(await admit(id)).toBe(true);
+    const [approved] = await sql`SELECT status, approval_status, action_input FROM runs WHERE id = ${id}`;
+    expect(approved).toEqual({ status: 'pending', approval_status: 'approved', action_input: actionInput });
   });
 
   it('concurrent and repeated claims create only one late approval notification', async () => {

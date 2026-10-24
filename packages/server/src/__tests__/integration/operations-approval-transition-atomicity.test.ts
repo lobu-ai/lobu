@@ -17,6 +17,10 @@ import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Context } from "hono";
 import type { Env } from "../../index";
+import {
+	DEVICE_FEED_READ_ACTION_KEY,
+	SOURCE_FEED_READ_METADATA_KEY,
+} from "../../lib/device-feed-read-protocol";
 import { queueAgentAsk } from "../../notifications/ask";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import type { ToolContext } from "../../tools/registry";
@@ -1317,6 +1321,77 @@ describe("worker completeActionRun card atomicity", () => {
 		expect((await currentApprovalCard(runId, orgId))?.interaction_status).toBe(
 			"failed",
 		);
+	});
+
+	describe.each([false, true])("source-read payload on worker failure (cancel=%s)", (cancel) => {
+		it.each([
+			{ kind: "device feed read", actionKey: DEVICE_FEED_READ_ACTION_KEY, sourceRead: false,
+				expectedInput: { scrubbed: true, feed_key: "files" } },
+			{ kind: "metadata source read", actionKey: "navigate", sourceRead: true,
+				expectedInput: { scrubbed: true } },
+			{ kind: "device feed read with source metadata", actionKey: DEVICE_FEED_READ_ACTION_KEY, sourceRead: true,
+				expectedInput: { scrubbed: true } },
+			{ kind: "ordinary action", actionKey: "navigate", sourceRead: false, expectedInput: null },
+		])("atomically finalizes $kind", async ({ actionKey, sourceRead, expectedInput }) => {
+			const sql = getTestDb();
+			const runId = await seedClaimedRun({ approvalStatus: "auto", withCard: false });
+			const actionInput = { feed_key: "files", query: "private caller query", limit: 10 };
+			const actionOutput = { rows: [{ name: "private source row" }] };
+			// Cancellation is read by lockAgentTurnRun only for native agent turns.
+			await sql`
+				UPDATE runs SET run_type = ${cancel ? "agent_turn" : "action"},
+					action_key = ${actionKey}, action_input = ${sql.json(actionInput)},
+					action_output = ${sql.json(actionOutput)},
+					run_metadata = ${sql.json({
+						[SOURCE_FEED_READ_METADATA_KEY]: sourceRead,
+						...(cancel ? { cancel_requested_at: "2026-01-01T00:00:00Z" } : {}),
+					})}
+				WHERE id = ${runId}
+			`;
+
+			// A non-deferred trigger checks NEW at the terminal UPDATE, so a later
+			// scrub cannot hide a privacy window, even within the same transaction.
+			await sql.unsafe(`
+CREATE FUNCTION test_require_claim_failure_scrub() RETURNS trigger AS $fn$
+BEGIN
+  IF OLD.status IS DISTINCT FROM NEW.status
+     AND NEW.status IN ('completed', 'failed', 'cancelled', 'timeout')
+     AND (OLD.action_key = '${DEVICE_FEED_READ_ACTION_KEY}'
+       OR OLD.run_metadata->>'${SOURCE_FEED_READ_METADATA_KEY}' = 'true')
+     AND (NEW.action_output IS NOT NULL OR NEW.action_input IS DISTINCT FROM
+       CASE WHEN OLD.run_metadata->>'${SOURCE_FEED_READ_METADATA_KEY}' = 'true'
+         THEN '{"scrubbed":true}'::jsonb
+         ELSE jsonb_build_object('scrubbed', true, 'feed_key', OLD.action_input->>'feed_key') END) THEN
+    RAISE EXCEPTION 'source-read terminal UPDATE must scrub input and SQL-null output';
+  END IF;
+  RETURN NEW;
+END;
+$fn$ LANGUAGE plpgsql;
+CREATE TRIGGER test_require_claim_failure_scrub_trg BEFORE UPDATE ON runs
+  FOR EACH ROW EXECUTE FUNCTION test_require_claim_failure_scrub();
+`);
+			try {
+				if (expectedInput) {
+					await expect(sql`UPDATE runs SET status = ${cancel ? "cancelled" : "failed"} WHERE id = ${runId}`)
+						.rejects.toThrow("source-read terminal UPDATE must scrub input and SQL-null output");
+				}
+				expect(await failClaimedWorkerRun({
+					runId, workerId: "worker-complete-test", errorMessage: "connector code unavailable",
+				})).toBe(true);
+			} finally {
+				await sql.unsafe(`DROP TRIGGER test_require_claim_failure_scrub_trg ON runs;
+DROP FUNCTION test_require_claim_failure_scrub();`);
+			}
+			const [row] = await sql`
+				SELECT status, outcome, action_input, action_output FROM runs WHERE id = ${runId}
+			`;
+			expect(row).toEqual({
+				status: cancel ? "cancelled" : "failed",
+				outcome: cancel ? null : "infra_error",
+				action_input: expectedInput ?? actionInput,
+				action_output: expectedInput ? null : actionOutput,
+			});
+		});
 	});
 
 	it("worker pre-dispatch failure rolls back when the failed card write fails", async () => {
