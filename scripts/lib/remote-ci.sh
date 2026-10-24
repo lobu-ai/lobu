@@ -1,54 +1,5 @@
 #!/usr/bin/env bash
-
-# Pure helpers shared by the Depot runner and the review gate. Keep these free
-# of process exits so the fail-closed status rules stay fixture-testable.
-
-remote_ci_extract_run_id() {
-  sed -n 's/^Run: \([[:alnum:]]*\)$/\1/p' | head -n 1
-}
-
-remote_ci_status_succeeded() {
-  jq -e '
-    .status == "finished"
-    and (.workflows | length > 0)
-    and all(.workflows[];
-      .status == "finished"
-      and (.jobs | length > 0)
-      # Conditional GitHub jobs are terminal successes when their `if` is
-      # false. Depot reports them as skipped rather than finished.
-      and all(.jobs[]; .status == "finished" or .status == "skipped")
-    )
-  ' >/dev/null
-}
-
-remote_ci_status_terminal() {
-  jq -e '.status == "finished" or .status == "failed" or .status == "cancelled"' >/dev/null
-}
-
-remote_ci_status_summary() {
-  jq -r '
-    [.workflows[].jobs[].status]
-    | group_by(.)
-    | map("\(.[0])=\(length)")
-    | join(" ")
-  '
-}
-
-remote_ci_print_failures() {
-  jq -r '
-    "Depot run status: \(.status)",
-    (.workflows[]
-      | select(.status != "finished")
-      | "workflow \(.name): \(.status)"),
-    (.workflows[].jobs[]
-      | select(.status != "finished" and .status != "skipped")
-      | "job \(.job_key): \(.status)"
-        + (if (.attempts[-1].view_url // "") != ""
-           then " — " + .attempts[-1].view_url
-           else ""
-           end))
-  '
-}
+# Exact staged-source helpers shared by remote providers.
 
 remote_ci_require_no_untracked() {
   local untracked
@@ -71,4 +22,18 @@ remote_ci_staged_tree() {
     return 1
   fi
   git write-tree
+}
+
+# Materialize the index and the submodule commit recorded in that index.
+remote_ci_materialize() {
+  local stage="$1" pin
+  mkdir -p "$stage/packages/owletto"
+  git checkout-index -a -f --prefix="$stage/"
+  if [ -e packages/owletto/.git ]; then
+    pin="$(git ls-files --stage -- packages/owletto | awk '$1 == "160000" { print $2 }')"
+    [ -n "$pin" ] || { echo "Missing staged Owletto gitlink." >&2; return 1; }
+    git -C packages/owletto archive "$pin" | tar -x -C "$stage/packages/owletto"
+  else
+    printf '%s\n' '{"name":"@lobu/owletto","private":true,"version":"1.6.0","description":"Stub — private submodule not initialized"}' > "$stage/packages/owletto/package.json"
+  fi
 }

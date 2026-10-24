@@ -36,70 +36,6 @@ job_run_script() {
   ' <<<"$1"
 }
 
-run_id="$(printf 'Org: test\nRun: bj0453b334\nWaiting...\n' | remote_ci_extract_run_id)"
-assert_eq "$run_id" "bj0453b334"
-
-success='{
-  "status":"finished",
-  "workflows":[{"name":"CI","status":"finished","jobs":[
-    {"job_key":"ci.yml:unit","status":"finished","attempts":[{"view_url":"https://example.test/unit"}]}
-  ]}]
-}'
-remote_ci_status_succeeded <<<"$success" || fail "finished graph was rejected"
-remote_ci_status_terminal <<<"$success" || fail "finished graph was not terminal"
-assert_eq "$(remote_ci_status_summary <<<"$success")" "finished=1"
-
-skipped_job="${success/\"finished\",\"attempts\"/\"skipped\",\"attempts\"}"
-remote_ci_status_succeeded <<<"$skipped_job" || fail "skipped conditional job was rejected"
-if remote_ci_print_failures <<<"$skipped_job" | grep -q 'job ci.yml:unit'; then
-  fail "skipped conditional job was reported as a failure"
-fi
-
-for bad_status in failed running cancelled queued; do
-  bad="${success/\"status\":\"finished\"/\"status\":\"$bad_status\"}"
-  if remote_ci_status_succeeded <<<"$bad"; then
-    fail "$bad_status graph was accepted"
-  fi
-  case "$bad_status" in
-    failed|cancelled)
-      remote_ci_status_terminal <<<"$bad" || fail "$bad_status graph was not terminal"
-      ;;
-    *)
-      if remote_ci_status_terminal <<<"$bad"; then
-        fail "$bad_status graph was terminal"
-      fi
-      ;;
-  esac
-done
-
-failed_job='{
-  "status":"finished",
-  "workflows":[{"name":"CI","status":"finished","jobs":[
-    {"job_key":"ci.yml:unit","status":"failed","attempts":[{"view_url":"https://example.test/unit"}]}
-  ]}]
-}'
-if remote_ci_status_succeeded <<<"$failed_job"; then
-  fail "failed job inside a finished run was accepted"
-fi
-
-empty='{"status":"finished","workflows":[]}'
-if remote_ci_status_succeeded <<<"$empty"; then
-  fail "empty graph was accepted"
-fi
-
-empty_workflow='{
-  "status":"finished",
-  "workflows":[
-    {"name":"empty","status":"finished","jobs":[]},
-    {"name":"other","status":"finished","jobs":[
-      {"job_key":"ci.yml:unit","status":"finished","attempts":[]}
-    ]}
-  ]
-}'
-if remote_ci_status_succeeded <<<"$empty_workflow"; then
-  fail "workflow without jobs was accepted"
-fi
-
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/lobu-remote-ci-test.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 repo="$tmp_dir/repo"
@@ -262,18 +198,24 @@ fi
 # ── provider dispatch (scripts/run-remote-ci.sh) ──────────────────────────
 # The dispatcher is exercised with a mocked daytona binary so no sandbox is
 # ever provisioned. A settled (staged, no untracked) tree is required first.
+# Copy it into the fixture: remote payloads have no parent .git directory.
+mkdir -p "$repo/scripts/lib"
+cp "$SCRIPT_DIR/../../run-remote-ci.sh" "$repo/scripts/"
+cp "$SCRIPT_DIR/../remote-ci.sh" "$SCRIPT_DIR/../gate-runner.sh" "$repo/scripts/lib/"
+git -C "$repo" add -- scripts
+runner="$repo/scripts/run-remote-ci.sh"
 
 ( cd "$repo"
-  if REMOTE_CI_PROVIDER=bogus bash "$SCRIPT_DIR/../../run-remote-ci.sh" unit >/dev/null 2>&1; then
+  if REMOTE_CI_PROVIDER=bogus bash "$runner" unit >/dev/null 2>&1; then
     fail "unknown provider was accepted"
   fi
 
-  if REMOTE_CI_PROVIDER=local bash "$SCRIPT_DIR/../../run-remote-ci.sh" nosuchjob >/dev/null 2>&1; then
+  if REMOTE_CI_PROVIDER=local GATE_PROVISION=0 bash "$runner" nosuchjob >/dev/null 2>&1; then
     fail "unknown job in the local fallback was accepted"
   fi
 
   # Mocked daytona: list succeeds (logged in), create records its args then
-  # fails. Auto-detection must pick daytona, pass memory in GB, and fail
+  # fails. Explicit Daytona selection must pass memory in GB and fail
   # closed when create fails.
   tmpbin="$(mktemp -d "${TMPDIR:-/tmp}/lobu-remote-ci-bin.XXXXXX")"
   cat > "$tmpbin/daytona" <<'MOCK'
@@ -289,8 +231,8 @@ esac
 MOCK
   chmod +x "$tmpbin/daytona"
   call_log="$(mktemp "${TMPDIR:-/tmp}/lobu-daytona-call.XXXXXX")"
-  if PATH="$tmpbin:$PATH" DAYTONA_CALL_LOG="$call_log" GATE_SKIP_SETTLED_CHECK=1 \
-      bash "$SCRIPT_DIR/../../run-remote-ci.sh" unit >/dev/null 2>&1; then
+  if PATH="$tmpbin:$PATH" DAYTONA_CALL_LOG="$call_log" REMOTE_CI_PROVIDER=daytona \
+      bash "$runner" unit >/dev/null 2>&1; then
     fail "mocked daytona create failure was accepted"
   fi
   grep -q -- '--memory' "$call_log" || fail "daytona create was not invoked"
@@ -302,24 +244,22 @@ MOCK
   grep -q -- '--disk 10 ' <<<"$flat" || fail "daytona create must pass the default disk"
   rm -rf "$tmpbin" "$call_log"
 
-  # Tri-state provider resolution. A present-but-faulty CLI (list fails, i.e.
-  # not logged in) must fail closed under `auto` rather than silently falling
-  # back to local — that masking is the regression this guards against.
+  # Explicit Daytona selection must fail closed when the CLI is not logged in.
   mkdir -p "$tmpbin"
   cat > "$tmpbin/daytona" <<'MOCK_FAULTY'
 #!/usr/bin/env bash
 exit 1
 MOCK_FAULTY
   chmod +x "$tmpbin/daytona"
-  if PATH="$tmpbin:$PATH" REMOTE_CI_PROVIDER=auto GATE_SKIP_SETTLED_CHECK=1 \
-      bash "$SCRIPT_DIR/../../run-remote-ci.sh" unit 2>/dev/null; then
-    fail "faulty (not logged in) daytona CLI was accepted under auto"
+  if PATH="$tmpbin:$PATH" REMOTE_CI_PROVIDER=daytona \
+      bash "$runner" unit 2>/dev/null; then
+    fail "faulty (not logged in) daytona CLI was accepted"
   fi
-  out="$(PATH="$tmpbin:$PATH" REMOTE_CI_PROVIDER=auto GATE_SKIP_SETTLED_CHECK=1 \
-      bash "$SCRIPT_DIR/../../run-remote-ci.sh" unit 2>&1 || true)"
+  out="$(PATH="$tmpbin:$PATH" REMOTE_CI_PROVIDER=daytona \
+      bash "$runner" unit 2>&1 || true)"
   case "$out" in
-    *"refusing to silently"*) ;;
-    *) fail "faulty CLI did not fail closed with a clear message: $out" ;;
+    *"not available or not logged in"*) ;;
+    *) fail "faulty Daytona CLI did not fail closed with a clear message: $out" ;;
   esac
   rm -rf "$tmpbin"
 
@@ -367,12 +307,13 @@ MOCK2
   name_file="$(mktemp "${TMPDIR:-/tmp}/lobu-daytona-name.XXXXXX")"
   del_flag="$(mktemp "${TMPDIR:-/tmp}/lobu-daytona-del.XXXXXX")"
   if ! PATH="$tmpbin:$PATH" DAYTONA_NAME_FILE="$name_file" DAYTONA_DELETE_FLAG="$del_flag" \
-      GATE_SKIP_SETTLED_CHECK=1 bash "$SCRIPT_DIR/../../run-remote-ci.sh" dead-code-report >/dev/null 2>&1; then
+      REMOTE_CI_PROVIDER=daytona bash "$runner" dead-code-report >/dev/null 2>&1; then
     fail "mocked successful daytona run was rejected"
   fi
   # The success path also proves the GATE_REMOTE_EXIT sentinel was parsed:
   # the dispatcher reported "remote gate exit: 0" (checked via the flag).
   [ -s "$del_flag" ] || fail "cleanup did not call daytona delete"
+  rm -rf "$tmpbin"
   rm -f "$name_file" "$del_flag"
 )
 
