@@ -35,6 +35,7 @@ import { CHAT_SOURCE_INGRESS_QUEUE, type ChatSourceIngressJob } from "../../../r
 import { receiveFeedNotifications } from "../../../runs/feed-notifications";
 import { sourceFeedScopeKey } from "../../../runs/source-feed-subscriptions";
 import * as executeHandler from "../../../tools/admin/manage_operations/handlers/execute";
+import { createAuthProfile } from "../../../utils/auth-profiles";
 import { upsertBundledConnectorForOrg } from "../../../utils/ensure-connector-installed";
 import { resetRateLimiterForTests } from "../../../utils/rate-limiter";
 import * as chromeDispatch from "../../../worker-api/dispatch-chrome-action";
@@ -91,7 +92,8 @@ function fakeXTab(params: { actionKey: string; actionInput: Record<string, unkno
   const at = expression.indexOf(marker);
   if (at < 0) throw new Error("unexpected X page call");
   const argument = expression.slice(at + marker.length, expression.lastIndexOf("); })()"));
-  const input = new Function(`return ${argument};`)() as { query?: string };
+  const input = new Function(`return ${argument};`)() as { query?: string; account_id?: string };
+  expect(input.account_id).toBe(SELF);
   const id = String(input.query).slice("id:".length);
   const rows = deviceMessages.filter((message) => rowId(message) === id).map((message, index) => ({
     id: rowId(message),
@@ -241,9 +243,12 @@ describe("X source chat", () => {
     deviceId = device.id;
     const installed = await upsertBundledConnectorForOrg({ organizationId: orgId, connectorKey: "x" });
     version = installed!.version;
+    const browserAccount = await createAuthProfile({ organizationId: orgId, connectorKey: "x",
+      displayName: "Synthetic X account", profileKind: "browser_session", status: "active", createdBy: ownerId,
+      deviceWorkerId: deviceId, authData: { mode: "live", account_id: SELF, verified_at: new Date().toISOString() } });
     const [connection] = await sql`INSERT INTO connections
-      (organization_id, connector_key, slug, status, visibility, device_worker_id, created_by)
-      VALUES (${orgId}, 'x', 'x-browser', 'active', 'private', ${deviceId}::uuid, ${ownerId}) RETURNING id`;
+      (organization_id, connector_key, slug, status, visibility, device_worker_id, auth_profile_id, created_by)
+      VALUES (${orgId}, 'x', 'x-browser', 'active', 'private', ${deviceId}::uuid, ${browserAccount.id}, ${ownerId}) RETURNING id`;
     connectionId = Number(connection.id);
     const [feed] = await sql`INSERT INTO feeds (organization_id, connection_id, feed_key, status, config)
       VALUES (${orgId}, ${connectionId}, 'live_messages', 'active', '{}'::jsonb) RETURNING id`;

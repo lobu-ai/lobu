@@ -2,9 +2,10 @@
  * Serialized into the signed-in x.com page. All bindings must remain inside
  * this function: the connector ships it with Function.prototype.toString().
  *
- * It reads and sends direct messages through the same-origin DM endpoints
- * the x.com web client calls, with the page's own session cookies. It never
- * opens /messages, which marks conversations read.
+ * It reads and sends direct messages, and reads the notifications timeline,
+ * through the same-origin endpoints the x.com web client calls, with the
+ * page's own session cookies. It never opens /messages or /notifications,
+ * which mark conversations and notifications read.
  */
 export function xDirectMessagesProgram() {
 	const key = "__lobuXDirectMessagesV1";
@@ -49,14 +50,26 @@ export function xDirectMessagesProgram() {
 		return raw ? decodeURIComponent(raw.slice(name.length + 1)) : "";
 	}
 	// `twid` carries the signed-in numeric user id; it is not a credential.
-	function account() {
+	function account(expected) {
 		const match = /^u=([0-9]+)$/.exec(cookie("twid"));
 		if (!match) fail("Sign in to X in the paired browser");
+		if (expected !== undefined && match[1] !== expected)
+			fail(
+				"X account changed or belongs to another account; reconnect this source",
+			);
 		return match[1];
 	}
-	async function request(path, init = {}) {
+	function savedAccount(input) {
+		if (
+			typeof input.account_id !== "string" ||
+			!/^[0-9]{1,20}$/.test(input.account_id)
+		)
+			fail("Saved X account identity is unavailable; reconnect this source");
+		return account(input.account_id);
+	}
+	async function request(path, init = {}, expected) {
 		init.signal?.throwIfAborted();
-		const self = account();
+		const self = account(expected);
 		const csrf = cookie("ct0");
 		if (!csrf) fail("Sign in to X in the paired browser");
 		const response = await fetch(path, {
@@ -73,6 +86,7 @@ export function xDirectMessagesProgram() {
 				...init.headers,
 			},
 		});
+		account(self);
 		if (!response.ok) {
 			let code = null;
 			try {
@@ -80,6 +94,7 @@ export function xDirectMessagesProgram() {
 			} catch {
 				code = null;
 			}
+			account(self);
 			fail(
 				`request failed (HTTP ${response.status}${code === null ? "" : `, X error ${code}`})`,
 				response.status,
@@ -89,23 +104,28 @@ export function xDirectMessagesProgram() {
 		if (account() !== self) fail("X account changed during the request");
 		return body;
 	}
-	async function inbox() {
+	async function inbox(self) {
 		const body = await request(
 			`${DM_API}/inbox_initial_state.json?${DM_PARAMS}`,
+			{},
+			self,
 		);
 		return body?.inbox_initial_state ?? fail("Inbox state is unavailable");
 	}
-	async function conversation(conversationId, maxId, signal) {
+	async function conversation(conversationId, maxId, signal, self) {
 		const page = maxId ? `&max_id=${encodeURIComponent(maxId)}` : "";
 		const body = await request(
 			`${DM_API}/conversation/${conversationId}.json?context=FETCH_DM_CONVERSATION&${DM_PARAMS}${page}`,
 			signal ? { signal } : {},
+			self,
 		);
 		return body?.conversation_timeline ?? fail("Conversation is unavailable");
 	}
-	async function updates(cursor) {
+	async function updates(cursor, self) {
 		const body = await request(
 			`${DM_API}/user_updates.json?cursor=${encodeURIComponent(cursor)}&${DM_PARAMS}`,
+			{},
+			self,
 		);
 		const events = body?.user_events ?? fail("Inbox updates are unavailable");
 		// A quiet inbox answers with only its cursor and last-seen ids: no
@@ -210,7 +230,12 @@ export function xDirectMessagesProgram() {
 	async function readMessage(self, conversationId, messageId) {
 		let maxId;
 		for (let page = 0; page < LOOKUP_PAGES; page++) {
-			const timeline = await conversation(conversationId, maxId);
+			const timeline = await conversation(
+				conversationId,
+				maxId,
+				undefined,
+				self,
+			);
 			const row = rowsOf(timeline, self).find(
 				(candidate) => candidate.message_id === messageId,
 			);
@@ -225,7 +250,7 @@ export function xDirectMessagesProgram() {
 		fail("Message lookup is incomplete: conversation page limit reached");
 	}
 	async function read(input) {
-		const self = account();
+		const self = savedAccount(input);
 		const limit = Math.max(1, Math.min(100, Number(input.limit) || 20));
 		const query = typeof input.query === "string" ? input.query.trim() : "";
 		if (query) {
@@ -235,7 +260,7 @@ export function xDirectMessagesProgram() {
 			return { rows: row ? [row] : [], hasMore: false };
 		}
 		// The inbox's recent state across conversations, not a history export.
-		const all = rowsOf(await inbox(), self);
+		const all = rowsOf(await inbox(self), self);
 		let start = 0;
 		if (input.cursor) {
 			if (typeof input.cursor !== "string" || input.cursor.length > 1000)
@@ -304,7 +329,7 @@ export function xDirectMessagesProgram() {
 		);
 	}
 	async function send(input) {
-		const self = account();
+		const self = savedAccount(input);
 		const signal = AbortSignal.timeout(SEND_TIMEOUT_MS);
 		const conversationId = String(input.conversation_id ?? "");
 		if (!CONVERSATION_ID.test(conversationId))
@@ -330,7 +355,7 @@ export function xDirectMessagesProgram() {
 		});
 		const readConversation = () => {
 			if (account() !== self) fail("X account changed before the send read");
-			return conversation(conversationId, undefined, signal);
+			return conversation(conversationId, undefined, signal, self);
 		};
 		// Only an existing conversation the account can read is a send target.
 		const before = await readConversation();
@@ -340,21 +365,25 @@ export function xDirectMessagesProgram() {
 		for (const delay of [...UNAVAILABLE_SEND_RETRY_DELAYS_MS, null]) {
 			if (account() !== self) fail("X account changed before the send");
 			try {
-				response = await request(`${DM_API}/new2.json`, {
-					method: "POST",
-					signal,
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify({
-						conversation_id: conversationId,
-						recipient_ids: false,
-						request_id: requestId,
-						text,
-						cards_platform: "Web-12",
-						include_cards: 1,
-						include_quote_count: true,
-						dm_users: false,
-					}),
-				});
+				response = await request(
+					`${DM_API}/new2.json`,
+					{
+						method: "POST",
+						signal,
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							conversation_id: conversationId,
+							recipient_ids: false,
+							request_id: requestId,
+							text,
+							cards_platform: "Web-12",
+							include_cards: 1,
+							include_quote_count: true,
+							dm_users: false,
+						}),
+					},
+					self,
+				);
 				break;
 			} catch (error) {
 				if (error?.status !== 503) throw error;
@@ -398,7 +427,7 @@ export function xDirectMessagesProgram() {
 	// inbox stands now, and each later pass reports what arrived after it.
 	async function snapshot(previous, self) {
 		if (!previous) {
-			const state = await inbox();
+			const state = await inbox(self);
 			messagesOf(state);
 			if (typeof state.cursor !== "string" || !state.cursor)
 				fail("Inbox cursor is unavailable");
@@ -417,7 +446,7 @@ export function xDirectMessagesProgram() {
 		let cursor = previous.cursor;
 		let more = false;
 		for (let page = 1; ; page++) {
-			const batch = await updates(cursor);
+			const batch = await updates(cursor, self);
 			for (const row of rowsOf(batch, self).reverse()) {
 				if (observed.has(row.id)) continue;
 				observed.add(row.id);
@@ -515,13 +544,13 @@ export function xDirectMessagesProgram() {
 	async function poll(listener) {
 		if (!active(listener)) return;
 		try {
+			account(listener.account);
 			if (!listener.batches.length) {
-				if (account() !== listener.account)
-					fail("X account changed; reconnect this source");
 				const { checkpoint } = listener;
 				const result = await snapshot(checkpoint?.x_dm, listener.account);
 				listener.batches = await batchesOf(checkpoint, result);
 			}
+			account(listener.account);
 			if (active(listener)) post(listener, listener.batches[0]);
 		} catch {
 			stop(
@@ -545,6 +574,11 @@ export function xDirectMessagesProgram() {
 			event.data.sequence !== listener.sequence
 		)
 			return;
+		try {
+			account(listener.account);
+		} catch {
+			return stop(listener, "X account changed; reconnect this source");
+		}
 		if (event.data.ok === false)
 			return stop(
 				listener,
@@ -561,7 +595,7 @@ export function xDirectMessagesProgram() {
 	async function listen(input) {
 		if (!input.bridge_id || !input.token)
 			fail("Source subscription binding is required");
-		const self = account();
+		const self = savedAccount(input);
 		const previous = input.checkpoint?.x_dm;
 		if (previous && previous.account !== self)
 			fail("Source checkpoint belongs to another account");
@@ -587,5 +621,188 @@ export function xDirectMessagesProgram() {
 			fail("Unable to attach source subscription");
 		return { listening: true };
 	}
-	globalThis[key] = { version, read, listen, send, detach };
+	// The notification API is read from this same neutral page. In particular,
+	// never render /notifications or call its seen/read-state endpoints here.
+	async function readNotifications(input) {
+		const self = savedAccount(input);
+		const limit = Math.max(
+			1,
+			Math.min(100, Math.trunc(Number(input.limit) || 25)),
+		);
+		let cursor = null;
+		if (input.cursor) {
+			if (typeof input.cursor !== "string" || input.cursor.length > 10000)
+				fail("Invalid notification cursor");
+			cursor = JSON.parse(input.cursor);
+			if (
+				cursor.v !== 1 ||
+				cursor.kind !== "notifications" ||
+				cursor.account !== self ||
+				!(cursor.source === null || typeof cursor.source === "string") ||
+				!(cursor.after === null || typeof cursor.after === "string")
+			)
+				fail("Notification cursor belongs to another account or source");
+		}
+		const path =
+			"/i/api/2/notifications/all.json?count=50" +
+			(cursor?.source ? `&cursor=${encodeURIComponent(cursor.source)}` : "");
+		let body;
+		try {
+			body = await request(path, {}, self);
+		} catch (error) {
+			account(self);
+			if (
+				input.restartExpired &&
+				cursor?.source &&
+				[400, 404].includes(error.status)
+			)
+				return { rows: [], account_id: self, expired: true };
+			throw error;
+		}
+		if (!Array.isArray(body?.timeline?.instructions) || !body.globalObjects)
+			fail("Notification timeline is unavailable");
+		const entries = [];
+		for (const instruction of body.timeline.instructions) {
+			for (const entry of instruction.addEntries?.entries ?? []) {
+				const index = entries.findIndex(
+					(prior) => prior.entryId === entry.entryId,
+				);
+				if (index < 0) entries.push(entry);
+				else entries[index] = entry;
+			}
+			const replacement = instruction.replaceEntry;
+			if (replacement?.entry) {
+				const index = entries.findIndex(
+					(prior) => prior.entryId === replacement.entryIdToReplace,
+				);
+				if (index < 0) entries.push(replacement.entry);
+				else entries[index] = replacement.entry;
+			}
+		}
+		const all = [];
+		const seen = new Set();
+		let next;
+		for (const entry of entries) {
+			const operation = entry.content?.operation;
+			if (operation?.cursor) {
+				if (operation.cursor.cursorType === "Bottom") {
+					if (typeof operation.cursor.value !== "string")
+						fail("Notification continuation is invalid");
+					next = operation.cursor.value || undefined;
+				}
+				continue;
+			}
+			if (typeof entry.entryId !== "string" || !entry.entryId)
+				fail("Notification entry has no stable identity");
+			const content = entry.content?.item?.content;
+			const ref = content?.notification;
+			const note = ref ? body.globalObjects.notifications?.[ref.id] : null;
+			const tweet = content?.tweet
+				? body.globalObjects.tweets?.[content.tweet.id]
+				: null;
+			if (ref ? !note || note.id !== ref.id : !tweet)
+				fail("Notification item is unavailable or unsupported");
+			const id = `${self}:${entry.entryId}`;
+			if (seen.has(id)) continue;
+			seen.add(id);
+			if (
+				note &&
+				(typeof note.timestampMs !== "string" ||
+					!/^[0-9]+$/.test(note.timestampMs))
+			)
+				fail("Notification item has no verifiable source date");
+			const sourceTime = note
+				? Number(note.timestampMs)
+				: Date.parse(tweet.created_at);
+			if (
+				!Number.isFinite(sourceTime) ||
+				!Number.isFinite(new Date(sourceTime).getTime())
+			)
+				fail("Notification item has no verifiable source date");
+			const actorIds = [...new Set(ref?.fromUsers ?? [tweet?.user_id_str])]
+				.filter((x) => typeof x === "string" && x)
+				.sort();
+			const tweetIds = [...new Set(ref?.targetTweets ?? [content?.tweet?.id])]
+				.filter((x) => typeof x === "string" && x)
+				.sort();
+			let url = "https://x.com/notifications";
+			if (tweet)
+				url = `https://x.com/i/status/${encodeURIComponent(content.tweet.id)}`;
+			else if (ref.url?.url) {
+				try {
+					const candidate = new URL(ref.url.url, "https://x.com");
+					if (candidate.origin === "https://x.com") url = candidate.href;
+				} catch {
+					/* Keep the source inbox link. */
+				}
+			}
+			const row = {
+				id,
+				account_id: self,
+				entry_id: entry.entryId,
+				notification_id: ref?.id ?? null,
+				kind: note?.icon?.id ?? "post",
+				actor_ids: actorIds,
+				tweet_ids: tweetIds,
+				text: note?.message?.text ?? tweet?.full_text ?? "",
+				url,
+				occurred_at: new Date(sourceTime).toISOString(),
+				timestamp_basis: note ? "notification" : "post_created_at",
+			};
+			const hash = await crypto.subtle.digest(
+				"SHA-256",
+				new TextEncoder().encode(JSON.stringify(row)),
+			);
+			row.revision = Array.from(new Uint8Array(hash), (x) =>
+				x.toString(16).padStart(2, "0"),
+			).join("");
+			// Keep the content-sensitive revision, but never persist sync bodies in child action output.
+			if (input.metadataOnly) delete row.text;
+			all.push(row);
+		}
+		let start = 0;
+		if (cursor?.after) {
+			start = all.findIndex((row) => row.id === cursor.after) + 1;
+			if (!start) {
+				account(self);
+				if (input.restartExpired)
+					return { rows: [], account_id: self, expired: true };
+				fail(
+					"Notification page changed; restart the read (coverage incomplete)",
+				);
+			}
+		}
+		const rows = all.slice(start, start + limit);
+		const moreInPage = start + rows.length < all.length;
+		if (!moreInPage && cursor && next === cursor.source) {
+			if (all.length) fail("Notification cursor did not advance");
+			next = undefined;
+		}
+		const nextCursor = moreInPage
+			? JSON.stringify({
+					v: 1,
+					kind: "notifications",
+					account: self,
+					source: cursor?.source ?? null,
+					after: rows.at(-1).id,
+				})
+			: next
+				? JSON.stringify({
+						v: 1,
+						kind: "notifications",
+						account: self,
+						source: next,
+						after: null,
+					})
+				: undefined;
+		if (account() !== self)
+			fail("X account changed during the notification read");
+		return {
+			rows,
+			account_id: self,
+			hasMore: !!nextCursor,
+			...(nextCursor ? { nextCursor } : {}),
+		};
+	}
+	globalThis[key] = { version, read, listen, send, detach, readNotifications };
 }

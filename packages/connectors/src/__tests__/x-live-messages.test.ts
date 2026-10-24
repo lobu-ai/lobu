@@ -344,6 +344,7 @@ function connector() {
 function read(dispatcher: unknown, extra: Record<string, unknown> = {}) {
 	return connector().definition.feeds.live_messages.read({
 		feedKey: "live_messages",
+		sessionState: { account_id: SELF },
 		config: {},
 		credentials: null,
 		browser: dispatcher,
@@ -355,6 +356,7 @@ function read(dispatcher: unknown, extra: Record<string, unknown> = {}) {
 function send(dispatcher: unknown, input: Record<string, unknown>) {
 	return connector().execute({
 		actionKey: "send_message",
+		sessionState: { account_id: SELF },
 		input,
 		credentials: null,
 		config: {},
@@ -364,7 +366,7 @@ function send(dispatcher: unknown, input: Record<string, unknown>) {
 
 describe("X live_messages contract", () => {
 	test("bumps the connector version", () => {
-		expect(connector().definition.version).toBe("3.15.0");
+		expect(connector().definition.version).toBe("3.16.0");
 	});
 
 	test("declares message.created as a reply-to-source Automation event and keeps every feed kind", () => {
@@ -638,6 +640,7 @@ describe("X live_messages observe", () => {
 		await expect(
 			connector().definition.feeds.live_messages.observe({
 				feedKey: "live_messages",
+				sessionState: { account_id: SELF },
 				config: {},
 				credentials: null,
 				checkpoint: {
@@ -647,6 +650,163 @@ describe("X live_messages observe", () => {
 			}),
 		).rejects.toThrow("Unable to attach");
 		expect(browser.posts.every((post) => !post.record.checkpoint)).toBe(true);
+	});
+
+	test.each([
+		null,
+		{ x_dm: { account: PEER, cursor: "cursor-0", started_at: 1 } },
+	])("rejects the wrong initial saved account before source access (%j)", async (checkpoint) => {
+		const x = fakeX();
+		seed(x);
+		const browser = page(x);
+		browser.setAccount(PEER);
+		await expect(read(browser.dispatcher)).rejects.toThrow(/account/);
+		const result = await send(browser.dispatcher, {
+			conversation_id: DM,
+			text: "synthetic",
+			idempotency_key: "synthetic-wrong-account",
+		});
+		expect(result.success).toBe(false);
+		expect(result.error).toMatch(/account/);
+		await expect(
+			connector().definition.feeds.live_messages.observe({
+				feedKey: "live_messages",
+				sessionState: { account_id: SELF },
+				config: {},
+				credentials: null,
+				checkpoint,
+				browser: browser.dispatcher,
+			}),
+		).rejects.toThrow(/account/);
+		expect(x.requests).toHaveLength(0);
+		expect(browser.posts).toHaveLength(0);
+	});
+
+	test.each([
+		undefined,
+		{},
+		{ account_id: "invalid" },
+	])("requires a valid saved account before dispatch (%j)", async (sessionState) => {
+		const x = fakeX();
+		await expect(read(page(x).dispatcher, { sessionState })).rejects.toThrow(
+			/account/,
+		);
+		expect(x.requests).toHaveLength(0);
+	});
+
+	test("replays interrupted reference chunks from the durable checkpoint on every reconnect boundary", async () => {
+		const x = fakeX();
+		for (let i = 0; i < 1001; i++)
+			x.messages.push({
+				id: String(10000 + i),
+				conversation_id: DM,
+				sender_id: PEER,
+				text: "Private synthetic DM",
+				time: 1700000000000 + i,
+			});
+		const checkpoint = {
+			x_dm: { account: SELF, cursor: "cursor-0", started_at: 1 },
+		};
+		const attach = (browser) =>
+			connector().definition.feeds.live_messages.observe({
+				feedKey: "live_messages",
+				sessionState: { account_id: SELF },
+				config: {},
+				credentials: null,
+				checkpoint,
+				browser: browser.dispatcher,
+			});
+		const full = page(x);
+		await attach(full);
+		while (!full.posts.at(-1).record.checkpoint) full.ack();
+		const records = full.posts.map((p) => p.record);
+		expect(records).toHaveLength(3);
+		expect(records.slice(0, -1).every((r) => !r.checkpoint)).toBe(true);
+		expect(records.at(-1).checkpoint.previous).toEqual(checkpoint);
+		expect(records.at(-1).checkpoint.next.x_dm.cursor).toBe("cursor-1001");
+		const ids = records.flatMap((r) => r.events.map((e) => e.id));
+		expect(new Set(ids).size).toBe(1001);
+		expect(JSON.stringify(records)).not.toContain("Private synthetic DM");
+		for (let boundary = 0; boundary < records.length - 1; boundary++) {
+			const browser = page(x);
+			await attach(browser);
+			for (let i = 0; i < boundary; i++) browser.ack();
+			const accepted = browser.posts.flatMap((p) =>
+				p.record.events.map((e) => e.id),
+			);
+			const firstReplay = browser.posts.length;
+			await attach(browser);
+			while (!browser.posts.at(-1).record.checkpoint) browser.ack();
+			const replay = browser.posts.slice(firstReplay).map((p) => p.record);
+			expect(replay).toEqual(records);
+			expect(
+				[
+					...new Set([
+						...accepted,
+						...replay.flatMap((r) => r.events.map((e) => e.id)),
+					]),
+				].sort(),
+			).toEqual([...ids].sort());
+		}
+	});
+
+	test("stops pending chunk delivery when the account changes before its acknowledgement", async () => {
+		const x = fakeX();
+		for (let i = 0; i < 501; i++)
+			x.messages.push({
+				id: String(10000 + i),
+				conversation_id: DM,
+				sender_id: PEER,
+				text: "synthetic",
+				time: 1700000000000 + i,
+			});
+		const browser = page(x);
+		await connector().definition.feeds.live_messages.observe({
+			feedKey: "live_messages",
+			sessionState: { account_id: SELF },
+			config: {},
+			credentials: null,
+			checkpoint: {
+				x_dm: { account: SELF, cursor: "cursor-0", started_at: 1 },
+			},
+			browser: browser.dispatcher,
+		});
+		expect(browser.posts[0].record.events).toHaveLength(500);
+		browser.setAccount(PEER);
+		browser.ack();
+		expect(browser.posts.at(-1).record.source_error).toBeTruthy();
+		expect(browser.posts.every((p) => !p.record.checkpoint)).toBe(true);
+	});
+
+	test("surfaces an expired DM provider cursor without replacing the accepted checkpoint", async () => {
+		const x = fakeX();
+		const fetch = x.fetch;
+		x.fetch = async (path, init) =>
+			path.includes("user_updates")
+				? {
+						ok: false,
+						status: 404,
+						json: async () => ({ errors: [{ code: 34 }] }),
+					}
+				: fetch(path, init);
+		const browser = page(x);
+		const checkpoint = {
+			x_dm: { account: SELF, cursor: "cursor-retired", started_at: 1 },
+		};
+		await expect(
+			connector().definition.feeds.live_messages.observe({
+				feedKey: "live_messages",
+				sessionState: { account_id: SELF },
+				config: {},
+				credentials: null,
+				checkpoint,
+				browser: browser.dispatcher,
+			}),
+		).rejects.toThrow("Unable to attach");
+		expect(browser.posts).toHaveLength(1);
+		expect(browser.posts[0].record.source_error).toBeTruthy();
+		expect(browser.posts[0].record.checkpoint).toBeUndefined();
+		expect(checkpoint.x_dm.cursor).toBe("cursor-retired");
 	});
 
 	test("treats a quiet inbox update without entries as zero events and advances its cursor", async () => {
@@ -667,6 +827,7 @@ describe("X live_messages observe", () => {
 		const browser = page(x);
 		await connector().definition.feeds.live_messages.observe({
 			feedKey: "live_messages",
+			sessionState: { account_id: SELF },
 			config: {},
 			credentials: null,
 			checkpoint: {
@@ -694,6 +855,7 @@ describe("X live_messages observe", () => {
 		await expect(
 			connector().definition.feeds.live_messages.observe({
 				feedKey: "live_messages",
+				sessionState: { account_id: SELF },
 				config: {},
 				credentials: null,
 				checkpoint: {
@@ -714,6 +876,7 @@ describe("X live_messages observe", () => {
 		await expect(
 			connector().definition.feeds.live_messages.observe({
 				feedKey: "live_messages",
+				sessionState: { account_id: SELF },
 				config: {},
 				credentials: null,
 				checkpoint: null,
@@ -728,6 +891,7 @@ describe("X live_messages observe", () => {
 		const browser = page(x);
 		await connector().definition.feeds.live_messages.observe({
 			feedKey: "live_messages",
+			sessionState: { account_id: SELF },
 			config: {},
 			credentials: null,
 			checkpoint: null,
@@ -779,6 +943,7 @@ describe("X live_messages observe", () => {
 		await expect(
 			connector().definition.feeds.live_messages.observe({
 				feedKey: "live_messages",
+				sessionState: { account_id: SELF },
 				config: {},
 				credentials: null,
 				checkpoint: {
