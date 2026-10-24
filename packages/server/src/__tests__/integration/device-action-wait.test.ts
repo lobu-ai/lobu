@@ -266,6 +266,74 @@ describe('waitForDeviceActionRun', () => {
     expect(rows[0].error_message).toContain('no device claimed the run');
   });
 
+  it.each([
+    {
+      kind: 'device feed read',
+      actionKey: DEVICE_FEED_READ_ACTION_KEY,
+      sourceRead: false,
+      expectedInput: { scrubbed: true, feed_key: 'files' },
+    },
+    {
+      kind: 'metadata source read',
+      actionKey: 'navigate',
+      sourceRead: true,
+      expectedInput: { scrubbed: true },
+    },
+    {
+      kind: 'device feed read with source metadata',
+      actionKey: DEVICE_FEED_READ_ACTION_KEY,
+      sourceRead: true,
+      expectedInput: { scrubbed: true },
+    },
+    {
+      kind: 'ordinary action',
+      actionKey: 'navigate',
+      sourceRead: false,
+      expectedInput: null,
+    },
+  ])('atomically finalizes timeout payloads for $kind', async ({ actionKey, sourceRead, expectedInput }) => {
+    const org = await createTestOrganization();
+    await insertChromeConnector(org.id);
+    const connId = await insertChromeConnection(org.id);
+    const actionInput = {
+      feed_key: 'files',
+      query: 'private caller query',
+      sort: [{ column: 'name', direction: 'asc' }],
+      limit: 10,
+    };
+    const actionOutput = { rows: [{ name: 'private source row' }] };
+    const runId = await insertPendingActionRun(org.id, connId, actionInput);
+    const sql = getTestDb();
+    await sql`
+      UPDATE runs
+      SET action_key = ${actionKey},
+          run_metadata = ${sql.json({ [SOURCE_FEED_READ_METADATA_KEY]: sourceRead })},
+          action_output = ${sql.json(actionOutput)}
+      WHERE id = ${runId} AND organization_id = ${org.id}
+    `;
+
+    let syntheticNow = Date.now();
+    const out = await waitForDeviceActionRunWithOptions(runId, org.id, {
+      ...FAST_BUDGETS,
+      now: () => syntheticNow,
+      sleep: workerTurn(async () => {
+        syntheticNow += FAST_BUDGETS.queueMs;
+      }),
+    });
+    expect(out.status).toBe('timeout');
+
+    // Read directly after the waiter returns, without the caller's finally scrub.
+    const [row] = await sql`
+      SELECT status, action_input, action_output FROM runs
+      WHERE id = ${runId} AND organization_id = ${org.id}
+    `;
+    expect(row).toEqual({
+      status: 'timeout',
+      action_input: expectedInput ?? actionInput,
+      action_output: expectedInput ? null : actionOutput,
+    });
+  });
+
   it('honors the post-claim budget after claim — extended wait if claimed late', async () => {
     const org = await createTestOrganization();
     await insertChromeConnector(org.id);

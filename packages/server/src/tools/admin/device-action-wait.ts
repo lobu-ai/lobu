@@ -10,6 +10,10 @@
 
 import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../../config/intervals';
 import { type DbClient, getDb } from '../../db/client';
+import {
+  DEVICE_FEED_READ_ACTION_KEY,
+  SOURCE_FEED_READ_METADATA_KEY,
+} from '../../lib/device-feed-read-protocol';
 import { classifyRunOutcome } from '../../runs/run-outcome';
 import { supersedeActionEvent } from './approval-events';
 import {
@@ -399,13 +403,26 @@ export async function waitForDeviceActionRunWithOptions(
   // here, unlike the approval-gated writers in worker-api: every caller of this
   // waiter dispatches an auto run, and an auto run created before the dispatch
   // card existed has none and must still reach a terminal state.
+  // Scrub source-read payloads in this write so the terminal row cannot expose
+  // them while the caller's finally cleanup is still pending.
   const updated = (await sql.begin(async (tx) => {
     const rows = (await tx`
       UPDATE runs
       SET status = 'timeout',
           outcome = ${classifyRunOutcome({ status: 'timeout' })},
           completed_at = current_timestamp,
-          error_message = ${timeoutMessage}
+          error_message = ${timeoutMessage},
+          action_output = CASE
+            WHEN action_key = ${DEVICE_FEED_READ_ACTION_KEY}
+              OR run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true'
+              THEN NULL
+            ELSE action_output END,
+          action_input = CASE
+            WHEN run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true'
+              THEN '{"scrubbed":true}'::jsonb
+            WHEN action_key = ${DEVICE_FEED_READ_ACTION_KEY}
+              THEN jsonb_build_object('scrubbed', true, 'feed_key', action_input->>'feed_key')
+            ELSE action_input END
       WHERE id = ${runId}
         AND organization_id = ${organizationId}
         AND status IN ('pending', 'running')
