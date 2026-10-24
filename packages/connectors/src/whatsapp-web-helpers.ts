@@ -14,7 +14,7 @@ import {
   WHATSAPP_PHONE_SERVER,
 } from "./whatsapp-web-identity.js";
 
-export const WHATSAPP_ADAPTER_VERSION = 26;
+export const WHATSAPP_ADAPTER_VERSION = 27;
 export const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 
 export type ChatFilter = "all" | "individual" | "group";
@@ -50,7 +50,11 @@ export interface WhatsAppMessage {
 
 /** Reference-only observation position in WhatsApp's own local message store. */
 export interface ObservationCheckpoint {
-  observation?: { after: number; started_at: number; chat_filter: ChatFilter };
+  observation?: {
+    after: number; started_at: number; chat_filter: ChatFilter;
+    account?: string; anchor?: string | null;
+    unresolved?: Array<{ position: number; id: string; first_seen: number }>;
+  };
 }
 
 export function rawMessageId(value: unknown): string | null {

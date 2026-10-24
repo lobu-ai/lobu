@@ -61,6 +61,15 @@ interface WhatsAppWebConfig {
   chat_filter?: ChatFilter;
 }
 
+/** Use the same identity namespace as the connection's browser account probe. */
+function requireWhatsAppAccount(ctx: { sessionState?: Record<string, unknown> | null }): string {
+  const account = ctx.sessionState?.account_id;
+  if (typeof account !== "string" || !/^[0-9]+@(c\.us|s\.whatsapp\.net|lid)$/.test(account)) {
+    throw new Error("WhatsApp saved account identity is unavailable; reconnect this connection");
+  }
+  return account;
+}
+
 /** Adapter failures the bridge can recover from by re-injecting the program. */
 const REINJECTABLE_STATES = new Set([
   "adapter_unavailable",
@@ -354,7 +363,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     name: "WhatsApp",
     description:
       "Personal WhatsApp messages read live from WhatsApp Web in the paired Owletto Chrome without importing message history. Automations react to new-message references and read content on demand. Search, draft, send, edit, react to, and revoke messages.",
-    version: "2.2.0",
+    version: "2.3.0",
     faviconDomain: "whatsapp.com",
     authSchema: { methods: [{ type: "browser", mode: "live" }] },
     browser: {
@@ -386,6 +395,9 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         },
       },
       capabilities: { replyToSource: true },
+    }, {
+      key: "source.gap", label: "Source history gap", resourceType: "message",
+      description: "WhatsApp local history or an unresolved placeholder could not be recovered completely. Read retained messages separately; this is not a new message.",
     }],
     feeds: {
       live_messages: {
@@ -395,7 +407,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
           "Read messages directly from WhatsApp Web without importing history, using literal text search, id:<message ID>, or chat:<chat JID> for one chat's messages in reverse storage order. Follow cursors even after an empty filtered page. Active Automations can subscribe to new-message references. Requires the paired browser to be online and signed in; reconnects replay messages still available in WhatsApp's local history.",
         read: (ctx) => this.readMessages(ctx),
         observe: (ctx) => this.observeMessages(ctx),
-        webhook: { mode: "trigger", events: ["message.created"] },
+        webhook: { mode: "trigger", events: ["message.created", "source.gap"] },
         configSchema: {
           type: "object",
           properties: {
@@ -593,14 +605,25 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
   };
 
   private async observeMessages(ctx: FeedObserveContext<ObservationCheckpoint, WhatsAppWebConfig>): Promise<void> {
+    const account = requireWhatsAppAccount(ctx);
+    if (ctx.checkpoint?.observation?.account && ctx.checkpoint.observation.account !== account) {
+      throw new Error("WhatsApp checkpoint belongs to a different saved account");
+    }
     const dispatcher = requireBrowser(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     const chatFilter = ctx.config.chat_filter ?? "all";
     const previous = ctx.checkpoint?.observation?.chat_filter === chatFilter ? ctx.checkpoint.observation : undefined;
     const startedAt = previous?.started_at ?? Math.floor(Date.now() / 1000);
+    type Replay = {
+      after: number; anchor?: string | null;
+      unresolved?: NonNullable<ObservationCheckpoint["observation"]>["unresolved"];
+      references: Array<{ id: string; timestamp: number }>; hasMore: boolean;
+      gaps?: Array<{ id: string; event_type: string; resource_type: string; resource_ref: string }>;
+    };
     // Snapshot before attaching so replay covers messages arriving during setup.
-    let after = previous?.after ?? (await invokeAdapter<{ after: number }>(
-      dispatcher, tabId, { op: "observe_messages", input: {} })).after;
+    let position = previous ?? await invokeAdapter<Replay>(dispatcher, tabId, {
+      op: "observe_messages", account_id: account, input: {},
+    });
     const binding = await dispatcher.dispatch<{
       bridge_id: string; token: string; listening?: boolean; subscription?: { scope_key: string };
     }>("feed_listen", { tab_id: tabId });
@@ -608,37 +631,43 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       throw new Error("A browser supporting source subscriptions is required for WhatsApp");
     }
     await invokeAdapter(dispatcher, tabId, {
-      op: "listen", bridge_id: binding.bridge_id, token: binding.token,
+      op: "listen", account_id: account, bridge_id: binding.bridge_id, token: binding.token,
       chat_filter: chatFilter, minimum_timestamp: startedAt,
     });
     let cursor = ctx.checkpoint ?? null;
     for (let page = 0; page < 10; page++) {
-      const replay = await invokeAdapter<{
-        after: number; references: Array<{ id: string; timestamp: number }>; hasMore: boolean;
-      }>(dispatcher, tabId, { op: "observe_messages", input: { after, started_at: startedAt, chat_filter: chatFilter } });
+      const replay = await invokeAdapter<Replay>(dispatcher, tabId, {
+        op: "observe_messages", account_id: account,
+        input: { after: position.after, anchor: position.anchor, unresolved: position.unresolved,
+          started_at: startedAt, chat_filter: chatFilter },
+      });
       const next: ObservationCheckpoint = {
-        observation: { after: replay.after, started_at: startedAt, chat_filter: chatFilter },
+        observation: { after: replay.after, started_at: startedAt, chat_filter: chatFilter,
+          account, anchor: replay.anchor ?? null, unresolved: replay.unresolved ?? [] },
       };
-      const events = replay.references.map(reference => ({
+      const events = [...(replay.gaps ?? []), ...replay.references.map(reference => ({
         id: reference.id, event_type: "message.created", resource_type: "message",
         resource_ref: reference.id, occurred_at: new Date(reference.timestamp * 1000).toISOString(),
-      }));
+      }))];
       // Earlier chunks may be replayed after interruption; existing signal
       // dedupe handles them. Advance only after the entire page is accepted.
-      const batches = splitReferenceBatches(events, (slice, isLast, offset) => ({
-        id: `replay:${chatFilter}:${startedAt}:${after}:${replay.after}:${offset}`,
+      // The page adapter hashes the entire batch before buffering it, including
+      // placeholders and predecessor, so unchanged row positions cannot collide.
+      const batches = splitReferenceBatches(events, (slice, isLast) => ({
+        // Reserve the final SHA-256 record ID when enforcing the byte limit.
+        id: `replay:${"0".repeat(64)}`,
         events: slice,
         ...(isLast ? { checkpoint: { previous: cursor, next } } : {}),
         more: isLast && replay.hasMore && page === 9,
       }));
       for (const batch of batches) {
         await invokeAdapter(dispatcher, tabId, {
-          op: "publish_changes", bridge_id: binding.bridge_id, token: binding.token, batch,
+          op: "publish_changes", account_id: account, bridge_id: binding.bridge_id, token: binding.token, batch, transition: { previous: cursor, next },
         });
       }
       if (!replay.hasMore) return;
       cursor = next;
-      after = replay.after;
+      position = next.observation!;
     }
   }
 
@@ -648,6 +677,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
     // Source message time cannot represent edits, revokes, or delayed arrivals.
     // Automations subscribe to new-message references and read content by ID.
     assertNoWindow(ctx, "WhatsApp live reads do not support change-time windows; subscribe to message.created and read references by id:<message ID>.");
+    const account = requireWhatsAppAccount(ctx);
     const dispatcher = requireBrowser(ctx);
     const tabId = await readyWhatsAppTab(dispatcher);
     const response = await invokeAdapter<{
@@ -655,7 +685,7 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       nextCursor?: string;
       hasMore: boolean;
     }>(dispatcher, tabId, {
-      op: "read_messages",
+      op: "read_messages", account_id: account,
       input: {
         query: ctx.query,
         cursor: ctx.cursor,
@@ -692,12 +722,13 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
       return { success: false, error: `Unknown action: ${action}` };
     }
     try {
+      const account = requireWhatsAppAccount(ctx);
       const dispatcher = requireBrowser(ctx);
       const tabId = await readyWhatsAppTab(dispatcher);
       const response = await invokeAdapter<Record<string, unknown>>(
         dispatcher,
         tabId,
-        { op: action, input: ctx.input ?? {} }
+        { op: action, account_id: account, input: ctx.input ?? {} }
       );
       if (action === "search_messages") {
         return {

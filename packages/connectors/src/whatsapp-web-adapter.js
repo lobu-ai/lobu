@@ -33,7 +33,7 @@ export function whatsAppWebAdapterProgram() {
   // when this number moves: shipping a fix under the old number leaves every
   // already-open tab running the previous code with nothing to show for it.
   // Keep in lockstep with WHATSAPP_ADAPTER_VERSION in whatsapp-web-helpers.ts.
-  const ADAPTER_VERSION = 26;
+  const ADAPTER_VERSION = 27;
   const SOURCE_ERROR_ID = "whatsapp-web:source-observation-error";
   // Storage rows one `chat:` read examines; a whole personal history is
   // usually under this, so one read answers.
@@ -57,13 +57,18 @@ export function whatsAppWebAdapterProgram() {
   if (existing?.version === ADAPTER_VERSION) {
     return;
   }
-  existing?.detach?.();
+  existing?.detach?.(undefined, "WhatsApp adapter was replaced; recovery is required");
   const listeners = new Map();
 
-  function detach(bindingId) {
+  function detach(bindingId, reason) {
     const selected = bindingId ? [listeners.get(bindingId)] : [...listeners.values()];
     for (const state of selected) {
       if (!state) continue;
+      if (reason) {
+        state.error = reason;
+        state.post({ sequence: ++state.sequence, record: { id: SOURCE_ERROR_ID, source_error: reason } });
+      }
+      for (const entry of state.pending.values()) entry.reject?.(new Error(reason ?? "Source listener was detached"));
       state.collection.off("add", state.onAdd);
       state.collection.off("change", state.onChange);
       window.removeEventListener("message", state.onReply);
@@ -71,7 +76,19 @@ export function whatsAppWebAdapterProgram() {
     }
   }
 
+  function assertAccount(account) {
+    if (typeof account !== "string" || !account || widString(meUser()) !== account) {
+      throw new Error("WhatsApp saved account changed or is unavailable; reconnect this connection");
+    }
+  }
+
+  async function digest(value) {
+    const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, "0")).join("");
+  }
+
   function listen(request) {
+    assertAccount(request.account_id);
     const collection = requireFirst(["WAWebCollections"])?.Msg;
     if (typeof collection?.on !== "function" || typeof collection?.off !== "function") {
       throw new Error("WhatsApp message observation is unavailable in this build");
@@ -94,7 +111,8 @@ export function whatsAppWebAdapterProgram() {
       });
     };
     const resident = listeners.get(request.bridge_id);
-    const previous = resident?.request.chat_filter === request.chat_filter
+    const previous = resident?.request.account_id === request.account_id
+      && resident?.request.chat_filter === request.chat_filter
       && resident?.request.minimum_timestamp === request.minimum_timestamp ? resident : null;
     detach(request.bridge_id);
     // A new listener identity fences pending normalization from the detached
@@ -116,8 +134,10 @@ export function whatsAppWebAdapterProgram() {
       const sequence = ++state.sequence;
       // A throwing model getter must reach the error record below, not escape
       // the collection handler, so the reference is read inside the promise.
-      void new Promise((resolve) => resolve(messageReference(model))).then((record) => {
-        if (listeners.get(state.id) !== state || !record || record.timestamp <= 0) return;
+      void new Promise((resolve) => { assertAccount(state.request.account_id); resolve(messageReference(model)); }).then((record) => {
+        if (listeners.get(state.id) !== state) return;
+        assertAccount(state.request.account_id);
+        if (!record || record.timestamp <= 0) return;
         if (state.request.chat_filter === "group" && !record.is_group) return;
         if (state.request.chat_filter === "individual" && record.is_group) return;
         if (state.request.minimum_timestamp != null && record.timestamp < state.request.minimum_timestamp) return;
@@ -160,6 +180,11 @@ export function whatsAppWebAdapterProgram() {
       if (event.source !== window || event.origin !== location.origin || event.data?.token !== state.token) return;
       if (event.data.type === "lobu-feed-record:stop") { detach(state.id); return; }
       if (event.data.type !== "lobu-feed-record:ack") return;
+      try { assertAccount(state.request.account_id); }
+      catch {
+        detach(state.id, "WhatsApp saved account changed; recovery is required");
+        return;
+      }
       for (const [id, entry] of state.pending) {
         if (entry.sequence !== event.data.sequence) continue;
         if (event.data.ok) {
@@ -192,7 +217,12 @@ export function whatsAppWebAdapterProgram() {
   async function publishChanges(request) {
     const state = listeners.get(request.bridge_id);
     if (!state || state.token !== request.token) throw new Error("Source listener is unavailable");
-    const record = request.batch;
+    assertAccount(state.request.account_id);
+    // Include the complete transition, not just row positions: a hydrated
+    // placeholder can change a batch while its insertion cursor stays fixed.
+    const record = { ...request.batch, id: `replay:${await digest(JSON.stringify([request.transition ?? null, request.batch]))}` };
+    if (listeners.get(state.id) !== state) throw new Error("Source listener was replaced");
+    assertAccount(state.request.account_id);
     const bytes = new TextEncoder().encode(JSON.stringify(record)).length;
     const previous = state.pending.get(record.id);
     if (bytes > MAX_RECORD_BYTES || state.pendingBytes - (previous?.bytes ?? 0) + bytes > MAX_BUFFER_BYTES ||
@@ -360,10 +390,14 @@ export function whatsAppWebAdapterProgram() {
     return { id, timestamp: unixSeconds(row), is_group: remote.endsWith("@g.us") };
   }
 
-  /** Resume insertion order after reconnect without exporting any message body. */
+  /** Replay retained routing metadata; row IDs alone do not survive a rebuild. */
   async function observeMessages(input = {}) {
     const after = input.after ?? null;
     if (after !== null && (!Number.isSafeInteger(after) || after < 0)) throw new Error("Invalid WhatsApp observation cursor");
+    const pending = input.unresolved ?? [];
+    if (!Array.isArray(pending) || pending.length > 32 || pending.some(row =>
+      !Number.isSafeInteger(row.position) || row.position <= 0 || typeof row.id !== "string" || row.id.length > 512 ||
+      !Number.isSafeInteger(row.first_seen) || row.first_seen < 0)) throw new Error("Invalid WhatsApp pending placeholder cursor");
     const database = await new Promise((resolve, reject) => {
       const request = indexedDB.open("model-storage");
       request.onupgradeneeded = () => { request.transaction.abort(); reject(new Error("WhatsApp source history database is unavailable")); };
@@ -371,48 +405,82 @@ export function whatsAppWebAdapterProgram() {
       request.onblocked = () => reject(new Error("WhatsApp source history database is blocked"));
       request.onsuccess = () => resolve(request.result);
     });
-    let rows;
+    const now = Math.floor(Date.now() / 1000);
+    const gaps = [];
+    const gap = (reason, detail) => gaps.push({ reason, detail });
+    const scan = (position, limit, direction = "next", inclusive = false) => new Promise((resolve, reject) => {
+      const transaction = database.transaction("message", "readonly");
+      transaction.onabort = () => reject(transaction.error ?? new Error("WhatsApp source observation aborted"));
+      const index = transaction.objectStore("message").index("rowId");
+      const request = index.openCursor(position === null ? null : IDBKeyRange.lowerBound(position, !inclusive), direction);
+      const page = [];
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) { resolve(page); return; }
+        if (!Number.isSafeInteger(cursor.key) || cursor.key <= 0 || typeof cursor.value.id !== "string" || cursor.value.id.length > 512) {
+          reject(new Error("WhatsApp source history has an unsupported key layout")); return;
+        }
+        page.push({ position: cursor.key, id: cursor.value.id, timestamp: unixSeconds(cursor.value), type: cursor.value.type });
+        if (page.length >= limit) resolve(page); else cursor.continue();
+      };
+    });
+    let rows, rechecks;
     try {
-      rows = await new Promise((resolve, reject) => {
-        const transaction = database.transaction("message", "readonly");
-        transaction.onabort = () => reject(transaction.error ?? new Error("WhatsApp source observation aborted"));
-        const index = transaction.objectStore("message").index("rowId");
-        const request = index.openCursor(after === null ? null : IDBKeyRange.lowerBound(after, true), after === null ? "prev" : "next");
-        const page = [];
-        request.onerror = () => reject(request.error);
-        request.onsuccess = () => {
-          const cursor = request.result;
-          if (!cursor) { resolve(page); return; }
-          if (!Number.isSafeInteger(cursor.key) || cursor.key <= 0 || typeof cursor.value.id !== "string") {
-            reject(new Error("WhatsApp source history has an unsupported key layout")); return;
-          }
-          page.push({ position: cursor.key, id: cursor.value.id, timestamp: unixSeconds(cursor.value), type: cursor.value.type });
-          if (after === null || page.length > 500) resolve(page);
-          else cursor.continue();
-        };
-      });
-    } finally { database.close(); }
-    if (after === null) return { after: rows[0]?.position ?? 0, references: [], hasMore: false };
-    const page = rows.slice(0, 500);
-    const references = [];
-    if (page.length) {
-      const keys = requireFirst(["WAWebMsgKey"]);
-      if (typeof keys?.fromString !== "function") throw new Error("WhatsApp source message keys are unavailable");
-      for (const row of page) {
-        // IndexedDB already contains routing and time metadata. Loading message
-        // models would hydrate private content and fails for status entries.
-        const reference = messageReference({ id: keys.fromString(row.id), t: row.timestamp, type: row.type });
-        if (!reference) continue;
-        // Timestamp-zero rows are source placeholders, not messages. A later
-        // hydration change is also observed by the reference listener.
-        if (reference.timestamp <= 0) continue;
-        if (reference.timestamp < input.started_at) continue;
-        if (input.chat_filter === "group" && !reference.is_group) continue;
-        if (input.chat_filter === "individual" && reference.is_group) continue;
-        references.push(reference);
+      if (after === null) {
+        rows = await scan(null, 1, "prev");
+        const head = rows[0];
+        return { after: head?.position ?? 0, anchor: head?.id ?? null,
+          unresolved: head?.timestamp === 0 ? [{ position: head.position, id: head.id, first_seen: now }] : [],
+          references: [], gaps: [], hasMore: false };
       }
+      let start = after;
+      if (after > 0) {
+        const [anchor] = await scan(after, 1, "next", true);
+        if (!input.anchor || anchor?.position !== after || anchor.id !== input.anchor) {
+          gap("history-continuity", [after, input.anchor ?? null]);
+          start = 0;
+        }
+      }
+      rechecks = await Promise.all(pending.map(async item => ({ item, row: (await scan(item.position, 1, "next", true))[0] })));
+      rows = await scan(start, 501);
+    } finally { database.close(); }
+    const page = rows.slice(0, 500);
+    const references = new Map();
+    const unresolved = new Map();
+    const keys = requireFirst(["WAWebMsgKey"]);
+    if ((page.length || rechecks.length) && typeof keys?.fromString !== "function") throw new Error("WhatsApp source message keys are unavailable");
+    const accept = (row, firstSeen = now) => {
+      const reference = messageReference({ id: keys.fromString(row.id), t: row.timestamp, type: row.type });
+      if (!reference) return;
+      if (input.chat_filter === "group" && !reference.is_group) return;
+      if (input.chat_filter === "individual" && reference.is_group) return;
+      if (reference.timestamp <= 0) {
+        if (now - firstSeen >= 7 * 24 * 60 * 60) gap("placeholder-expired", [row.position, row.id, firstSeen]);
+        else if (unresolved.size < 32 || unresolved.has(row.id)) unresolved.set(row.id, { position: row.position, id: row.id, first_seen: firstSeen });
+        else gap("placeholder-capacity", [row.position, row.id]);
+        return;
+      }
+      if (reference.timestamp >= input.started_at) references.set(reference.id, reference);
+    };
+    const checked = new Set();
+    for (const { item, row } of rechecks) {
+      if (!row || row.position !== item.position || row.id !== item.id) gap("placeholder-unavailable", [item.position, item.id]);
+      else { checked.add(item.id); accept(row, item.first_seen); }
     }
-    return { after: page[page.length - 1]?.position ?? after, references, hasMore: rows.length > 500 };
+    for (const row of page) if (!checked.has(row.id)) accept(row);
+    const last = page[page.length - 1];
+    const rebased = gaps.some(item => item.reason === "history-continuity");
+    return {
+      after: last?.position ?? (rebased ? 0 : after),
+      anchor: last?.id ?? (rebased ? null : input.anchor ?? null),
+      unresolved: [...unresolved.values()], references: [...references.values()], hasMore: rows.length > 500,
+      gaps: await Promise.all(gaps.map(async item => {
+        const identity = await digest(JSON.stringify([input.account_id, input.started_at, input.chat_filter, item]));
+        return { id: `gap:${identity}`, event_type: "source.gap", resource_type: "message",
+          resource_ref: `whatsapp:${item.reason}:${identity}` };
+      })),
+    };
   }
 
   function models(collection) {
@@ -933,7 +1001,7 @@ export function whatsAppWebAdapterProgram() {
    * `id:<message ID>` read is the exception: ids are unique, so it walks
    * history until that message and answers in one read.
    */
-  async function readMessages(input = {}) {
+  async function readMessages(input = {}, account) {
     const query = String(input.query ?? "").trim();
     const chatFilter = input.chat_filter ?? "all";
     const limit = Math.min(100, Math.max(1, Math.trunc(Number(input.limit) || 50)));
@@ -941,7 +1009,7 @@ export function whatsAppWebAdapterProgram() {
     if (input.cursor) {
       const cursor = JSON.parse(input.cursor);
       if (cursor.v !== 1 || !Number.isSafeInteger(cursor.before) || cursor.before <= 0 ||
-        cursor.query !== query || cursor.chat_filter !== chatFilter) {
+        cursor.query !== query || cursor.chat_filter !== chatFilter || cursor.account !== account) {
         throw new Error("Invalid WhatsApp source cursor or changed query scope");
       }
       before = cursor.before;
@@ -1051,7 +1119,7 @@ export function whatsAppWebAdapterProgram() {
     return {
       results,
       hasMore,
-      ...(hasMore ? { nextCursor: JSON.stringify({ v: 1, before: last.position, query, chat_filter: chatFilter }) } : {}),
+      ...(hasMore ? { nextCursor: JSON.stringify({ v: 1, before: last.position, query, chat_filter: chatFilter, account }) } : {}),
     };
   }
 
@@ -1166,7 +1234,7 @@ export function whatsAppWebAdapterProgram() {
     };
   }
 
-  async function draftMessage(input) {
+  async function draftMessage(input, account) {
     const collections = requireFirst(["WAWebCollections"]);
     const chat = await resolveChat(collections, input);
     const text = String(input?.text ?? "");
@@ -1187,11 +1255,13 @@ export function whatsAppWebAdapterProgram() {
     ]) {
       if (typeof fn !== "function") continue;
       try {
+        assertAccount(account);
         await fn.call(module, chat, draft);
         applied = true;
         break;
       } catch {
         try {
+          assertAccount(account);
           await fn.call(module, draft, chat);
           applied = true;
           break;
@@ -1201,6 +1271,7 @@ export function whatsAppWebAdapterProgram() {
       }
     }
     if (!applied && typeof chat?.setDraft === "function") {
+      assertAccount(account);
       await chat.setDraft(draft);
       applied = true;
     }
@@ -1220,7 +1291,7 @@ export function whatsAppWebAdapterProgram() {
     };
   }
 
-  async function sendMessage(input) {
+  async function sendMessage(input, account) {
     const collections = requireFirst(["WAWebCollections"]);
     const chat = await resolveChat(collections, input);
     const text = String(input?.text ?? "");
@@ -1241,6 +1312,7 @@ export function whatsAppWebAdapterProgram() {
       const plannedId = rawId(data?.id);
       if (!plannedId)
         throw new Error("WhatsApp did not assign an id to the outgoing message");
+      assertAccount(account);
       await module.addAndSendTextMsg(chat, data);
       return {
         sent: true,
@@ -1254,6 +1326,7 @@ export function whatsAppWebAdapterProgram() {
       throw new Error(
         "WhatsApp send capability is unavailable in this web build"
       );
+    assertAccount(account);
     const result =
       fn === chat?.sendMessage
         ? await fn.call(chat, text)
@@ -1308,7 +1381,7 @@ export function whatsAppWebAdapterProgram() {
     return message;
   }
 
-  async function editMessage(input) {
+  async function editMessage(input, account) {
     const collections = requireFirst(["WAWebCollections"]);
     const message = resolveMessage(collections, input?.message_id);
     const before = modelData(message);
@@ -1339,6 +1412,7 @@ export function whatsAppWebAdapterProgram() {
     // `canEditText(chat)` check fail and reject with "Cannot edit message",
     // an error that reads like the message was ineligible when in fact it
     // was being handed the wrong object.
+    assertAccount(account);
     await (fn === message?.edit
       ? fn.call(message, text)
       : fn.call(module, message, text, {}));
@@ -1355,7 +1429,7 @@ export function whatsAppWebAdapterProgram() {
     };
   }
 
-  async function reactMessage(input) {
+  async function reactMessage(input, account) {
     const collections = requireFirst(["WAWebCollections"]);
     const message = resolveMessage(collections, input?.message_id);
     const emoji = input?.remove ? "" : String(input?.emoji ?? "");
@@ -1368,6 +1442,7 @@ export function whatsAppWebAdapterProgram() {
       throw new Error(
         "WhatsApp reaction capability is unavailable in this web build"
       );
+    assertAccount(account);
     await (fn === message?.react
       ? fn.call(message, emoji)
       : fn.call(module, message, emoji));
@@ -1410,7 +1485,7 @@ export function whatsAppWebAdapterProgram() {
     };
   }
 
-  async function revokeMessage(input) {
+  async function revokeMessage(input, account) {
     const collections = requireFirst(["WAWebCollections"]);
     const message = resolveMessage(collections, input?.message_id);
     const before = modelData(message);
@@ -1440,6 +1515,7 @@ export function whatsAppWebAdapterProgram() {
       throw new Error(
         "WhatsApp revoke capability is unavailable in this web build"
       );
+    assertAccount(account);
     if (fn === message?.sendRevoke || fn === message?.revoke)
       await fn.call(message);
     else await fn.call(module, [message], modelData(message).id?.remote);
@@ -1474,9 +1550,16 @@ export function whatsAppWebAdapterProgram() {
           ? { ok: true, status, capabilities: operationCapabilities() }
           : { ok: false, error: status };
       }
+      assertAccount(request.account_id);
+      const input = { ...request.input, account_id: request.account_id };
+      const finish = async promise => {
+        const value = await promise;
+        assertAccount(request.account_id);
+        return { ok: true, ...value };
+      };
       if (request.op === "listen") return listen(request);
       if (request.op === "publish_changes") return await publishChanges(request);
-      if (request.op === "observe_messages") return { ok: true, ...(await observeMessages(request.input)) };
+      if (request.op === "observe_messages") return await finish(observeMessages(input));
       const capabilities = operationCapabilities();
       if (capabilities[request.op] !== true) {
         return {
@@ -1488,24 +1571,27 @@ export function whatsAppWebAdapterProgram() {
         };
       }
       if (request.op === "read_messages")
-        return { ok: true, ...(await readMessages(request.input)) };
+        return await finish(readMessages(input, request.account_id));
       if (request.op === "search_messages")
-        return { ok: true, ...(await searchMessages(request.input)) };
+        return await finish(searchMessages(input));
       if (request.op === "draft_message")
-        return { ok: true, ...(await draftMessage(request.input)) };
+        return await finish(draftMessage(input, request.account_id));
       if (request.op === "send_message")
-        return { ok: true, ...(await sendMessage(request.input)) };
+        return await finish(sendMessage(input, request.account_id));
       if (request.op === "edit_message")
-        return { ok: true, ...(await editMessage(request.input)) };
+        return await finish(editMessage(input, request.account_id));
       if (request.op === "react_message")
-        return { ok: true, ...(await reactMessage(request.input)) };
+        return await finish(reactMessage(input, request.account_id));
       if (request.op === "revoke_message")
-        return { ok: true, ...(await revokeMessage(request.input)) };
+        return await finish(revokeMessage(input, request.account_id));
       return {
         ok: false,
         error: { state: "unsupported_operation", reason: String(request?.op) },
       };
     } catch (error) {
+      if (request?.account_id && widString(meUser()) !== request.account_id) {
+        error = new Error("WhatsApp saved account changed or is unavailable; reconnect this connection");
+      }
       return {
         ok: false,
         error: {
