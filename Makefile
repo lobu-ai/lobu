@@ -390,8 +390,8 @@ pre-pr:
 	@echo "✅ pre-pr gates clean. NOTE: confirm your fix is in 'git show HEAD:<file>',"
 	@echo "   not just the working tree — a fix that isn't committed won't reach CI."
 
-# OPTIONAL full-gate runner (GitHub CI is canonical). Auto prefers Boat, then
-# Daytona, then local when CLIs are absent; installed faulty CLIs fail closed.
+# OPTIONAL full-gate runner (GitHub CI is canonical). Auto prefers Daytona,
+# then Boat, then local when CLIs are absent; installed faulty CLIs fail closed.
 # REMOTE_CI_PROVIDER=boat|daytona|local forces a provider; REMOTE_JOBS narrows
 # the job list. Stage intended files first: remote runs use the exact index.
 # Boat: authenticated CLI; BOAT_TYPE=default, optional BOAT_SNAPSHOT=<name>.

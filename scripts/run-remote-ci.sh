@@ -2,7 +2,7 @@
 # Run the Linux CI graph against local changes (optional; GitHub CI is canonical).
 #
 # Provider (REMOTE_CI_PROVIDER, default: auto):
-#   auto    - prefer Boat, then Daytona, then local when CLIs are absent.
+#   auto    - prefer Daytona, then Boat, then local when CLIs are absent.
 #             An installed but unusable provider fails closed.
 #   boat    - require Boat (fail closed if unavailable).
 #   daytona - require Daytona (fail closed if unavailable).
@@ -70,19 +70,19 @@ boat_probe() {
 PROVIDER="${REMOTE_CI_PROVIDER:-auto}"
 case "$PROVIDER" in
   auto)
-    case "$(boat_probe)" in
-      ready) PROVIDER=boat ;;
+    case "$(daytona_probe)" in
+      ready) PROVIDER=daytona ;;
       faulty)
-        echo "Boat CLI is installed but not usable — refusing to silently fall back." >&2
-        echo "Update Boat (boat self-update) and run 'boat login', or select REMOTE_CI_PROVIDER=daytona|local explicitly." >&2
+        echo "Daytona CLI is installed but not usable — refusing to silently fall back." >&2
+        echo "Run 'daytona login', or select REMOTE_CI_PROVIDER=boat|local explicitly." >&2
         exit 2 ;;
       absent)
-        case "$(daytona_probe)" in
-          ready) PROVIDER=daytona ;;
+        case "$(boat_probe)" in
+          ready) PROVIDER=boat ;;
           absent) PROVIDER=local ;;
           faulty)
-            echo "Daytona CLI is installed but not usable — refusing to silently fall back." >&2
-            echo "Run 'daytona login', or select REMOTE_CI_PROVIDER=local explicitly." >&2
+            echo "Boat CLI is installed but not usable — refusing to silently fall back." >&2
+            echo "Update Boat (boat self-update) and run 'boat login', or select REMOTE_CI_PROVIDER=daytona|local explicitly." >&2
             exit 2 ;;
         esac ;;
     esac

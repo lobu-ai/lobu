@@ -36,7 +36,7 @@ case "$1" in
  *) exit 99 ;;
 esac
 MOCK
-# Daytona must not run when Boat is present (including faulty Boat).
+# Explicit Boat selection must not invoke Daytona.
 printf '#!/usr/bin/env bash\nexit 92\n' > "$base/bin/daytona"
 chmod +x "$base/bin/boat" "$base/bin/daytona"
 export PATH="$base/bin:$PATH" BOAT_CALL_LOG="$base/calls" BOAT_ARCHIVE="$base/tree.tar.gz"
@@ -54,8 +54,6 @@ export BOAT_RUN_RC=37
 export BOAT_RUN_RC=124
 [ "$(run_rc unit)" = 124 ] || fail 'timeout exit lost'
 unset BOAT_RUN_RC
-export REMOTE_CI_PROVIDER=auto
-[ "$(run_rc unit)" = 0 ] || fail 'auto did not prefer Boat'
 export BOAT_STATUS_RC=1
 [ "$(run_rc unit)" = 2 ] || fail 'faulty Boat fell through to another provider'
 unset BOAT_STATUS_RC
@@ -103,11 +101,17 @@ rm -f "$BOAT_CALL_LOG"
 )
 # Exercise auto fallback with a controlled PATH: no host-installed provider.
 mkdir -p "$base/fallback-bin"
-for tool in bash dirname git mkdir mktemp tar gzip awk rm grep tail; do
+for tool in bash dirname git mkdir mktemp tar gzip awk rm grep tail cp cat; do
  ln -s "$(command -v "$tool")" "$base/fallback-bin/$tool"
 done
 export REMOTE_CI_PROVIDER=auto
 [ "$(PATH="$base/fallback-bin" run_rc unit)" = 91 ] || fail 'absent CLIs did not choose local'
+git -C "$base/repo" add -- input.txt packages/owletto
+cp "$base/bin/boat" "$base/fallback-bin/boat"
+[ "$(PATH="$base/fallback-bin" run_rc unit)" = 0 ] || fail "absent Daytona did not choose available Boat: $(cat "$base/output")"
+export BOAT_STATUS_RC=1
+[ "$(PATH="$base/fallback-bin" run_rc unit)" = 2 ] || fail 'faulty Boat fallback was accepted'
+unset BOAT_STATUS_RC
 if command -v jq >/dev/null; then
  ln -s "$(command -v jq)" "$base/fallback-bin/jq"
  cat > "$base/fallback-bin/daytona" <<'DAYTONA'
@@ -116,7 +120,11 @@ if command -v jq >/dev/null; then
 exit 1
 DAYTONA
  chmod +x "$base/fallback-bin/daytona"
+ rm -f "$BOAT_CALL_LOG"
  [ "$(PATH="$base/fallback-bin" GATE_SKIP_SETTLED_CHECK=1 run_rc unit)" = 1 ] || fail "Daytona fallback did not fail on create: $(cat "$base/output")"
- grep -q 'provider: daytona' "$base/output" || fail 'auto did not select available Daytona'
+ grep -q 'provider: daytona' "$base/output" || fail 'auto did not prefer available Daytona'
+ [ ! -e "$BOAT_CALL_LOG" ] || fail 'Boat ran despite available Daytona'
+ printf '#!/usr/bin/env bash\nexit 1\n' > "$base/fallback-bin/daytona"
+ [ "$(PATH="$base/fallback-bin" run_rc unit)" = 2 ] || fail 'faulty Daytona fell through to Boat'
 fi
 echo 'ok - Boat dispatch, exact staged archive, secrets, failure and timeout guards'
