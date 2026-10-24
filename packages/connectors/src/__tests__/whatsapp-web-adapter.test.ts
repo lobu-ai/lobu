@@ -1,7 +1,14 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "bun:test";
-import { WHATSAPP_ADAPTER_VERSION } from "../whatsapp-web-helpers.js";
+import { readFileSync } from "node:fs";
 import { whatsAppWebAdapterProgram } from "../whatsapp-web-adapter.js";
+import { WHATSAPP_ADAPTER_VERSION } from "../whatsapp-web-helpers.js";
+
+function bindAccount(adapter: any, account: string) {
+  const invoke = adapter.invoke;
+  adapter.invoke = (request: any) =>
+    invoke({ account_id: account, ...request });
+  return adapter;
+}
 
 /**
  * The connector ships this adapter by serialising the function with
@@ -206,8 +213,74 @@ describe("whatsAppWebAdapterProgram send_message", () => {
       `"use strict";(${whatsAppWebAdapterProgram.toString()})();`,
     );
     run(...Object.values(page));
-    return globals.__owlettoWhatsAppAdapterV1;
+    return bindAccount(globals.__owlettoWhatsAppAdapterV1, "447000000000@c.us");
   }
+
+  it.each([
+    "resolve",
+    "construct",
+  ])("does not send if the account changes during %s", async (stage) => {
+    let account = "447000000000@c.us";
+    const sent: unknown[] = [];
+    const chat = { id: { _serialized: account } };
+    const modules: Record<string, any> = {
+      WAWebUserPrefsMeUser: { getMaybeMePnUser: () => account },
+      WAWebCollections: { Chat: { _models: [chat] }, Msg: { _models: [] } },
+      WAWebSendTextMsgChatAction: {
+        createTextMsgData: async () => {
+          if (stage === "construct") account = "447000000001@c.us";
+          return { id: msgId("SYNTHETIC") };
+        },
+        addAndSendTextMsg: (...args: unknown[]) => sent.push(args),
+      },
+    };
+    const globals: Record<string, any> = {};
+    new Function(
+      "globalThis",
+      "window",
+      `(${whatsAppWebAdapterProgram.toString()})();`,
+    )(globals, { require: (name: string) => modules[name] });
+    const request = globals.__owlettoWhatsAppAdapterV1.invoke({
+      op: "send_message",
+      adapter_version: WHATSAPP_ADAPTER_VERSION,
+      account_id: account,
+      input: { chat_jid: account, text: "private synthetic text" },
+    });
+    if (stage === "resolve") account = "447000000001@c.us";
+    expect(await request).toMatchObject({ ok: false });
+    expect(sent).toEqual([]);
+  });
+
+  it("does not try a draft fallback after the account changes", async () => {
+    let account = "15550000001@c.us";
+    let calls = 0;
+    const chat = { id: { _serialized: account } };
+    const modules: Record<string, any> = {
+      WAWebUserPrefsMeUser: { getMaybeMePnUser: () => account },
+      WAWebCollections: { Chat: { _models: [chat] }, Msg: { _models: [] } },
+      WAWebChatDraftUtils: {
+        setDraft: async () => {
+          calls++;
+          account = "15550000002@c.us";
+          throw new Error("uncertain provider result");
+        },
+      },
+    };
+    const globals: Record<string, any> = {};
+    new Function(
+      "globalThis",
+      "window",
+      `(${whatsAppWebAdapterProgram.toString()})();`,
+    )(globals, { require: (name: string) => modules[name] });
+    const result = await globals.__owlettoWhatsAppAdapterV1.invoke({
+      op: "draft_message",
+      adapter_version: WHATSAPP_ADAPTER_VERSION,
+      account_id: account,
+      input: { chat_jid: account, text: "synthetic draft" },
+    });
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
 
   it("returns the id WhatsApp assigned, not one read off the ack", async () => {
     const sent: string[] = [];
@@ -396,6 +469,7 @@ describe("whatsAppWebAdapterProgram message actions", () => {
     };
     const modules: Record<string, unknown> = {
       WAWebCollections: { Msg: { _models: [message] }, Chat: { _models: [] } },
+      WAWebUserPrefsMeUser: { getMaybeMePnUser: () => "15550000001@c.us" },
       WAWebMsgActionCapability: opts.capability ?? {},
       WAWebSendMessageEditAction: {
         sendMessageEdit: (...args: unknown[]) => {
@@ -435,7 +509,12 @@ describe("whatsAppWebAdapterProgram message actions", () => {
       `"use strict";(${whatsAppWebAdapterProgram.toString()})();`,
     );
     run(...Object.values(page));
-    return { adapter: globals.__owlettoWhatsAppAdapterV1, message };
+    return { adapter: bindAccount(
+        globals.__owlettoWhatsAppAdapterV1,
+        "15550000001@c.us",
+      ),
+      message,
+    };
   }
 
   const V = WHATSAPP_ADAPTER_VERSION;
@@ -590,6 +669,7 @@ describe("whatsAppWebAdapterProgram mentions of the own account", () => {
     run(...Object.values(page));
     const result = await globals.__owlettoWhatsAppAdapterV1.invoke({
       op: "search_messages",
+      account_id: ME_PN,
       adapter_version: WHATSAPP_ADAPTER_VERSION,
       input: { query: "hey" },
     });
@@ -668,9 +748,11 @@ describe("whatsAppWebAdapterProgram version", () => {
 
 describe("WhatsApp source observation", () => {
   function install(toPn?: (value: unknown) => unknown) {
+    let account = "15550000001@c.us";
     const handlers = new Map<string, Set<(model: unknown) => void>>();
     const replies = new Set<(event: unknown) => void>();
     const posts: any[] = [];
+    const postWaiters = new Map<number, () => void>();
     const collection = {
       _models: [],
       on: (kind: string, fn: (model: unknown) => void) => {
@@ -683,19 +765,45 @@ describe("WhatsApp source observation", () => {
     const window = {
       require: (name: string) => name === "WAWebCollections"
         ? { Msg: collection, Chat: { _models: [] }, Contact: { _models: [] } }
-        : name === "WAWebLidMigrationUtils" ? { toPn } : null,
+        : name === "WAWebUserPrefsMeUser"
+            ? { getMaybeMePnUser: () => account }
+            : name === "WAWebLidMigrationUtils" ? { toPn } : null,
       addEventListener: (_kind: string, fn: (event: unknown) => void) => replies.add(fn),
       removeEventListener: (_kind: string, fn: (event: unknown) => void) => replies.delete(fn),
-      postMessage: (data: unknown) => posts.push(data),
+      postMessage: (data: unknown) => {
+        posts.push(data);
+        for (const [count, resolve] of postWaiters) {
+          if (posts.length < count) continue;
+          postWaiters.delete(count);
+          resolve();
+        }
+      },
     };
     new Function("globalThis", "window", "location", `(${whatsAppWebAdapterProgram.toString()})();`)(globals, window, { origin: "https://web.whatsapp.com" });
     const adapter = globals.__owlettoWhatsAppAdapterV1;
     return {
       posts, handlers,
-      publish: (batch: unknown) => adapter.invoke({ op: "publish_changes", adapter_version: WHATSAPP_ADAPTER_VERSION,
-        bridge_id: "synthetic-feed", token: "synthetic-token", batch }),
-      listen: (token = "synthetic-token", extra = {}) => adapter.invoke({ op: "listen", adapter_version: WHATSAPP_ADAPTER_VERSION, bridge_id: "synthetic-feed", token, minimum_timestamp: 1000, ...extra }),
-      emit: (kind: string, body: string, t = 1100, remote = "15550000000@c.us") => {
+      posted: (count: number) => posts.length >= count
+        ? Promise.resolve()
+        : new Promise<void>(resolve => postWaiters.set(count, resolve)),
+      changeAccount: () => {
+        account = "15550000002@c.us";
+      },
+      replace: () => {
+        globals.__owlettoWhatsAppAdapterV1.version--;
+    new Function("globalThis", "window", "location", `(${whatsAppWebAdapterProgram.toString()})();`)(globals, window, { origin: "https://web.whatsapp.com" });
+      },
+      publish: (batch: unknown) => adapter.invoke({ op: "publish_changes",
+          account_id: "15550000001@c.us",
+          adapter_version: WHATSAPP_ADAPTER_VERSION,
+        bridge_id: "synthetic-feed", token: "synthetic-token", batch,
+        }),
+      listen: (token = "synthetic-token", extra = {}) => adapter.invoke({ op: "listen",
+          account_id: "15550000001@c.us",
+          adapter_version: WHATSAPP_ADAPTER_VERSION, bridge_id: "synthetic-feed", token, minimum_timestamp: 1000, ...extra,
+        }),
+      emit: (kind: string, body: string, t = 1100, remote = "15550000000@c.us",
+      ) => {
         for (const fn of handlers.get(kind) ?? []) fn({ attributes: { id: { id: "synthetic-message", remote }, from: "15550000000@c.us", body, type: "chat", t } });
       },
       emitModel: (kind: string, model: unknown) => {
@@ -706,15 +814,120 @@ describe("WhatsApp source observation", () => {
   }
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+  it("refuses an initial listener for a different saved session account", async () => {
+    const source = install();
+    source.changeAccount();
+    expect(
+      await source.listen("reference-token", {
+        account_id: "15550000001@c.us",
+      }),
+    ).toMatchObject({ ok: false });
+    expect(source.handlers.get("add")?.size ?? 0).toBe(0);
+  });
+
+  it("fences a live reference when the account changes before normalization finishes", async () => {
+    const source = install();
+    await source.listen("reference-token", { account_id: "15550000001@c.us" });
+    source.emit("add", "private message from another account");
+    source.changeAccount();
+    await settle();
+    expect(source.posts.some((post) => post.record.source_error)).toBe(true);
+    expect(source.posts.some((post) => post.record.events?.length)).toBe(false);
+  });
+
+  it("reports a recoverable source error before replacing an attached adapter", async () => {
+    const source = install();
+    await source.listen("reference-token", { account_id: "15550000001@c.us" });
+    source.replace();
+    expect(source.posts.some((post) => post.record.source_error)).toBe(true);
+    expect(source.handlers.get("add")?.size).toBe(0);
+  });
+
+  it("refuses an acceptance receipt after the saved account changes", async () => {
+    const source = install();
+    await source.listen();
+    const published = source.publish({
+      id: "page",
+      events: [],
+      checkpoint: { previous: null, next: { after: 1 } },
+    });
+    await source.posted(1);
+    const receipt = source.posts[0];
+    source.changeAccount();
+    source.reply({
+      type: "lobu-feed-record:ack",
+      token: receipt.token,
+      sequence: receipt.sequence,
+      ok: true,
+    });
+    expect(await published).toMatchObject({ ok: false });
+    expect(source.posts.at(-1).record.source_error).toMatch(/account/i);
+    const errorReceipt = source.posts.at(-1);
+    const postCount = source.posts.length;
+    source.reply({
+      type: "lobu-feed-record:ack",
+      token: errorReceipt.token,
+      sequence: errorReceipt.sequence,
+      ok: true,
+    });
+    expect(source.posts).toHaveLength(postCount);
+  });
+
+  it("rejects outstanding publication on replacement and keeps normal unsubscribe quiet", async () => {
+    const source = install();
+    await source.listen();
+    const pending = source.publish({ id: "page", events: [] });
+    await source.posted(1);
+    source.replace();
+    expect(await pending).toMatchObject({ ok: false });
+    expect(source.posts.at(-1).record.source_error).toMatch(/replaced/i);
+    const normal = install();
+    await normal.listen();
+    normal.reply({ type: "lobu-feed-record:stop", token: "synthetic-token" });
+    expect(normal.posts).toEqual([]);
+  });
+
+  it("gives different placeholder transitions distinct durable buffer identities at the same row positions", async () => {
+    const source = install();
+    await source.listen();
+    const first = source.publish({
+      id: "same-position",
+      events: [],
+      checkpoint: { previous: null, next: { after: 2, unresolved: [1] } },
+    });
+    await source.posted(1);
+    const firstPost = source.posts[0];
+    const second = source.publish({
+      id: "same-position",
+      events: [{ id: "hydrated" }],
+      checkpoint: { previous: null, next: { after: 2, unresolved: [] } },
+    });
+    await source.posted(2);
+    const secondPost = source.posts[1];
+    expect(secondPost.record.id).not.toBe(firstPost.record.id);
+    for (const post of [firstPost, secondPost])
+      source.reply({
+        type: "lobu-feed-record:ack",
+        token: post.token,
+        sequence: post.sequence,
+        ok: true,
+      });
+    expect(await first).toEqual({ ok: true });
+    expect(await second).toEqual({ ok: true });
+  });
+
   it("waits for durable browser acceptance before finishing a replay page", async () => {
     const source = install();
     await source.listen("synthetic-token");
     const batch = { id: "replay-1", events: [], checkpoint: { previous: null, next: { after: 1 } } };
     let completed = false;
     const published = source.publish(batch).then((result: unknown) => { completed = true; return result; });
-    await settle();
+    await source.posted(1);
     expect(completed).toBe(false);
-    expect(source.posts[0].record).toEqual(batch);
+    expect(source.posts[0].record).toEqual({
+      ...batch,
+      id: expect.stringMatching(/^replay:[a-f0-9]{64}$/),
+    });
     source.reply({ type: "lobu-feed-record:ack", token: "wrong-token", sequence: source.posts[0].sequence, ok: true });
     await settle();
     expect(completed).toBe(false);
@@ -728,7 +941,7 @@ describe("WhatsApp source observation", () => {
     const source = install();
     await source.listen("synthetic-token");
     const published = source.publish({ id: "rejected-page", events: [] });
-    await settle();
+    await source.posted(1);
     source.reply({ type: "lobu-feed-record:ack", token: "synthetic-token", sequence: source.posts[0].sequence, ok: false });
     expect(await published).toMatchObject({ ok: false });
   });
@@ -765,7 +978,11 @@ describe("WhatsApp source observation", () => {
       get body(): string { throw new Error("The observer must not read content"); } };
     source.emitModel("add", { attributes });
     await settle();
-    expect(source.posts.map(post => post.record)).toEqual([{ id: "synthetic-message", events: [{ id: "synthetic-message", event_type: "message.created", resource_ref: "synthetic-message", resource_type: "message", occurred_at: new Date(1100 * 1000).toISOString() }] }]);
+    expect(source.posts.map((post) => post.record)).toEqual([{ id: "synthetic-message", events: [{ id: "synthetic-message", event_type: "message.created", resource_ref: "synthetic-message", resource_type: "message", occurred_at: new Date(1100 * 1000).toISOString(),
+          },
+        ],
+      },
+    ]);
     source.emitModel("change", { attributes });
     await settle();
     expect(source.posts).toHaveLength(1);
@@ -780,7 +997,11 @@ describe("WhatsApp source observation", () => {
     expect(source.posts).toHaveLength(0);
     source.emit("change", "hydrated private body", 1100);
     await settle();
-    expect(source.posts.map(post => post.record)).toEqual([{ id: "synthetic-message", events: [{ id: "synthetic-message", event_type: "message.created", resource_ref: "synthetic-message", resource_type: "message", occurred_at: new Date(1100 * 1000).toISOString() }] }]);
+    expect(source.posts.map((post) => post.record)).toEqual([{ id: "synthetic-message", events: [{ id: "synthetic-message", event_type: "message.created", resource_ref: "synthetic-message", resource_type: "message", occurred_at: new Date(1100 * 1000).toISOString(),
+          },
+        ],
+      },
+    ]);
   });
 
   it("ignores historical hydration and changes to pre-subscription messages", async () => {

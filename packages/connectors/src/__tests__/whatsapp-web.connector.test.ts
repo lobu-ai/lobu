@@ -4,7 +4,6 @@
  * Nothing here stores a message; there is no history-import feed.
  */
 
-import { readFileSync } from "node:fs";
 import {
   beforeEach,
   describe,
@@ -12,8 +11,9 @@ import {
   it,
   mock,
 } from "bun:test";
-import WhatsAppWebConnector from "../whatsapp_web.js";
+import { readFileSync } from "node:fs";
 import { constrainBrowserInput } from "../../../connector-sdk/src/browser-requirement.js";
+import WhatsAppWebConnector from "../whatsapp_web.js";
 import {
   canonicalizeJid,
   messagePayloadText,
@@ -56,7 +56,7 @@ interface DispatchCall {
  */
 function makeDispatcher(
   responses: Record<string, unknown | ((input: unknown) => unknown)> = {},
-  { adapterInstalled = true }: { adapterInstalled?: boolean } = {}
+  { adapterInstalled = true }: { adapterInstalled?: boolean } = {},
 ) {
   const calls: DispatchCall[] = [];
   const adapterOps: string[] = [];
@@ -68,7 +68,8 @@ function makeDispatcher(
       input = constrainBrowserInput(connector.definition.browser, action, input);
       calls.push({ action, input });
       if (action === "navigate") return { tab_id: 42, current_url: input.url };
-      if (action === "feed_listen") return typeof responses.feed_listen === "function" ? responses.feed_listen(input) : responses.feed_listen ?? { bridge_id: "synthetic-feed", binding_id: "synthetic-feed", epoch: "synthetic-epoch", token: "synthetic-token", records: [] };
+      if (action === "feed_listen") return typeof responses.feed_listen === "function" ? responses.feed_listen(input) : (responses.feed_listen ?? { bridge_id: "synthetic-feed", binding_id: "synthetic-feed", epoch: "synthetic-epoch", token: "synthetic-token", records: [],
+            });
       if (action !== "evaluate") return {};
       const expression = String(input.expression ?? "");
       if (expression.includes("location.reload()")) {
@@ -108,7 +109,7 @@ function makeDispatcher(
           error: { state: "unsupported_operation", reason: request.op },
         },
       };
-    }
+    },
   );
   return {
     dispatcher: { dispatch } as never,
@@ -131,7 +132,8 @@ beforeEach(() => {
 /** A live source read: the one path every readiness case goes through now. */
 function liveRead(dispatcher: unknown) {
   return connector.read({
-    feedKey: "live_messages", config: {}, credentials: null, browser: dispatcher as never,
+    feedKey: "live_messages", config: {}, credentials: null,
+    sessionState: { account_id: "15550000001@c.us" }, browser: dispatcher as never,
   });
 }
 
@@ -145,7 +147,8 @@ describe("WhatsApp live source reads", () => {
     const feed = connector.definition.feeds.live_messages;
     expect(typeof feed.read).toBe("function");
     expect("sync" in feed).toBe(false);
-    expect(feed.webhook).toEqual({ mode: "trigger", events: ["message.created"] });
+    expect(feed.webhook).toEqual({ mode: "trigger", events: ["message.created", "source.gap"],
+    });
     expect("eventKinds" in feed).toBe(false);
   });
 
@@ -156,6 +159,7 @@ describe("WhatsApp live source reads", () => {
     });
     const result = await connector.read({
       feedKey: "live_messages", config: { chat_filter: "individual" }, credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
       query: "hello", limit: 10, browser: page.dispatcher,
     });
     expect(result.rows).toMatchObject([{ id: "live-message", text: "hello" }]);
@@ -174,7 +178,10 @@ describe("WhatsApp live source reads", () => {
         message("outbound", { from_me: true }),
       ], hasMore: false },
     });
-    const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null, browser: page.dispatcher });
+    const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
+      browser: page.dispatcher,
+    });
     expect(result.rows).toMatchObject([
       { id: "inbound", push_name: "Alice", sender_phone: "15551234567", is_group: false },
       { id: "group", push_name: "Bob", sender_phone: "15557654321", is_group: true },
@@ -193,7 +200,10 @@ describe("WhatsApp live source reads", () => {
         message("legacy"),
       ], hasMore: false },
     });
-    const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null, browser: page.dispatcher });
+    const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
+      browser: page.dispatcher,
+    });
     expect(result.rows.map((row) => [row.id, row.mentions_me])).toEqual([
       ["mention", true],
       ["chatter", false],
@@ -215,7 +225,10 @@ describe("WhatsApp live source reads", () => {
         message("system-caption", { body: "", caption: "Group updated", is_system_event: true }),
       ], hasMore: false },
     });
-    const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null, browser: page.dispatcher });
+    const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
+      browser: page.dispatcher,
+    });
     expect(result.rows.map((row) => [row.id, row.content_kind, row.text])).toEqual([
       ["text", "text", "hello"],
       ["captioned", "text", "look"],
@@ -229,9 +242,12 @@ describe("WhatsApp live source reads", () => {
   });
 
   it("declares that a new message can be answered where it came from", () => {
-    expect(connector.definition.automationEvents).toEqual([
-      expect.objectContaining({ key: "message.created", capabilities: { replyToSource: true } }),
-    ]);
+    expect(connector.definition.automationEvents).toEqual(
+      expect.arrayContaining([
+      expect.objectContaining({ key: "message.created", capabilities: { replyToSource: true },
+        }),
+    ]),
+    );
   });
 
   it("preserves the continuation of an empty filtered page", async () => {
@@ -239,6 +255,7 @@ describe("WhatsApp live source reads", () => {
       read_messages: { ok: true, results: [], nextCursor: "next-page", hasMore: true },
     });
     const result = await connector.read({ feedKey: "live_messages", config: {}, credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
       cursor: "previous-page", browser: page.dispatcher,
     });
     expect(result).toMatchObject({ rows: [], nextCursor: "next-page", hasMore: true });
@@ -249,13 +266,16 @@ describe("WhatsApp live source reads", () => {
       read_messages: { ok: false, error: { state: "operation_failed", reason: "Source message could not be loaded" } },
     });
     await expect(connector.read({ feedKey: "live_messages", config: {}, credentials: null,
-      browser: page.dispatcher,
-    })).rejects.toThrow("Source message could not be loaded");
+        sessionState: { account_id: "15550000001@c.us" },
+        browser: page.dispatcher,
+    }),
+    ).rejects.toThrow("Source message could not be loaded");
   });
 
   it("rejects unsupported sorting and offset pagination before dispatch", async () => {
     const page = makeDispatcher();
     const ctx = { feedKey: "live_messages", config: {}, credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
       browser: page.dispatcher,
     };
     await expect(connector.read({ ...ctx, offset: 10 })).rejects.toThrow("cursor");
@@ -272,25 +292,93 @@ describe("WhatsApp source listener setup", () => {
     {},
     {
       schema: "owletto.whatsapp.browser.v1", adapter_version: 22,
-      head: {}, backfill: { complete: true, cursor_chat_jid: null, inventory: [], chats: {} },
+      head: {}, backfill: { complete: true, cursor_chat_jid: null, inventory: [], chats: {},
+      },
     },
   ])("publishes atomic replay batches from current and pre-upgrade checkpoints: %j", async (legacyFields) => {
     const batches: Array<any> = [];
     let pages = 0;
     const page = makeDispatcher({ probe: READY, feed_listen: binding,
-      observe_messages: () => ({ ok: true, after: 101 + pages, references: [{ id: "message-" + (++pages), timestamp: 2001 }], hasMore: pages < 2 }),
+      observe_messages: () => ({ ok: true, after: 101 + pages, references: [{ id: "message-" + ++pages, timestamp: 2001 }], hasMore: pages < 2,
+      }),
       publish_changes: (request: any) => { batches.push(request.batch); return { ok: true }; },
     });
     const checkpoint: ObservationCheckpoint = { ...legacyFields, observation: { after: 100, started_at: 2000, chat_filter: "all" } };
     expect(await connector.observe({ feedKey: "live_messages", config: { chat_filter: "all" },
-      checkpoint, credentials: null, browser: page.dispatcher })).toBeUndefined();
+      checkpoint, credentials: null,
+        sessionState: { account_id: "15550000001@c.us" },
+        browser: page.dispatcher,
+      }),
+    ).toBeUndefined();
     expect(batches).toHaveLength(2);
     expect(batches[0].checkpoint.previous).toEqual(checkpoint);
     expect(batches[1].checkpoint.previous).toEqual(batches[0].checkpoint.next);
-    expect(batches[1].checkpoint.next).toEqual({ observation: { after: 102, started_at: 2000, chat_filter: "all" } });
+    expect(batches[1].checkpoint.next).toEqual({ observation: { after: 102, started_at: 2000, chat_filter: "all",
+        account: "15550000001@c.us",
+        anchor: null,
+        unresolved: [],
+      },
+    });
     expect(batches[0].events).toEqual([{ id: "message-1", event_type: "message.created", resource_type: "message",
       resource_ref: "message-1", occurred_at: new Date(2001 * 1000).toISOString() }]);
-    expect(batches.every(batch => batch.more === false)).toBe(true);
+    expect(batches.every((batch) => batch.more === false)).toBe(true);
+  });
+
+  it("declares source gaps without granting reply-to-source capability", () => {
+    const gap = connector.definition.automationEvents?.find(
+      (event) => event.key === "source.gap",
+    );
+    expect(gap).toBeDefined();
+    expect(gap?.capabilities?.replyToSource).not.toBe(true);
+  });
+
+  it.each([
+    "read",
+    "observe",
+    "send",
+  ])("requires a saved session account before %s browser access", async (method) => {
+    const page = makeDispatcher({ probe: READY });
+    const ctx = { feedKey: "live_messages", config: {}, credentials: null,
+      browser: page.dispatcher,
+    };
+    if (method === "send")
+      expect(
+        await connector.execute({
+          ...ctx,
+          actionKey: "send_message",
+          input: {},
+        } as never),
+      ).toMatchObject({
+        success: false,
+        error: expect.stringMatching(/saved account/i),
+      });
+    else
+      await expect(
+        method === "read" ? connector.read(ctx) : connector.observe(ctx),
+      ).rejects.toThrow(/saved account/i);
+    expect(page.calls).toEqual([]);
+  });
+
+  it("rejects a replay checkpoint from a different saved session account before browser access", async () => {
+    const page = makeDispatcher({ probe: READY, feed_listen: binding });
+    await expect(
+      connector.observe({
+        feedKey: "live_messages",
+        config: {},
+        checkpoint: {
+          observation: {
+            after: 100,
+            started_at: 2000,
+            chat_filter: "all",
+            account: "15550000002@c.us",
+          },
+        },
+        credentials: null,
+        sessionState: { account_id: "15550000001@c.us" },
+        browser: page.dispatcher,
+      } as never),
+    ).rejects.toThrow(/account/i);
+    expect(page.calls).toHaveLength(0);
   });
 
   it("starts a fresh baseline when the chat filter changes", async () => {
@@ -305,7 +393,10 @@ describe("WhatsApp source listener setup", () => {
     });
     const checkpoint: ObservationCheckpoint = { observation: { after: 100, started_at: 1, chat_filter: "individual" } };
     await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
-      checkpoint, credentials: null, browser: page.dispatcher });
+      checkpoint, credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
+      browser: page.dispatcher,
+    });
     expect(requests).toHaveLength(2);
     expect(requests[0]).toEqual({});
     expect(requests[1]).toMatchObject({ after: 900, chat_filter: "group" });
@@ -314,32 +405,111 @@ describe("WhatsApp source listener setup", () => {
     expect(batches[0].events).toEqual([]);
   });
 
-  it("splits large replay pages by encoded bytes and advances the cursor only after the final chunk", async () => {
-    const references = Array.from({ length: 500 }, (_, index) => ({
-      id: `synthetic-${index}-${"界".repeat(60)}`, timestamp: 2001,
+  it.each([
+    [500, "界".repeat(60)],
+    [143, "x".repeat(381)],
+  ] as const)("splits %i references by final encoded bytes and advances the cursor only after the final chunk", async (count, suffix) => {
+    const references = Array.from({ length: count }, (_, index) => ({
+      id: `synthetic-${index}-${suffix}`, timestamp: 2001,
     }));
     const batches: Array<any> = [];
     const page = makeDispatcher({ probe: READY, feed_listen: binding,
       observe_messages: { ok: true, after: 600, references, hasMore: false },
       publish_changes: (request: any) => {
-        expect(new TextEncoder().encode(JSON.stringify(request.batch)).length).toBeLessThanOrEqual(128 * 1024);
+        const record = { ...request.batch, id: `replay:${"0".repeat(64)}` };
+        expect(new TextEncoder().encode(JSON.stringify(record)).length,
+        ).toBeLessThanOrEqual(128 * 1024);
         batches.push(request.batch);
         return { ok: true };
       },
     });
     const checkpoint: ObservationCheckpoint = { observation: { after: 100, started_at: 2000, chat_filter: "group" } };
     await connector.observe({ feedKey: "live_messages", config: { chat_filter: "group" },
-      checkpoint, credentials: null, browser: page.dispatcher });
+      checkpoint, credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
+      browser: page.dispatcher,
+    });
     expect(batches.length).toBeGreaterThan(1);
-    expect(batches.flatMap(batch => batch.events.map((event: any) => event.resource_ref))).toEqual(references.map(ref => ref.id));
-    expect(batches.slice(0, -1).every(batch => !batch.checkpoint)).toBe(true);
+    expect(batches.flatMap((batch) => batch.events.map((event: any) => event.resource_ref),
+      ),
+    ).toEqual(references.map((ref) => ref.id));
+    expect(batches.slice(0, -1).every((batch) => !batch.checkpoint)).toBe(true);
     expect(batches.at(-1).checkpoint).toMatchObject({ previous: checkpoint, next: { observation: { after: 600 } } });
+  });
+
+  it("retries interrupted chunks without advancing past unaccepted references", async () => {
+    const references = Array.from({ length: 500 }, (_, index) => ({
+      id: `synthetic-${index}-${"界".repeat(60)}`, timestamp: 2001,
+    }));
+    const checkpoint = {
+      observation: {
+        after: 100,
+        started_at: 2000,
+        chat_filter: "all" as const,
+        account: "15550000001@c.us",
+      },
+    };
+    let chunkCount = 0;
+    const successful: any[] = [];
+    for (let boundary = 0; boundary < 5; boundary++) {
+    let calls = 0;
+      const accepted: any[] = [];
+      const page = makeDispatcher({
+        probe: READY,
+        feed_listen: binding,
+        observe_messages: {
+          ok: true,
+          after: 600,
+          references,
+          unresolved: [],
+          hasMore: false,
+        },
+        publish_changes: (request: any) => {
+          if (calls++ === boundary) throw new Error("synthetic interruption");
+          accepted.push(request.batch);
+        return { ok: true };
+        },
+      });
+      const attempt = connector.observe({
+        feedKey: "live_messages",
+        config: {},
+        checkpoint,
+        sessionState: { account_id: "15550000001@c.us" },
+        credentials: null,
+        browser: page.dispatcher,
+      });
+      if (boundary < chunkCount || boundary === 0)
+        await expect(attempt).rejects.toThrow("synthetic interruption");
+      else {
+        try {
+          await attempt;
+        } catch (error) {
+          expect(String(error)).toContain("synthetic interruption");
+        }
+      }
+      if (calls <= boundary) {
+        successful.push(...accepted);
+        break;
+      }
+      expect(accepted.every((batch) => !batch.checkpoint)).toBe(true);
+      chunkCount = calls;
+    }
+    expect(
+      successful.flatMap((batch) =>
+        batch.events.map((event: any) => event.resource_ref),
+      ),
+    ).toEqual(references.map((row) => row.id));
+    expect(successful.at(-1).checkpoint.previous).toEqual(checkpoint);
   });
 
   it("rejects a browser without reference-delivery support", async () => {
     const page = makeDispatcher({ probe: READY, observe_messages: { ok: true, after: 1 } });
     await expect(connector.observe({ feedKey: "live_messages", config: {}, checkpoint: null,
-      credentials: null, browser: page.dispatcher })).rejects.toThrow("source subscriptions");
+      credentials: null,
+        sessionState: { account_id: "15550000001@c.us" },
+        browser: page.dispatcher,
+      }),
+    ).rejects.toThrow("source subscriptions");
   });
 });
 
@@ -660,8 +830,8 @@ describe("readiness over the generic chrome bridge", () => {
     }
   });
 
-  it("bumps the WhatsApp connector version for chat-scoped source reads", () => {
-    expect(connector.definition.version).toBe("2.2.0");
+  it("bumps the WhatsApp connector version for account-bound source recovery", () => {
+    expect(connector.definition.version).toBe("2.3.0");
   });
 
   it("names the remedy when WhatsApp Web is signed out", async () => {
@@ -727,6 +897,7 @@ describe("actions", () => {
       actionKey: "search_messages",
       input: { query: "hello" },
       credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
       config: {},
       browser: dispatcher,
     } as never);
@@ -747,6 +918,7 @@ describe("actions", () => {
       actionKey: "send_message",
       input: { chat_jid: "1@s.whatsapp.net", text: "hi" },
       credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
       config: {},
       browser: dispatcher,
     } as never);
@@ -768,6 +940,7 @@ describe("actions", () => {
       actionKey: "send_message",
       input: { chat_jid: "1@s.whatsapp.net", text: "hi" },
       credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
       config: {},
       browser: dispatcher,
     } as never);
@@ -794,6 +967,7 @@ describe("actions", () => {
       actionKey: "revoke_message",
       input: { message_id: "3EB0" },
       credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
       config: {},
       browser: dispatcher,
     } as never);
