@@ -74,6 +74,7 @@ interface RedditCheckpoint {
   last_timestamp?: string;
   pagination_token?: string;
   pagination_cutoff?: string;
+  inbox_head?: string | null;
 }
 
 interface RedditInboxItem {
@@ -132,8 +133,7 @@ export default class RedditConnector extends ConnectorRuntime {
           type: 'oauth',
           provider: 'reddit',
           requiredScopes: ['identity', 'read', 'history'],
-          // Feed-level requiredScopes gate a feed; only method scopes are ever
-          // requested at connect/reconnect, so the inbox scope must be askable here.
+          // Explicit reconnect requests for new scopes use method optionalScopes.
           optionalScopes: ['privatemessages'],
           loginScopes: ['identity'],
           setupInstructions:
@@ -403,11 +403,17 @@ export default class RedditConnector extends ConnectorRuntime {
 
   private async syncInbox(ctx: SyncContext): Promise<SyncResult> {
     const saved = (ctx.checkpoint?.pagination_token as string | undefined) ?? undefined;
+    const previousHead = ctx.checkpoint?.inbox_head;
+    let head: string | undefined;
+    let catchingUp = !!saved;
     const seenCursors = new Set<string>();
     const seenItems = new Set<string>();
     const events: EventEnvelope[] = [];
     let after: string | undefined;
-    let cursorReset = false;
+    let exhausted = false;
+    // Old checkpoints have no evidence that the refreshed head meets the tail.
+    // Rewalk from the head instead of skipping an unobserved arrival interval.
+    let cursorReset = !!saved && !previousHead;
     for (let page = 0; page < this.MAX_PAGES; page++) {
       if (page) await sleep(this.RATE_LIMIT_MS);
       if (after) seenCursors.add(after);
@@ -426,6 +432,7 @@ export default class RedditConnector extends ConnectorRuntime {
         }
         throw error;
       }
+      head ??= listing.children[0]?.data.name;
       for (const item of listing.children) {
         if (seenItems.has(item.data.name)) continue;
         seenItems.add(item.data.name);
@@ -439,15 +446,22 @@ export default class RedditConnector extends ConnectorRuntime {
         });
       }
       after = listing.after ?? undefined;
-      // Re-read arrivals at the head, then continue the unfinished history sweep.
-      // Every completed sweep restarts at the head; mutable inboxes do not have
-      // a timestamp high-water mark that can safely exclude older items.
-      if (page === 0 && after && saved) after = saved;
-      if (!after) break;
+      // Re-read every arrival page through the prior head before resuming the
+      // unfinished history sweep. A deleted/missing boundary falls back to a
+      // bounded full sweep; occurrence time cannot safely exclude older items.
+      if (catchingUp && listing.children.some(item => item.data.name === previousHead)) {
+        catchingUp = false;
+        if (after && saved) after = saved;
+      }
+      if (!after) {
+        exhausted = true;
+        break;
+      }
       if (seenCursors.has(after)) throw new Error('Reddit inbox cursor did not advance.');
     }
-    await ctx.commit(events, { pagination_token: after ?? null });
-    return { status: after ? 'more' : 'complete', metadata: {
+    await ctx.commit(events, { pagination_token: after ?? null, inbox_head: head ?? null });
+    // A reset on the final request leaves no cursor but still needs a new sweep.
+    return { status: exhausted ? 'complete' : 'more', metadata: {
       items_found: events.length,
       ...(cursorReset ? { cursor_reset: true } : {}),
     } };

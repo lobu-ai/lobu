@@ -33,7 +33,7 @@ describe('Reddit inbox source', () => {
     expect(JSON.stringify(result.events)).not.toContain('Private source body');
     expect(result.events[0].metadata).toMatchObject({ source_id: 't1_reply', category: 'comment_notification' });
     expect(new RedditConnector().definition.feeds.inbox.requiredScopes).toEqual(['privatemessages']);
-    // Only method scopes are requested at connect/reconnect; a feed-only scope is unreachable.
+    // Explicit requests for a new scope must be declared in method optionalScopes.
     expect(new RedditConnector().definition.authSchema.methods[0].optionalScopes).toContain('privatemessages');
   });
 
@@ -97,6 +97,67 @@ describe('Reddit inbox source', () => {
     expect(commits).toBe(0);
   });
 
+  test('collects arrivals spanning multiple head pages before resuming old history', async () => {
+    const items = Array.from({ length: 14 }, (_, index) => item(`old${index}`));
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const cursor = new URL(input.toString()).searchParams.get('after');
+      const start = cursor ? items.findIndex(x => x.data.name === cursor) + 1 : 0;
+      const children = items.slice(start, start + 2);
+      return Response.json({ data: { children, after: start + children.length < items.length ? children.at(-1)?.data.name : null } });
+    }) as typeof fetch;
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    connector.MAX_PAGES = 3;
+    const baseline = await runSync(connector, options);
+    items.unshift(...Array.from({ length: 4 }, (_, index) => item(`new${index}`)));
+    const next = await runSync(connector, { ...options, checkpoint: baseline.checkpoint });
+    for (let index = 0; index < 4; index++) {
+      expect(next.events.map(x => x.origin_id)).toContain(`reddit_inbox_t1_new${index}`);
+    }
+  });
+
+  test('safely rewalks the head when a legacy checkpoint has no arrival boundary', async () => {
+    const items = Array.from({ length: 6 }, (_, index) => item(`retained${index}`));
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const cursor = new URL(input.toString()).searchParams.get('after');
+      const start = cursor ? items.findIndex(x => x.data.name === cursor) + 1 : 0;
+      const children = items.slice(start, start + 2);
+      return Response.json({ data: { children, after: start + children.length < items.length ? children.at(-1)?.data.name : null } });
+    }) as typeof fetch;
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    connector.MAX_PAGES = 3;
+    const result = await runSync(connector, { ...options, checkpoint: { pagination_token: 't1_retained3' } });
+    expect(result.events.map(x => x.origin_id)).toContain('reddit_inbox_t1_retained2');
+    expect(result.events.map(x => x.origin_id)).toContain('reddit_inbox_t1_retained3');
+  });
+
+  test('defers a retired-cursor restart at the request budget and progresses on the next sync', async () => {
+    const after: Array<string | null> = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const cursor = new URL(input.toString()).searchParams.get('after');
+      after.push(cursor);
+      if (cursor === 't1_retired') return new Response('retired anchor', { status: 404 });
+      return Response.json({ data: cursor === null ? { children: [item('head')], after: 't1_head' }
+        : { children: [item('older')], after: null } });
+    }) as typeof fetch;
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    connector.MAX_PAGES = 2;
+    const result = await runSync(connector, { ...options,
+      checkpoint: { pagination_token: 't1_retired', inbox_head: 't1_head' },
+    });
+    expect(result.status).toBe('more');
+    expect(result.checkpoint?.pagination_token).toBeNull();
+    expect(result.events.map(x => x.origin_id)).toEqual(['reddit_inbox_t1_head']);
+    expect(after).toEqual([null, 't1_retired']);
+    after.length = 0;
+    const resumed = await runSync(connector, { ...options, checkpoint: result.checkpoint });
+    expect(resumed.status).toBe('complete');
+    expect(resumed.events.map(x => x.origin_id)).toContain('reddit_inbox_t1_older');
+    expect(after).toEqual([null, 't1_head']);
+  });
+
   test.each([{}, { data: { children: [], after: 3 } }, { data: { children: [{ kind: 't1', data: { name: 't4_other', created_utc: 1 } }], after: null } }])(
     'rejects malformed source responses instead of completing with missing identities', async body => {
       globalThis.fetch = (async () => Response.json(body)) as typeof fetch;
@@ -112,18 +173,23 @@ describe('Reddit inbox source', () => {
   });
 
   test.each([400, 404])('restarts a retired saved anchor on HTTP %s without discarding arrivals', async status => {
+    const after: Array<string | null> = [];
     globalThis.fetch = (async (input: string | URL | Request) => {
       const cursor = new URL(input.toString()).searchParams.get('after');
+      after.push(cursor);
       if (cursor === 't1_retired') return new Response('retired anchor', { status });
       return Response.json({ data: cursor === null ? { children: [item('new')], after: 't1_new' }
         : { children: [item('older')], after: null } });
     }) as typeof fetch;
     const connector = new RedditConnector();
     connector.RATE_LIMIT_MS = 0;
-    const result = await runSync(connector, { ...options, checkpoint: { pagination_token: 't1_retired' } });
+    const result = await runSync(connector, { ...options,
+      checkpoint: { pagination_token: 't1_retired', inbox_head: 't1_new' },
+    });
     expect(result.status).toBe('complete');
     expect(result.metadata?.cursor_reset).toBe(true);
     expect(result.events.map(x => x.origin_id)).toEqual(['reddit_inbox_t1_new', 'reddit_inbox_t1_older']);
+    expect(after).toEqual([null, 't1_retired', null, 't1_new']);
   });
 
   test.each([401, 403, 429, 500])('preserves an HTTP %s failure instead of completing a scan', async status => {
