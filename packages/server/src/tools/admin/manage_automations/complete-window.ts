@@ -535,10 +535,8 @@ export async function handleCompleteWindow(
   // ============================================
   // STEP 6: Wrap all DB operations in a transaction
   // ============================================
-  // Owned-field changes and policy-held creates an automation proposed but couldn't
-  // apply; surfaced out of the transaction as deferred approvals and flushed once
-  // the window commits.
-  let deferredApprovals: DeferredMutation[] = [];
+  // Deferred approvals persist a task with the window before their post-commit delivery.
+  const deferredApprovals: DeferredMutation[] = [];
   const result = await sql.begin(async (tx) => {
     if (externalClaimedBy !== null) {
       // Claim and complete in one transaction. A downstream write failure must
@@ -709,7 +707,13 @@ export async function handleCompleteWindow(
           createdBy: automationCreatedBy,
           validContentIds,
         });
-        deferredApprovals.push(...promote.deferred);
+        for (const deferred of promote.deferred) {
+          if (!deferred.enqueue) {
+            throw new Error('Deferred mutation has no durable handoff');
+          }
+          await deferred.enqueue(tx, ctx);
+          deferredApprovals.push(deferred);
+        }
         entityChanges.push(...promote.changes);
       } else {
         const persistedEvents = await persistAutomationEventOutput({
@@ -960,19 +964,15 @@ export async function handleCompleteWindow(
     };
   });
 
-  // Post-commit: flush any deferred approvals (owned-field changes + policy-held
-  // creates) the automation couldn't apply inline. Done after the window transaction
-  // so the durable approval (run + event + notify) is never rolled back with the
-  // window, and a failure here never undoes the committed sync. Best-effort each.
-  for (const d of deferredApprovals) {
-    await d
-      .queue(ctx, env)
-      .catch((err) =>
-        logger.error(
-          { err, automationId, action: d.display.action },
-          '[complete-window] failed to queue deferred entity approval'
-        )
-      );
+  // Preserve immediate cards when delivery is healthy. Every intent already
+  // has a transactional task, so a failed/lost response is retried durably.
+  for (const deferred of deferredApprovals) {
+    await deferred.queue(ctx, env).catch((err) =>
+      logger.error(
+        { err, automationId },
+        '[complete-window] approval task will retry delivery'
+      )
+    );
   }
 
   // The window committed, so a run queued behind this one is claimable now.

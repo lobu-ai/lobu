@@ -7,6 +7,10 @@
  */
 
 import type { Env } from '@lobu/connector-sdk';
+import {
+  runEntityApprovalTask,
+  type EntityApprovalTaskPayload,
+} from '../authz/deferred-approval-task';
 import { runAclSyncTick } from '../authz/acl-sync';
 import {
   activateWorkspaceEventTask,
@@ -39,6 +43,7 @@ import {
 } from './scheduled-jobs-service';
 import { TaskScheduler } from './task-scheduler';
 import {
+  ENTITY_APPROVAL_TASK,
   AUTOMATION_REACTION_TASK,
   AUTOMATION_DIGEST_TASK,
   AUTOMATION_SCRIPT_TASK,
@@ -492,6 +497,10 @@ function registerMaintenanceTasks(
 
   scheduler.register(SOURCE_FEED_LISTENER_TASK, async (ctx) => {
     await runSourceFeedListener(ctx.payload as SourceFeedListenerTask);
+  });
+
+  scheduler.register(ENTITY_APPROVAL_TASK, async (ctx) => {
+    await runEntityApprovalTask(ctx.payload as EntityApprovalTaskPayload, ctx.taskRunId);
   });
 
   // The Automation reaction script. Queued inside `complete_window`'s window

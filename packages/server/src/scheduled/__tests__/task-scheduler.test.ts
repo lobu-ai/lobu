@@ -28,6 +28,7 @@ import {
 import {
   AUTOMATION_REACTION_TASK,
   AUTOMATION_REACTION_TASK_QUEUE,
+  ENTITY_APPROVAL_TASK,
   NOTIFICATION_DELIVERY_TASK,
   NOTIFICATION_DELIVERY_TASK_QUEUE,
 } from "../task-definitions";
@@ -137,6 +138,20 @@ describe("TaskScheduler.spawn", () => {
     await scheduler.spawn(AUTOMATION_REACTION_TASK, { sourceRunId: 42 });
 
     expect(queue.sent[0]?.queueName).toBe(AUTOMATION_REACTION_TASK_QUEUE);
+  });
+
+  test("routes entity approvals only to replicas with the new handler", async () => {
+    const oldQueue = new FakeQueue();
+    await new TaskScheduler(oldQueue).start();
+    expect(oldQueue.workers.has(`task:${ENTITY_APPROVAL_TASK}`)).toBe(false);
+
+    const queue = new FakeQueue();
+    const scheduler = new TaskScheduler(queue);
+    scheduler.register(ENTITY_APPROVAL_TASK, async () => {});
+    await scheduler.start();
+    await scheduler.spawn(ENTITY_APPROVAL_TASK, { sourceRunId: 42 });
+    expect(queue.sent[0]?.queueName).toBe(`task:${ENTITY_APPROVAL_TASK}`);
+    expect(queue.workers.has(`task:${ENTITY_APPROVAL_TASK}`)).toBe(true);
   });
 });
 

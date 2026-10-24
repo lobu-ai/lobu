@@ -14,6 +14,7 @@ export const NOTIFICATION_DELIVERY_TASK_QUEUE =
   `task:${NOTIFICATION_DELIVERY_TASK}`;
 export const AUTOMATION_REACTION_TASK = 'automation-reaction';
 export const AUTOMATION_DIGEST_TASK = 'automation-digest';
+export const ENTITY_APPROVAL_TASK = 'entity-approval';
 export const AUTOMATION_SCRIPT_TASK = 'automation-script';
 export const SOURCE_FEED_LISTENER_TASK = 'source-feed-listener';
 export const WORKSPACE_PURGE_TASK = 'workspace-purge';
@@ -33,6 +34,7 @@ export const AUTOMATION_SCRIPT_TASK_QUEUE =
  * during a rolling deploy. Existing task names stay on the shared lane.
  */
 export function taskQueueName(name: string): string {
+  if (name === ENTITY_APPROVAL_TASK) return `task:${ENTITY_APPROVAL_TASK}`;
   if (name === SOURCE_FEED_LISTENER_TASK) {
     return SOURCE_FEED_LISTENER_TASK_QUEUE;
   }
@@ -55,6 +57,7 @@ export function taskQueueName(name: string): string {
 
 export function isTransactionalTaskName(name: string): boolean {
   return (
+    name === ENTITY_APPROVAL_TASK ||
     name === WORKSPACE_EVENT_ACTIVATION_TASK ||
     name === INTERACTIVE_EVENT_CARD_REFRESH_TASK ||
     name === AUTOMATION_REACTION_TASK ||

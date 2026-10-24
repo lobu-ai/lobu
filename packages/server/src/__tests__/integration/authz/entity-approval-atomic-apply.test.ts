@@ -153,6 +153,7 @@ async function persistedProposal(organizationId: string): Promise<{
 	const [queued] = await sql<{ action_input: unknown }[]>`
     SELECT action_input FROM runs
     WHERE organization_id = ${organizationId}
+      AND run_type = 'internal' AND action_key IN ('entity_field_change', 'entity_change')
     ORDER BY id DESC LIMIT 1
   `;
 	return (
@@ -375,6 +376,7 @@ describe("an escalated card applies atomically or not at all", () => {
 		const [queued] = await sql<{ id: number }[]>`
 			SELECT id FROM runs
 			WHERE organization_id = ${org.id}
+        AND run_type = 'internal' AND action_key IN ('entity_field_change', 'entity_change')
 			ORDER BY id DESC LIMIT 1
 		`;
 
@@ -462,6 +464,7 @@ describe("an approved DELETE card is honoured despite the rule that escalated it
 		const [queued] = await sql<{ action_input: unknown }[]>`
       SELECT action_input FROM runs
       WHERE organization_id = ${org.id}
+        AND run_type = 'internal' AND action_key IN ('entity_field_change', 'entity_change')
       ORDER BY id DESC LIMIT 1
     `;
 		const proposal = (

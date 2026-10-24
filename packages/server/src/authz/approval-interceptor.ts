@@ -24,6 +24,7 @@ import {
 	proposeEntityFieldChange,
 } from "../tools/admin/entity-field-approval";
 import type { EntityData } from "../utils/entity-management";
+import { enqueueEntityApproval } from "./deferred-approval-task";
 import type {
 	DeferredMutation,
 	EntityMutationRequest,
@@ -72,28 +73,37 @@ export function buildCreateDeferral(args: {
 }): DeferredMutation {
 	const name =
 		typeof args.entityData.name === "string" ? args.entityData.name : undefined;
+	const proposal = {
+		operation: "create" as const,
+		entity_data: args.entityData,
+		proposal: args.proposal,
+		escalated_fields: args.escalatedFields,
+		automation_id: args.automationId ?? null,
+		attribution: args.attribution,
+		reason:
+			args.reason ??
+			reasonFor(
+				args.attribution,
+				"creating",
+				args.entityData.entity_type,
+				name,
+			),
+	};
 	return {
+		enqueue: (tx, ctx) =>
+			enqueueEntityApproval(tx, ctx, proposal, args.parentRunId ?? null),
 		display: {
 			action: "create",
 			attribution: args.attribution,
 			proposal: args.proposal,
 		},
 		queue: (ctx) =>
-			proposeEntityCreate(ctx, {
-				entity_data: args.entityData,
-				proposal: args.proposal,
-				escalated_fields: args.escalatedFields,
-				automation_id: args.automationId ?? null,
-				attribution: args.attribution,
-				reason:
-					args.reason ??
-					reasonFor(
-						args.attribution,
-						"creating",
-						args.entityData.entity_type,
-						name,
-					),
-			}, args.parentRunId ?? null),
+			proposeEntityCreate(
+				ctx,
+				proposal,
+				args.parentRunId ?? null,
+				args.parentRunId != null,
+			),
 	};
 }
 
@@ -113,7 +123,21 @@ export function buildFieldChangeDeferral(args: {
 	automationId?: number | null;
 	parentRunId?: number | null;
 }): DeferredMutation {
+	const proposal = {
+		operation: "update" as const,
+		entity_id: args.entityId,
+		fields: args.fields,
+		current: args.current,
+		escalated_fields: args.escalatedFields,
+		automation_id: args.automationId ?? null,
+		attribution: args.attribution,
+		reason:
+			args.reason ??
+			fieldChangeReason(args.attribution, Object.keys(args.fields)),
+	};
 	return {
+		enqueue: (tx, ctx) =>
+			enqueueEntityApproval(tx, ctx, proposal, args.parentRunId ?? null),
 		display: {
 			action: "update",
 			attribution: args.attribution,
@@ -121,17 +145,12 @@ export function buildFieldChangeDeferral(args: {
 			current: args.current,
 		},
 		queue: (ctx) =>
-			proposeEntityFieldChange(ctx, {
-				entity_id: args.entityId,
-				fields: args.fields,
-				current: args.current,
-				escalated_fields: args.escalatedFields,
-				automation_id: args.automationId ?? null,
-				attribution: args.attribution,
-				reason:
-					args.reason ??
-					fieldChangeReason(args.attribution, Object.keys(args.fields)),
-			}, args.parentRunId ?? null),
+			proposeEntityFieldChange(
+				ctx,
+				proposal,
+				args.parentRunId ?? null,
+				args.parentRunId != null,
+			),
 	};
 }
 

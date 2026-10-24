@@ -53,7 +53,6 @@ import {
 	insertEvent,
 	stableJson,
 } from "../../utils/insert-event";
-import logger from "../../utils/logger";
 import {
 	buildEntityUrl,
 	buildResourcePermalink,
@@ -327,13 +326,15 @@ async function resolveProposalFieldOwner(
 }
 
 /**
- * Queue an automation field-change for approval. Returns the pending run/event ids.
- * Called post-commit from the automation promotion path.
+ * Queue an Automation field-change for approval. Durable handoff retries may
+ * return an already decided run/event. Called after promotion commits.
  */
 export async function proposeEntityFieldChange(
 	ctx: ToolContext,
 	proposal: EntityFieldChangeProposal,
 	parentRunId: number | null = null,
+	/** Internal durable handoffs also reconcile an already decided card. */
+	includeSettled = false,
 ): Promise<{ runId: number; eventId: number; approvalUrl?: string }> {
 	const ownerUserId = await resolveProposalFieldOwner(
 		ctx.organizationId,
@@ -344,7 +345,7 @@ export async function proposeEntityFieldChange(
 		...proposal,
 		...(ownerUserId ? { owner_user_id: ownerUserId } : {}),
 		operation: "update",
-	}, parentRunId);
+	}, parentRunId, includeSettled);
 }
 
 export async function proposeEntityDelete(
@@ -359,14 +360,18 @@ export async function proposeEntityCreate(
 	ctx: ToolContext,
 	proposal: Omit<EntityCreateProposal, "operation">,
 	parentRunId: number | null = null,
+	/** Internal durable handoffs also reconcile an already decided card. */
+	includeSettled = false,
 ): Promise<{ runId: number; eventId: number; approvalUrl?: string }> {
-	return proposeEntityChange(ctx, { ...proposal, operation: "create" }, parentRunId);
+	return proposeEntityChange(ctx, { ...proposal, operation: "create" }, parentRunId, includeSettled);
 }
 
 export async function proposeEntityChange(
 	ctx: ToolContext,
 	proposal: EntityChangeProposal,
 	parentRunId: number | null = null,
+	/** Internal durable handoffs also reconcile an already decided card. */
+	includeSettled = false,
 ): Promise<{ runId: number; eventId: number; approvalUrl?: string }> {
 	const sql = getDb();
 	const operation = entityChangeOperation(proposal);
@@ -390,8 +395,8 @@ export async function proposeEntityChange(
 
 	// Idempotency: complete_window is replay-safe (retries + concurrent replicas),
 	// so the same blocked change can be proposed more than once. Collapse to one
-	// active run — whether still pending or already applying — instead of stacking
-	// duplicate cards or colliding with the global active-run idempotency index.
+	// active run — whether still pending or already applying. Durable completion
+	// retries also reuse settled cards so a human decision never reopens the ask.
 	// (Deletes match on force_delete_tree too: force and non-force are different
 	// asks and must not affirm each other.)
 	type ExistingChangeRun = {
@@ -415,10 +420,11 @@ export async function proposeEntityChange(
     WHERE r.organization_id = ${ctx.organizationId}
       AND r.run_type = 'internal'
       AND r.action_key = ${actionKey}
+      AND (NOT ${includeSettled} OR r.parent_run_id = ${parentRunId})
       AND (
         (
           r.idempotency_key = ${idempotencyKey}
-          AND r.status IN ('pending', 'claimed', 'running')
+          AND (${includeSettled} OR r.status IN ('pending', 'claimed', 'running'))
         )
         OR (
           r.idempotency_key IS NULL
@@ -583,7 +589,7 @@ export async function proposeEntityChange(
 		}
 		if (!isPending) {
 			throw new Error(
-				`Active entity change run ${row.id} has no approval event`,
+				`Entity change run ${row.id} has no approval event`,
 			);
 		}
 		const event = await insertApprovalEvent(Number(row.id), db);
@@ -594,74 +600,7 @@ export async function proposeEntityChange(
 		};
 	};
 
-	const persisted = await sql.begin(async (tx) => {
-		await tx`SELECT pg_advisory_xact_lock(hashtextextended(${idempotencyKey}, 0))`;
-		const existing = await findExisting(tx);
-		if (existing.length > 0) {
-			return reuseExisting(existing[0], tx);
-		}
-
-		const inserted = await tx<{ id: number }>`
-			INSERT INTO runs (
-				organization_id, run_type, action_key, action_input, parent_run_id,
-				automation_id, created_by_user_id, initiator_kind, initiator_ref,
-				approval_status, status, idempotency_key, created_at
-			) VALUES (
-				${ctx.organizationId}, 'internal', ${actionKey},
-				${tx.json(proposal as unknown as Record<string, unknown>)},
-				${parentRunId}, ${proposal.automation_id ?? null},
-				${initiatorColumns.createdByUserId},
-				${initiatorColumns.initiatorKind},
-				${tx.json(initiatorColumns.initiatorRef)},
-				'pending', 'pending', ${idempotencyKey}, current_timestamp
-			)
-			ON CONFLICT DO NOTHING
-			RETURNING id
-		`;
-		if (inserted.length === 0) {
-			const winner = await findExisting(tx);
-			if (winner.length === 0) {
-				throw new Error("Entity change idempotency conflict has no active run");
-			}
-			return reuseExisting(winner[0], tx);
-		}
-
-		const runId = Number(inserted[0].id);
-		const event = await insertApprovalEvent(runId, tx);
-		return { runId, eventId: Number(event.id), reused: false };
-	});
-	const { runId, eventId } = persisted;
-
-	const [permalinkRun] = await sql<{
-		initiator_kind: string | null;
-		initiator_ref: Record<string, unknown> | null;
-		initiator_agent_id: string | null;
-	}>`
-		SELECT r.initiator_kind, r.initiator_ref, w.managed_agent_id AS initiator_agent_id
-		FROM runs r
-		LEFT JOIN automations w
-			ON w.id = r.automation_id AND w.organization_id = r.organization_id
-		WHERE r.id = ${runId} AND r.organization_id = ${ctx.organizationId}
-	`;
 	const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
-	// Run-scoped: the pending event is superseded on approve→complete; a run link
-	// stays valid across the chain. (Read-side content_ids resolution also covers
-	// the event id below, carried for the notification's resourceId.)
-	// An Automation-initiated proposal lands on that Automation's drill-down instead
-	// of the workspace-wide log, so the link answers where it came from.
-	const approvalUrl = buildResourcePermalink(
-		ownerSlug,
-		runPermalinkResource(
-			{
-				initiatorKind: permalinkRun?.initiator_kind,
-				initiatorRef: permalinkRun?.initiator_ref,
-			},
-			runId,
-			permalinkRun?.initiator_agent_id,
-		),
-		baseUrl,
-	);
-	if (persisted.reused) return { runId, eventId, approvalUrl };
 	const entityUrl =
 		ownerSlug && entity?.entity_type && entity.slug
 			? buildEntityUrl(
@@ -698,60 +637,129 @@ export async function proposeEntityChange(
 			: await resolveApprovalChatOrigin(ctx);
 	const actionOrigin = await resolveActionOrigin(ctx);
 
-	notifyActionApprovalNeeded({
-		orgId: ctx.organizationId,
-		runId,
-		actionKey,
-		connectionName: actionLabel,
-		eventId,
-		approvalUrl,
-		connectionId: deliveryTarget.connectionId,
-		channelId: deliveryTarget.channelId,
-		teamId: deliveryTarget.teamId,
-		ownerUserId: updateProposal?.owner_user_id ?? null,
-		requesterUserId: ctx.userId ?? null,
-		mcpActivity: currentMcpActivityAttribution(ctx),
-		actionOrigin,
-		details:
-			operation === "update"
-				? {
-						kind: "entity_field_change",
-						actorLabel,
-						entityId: updateProposal?.entity_id ?? null,
-						entityType: entity?.entity_type ?? null,
-						entityName: entity?.name ?? null,
-						entityUrl,
-						fields: updateProposal?.fields ?? {},
-						current: updateProposal?.current ?? null,
-						reason: proposal.reason ?? null,
-					}
-				: {
-						kind: "entity_change",
-						operation,
-						actorLabel,
-						entityId:
-							identityProposal?.entity_id ?? deleteProposal?.entity_id ?? null,
-						entityType: entityType ?? null,
-						entityName: entityName ?? null,
-						entityUrl,
-						proposal: identityProposal ? { from_entity_id: identityProposal.entity_id, to_entity_id: identityProposal.to_entity_id, relationship_type: identityProposal.relationship_type_slug, records: identityProposal.current } : deleteProposal
-								? {
-										entity_id: deleteProposal.entity_id,
-										entity_type:
-											entity?.entity_type ?? deleteProposal.current.entity_type,
-										name: entity?.name ?? deleteProposal.current.name,
-										force_delete_tree:
-											deleteProposal.force_delete_tree ?? false,
-									}
-								: (createProposal?.proposal ?? null),
-						current: deleteProposal?.current ?? null,
-						reason: proposal.reason ?? null,
-					},
-	}).catch((error) =>
-		logger.error(error, "Failed to send entity change approval notification"),
-	);
+	// Commit the approval with its notification and delivery task when recipients
+	// exist, so a failed handoff cannot leave a card that retries mistake for delivered.
+	return sql.begin(async (tx) => {
+		await tx`SELECT pg_advisory_xact_lock(hashtextextended(${idempotencyKey}, 0))`;
+		const existing = await findExisting(tx);
+		let persisted: { runId: number; eventId: number; reused: boolean };
+		if (existing.length > 0) {
+			persisted = await reuseExisting(existing[0], tx);
+		} else {
+			const inserted = await tx<{ id: number }>`
+				INSERT INTO runs (
+					organization_id, run_type, action_key, action_input, parent_run_id,
+					automation_id, created_by_user_id, initiator_kind, initiator_ref,
+					approval_status, status, idempotency_key, created_at
+				) VALUES (
+					${ctx.organizationId}, 'internal', ${actionKey},
+					${tx.json(proposal as unknown as Record<string, unknown>)},
+					${parentRunId}, ${proposal.automation_id ?? null},
+					${initiatorColumns.createdByUserId},
+					${initiatorColumns.initiatorKind},
+					${tx.json(initiatorColumns.initiatorRef)},
+					'pending', 'pending', ${idempotencyKey}, current_timestamp
+				)
+				ON CONFLICT DO NOTHING
+				RETURNING id
+			`;
+			if (inserted.length === 0) {
+				const winner = await findExisting(tx);
+				if (winner.length === 0) {
+					throw new Error("Entity change idempotency conflict has no active run");
+				}
+				persisted = await reuseExisting(winner[0], tx);
+			} else {
+				const runId = Number(inserted[0].id);
+				const event = await insertApprovalEvent(runId, tx);
+				persisted = { runId, eventId: Number(event.id), reused: false };
+			}
+		}
+		const { runId, eventId } = persisted;
 
-	return { runId, eventId, approvalUrl };
+		const [permalinkRun] = await tx<{
+			initiator_kind: string | null;
+			initiator_ref: Record<string, unknown> | null;
+			initiator_agent_id: string | null;
+		}>`
+			SELECT r.initiator_kind, r.initiator_ref, w.managed_agent_id AS initiator_agent_id
+			FROM runs r
+			LEFT JOIN automations w
+				ON w.id = r.automation_id AND w.organization_id = r.organization_id
+			WHERE r.id = ${runId} AND r.organization_id = ${ctx.organizationId}
+		`;
+		// Run-scoped: the pending event is superseded on approve→complete; a run link
+		// stays valid across the chain. (Read-side content_ids resolution also covers
+		// the event id below, carried for the notification's resourceId.)
+		// An Automation-initiated proposal lands on that Automation's drill-down instead
+		// of the workspace-wide log, so the link answers where it came from.
+		const approvalUrl = buildResourcePermalink(
+			ownerSlug,
+			runPermalinkResource(
+				{
+					initiatorKind: permalinkRun?.initiator_kind,
+					initiatorRef: permalinkRun?.initiator_ref,
+				},
+				runId,
+				permalinkRun?.initiator_agent_id,
+			),
+			baseUrl,
+		);
+		if (persisted.reused) return { runId, eventId, approvalUrl };
+
+		await notifyActionApprovalNeeded({
+			orgId: ctx.organizationId,
+			runId,
+			actionKey,
+			connectionName: actionLabel,
+			eventId,
+			approvalUrl,
+			connectionId: deliveryTarget.connectionId,
+			channelId: deliveryTarget.channelId,
+			teamId: deliveryTarget.teamId,
+			ownerUserId: updateProposal?.owner_user_id ?? null,
+			requesterUserId: ctx.userId ?? null,
+			mcpActivity: currentMcpActivityAttribution(ctx),
+			actionOrigin,
+			details:
+				operation === "update"
+					? {
+							kind: "entity_field_change",
+							actorLabel,
+							entityId: updateProposal?.entity_id ?? null,
+							entityType: entity?.entity_type ?? null,
+							entityName: entity?.name ?? null,
+							entityUrl,
+							fields: updateProposal?.fields ?? {},
+							current: updateProposal?.current ?? null,
+							reason: proposal.reason ?? null,
+						}
+					: {
+							kind: "entity_change",
+							operation,
+							actorLabel,
+							entityId:
+								identityProposal?.entity_id ?? deleteProposal?.entity_id ?? null,
+							entityType: entityType ?? null,
+							entityName: entityName ?? null,
+							entityUrl,
+							proposal: identityProposal ? { from_entity_id: identityProposal.entity_id, to_entity_id: identityProposal.to_entity_id, relationship_type: identityProposal.relationship_type_slug, records: identityProposal.current } : deleteProposal
+									? {
+											entity_id: deleteProposal.entity_id,
+											entity_type:
+												entity?.entity_type ?? deleteProposal.current.entity_type,
+											name: entity?.name ?? deleteProposal.current.name,
+											force_delete_tree:
+												deleteProposal.force_delete_tree ?? false,
+										}
+									: (createProposal?.proposal ?? null),
+							current: deleteProposal?.current ?? null,
+							reason: proposal.reason ?? null,
+						},
+		}, tx);
+
+		return { runId, eventId, approvalUrl };
+	});
 }
 
 /** Reserved $-prefixed proposal keys that map to entity ATTRIBUTES, not metadata. */
