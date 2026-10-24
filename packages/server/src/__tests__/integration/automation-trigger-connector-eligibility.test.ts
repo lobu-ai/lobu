@@ -121,6 +121,21 @@ describe("event-trigger connector eligibility", () => {
 		},
 	);
 
+  it('accepts capture only for declared source-only observer events', async () => {
+    await defineConnector('elig-observer', { events: [{ key: 'message.created' }],
+      feeds: { messages: { operations: ['read'], webhook: { mode: 'trigger', events: ['message.created'] } } } });
+    await defineConnector('elig-sync', { events: [{ key: 'message.created' }],
+      feeds: { messages: { operations: ['read', 'sync'], webhook: { mode: 'trigger', events: ['message.created'] } } } });
+    for (const connectorKey of ['elig-rich', 'elig-sync']) {
+      await expect(assertAutomationTriggerConnections(getTestDb(), orgId, [{
+        kind: 'event', connector_key: connectorKey, event_types: ['message.created'], capture: 'references',
+      }])).rejects.toThrow(/source-only reference observer/);
+    }
+    await expect(assertAutomationTriggerConnections(getTestDb(), orgId, [{
+      kind: 'event', connector_key: 'elig-observer', event_types: ['message.created'], capture: 'references',
+    }])).resolves.toBeUndefined();
+  });
+
 	it("rejects a connector with no declared events AND no feeds", async () => {
 		const sql = getTestDb();
 		await expect(

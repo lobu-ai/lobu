@@ -28,6 +28,12 @@ export const AutomationEventTriggerSchema = Type.Object(
       maxItems: 32,
       uniqueItems: true,
     }),
+    capture: Type.Optional(
+      Type.Literal("references", {
+        description:
+          "Authorize continuous retention of source change references from declared source-only observers while this Automation is active. Supports resource_ref/resource_type matching only. Does not retain bodies or start an external executor.",
+      })
+    ),
     match: Type.Optional(
       Type.Record(Type.String(), AutomationTriggerMatchValueSchema, {
         description:

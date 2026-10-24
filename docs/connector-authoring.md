@@ -170,14 +170,34 @@ then publish reference batches through the existing page transport:
 
 Each batch contains at most 500 references and 128 KiB, including its checkpoint.
 Split oversized source pages into ordered batches with stable IDs, and put the
-page checkpoint only on the final batch so interruption cannot skip references.
+page checkpoint on the final batch when earlier batches have immutable source
+IDs and are durably retained in order. For mutable observations, every chunk
+must carry its own predecessor/successor checkpoint and advance a durable
+observation generation. Intermediate checkpoints retain accepted fingerprints
+and the original source position; only the final chunk advances source position.
+Never trim unfinished-pass mutable fingerprints before safe advancement. Preserve
+which fingerprints were anchors before the pass: a newly accepted partial page
+must not become an early-stop anchor on reconnect. Retain every fingerprint in
+the final stopping page, including pages larger than the normal cache, so an
+unchanged poll cannot manufacture new observations. If this exceeds transport
+limits, fail before sending or advancing a checkpoint.
 The browser sends
 bounded batches through its normal worker poll; it accepts at most 64 listener
 bindings and reports every accepted binding on each poll. The server queues
 matching Automations using the existing delivery dedupe and batching, and
 advances the cursor in the same transaction. Only its committed acknowledgment removes
-the batch from the browser buffer. Stable change IDs must be identical across
-overlapping feeds. References contain no message bodies, media or attributes;
+the batch from the browser buffer. With explicit `capture:"references"`
+consent, references and checkpoint progress commit atomically to append-only
+Events before acknowledgment, even when an external client is offline. A stale
+checkpoint branch may acknowledge already accepted identical observations as a
+no-op; an unknown observation revokes the binding and rebinds from committed
+progress. Transient transaction failures retain the batch for retry. Native immutable source change IDs must be identical across overlapping feeds.
+When a provider supplies no immutable change revision, a connector may identify
+accepted observer occurrences using a checkpoint-scoped epoch and monotonic
+generation. Such IDs are replay-stable within that observer, including A-to-B-to-A
+transitions, but do not promise cross-observer deduplication. Document that
+limitation and use one observer per source scope. A resource reference always
+identifies the underlying source resource separately. References contain no message bodies, media or attributes;
 opaque cursors contain only bounded source positions. `more: true` asks for
 another setup/replay pass when a bounded replay cannot finish.
 

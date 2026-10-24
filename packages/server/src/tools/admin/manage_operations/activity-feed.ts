@@ -13,7 +13,7 @@ import { buildResourcePermalink } from "../../../utils/url-builder";
 import { AGENT_ASK_ACTION_KEY } from "../../../notifications/ask";
 import { resolveAskAffordance } from "../../../notifications/ask-schema";
 import { ENTITY_CHANGE_ACTION_KEYS } from "../run-decider";
-import { listExternalAutomationWork, type ExternalActivityCaller } from '../../../automations/external-activity';
+import { listExternalAutomationWork, listExternalSourceSubscriptions, type ExternalActivityCaller } from '../../../automations/external-activity';
 
 /**
  * Approval families a human may settle straight from a feed row, without
@@ -107,7 +107,7 @@ export type ActivityCard = {
 	next_action?: {
 		method: 'automations.claimNextWindow';
 		input: { automation_id: string; run_id?: number };
-	};
+	} | { method: 'knowledge.read'; input: { automation_id: number; view: 'changes' } };
 };
 
 type RawCard = ActivityCard & {
@@ -767,6 +767,26 @@ export async function listOrgActivity(opts: {
 		const fillCount = Math.max(0, limit - pinned.length - currentWork.length);
 		items = [...pinned, ...currentWork, ...(fillCount > 0 ? history.slice(-fillCount) : [])]
 			.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+	}
+	if (includeRuns && kindFilter?.has('source_changes')) {
+		const subscriptions = await listExternalSourceSubscriptions({ organizationId: opts.organizationId,
+			caller: opts.caller ?? { userId: opts.userId, agentId: null, clientId: null }, agentId: opts.agentId, limit });
+		const cards: ActivityCard[] = subscriptions.map(entry => ({
+			id: `source_changes:${entry.id}`, kind: 'source_changes', title: entry.name,
+			body: 'Read captured source observations using your saved cursor. This subscription is not an unread count.',
+			at: entry.updated_at instanceof Date ? entry.updated_at.toISOString() : String(entry.updated_at),
+			status: 'available', count: 1,
+			href: `/${encodeURIComponent(opts.ownerSlug)}/automations/${entry.id}`,
+			automation_id: Number(entry.id),
+			next_action: { method: 'knowledge.read', input: { automation_id: Number(entry.id), view: 'changes' } },
+		}));
+		// Preserve human attention cards. Readers discover subscriptions through
+		// kinds=['source_changes']; each stores its own change-read cursor.
+		const pinned = items.filter(card => card.notification_id != null && pinnedAttentionIds.has(card.notification_id));
+		const available = Math.max(0, limit - pinned.length);
+		const remaining = Math.max(0, available - cards.length);
+		items = [...pinned, ...cards.slice(0, available), ...(remaining > 0
+			? items.filter(card => !pinned.includes(card)).slice(-remaining) : [])];
 	}
 	return { items, total: items.length, limit };
 }

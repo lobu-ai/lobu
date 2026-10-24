@@ -271,7 +271,8 @@ export const ListActivityAction = Type.Object({
    * Failures never merge with successes. Default true.
    */
   aggregate: Type.Optional(Type.Boolean({ default: true })),
-  /** Restrict kinds: automation_due | automation | sync | action | notification (default all). */
+  /** Restrict kinds: automation_due | automation | sync | action | notification (default all).
+   * Explicitly request source_changes to discover subscriptions, not per-client unread activity. Follow knowledge.read with your saved cursor. */
   kinds: Type.Optional(Type.Array(Type.String())),
   /**
    * Scope the feed to a single agent: only that agent's Automation runs are
@@ -553,13 +554,22 @@ export const ManageOperationsResultSchema = Type.Union([
         automation_id: Type.Optional(Type.Integer()),
         automation_name: Type.Optional(Type.String()),
         next_action: Type.Optional(
-          Type.Object({
-            method: Type.Literal("automations.claimNextWindow"),
-            input: Type.Object({
-              automation_id: Type.String(),
-              run_id: Type.Optional(Type.Integer()),
+          Type.Union([
+            Type.Object({
+              method: Type.Literal("automations.claimNextWindow"),
+              input: Type.Object({
+                automation_id: Type.String(),
+                run_id: Type.Optional(Type.Integer()),
+              }),
             }),
-          })
+            Type.Object({
+              method: Type.Literal("knowledge.read"),
+              input: Type.Object({
+                automation_id: Type.Integer(),
+                view: Type.Literal("changes"),
+              }),
+            }),
+          ])
         ),
         agent_id: Type.Optional(Type.String()),
         agent_name: Type.Optional(Type.String()),

@@ -413,7 +413,7 @@ describe("LinkedIn source adapter", () => {
     // Posts one batch at a time; each matching receipt releases the next.
     const drain = () => {
       const batches = [sent.at(-1).record];
-      while (!batches.at(-1).checkpoint) {
+      while (batches.at(-1).more === undefined) {
         reply(sent.at(-1), true);
         batches.push(sent.at(-1).record);
       }
@@ -445,7 +445,7 @@ describe("LinkedIn source adapter", () => {
       expect(
         first
           .slice(0, -1)
-          .every((batch) => !batch.checkpoint && batch.more === undefined)
+          .every((batch) => batch.checkpoint && batch.more === undefined)
       ).toBe(true);
       expect(new Set(first.map((batch) => batch.id)).size).toBe(first.length);
       const events = first.flatMap((batch) => batch.events);
@@ -457,7 +457,9 @@ describe("LinkedIn source adapter", () => {
       ).toHaveLength(40);
       const last = first.at(-1);
       expect(last.more).toBe(true);
-      expect(last.checkpoint.previous).toEqual(start);
+      expect(first[0].checkpoint.previous).toEqual(start);
+      for (let index = 1; index < first.length; index++)
+        expect(first[index].checkpoint.previous).toEqual(first[index - 1].checkpoint.next);
       const resumed = last.checkpoint.next.linkedin_inbox;
       expect(resumed.after).toBe(start.linkedin_inbox.after);
       expect(resumed.round.cursor).toBe("c3");
@@ -1099,6 +1101,136 @@ describe("LinkedIn source adapter", () => {
       api.detach();
       dom.window.close();
     }
+  });
+
+  test("notification generations preserve A to B to A to B and replay a checkpoint deterministically", async () => {
+    let headline = 'state-A';
+    const { dom, api } = adapter(async url => url === '/voyager/api/me'
+      ? { ok: true, json: async () => ({ miniProfile: { entityUrn: 'urn:li:fs_miniProfile:synthetic-self' } }) }
+      : { ok: true, text: async () => `<script>window.__como_rehydration__ = ${JSON.stringify([flight(headline)])};</script>` });
+    dom.window.setTimeout = (() => 1) as any;
+    const sent: any[] = [];
+    dom.window.postMessage = message => { sent.push(message); };
+    const bind = (checkpoint?: unknown) => api.listen({ feed: 'notifications', bridge_id: 'synthetic-bridge',
+      token: 'synthetic-token', checkpoint });
+    try {
+      await bind();
+      let checkpoint = sent.at(-1).record.checkpoint.next;
+      const ids: string[] = [];
+      for (headline of ['state-B', 'state-A', 'state-B']) {
+        await bind(checkpoint);
+        const batch = sent.at(-1).record;
+        expect(batch.events).toHaveLength(1);
+        ids.push(batch.events[0].id);
+        // A lost receipt / restart from exactly the same durable position.
+        await bind(checkpoint);
+        expect(sent.at(-1).record.events[0].id).toBe(ids.at(-1));
+        checkpoint = batch.checkpoint.next;
+      }
+      expect(new Set(ids).size).toBe(3);
+      expect(JSON.stringify(sent)).not.toContain('state-');
+    } finally { api.detach(); dom.window.close(); }
+  });
+
+  test("notification recovery retains accepted fingerprints beyond the final seen limit", async () => {
+    let headline = 'before';
+    const cards = JSON.parse(flight().slice(2, flight().indexOf('\n')))[0][1];
+    const { dom, api } = adapter(async url => url === '/voyager/api/me'
+      ? { ok: true, json: async () => ({ miniProfile: { entityUrn: 'urn:li:fs_miniProfile:synthetic-self' } }) }
+      : { ok: true, text: async () => {
+        const frames = Array.from({ length: 650 }, (_, i) => `${(i + 1).toString(16)}:${JSON.stringify([
+          ['Original', JSON.parse(JSON.stringify(cards).replaceAll('1000', String(1000 + i)).replaceAll('$2', '$fff'))],
+        ])}\n`).join('');
+        const stream = `${frames}fff:T${new TextEncoder().encode(headline).length.toString(16)},${headline}`;
+        return `<script>window.__como_rehydration__ = ${JSON.stringify([stream])};</script>`;
+      } });
+    dom.window.setTimeout = (() => 1) as any;
+    const sent: any[] = [];
+    dom.window.postMessage = message => { sent.push(message); };
+    const bind = (checkpoint?: unknown) => api.listen({ feed: 'notifications', bridge_id: 'synthetic-bridge',
+      token: 'synthetic-token', checkpoint });
+    const ack = () => dom.window.dispatchEvent(new dom.window.MessageEvent('message', { source: dom.window,
+      origin: 'https://www.linkedin.com', data: { type: 'lobu-feed-record:ack', token: 'synthetic-token', sequence: sent.at(-1).sequence, ok: true } }));
+    try {
+      await bind();
+      const baseline = sent.at(-1).record.checkpoint.next;
+      headline = 'after';
+      await bind(baseline);
+      const accepted = new Set<string>();
+      let checkpoint: any;
+      while (accepted.size <= 256) {
+        const batch = sent.at(-1).record;
+        expect(batch.more).toBeUndefined();
+        batch.events.forEach((event: any) => accepted.add(event.resource_ref));
+        checkpoint = batch.checkpoint.next;
+        ack();
+      }
+      expect(Object.keys(checkpoint.linkedin_inbox.seen).length).toBeGreaterThan(256);
+      await bind(checkpoint);
+      const remaining: any[] = [];
+      for (;;) {
+        const batch = sent.at(-1).record;
+        remaining.push(...batch.events);
+        if (batch.more !== undefined) break;
+        ack();
+      }
+      expect(remaining.some(event => accepted.has(event.resource_ref))).toBe(false);
+      expect(remaining.length + accepted.size).toBe(650);
+      // The complete stopping page must remain remembered on idle polls.
+      await bind(sent.at(-1).record.checkpoint.next);
+      expect(sent.at(-1).record.events).toEqual([]);
+    } finally { api.detach(); dom.window.close(); }
+  });
+
+  test("notification recovery crosses provider pages until the original anchor after an accepted chunk", async () => {
+    let expanded = false;
+    const pagesRead: number[] = [];
+    const card = JSON.parse(flight().slice(2, flight().indexOf('\n')))[0][1];
+    const page = (index: number) => {
+      pagesRead.push(index);
+      const ids = expanded ? Array.from({ length: index === 2 ? 100 : 200 }, (_, i) => 1000 + index * 200 + i) : [];
+      if (!expanded || index === 2) ids.push(9000);
+      const frames = ids.map((id, i) => `${(i + 1).toString(16)}:${JSON.stringify([
+        ['Original', JSON.parse(JSON.stringify(card).replaceAll('1000', String(id)).replaceAll('$2', '$fff'))],
+      ])}\n`).join('');
+      const request = JSON.stringify({ $type: 'proto.sdui.actions.requests.PaginationRequest',
+        pagerId: 'com.linkedin.sdui.pagers.notificationsList', requestedArguments: { payload: {
+          startIndex: index + 1, filterPillType: 'All', trackingIdsToDrop: [],
+        } } });
+      return `${frames}fff:T5,hello${expanded && index < 2 ? `ffe:T${new TextEncoder().encode(request).length.toString(16)},${request}` : ''}`;
+    };
+    const { dom, api } = adapter(async (url, init) => url === '/voyager/api/me'
+      ? { ok: true, json: async () => ({ miniProfile: { entityUrn: 'urn:li:fs_miniProfile:synthetic-self' } }) }
+      : init?.body ? { ok: true, text: async () => page(JSON.parse(init.body).paginationRequest.requestedArguments.payload.startIndex) }
+      : { ok: true, text: async () => `<script>window.__como_rehydration__ = ${JSON.stringify([page(0)])};</script>` });
+    dom.window.setTimeout = (() => 1) as any;
+    const sent: any[] = [];
+    dom.window.postMessage = message => { sent.push(message); };
+    const bind = (checkpoint?: unknown) => api.listen({ feed: 'notifications', bridge_id: 'synthetic-bridge',
+      token: 'synthetic-token', checkpoint });
+    const ack = () => dom.window.dispatchEvent(new dom.window.MessageEvent('message', { source: dom.window,
+      origin: 'https://www.linkedin.com', data: { type: 'lobu-feed-record:ack', token: 'synthetic-token', sequence: sent.at(-1).sequence, ok: true } }));
+    try {
+      await bind();
+      expanded = true;
+      await bind(sent.at(-1).record.checkpoint.next);
+      const first = sent.at(-1).record;
+      expect(first.more).toBeUndefined();
+      expect(first.events.length).toBeGreaterThan(0);
+      const accepted = new Set(first.events.map((event: any) => event.resource_ref));
+      pagesRead.length = 0;
+      await bind(first.checkpoint.next);
+      expect(pagesRead).toEqual([0, 1, 2]);
+      const remaining: any[] = [];
+      for (;;) {
+        const batch = sent.at(-1).record;
+        remaining.push(...batch.events);
+        if (batch.more !== undefined) break;
+        ack();
+      }
+      expect(remaining.some(event => accepted.has(event.resource_ref))).toBe(false);
+      expect(remaining.length + accepted.size).toBe(500);
+    } finally { api.detach(); dom.window.close(); }
   });
 
   test("recognizes the continuation encoded as a Flight text record", async () => {

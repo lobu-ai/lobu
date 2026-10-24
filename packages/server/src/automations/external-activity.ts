@@ -5,6 +5,24 @@ import { encodeExternalAutomationClaimOwner } from './external-claim-owner';
 
 export type ExternalActivityCaller = Pick<ToolContext, 'userId' | 'agentId' | 'clientId'>;
 
+/** Subscription discovery, not a per-client unread count or processing acknowledgment. */
+export async function listExternalSourceSubscriptions(params: {
+  organizationId: string; caller: ExternalActivityCaller; agentId?: string; limit: number;
+}) {
+  if (!params.caller.userId && !params.caller.agentId && !params.caller.clientId) return [];
+  const sql = getDb();
+  return sql<{ id: number; name: string; updated_at: string | Date }>`
+    SELECT a.id, a.name, a.updated_at FROM automations a
+    WHERE a.organization_id = ${params.organizationId} AND a.status = 'active'
+      AND a.execution_config->'executor'->>'kind' = 'external'
+      ${params.agentId ? sql`AND a.managed_agent_id = ${params.agentId}` : sql``}
+      ${params.caller.agentId ? sql`AND (a.managed_agent_id IS NULL OR a.managed_agent_id = ${params.caller.agentId})` : sql``}
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements(a.triggers) trigger
+        WHERE trigger->>'kind' = 'event' AND trigger->>'source' IS DISTINCT FROM 'workspace'
+          AND trigger->>'capture' = 'references')
+    ORDER BY a.id LIMIT ${params.limit}`;
+}
+
 /** Read current config + active runs only. Discovery never creates a run or renews a lease. */
 export async function listExternalAutomationWork(params: {
   organizationId: string;

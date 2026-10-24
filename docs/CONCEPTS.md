@@ -141,6 +141,15 @@ flowchart LR
    atomically queues activation of downstream `source: "workspace"` Automations —
    that is how automations chain.
 
+Source-only observers can also retain metadata-only change references under an
+active Automation's explicit `capture: "references"` consent. Acceptance and
+source checkpoint advancement commit together, independently of agent execution.
+External clients read those append-only observations through
+`knowledge.read({automation_id, view:"changes", cursor})`, each maintaining its
+own cursor. This read neither creates a run nor advances shared processing
+progress. Initial provider scans and entity identity decisions remain separate
+existing operations; references alone do not import bodies or merge entities.
+
 ## Feature map
 
 | Layer | What it does | Where it lives |

@@ -13,6 +13,19 @@
 import { type Static, Type } from "@sinclair/typebox";
 
 export const GetContentSchema = Type.Object({
+  view: Type.Optional(
+    Type.Literal("changes", {
+      description:
+        "Read retained source-reference observations for an Automation with capture=references, without a run or processing checkpoint. Without cursor, starts at retained history; drain next_cursor, then poll resume_cursor. No source bodies or live provider scan.",
+    })
+  ),
+  cursor: Type.Optional(
+    Type.String({
+      maxLength: 8192,
+      description:
+        "Opaque next_cursor or resume_cursor from view=changes. Keep the same Automation and caller; permissions are rechecked on every page.",
+    })
+  ),
   query: Type.Optional(
     Type.String({
       description:
@@ -54,7 +67,7 @@ export const GetContentSchema = Type.Object({
   automation_id: Type.Optional(
     Type.Number({
       description:
-        "Persisted Automation ID (`automation_id`) to fetch content for. With run_id, uses that run's queued version/window; otherwise computes the Automation's pending window. Returns window_token for complete_window action.",
+        "Persisted Automation ID (`automation_id`) to fetch content for. With run_id, uses that run's queued version/window; otherwise computes the Automation's pending window. Returns window_token for complete_window action, except view=changes which uses independent read cursors.",
     })
   ),
   template_version_id: Type.Optional(
