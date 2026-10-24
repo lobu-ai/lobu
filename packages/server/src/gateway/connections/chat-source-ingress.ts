@@ -97,17 +97,20 @@ export async function handleChatSourceIngress(
   }
 
   const disposition = await orgContext.run({ organizationId }, async (): Promise<ChatSourceDisposition> => {
+    // Recheck the current executor as well as source admission: a queued job
+    // may outlive a switch to external, reference-only capture.
+    const subscribed = new Set(
+      (await sourceFeedSubscriptions(sql, organizationId, feedId))
+        .filter((s) => s.executorKind !== "external").map((s) => s.automationId),
+    );
+    const candidates = job.data.automationIds.filter((id) => subscribed.has(id));
+    if (candidates.length === 0) return "no_subscribed_reply_automation";
+
     const runtimeId = String(connectionId);
     if (!(await manager.warmConnection(runtimeId))) return "not_chat_transport";
     const instance = manager.getInstance(runtimeId);
     const descriptor = instance && getPlatformDescriptor(instance.connection.platform);
     if (!instance || !descriptor?.parseSourceMessage) return "not_chat_transport";
-
-    const subscribed = new Set(
-      (await sourceFeedSubscriptions(sql, organizationId, feedId)).map((s) => s.automationId),
-    );
-    const candidates = job.data.automationIds.filter((id) => subscribed.has(id));
-    if (candidates.length === 0) return "no_subscribed_reply_automation";
 
     const read = await readSourceFeed({
       // Server-side ingress for a subscribed Automation: no chat caller.

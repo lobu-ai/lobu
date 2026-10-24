@@ -876,7 +876,8 @@ export function linkedInInboxProgram() {
           occurred_at: row.occurred_at ?? new Date(observedAt).toISOString(),
         });
       }
-      observed.set(key, fingerprint);
+      // Overlapping pages must checkpoint the same revision we emitted first.
+      if (!observed.has(key)) observed.set(key, fingerprint);
       // Accepted chunks suppress repeats, but newly accepted items are not
       // the original catch-up boundary. Otherwise a rebind stops on page one
       // before reaching unfinished provider pages.

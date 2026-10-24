@@ -163,9 +163,9 @@ bounded index scans per authorized connection/event type. A transaction still
 committing cannot fall behind the resume position. Exact resource matching may
 yield empty pages with `has_more:true` inside an authorized source; continue
 until `resume_cursor`. Other private or ACL-graphed sources do not influence
-page counts. Permissions are rechecked for every page. Changing the caller, readable source permissions, or
-Automation configuration invalidates its cursor; restart without one and
-dedupe already processed observation identities.
+page counts. Permissions are rechecked for every page. Changing the caller,
+readable source set, Automation version, or capture triggers invalidates its
+cursor; restart without one and dedupe already processed observation identities.
 
 The stream includes accepted `source_reference` observations only. An initial
 source scan still uses existing bounded feed reads; establishing an observer

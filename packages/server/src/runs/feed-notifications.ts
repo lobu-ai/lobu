@@ -71,7 +71,10 @@ async function receiveSourceReferenceDelivery(
   await tx`UPDATE feeds SET next_run_at = NULL, consecutive_failures = 0
     WHERE id = ${notice.feed_id} AND organization_id = ${feed.organization_id}
       AND last_error IS NULL AND next_run_at > now()`;
-  const allowed = new Set(subscriptions.map(subscription => subscription.automationId));
+  // External subscriptions authorize reference retention, never chat-body
+  // hydration or execution, even when the Automation has an owning agent.
+  const executionSubscriptions = subscriptions.filter(subscription => subscription.executorKind !== 'external');
+  const allowed = new Set(executionSubscriptions.map(subscription => subscription.automationId));
   // Events whose messages the chat ingress can read (`chat-source-ingress.ts`).
   const readable = new Set((feed.automation_events ?? [])
     .filter(event => event.capabilities?.replyToSource).map(event => event.key));
@@ -128,7 +131,7 @@ async function receiveSourceReferenceDelivery(
       // filter needs the message, which only the ingress worker reads. So
       // such an Automation is routed there, all of its triggers at once.
       const automationIds = readable.has(event.event_type)
-        ? subscriptions
+        ? executionSubscriptions
           .filter(subscription => needsSourceMessage(subscription.triggers, signal))
           .map(subscription => subscription.automationId)
         : [];

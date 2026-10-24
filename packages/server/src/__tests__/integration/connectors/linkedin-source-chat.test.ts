@@ -318,6 +318,67 @@ describe("LinkedIn source chat", () => {
     expect(stored).toMatchObject({ id: String(connectionId), platform: "linkedin" });
   }, 60_000);
 
+  it.each([
+    ["matching resource reference", { resource_ref: messageUrn("SYNTHCAPTURE") }, true],
+    ["nonmatching resource reference", { resource_ref: messageUrn("SYNTHOTHER") }, false],
+    ["matching resource type", { resource_type: "message" }, true],
+    ["nonmatching resource type", { resource_type: "notification" }, false],
+  ])("external reference capture with %s never hydrates message bodies", async (_, match, retained) => {
+    const automationId = await insertAutomation("external-capture", { capture: "references", output: "silent", match });
+    // An owning agent must not override the explicitly external executor.
+    await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: "external" } })}
+      WHERE id = ${automationId}`;
+    inbox.push({ id: "SYNTHCAPTURE", thread: DM_THREAD, text: "Private body stays at its source." });
+
+    await deliver("SYNTHCAPTURE");
+    expect(await ingressJobs()).toHaveLength(0);
+    await drain();
+    expect(reads).toEqual([]);
+    expect(enqueued).toEqual([]);
+    expect(sends).toEqual([]);
+    const references = await sql`SELECT payload_type FROM events WHERE organization_id = ${orgId}
+      AND origin_type = 'source_reference' AND semantic_type = 'message.created'`;
+    expect(references).toEqual(retained ? [{ payload_type: "empty" }] : []);
+    expect(await sql`SELECT id FROM runs WHERE organization_id = ${orgId} AND automation_id = ${automationId}`).toHaveLength(0);
+  }, 60_000);
+
+  it("external reference capture is excluded from a managed subscriber's hydration job", async () => {
+    const externalId = await insertAutomation("external-capture", { capture: "references", output: "silent",
+      match: { resource_type: "message" } });
+    await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: "external" } })}
+      WHERE id = ${externalId}`;
+    const managedId = await insertAutomation("managed-reply", replyTo());
+    inbox.push({ id: "SYNTHMIXED", thread: DM_THREAD, text: "An explicitly authorized managed reply." });
+
+    await deliver("SYNTHMIXED");
+    await drain();
+    const [job] = await sql`SELECT action_input FROM runs WHERE organization_id = ${orgId}
+      AND queue_name = ${CHAT_SOURCE_INGRESS_QUEUE}`;
+    expect(job.action_input.automationIds).toEqual([managedId]);
+    expect(reads).toEqual([`id:${messageUrn("SYNTHMIXED")}`]);
+    expect(enqueued).toHaveLength(1);
+  }, 60_000);
+
+  it("external reference capture rechecks an already queued ingress before reading its body", async () => {
+    await queue!.stop();
+    queue = null;
+    const match = { resource_ref: messageUrn("SYNTHQUEUED") };
+    const automationId = await insertAutomation("queued-capture", { output: "silent", match });
+    inbox.push({ id: "SYNTHQUEUED", thread: DM_THREAD, text: "Do not hydrate after the executor changes." });
+    await deliver("SYNTHQUEUED");
+    expect(await ingressJobs()).toHaveLength(1);
+    await sql`UPDATE automations SET execution_config = ${sql.json({ executor: { kind: "external" } })},
+      triggers = ${sql.json([{ kind: "event", connector_key: "linkedin", connection_id: connectionId,
+        event_types: ["message.created"], capture: "references", match }])} WHERE id = ${automationId}`;
+
+    await startWorker();
+    await drain();
+    expect(reads).toEqual([]);
+    expect(enqueued).toEqual([]);
+    expect(sends).toEqual([]);
+    expect(await dispositions()).toEqual(["no_subscribed_reply_automation"]);
+  }, 60_000);
+
   it("answers a linked member's DM as that member with exactly one keyed send_message", async () => {
     await insertAutomation("dm-reply", replyTo());
     inbox.push({ id: "SYNTHDM1", thread: DM_THREAD, text: "are you around?" });

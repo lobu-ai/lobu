@@ -8,6 +8,7 @@ import type { DbClient } from '../db/client';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { feedTriggerEligibilitySql } from '../connectors/feed-health-semantics';
 import { DEVICE_FEED_READ_ACTION_KEY } from '../lib/device-feed-read-protocol';
+import { resolveAutomationExecutor, type ResolvedExecutor } from '../tools/admin/manage_automations/executors';
 
 /** The same source configuration key fences listener setup and incoming deliveries. */
 export function sourceFeedScopeKey(config: unknown, version: string | null): string {
@@ -18,6 +19,7 @@ export interface SourceFeedSubscription {
   automationId: number;
   principal: string | null;
   agentId: string | null;
+  executorKind: ResolvedExecutor['kind'];
   triggers: AutomationTrigger[];
 }
 
@@ -30,7 +32,8 @@ export async function sourceFeedSubscriptions(
 ): Promise<SourceFeedSubscription[]> {
   // Resource-ref match predicates are evaluated per change by the normal activation path.
   const rows = await sql`
-    SELECT a.id, a.created_by, a.managed_agent_id, a.triggers, c.id AS connection_id, c.connector_key, f.feed_key, f.config AS source_config,
+    SELECT a.id, a.created_by, a.managed_agent_id, a.device_worker_id, a.agent_kind, a.execution_config,
+      a.triggers, c.id AS connection_id, c.connector_key, f.feed_key, f.config AS source_config,
       COALESCE(f.pinned_version, d.version) AS scope_version,
       d.feeds_schema->f.feed_key->'webhook'->'events' AS feed_events
     FROM feeds f JOIN connections c ON c.id = f.connection_id AND c.organization_id = f.organization_id
@@ -65,6 +68,9 @@ export async function sourceFeedSubscriptions(
   const subscriptions: SourceFeedSubscription[] = [];
   let hasCapture = false;
   for (const row of rows) {
+    const executor = resolveAutomationExecutor({ agentId: row.managed_agent_id,
+      deviceWorkerId: row.device_worker_id, agentKind: row.agent_kind, executionConfig: row.execution_config });
+    if (!executor) continue;
     const principal = typeof row.created_by === 'string' ? row.created_by : null;
     const subscriptionId = Number(row.id);
     const actor = await resolveActingPrincipal(sql, {
@@ -93,6 +99,7 @@ export async function sourceFeedSubscriptions(
       automationId: subscriptionId,
       principal,
       agentId: row.managed_agent_id ?? null,
+      executorKind: executor.kind,
       triggers: Array.isArray(row.triggers) ? row.triggers : [],
     });
   }

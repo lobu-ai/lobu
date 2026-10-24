@@ -1182,6 +1182,36 @@ describe("LinkedIn source adapter", () => {
     } finally { api.detach(); dom.window.close(); }
   });
 
+  test("overlapping notification pages checkpoint the revision that was emitted", async () => {
+    let expanded = false;
+    const request = JSON.stringify({ $type: 'proto.sdui.actions.requests.PaginationRequest',
+      pagerId: 'com.linkedin.sdui.pagers.notificationsList', requestedArguments: { payload: {
+        startIndex: 1, filterPillType: 'All', trackingIdsToDrop: [],
+      } } });
+    const { dom, api } = adapter(async (url, init) => url === '/voyager/api/me'
+      ? { ok: true, json: async () => ({ miniProfile: { entityUrn: 'urn:li:fs_miniProfile:synthetic-self' } }) }
+      : { ok: true, text: async () => {
+        if (init?.body) return flight('older revision');
+        const stream = expanded
+          ? `${flight('current revision')}4:T${new TextEncoder().encode(request).length.toString(16)},${request}`
+          : flight('baseline').replaceAll('1000', '9000');
+        return `<script>window.__como_rehydration__ = ${JSON.stringify([stream])};</script>`;
+      } });
+    dom.window.setTimeout = (() => 1) as any;
+    const sent: any[] = [];
+    dom.window.postMessage = message => { sent.push(message); };
+    const bind = (checkpoint?: unknown) => api.listen({ feed: 'notifications', bridge_id: 'synthetic-bridge',
+      token: 'synthetic-token', checkpoint });
+    try {
+      await bind();
+      expanded = true;
+      await bind(sent.at(-1).record.checkpoint.next);
+      expect(sent.at(-1).record.events).toHaveLength(1);
+      await bind(sent.at(-1).record.checkpoint.next);
+      expect(sent.at(-1).record.events).toEqual([]);
+    } finally { api.detach(); dom.window.close(); }
+  });
+
   test("notification recovery crosses provider pages until the original anchor after an accepted chunk", async () => {
     let expanded = false;
     const pagesRead: number[] = [];

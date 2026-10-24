@@ -21,7 +21,7 @@ test.each(['connector', 'connection', 'event'])('unrelated %s capture does not r
     event_types: [target === 'event' ? 'other.changed' : 'message.created'] };
   spies.push(
     spyOn(subscriptions, 'sourceFeedSubscriptions').mockResolvedValue([{
-      automationId: 1, principal: 'synthetic-user', agentId: 'synthetic-agent',
+      automationId: 1, principal: 'synthetic-user', agentId: 'synthetic-agent', executorKind: 'agent',
       triggers: [{ kind: 'event', connector_key: 'synthetic.source', event_types: ['message.created'] }, capture],
     }]),
     spyOn(feedPage, 'lockFeedPage').mockResolvedValue(),
