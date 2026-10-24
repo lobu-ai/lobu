@@ -34,6 +34,13 @@ function inboxOf(feedKey: string, config: unknown): unknown {
     : undefined;
 }
 
+function savedAccount(ctx: { sessionState?: Record<string, unknown> | null }): string {
+  const account = ctx.sessionState?.account_id;
+  if (typeof account !== "string" || !/^urn:li:fs_miniProfile:.+$/.test(account))
+    throw new Error("LinkedIn source requires the connection's saved account; reconnect this source");
+  return account;
+}
+
 async function readyTab(browser: ChromeActionDispatcher): Promise<number> {
   // Opening the inbox itself marks conversations seen. A scrape-owned neutral
   // tab supplies authentication without changing notification/message state.
@@ -81,12 +88,14 @@ export async function sendLinkedInMessage(
   ctx: ActionContext
 ): Promise<ActionResult> {
   try {
+    const expectedAccount = savedAccount(ctx);
     const browser = requireBrowser(ctx);
     const output = await invoke<Record<string, unknown>>(
       browser,
       await readyTab(browser),
       "send",
       {
+        expected_account: expectedAccount,
         conversation_id: ctx.input.conversation_id,
         text: ctx.input.text,
         idempotency_key: ctx.input.idempotency_key,
@@ -116,8 +125,10 @@ export async function readLinkedInInbox<F>(
   } else {
     assertInboxSourceRead(ctx, "LinkedIn");
   }
+  const expectedAccount = savedAccount(ctx);
   const browser = requireBrowser(ctx);
   return invoke(browser, await readyTab(browser), "read", {
+    expected_account: expectedAccount,
     feed: ctx.feedKey,
     inbox: inboxOf(ctx.feedKey, ctx.config),
     query: ctx.query,
@@ -130,6 +141,7 @@ export async function observeLinkedInInbox<
   C extends LinkedInInboxCheckpoint,
   F,
 >(ctx: FeedObserveContext<C, F>): Promise<void> {
+  const expectedAccount = savedAccount(ctx);
   const browser = requireBrowser(ctx);
   const tabId = await readyTab(browser);
   const binding = await browser.dispatch<{
@@ -150,6 +162,7 @@ export async function observeLinkedInInbox<
     feed: ctx.feedKey,
     inbox: inboxOf(ctx.feedKey, ctx.config),
     checkpoint: ctx.checkpoint,
+    expected_account: expectedAccount,
     bridge_id: binding.bridge_id,
     token: binding.token,
   });

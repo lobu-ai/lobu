@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
 import { webcrypto } from "node:crypto";
 import { linkedInInboxProgram } from "../linkedin-inbox-adapter.js";
-import { observeLinkedInInbox, readLinkedInInbox } from "../linkedin-inbox";
+import { observeLinkedInInbox, readLinkedInInbox, sendLinkedInMessage } from "../linkedin-inbox";
 import LinkedInConnector from "../linkedin";
 
 function adapter(fetcher: (url: string, init?: any) => Promise<any>) {
@@ -61,6 +61,50 @@ function flight(text = "Alex reacted to your post", age = "12h") {
 }
 
 describe("LinkedIn source adapter", () => {
+  test.each(["notifications", "live_messages"])("first %s subscription rejects a browser account different from the saved profile", async (feedKey) => {
+    let sourceReads = 0;
+    const { dom, api } = adapter(async (url) => {
+      if (url !== "/voyager/api/me") sourceReads++;
+      return { ok: true, json: async () => ({ miniProfile: { entityUrn: "urn:li:fs_miniProfile:synthetic-other" } }), text: async () => `<script>window.__como_rehydration__ = ${JSON.stringify([flight()])};</script>` };
+    });
+    const browser = {
+      dispatch: async (op: string, input: any) => {
+        if (op === "navigate") return { tab_id: 42 };
+        if (op === "feed_listen") return { bridge_id: "synthetic-bridge", token: "synthetic-token", subscription: { scope_key: "synthetic-scope" } };
+        return { value: await dom.window.eval(input.expression) };
+      },
+    };
+    const sent: any[] = [];
+    dom.window.postMessage = (message: unknown) => { sent.push(message); };
+    try {
+      await expect(observeLinkedInInbox({ browser, feedKey, sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" } } as any)).rejects.toThrow("saved account");
+      expect(sourceReads).toBe(0);
+      expect(sent).toEqual([]);
+    } finally { api.detach(); dom.window.close(); }
+  });
+
+  test("source reads and sends reject the wrong saved account before source access", async () => {
+    let sourceReads = 0;
+    const { dom } = adapter(async (url) => {
+      if (url !== "/voyager/api/me") sourceReads++;
+      return { ok: true, json: async () => ({ miniProfile: { entityUrn: "urn:li:fs_miniProfile:synthetic-other" } }) };
+    });
+    const browser = { dispatch: async (op: string, input: any) => op === "navigate" ? { tab_id: 42 } : { value: await dom.window.eval(input.expression) } };
+    const context = { browser, sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" } };
+    try {
+      for (const feedKey of ["notifications", "live_messages"])
+        await expect(readLinkedInInbox({ ...context, feedKey } as any)).rejects.toThrow("saved account");
+      expect(await sendLinkedInMessage({ ...context, input: { conversation_id: "synthetic-thread", text: "Synthetic reply", idempotency_key: "synthetic-key" } } as any)).toMatchObject({ success: false, error: expect.stringContaining("saved account") });
+      expect(sourceReads).toBe(0);
+    } finally { dom.window.close(); }
+  });
+
+  test("observation without a saved account fails before browser dispatch", async () => {
+    let calls = 0;
+    await expect(observeLinkedInInbox({ feedKey: "notifications", browser: { dispatch: async () => { calls++; throw new Error("unexpected browser dispatch"); } } } as any)).rejects.toThrow("saved account");
+    expect(calls).toBe(0);
+  });
+
   test("a structured empty notification continuation exhausts the source", async () => {
     const empty = `1:"synthetic-module"\n2:I["$1",[],"default"]\n0:${JSON.stringify(
       [
@@ -117,7 +161,7 @@ describe("LinkedIn source adapter", () => {
     );
     let cursor: string;
     const readNext = () =>
-      api.read({
+      api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "notifications",
         cursor,
       });
@@ -126,13 +170,13 @@ describe("LinkedIn source adapter", () => {
       sent.push(message);
     };
     try {
-      const first = await api.read({ feed: "notifications" });
+      const first = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications" });
       expect(first.hasMore).toBe(true);
       expect(first.rows).toHaveLength(1);
       cursor = first.nextCursor;
       expect(JSON.parse(cursor).page).toEqual(payload);
       await expect(readNext()).resolves.toEqual({ rows: [], hasMore: false });
-      await api.listen({
+      await api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "notifications",
         bridge_id: "synthetic-bridge",
         token: "synthetic-token",
@@ -158,7 +202,7 @@ describe("LinkedIn source adapter", () => {
       ).toHaveLength(1);
       const checkpoint = sent[0].record.checkpoint.next;
       sent.length = 0;
-      await api.listen({
+      await api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "notifications",
         bridge_id: "synthetic-bridge",
         token: "synthetic-token",
@@ -166,7 +210,7 @@ describe("LinkedIn source adapter", () => {
       });
       expect(sent[0].record.events).toEqual([]);
       initialStream = empty;
-      await expect(api.read({ feed: "notifications" })).rejects.toThrow(
+      await expect(api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications" })).rejects.toThrow(
         "Notification source format changed"
       );
       for (const changed of [
@@ -217,9 +261,9 @@ describe("LinkedIn source adapter", () => {
         return { value: { rows: [], listening: true } };
       },
     };
-    await observeLinkedInInbox({ browser, feedKey: "notifications" } as any);
-    await observeLinkedInInbox({ browser, feedKey: "live_messages" } as any);
-    await readLinkedInInbox({ browser, feedKey: "notifications" } as any);
+    await observeLinkedInInbox({ browser, feedKey: "notifications", sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" } } as any);
+    await observeLinkedInInbox({ browser, feedKey: "live_messages", sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" } } as any);
+    await readLinkedInInbox({ browser, feedKey: "notifications", sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" } } as any);
     expect(documentLoads).toBe(0);
   });
 
@@ -275,7 +319,7 @@ describe("LinkedIn source adapter", () => {
       },
     };
     try {
-      await api.listen({
+      await api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         bridge_id: "synthetic-bridge",
         token: "synthetic-token",
@@ -298,7 +342,7 @@ describe("LinkedIn source adapter", () => {
         checkpoint.linkedin_inbox.after
       );
       expect(JSON.stringify(batch)).not.toContain("Private message body");
-      await api.listen({
+      await api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         bridge_id: "synthetic-bridge",
         token: "synthetic-token",
@@ -404,7 +448,7 @@ describe("LinkedIn source adapter", () => {
       },
     };
     const bind = (checkpoint: unknown) =>
-      api.listen({
+      api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         bridge_id: "synthetic-bridge",
         token: "synthetic-token",
@@ -554,7 +598,7 @@ describe("LinkedIn source adapter", () => {
       sent.push(message);
     };
     const bind = (checkpoint: unknown) =>
-      api.listen({
+      api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         bridge_id: "synthetic-bridge",
         token: "synthetic-token",
@@ -656,7 +700,7 @@ describe("LinkedIn source adapter", () => {
       },
     };
     try {
-      await api.listen({
+      await api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "notifications",
         bridge_id: "synthetic-bridge",
         token: "synthetic-token",
@@ -758,7 +802,7 @@ describe("LinkedIn source adapter", () => {
     let next: any;
     try {
       for (const feed of ["notifications", "live_messages"]) {
-        await api.listen({
+        await api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
           feed,
           bridge_id: `synthetic-${feed}`,
           token: `token-${feed}`,
@@ -781,13 +825,13 @@ describe("LinkedIn source adapter", () => {
       await Promise.all(timers.splice(0).map((timer) => timer()));
       expect(sent).toEqual([]);
       // Reattachment starts from the server's durable checkpoint only.
-      await next.listen({
+      await next.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "notifications",
         bridge_id: "synthetic-notifications",
         token: "token-rebound",
       });
       expect(sent[0].record.checkpoint.previous).toBeNull();
-      await next.listen({
+      await next.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         bridge_id: "synthetic-live_messages",
         token: "token-rebound-messages",
@@ -825,7 +869,7 @@ describe("LinkedIn source adapter", () => {
     }));
     try {
       await expect(
-        api.read({ feed: "live_messages", limit: 20 })
+        api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-1", feed: "live_messages", limit: 20 })
       ).rejects.toThrow("account changed");
     } finally {
       dom.window.close();
@@ -846,7 +890,7 @@ describe("LinkedIn source adapter", () => {
         `<script>globalThis.unexpectedExecution = true;</script><script data-note="a>b">\n window.__como_rehydration__ = ${JSON.stringify([flight()])};${closingTag}`,
     }));
     try {
-      const result = await api.read({ feed: "notifications", limit: 10 });
+      const result = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications", limit: 10 });
       expect(result.rows).toHaveLength(1);
       expect(result.rows[0].text).toBe("Alex reacted to your post");
       expect((dom.window as any).unexpectedExecution).toBeUndefined();
@@ -866,21 +910,21 @@ describe("LinkedIn source adapter", () => {
         `<script>window.__como_rehydration__ = ${JSON.stringify([stream])};</script>`,
     }));
     try {
-      const rows = await api.read({ feed: "notifications" });
+      const rows = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications" });
       expect(rows.rows).toHaveLength(1);
       expect(rows.rows[0].text).toBe("Alex 👋 reacted to your post");
       expect(rows.rows[0].id).toContain("groupBy=urn:li:activity:1000");
       expect(rows.rows[0].occurred_at).toBeNull();
       stream = flight();
-      const initial = await api.read({ feed: "notifications" });
+      const initial = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications" });
       stream = flight("Alex reacted to your post", "13h");
-      const aged = await api.read({ feed: "notifications" });
+      const aged = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications" });
       expect(aged.rows[0].revision).toEqual(initial.rows[0].revision);
       expect(aged.rows[0].source_revision).toEqual(
         initial.rows[0].source_revision
       );
       stream = flight("Alex and Sam reacted to your post");
-      const changed = await api.read({ feed: "notifications" });
+      const changed = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications" });
       expect(changed.rows[0].revision).not.toEqual(initial.rows[0].revision);
       expect(changed.rows[0].source_revision).not.toEqual(
         initial.rows[0].source_revision
@@ -904,10 +948,10 @@ describe("LinkedIn source adapter", () => {
       };
     });
     try {
-      await expect(api.read({ feed: "notifications" })).rejects.toThrow();
+      await expect(api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications" })).rejects.toThrow();
       calls.length = 0;
       await expect(
-        api.read({
+        api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
           feed: "notifications",
           cursor: JSON.stringify({
             v: 1,
@@ -978,7 +1022,7 @@ describe("LinkedIn source adapter", () => {
       return { ok: true, status: 200, json: async () => data };
     });
     try {
-      const result = await api.read({ feed: "live_messages", limit: 20 });
+      const result = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", limit: 20 });
       expect(result.rows[0]).toMatchObject({
         id: message.entityUrn,
         text: "Hello",
@@ -990,13 +1034,13 @@ describe("LinkedIn source adapter", () => {
         "https://www.linkedin.com/messaging/thread/synthetic-thread==/"
       );
       Object.assign(message, { messageBodyRenderFormat: "RECALLED" });
-      const recalled = await api.read({ feed: "live_messages", limit: 20 });
+      const recalled = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", limit: 20 });
       expect(recalled.rows[0]).toMatchObject({ recalled: true, text: "" });
       Object.assign(message, { messageBodyRenderFormat: "TEXT" });
       expect(result.rows[0].source_revision).toMatch(/^[a-f0-9]{64}$/);
       const originalRevision = result.rows[0].source_revision;
       message.body.text = "Hello. Actually, wait until Friday.";
-      const edited = await api.read({ feed: "live_messages", limit: 20 });
+      const edited = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", limit: 20 });
       expect(edited.rows[0].source_revision).not.toBe(originalRevision);
       expect(calls.some((url) => url.includes("%28"))).toBe(true);
       expect(calls.every((url) => !/mark|Seen|Read/.test(url))).toBe(true);
@@ -1053,7 +1097,7 @@ describe("LinkedIn source adapter", () => {
         })
       );
     try {
-      await api.listen({
+      await api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "notifications",
         bridge_id: "synthetic-bridge",
         token: "synthetic-token",
@@ -1111,7 +1155,7 @@ describe("LinkedIn source adapter", () => {
     dom.window.setTimeout = (() => 1) as any;
     const sent: any[] = [];
     dom.window.postMessage = message => { sent.push(message); };
-    const bind = (checkpoint?: unknown) => api.listen({ feed: 'notifications', bridge_id: 'synthetic-bridge',
+    const bind = (checkpoint?: unknown) => api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: 'notifications', bridge_id: 'synthetic-bridge',
       token: 'synthetic-token', checkpoint });
     try {
       await bind();
@@ -1147,7 +1191,7 @@ describe("LinkedIn source adapter", () => {
     dom.window.setTimeout = (() => 1) as any;
     const sent: any[] = [];
     dom.window.postMessage = message => { sent.push(message); };
-    const bind = (checkpoint?: unknown) => api.listen({ feed: 'notifications', bridge_id: 'synthetic-bridge',
+    const bind = (checkpoint?: unknown) => api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: 'notifications', bridge_id: 'synthetic-bridge',
       token: 'synthetic-token', checkpoint });
     const ack = () => dom.window.dispatchEvent(new dom.window.MessageEvent('message', { source: dom.window,
       origin: 'https://www.linkedin.com', data: { type: 'lobu-feed-record:ack', token: 'synthetic-token', sequence: sent.at(-1).sequence, ok: true } }));
@@ -1200,7 +1244,7 @@ describe("LinkedIn source adapter", () => {
     dom.window.setTimeout = (() => 1) as any;
     const sent: any[] = [];
     dom.window.postMessage = message => { sent.push(message); };
-    const bind = (checkpoint?: unknown) => api.listen({ feed: 'notifications', bridge_id: 'synthetic-bridge',
+    const bind = (checkpoint?: unknown) => api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: 'notifications', bridge_id: 'synthetic-bridge',
       token: 'synthetic-token', checkpoint });
     try {
       await bind();
@@ -1236,7 +1280,7 @@ describe("LinkedIn source adapter", () => {
     dom.window.setTimeout = (() => 1) as any;
     const sent: any[] = [];
     dom.window.postMessage = message => { sent.push(message); };
-    const bind = (checkpoint?: unknown) => api.listen({ feed: 'notifications', bridge_id: 'synthetic-bridge',
+    const bind = (checkpoint?: unknown) => api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: 'notifications', bridge_id: 'synthetic-bridge',
       token: 'synthetic-token', checkpoint });
     const ack = () => dom.window.dispatchEvent(new dom.window.MessageEvent('message', { source: dom.window,
       origin: 'https://www.linkedin.com', data: { type: 'lobu-feed-record:ack', token: 'synthetic-token', sequence: sent.at(-1).sequence, ok: true } }));
@@ -1285,7 +1329,7 @@ describe("LinkedIn source adapter", () => {
         requestedArguments: { payload },
       });
       stream = `${flight()}4:T${new TextEncoder().encode(request).length.toString(16)},${request}`;
-      const result = await api.read({ feed: "notifications" });
+      const result = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications" });
       expect(JSON.parse(result.nextCursor).page).toEqual(payload);
     } finally {
       dom.window.close();
@@ -1426,7 +1470,7 @@ describe("LinkedIn direct messages", () => {
       },
     });
     try {
-      const first = await api.read({ feed: "live_messages", limit: 20 });
+      const first = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", limit: 20 });
       expect(first.rows[0]).toMatchObject({
         thread_id: "2-synthetic-dm==",
         is_group: false,
@@ -1436,7 +1480,7 @@ describe("LinkedIn direct messages", () => {
         from_me: false,
         content_kind: "text",
       });
-      const second = await api.read({
+      const second = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         limit: 20,
         cursor: first.nextCursor,
@@ -1460,7 +1504,7 @@ describe("LinkedIn direct messages", () => {
       messages: { [DM]: [INBOUND], [GROUP]: [] },
     });
     try {
-      const found = await api.read({
+      const found = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         query: `id:${INBOUND.entityUrn}`,
       });
@@ -1468,13 +1512,13 @@ describe("LinkedIn direct messages", () => {
       // No group flag and no participants: unknown, never assumed a DM.
       expect(found.rows[0]).toMatchObject({ id: INBOUND.entityUrn, is_group: null });
       expect(found.hasMore).toBe(false);
-      const missing = await api.read({
+      const missing = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         query: `id:urn:li:msg_message:(${SELF},absent)`,
       });
       expect(missing.rows).toEqual([]);
       await expect(
-        api.read({ feed: "live_messages", query: "id:not-a-message" })
+        api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", query: "id:not-a-message" })
       ).rejects.toThrow("Message lookup");
     } finally {
       dom.window.close();
@@ -1493,12 +1537,12 @@ describe("LinkedIn direct messages", () => {
       messages: { [DM]: [INBOUND] },
     });
     try {
-      const found = await api.read({
+      const found = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         query: `id:${INBOUND.entityUrn}`,
       });
       expect(found.rows).toMatchObject([{ id: INBOUND.entityUrn, thread_id: "2-synthetic-dm==" }]);
-      const sent = await api.send({
+      const sent = await api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         conversation_id: "2-synthetic-dm==",
         text: "Yes, here.",
         idempotency_key: "page-six",
@@ -1517,7 +1561,7 @@ describe("LinkedIn direct messages", () => {
       messages,
     });
     try {
-      const input = {
+      const input = { expected_account: "urn:li:fs_miniProfile:synthetic-self",
         conversation_id: "2-synthetic-dm==",
         text: "Yes, around all afternoon.",
         idempotency_key: "chat-post:1:turn-1:abc",
@@ -1537,7 +1581,7 @@ describe("LinkedIn direct messages", () => {
       expect(retry).toMatchObject({ already_sent: true, message_id: first.message_id });
       expect(posts).toHaveLength(1);
       // A different key is a different reply.
-      await api.send({ ...input, idempotency_key: "chat-post:1:turn-2:def" });
+      await api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", ...input, idempotency_key: "chat-post:1:turn-2:def" });
       expect(posts).toHaveLength(2);
     } finally {
       dom.window.close();
@@ -1551,14 +1595,14 @@ describe("LinkedIn direct messages", () => {
       echoOriginToken: false,
     });
     try {
-      const input = {
+      const input = { expected_account: "urn:li:fs_miniProfile:synthetic-self",
         conversation_id: "2-synthetic-dm==",
         text: "On my way.",
         idempotency_key: "k1",
       };
       const first = await api.send(input);
       expect(await api.send(input)).toMatchObject({ message_id: first.message_id });
-      const second = await api.send({ ...input, idempotency_key: "k2" });
+      const second = await api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", ...input, idempotency_key: "k2" });
       expect(second.message_id).not.toBe(first.message_id);
       expect(posts.every((post) => post.dedupeByClientGeneratedToken === true)).toBe(true);
     } finally {
@@ -1573,7 +1617,7 @@ describe("LinkedIn direct messages", () => {
       messages,
     });
     try {
-      const input = {
+      const input = { expected_account: "urn:li:fs_miniProfile:synthetic-self",
         conversation_id: "2-synthetic-dm==",
         text: "hi",
         idempotency_key: "same-key",
@@ -1599,7 +1643,7 @@ describe("LinkedIn direct messages", () => {
     });
     try {
       await expect(
-        api.send({ conversation_id: threadId, text: "hi", idempotency_key: "k" })
+        api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: threadId, text: "hi", idempotency_key: "k" })
       ).rejects.toThrow(error);
       expect(posts).toHaveLength(0);
     } finally {
@@ -1615,7 +1659,7 @@ describe("LinkedIn direct messages", () => {
     });
     try {
       await expect(
-        api.send({ conversation_id: "2-synthetic-dm==", text: "hi", idempotency_key: "k" })
+        api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: "2-synthetic-dm==", text: "hi", idempotency_key: "k" })
       ).rejects.toThrow("did not appear");
       expect(posts).toHaveLength(1);
     } finally {
@@ -1655,10 +1699,10 @@ describe("LinkedIn page inboxes", () => {
     };
     const { api, dom } = messenger(options);
     try {
-      const first = await api.read({ feed: "live_messages", inbox: PAGE, limit: 1 });
+      const first = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: PAGE, limit: 1 });
       options.member = "urn:li:fsd_profile:synthetic-other-admin";
-      await expect(api.read({ feed: "live_messages", inbox: PAGE, cursor: first.nextCursor }))
-        .rejects.toThrow("different source or account");
+      await expect(api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: PAGE, cursor: first.nextCursor }))
+        .rejects.toThrow("saved account");
     } finally {
       dom.window.close();
     }
@@ -1675,15 +1719,15 @@ describe("LinkedIn page inboxes", () => {
     const sent: any[] = [];
     dom.window.postMessage = (message: unknown) => { sent.push(message); };
     try {
-      await api.listen({ feed: "live_messages", inbox: PAGE, bridge_id: "page", token: "token" });
+      await api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: PAGE, bridge_id: "page", token: "token" });
       const checkpoint = sent[0].record.checkpoint.next;
       options.member = "urn:li:fsd_profile:synthetic-other-admin";
       for (const inbox of [PAGE, "me"]) {
-        await expect(api.listen({ feed: "live_messages", inbox, bridge_id: "reattach", token: "token", checkpoint }))
-          .rejects.toThrow("belongs to another account");
+        await expect(api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox, bridge_id: "reattach", token: "token", checkpoint }))
+          .rejects.toThrow("saved account");
       }
       options.member = SELF;
-      await expect(api.listen({ feed: "live_messages", inbox: "me", bridge_id: "member", token: "token", checkpoint }))
+      await expect(api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: "me", bridge_id: "member", token: "token", checkpoint }))
         .resolves.toEqual({ listening: true });
     } finally {
       api.detach();
@@ -1700,8 +1744,8 @@ describe("LinkedIn page inboxes", () => {
         messages: { [PAGE_DM]: [PAGE_INBOUND] },
       });
       try {
-        await expect(api.read({ feed: "live_messages", inbox: PAGE })).rejects.toThrow();
-        await expect(api.send({ conversation_id: PAGE_DM, text: "hi", idempotency_key: "key" })).rejects.toThrow();
+        await expect(api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: PAGE })).rejects.toThrow();
+        await expect(api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "hi", idempotency_key: "key" })).rejects.toThrow();
         expect(calls.some((url) => url.includes("messengerConversations."))).toBe(false);
         expect(posts).toHaveLength(0);
       } finally {
@@ -1725,7 +1769,7 @@ describe("LinkedIn page inboxes", () => {
     });
     const { api, dom, posts } = messenger(options);
     try {
-      await expect(api.send({ conversation_id: PAGE_DM, text: "hi", idempotency_key: "key" }))
+      await expect(api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "hi", idempotency_key: "key" }))
         .rejects.toThrow("account changed");
       expect(posts).toHaveLength(0);
     } finally {
@@ -1742,7 +1786,7 @@ describe("LinkedIn page inboxes", () => {
       messages: { [PAGE_DM]: [...PAGE_REPLIES, PAGE_ADMIN_AS_MEMBER, PAGE_INBOUND] },
     });
     try {
-      const page = await api.read({ feed: "live_messages", inbox: PAGE, limit: 20 });
+      const page = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: PAGE, limit: 20 });
       const conversationsUrl = calls.find((url) => url.includes("messengerConversations."));
       expect(conversationsUrl).toContain(`mailboxUrn:${encodeURIComponent(PAGE)}`);
       expect(page.rows.map((row: any) => [row.id, row.from_me])).toEqual([
@@ -1758,13 +1802,13 @@ describe("LinkedIn page inboxes", () => {
         sender_member_id: "ACoAASyntheticPeer",
         topic: "Other",
       });
-      const first = await api.read({ feed: "live_messages", inbox: PAGE, limit: 1 });
+      const first = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: PAGE, limit: 1 });
       expect(JSON.parse(first.nextCursor).account).toBe(PAGE);
       // A page cursor never resumes the member's inbox.
       await expect(
-        api.read({ feed: "live_messages", limit: 1, cursor: first.nextCursor })
+        api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", limit: 1, cursor: first.nextCursor })
       ).rejects.toThrow("different source or account");
-      const found = await api.read({
+      const found = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         inbox: PAGE,
         query: `id:${PAGE_INBOUND.entityUrn}`,
@@ -1781,7 +1825,7 @@ describe("LinkedIn page inboxes", () => {
       messages: { [DM]: [INBOUND] },
     });
     try {
-      const { rows } = await api.read({ feed: "live_messages", inbox: "me", limit: 20 });
+      const { rows } = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: "me", limit: 20 });
       expect(rows).toHaveLength(1);
       expect("topic" in rows[0]).toBe(false);
     } finally {
@@ -1796,15 +1840,15 @@ describe("LinkedIn page inboxes", () => {
     });
     try {
       await expect(
-        api.read({ feed: "live_messages", inbox: PAGE, limit: 20 })
+        api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox: PAGE, limit: 20 })
       ).rejects.toThrow("does not administer");
       await expect(
-        api.send({ conversation_id: PAGE_DM, text: "hi", idempotency_key: "k" })
+        api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "hi", idempotency_key: "k" })
       ).rejects.toThrow("does not administer");
       expect(calls.some((url) => url.includes("messengerConversations."))).toBe(false);
       expect(posts).toHaveLength(0);
       for (const inbox of ["900001", "urn:li:fsd_company:900002", "urn:li:fsd_profile:someone"]) {
-        await expect(api.read({ feed: "live_messages", inbox })).rejects.toThrow("inbox must be");
+        await expect(api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "live_messages", inbox })).rejects.toThrow("inbox must be");
       }
     } finally {
       dom.window.close();
@@ -1821,7 +1865,7 @@ describe("LinkedIn page inboxes", () => {
       messages: { [PAGE_DM]: [PAGE_INBOUND], [DM]: [INBOUND] },
     });
     try {
-      const input = { conversation_id: PAGE_DM, text: "Happy to help.", idempotency_key: "page-key" };
+      const input = { expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: PAGE_DM, text: "Happy to help.", idempotency_key: "page-key" };
       const first = await api.send(input);
       expect(first).toMatchObject({ sent: true, conversation_id: PAGE_DM });
       expect(posts[0]).toMatchObject({
@@ -1831,10 +1875,10 @@ describe("LinkedIn page inboxes", () => {
       expect(await api.send(input)).toMatchObject({ already_sent: true, message_id: first.message_id });
       expect(posts).toHaveLength(1);
       // The member's own conversation URN is the member inbox.
-      await api.send({ conversation_id: DM, text: "Hi", idempotency_key: "member-key" });
+      await api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self", conversation_id: DM, text: "Hi", idempotency_key: "member-key" });
       expect(posts[1]).toMatchObject({ mailboxUrn: SELF, message: { conversationUrn: DM } });
       await expect(
-        api.send({
+        api.send({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
           conversation_id: "urn:li:msg_conversation:(urn:li:fsd_profile:someone-else,2-synthetic-dm==)",
           text: "Hi",
           idempotency_key: "k",
@@ -1860,7 +1904,7 @@ describe("LinkedIn page inboxes", () => {
       linkedin_inbox: { feed: "live_messages", account: SELF, started_at: 1, after: 1, floor: 1, seen: {} },
     };
     try {
-      await api.listen({
+      await api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
         feed: "live_messages",
         inbox: PAGE,
         bridge_id: "synthetic-bridge",
@@ -1874,7 +1918,7 @@ describe("LinkedIn page inboxes", () => {
       expect(sent[0].record.checkpoint.previous).toEqual(memberCheckpoint);
       expect(sent[0].record.checkpoint.next.linkedin_inbox.account).toBe(PAGE);
       await expect(
-        api.listen({
+        api.listen({ expected_account: "urn:li:fs_miniProfile:synthetic-self",
           feed: "live_messages",
           bridge_id: "synthetic-bridge-2",
           token: "synthetic-token-2",
@@ -1935,6 +1979,7 @@ describe("LinkedIn chat declarations", () => {
       await readLinkedInInbox({
         feedKey,
         config: { inbox: PAGE },
+        sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" },
         credentials: null,
         browser,
       } as any);
@@ -1957,6 +2002,7 @@ describe("LinkedIn chat declarations", () => {
       feedKey: "live_messages",
       query: "id:urn:li:msg_message:x",
       config: {},
+      sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" },
       credentials: null,
       browser,
     } as any);
@@ -1966,6 +2012,7 @@ describe("LinkedIn chat declarations", () => {
         feedKey: "live_messages",
         query: "hello",
         config: {},
+        sessionState: { account_id: "urn:li:fs_miniProfile:synthetic-self" },
         credentials: null,
         browser,
       } as any)

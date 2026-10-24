@@ -57,6 +57,14 @@ export function linkedInInboxProgram() {
       fail("Account identity is unavailable");
     return urn.replace("fs_miniProfile", "fsd_profile");
   }
+  async function boundAccount(expected) {
+    if (typeof expected !== "string" || !/^urn:li:fs_miniProfile:.+$/.test(expected))
+      fail("Source requires the connection's saved account; reconnect this source");
+    const member = await account();
+    if (expected.replace(/^urn:li:fs_miniProfile:/, "urn:li:fsd_profile:") !== member)
+      fail("Source does not match the connection's saved account; reconnect this source");
+    return member;
+  }
   const PAGE_MAILBOX = /^urn:li:fsd_pageMailbox:[0-9]+$/;
   const NOT_ADMIN =
     "The signed-in LinkedIn account does not administer this page inbox";
@@ -83,8 +91,8 @@ export function linkedInInboxProgram() {
   // The inbox one feed reads: the signed-in member's own ("me", the default),
   // or a company page's mailbox the member administers. `member` is the
   // signed-in account, which must not change while the inbox is in use.
-  async function inboxOf(selected) {
-    const member = await account();
+  async function inboxOf(selected, expected) {
+    const member = await boundAccount(expected);
     if (selected === undefined || selected === null || selected === "me")
       return { mailbox: member, member, page: false };
     if (typeof selected !== "string" || !PAGE_MAILBOX.test(selected))
@@ -656,7 +664,7 @@ export function linkedInInboxProgram() {
   }
   async function read(input) {
     const inbox = await inboxOf(
-      input.feed === "live_messages" ? input.inbox : undefined
+      input.feed === "live_messages" ? input.inbox : undefined, input.expected_account
     );
     const mailbox = inbox.mailbox;
     const cursor = cursorOf(input.cursor, input.feed, inbox);
@@ -1101,9 +1109,9 @@ export function linkedInInboxProgram() {
   // `conversation_id` is a thread id of the member's own inbox, or a full
   // conversation URN whose mailbox names the inbox the reply leaves from: the
   // member's own or a page the member administers.
-  async function sendTarget(given) {
+  async function sendTarget(given, expected) {
     if (typeof given === "string" && /^[A-Za-z0-9_-]+=*$/.test(given)) {
-      const member = await account();
+      const member = await boundAccount(expected);
       return { inbox: { mailbox: member, member, page: false }, thread: given };
     }
     const match =
@@ -1116,14 +1124,14 @@ export function linkedInInboxProgram() {
         "conversation_id must be a LinkedIn conversation thread id or conversation URN"
       );
     if (PAGE_MAILBOX.test(match[1]))
-      return { inbox: await inboxOf(match[1]), thread: match[2] };
-    const member = await account();
+      return { inbox: await inboxOf(match[1], expected), thread: match[2] };
+    const member = await boundAccount(expected);
     if (match[1] !== member)
       fail("The conversation belongs to another LinkedIn account; not sending");
     return { inbox: { mailbox: member, member, page: false }, thread: match[2] };
   }
   async function send(input) {
-    const { inbox, thread } = await sendTarget(input.conversation_id);
+    const { inbox, thread } = await sendTarget(input.conversation_id, input.expected_account);
     const mailbox = inbox.mailbox;
     const text = typeof input.text === "string" ? input.text.trim() : "";
     if (!text || text.length > 3000)
@@ -1200,7 +1208,7 @@ export function linkedInInboxProgram() {
     if (!input.bridge_id || !input.token)
       fail("Source subscription binding is required");
     const inbox = await inboxOf(
-      input.feed === "live_messages" ? input.inbox : undefined
+      input.feed === "live_messages" ? input.inbox : undefined, input.expected_account
     );
     const previous = input.checkpoint?.linkedin_inbox;
     // A mailbox change restarts the baseline, but never permits a changed sign-in.
