@@ -28,6 +28,7 @@ import type { DiscoveryDocument } from './_google/discovery';
 import gmailDiscovery from './_google/discovery/gmail_v1.json';
 import { GOOGLE_API_POLICIES } from './_google/policies';
 import TurndownService from 'turndown';
+import { syncGmailReferences, type GmailReferenceState } from './google_gmail_references';
 
 /**
  * Supported Gmail API methods as actions, compiled from the pinned Discovery
@@ -108,6 +109,7 @@ interface GmailThreadGetResponse {
 // ---------------------------------------------------------------------------
 
 interface GmailCheckpoint {
+  references?: GmailReferenceState;
   /** Bumped when the shape below changes; a mismatch re-runs the lookback. */
   schema_version?: number;
   /** Serialized search + person filter the two fields below were produced under. */
@@ -173,7 +175,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     name: 'Gmail',
     description:
       'Syncs Gmail threads, live-reads matching messages, and supports sending, drafts, and replies.',
-    version: '1.0.8',
+    version: '1.1.0',
     faviconDomain: 'mail.google.com',
     authSchema: {
       methods: [
@@ -193,6 +195,59 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       ],
     },
     feeds: {
+      message_references: {
+        key: 'message_references',
+        name: 'Message references',
+        userManaged: true,
+        requiredScopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        description:
+          'ID-only references to available messages and subsequent additions, including spam, trash, imports and drafts. No subjects, senders, snippets, bodies or provider occurrence dates. Use created_at for arrival previews; source_occurred_at is unknown. History expiry is a visible gap; recovery lists currently available messages. Sync-only, explicitly triggered or scheduled. Not a current-state mirror, edit/deletion archive or observer subscription.',
+        sync: (ctx) =>
+          syncGmailReferences(ctx, (token) => this.createClient(token)),
+        configSchema: {
+          type: 'object',
+          properties: {
+            max_results: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 500,
+              default: 500,
+              description:
+                'Maximum message references per pass, without individual message downloads. Unfinished inventory/history resumes immediately from its committed checkpoint, even without a schedule.',
+            },
+          },
+        },
+        eventKinds: {
+          message_reference: {
+            description:
+              'An available Gmail message reference, without email content',
+            metadataSchema: {
+              type: 'object',
+              properties: {
+                source_id: { type: 'string' },
+                thread_id: { type: 'string' },
+                source_occurred_at: { type: 'null' },
+                timestamp_basis: { type: 'string', enum: ['unknown'] },
+              },
+            },
+          },
+          source_gap: {
+            description:
+              'A retained Gmail history discontinuity; available inventory cannot restore deleted or expired history',
+            metadataSchema: {
+              type: 'object',
+              properties: {
+                reason: { type: 'string' },
+                from_history_id: { type: 'string' },
+                to_history_id: { type: 'string' },
+                recovery: { type: 'string' },
+                source_occurred_at: { type: 'null' },
+                timestamp_basis: { type: 'string', enum: ['unknown'] },
+              },
+            },
+          },
+        },
+      },
       threads: {
         key: 'threads',
         name: 'Threads',
