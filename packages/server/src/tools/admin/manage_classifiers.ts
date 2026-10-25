@@ -13,7 +13,7 @@
  * - classify: Write or unset labels (single or batch)
  */
 
-import { classifyMutationPrincipal } from '../../authz/entity-policy';
+import { isManualUserEdit } from '../../auth/direct-user-context';
 import {
   ClassifyContentAction,
   CreateClassifierAction,
@@ -288,13 +288,8 @@ async function handleClassify(
 
     const classifier = classifierResult[0];
     // `user` marks a human label that outranks model labels and serves as
-    // ground truth, so it follows the acting principal, never the caller's word.
-    const humanCaller =
-      classifyMutationPrincipal({
-        userId: ctx.userId,
-        agentId: ctx.agentId,
-        automationSource: ctx.actingAutomationId,
-      }) === 'user';
+    // ground truth. Account authority is not proof of a manual correction.
+    const humanCaller = isManualUserEdit(ctx);
     if (!humanCaller && args.source === 'user') {
       return {
         success: false,

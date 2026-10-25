@@ -124,7 +124,7 @@ function ownerAuthCtx(orgId: string, userId: string): AuthContext {
     isAuthenticated: true,
     clientId: null,
     scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
-    tokenType: 'oauth',
+    tokenType: 'session',
     requestUrl: `http://localhost/api/${orgId}`,
     baseUrl: '',
     scopedToOrg: true,
@@ -811,6 +811,43 @@ describe('complete_window promotes keyed rows into entities (P2 phase 1)', () =>
     `;
     expect(claims).toHaveLength(1);
     expect(Number(claims[0].entity_id)).toBe(Number(rows[0].id));
+  });
+
+  it('promotes the next window after a delegated client updates the same field', async () => {
+    const ctx = await setupKeyedAutomation();
+    const first = await nextCompletion(ctx);
+    await completeWithToken(ctx, first.token, first.runId, {
+      problems: [{ category: 'Stability', name: 'App Crashes', severity: 'low' }],
+    });
+    const [entity] = await ctx.sql`
+      SELECT entity_id FROM entity_identities
+      WHERE organization_id = ${ctx.workspace.org.id}
+        AND namespace = 'automation_key'
+        AND identifier = ${topicIdentity(ctx.automationId, APP_CRASHES_KEY)}
+    `;
+    const delegated = {
+      ...ownerAuthCtx(ctx.workspace.org.id, ctx.workspace.users.owner.id),
+      tokenType: 'pat' as const,
+      clientId: 'pat_test-delegated-worker',
+    };
+    await executeTool('manage_entity', {
+      action: 'update', entity_id: Number(entity.entity_id), metadata: { severity: 'high' },
+    }, TEST_ENV, delegated);
+
+    const next = await nextCompletion(ctx);
+    await completeWithToken(ctx, next.token, next.runId, {
+      problems: [{ category: 'Stability', name: 'App Crashes', severity: 'critical' }],
+    });
+    const [row] = await ctx.sql`
+      SELECT metadata, field_controls FROM entities WHERE id = ${entity.entity_id}
+    `;
+    expect(row.metadata.severity).toBe('critical');
+    expect(row.field_controls).toEqual({});
+    const pending = await ctx.sql`
+      SELECT id FROM runs WHERE organization_id = ${ctx.workspace.org.id}
+        AND run_type = 'internal' AND approval_status = 'pending'
+    `;
+    expect(pending).toHaveLength(0);
   });
 
   it('updates a derived display name without changing the stable identity or slug', async () => {
