@@ -29,8 +29,10 @@
  *    worker-driven liveness signal, so a live-but-slow worker is never falsely
  *    failed while a silent one lapses. On the isolate `agent_turn` lane that
  *    signal is the run heartbeat ({@link extendHeartbeatedTurnMarker}, every
- *    `intervals.isolateTurnHeartbeatMs`); the deadline is sized as a multiple
- *    of that beat, so one slow or dropped beat cannot fail a working turn.
+ *    `intervals.isolateTurnHeartbeatMs`), which extends to
+ *    {@link reaperBackstopDeadlineMs}: there the run reaper
+ *    (`sweepStaleAgentTurnRuns`) detects a dead worker first and decides
+ *    between a re-run and WORKER_DIED, and this sweep is its backstop.
  *    Other lanes extend through {@link extendTurnDeadlines} on a status update,
  *    the SSE-ping ACK, or a delivery receipt.
  *
@@ -77,7 +79,7 @@ const THREAD_RESPONSE_CHANNEL = "runs_lobu:thread_response";
 // The execution deadline and sweep cadence live in config/intervals.ts
 // (`turnDefaultDeadlineMs` / `turnLivenessSweepIntervalMs`), env-overridable.
 // A turn that has not started yet carries the worker-claim horizon on top —
-// see {@link admissionDeadlineMs}.
+// see {@link reaperBackstopDeadlineMs}.
 
 /** Routing needed to build the terminal `thread_response{error}` for a turn,
  *  stored as the marker's `action_input`. */
@@ -142,8 +144,11 @@ function turnMarkerKey(deploymentName: string, messageId: string): string {
 }
 
 /**
- * Marker deadline for a turn that has not started executing yet: the reaper's
- * claim horizon plus one execution window.
+ * Marker deadline for an isolate-lane turn the run reaper owns: the reaper's
+ * staleness horizon plus one execution window. Two callers, one reason —
+ * the reaper decides first and this marker stays the backstop behind it.
+ *
+ * A turn that has not started executing yet:
  *
  * Arming happens BEFORE admission, and a run still waiting for a worker slot
  * has nothing that could heartbeat it — so on the bare execution deadline a
@@ -154,11 +159,17 @@ function turnMarkerKey(deploymentName: string, messageId: string): string {
  * that delivery discharges this marker. So the marker only has to outlast that
  * claim horizon by one execution window to stay the backstop instead of the
  * first thing to fire — and the client gets the precise "never started" code
- * rather than the generic unresponsive-worker one. Once the worker heartbeats,
- * {@link extendTurnDeadlines} drops the marker to the shorter execution
- * deadline.
+ * rather than the generic unresponsive-worker one.
+ *
+ * A turn that is executing: every isolate heartbeat re-extends to this same
+ * deadline (`extendHeartbeatedTurnMarker`), not the shorter execution one. A
+ * dead worker's turn is decided by `sweepStaleAgentTurnRuns` — re-run once when
+ * no tool trace was stored, otherwise WORKER_DIED — so the marker must not
+ * lapse before that sweep fires, or the client holds a WORKER_UNRESPONSIVE for
+ * a turn the reaper then runs again. A re-run gets this window back via
+ * {@link resetTurnAdmissionDeadline}.
  */
-function admissionDeadlineMs(): number {
+export function reaperBackstopDeadlineMs(): number {
   return (
     intervals.runsReaperStaleAfterSeconds * 1000 + intervals.turnDefaultDeadlineMs
   );
@@ -179,7 +190,7 @@ function admissionDeadlineMs(): number {
 export async function armTurnTimeout(
   queue: IMessageQueue,
   routing: TurnRouting,
-  deadlineMs: number = admissionDeadlineMs()
+  deadlineMs: number = reaperBackstopDeadlineMs()
 ): Promise<void> {
   await queue.createQueue(TURN_TIMEOUT_QUEUE);
   await queue.send(TURN_TIMEOUT_QUEUE, routing, {
@@ -192,18 +203,17 @@ export async function armTurnTimeout(
  * Restart a released follower's admission clock, in the same transaction as the
  * queue handoff that made it claimable (`releaseNextAgentTurn`).
  *
- * A queued follower shares its deployment with the owner blocking it, so every
- * owner heartbeat collapsed its marker to the execution deadline. That is
- * harmless while the owner keeps beating, but it leaves the follower only that
- * window to be claimed once the owner is gone — and a blocked follower is not
- * claim-eligible, so `sweepStaleAgentTurnRuns` never covered it either.
+ * A queued follower shares its deployment with the owner blocking it. Its last
+ * liveness extension can precede the owner's completion, so handoff starts a
+ * fresh admission window. A blocked follower is not claim-eligible, and the
+ * run reaper does not apply a startup deadline until it is released.
  */
 export async function resetTurnAdmissionDeadline(
   sql: DbClient,
   deploymentName: string,
   messageId: string
 ): Promise<void> {
-  const deadlineSec = Math.ceil(admissionDeadlineMs() / 1000);
+  const deadlineSec = Math.ceil(reaperBackstopDeadlineMs() / 1000);
   await sql`UPDATE public.runs
     SET run_at = now() + (${deadlineSec}::int * interval '1 second')
     WHERE idempotency_key = ${turnMarkerKey(deploymentName, messageId)}
@@ -279,10 +289,10 @@ export async function extendTurnDeadlines(
  * recover: the OpenAI client retries (default `maxRetries: 2`, honouring
  * `Retry-After`) and a later attempt on the same turn may well succeed. Failing
  * the turn here would kill turns that were about to work. Instead we only
- * withdraw the *extension* — the turn keeps whatever deadline it already had
- * (at most `turnDefaultDeadlineMs` from its last extension, or the longer
- * arming deadline when no extension has landed yet), which normally
- * outlasts the SDK's short `Retry-After` backoff. If a retry succeeds the
+ * withdraw the *extension* — the turn keeps whatever deadline it already had,
+ * capped at `turnDefaultDeadlineMs` from the mark (an isolate turn's heartbeat
+ * holds the longer reaper-backstop deadline), which normally outlasts the
+ * SDK's short `Retry-After` backoff. If a retry succeeds the
  * worker resumes real progress and {@link clearTurnProviderFailed} re-arms
  * extension; if none does, the marker lapses and `sweepExpiredTurns` emits a
  * terminal error carrying `code` — so the client is told the PROVIDER failed
@@ -301,6 +311,7 @@ export async function markTurnProviderFailed(
 ): Promise<void> {
   try {
     const sql = getDb();
+    const deadlineSec = Math.ceil(intervals.turnDefaultDeadlineMs / 1000);
     await sql`
       UPDATE public.runs
       SET action_input = action_input
@@ -308,7 +319,11 @@ export async function markTurnProviderFailed(
              'providerFailed', true,
              'providerFailedCode', ${code}::text,
              'providerFailedReason', ${reason}::text
-           )
+           ),
+        -- At most one execution window from now. An isolate turn's heartbeat
+        -- holds its marker on the longer reaper-backstop deadline, and a
+        -- wedged provider-failed turn must still be told within this window.
+        run_at = LEAST(run_at, now() + (${deadlineSec}::int * interval '1 second'))
       WHERE status = 'pending'
         AND run_type = 'internal'
         AND queue_name = ${TURN_TIMEOUT_QUEUE}

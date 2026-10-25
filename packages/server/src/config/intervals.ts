@@ -132,6 +132,18 @@ export const intervals = {
     return 30_000;
   },
 
+  /** Gateway wall-clock cap of one isolate-lane turn execution, matching
+   *  `DEFAULT_CONFIG.timeoutMs` in the worker's `daemon/executor.ts`.
+   *
+   *  `sweepStaleAgentTurnRuns` ends a `claimed`/`running` turn older than this
+   *  plus its staleness threshold: the worker's beat is a host interval that
+   *  keeps firing when the turn itself is wedged, so heartbeat age alone never
+   *  ends such a turn. This uses the default worker timeout; an injected
+   *  executor or ExecutorConfig override can use a different limit. */
+  get isolateTurnTimeoutMs(): number {
+    return 600_000;
+  },
+
   /** Turn-liveness deadline while the turn EXECUTES. Must clear THREE beats of
    *  the lane that actually extends it, so one slow or dropped beat cannot fail
    *  a working turn.

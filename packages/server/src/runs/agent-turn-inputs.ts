@@ -4,7 +4,7 @@ import { AGENT_TURN_INPUT_MAX, type AgentTurnPollPayload, type HeartbeatResponse
 import { CURRENT_SESSION_VERSION } from '@mariozechner/pi-coding-agent';
 import { getDb, type DbClient } from '../db/client';
 import type { TurnReply } from '../gateway/orchestration/agent-turn-producer';
-import { dischargeTurnMarkers, extendTurnDeadlines, insertThreadResponseRow, resetTurnAdmissionDeadline } from '../gateway/orchestration/turn-liveness';
+import { dischargeTurnMarkers, extendTurnDeadlines, insertThreadResponseRow, reaperBackstopDeadlineMs, resetTurnAdmissionDeadline } from '../gateway/orchestration/turn-liveness';
 import { generateDeploymentName } from '../gateway/orchestration/deployment-identity';
 
 export interface NativeTurnRun {
@@ -29,8 +29,22 @@ export interface NativeTurnRun {
      * completed before the marker existed, which keep legacy idempotence.
      */
     turn_completion_hash?: string;
+    /** Last streamed delta sequence published for the current attempt. */
+    turn_delta_sequence?: number;
+    /**
+     * Whether the current attempt durably stored any tool trace. Stamped
+     * `false` at claim and `true` with the first stored trace. This records
+     * receipts, not execution: an in-flight or unacknowledged tool can already
+     * have side effects. Absent means unknown, which is never re-run.
+     */
+    turn_tool_events_stored?: boolean;
+    /** How many times the reaper put this turn back after its worker died. */
+    turn_requeue_count?: number;
   } | null;
 }
+
+/** Maximum requeues of a stale turn without a stored tool receipt. */
+export const AGENT_TURN_MAX_REQUEUES = 1;
 
 /** One namespace for admission, claims and terminal queue handoff across replicas. */
 export function agentTurnLockKey(sql: DbClient, organizationId: string | null, agentId: string | null, conversationId: string | null) {
@@ -84,12 +98,22 @@ export async function releaseNextAgentTurn(sql: DbClient, run: NativeTurnRun) {
       AND action_input->'turn'->>'conversation_id' = ${run.action_input?.turn?.conversation_id ?? null}
     ORDER BY id LIMIT 1
   ) RETURNING id, organization_id, action_input`;
-  // The follower becomes claimable from now, so its liveness marker — which the
-  // owner's heartbeats collapsed to the execution deadline — needs its
+  // The follower becomes claimable from now, so its liveness marker needs its
   // admission window back, in this transaction.
-  const deployment = next && turnMarkerDeployment(next);
-  if (deployment && next.action_input?.turn?.message_id) {
-    await resetTurnAdmissionDeadline(sql, deployment, next.action_input.turn.message_id);
+  if (next) await resetAgentTurnAdmission(sql, next);
+}
+
+/**
+ * Give a turn that just became claimable its liveness marker's admission
+ * window back, in the transaction that made it claimable: a follower released
+ * by its owner's terminal handoff, or a turn the reaper put back to `pending`
+ * after its worker died. Without it the turn waiting for a worker is failed as
+ * unresponsive before anyone claims it.
+ */
+export async function resetAgentTurnAdmission(sql: DbClient, run: Pick<NativeTurnRun, 'organization_id' | 'action_input'>) {
+  const deployment = turnMarkerDeployment(run);
+  if (deployment && run.action_input?.turn?.message_id) {
+    await resetTurnAdmissionDeadline(sql, deployment, run.action_input.turn.message_id);
   }
 }
 
@@ -179,7 +203,7 @@ export async function pendingAgentTurnInputs(sql: DbClient, owner: NativeTurnRun
  * admission window — so none can drift from the arming site in
  * `MessageConsumer`.
  */
-function turnMarkerDeployment(run: NativeTurnRun): string | null {
+function turnMarkerDeployment(run: Pick<NativeTurnRun, 'organization_id' | 'action_input'>): string | null {
   const envelope = run.action_input;
   const reply = envelope?.reply;
   if (!reply) return null;
@@ -219,7 +243,10 @@ export async function extendHeartbeatedTurnMarker(
       FROM runs WHERE id = ${runId} AND run_type = 'agent_turn'
     `;
     const deployment = run && turnMarkerDeployment(run);
-    if (deployment) await extendTurnDeadlines(deployment);
+    // The reaper-backstop deadline, not the shorter execution one: a dead
+    // worker's turn is the run reaper's call (re-run or WORKER_DIED), so the
+    // marker must outlast it.
+    if (deployment) await extendTurnDeadlines(deployment, reaperBackstopDeadlineMs());
   } catch {
     // Deliberately silent — see the doc comment.
   }

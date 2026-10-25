@@ -4,8 +4,8 @@
  * `MessageConsumer` arms one marker per dispatched turn — the client's only
  * promise of a terminal event — covering the worker-claim horizon plus one
  * `TURN_DEFAULT_DEADLINE_MS` execution window, and `sweepExpiredTurns` turns a
- * lapsed marker into a terminal WORKER_UNRESPONSIVE. The first heartbeat
- * extension drops it to that execution deadline. Two things
+ * lapsed marker into a terminal WORKER_UNRESPONSIVE. Heartbeat extensions keep
+ * that backstop window so the run reaper decides first. Two things
  * therefore have to happen, and the subprocess lane did both from
  * `/worker/response`, a route this lane never calls:
  *
@@ -25,6 +25,7 @@
  */
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { AgentErrorCode } from "@lobu/core";
+import { intervals } from "../../config/intervals.js";
 import { getDb } from "../../db/client.js";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import {
@@ -127,8 +128,8 @@ describe("isolate-lane heartbeat vs the turn-liveness marker", () => {
       VALUES (${ORG}, 'agent_turn', 'pending',
         ${getDb().json(nativeRun(conversationId, messageId).action_input as never)})`;
 
-    // Every owner heartbeat extends the WHOLE deployment, so it also collapses
-    // the queued follower's marker to the execution deadline.
+    // Simulate a shorter marker left by a non-heartbeat liveness signal.
+    // Releasing the follower must restore its full admission window.
     await extendTurnDeadlines(deploymentName);
 
     await getDb().begin(async (tx) => {
@@ -185,6 +186,40 @@ describe("isolate-lane heartbeat vs the turn-liveness marker", () => {
 
     expect(await sweepExpiredTurns(AgentErrorCode.WORKER_UNRESPONSIVE)).toBe(0);
     expect(await armedMarkers()).toBe(1);
+  });
+
+  test("a heartbeat keeps the marker beyond the run reaper's reach", async () => {
+    // A dead worker's turn is decided by the run reaper — re-run or WORKER_DIED.
+    // If the marker could lapse first, the client would already hold a
+    // WORKER_UNRESPONSIVE for a turn the reaper is about to run again.
+    const conversationId = "conv-reaper-first";
+    const messageId = "m-reaper-first";
+    const deploymentName = generateDeploymentName(identity(conversationId));
+    await armTurnTimeout(queue, {
+      messageId,
+      channelId: CHANNEL,
+      conversationId,
+      userId: USER,
+      platform: "api",
+      deploymentName,
+      organizationId: ORG,
+    });
+    const [row] = await getDb()<{ id: number }>`
+      INSERT INTO public.runs (organization_id, run_type, status, queue_name, action_input)
+      VALUES (${ORG}, 'agent_turn', 'running', 'agent_turn',
+        ${getDb().json(nativeRun(conversationId, messageId).action_input as never)})
+      RETURNING id`;
+
+    await extendHeartbeatedTurnMarker(Number(row!.id));
+
+    // The reaper fires at most one tick after its staleness threshold.
+    const reaperFiresWithinSec =
+      intervals.runsReaperStaleAfterSeconds + intervals.runsReaperTickMs / 1000;
+    const [marker] = await getDb()<{ left: number }>`
+      SELECT EXTRACT(EPOCH FROM (run_at - now()))::int AS left FROM public.runs
+      WHERE status = 'pending' AND run_type = 'internal'
+        AND queue_name = 'internal:turn_timeout'`;
+    expect(Number(marker!.left)).toBeGreaterThan(reaperFiresWithinSec);
   });
 
   test("a REPLIED turn emits no second WORKER_UNRESPONSIVE once heartbeats stop", async () => {

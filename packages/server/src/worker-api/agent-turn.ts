@@ -8,8 +8,9 @@ import { logRunFailure } from "../runs/log-run-failure";
  * terminal transition.
  *
  * `sweepStaleAgentTurnRuns` covers the path that never reaches this route: a
- * worker that crashes mid-turn is terminalized by the reaper, which delivers
- * the error the completion route would have.
+ * worker that crashes mid-turn is re-run once if it stored no tool trace,
+ * otherwise terminalized by the reaper, which delivers the error the
+ * completion route would have.
  */
 import {
 	AGENT_ERRORS,
@@ -37,9 +38,10 @@ import {
 import { MAX_SNAPSHOT_BYTES, transcriptText } from "../gateway/services/transcript-snapshot";
 import type { Env } from "../index";
 import { incrementCounter } from "../gateway/metrics/prometheus";
+import { intervals } from "../config/intervals";
 import { runLeaseFence } from "../runs/run-lease";
 import { classifyRunOutcome } from "../runs/run-outcome";
-import { insertAgentTurnResponse, agentTurnClaimEligible, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, type NativeTurnRun } from "../runs/agent-turn-inputs";
+import { AGENT_TURN_MAX_REQUEUES, insertAgentTurnResponse, agentTurnClaimEligible, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, resetAgentTurnAdmission, type NativeTurnRun } from "../runs/agent-turn-inputs";
 import { errorMessage } from "../utils/errors";
 import { stripNul } from "../utils/strip-nul";
 import { authorizeRunForWorker } from "./shared";
@@ -269,6 +271,16 @@ async function publishTurnDelta(
 		const envelope = row.action_input ?? {};
 		const reply = envelope.reply;
 		if (!reply) return false;
+		// API output events only append; neither the renderer nor the SPA supports
+		// isFullReplacement. Retire retry deltas without publishing them and let
+		// the authoritative completion replace the dead attempt's partial text.
+		if (reply.platform === 'api' && (owner.run_metadata?.turn_requeue_count ?? 0) > 0) return false;
+		// The first span of a re-run (`sweepStaleAgentTurnRuns` put the turn back
+		// after its worker died) starts the reply over: the dead attempt's partial
+		// text is already on the wire, and appending to it would glue two answers
+		// together. Read off the row locked above, before this UPDATE moved it.
+		const restartsReply = (owner.run_metadata?.turn_requeue_count ?? 0) > 0
+			&& owner.run_metadata?.turn_delta_sequence === undefined;
 		await insertThreadResponseRow(
 			tx,
 			{
@@ -282,8 +294,8 @@ async function publishTurnDelta(
 				platformMetadata: reply.platform_metadata,
 				delta: delta.text,
 				// Incremental: this span CONTINUES the reply, it does not restate
-				// it. The renderers append.
-				isFullReplacement: false,
+				// it. The renderers append — except after a re-run's restart.
+				isFullReplacement: restartsReply,
 				timestamp: Date.now(),
 			},
 			row.organization_id
@@ -360,13 +372,21 @@ async function publishTurnToolEvents(
 		const repliesByInputRunId = new Map<number, TurnReply>(
 			offered.map((input) => [input.run_id, { ...reply, message_id: input.message_id }]),
 		);
-		return insertTurnToolEventRows(tx, {
+		const stored = await insertTurnToolEventRows(tx, {
 			reply,
 			conversationId: String(envelope.turn?.conversation_id ?? ""),
 			organizationId: row.organization_id,
 			events,
 			repliesByInputRunId,
 		});
+		// Committed with the traces: this attempt may now have side effects, so
+		// the reaper must never re-run it (`sweepStaleAgentTurnRuns`).
+		if (stored > 0 && owner.run_metadata?.turn_tool_events_stored !== true) {
+			await tx`UPDATE public.runs
+        SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"turn_tool_events_stored": true}'::jsonb
+        WHERE id = ${runId}`;
+		}
+		return stored;
 	});
 	if (stored) await notifyThreadResponse();
 	return stored;
@@ -1046,32 +1066,78 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
   return c.json({ ok: true, status: result.status, ...(result.idempotent ? { idempotent: true } : {}) });
 }
 
-/** Reap only ready startup work or expired owners; blocked followers have no startup deadline. */
-export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise<{ reaped: number; delivered: number }> {
+/**
+ * Reap only ready startup work or expired owners; blocked followers have no
+ * startup deadline.
+ *
+ * An owner expires three ways, each decided once here:
+ *  - a cancel the worker never acknowledged ends `cancelled`;
+ *  - an attempt still beating past the gateway's execution cap plus the
+ *    staleness threshold ends `timeout` / WORKER_UNRESPONSIVE. The worker's beat is a
+ *    host interval that keeps firing when the turn itself is wedged, so
+ *    heartbeat age alone never ends such a turn. This path is terminal;
+ *  - a lost heartbeat marks the worker stale. If that attempt stored no tool
+ *    trace and the turn has not been re-run yet, it goes back to `pending`
+ *    for one fresh attempt instead of an error, starting from the same stored
+ *    snapshot. Missing receipts do not prove that no tool executed. Otherwise
+ *    `timeout` / WORKER_DIED as before.
+ */
+export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise<{ reaped: number; delivered: number; requeued: number }> {
   const sql = getDb();
+  const maxAgeSeconds = intervals.isolateTurnTimeoutMs / 1000 + thresholdSeconds;
+  const overAge = (tx: DbClient) => tx`r.claimed_at < now() - ${maxAgeSeconds} * interval '1 second'`;
+  const heartbeatLost = (tx: DbClient) => tx`COALESCE(r.last_heartbeat_at, r.claimed_at, r.created_at) < now() - ${thresholdSeconds} * interval '1 second'`;
   const stale = (tx: DbClient) => tx`r.run_type = 'agent_turn' AND (
     (r.status = 'pending' AND r.approval_status <> 'pending' AND ${agentTurnClaimEligible(tx)}
       AND r.run_at < now() - ${thresholdSeconds} * interval '1 second')
-    OR (r.status IN ('claimed', 'running') AND CASE
+    OR (r.status IN ('claimed', 'running') AND (CASE
       WHEN r.run_metadata->>'cancel_requested_at' IS NOT NULL
       THEN (r.run_metadata->>'cancel_requested_at')::timestamptz < now() - ${thresholdSeconds} * interval '1 second'
-      ELSE COALESCE(r.last_heartbeat_at, r.claimed_at, r.created_at) < now() - ${thresholdSeconds} * interval '1 second'
-    END)
+      ELSE ${heartbeatLost(tx)}
+    END OR ${overAge(tx)}))
   )`;
   const candidates = await sql<{ id: number }>`SELECT r.id FROM runs r WHERE ${stale(sql)} ORDER BY r.id LIMIT 100`;
   let reaped = 0;
   let delivered = 0;
+  let requeued = 0;
   for (const candidate of candidates) {
     const result = await sql.begin(async (tx) => {
       const run = await lockAgentTurnRun(tx, Number(candidate.id), true);
       if (!run) return null;
+      // Heartbeat loss takes precedence over age; only a turn still beating
+      // past the cap is classified as wedged.
+      const [state] = await tx<{ wedged: boolean }>`SELECT COALESCE(${overAge(tx)} AND NOT ${heartbeatLost(tx)}, false) AS wedged
+        FROM runs r WHERE r.id = ${run.id} AND ${stale(tx)}`;
+      if (!state) return null;
       const cancelled = !!run.run_metadata?.cancel_requested_at;
       const neverClaimed = run.status === 'pending';
-      const code = neverClaimed ? AgentErrorCode.WORKER_STARTUP_FAILED : AgentErrorCode.WORKER_DIED;
+      const wedged = !cancelled && !neverClaimed && state.wedged;
+      // The flag tracks stored receipts, not tool starts: a tool can have
+      // executed before its receipt arrives. An absent flag (claimed before
+      // it existed) is unknown and terminal.
+      const rerun = !cancelled && !neverClaimed && !wedged
+        && run.run_metadata?.turn_tool_events_stored === false
+        && (run.run_metadata?.turn_requeue_count ?? 0) < AGENT_TURN_MAX_REQUEUES;
+      if (rerun) {
+        // The run keeps its id, so it stays ahead of the followers queued
+        // behind it; nothing is released and nothing is delivered. Its worker
+        // numbers deltas from 1 again, so the delta fence is cleared too.
+        const rows = await tx`UPDATE runs r SET status = 'pending', run_at = now(),
+            claimed_at = NULL, claimed_by = NULL, last_heartbeat_at = NULL,
+            run_metadata = (COALESCE(r.run_metadata, '{}'::jsonb) - 'turn_delta_sequence')
+              || jsonb_build_object('turn_requeue_count', COALESCE((r.run_metadata->>'turn_requeue_count')::int, 0) + 1)
+          WHERE r.id = ${run.id} AND ${stale(tx)} RETURNING r.id`;
+        if (!rows.length) return null;
+        await resetAgentTurnAdmission(tx, run);
+        return 'requeued' as const;
+      }
+      const code = neverClaimed ? AgentErrorCode.WORKER_STARTUP_FAILED
+        : wedged ? AgentErrorCode.WORKER_UNRESPONSIVE : AgentErrorCode.WORKER_DIED;
       const status = cancelled ? 'cancelled' : 'timeout';
       const rows = await tx`UPDATE runs r SET status = ${status}, completed_at = now(),
         outcome = ${classifyRunOutcome({ status })}, exit_reason = ${cancelled ? 'cancelled' : 'timeout'},
-        error_message = ${cancelled ? 'agent turn cancelled' : neverClaimed ? 'worker_claim_timeout' : 'worker_heartbeat_lost'}
+        error_message = ${cancelled ? 'agent turn cancelled' : neverClaimed ? 'worker_claim_timeout'
+          : wedged ? 'turn_max_age_exceeded' : 'worker_heartbeat_lost'}
         WHERE r.id = ${run.id} AND ${stale(tx)} RETURNING r.id`;
       if (!rows.length) return null;
       await releaseNextAgentTurn(tx, run);
@@ -1081,9 +1147,15 @@ export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise
       });
     });
     if (result === null) continue;
+    if (result === 'requeued') {
+      requeued++;
+      incrementCounter('lobu_agent_turn_requeued_total');
+      logger.warn({ runId: Number(candidate.id) }, 'Agent turn heartbeat lost without a stored tool receipt; re-running the turn');
+      continue;
+    }
     reaped++;
     if (result) delivered++;
   }
   if (delivered) await notifyThreadResponse();
-  return { reaped, delivered };
+  return { reaped, delivered, requeued };
 }

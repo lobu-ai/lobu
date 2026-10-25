@@ -480,8 +480,10 @@ describe('agent turn per-input responses', () => {
 
   it('a reaped turn and a late completion produce exactly one terminal', async () => {
     const { body } = await inputScenario();
-    // The worker dies mid-turn; the stale sweep terminalizes the owner. A
-    // threshold of zero treats the just-claimed heartbeat as lapsed.
+    // The worker dies mid-turn after its one re-run; the stale sweep
+    // terminalizes the owner. A threshold of zero treats the just-claimed
+    // heartbeat as lapsed.
+    await getTestDb()`UPDATE runs SET run_metadata = run_metadata || '{"turn_requeue_count": 1}'::jsonb WHERE id = ${body.run_id}`;
     const swept = await sweepStaleAgentTurnRuns(0);
     expect(swept.reaped).toBeGreaterThanOrEqual(1);
     expect(await threadResponseRows()).toHaveLength(1);
