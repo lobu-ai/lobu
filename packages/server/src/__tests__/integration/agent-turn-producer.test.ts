@@ -869,11 +869,10 @@ describe('agent turn producer', () => {
       if (timing === 'cancel') expect(result.error).toBeTruthy();
       else if (timing === 'mid') {
         // The first completion landed (terminal stored, reply delivered) but
-        // its response was destroyed, so the worker never heard the ack. Its
-        // failure report is a CONFLICTING completion — rejected without a
-        // second terminal — and the worker surfaces that instead of claiming
-        // success it cannot confirm.
-        expect(result.error).toMatch(/409|conflict/i);
+        // its response was destroyed, so the worker never heard the ack. It
+        // re-sends the SAME completion, which the gateway acknowledges by its
+        // completion hash, so the finished turn is reported as finished.
+        expect(result.error).toBeUndefined();
       }
       else expect(result.error).toBeUndefined();
       if (timing === 'mid') {
@@ -891,11 +890,12 @@ describe('agent turn producer', () => {
         const entry = completion.session_jsonl.trim().split('\n').map((line: string) => JSON.parse(line))
           .find((entry: { id: string }) => entry.id === row.run_metadata.session_entry_id);
         expect(entry.message).toMatchObject({ role: 'user', content: [{ type: 'text', text: followUp.messageText }] });
-        // The retry is the worker's failure report for a turn that already
-        // completed — a conflicting completion, rejected without a second
-        // terminal rather than acknowledged as idempotent.
-        expect(completions.at(-1)!.request.status).toBe('failed');
-        expect(completions.at(-1)!.response).toMatchObject({ error: expect.stringMatching(/conflict/i) });
+        // The retry is an exact re-send of the completed payload — never a
+        // contradictory failure report — and is acknowledged as idempotent
+        // without a second terminal.
+        expect(completions).toHaveLength(2);
+        expect(completions[1].request).toEqual(completions[0].request);
+        expect(completions[1].response).toMatchObject({ status: 'completed', idempotent: true });
       } else {
         expect((await runRow(followerId)).status).toBe('pending');
         if (timing === 'late') {
