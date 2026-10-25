@@ -284,7 +284,11 @@ describe('Gmail reference ingestion', () => {
       if (run < 2)
         expect(checkpoint?.references).toMatchObject({
           history_id: hugeStart,
-          partial: { record_id: hugeRecord },
+          partial: {
+            record_id: hugeRecord,
+            digest:
+              '55ce5e93406b1912e3bafe2a765d9d5b2813b1ff2ef5a9f5cf3f0d8f1cbc6670',
+          },
         });
     }
     expect(ids).toEqual(['a', 'b', 'c', 'd']);

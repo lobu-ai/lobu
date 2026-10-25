@@ -1,5 +1,4 @@
 /** Gmail mailbox additions, retained as references rather than email content. */
-import { createHash } from 'node:crypto';
 import type {
   EventEnvelope,
   HttpClient,
@@ -355,9 +354,15 @@ export async function syncGmailReferences(
       if (state.partial && recordId !== state.partial.record_id)
         return recover('history_anchor_missing');
       const messages = additions(record);
-      const digest = createHash('sha256')
-        .update(JSON.stringify(messages))
-        .digest('hex');
+      const digest = Array.from(
+        new Uint8Array(
+          await crypto.subtle.digest(
+            'SHA-256',
+            new TextEncoder().encode(JSON.stringify(messages)),
+          ),
+        ),
+        (byte) => byte.toString(16).padStart(2, '0'),
+      ).join('');
       if (
         state.partial &&
         (state.partial.digest !== digest ||
