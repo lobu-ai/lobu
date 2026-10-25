@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { captureEffect, type CaptureIdentity } from '../gateway/routes/internal/capture-mode';
+import type { AgentTurnIdentity } from './turn-write-idempotency';
 import type { ChatSenderReach } from '../auth/oauth/types';
 import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from '../sandbox/client-sdk';
 import { verifiedAutomationSource } from '../automations/automation-source';
@@ -114,6 +115,11 @@ export interface AuthContext {
   executionMode?: 'live' | 'capture' | null;
   /** Verified capture owner; never taken from tool arguments. */
   captureIdentity?: CaptureIdentity | null;
+  /**
+   * The agent turn this request came from (verified credential). Per request:
+   * the MCP lane stamps it in `forThisRequest`, never on the reusable session.
+   */
+  agentTurn?: AgentTurnIdentity | null;
   /** Sender-workspace reach of a member's direct-message chat turn. See ChatSenderReach. */
   chatSenderReach?: ChatSenderReach | null;
 }
@@ -560,6 +566,7 @@ export function toAccountToolContext(authCtx: AuthContext): AccountToolContext {
     mcpConversationId: authCtx.mcpConversationId ?? null,
     executionMode: authCtx.executionMode ?? null,
     captureIdentity: authCtx.captureIdentity ?? null,
+    agentTurn: authCtx.agentTurn ?? null,
     // Agent binding keeps the OAuth grant off above; a chat turn's sender
     // reach is its own, separately verified, grant (sandbox/client-sdk.ts).
     chatSenderReach: authCtx.chatSenderReach ?? null,

@@ -6,6 +6,7 @@
  */
 
 import type { CaptureIdentity } from '../../gateway/routes/internal/capture-mode';
+import type { AgentTurnIdentity } from '../../tools/turn-write-idempotency';
 import type { ChatTurnAccess } from '@lobu/core';
 
 // ============================================
@@ -265,6 +266,12 @@ export interface AuthInfo {
   executionMode?: 'live' | 'capture' | null;
   /** Verified capture owner; never taken from tool arguments. */
   captureIdentity?: CaptureIdentity | null;
+  /**
+   * The agent turn a verified turn credential names
+   * (`agentTurnIdentityFromClaims`). Read per request by the MCP lane; never
+   * copied onto a reusable session.
+   */
+  agentTurn?: AgentTurnIdentity | null;
   /**
    * Set only for a chat turn whose verified worker token carries the
    * sender-workspace grant (WorkerTokenData.chatSenderWorkspaces). See

@@ -34,7 +34,9 @@ import {
 	RejectBatchAction,
 } from "./manage_operations/schemas";
 import { queueApprovalNotificationCardRefresh } from "../../notifications/service";
+import { getOperationForConnection } from "../../operations/connector-operations";
 import type { ToolContext } from "../registry";
+import { withTurnIdempotencyKey } from "../turn-write-idempotency";
 
 function settleApprovalResult<T>(ctx: ToolContext, result: T): T {
 	const record = result as Record<string, unknown>;
@@ -49,7 +51,17 @@ function settleApprovalResult<T>(ctx: ToolContext, result: T): T {
 
 const manageOperationsTool = defineActionTool("manage_operations", {
 	list_available: action(ListAvailableAction, handleListAvailable),
-	execute: action(ExecuteAction, handleExecute),
+	// Apply turn dedupe at the MCP/SDK boundary, leaving internal retries alone.
+	// Reads must stay fresh: a turn can poll the same operation after a write.
+	execute: action(ExecuteAction, async (args, ctx, env) => {
+		if (ctx.agentTurn && args.idempotency_key == null) {
+			const resolved = await getOperationForConnection(ctx.organizationId, args.connection_id, args.operation_key);
+			if (resolved?.operation.kind === "write") {
+				args = await withTurnIdempotencyKey(ctx.agentTurn, "operations.execute", args);
+			}
+		}
+		return handleExecute(args, ctx, env);
+	}),
 	list_runs: action(ListRunsAction, handleListRuns),
 	get_run: action(GetRunAction, handleGetRun),
 	cancel: action(CancelAction, async (args, ctx) =>

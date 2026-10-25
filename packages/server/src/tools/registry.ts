@@ -25,6 +25,7 @@ import { type Static, Type } from '@sinclair/typebox';
 import { getMcpConnectionScopes } from '../auth/oauth/scopes';
 import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
 import type { CaptureIdentity } from '../gateway/routes/internal/capture-mode';
+import type { AgentTurnIdentity } from './turn-write-idempotency';
 import type { ChatSenderReach } from '../auth/oauth/types';
 import type { Env } from '../index';
 import { LOBU_INTERACTION_RESOURCE_URI } from '../mcp-app-resource-uris';
@@ -181,6 +182,12 @@ export interface ToolContext {
   executionMode?: 'live' | 'capture' | null;
   /** Verified capture owner; never taken from tool arguments. */
   captureIdentity?: CaptureIdentity | null;
+  /**
+   * The agent turn driving this call, from its verified worker credential.
+   * A turn's writes derive their idempotency key from it
+   * (tools/turn-write-idempotency.ts). Null for every non-turn caller.
+   */
+  agentTurn?: AgentTurnIdentity | null;
   /**
    * A member's direct-message chat turn: `client.org(slug)` and workspace
    * arguments may select the sender's other workspaces, re-checking the
