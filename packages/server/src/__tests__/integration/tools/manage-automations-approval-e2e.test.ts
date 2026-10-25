@@ -143,23 +143,30 @@ describe("manage_automations — builder gate e2e", () => {
 		agentCtx.mcpSessionId = "session-manage-automations";
 	});
 
-	it("human owner: create applies immediately with no approval run", async () => {
+	it.each([
+		{ label: "web session", slug: "human-automation", context: {} },
+		{
+			label: "delegated OAuth",
+			slug: "delegated-automation",
+			context: { clientId: "test-oauth-client", tokenType: "oauth" as const },
+		},
+	])("owner authority through $label creates an Automation with no approval run", async ({ slug, context }) => {
 		const res = (await executeTool(
 			"manage_automations",
 			{
 				action: "create",
-				slug: "human-automation",
+				slug,
 				name: "Human Automation",
 				prompt: "Track things.",
 				managed_agent_id: agentId,
 			},
 			TEST_ENV,
-			ownerCtx
+			{ ...ownerCtx, ...context }
 		)) as { action: string; automation_id?: string; status?: string };
 		// Immediate apply returns the automation status ('active'), not pending_approval.
 		expect(res.status).not.toBe("pending_approval");
 		expect(res.automation_id).toBeDefined();
-		expect(await automationExists(orgId, "human-automation")).toBe(true);
+		expect(await automationExists(orgId, slug)).toBe(true);
 
 		const sql = getTestDb();
 		const runRows = await sql`

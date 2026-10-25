@@ -379,13 +379,18 @@ describe("manage_operations batch scope (connector-approval lane)", () => {
 		expect(await approvalStatusOf(pending)).toBe("pending");
 	});
 
-	it("rejects an otherwise-human caller whose request came through MCP", async () => {
+	it.each([
+		{ label: "MCP", context: { mcpSessionId: "unbound-human-session" } },
+		{ label: "OAuth", context: { clientId: "test-oauth-client", tokenType: "oauth" as const } },
+		{ label: "PAT", context: { clientId: "pat_test-client", tokenType: "pat" as const } },
+		{ label: "Automation", context: { actingAutomationId: 123 } },
+	])("rejects a $label context carrying a user's identity", async ({ context }) => {
 		const mcpCtx = {
 			...ownerCtx,
 			agentId: null,
 			clientId: null,
-			mcpSessionId: "unbound-human-session",
 			tokenType: "session",
+			...context,
 		} as ToolContext;
 		const attempts: Array<{ pending: number; result: { error?: string } }> = [];
 
@@ -411,6 +416,25 @@ describe("manage_operations batch scope (connector-approval lane)", () => {
 		}
 		for (const { result } of attempts) {
 			expect(result.error).toContain("human web session");
+		}
+	});
+
+	it.each(["slack", "google-chat"])("accepts a verified %s reviewer with conversation attribution", async (platform) => {
+		for (const action of ["approve", "reject"] as const) {
+			const pending = await seedPendingAction({
+				connectionId: approvalConnectionId,
+				connectorKey: APPROVAL_CONNECTOR,
+				actionKey: "needs_approval",
+			});
+			const result = await manageOperations({ action, run_id: pending }, {} as Env, {
+				...ownerCtx,
+				tokenType: "session",
+				clientId: null,
+				agentId: null,
+				sourceContext: { platform, connectionId: "test-chat", channelId: "test-channel", userId: "test-reviewer" },
+			});
+			expect(result).not.toHaveProperty("error");
+			expect(await approvalStatusOf(pending)).toBe(action === "approve" ? "approved" : "rejected");
 		}
 	});
 

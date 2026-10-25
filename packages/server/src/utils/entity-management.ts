@@ -7,6 +7,7 @@
  */
 
 import { deriveToolActorSource } from './apply-context';
+import { isManualUserEdit } from '../auth/direct-user-context';
 import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
 import { attachEntityIdentities, identityMemberExistsSql, identityMemberIdsSql, identityRootSql } from './entity-identity';
 import { type EntityReadRestrictions, entityReadPolicySql, entityReadRestrictions, filterEntityReadRows } from '../authz/entity-read-policy';
@@ -1080,8 +1081,11 @@ export async function updateEntity(
 	// non-human write (chat agent or automation reaction via manage_entity) is an
 	// ownership-aware automation-source merge: unowned fields write, owned fields
 	// are blocked and surfaced to the caller for an approval. There is no
-	// plain-merge branch — the only caller is agent-attributed.
-	const isHumanEdit = !!ctx.userId && !ctx.agentId;
+	// plain-merge branch. A delegated client can carry the user's authority without
+	// being a manual edit, and verified Automation attribution prevents pinning
+	// when the calling context happens to carry a signed-in user.
+	const isHumanEdit = isManualUserEdit(ctx) &&
+		opts?.policyPrincipalKind !== "automation";
 	// affirm_fields claims ownership, which only a human may do. An agent must
 	// never silently claim a field — reject before touching the transaction.
 	if (!isHumanEdit && affirmFields.length > 0) {

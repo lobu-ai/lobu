@@ -40,7 +40,7 @@ function humanCtx(orgId: string, userId: string): AuthContext {
     isAuthenticated: true,
     clientId: null,
     scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
-    tokenType: 'oauth',
+    tokenType: 'session',
     requestUrl: `http://localhost/api/${orgId}`,
     baseUrl: '',
     scopedToOrg: true,
@@ -144,6 +144,58 @@ describe('ownership gate on agent entity writes', () => {
         ownerUserId: workspace.users.owner.id,
       });
     }
+  });
+
+  it.each([
+    { label: 'OAuth', tokenType: 'oauth' as const, clientId: 'test-oauth-client', mcpSessionId: 'test-mcp-session' },
+    { label: 'PAT', tokenType: 'pat' as const, clientId: 'pat_test-client' },
+    { label: 'MCP', tokenType: 'session' as const, clientId: null, mcpSessionId: 'test-mcp-session' },
+    { label: 'chat turn in another workspace', tokenType: 'session' as const, clientId: null, sourceContext: { platform: 'slack', source: 'test-chat-turn' } },
+  ])('does not pin fields written through $label delegated auth', async ({ label: _label, ...transport }) => {
+    const ctx = { ...humanCtx(workspace.org.id, workspace.users.owner.id), ...transport };
+    const first = await manageEntityUpdate(ctx, entity.id, { severity: 'high' });
+    expect(first.applied_fields).toContain('severity');
+    const [row] = await getTestDb()`SELECT field_controls FROM entities WHERE id = ${entity.id}`;
+    expect(row.field_controls).toEqual({});
+
+    const next = await manageEntityUpdate(agentCtx(workspace.org.id, workspace.users.owner.id), entity.id, {
+      severity: 'critical',
+    });
+    expect(next.applied_fields).toContain('severity');
+    expect(next.approval_queued).toBeFalsy();
+  });
+
+  it('does not treat a verified Automation write carrying a user identity as a manual edit', async () => {
+    const seeded = await seedAutomationAndRun(workspace, 'delegated');
+    const result = await manageEntityUpdate(humanCtx(workspace.org.id, workspace.users.owner.id), seeded.entity.id, {
+      severity: 'high',
+    }, { automation_source: { automation_id: seeded.automationId, run_id: seeded.runId } });
+    expect(result.applied_fields).toContain('severity');
+    const [row] = await getTestDb()`SELECT field_controls FROM entities WHERE id = ${seeded.entity.id}`;
+    expect(row.field_controls).toEqual({});
+  });
+
+  it('rejects field ownership assertions from an unbound OAuth client', async () => {
+    const ctx = { ...humanCtx(workspace.org.id, workspace.users.owner.id), clientId: 'test-oauth-client' };
+    await expect(manageEntityUpdate(ctx, entity.id, { severity: 'high' }, {
+      affirm_fields: ['severity'],
+    })).rejects.toThrow('affirm_fields is only allowed for human edits');
+  });
+
+  it('holds an unbound OAuth client overwrite of a genuine manual edit', async () => {
+    const ctx = humanCtx(workspace.org.id, workspace.users.owner.id);
+    await manageEntityUpdate(ctx, entity.id, { severity: 'high' });
+    const result = await manageEntityUpdate({ ...ctx, clientId: 'test-oauth-client' }, entity.id, {
+      severity: 'critical',
+      notes: 'delegated write',
+    });
+    expect(result.blocked_fields).toContain('severity');
+    expect(result.applied_fields).toContain('notes');
+    expect(result.approval_queued).toBe(true);
+    const [row] = await getTestDb()`SELECT metadata, field_controls FROM entities WHERE id = ${entity.id}`;
+    expect(row.metadata.severity).toBe('high');
+    expect(row.field_controls.severity.set_by).toBe(workspace.users.owner.id);
+    expect(row.field_controls.notes).toBeUndefined();
   });
 
   it('blocks an agent overwrite of a human-owned field and queues an approval', async () => {

@@ -14,6 +14,12 @@
  * Human edits are never gated here — role restrictions for humans live in the
  * tool-access tier (e.g. manage_entity delete is owner/admin).
  *
+ * The `user` policy principal represents account authority, including unbound
+ * OAuth/PAT clients acting under that account's grant. It does not prove a
+ * manual edit: field ownership and classifier ground truth separately check
+ * authenticated transport context. Reclassifying those clients as agents here
+ * would also change configuration, operation cancellation, and delete policy.
+ *
  * Gated paths: manage_entity create/update/delete and automation window promotion
  * (promote-keyed-entities). Ingestion-infrastructure writes (entity-link-upsert
  * identity stubs, classifier extraction) are exempt BY DESIGN — they are

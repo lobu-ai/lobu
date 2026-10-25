@@ -359,6 +359,24 @@ describe('manage_classifiers classify contract', () => {
     expect(sharedRows[0].automation_id).toBeNull();
     expect(parsePgTextArray(sharedRows[0].values)).toEqual(['negative']);
   });
+  it.each([
+    { label: 'OAuth', context: { clientId: 'test-oauth-client', tokenType: 'oauth' as const } },
+    { label: 'PAT', context: { clientId: 'pat_test-client', tokenType: 'pat' as const } },
+    { label: 'MCP', context: { mcpSessionId: 'test-mcp-session' } },
+    { label: 'chat turn', context: { sourceContext: { platform: 'slack' } } },
+  ])('does not claim human ground truth for a $label label', async ({ context }) => {
+    const { orgId, ctx } = await seed();
+    const event = await createTestEvent({ organization_id: orgId, content: 'great' });
+    const delegated = { ...ctx, ...context };
+    const args = { action: 'classify', classifier_slug: 'sentiment', content_id: Number(event.id), value: 'positive' } as const;
+    const claimed = await manageClassifiers({ ...args, source: 'user' }, {} as never, delegated);
+    expect(claimed.success).toBe(false);
+    expect(await labels(Number(event.id))).toEqual([]);
+    const inferred = await manageClassifiers(args, {} as never, delegated);
+    expect(inferred.success).toBe(true);
+    expect((await labels(Number(event.id))).map(r => [r.source, r.is_manual])).toEqual([['llm', false]]);
+  });
+
   it('derives source from the acting principal: only a person writes user labels', async () => {
     const { orgId, userId, ctx } = await seed();
     const sql = getTestDb();
