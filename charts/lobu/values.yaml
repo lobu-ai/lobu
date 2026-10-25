@@ -158,18 +158,21 @@ app:
 worker:
   enabled: true
   replicaCount: 1
-  # RWO cache PVCs cannot be mounted by old and new pods at once.
-  # Defaults to Recreate when cache.enabled; override for RWX/no-cache deployments.
+  # Empty = RollingUpdate with maxSurge 1 / maxUnavailable 0, so a deploy
+  # starts the new pod before the old one begins draining. Set a full
+  # strategy object to override.
   strategy: {}
 
-  # Cache PVCs are mounted as root-owned by default; grant the image user group write access.
   podSecurityContext:
     fsGroup: 1001
     fsGroupChangePolicy: OnRootMismatch
 
-  # Agent/connector runs can be minutes-long; give the daemon time to finish
-  # or hand off in-flight runs after SIGTERM before the kubelet escalates to
-  # SIGKILL (which orphans runs until the stale-run reaper recovers them).
+  # Agent/connector runs can be minutes-long. On SIGTERM the daemon stops
+  # claiming and waits for in-flight runs for this long minus a 15s exit
+  # margin (the template hands it the value as WORKER_SHUTDOWN_GRACE_SECONDS);
+  # then the daemon exits and the stale-run reaper recovers unfinished runs.
+  # Keep <= migrations.quiesceBeforeUpgrade.timeoutSeconds: an incompatible
+  # migration waits that long for worker pods to terminate.
   terminationGracePeriodSeconds: 300
 
   # The worker executes untrusted agent/connector code — the highest-value
@@ -207,11 +210,12 @@ worker:
     # Label worker and embedding diagnostics as production.
     ENVIRONMENT: production
 
-  # Transformer model cache volume
+  # Transformer model cache: a per-pod emptyDir capped at `size`. Only used
+  # when the worker embeds locally (no embeddings service); models re-download
+  # into a fresh pod.
   cache:
     enabled: true
     size: 5Gi
-    storageClass: ""
 
 # Embeddings service deployment settings
 embeddings:

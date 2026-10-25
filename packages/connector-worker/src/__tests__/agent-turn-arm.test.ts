@@ -2,10 +2,9 @@
  * The daemon arm for an agent turn.
  *
  * The run is ALREADY CLAIMED by the time this arm sees it, so the property
- * under test everywhere here is the same one: every exit reports to
- * `/complete-agent-turn`. An arm that returned an error locally instead would
- * leave the turn `running` until the stale-run reaper writes it off minutes
- * later — the failure looks like a hang rather than a failure.
+ * under test is that every outcome is submitted to `/complete-agent-turn`.
+ * Delivery retries preserve that outcome; exhausting them must not turn a
+ * completed turn into a failure or replace a failure's execution evidence.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -15,14 +14,18 @@ import {
   TURN_TOOL_EVENT_QUEUE_MAX,
 } from "@lobu/core/contracts/worker/protocol";
 import { executeAgentTurnRun } from "../daemon/agent-turn.js";
-import { DEFAULT_CONFIG, type ExecutorConfig } from "../daemon/executor.js";
+import { DEFAULT_CONFIG, executeRun, type ExecutorConfig } from "../daemon/executor.js";
 import type {
   ExecutionHooks,
   ExecutorJob,
   ExecutorResult,
   SyncExecutor,
 } from "../executor/interface.js";
-import type { CompleteAgentTurnRequest } from "../daemon/client.js";
+import {
+  type CompleteAgentTurnRequest,
+  WorkerDecodeError,
+  WorkerHttpError,
+} from "../daemon/client.js";
 
 const WORKER_ID = "fleet-test-worker";
 const SESSION_JSONL = [
@@ -1306,4 +1309,106 @@ describe("executeAgentTurnRun streaming", () => {
     // Absent, not false: the server suppresses only on a positive signal.
     expect(reported.calls[0]?.replied_in_band).toBeUndefined();
   });
+});
+
+/**
+ * Completion delivery across a gateway blip. A deploy rolls the app pods while
+ * a fleet worker finishes a turn, so the one `/complete-agent-turn` POST can
+ * meet a dropped connection or a 503 from a pod going away. The server dedupes
+ * an exact retry by its completion hash, so re-sending the same payload is
+ * safe; turning the transport error into a `failed` completion is not — it
+ * discards a finished answer, and 409s if the first attempt had landed.
+ */
+describe("executeAgentTurnRun completion delivery", () => {
+  const finished = () =>
+    executorReturning({
+      mode: "agent_turn",
+      turn: { text: "hi", stopReason: "stop", usage: null, consumedInputs: [], sessionJsonl: SESSION_JSONL },
+    });
+
+  function flakyClient(reported: Reported, failures: unknown[]) {
+    const base = fakeClient(reported);
+    return {
+      ...base,
+      completeAgentTurn: async (req: CompleteAgentTurnRequest) => {
+        reported.calls.push(req);
+        const failure = failures.shift();
+        if (failure) throw failure;
+        return { ok: true as const, status: req.status };
+      },
+    };
+  }
+
+  test("re-sends the SAME completed payload after a transport error, never a failure", async () => {
+    const reported: Reported = { calls: [] };
+    const outcome = await executeAgentTurnRun(
+      flakyClient(reported, [new TypeError("fetch failed")]) as never,
+      turnJob(),
+      {},
+      cfgWith(finished())
+    );
+
+    expect(outcome.error).toBeUndefined();
+    expect(reported.calls.map((call) => call.status)).toEqual(["completed", "completed"]);
+    expect(reported.calls[1]).toEqual(reported.calls[0]);
+  });
+
+  test("re-sends after a 5xx from a pod going away", async () => {
+    const reported: Reported = { calls: [] };
+    const outcome = await executeAgentTurnRun(
+      flakyClient(reported, [
+        new WorkerHttpError(503, "/api/workers/complete-agent-turn", "Service Unavailable"),
+      ]) as never,
+      turnJob(),
+      {},
+      cfgWith(finished())
+    );
+
+    expect(outcome.error).toBeUndefined();
+    expect(reported.calls.map((call) => call.status)).toEqual(["completed", "completed"]);
+  });
+
+  test("does NOT replace a completion the gateway answered with a 409", async () => {
+    const reported: Reported = { calls: [] };
+    const conflict = new WorkerHttpError(409, "/api/workers/complete-agent-turn", "conflict");
+    const outcome = await executeRun(
+      flakyClient(reported, [conflict]) as never,
+      turnJob(),
+      {},
+      cfgWith(finished())
+    );
+
+    expect(outcome.error).toContain("409");
+    expect(reported.calls.map((call) => call.status)).toEqual(["completed"]);
+  });
+
+  test("does NOT replace a completion after a decode error", async () => {
+    const reported: Reported = { calls: [] };
+    const outcome = await executeRun(
+      flakyClient(reported, [new WorkerDecodeError("bad body")]) as never,
+      turnJob(),
+      {},
+      cfgWith(finished())
+    );
+
+    expect(outcome.error).toContain("bad body");
+    expect(reported.calls.map((call) => call.status)).toEqual(["completed"]);
+  });
+
+  test.each(["completed", "failed"] as const)("preserves the %s payload after exhausting retries", async (status) => {
+    const reported: Reported = { calls: [] };
+    const executor = status === "completed" ? finished() : {
+      execute: async () => { throw new Error("provider failed"); },
+    };
+    const outcome = await executeRun(
+      flakyClient(reported, Array.from({ length: 4 }, () => new TypeError("fetch failed"))) as never,
+      turnJob(),
+      {},
+      cfgWith(executor)
+    );
+
+    expect(outcome.error).toBeDefined();
+    expect(reported.calls.map((call) => call.status)).toEqual(Array(4).fill(status));
+    for (const call of reported.calls) expect(call).toEqual(reported.calls[0]);
+  }, 15_000);
 });

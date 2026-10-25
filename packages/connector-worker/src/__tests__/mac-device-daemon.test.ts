@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -437,6 +437,55 @@ describe('WorkerPollLoop', () => {
     await handler('SIGTERM');
 
     expect(events).toEqual(['daemon-stop', 'wait', 'exit:0']);
+  });
+
+  // A fleet pod gets SIGTERM on every deploy. The kubelet SIGKILLs it after
+  // terminationGracePeriodSeconds, which the chart hands the daemon as
+  // WORKER_SHUTDOWN_GRACE_SECONDS. Draining for a hardcoded 30s instead killed
+  // every agent turn still running half a minute into a deploy.
+  describe('drain budget', () => {
+    const KEY = 'WORKER_SHUTDOWN_GRACE_SECONDS';
+    let saved: string | undefined;
+    beforeEach(() => {
+      saved = process.env[KEY];
+    });
+    afterEach(() => {
+      if (saved === undefined) delete process.env[KEY];
+      else process.env[KEY] = saved;
+    });
+
+    async function drainTimeout(): Promise<number | undefined> {
+      const timeouts: Array<number | undefined> = [];
+      const loop = {
+        waitForActiveJobs: async (timeoutMs?: number) => {
+          timeouts.push(timeoutMs);
+          return true;
+        },
+      } as unknown as WorkerPollLoop;
+      await createWorkerPollLoopShutdownHandler(loop, () => undefined, () => undefined)('SIGTERM');
+      expect(timeouts).toHaveLength(1);
+      return timeouts[0];
+    }
+
+    test('drains for the pod grace period minus the exit margin', async () => {
+      process.env[KEY] = '675';
+      expect(await drainTimeout()).toBe(660_000);
+    });
+
+    test('keeps the 30s drain when no grace period is configured', async () => {
+      delete process.env[KEY];
+      expect(await drainTimeout()).toBe(30_000);
+    });
+
+    test('never drains past a grace period shorter than the margin', async () => {
+      process.env[KEY] = '5';
+      expect(await drainTimeout()).toBe(0);
+    });
+
+    test('ignores a grace period that is not a whole number of seconds', async () => {
+      process.env[KEY] = 'soon';
+      expect(await drainTimeout()).toBe(30_000);
+    });
   });
 });
 

@@ -45,6 +45,7 @@ API_URL=http://localhost:8787 bun run daemon
 | `WORKER_ID` | Worker identifier (auto-generated if unset) | No |
 | `WORKER_API_TOKEN` | Bearer token for backend auth | No |
 | `WORKER_MAX_CONCURRENT_JOBS` | Maximum active runs (device default: half the host threads, 2-8; fleet default: 1); overridden by `--max-concurrent-jobs` | No |
+| `WORKER_SHUTDOWN_GRACE_SECONDS` | Seconds until the supervisor force-kills after SIGTERM (the Helm chart sets it from `worker.terminationGracePeriodSeconds`); in-flight runs drain for this minus 15s. Unset: 30s drain | No |
 | `EMBEDDINGS_MODEL` | Override local embedding model | No |
 | `EMBEDDINGS_SERVICE_URL` | Use a remote embedding service instead of local | No |
 | `GITHUB_TOKEN` | GitHub API token | No |

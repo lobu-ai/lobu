@@ -1,5 +1,5 @@
 import type { PollResponse, ExecutorClient } from './client.js';
-import { completeActionOnce } from './terminal-delivery.js';
+import { completeActionOnce, completeAgentTurnOnce } from './terminal-delivery.js';
 
 export async function reportTerminalFailure(
   client: ExecutorClient,
@@ -29,7 +29,7 @@ export async function reportTerminalFailure(
   if (job.run_type === 'agent_turn') {
     // The generic route refuses an agent turn with a 409, so a failure that
     // fell through to it would leave the run parked until the stale sweep.
-    await client.completeAgentTurn({
+    await completeAgentTurnOnce(client, {
       run_id: job.run_id,
       worker_id: client.id,
       status: 'failed',

@@ -31,6 +31,7 @@ import { selectExecutor } from '../executor/select.js';
 import type { ExecutorConfig } from './executor.js';
 import { type ExecutorClient, trimTrailingSlashes } from './client.js';
 import { log } from './log.js';
+import { completeAgentTurnOnce } from './terminal-delivery.js';
 
 /**
  * How often a streaming turn pushes what it has produced.
@@ -68,18 +69,25 @@ export async function executeAgentTurnRun(
   if (!runId) return { itemsCollected: 0, error: 'agent turn run missing its run id' };
 
   const fail = async (error: string, trailing?: AgentTurnToolEvent[]) => {
-    const receipt = await client.completeAgentTurn({
-      run_id: runId,
-      worker_id: client.id,
-      status: 'failed',
-      error,
-      // Whatever evidence was retained rides the failure, so the server holds
-      // the prefix that explains the turn. Bounded by construction (the queue
-      // below never exceeds the cap); the overflow error names what did not fit.
-      ...(trailing?.length ? { turn_tool_events: trailing } : {}),
-      exit_reason: 'error_message',
-    });
-    return { itemsCollected: 0, ...(receipt.status === 'completed' ? {} : { error }) };
+    try {
+      const receipt = await completeAgentTurnOnce(client, {
+        run_id: runId,
+        worker_id: client.id,
+        status: 'failed',
+        error,
+        // Whatever evidence was retained rides the failure, so the server holds
+        // the prefix that explains the turn. Bounded by construction (the queue
+        // below never exceeds the cap); the overflow error names what did not fit.
+        ...(trailing?.length ? { turn_tool_events: trailing } : {}),
+        exit_reason: 'error_message',
+      });
+      return { itemsCollected: 0, ...(receipt.status === 'completed' ? {} : { error }) };
+    } catch (deliveryError) {
+      // The outer executor must not replace this failure's evidence with a
+      // second terminal payload describing only the transport error.
+      log.info(`[agent-turn] run ${runId} failure delivery uncertain:`, deliveryError);
+      return { itemsCollected: 0, error };
+    }
   };
 
   // The run is already claimed, so a rejected envelope must be REPORTED, not
@@ -325,6 +333,7 @@ export async function executeAgentTurnRun(
     `${toolReceiptOverflow?.dropped ?? 0} trace(s) could not be retained, starting with ` +
     `${toolReceiptOverflow?.toolCallId ?? 'unknown'} (${toolReceiptOverflow?.name ?? 'unknown'}); ` +
     `external effects past the retained prefix are unknown`;
+  let terminalPayloadStarted = false;
   try {
     const guestCode = await agentGuestBundle();
     // Same executor seam every other lane uses (`resolveJobExecution`): an
@@ -587,7 +596,10 @@ export async function executeAgentTurnRun(
     const trailingTraces = [...tracesInFlight, ...toolEvents];
     tracesInFlight = [];
     toolEvents = [];
-    const receipt = await client.completeAgentTurn({
+    // Exact retries share the gateway's completion hash. Once delivery starts,
+    // even an exhausted retry budget must not replace this terminal outcome.
+    terminalPayloadStarted = true;
+    const receipt = await completeAgentTurnOnce(client, {
       run_id: runId,
       worker_id: client.id,
       status: 'completed',
@@ -614,6 +626,11 @@ export async function executeAgentTurnRun(
     );
     return { itemsCollected: 0 };
   } catch (error) {
+    if (terminalPayloadStarted) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.info(`[agent-turn] run ${runId} completion delivery uncertain:`, message);
+      return { itemsCollected: 0, error: message };
+    }
     // Any failure reports the retained receipt prefix. A provider/runtime
     // error after a tool finished must not erase mandatory external-effect
     // evidence merely because the queue did not overflow.

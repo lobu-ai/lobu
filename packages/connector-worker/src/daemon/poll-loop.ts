@@ -30,6 +30,27 @@ export interface WorkerPollLoopOptions {
 
 export type WorkerPollLoopExit = (code: number) => void;
 
+/** Drain budget for a daemon nobody told how long it has (devices, local runs). */
+const DEFAULT_SHUTDOWN_DRAIN_MS = 30_000;
+/**
+ * Reserved at the end of the pod's grace period for the exit itself, so the
+ * daemon leaves on its own terms instead of being SIGKILLed mid-report.
+ */
+const SHUTDOWN_EXIT_MARGIN_MS = 15_000;
+
+/**
+ * How long SIGTERM waits for in-flight runs. A fleet pod is SIGKILLed
+ * `terminationGracePeriodSeconds` after SIGTERM; the chart passes that same
+ * value as `WORKER_SHUTDOWN_GRACE_SECONDS`, so the drain uses all of it except
+ * the exit margin. Anything else keeps the fixed default.
+ */
+function resolveWorkerShutdownDrainMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.WORKER_SHUTDOWN_GRACE_SECONDS?.trim();
+  const seconds = raw ? Number(raw) : Number.NaN;
+  if (!Number.isInteger(seconds) || seconds < 0) return DEFAULT_SHUTDOWN_DRAIN_MS;
+  return Math.max(0, seconds * 1000 - SHUTDOWN_EXIT_MARGIN_MS);
+}
+
 export interface WorkerPollLoopSignalOptions {
   /** Only a supervised parent/child launch treats stdin EOF as shutdown. */
   stdinEof?: boolean;
@@ -222,6 +243,7 @@ export function createWorkerPollLoopShutdownHandler(
   onShutdown: () => void | Promise<void> = () => loop.stop(),
   exit: WorkerPollLoopExit = process.exit
 ): (signal: string) => Promise<void> {
+  const drainTimeoutMs = resolveWorkerShutdownDrainMs();
   let shuttingDown = false;
   return async (signal: string) => {
     if (shuttingDown) {
@@ -238,7 +260,8 @@ export function createWorkerPollLoopShutdownHandler(
       shutdownHookSucceeded = false;
       log.info('[daemon] Shutdown hook failed:', error);
     }
-    const allDone = await loop.waitForActiveJobs();
+    log.info(`[daemon] Draining in-flight runs for up to ${drainTimeoutMs}ms`);
+    const allDone = await loop.waitForActiveJobs(drainTimeoutMs);
     if (!allDone) log.info('[daemon] Forcing exit with active jobs still running');
     exit(allDone && shutdownHookSucceeded ? 0 : 1);
   };

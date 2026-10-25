@@ -133,6 +133,34 @@ jobs:
             exit 1
           fi
 
+      - name: Workers roll and drain on deploy
+        # Recreate (forced by the old RWO cache PVC) left no worker claiming
+        # while the outgoing pod drained, and a drain that ignores the grace
+        # period kills in-flight agent turns 30s into every deploy.
+        run: |
+          helm template lobu charts/lobu --namespace lobu \
+            --show-only templates/worker-deployment.yaml >/tmp/lobu-worker.yaml
+          grep -q 'type: RollingUpdate' /tmp/lobu-worker.yaml
+          grep -q 'maxSurge: 1' /tmp/lobu-worker.yaml
+          grep -q 'maxUnavailable: 0' /tmp/lobu-worker.yaml
+          grep -q 'emptyDir:' /tmp/lobu-worker.yaml
+          if grep -q 'persistentVolumeClaim:' /tmp/lobu-worker.yaml; then
+            echo "worker cache must be per-pod; a shared RWO claim blocks cross-node surge" >&2
+            exit 1
+          fi
+          grep -A1 'name: WORKER_SHUTDOWN_GRACE_SECONDS' /tmp/lobu-worker.yaml \
+            | grep -q 'value: "300"'
+          for grace in 0 120 null; do
+            expected="$grace"
+            if [ "$grace" = null ]; then expected=30; fi
+            helm template lobu charts/lobu --namespace lobu \
+              --set worker.terminationGracePeriodSeconds="$grace" \
+              --show-only templates/worker-deployment.yaml >/tmp/lobu-worker.yaml
+            grep -q "terminationGracePeriodSeconds: $expected$" /tmp/lobu-worker.yaml
+            grep -A1 'name: WORKER_SHUTDOWN_GRACE_SECONDS' /tmp/lobu-worker.yaml \
+              | grep -q "value: \"$expected\""
+          done
+
       - name: Exercise migration failure recovery
         run: sh charts/lobu/tests/migrate-upgrade-recovery.sh
 

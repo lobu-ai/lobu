@@ -108,7 +108,7 @@ spec:
             summary: "Lobu worker claim query failed after retries"
             description: "A {{`{{ $labels.worker_kind }}`}} worker poll (platform={{`{{ $labels.platform }}`}}) exhausted DB retries while claiming work. Check app logs for classification=dispatch_unavailable and stage=worker_claim_query, then inspect DB pool/lock health."
         # Fleet workers poll every 10s in production. A 5m lookback held false
-        # for another 5m detects roughly 10m of silence while ignoring Recreate
+        # for another 5m detects roughly 10m of silence while ignoring brief
         # rollout gaps. Device polls are intentionally excluded: laptops being
         # offline is normal and is handled by due-feed deferral.
         - alert: LobuFleetWorkerPollingSilent
