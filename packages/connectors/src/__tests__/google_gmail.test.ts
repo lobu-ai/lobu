@@ -285,7 +285,7 @@ describe('Gmail default person admission', () => {
 
 describe('Gmail person attribution rule', () => {
   test('bumps the connector version for the changed sync contract', () => {
-    expect(new GmailConnector().definition.version).toBe('1.0.8');
+    expect(new GmailConnector().definition.version).toBe('1.1.0');
   });
 
   test('autoCreate requires an explicit positive person verdict without a replied-only fallback', () => {
