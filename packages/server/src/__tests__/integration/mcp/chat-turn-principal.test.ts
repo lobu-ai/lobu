@@ -34,6 +34,7 @@ import {
   createTestUser,
   linkChatIdentityInGraph,
   seedSystemEntityTypes,
+  insertAgentTurnRun,
 } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
 
@@ -94,7 +95,8 @@ async function chatTurnGatewayMcpToken(
   senderPlatformId = SENDER_PLATFORM_ID,
   evidence: Evidence = { isDirect: true },
 ): Promise<string> {
-  const turnToken = await mintTurnToken(slackChatMessage(organizationId, senderPlatformId, evidence), 1);
+  const message = slackChatMessage(organizationId, senderPlatformId, evidence);
+  const turnToken = await mintTurnToken(message, await insertAgentTurnRun(message));
   const gatewayToken = mintGatewayMcpToken(turnToken);
   if (!gatewayToken) throw new Error('chat turn token did not verify');
   return gatewayToken;

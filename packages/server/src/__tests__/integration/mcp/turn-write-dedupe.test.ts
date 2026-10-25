@@ -24,6 +24,7 @@ import {
   insertChatConnectionRow,
   linkChatIdentityInGraph,
   seedSystemEntityTypes,
+  insertAgentTurnRun,
 } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
 
@@ -67,16 +68,8 @@ function slackChatMessage(organizationId: string, sender: string, messageId: str
 
 /** One stored agent turn for `messageId` plus the gateway-hop credential minted for it. */
 async function turnFor(organizationId: string, sender: string, messageId: string, evidence: Evidence): Promise<string> {
-  const [run] = await getTestDb()<{ id: number }>`
-    INSERT INTO runs (organization_id, run_type, status, action_input, created_at)
-    VALUES (${organizationId}, 'agent_turn', 'running', ${getTestDb().json({
-      turn: { agent_id: AGENT_ID, conversation_id: CONVERSATION_ID, message_id: messageId },
-    })}, NOW())
-    RETURNING id
-  `;
-  const token = mintGatewayMcpToken(
-    await mintTurnToken(slackChatMessage(organizationId, sender, messageId, evidence), Number(run.id))
-  );
+  const message = slackChatMessage(organizationId, sender, messageId, evidence);
+  const token = mintGatewayMcpToken(await mintTurnToken(message, await insertAgentTurnRun(message)));
   if (!token) throw new Error('turn token did not verify');
   return token;
 }
