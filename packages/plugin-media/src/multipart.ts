@@ -82,6 +82,7 @@ export async function uploadMultipart(
         Authorization: `Bearer ${gw.workerToken}`,
         "X-Channel-Id": gw.channelId,
         "X-Conversation-Id": gw.conversationId,
+        ...gw.headers,
         ...options.extraHeaders,
       },
       body: form,

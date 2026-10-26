@@ -12,6 +12,7 @@ import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
 import { captureSideEffect } from "./capture-mode.js";
+import { sendOncePerTurnInput } from "./turn-write-once.js";
 
 const logger = createLogger("internal-audio-routes");
 
@@ -56,35 +57,37 @@ export function createAudioRoutes(
       const captured = await captureSideEffect(c, "audio.synthesize", { voice, speed });
       if (captured) return captured;
 
-      logger.info("Synthesizing audio", {
-        agentId,
-        textLength: text.length,
-        voice,
-      });
+      return await sendOncePerTurnInput(c, worker, "audio.synthesize", { text, voice, speed }, async () => {
+        logger.info("Synthesizing audio", {
+          agentId,
+          textLength: text.length,
+          voice,
+        });
 
-      const result = await transcriptionService.synthesize(text, agentId, {
-        voice,
-        speed,
-      });
+        const result = await transcriptionService.synthesize(text, agentId, {
+          voice,
+          speed,
+        });
 
-      if ("error" in result) {
-        logger.warn("Audio synthesis failed", { error: result.error });
-        return c.json(
-          {
-            error: result.error,
-            availableProviders: result.availableProviders,
+        if ("error" in result) {
+          logger.warn("Audio synthesis failed", { error: result.error });
+          return c.json(
+            {
+              error: result.error,
+              availableProviders: result.availableProviders,
+            },
+            400
+          );
+        }
+
+        // Return audio as binary response
+        return new Response(result.audioBuffer, {
+          headers: {
+            "Content-Type": result.mimeType,
+            "Content-Length": result.audioBuffer.length.toString(),
+            "X-Audio-Provider": result.provider,
           },
-          400
-        );
-      }
-
-      // Return audio as binary response
-      return new Response(result.audioBuffer, {
-        headers: {
-          "Content-Type": result.mimeType,
-          "Content-Length": result.audioBuffer.length.toString(),
-          "X-Audio-Provider": result.provider,
-        },
+        });
       });
     } catch (error) {
       logger.error("Audio synthesis error", { error });

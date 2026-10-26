@@ -26,6 +26,7 @@ import {
 import { intervals } from "../../../config/intervals.js";
 import { getDb, getDbListener, type DbClient } from "../../../db/client.js";
 import { incrementCounter } from "../../metrics/prometheus.js";
+import { pruneTurnWriteReceipts } from "../../../tools/turn-write-idempotency.js";
 import {
   isDeferralError,
   type IMessageQueue,
@@ -966,6 +967,10 @@ export async function sweepCompletedRuns(): Promise<number> {
     SELECT count(*)::int AS count FROM d
   `;
   total += Number((agedFailed[0] as { count?: number } | undefined)?.count ?? 0);
+
+  // Bound receipt storage by the configured retention window. Agent-turn
+  // rows are not pruned above; replay after this window can repeat a write.
+  total += await pruneTurnWriteReceipts(retentionDays);
 
   return total;
 }

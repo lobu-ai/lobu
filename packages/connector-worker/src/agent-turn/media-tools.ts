@@ -26,6 +26,7 @@ import {
 } from '@lobu/plugin-media/portable';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import type { InMemoryFs } from 'just-bash/browser';
+import { perCallInputRun } from './gateway-tools.js';
 import type { AgentTurnConversation, AgentTurnMediaTool } from './types.js';
 import { WORKSPACE_ROOT, type AgentWorkspace } from './workspace.js';
 
@@ -89,11 +90,13 @@ export function createTurnMediaTools(
     conversation: AgentTurnConversation;
     workspace: AgentWorkspace | null;
     onFileUploaded: (data: Record<string, unknown>) => void;
+    inputRunFor: (toolCallId: string) => number | undefined;
   }
 ): AgentTool[] {
   const wanted = new Set<string>(allowed);
   if (wanted.size === 0) return [];
-  const tools = createMediaTools({
+  const build = (headers?: Record<string, string>) => createMediaTools({
+    ...(headers ? { headers } : {}),
     gatewayUrl: args.gatewayUrl,
     workerToken: args.credential,
     channelId: args.conversation.channelId,
@@ -109,8 +112,9 @@ export function createTurnMediaTools(
     filePort: args.workspace
       ? createWorkspaceFilePort(args.workspace)
       : { resolve: async () => ({ ok: false, reason: 'no-workspace' }), read: async () => new Uint8Array(0) },
-  });
-  return tools.filter(
+  }) as unknown as AgentTool[];
+  const offered = build().filter(
     (tool) => wanted.has(tool.name) && (tool.name !== 'upload_file' || args.workspace !== null)
-  ) as unknown as AgentTool[];
+  );
+  return perCallInputRun(offered, build, args.inputRunFor);
 }

@@ -28,6 +28,7 @@ import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
 import { captureSideEffect } from "./capture-mode.js";
+import { sendOncePerTurnInput } from "./turn-write-once.js";
 
 const logger = createLogger("conversations-routes");
 
@@ -201,81 +202,92 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
       });
       if (captured) return captured;
 
-      const manager = getChatInstanceManager();
-      if (!manager?.postToConversation) {
-        return errorResponse(c, "Chat instance manager unavailable", 503);
-      }
-      const sent = (await manager.postToConversation(target.connectionId, {
-        platform: target.platform,
-        channelKey: target.channelKey,
+      // A turn that repeats this post for the same input message (a re-run,
+      // a redelivered message, a repeated call) posts once; the repeat gets
+      // the first post's answer.
+      const signed = { organizationId: worker.organizationId, agentId: worker.agentId };
+      return await sendOncePerTurnInput(c, worker, "conversations.send", {
+        connectionId: target.connectionId,
         channelId: target.channelId,
-        threadId,
-        content: { markdown: text },
-        // Follow the thread we just posted into so replies (e.g. lunch orders)
-        // come back to us and land in the transcript.
-        subscribe: true,
-      })) as { messageId: string; threadId: string };
-
-      logger.info(
-        `agent ${worker.agentId} sent to ${target.platform}/${target.channelId}${threadId ? " (thread)" : ""} via ${target.connectionId}`
-      );
-
-      // Persist the bot's own post into the transcript (with the real platform
-      // message id) so read_conversation includes it AND the inbound echo of
-      // this message dedups against it.
-      if (sent.messageId) {
-        captureChannelMessage({
-          organizationId: worker.organizationId,
-          connectionId: target.connectionId,
+        threadId: threadId ?? null,
+        text,
+      }, async () => {
+        const manager = getChatInstanceManager();
+        if (!manager?.postToConversation) {
+          return errorResponse(c, "Chat instance manager unavailable", 503);
+        }
+        const sent = (await manager.postToConversation(target.connectionId, {
           platform: target.platform,
+          channelKey: target.channelKey,
           channelId: target.channelId,
-          threadId: threadId ?? null,
-          platformMessageId: sent.messageId,
-          authorId: worker.agentId,
-          authorName: worker.agentId,
-          // Bot's own post — no sender attribution; team_id is not in scope here.
-          teamId: null,
-          isBot: true,
-          text,
-          occurredAt: new Date(),
+          threadId,
+          content: { markdown: text },
+          // Follow the thread we just posted into so replies (e.g. lunch orders)
+          // come back to us and land in the transcript.
+          subscribe: true,
+        })) as { messageId: string; threadId: string };
+
+        logger.info(
+          `agent ${signed.agentId} sent to ${target.platform}/${target.channelId}${threadId ? " (thread)" : ""} via ${target.connectionId}`
+        );
+
+        // Persist the bot's own post into the transcript (with the real platform
+        // message id) so read_conversation includes it AND the inbound echo of
+        // this message dedups against it.
+        if (sent.messageId) {
+          captureChannelMessage({
+            organizationId: signed.organizationId,
+            connectionId: target.connectionId,
+            platform: target.platform,
+            channelId: target.channelId,
+            threadId: threadId ?? null,
+            platformMessageId: sent.messageId,
+            authorId: signed.agentId,
+            authorName: signed.agentId,
+            // Bot's own post — no sender attribution; team_id is not in scope here.
+            teamId: null,
+            isBot: true,
+            text,
+            occurredAt: new Date(),
+          });
+        }
+
+        // A thread handle lets a later run reply into this message's thread.
+        // Prefer the adapter's returned thread id (root) when it carries one
+        // (reply-in-existing-thread); fall back to the new message id (the root
+        // of a freshly-opened thread). Telegram's message id is `${chatId}:${n}`,
+        // so strip the redundant channel prefix — else the thread handle encodes a
+        // 4-segment `platform:channel:chatId:n` that its own 3-part decode rejects
+        // (and createThread can't resolve). No-op for ids that aren't prefixed
+        // (e.g. a Slack `ts`).
+        const rawRoot =
+          typeof sent.threadId === "string" && sent.threadId.split(":")[2]
+            ? sent.threadId.split(":")[2]
+            : sent.messageId;
+        const threadRoot = rawRoot.startsWith(`${target.channelId}:`)
+          ? rawRoot.slice(target.channelId.length + 1)
+          : rawRoot;
+        const threadHandle = threadRoot
+          ? threadHandleForMessage(target, threadRoot)
+          : undefined;
+        // Did this post land in the very conversation that triggered the run?
+        // If so the user has ALREADY read the agent's answer, and the terminal
+        // `finalText` the worker is about to emit is a report about it — posting
+        // that too is the double-message. The comparison can only happen here:
+        // the model holds an opaque handle, and only this route has resolved it
+        // to concrete channel/thread coordinates. The worker's own conversation
+        // comes from its signed token, so the model cannot spoof a match to
+        // silence its own reply.
+        const deliveredInBand = conversationRefsMatch(
+          { channelKey: target.channelKey, ...(threadId ? { threadId } : {}) },
+          parseConversationRef(worker.conversationId)
+        );
+
+        return c.json({
+          messageId: sent.messageId || null,
+          thread: threadHandle,
+          deliveredInBand,
         });
-      }
-
-      // A thread handle lets a later run reply into this message's thread.
-      // Prefer the adapter's returned thread id (root) when it carries one
-      // (reply-in-existing-thread); fall back to the new message id (the root
-      // of a freshly-opened thread). Telegram's message id is `${chatId}:${n}`,
-      // so strip the redundant channel prefix — else the thread handle encodes a
-      // 4-segment `platform:channel:chatId:n` that its own 3-part decode rejects
-      // (and createThread can't resolve). No-op for ids that aren't prefixed
-      // (e.g. a Slack `ts`).
-      const rawRoot =
-        typeof sent.threadId === "string" && sent.threadId.split(":")[2]
-          ? sent.threadId.split(":")[2]
-          : sent.messageId;
-      const threadRoot = rawRoot.startsWith(`${target.channelId}:`)
-        ? rawRoot.slice(target.channelId.length + 1)
-        : rawRoot;
-      const threadHandle = threadRoot
-        ? threadHandleForMessage(target, threadRoot)
-        : undefined;
-      // Did this post land in the very conversation that triggered the run?
-      // If so the user has ALREADY read the agent's answer, and the terminal
-      // `finalText` the worker is about to emit is a report about it — posting
-      // that too is the double-message. The comparison can only happen here:
-      // the model holds an opaque handle, and only this route has resolved it
-      // to concrete channel/thread coordinates. The worker's own conversation
-      // comes from its signed token, so the model cannot spoof a match to
-      // silence its own reply.
-      const deliveredInBand = conversationRefsMatch(
-        { channelKey: target.channelKey, ...(threadId ? { threadId } : {}) },
-        parseConversationRef(worker.conversationId)
-      );
-
-      return c.json({
-        messageId: sent.messageId || null,
-        thread: threadHandle,
-        deliveredInBand,
       });
     } catch (error) {
       logger.error(`send conversation failed: ${String(error)}`);
@@ -319,53 +331,60 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
       });
       if (captured) return captured;
 
-      const presentation = await presentStoredEventToConversation({
-        organizationId: worker.organizationId,
+      // Presented once per turn input message; a repeat gets the first answer.
+      const signed = { organizationId: worker.organizationId, connectionId: worker.connectionId, platform: worker.platform, channelId: worker.channelId, agentId: worker.agentId };
+      return await sendOncePerTurnInput(c, worker, "conversations.present-event", {
         eventId,
-        connectionId: worker.connectionId,
-        platform: worker.platform,
-        channelId: worker.channelId,
-        channelKey: `${worker.platform}:${stripPlatformPrefix(
-          worker.platform,
-          worker.channelId
-        )}`,
         conversationId: worker.conversationId,
-        threadId:
-          worker.responseThreadId ??
-          parseConversationRef(worker.conversationId)?.threadId,
-      });
-      if (!presentation.ok) {
-        if (presentation.reason === "not_found") {
-          return errorResponse(c, "Event not found or already replaced", 404);
+      }, async () => {
+        const presentation = await presentStoredEventToConversation({
+          organizationId: signed.organizationId,
+          eventId,
+          connectionId: signed.connectionId,
+          platform: signed.platform,
+          channelId: signed.channelId,
+          channelKey: `${signed.platform}:${stripPlatformPrefix(
+            signed.platform,
+            signed.channelId
+          )}`,
+          conversationId: worker.conversationId,
+          threadId:
+            worker.responseThreadId ??
+            parseConversationRef(worker.conversationId)?.threadId,
+        });
+        if (!presentation.ok) {
+          if (presentation.reason === "not_found") {
+            return errorResponse(c, "Event not found or already replaced", 404);
+          }
+          if (presentation.reason === "not_renderable") {
+            return errorResponse(
+              c,
+              "Event permalink is unavailable",
+              422
+            );
+          }
+          return errorResponse(c, "Chat instance manager unavailable", 503);
         }
-        if (presentation.reason === "not_renderable") {
-          return errorResponse(
-            c,
-            "Event permalink is unavailable",
-            422
-          );
-        }
-        return errorResponse(c, "Chat instance manager unavailable", 503);
-      }
 
-      captureChannelMessage({
-        organizationId: worker.organizationId,
-        connectionId: worker.connectionId,
-        platform: worker.platform,
-        channelId: worker.channelId,
-        threadId: presentation.threadId,
-        platformMessageId: presentation.messageId,
-        authorId: worker.agentId,
-        authorName: worker.agentId,
-        teamId: worker.teamId ?? null,
-        isBot: true,
-        text: presentation.fallbackText,
-        occurredAt: new Date(),
-      });
+        captureChannelMessage({
+          organizationId: signed.organizationId,
+          connectionId: signed.connectionId,
+          platform: signed.platform,
+          channelId: signed.channelId,
+          threadId: presentation.threadId,
+          platformMessageId: presentation.messageId,
+          authorId: signed.agentId,
+          authorName: signed.agentId,
+          teamId: worker.teamId ?? null,
+          isBot: true,
+          text: presentation.fallbackText,
+          occurredAt: new Date(),
+        });
 
-      return c.json({
-        messageId: presentation.messageId,
-        deliveredInBand: true,
+        return c.json({
+          messageId: presentation.messageId,
+          deliveredInBand: true,
+        });
       });
     } catch (error) {
       logger.error(`present event failed: ${String(error)}`);

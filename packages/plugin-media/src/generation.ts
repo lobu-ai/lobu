@@ -68,6 +68,7 @@ async function generateAndUploadMedia(
     }).request(config.endpoint, {
       method: "POST",
       body: JSON.stringify(config.requestBody),
+      headers: gw.headers,
       // Generation can take a while at high quality, but never minutes — cap
       // the wait so a stalled upstream provider doesn't hang the agent turn.
       timeoutMs: 120_000,

@@ -17,9 +17,33 @@
  * the turn's one credential as the bearer, and pi's `AgentTool` shape.
  */
 
+import { TURN_INPUT_RUN_HEADER } from '@lobu/core/agent-tooling';
 import { createConversationTools } from '@lobu/plugin-conversations';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import type { AgentTurnConversation, AgentTurnGatewayTool } from './types.js';
+
+/**
+ * `tools`, with each call executed by a tool set built for THAT call: one whose
+ * gateway requests name the steered input the call answers
+ * (`TURN_INPUT_RUN_HEADER`), so the gateway keys the write on that input's
+ * stored message. Building a plugin tool set is only object construction; the
+ * schemas and descriptions offered to the model are the first set's.
+ */
+export function perCallInputRun(
+  tools: AgentTool[],
+  build: (headers: Record<string, string>) => AgentTool[],
+  inputRunFor: (toolCallId: string) => number | undefined
+): AgentTool[] {
+  return tools.map((tool) => ({
+    ...tool,
+    execute: (toolCallId, ...rest) => {
+      const inputRunId = inputRunFor(toolCallId);
+      if (inputRunId === undefined) return tool.execute(toolCallId, ...rest);
+      const forCall = build({ [TURN_INPUT_RUN_HEADER]: String(inputRunId) }).find((t) => t.name === tool.name)!;
+      return forCall.execute(toolCallId, ...rest);
+    },
+  }));
+}
 
 /**
  * Build the gateway tools this turn may call.
@@ -46,18 +70,21 @@ export function createGatewayTools(
     conversation: AgentTurnConversation;
     onAskUserPosted: () => void;
     onInBandReplyDelivered: () => void;
+    inputRunFor: (toolCallId: string) => number | undefined;
   }
 ): AgentTool[] {
   const wanted = new Set<string>(allowed);
   if (wanted.size === 0) return [];
-  const tools = createConversationTools({
-    gatewayUrl: args.gatewayUrl,
-    workerToken: args.credential,
-    channelId: args.conversation.channelId,
-    conversationId: args.conversation.conversationId,
-    platform: args.conversation.platform,
-    onAskUserPosted: args.onAskUserPosted,
-    onInBandReplyDelivered: args.onInBandReplyDelivered,
-  });
-  return tools.filter((tool) => wanted.has(tool.name)) as unknown as AgentTool[];
+  const build = (headers?: Record<string, string>) =>
+    createConversationTools({
+      gatewayUrl: args.gatewayUrl,
+      workerToken: args.credential,
+      channelId: args.conversation.channelId,
+      conversationId: args.conversation.conversationId,
+      platform: args.conversation.platform,
+      ...(headers ? { headers } : {}),
+      onAskUserPosted: args.onAskUserPosted,
+      onInBandReplyDelivered: args.onInBandReplyDelivered,
+    }) as unknown as AgentTool[];
+  return perCallInputRun(build().filter((tool) => wanted.has(tool.name)), build, args.inputRunFor);
 }
