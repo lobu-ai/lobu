@@ -363,6 +363,16 @@ export class ChatInstanceManager {
     { rowVersion: number; attempts: number; nextRetryAt: number }
   >();
   private exclusiveTickInFlight = false;
+  /**
+   * Inbound messages a webhook already acked but whose handling is still
+   * running. Chat SDK adapters answer the platform before dispatching the
+   * message, so once the 200 is out we cannot rely on redelivery:
+   * `shutdown()` must let these finish enqueueing
+   * before it disconnects the state adapter and the DB pool goes away.
+   */
+  private webhookTasks = new Set<Promise<unknown>>();
+  /** Upper bound `shutdown()` waits on `webhookTasks`; inside the pod's grace period. */
+  private webhookDrainTimeoutMs = 15_000;
 
   /**
    * Public gateway base URL (`PUBLIC_GATEWAY_URL` or derived) — exposed so the
@@ -405,6 +415,7 @@ export class ChatInstanceManager {
       { count: this.instances.size },
 			"Shutting down all connections",
     );
+    await this.drainWebhookTasks();
     if (this.exclusiveTimer) {
       clearInterval(this.exclusiveTimer);
       this.exclusiveTimer = undefined;
@@ -1554,7 +1565,9 @@ export class ChatInstanceManager {
     }
 
     try {
-      return await webhookHandler(request);
+      return await webhookHandler(request, {
+        waitUntil: (task: Promise<unknown>) => this.trackWebhookTask(task),
+      });
     } catch (error) {
       logger.error(
         { connectionId, platform, error: String(error) },
@@ -1598,6 +1611,52 @@ export class ChatInstanceManager {
   }
 
   // --- Private ---
+
+  private trackWebhookTask(task: Promise<unknown>): void {
+    const tracked = task.then(
+      () => undefined,
+      (error) => {
+        logger.error({ error: getErrorMessage(error) }, "Background webhook task failed");
+      },
+    );
+    this.webhookTasks.add(tracked);
+    void tracked.finally(() => this.webhookTasks.delete(tracked));
+  }
+
+  /** Wait (bounded) for acked inbound messages to finish being handled. */
+  private async drainWebhookTasks(): Promise<void> {
+    if (this.webhookTasks.size === 0) return;
+    const pending = this.webhookTasks.size;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<true>((resolve) => {
+      timer = setTimeout(() => resolve(true), this.webhookDrainTimeoutMs);
+    });
+    let timedOut = false;
+    try {
+      // Adapters can register dispatch after async setup (e.g. reaction lookup).
+      // Recheck the set after each batch, sharing one budget across all batches.
+      while (this.webhookTasks.size > 0 && !timedOut) {
+        timedOut = await Promise.race([
+          Promise.all(this.webhookTasks).then(() => false),
+          timeout,
+        ]);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+    if (timedOut) {
+      logger.error(
+        {
+          pending,
+          stillRunning: this.webhookTasks.size,
+          timeoutMs: this.webhookDrainTimeoutMs,
+        },
+				"Shutdown drain timed out with acked inbound messages still being handled; delivery may be lost",
+      );
+    } else {
+      logger.info({ pending }, "Drained acked inbound messages before shutdown");
+    }
+  }
 
   /**
    * Tear down a running managed instance (interaction bridge + chat shutdown)
