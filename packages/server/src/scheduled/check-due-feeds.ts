@@ -14,6 +14,7 @@ import type { Env } from '../index';
 import { DEVICE_ONLINE_WINDOW_SECONDS } from '../utils/device-liveness';
 import {
   delegatedBrowserAffinitySql,
+  pinnedDeviceConnectorContractSql,
   selectedConnectorVersionArtifactSql,
 } from '../utils/connector-execution-placement';
 import logger from '../utils/logger';
@@ -85,16 +86,16 @@ export async function materializeDueFeeds(
   const claimEligibility = claimContext
     ? connectorClaimLaneSql(sql, claimContext, {
         connectorKey: sql`c.connector_key`,
-        connectorVersion: sql`COALESCE(f.pinned_version, cd.version)`,
+        connectorVersion: sql`selected_contract.version`,
         organizationId: sql`f.organization_id`,
         activationKind: sql`NULL::text`,
         activatedAt: sql`NULL::timestamptz`,
         connectionDeviceWorkerId: sql`c.device_worker_id`,
         pinPlatform: sql`pin_dw.platform`,
-        runRequiredCapability: sql`cd.run_required_capability`,
+        runRequiredCapability: sql`COALESCE(selected_contract.manifest->>'required_capability', cd.run_required_capability)`,
         runManifestBacked: sql`run_cv.manifest_backed`,
         runManifestHash: sql`run_cv.artifact_hash`,
-        runRuntime: sql`cd.run_runtime`,
+        runRuntime: sql`COALESCE(selected_contract.manifest->'runtime', cd.run_runtime)`,
         runRequiresHttpAuth: sql`http_ap.metadata ? 'http'`,
       })
     : sql`true`;
@@ -154,9 +155,14 @@ export async function materializeDueFeeds(
         LIMIT 1
       ) cd ON true
       LEFT JOIN LATERAL (
+        ${sql.unsafe(pinnedDeviceConnectorContractSql({ connectorKey: 'c.connector_key',
+          organizationId: 'f.organization_id', deviceWorkerId: 'c.device_worker_id',
+          pinnedVersion: 'f.pinned_version', defaultVersion: 'cd.version' }))}
+      ) selected_contract ON true
+      LEFT JOIN LATERAL (
         ${selectedConnectorVersionArtifactSql(sql, {
           connectorKey: sql`c.connector_key`,
-          version: sql`COALESCE(f.pinned_version, cd.version)`,
+          version: sql`selected_contract.version`,
           organizationId: sql`f.organization_id`,
         })}
       ) run_cv ON true
@@ -167,7 +173,7 @@ export async function materializeDueFeeds(
         AND ${sql.unsafe(organizationIdLiveSql('f.organization_id'))}
         AND (
           cd.definition_id IS NULL
-          OR cd.feed_operations @> '["sync"]'::jsonb
+          OR (CASE WHEN selected_contract.manifest IS NOT NULL THEN COALESCE(selected_contract.manifest->'feeds_schema'->f.feed_key->'operations', '[]'::jsonb) ELSE cd.feed_operations END) @> '["sync"]'::jsonb
         )
         -- A connection pinned for EXECUTION can only run while that device is
         -- polling. In worker-api/poll.ts the fleet lane (1A) takes a pinned

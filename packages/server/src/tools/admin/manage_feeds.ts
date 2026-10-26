@@ -71,6 +71,7 @@ import {
 import {
   isChromeNamespaceConnectorKey,
   selectedConnectorVersionArtifactSql,
+  pinnedDeviceConnectorContractSql,
 } from '../../utils/connector-execution-placement';
 import {
   nextRunAt,
@@ -358,7 +359,7 @@ async function handleListFeeds(
              THEN 'offline'
            END AS device_status,
            cd.name AS connector_name,
-           COALESCE(p.pinned_version, cd.version) AS connector_version,
+           selected_contract.version AS connector_version,
            COALESCE(cv.manifest_backed, false) AS connector_manifest_backed,
            cv.artifact_hash AS connector_manifest_hash,
            ap.profile_kind AS auth_profile_kind,
@@ -394,9 +395,14 @@ async function handleListFeeds(
       LIMIT 1
     ) cd ON TRUE
     LEFT JOIN LATERAL (
+      ${sql.unsafe(pinnedDeviceConnectorContractSql({ connectorKey: 'c.connector_key',
+        organizationId: 'p.organization_id', deviceWorkerId: 'c.device_worker_id',
+        pinnedVersion: 'p.pinned_version', defaultVersion: 'cd.version' }))}
+    ) selected_contract ON TRUE
+    LEFT JOIN LATERAL (
       ${selectedConnectorVersionArtifactSql(sql, {
         connectorKey: sql`c.connector_key`,
-        version: sql`COALESCE(p.pinned_version, cd.version)`,
+        version: sql`selected_contract.version`,
         organizationId: sql`p.organization_id`,
       })}
     ) cv ON TRUE
@@ -529,22 +535,7 @@ async function handleReadFeed(
            c.display_name AS connection_name,
            COALESCE((
              SELECT definition.feeds_schema -> f.feed_key -> 'operations'
-             FROM connector_definitions definition
-             WHERE definition.key = c.connector_key
-               AND definition.organization_id = f.organization_id
-               -- Same definition selection as readSourceFeed, so the reported
-               -- capabilities are the ones a read/sync would actually run.
-               AND (
-                 (f.pinned_version IS NULL AND definition.status = 'active')
-                 OR (
-                   f.pinned_version IS NOT NULL
-                   AND (definition.version = f.pinned_version OR definition.status = 'active')
-                 )
-               )
-             ORDER BY (definition.version = f.pinned_version) DESC,
-                      (definition.status = 'active') DESC,
-                      definition.updated_at DESC, definition.id DESC
-             LIMIT 1
+             FROM (${feedDefinitionSelection(sql)}) definition
            ), '[]'::jsonb) AS operations,
            (
              SELECT string_agg(DISTINCT ent.name, ', ' ORDER BY ent.name)

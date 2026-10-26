@@ -40,7 +40,9 @@ SET attach = COALESCE((
       AND e.organization_id = v.organization_id
       AND e.deleted_at IS NULL
       AND (
-        (jsonb_typeof(a.x->'entity') = 'number' AND e.id = (a.x->>'entity')::bigint)
+        -- CASE, not AND: the planner may OR the id and slug indexes, computing
+        -- the id key for a slug pin before any sibling condition.
+        e.id = CASE WHEN jsonb_typeof(a.x->'entity') = 'number' THEN (a.x->>'entity')::bigint END
         OR (jsonb_typeof(a.x->'entity') = 'string' AND e.parent_id IS NULL AND e.slug = a.x->>'entity')
       )
   ) m

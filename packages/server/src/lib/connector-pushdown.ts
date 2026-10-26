@@ -35,6 +35,7 @@ import { isMetadataOnlyDeviceConnector, readDeviceFeed } from './device-feed-rea
 import { readSourceFeedFromAdapter } from './source-feed-adapters';
 import { createSourceReadBridge, sourceReadDeadlineError } from './source-read-bridge';
 import { sourceRecoveryHash } from './browser-recovery';
+import { pinnedDeviceConnectorContractSql } from '../utils/connector-execution-placement';
 import { computeCodeHash } from '../utils/compiler-core';
 import { sourceFeedScopeKey, sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
 
@@ -361,17 +362,19 @@ async function readSourceFeedWithinDeadline(
      JOIN "organization" o ON o.id = c.organization_id
      LEFT JOIN device_workers pinned_dw ON pinned_dw.id = c.device_worker_id
      LEFT JOIN LATERAL (
-       SELECT cd0.version, cd0.mcp_config, cd0.runtime, cd0.required_capability,
-              COALESCE(cd0.feeds_schema -> f.feed_key -> 'operations', '[]'::jsonb)
+       SELECT selected_contract.version, cd0.mcp_config,
+              COALESCE(selected_contract.manifest->'runtime', cd0.runtime) AS runtime,
+              COALESCE(selected_contract.manifest->>'required_capability', cd0.required_capability) AS required_capability,
+              COALESCE((CASE WHEN selected_contract.manifest IS NOT NULL THEN selected_contract.manifest->'feeds_schema' ELSE cd0.feeds_schema END) -> f.feed_key -> 'operations', '[]'::jsonb)
                 AS feed_operations,
-              cd0.feeds_schema -> f.feed_key ->> 'readWindowAxis' AS read_window_axis,
-              COALESCE(cd0.feeds_schema -> f.feed_key -> 'matchPaths', '[]'::jsonb)
+              (CASE WHEN selected_contract.manifest IS NOT NULL THEN selected_contract.manifest->'feeds_schema' ELSE cd0.feeds_schema END) -> f.feed_key ->> 'readWindowAxis' AS read_window_axis,
+              COALESCE((CASE WHEN selected_contract.manifest IS NOT NULL THEN selected_contract.manifest->'feeds_schema' ELSE cd0.feeds_schema END) -> f.feed_key -> 'matchPaths', '[]'::jsonb)
                 AS match_paths,
               (
                 SELECT cv.compiled_code_hash
                 FROM connector_versions cv
                 WHERE cv.connector_key = cd0.key
-                  AND cv.version = COALESCE(f.pinned_version, cd0.version)
+                  AND cv.version = selected_contract.version
                   AND (cv.organization_id = cd0.organization_id
                        OR cv.organization_id IS NULL)
                 ORDER BY cv.organization_id NULLS LAST
@@ -381,7 +384,7 @@ async function readSourceFeedWithinDeadline(
                 -- Does the SELECTED version ship code THIS path can execute?
                 --
                 -- Mirrors resolveConnectorCodeForKey's own resolution: the
-                -- definition's version, org artifact preferred over the shared
+                -- selected version, org artifact preferred over the shared
                 -- one. source_path is deliberately NOT part of it, and that is
                 -- not an oversight — resolveConnectorCode() reads only
                 -- compiled_code (recompiling from source_code when the config
@@ -400,13 +403,16 @@ async function readSourceFeedWithinDeadline(
                   -- execution remains pinned. Inspect that same artifact here
                   -- so a compiled historical version never gets misrouted to
                   -- the device read lane.
-                  AND cv.version = COALESCE(f.pinned_version, cd0.version)
+                  AND cv.version = selected_contract.version
                   AND (cv.organization_id = cd0.organization_id
                        OR cv.organization_id IS NULL)
                   AND cv.compiled_code IS NOT NULL
                   AND cv.compiled_code <> ''
               ) AS has_compiled_code
        FROM connector_definitions cd0
+       LEFT JOIN LATERAL (${pinnedDeviceConnectorContractSql({ connectorKey: 'c.connector_key',
+         organizationId: 'c.organization_id', deviceWorkerId: 'c.device_worker_id',
+         pinnedVersion: 'f.pinned_version', defaultVersion: 'cd0.version' })}) selected_contract ON TRUE
        WHERE cd0.key = c.connector_key
          AND (
            (f.pinned_version IS NULL AND cd0.status = 'active')
