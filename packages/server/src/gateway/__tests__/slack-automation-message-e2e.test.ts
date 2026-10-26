@@ -30,7 +30,10 @@ import { getDb } from "../../db/client.js";
 import { resetRateLimiterForTests } from "../../utils/rate-limiter.js";
 import { AutomationSubscriptionService } from "../channels/automation-subscription-service.js";
 import { getResponseStrategy } from "../connections/platform-strategies/index.js";
-import { createConnectedGatewayStateAdapter } from "../connections/state-adapter.js";
+import {
+  createConnectedGatewayStateAdapter,
+  scopeInboundClaimsToConnection,
+} from "../connections/state-adapter.js";
 import type { PlatformConnection } from "../connections/types.js";
 import {
   type AssembledChatBridge,
@@ -189,7 +192,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     chat = new Chat({
       userName: "lobu",
       adapters: { slack: adapter },
-      state,
+      state: scopeInboundClaimsToConnection(state, RUNTIME_CONNECTION_ID, organizationId),
       logger: "silent",
     });
 
@@ -779,14 +782,11 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     }
   });
 
-  // CURRENT (known gap): Chat SDK dedupes inbound messages on
-  // `dedupe:<adapter name>:<message id>` BEFORE Lobu routing
-  // (node_modules/chat/dist/index.js routeIncomingMessage), and every
-  // connection shares the Postgres state prefix. A Slack message id is its
-  // channel-local `ts`, so when two Lobu installations sit in the same channel
-  // the second installation's copy of the message is dropped as a duplicate of
-  // the first.
-  test("a second installation in the same channel loses the message to the shared SDK dedupe key", async () => {
+  // Chat SDK claims an inbound message on `dedupe:<adapter name>:<message id>`
+  // and locks its thread on the platform thread id. Those ids are shared by
+  // installations receiving the same Slack message, so two
+  // Lobu installations in one channel must each claim their own copy.
+  test("two installations in the same channel each get the message exactly once", async () => {
     const sql = getDb();
     const secondOrg = "org-slack-second-install";
     const secondConnectionId = "slackinst-second-install-e2e";
@@ -831,7 +831,7 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
     const secondChat = new Chat({
       userName: "lobu-second",
       adapters: { slack: secondAdapter },
-      state: secondState,
+      state: scopeInboundClaimsToConnection(secondState, secondConnectionId, secondOrg),
       logger: "silent",
     });
     bridge.attach(secondChat, secondState, {
@@ -862,13 +862,12 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
       const rows = await sql`SELECT organization_id FROM runs WHERE run_type = 'chat_message'`;
       expect(rows).toEqual([{ organization_id: "org-slack-grid-e2e" }]);
     });
+    // The first installation may still hold its thread lock while the second
+    // installation's copy arrives; that must not drop the second copy.
+    const threadId = secondAdapter.encodeThreadId({ channel: CHANNEL_ID, threadTs: sharedTs });
+    const firstLock = await chat.getState().acquireLock(threadId, 30_000);
+    expect(firstLock).not.toBeNull();
     expect((await deliver(message("Ev_SECOND_APP", sharedTs), secondChat)).status).toBe(200);
-    const afterCollision = await sql`SELECT organization_id FROM runs WHERE run_type = 'chat_message'`;
-    expect(afterCollision).toEqual([{ organization_id: "org-slack-grid-e2e" }]);
-
-    // Control: the second installation is correctly wired — a message with a
-    // ts the first installation never saw reaches its own Automation.
-    expect((await deliver(message("Ev_SECOND_APP_UNIQUE", "1787292100.000002"), secondChat)).status).toBe(200);
     await waitFor(async () => {
       const rows = await sql`SELECT organization_id FROM runs WHERE run_type = 'chat_message' ORDER BY id`;
       expect(rows).toEqual([
@@ -876,5 +875,16 @@ describe("Slack Enterprise Grid event -> chat Automation -> Slack reply", () => 
         { organization_id: secondOrg },
       ]);
     });
+    await chat.getState().releaseLock(firstLock!);
+
+    // Within one installation the claim still dedupes: Slack's second event
+    // for the same message (or a redelivery) does not start another turn.
+    expect((await deliver(message("Ev_SECOND_APP_AGAIN", sharedTs), secondChat)).status).toBe(200);
+    expect((await deliver(message("Ev_FIRST_APP_AGAIN", sharedTs))).status).toBe(200);
+    const afterRedelivery = await sql`SELECT organization_id FROM runs WHERE run_type = 'chat_message' ORDER BY id`;
+    expect(afterRedelivery).toEqual([
+      { organization_id: "org-slack-grid-e2e" },
+      { organization_id: secondOrg },
+    ]);
   });
 });

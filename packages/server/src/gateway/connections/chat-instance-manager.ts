@@ -55,7 +55,10 @@ import {
   type SlackHomeContext,
   type SlackHomeInbox,
 } from "./slack-platform-bridge.js";
-import { createConnectedGatewayStateAdapter } from "./state-adapter.js";
+import {
+  createConnectedGatewayStateAdapter,
+  scopeInboundClaimsToConnection,
+} from "./state-adapter.js";
 import { chatMessageSignal, resolveChatRoute } from "./chat-route.js";
 import { planAutomationActivationsForRuntimeConnection } from "../../automations/activation.js";
 import {
@@ -1746,7 +1749,7 @@ export class ChatInstanceManager {
       const chat = new Chat({
         userName: connection.metadata.botUsername || `bot-${connection.id}`,
         adapters: { [adapterKey]: adapter },
-        state: stateAdapter,
+        state: scopeInboundClaimsToConnection(stateAdapter, connection.id, connection.organizationId),
         // Not hardcoded: the SDK's silent-drop paths (self-authored, duplicate,
         // lock conflict) log at `debug`, so pinning this to "warn" made a
         // dropped inbound message leave no trace at any LOG_LEVEL. Default

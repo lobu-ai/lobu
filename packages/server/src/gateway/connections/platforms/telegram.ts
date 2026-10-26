@@ -13,6 +13,7 @@ import { runtimeConnectionIdToSlug } from "../../../lobu/stores/connections-proj
 import { isCloudMode } from "../../../utils/cloud-mode.js";
 import type { IFileHandler } from "../../platform/file-handler.js";
 import { persistSecretValue, resolveSecretValue } from "../../secrets/index.js";
+import { connectionStateKey } from "../state-adapter.js";
 import {
   isTelegramConfig,
   type PlatformConnection,
@@ -281,10 +282,41 @@ function createTelegramFileHandler(
 export const telegramPlatform: ChatPlatformDescriptor = {
   requiredConfigKeys: ["botToken"],
 
-  // Pre-existing lazy adapter factory, moved verbatim from the manager's
-  // ADAPTER_FACTORIES map (adapter SDKs stay lazy-loaded per platform).
-  createAdapter: async (c) =>
-    (await import("@chat-adapter/telegram")).createTelegramAdapter(c),
+  // Preserve the manager's lazy adapter loading per platform.
+  createAdapter: async (c, context) => {
+    const adapter = (await import("@chat-adapter/telegram")).createTelegramAdapter(c);
+    const connectionId = context?.connection?.id;
+    if (!connectionId) return adapter;
+
+    const initialize = adapter.initialize.bind(adapter);
+    adapter.initialize = async (chat) => {
+      // The SDK's media-group buffer must have the same connection boundary as
+      // its lock. Otherwise separate connections can mutate one shared album.
+      const state = new Proxy(chat.getState(), {
+        get(target, method) {
+          const fn = Reflect.get(target, method, target);
+          if (typeof fn !== "function") return fn;
+          if (["get", "set", "delete"].includes(String(method))) {
+            return (key: string, ...args: unknown[]) => fn.call(target,
+              key.startsWith("telegram:incoming-media-group:")
+                ? connectionStateKey(connectionId, key, context?.connection?.organizationId)
+                : key,
+              ...args,
+            );
+          }
+          return fn.bind(target);
+        },
+      });
+      await initialize(new Proxy(chat, {
+        get(target, property) {
+          if (property === "getState") return () => state;
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }));
+    };
+    return adapter;
+  },
 
   extractRoutingInfo: (body) => {
     const telegram = body.telegram as { chatId?: string | number } | undefined;
