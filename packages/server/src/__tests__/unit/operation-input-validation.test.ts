@@ -37,6 +37,17 @@ describe('validateOperationInput', () => {
     expect(input.code).toBe(123);
   });
 
+  test('accepts the fragment form of the 2020-12 dialect URI', () => {
+    const descriptor = operation({
+      $schema: 'https://json-schema.org/draft/2020-12/schema#',
+      type: 'object',
+      properties: { code: { type: 'string' } },
+    });
+
+    expect(validateOperationInput(descriptor, { code: 'x' })).toBeNull();
+    expect(validateOperationInput(descriptor, { code: 1 })).toBe('code: must be string');
+  });
+
   test('enforces 2020-12 tuple keywords rather than stripping the dialect', () => {
     const descriptor = operation({
       $schema: 'https://json-schema.org/draft/2020-12/schema',
