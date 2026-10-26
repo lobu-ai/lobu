@@ -1565,6 +1565,19 @@ jobs:
             echo "[migration-never-applied] sentinel present; immutability check is skipped for this PR."
             exit 0
           fi
+          # 5. PRs whose commit message contains `[migration-pending-only-fix]`
+          #    may edit an applied migration whose fixed body yields the same
+          #    result wherever the old body succeeded, and only stops it from
+          #    failing where it is still pending (a self-hosted upgrade). The
+          #    silent no-op where it already applied is then harmless. Code
+          #    review is the gate: confirm the edit cannot change any outcome
+          #    the old body produced, and pin the failing case in a test.
+          #    Renames and deletions remain forbidden under this exception.
+          migration_diff_filter=MRD
+          if git log "$BASE_SHA"..HEAD --format=%B | grep -F '[migration-pending-only-fix]' > /dev/null; then
+            echo "[migration-pending-only-fix] sentinel present; only migration body edits are exempt."
+            migration_diff_filter=RD
+          fi
           # Precondition sidecars (db/migrations/preconditions/) are deploy-time
           # gates for PENDING migrations, not ledgered history: never recorded in
           # schema_migrations, never evaluated once their migration is applied.
@@ -1572,7 +1585,7 @@ jobs:
           # still pending — exactly where a wrong sidecar has to be fixed — so
           # the silent-no-op rationale above does not apply. Migration bodies
           # stay immutable; the runner rejects a sidecar whose migration is gone.
-          edited=$(git diff --name-only --diff-filter=MRD "$BASE_SHA"...HEAD -- db/migrations/ ':!db/migrations/preconditions/' \
+          edited=$(git diff --name-only --diff-filter="$migration_diff_filter" "$BASE_SHA"...HEAD -- db/migrations/ ':!db/migrations/preconditions/' \
             | grep -v '^db/migrations/00000000000000_baseline\.sql$' || true)
           if [ -n "$edited" ]; then
             echo "::error::Migration files were modified or renamed — applied migrations are immutable (only db/migrations/00000000000000_baseline.sql and db/migrations/preconditions/ are excluded). Add a new dated migration instead."
