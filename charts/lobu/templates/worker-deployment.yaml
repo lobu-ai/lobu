@@ -1,6 +1,7 @@
 {{- if .Values.worker.enabled }}
-{{- if and (gt (int .Values.worker.replicaCount) 1) .Values.worker.cache.enabled }}
-{{- fail "worker.replicaCount > 1 requires worker.cache.enabled=false: the worker cache PVC is ReadWriteOnce and cannot be mounted by multiple pods at once (a second replica would hit a Multi-Attach error). Disable the cache or keep a single worker replica." }}
+{{- $shutdownGraceSeconds := 30 }}
+{{- if ne .Values.worker.terminationGracePeriodSeconds nil }}
+{{- $shutdownGraceSeconds = .Values.worker.terminationGracePeriodSeconds }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -11,14 +12,16 @@ metadata:
     app.kubernetes.io/component: worker
 spec:
   replicas: {{ .Values.worker.replicaCount }}
-  {{- with .Values.worker.strategy }}
   strategy:
+  {{- with .Values.worker.strategy }}
     {{- toYaml . | nindent 4 }}
   {{- else }}
-  {{- if .Values.worker.cache.enabled }}
-  strategy:
-    type: Recreate
-  {{- end }}
+    # Start a replacement before terminating the outgoing worker, which stops
+    # claiming on SIGTERM while it drains its active runs.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   {{- end }}
   selector:
     matchLabels:
@@ -36,9 +39,7 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.worker.terminationGracePeriodSeconds }}
-      terminationGracePeriodSeconds: {{ . }}
-      {{- end }}
+      terminationGracePeriodSeconds: {{ $shutdownGraceSeconds }}
       initContainers:
         # Wait for the app pod's /health before starting the worker daemon.
         # Without this the daemon's hard health check (worker.ts:77) crashes
@@ -90,6 +91,11 @@ spec:
                   fieldPath: metadata.name
             - name: TRANSFORMERS_CACHE
               value: /app/.cache/transformers
+            # The daemon drains in-flight runs on SIGTERM for this long minus
+            # an exit margin. Derived from the pod's own grace period (the
+            # Kubernetes default when unset) so the two cannot drift.
+            - name: WORKER_SHUTDOWN_GRACE_SECONDS
+              value: {{ $shutdownGraceSeconds | quote }}
             {{- if .Values.embeddings.service.port }}
             {{- if .Values.embeddings.serviceUrl }}
             - name: EMBEDDINGS_SERVICE_URL
@@ -154,9 +160,11 @@ spec:
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
       {{- if .Values.worker.cache.enabled }}
+      # Per-pod scratch lets surge pods use different nodes; ReadWriteOnce
+      # restricts a shared claim to one node. Models can be downloaded again.
       volumes:
         - name: worker-cache
-          persistentVolumeClaim:
-            claimName: {{ include "lobu.fullname" . }}-worker-cache
+          emptyDir:
+            sizeLimit: {{ .Values.worker.cache.size }}
       {{- end }}
 {{- end }}

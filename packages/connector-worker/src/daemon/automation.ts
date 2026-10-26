@@ -53,7 +53,8 @@ import {
   waitForTargetExitAfterTermination,
 } from './automation-process.js';
 import type { ExecutorClient } from './client.js';
-import { WorkerDecodeError, WorkerHttpError } from './client.js';
+import { WorkerHttpError } from './client.js';
+import { isRetriableDeliveryFailure } from './terminal-delivery.js';
 import { log } from './log.js';
 import {
   attachedInteractiveSession,
@@ -714,16 +715,6 @@ export async function runCli(
     }
     cleanup();
   }
-}
-
-/**
- * A delivery failure's retry classification: HTTP 5xx/429 and transport errors
- * are retriable; a server answer we could not read (decode) or a 4xx is not.
- */
-function isRetriableDeliveryFailure(err: unknown): boolean {
-  if (err instanceof WorkerHttpError) return err.status >= 500 || err.status === 429;
-  if (err instanceof WorkerDecodeError) return false;
-  return true;
 }
 
 /** The CLI spawn + exit-report seams the resume loop drives. Injecting them is

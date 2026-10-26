@@ -54,6 +54,8 @@ Environment Variables:
   WORKER_CAPABILITIES Comma-separated capabilities (same as --capabilities)
   WORKER_LABEL      Human-readable device name (same as --label)
   LOBU_ORG          Active org slug (same as --active-org)
+  WORKER_SHUTDOWN_GRACE_SECONDS Seconds before a force-kill after SIGTERM;
+                    in-flight runs drain for this minus 15s (default drain 30s)
 
 Examples:
   # Worker daemon
