@@ -21,6 +21,7 @@ import { getMissingKnownOAuthScopes } from "../../../../operations/oauth-scope-r
 import type { AvailableOperation, OperationDescriptor } from "../../../../operations/types";
 import {
 	describeMissingBrowserExecutionPin,
+	pinnedDeviceConnectorContractSql,
 	hashlessManifestArtifactMayBeClaimed,
 	isChromeNamespaceConnectorKey,
 } from "../../../../utils/connector-execution-placement";
@@ -619,9 +620,13 @@ async function loadVisibleOperationTargets(
 		 LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
 		 LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
 		 LEFT JOIN LATERAL (
-		   SELECT cd.version, cd.runtime, cd.browser, cd.auth_schema,
+		   SELECT selected_contract.version, COALESCE(selected_contract.manifest->'runtime', cd.runtime) AS runtime,
+		          cd.browser, COALESCE(selected_contract.manifest->'auth_schema', cd.auth_schema) AS auth_schema,
 		          artifact.manifest_backed, artifact.artifact_hash
 		   FROM connector_definitions cd
+           LEFT JOIN LATERAL (${pinnedDeviceConnectorContractSql({ connectorKey: 'c.connector_key',
+             organizationId: 'c.organization_id', deviceWorkerId: 'c.device_worker_id',
+             defaultVersion: 'cd.version' })}) selected_contract ON TRUE
 		   LEFT JOIN LATERAL (
 		     SELECT
 		       (
@@ -633,7 +638,7 @@ async function loadVisibleOperationTargets(
 		       cv.compiled_code_hash AS artifact_hash
 		     FROM connector_versions cv
 		     WHERE cv.connector_key = cd.key
-		       AND cv.version = cd.version
+		       AND cv.version = selected_contract.version
 		       AND (cv.organization_id = cd.organization_id OR cv.organization_id IS NULL)
 		     ORDER BY cv.organization_id NULLS LAST
 		     LIMIT 1

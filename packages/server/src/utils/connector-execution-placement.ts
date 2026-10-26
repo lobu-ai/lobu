@@ -1,3 +1,5 @@
+import { DEVICE_WORKER_FRESH_INTERVAL } from './device-liveness';
+
 interface SqlTag<TFragment> {
   (strings: TemplateStringsArray, ...values: any[]): TFragment;
 }
@@ -153,6 +155,60 @@ export function selectedConnectorVersionArtifactSql<TFragment>(
       )
     ORDER BY cv.organization_id NULLS LAST
     LIMIT 1
+  `;
+}
+
+/**
+ * Select the contract an exact execution pin advertises before deriving
+ * eligibility, schemas or readiness. References are trusted SQL expressions,
+ * never caller values. The inventory has one entry per connector key
+ * (storedManifestMap); both scheduling and dispatch use this same selector.
+ *
+ * A retained artifact must match the advertised hash, with organization
+ * overrides taking precedence over shared artifacts. This only selects a
+ * candidate: the existing validated-manifest, owner, capability and policy
+ * admission gates still authorize execution. Missing/invalid inventory keeps
+ * the ordinary selection and its fail-closed diagnostics. Explicit feed pins
+ * always win. This is a primary-key device lookup, not a fleet/history scan.
+ */
+export function pinnedDeviceConnectorContractSql(refs: {
+  connectorKey: string;
+  organizationId: string;
+  deviceWorkerId: string;
+  pinnedVersion?: string;
+  defaultVersion: string;
+}): string {
+  const pin = refs.pinnedVersion ?? 'NULL::text';
+  return `
+    SELECT COALESCE(${pin}, native.version, ${refs.defaultVersion}) AS version,
+           native.manifest
+    FROM (SELECT 1) seed
+    LEFT JOIN LATERAL (
+      SELECT inventory.entry->'manifest' AS manifest,
+             inventory.entry->'manifest'->>'version' AS version
+      FROM device_workers contract_dw
+      CROSS JOIN LATERAL (
+        SELECT contract_dw.connector_manifests->(${refs.connectorKey}) AS entry
+      ) inventory
+      LEFT JOIN LATERAL (
+        SELECT cv.* FROM connector_versions cv
+        WHERE cv.connector_key = ${refs.connectorKey}
+          AND cv.version = inventory.entry->'manifest'->>'version'
+          AND (cv.organization_id = ${refs.organizationId} OR cv.organization_id IS NULL)
+        ORDER BY cv.organization_id NULLS LAST
+        LIMIT 1
+      ) registered ON TRUE
+      WHERE contract_dw.id = ${refs.deviceWorkerId}
+        AND contract_dw.last_seen_at > now() - '${DEVICE_WORKER_FRESH_INTERVAL}'::interval
+        AND inventory.entry->'manifest'->>'key' = ${refs.connectorKey}
+        AND (${pin} IS NULL OR inventory.entry->'manifest'->>'version' = ${pin})
+        AND inventory.entry->'manifest'->'runtime'->'platforms' ? contract_dw.platform
+        AND registered.compiled_code_hash = inventory.entry->>'manifest_hash'
+        AND registered.source_path LIKE 'device-manifest://%'
+        AND registered.compiled_code IS NULL
+        AND registered.compile_config_hash IS NULL
+        AND registered.source_code IS NULL
+    ) native ON TRUE
   `;
 }
 

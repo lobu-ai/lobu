@@ -6,7 +6,10 @@ import { fetchPublicUrl } from "@lobu/connector-worker/egress";
 import { discoverTools } from "../mcp-proxy/client";
 import type { DiscoveredTool, McpProxyConfig } from "../mcp-proxy/types";
 import { errorMessage } from "../utils/errors";
-import { selectedConnectorVersionArtifactSql } from "../utils/connector-execution-placement";
+import {
+	pinnedDeviceConnectorContractSql,
+	selectedConnectorVersionArtifactSql,
+} from "../utils/connector-execution-placement";
 import {
 	cancelResponseBody,
 	readResponseTextWithLimit,
@@ -515,9 +518,12 @@ function dedupeOperations(
 		const existing = byKey.get(operation.operation_key);
 		if (!existing || priority[operation.backend] < priority[existing[0].backend]) {
 			byKey.set(operation.operation_key, [operation]);
-		} else if (operation.backend === "mcp_tool" && existing[0].backend === "mcp_tool") {
-			// A tool name is account-scoped. Merge identical descriptions/schemas,
-			// but never advertise one account's schema for another account's target.
+		} else if (
+			operation.backend === existing[0].backend &&
+			(operation.backend === "mcp_tool" || operation.discovery_connection_ids !== undefined)
+		) {
+			// Accounts and pinned devices can expose different contracts under one
+			// operation key. Merge only identical descriptors and retain their targets.
 			const { discovery_connection_ids, ...descriptor } = operation;
 			const matching = existing.find(({ discovery_connection_ids: _ids, ...candidate }) =>
 				isDeepStrictEqual(candidate, descriptor),
@@ -584,12 +590,21 @@ async function getConnectorsForListing(params: {
 
 	if (params.connectionId) {
 		const rows = await sql`
-      SELECT cd.key, cd.name, cd.actions_schema, cd.auth_schema, cd.mcp_config, cd.openapi_config, cd.supports_execute, cd.browser
+      SELECT cd.key, cd.name,
+        CASE WHEN selected_contract.manifest IS NOT NULL THEN COALESCE(selected_contract.manifest->'actions_schema', '{}'::jsonb) ELSE cd.actions_schema END AS actions_schema,
+        COALESCE(selected_contract.manifest->'auth_schema', cd.auth_schema) AS auth_schema,
+        cd.mcp_config, cd.openapi_config,
+        CASE WHEN selected_contract.manifest IS NOT NULL THEN selected_contract.manifest->'actions_schema' IS NOT NULL ELSE cd.supports_execute END AS supports_execute,
+        cd.browser
       FROM connections c
       JOIN connector_definitions cd
         ON cd.key = c.connector_key
        AND cd.status = 'active'
        AND cd.organization_id = ${params.organizationId}
+      LEFT JOIN LATERAL (${sql.unsafe(pinnedDeviceConnectorContractSql({
+        connectorKey: 'c.connector_key', organizationId: 'c.organization_id',
+        deviceWorkerId: 'c.device_worker_id', defaultVersion: 'cd.version',
+      }))}) selected_contract ON TRUE
       WHERE c.id = ${params.connectionId}
         AND c.organization_id = ${params.organizationId}
         AND c.deleted_at IS NULL
@@ -683,6 +698,60 @@ async function buildCatalogOperations(
 	))).flat();
 }
 
+/** Keep native operation schemas scoped to the exact connection contract. */
+async function withPinnedDeviceOperations(
+	operations: OperationDescriptor[],
+	params: {
+		organizationId: string;
+		discoveryUserId?: string | null;
+		connectorKey?: string;
+		connectionId?: number;
+		entityId?: number;
+	},
+): Promise<OperationDescriptor[]> {
+	// Direct discovery already projects this connection's manifest in its SQL.
+	if (params.connectionId !== undefined) return operations;
+	const sql = getDb();
+	const visibility = compileConnectionRowVisibility({
+		organizationId: params.organizationId,
+		principal: params.discoveryUserId ?? null,
+	}, "c");
+	const rows = await sql<{ id: number; connector_key: string; manifest: Record<string, any> | null }>`
+    SELECT c.id, c.connector_key, selected_contract.manifest
+    FROM connections c
+    JOIN connector_definitions cd ON cd.organization_id = c.organization_id
+      AND cd.key = c.connector_key AND cd.status = 'active'
+    LEFT JOIN LATERAL (${sql.unsafe(pinnedDeviceConnectorContractSql({
+      connectorKey: 'c.connector_key', organizationId: 'c.organization_id',
+      deviceWorkerId: 'c.device_worker_id', defaultVersion: 'cd.version',
+    }))}) selected_contract ON TRUE
+    WHERE c.organization_id = ${params.organizationId} AND c.deleted_at IS NULL
+      ${sql.unsafe(visibility)}
+      AND (${params.connectorKey ?? null}::text IS NULL OR c.connector_key = ${params.connectorKey ?? null})
+      AND (${params.entityId ?? null}::bigint IS NULL OR EXISTS (
+        SELECT 1 FROM feeds f WHERE f.connection_id = c.id AND f.deleted_at IS NULL
+          AND ${params.entityId ?? null}::bigint = ANY(f.entity_ids)
+      ))
+  `;
+	const nativeKeys = new Set(rows.filter((row) => row.manifest !== null).map((row) => row.connector_key));
+	const retained = operations.filter((op) => op.backend !== "local_action" || !nativeKeys.has(op.connector_key));
+	for (const key of nativeKeys) {
+		const base = operations.filter((op) => op.connector_key === key && op.backend === "local_action");
+		const candidates: OperationDescriptor[] = [];
+		for (const row of rows.filter((target) => target.connector_key === key)) {
+			const local = row.manifest
+				? getLocalActionOperations(
+					key, base[0]?.connector_name ?? String(row.manifest.name),
+					row.manifest.actions_schema ?? {}, true, false,
+				)
+				: base;
+			candidates.push(...local.map((op) => ({ ...op, discovery_connection_ids: [Number(row.id)] })));
+		}
+		retained.push(...dedupeOperations(candidates));
+	}
+	return retained;
+}
+
 export async function listOperations(params: {
 	organizationId: string;
 	/** Requesting user for remote discovery; null/headless sees org-shared connections only. */
@@ -703,7 +772,7 @@ export async function listOperations(params: {
 	offset: number;
 }> {
 	const connectors = await getConnectorsForListing(params);
-	const operations = await buildCatalogOperations(connectors, params);
+	const operations = await withPinnedDeviceOperations(await buildCatalogOperations(connectors, params), params);
 
 	const filtered = operations.filter((operation) => {
 		if (params.kind && operation.kind !== params.kind) return false;
@@ -760,7 +829,7 @@ export async function getOperationForConnection(
     SELECT
       c.id,
       c.connector_key,
-      cd.version AS connector_version,
+      selected_contract.version AS connector_version,
       c.status,
       c.auth_profile_id,
       c.app_auth_profile_id,
@@ -769,12 +838,12 @@ export async function getOperationForConnection(
       c.device_worker_id,
       dw.platform AS device_platform,
       cd.name,
-      cd.actions_schema,
+      CASE WHEN selected_contract.manifest IS NOT NULL THEN COALESCE(selected_contract.manifest->'actions_schema', '{}'::jsonb) ELSE cd.actions_schema END AS actions_schema,
       cd.mcp_config,
       cd.openapi_config,
-      cd.supports_execute,
+      CASE WHEN selected_contract.manifest IS NOT NULL THEN selected_contract.manifest->'actions_schema' IS NOT NULL ELSE cd.supports_execute END AS supports_execute,
       cd.browser,
-      cd.runtime AS connector_runtime,
+      COALESCE(selected_contract.manifest->'runtime', cd.runtime) AS connector_runtime,
       COALESCE(cv.manifest_backed, false) AS connector_manifest_backed,
       CASE WHEN cv.manifest_backed THEN cv.artifact_hash ELSE NULL END AS connector_manifest_hash,
       cv.artifact_source_path AS connector_artifact_source_path
@@ -784,10 +853,14 @@ export async function getOperationForConnection(
      AND cd.status = 'active'
      AND cd.organization_id = ${organizationId}
     LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
+    LEFT JOIN LATERAL (${sql.unsafe(pinnedDeviceConnectorContractSql({
+      connectorKey: 'c.connector_key', organizationId: 'c.organization_id',
+      deviceWorkerId: 'c.device_worker_id', defaultVersion: 'cd.version',
+    }))}) selected_contract ON TRUE
     LEFT JOIN LATERAL (
       ${selectedConnectorVersionArtifactSql(sql, {
         connectorKey: sql`cd.key`,
-        version: sql`cd.version`,
+        version: sql`selected_contract.version`,
         organizationId: sql`cd.organization_id`,
       })}
     ) cv ON true
@@ -898,9 +971,11 @@ export async function getOperationsSummary(
 		connectionId,
 	});
 	if (connectors.length === 0) return { ...EMPTY_SUMMARY };
-	const operations = await buildCatalogOperations(connectors, {
-		organizationId, connectionId, tolerateMcpFailure: true,
-	});
+	const params = { organizationId, connectorKey, connectionId };
+	const operations = await withPinnedDeviceOperations(
+		await buildCatalogOperations(connectors, { ...params, tolerateMcpFailure: true }),
+		params,
+	);
 	return summarizeOperations(operations);
 }
 
@@ -921,15 +996,18 @@ export async function getOperationsSummaryBatch(
 	const connectors = await getConnectorsForListing({ organizationId });
 	const relevant = connectors.filter((c) => connectorKeys.includes(c.key));
 
-	const operations = await buildCatalogOperations(relevant, { organizationId, discoveryUserId });
+	const params = { organizationId, discoveryUserId };
+	const operations = await withPinnedDeviceOperations(
+		await buildCatalogOperations(relevant, params), params,
+	);
 	return new Map(connectorKeys.map((key) => [
 		key, summarizeOperations(operations.filter((operation) => operation.connector_key === key)),
 	]));
 }
 
 /**
- * Per-connection summaries. Remote MCP catalogs can differ by account, so
- * list/get must not collapse two connections of the same connector key.
+ * Per-connection summaries use the same selected contract as direct discovery,
+ * including account-specific MCP tools and pinned-device actions.
  */
 export async function getOperationsSummariesByConnection(
 	organizationId: string,
@@ -937,23 +1015,11 @@ export async function getOperationsSummariesByConnection(
 ): Promise<Map<number, OperationsSummary>> {
 	if (connections.length === 0) return new Map();
 
-	const connectors = await getConnectorsForListing({ organizationId });
-	const byKey = new Map(connectors.map((connector) => [connector.key, connector]));
-
 	const entries = await Promise.all(
-		connections.map(async (connection) => {
-			const connector = byKey.get(connection.connectorKey);
-			if (!connector) return [connection.id, { ...EMPTY_SUMMARY }] as const;
-			const operations = await buildConnectorOperations(
-				connector,
-				organizationId,
-				{
-					connectionIds: [connection.id],
-					tolerateMcpFailure: true,
-				},
-			);
-			return [connection.id, summarizeOperations(operations)] as const;
-		}),
+		connections.map(async (connection) => [
+			connection.id,
+			await getOperationsSummary(organizationId, connection.connectorKey, connection.id),
+		] as const),
 	);
 
 	return new Map(entries);
