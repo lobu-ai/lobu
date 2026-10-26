@@ -5,14 +5,19 @@ import { Hono } from 'hono';
 import type { McpProxy } from '../../gateway/auth/mcp/proxy';
 import { handleCallTool } from '../../gateway/auth/mcp/proxy-rest-routes';
 import { getRevokedTokenStore } from '../../gateway/auth/revoked-token-store';
+import * as agentTurnInputs from '../../runs/agent-turn-inputs';
 
 const originalKey = process.env.ENCRYPTION_KEY;
 let revocation: ReturnType<typeof spyOn>;
+let toolStamp: ReturnType<typeof spyOn>;
 let token: string;
 
 beforeAll(() => {
   process.env.ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
   revocation = spyOn(getRevokedTokenStore(), 'isRevoked').mockResolvedValue(false);
+  // The agent turn's pre-execution tool stamp is a Postgres write; this suite
+  // is about header forwarding, so the stamp succeeds.
+  toolStamp = spyOn(agentTurnInputs, 'markAgentTurnToolStarted').mockResolvedValue(undefined);
   token = generateWorkerToken('synthetic-user', 'synthetic-conversation', 'agent-turn:synthetic-message', {
     channelId: 'synthetic-channel', agentId: 'synthetic-agent', organizationId: 'synthetic-org', runId: 701, messageId: 'synthetic-message',
   });
@@ -20,6 +25,7 @@ beforeAll(() => {
 
 afterAll(() => {
   revocation.mockRestore();
+  toolStamp.mockRestore();
   if (originalKey === undefined) delete process.env.ENCRYPTION_KEY;
   else process.env.ENCRYPTION_KEY = originalKey;
 });
