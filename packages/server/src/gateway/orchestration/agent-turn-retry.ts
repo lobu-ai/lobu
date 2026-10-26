@@ -17,6 +17,7 @@
  */
 
 import { AgentErrorCode, type MessagePayload } from "@lobu/core";
+import { CHAT_TURN_CONTEXT_CHARS } from "./chat-turn-limits.js";
 import { type DbClient, getDb, pgTextArray } from "../../db/client.js";
 import {
   AGENT_TURN_TOOL_LOG_MAX,
@@ -95,6 +96,13 @@ const NOTE_LINE_CHARS = 240;
  * room for the sender line and caller context behind it.
  */
 const NOTE_BUDGET_CHARS = 1_200;
+/**
+ * Room left for the sender line `chatTurnContext` appends behind the caller
+ * context. The note never takes this space or the caller's own context.
+ */
+const SENDER_LINE_RESERVE_CHARS = 160;
+/** Used when the full note does not fit beside the caller's context. */
+const SHORT_NOTE = "A previous attempt at this message was interrupted after it ran tools. Check for their effects before repeating any.";
 
 function clip(text: string, max: number): string {
   const flat = text.replaceAll("\r", " ").replaceAll("\n", " ").trim();
@@ -151,7 +159,11 @@ function tracedLine(trace: StoredToolTrace): string {
  * (matched by tool name), as "started, outcome unknown". Clipped per line and
  * to {@link NOTE_BUDGET_CHARS} overall.
  */
-export async function buildInterruptedTurnNote(sql: DbClient, run: NativeTurnRun): Promise<string | undefined> {
+export async function buildInterruptedTurnNote(
+  sql: DbClient,
+  run: NativeTurnRun,
+  budget: number = NOTE_BUDGET_CHARS,
+): Promise<string | undefined> {
   const lines: string[] = [];
   const attempts = await failedAttempts(sql, run);
   if (retryOf(attempts[0]!) !== undefined || attempts.some((attempt) =>
@@ -203,12 +215,17 @@ export async function buildInterruptedTurnNote(sql: DbClient, run: NativeTurnRun
   if (!lines.length) return undefined;
   const head = "A previous attempt at this message was interrupted after it already did:";
   const tail = "Don't repeat these; continue from here.";
+  const limit = Math.min(budget, NOTE_BUDGET_CHARS);
+  // Not even one line fits beside the caller's context: say so in one line.
+  if (head.length + tail.length + lines[0]!.length + 2 > limit) {
+    return SHORT_NOTE.length <= limit ? SHORT_NOTE : undefined;
+  }
   const kept: string[] = [];
   let size = head.length + tail.length + 2;
   for (const [index, line] of lines.entries()) {
     const more = `- …and ${lines.length - index} more`;
     const reserve = index < lines.length - 1 ? more.length + 1 : 0;
-    if (size + line.length + 1 + reserve > NOTE_BUDGET_CHARS) {
+    if (size + line.length + 1 + reserve > limit) {
       kept.push(more);
       break;
     }
@@ -230,9 +247,13 @@ export async function buildInterruptedTurnNote(sql: DbClient, run: NativeTurnRun
  * transaction, so a double press admits one turn.
  *
  * `connectionId`, when given, must be the connection the message arrived on.
+ * A chat click is scoped by that connection rather than by its owner's
+ * organization: a shared preview connection routes its turns into other
+ * organizations, whose runs are still this connection's messages.
  */
 export async function retryInterruptedAgentTurn(input: {
-  organizationId: string;
+  /** Required unless `connectionId` scopes the turn. */
+  organizationId?: string;
   turnRunId: number;
   actorUserId: string;
   connectionId?: string;
@@ -240,7 +261,8 @@ export async function retryInterruptedAgentTurn(input: {
   return getDb().begin(async (tx: DbClient): Promise<AgentTurnRetryOutcome> => {
     const run = await lockAgentTurnRun(tx, input.turnRunId);
     const reply = run?.action_input?.reply;
-    if (!run || !reply || run.organization_id !== input.organizationId
+    if (!run || !reply || (input.organizationId === undefined && input.connectionId === undefined)
+      || (input.organizationId !== undefined && run.organization_id !== input.organizationId)
       || (input.connectionId !== undefined && reply.platform_metadata?.connectionId !== input.connectionId)) {
       return { status: "not_found" };
     }
@@ -258,7 +280,6 @@ export async function retryInterruptedAgentTurn(input: {
     `;
     // The admitted message is pruned with the runs retention; nothing is left to re-admit.
     if (!source?.action_input) return { status: "not_retryable" };
-    const note = await buildInterruptedTurnNote(tx, run);
     // Re-admitted as a new `messages` run: the consumer binds its own run id and mints its own token.
     const original: MessagePayload = { ...source.action_input };
     delete original.runId;
@@ -266,7 +287,12 @@ export async function retryInterruptedAgentTurn(input: {
     const priorNoteLength = original.platformMetadata?.[RETRY_NOTE_LENGTH];
     const originalContext = retryOf(run) !== undefined && typeof priorNoteLength === "number"
       ? original.ephemeralContext?.slice(priorNoteLength) : original.ephemeralContext;
-    const ephemeralContext = [note, originalContext?.trim()].filter(Boolean).join("\n\n");
+    // The producer keeps CHAT_TURN_CONTEXT_CHARS of context and the note goes
+    // first, so it only gets what the caller's own context leaves.
+    const callerContext = originalContext?.trim() ?? "";
+    const note = await buildInterruptedTurnNote(tx, run,
+      CHAT_TURN_CONTEXT_CHARS - (callerContext ? callerContext.length + 2 : 0) - SENDER_LINE_RESERVE_CHARS);
+    const ephemeralContext = [note, callerContext].filter(Boolean).join("\n\n");
     const payload: MessagePayload = {
       ...original,
       ephemeralContext: ephemeralContext || undefined,

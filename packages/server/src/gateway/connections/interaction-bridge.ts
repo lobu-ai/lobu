@@ -923,14 +923,14 @@ export function registerActionHandlers(
 		// compared in the reply's own id space (the platform user who sent it).
 		const retryTurnRunId = parseTurnRetryActionId(actionId);
 		if (retryTurnRunId !== undefined) {
-			const organizationId = connection.organizationId;
 			const clicker = event.user?.userId;
-			if (!organizationId || typeof clicker !== "string" || !clicker) return;
+			if (typeof clicker !== "string" || !clicker) return;
 			let refusal: string | undefined;
 			try {
+				// Scoped by the connection, not its owner's organization: a shared
+				// preview connection routes turns into other organizations.
 				refusal = turnRetryRefusal(
 					await retryInterruptedAgentTurn({
-						organizationId,
 						turnRunId: retryTurnRunId,
 						actorUserId: clicker,
 						connectionId: connection.id,

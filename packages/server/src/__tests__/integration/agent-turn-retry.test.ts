@@ -314,6 +314,47 @@ describe('retry of an interrupted agent turn', () => {
     expect(posted).toHaveBeenLastCalledWith("I couldn't find that message to retry.");
   });
 
+  it('retries a turn a shared preview connection routed into another organization', async () => {
+    const owner = await createTestOrganization();
+    const routed = await createTestOrganization();
+    const message = {
+      ...messageFor(routed.id), platform: 'slack', channelId: 'slack:C_PREVIEW', conversationId: 'slack:C_PREVIEW:1787292000.000200',
+      platformMetadata: { connectionId: 'conn-preview', senderId: SENDER },
+    } as MessagePayload;
+    const failed = await produce(message);
+    const { runId } = await claim('fleet-preview');
+    await getTestDb()`UPDATE runs SET run_metadata = run_metadata || '{"turn_requeue_count": 1}'::jsonb WHERE id = ${runId}`;
+    await killWorker(runId);
+
+    let onAction: ((event: unknown) => Promise<void>) | undefined;
+    registerActionHandlers({ onAction: (handler: typeof onAction) => { onAction = handler; } },
+      { id: 'conn-preview', platform: 'slack', organizationId: owner.id, settings: { previewMode: true } } as unknown as PlatformConnection);
+    const posted = vi.fn(async () => undefined);
+    await onAction!({ actionId: `turn-retry:${failed.id}`, user: { userId: SENDER }, thread: { post: posted } });
+    expect(posted).not.toHaveBeenCalled();
+    const [admitted] = await retryAdmissions();
+    expect(admitted!.action_input.organizationId).toBe(routed.id);
+  });
+
+  it('never lets the note push the caller context past the turn context cap', async () => {
+    const org = await createTestOrganization();
+    const callerContext = `${'Keep these instructions. '.repeat(74)}NEVER APPROVE WITHOUT ASKING.`;
+    expect(callerContext.length).toBeGreaterThan(1_800);
+    const failed = await produce({ ...messageFor(org.id), ephemeralContext: callerContext });
+    const { runId } = await claim('fleet-near-cap');
+    await getTestDb()`UPDATE runs SET run_metadata = run_metadata || ${getTestDb().json({
+      turn_tool_started: true, turn_started_tools: ['send_message', 'run_sdk'],
+    })}::jsonb WHERE id = ${runId}`;
+    await killWorker(runId);
+
+    expect((await retryInterruptedAgentTurn({ organizationId: org.id, turnRunId: failed.id, actorUserId: SENDER })).status).toBe('started');
+    const [admitted] = await retryAdmissions();
+    const retry = await produce(admitted!.action_input, admitted!.id);
+    const context = String(retry.action_input.turn.ephemeral_context);
+    expect(context.endsWith('NEVER APPROVE WITHOUT ASKING.')).toBe(true);
+    expect(context.length).toBeLessThanOrEqual(2_048);
+  });
+
   it('keeps the input message id, so the retry turn replays a write the failed turn made', async () => {
     const org = await createTestOrganization();
     const message = messageFor(org.id);
