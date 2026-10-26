@@ -106,16 +106,17 @@ describe("active-conversation event tools", () => {
     expect(presentStoredEventToConversation).not.toHaveBeenCalled();
   });
 
-  test("schedules only the signed agent in the signed conversation", async () => {
+  test.each([undefined, "followup", "platform-cli", "scheduled-job"])("schedules only the signed agent and origin (%s) in the signed conversation", async (source) => {
     const runAt = new Date(Date.now() + 60_000).toISOString();
     const response = await post(
       router,
       "/conversations/schedule-followup",
-      token(),
+      token({ runId: 4242, source }),
       {
         runAt,
         prompt: "Close event-backed poll entity 77.",
         idempotencyKey: "poll-deadline:77",
+        source: "caller-supplied-source",
       }
     );
 
@@ -141,6 +142,9 @@ describe("active-conversation event tools", () => {
         channelId: "spaces/AAAA",
         conversationId: "gchat:spaces/AAAA:dm",
         userId: "users/owner",
+        source,
+        // The signed turn run: the follow-up keeps this sender's evidence.
+        turnRunId: 4242,
       },
     });
 

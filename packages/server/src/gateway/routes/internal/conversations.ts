@@ -492,6 +492,9 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
             conversationId: worker.conversationId,
             teamId: worker.teamId,
             userId: worker.userId,
+            source: worker.source,
+            // Resolve sender evidence from the signed turn, never caller input.
+            ...(worker.runId ? { turnRunId: worker.runId } : {}),
           },
           isAuthenticated: true,
           clientId: "lobu-worker",

@@ -17,6 +17,7 @@
  */
 
 import { getDb } from '../db/client';
+import type { ChatTurnEvidence } from '../gateway/orchestration/chat-turn-actor';
 import { runtimeConnectionIdToSlug } from '../lobu/stores/connections-projection';
 import { nextRunAt as nextCronTickAt } from '../utils/cron';
 import logger from '../utils/logger';
@@ -31,6 +32,21 @@ export interface ScheduledDeliveryContext {
   teamId?: string | null;
   connectionId: string;
   userId?: string | null;
+  /**
+   * The bridge's evidence for the message whose turn scheduled this wake, read
+   * at schedule time off the stored turn run. The wake runs as `userId` with
+   * it, re-evaluating chat-sender authorization against current membership.
+   * Absent evidence decides as "no" (fails closed).
+   */
+  senderEvidence?: ChatTurnEvidence;
+  /**
+   * The `source` claim of the turn that scheduled this wake, when it had one
+   * (a platform-CLI turn's `userId` is a Lobu user, not a chat sender). The
+   * wake decides whether it carries a chat sender from this origin with the
+   * producer's own `isChatSenderTurn`. Rows stored before this field decide
+   * as chat-sender origins with no evidence (fail closed).
+   */
+  originSource?: string;
 }
 
 /**
@@ -38,7 +54,7 @@ export interface ScheduledDeliveryContext {
  * of truth shared by the create-time gate (`manage_schedules`) and the
  * fire-time dispatch (`scheduled/jobs.ts`) so the two can never drift — a
  * platform accepted at creation but unhandled at execution would store a dead
- * `delivery_context` and silently fall back to the api path.
+ * `delivery_context` and fail at dispatch.
  */
 export const DELIVERABLE_CHAT_PLATFORMS = ['slack', 'telegram', 'gchat'] as const;
 

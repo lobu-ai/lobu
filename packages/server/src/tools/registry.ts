@@ -102,6 +102,11 @@ export interface ToolSourceContext {
   source?: string;
   /** The chat turn's signed tier (see `chatTurnAccessOf`); absent for non-chat calls. */
   chatAccess?: ChatTurnAccess;
+  /**
+   * The signed `agent_turn` run id behind a chat turn's tool call. A follow-up
+   * scheduled from the turn reads the original sender's evidence off it.
+   */
+  turnRunId?: number;
 }
 
 /**
