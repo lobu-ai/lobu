@@ -1507,8 +1507,20 @@ oauthRoutes.get('/oauth/userinfo', async (c) => {
   const token = authHeader.slice(7);
   const userInfo = await provider.getUserInfo(token);
 
-  if (!userInfo) {
-    return c.json(createOAuthError('access_denied', 'Invalid token or insufficient scope'), 403);
+  // Report invalid tokens as 401 so clients can attempt token renewal.
+  if (userInfo === 'invalid_token') {
+    return c.json(
+      createOAuthError('invalid_token', 'Access token is invalid, expired, or revoked'),
+      401,
+      { 'WWW-Authenticate': 'Bearer error="invalid_token"' }
+    );
+  }
+  if (userInfo === 'insufficient_scope') {
+    return c.json(
+      createOAuthError('insufficient_scope', 'Access token lacks the profile:read scope'),
+      403,
+      { 'WWW-Authenticate': 'Bearer error="insufficient_scope", scope="profile:read"' }
+    );
   }
 
   return c.json(userInfo);
