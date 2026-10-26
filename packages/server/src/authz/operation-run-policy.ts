@@ -2,7 +2,7 @@ import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
 import { resolveAutomationConnectionVisibilityUserId } from './automation-connection-visibility';
 import { connectionBrowserGrant } from '../connectors/browser-resource';
 import { type DbClient, getDb } from '../db/client';
-import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, isSourceFeedRead, sourceReadScrubAssignments } from '../lib/device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_SUBSCRIPTION_METADATA_KEY, isSourceFeedRead, guardedSourceReadScrubAssignments } from '../lib/device-feed-read-protocol';
 import { sourceFeedSubscriptions } from '../runs/source-feed-subscriptions';
 import { getOperationForConnection } from '../operations/connector-operations';
 import { supersedeActionEvent } from '../tools/admin/approval-events';
@@ -185,7 +185,7 @@ export async function applyRunConnectorPolicyAtClaim(params: {
       claimed_by = ${blocked ? sql`claimed_by` : null},
       claimed_at = ${blocked ? sql`claimed_at` : null},
       last_heartbeat_at = ${blocked ? sql`last_heartbeat_at` : null},
-      ${sourceReadScrubAssignments(sql, { guard: blocked })}
+      ${guardedSourceReadScrubAssignments(sql, blocked)}
     WHERE id = ${runId} AND organization_id = ${organizationId}
       AND status = ${run.status} AND approval_status IN ('auto', 'approved')
     RETURNING id
