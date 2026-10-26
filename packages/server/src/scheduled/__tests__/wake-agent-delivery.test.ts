@@ -122,6 +122,29 @@ describe("runWakeAgentTask chat delivery dispatch", () => {
     expect(msg.platformMetadata.senderVouched).toBe(false);
   });
 
+  test("keeps a platform-supplied message id so a retried wake collapses onto it", async () => {
+    await seedChatConnection({ id: "conn-real" });
+    const enqueued: MessagePayload[] = [];
+    const delivery = {
+      platform: "slack",
+      connectionId: "conn-real",
+      channelId: "C-real",
+      conversationId: "slack:C-real:123",
+      teamId: null,
+      userId: USER,
+    };
+
+    await runWakeAgentTask(
+      fakeCoreServices(enqueued),
+      payload(delivery, { __message_id: "operation-outcome-42" })
+    );
+    await runWakeAgentTask(fakeCoreServices(enqueued), payload(delivery));
+
+    expect(enqueued).toHaveLength(2);
+    expect(enqueued[0].messageId).toBe("operation-outcome-42");
+    expect(enqueued[1].messageId).toMatch(/^wake_job-1_\d+$/);
+  });
+
   test("posts a one-shot wake back to Google Chat", async () => {
     await seedChatConnection({ id: "gchat-real", platform: "gchat" });
     const enqueued: MessagePayload[] = [];

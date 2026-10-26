@@ -57,6 +57,7 @@ import {
   INTERACTIVE_EVENT_CARD_REFRESH_TASK,
   WORKSPACE_EVENT_ACTIVATION_TASK,
   WORKSPACE_PURGE_TASK,
+  WAKE_AGENT_TASK,
 } from './task-definitions';
 import { triggerEmbedBackfill } from './trigger-embed-backfill';
 import { runMemberClaimDriftCheck } from './member-claim-drift';
@@ -644,7 +645,7 @@ function registerMaintenanceTasks(
   // Handler: wake_agent. Creates a thread for the agent (or reuses one
   // supplied by the caller) and enqueues the prompt as a user message.
   // Lets an agent schedule its own follow-up wake-ups via manage_schedules.
-  scheduler.register('wake_agent', (ctx) =>
+  scheduler.register(WAKE_AGENT_TASK, (ctx) =>
     runWakeAgentTask(coreServices, ctx.payload as WakeAgentTaskPayload)
   );
 }
@@ -655,6 +656,12 @@ export interface WakeAgentTaskPayload {
   __created_by_agent?: string | null;
   __scheduled_job_id?: string;
   __delivery_context?: unknown;
+  /**
+   * Stable chat message id for a wake enqueued by the platform (an operation
+   * outcome), so a retried task collapses onto the same message. Only server
+   * code sets `__` keys; schedule payloads are rebuilt from an allowlist.
+   */
+  __message_id?: string;
   organization_id?: string;
   agent_id?: string;
   prompt?: string;
@@ -744,7 +751,8 @@ export async function runWakeAgentTask(
         teamId: delivery.teamId ?? undefined,
         agentId: p.agent_id,
         organizationId: orgId,
-        messageId: `wake_${p.__scheduled_job_id ?? p.agent_id}_${Date.now()}`,
+        messageId:
+          p.__message_id ?? `wake_${p.__scheduled_job_id ?? p.agent_id}_${Date.now()}`,
         messageText: p.prompt,
         channelId: delivery.channelId,
         platformMetadata: {

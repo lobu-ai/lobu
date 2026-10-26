@@ -18,6 +18,8 @@ export const ENTITY_APPROVAL_TASK = 'entity-approval';
 export const AUTOMATION_SCRIPT_TASK = 'automation-script';
 export const SOURCE_FEED_LISTENER_TASK = 'source-feed-listener';
 export const WORKSPACE_PURGE_TASK = 'workspace-purge';
+/** Wake an agent with a prompt; scheduled follow-ups and operation outcomes. */
+export const WAKE_AGENT_TASK = 'wake_agent';
 const WORKSPACE_PURGE_TASK_QUEUE = `task:${WORKSPACE_PURGE_TASK}`;
 const SOURCE_FEED_LISTENER_TASK_QUEUE = `task:${SOURCE_FEED_LISTENER_TASK}`;
 export const AUTOMATION_REACTION_TASK_QUEUE =
@@ -65,6 +67,7 @@ export function isTransactionalTaskName(name: string): boolean {
     name === NOTIFICATION_DELIVERY_TASK ||
     name === AUTOMATION_SCRIPT_TASK ||
     name === SOURCE_FEED_LISTENER_TASK ||
-    name === WORKSPACE_PURGE_TASK
+    name === WORKSPACE_PURGE_TASK ||
+    name === WAKE_AGENT_TASK
   );
 }

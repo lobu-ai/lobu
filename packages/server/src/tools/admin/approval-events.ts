@@ -1,4 +1,5 @@
 import { type DbClient, getDb } from "../../db/client";
+import { queueOperationOutcomeFollowup } from "../../operations/operation-outcome-followup";
 import { runOwnerFence } from "../../runs/run-lease";
 import { insertEvent } from "../../utils/insert-event";
 
@@ -188,6 +189,35 @@ export async function supersedeActionEvent(
 		},
 		{ sql },
 	);
+
+	// Auto runs also have cards, and a policy veto changes their run status to
+	// rejected without ever asking a human. Only an actual approval request
+	// carries approval_context (including an auto run later promoted to Ask).
+	if (!priorMetadata.approval_context) return Number(nextEvent.id);
+
+	await queueOperationOutcomeFollowup(sql, {
+		runId,
+		organizationId,
+		cardStatus: status,
+		operationName: String(
+			priorMetadata.operation_name ??
+				priorMetadata.action_name ??
+				priorMetadata.operation_key ??
+				priorMetadata.action_key ??
+				"Operation",
+		),
+		connectionName:
+			typeof priorMetadata.connection_name === "string"
+				? priorMetadata.connection_name
+				: null,
+		output: extraMetadata.output ?? extraMetadata.action_output ?? null,
+		reason: String(
+			extraMetadata.error_message ??
+				extraMetadata.reject_reason ??
+				extraMetadata.expiry_reason ??
+				content,
+		),
+	});
 
 	return Number(nextEvent.id);
 }
