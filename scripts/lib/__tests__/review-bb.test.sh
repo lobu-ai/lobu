@@ -187,6 +187,7 @@ true
 SCRATCH="$TEST_DIR/scratch"
 git init -qb main "$SCRATCH"
 git -C "$SCRATCH" config user.email t@t.t
+git -C "$SCRATCH" config user.name t
 git -C "$SCRATCH" -c init.defaultBranch=main commit -q --allow-empty -m init
 HEAD_SHA_SCRATCH="$(git -C "$SCRATCH" rev-parse HEAD)"
 pushd "$SCRATCH" >/dev/null
@@ -365,6 +366,7 @@ popd >/dev/null
 FIXSCRATCH="$TEST_DIR/fixscratch"
 git init -qb main "$FIXSCRATCH"
 git -C "$FIXSCRATCH" config user.email t@t.t
+git -C "$FIXSCRATCH" config user.name t
 printf 'one\n' > "$FIXSCRATCH/file.txt"
 mkdir -p "$FIXSCRATCH/prompts"
 cp "$repo_root/prompts/review-fix-prompt.md" "$FIXSCRATCH/prompts/review-fix-prompt.md"
