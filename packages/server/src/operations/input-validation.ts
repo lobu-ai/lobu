@@ -1,5 +1,5 @@
 import type { Options, ValidateFunction } from 'ajv';
-import Ajv2020 from 'ajv/dist/2020';
+import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { createAjv, formatAjvError } from '@lobu/core/ajv';
 import type { OperationDescriptor } from './types';
