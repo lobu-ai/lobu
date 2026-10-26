@@ -431,3 +431,55 @@ export async function createConnectedGatewayStateAdapter(): Promise<StateAdapter
   await adapter.connect();
   return adapter;
 }
+
+/**
+ * Claims the Chat SDK builds from platform ids without an installation scope:
+ * the inbound claim (`setIfNotExists("dedupe:<adapter>:<message id>")`, plus
+ * adapter claims such as Telegram's webhook update id) and the thread lock and
+ * its queue (keyed by thread id). The same message and thread ids can reach
+ * multiple installations, which must claim and process their copies separately.
+ */
+const INBOUND_CLAIM_METHODS = new Set<PropertyKey>([
+  "setIfNotExists",
+  "acquireLock",
+  "forceReleaseLock",
+  "enqueue",
+  "dequeue",
+  "queueDepth",
+]);
+
+export function connectionStateKey(
+  connectionId: string,
+  key: string,
+  organizationId?: string,
+): string {
+  // Runtime ids can be organization-local slugs. Tuple encoding also keeps
+  // separators inside either identifier from aliasing another connection.
+  return `connection:${JSON.stringify([organizationId ?? null, connectionId])}:${key}`;
+}
+
+/**
+ * The state a connection's `Chat` instance uses: inbound claims are scoped to
+ * that connection, so they still dedupe across replicas of one connection but
+ * never across connections. Other state keeps its existing addressing, so
+ * history and subscriptions remain accessible to readers outside this Chat.
+ * `releaseLock`/`extendLock` need no rewrite: they use the scoped id on the
+ * `Lock` that `acquireLock` returned.
+ */
+export function scopeInboundClaimsToConnection(
+  state: StateAdapter,
+  connectionId: string,
+  organizationId?: string,
+): StateAdapter {
+  return new Proxy(state, {
+    get(target, method) {
+      const fn = Reflect.get(target, method, target);
+      if (typeof fn !== "function") return fn;
+      if (INBOUND_CLAIM_METHODS.has(method)) {
+        return (key: string, ...rest: unknown[]) =>
+          fn.call(target, connectionStateKey(connectionId, key, organizationId), ...rest);
+      }
+      return fn.bind(target);
+    },
+  });
+}
