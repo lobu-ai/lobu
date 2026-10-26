@@ -11,7 +11,9 @@ import { ToolUserError } from "../utils/errors";
 import { resolvePublicOrigin } from "../utils/public-origin";
 import { viewPathSuffix } from "@lobu/core/contracts/tools/view-path";
 import { getOrganizationSlug } from "../utils/url-builder";
-import { getView, viewResourceUri, type StoredView } from "../views/views";
+import { getView, LOBU_VIEWS_RESOURCE_URI, viewResourceUri, type StoredView } from "../views/views";
+import { listLiveGrantedMemberWorkspaces } from "../auth/oauth/workspace-grants";
+import { CrossOrgAccessDenied, resolveCrossOrgToolContext } from "../sandbox/client-sdk";
 import { getDb } from "../db/client";
 import { requireWorkspaceContext } from "./access-control";
 import { resolveEventViewSubject } from "../views/event-subject";
@@ -23,7 +25,8 @@ const ParamValueSchema = Type.Union([Type.String(), Type.Number(), Type.Boolean(
 
 export const OpenViewSchema = Type.Object(
 	{
-		key: ViewKeySchema,
+		key: Type.Optional(ViewKeySchema),
+		organization: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: "Authorized workspace slug or id. Omit key to browse that workspace's views; omit both to open the workspace picker." })),
 		scope: Type.Optional(
 			Type.Object({
 				collection: Type.Optional(CollectionSelectionSchema),
@@ -52,7 +55,7 @@ export const OpenViewSchema = Type.Object(
 	{ additionalProperties: false }
 );
 
-export const OpenViewResultSchema = Type.Object({
+const OpenedViewResultSchema = Type.Object({
 	view: Type.String(),
 	scope: Type.Object({
 		collection: Type.Optional(CollectionSelectionSchema),
@@ -68,6 +71,62 @@ export const OpenViewResultSchema = Type.Object({
 		description: "MCP App resource uri a frame host renders.",
 	}),
 });
+
+const ViewPickerSchema = Type.Object({
+	workspaces: Type.Array(Type.Object({ slug: Type.String(), name: Type.String() })),
+	organization: Type.Optional(Type.String()),
+	views: Type.Array(Type.Object({ key: Type.String(), name: Type.String(), description: Type.String() })),
+});
+
+// Keep one object outputSchema for MCP hosts, preserving the keyed result's
+// fields while allowing the no-key launcher to return only a picker.
+export const OpenViewResultSchema = Type.Object({
+	...Type.Partial(OpenedViewResultSchema).properties,
+	resource: OpenedViewResultSchema.properties.resource,
+	organization: Type.Optional(Type.String()),
+	picker: Type.Optional(ViewPickerSchema),
+});
+
+/** Resolve explicit frame targets through the same live grant check as SDK reads. */
+export async function resolveViewWorkspace(ctx: AccountToolContext, organization?: string) {
+	if (!organization) return requireWorkspaceContext(ctx);
+	if (ctx.organizationId && (organization === ctx.organizationId || organization === await getOrganizationSlug(ctx.organizationId))) {
+		return requireWorkspaceContext(ctx);
+	}
+	try {
+		return await resolveCrossOrgToolContext(organization, ctx);
+	} catch (error) {
+		if (error instanceof CrossOrgAccessDenied) throw new ToolUserError(error.message, 403, "PERMISSION");
+		throw error;
+	}
+}
+
+async function openViewPicker(args: OpenViewArgs, ctx: AccountToolContext): Promise<Static<typeof OpenViewResultSchema>> {
+	if (!ctx.isAuthenticated || !ctx.userId) throw new ToolUserError("Sign in to browse workspace views.", 401);
+	if (args.scope !== undefined || args.params !== undefined) throw new ToolUserError("Pass a view key with scope or params.", 400);
+	const ids = ctx.allowCrossOrg ? ctx.grantedOrganizationIds ?? [] : ctx.organizationId ? [ctx.organizationId] : [];
+	const workspaces = await listLiveGrantedMemberWorkspaces({ userId: ctx.userId, grantedOrganizationIds: ids });
+	const selected = args.organization ? await resolveViewWorkspace(ctx, args.organization) : ctx.organizationId ? requireWorkspaceContext(ctx) : null;
+	const workspace = selected ? workspaces.find(w => w.id === selected.organizationId) : undefined;
+	if (selected && !workspace) throw new ToolUserError("Workspace is not available for this authorization.", 403, "PERMISSION");
+	// Read only the catalog metadata needed for navigation. Never send the
+	// compiled/source code or guess subjects for record/collection/event views.
+	const sql = getDb();
+	const rows = workspace ? await sql<{ key: string; name: string; description: string }>`
+		SELECT key, name, description FROM views
+		WHERE organization_id = ${workspace.id} AND attach @> '[{"workspace":true}]'::jsonb
+		ORDER BY key LIMIT 100
+	` : [];
+	return {
+		resource: LOBU_VIEWS_RESOURCE_URI,
+		...(workspace ? { url: `${resolvePublicOrigin(ctx.requestUrl ?? ctx.baseUrl ?? "http://127.0.0.1")}/${workspace.slug}` } : {}),
+		picker: {
+			workspaces: workspaces.map(w => ({ slug: w.slug, name: w.name })),
+			...(workspace ? { organization: workspace.slug } : {}),
+			views: rows.map(v => ({ key: v.key, name: v.name, description: v.description })),
+		},
+	};
+}
 
 type OpenViewArgs = Static<typeof OpenViewSchema>;
 
@@ -190,7 +249,8 @@ async function openViewImpl(
 	env: Env,
 	ctx: AccountToolContext
 ): Promise<Static<typeof OpenViewResultSchema>> {
-	const target = requireWorkspaceContext(ctx);
+	if (!args.key) return openViewPicker(args, ctx);
+	const target = await resolveViewWorkspace(ctx, args.organization);
 	const view = await getView(target.organizationId, args.key);
 	if (!view) {
 		throw new ToolUserError(`Unknown view: ${args.key}`, 404);
@@ -234,7 +294,8 @@ async function openViewImpl(
 		},
 		params,
 		url: `${origin}${pathname}${query ? `?${query}` : ""}`,
-		resource: viewResourceUri(args.key),
+		resource: viewResourceUri(args.key, args.organization ? orgSlug : undefined),
+		...(args.organization ? { organization: orgSlug } : {}),
 	};
 }
 

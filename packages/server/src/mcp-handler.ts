@@ -63,7 +63,9 @@ import {
   executeTool,
   extractAuthContext,
   isSoftErrorResult,
+  toAccountToolContext,
 } from './tools/execute';
+import { resolveViewWorkspace } from './tools/open_view';
 import { getMcpResultContent } from './tools/mcp-result-content';
 import { getMcpResultMeta } from './tools/mcp-result-meta';
 import { MCP_APP_CAPABILITY_MAX_LENGTH } from './tools/mcp-app-capability';
@@ -79,6 +81,7 @@ import {
   viewRuntimeScript,
   renderViewsLoaderShell,
   viewKeyFromResourceUri,
+  viewOrganizationFromResourceUri,
   viewResourceMeta,
 } from './views/views';
 import { resolvePublicOrigin } from './utils/public-origin';
@@ -290,6 +293,12 @@ const MCP_APP_RESOURCES: Record<
       frameDomains: string[];
     };
     prefersBorder: boolean;
+    /**
+     * Display modes the component supports, declared on the resource so
+     * ChatGPT can pick one (its launcher opens fullscreen) before the frame
+     * initializes. The mounted app declares the same set at `ui/initialize`.
+     */
+    availableDisplayModes?: ('inline' | 'fullscreen' | 'pip')[];
   }
 > = {
   [LOBU_INTERACTION_RESOURCE_URI]: {
@@ -322,6 +331,7 @@ const VIEWS_LOADER_META = {
     frameDomains: [] as string[],
   },
   prefersBorder: true,
+  availableDisplayModes: ['inline', 'fullscreen'] as ('inline' | 'fullscreen' | 'pip')[],
 };
 
 /**
@@ -435,6 +445,9 @@ function mcpAppResourceMeta(
   return {
     ui: mcpAppUiMeta(authCtx, app),
     'openai/widgetDescription': app.description,
+    ...(app.availableDisplayModes
+      ? { 'openai/ui': { availableDisplayModes: app.availableDisplayModes } }
+      : {}),
   };
 }
 
@@ -574,20 +587,21 @@ function createServerForContext(
       };
     }
     const viewKey = viewKeyFromResourceUri(uri);
-    if (viewKey && authCtx.organizationId) {
+    if (viewKey) {
       // Per-view bundles carry the org's view code: a signed-in caller only,
       // mirroring the shell route. Anonymous sessions present the "*" scope
       // sentinel, so the scope check below would pass them — identity first.
       if (!authCtx.isAuthenticated || !authCtx.userId) {
         throw new Error('Authentication required to read views.');
       }
-      if (!authCtx.memberRole) {
-        throw new Error('Workspace membership is required to read views.');
-      }
       if (!hasRequiredMcpScope('read', authCtx.scopes)) {
         throw new Error('Reading views requires an MCP session with read access.');
       }
-      const storedView = await getServedView(authCtx.organizationId, viewKey);
+      const workspace = await resolveViewWorkspace(
+        toAccountToolContext(forThisRequest(authCtx)), viewOrganizationFromResourceUri(uri)
+      );
+      if (!workspace.memberRole) throw new Error('Workspace membership is required to read views.');
+      const storedView = await getServedView(workspace.organizationId, viewKey);
       if (storedView) {
         const meta = viewResourceMeta(storedView);
         return {
@@ -597,7 +611,7 @@ function createServerForContext(
               mimeType: MCP_APP_MIME_TYPE,
               text: renderViewShell(
                 storedView,
-                await viewWorkspaceUrl(authCtx.organizationId, authCtx.requestUrl),
+                await viewWorkspaceUrl(workspace.organizationId, authCtx.requestUrl),
                 await viewRuntimeScript()
               ),
               _meta: mcpAppResourceMeta(authCtx, meta),
