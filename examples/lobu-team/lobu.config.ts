@@ -15,9 +15,11 @@ import {
   skillFromFile,
   Type,
 } from "@lobu/cli/config";
+import type CloudflareAccessConnector from "./cloudflare-access.connector.ts";
 import type DeliverooConnector from "./deliveroo.connector.ts";
 import type LokiActivityConnector from "./loki-activity.connector.ts";
 import type lunchDeliverooReaction from "./lunch-deliveroo.reaction.ts";
+import type PosthogEventsConnector from "./posthog-events.connector.ts";
 const lunchOpenSkill = defineSkill({
   name: "lunch-open",
   content:
@@ -440,6 +442,12 @@ const lobuTeamSlack = defineConnection({
 
 export default defineConfig({
   connectors: [
+    connectorFromFile<typeof PosthogEventsConnector>(
+      "./posthog-events.connector.ts"
+    ),
+    connectorFromFile<typeof CloudflareAccessConnector>(
+      "./cloudflare-access.connector.ts"
+    ),
     connectorFromFile<typeof DeliverooConnector>("./deliveroo.connector.ts"),
     connectorFromFile<typeof LokiActivityConnector>(
       "./loki-activity.connector.ts"
