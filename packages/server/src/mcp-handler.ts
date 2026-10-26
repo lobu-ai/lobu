@@ -262,6 +262,9 @@ class SessionServer extends Server {
   }
 }
 
+/** Display modes an MCP App resource can declare for the host. */
+type McpAppDisplayMode = 'inline' | 'fullscreen' | 'pip';
+
 /**
  * MCP Apps UI resources (interactive iframe payloads a host renders in a
  * sandboxed iframe). Keyed by `ui://` uri → the built bundle's app dir under
@@ -299,7 +302,7 @@ const MCP_APP_RESOURCES: Record<
      * ChatGPT can pick one (its launcher opens fullscreen) before the frame
      * initializes. The mounted app declares the same set at `ui/initialize`.
      */
-    availableDisplayModes?: ('inline' | 'fullscreen' | 'pip')[];
+    availableDisplayModes?: McpAppDisplayMode[];
   }
 > = {
   [LOBU_INTERACTION_RESOURCE_URI]: {
@@ -332,7 +335,7 @@ const VIEWS_LOADER_META = {
     frameDomains: [] as string[],
   },
   prefersBorder: true,
-  availableDisplayModes: ['inline', 'fullscreen'] as ('inline' | 'fullscreen' | 'pip')[],
+  availableDisplayModes: ['inline', 'fullscreen'] as McpAppDisplayMode[],
 };
 
 /**

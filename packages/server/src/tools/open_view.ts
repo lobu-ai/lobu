@@ -90,8 +90,10 @@ export const OpenViewResultSchema = Type.Object({
 /** Resolve explicit frame targets through the same live grant check as SDK reads. */
 export async function resolveViewWorkspace(ctx: AccountToolContext, organization?: string) {
 	if (!organization) return requireWorkspaceContext(ctx);
-	if (ctx.organizationId && (organization === ctx.organizationId || organization === await getOrganizationSlug(ctx.organizationId))) {
-		return requireWorkspaceContext(ctx);
+	// The session's own workspace, named by id or slug, needs no grant lookup.
+	if (ctx.organizationId) {
+		if (organization === ctx.organizationId) return requireWorkspaceContext(ctx);
+		if (organization === await getOrganizationSlug(ctx.organizationId)) return requireWorkspaceContext(ctx);
 	}
 	try {
 		return await resolveCrossOrgToolContext(organization, ctx);
