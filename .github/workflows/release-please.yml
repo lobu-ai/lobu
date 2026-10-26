@@ -23,7 +23,7 @@ jobs:
   attest:
     name: Attest main image and CI runs
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     # `types: [completed]` also fires for failure and cancellation, and
     # `branches: [main]` admits a manual Build Images dispatch as readily as a
     # push. Both would start this job and then hard-fail the API checks below,
@@ -109,7 +109,10 @@ jobs:
 
           ci_workflow_id=$(gh api "repos/${REPOSITORY}/actions/workflows/ci.yml" --jq '.id' | tr -d '\n')
           ci_run_id=""
-          for _ in $(seq 1 20); do
+          # Parallel image builds can finish well before the integration and
+          # Mac CI jobs. Allow 20 minutes for the exact CI run, with additional
+          # job time for API calls; never substitute another commit's result.
+          for _ in $(seq 1 60); do
             # Re-checked every iteration so the bounded wait still bails out
             # early: a commit force-pushed off main stops being reachable.
             current_sha=$(gh api "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')

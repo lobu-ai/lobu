@@ -24,6 +24,8 @@ on:
   push:
     branches:
       - main
+    # Canary publication attests an image run for the exact main tip, including
+    # docs-only tips. Keep push events unfiltered to preserve that contract.
   # release-please publishes `lobu-vX.Y.Z`. Building on that too is what gives
   # the images a semver tag and repoints `latest` at a release instead of an
   # arbitrary commit (#2184). Unrelated releases are ignored.
@@ -136,45 +138,24 @@ jobs:
           PRERELEASE: ${{ github.event_name == 'release' && github.event.release.prerelease || false }}
         run: node scripts/derive-image-tags.mjs
 
-  # Connector-runtime parity smoke gate (main/deploy side). RUNS the built worker
-  # artifact's self-check before any deployable tag is published, so the
-  # packaging/parity drift that broke prod (worker image missing `COPY
-  # packages/core` → dangling transitive `@lobu/core` → every feed sync
-  # crashed, all CI green) can't ship.
-  # `build-worker` depends on this, and `build-app` depends on `build-worker`.
-  # Promotion waits for all three candidate builds and the app-image smoke
-  # before publishing the shared tag Flux deploys to app, worker, and
-  # embeddings.
-  #
-  # amd64-only (no QEMU/arm64): a smoke gate, not a release. Reuses the same GHA
-  # buildx cache scope as `build-worker` so this doesn't double the build cost.
+  # Smoke the worker candidate by immutable digest. All candidates build in
+  # parallel; promotion waits for this self-check and the app smoke before any
+  # deployment, latest or semver tag can be published. No second worker build.
   connector-parity-smoke:
     runs-on: ubuntu-24.04
-    needs: [generate-tag]
+    needs: [generate-tag, build-worker]
     if: needs.generate-tag.outputs.should_publish == 'true'
     timeout-minutes: 25
-    # Builds + runs the image locally (push: false), so it never needs the
-    # top-level `packages: write`. Drop to read-only for least privilege.
     permissions:
       contents: read
+      packages: read
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build worker image (amd64, load, no push)
-        uses: docker/build-push-action@v7
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
         with:
-          context: .
-          platforms: linux/amd64
-          file: ./docker/worker/Dockerfile
-          load: true
-          push: false
-          tags: lobu-worker:parity-smoke
-          cache-from: type=gha,scope=worker
-          cache-to: type=gha,mode=max,scope=worker
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Worker image self-check (docker run --network=none)
         # The image runs under Node so the connector isolate lane (isolated-vm,
@@ -184,7 +165,7 @@ jobs:
         # optionalDependency install regressed inside the image.
         run: |
           set -o pipefail
-          docker run --rm --network=none lobu-worker:parity-smoke \
+          docker run --rm --network=none "${REGISTRY}/${IMAGE_NAME_WORKER}@${{ needs.build-worker.outputs.digest }}" \
             node dist/bin.js self-check --json | tee worker-self-check.json
           jq -e '.isolate_lane.available == true' worker-self-check.json >/dev/null || {
             echo "::error::worker image cannot load isolated-vm: $(jq -c .isolate_lane worker-self-check.json)"
@@ -194,7 +175,7 @@ jobs:
   build-app:
     runs-on: ubuntu-24.04
     if: needs.generate-tag.outputs.should_publish == 'true'
-    needs: [generate-tag, build-worker, build-embeddings-service]
+    needs: [generate-tag]
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     permissions:
@@ -323,7 +304,7 @@ jobs:
 
   promote-images:
     runs-on: ubuntu-24.04
-    needs: [generate-tag, build-app, build-worker, build-embeddings-service, app-image-smoke]
+    needs: [generate-tag, build-app, build-worker, build-embeddings-service, connector-parity-smoke, app-image-smoke]
     if: needs.generate-tag.outputs.should_publish == 'true'
     permissions:
       contents: read
@@ -377,9 +358,8 @@ jobs:
 
   build-worker:
     runs-on: ubuntu-24.04
-    # Gate the worker push (and transitively the app push, which `needs:
-    # build-worker`) on the parity smoke passing.
-    needs: [generate-tag, connector-parity-smoke]
+    # Publish a candidate only; the exact digest must pass before promotion.
+    needs: [generate-tag]
     if: needs.generate-tag.outputs.should_publish == 'true'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
@@ -422,8 +402,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Share the buildx cache scope with the connector-parity-smoke job so
-          # its amd64 layers are reused here (only the arm64 leg is new work).
+          # Retain builder-stage layers for native compilation. This is the
+          # sole main-push cache writer; parity consumes the candidate digest.
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
 

@@ -1,4 +1,5 @@
 import { getDb } from '../db/client';
+import logger from '../utils/logger';
 import { automationArrivalSettleMs } from '../utils/window-utils';
 import type { ToolContext } from '../tools/registry';
 import { encodeExternalAutomationClaimOwner } from './external-claim-owner';
@@ -39,7 +40,7 @@ export async function listExternalAutomationWork(params: {
     ? sql`AND (active.claimed_by = ${owner}
         OR (active.id IS NOT NULL AND (active.agent_id IS NULL OR active.agent_id = ${caller.agentId}))
         OR (active.id IS NULL AND (a.managed_agent_id IS NULL OR a.managed_agent_id = ${caller.agentId})))` : sql``;
-  return sql<{
+  const work = await sql<{
     id: number; name: string; next_run_at: string | Date | null;
     run_id: number | null; run_status: string | null;
     claimed_by: string | null; created_at: string | Date | null;
@@ -73,4 +74,46 @@ export async function listExternalAutomationWork(params: {
              a.next_run_at ASC NULLS LAST, a.id
     LIMIT ${limit}
   `;
+  if (work.length === 0) {
+    // Temporary branch-3 diagnostics: org-wide, with raw timestamp precision preserved.
+    const settleMs = automationArrivalSettleMs();
+    let diagnosticsError: string | null = null;
+    const diagnostics = await sql`
+      SELECT a.id, active.id IS NOT NULL AS has_active_run,
+             a.schedule IS NULL AS schedule_is_null,
+             a.schedule_auto_paused_at IS NULL AS schedule_auto_paused_at_is_null,
+             a.next_run_at::text AS next_run_at,
+             a.next_window_start::text AS next_window_start,
+             CURRENT_TIMESTAMP::text AS diagnostic_now,
+             (a.next_window_start < CURRENT_TIMESTAMP - (${settleMs} * INTERVAL '1 millisecond')) IS TRUE AS window_settled,
+             (a.next_run_at <= CURRENT_TIMESTAMP) IS TRUE AS run_due
+      FROM automations a
+      LEFT JOIN LATERAL (
+        SELECT r.id FROM runs r
+        WHERE r.automation_id = a.id AND r.run_type = 'automation'
+          AND r.status IN ('pending', 'claimed', 'running')
+          AND (r.expires_at IS NULL OR r.expires_at > CURRENT_TIMESTAMP)
+        LIMIT 1
+      ) active ON true
+      WHERE a.organization_id = ${organizationId} AND a.status = 'active'
+        AND a.execution_config->'executor'->>'kind' = 'external'
+      ORDER BY a.id
+      LIMIT 50
+    `.catch((err) => {
+      diagnosticsError = err instanceof Error ? err.message : String(err);
+      return null;
+    }); // Diagnostics must not prevent returning the original work.
+    logger.info({
+      organizationId,
+      hasUserId: Boolean(caller.userId),
+      hasAgentId: Boolean(caller.agentId),
+      hasClientId: Boolean(caller.clientId),
+      workRowCount: work.length,
+      settleMs,
+      diagnosticsFailed: diagnostics === null,
+      diagnosticsError,
+      diagnostics,
+    }, '[external-activity] Branch-3 due-work diagnostics');
+  }
+  return work;
 }
