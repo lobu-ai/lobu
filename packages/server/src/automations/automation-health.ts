@@ -14,6 +14,7 @@
 
 import type { AutomationTrigger } from '../types/automations';
 import { intervals } from '../config/intervals';
+import { referenceCaptureTriggers } from './event-trigger';
 
 export type AutomationHealthStatus = 'healthy' | 'degraded';
 
@@ -105,7 +106,8 @@ function toMs(value: string | Date | null | undefined): number | null {
  * Derive an automation's health from already-selected fields.
  *
  * `degraded` when the automation is `active` AND any of:
- *   - it activates on an event but has neither a run nor an activation stamp;
+ *   - it dispatches on an event but has neither a run nor an activation stamp
+ *     (external reference capture deliberately does not dispatch);
  *   - its latest run ended in a terminal failure (`failed`/`timeout`) — the
  *     automation ran and broke, regardless of the scheduler cursor; or
  *   - at least half of a meaningful window of recent terminal runs failed — a
@@ -145,8 +147,12 @@ export function computeAutomationHealth(
     );
   }
 
+  // External reference subscriptions only retain observations. Native
+  // subscribers can both capture and dispatch, so only external capture is exempt.
+  const captureOnlyTriggers = new Set<AutomationTrigger>(input.externalExecutor
+    ? referenceCaptureTriggers(input.triggers ?? []) : []);
   const hasEventTrigger = (input.triggers ?? []).some(
-    (trigger) => trigger.kind === 'event'
+    (trigger) => trigger.kind === 'event' && !captureOnlyTriggers.has(trigger)
   );
   if (
     hasEventTrigger &&
