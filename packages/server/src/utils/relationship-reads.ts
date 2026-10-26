@@ -159,25 +159,29 @@ export async function readableRelationships(
       .some(id => typeof id === 'number' && !allowed.has(id));
     const touchesMember = row.from_entity_type === MEMBER_ENTITY_TYPE_SLUG || row.to_entity_type === MEMBER_ENTITY_TYPE_SLUG;
     if (hiddenStoredEndpoint || (touchesMember && !canSeeMemberList(ctx.memberRole))) return null;
-    try {
-      const [from, to] = await Promise.all([
-        typeof row.from_entity_id === 'string' ? resolveSource(row.from_entity_id, row.from_entity_type) : null,
-        typeof row.to_entity_id === 'string' ? resolveSource(row.to_entity_id, row.to_entity_type) : null,
-      ]);
-      return {
-        ...row,
-        ...(from ? { from_entity_name: from.name } : {}),
-        ...(to ? { to_entity_name: to.name } : {}),
-      };
-    } catch (error) {
-      // Missing/hidden endpoints disclose neither keys nor failure IDs.
-      if (error instanceof ToolUserError && (error.httpStatus === 403 || error.httpStatus === 404)) return null;
+    const outcomes = await Promise.allSettled([
+      typeof row.from_entity_id === 'string' ? resolveSource(row.from_entity_id, row.from_entity_type) : null,
+      typeof row.to_entity_id === 'string' ? resolveSource(row.to_entity_id, row.to_entity_type) : null,
+    ]);
+    const rejected = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
+    // Hidden endpoints suppress failure IDs even when another read fails first.
+    if (rejected.some(({ reason }) => reason instanceof ToolUserError && (reason.httpStatus === 403 || reason.httpStatus === 404))) return null;
+    if (rejected.length) {
+      const fatal = rejected.find(({ reason }) => !(reason instanceof ToolUserError) || reason.httpStatus < 500);
+      if (fatal) throw fatal.reason;
+      const error: unknown = rejected[0].reason;
       if (failures && error instanceof ToolUserError && error.httpStatus >= 500) {
         failures.push({ relationship_id: row.id, code: error.code ?? 'UPSTREAM_UNAVAILABLE' });
         return null;
       }
       throw error;
     }
+    const [from, to] = outcomes.map(outcome => outcome.status === 'fulfilled' ? outcome.value : null);
+    return {
+      ...row,
+      ...(from ? { from_entity_name: from.name } : {}),
+      ...(to ? { to_entity_name: to.name } : {}),
+    };
   }
 
   const visible: RelationshipRow[] = [];

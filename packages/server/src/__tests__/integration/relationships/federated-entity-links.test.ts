@@ -1,10 +1,12 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createAuthProfile } from '../../../utils/auth-profiles';
 import { resolvePath } from '../../../tools/resolve_path';
 import { querySqlImpl } from '../../../tools/admin/query_sql';
 import { ownerToolContext } from '../../setup/test-fixtures';
 import { TestWorkspace } from '../../setup/test-mcp-client';
+import * as entityReferences from '../../../utils/entity-reference';
+import { ToolUserError } from '../../../utils/errors';
 
 describe('typed references and authored source relationships', () => {
   let ws: TestWorkspace;
@@ -178,5 +180,51 @@ describe('typed references and authored source relationships', () => {
     await ws.owner.entity_schema.updateType({ slug: 'outage-items', backing: { sql: "SELECT 'replacement' AS id" } });
     await ws.owner.entities.unlink({ relationship_id: Number(healthy.relationship.id) });
   });
+
+  it.each([403, 404, 409].flatMap(endpointStatus => [true, false].flatMap(unavailableFirst =>
+    [true, false].map(unavailableFrom => ({ endpointStatus, unavailableFirst, unavailableFrom })))))(
+    'prioritizes endpoint status $endpointStatus over an outage (outage first: $unavailableFirst, from: $unavailableFrom)',
+    async ({ endpointStatus, unavailableFirst, unavailableFrom }) => {
+      const edge = await ws.owner.entities.link({ from_entity_id: '007', from_entity_type: type,
+        to_entity_id: 'B', to_entity_type: type, relationship_type_slug: 'related-item' });
+      const resolveReference = entityReferences.resolveEntityReference;
+      let anchorReads = 0;
+      let rejectAnchor!: (error: Error) => void;
+      let rejectPeer!: (error: Error) => void;
+      let started!: () => void;
+      const bothStarted = new Promise<void>(resolve => { started = resolve; });
+      const resolver = vi.spyOn(entityReferences, 'resolveEntityReference').mockImplementation((id, entityType, ctx, options) => {
+        if (entityType === type && (id === 'B' || (id === '007' && ++anchorReads > 1))) {
+          return new Promise((_, reject) => {
+            if (id === '007') rejectAnchor = reject;
+            else rejectPeer = reject;
+            if (rejectAnchor && rejectPeer) started();
+          });
+        }
+        return resolveReference(id, entityType, ctx, options);
+      });
+      try {
+        const listing = ws.member.entities.listLinks({ entity_id: '007', entity_type: type })
+          .then(result => ({ result }), error => ({ error }));
+        await bothStarted;
+        const unavailable = new ToolUserError('Source unavailable', 500, 'UPSTREAM_5XX');
+        const endpointError = new ToolUserError('Source record is hidden or has a conflicting key', endpointStatus);
+        const rejectUnavailable = unavailableFrom ? rejectAnchor : rejectPeer;
+        const rejectEndpoint = unavailableFrom ? rejectPeer : rejectAnchor;
+        if (unavailableFirst) rejectUnavailable(unavailable);
+        else rejectEndpoint(endpointError);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        if (unavailableFirst) rejectEndpoint(endpointError);
+        else rejectUnavailable(unavailable);
+        const outcome = await listing;
+        if (endpointStatus === 409) expect(outcome).toMatchObject({ error: { httpStatus: 409 } });
+        else expect(outcome).toMatchObject({ result: { relationships: [], relationship_failures: [], counts_by_type: [] } });
+        expect(anchorReads).toBe(2);
+      } finally {
+        resolver.mockRestore();
+        await ws.owner.entities.unlink({ relationship_id: Number(edge.relationship.id) });
+      }
+    },
+  );
 
 });
