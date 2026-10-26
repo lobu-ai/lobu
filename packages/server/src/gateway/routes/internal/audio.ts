@@ -76,9 +76,11 @@ export function createAudioRoutes(
               error: result.error,
               availableProviders: result.availableProviders,
             },
-            // 502 after a provider call: it may have produced (and billed)
-            // output, so the turn receipt keeps its claim. 400 = never sent.
-            result.dispatched ? 502 : 400
+            // 500 after a provider call: it may have produced (and billed)
+            // output, so the turn receipt keeps its claim (any 5xx does).
+            // Not 502: the CDN replaces a 502 body, losing this error
+            // (utils/errors.ts). 400 = never sent.
+            result.dispatched ? 500 : 400
           );
         }
 
