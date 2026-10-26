@@ -182,3 +182,46 @@ test('a steered input without its own answer fails the turn', async () => {
   expect(error).toBeInstanceOf(Error);
   expect(String((error as Error).message)).toContain('completed without its own answer');
 });
+
+/**
+ * Each gateway tool call names the input it answers.
+ *
+ * The gateway keys a turn's write on the input message the call belongs to,
+ * so an identical write a steered follow-up asks for again is not swallowed
+ * by the owner's. The owner's call carries no header (the owner is the
+ * default); the follow-up's carries its run id — the same binding its trace
+ * reports as `inputRunId`.
+ */
+test("a steered follow-up's tool call names its own input to the gateway", async () => {
+  let steeringTaken = 0;
+  const takeSteering = () => {
+    steeringTaken += 1;
+    return steeringTaken === 1 ? [{ runId: 701, messageId: 'input-0', text: 'Send it again.' }] : [];
+  };
+  const toolCalls: Array<{ inputRun: string | null }> = [];
+  let requests = 0;
+  globalThis.fetch = (async (url, init) => {
+    if (String(url).includes('/mcp/')) {
+      toolCalls.push({ inputRun: new Headers(init?.headers).get('x-lobu-turn-input-run') });
+      return Response.json({ content: [{ type: 'text', text: 'sent' }] });
+    }
+    requests += 1;
+    const call = (id: string) => ({ index: 0, id, type: 'function', function: { name: 'send_message', arguments: '{"text":"hi"}' } });
+    if (requests === 1) {
+      return sse([{ index: 0, delta: { role: 'assistant', content: 'Owner answer.', tool_calls: [call('call_owner')] }, finish_reason: 'tool_calls' }]);
+    }
+    if (requests === 2) {
+      return sse([{ index: 0, delta: { role: 'assistant', content: 'Sending again.', tool_calls: [call('call_follow')] }, finish_reason: 'tool_calls' }]);
+    }
+    return sse([{ index: 0, delta: { role: 'assistant', content: 'Sent again.' }, finish_reason: 'stop' }]);
+  }) as typeof fetch;
+
+  const result = await runAgentTurn({
+    provider: { api: 'openai-completions', provider: 'openai', modelId: 'synthetic-model', baseUrl: 'https://provider.example.test/v1', apiKey: 'synthetic-key' },
+    systemPrompt: 'Answer each message.', userMessage: 'Send hi', sessionJsonl: '',
+    tools: { gatewayUrl: 'https://gateway.example.test', definitions: [{ mcpId: 'synthetic', name: 'send_message', description: 'Send', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } }] },
+  }, () => undefined, takeSteering);
+
+  expect(result.consumedInputs).toEqual([expect.objectContaining({ runId: 701, toolsUsed: ['send_message'] })]);
+  expect(toolCalls).toEqual([{ inputRun: null }, { inputRun: '701' }]);
+});

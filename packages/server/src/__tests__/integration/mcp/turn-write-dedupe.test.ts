@@ -9,9 +9,13 @@
  */
 
 import { mintGatewayMcpToken, type MessagePayload } from '@lobu/core';
+import { TURN_INPUT_RUN_HEADER } from '@lobu/core/agent-tooling';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { upsertEntityApprovalPolicy } from '../../../authz/entity-policy';
-import { mintTurnToken } from '../../../gateway/orchestration/agent-turn-producer';
+import { enqueueAgentTurn, mintTurnToken } from '../../../gateway/orchestration/agent-turn-producer';
+import type { AgentSettingsStore } from '../../../gateway/auth/settings/agent-settings-store';
+import type { ProviderCatalogService } from '../../../gateway/auth/provider-catalog';
+import type { ModelProviderModule } from '../../../gateway/modules/module-system';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -127,6 +131,69 @@ async function actionRuns() {
     WHERE organization_id = ${org.id} AND run_type = 'action' AND connection_id = ${connectionId}
     ORDER BY id
   `;
+}
+
+
+// ── Steering: one execution answering several inputs, through the producer ──
+
+function claudeModule(): ModelProviderModule {
+  return {
+    providerId: 'claude',
+    sdkCompat: 'anthropic',
+    getUpstreamConfig: () => ({ slug: 'anthropic', upstreamBaseUrl: 'https://api.anthropic.com', apiKeyHeader: 'x-api-key' as const }),
+    getProxyBaseUrlMappings: (proxyUrl: string, agentId?: string, context?: { organizationId?: string; userId?: string }) => ({
+      ANTHROPIC_BASE_URL: `${proxyUrl}/anthropic/a/${agentId}/o/${context?.organizationId}/u/${context?.userId}`,
+    }),
+    buildCredentialPlaceholder: (_agentId: string, context?: { workerToken?: string }) => context?.workerToken ?? 'lobu-proxy',
+  } as unknown as ModelProviderModule;
+}
+
+const turnDeps = {
+  agentSettings: { getSettings: async () => ({ identityMd: 'I am the turn agent.', soulMd: '', userMd: '' }) } as unknown as AgentSettingsStore,
+  catalog: { getInstalledModules: async () => [claudeModule()], findProviderForModel: async () => claudeModule() } as unknown as ProviderCatalogService,
+  gatewayUrl: 'https://gateway.test.invalid/lobu',
+};
+
+/** Admit a chat message the way the message consumer does, then produce its turn. */
+async function produceTurn(message: MessagePayload): Promise<number> {
+  const sql = getTestDb();
+  const [admitted] = await sql<{ id: number }>`
+    INSERT INTO runs (organization_id, run_type, queue_name, status, action_input)
+    VALUES (${message.organizationId}, 'chat_message', 'messages', 'claimed', ${sql.json(message)}) RETURNING id
+  `;
+  await enqueueAgentTurn({ ...message, runId: Number(admitted.id), agentOptions: { model: 'claude/claude-opus-4-8' } } as MessagePayload, turnDeps);
+  const [turn] = await sql<{ id: number }>`
+    SELECT id FROM runs WHERE run_type = 'agent_turn' AND action_input->'turn'->>'message_id' = ${message.messageId}
+    ORDER BY id DESC LIMIT 1
+  `;
+  return Number(turn.id);
+}
+
+/**
+ * An owner turn claimed by a fleet worker, with a follow-up steered into it.
+ * Returns the owner's own gateway-hop credential (the one every call of the
+ * execution carries) and the follow-up's run id.
+ */
+async function steeredTurn(messageId: string, followUpId: string) {
+  const owner = slackChatMessage(org.id, OWNER_PLATFORM_ID, messageId, { isDirect: true });
+  const ownerRunId = await produceTurn(owner);
+  const polled = await post('/api/workers/poll', {
+    body: { worker_id: 'fleet-turn-write', capabilities: { agent_turn: true } },
+    token: 'test-fleet-token',
+    env: { WORKER_API_TOKEN: 'test-fleet-token' },
+  });
+  expect(polled.status).toBe(200);
+  const followUpRunId = await produceTurn({ ...owner, messageId: followUpId, messageText: 'do it again' });
+  const [row] = await getTestDb()<{ credential: string }>`
+    SELECT action_input->>'credential' AS credential FROM runs WHERE id = ${ownerRunId}
+  `;
+  const token = mintGatewayMcpToken(row.credential);
+  if (!token) throw new Error('owner credential did not verify');
+  return { token, ownerRunId, followUpRunId };
+}
+
+function asInput(runId: number) {
+  return { headers: { ...DIRECT_AUTH, [TURN_INPUT_RUN_HEADER]: String(runId) } };
 }
 
 describe('a repeated turn write runs once per input message', () => {
@@ -252,6 +319,37 @@ describe('a repeated turn write runs once per input message', () => {
     const body = (await response.json()) as { result?: { isError?: boolean; content?: Array<{ text?: string }> } };
     expect(body.result?.isError).toBe(true);
     expect(body.result?.content?.[0]?.text).toContain('does not match this credential');
+    expect(await actionRuns()).toHaveLength(0);
+  });
+
+
+  it('a steered follow-up repeating an identical write runs it once more, and only once', async () => {
+    const { token, ownerRunId, followUpRunId } = await steeredTurn('m-1', 'm-follow');
+    const owner = await callTool(org.slug, token, 'manage_operations', execute({ text: 'hi' }));
+    const follow = await callTool(org.slug, token, 'manage_operations', execute({ text: 'hi' }), asInput(followUpRunId));
+    expect(follow.run_id).not.toBe(owner.run_id);
+    // The follow-up's own retry, and the owner named explicitly, each replay their own run.
+    const followRetry = await callTool(org.slug, token, 'manage_operations', execute({ text: 'hi' }), asInput(followUpRunId));
+    const ownerRetry = await callTool(org.slug, token, 'manage_operations', execute({ text: 'hi' }), asInput(ownerRunId));
+    expect(followRetry.run_id).toBe(follow.run_id);
+    expect(ownerRetry.run_id).toBe(owner.run_id);
+    expect(await actionRuns()).toHaveLength(2);
+  });
+
+  it('refuses a call naming an input the turn does not own', async () => {
+    const { token } = await steeredTurn('m-1', 'm-follow');
+    const strangerRunId = await insertAgentTurnRun({
+      organizationId: org.id, agentId: AGENT_ID, conversationId: 'slack:C0OTHER:1', messageId: 'm-elsewhere',
+    });
+    const sessionId = await openSession(org.slug, token);
+    const response = await post(`/mcp/${org.slug}`, {
+      body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'manage_operations', arguments: execute({ text: 'hi' }) } },
+      token,
+      headers: { ...asInput(strangerRunId).headers, 'mcp-session-id': sessionId, 'X-MCP-Format': 'json' },
+    });
+    const body = (await response.json()) as { result?: { isError?: boolean; content?: Array<{ text?: string }> } };
+    expect(body.result?.isError).toBe(true);
+    expect(body.result?.content?.[0]?.text).toContain('does not own the input');
     expect(await actionRuns()).toHaveLength(0);
   });
 

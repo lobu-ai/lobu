@@ -16,6 +16,15 @@
 
 import { Type } from "@sinclair/typebox";
 
+/**
+ * Request header an agent turn's isolate sets on a gateway tool call to name
+ * the steered input run the call answers (the same id its tool trace carries
+ * as `input_run_id`). Advisory until verified: the gateway accepts it only as
+ * the turn's own run or one of that turn's stored inputs, and derives a
+ * write's idempotency key from THAT row. Absent means the owner input.
+ */
+export const TURN_INPUT_RUN_HEADER = "x-lobu-turn-input-run";
+
 export {
   CUSTOM_TOOL_METADATA,
   type CustomToolMetadata,

@@ -21,7 +21,7 @@
 
 import type { AgentTool, AgentMessage } from '@mariozechner/pi-agent-core';
 import { mcpToolResult, toolImageBudget, type ToolImageBudget, type ToolResult } from '@lobu/plugin-toolkit';
-import { FOLLOW_UP_SUGGESTIONS_PROMPT, parseFollowUpSuggestions, type SuggestedPrompt } from '@lobu/core/agent-tooling';
+import { FOLLOW_UP_SUGGESTIONS_PROMPT, parseFollowUpSuggestions, TURN_INPUT_RUN_HEADER, type SuggestedPrompt } from '@lobu/core/agent-tooling';
 import { createGatewayTools } from './gateway-tools.js';
 import { createTurnMediaTools } from './media-tools.js';
 import { createTurnMemoryHooks, type TurnMemory } from './memory.js';
@@ -88,7 +88,8 @@ async function callMcpTool(
   args: unknown,
   timeoutMs = TOOL_CALL_TIMEOUT_MS,
   supportsImages = true,
-  imageBudget?: ToolImageBudget
+  imageBudget?: ToolImageBudget,
+  inputRunId?: number
 ): Promise<ToolResult> {
   const url = `${gatewayUrl}/mcp/${encodeURIComponent(tool.mcpId)}/tools/${encodeURIComponent(tool.name)}`;
   let response: Response;
@@ -102,6 +103,10 @@ async function callMcpTool(
         // structured body; capture validates the save receipt. The gateway
         // renders markdown unless asked.
         ...(isRetrievalTool(tool.name) || tool.name === 'save_memory' ? { 'x-mcp-format': 'json' } : {}),
+        // The steered input this call answers. The gateway verifies it against
+        // the turn's stored inputs before a write keys on its message; absent
+        // means the turn's own (owner) input.
+        ...(inputRunId !== undefined ? { [TURN_INPUT_RUN_HEADER]: String(inputRunId) } : {}),
       },
       body: JSON.stringify(args ?? {}),
       signal: AbortSignal.timeout(timeoutMs),
@@ -146,6 +151,7 @@ function buildTools(
   onAskUserPosted: () => void,
   onInBandReplyDelivered: () => void,
   emit: (event: AgentTurnEvent) => void,
+  inputRunFor: (toolCallId: string) => number | undefined,
   runtimeExec?: (request: RuntimeExecRequest) => Promise<RuntimeExecResult>
 ): { tools: AgentTool[]; workspace: AgentWorkspace | null; canReadFiles: boolean; imageBudget: ToolImageBudget } {
   const imageBudget = toolImageBudget((input.images ?? []).map(image => ({ type: 'image', data: image.data })));
@@ -188,7 +194,7 @@ function buildTools(
     description: tool.description,
     // A plain JSON schema: pi-ai validates arguments against it as-is.
     parameters: tool.inputSchema as never,
-    execute: async (_toolCallId: string, args: unknown) => {
+    execute: async (toolCallId: string, args: unknown) => {
       const result = await callMcpTool(
         tools.gatewayUrl,
         credential,
@@ -196,7 +202,8 @@ function buildTools(
         args,
         TOOL_CALL_TIMEOUT_MS,
         input.provider.input?.includes('image') === true,
-        imageBudget
+        imageBudget,
+        inputRunFor(toolCallId)
       );
       const text = joinText(result.content);
       if (result.isError === true) throw new Error(String(result.error || text || `${tool.name} failed`));
@@ -502,6 +509,8 @@ export async function runAgentTurn(
     () => { askedUser = true; },
     () => { repliedInBand = true; },
     emit,
+    // Bound at `tool_execution_start`, which Pi emits before `execute`.
+    (toolCallId) => toolInputRun.get(toolCallId),
     runtimeExec
   );
   const tools = built.tools;
