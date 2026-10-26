@@ -40,6 +40,16 @@ describe('MCP OAuth resource indicators', () => {
     expect(canonicalizeMcpResource('https://app.lobu.ai/mcp/acme?admin=1', requestUrl)).toBeNull();
   });
 
+  test('rejects the removed directory endpoint as an OAuth resource', () => {
+    const requestUrl = 'https://app.lobu.ai/oauth/authorize';
+
+    for (const path of ['/mcp-directory', '/mcp-directory/']) {
+      const resource = `https://app.lobu.ai${path}`;
+      expect(canonicalizeMcpResource(resource, requestUrl)).toBeNull();
+      expect(getMcpResourceForRequest(resource)).toBeNull();
+    }
+  });
+
   test('builds an exact path-specific protected-resource challenge', () => {
     const requestUrl = 'https://app.lobu.ai/mcp/acme';
 

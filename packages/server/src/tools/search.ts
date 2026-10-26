@@ -40,7 +40,6 @@ import { entityLinkMatchSql, searchContentByText } from '../utils/content-search
 import { resolveBoundChannelRows, stripPlatformPrefix } from '../gateway/channels/bound-channels';
 import { filterChannelsForRequester } from '../authz/channel-visibility';
 import { redactConnectionRows } from '../utils/connection-config-redaction';
-import { isDirectoryMcpRequest } from '../mcp-surface';
 import { toVectorLiteral } from '../utils/entity-management';
 import { generateQueryEmbedding } from '../utils/embeddings';
 import { ToolUserError } from '../utils/errors';
@@ -604,8 +603,7 @@ function buildEmptySearchSuggestion(
   query: string | null,
   args: SearchArgs,
   coverage?: SearchCoverage,
-  callerMax?: ToolAccessLevel,
-  directory = false
+  callerMax?: ToolAccessLevel
 ): string {
   if (args.entity_id) return entityIdNotFoundSuggestion(args.entity_id);
 
@@ -616,14 +614,6 @@ function buildEmptySearchSuggestion(
     : 'in saved workspace memory';
 
   const lines: string[] = [`No matches found${queryLabel} ${scopeLabel}.`];
-
-  if (directory) {
-    lines.push('Try alternate keywords or broaden the workspace filter. Only saved workspace data was searched; use Lobu to read connected sources or configure integrations.');
-    if (callerMax !== 'read') {
-      lines.push('If the user asks to save new knowledge, use save_memory with an explicit org_slug.');
-    }
-    return lines.join('\n');
-  }
 
   lines.push('');
   lines.push('**Additional steps to read relevant data:**');
@@ -702,8 +692,7 @@ export function mergeFederatedSearchResults(
   args: SearchArgs,
   targets: readonly GrantedMemberWorkspace[],
   settled: readonly PromiseSettledResult<UnifiedSearchResult>[],
-  callerMax?: ToolAccessLevel,
-  directory = false
+  callerMax?: ToolAccessLevel
 ): UnifiedSearchResult {
   const fulfilled = settled.flatMap((item) => (item.status === 'fulfilled' ? [item.value] : []));
   if (fulfilled.length === 0) {
@@ -833,7 +822,7 @@ export function mergeFederatedSearchResults(
           ? QUERY_EMBEDDING_UNAVAILABLE_SUGGESTION
           : 'Search returned partial results; one or more granted workspaces was temporarily unavailable.'
         : matches.length === 0 && !hasAnyRecall
-          ? buildEmptySearchSuggestion(args.query ?? null, args, coverage, callerMax, directory)
+          ? buildEmptySearchSuggestion(args.query ?? null, args, coverage, callerMax)
           : selectedResult?.suggestion,
     ...(entity && selectedResult?.view_url ? { view_url: selectedResult.view_url } : {}),
     metadata: {
@@ -1517,8 +1506,7 @@ async function searchImpl(
     args,
     targets,
     settled,
-    guidanceAccessTier(ctx, highestGrantedRole(targets)),
-    !!ctx.requestUrl && isDirectoryMcpRequest(ctx.requestUrl)
+    guidanceAccessTier(ctx, highestGrantedRole(targets))
   );
 }
 
@@ -1812,7 +1800,7 @@ async function searchWorkspaceImpl(
 
   const suggestionText = hasRecallHits
     ? 'No matching entities found, but related memory content was recalled below.'
-    : buildEmptySearchSuggestion(query, args, recall.coverage, guidanceAccessTier(ctx), !!ctx.requestUrl && isDirectoryMcpRequest(ctx.requestUrl));
+    : buildEmptySearchSuggestion(query, args, recall.coverage, guidanceAccessTier(ctx));
 
   const result = withRecall(
     emptyResult({
@@ -2308,9 +2296,7 @@ async function formatEntityResult(
     const pausedConnections = connections?.filter((c) => c.status === 'paused').length || 0;
 
     if (activeConnections === 0 && pausedConnections === 0) {
-      suggestion = ctx.requestUrl && isDirectoryMcpRequest(ctx.requestUrl)
-        ? `Entity "${primaryEntity.name}" found with no connections. Configure integrations in Lobu to collect source data.`
-        : `Entity "${primaryEntity.name}" found with no connections. Use search_sdk to choose a connector and feed, then run_sdk with client.connections.connect({ connector_key: '<connector_key>' }), client.feeds.create({ connection_id: <connection_id>, feed_key: '<feed_key>', entity_ids: [${primaryEntity.id}], config: {} }) to target this entity, and client.feeds.trigger({ feed_id: <feed_id> }) to collect now.`;
+      suggestion = `Entity "${primaryEntity.name}" found with no connections. Use search_sdk to choose a connector and feed, then run_sdk with client.connections.connect({ connector_key: '<connector_key>' }), client.feeds.create({ connection_id: <connection_id>, feed_key: '<feed_key>', entity_ids: [${primaryEntity.id}], config: {} }) to target this entity, and client.feeds.trigger({ feed_id: <feed_id> }) to collect now.`;
     } else if (activeConnections === 0 && pausedConnections > 0) {
       suggestion = `Entity "${primaryEntity.name}" has ${pausedConnections} paused connection(s). Reactivate a connection to resume collection.`;
     } else {

@@ -12,7 +12,6 @@ import {
 } from '../../utils/public-origin';
 import { resolveBaseUrl, safeParseUrl } from '../base-url';
 import { DEFAULT_SCOPES_STRING, getMcpConnectionScopes } from './scopes';
-import { isAccountMcpPath } from '../../mcp-surface';
 
 /**
  * The request URL as the client sees it: the serving/forwarded origin when it
@@ -145,7 +144,7 @@ export function canonicalizeMcpResource(
     return null;
   }
   const path = parsed.pathname.replace(/\/+$/, '') || '/';
-  if (!isAccountMcpPath(path) && !/^\/mcp\/[^/]+$/.test(path)) return null;
+  if (path !== '/mcp' && !/^\/mcp\/[^/]+$/.test(path)) return null;
   return `${parsed.origin}${path}`;
 }
 
