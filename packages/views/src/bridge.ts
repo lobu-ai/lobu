@@ -1,7 +1,7 @@
 /**
  * Hand-written MCP Apps guest transport for Lobu views.
  *
- * Zero dependencies on purpose: the spike measured zod + MCP SDK + ext-apps at
+ * No protocol SDK dependencies: the spike measured zod + MCP SDK + ext-apps at
  * 378 KB of a 577 KB view bundle, so the guest speaks the wire protocol
  * directly instead of importing `@modelcontextprotocol/ext-apps`. The method
  * names below mirror that SDK (protocol version `2026-01-26`): the host side

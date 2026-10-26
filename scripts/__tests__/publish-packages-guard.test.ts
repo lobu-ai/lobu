@@ -10,6 +10,7 @@
 import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -574,16 +575,15 @@ describe("@lobu/views release selection", () => {
 
 /**
  * Packs the real @lobu/views dist and loads it the way an external consumer
- * does: only the tarball contents plus peer dependencies are visible, never
+ * does: only packed contents and declared dependencies are visible, never
  * the monorepo fall-through.
  */
 describe("@lobu/views packed dist (consumer fixture)", () => {
-  it("loads the published export with only peers present", async () => {
+  it("loads the published export with only declared dependencies present", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "lobu-views-consumer-"));
     try {
       // The public declarations reuse core's contract types. Build that
-      // dependency even in the format-lint job's clean checkout; the runtime
-      // consumer below still receives only the tarball and React peers.
+      // dependency even in the format-lint job's clean checkout.
       const core = spawnSync(
         process.execPath,
         [
@@ -650,6 +650,45 @@ describe("@lobu/views packed dist (consumer fixture)", () => {
       const modules = join(scratch, "node_modules");
       mkdirSync(join(modules, "@lobu"), { recursive: true });
       symlinkSync(join(extracted, "package"), join(modules, "@lobu", "views"));
+      // @lobu/core is a declared runtime dependency. Supply its packed bytes,
+      // rather than linking the checkout and masking missing package files.
+      expect(Object.keys(transformed.dependencies)).toEqual(["@lobu/core"]);
+      const corePackage = join(scratch, "core-package");
+      mkdirSync(corePackage);
+      for (const dir of ["src", "dist"]) {
+        cpSync(join(REPO_ROOT, "packages/core", dir), join(corePackage, dir), {
+          recursive: true,
+        });
+      }
+      const coreManifest = rewriteWorkspaceRefs(
+        JSON.parse(
+          readFileSync(join(REPO_ROOT, "packages/core/package.json"), "utf8")
+        )
+      );
+      expect(transformed.dependencies["@lobu/core"]).toBe(coreManifest.version);
+      writeFileSync(
+        join(corePackage, "package.json"),
+        JSON.stringify(coreManifest)
+      );
+      const corePack = spawnSync(
+        "npm",
+        ["pack", corePackage, "--pack-destination", scratch],
+        { encoding: "utf8" }
+      );
+      expect(corePack.status, corePack.stderr).toBe(0);
+      const coreExtracted = join(scratch, "core-extracted");
+      mkdirSync(coreExtracted);
+      const coreTarball = join(
+        scratch,
+        corePack.stdout.trim().split("\n").pop()!.trim()
+      );
+      expect(
+        spawnSync("tar", ["xzf", coreTarball, "-C", coreExtracted]).status
+      ).toBe(0);
+      symlinkSync(
+        join(coreExtracted, "package"),
+        join(modules, "@lobu", "core")
+      );
       for (const peer of ["react", "react-dom"]) {
         symlinkSync(join(REPO_ROOT, "node_modules", peer), join(modules, peer));
       }
@@ -666,12 +705,14 @@ describe("@lobu/views packed dist (consumer fixture)", () => {
           ``,
         ].join("\n")
       );
-      const run = spawnSync(process.execPath, [join(scratch, "run.mjs")], {
-        cwd: scratch,
-        encoding: "utf8",
-      });
-      expect(`${run.stdout}${run.stderr}`).toContain("CONSUMER_OK");
-      expect(run.status).toBe(0);
+      for (const runtime of [process.execPath, "node"]) {
+        const run = spawnSync(runtime, [join(scratch, "run.mjs")], {
+          cwd: scratch,
+          encoding: "utf8",
+        });
+        expect(`${run.stdout}${run.stderr}`).toContain("CONSUMER_OK");
+        expect(run.status).toBe(0);
+      }
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
