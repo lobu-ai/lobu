@@ -179,6 +179,7 @@ describe("executeAgentTurnRun", () => {
     expect(reported.calls[0]).toEqual({
       run_id: 4242,
       worker_id: WORKER_ID,
+      turn_credential: "lobu_secret_placeholder",
       status: "completed",
       text: "hi",
       stop_reason: "stop",
@@ -468,6 +469,7 @@ describe("executeAgentTurnRun", () => {
       {
         run_id: 4242,
         worker_id: WORKER_ID,
+        turn_credential: "lobu_secret_placeholder",
         status: "failed",
         error: "the isolate ran out of memory",
         exit_reason: "error_message",
@@ -598,6 +600,42 @@ describe("executeAgentTurnRun cancellation", () => {
     // The arm reports the failure it saw; the server has already written the
     // run as cancelled, so this completion is fenced out there.
     expect(reported.calls[0]?.status).toBe("failed");
+  });
+
+  test("stops the guest when a beat is refused because this attempt no longer owns the run", async () => {
+    const reported: Reported = { calls: [] };
+    const sentCredentials: Array<string | undefined> = [];
+    const client = {
+      ...fakeClient(reported),
+      heartbeat: async (...args: unknown[]) => {
+        sentCredentials.push(args[5] as string | undefined);
+        throw new WorkerHttpError(409, "/api/workers/heartbeat", "This agent turn attempt no longer owns the run");
+      },
+    };
+    let aborted = false;
+    const executor: SyncExecutor = {
+      execute: async (_code, _job, hooks) => {
+        await new Promise<void>((resolve, reject) => {
+          const signal = hooks?.signal;
+          if (!signal) return reject(new Error("the arm passed no abort signal"));
+          signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(new Error("the run was superseded"));
+          });
+          setTimeout(resolve, 2_000);
+        });
+        return { mode: "agent_turn", turn: { text: "never", stopReason: "stop", usage: null, consumedInputs: [], sessionJsonl: SESSION_JSONL } };
+      },
+    };
+
+    const started = Date.now();
+    await executeAgentTurnRun(client as never, turnJob(), {}, { ...cfgWith(executor), heartbeatIntervalMs: 5 });
+    expect(aborted).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1_500);
+    // Every beat names the attempt it speaks for: the credential it was claimed with.
+    expect(sentCredentials.length).toBeGreaterThan(0);
+    expect(sentCredentials.every((credential) => credential === "lobu_secret_placeholder")).toBe(true);
+    expect(reported.calls[0]).toMatchObject({ status: "failed", turn_credential: "lobu_secret_placeholder" });
   });
 
   test("leaves a healthy turn alone", async () => {

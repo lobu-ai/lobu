@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { isExplicitCancelMessage, isSteerableHumanMessage, verifyWorkerToken, type AgentErrorContext, type MessagePayload, type SuggestedPrompt, type WorkerTokenData } from '@lobu/core';
+import { decrypt, isExplicitCancelMessage, isSteerableHumanMessage, verifyWorkerToken, type AgentErrorContext, type MessagePayload, type SuggestedPrompt, type WorkerTokenData } from '@lobu/core';
 import { AGENT_TURN_INPUT_MAX, type AgentTurnPollPayload, type HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
 import { CURRENT_SESSION_VERSION } from '@mariozechner/pi-coding-agent';
 import { getDb, type DbClient } from '../db/client';
@@ -55,6 +55,53 @@ export class StaleAgentTurnAttemptError extends Error {
 }
 
 /**
+ * The attempt a turn credential names: its `jti`. Each claim of a re-run gets a
+ * freshly minted credential (the reaper rotates it on requeue) and a refresh
+ * keeps the jti, so the jti identifies one attempt for its whole life.
+ *
+ * Decoded, not verified: the AES-GCM envelope already proves the server minted
+ * it, and the TTL is the wrong question here. The run's stored copy keeps its
+ * mint timestamp while the worker refreshes its own, so a TTL check would
+ * retire a live attempt.
+ */
+function turnCredentialJti(credential: unknown): string | undefined {
+  if (typeof credential !== 'string' || credential.length === 0) return undefined;
+  try {
+    const payload: unknown = JSON.parse(decrypt(credential));
+    if (!payload || typeof payload !== 'object') return undefined;
+    const { tokenKind, jti } = payload as { tokenKind?: unknown; jti?: unknown };
+    return tokenKind === 'worker' && typeof jti === 'string' && jti.length > 0 ? jti : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * THE attempt fence: does `attemptJti` name the attempt that currently holds
+ * this agent turn (the credential the run was last claimed with)? `claimed_by`
+ * cannot say this when the same worker id re-claims a re-run. Every report
+ * from an attempt goes through here: gateway tool calls
+ * ({@link markAgentTurnToolStarted}), heartbeats (deltas and tool traces ride
+ * them) and the completion.
+ */
+export function isCurrentAgentTurnAttempt(runCredential: unknown, attemptJti: string | undefined): boolean {
+  const current = turnCredentialJti(runCredential);
+  return current !== undefined && current === attemptJti;
+}
+
+/**
+ * True when a worker report (heartbeat or completion) carries a turn
+ * credential that does not name the run's current attempt. A report with no
+ * `turn_credential` retains the older `claimed_by` fence. That cannot
+ * distinguish attempts when the same worker re-claims a run, so mixed-version
+ * fleets do not have the attempt-level guarantee until every worker sends it.
+ */
+export function isStaleAgentTurnReport(runType: string | null | undefined, runCredential: unknown, turnCredential: unknown): boolean {
+  if (turnCredential === undefined || runType !== 'agent_turn') return false;
+  return !isCurrentAgentTurnAttempt(runCredential, turnCredentialJti(turnCredential));
+}
+
+/**
  * Record, BEFORE the gateway executes it, that a call made with an agent
  * turn's credential may have a side effect — so the reaper never re-runs that
  * attempt (`sweepStaleAgentTurnRuns`). The worker reports a tool only when it
@@ -82,8 +129,7 @@ export async function markAgentTurnToolStarted(
       SELECT status, action_input->>'credential' AS credential FROM runs
       WHERE id = ${runId} AND run_type = 'agent_turn' AND organization_id = ${claims.organizationId ?? null}
       FOR UPDATE`;
-    const current = row?.credential ? verifyWorkerToken(row.credential) : null;
-    if (!row || row.status !== 'running' || !claims.jti || current?.jti !== claims.jti) {
+    if (!row || row.status !== 'running' || !isCurrentAgentTurnAttempt(row.credential, claims.jti)) {
       throw new StaleAgentTurnAttemptError();
     }
     await tx`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"turn_tool_started": true}'::jsonb
@@ -273,6 +319,7 @@ function turnMarkerDeployment(run: Pick<NativeTurnRun, 'organization_id' | 'acti
  */
 export async function extendHeartbeatedTurnMarker(
   runId: number,
+  turnCredential?: string,
 ): Promise<void> {
   try {
     // Its OWN connection, never the caller's transaction handle: the caller
@@ -282,12 +329,16 @@ export async function extendHeartbeatedTurnMarker(
     // A plain read, deliberately not `lockAgentTurnRun`: this runs on every
     // heartbeat and only needs the envelope's identity, so taking the
     // conversation lock here would serialize heartbeats behind turn admission.
+    // The attempt check is therefore not atomic with the extension; losing that
+    // race only extends the replacement attempt's own marker, which its own
+    // beats extend anyway.
     const sql = getDb();
     const [run] = await sql<NativeTurnRun>`
       SELECT id, organization_id, action_input
       FROM runs WHERE id = ${runId} AND run_type = 'agent_turn'
     `;
-    const deployment = run && turnMarkerDeployment(run);
+    if (!run || isStaleAgentTurnReport('agent_turn', run.action_input?.credential, turnCredential)) return;
+    const deployment = turnMarkerDeployment(run);
     // The reaper-backstop deadline, not the shorter execution one: a dead
     // worker's turn is the run reaper's call (re-run or WORKER_DIED), so the
     // marker must outlast it.

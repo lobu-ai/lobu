@@ -4890,6 +4890,39 @@ describe('agent turn reaper', () => {
     expect(effects).toHaveBeenCalledTimes(1);
   });
 
+  it('fences a stalled attempt\'s late heartbeat and completion after the same worker re-claims the re-run', async () => {
+    const worker_id = 'fleet-same-worker';
+    const runId = await claimedTurnRun(worker_id, 'slack');
+    const oldCredential = await credentialOf(runId);
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+    // The SAME worker id claims the re-run, so `claimed_by` alone cannot tell
+    // the stalled first attempt from the new one.
+    const retry = await (await pollFleet(worker_id, { agent_turn: true })).json();
+    expect(retry.run_id).toBe(runId);
+    const newCredential = retry.credentials.accessToken as string;
+    expect(newCredential).not.toBe(oldCredential);
+
+    const lateBeat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId, worker_id, turn_credential: oldCredential, turn_delta: { text: 'stale span', sequence: 1 },
+    });
+    expect(lateBeat.status).toBe(409);
+    const lateCompletion = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id, turn_credential: oldCredential, status: 'failed', error: 'stale attempt failed',
+    });
+    expect(lateCompletion.status).toBe(409);
+    expect((await turnRow(runId)).status).toBe('running');
+    expect(await threadResponses()).toHaveLength(0);
+
+    const beat = await postAsFleet('/api/workers/heartbeat', { run_id: runId, worker_id, turn_credential: newCredential });
+    expect(await beat.json()).toMatchObject({ continue: true });
+    const done = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id, turn_credential: newCredential, status: 'completed', text: 'the isolate answer', session_jsonl: nativeSession(),
+    });
+    expect(await done.json()).toMatchObject({ ok: true, status: 'completed' });
+    expect((await turnRow(runId)).status).toBe('completed');
+  });
+
   it('never re-runs a cancelled turn', async () => {
     const runId = await claimedTurnRun('fleet-cancelled');
     await loseHeartbeat(runId);

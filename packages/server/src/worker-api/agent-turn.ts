@@ -43,7 +43,7 @@ import { incrementCounter } from "../gateway/metrics/prometheus";
 import { intervals } from "../config/intervals";
 import { runLeaseFence } from "../runs/run-lease";
 import { classifyRunOutcome } from "../runs/run-outcome";
-import { AGENT_TURN_MAX_REQUEUES, insertAgentTurnResponse, agentTurnClaimEligible, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, resetAgentTurnAdmission, type NativeTurnRun } from "../runs/agent-turn-inputs";
+import { AGENT_TURN_MAX_REQUEUES, insertAgentTurnResponse, agentTurnClaimEligible, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, resetAgentTurnAdmission, type NativeTurnRun } from "../runs/agent-turn-inputs";
 import { errorMessage } from "../utils/errors";
 import { stripNul } from "../utils/strip-nul";
 import { authorizeRunForWorker } from "./shared";
@@ -232,12 +232,14 @@ type TurnDeltaOutcome = { published: boolean };
 async function publishTurnDelta(
 	runId: number,
 	workerId: string,
-	delta: { text: string; sequence: number }
+	delta: { text: string; sequence: number },
+	turnCredential?: string
 ): Promise<TurnDeltaOutcome> {
 	const sql = getDb();
 	const emitted = await sql.begin(async (tx) => {
 		const owner = await lockAgentTurnRun(tx, runId);
-		if (!owner || owner.run_metadata?.cancel_requested_at) return false;
+		if (!owner || owner.run_metadata?.cancel_requested_at
+			|| isStaleAgentTurnReport('agent_turn', owner.action_input?.credential, turnCredential)) return false;
 		// One statement, fenced on the lease, so a run cancelled or re-claimed
 		// between the read and the write cannot have a stale worker's text
 		// published into its conversation. The sequence is kept on the
@@ -341,13 +343,15 @@ async function publishTurnDelta(
 async function publishTurnToolEvents(
 	runId: number,
 	workerId: string,
-	events: readonly AgentTurnToolEvent[]
+	events: readonly AgentTurnToolEvent[],
+	turnCredential?: string
 ): Promise<number> {
 	if (events.length === 0) return 0;
 	const sql = getDb();
 	const stored = await sql.begin(async (tx) => {
 		const owner = await lockAgentTurnRun(tx, runId);
-		if (!owner || owner.run_metadata?.cancel_requested_at) return 0;
+		if (!owner || owner.run_metadata?.cancel_requested_at
+			|| isStaleAgentTurnReport('agent_turn', owner.action_input?.credential, turnCredential)) return 0;
 		const rows = (await tx`
       SELECT action_input, organization_id
       FROM public.runs
@@ -586,10 +590,11 @@ async function insertTurnToolEventRows(
 export async function publishTurnToolEventsBestEffort(
 	runId: number,
 	workerId: string,
-	events: readonly AgentTurnToolEvent[]
+	events: readonly AgentTurnToolEvent[],
+	turnCredential?: string
 ): Promise<number | undefined> {
 	try {
-		return await publishTurnToolEvents(runId, workerId, events);
+		return await publishTurnToolEvents(runId, workerId, events, turnCredential);
 	} catch (err) {
 		incrementCounter("lobu_turn_tool_event_publish_failed_total");
 		logger.debug(
@@ -627,10 +632,11 @@ let lastDeltaFailureLogAt = 0;
 export async function publishTurnDeltaBestEffort(
 	runId: number,
 	workerId: string,
-	delta: { text: string; sequence: number }
+	delta: { text: string; sequence: number },
+	turnCredential?: string
 ): Promise<TurnDeltaOutcome | undefined> {
 	try {
-		return await publishTurnDelta(runId, workerId, delta);
+		return await publishTurnDelta(runId, workerId, delta, turnCredential);
 	} catch (err) {
 		incrementCounter("lobu_turn_delta_publish_failed_total");
 		const now = Date.now();
@@ -667,12 +673,14 @@ export async function publishTurnDeltaBestEffort(
  */
 async function publishTurnStatus(
 	runId: number,
-	workerId: string
+	workerId: string,
+	turnCredential?: string
 ): Promise<void> {
 	const sql = getDb();
 	const emitted = await sql.begin(async (tx) => {
 		const owner = await lockAgentTurnRun(tx, runId);
-		if (!owner || owner.run_metadata?.cancel_requested_at) return false;
+		if (!owner || owner.run_metadata?.cancel_requested_at
+			|| isStaleAgentTurnReport('agent_turn', owner.action_input?.credential, turnCredential)) return false;
 		const rows = (await tx`
       SELECT action_input, organization_id, claimed_at
       FROM public.runs
@@ -722,10 +730,11 @@ async function publishTurnStatus(
 /** Never let a status publish fail the heartbeat that carried it. */
 export async function publishTurnStatusBestEffort(
 	runId: number,
-	workerId: string
+	workerId: string,
+	turnCredential?: string
 ): Promise<void> {
 	try {
-		await publishTurnStatus(runId, workerId);
+		await publishTurnStatus(runId, workerId, turnCredential);
 	} catch (err) {
 		incrementCounter("lobu_turn_status_publish_failed_total");
 		logger.debug(
@@ -876,6 +885,12 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     const run = await lockAgentTurnRun(tx, body.run_id, true);
     if (!run) return { error: 'Agent turn run not found', code: 404 as const };
     if (run.claimed_by !== body.worker_id) return { error: 'Run is not owned by this worker', code: 409 as const };
+    // Before the terminal checks: a stalled attempt's late report must not
+    // terminalize (or be acknowledged against) the attempt that re-claimed the
+    // run under the same worker id.
+    if (isStaleAgentTurnReport('agent_turn', run.action_input?.credential, body.turn_credential)) {
+      return { error: 'This agent turn attempt no longer owns the run', code: 409 as const };
+    }
     if (!['claimed', 'running', 'pending'].includes(run.status)) {
       const terminal = run.status === 'completed' ? 'completed' : run.status === 'cancelled' ? 'cancelled' : 'failed';
       // Exact-retry idempotence, checked BEFORE any new-write/seal work: the

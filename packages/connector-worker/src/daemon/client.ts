@@ -36,7 +36,8 @@ export interface ExecutorClient {
     },
     agentSession?: NonNullable<HeartbeatRequest['agent_session']>,
     turnDelta?: NonNullable<HeartbeatRequest['turn_delta']>,
-    turnToolEvents?: NonNullable<HeartbeatRequest['turn_tool_events']>
+    turnToolEvents?: NonNullable<HeartbeatRequest['turn_tool_events']>,
+    turnCredential?: string
   ): Promise<HeartbeatResponse>;
   stream(batch: StreamBatch): Promise<void>;
   complete(req: CompleteRequest): Promise<void>;
@@ -406,7 +407,13 @@ export class WorkerClient implements ExecutorClient {
      */
     turnDelta?: NonNullable<HeartbeatRequest['turn_delta']>,
     /** Tool calls the turn finished since the last beat. */
-    turnToolEvents?: NonNullable<HeartbeatRequest['turn_tool_events']>
+    turnToolEvents?: NonNullable<HeartbeatRequest['turn_tool_events']>,
+    /**
+     * The agent turn credential this attempt was claimed with, so the gateway
+     * can refuse a stalled attempt's beat (409) after the run was re-queued and
+     * re-claimed — see `HeartbeatRequestSchema.turn_credential`.
+     */
+    turnCredential?: string
   ): Promise<HeartbeatResponse> {
     // A stalled response must release the turn's serialized delta beat before
     // the next 30s liveness interval. The deadline covers the response body too.
@@ -419,6 +426,7 @@ export class WorkerClient implements ExecutorClient {
       ...(turnToolEvents && turnToolEvents.length > 0
         ? { turn_tool_events: turnToolEvents }
         : {}),
+      ...(turnCredential ? { turn_credential: turnCredential } : {}),
     }, AbortSignal.timeout(15_000));
   }
 
