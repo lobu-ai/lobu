@@ -188,6 +188,38 @@ describe("POST /inference-providers seeds a routable text model", () => {
 		expect(await sql`SELECT id FROM events WHERE organization_id = ${ORG} AND metadata->>'resource_kind' = 'inference-provider'`).toHaveLength(1);
 	});
 
+	test("audit failure rolls back provider creation, edits, defaults, keys and deletion", async () => {
+		for (const slug of ["original", "alternate"]) expect((await createProvider({ slug, kind: "gemini", apiKey: `synthetic-${slug}` })).status).toBe(201);
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const snapshot = async () => ({
+			providers: await sql`SELECT * FROM inference_providers WHERE organization_id = ${ORG} ORDER BY id`,
+			secrets: await sql`SELECT name, ciphertext FROM agent_secrets WHERE organization_id = ${ORG} ORDER BY name`,
+			audits: await sql`SELECT id FROM events WHERE organization_id = ${ORG} AND metadata->>'category' = 'config' ORDER BY id`,
+		});
+		const before = await snapshot();
+		await sql.unsafe("CREATE FUNCTION reject_provider_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.metadata->>'category' = 'config' THEN RAISE EXCEPTION 'synthetic provider audit failure'; END IF; RETURN NEW; END $$");
+		await sql.unsafe("CREATE TRIGGER reject_provider_audit BEFORE INSERT ON events FOR EACH ROW EXECUTE FUNCTION reject_provider_audit()");
+		try {
+			expect((await createProvider({ slug: "rejected", kind: "gemini", apiKey: "synthetic-rejected" })).status).toBe(500);
+			const { agentRoutes } = await import("../agent-routes.js");
+			for (const [path, method, body] of [
+				["original", "PUT", { displayName: "Changed" }],
+				["alternate/default", "PUT", {}],
+				["original/key", "PUT", { value: "synthetic-rotated" }],
+				["original/capabilities/text", "PUT", { block: { model: "synthetic-model" } }],
+				["original", "DELETE", {}],
+			] as const) {
+				const response = await agentRoutes.request(`/inference-providers/${path}`, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+				expect(response.status).toBe(500);
+				expect(await snapshot()).toEqual(before);
+			}
+		} finally {
+			await sql.unsafe("DROP TRIGGER reject_provider_audit ON events");
+			await sql.unsafe("DROP FUNCTION reject_provider_audit()");
+		}
+	});
+
 	test("concurrent creates serialize without a parent-lock upgrade deadlock", async () => {
 		const { getDb } = await import("../../db/client.js");
 		const sql = getDb();
