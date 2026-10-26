@@ -39,8 +39,8 @@ const KNOWN: Record<string, string> = {
   // Tool entry points: the caller's own ToolContext.
   'tools/admin/manage_feeds.ts -> sourceReadScopeFromToolContext': 'read_feeds ToolContext',
   'tools/admin/manage_feeds.ts -> readSourceFeedPage': 'that scope',
-  'tools/admin/manage_entity.ts -> sourceReadScopeFromToolContext': 'record links ToolContext',
-  'tools/admin/manage_entity.ts -> readSourceRecordLinks': 'that scope',
+  'utils/relationship-reads.ts -> sourceReadScopeFromToolContext': 'record links ToolContext forwarded unchanged by manage_entity',
+  'utils/relationship-reads.ts -> readSourceRecordLinks': 'that scope, preserving tokenType and sourceContext',
   'tools/get_content/handler.ts -> sourceReadScopeFromToolContext': 'record activity ToolContext',
   'tools/get_content/handler.ts -> readSourceRecordActivity': 'that scope',
   'tools/get_content/handler.ts -> handleAutomationMode': 'ctx.sourceContext + ctx.tokenType',
