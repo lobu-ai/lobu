@@ -43,7 +43,7 @@ import { incrementCounter } from "../gateway/metrics/prometheus";
 import { intervals } from "../config/intervals";
 import { runLeaseFence } from "../runs/run-lease";
 import { classifyRunOutcome } from "../runs/run-outcome";
-import { AGENT_TURN_MAX_REQUEUES, insertAgentTurnResponse, agentTurnClaimEligible, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, resetAgentTurnAdmission, type NativeTurnRun } from "../runs/agent-turn-inputs";
+import { AGENT_TURN_MAX_REQUEUES, AGENT_TURN_TOOL_LOG_MAX, insertAgentTurnResponse, agentTurnClaimEligible, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, resetAgentTurnAdmission, type NativeTurnRun } from "../runs/agent-turn-inputs";
 import { errorMessage } from "../utils/errors";
 import { stripNul } from "../utils/strip-nul";
 import { authorizeRunForWorker } from "./shared";
@@ -387,10 +387,18 @@ async function publishTurnToolEvents(
 		});
 		// Committed with the traces. The gateway already stamped this for any
 		// side-effecting call (`markAgentTurnToolStarted`); a stored trace is
-		// the same evidence for a tool that reached no gateway route.
-		if (stored > 0 && owner.run_metadata?.turn_tool_started !== true) {
+		// the same evidence for a tool that reached no gateway route. The owner
+		// input's trace ids are kept too, so a Retry of this turn can read the
+		// stored traces back by key (`buildInterruptedTurnNote`).
+		const known = owner.run_metadata?.turn_tool_call_ids ?? [];
+		const callIds = [...new Set([
+			...known,
+			...events.slice(0, stored).filter((event) => event.input_run_id === undefined).map((event) => event.tool_call_id),
+		])].slice(0, AGENT_TURN_TOOL_LOG_MAX);
+		if (stored > 0 && (owner.run_metadata?.turn_tool_started !== true || callIds.length !== known.length)) {
 			await tx`UPDATE public.runs
-        SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"turn_tool_started": true}'::jsonb
+        SET run_metadata = COALESCE(run_metadata, '{}'::jsonb)
+          || ${tx.json({ turn_tool_started: true, turn_tool_call_ids: callIds })}::jsonb
         WHERE id = ${runId}`;
 		}
 		return stored;
@@ -408,7 +416,7 @@ async function publishTurnToolEvents(
  * same call compute the same key with different bodies, which is the conflict
  * the insert path rejects.
  */
-function turnToolEventKey(args: {
+export function turnToolEventKey(args: {
 	organizationId: string | null;
 	conversationId: string;
 	messageId: string;
@@ -1165,7 +1173,8 @@ export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise
       const rows = await tx`UPDATE runs r SET status = ${status}, completed_at = now(),
         outcome = ${classifyRunOutcome({ status })}, exit_reason = ${cancelled ? 'cancelled' : 'timeout'},
         error_message = ${cancelled ? 'agent turn cancelled' : neverClaimed ? 'worker_claim_timeout'
-          : wedged ? 'turn_max_age_exceeded' : 'worker_heartbeat_lost'}
+          : wedged ? 'turn_max_age_exceeded' : 'worker_heartbeat_lost'},
+        run_metadata = COALESCE(r.run_metadata, '{}'::jsonb) || ${tx.json(cancelled ? {} : { turn_error_code: code })}::jsonb
         WHERE r.id = ${run.id} AND ${stale(tx)} RETURNING r.id`;
       if (!rows.length) return null;
       await releaseNextAgentTurn(tx, run);

@@ -19,7 +19,7 @@ import {
   type SuggestedPrompt,
 } from "@lobu/core";
 import { toAgentErrorCode } from "@lobu/core";
-import { Actions, Card, CardText, LinkButton } from "chat";
+import { Actions, Button, Card, CardText, LinkButton } from "chat";
 import { getDb } from "../../db/client.js";
 import {
   buildAgentSettingsUrl,
@@ -34,6 +34,10 @@ import {
 } from "../../automations/schedule-cursor.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { InteractionService } from "../interactions.js";
+import {
+  isRetryableTurnError,
+  turnRetryActionId,
+} from "../orchestration/agent-turn-retry.js";
 import { interactionTeamId } from "../orchestration/worker-token-claims.js";
 import {
   OutputGuardrailScanner,
@@ -780,6 +784,29 @@ export class ChatResponseBridge implements ResponseRenderer {
           label: ctaButton.ctaLabel,
         }),
         "Failed to send error card"
+      );
+      return;
+    }
+
+    // A native turn its worker failed to finish gets a Retry button: pressing
+    // it re-admits the same message (`retryInterruptedAgentTurn`, handled by
+    // the interaction bridge's `turn-retry:` action).
+    if (code && isRetryableTurnError(code) && payload.turnRunId != null) {
+      await this.postToPayloadTarget(
+        payload,
+        ctx,
+        {
+          card: Card({
+            children: [
+              CardText(payload.error),
+              Actions([
+                Button({ id: turnRetryActionId(payload.turnRunId), label: "Retry" }),
+              ]),
+            ],
+          }),
+          fallbackText: payload.error,
+        },
+        "Failed to send retryable error card"
       );
       return;
     }

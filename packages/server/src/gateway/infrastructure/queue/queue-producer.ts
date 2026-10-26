@@ -6,6 +6,31 @@ import type { IMessageQueue } from "./types.js";
 const logger = createLogger("queue-producer");
 
 /**
+ * The `messages` job options for `payload`: one admission per message within
+ * its canonical conversation identity while a row is live. Shared by every
+ * writer of that queue so they collide on the same singleton key.
+ */
+export function messagesJobOptions(
+  payload: MessagePayload,
+  options?: {
+    priority?: number;
+    retryLimit?: number;
+    retryDelay?: number;
+    expireInSeconds?: number;
+  }
+) {
+  // Preserve the existing key normalization so retries collide with ordinary admissions.
+  const rawSingletonKey = `message-${payload.platform}-${payload.channelId}-${payload.conversationId}-${payload.messageId || Date.now()}`;
+  return {
+    priority: options?.priority || 0,
+    retryLimit: options?.retryLimit || 3,
+    retryDelay: options?.retryDelay || 30,
+    expireInSeconds: options?.expireInSeconds || 300,
+    singletonKey: rawSingletonKey.replace(/:/g, "-"),
+  };
+}
+
+/**
  * Queue producer for dispatching messages to the runs queue.
  * Handles both direct_message and thread_message queues with bot isolation.
  */
@@ -60,22 +85,11 @@ export class QueueProducer {
 
     try {
       // All messages go to the single 'messages' queue.
-      //
-      // BullMQ interprets ':' in custom jobIds as an internal repeatable-job
-      // separator and rejects anything with more/fewer than 3 colon segments.
-      // Platform identifiers from the Chat SDK (e.g. Slack's
-      // `slack:C09EH3ASNQ1`, message timestamps like `1776219228.000100`
-      // that can embed colons in some paths) would all blow up enqueue.
-      // Sanitize the *entire* singletonKey — not just the messageId — so any
-      // platform's channelId/conversationId/messageId scheme is safe.
-      const rawSingletonKey = `message-${payload.platform}-${payload.channelId}-${payload.conversationId}-${payload.messageId || Date.now()}`;
-      const jobId = await this.queue.send("messages", payload, {
-        priority: options?.priority || 0,
-        retryLimit: options?.retryLimit || 3,
-        retryDelay: options?.retryDelay || 30,
-        expireInSeconds: options?.expireInSeconds || 300, // 5 minutes = 300 seconds
-        singletonKey: rawSingletonKey.replace(/:/g, "-"), // Prevent duplicates within canonical conversation identity
-      });
+      const jobId = await this.queue.send(
+        "messages",
+        payload,
+        messagesJobOptions(payload, options)
+      );
 
       logger.info(
         `Enqueued message job ${jobId} for user ${payload.userId}, conversation ${payload.conversationId}`

@@ -226,6 +226,41 @@ describe("ChatResponseBridge.handleDelta — AsyncIterable streaming", () => {
     }
   );
 
+  test("handleError gives a native turn's worker failure a Retry button", async () => {
+    // WORKER_DIED on an agent turn (it carries `turnRunId`): the card's button
+    // is the `turn-retry:` action the interaction bridge turns into a retry.
+    const { target, plainPosts } = createStreamingTarget();
+    const { manager } = createHarness(target);
+    const bridge = new ChatResponseBridge(manager as any);
+
+    await bridge.handleError(
+      { ...basePayload, error: "worker_heartbeat_lost", errorCode: "WORKER_DIED", turnRunId: 42 },
+      "s"
+    );
+
+    expect(plainPosts).toHaveLength(1);
+    const posted = plainPosts[0] as { card: unknown; fallbackText: string };
+    expect(posted.fallbackText).toContain("stopped unexpectedly");
+    const card = JSON.stringify(posted.card);
+    expect(card).toContain('"id":"turn-retry:42"');
+    expect(card).toContain('"label":"Retry"');
+  });
+
+  test("handleError offers no Retry for a worker failure that is not a native turn's", async () => {
+    const { target, plainPosts } = createStreamingTarget();
+    const { manager } = createHarness(target);
+    const bridge = new ChatResponseBridge(manager as any);
+
+    await bridge.handleError(
+      { ...basePayload, error: "worker_heartbeat_lost", errorCode: "WORKER_DIED" },
+      "s"
+    );
+
+    expect(plainPosts).toHaveLength(1);
+    expect(typeof plainPosts[0]).toBe("string");
+    expect(String(plainPosts[0])).toContain("stopped unexpectedly");
+  });
+
   test("handleError with no prior stream still posts fallback (worker crashed early)", async () => {
     // No delta was ever sent (e.g. NO_MODEL_CONFIGURED path calls signalError
     // with no preceding sendStreamDelta). The fallback is the only way the

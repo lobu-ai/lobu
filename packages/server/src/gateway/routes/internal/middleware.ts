@@ -46,7 +46,7 @@ export const authenticateWorker = async (
   // Reads are GET; anything else may have an effect, unknown routes included.
   if (c.req.method !== "GET" && c.req.method !== "HEAD") {
     try {
-      await markAgentTurnToolStarted(tokenData);
+      await markAgentTurnToolStarted(tokenData, GATEWAY_TOOL_ROUTES[route] ?? route);
     } catch (error) {
       if (error instanceof StaleAgentTurnAttemptError) {
         return c.json({ error: error.message }, 409);
@@ -57,6 +57,25 @@ export const authenticateWorker = async (
   c.set("worker", tokenData);
   await next();
   return undefined;
+};
+
+/**
+ * The model-facing tool behind each side-effecting route, so a retry note names
+ * a call the way the model made it. An unlisted route is named by its template.
+ */
+const GATEWAY_TOOL_ROUTES: Record<string, string> = {
+  "POST /internal/conversations/send": "send_message",
+  "POST /internal/conversations/present-event": "present_event",
+  "POST /internal/conversations/schedule-followup": "schedule_followup",
+  "POST /internal/conversations/react": "react",
+  "POST /internal/conversations/edit": "edit_message",
+  "POST /internal/conversations/delete": "delete_message",
+  "POST /internal/interactions/create": "ask_user",
+  "POST /internal/files/upload": "upload_file",
+  "POST /internal/files/upload-batch": "upload_file",
+  "POST /internal/images/generate": "generate_image",
+  "POST /internal/audio/synthesize": "generate_audio",
+  "POST /internal/runtime/exec": "bash",
 };
 
 const CAPTURE_ROUTES = new Set([
