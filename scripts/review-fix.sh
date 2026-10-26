@@ -17,8 +17,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/review-reviewer.sh"
 # shellcheck source=scripts/lib/review-skip.sh
 . "$SCRIPT_DIR/lib/review-skip.sh"
+# shellcheck source=scripts/lib/review-bb.sh
+. "$SCRIPT_DIR/lib/review-bb.sh"
 
 cd "$(dirname "$0")/.."
+
+review_fix_bb_cleanup() {
+  review_bb_cancel_owned
+}
+trap review_fix_bb_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 BASE_BRANCH="${BASE:-}"
 while [ $# -gt 0 ]; do
@@ -70,6 +79,12 @@ fi
 
 FIXER_CLI="$(review_select_reviewer "${REVIEWER_CLI:-auto}")"
 CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-fable}"
+
+if review_bb_wants_run; then
+  echo ">> BB context detected ($BB_THREAD_ID): routing the fixer through a visible BB child in an isolated worktree" >&2
+  review_bb_run_fixer "$BASE_BRANCH"
+  exit $?
+fi
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-high}"
 CODEX_REVIEW_MODEL="${CODEX_REVIEW_MODEL:-gpt-6-astra}"
 CODEX_REVIEW_EFFORT="${CODEX_REVIEW_EFFORT:-xhigh}"

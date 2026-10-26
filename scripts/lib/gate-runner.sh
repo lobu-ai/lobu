@@ -173,6 +173,7 @@ gate_format_lint() {
   bash scripts/lib/__tests__/review-commit-lock.test.sh || return 1
   bash scripts/lib/__tests__/review-process.test.sh || return 1
   bash scripts/lib/__tests__/review-reviewer.test.sh || return 1
+  bash scripts/lib/__tests__/review-bb.test.sh || return 1
   bash scripts/lib/__tests__/review-upstream-guard.test.sh || return 1
   bash scripts/lib/__tests__/review-skip.test.sh || return 1
   bash scripts/lib/__tests__/review-cache.test.sh || return 1
