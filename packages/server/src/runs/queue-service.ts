@@ -7,6 +7,7 @@
  * - JSON utilities for duplicate detection
  */
 
+import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 import { browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
 import { randomUUID } from 'node:crypto';
 import type { BrowserActionContext } from '../worker-api/browser-action-context';
@@ -465,26 +466,8 @@ async function createSyncRunWithClient(
     JOIN connections c ON c.id = f.connection_id
     LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
     LEFT JOIN LATERAL (
-      SELECT connector_definitions.id AS definition_id,
-             connector_definitions.feeds_schema -> f.feed_key -> 'operations' AS feed_operations
-      FROM connector_definitions
-      WHERE connector_definitions.key = c.connector_key
-        AND connector_definitions.organization_id = f.organization_id
-        AND (
-          (f.pinned_version IS NULL AND connector_definitions.status = 'active')
-          OR (
-            f.pinned_version IS NOT NULL
-            AND (
-              connector_definitions.version = f.pinned_version
-              OR connector_definitions.status = 'active'
-            )
-          )
-        )
-      ORDER BY (connector_definitions.version = f.pinned_version) DESC,
-               (connector_definitions.status = 'active') DESC,
-               connector_definitions.updated_at DESC,
-               connector_definitions.id DESC
-      LIMIT 1
+      SELECT d.id AS definition_id, d.feeds_schema -> f.feed_key -> 'operations' AS feed_operations
+      FROM (${feedDefinitionSelection(sql)}) d
     ) cd ON TRUE
     WHERE f.id = ${feedId}
   `;
