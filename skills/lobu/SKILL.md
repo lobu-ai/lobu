@@ -17,7 +17,7 @@ Use this playbook when a new user asks you to build them a Lobu agent from scrat
 
 Before interviewing, look at what already exists so your questions and suggestions are personal rather than a blank slate. This is discovery, not a design decision — do not let it skip the interview.
 
-- Local: run `lobu context list` to see existing contexts; check the current directory and home for existing Lobu projects (`lobu.config.ts`), configured MCP servers, and CLI auth state. Note what the user already set up.
+- Local: run `lobu context list` to see existing contexts (`--json` adds `loggedIn`, which reports stored credentials, not session validity); check the current directory and home for existing Lobu projects (`lobu.config.ts`), configured MCP servers, and CLI auth state. Note what the user already set up.
 - Cloud: if the user has an active session (do not create one just to look), call `client.organizations.list()`, `client.agents.list()` for each org, `client.catalog.listInstalled({ kinds: ["connectors"] })`, and `search_memory` for prior knowledge. This reveals existing agents, connectors, and memory you can build on.
 - Tell the user what you are looking at so they can correct you, and let what you find shape the options you offer. Never treat this discovery as an identity signal: orgs, emails, or domains never prove a company or product, and never mention a competitor or third party unless it actually appears in what you found.
 

@@ -3,15 +3,34 @@ import {
   addContext,
   getCurrentContextName,
   loadContextConfig,
+  loadCredentials,
   removeContext,
   resolveContext,
   setCurrentContext,
 } from "../internal/index.js";
 import type { LobuServerConfig } from "../internal/context.js";
 
-export async function contextListCommand(): Promise<void> {
+export async function contextListCommand(
+  options: { json?: boolean } = {}
+): Promise<void> {
   const config = await loadContextConfig();
   const currentContext = await getCurrentContextName();
+
+  if (options.json) {
+    // Stored credentials may be expired; listing must not refresh them.
+    const contexts = await Promise.all(
+      Object.entries(config.contexts).map(async ([name, context]) => ({
+        name,
+        url: context.url,
+        current: name === currentContext,
+        loggedIn: (await loadCredentials(name)) !== null,
+      }))
+    );
+    process.stdout.write(
+      `${JSON.stringify({ current: currentContext, contexts }, null, 2)}\n`
+    );
+    return;
+  }
 
   console.log(chalk.bold("\n  Lobu contexts"));
   for (const [name, context] of Object.entries(config.contexts)) {
