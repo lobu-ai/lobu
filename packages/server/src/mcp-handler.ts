@@ -66,6 +66,7 @@ import {
   toAccountToolContext,
 } from './tools/execute';
 import { resolveViewWorkspace } from './tools/open_view';
+import { VIEW_WORKSPACE_META_KEY } from '@lobu/core/contracts/tools/view-runtime';
 import { getMcpResultContent } from './tools/mcp-result-content';
 import { getMcpResultMeta } from './tools/mcp-result-meta';
 import { MCP_APP_CAPABILITY_MAX_LENGTH } from './tools/mcp-app-capability';
@@ -597,8 +598,16 @@ function createServerForContext(
       if (!hasRequiredMcpScope('read', authCtx.scopes)) {
         throw new Error('Reading views requires an MCP session with read access.');
       }
+      const viewOrganization = viewOrganizationFromResourceUri(uri);
+      // An account session has no workspace of its own: the frame names the
+      // one the view belongs to, as `open_view` wrote it into the resource id.
+      if (!viewOrganization && !authCtx.organizationId) {
+        throw new Error(
+          `Reading a view on an account session needs its workspace: ui://lobu/views/${viewKey}?organization=<slug>`
+        );
+      }
       const workspace = await resolveViewWorkspace(
-        toAccountToolContext(forThisRequest(authCtx)), viewOrganizationFromResourceUri(uri)
+        toAccountToolContext(forThisRequest(authCtx)), viewOrganization
       );
       if (!workspace.memberRole) throw new Error('Workspace membership is required to read views.');
       const storedView = await getServedView(workspace.organizationId, viewKey);
@@ -665,7 +674,7 @@ function createServerForContext(
       compatApprovalCapability || compatEventActionCapability
         ? stripCapabilityCompatMeta(args)
         : args;
-    const callAuthCtx = {
+    let callAuthCtx = {
       ...forThisRequest(authCtx),
       mcpAppsSupported,
       mcpConversationId: hostConversationIdFromMeta(request.params._meta),
@@ -691,14 +700,33 @@ function createServerForContext(
     // than silently drop the downgrade. `memberRole` is resolved server-side
     // from the membership row and returned only to the caller it describes,
     // so it can be neither forged nor read cross-tenant. Computed once here,
-    // outside the try, so a thrown error carries the same viewer role as a
+    // outside the try (re-authored only when a per-call workspace pin below
+    // resolves), so a thrown error carries the same viewer role as a
     // successful result and the app can never hold onto a stale role after a
     // downgrade.
-    const uiMemberRoleMeta: { 'lobu/member-role': string | null } | undefined = tool?.mcpMeta?.ui
+    let uiMemberRoleMeta: { 'lobu/member-role': string | null } | undefined = tool?.mcpMeta?.ui
       ? { 'lobu/member-role': callAuthCtx.memberRole }
       : undefined;
     // Regular tool execution
     try {
+      if (request.params._meta && Object.hasOwn(request.params._meta, VIEW_WORKSPACE_META_KEY)) {
+        const target = request.params._meta[VIEW_WORKSPACE_META_KEY];
+        if (typeof target !== 'string' || !target.trim() || target.length > 256) {
+          throw new ToolUserError('View workspace must be a workspace slug or id.', 400, 'VALIDATION');
+        }
+        const workspace = await resolveViewWorkspace(toAccountToolContext(callAuthCtx), target);
+        // Pin only this invocation. Never mutate the reusable MCP session or
+        // widen its authority: explicit SDK/tool targets can select this one
+        // live grant, while an untagged caller retains its original context.
+        callAuthCtx = {
+          ...callAuthCtx,
+          organizationId: workspace.organizationId,
+          memberRole: workspace.memberRole,
+          grantedOrganizationIds: callAuthCtx.grantedOrganizationIds === null ? null : [workspace.organizationId],
+          directSearchFederation: false,
+        };
+        if (uiMemberRoleMeta) uiMemberRoleMeta = { 'lobu/member-role': workspace.memberRole };
+      }
       // The call ends when the client cancels it or its HTTP request closes.
       const httpSignal = mcpRequestContext.getStore()?.signal;
       const callerSignal = httpSignal ? AbortSignal.any([extra.signal, httpSignal]) : extra.signal;

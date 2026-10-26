@@ -143,6 +143,36 @@ describe("ViewBridge handshake", () => {
 });
 
 describe("ViewBridge requests", () => {
+  test("routes calls with the workspace from host input and clears it on a legacy open", async () => {
+    const { guest, parent, bridge } = setup();
+    const connected = bridge.connect();
+    answerInitialize(parent, guest);
+    await connected;
+    for (const organization of ["sample-a", "sample-b", undefined]) {
+      guest.dispatch(
+        {
+          jsonrpc: "2.0",
+          method: "ui/notifications/tool-input",
+          params: {
+            arguments: {
+              key: "home",
+              ...(organization ? { organization } : {}),
+            },
+          },
+        },
+        parent
+      );
+      const call = bridge.callTool("query_sql", { sql: "SELECT 1" });
+      const posted = parent.lastPost() as any;
+      expect(posted.params._meta).toEqual(
+        organization ? { "lobu/view-workspace": organization } : undefined
+      );
+      guest.dispatch({ jsonrpc: "2.0", id: posted.id, result: {} }, parent);
+      await call;
+    }
+    bridge.close();
+  });
+
   test("callTool posts tools/call and resolves the full result", async () => {
     const { guest, parent, bridge } = setup();
     const connected = bridge.connect();
@@ -288,7 +318,11 @@ describe("ViewBridge loader handoff", () => {
   }
 
   test("adopts cached input, context, queue and request numbering", async () => {
-    const args = { scope: { type: "deal" }, params: { q: "x" } };
+    const args = {
+      organization: "sample-handoff",
+      scope: { type: "deal" },
+      params: { q: "x" },
+    };
     const { guest, parent, bridge } = setupWithHandoff({
       v: 1,
       hostContext: { theme: "dark" },
@@ -319,8 +353,14 @@ describe("ViewBridge loader handoff", () => {
     expect(results).toBe(1);
     // Next request continues the loader's numbering, not 1 or 2.
     const call = bridge.callTool("query_sql", { sql: "SELECT 1" });
-    const posted = parent.lastPost() as { id: number };
+    const posted = parent.lastPost() as {
+      id: number;
+      params: { _meta: Record<string, unknown> };
+    };
     expect(posted.id).toBeGreaterThanOrEqual(7);
+    expect(posted.params._meta).toEqual({
+      "lobu/view-workspace": "sample-handoff",
+    });
     guest.dispatch(
       { jsonrpc: "2.0", id: posted.id, result: { structuredContent: {} } },
       parent

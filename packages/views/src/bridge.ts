@@ -14,6 +14,8 @@
  * like the SDK's transport.
  */
 
+import { VIEW_WORKSPACE_META_KEY } from "@lobu/core/contracts/tools/view-runtime";
+
 export interface ToolResult {
   isError?: boolean;
   structuredContent?: unknown;
@@ -104,6 +106,7 @@ export class ViewBridge {
    *  before it (the host seeds scope + params there; anything read earlier
    *  runs against defaults and double-fetches). */
   private toolInputReceived = false;
+  private workspace: string | null = null;
   private hostContext: HostContext = {};
   private didConnect = false;
   private handoff: ViewHandoff | null = null;
@@ -224,6 +227,8 @@ export class ViewBridge {
     if (isRecord(h.toolInput)) {
       this.toolInputReceived = true;
       const args = h.toolInput;
+      this.workspace =
+        typeof args.organization === "string" ? args.organization : null;
       for (const listener of [...this.toolInputListeners]) listener(args);
     }
     if (Array.isArray(h.queue)) {
@@ -250,6 +255,9 @@ export class ViewBridge {
     return this.request("tools/call", {
       name,
       arguments: args,
+      ...(this.workspace
+        ? { _meta: { [VIEW_WORKSPACE_META_KEY]: this.workspace } }
+        : {}),
     }) as Promise<ToolResult>;
   }
 
@@ -408,6 +416,8 @@ export class ViewBridge {
       case "ui/notifications/tool-input": {
         this.toolInputReceived = true;
         const args = isRecord(params.arguments) ? params.arguments : {};
+        this.workspace =
+          typeof args.organization === "string" ? args.organization : null;
         for (const listener of [...this.toolInputListeners]) listener(args);
         break;
       }
