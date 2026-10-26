@@ -21,6 +21,7 @@ describe('OAuth scope reconciliation', () => {
     const profile = {
       id: 1, slug: 'synthetic-profile', connector_key: 'synthetic.oauth',
       profile_kind: 'oauth_account', provider: 'synthetic', account_id: 'synthetic-account',
+      created_by: 'synthetic-owner',
       status: 'active',
       auth_data: { requested_scopes: [...declared, ...(isolated ? [] : ['sibling.read'])] },
     };
@@ -33,6 +34,7 @@ describe('OAuth scope reconciliation', () => {
     const updateAuthProfile = vi.fn();
     const sql = vi.fn(async (parts: TemplateStringsArray) => {
       const query = parts.join('?');
+      if (query.includes('FROM account')) return [{ userId: 'synthetic-owner', providerId: 'synthetic' }];
       if (query.includes('FROM "account"')) return [{
         accountId: isolated ? 'lobu-connector:synthetic:oauth:1' : 'synthetic-provider-user',
         scope: accountScopes.join(' '),

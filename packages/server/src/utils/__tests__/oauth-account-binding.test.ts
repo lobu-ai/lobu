@@ -6,7 +6,7 @@ const binding = {
   ownerUserId: 'synthetic-private-owner', reservePending: true,
 };
 const profile = {
-  profile_kind: 'oauth_account', created_by: binding.ownerUserId as string | null,
+  profile_kind: 'oauth_account', provider: 'synthetic', created_by: binding.ownerUserId as string | null,
   account_id: 'synthetic-private-account' as string | null,
   auth_data: {
     app_auth_profile_id: 202,
@@ -17,10 +17,10 @@ const profile = {
 
 async function setup(rows: {
   profile?: Partial<typeof profile> | null;
-  account?: { userId: string | null } | null;
+  account?: { userId: string | null; providerId?: string } | null;
   conflicts?: object[];
 } = {}) {
-  const account = rows.account === undefined ? { userId: binding.ownerUserId } : rows.account;
+  const account = rows.account === undefined ? { userId: binding.ownerUserId, providerId: 'synthetic' } : rows.account;
   const sql = Object.assign(vi.fn(async (parts: TemplateStringsArray) => {
     const query = parts.join('?');
     if (query.includes('FROM auth_profiles')) return rows.profile === null ? [] : [{ ...profile, ...rows.profile }];
@@ -52,6 +52,7 @@ describe('OAuth account binding diagnostics', () => {
     { reason: 'profile_owner', rows: { profile: { created_by: 'synthetic-other-owner' } }, queries: 1 },
     { reason: 'backing_account_absent', rows: { account: null }, queries: 2 },
     { reason: 'backing_account_owner', rows: { account: { userId: 'synthetic-other-owner' } }, queries: 2 },
+    { reason: 'backing_account_provider', rows: { account: { userId: binding.ownerUserId, providerId: 'other' } }, queries: 2 },
     { reason: 'stored_app_mismatch', rows: { profile: { auth_data: { ...profile.auth_data, app_auth_profile_id: 303 } } }, queries: 2 },
     { reason: 'live_connection_app_mismatch', rows: { conflicts: [{ '?column?': 1 }] }, queries: 3 },
   ])('still rejects $reason and logs only safe fields', async ({ reason, rows, queries }) => {

@@ -795,6 +795,7 @@ describe('optional MCP OAuth connections', () => {
       connector_key: connectorKey,
       createDefaultFeed: false,
       visibility: 'private',
+      created_by: owner.id,
     });
     const appProfile = await createAuthProfile({
       organizationId: organization.id,
@@ -822,6 +823,7 @@ describe('optional MCP OAuth connections', () => {
       profileKind: 'oauth_account',
       provider: connectorKey,
       accountId,
+      createdBy: owner.id,
     });
     await sql`
       UPDATE connections
@@ -1094,6 +1096,7 @@ describe('MCP refresh-on-401 (dead access token)', () => {
       profileKind: 'oauth_account',
       provider: 'demo',
       accountId,
+      createdBy: owner.id,
     });
 
     const connection = await createTestConnection({
@@ -1101,6 +1104,7 @@ describe('MCP refresh-on-401 (dead access token)', () => {
       connector_key: connectorKey,
       createDefaultFeed: false,
       visibility: 'private',
+      created_by: owner.id,
     });
 
     // Bind both profiles to the connection, as the OAuth install flow does.

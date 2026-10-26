@@ -1,5 +1,6 @@
 import { fetchUserInfoWithRaw } from '../connect/oauth-providers';
 import { getDb } from '../db/client';
+import { assertOAuthAccountGrant } from '../authz/oauth-account-ownership';
 import type { Env } from '../index';
 import { splitConfigByFeedScope } from '../tools/admin/helpers/feed-helpers';
 import {
@@ -61,6 +62,10 @@ export async function provisionConnectorFromSocialLogin(params: {
     );
     if (!oauthMethod?.loginProvisioning?.autoCreateConnection) continue;
 
+    await assertOAuthAccountGrant(sql, {
+      account_id: params.account.id, created_by: params.account.userId, provider,
+    });
+
     const accessToken = params.account.accessToken ?? null;
     const { raw: rawUserInfo, normalized: userInfo } = accessToken
       ? await fetchUserInfoWithRaw({
@@ -90,6 +95,7 @@ export async function provisionConnectorFromSocialLogin(params: {
         AND connector_key = ${row.key}
         AND profile_kind = 'oauth_account'
         AND account_id = ${params.account.id}
+        AND created_by = ${params.account.userId}
       ORDER BY updated_at DESC, id DESC
       LIMIT 1
     `;
@@ -159,6 +165,8 @@ export async function provisionConnectorFromSocialLogin(params: {
       WHERE c.organization_id = ${organizationId}
         AND c.connector_key = ${row.key}
         AND c.deleted_at IS NULL
+        AND c.created_by = ${params.account.userId}
+        AND (ap.id IS NULL OR ap.created_by = ${params.account.userId})
         AND (
           c.auth_profile_id = ${authProfile.id}
           OR ap.account_id = ${params.account.id}
@@ -186,9 +194,11 @@ export async function provisionConnectorFromSocialLogin(params: {
         await sql`
           UPDATE connections
           SET auth_profile_id = ${authProfile.id},
+              account_id = ${authProfile.account_id},
               visibility = 'private',
               updated_at = NOW()
-          WHERE id = ${existingConnection.id} AND deleted_at IS NULL
+          WHERE id = ${existingConnection.id} AND organization_id = ${organizationId}
+            AND created_by = ${params.account.userId} AND deleted_at IS NULL
         `;
       }
     } else if (appAuthProfile) {
