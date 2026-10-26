@@ -41,9 +41,6 @@ export async function provisionConnectorFromSocialLogin(params: {
   if (!provider || !params.account.userId) return;
 
   const sql = getDb();
-  await assertOAuthAccountGrant(sql, {
-    account_id: params.account.id, created_by: params.account.userId, provider,
-  });
   const connectorRows = await sql`
     SELECT key, name, auth_schema, feeds_schema, default_connection_config
     FROM connector_definitions
@@ -64,6 +61,10 @@ export async function provisionConnectorFromSocialLogin(params: {
       (method) => method.provider.toLowerCase() === provider
     );
     if (!oauthMethod?.loginProvisioning?.autoCreateConnection) continue;
+
+    await assertOAuthAccountGrant(sql, {
+      account_id: params.account.id, created_by: params.account.userId, provider,
+    });
 
     const accessToken = params.account.accessToken ?? null;
     const { raw: rawUserInfo, normalized: userInfo } = accessToken
