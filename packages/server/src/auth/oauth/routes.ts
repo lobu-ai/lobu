@@ -22,6 +22,7 @@ import {
 import { buildAuthMd } from './auth-md';
 import { OAuthProvider } from './provider';
 import { canonicalizeMcpResource, publicMcpRequestUrl } from './resource-indicator';
+import { isAccountMcpPath } from '../../mcp-surface';
 import {
   AVAILABLE_SCOPES,
   canonicalizeOAuthScopeGrant,
@@ -145,7 +146,7 @@ function getOrgSlugFromResource(resource: string | undefined | null): string | n
 
 function isBareMcpResource(resource: string | undefined | null): boolean {
   const parsed = safeParseUrl(resource);
-  return parsed?.pathname === '/mcp';
+  return parsed ? isAccountMcpPath(parsed.pathname) : false;
 }
 
 type WorkspaceAccessMode = 'all_current' | 'selected';

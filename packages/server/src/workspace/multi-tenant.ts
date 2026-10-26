@@ -24,6 +24,7 @@ import {
 } from '../gateway/orchestration/chat-turn-actor';
 import { resolveRestToolGetRoute } from '../http/rest-tool-routes';
 import type { Env } from '../index';
+import { isAccountMcpPath } from '../mcp-surface';
 import { agentTurnIdentityFromClaims } from '../tools/turn-write-idempotency';
 import { checkApplyPause } from '../utils/deployment-pause';
 import logger from '../utils/logger';
@@ -112,7 +113,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
     const sql = getDb();
     const baseUrl = getConfiguredPublicOrigin() ?? new URL(c.req.url).origin;
     const requestPath = new URL(c.req.url).pathname;
-    const isMcpRoute = requestPath === '/mcp' || requestPath.startsWith('/mcp/');
+    const isMcpRoute = isAccountMcpPath(requestPath) || requestPath.startsWith('/mcp/');
     const bearerChallenge = (error?: string) =>
       isMcpRoute
         ? buildMcpBearerChallenge(publicMcpRequestUrl(c.req.raw), error)
@@ -126,7 +127,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
     //     devices, web-session handoff, etc.)
     const isUnscopedRoute =
       UNSCOPED_PATH_PREFIXES.some((prefix) => requestPath.startsWith(prefix)) ||
-      requestPath === '/mcp';
+      isAccountMcpPath(requestPath);
     const requestedOrgSlug = c.req.param('orgSlug') || c.get('subdomainOrg') || null;
     const requestedToolName = c.req.param('toolName') || null;
     const organizationNotFound = () =>

@@ -78,6 +78,7 @@ import {
 	resolveSlackPendingByTenant,
 } from "./lobu/stores/slack-installations";
 import { handleMcp, MCP_APP_DIRS } from "./mcp-handler";
+import { DIRECTORY_MCP_PATH } from "./mcp-surface";
 import {
 	restDeleteNotification,
 	restGetUnreadCount,
@@ -339,6 +340,8 @@ const rejectUntrustedMcpOrigin = async (
 };
 app.use("/mcp", rejectUntrustedMcpOrigin);
 app.use("/mcp/*", rejectUntrustedMcpOrigin);
+app.use(DIRECTORY_MCP_PATH, rejectUntrustedMcpOrigin);
+app.use(`${DIRECTORY_MCP_PATH}/`, rejectUntrustedMcpOrigin);
 
 // Enable CORS for MCP clients and frontend
 app.use(
@@ -1851,6 +1854,10 @@ app.all("/mcp", handleMcp);
 app.all("/mcp/", handleMcp);
 app.all("/mcp/:orgSlug", handleMcp);
 app.all("/mcp/:orgSlug/", handleMcp);
+app.use(DIRECTORY_MCP_PATH, mcpAuth);
+app.use(`${DIRECTORY_MCP_PATH}/`, mcpAuth);
+app.all(DIRECTORY_MCP_PATH, handleMcp);
+app.all(`${DIRECTORY_MCP_PATH}/`, handleMcp);
 
 // MCP App public template. The same absolute origin and CSP contract is used by
 // `resources/read`; its content-versioned asset URLs remain safe across mixed
