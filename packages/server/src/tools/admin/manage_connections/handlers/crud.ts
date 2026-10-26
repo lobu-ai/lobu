@@ -2085,7 +2085,7 @@ export async function handleUpdate(
         (hasAuthProfileArg || hasAppAuthProfileArg || hasDeviceWorkerArg || args.config !== undefined || args.status === 'active');
       if (validateOAuthBinding && !await lockOAuthAccountBinding(tx, {
         organizationId, authProfileId: nextAuthProfileId!, appAuthProfileId: nextAppAuthProfileId,
-        ownerUserId: ctx.userId ?? null, reservePending: true,
+        ownerUserId: ctx.userId ?? null,
       })) return { denial: { error: OAUTH_ACCOUNT_BINDING_ERROR } };
       const lockedRows = await tx`
         SELECT *
@@ -2096,6 +2096,10 @@ export async function handleUpdate(
         FOR UPDATE
       `;
       if (lockedRows.length === 0) return { rows: [], previousStatus: null };
+      if (lockedRows[0].auth_profile_id !== existing.auth_profile_id ||
+        lockedRows[0].app_auth_profile_id !== existing.app_auth_profile_id) {
+        return { denial: { error: 'Connection authentication configuration changed during the update. Refresh and try again.' } };
+      }
       if (validateOAuthBinding && lockedRows[0].created_by !== ctx.userId) {
         return { denial: { error: 'You can only manage OAuth account profiles you created, on your own connections. Ask the account owner to reconnect.' } };
       }

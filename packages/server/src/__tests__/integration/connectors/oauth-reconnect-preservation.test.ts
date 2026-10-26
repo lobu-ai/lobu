@@ -65,16 +65,16 @@ async function state(connectionId: number) {
   return { connection, feeds };
 }
 
-async function waitForBlockedConnectTokens(count: number): Promise<void> {
+async function waitForBlockedQueries(table: 'connect_tokens' | 'connections', count: number): Promise<void> {
   const sql = getTestDb();
   for (let attempt = 0; attempt < 200; attempt++) {
     const rows = await sql`SELECT pid FROM pg_stat_activity
       WHERE datname = current_database() AND state = 'active' AND wait_event_type = 'Lock'
-        AND query ILIKE '%connect_tokens%'`;
+        AND query ILIKE ${`%${table}%`}`;
     if (rows.length >= count) return;
     await new Promise(resolve => setTimeout(resolve, 25));
   }
-  throw new Error(`Expected ${count} blocked connect-token queries`);
+  throw new Error(`Expected ${count} blocked ${table} queries`);
 }
 
 describe('OAuth reconnect preserves the existing connection until consent', () => {
@@ -164,6 +164,66 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
       auth_profile_id: profile.id, app_auth_profile_id: s.app.id, status: 'active' });
     expect(await new CredentialService(sql).getConnectionTokens(s.connection.id, s.profile.account_id!)).toBeNull();
     expect(await new CredentialService(sql).getConnectionTokens(s.connection.id, accountId)).toMatchObject({ accessToken: 'synthetic-replacement-token' });
+  });
+
+  it('does not restore a stale binding when a metadata edit waits behind a rebind', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    const replacement = await createAuthProfile({ organizationId: s.org.id, connectorKey: KEY,
+      displayName: 'Synthetic new pending account', profileKind: 'oauth_account', provider: 'synthetic',
+      createdBy: s.user.id, status: 'pending_auth' });
+    let release!: () => void;
+    let ready!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const held = new Promise<void>(resolve => { ready = resolve; });
+    const holder = sql.begin(async (tx: typeof sql) => {
+      await tx`SELECT id FROM connections WHERE id = ${s.connection.id} FOR UPDATE`;
+      ready();
+      await gate;
+      await tx`UPDATE connections SET auth_profile_id = ${replacement.id},
+        app_auth_profile_id = ${s.otherApp.id}, account_id = NULL, status = 'pending_auth'
+        WHERE id = ${s.connection.id}`;
+    });
+    await held;
+    const editing = manageConnections({ action: 'update', connection_id: s.connection.id,
+      display_name: 'Synthetic concurrent rename' }, {} as Env, s.ctx);
+    try {
+      await waitForBlockedQueries('connections', 1);
+    } finally { release(); }
+    await holder;
+    expect(await editing).toHaveProperty('error');
+    const [current] = await sql`SELECT auth_profile_id, app_auth_profile_id, account_id, status
+      FROM connections WHERE id = ${s.connection.id}`;
+    expect(current).toMatchObject({ auth_profile_id: replacement.id,
+      app_auth_profile_id: s.otherApp.id, account_id: null, status: 'pending_auth' });
+  });
+
+  it('does not reserve a pending account when its target is deleted while rebinding', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    const profile = await createAuthProfile({ organizationId: s.org.id, connectorKey: KEY,
+      displayName: 'Synthetic pending rebind', profileKind: 'oauth_account', provider: 'synthetic',
+      createdBy: s.user.id, status: 'pending_auth' });
+    const [before] = await sql`SELECT * FROM auth_profiles WHERE id = ${profile.id}`;
+    let release!: () => void;
+    let ready!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const held = new Promise<void>(resolve => { ready = resolve; });
+    const holder = sql.begin(async (tx: typeof sql) => {
+      await tx`SELECT id FROM connections WHERE id = ${s.connection.id} FOR UPDATE`;
+      ready();
+      await gate;
+      await tx`UPDATE connections SET deleted_at = NOW() WHERE id = ${s.connection.id}`;
+    });
+    await held;
+    const editing = manageConnections({ action: 'update', connection_id: s.connection.id,
+      auth_profile_slug: profile.slug, app_auth_profile_slug: s.app.slug }, {} as Env, s.ctx);
+    try {
+      await waitForBlockedQueries('connections', 1);
+    } finally { release(); }
+    await holder;
+    expect(await editing).toMatchObject({ error: 'Connection not found' });
+    expect(await sql`SELECT * FROM auth_profiles WHERE id = ${profile.id}`).toEqual([before]);
   });
 
   it.each([undefined, {}])('reuses an active connection for the selected personal account with config %j', async (config) => {
@@ -323,11 +383,11 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     try {
       // Queue /oauth/start first. The retries read the pre-initialization
       // snapshot before start saves its verifier on the held token row.
-      await waitForBlockedConnectTokens(1);
+      await waitForBlockedQueries('connect_tokens', 1);
       retries.push(client.connect({ ...args, requested_scopes: [OLD] }));
-      await waitForBlockedConnectTokens(2);
+      await waitForBlockedQueries('connect_tokens', 2);
       retries.push(client.connect({ ...args, requested_scopes: [EXTRA] }));
-      await waitForBlockedConnectTokens(3);
+      await waitForBlockedQueries('connect_tokens', 3);
     } finally {
       release();
       await Promise.allSettled([holder, opening, ...retries]);
@@ -449,9 +509,9 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     const first = s.client.connect({ connector_key: KEY, requested_scopes: [OLD] });
     let second: Promise<unknown> | undefined;
     try {
-      await waitForBlockedConnectTokens(1);
+      await waitForBlockedQueries('connect_tokens', 1);
       second = s.client.connect({ connector_key: KEY, requested_scopes: [EXTRA] });
-      await waitForBlockedConnectTokens(2);
+      await waitForBlockedQueries('connect_tokens', 2);
     } finally {
       release();
       await Promise.allSettled([holder, first, second]);
@@ -568,9 +628,9 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     const callback = connectRoutes.request(`/oauth/callback?state=${token}&code=synthetic-completed-code`, {}, {} as Env);
     let retry: Promise<unknown> | undefined;
     try {
-      await waitForBlockedConnectTokens(1);
+      await waitForBlockedQueries('connect_tokens', 1);
       retry = s.client.connect({ connector_key: KEY, requested_scopes: [EXTRA] });
-      await waitForBlockedConnectTokens(2);
+      await waitForBlockedQueries('connect_tokens', 2);
     } finally {
       release();
       await Promise.allSettled([holder, callback, retry]);
