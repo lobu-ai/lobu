@@ -8,7 +8,8 @@ commands below perform normalization/import/replay without an LLM per row.
 
 1. Discover and authorize once
 
-Use the Lobu skill. Select the intended CLI context and workspace explicitly.
+Use the Lobu skill. Select the intended workspace explicitly. For the optional
+terminal path, also select the intended CLI context.
 Discover the installed connector versions, actual connections, feed keys, saved
 account bindings, policies and available operations using search_sdk. Reuse
 existing feeds and source checkpoints. Authorize any missing source normally.
@@ -34,7 +35,62 @@ extractor discards unrelated input fields and outgoing-message sender records.
 It never infers an outgoing peer, country code, first meeting, or human status.
 Display-name-only contacts stay unresolved outside the identity import.
 
-2. Install the data definitions, without enabling execution
+2. Choose the connected MCP path or the optional terminal path
+
+ChatGPT and other MCP clients need no Bun, CLI, shell or local files.
+Use search_sdk to discover current entitySchema, entities and query methods.
+Inspect the existing workspace definitions. For missing definitions, translate
+identity.schema.ts and person.schema.ts into the existing entitySchema.createType,
+createRelType and addRule inputs. Preserve relationship purpose, resolution rules,
+custom fields and existing policies. Do not replace existing definitions blindly.
+A schema change may need owner/admin authorization; render the returned approval
+or access request instead of asking the user to install a CLI to bypass it.
+Prove the destination audience before importing private-source identifiers.
+
+Use an account-scoped /mcp connection authorized for the selected workspace;
+the helper selects it with client.org(workspace). Use the committed
+identity-bootstrap.mcp.js as the unchanged script prefix in
+query_sdk/run_sdk, then append a default handler:
+
+  export default async (_ctx, client) => runMcpIdentity(client, {
+    workspace: "your-selected-workspace",
+    mode: "preview",
+    input: { observations: /* projected observations */, aliases: [] }
+  });
+
+Script asset:
+https://raw.githubusercontent.com/lobu-ai/lobu/main/examples/personal-agent/identity-bootstrap.mcp.js
+It bundles the same normalization, alias validation and import/readback logic as
+the CLI. It requires no runtime imports. Retrieve the COMPLETE asset once; do not
+reconstruct it from a truncated preview. Keep input metadata-only and each full
+script below the discovered tool limit. You can build input within the SDK script
+from bounded, projected retained rows so private source data never needs to be
+returned to the model. Freeze the selected row range and account/source bindings
+for the batch. Source collection and account checks in section 1 still apply.
+
+1) Preview with query_sdk. Save the returned digest/continuation with the input.
+2) Import with run_sdk, mode:"import", and the exact preview continuation.
+   Repeat with returned continuation until done:true. Each invocation executes
+   multiple records deterministically with a bounded SDK-call budget. There is
+   no LLM per row and no background agent. The client must remain active to resume.
+3) Replay import from the preview continuation; every returned changed/linked
+   count must be zero. Start verify from the SAME preview continuation with
+   query_sdk and mode:"verify", then traverse every returned continuation.
+   A final done:true proves only the traversal you actually performed; retain
+   receipts for all accepted ranges. Never start verify from an import end cursor.
+
+Only one writer may import an identity scope. No local receipt file is needed
+for MCP: the live records/evidence are durable, and tool results hold bounded
+continuations. Preserve them in the client or an existing authorized Lobu record
+if cross-session resume is needed. After timeout or a lost response, replay the
+SAME input/continuation: exact live readback reconciles already-applied work.
+Errors, authorization and approvals must stop advancement. Imports are not
+transactional; a failed invocation can have partially applied records.
+Changed input/workspace requires a fresh preview. No person or same_person edge
+is created by this helper. Browser/history collection and new-source access
+remain explicit separate steps, not a promise that all provider history exists.
+
+Optional terminal path: install the data definitions, without enabling execution
 
 From examples/personal-agent, run bun install (CLI and connector SDK >=24.1.1).
 Older CLI compilers can silently drop relationship purpose and fail to group
@@ -52,7 +108,7 @@ them. Person matching here is review-only; same_source_account auto-grouping
 requires the full provider/account_scope/canonical_source_account_key tuple.
 Contact-field evidence does not merge people. Existing reviewed holds remain.
 
-3. Prepare, import and verify from examples/personal-agent
+3. Optional terminal prepare, import and verify from examples/personal-agent
 
   bun run identity prepare --input /your/private/observations.json --output /your/private/manifest.json
   bun run identity import --input /your/private/observations.json --org your-workspace --context your-context --receipts /your/private/import-receipts.json

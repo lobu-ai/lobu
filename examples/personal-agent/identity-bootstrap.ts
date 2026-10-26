@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 export interface SourceRef {
   feed_id: number;
@@ -54,8 +54,20 @@ const namespaces = new Set([
   "whatsapp:group",
   "whatsapp:lid",
 ]);
-const hash = (value: unknown) =>
-  createHash("sha256").update(JSON.stringify(value)).digest("hex");
+export const identityDigest = (value: unknown) => {
+  // JSON escapes lone surrogates; encodeURIComponent supplies portable UTF-8
+  // bytes without Node's Buffer or a TextEncoder global in the MCP isolate.
+  const bytes = Uint8Array.from(
+    encodeURIComponent(JSON.stringify(value)).match(/%[0-9A-F]{2}|[^%]/g) ?? [],
+    (part) =>
+      part.startsWith("%")
+        ? Number.parseInt(part.slice(1), 16)
+        : part.charCodeAt(0)
+  );
+  return Array.from(sha256(bytes), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+};
 const unique = <T>(values: T[]) => [
   ...new Map(values.map((value) => [JSON.stringify(value), value])).values(),
 ];
@@ -113,7 +125,7 @@ export function observationKey(
 ): string {
   if (!row.account_scope?.trim())
     throw new Error("Explicit account_scope required; no default account");
-  return hash([
+  return identityDigest([
     row.namespace,
     row.account_scope,
     normalizeKey(row.namespace, row.native_key),
@@ -258,7 +270,7 @@ export function buildManifest(input: IdentityInput): IdentityManifest {
     if (pair.some((item) => claimed.has(item.slug)))
       throw new Error("Identifier reuse or conflicting alias evidence");
     for (const item of pair) claimed.add(item.slug);
-    const canonical = hash([
+    const canonical = identityDigest([
       a.provider,
       a.account_scope,
       representative.metadata.namespace,

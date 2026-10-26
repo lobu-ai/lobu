@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, expect, test } from "vitest";
 import {
   cleanupTestDatabase,
@@ -10,6 +11,7 @@ import {
 import { TestWorkspace } from "../../../packages/server/src/__tests__/setup/test-mcp-client";
 import type { Env } from "../../../packages/server/src/index";
 import { buildClientSDK } from "../../../packages/server/src/sandbox/client-sdk";
+import { runScript } from "../../../packages/server/src/sandbox/run-script";
 import { contactIdentity, identityRelationships } from "../identity.schema";
 import {
   buildManifest,
@@ -23,13 +25,19 @@ import {
 
 afterEach(cleanupTestDatabase);
 
-test("fresh workspace setup, retained alias lookup, interrupted import and replay through real governed SDK", async () => {
+test.each([
+  "direct",
+  "MCP",
+])("fresh workspace setup, retained alias lookup, interrupted import and replay through real governed SDK (%s)", async (transport) => {
   const workspace = await TestWorkspace.create({
     name: "Synthetic Identity Bootstrap",
   });
   const context = {
     ...ownerToolContext(workspace.org.id, workspace.users.owner.id),
-    tokenType: "session" as const,
+    tokenType: "oauth" as const,
+    scopedToOrg: false,
+    allowCrossOrg: true,
+    grantedOrganizationIds: [workspace.org.id],
   };
   const sdk = buildClientSDK(context, {} as Env);
   const person = await createTestEntity({
@@ -96,21 +104,74 @@ test("fresh workspace setup, retained alias lookup, interrupted import and repla
       },
     ],
   });
-  // Crash boundary after first record, then replay the full intended chunk.
-  await runIdentityChunk(
-    client,
-    { items: [plan.items[0]], aliases: [] },
-    false
-  );
-  const imported = await runIdentityChunk(client, plan, false);
-  expect(imported.records).toHaveLength(2);
-  expect(
-    imported.edges.filter((edge) => edge.action === "linked")
-  ).toHaveLength(2);
-  const replay = await runIdentityChunk(client, plan, false);
-  expect(replay.records.every((row) => row.action === "adopted")).toBe(true);
-  expect(replay.edges.every((row) => row.action === "adopted")).toBe(true);
-  await runIdentityChunk(client, plan, true);
+  if (transport === "MCP") {
+    // Exact published asset in the production V8 bridge: no Node/Bun/filesystem
+    // globals in the guest, and real governed SDK writes/readback on fresh PG.
+    const bundle = readFileSync(
+      new URL("../identity-bootstrap.mcp.js", import.meta.url),
+      "utf8"
+    );
+    const request = {
+      workspace: workspace.org.slug,
+      mode: "preview",
+      input: {
+        observations: [a, b],
+        aliases: [
+          {
+            left: observationKey(a),
+            right: observationKey(b),
+            kind: "same_row",
+            source_ref: ref,
+          },
+        ],
+      },
+    };
+    const mcp = async (input: unknown, access: "read" | "write") => {
+      const result = await runScript({
+        source: `${bundle}\nexport default async (_ctx, client) => runMcpIdentity(client, ${JSON.stringify(input)});`,
+        sdk,
+        maxAccessLevel: access,
+        allowCrossOrg: true,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      return result.returnValue as {
+        continuation: { digest: string; next: number };
+      };
+    };
+    const preview = await mcp(request, "read");
+    const mcpImported = await mcp(
+      { ...request, mode: "import", continuation: preview.continuation },
+      "write"
+    );
+    expect(mcpImported).toMatchObject({ done: true, changed: 2, linked: 2 });
+    const mcpReplay = await mcp(
+      { ...request, mode: "import", continuation: preview.continuation },
+      "write"
+    );
+    expect(mcpReplay).toMatchObject({ done: true, changed: 0, linked: 0 });
+    const verified = await mcp(
+      { ...request, mode: "verify", continuation: preview.continuation },
+      "read"
+    );
+    expect(verified).toMatchObject({ done: true, changed: 0, linked: 0 });
+  } else {
+    // Crash boundary after first record, then replay the full intended chunk.
+    await runIdentityChunk(
+      client,
+      { items: [plan.items[0]], aliases: [] },
+      false
+    );
+    const imported = await runIdentityChunk(client, plan, false);
+    expect(imported.records).toHaveLength(2);
+    expect(
+      imported.edges.filter((edge) => edge.action === "linked")
+    ).toHaveLength(2);
+    const replay = await runIdentityChunk(client, plan, false);
+    expect(replay.records.every((row) => row.action === "adopted")).toBe(true);
+    expect(replay.edges.every((row) => row.action === "adopted")).toBe(true);
+    await runIdentityChunk(client, plan, true);
+  }
   const records =
     await sql`SELECT id, metadata FROM entities WHERE organization_id = ${workspace.org.id} AND entity_type_id = (SELECT id FROM entity_types WHERE organization_id = ${workspace.org.id} AND slug = 'contact-identity')`;
   expect(records).toHaveLength(2);
