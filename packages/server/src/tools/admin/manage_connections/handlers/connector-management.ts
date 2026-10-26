@@ -7,8 +7,9 @@
  */
 
 import { getErrorMessage } from "@lobu/core";
+import { lockOrganizationForRelationshipClaims } from "../../../../utils/relationship-claims";
 import { getDb } from "../../../../db/client";
-import { recordToolConfigChange } from "../../helpers/config-audit";
+import { withToolConfigTransaction, insertToolConfigChange } from "../../helpers/config-audit";
 import { normalizeAuthValues } from "../../../../utils/auth-profiles";
 import {
 	DEVICE_AUTOWIRE_SUPPRESSION_ERROR,
@@ -41,6 +42,7 @@ export async function handleInstallConnector(
 	args: Extract<ConnectionsArgs, { action: "install_connector" }>,
 	ctx: ToolContext,
 ): Promise<ManageConnectionsResult> {
+	return withToolConfigTransaction<ManageConnectionsResult>(ctx, async (tx) => {
 	try {
 		const connectorId = args.connector_id?.trim();
 		const mcpUrl = args.mcp_url?.trim();
@@ -62,15 +64,18 @@ export async function handleInstallConnector(
 
 		const installed = connectorId
 			? await installCatalogConnectorDefinition({
+			transaction: tx,
 					organizationId: ctx.organizationId,
 					connectorId,
 				})
 			: mcpUrl
 				? await installConnectorFromMcpUrl({
+			transaction: tx,
 						organizationId: ctx.organizationId,
 						mcpUrl,
 					})
 				: await installConnectorDefinitionFromSource({
+			transaction: tx,
 						organizationId: ctx.organizationId,
 						sourceUrl,
 						sourceUri,
@@ -81,9 +86,9 @@ export async function handleInstallConnector(
 						dependencies: args.dependencies,
 					});
 
-		await maybeUpsertAuthAfterInstall(installed, args.auth_values, ctx);
+		await maybeUpsertAuthAfterInstall(installed, args.auth_values, ctx, tx);
 
-		recordToolConfigChange(ctx, {
+		await insertToolConfigChange(ctx, {
 			resourceKind: "connector-definition",
 			resourceId: installed.connectorKey,
 			op: installed.updated ? "updated" : "created",
@@ -99,7 +104,7 @@ export async function handleInstallConnector(
 				...(sourceUrl ? { source_url: sourceUrl } : {}),
 				...(sourceUri ? { source_uri: sourceUri } : {}),
 			},
-		});
+		}, tx);
 
 		return {
 			action: "install_connector",
@@ -115,6 +120,7 @@ export async function handleInstallConnector(
 			error: `Install failed: ${getErrorMessage(error)}`,
 		};
 	}
+	});
 }
 
 // ============================================
@@ -125,8 +131,10 @@ export async function handleUninstallConnector(
 	args: Extract<ConnectionsArgs, { action: "uninstall_connector" }>,
 	ctx: ToolContext,
 ): Promise<ManageConnectionsResult> {
+	return withToolConfigTransaction<ManageConnectionsResult>(ctx, async (tx) => {
 	try {
 		const archived = await uninstallConnectorDefinition({
+			transaction: tx,
 			organizationId: ctx.organizationId,
 			connectorKey: args.connector_key,
 		});
@@ -139,19 +147,20 @@ export async function handleUninstallConnector(
 		return { error: getErrorMessage(error) };
 	}
 
-	recordToolConfigChange(ctx, {
+	await insertToolConfigChange(ctx, {
 		resourceKind: "connector-definition",
 		resourceId: args.connector_key,
 		op: "deleted",
 		summary: `Connector '${args.connector_key}' uninstalled`,
 		state: null,
-	});
+	}, tx);
 
 	return {
 		action: "uninstall_connector",
 		uninstalled: true,
 		connector_key: args.connector_key,
 	};
+	});
 }
 
 // ============================================
@@ -228,8 +237,10 @@ export async function handleUpdateConnectorSource(
 	args: Extract<ConnectionsArgs, { action: "update_connector_source" }>,
 	ctx: ToolContext,
 ): Promise<ManageConnectionsResult> {
+	return withToolConfigTransaction<ManageConnectionsResult>(ctx, async (tx) => {
 	try {
 		const updated = await updateInstalledConnectorSource({
+			transaction: tx,
 			organizationId: ctx.organizationId,
 			connectorKey: args.connector_key,
 			sourceCode: args.source_code,
@@ -240,7 +251,7 @@ export async function handleUpdateConnectorSource(
 			expectedVersion: args.expected_version,
 		});
 
-		recordToolConfigChange(ctx, {
+		await insertToolConfigChange(ctx, {
 			resourceKind: "connector-definition",
 			resourceId: updated.connectorKey,
 			op: "updated",
@@ -253,7 +264,7 @@ export async function handleUpdateConnectorSource(
 				code_hash: updated.codeHash,
 			},
 			changedFields: ["source_code", "version"],
-		});
+		}, tx);
 
 		return {
 			action: "update_connector_source",
@@ -267,20 +278,23 @@ export async function handleUpdateConnectorSource(
 	} catch (error) {
 		return { error: `Update failed: ${getErrorMessage(error)}` };
 	}
+	});
 }
 
 export async function handleRollbackConnectorVersion(
 	args: Extract<ConnectionsArgs, { action: "rollback_connector_version" }>,
 	ctx: ToolContext,
 ): Promise<ManageConnectionsResult> {
+	return withToolConfigTransaction<ManageConnectionsResult>(ctx, async (tx) => {
 	try {
 		const rolled = await rollbackConnectorVersion({
+			transaction: tx,
 			organizationId: ctx.organizationId,
 			connectorKey: args.connector_key,
 			version: args.version,
 		});
 
-		recordToolConfigChange(ctx, {
+		await insertToolConfigChange(ctx, {
 			resourceKind: "connector-definition",
 			resourceId: rolled.connectorKey,
 			op: "updated",
@@ -292,7 +306,7 @@ export async function handleRollbackConnectorVersion(
 				code_hash: rolled.codeHash,
 			},
 			changedFields: ["version"],
-		});
+		}, tx);
 
 		return {
 			action: "rollback_connector_version",
@@ -306,6 +320,7 @@ export async function handleRollbackConnectorVersion(
 	} catch (error) {
 		return { error: `Rollback failed: ${getErrorMessage(error)}` };
 	}
+	});
 }
 
 // ============================================
@@ -320,8 +335,10 @@ export async function handleToggleConnectorLogin(
 	args: Extract<ConnectionsArgs, { action: "toggle_connector_login" }>,
 	ctx: ToolContext,
 ): Promise<ManageConnectionsResult> {
+	return withToolConfigTransaction<ManageConnectionsResult>(ctx, async (tx) => {
 	try {
 		const connector = await toggleConnectorLoginEnabled({
+			transaction: tx,
 			organizationId: ctx.organizationId,
 			connectorKey: args.connector_key,
 			enabled: args.enabled,
@@ -338,14 +355,14 @@ export async function handleToggleConnectorLogin(
 			"Connector login provider toggled",
 		);
 
-		recordToolConfigChange(ctx, {
+		await insertToolConfigChange(ctx, {
 			resourceKind: "connector-definition",
 			resourceId: args.connector_key,
 			op: "updated",
 			summary: `Connector '${args.connector_key}' login provider ${args.enabled ? "enabled" : "disabled"}`,
 			state: { connector_key: args.connector_key, login_enabled: args.enabled },
 			changedFields: ["login_enabled"],
-		});
+		}, tx);
 
 		return {
 			action: "toggle_connector_login",
@@ -356,6 +373,7 @@ export async function handleToggleConnectorLogin(
 	} catch (error) {
 		return { error: getErrorMessage(error) };
 	}
+	});
 }
 
 // ============================================
@@ -366,7 +384,8 @@ export async function handleUpdateConnectorAuth(
 	args: Extract<ConnectionsArgs, { action: "update_connector_auth" }>,
 	ctx: ToolContext,
 ): Promise<ManageConnectionsResult> {
-	const sql = getDb();
+	return withToolConfigTransaction<ManageConnectionsResult>(ctx, async (tx) => {
+	const sql = tx;
 	const organizationId = ctx.organizationId;
 	const userId = ctx.userId ?? "api";
 
@@ -401,7 +420,7 @@ export async function handleUpdateConnectorAuth(
 		authSchema: connector.auth_schema,
 		authValues,
 		createdBy: userId,
-	});
+	}, tx);
 
 	logger.info(
 		{ connector_key: args.connector_key, keys: Object.keys(authValues) },
@@ -410,14 +429,14 @@ export async function handleUpdateConnectorAuth(
 
 	// Metadata-only (state null): auth values are secret material, and the
 	// key NAMES alone already say which credentials were rotated.
-	recordToolConfigChange(ctx, {
+	await insertToolConfigChange(ctx, {
 		resourceKind: "connector-definition",
 		resourceId: args.connector_key,
 		op: "updated",
 		summary: `Connector '${args.connector_key}' auth updated (${Object.keys(authValues).join(", ")})`,
 		state: null,
 		changedFields: ["auth_profiles"],
-	});
+	}, tx);
 
 	return {
 		action: "update_connector_auth",
@@ -425,6 +444,7 @@ export async function handleUpdateConnectorAuth(
 		connector_key: args.connector_key,
 		keys_updated: Object.keys(authValues),
 	};
+	});
 }
 
 // ============================================
@@ -445,6 +465,7 @@ export async function handleUpdateConnectorDefaultConfig(
 	const sql = getDb();
 	const outcome = await sql.begin(
 		async (tx): Promise<"not_found" | { error: string } | null> => {
+			await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
 			const rows = (await tx`
 				SELECT default_connection_config
 				FROM connector_definitions
@@ -462,6 +483,18 @@ export async function handleUpdateConnectorDefaultConfig(
 					AND organization_id = ${ctx.organizationId}
 					AND status = 'active'
 			`;
+	await insertToolConfigChange(ctx, {
+		resourceKind: "connector-definition",
+		resourceId: args.connector_key,
+		op: "updated",
+		summary: `Connector '${args.connector_key}' default connection config updated`,
+		before: { connector_key: args.connector_key, default_connection_config: rows[0].default_connection_config },
+		state: {
+			connector_key: args.connector_key,
+			default_connection_config: args.default_connection_config,
+		},
+		changedFields: ["default_connection_config"],
+	}, tx);
 			return null;
 		},
 	);
@@ -471,17 +504,7 @@ export async function handleUpdateConnectorDefaultConfig(
 	}
 	if (outcome) return outcome;
 
-	recordToolConfigChange(ctx, {
-		resourceKind: "connector-definition",
-		resourceId: args.connector_key,
-		op: "updated",
-		summary: `Connector '${args.connector_key}' default connection config updated`,
-		state: {
-			connector_key: args.connector_key,
-			default_connection_config: args.default_connection_config,
-		},
-		changedFields: ["default_connection_config"],
-	});
+
 
 	return {
 		action: "update_connector_default_config",

@@ -7,7 +7,7 @@
  * query surfaced "query_sql completed". Root cause: every Automation action
  * dual-writes a lifecycle row (metadata.category='lifecycle', feeds
  * metric_series dashboards) and a config row (category='config', feeds the
- * Deployments feed), both stored as `events` with semantic_type 'change';
+ * Events page's Configuration filter), both stored as `events` with semantic_type 'change';
  * tool invocations add semantic_type 'audit' + origin_type 'tool_invocation'
  * rows. All three carry no body text and no embedding, so recall can only
  * title-match them into noise.
@@ -77,7 +77,7 @@ describe('searchContentByText > exclude_internal_ops', () => {
       ).id
     );
 
-    // The config dual-write (single-quoted title, Deployments feed source).
+    // The config dual-write (single-quoted title, configuration audit source).
     configRowId = String(
       (
         await createTestEvent({

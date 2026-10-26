@@ -20,7 +20,7 @@ import {
 	withSessionAdvisoryLock,
 	type DbClient,
 } from "../../../../db/client";
-import { recordToolConfigChange } from "../../helpers/config-audit";
+import { insertToolConfigChange } from "../../helpers/config-audit";
 import { slugify } from "../../../../auth/personal-org-provisioning";
 import {
 	connectorSecretKeysFromSchemas,
@@ -34,6 +34,7 @@ import {
 	updateChatConnection,
 	upsertByoChatConnection,
 } from "../../../../gateway/connections/chat-connection-service";
+import type { ChatConfigAudit } from "../../../../gateway/connections/chat-connection-service";
 import { queueApprovalNotificationCardRefresh } from "../../../../notifications/service";
 import {
   EMPTY_SUMMARY,
@@ -155,6 +156,21 @@ import {
 	lockOrganizationForRelationshipClaims,
 	retractConnectionRelationshipClaims,
 } from "../../../../utils/relationship-claims";
+
+function chatConfigAudit(ctx: ToolContext, name: string, changedFields?: string[]): ChatConfigAudit {
+  return async (tx, { before, after }) => {
+    const row = after ?? before;
+    if (!row) return;
+    const op = after ? before ? 'updated' : 'created' : 'deleted';
+    await insertToolConfigChange(ctx, {
+      resourceKind: 'connection', resourceId: row.id, op,
+      summary: `Connection '${name}' ${op}`,
+      before: before ? before as unknown as Record<string, unknown> : null,
+      state: after ? after as unknown as Record<string, unknown> : null,
+      ...(changedFields ? { changedFields } : {}),
+    }, tx);
+  };
+}
 
 // ============================================
 // handleListConnectorGroups
@@ -838,6 +854,7 @@ export async function handleCreate(
 					.replace(/-/g, "")
 					.slice(0, 6)}`;
 			const created = await upsertByoChatConnection({
+        onPersist: chatConfigAudit(ctx, args.display_name ?? args.connector_key),
 				organizationId,
 				createdBy: effectiveCreatedBy ?? undefined,
 				platform: args.connector_key,
@@ -850,13 +867,6 @@ export async function handleCreate(
 				ctx,
 			);
 			if ("error" in read || read.action !== "get") return read;
-			recordToolConfigChange(ctx, {
-				resourceKind: "connection",
-				resourceId: created.connectionId,
-				op: created.created ? "created" : "updated",
-				summary: `Connection '${args.display_name ?? args.connector_key}' ${created.created ? "created" : "updated"}`,
-				state: read.connection as Record<string, unknown>,
-			});
 			return {
 				action: "create",
 				connection: read.connection,
@@ -1304,12 +1314,12 @@ export async function handleCreate(
   });
 	if ("error" in slugResult) return { error: slugResult.error };
 
-	const insertConnection = (
+	const insertConnection = async (
 		db: DbClient,
 		authProfileId: number | null,
 		useSavepoint: boolean,
-	) =>
-		insertConnectionWithSlug({
+	) => {
+    const rows = await insertConnectionWithSlug({
       organizationId,
       connectorKey: args.connector_key,
       displayName,
@@ -1340,6 +1350,9 @@ export async function handleCreate(
 				return useSavepoint ? db.savepoint(insert) : insert();
 			},
 		});
+    await insertToolConfigChange(ctx, { resourceKind: "connection", resourceId: Number(rows[0].id), op: "created", summary: `Connection '${displayName}' created`, before: null, state: rows[0] as Record<string, unknown> }, db);
+    return rows;
+  };
 
 	let inserted: Record<string, unknown>[];
 	let interactiveAuthRunId: number | null;
@@ -1389,13 +1402,7 @@ export async function handleCreate(
     extra: { connector_key: args.connector_key, slug: inserted[0].slug },
   });
 
-  recordToolConfigChange(ctx, {
-		resourceKind: "connection",
-		resourceId: Number(inserted[0].id),
-		op: "created",
-    summary: `Connection '${displayName}' created`,
-    state: inserted[0] as Record<string, unknown>,
-  });
+
 
 	if (interactiveMethod) {
 		const connectionId = Number(inserted[0].id);
@@ -1464,6 +1471,7 @@ export async function handleApplyChatConnection(
 	}
 	try {
 		const result = await upsertByoChatConnection({
+      onPersist: chatConfigAudit(ctx, args.display_name ?? args.stable_id),
 			organizationId,
 			createdBy: ctx.userId ?? undefined,
 			platform: args.connector_key,
@@ -1478,15 +1486,6 @@ export async function handleApplyChatConnection(
 			ctx,
 		);
 		if ("error" in read || read.action !== "get") return read;
-		if (result.created || result.changed) {
-			recordToolConfigChange(ctx, {
-				resourceKind: "connection",
-				resourceId: result.connectionId,
-				op: result.created ? "created" : "updated",
-				summary: `Connection '${args.display_name ?? args.stable_id}' ${result.created ? "created" : "updated"}`,
-				state: read.connection as Record<string, unknown>,
-			});
-		}
 		return {
 			action: "apply_chat_connection",
 			connection: read.connection,
@@ -1629,6 +1628,12 @@ export async function handleUpdate(
 		}
 		try {
 			await updateChatConnection({
+        onPersist: chatConfigAudit(ctx, args.display_name ?? String(args.connection_id), [
+          ...(args.display_name !== undefined ? ["display_name"] : []),
+          ...(args.config !== undefined ? ["config"] : []),
+          ...(args.status !== undefined ? ["status"] : []),
+          ...(hasAgentIdArg ? ["agent_id"] : []),
+        ]),
 				organizationId,
 				connectionId: args.connection_id,
 				displayName: args.display_name,
@@ -1649,19 +1654,6 @@ export async function handleUpdate(
 				ctx,
 			);
 			if ("error" in read || read.action !== "get") return read;
-			recordToolConfigChange(ctx, {
-				resourceKind: "connection",
-				resourceId: args.connection_id,
-				op: "updated",
-				summary: `Connection '${args.display_name ?? args.connection_id}' updated`,
-				state: read.connection as Record<string, unknown>,
-				changedFields: [
-					...(args.display_name !== undefined ? ["display_name"] : []),
-					...(args.config !== undefined ? ["config"] : []),
-					...(args.status !== undefined ? ["status"] : []),
-					...(hasAgentIdArg ? ["agent_id"] : []),
-				],
-			});
 			return { action: "update", connection: read.connection };
 		} catch (error) {
 			return { error: getErrorMessage(error) };
@@ -2078,8 +2070,9 @@ export async function handleUpdate(
     // UPDATE makes the restore source the row the write is actually based on.
     // Mirrors the shape manage_feeds already uses for handleUpdateFeed.
     const updateOutcome = await sql.begin(async (tx) => {
+      await lockOrganizationForRelationshipClaims(tx, organizationId);
       const lockedRows = await tx`
-        SELECT config, auth_profile_id, app_auth_profile_id, status
+        SELECT *
         FROM connections
         WHERE id = ${args.connection_id}
           AND organization_id = ${organizationId}
@@ -2205,6 +2198,20 @@ export async function handleUpdate(
             AND deleted_at IS NULL
         `;
       }
+      const finalRows = await tx`SELECT * FROM connections WHERE id = ${args.connection_id} AND organization_id = ${organizationId}`;
+      const changedFields = [
+        ...(args.display_name !== undefined ? ['display_name'] : []),
+        ...(updateExplicitSlug ? ['slug'] : []),
+        ...(args.status !== undefined ? ['status'] : []),
+        ...(hasAuthProfileArg ? ['auth_profile_id'] : []),
+        ...(hasAppAuthProfileArg ? ['app_auth_profile_id'] : []),
+        ...(hasDeviceWorkerArg ? ['device_worker_id'] : []),
+        ...(lockedRows[0].error_message !== finalRows[0].error_message ? ['error_message'] : []),
+        ...(args.entity_ids !== undefined ? ['entity_ids'] : []),
+        ...(args.config !== undefined ? ['config'] : []),
+        ...(args.visibility !== undefined ? ['visibility'] : []),
+      ];
+      await insertToolConfigChange(ctx, { resourceKind: "connection", resourceId: args.connection_id, op: "updated", summary: `Connection '${finalRows[0].display_name ?? finalRows[0].slug ?? args.connection_id}' updated`, before: lockedRows[0] as Record<string, unknown>, state: finalRows[0] as Record<string, unknown>, changedFields }, tx);
       return { rows, previousStatus: String(lockedRows[0].status) };
     });
     if ("denial" in updateOutcome && updateOutcome.denial) {
@@ -2308,27 +2315,6 @@ export async function handleUpdate(
     await syncOAuthConnectionsForAuthProfile(organizationId, effectiveAuth.id);
   }
 
-  const updatedRow = updated[0] as Record<string, unknown>;
-  const changedFields = [
-    ...(args.display_name !== undefined ? ["display_name"] : []),
-    ...(updateExplicitSlug ? ["slug"] : []),
-    ...(args.status !== undefined ? ["status"] : []),
-    ...(hasAuthProfileArg ? ["auth_profile_id"] : []),
-    ...(hasAppAuthProfileArg ? ["app_auth_profile_id"] : []),
-    ...(hasDeviceWorkerArg ? ["device_worker_id"] : []),
-    ...(clearedDeviceTombstone ? ["error_message"] : []),
-    ...(args.entity_ids !== undefined ? ["entity_ids"] : []),
-    ...(args.config !== undefined ? ["config"] : []),
-    ...(args.visibility !== undefined ? ["visibility"] : []),
-  ];
-  recordToolConfigChange(ctx, {
-    resourceKind: "connection",
-    resourceId: args.connection_id,
-    op: "updated",
-    summary: `Connection '${updatedRow.display_name ?? updatedRow.slug ?? args.connection_id}' updated`,
-    state: updatedRow,
-    ...(changedFields.length > 0 ? { changedFields } : {}),
-  });
 
 	if (args.config !== undefined || args.status !== undefined) {
 		const read = await handleGet(
@@ -2567,6 +2553,7 @@ export async function handleDelete(
     // Match organization deletion's parent -> child lock order before taking
     // the connection row lock below.
     await lockOrganizationForRelationshipClaims(tx, organizationId);
+    const beforeRows = await tx`SELECT * FROM connections WHERE id = ${args.connection_id} AND organization_id = ${organizationId} AND deleted_at IS NULL FOR UPDATE`;
     const tombstoned = await tx`
       UPDATE connections
       SET deleted_at = NOW(),
@@ -2616,6 +2603,7 @@ export async function handleDelete(
       connectionId: args.connection_id,
     });
 
+    await insertToolConfigChange(ctx, { resourceKind: "connection", resourceId: args.connection_id, op: "deleted", summary: `Connection '${tombstoned[0].display_name ?? tombstoned[0].slug ?? args.connection_id}' deleted`, before: beforeRows[0] as Record<string, unknown>, state: null }, tx);
 		return { tombstoned, expiredApprovalRunIds };
   });
   if (deleted === null) {
@@ -2664,13 +2652,7 @@ export async function handleDelete(
     extra: { connector_key: conn.connector_key, slug: conn.slug },
   });
 
-  recordToolConfigChange(ctx, {
-		resourceKind: "connection",
-    resourceId: args.connection_id,
-		op: "deleted",
-    summary: `Connection '${connName}' deleted`,
-    state: null,
-  });
+
 
   return {
 		action: "delete",

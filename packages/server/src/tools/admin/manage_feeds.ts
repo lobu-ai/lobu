@@ -94,9 +94,10 @@ import {
   findDeviceConnectorReadiness,
   loadDeviceConnectorReadiness,
 } from '../../worker-api/device-connector-readiness';
+import { lockOrganizationForRelationshipClaims } from '../../utils/relationship-claims';
 import type { ToolContext } from '../registry';
 import { action, defineActionTool } from './action-tool';
-import { recordToolConfigChange } from './helpers/config-audit';
+import { insertToolConfigChange } from './helpers/config-audit';
 import { assertEntityIdsInOrg, callerIsAdmin } from './helpers/db-helpers';
 import {
   type FeedDefinition,
@@ -786,20 +787,31 @@ async function handleCreateFeed(
     feedInitialStatus === 'paused' &&
     authProfile?.profile_kind === 'oauth_account';
 
-  const inserted = await sql`
+  const inserted = await sql.begin(async (tx) => {
+  const rows = await tx`
     INSERT INTO feeds (
       organization_id, connection_id, feed_key, display_name, status,
       entity_ids, config, schedule, timezone, next_run_at, last_error
     ) VALUES (
       ${organizationId}, ${args.connection_id}, ${args.feed_key}, ${displayName}, ${feedInitialStatus},
       ${entityIdsValue}::bigint[],
-      ${args.config || Object.keys(effectiveFeedConfig).length > 0 ? sql.json(effectiveFeedConfig) : null},
+      ${args.config || Object.keys(effectiveFeedConfig).length > 0 ? tx.json(effectiveFeedConfig) : null},
       ${schedule}, ${timezone}, ${nextRunAtVal},
       ${systemScopePaused ? OAUTH_SCOPE_PAUSE_LAST_ERROR : null}
     )
-    RETURNING ${sql.unsafe(publicFeedColumnList())}
+    RETURNING ${tx.unsafe(publicFeedColumnList())}
   `;
 
+  await insertToolConfigChange(ctx, {
+    resourceKind: 'feed',
+    resourceId: rows[0].id as number,
+    op: 'created',
+    summary: `Feed '${displayName}' created`,
+    before: null,
+    state: rows[0] as Record<string, unknown>,
+  }, tx);
+    return rows;
+  });
   if (authProfile?.profile_kind === 'oauth_account') {
     await syncOAuthConnectionsForAuthProfile(organizationId, authProfile.id);
   }
@@ -813,13 +825,7 @@ async function handleCreateFeed(
     'Feed created',
   );
 
-  recordToolConfigChange(ctx, {
-    resourceKind: 'feed',
-    resourceId: inserted[0].id as number,
-    op: 'created',
-    summary: `Feed '${displayName}' created`,
-    state: inserted[0] as Record<string, unknown>,
-  });
+
 
   return {
     action: 'create_feed',
@@ -893,6 +899,7 @@ async function handleUpdateFeed(
   // in what is stored. Without the schema check a patch could push the stored
   // config into a shape that only fails at sync time.
   const txResult = await sql.begin(async (tx) => {
+    await lockOrganizationForRelationshipClaims(tx, organizationId);
     const existing = await tx`
       SELECT f.id, f.status, f.schedule, f.timezone, f.feed_key, f.config,
              f.pinned_version, c.auth_profile_id, cd.feeds_schema,
@@ -906,6 +913,7 @@ async function handleUpdateFeed(
     if (existing.length === 0) {
       return { error: 'Feed not found' } as const;
     }
+    const before = await tx`SELECT ${tx.unsafe(publicFeedColumnList())} FROM feeds WHERE id = ${args.feed_id}`;
     const feedRow = existing[0] as Record<string, unknown>;
     const operations = feedOperations(
       feedRow.feeds_schema as Record<string, FeedDefinition> | null,
@@ -996,6 +1004,24 @@ async function handleUpdateFeed(
       WHERE id = ${args.feed_id} AND organization_id = ${organizationId}
       RETURNING ${tx.unsafe(publicFeedColumnList())}
     `;
+  const changedFields = [
+    ...(args.display_name !== undefined ? ['display_name'] : []),
+    ...(args.status !== undefined ? ['status'] : []),
+    ...(args.entity_ids !== undefined ? ['entity_ids'] : []),
+    ...(args.config !== undefined ? ['config'] : []),
+    ...(args.schedule !== undefined ? ['schedule'] : []),
+    ...(hasTimezoneArg ? ['timezone'] : []),
+  ];
+  await insertToolConfigChange(ctx, {
+    resourceKind: 'feed',
+    resourceId: args.feed_id,
+    op: 'updated',
+    summary: `Feed '${updated[0].display_name ?? updated[0].feed_key ?? args.feed_id}' updated`,
+    state: updated[0] as Record<string, unknown>,
+    before: before[0] as Record<string, unknown>,
+    ...(changedFields.length > 0 ? { changedFields } : {}),
+  }, tx);
+
     return {
       updated,
       operations,
@@ -1021,22 +1047,6 @@ async function handleUpdateFeed(
   }
 
   const updatedFeed = updated[0] as Record<string, unknown>;
-  const changedFields = [
-    ...(args.display_name !== undefined ? ['display_name'] : []),
-    ...(args.status !== undefined ? ['status'] : []),
-    ...(args.entity_ids !== undefined ? ['entity_ids'] : []),
-    ...(args.config !== undefined ? ['config'] : []),
-    ...(args.schedule !== undefined ? ['schedule'] : []),
-    ...(hasTimezoneArg ? ['timezone'] : []),
-  ];
-  recordToolConfigChange(ctx, {
-    resourceKind: 'feed',
-    resourceId: args.feed_id,
-    op: 'updated',
-    summary: `Feed '${updatedFeed.display_name ?? updatedFeed.feed_key ?? args.feed_id}' updated`,
-    state: updatedFeed,
-    ...(changedFields.length > 0 ? { changedFields } : {}),
-  });
 
   return {
     action: 'update_feed',
@@ -1056,22 +1066,35 @@ async function handleDeleteFeed(
   // the feed), so cancelling runs first would let a guessed foreign feed_id
   // cancel another org's runs even though the delete then no-ops. Delete the
   // org-owned feed first and bail when nothing matched.
-  const deleted = await sql`
+  const deleted = await sql.begin(async (tx) => {
+    await lockOrganizationForRelationshipClaims(tx, organizationId);
+    const before = await tx`SELECT ${tx.unsafe(publicFeedColumnList())} FROM feeds WHERE id = ${args.feed_id} AND organization_id = ${organizationId} AND deleted_at IS NULL FOR UPDATE`;
+  const rows = await tx`
     UPDATE feeds
     SET deleted_at = NOW(), status = 'paused', updated_at = NOW()
     WHERE id = ${args.feed_id} AND organization_id = ${organizationId} AND deleted_at IS NULL
     RETURNING id, feed_key, connection_id, entity_ids
   `;
 
-  if (deleted.length === 0) {
-    return { error: 'Feed not found or already deleted' };
-  }
+  if (rows.length === 0) return [];
 
   // Ownership confirmed — now safe to cancel this feed's active runs.
-  await sql`
+  await tx`
     UPDATE runs SET status = 'cancelled', completed_at = NOW()
     WHERE feed_id = ${args.feed_id} AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
   `;
+
+  await insertToolConfigChange(ctx, {
+    resourceKind: 'feed',
+    resourceId: args.feed_id,
+    op: 'deleted',
+    summary: `Feed '${rows[0].feed_key}' deleted`,
+    state: null,
+    before: before[0] as Record<string, unknown>,
+  }, tx);
+    return rows;
+  });
+  if (deleted.length === 0) return { error: 'Feed not found or already deleted' };
 
   // Record change event in knowledge for audit trail
   const feed = deleted[0];
@@ -1091,13 +1114,7 @@ async function handleDeleteFeed(
     },
   });
 
-  recordToolConfigChange(ctx, {
-    resourceKind: 'feed',
-    resourceId: args.feed_id,
-    op: 'deleted',
-    summary: `Feed '${feed.feed_key}' deleted`,
-    state: null,
-  });
+
 
   return { action: 'delete_feed', deleted: true, feed_id: args.feed_id };
 }
@@ -1182,6 +1199,7 @@ async function handleRecollectFeed(
   const { organizationId } = ctx;
 
   const result = await sql.begin(async (tx): Promise<{ error: string } | { feed: Record<string, unknown> }> => {
+    await lockOrganizationForRelationshipClaims(tx, organizationId);
     const locked = await tx`
       SELECT f.id
       FROM feeds f
@@ -1204,6 +1222,7 @@ async function handleRecollectFeed(
       };
     }
 
+    const before = await tx`SELECT ${tx.unsafe(publicFeedColumnList())} FROM feeds WHERE id = ${args.feed_id}`;
     const updated = await tx`
       UPDATE feeds
       SET checkpoint = CASE
@@ -1214,21 +1233,23 @@ async function handleRecollectFeed(
       WHERE id = ${args.feed_id}
       RETURNING ${tx.unsafe(publicFeedColumnList())}
     `;
+  await insertToolConfigChange(ctx, {
+    resourceKind: 'feed',
+    resourceId: args.feed_id,
+    op: 'updated',
+    action: 'recollect_feed',
+    summary: `Feed '${updated[0].display_name ?? updated[0].feed_key ?? args.feed_id}' cursor cleared for re-collection`,
+    state: updated[0] as Record<string, unknown>,
+    before: before[0] as Record<string, unknown>,
+    changedFields: ['checkpoint'],
+  }, tx);
     return { feed: updated[0] as Record<string, unknown> };
   });
   if ('error' in result) {
     return { error: result.error };
   }
 
-  recordToolConfigChange(ctx, {
-    resourceKind: 'feed',
-    resourceId: args.feed_id,
-    op: 'updated',
-    action: 'recollect_feed',
-    summary: `Feed '${result.feed.display_name ?? result.feed.feed_key ?? args.feed_id}' cursor cleared for re-collection`,
-    state: result.feed,
-    changedFields: ['checkpoint'],
-  });
+
 
   return { action: 'recollect_feed', feed_id: args.feed_id };
 }

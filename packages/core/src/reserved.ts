@@ -204,9 +204,12 @@ export const SANDBOX_ROW_KEY_PREFIX = "sandbox:";
 export const SANDBOX_PROVIDER_KEY_PREFIX = "sandbox-provider:";
 
 /**
- * Path segments under `/connectors/` that are real routes, not connector keys:
+ * Path segments under `/connectors/` reserved from connector keys:
  * `/connectors/device/{id}`, `/connectors/client/{id}`, `/connectors/app/{id}`,
- * plus the static `create` flow and `deployments` pages.
+ * plus the static `create` flow. `deployments` is no longer a route (the
+ * audit feed now lives in the workspace Events page and the redirect was
+ * removed) but stays reserved so a stale `/connectors/deployments` bookmark always lands
+ * on the not-installed fallback instead of a connector that took the name.
  *
  * Model providers and sandboxes are namespaced INTO the `$connectorKey` param
  * with a `prefix:` because they share that one detail route. Devices, clients
@@ -225,7 +228,7 @@ export const CONNECTOR_SUBROUTE_SEGMENTS = [
 ] as const;
 
 /**
- * Whether a connector key would be shadowed by a `/connectors/*` subroute.
+ * Whether a connector key is reserved under `/connectors/*`.
  * Compared lowercased: the router matches static segments case-insensitively
  * (no `caseSensitive` option is set), so `Device` is shadowed like `device`.
  */

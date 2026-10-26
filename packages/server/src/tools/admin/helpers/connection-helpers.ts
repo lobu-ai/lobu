@@ -7,7 +7,8 @@
 import { findLiveBrowserProfile, type LiveBrowserProfileParams } from '../../../utils/live-browser-profile';
 import { getScopedConnectorDefinition } from '../../../catalog/connector-definitions';
 import { oauthAccountOwnershipError } from '../../../authz/oauth-account-ownership';
-import { getDb } from '../../../db/client';
+import { type DbClient, getDb } from '../../../db/client';
+import { withTransaction } from '../../../db/transaction';
 import { getErrorMessage } from '@lobu/core';
 import logger from '../../../utils/logger';
 import {
@@ -348,7 +349,7 @@ export async function upsertConnectorAuthProfiles(params: {
   authSchema: AuthSchema;
   authValues: Record<string, string>;
   createdBy: string;
-}): Promise<string[]> {
+}, transaction?: DbClient): Promise<string[]> {
   const keysUpdated = new Set<string>();
   const { envValues, oauthAppProfiles } = splitAuthValuesBySchema(
     params.authSchema,
@@ -357,7 +358,7 @@ export async function upsertConnectorAuthProfiles(params: {
 
   for (const profile of oauthAppProfiles) {
     const profileSlug = normalizeAuthProfileSlug(`${params.connectorKey}-${profile.provider}-app`);
-    const existing = await getAuthProfileBySlug(params.organizationId, profileSlug);
+    const existing = await getAuthProfileBySlug(params.organizationId, profileSlug, transaction);
     if (existing) {
       await updateAuthProfile({
         organizationId: params.organizationId,
@@ -366,7 +367,7 @@ export async function upsertConnectorAuthProfiles(params: {
         authData: profile.credentials,
         status: 'active',
         provider: profile.provider,
-      });
+      }, transaction);
     } else {
       await createAuthProfile({
         organizationId: params.organizationId,
@@ -377,7 +378,7 @@ export async function upsertConnectorAuthProfiles(params: {
         authData: profile.credentials,
         provider: profile.provider,
         createdBy: params.createdBy,
-      });
+      }, transaction);
     }
     for (const key of Object.keys(profile.credentials)) {
       keysUpdated.add(key);
@@ -386,7 +387,7 @@ export async function upsertConnectorAuthProfiles(params: {
 
   if (Object.keys(envValues).length > 0) {
     const profileSlug = normalizeAuthProfileSlug(`${params.connectorKey}-default`);
-    const existing = await getAuthProfileBySlug(params.organizationId, profileSlug);
+    const existing = await getAuthProfileBySlug(params.organizationId, profileSlug, transaction);
     if (existing) {
       await updateAuthProfile({
         organizationId: params.organizationId,
@@ -394,7 +395,7 @@ export async function upsertConnectorAuthProfiles(params: {
         displayName: `${params.connectorName} Default`,
         authData: envValues,
         status: 'active',
-      });
+      }, transaction);
     } else {
       await createAuthProfile({
         organizationId: params.organizationId,
@@ -404,7 +405,7 @@ export async function upsertConnectorAuthProfiles(params: {
         profileKind: 'env',
         authData: envValues,
         createdBy: params.createdBy,
-      });
+      }, transaction);
     }
     for (const key of Object.keys(envValues)) {
       keysUpdated.add(key);
@@ -556,6 +557,7 @@ export async function issueOAuthReconnectLink(params: {
   requestedScopes?: string[];
   connectionId?: number;
   appAuthProfileSlug?: string;
+  transaction?: DbClient;
 }): Promise<
   | { error: string }
   | {
@@ -598,7 +600,7 @@ export async function issueOAuthReconnectLink(params: {
     };
   }
 
-  const sql = getDb();
+  const sql = params.transaction ?? getDb();
   if (params.connectionId) {
     const owned = await sql`
       SELECT 1 FROM connections
@@ -645,7 +647,7 @@ export async function issueOAuthReconnectLink(params: {
       ...(appAuthProfileId ? { appAuthProfileId } : {}),
     },
     createdBy: ctx.userId,
-  });
+  }, params.transaction);
 
   return {
     authProfile,
@@ -1000,7 +1002,8 @@ export async function maybeUpsertAuthAfterInstall(
     mcpOAuth?: McpOAuthMetadata;
   },
   authValues: Record<string, string> | undefined,
-  ctx: ToolContext
+  ctx: ToolContext,
+  transaction?: DbClient
 ): Promise<void> {
   const normalized = normalizeAuthValues(authValues ?? {});
   if (Object.keys(normalized).length > 0) {
@@ -1011,7 +1014,7 @@ export async function maybeUpsertAuthAfterInstall(
       authSchema: installed.authSchema,
       authValues: normalized,
       createdBy: ctx.userId ?? 'api',
-    });
+    }, transaction);
   }
 
   const oauthMetadata = installed.mcpOAuth;
@@ -1029,12 +1032,11 @@ export async function maybeUpsertAuthAfterInstall(
   const redirectUri = `${callbackBase}/connect/oauth/callback`;
   const { clientIdKey, clientSecretKey } = getOAuthCredentialKeys(oauthMethod);
   const provider = oauthMethod.provider.toLowerCase();
-  const sql = getDb();
 
   // The connector-definition row is the existing durable install chokepoint.
   // Lock it while checking/creating the one org-scoped dynamic client so two
   // replicas cannot both register separate provider clients for one connector.
-  await sql.begin(async (tx) => {
+  await withTransaction(transaction, async (tx) => {
     const connectorRows = await tx`
       SELECT id
       FROM connector_definitions

@@ -1,6 +1,6 @@
 /**
  * Deployments API — the config audit trail behind the owletto
- * Infrastructure → Deployments tab.
+ * Events page (Applies filter).
  *
  * A "deployment" is one `lobu apply` run: the CLI threads an
  * `x-lobu-apply-id` header through every mutation (grouping the
@@ -43,7 +43,7 @@ const DEPLOYMENT_STATUSES = new Set([
 	"succeeded",
 	"partial_failure",
 	// A run that was blocked by drift — it never mutated state. Carries the
-	// blocking candidates so the reconciler/Deployments tab can act on them.
+	// blocking candidates so the reconciler/Events page can act on them.
 	"blocked",
 ]);
 
@@ -153,7 +153,7 @@ routes.post("/", async (c) => {
 		manifest = body.manifest as Record<string, unknown>;
 	}
 	// Blocking-drift candidates (blocking-item list + the confirm token) for a
-	// `blocked` run — what the reconciler and the Deployments tab render.
+	// `blocked` run — what the reconciler and the Events page render.
 	let candidates: unknown = null;
 	if (body.candidates !== undefined && body.candidates !== null) {
 		if (typeof body.candidates !== "object" || Array.isArray(body.candidates)) {

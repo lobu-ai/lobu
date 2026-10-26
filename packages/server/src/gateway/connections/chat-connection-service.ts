@@ -1,16 +1,25 @@
 import { Value } from "@sinclair/typebox/value";
-import { getDb } from "../../db/client.js";
+import { type DbClient, getDb } from "../../db/client.js";
 import { getChatInstanceManager } from "../../lobu/gateway.js";
 import {
+	chatTenantAdvisoryLockKey,
+	managedTenantAdvisoryLockKey,
 	runtimeConnectionIdToSlug,
 	slugToRuntimeConnectionId,
 } from "../../lobu/stores/connections-projection.js";
+import { PostgresSecretStore } from "../../lobu/stores/postgres-secret-store.js";
+import {
+	createPostgresAgentConnectionStore,
+	withChatConnectionDeadlockRetry,
+} from "../../lobu/stores/postgres-stores.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { restoreRedactedConfig } from "../../utils/connection-config-redaction.js";
+import { lockOrganizationForRelationshipClaims } from "../../utils/relationship-claims.js";
 import { SLACK_INSTALLATION_ID_PREFIX } from "../../lobu/stores/slack-installations.js";
 import { PlatformAdapterConfigSchema } from "../routes/schemas/platform-config.js";
-import { isAdapterlessPlatform } from "./chat-instance-manager.js";
-import { getPlatformDescriptor } from "./platforms/index.js";
+import { deleteSecretsByPrefix } from "../secrets/index.js";
+import { isAdapterlessPlatform, normalizeChatConfigForStorage, type ChatMutationPersistence } from "./chat-instance-manager.js";
+import { connectorTransportPlatforms, getPlatformDescriptor } from "./platforms/index.js";
 import { createSlackWebApi } from "./slack-web.js";
 import { isSlackConfig, type PlatformAdapterConfig } from "./types.js";
 
@@ -32,7 +41,10 @@ export interface ChatConnectionRow {
 	display_name: string | null;
 }
 
+export type ChatConfigAudit = (tx: DbClient, change: { before: ChatConnectionRow | null; after: ChatConnectionRow | null }) => Promise<void>;
+
 export interface UpsertChatConnectionInput {
+  onPersist?: ChatConfigAudit;
 	organizationId: string;
 	createdBy?: string;
 	platform: string;
@@ -41,6 +53,41 @@ export interface UpsertChatConnectionInput {
 	agentId?: string;
 	config: Record<string, unknown>;
 	settings?: { allowFrom?: string[]; allowGroups?: boolean };
+}
+
+/** Commit secret refs, the chat row, and the caller's audit before touching its runtime. */
+export function createChatMutationPersistence(input: { organizationId: string; displayName?: string; status?: string; onPersist?: ChatConfigAudit }, manager = requireManager()): ChatMutationPersistence {
+  const persist = async (connection: Parameters<ChatMutationPersistence['save']>[0], remove: boolean) => {
+    const next = { ...connection, status: input.status === 'paused' ? 'stopped' as const : input.status === 'active' ? 'active' as const : connection.status, ...(input.status === 'active' ? { errorMessage: undefined } : {}) };
+    const transaction = () => orgContext.run({ organizationId: input.organizationId }, () => getDb().begin(async tx => {
+      await lockOrganizationForRelationshipClaims(tx, input.organizationId);
+      for (const key of [chatTenantAdvisoryLockKey(next, input.organizationId), managedTenantAdvisoryLockKey(next)]) {
+        if (key) await tx.unsafe('SELECT pg_advisory_xact_lock(hashtext($1))', [key]);
+      }
+      const slug = runtimeConnectionIdToSlug(connection.id);
+      const rows = await tx`SELECT * FROM connections WHERE organization_id = ${input.organizationId} AND slug = ${slug} AND deleted_at IS NULL FOR UPDATE`;
+      const before = (rows[0] as ChatConnectionRow | undefined) ?? null;
+      const secretStore = new PostgresSecretStore(tx);
+      const store = createPostgresAgentConnectionStore({ transaction: tx, connectorTransportPlatforms: connectorTransportPlatforms() });
+      if (remove) {
+        if (!before) return;
+        await deleteSecretsByPrefix(secretStore, `connections/${connection.id}/`);
+        await store.deleteConnection(connection.id);
+        await input.onPersist?.(tx, { before, after: null });
+        return;
+      }
+      const config = await normalizeChatConfigForStorage(secretStore, connection.id, connection.config);
+      await store.saveConnection({ ...next, config });
+      await tx`UPDATE connections SET display_name = COALESCE(${input.displayName ?? null}, display_name) WHERE organization_id = ${input.organizationId} AND slug = ${slug} AND deleted_at IS NULL`;
+      const after = await tx`SELECT * FROM connections WHERE organization_id = ${input.organizationId} AND slug = ${slug} AND deleted_at IS NULL`;
+      if (!after[0]) throw new Error('Chat connection did not persist');
+      await input.onPersist?.(tx, { before, after: after[0] as ChatConnectionRow });
+    }));
+    if (remove) await transaction();
+    else await withChatConnectionDeadlockRetry({ organizationId: input.organizationId, slug: runtimeConnectionIdToSlug(connection.id) }, transaction);
+    manager.invalidateConfigSecretCache(connection);
+  };
+  return { save: connection => persist(connection, false), compensateCreate: connection => persist(connection, true) };
 }
 
 function hashLockKey(value: string): number {
@@ -375,6 +422,7 @@ export async function upsertByoChatConnection(
 					},
 					input.stableId,
 					input.createdBy,
+          createChatMutationPersistence(input),
 				),
 			);
 			const rows = (await sql`
@@ -441,15 +489,8 @@ export async function upsertByoChatConnection(
 					...providerMetadata,
 					...(input.displayName ? { teamName: input.displayName } : {}),
 				},
-			}),
+			}, createChatMutationPersistence(input)),
 		);
-		if (input.displayName && existing.display_name !== input.displayName) {
-			await sql`
-        UPDATE connections
-        SET display_name = ${input.displayName}, updated_at = now()
-        WHERE id = ${existing.id} AND organization_id = ${input.organizationId}
-      `;
-		}
 		return {
 			connectionId: existing.id,
 			runtimeId: input.stableId,
@@ -461,6 +502,7 @@ export async function upsertByoChatConnection(
 
 export async function updateChatConnection(input: {
 	organizationId: string;
+  onPersist?: ChatConfigAudit;
 	connectionId: number;
 	displayName?: string;
 	/** Fallback agent for the chat runtime; `null` clears it, `undefined` leaves it untouched. */
@@ -532,28 +574,20 @@ export async function updateChatConnection(input: {
 						...providerMetadata,
 						...(input.displayName ? { teamName: input.displayName } : {}),
 					},
-				}),
+				}, createChatMutationPersistence(input)),
 			);
-		} else if (input.agentId !== undefined) {
+		} else {
 			// agentId-only update: no config change, so no restart is needed — the
 			// manager persists the new fallback agent and refreshes any warm
 			// in-memory instance in place.
 			await orgContext.run({ organizationId: input.organizationId }, () =>
-				manager.updateConnection(runtimeId, { agentId: input.agentId }),
+				manager.updateConnection(runtimeId, { ...(input.agentId !== undefined ? { agentId: input.agentId } : {}) }, createChatMutationPersistence(input)),
 			);
 		}
 		if (input.status === "active") {
 			await manager.restartConnection(runtimeId);
 		} else if (input.status === "paused") {
 			await manager.stopConnection(runtimeId);
-		}
-		if (input.displayName !== undefined) {
-			const sql = getDb();
-			await sql`
-        UPDATE connections
-        SET display_name = ${input.displayName || row.connector_key}, updated_at = now()
-        WHERE id = ${row.id} AND organization_id = ${input.organizationId}
-      `;
 		}
 	});
 }

@@ -2,6 +2,7 @@ import { slugify } from '@lobu/core';
 import { HttpAuthBindingSchema, type HttpAuthBinding } from '@lobu/core/contracts/tools/manage-auth-profiles';
 import { Value } from '@sinclair/typebox/value';
 import { getDb, type DbClient } from '../db/client';
+import { withTransaction } from '../db/transaction';
 import { persistAuthCredentials } from './auth-credential-secrets';
 import { ToolUserError } from './errors';
 import { isUniqueViolation } from './pg-errors';
@@ -311,8 +312,8 @@ export async function listAuthProfiles(params: {
 export async function getAuthProfileBySlug(
   organizationId: string,
   slug: string
-): Promise<AuthProfileRow | null> {
-  const sql = getDb();
+, transaction?: DbClient): Promise<AuthProfileRow | null> {
+  const sql = transaction ?? getDb();
   const rows = await sql`
     SELECT ${sql.unsafe(AUTH_PROFILE_COLUMNS)}
     FROM auth_profiles
@@ -531,18 +532,18 @@ export async function updateAuthProfile(params: {
   status?: AuthProfileStatus;
   accountId?: string | null;
   provider?: string | null;
-}): Promise<AuthProfileRow | null> {
-  const existing = await getAuthProfileBySlug(params.organizationId, params.slug);
+}, transaction?: DbClient): Promise<AuthProfileRow | null> {
+  const existing = await getAuthProfileBySlug(params.organizationId, params.slug, transaction);
   if (!existing) return null;
 
-  const sql = getDb();
+  const sql = transaction ?? getDb();
   const nextSlug =
     params.nextSlug && params.nextSlug.trim().length > 0
       ? await ensureUniqueAuthProfileSlug({
           organizationId: params.organizationId,
           slug: normalizeAuthProfileSlug(params.nextSlug, existing.slug),
           excludeId: existing.id,
-        })
+        }, sql)
       : existing.slug;
 
   // `env` profiles: a no-credential update (rename, status) leaves authData
@@ -558,6 +559,7 @@ export async function updateAuthProfile(params: {
       organizationId: params.organizationId,
       authProfileId: existing.id,
       credentials: normalizeAuthData(existing.profile_kind, params.authData),
+      ...(transaction ? { db: transaction } : {}),
     });
   }
 
@@ -592,14 +594,13 @@ export async function updateAuthProfile(params: {
 export async function deleteAuthProfile(
   organizationId: string,
   slug: string
-): Promise<AuthProfileRow | null> {
-  const sql = getDb();
+, transaction?: DbClient): Promise<AuthProfileRow | null> {
   // Profile row + its encrypted credential rows must leave together. Env
   // profiles write `agent_secrets` under `auth-profile/<id>/…`; leaving those
   // behind after a delete keeps decryptable bearer credentials (DSNs, API
   // keys) until manual GC. Both deletes run in one transaction so a partial
   // failure cannot orphan secrets or leave a profile without credentials.
-  return await sql.begin(async (tx) => {
+  return await withTransaction(transaction, async (tx) => {
     const rows = await tx`
       DELETE FROM auth_profiles
       WHERE organization_id = ${organizationId}
@@ -711,9 +712,8 @@ export async function revokeOAuthAppProfileAtomic(params: {
   organizationId: string;
   profileId: number;
   nextStatus: 'revoked' | 'error';
-}): Promise<AuthProfileRow | null> {
-  const sql = getDb();
-  return sql.begin(async (tx) => {
+}, transaction?: DbClient): Promise<AuthProfileRow | null> {
+  return withTransaction(transaction, async (tx) => {
     const profileRows = await tx`
       UPDATE auth_profiles
       SET status = ${params.nextStatus},
@@ -752,10 +752,9 @@ export async function setDefaultAuthProfileForConnector(params: {
   organizationId: string;
   connectorKey: string;
   slug: string | null;
-}): Promise<AuthProfileRow | null> {
-  const sql = getDb();
+}, transaction?: DbClient): Promise<AuthProfileRow | null> {
 
-  return sql.begin(async (tx) => {
+  return withTransaction(transaction, async (tx) => {
     await tx`
       UPDATE auth_profiles
       SET is_default_for_connector = false,
@@ -775,6 +774,8 @@ export async function setDefaultAuthProfileForConnector(params: {
       WHERE organization_id = ${params.organizationId}
         AND slug = ${params.slug}
         AND profile_kind = 'oauth_app'
+        AND connector_key = ${params.connectorKey}
+        AND status = 'active'
       RETURNING ${tx.unsafe(AUTH_PROFILE_COLUMNS)}
     `;
 

@@ -54,7 +54,7 @@ async function seedOrgAndAgent(orgId: string, agentId: string): Promise<void> {
   `;
 }
 
-/** Insert a category='config' event the way recordConfigChangeEvent does. */
+/** Insert a category='config' event the way insertConfigChangeEventInTransaction does. */
 async function insertConfigEvent(params: {
   organizationId: string;
   resourceKind: string;
@@ -395,7 +395,6 @@ describe('x-lobu-apply-id end-to-end through a real mutation', () => {
     });
     expect(patch.status).toBe(200);
 
-    // recordConfigChangeEvent is fire-and-forget — poll until it lands.
     const events = await waitForConfigEvents(ORG, 1);
     const metadata = events[events.length - 1].metadata as Record<string, unknown>;
     expect(metadata.resource_kind).toBe('agent-settings');

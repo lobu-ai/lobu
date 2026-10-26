@@ -2,6 +2,7 @@
  * Content listing path: executeListQuery and listContentInternal.
  */
 
+import { buildEventResourceFilterClause } from './resource-filter';
 import { type DbClient } from '../../db/client';
 import { boundedQuery } from '../bounded-read';
 import { CONTENT_READ_STATEMENT_TIMEOUT_MS } from '../content-read-bounds';
@@ -505,6 +506,9 @@ export async function listContentInternal(
         engagement_min: options.engagement_min,
         engagement_max: options.engagement_max,
         semantic_type: options.semantic_type,
+        event_category: options.event_category,
+        resource_kind: options.resource_kind,
+        resource_id: options.resource_id,
         interaction_status: options.interaction_status,
         agent_id: options.agent_id,
         client_id: options.client_id,
@@ -660,6 +664,8 @@ export async function listContentInternal(
     baseParamIndex: paramsBeforeEntityTypes.length + 1,
   });
   const countParams = [...paramsBeforeEntityTypes, ...entityTypesClause.params];
+  const resourceClause = buildEventResourceFilterClause(options, countParams.length + 1);
+  countParams.push(...resourceClause.params);
 
   return executeListQuery({
     sql,
@@ -687,7 +693,7 @@ export async function listContentInternal(
           ${producedFilterClause.sql}
           ${analyzedFilterClause.sql}
           ${visibilityClause.sql}
-          ${entityTypesClause.sql} ${futureClause.sql}`,
+          ${entityTypesClause.sql} ${resourceClause.sql} ${futureClause.sql}`,
     orgScope,
     // $3/$4 are buildStandardParams' since/until slots.
     directArmRangeSql: buildEffectiveAtRangeSql('$3::timestamptz', '$4::timestamptz'),

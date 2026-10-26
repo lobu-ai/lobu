@@ -102,6 +102,24 @@ describe("manage_feeds recollect_feed", () => {
 		});
 	});
 
+	it("rolls back cursor changes when durable audit persistence fails", async () => {
+		const sql = getTestDb();
+		const before = await feedRow();
+		await sql.unsafe(
+			`CREATE OR REPLACE FUNCTION reject_synthetic_feed_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.metadata->>'category' = 'config' AND NEW.metadata->>'resource_kind' = 'feed' THEN RAISE EXCEPTION 'synthetic audit failure'; END IF; RETURN NEW; END $$`,
+		);
+		await sql.unsafe(
+			"CREATE TRIGGER reject_synthetic_feed_audit BEFORE INSERT ON events FOR EACH ROW EXECUTE FUNCTION reject_synthetic_feed_audit()",
+		);
+		try {
+			await expect(owner.feeds.recollect({ feed_id: feedId })).rejects.toThrow();
+			expect(await feedRow()).toEqual(before);
+		} finally {
+			await sql.unsafe("DROP TRIGGER reject_synthetic_feed_audit ON events");
+			await sql.unsafe("DROP FUNCTION reject_synthetic_feed_audit()");
+		}
+	});
+
 	it("clears a cursor-only checkpoint to NULL", async () => {
 		const sql = getTestDb();
 		await sql`UPDATE feeds SET checkpoint = ${sql.json({ cursor: "page-9" })} WHERE id = ${feedId}`;

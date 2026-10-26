@@ -342,7 +342,10 @@ Memory:
   // ─── rollback ───────────────────────────────────────────────────────────
   program
     .command("rollback")
-    .argument("<applyId>", "Deployment to restore (apl_… from `Deployments`)")
+    .argument(
+      "<applyId>",
+      "Deployment to restore (apl_… from the Events page, Applies filter)"
+    )
     .description(
       "Restore a previous deployment from its stored snapshot (pauses future applies until --resume)"
     )

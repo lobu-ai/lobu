@@ -18,6 +18,7 @@ import {
   resolveClassifierIds,
 } from './content-search/classification';
 import { buildSemanticTypeFilterSql } from './content-search/params';
+import { buildEventResourceFilterClause } from './content-search/resource-filter';
 import { operationalTrailExclusionSql } from './content-search/sql-fragments';
 import type { DbClient } from '../db/client';
 import logger from './logger';
@@ -59,6 +60,9 @@ interface NormalizedScoreFilters {
   classification_filters?: Array<{ classifier_slug: string; value: string }>;
   classification_source?: 'user' | 'embedding' | 'llm';
   semantic_type?: string | string[];
+  event_category?: string;
+  resource_kind?: string;
+  resource_id?: string;
   interaction_status?: 'pending' | 'approved' | 'rejected' | 'completed' | 'failed';
   /**
    * Exclude workspace-identity audit events (`metadata.category='workspace'`),
@@ -342,6 +346,9 @@ async function buildFilterConditionsAndJoins(
     }
   }
 
+  const resource = buildEventResourceFilterClause(filters ?? {}, paramIndex);
+  filterConditions.push(...resource.conditions);
+  params.push(...resource.params);
   return { filterConditions, additionalJoins, params, dropAll };
 }
 export async function getNormalizedScoreContent(

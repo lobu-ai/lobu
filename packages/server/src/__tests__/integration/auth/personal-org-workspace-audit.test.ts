@@ -4,7 +4,7 @@
  * member created event, both `semantic_type='change'` /
  * `metadata.category='workspace'` with a redacted post-change state snapshot.
  * These rows are what make "org created" / "member joined" visible in the
- * All activity feed (the Deployments feed filters them out by category).
+ * All activity feed (the Events page's Configuration filter excludes them by category).
  */
 
 import { beforeEach, describe, expect, it } from "vitest";

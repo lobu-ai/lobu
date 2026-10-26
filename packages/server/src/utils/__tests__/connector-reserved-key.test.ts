@@ -23,6 +23,8 @@ describe('validateConnectorMetadata reserved keys', () => {
   // The guard must cover every segment the router actually declares, not a
   // hand-copied subset: a new `/connectors/<segment>/$id` route added without
   // touching the reserved list is exactly the case that would slip through.
+  // `deployments` is a retired route kept reserved so stale bookmarks resolve
+  // to the not-installed fallback rather than a connector of that name.
   test('covers every declared subroute segment', () => {
     expect([...CONNECTOR_SUBROUTE_SEGMENTS].sort()).toEqual([
       'app',

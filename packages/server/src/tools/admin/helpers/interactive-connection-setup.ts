@@ -37,7 +37,7 @@ export async function createConnectionSetupBundle(params: {
 	}
 	if (!params.interactive) {
 		return {
-			rows: await params.insertConnection(params.db, null, false),
+			rows: await params.db.begin((tx) => params.insertConnection(tx, null, true)),
 			authRunId: null,
 		};
 	}

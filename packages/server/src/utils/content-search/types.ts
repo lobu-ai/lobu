@@ -74,6 +74,9 @@ export interface ContentSearchOptions {
    * kind-backed notification stores its content kind as semantic_type.
    */
   semantic_type?: string | string[];
+  event_category?: string;
+  resource_kind?: string;
+  resource_id?: string;
   /** Org-wide filter: events whose entity_ids overlap entities of these type slugs. */
   entity_types?: string[];
   interaction_status?: 'pending' | 'approved' | 'rejected' | 'completed' | 'failed';

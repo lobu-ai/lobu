@@ -22,7 +22,7 @@ import {
   parseSecretRef,
   type SecretRef,
 } from '@lobu/core';
-import { getDb, tsTime } from '../../db/client';
+import { type DbClient, getDb, tsTime } from '../../db/client';
 import type { WritableSecretStore } from '../../gateway/secrets/index';
 import logger from '../../utils/logger';
 import { tryGetOrgId } from './org-context';
@@ -74,6 +74,7 @@ function resolveName(nameOrRef: string): string {
 }
 
 export class PostgresSecretStore implements WritableSecretStore {
+  constructor(private readonly transaction?: DbClient) {}
   async get(ref: SecretRef): Promise<string | null> {
     const parsed = parseSecretRef(ref);
     if (!parsed || parsed.scheme !== DEFAULT_SCHEME) return null;
@@ -85,7 +86,7 @@ export class PostgresSecretStore implements WritableSecretStore {
     }
 
     const orgId = tryGetOrgId();
-    const sql = getDb();
+    const sql = this.transaction ?? getDb();
 
     // Per-org row wins; fall through to the empty-string "global" bucket
     // (system env secrets and pre-org-scoping rows). ORDER BY puts the
@@ -140,7 +141,7 @@ export class PostgresSecretStore implements WritableSecretStore {
       );
     }
 
-    const sql = getDb();
+    const sql = this.transaction ?? getDb();
     await sql`
       INSERT INTO agent_secrets (organization_id, name, ciphertext, expires_at, created_at, updated_at)
       VALUES (${orgId}, ${name}, ${ciphertext}, ${expiresAt}, now(), now())
@@ -163,7 +164,7 @@ export class PostgresSecretStore implements WritableSecretStore {
         '[secret-store] delete() without org context — targeting GLOBAL bucket'
       );
     }
-    const sql = getDb();
+    const sql = this.transaction ?? getDb();
     await sql`
       DELETE FROM agent_secrets
       WHERE name = ${name} AND organization_id = ${orgId}
@@ -172,7 +173,7 @@ export class PostgresSecretStore implements WritableSecretStore {
 
   async list(prefix?: string): Promise<SecretListEntry[]> {
     const orgId = tryGetOrgId();
-    const sql = getDb();
+    const sql = this.transaction ?? getDb();
 
     // Without org context, list only the global bucket. With org context,
     // list per-org rows; global rows are deployment-level and not

@@ -3,6 +3,7 @@
  * buildStandardParams, buildStandardWhereSql, RUN_JOIN_SQL.
  */
 
+import { buildEventResourceFilterClause } from './resource-filter';
 import { pgTextArray } from '../../db/client';
 import { INTERNAL_OPS_EXCLUSION_SQL, operationalTrailExclusionSql } from './sql-fragments';
 import type { ContentSearchOptions } from './types';
@@ -161,6 +162,9 @@ export function appendStandardEventFilters(
     | 'engagement_min'
     | 'engagement_max'
     | 'semantic_type'
+    | 'event_category'
+    | 'resource_kind'
+    | 'resource_id'
     | 'interaction_status'
     | 'agent_id'
     | 'client_id'
@@ -241,5 +245,8 @@ export function appendStandardEventFilters(
     params.push(pgTextArray(filters.mcp_session_ids));
     conditions.push(`${alias}.metadata->>'mcp_session_id' = ANY($${params.length}::text[])`);
   }
+  const resource = buildEventResourceFilterClause(filters, params.length + 1);
+  conditions.push(...resource.conditions);
+  params.push(...resource.params);
   return { sinceParam, untilParam };
 }

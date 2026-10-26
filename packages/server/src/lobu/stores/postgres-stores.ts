@@ -6,7 +6,8 @@ import type {
 } from "@lobu/core";
 import { createLogger } from "@lobu/core";
 import { resolveNewAgentProvisioningDefaults } from "../../auth/system-provider-resolution";
-import { getDb, pgTextArray, tsTime, tsTimeOrNull } from "../../db/client";
+import { type DbClient, getDb, pgTextArray, tsTime, tsTimeOrNull } from "../../db/client";
+import { withTransaction } from "../../db/transaction";
 import { recordLifecycleEvent } from "../../utils/insert-event";
 import {
 	chatTenantAdvisoryLockKey,
@@ -28,7 +29,7 @@ export function isValidAgentId(agentId: string): boolean {
 	return AGENT_ID_PATTERN.test(agentId);
 }
 
-async function withChatConnectionDeadlockRetry<T>(
+export async function withChatConnectionDeadlockRetry<T>(
 	context: { organizationId: string; slug: string },
 	transaction: () => Promise<T>,
 ): Promise<T> {
@@ -125,10 +126,10 @@ function isRedactedSecretValue(value: unknown): value is string {
 	return typeof value === "string" && value.startsWith("***");
 }
 
-export function createPostgresAgentConfigStore(): AgentConfigStore {
+export function createPostgresAgentConfigStore(transaction?: DbClient): AgentConfigStore {
 	const store: AgentConfigStore = {
 		async getSettings(agentId) {
-			const sql = getDb();
+			const sql = transaction ?? getDb();
 			// CROSS-TENANT GUARD: `agents` is keyed (organization_id, id) with no
 			// global unique index on `id`, so a shared agent id (the same string
 			// in multiple orgs) has one row per tenant and an id-only read returns
@@ -160,7 +161,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
 			return rowToSettings(rows[0]);
 		},
 		async saveSettings(agentId, settings) {
-			const sql = getDb();
+			const sql = transaction ?? getDb();
 			const orgId = getOrgId();
 			const now = new Date();
 			await sql`
@@ -192,7 +193,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
 			});
 		},
 		async deleteSettings(agentId) {
-			const sql = getDb();
+			const sql = transaction ?? getDb();
 			const orgId = getOrgId();
 			await sql`
         UPDATE agents SET
@@ -213,7 +214,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
 			return store.hasAgent(agentId);
 		},
 		async getMetadata(agentId) {
-			const sql = getDb();
+			const sql = transaction ?? getDb();
 			// CROSS-TENANT GUARD: same composite-key reasoning as `getSettings`, and
 			// higher stakes — `verifyOwnedAgentAccess` vouches the caller against the
 			// `owner_*` columns of whatever row this returns, so an id-only read lets
@@ -236,7 +237,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
 			return rowToMetadata(rows[0]);
 		},
 		async saveMetadata(agentId, metadata) {
-			const sql = getDb();
+			const sql = transaction ?? getDb();
 			const orgId = getOrgId();
 			const now = new Date();
 			// Fresh-agent provisioning defaults, from the SAME helper every other
@@ -275,7 +276,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
         RETURNING (xmax = 0) AS inserted
       `;
 			const inserted = rows[0]?.inserted === true;
-			recordLifecycleEvent({
+			await recordLifecycleEvent({
 				organizationId: orgId,
 				entityType: "agent",
 				op: inserted ? "created" : "updated",
@@ -283,10 +284,10 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
 				summary: inserted
 					? `Agent "${metadata.name}" created`
 					: `Agent "${metadata.name}" updated`,
-			});
+			}, transaction);
 		},
 		async updateMetadata(agentId, updates) {
-			const sql = getDb();
+			const sql = transaction ?? getDb();
 			const orgId = getOrgId();
 			// A DIRECT update of the three mutable metadata fields, deliberately NOT
 			// a read-then-`saveMetadata` round trip. Routing a rename through the
@@ -306,16 +307,16 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
         RETURNING name
       `;
 			if (rows.length === 0) return;
-			recordLifecycleEvent({
+			await recordLifecycleEvent({
 				organizationId: orgId,
 				entityType: "agent",
 				op: "updated",
 				entityId: agentId,
 				summary: `Agent "${rows[0].name ?? agentId}" updated`,
-			});
+			}, transaction);
 		},
 		async deleteMetadata(agentId) {
-			const sql = getDb();
+			const sql = transaction ?? getDb();
 			const orgId = getOrgId();
 			const rows = await sql`
         DELETE FROM agents
@@ -323,17 +324,17 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
         RETURNING name
       `;
 			if (rows.length > 0) {
-				recordLifecycleEvent({
+				await recordLifecycleEvent({
 					organizationId: orgId,
 					entityType: "agent",
 					op: "deleted",
 					entityId: agentId,
 					summary: `Agent "${rows[0].name ?? agentId}" deleted`,
-				});
+				}, transaction);
 			}
 		},
 		async hasAgent(agentId) {
-			const sql = getDb();
+			const sql = transaction ?? getDb();
 			const orgId = getOrgId();
 			const rows = await sql`
         SELECT 1 FROM agents WHERE id = ${agentId} AND organization_id = ${orgId} LIMIT 1
@@ -341,7 +342,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
 			return rows.length > 0;
 		},
 		async listAgents() {
-			const sql = getDb();
+			const sql = transaction ?? getDb();
 			const orgId = getOrgId();
 			const rows = await sql`
         SELECT id, organization_id, name, description, owner_platform, owner_user_id,
@@ -386,6 +387,7 @@ function connectionRowToStored(row: Record<string, any>) {
 
 export function createPostgresAgentConnectionStore(
 	options: {
+    transaction?: DbClient;
 		/** Platforms whose transport is a connector connection (see the descriptor). */
 		connectorTransportPlatforms?: readonly string[];
 	} = {},
@@ -401,7 +403,7 @@ export function createPostgresAgentConnectionStore(
 	}
 	return {
 		async getConnection(connectionId) {
-			const sql = getDb();
+			const sql = options.transaction ?? getDb();
 			const orgId = tryGetOrgId();
 			// A connector-transport row's runtime id is numeric. New chat slugs are
 			// never numeric, but a legacy one may be, so a miss here still falls
@@ -439,7 +441,7 @@ export function createPostgresAgentConnectionStore(
 			return projRows.length > 0 ? connectionsRowToStored(projRows[0]) : null;
 		},
 		async listConnections(filter) {
-			const sql = getDb();
+			const sql = options.transaction ?? getDb();
 			const orgId = tryGetOrgId();
 			const agentId = filter?.agentId ?? null;
 			const platform = filter?.platform ?? null;
@@ -492,7 +494,7 @@ export function createPostgresAgentConnectionStore(
 			// The connector owns its connection row; a chat projection written over
 			// it would mint a second, credentialed row under a BYO slug.
 			assertChatOwned(connection.platform);
-			const sql = getDb();
+			const sql = options.transaction ?? getDb();
 			const orgId = getOrgId();
 			const slug = runtimeConnectionIdToSlug(connection.id);
 
@@ -507,10 +509,7 @@ export function createPostgresAgentConnectionStore(
 			// demotes the other's target. Retrying once is safe here: every effect is
 			// enclosed by this transaction, so PostgreSQL rolls the aborted attempt
 			// back completely before the callback is re-run.
-			await withChatConnectionDeadlockRetry(
-				{ organizationId: orgId, slug },
-				() =>
-					sql.begin(async (tx: typeof sql) => {
+      const persist = () => withTransaction(options.transaction, async (tx: typeof sql) => {
 						const configToPersist = { ...connection.config };
 						// Universal lock order for chat writes (see
 						// chatTenantAdvisoryLockKey): org-tenant advisory →
@@ -601,8 +600,10 @@ export function createPostgresAgentConnectionStore(
 							orgId,
 							existingCredentialMode ?? "byo",
 						);
-					}),
-			);
+					});
+      // A caller-owned transaction must be retried as a whole by its owner.
+      if (options.transaction) await persist();
+      else await withChatConnectionDeadlockRetry({ organizationId: orgId, slug }, persist);
 		},
 		async updateConnection(connectionId, updates) {
 			const existing = await this.getConnection(connectionId);
@@ -614,11 +615,10 @@ export function createPostgresAgentConnectionStore(
 		async deleteConnection(connectionId) {
 			const existing = await this.getConnection(connectionId);
 			if (existing) assertChatOwned(existing.platform);
-			const sql = getDb();
 			const orgId = tryGetOrgId();
 			// `connections` is the sole source of truth — soft-delete (`deleted_at`)
 			// the chat projection (kept for audit; getConnection filters it out).
-			await sql.begin((tx) =>
+			await withTransaction(options.transaction, (tx) =>
 				softDeleteChatConnectionProjection(tx, orgId, connectionId),
 			);
 		},

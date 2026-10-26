@@ -26,9 +26,11 @@ import {
   type ManageAuthProfilesResult,
 } from '@lobu/core/contracts/tools/manage-auth-profiles';
 import { oauthAccountOwnershipError } from '../../authz/oauth-account-ownership';
-import { getDb } from '../../db/client';
+import { type DbClient, getDb } from '../../db/client';
+import { withTransaction } from '../../db/transaction';
 import {
   type AuthProfileKind,
+  type AuthProfileRow,
   type AuthProfileStatus,
   createAuthProfile,
   deleteAuthProfile,
@@ -44,7 +46,8 @@ import {
   summarizeBrowserSessionAuthData,
   updateAuthProfile,
 } from '../../utils/auth-profiles';
-import { recordToolConfigChange } from "./helpers/config-audit";
+import { lockOrganizationForRelationshipClaims } from '../../utils/relationship-claims';
+import { insertToolConfigChange, withToolConfigTransaction } from "./helpers/config-audit";
 import type { ToolContext } from '../registry';
 import { action, defineActionTool } from './action-tool';
 import { getScopedConnectorDefinition } from "../../catalog/connector-definitions";
@@ -92,12 +95,12 @@ function recordAuthProfileConfigChange(
     summary: string;
     state: Record<string, unknown> | null;
     changedFields?: string[];
-  }
-): void {
-  recordToolConfigChange(ctx, {
-    resourceKind: 'auth-profile',
-    ...params,
-  });
+    before?: Record<string, unknown> | null;
+  },
+  transaction: DbClient
+): Promise<void> {
+  const change = { resourceKind: 'auth-profile' as const, ...params };
+  return insertToolConfigChange(ctx, change, transaction);
 }
 
 // ============================================
@@ -272,9 +275,10 @@ async function handleTestAuthProfile(
 async function syncConnectionsForOAuthAppProfile(
   organizationId: string,
   authProfileId: number,
-  active: boolean
+  active: boolean,
+  transaction?: DbClient
 ): Promise<void> {
-  const sql = getDb();
+  const sql = transaction ?? getDb();
   const nextConnectionStatus = active ? 'active' : 'pending_auth';
 
   await sql`
@@ -295,10 +299,10 @@ async function syncConnectionsForOAuthAppProfile(
 async function syncConnectionsForBrowserAuthProfile(
   organizationId: string,
   authProfileId: number,
-  active: boolean
+  active: boolean,
+  transaction?: DbClient
 ): Promise<void> {
-  const sql = getDb();
-  await sql.begin(async (tx) => {
+  await withTransaction(transaction, async (tx) => {
     if (active) {
       const recovered = (await tx`
         UPDATE connections
@@ -452,6 +456,7 @@ async function handleCreateAuthProfile(
     // try/catch here closes the race window between that SELECT and this
     // INSERT (and surfaces an explicit slug collision with a friendly error
     // instead of the raw PG constraint name).
+    return withToolConfigTransaction<ManageAuthProfilesResult>(ctx, async (tx) => {
     let authProfile: Awaited<ReturnType<typeof createAuthProfile>>;
     try {
       authProfile = await createAuthProfile({
@@ -464,7 +469,7 @@ async function handleCreateAuthProfile(
         provider: oauthMethod.provider.toLowerCase(),
         status: 'pending_auth',
         createdBy: ctx.userId ?? 'api',
-      });
+      }, tx);
     } catch (err) {
       if (err instanceof PendingAuthConflictError) {
         return { error: err.message };
@@ -475,22 +480,23 @@ async function handleCreateAuthProfile(
     let reconnect: Awaited<ReturnType<typeof issueOAuthReconnectLink>>;
     try {
       reconnect = await issueOAuthReconnectLink({ authProfile, ctx,
-        requestedScopes: args.requested_scopes, appAuthProfileSlug: args.app_auth_profile_slug });
+        requestedScopes: args.requested_scopes, appAuthProfileSlug: args.app_auth_profile_slug, transaction: tx });
       if ('error' in reconnect) {
-        await deleteAuthProfile(ctx.organizationId, authProfile.slug);
+        await deleteAuthProfile(ctx.organizationId, authProfile.slug, tx);
         return reconnect;
       }
     } catch (err) {
-      await deleteAuthProfile(ctx.organizationId, authProfile.slug).catch(() => undefined);
+      await deleteAuthProfile(ctx.organizationId, authProfile.slug, tx).catch(() => undefined);
       throw err;
     }
 
-    recordAuthProfileConfigChange(ctx, {
+    await recordAuthProfileConfigChange(ctx, {
+      before: null,
       resourceId: authProfile.slug,
       op: 'created',
       summary: `Auth profile '${authProfile.display_name ?? authProfile.slug}' created`,
       state: serializeAuthProfile(authProfile),
-    });
+    }, tx);
 
     return {
       action: 'create_auth_profile',
@@ -498,6 +504,7 @@ async function handleCreateAuthProfile(
       connect_url: reconnect.connectUrl,
       connect_token: reconnect.connectToken,
     };
+    });
   }
 
   const credentials = normalizeAuthValues(args.credentials ?? {});
@@ -526,7 +533,9 @@ async function handleCreateAuthProfile(
       ? (getOAuthMethods(connector.auth_schema)[0]?.provider ?? null)
       : null;
 
-  const authProfile = await createAuthProfile({
+  const authProfile = await getDb().begin(async (tx) => {
+    await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
+  const profile = await createAuthProfile({
     organizationId: ctx.organizationId,
     connectorKey,
     displayName: args.display_name,
@@ -536,13 +545,17 @@ async function handleCreateAuthProfile(
     http: args.http,
     provider,
     createdBy: ctx.userId ?? 'api',
-  });
+  }, tx);
 
-  recordAuthProfileConfigChange(ctx, {
-    resourceId: authProfile.slug,
+  await recordAuthProfileConfigChange(ctx, {
+    before: null,
+    resourceId: profile.slug,
     op: 'created',
-    summary: `Auth profile '${authProfile.display_name ?? authProfile.slug}' created`,
-    state: serializeAuthProfile(authProfile),
+    summary: `Auth profile '${profile.display_name ?? profile.slug}' created`,
+    state: serializeAuthProfile(profile),
+  }, tx);
+
+    return profile;
   });
 
   return { action: 'create_auth_profile', auth_profile: serializeAuthProfile(authProfile) };
@@ -555,7 +568,9 @@ async function handleCreateBrowserSessionProfile(
   const authData = (args.auth_data as Record<string, unknown> | undefined) ?? {};
   if (authData.mode === 'live') return { error: 'Live browser accounts are created and verified through connections.create with a paired browser.' };
   const browserSessionReady = (await getBrowserSessionReadiness(authData)).usable;
-  const authProfile = await createAuthProfile({
+  const authProfile = await getDb().begin(async (tx) => {
+    await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
+  const profile = await createAuthProfile({
     organizationId: ctx.organizationId,
     connectorKey: null,
     displayName: args.display_name,
@@ -564,13 +579,17 @@ async function handleCreateBrowserSessionProfile(
     authData,
     status: browserSessionReady ? 'active' : 'pending_auth',
     createdBy: ctx.userId ?? 'api',
-  });
+  }, tx);
 
-  recordAuthProfileConfigChange(ctx, {
-    resourceId: authProfile.slug,
+  await recordAuthProfileConfigChange(ctx, {
+    before: null,
+    resourceId: profile.slug,
     op: 'created',
-    summary: `Auth profile '${authProfile.display_name ?? authProfile.slug}' created`,
-    state: serializeAuthProfile(authProfile),
+    summary: `Auth profile '${profile.display_name ?? profile.slug}' created`,
+    state: serializeAuthProfile(profile),
+  }, tx);
+
+    return profile;
   });
 
   return { action: 'create_auth_profile', auth_profile: serializeAuthProfile(authProfile) };
@@ -625,20 +644,33 @@ async function handleUpdateAuthProfile(
     return { error: 'Live browser identity and readiness are gateway-owned. Use connections.test to verify the selected browser account.' };
   }
 
-  // The grant's identity and app binding are callback-owned, including raw profile patches.
-  if (updateAuthDataPayload && existingForRoleCheck?.profile_kind === 'oauth_account') {
-    delete updateAuthDataPayload.identity;
-    if (existingForRoleCheck.auth_data?.identity !== undefined) {
-      updateAuthDataPayload.identity = existingForRoleCheck.auth_data.identity;
-    }
-    delete updateAuthDataPayload.app_auth_profile_id;
-    if (existingForRoleCheck.auth_data?.app_auth_profile_id !== undefined) {
-      updateAuthDataPayload.app_auth_profile_id = existingForRoleCheck.auth_data.app_auth_profile_id;
-    }
-  }
   if (args.app_auth_profile_slug && !args.reconnect) {
     return { error: 'app_auth_profile_slug selects an app for reconnect=true; it cannot rebind a saved account grant.' };
   }
+
+  return withToolConfigTransaction<ManageAuthProfilesResult>(ctx, async (tx) => {
+    await tx`SELECT id FROM auth_profiles WHERE organization_id = ${ctx.organizationId} AND slug = ${args.auth_profile_slug} FOR UPDATE`;
+    const before = await getAuthProfileBySlug(ctx.organizationId, args.auth_profile_slug, tx);
+    if (!before || before.id !== existingForRoleCheck?.id) return authProfileNotFound(args.auth_profile_slug);
+    // Admission must use the locked row as callbacks can change readiness while we wait.
+    const lockedLiveBrowser = before.profile_kind === 'browser_session' && before.auth_data?.mode === 'live';
+    if (before.profile_kind !== 'oauth_account' && !lockedLiveBrowser && !(await callerIsAdmin(tx, ctx))) {
+      return { error: `Only admins can modify ${before.profile_kind} auth profiles.` };
+    }
+    const lockedOwnershipError = oauthAccountOwnershipError(before, ctx.userId);
+    if (lockedOwnershipError) return { error: lockedOwnershipError };
+    if (before.auth_data?.mode === 'live' &&
+      (updateAuthDataPayload !== undefined || (args.status !== undefined && args.status !== 'revoked') || args.reconnect)) {
+      return { error: 'Live browser identity and readiness are gateway-owned. Use connections.test to verify the selected browser account.' };
+    }
+    // The grant's identity and app binding are callback-owned, including raw
+    // profile patches; read them off the locked row, not the pre-check copy.
+    if (updateAuthDataPayload && before.profile_kind === 'oauth_account') {
+      delete updateAuthDataPayload.identity;
+      delete updateAuthDataPayload.app_auth_profile_id;
+      if (before.auth_data?.identity !== undefined) updateAuthDataPayload.identity = before.auth_data.identity;
+      if (before.auth_data?.app_auth_profile_id !== undefined) updateAuthDataPayload.app_auth_profile_id = before.auth_data.app_auth_profile_id;
+    }
 
   let authProfile = await updateAuthProfile({
     organizationId: ctx.organizationId,
@@ -647,7 +679,7 @@ async function handleUpdateAuthProfile(
     nextSlug: args.slug,
     authData: updateAuthDataPayload,
     status: args.status as AuthProfileStatus | undefined,
-  });
+  }, tx);
 
   if (!authProfile) {
     return { error: `Auth profile '${args.auth_profile_slug}' not found` };
@@ -660,14 +692,15 @@ async function handleUpdateAuthProfile(
     ...(args.requested_scopes !== undefined ? ['requested_scopes'] : []),
     ...(args.status !== undefined ? ['status'] : []),
   ];
-  const emitUpdateConfigChange = (profile: NonNullable<typeof authProfile>) =>
-    recordAuthProfileConfigChange(ctx, {
+  const emitUpdateConfigChange = async (profile: NonNullable<typeof authProfile>) =>
+    await recordAuthProfileConfigChange(ctx, {
+      before: before ? serializeAuthProfile(before) : null,
       resourceId: profile.slug,
       op: 'updated',
       summary: `Auth profile '${profile.display_name ?? profile.slug}' updated`,
       state: serializeAuthProfile(profile),
       ...(updateChangedFields.length > 0 ? { changedFields: updateChangedFields } : {}),
-    });
+    }, tx);
 
   const authProfileProvider = authProfile.provider;
 
@@ -697,7 +730,7 @@ async function handleUpdateAuthProfile(
             ...(authProfile.auth_data ?? {}),
             requested_scopes: requestedScopes,
           },
-        })) ?? authProfile;
+        }, tx)) ?? authProfile;
     }
   }
 
@@ -707,11 +740,12 @@ async function handleUpdateAuthProfile(
       ctx,
       requestedScopes: args.requested_scopes,
       appAuthProfileSlug: args.app_auth_profile_slug,
+      transaction: tx,
     });
     if ('error' in reconnect) return reconnect;
 
     authProfile = reconnect.authProfile;
-    emitUpdateConfigChange(authProfile);
+    await emitUpdateConfigChange(authProfile);
 
     return {
       action: 'update_auth_profile',
@@ -733,44 +767,39 @@ async function handleUpdateAuthProfile(
           organizationId: ctx.organizationId,
           slug: authProfile.slug,
           status: nextStatus,
-        })) ?? authProfile;
+        }, tx)) ?? authProfile;
     }
     await syncConnectionsForBrowserAuthProfile(
       ctx.organizationId,
       authProfile.id,
-      browserSessionReady.usable
+      browserSessionReady.usable, tx
     );
   }
 
   if (authProfile.profile_kind === 'browser_session' && authProfile.auth_data?.mode === 'live' && args.status === 'revoked') {
-    await syncConnectionsForBrowserAuthProfile(ctx.organizationId, authProfile.id, false);
+    await syncConnectionsForBrowserAuthProfile(ctx.organizationId, authProfile.id, false, tx);
   }
 
   // Cascade for oauth_app: admins flipping an app profile to revoked/error
-  // need dependent connections to surface as broken (instead of silently
-  // continuing to point at a profile whose creds the gateway can no longer
-  // resolve). For the revoke/error case we re-do the status flip inside a
-  // transaction together with the cascade + default-clear so there's no
-  // window where connections still reference the revoked profile (the prior
-  // updateAuthProfile call above already wrote status, but its tx is now
-  // closed — this overwrite is idempotent and lands the full state change
-  // atomically).
+  // need dependent connections to surface as broken. The profile status,
+  // cascade, default-clear and audit all share this transaction.
   if (authProfile.profile_kind === 'oauth_app') {
     if (authProfile.status === 'revoked' || authProfile.status === 'error') {
       const atomic = await revokeOAuthAppProfileAtomic({
         organizationId: ctx.organizationId,
         profileId: authProfile.id,
         nextStatus: authProfile.status,
-      });
+      }, tx);
       if (atomic) authProfile = atomic;
     } else if (authProfile.status === 'active') {
-      await syncConnectionsForOAuthAppProfile(ctx.organizationId, authProfile.id, true);
+      await syncConnectionsForOAuthAppProfile(ctx.organizationId, authProfile.id, true, tx);
     }
   }
 
-  emitUpdateConfigChange(authProfile);
+  await emitUpdateConfigChange(authProfile);
 
   return { action: 'update_auth_profile', auth_profile: serializeAuthProfile(authProfile) };
+  });
 }
 
 async function handleDeleteAuthProfile(
@@ -810,8 +839,9 @@ async function handleDeleteAuthProfile(
   // row up front (`FOR UPDATE` conflicts with the FK insert's FOR KEY SHARE
   // lock, so concurrent inserts block until we commit and then fail FK).
   const deleted = await sql.begin(async (tx) => {
+    await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
     const lockRows = await tx`
-      SELECT id FROM auth_profiles
+      SELECT * FROM auth_profiles
       WHERE organization_id = ${ctx.organizationId}
         AND id = ${existing.id}
       FOR UPDATE
@@ -887,6 +917,15 @@ async function handleDeleteAuthProfile(
         AND id = ${existing.id}
       RETURNING id
     `;
+    if (deletedRows.length > 0) {
+  await recordAuthProfileConfigChange(ctx, {
+    resourceId: args.auth_profile_slug,
+    op: 'deleted',
+    summary: `Auth profile '${existing.display_name ?? args.auth_profile_slug}' deleted`,
+    state: null,
+    before: serializeAuthProfile(lockRows[0] as typeof existing),
+  }, tx);
+    }
     return deletedRows.length > 0 ? deletedRows[0] : null;
   });
   if (!deleted) {
@@ -894,12 +933,7 @@ async function handleDeleteAuthProfile(
   }
   if ('error' in deleted) return { error: String(deleted.error) };
 
-  recordAuthProfileConfigChange(ctx, {
-    resourceId: args.auth_profile_slug,
-    op: 'deleted',
-    summary: `Auth profile '${existing.display_name ?? args.auth_profile_slug}' deleted`,
-    state: null,
-  });
+
 
   return {
     action: 'delete_auth_profile',
@@ -912,8 +946,10 @@ async function handleSetDefaultAuthProfile(
   args: Static<typeof SetDefaultAuthProfileAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
+  return withToolConfigTransaction<ManageAuthProfilesResult>(ctx, async (tx) => {
+  const previous = await tx<AuthProfileRow>`SELECT * FROM auth_profiles WHERE organization_id = ${ctx.organizationId} AND connector_key = ${args.connector_key} ORDER BY id FOR UPDATE`;
   if (args.auth_profile_slug !== null) {
-    const target = await getAuthProfileBySlug(ctx.organizationId, args.auth_profile_slug);
+    const target = await getAuthProfileBySlug(ctx.organizationId, args.auth_profile_slug, tx);
     if (!target) {
       return authProfileNotFound(args.auth_profile_slug);
     }
@@ -938,23 +974,27 @@ async function handleSetDefaultAuthProfile(
     organizationId: ctx.organizationId,
     connectorKey: args.connector_key,
     slug: args.auth_profile_slug,
-  });
+  }, tx);
 
-  recordAuthProfileConfigChange(ctx, {
-    resourceId: args.auth_profile_slug ?? args.connector_key,
-    op: 'updated',
-    summary: args.auth_profile_slug
-      ? `Auth profile '${args.auth_profile_slug}' pinned as default for connector '${args.connector_key}'`
-      : `Default auth profile cleared for connector '${args.connector_key}'`,
-    state: pinned
-      ? serializeAuthProfile(pinned)
-      : { connector_key: args.connector_key, default_cleared: true },
-    changedFields: ['is_default_for_connector'],
-  });
+  const affected = previous.filter(profile => profile.is_default_for_connector !== (profile.id === pinned?.id));
+  for (const profile of affected) {
+    const after = await getAuthProfileBySlug(ctx.organizationId, profile.slug, tx);
+    await recordAuthProfileConfigChange(ctx, {
+      resourceId: profile.slug,
+      op: 'updated',
+      summary: after?.is_default_for_connector
+        ? `Auth profile '${profile.slug}' pinned as default for connector '${args.connector_key}'`
+        : `Auth profile '${profile.slug}' cleared as default for connector '${args.connector_key}'`,
+      before: serializeAuthProfile(profile),
+      state: after ? serializeAuthProfile(after) : null,
+      changedFields: ['is_default_for_connector'],
+    }, tx);
+  }
 
   return {
     action: 'set_default_auth_profile',
     connector_key: args.connector_key,
     auth_profile: pinned ? serializeAuthProfile(pinned) : null,
   };
+  });
 }

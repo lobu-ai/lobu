@@ -15,6 +15,7 @@ import {
 } from '../../utils/content-search';
 import { buildClassificationOrderSql } from '../../utils/content-search/classification';
 import { buildSemanticTypeFilterSql } from '../../utils/content-search/params';
+import { buildEventResourceFilterClause } from '../../utils/content-search/resource-filter';
 import { operationalTrailExclusionSql } from '../../utils/content-search/sql-fragments';
 import logger from '../../utils/logger';
 import { validateNumericId } from '../../utils/sql-validation';
@@ -360,7 +361,9 @@ export async function fetchByContentIds(opts: {
   });
   queryParams.push(...scope.params);
 
-  const where = `${idFilter} ${scope.sql}`;
+  const resource = buildEventResourceFilterClause(args, queryParams.length + 1);
+  queryParams.push(...resource.params);
+  const where = `${idFilter} ${scope.sql} ${resource.sql}`;
 
   // Read the full chain from `events` (not the masked view — superseded rows are
   // what we're here for). The list query JOINs resolved_ids so it can order by
@@ -621,6 +624,9 @@ export async function fetchIncludeSuperseded(opts: {
     paramIndex += visibility.params.length;
   }
 
+  const resource = buildEventResourceFilterClause(args, queryParams.length + 1, 'e');
+  conditions.push(...resource.conditions);
+  queryParams.push(...resource.params);
   const orderDirection = args.sort_order === 'asc' ? 'ASC' : 'DESC';
   const orderBySql = `e.occurred_at ${orderDirection} NULLS LAST, e.id ${orderDirection}`;
 
@@ -817,6 +823,10 @@ export async function fetchClassificationStats(opts: {
     params.push(...statsVisibility.params);
     paramIndex += statsVisibility.params.length;
   }
+
+  const resource = buildEventResourceFilterClause(args, paramIndex);
+  conditions.push(...resource.conditions);
+  params.push(...resource.params);
 
   // Stats query WITHOUT classification filters (to show full distribution)
   const statsQueryResult = await boundedQuery(

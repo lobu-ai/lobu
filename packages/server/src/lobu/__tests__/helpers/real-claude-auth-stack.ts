@@ -20,6 +20,7 @@ import { MockMessageQueue } from "../../../gateway/__tests__/setup.js";
 import type { ProviderOAuthStateStore } from "../../../gateway/auth/oauth/state-store.js";
 import type { AuthProfilesManager } from "../../../gateway/auth/settings/auth-profiles-manager.js";
 import type { GatewayConfig } from "../../../gateway/config/index.js";
+import { PostgresSecretStore } from "../../stores/postgres-secret-store.js";
 import {
   SecretStoreRegistry,
   type WritableSecretStore,
@@ -103,9 +104,12 @@ export interface RealClaudeAuthStack {
  * `AuthProfilesManager` + OAuth state store the SPA route will use. Call after
  * `ensureDbForGatewayTests()` + `resetTestDatabase()` + the org/agent seed.
  */
-export async function buildRealClaudeAuthStack(): Promise<RealClaudeAuthStack> {
+export async function buildRealClaudeAuthStack(options: { durableSecrets?: boolean } = {}): Promise<RealClaudeAuthStack> {
   const hostStore = new InMemoryWritableStore();
-  const secretStore = new SecretStoreRegistry(hostStore, { host: hostStore });
+  const postgres = new PostgresSecretStore();
+  const secretStore = options.durableSecrets
+    ? new SecretStoreRegistry(postgres, { secret: postgres, host: hostStore })
+    : new SecretStoreRegistry(hostStore, { host: hostStore });
   const coreServices = new CoreServices(minimalGatewayConfig(), {
     secretStore,
     stateAdapter: new InMemoryStateAdapter(),
