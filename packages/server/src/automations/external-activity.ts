@@ -76,13 +76,10 @@ export async function listExternalAutomationWork(params: {
   `;
   // Temporary branch-3 diagnostics: org-wide, with raw timestamp precision preserved.
   const settleMs = automationArrivalSettleMs();
+  let diagnosticsError: string | null = null;
   const diagnostics = await sql`
     SELECT a.id, active.id IS NOT NULL AS has_active_run,
-           active.id IS NULL AS no_active_run,
-           a.execution_config->'executor'->>'kind' AS executor_kind,
-           a.execution_config->'executor'->>'kind' = 'external' AS executor_is_external,
            a.schedule IS NULL AS schedule_is_null,
-           a.schedule IS NOT NULL AS has_schedule,
            a.schedule_auto_paused_at IS NULL AS schedule_auto_paused_at_is_null,
            a.next_run_at::text AS next_run_at,
            a.next_window_start::text AS next_window_start,
@@ -100,7 +97,11 @@ export async function listExternalAutomationWork(params: {
     WHERE a.organization_id = ${organizationId} AND a.status = 'active'
       AND a.execution_config->'executor'->>'kind' = 'external'
     ORDER BY a.id
-  `.catch(() => null); // Diagnostics must not prevent returning the original work.
+    LIMIT 50
+  `.catch((err) => {
+    diagnosticsError = err instanceof Error ? err.message : String(err);
+    return null;
+  }); // Diagnostics must not prevent returning the original work.
   logger.info({
     organizationId,
     hasUserId: Boolean(caller.userId),
@@ -109,6 +110,7 @@ export async function listExternalAutomationWork(params: {
     workRowCount: work.length,
     settleMs,
     diagnosticsFailed: diagnostics === null,
+    diagnosticsError,
     diagnostics,
   }, '[external-activity] Branch-3 due-work diagnostics');
   return work;
