@@ -1,0 +1,40 @@
+{
+  "sources": [
+    {
+      "source": {
+        "provider": "whatsapp",
+        "account_scope": "synthetic-owner-account",
+        "feed_id": 101,
+        "connection_id": 202
+      },
+      "rows": [
+        {
+          "origin_id": "synthetic-native-message-1",
+          "observed_at": "2026-01-01T00:00:00Z",
+          "metadata": {
+            "sender_jid": "441234567890@c.us",
+            "sender_phone": "441234567890",
+            "push_name": "Synthetic Contact",
+            "from_me": false
+          }
+        }
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "provider": "gmail",
+      "account_scope": "synthetic-mailbox-account",
+      "namespace": "gmail:mailbox",
+      "native_key": "contact@example.test",
+      "source_refs": [
+        {
+          "feed_id": 303,
+          "connection_id": 404,
+          "origin_id": "synthetic-native-mail-1",
+          "observed_at": "2026-01-01T00:00:00Z"
+        }
+      ]
+    }
+  ]
+}

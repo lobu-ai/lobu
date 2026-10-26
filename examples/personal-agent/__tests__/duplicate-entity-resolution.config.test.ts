@@ -2,10 +2,13 @@ import { describe, expect, test } from "bun:test";
 import config from "../lobu.config";
 
 describe("duplicate entity resolution configuration", () => {
-  test("keeps identity matching disabled with the workspace configuration", () => {
+  test("keeps all person contact-field matches review-only", () => {
     const person = config.entities?.find((entity) => entity.key === "person");
     expect(person).toBeDefined();
-    expect(person?.resolutionPolicy).toBeUndefined();
+    expect(person?.resolutionPolicy?.rules).toHaveLength(4);
+    expect(
+      person?.resolutionPolicy?.rules.every((rule) => rule.onMatch === "review")
+    ).toBe(true);
   });
 
   // Automation `triggers` are always-managed by apply: an omitted key projects
