@@ -89,7 +89,7 @@ import logger from './utils/logger';
 import { getClientIP } from './utils/rate-limiter';
 import { organizationIdLiveSql } from './workspace/deletion-state';
 import { eventClientId } from './auth/event-client-id';
-import type { AgentTurnIdentity } from './tools/turn-write-idempotency';
+import { type AgentTurnIdentity, withTurnInputRun } from './tools/turn-write-idempotency';
 import { TURN_INPUT_RUN_HEADER } from '@lobu/core/agent-tooling';
 
 // ---------------------------------------------------------------------------
@@ -1418,18 +1418,6 @@ async function withRequestActivity<T>(signal: AbortSignal, handler: () => T | Pr
   } finally {
     stop();
   }
-}
-
-/**
- * The steered input a turn's call names, attached for verification by the
- * write that keys on it. A malformed value is kept as an id no stored input can
- * have, so the write fails closed instead of silently keying on the owner.
- */
-function withTurnInputRun(agentTurn: AgentTurnIdentity | null, header: string | null): AgentTurnIdentity | null {
-  if (!agentTurn || header === null) return agentTurn;
-  const parsed = Number(header);
-  const canonical = Number.isSafeInteger(parsed) && parsed > 0 && String(parsed) === header;
-  return { ...agentTurn, inputRunId: canonical ? parsed : 0 };
 }
 
 // POST responses are JSON; only the standalone GET notification stream is SSE.

@@ -70,6 +70,12 @@ export interface GatewayParams {
   conversationId: string;
   platform?: string;
   workspaceDir?: string;
+  /**
+   * Extra headers on every gateway request a tool makes with these params.
+   * The agent-turn isolate builds a tool's params per call to name the
+   * steered input that call answers (`TURN_INPUT_RUN_HEADER`).
+   */
+  headers?: Record<string, string>;
 }
 
 export interface GatewayRequestInit {
@@ -168,6 +174,7 @@ export async function gatewayFetch<T>(
       token: gateway.workerToken,
     }).request(path, {
       ...options,
+      headers: { ...gateway.headers, ...options.headers },
       timeoutMs: options.timeoutMs ?? 60_000,
     });
   } catch (error) {

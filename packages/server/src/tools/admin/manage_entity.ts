@@ -78,6 +78,7 @@ import {
 } from "../../utils/entity-management";
 import { sourceReadScopeFromToolContext } from "../../authz/scope";
 import { ToolUserError } from "../../utils/errors";
+import { runTurnWriteOnce } from "../turn-write-idempotency";
 import { readSourceRecordLinks } from "../../utils/source-record-reads";
 import {
 	EntityPolicyDenialError,
@@ -270,7 +271,10 @@ type Handler<A> = (
 const manageEntityTool = defineActionTool("manage_entity", {
 	create: action(
 		CreateEntityAction,
-		trackedMutation((args, ctx, env) => handleCreate(args, env, ctx)),
+		oncePerTurnInput(
+			"entities.create",
+			trackedMutation((args, ctx, env) => handleCreate(args, env, ctx)),
+		),
 	),
 	update: action(
 		UpdateEntityAction,
@@ -296,6 +300,42 @@ const manageEntityTool = defineActionTool("manage_entity", {
 });
 
 export const manageEntity = manageEntityTool.run;
+
+/**
+ * While its receipt is retained, a re-run or repeated create with the same
+ * arguments replays the first result (including a deferred
+ * approval) instead of creating a second row. A claim with no result — an
+ * attempt still running or one that died mid-write — refuses rather than
+ * guess. A refusal (a soft error result or a ToolUserError) releases its
+ * claim; any other thrown error retains it because the create or its
+ * approval may already have committed. Non-turn
+ * callers run the handler as before.
+ */
+function oncePerTurnInput<A>(surface: string, handler: Handler<A>): Handler<A> {
+	return async (args, ctx, env) => {
+		let result: ManageEntityResult | undefined;
+		const outcome = await runTurnWriteOnce<ManageEntityResult>(
+			ctx.agentTurn,
+			surface,
+			args,
+			async () => {
+				result = await handler(args, ctx, env);
+				const error = (result as { error?: unknown }).error;
+				return typeof error === "string" && error.length > 0
+					? { release: true }
+					: { store: result };
+			},
+		);
+		if (outcome.kind === "replay") return outcome.result;
+		if (outcome.kind === "attempted") {
+			throw new ToolUserError(
+				"This create was already attempted for this message and may have succeeded; it was not repeated.",
+				409,
+			);
+		}
+		return result as ManageEntityResult;
+	};
+}
 
 /**
  * Record an Automation reaction for a mutating action once its handler

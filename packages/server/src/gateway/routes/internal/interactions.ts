@@ -13,6 +13,7 @@ import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
 import { captureSideEffect } from "./capture-mode.js";
+import { sendOncePerTurnInput } from "./turn-write-once.js";
 
 const logger = createLogger("internal-interaction-routes");
 
@@ -71,84 +72,93 @@ export function createInteractionRoutes(
         });
         if (captured) return captured;
 
-        if (interactionType === "link_button") {
-          const posted = await interactionService.postLinkButton(
-            userId,
-            conversationId,
-            channelId,
-            teamId,
-            connectionId,
-            platform || "unknown",
-            body.url,
-            body.label,
-            body.linkType || "oauth",
-            typeof body.body === "string" ? body.body : undefined,
-            source,
-            messageId
-          );
-          return c.json({ id: posted.id, status: "posted" });
-        }
+        // Once per turn input: a re-run or repeated call posts one card.
+        return await sendOncePerTurnInput(
+          c,
+          worker,
+          "interactions.create",
+          { conversationId, channelId, body },
+          async () => {
+            if (interactionType === "link_button") {
+              const posted = await interactionService.postLinkButton(
+                userId,
+                conversationId,
+                channelId,
+                teamId,
+                connectionId,
+                platform || "unknown",
+                body.url,
+                body.label,
+                body.linkType || "oauth",
+                typeof body.body === "string" ? body.body : undefined,
+                source,
+                messageId
+              );
+              return c.json({ id: posted.id, status: "posted" });
+            }
 
-        // Durable approval card (runs/events-backed; an agent's manage_agents
-        // write gate). Routed to the API platform's
-        // tool:durable-approval-card subscription, which enqueues it onto the
-        // SAME owner-gated thread_response queue the other cards use.
-        if (interactionType === "tool_approval") {
-          const posted = await interactionService.postDurableApprovalCard(
-            userId,
-            conversationId,
-            channelId,
-            teamId,
-            connectionId,
-            platform || "unknown",
-            Number(body.runId),
-            typeof body.action === "string" ? body.action : "change",
-            (body.proposal ?? null) as Record<string, unknown> | null,
-            (body.current ?? null) as Record<string, unknown> | null,
-            source,
-            // entity_field_change (manage_entity) carries a human-owned-field
-            // diff + who proposed it; manage_agents leaves these null.
-            (body.fields ?? null) as Record<string, unknown> | null,
-            // Keep malformed/legacy cards non-fatal without lying to the
-            // downstream contract about their discriminator values.
-            isApprovalAttribution(body.attribution) ? body.attribution : null,
-            isInteractionResourceKind(body.resourceKind)
-              ? body.resourceKind
-              : null,
-            messageId
-          );
-          // The live approval card is a one-shot SSE push, and the transcript
-          // doesn't carry interaction parts — so on reload the card is lost.
-          // Stamp the conversation onto the durable approval event (manage_agents
-          // created it WITHOUT one — the tool ctx has no conversationId; the
-          // worker does) so the history endpoint can replay it. Routing-metadata
-          // only; `events` is append-only for DELETE, and once the approval is
-          // resolved the superseding event drops it from current_event_records.
-          await getDb()`
-            UPDATE events
-            SET metadata = coalesce(metadata, '{}'::jsonb)
-              || jsonb_build_object('conversationId', ${conversationId}::text)
-            WHERE run_id = ${Number(body.runId)}
-              AND interaction_type = 'approval'
-              AND interaction_status = 'pending'
-          `;
-          return c.json({ id: posted.id, status: "posted" });
-        }
+            // Durable approval card (runs/events-backed; an agent's manage_agents
+            // write gate). Routed to the API platform's
+            // tool:durable-approval-card subscription, which enqueues it onto the
+            // SAME owner-gated thread_response queue the other cards use.
+            if (interactionType === "tool_approval") {
+              const posted = await interactionService.postDurableApprovalCard(
+                userId,
+                conversationId,
+                channelId,
+                teamId,
+                connectionId,
+                platform || "unknown",
+                Number(body.runId),
+                typeof body.action === "string" ? body.action : "change",
+                (body.proposal ?? null) as Record<string, unknown> | null,
+                (body.current ?? null) as Record<string, unknown> | null,
+                source,
+                // entity_field_change (manage_entity) carries a human-owned-field
+                // diff + who proposed it; manage_agents leaves these null.
+                (body.fields ?? null) as Record<string, unknown> | null,
+                // Keep malformed/legacy cards non-fatal without lying to the
+                // downstream contract about their discriminator values.
+                isApprovalAttribution(body.attribution) ? body.attribution : null,
+                isInteractionResourceKind(body.resourceKind)
+                  ? body.resourceKind
+                  : null,
+                messageId
+              );
+              // The live approval card is a one-shot SSE push, and the transcript
+              // doesn't carry interaction parts — so on reload the card is lost.
+              // Stamp the conversation onto the durable approval event (manage_agents
+              // created it WITHOUT one — the tool ctx has no conversationId; the
+              // worker does) so the history endpoint can replay it. Routing-metadata
+              // only; `events` is append-only for DELETE, and once the approval is
+              // resolved the superseding event drops it from current_event_records.
+              await getDb()`
+                UPDATE events
+                SET metadata = coalesce(metadata, '{}'::jsonb)
+                  || jsonb_build_object('conversationId', ${conversationId}::text)
+                WHERE run_id = ${Number(body.runId)}
+                  AND interaction_type = 'approval'
+                  AND interaction_status = 'pending'
+              `;
+              return c.json({ id: posted.id, status: "posted" });
+            }
 
-        const posted = await interactionService.postQuestion(
-          userId,
-          conversationId,
-          channelId,
-          teamId,
-          connectionId,
-          platform || "unknown",
-          body.question,
-          body.options || [],
-          source,
-          messageId
+            const posted = await interactionService.postQuestion(
+              userId,
+              conversationId,
+              channelId,
+              teamId,
+              connectionId,
+              platform || "unknown",
+              body.question,
+              body.options || [],
+              source,
+              messageId
+            );
+
+            return c.json({ id: posted.id, status: "posted" });
+          }
         );
-
-        return c.json({ id: posted.id, status: "posted" });
       } catch (error) {
         // Serialize the message + stack explicitly. The console logger
         // JSON.stringifies a positional Error arg to `{}` (Error's own

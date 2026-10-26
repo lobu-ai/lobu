@@ -44,6 +44,12 @@ interface ImageGenerationSuccess {
 interface ImageGenerationError {
   error: string;
   availableProviders: ImageGenerationProvider[];
+  /**
+   * The provider was called and the call failed: an image may have been
+   * generated (and billed) even though none came back. Absent when the
+   * request never left, e.g. no provider is configured.
+   */
+  dispatched?: true;
 }
 
 type ImageGenerationResult = ImageGenerationSuccess | ImageGenerationError;
@@ -246,6 +252,7 @@ export class ImageGenerationService {
       return {
         error: `Image generation failed with ${config.displayName}: ${errorMessage}`,
         availableProviders: [config.provider],
+        dispatched: true,
       };
     }
   }

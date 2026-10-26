@@ -225,3 +225,90 @@ test("a steered follow-up's tool call names its own input to the gateway", async
   expect(result.consumedInputs).toEqual([expect.objectContaining({ runId: 701, toolsUsed: ['send_message'] })]);
   expect(toolCalls).toEqual([{ inputRun: null }, { inputRun: '701' }]);
 });
+
+/**
+ * The gateway and media plugin tools post to the gateway's own write routes,
+ * not the MCP route, and are keyed there per input the same way: the
+ * follow-up's `send_message` names its input run, the owner's names none.
+ */
+test("a steered follow-up's send_message names its own input to the delivery route", async () => {
+  let steeringTaken = 0;
+  const takeSteering = () => {
+    steeringTaken += 1;
+    return steeringTaken === 1 ? [{ runId: 702, messageId: 'input-0', text: 'Send it again.' }] : [];
+  };
+  const sends: Array<{ inputRun: string | null }> = [];
+  let requests = 0;
+  globalThis.fetch = (async (url, init) => {
+    if (String(url).includes('/internal/conversations/send')) {
+      sends.push({ inputRun: new Headers(init?.headers).get('x-lobu-turn-input-run') });
+      return Response.json({ success: true, delivered: true, inBand: false });
+    }
+    requests += 1;
+    const call = (id: string) => ({ index: 0, id, type: 'function', function: { name: 'send_message', arguments: '{"target":"t1","text":"hi"}' } });
+    if (requests === 1) {
+      return sse([{ index: 0, delta: { role: 'assistant', content: 'Owner answer.', tool_calls: [call('call_owner')] }, finish_reason: 'tool_calls' }]);
+    }
+    if (requests === 2) {
+      return sse([{ index: 0, delta: { role: 'assistant', content: 'Sending again.', tool_calls: [call('call_follow')] }, finish_reason: 'tool_calls' }]);
+    }
+    return sse([{ index: 0, delta: { role: 'assistant', content: 'Sent again.' }, finish_reason: 'stop' }]);
+  }) as typeof fetch;
+
+  const result = await runAgentTurn({
+    provider: { api: 'openai-completions', provider: 'openai', modelId: 'synthetic-model', baseUrl: 'https://provider.example.test/v1', apiKey: 'synthetic-key' },
+    systemPrompt: 'Answer each message.', userMessage: 'Send hi', sessionJsonl: '',
+    tools: {
+      gatewayUrl: 'https://gateway.example.test', definitions: [], gateway: ['send_message'],
+      conversation: { channelId: 'C1', conversationId: 'conv-1', platform: 'slack' },
+    },
+  }, () => undefined, takeSteering);
+
+  expect(result.consumedInputs).toEqual([expect.objectContaining({ runId: 702, toolsUsed: ['send_message'] })]);
+  expect(sends).toEqual([{ inputRun: null }, { inputRun: '702' }]);
+});
+
+test('a steered generation keeps its input header through generation and upload', async () => {
+  let steeringTaken = 0;
+  const takeSteering = () => ++steeringTaken === 1
+    ? [{ runId: 703, messageId: 'input-media', text: 'Generate it again.' }]
+    : [];
+  const writes: Array<{ path: string; inputRun: string | null }> = [];
+  let requests = 0;
+  globalThis.fetch = (async (url, init) => {
+    const path = new URL(String(url)).pathname;
+    if (path === '/internal/images/capabilities') return Response.json({ available: true });
+    if (path === '/internal/images/generate' || path === '/internal/files/upload') {
+      writes.push({ path, inputRun: new Headers(init?.headers).get('x-lobu-turn-input-run') });
+      return path.endsWith('/generate')
+        ? new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/png' } })
+        : Response.json({ success: true, fileId: 'synthetic-file', permalink: 'https://example.test/image' });
+    }
+    requests += 1;
+    if (requests <= 2) {
+      return sse([{
+        index: 0,
+        delta: { role: 'assistant', tool_calls: [{ index: 0, id: `call_media_${requests}`, type: 'function', function: { name: 'generate_image', arguments: '{"prompt":"a lighthouse"}' } }] },
+        finish_reason: 'tool_calls',
+      }]);
+    }
+    return sse([{ index: 0, delta: { role: 'assistant', content: 'Generated.' }, finish_reason: 'stop' }]);
+  }) as typeof fetch;
+
+  const result = await runAgentTurn({
+    provider: { api: 'openai-completions', provider: 'openai', modelId: 'synthetic-model', baseUrl: 'https://provider.example.test/v1', apiKey: 'synthetic-key' },
+    systemPrompt: 'Generate the requested images.', userMessage: 'Draw a lighthouse.', sessionJsonl: '',
+    tools: {
+      gatewayUrl: 'https://gateway.example.test', definitions: [], media: ['generate_image'],
+      conversation: { channelId: 'C1', conversationId: 'conv-1', platform: 'slack' },
+    },
+  }, () => undefined, takeSteering);
+
+  expect(result.consumedInputs).toEqual([expect.objectContaining({ runId: 703, toolsUsed: ['generate_image'] })]);
+  expect(writes).toEqual([
+    { path: '/internal/images/generate', inputRun: null },
+    { path: '/internal/files/upload', inputRun: null },
+    { path: '/internal/images/generate', inputRun: '703' },
+    { path: '/internal/files/upload', inputRun: '703' },
+  ]);
+});

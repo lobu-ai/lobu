@@ -174,6 +174,7 @@ function buildTools(
           conversation: tools.conversation,
           onAskUserPosted,
           onInBandReplyDelivered,
+          inputRunFor,
         })
       : [];
   const media =
@@ -186,6 +187,7 @@ function buildTools(
           // The isolate has one channel out — its event stream — so the upload
           // notification rides that and the host decides what to do with it.
           onFileUploaded: (data) => emit({ type: 'file_uploaded', data }),
+          inputRunFor,
         })
       : [];
   const mcp: AgentTool[] = tools.definitions.map((tool) => ({

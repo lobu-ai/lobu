@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import {
 	createLogger,
@@ -16,6 +17,7 @@ import type { IFileHandler } from "../../platform/file-handler.js";
 import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
 import { captureSideEffect } from "./capture-mode.js";
+import { sendOncePerTurnInput } from "./turn-write-once.js";
 import type { WorkerContext } from "./types.js";
 
 const logger = createLogger("file-routes");
@@ -134,75 +136,92 @@ export function createFileRoutes(
       });
       if (captured) return captured;
 
-      const fileHandler = await resolveFileHandler(platformRegistry, {
-        platformName: worker.platform,
-        connectionId: worker.connectionId,
-        channelId,
-        conversationId,
-        teamId: worker.teamId,
-      });
-
-      logger.info(
-        `Worker uploading file ${filename} via ${worker.platform || "unknown"} for conversation ${worker.conversationId} to conversation ${conversationId}${voiceMessage ? " as voice message" : ""}`
-      );
-
       const fileBuffer = Buffer.from(await file.arrayBuffer());
-      let result:
-        | {
-            fileId: string;
-            permalink: string;
-            name: string;
-            size: number;
-            delivery?: "platform-upload" | "artifact-url";
-            artifactId?: string;
-          }
-        | undefined;
-
-      if (fileHandler) {
-        try {
-          result = await fileHandler.uploadFile(Readable.from(fileBuffer), {
-            filename,
-            channelId,
-            threadTs: conversationId,
-            initialComment: initialComment || undefined,
-            voiceMessage,
-          });
-          logger.info(`File uploaded successfully: ${result.fileId}`);
-        } catch (error) {
-          logger.warn(
-            `Platform upload failed for ${filename}; falling back to artifact URL`,
-            error
-          );
-        }
-      }
-
-      if (!result) {
-        const artifact = await artifactStore.publish({
-          buffer: fileBuffer,
+      // Once per turn input: the same bytes, name and caption delivered to the
+      // same conversation by a re-run or a repeated call is one delivery.
+      return await sendOncePerTurnInput(
+        c,
+        worker,
+        "files.upload",
+        {
+          channelId,
+          conversationId,
           filename,
-          contentType: file.type || "application/octet-stream",
-          publicGatewayUrl,
-        });
-        result = {
-          fileId: artifact.artifactId,
-          permalink: artifact.downloadUrl,
-          name: artifact.filename,
-          size: artifact.size,
-          delivery: "artifact-url",
-          artifactId: artifact.artifactId,
-        };
-        logger.info(`Published artifact fallback: ${artifact.artifactId}`);
-      }
+          comment: initialComment,
+          voiceMessage,
+          sha256: createHash("sha256").update(fileBuffer).digest("hex"),
+        },
+        async () => {
+          const fileHandler = await resolveFileHandler(platformRegistry, {
+            platformName: worker.platform,
+            connectionId: worker.connectionId,
+            channelId,
+            conversationId,
+            teamId: worker.teamId,
+          });
 
-      return c.json({
-        success: true,
-        fileId: result.fileId,
-        permalink: result.permalink,
-        name: result.name,
-        size: result.size,
-        delivery: result.delivery || "platform-upload",
-        artifactId: result.artifactId,
-      });
+          logger.info(
+            `Worker uploading file ${filename} via ${worker.platform || "unknown"} for conversation ${worker.conversationId} to conversation ${conversationId}${voiceMessage ? " as voice message" : ""}`
+          );
+
+          let result:
+            | {
+                fileId: string;
+                permalink: string;
+                name: string;
+                size: number;
+                delivery?: "platform-upload" | "artifact-url";
+                artifactId?: string;
+              }
+            | undefined;
+
+          if (fileHandler) {
+            try {
+              result = await fileHandler.uploadFile(Readable.from(fileBuffer), {
+                filename,
+                channelId,
+                threadTs: conversationId,
+                initialComment: initialComment || undefined,
+                voiceMessage,
+              });
+              logger.info(`File uploaded successfully: ${result.fileId}`);
+            } catch (error) {
+              logger.warn(
+                `Platform upload failed for ${filename}; falling back to artifact URL`,
+                error
+              );
+            }
+          }
+
+          if (!result) {
+            const artifact = await artifactStore.publish({
+              buffer: fileBuffer,
+              filename,
+              contentType: file.type || "application/octet-stream",
+              publicGatewayUrl,
+            });
+            result = {
+              fileId: artifact.artifactId,
+              permalink: artifact.downloadUrl,
+              name: artifact.filename,
+              size: artifact.size,
+              delivery: "artifact-url",
+              artifactId: artifact.artifactId,
+            };
+            logger.info(`Published artifact fallback: ${artifact.artifactId}`);
+          }
+
+          return c.json({
+            success: true,
+            fileId: result.fileId,
+            permalink: result.permalink,
+            name: result.name,
+            size: result.size,
+            delivery: result.delivery || "platform-upload",
+            artifactId: result.artifactId,
+          });
+        }
+      );
     } catch (error) {
       // Hono does not export `BodyLimitError`, so its name is the only handle
       // on it; `instanceof` has no class to test against.

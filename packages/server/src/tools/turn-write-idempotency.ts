@@ -126,3 +126,116 @@ export async function withTurnIdempotencyKey<T extends { idempotency_key?: strin
   const key = await turnWriteIdempotencyKey(turn, surface, args);
   return key ? { ...args, idempotency_key: key } : args;
 }
+
+/**
+ * The steered input a turn's call names (`TURN_INPUT_RUN_HEADER`), attached
+ * for verification by the write that keys on it. A malformed value is kept as
+ * an id no stored input can have, so the write fails closed instead of
+ * silently keying on the owner.
+ */
+export function withTurnInputRun(
+  agentTurn: AgentTurnIdentity | null,
+  header: string | null | undefined
+): AgentTurnIdentity | null {
+  if (!agentTurn || header == null) return agentTurn;
+  const parsed = Number(header);
+  const canonical = Number.isSafeInteger(parsed) && parsed > 0 && String(parsed) === header;
+  return { ...agentTurn, inputRunId: canonical ? parsed : 0 };
+}
+
+/**
+ * A replayable result; an explicit refusal before the effect took place
+ * (frees the claim); or a failure after it may have taken place (keeps the
+ * claim with no result, so a repeat answers "attempted").
+ */
+type TurnWriteEffect<R> = { store: R } | { release: true } | { retain: true };
+
+/** Outcome of `runTurnWriteOnce`: the effect ran now, an earlier one is replayed, or one was claimed and never finished. */
+type TurnWriteOutcome<R> =
+  | { kind: 'ran' }
+  | { kind: 'replay'; result: R }
+  | { kind: 'attempted' };
+
+/**
+ * Run a turn's write at most once per input message while its receipt is
+ * retained, for writes whose own
+ * storage has no idempotency key (a chat post, an upload, an entity row). The
+ * key is `withTurnIdempotencyKey`'s; the receipt lives in
+ * `turn_write_receipts`.
+ *
+ * Claim before the effect: the claim row commits first, so two concurrent
+ * repeats cannot both run it. A completed effect stores its result and later
+ * repeats replay it. An explicit refusal (a `release` result or a thrown
+ * `ToolUserError`) releases the claim so the same input can try again. Any
+ * other thrown error retains it: the effect may have succeeded before its
+ * response was lost. A claim with no result means an earlier
+ * attempt stopped mid-way (a crash after the platform call, say): it may have
+ * been delivered, so the
+ * answer is "attempted", never a second delivery. A non-turn caller runs the
+ * effect directly, as before.
+ */
+export async function runTurnWriteOnce<R>(
+  turn: AgentTurnIdentity | null | undefined,
+  surface: string,
+  args: unknown,
+  effect: () => Promise<TurnWriteEffect<R>>
+): Promise<TurnWriteOutcome<R>> {
+  const key = await turnWriteIdempotencyKey(turn, surface, args);
+  if (!key || !turn) {
+    await effect();
+    return { kind: 'ran' };
+  }
+  const sql = getDb();
+  const claimed = await sql`
+    INSERT INTO turn_write_receipts (organization_id, idempotency_key, surface, state)
+    VALUES (${turn.organizationId}, ${key}, ${surface}, 'claimed')
+    ON CONFLICT (organization_id, idempotency_key) DO NOTHING
+    RETURNING 1
+  `;
+  if (claimed.length === 0) {
+    const [prior] = await sql<{ state: string; result: R | null }>`
+      SELECT state, result FROM turn_write_receipts
+      WHERE organization_id = ${turn.organizationId} AND idempotency_key = ${key}
+    `;
+    if (prior?.state === 'done') return { kind: 'replay', result: prior.result as R };
+    return { kind: 'attempted' };
+  }
+  const release = () => sql`
+    DELETE FROM turn_write_receipts
+    WHERE organization_id = ${turn.organizationId} AND idempotency_key = ${key} AND state = 'claimed'
+  `;
+  let outcome: TurnWriteEffect<R>;
+  try {
+    outcome = await effect();
+  } catch (error) {
+    // A ToolUserError is the typed refusal a handler raises before it writes
+    // (validation, policy, ownership), so nothing was delivered. Anything
+    // else may have struck after the effect landed, so its claim stays.
+    if (error instanceof ToolUserError) await release();
+    throw error;
+  }
+  if ('release' in outcome) {
+    await release();
+    return { kind: 'ran' };
+  }
+  if ('retain' in outcome) return { kind: 'ran' };
+  await sql`
+    UPDATE turn_write_receipts
+    SET state = 'done', result = ${sql.json(JSON.parse(JSON.stringify(outcome.store ?? null)))}
+    WHERE organization_id = ${turn.organizationId} AND idempotency_key = ${key}
+  `;
+  return { kind: 'ran' };
+}
+
+/** Delete receipts past the runs retention window. Called from the runs sweep. */
+export async function pruneTurnWriteReceipts(retentionDays: number): Promise<number> {
+  const deleted = await getDb()`
+    WITH d AS (
+      DELETE FROM turn_write_receipts
+      WHERE created_at < now() - (${retentionDays}::int * interval '1 day')
+      RETURNING 1
+    )
+    SELECT count(*)::int AS count FROM d
+  `;
+  return Number((deleted[0] as { count?: number } | undefined)?.count ?? 0);
+}

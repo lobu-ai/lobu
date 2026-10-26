@@ -11,6 +11,7 @@ import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
 import { captureSideEffect } from "./capture-mode.js";
+import { sendOncePerTurnInput } from "./turn-write-once.js";
 
 const logger = createLogger("internal-image-routes");
 
@@ -52,37 +53,41 @@ export function createImageRoutes(
       const captured = await captureSideEffect(c, "images.generate", { prompt, size });
       if (captured) return captured;
 
-      logger.info("Generating image", {
-        agentId,
-        promptLength: prompt.length,
-        size,
-        quality,
-        background,
-        format,
-      });
+      return await sendOncePerTurnInput(c, worker, "images.generate", { prompt, size, quality, background, format }, async () => {
+        logger.info("Generating image", {
+          agentId,
+          promptLength: prompt.length,
+          size,
+          quality,
+          background,
+          format,
+        });
 
-      const result = await imageGenerationService.generate(prompt, agentId, {
-        size,
-        quality,
-        background,
-        format,
-      });
-      if ("error" in result) {
-        return c.json(
-          {
-            error: result.error,
-            availableProviders: result.availableProviders,
+        const result = await imageGenerationService.generate(prompt, agentId, {
+          size,
+          quality,
+          background,
+          format,
+        });
+        if ("error" in result) {
+          return c.json(
+            {
+              error: result.error,
+              availableProviders: result.availableProviders,
+            },
+            // 502 after a provider call: it may have produced (and billed)
+            // output, so the turn receipt keeps its claim. 400 = never sent.
+            result.dispatched ? 502 : 400
+          );
+        }
+
+        return new Response(result.imageBuffer, {
+          headers: {
+            "Content-Type": result.mimeType,
+            "Content-Length": result.imageBuffer.length.toString(),
+            "X-Image-Provider": result.provider,
           },
-          400
-        );
-      }
-
-      return new Response(result.imageBuffer, {
-        headers: {
-          "Content-Type": result.mimeType,
-          "Content-Length": result.imageBuffer.length.toString(),
-          "X-Image-Provider": result.provider,
-        },
+        });
       });
     } catch (error) {
       logger.error("Image generation error", { error });
