@@ -16,6 +16,9 @@
 /** Global the shell's runtime script assigns and every view bundle reads. */
 export const VIEW_RUNTIME_GLOBAL = "__lobuViews";
 
+/** Per-call workspace selected by an MCP view. A routing hint, never authority. */
+export const VIEW_WORKSPACE_META_KEY = "lobu/view-workspace";
+
 /** Module specifiers a view imports from the shell runtime. */
 export const VIEW_RUNTIME_MODULES: readonly string[] = [
   "react",

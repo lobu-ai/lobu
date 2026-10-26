@@ -35,16 +35,41 @@ function runLoader() {
       (listeners[type] ??= []).push(fn);
     },
   };
+  class Element {
+    children: Element[] = [];
+    id = ''; value = ''; textContent = ''; className = ''; disabled = false;
+    handlers: Record<string, () => void> = {};
+    attributes: Record<string, string> = {};
+    constructor(readonly tag: string) {}
+    appendChild(child: Element) { this.children.push(child); return child; }
+    replaceChildren() { this.children = []; }
+    setAttribute(key: string, value: string) { this.attributes[key] = value; }
+    focus() { fakeDocument.activeElement = this; }
+    addEventListener(type: string, callback: () => void) { this.handlers[type] = callback; }
+    all(): Element[] { return [this, ...this.children.flatMap(child => child.all())]; }
+    querySelectorAll(selector: string) { return this.all().filter(el => selector.split(',').includes(el.tag)); }
+  }
+  const root = new Element('div'); root.id = 'root';
+  const status = new Element('div'); status.id = 'lobu-views-status'; root.appendChild(status);
+  const classes = new Set<string>();
+  const variables: Record<string, string> = {};
+  const timers: Array<() => void> = [];
   const fakeDocument = {
+    activeElement: null as Element | null,
+    createElement: (tag: string) => new Element(tag),
+    documentElement: {
+      classList: { toggle: (name: string, on: boolean) => on ? classes.add(name) : classes.delete(name) },
+      style: { setProperty: (key: string, value: string) => { variables[key] = value; } },
+    },
     open: () => {},
     write: (chunk: string) => {
       written.push(chunk);
     },
     close: () => {},
-    getElementById: () => null,
+    getElementById: (id: string) => root.all().find(el => el.id === id) ?? null,
   };
-  new Function("window", "document", script)(fakeWindow, fakeDocument);
-  return { listeners, announced, hostParent, written };
+  new Function("window", "document", "setTimeout", script)(fakeWindow, fakeDocument, (fn: () => void) => timers.push(fn));
+  return { listeners, announced, hostParent, written, root, fakeDocument, classes, variables, timers };
 }
 
 function message(
@@ -56,6 +81,93 @@ function message(
 }
 
 describe("views loader shell", () => {
+  it('opens the picker from an empty tool input and requests an explicit workspace before a view', () => {
+    const h = runLoader();
+    const deliver = (method: string, params: unknown) => message(h.listeners, h.hostParent, { jsonrpc: '2.0', method, params });
+    const picker = { workspaces: [{ slug: 'sample', name: 'Sample workspace' }], views: [] };
+    deliver('ui/notifications/tool-input', { arguments: {} });
+    deliver('ui/notifications/tool-result', { structuredContent: { picker } });
+    expect(h.root.all().find(el => el.textContent === 'Lobu views')).toBeDefined();
+    const select = h.fakeDocument.getElementById('picker-workspace')!;
+    select.value = 'sample'; select.handlers.change();
+    const call = h.announced.at(-1) as any;
+    expect(call.params).toEqual({ name: 'open_view', arguments: { organization: 'sample' } });
+    message(h.listeners, h.hostParent, { jsonrpc: '2.0', id: call.id, result: { structuredContent: {
+      picker: { ...picker, organization: 'sample', views: [{ key: 'home', name: '<img src=x>', description: 'Saved project context' }] },
+    } } });
+    expect(h.root.all().some(el => el.tag === 'img')).toBe(false);
+    expect(h.root.all().some(el => el.textContent === '<img src=x>')).toBe(true);
+    const button = h.root.all().find(el => el.tag === 'li')!.children[0];
+    button.handlers.click();
+    const open = h.announced.at(-1) as any;
+    expect(open.params.arguments).toEqual({ organization: 'sample', key: 'home' });
+    message(h.listeners, h.hostParent, { jsonrpc: '2.0', id: open.id, result: { structuredContent: { view: 'home' } } });
+    const read = h.announced.at(-1) as any;
+    expect(read.params.uri).toBe('ui://lobu/views/home?organization=sample');
+    expect(h.fakeDocument.getElementById('picker-search')!.disabled).toBe(true);
+    expect(h.fakeDocument.getElementById('picker-loading')!.textContent).toContain('Loading');
+    message(h.listeners, h.hostParent, { jsonrpc: '2.0', id: read.id, result: { contents: [{ text: '<html><head></head><body>Home</body></html>' }] } });
+    expect(h.written[0]).toContain('"organization":"sample"');
+    // The opened result rides the handoff queue, as a host-driven open would.
+    expect(h.written[0]).toContain('"method":"ui/notifications/tool-result"');
+    expect(h.written[0]).toContain('"view":"home"');
+    expect(h.written[0]).toContain('<body>Home</body>');
+  });
+
+  it('restores the displayed workspace after failure and keeps keyboard focus after a successful switch', () => {
+    const h = runLoader();
+    const picker = { organization: 'sample', workspaces: [{ slug: 'sample', name: 'Sample' }, { slug: 'other', name: 'Other' }], views: [] };
+    message(h.listeners, h.hostParent, { jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: { structuredContent: { picker } } });
+    const select = h.fakeDocument.getElementById('picker-workspace')!;
+    select.focus(); select.value = 'other'; select.handlers.change();
+    let call = h.announced.at(-1) as any;
+    message(h.listeners, h.hostParent, { jsonrpc: '2.0', id: call.id, error: { message: 'unavailable' } });
+    expect(select.value).toBe('sample');
+    expect(h.fakeDocument.getElementById('picker-error')!.textContent).toContain('Other');
+    expect(h.fakeDocument.getElementById('picker-loading')!.textContent).toBe('');
+    select.value = 'other'; select.handlers.change();
+    call = h.announced.at(-1) as any;
+    message(h.listeners, h.hostParent, { jsonrpc: '2.0', id: call.id, result: { structuredContent: { picker: { ...picker, organization: 'other' } } } });
+    const replacement = h.fakeDocument.getElementById('picker-workspace')!;
+    expect(replacement.value).toBe('other');
+    expect(h.fakeDocument.activeElement).toBe(replacement);
+    expect(replacement.disabled).toBe(false);
+  });
+
+  it('keeps picker errors recoverable, filters views, and applies live host theme variables', () => {
+    const h = runLoader();
+    message(h.listeners, h.hostParent, { jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: {
+      structuredContent: { picker: { organization: 'sample', workspaces: [{ slug: 'sample', name: 'Sample' }], views: [{ key: 'home', name: 'Home', description: '' }] } },
+    } });
+    const search = h.fakeDocument.getElementById('picker-search')!;
+    search.value = 'missing'; search.handlers.input();
+    expect(h.root.all().some(el => el.textContent === 'No views match your search.')).toBe(true);
+    search.value = ''; search.handlers.input();
+    const button = h.root.all().find(el => el.tag === 'li')!.children[0];
+    button.handlers.click();
+    const call = h.announced.at(-1) as any;
+    message(h.listeners, h.hostParent, { jsonrpc: '2.0', id: call.id, result: { isError: true } });
+    expect(button.disabled).toBe(false);
+    expect(h.fakeDocument.getElementById('picker-error')!.textContent).toContain('Try again');
+    message(h.listeners, h.hostParent, { jsonrpc: '2.0', method: 'ui/notifications/host-context-changed', params: {
+      theme: 'dark', styles: { variables: { '--color-text-primary': '#eee', invalid: 'bad' } },
+    } });
+    expect(h.classes.has('dark')).toBe(true);
+    expect(h.variables).toEqual({ '--color-text-primary': '#eee' });
+  });
+
+  it('shows an empty grant state and ignores forged picker results', () => {
+    const h = runLoader();
+    const notification = { jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: { structuredContent: { picker: { workspaces: [], views: [] } } } };
+    message(h.listeners, {}, notification);
+    expect(h.fakeDocument.getElementById('picker-workspace')).toBeNull();
+    message(h.listeners, h.hostParent, notification);
+    expect(h.fakeDocument.getElementById('picker-workspace')!.disabled).toBe(true);
+    expect(h.root.all().some(el => el.textContent.includes('No authorized workspaces'))).toBe(true);
+    h.timers.at(-1)!();
+    expect(h.root.all().some(el => el.textContent.includes('No authorized workspaces'))).toBe(true);
+  });
+
   it("announces via ui/initialize on load, then initialized", () => {
     const { listeners, announced, hostParent } = runLoader();
     const init = announced[0] as Record<string, unknown>;

@@ -296,9 +296,9 @@ export const runSdk = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Open a Lobu view
+ * Browse authorized workspaces and their workspace views, or open a specific Lobu view by key
  *
- * Open a Lobu view. Frame-capable hosts render it inline as an MCP App; the result also carries a web URL that renders the same view with the same params for hosts that cannot show a frame.
+ * Browse authorized workspaces and their workspace views, or open a specific Lobu view by key. Omit key to show the picker; pass organization to select an authorized workspace. Views for a record, collection, or event still require their scope.
  */
 export const openView = <ThrowOnError extends boolean = false>(
   options: Options<OpenViewData, ThrowOnError>,

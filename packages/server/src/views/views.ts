@@ -80,15 +80,36 @@ export function isValidViewKey(key: string): boolean {
   return VIEW_KEY_RE.test(key);
 }
 
-export function viewResourceUri(key: string): string {
-  return `${VIEW_RESOURCE_PREFIX}${key}`;
+export function viewResourceUri(key: string, organization?: string): string {
+  return `${VIEW_RESOURCE_PREFIX}${key}${organization ? `?organization=${encodeURIComponent(organization)}` : ''}`;
+}
+
+/**
+ * `ui://lobu/views/<key>[?organization=<slug|id>]`: the key, plus the
+ * explicit workspace an account (bare OAuth) frame names. Any other query or
+ * a fragment is not a view resource.
+ */
+function parseViewResourceUri(uri: string): { key: string; organization?: string } | null {
+  if (!uri.startsWith(VIEW_RESOURCE_PREFIX)) return null;
+  const rest = uri.slice(VIEW_RESOURCE_PREFIX.length);
+  if (rest.includes('#')) return null;
+  const [key, query, extra] = rest.split('?');
+  if (extra !== undefined || !VIEW_KEY_RE.test(key)) return null;
+  if (query === undefined) return { key };
+  const params = new URLSearchParams(query);
+  const organization = params.get('organization')?.trim();
+  if (params.size !== 1 || !organization) return null;
+  return { key, organization };
 }
 
 /** The per-view key for a `ui://lobu/views/<key>` uri, else null. */
 export function viewKeyFromResourceUri(uri: string): string | null {
-  if (!uri.startsWith(VIEW_RESOURCE_PREFIX)) return null;
-  const key = uri.slice(VIEW_RESOURCE_PREFIX.length);
-  return VIEW_KEY_RE.test(key) ? key : null;
+  return parseViewResourceUri(uri)?.key ?? null;
+}
+
+/** The explicit workspace of a per-view uri, when the frame named one. */
+export function viewOrganizationFromResourceUri(uri: string): string | undefined {
+  return parseViewResourceUri(uri)?.organization;
 }
 
 /** Shared content identity (server and CLI derive the key from one function). */
@@ -758,8 +779,10 @@ export function renderViewShell(
  * injects the collected bootstrap state (host context, last tool input,
  * queued event notifications, request counter) as `window.__lobuViewHandoff`,
  * so the mounted guest continues the session instead of starting unseeded.
- * With no delivery it stays an honest loading state instead of guessing a
- * protocol.
+ * A keyless `open_view` (the host's launcher entrypoint) delivers a picker
+ * result instead: the shell renders the workspace/view list itself, and a
+ * chosen view goes through the same tool call and bundle read. With no
+ * delivery it stays an honest loading state instead of guessing a protocol.
  */
 export function renderViewsLoaderShell(): string {
   return `<!doctype html>
@@ -769,7 +792,25 @@ export function renderViewsLoaderShell(): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="lobu-views-loader" content="1">
 <title>Lobu views</title>
-<style>${BASE_CSS}#lobu-views-status{padding:12px;color:var(--muted)}</style>
+<style>${BASE_CSS}
+#root{max-width:960px;margin:auto;padding:24px}
+#lobu-views-status{color:var(--muted)}
+.view-picker h1{font-size:24px;line-height:1.2;margin:0 0 8px}
+.view-picker p{color:var(--muted);max-width:65ch;margin:0 0 24px}
+.view-picker label{display:block;font-weight:600;margin:20px 0 6px}
+.view-picker input,.view-picker select{display:block;width:100%;max-width:480px;min-height:40px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font:inherit;color:var(--fg);background:Canvas}
+.view-picker button{font:inherit;color:var(--fg);cursor:pointer}
+.view-picker button:disabled{cursor:wait;opacity:.6}
+.view-picker :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.view-picker ul{list-style:none;padding:0;margin:24px 0}
+.view-picker li{border-bottom:1px solid var(--border)}
+.view-picker li button{display:block;text-align:left;width:100%;padding:16px 0;border:0;background:transparent}
+.view-picker li button:hover strong{color:var(--accent)}
+.view-picker li span{display:block;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}
+.view-picker .picker-link{border:0;background:transparent;color:var(--accent);padding:8px 0;text-decoration:underline;text-underline-offset:3px}
+.view-picker [role=alert]{margin:16px 0}
+@media(max-width:480px){#root{padding:16px}.view-picker h1{font-size:22px}}
+</style>
 </head>
 <body>
 <div id="root"><div id="lobu-views-status">Loading view…</div></div>
@@ -788,9 +829,133 @@ export function renderViewsLoaderShell(): string {
   var toolInput = null;
   var queue = [];
   var QUEUE_CAP = 50;
+  var pickerState = null;
+  var pickerBusy = false;
   function status(text) {
     var el = document.getElementById("lobu-views-status");
     if (el) el.textContent = text;
+  }
+  function applyTheme() {
+    var root = document.documentElement;
+    if (!root) return;
+    root.classList.toggle('dark', hostContext.theme === 'dark');
+    var variables = hostContext.styles && hostContext.styles.variables;
+    if (variables) Object.keys(variables).forEach(function (key) {
+      if (key.indexOf('--') === 0 && typeof variables[key] === 'string') root.style.setProperty(key, variables[key]);
+    });
+  }
+  function element(tag, text) {
+    var el = document.createElement(tag);
+    if (text) el.textContent = text;
+    return el;
+  }
+  function pickerError(text) {
+    var el = document.getElementById('picker-error');
+    if (el) el.textContent = text;
+  }
+  function pickerLoading(busy, text) {
+    pickerBusy = busy;
+    var root = document.getElementById('root');
+    if (root) {
+      root.setAttribute('aria-busy', String(busy));
+      root.querySelectorAll('button,select,input').forEach(function (el) { el.disabled = busy; });
+      var select = document.getElementById('picker-workspace');
+      if (select && pickerState && !pickerState.picker.workspaces.length) select.disabled = true;
+    }
+    var loading = document.getElementById('picker-loading');
+    if (loading) loading.textContent = text || '';
+  }
+  function pickerCall(args, onResult, onError) {
+    if (pickerBusy) return;
+    pickerError('');
+    pickerLoading(true, args.key ? 'Loading view…' : 'Loading workspace views…');
+    request('tools/call', { name: 'open_view', arguments: args }, function (err, result) {
+      if (err || !result || result.isError) {
+        pickerLoading(false);
+        if (onError) onError();
+        else pickerError('Could not open the view. Try again or reconnect Lobu.');
+        return;
+      }
+      onResult(result.structuredContent, result, function () { pickerLoading(false); });
+    });
+  }
+  function renderPicker(data) {
+    if (settled || !data || !data.picker) return;
+    pickerState = data;
+    var root = document.getElementById('root');
+    if (!root) return;
+    root.replaceChildren();
+    root.className = 'view-picker';
+    root.appendChild(element('h1', 'Lobu views'));
+    root.appendChild(element('p', 'Open a workspace view and continue working with its saved context.'));
+    var picker = data.picker;
+    var label = element('label', 'Workspace'); label.htmlFor = 'picker-workspace'; root.appendChild(label);
+    var select = element('select'); select.id = 'picker-workspace';
+    var placeholder = element('option', 'Choose a workspace'); placeholder.value = ''; select.appendChild(placeholder);
+    picker.workspaces.forEach(function (workspace) {
+      var option = element('option', workspace.name); option.value = workspace.slug; select.appendChild(option);
+    });
+    select.value = picker.organization || '';
+    select.disabled = picker.workspaces.length === 0;
+    select.addEventListener('change', function () {
+      var selected = picker.workspaces.find(function (workspace) { return workspace.slug === select.value; });
+      var restoreFocus = document.activeElement === select;
+      pickerCall(select.value ? { organization: select.value } : {}, function (next, result, done) {
+        renderPicker(next);
+        done();
+        if (restoreFocus) document.getElementById('picker-workspace').focus();
+      }, function () {
+        select.value = picker.organization || '';
+        pickerError('Could not load ' + (selected ? selected.name : 'workspaces') + '. Try again or reconnect Lobu.');
+      });
+    });
+    root.appendChild(select);
+    var error = element('div'); error.id = 'picker-error'; error.setAttribute('role', 'alert'); root.appendChild(error);
+    var loading = element('div'); loading.id = 'picker-loading'; loading.setAttribute('role', 'status'); root.appendChild(loading);
+    var list = element('ul');
+    if (!picker.workspaces.length) {
+      root.appendChild(element('p', 'No authorized workspaces are available. Reconnect Lobu and select a workspace you belong to.'));
+    } else if (picker.organization) {
+      var searchLabel = element('label', 'Find a view'); searchLabel.htmlFor = 'picker-search'; root.appendChild(searchLabel);
+      var search = element('input'); search.id = 'picker-search'; search.type = 'search'; root.appendChild(search);
+      var empty = element('p'); empty.setAttribute('role', 'status');
+      function filter() {
+        list.replaceChildren();
+        var query = search.value.toLocaleLowerCase();
+        picker.views.filter(function (view) { return (view.name + ' ' + view.description).toLocaleLowerCase().includes(query); }).forEach(function (view) {
+          var row = element('li'); var button = element('button'); button.type = 'button'; button.disabled = pickerBusy;
+          button.appendChild(element('strong', view.name));
+          if (view.description) button.appendChild(element('span', view.description));
+          button.addEventListener('click', function () {
+            var args = { organization: picker.organization, key: view.key };
+            pickerCall(args, function (opened, result, done) {
+              var previousInput = toolInput;
+              toolInput = args;
+              readViewBundle(view.key, function (err, html) {
+                if (err) {
+                  toolInput = previousInput;
+                  done();
+                  pickerError('Could not load the view. Try again.');
+                } else {
+                  queue.push({ method: 'ui/notifications/tool-result', params: result });
+                  show(html);
+                }
+              });
+            });
+          });
+          row.appendChild(button); list.appendChild(row);
+        });
+        empty.textContent = list.children.length ? '' : picker.views.length ? 'No views match your search.' : 'No workspace views have been published here yet. Views for a record, collection, or event open from that context.';
+      }
+      search.addEventListener('input', filter); root.appendChild(list); root.appendChild(empty); filter();
+      root.appendChild(element('p', 'Showing up to 100 workspace views.'));
+      if (typeof data.url === 'string') {
+        var link = element('button', 'Open workspace in Lobu'); link.type = 'button'; link.className = 'picker-link';
+        link.addEventListener('click', function () { request('ui/open-link', { url: data.url }, function (err) { if (err) pickerError('Could not open Lobu. Try again.'); }); });
+        root.appendChild(link);
+      }
+    } else root.appendChild(element('p', 'Choose a workspace to see its published views.'));
+    applyTheme();
   }
   function handoffTag() {
     var handoff = { v: 1, hostContext: hostContext, toolInput: toolInput, queue: queue, nextId: nextId };
@@ -837,7 +1002,9 @@ export function renderViewsLoaderShell(): string {
       onDone(new Error('unknown view "' + String(key) + '"'));
       return;
     }
-    request("resources/read", { uri: "ui://lobu/views/" + key }, function (err, result) {
+    var uri = "ui://lobu/views/" + key;
+    if (toolInput && typeof toolInput.organization === 'string') uri += '?organization=' + encodeURIComponent(toolInput.organization);
+    request("resources/read", { uri: uri }, function (err, result) {
       if (err) {
         onDone(err);
         return;
@@ -889,6 +1056,18 @@ export function renderViewsLoaderShell(): string {
           else show(html);
         });
       }
+      else status('Loading workspaces…');
+      return;
+    }
+    // A keyless open_view result is the picker: the shell renders it in place
+    // of a view. Its failure is terminal for this frame, since no view can
+    // follow without a workspace.
+    if (data.method === "ui/notifications/tool-result" && params.structuredContent && params.structuredContent.picker) {
+      renderPicker(params.structuredContent);
+      return;
+    }
+    if (data.method === "ui/notifications/tool-result" && params.isError && (!toolInput || !toolInput.key)) {
+      fail('Could not load workspaces. Reopen Lobu or reconnect your account.');
       return;
     }
     // Event notifications that arrive after the opening input are queued for
@@ -905,6 +1084,7 @@ export function renderViewsLoaderShell(): string {
         if (k === "__proto__") continue;
         hostContext[k] = params[k];
       }
+      applyTheme();
       return;
     }
     // Same-origin fast path: the host read the shell over REST and posts it.
@@ -914,16 +1094,17 @@ export function renderViewsLoaderShell(): string {
   });
   request("ui/initialize", {
     appInfo: { name: "Lobu views", version: "0.0.1" },
-    appCapabilities: {},
+    appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
     protocolVersion: PROTOCOL
   }, function (err, result) {
     if (result && typeof result.hostContext === "object" && result.hostContext) {
       hostContext = result.hostContext;
     }
+    applyTheme();
     send({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
   });
   setTimeout(function () {
-    if (!settled) fail("The host did not deliver a view. Reopen it from Lobu.");
+    if (!settled && !pickerState) fail("The host did not deliver a view. Reopen it from Lobu.");
   }, 90000);
 })();
 </script>

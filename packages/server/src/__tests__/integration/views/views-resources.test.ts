@@ -26,7 +26,7 @@ import {
 	createTestOrganization,
 	createTestUser,
 } from '../../setup/test-fixtures';
-import { get, post } from '../../setup/test-helpers';
+import { get, post, mcpRequest } from '../../setup/test-helpers';
 
 const TEST_ENV: Env = {
 	ENVIRONMENT: 'test',
@@ -203,7 +203,9 @@ describe('views resources + open_view + invoke_view_action', () => {
 		// §10(a): the loader ships no ext-apps/React/framework bytes.
 		expect(html).not.toContain('ext-apps');
 		expect(html).not.toContain('react');
-		expect(html.length).toBeLessThan(12288);
+		// The stable shell now also owns the workspace/view picker, without a
+		// framework bundle or remote assets.
+		expect(html.length).toBeLessThan(16384);
 	});
 
 	it('loader only accepts bundle messages from the host frame', async () => {
@@ -273,11 +275,128 @@ describe('views resources + open_view + invoke_view_action', () => {
 			LOBU_VIEWS_RESOURCE_URI
 		);
 		expect(openView.outputSchema).toBeDefined();
+		expect(openView.inputSchema.required ?? []).not.toContain('key');
+		expect(openView._meta['openai/ui'].entrypoints).toEqual([
+			{ type: 'global' }, { type: 'thread' },
+		]);
 		// invoke_view_action stays app-only: hidden from the list, callable
 		// by name from a rendered frame.
 		expect(
 			result.tools.some((t: { name: string }) => t.name === 'invoke_view_action')
 		).toBe(false);
+	});
+
+	it('opens a workspace view picker without arguments and excludes views needing a subject', async () => {
+		await executeTool('manage_views', {
+			action: 'set',
+			source_code: viewModule({ key: 'workspace-home', name: 'Workspace home', attach: [{ workspace: true }] }, VIEW_SOURCE),
+		}, TEST_ENV, ownerCtx);
+		const result = await rpc('tools/call', { name: 'open_view', arguments: {} });
+		expect(result.structuredContent.resource).toBe(LOBU_VIEWS_RESOURCE_URI);
+		expect(result.structuredContent.picker.organization).toBe(org.slug);
+		expect(result.structuredContent.picker.workspaces).toEqual([{ slug: org.slug, name: org.name }]);
+		expect(result.structuredContent.picker.views.map((v: { key: string }) => v.key)).toContain('workspace-home');
+		expect(result.structuredContent.picker.views.map((v: { key: string }) => v.key)).not.toContain('board');
+		expect(JSON.stringify(result.structuredContent)).not.toContain('source_code');
+		await executeTool('manage_views', { action: 'remove', key: 'workspace-home' }, TEST_ENV, ownerCtx);
+	});
+
+	it('account picker only lists live granted memberships and opens an explicitly selected workspace', async () => {
+		const outside = await createTestOrganization({ name: 'Other private workspace' });
+		await addUserToOrganization(owner.id, outside.id, 'owner');
+		const accountCtx = { ...ownerCtx, organizationId: null, tokenOrganizationId: null, memberRole: null,
+			scopedToOrg: false, allowCrossOrg: true, grantedOrganizationIds: [org.id] };
+		const result: any = await executeTool('open_view', {}, TEST_ENV, accountCtx);
+		expect(result.picker.workspaces).toEqual([{ slug: org.slug, name: org.name }]);
+		expect(result.picker.views).toEqual([]);
+		const selected: any = await executeTool('open_view', { organization: org.slug }, TEST_ENV, accountCtx);
+		expect(selected.picker.organization).toBe(org.slug);
+		await expect(executeTool('open_view', { organization: outside.slug }, TEST_ENV, accountCtx))
+			.rejects.toMatchObject({ httpStatus: 403 });
+		const sql = getTestDb();
+		await sql`DELETE FROM member WHERE "userId" = ${owner.id} AND "organizationId" = ${org.id}`;
+		try {
+			const revoked: any = await executeTool('open_view', {}, TEST_ENV, accountCtx);
+			expect(revoked.picker.workspaces).toEqual([]);
+			await expect(executeTool('open_view', { organization: org.slug }, TEST_ENV, accountCtx))
+				.rejects.toMatchObject({ httpStatus: 403 });
+		} finally {
+			await addUserToOrganization(owner.id, org.id, 'owner');
+		}
+	});
+
+	it('rejects view params without a view key instead of silently ignoring them', async () => {
+		await expect(executeTool('open_view', { params: { by: 'stage' } }, TEST_ENV, ownerCtx))
+			.rejects.toMatchObject({ httpStatus: 400 });
+	});
+
+	it('revalidates explicit resource workspaces on an account MCP connection', async () => {
+		const client = await createTestOAuthClient();
+		const access = await createTestAccessToken(owner.id, org.id, client.client_id, { scope: 'mcp:read', grantedOrganizationIds: [org.id] });
+		const sql = getTestDb();
+		await sql`UPDATE oauth_tokens SET organization_id = NULL WHERE client_id = ${client.client_id}`;
+		const options = { token: access.token };
+		const listed = await mcpRequest('tools/list', {}, options);
+		const entry = listed.result.tools.find((t: { name: string }) => t.name === 'open_view');
+		expect(entry.inputSchema.required ?? []).toEqual([]);
+		const opened = await mcpRequest('tools/call', { name: 'open_view', arguments: { organization: org.slug, key: 'board', scope: { type: 'company' } } }, options);
+		expect(opened.result.structuredContent.resource).toBe(`ui://lobu/views/board?organization=${org.slug}`);
+		const uri = opened.result.structuredContent.resource;
+		const resource = await mcpRequest('resources/read', { uri }, options);
+		expect(resource.result.contents[0].text).toContain('lobu-view-hash');
+		const unnamed = await mcpRequest('resources/read', { uri: 'ui://lobu/views/board' }, options);
+		expect(unnamed.error.message).toContain('needs its workspace');
+		const outside = await createTestOrganization({ name: 'Ungrantable workspace' });
+		const denied = await mcpRequest('resources/read', { uri: `ui://lobu/views/board?organization=${outside.slug}` }, options);
+		expect(denied.error).toBeDefined();
+		await sql`DELETE FROM member WHERE "userId" = ${owner.id} AND "organizationId" = ${org.id}`;
+		try {
+			const revoked = await mcpRequest('resources/read', { uri }, options);
+			expect(revoked.error).toBeDefined();
+		} finally {
+			await addUserToOrganization(owner.id, org.id, 'owner');
+		}
+	});
+
+	it('routes frame reads and actions per request without changing the account session', async () => {
+		const second = await createTestOrganization({ name: 'Second view workspace' });
+		await addUserToOrganization(owner.id, second.id, 'owner');
+		const other = await createTestEntity({ name: 'Second workspace record', entity_type: 'company', organization_id: second.id, created_by: owner.id });
+		const client = await createTestOAuthClient();
+		const access = await createTestAccessToken(owner.id, org.id, client.client_id, { scope: 'mcp:read mcp:write', grantedOrganizationIds: [org.id, second.id] });
+		const sql = getTestDb();
+		await sql`UPDATE oauth_tokens SET organization_id = NULL WHERE client_id = ${client.client_id}`;
+		const options = { token: access.token };
+		const call = (organization: unknown, name: string, args: unknown) => mcpRequest('tools/call', { name, arguments: args, _meta: { 'lobu/view-workspace': organization } }, options);
+		const query = { sql: `SELECT id FROM entities WHERE id IN (${entityId}, ${other.id}) ORDER BY id` };
+		const first = await call(org.slug, 'query_sql', query);
+		expect(first.result.isError).not.toBe(true);
+		expect(first.result.structuredContent.rows).toEqual([{ id: entityId }]);
+		const next = await call(second.slug, 'query_sql', query);
+		expect(next.result.structuredContent.rows).toEqual([{ id: other.id }]);
+		const openedAction = await call(org.slug, 'invoke_view_action', { view: 'board', action: 'retry', interaction_id: 'frame-routing-test' });
+		expect(openedAction.result.structuredContent.created).toBe(true);
+		const [event] = await sql`SELECT organization_id FROM events WHERE id = ${openedAction.result.structuredContent.event_id}`;
+		expect(event.organization_id).toBe(org.id);
+		const mismatch = await call(org.slug, 'query_sql', { ...query, org_slug: second.slug });
+		expect(mismatch.result.isError).toBe(true);
+		const unscoped = await mcpRequest('tools/call', { name: 'query_sql', arguments: query }, options);
+		expect(unscoped.result.isError).toBe(true);
+		const pinned = await mcpRequest('tools/call', { name: 'query_sql', arguments: query, _meta: { 'lobu/view-workspace': second.slug } }, { token, orgSlug: org.slug });
+		expect(pinned.result.isError).toBe(true);
+		for (const invalid of ['', 42, { slug: org.slug }]) {
+			expect((await call(invalid, 'query_sql', query)).result.isError).toBe(true);
+		}
+		await sql`DELETE FROM member WHERE "userId" = ${owner.id} AND "organizationId" = ${second.id}`;
+		try {
+			expect((await call(second.slug, 'query_sql', query)).result.isError).toBe(true);
+		} finally { await addUserToOrganization(owner.id, second.id, 'owner'); }
+		const readOnly = await createTestAccessToken(owner.id, org.id, client.client_id, { scope: 'mcp:read', grantedOrganizationIds: [org.id] });
+		await sql`UPDATE oauth_tokens SET organization_id = NULL WHERE client_id = ${client.client_id}`;
+		const blocked = await mcpRequest('tools/call', { name: 'invoke_view_action', arguments: { view: 'board', action: 'retry' }, _meta: { 'lobu/view-workspace': org.slug } }, { token: readOnly.token });
+		expect(blocked.result.isError).toBe(true);
+		const ungranted = await mcpRequest('tools/call', { name: 'query_sql', arguments: query, _meta: { 'lobu/view-workspace': second.slug } }, { token: readOnly.token });
+		expect(ungranted.result.isError).toBe(true);
 	});
 
 	it('open_view returns the frame shape: per-view resource + canonical params', async () => {

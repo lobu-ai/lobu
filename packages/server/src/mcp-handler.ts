@@ -63,7 +63,10 @@ import {
   executeTool,
   extractAuthContext,
   isSoftErrorResult,
+  toAccountToolContext,
 } from './tools/execute';
+import { resolveViewWorkspace } from './tools/open_view';
+import { VIEW_WORKSPACE_META_KEY } from '@lobu/core/contracts/tools/view-runtime';
 import { getMcpResultContent } from './tools/mcp-result-content';
 import { getMcpResultMeta } from './tools/mcp-result-meta';
 import { MCP_APP_CAPABILITY_MAX_LENGTH } from './tools/mcp-app-capability';
@@ -79,6 +82,7 @@ import {
   viewRuntimeScript,
   renderViewsLoaderShell,
   viewKeyFromResourceUri,
+  viewOrganizationFromResourceUri,
   viewResourceMeta,
 } from './views/views';
 import { resolvePublicOrigin } from './utils/public-origin';
@@ -258,6 +262,9 @@ class SessionServer extends Server {
   }
 }
 
+/** Display modes an MCP App resource can declare for the host. */
+type McpAppDisplayMode = 'inline' | 'fullscreen' | 'pip';
+
 /**
  * MCP Apps UI resources (interactive iframe payloads a host renders in a
  * sandboxed iframe). Keyed by `ui://` uri → the built bundle's app dir under
@@ -290,6 +297,12 @@ const MCP_APP_RESOURCES: Record<
       frameDomains: string[];
     };
     prefersBorder: boolean;
+    /**
+     * Display modes the component supports, declared on the resource so
+     * ChatGPT can pick one (its launcher opens fullscreen) before the frame
+     * initializes. The mounted app declares the same set at `ui/initialize`.
+     */
+    availableDisplayModes?: McpAppDisplayMode[];
   }
 > = {
   [LOBU_INTERACTION_RESOURCE_URI]: {
@@ -322,6 +335,7 @@ const VIEWS_LOADER_META = {
     frameDomains: [] as string[],
   },
   prefersBorder: true,
+  availableDisplayModes: ['inline', 'fullscreen'] as McpAppDisplayMode[],
 };
 
 /**
@@ -435,6 +449,9 @@ function mcpAppResourceMeta(
   return {
     ui: mcpAppUiMeta(authCtx, app),
     'openai/widgetDescription': app.description,
+    ...(app.availableDisplayModes
+      ? { 'openai/ui': { availableDisplayModes: app.availableDisplayModes } }
+      : {}),
   };
 }
 
@@ -574,20 +591,29 @@ function createServerForContext(
       };
     }
     const viewKey = viewKeyFromResourceUri(uri);
-    if (viewKey && authCtx.organizationId) {
+    if (viewKey) {
       // Per-view bundles carry the org's view code: a signed-in caller only,
       // mirroring the shell route. Anonymous sessions present the "*" scope
       // sentinel, so the scope check below would pass them — identity first.
       if (!authCtx.isAuthenticated || !authCtx.userId) {
         throw new Error('Authentication required to read views.');
       }
-      if (!authCtx.memberRole) {
-        throw new Error('Workspace membership is required to read views.');
-      }
       if (!hasRequiredMcpScope('read', authCtx.scopes)) {
         throw new Error('Reading views requires an MCP session with read access.');
       }
-      const storedView = await getServedView(authCtx.organizationId, viewKey);
+      const viewOrganization = viewOrganizationFromResourceUri(uri);
+      // An account session has no workspace of its own: the frame names the
+      // one the view belongs to, as `open_view` wrote it into the resource id.
+      if (!viewOrganization && !authCtx.organizationId) {
+        throw new Error(
+          `Reading a view on an account session needs its workspace: ui://lobu/views/${viewKey}?organization=<slug>`
+        );
+      }
+      const workspace = await resolveViewWorkspace(
+        toAccountToolContext(forThisRequest(authCtx)), viewOrganization
+      );
+      if (!workspace.memberRole) throw new Error('Workspace membership is required to read views.');
+      const storedView = await getServedView(workspace.organizationId, viewKey);
       if (storedView) {
         const meta = viewResourceMeta(storedView);
         return {
@@ -597,7 +623,7 @@ function createServerForContext(
               mimeType: MCP_APP_MIME_TYPE,
               text: renderViewShell(
                 storedView,
-                await viewWorkspaceUrl(authCtx.organizationId, authCtx.requestUrl),
+                await viewWorkspaceUrl(workspace.organizationId, authCtx.requestUrl),
                 await viewRuntimeScript()
               ),
               _meta: mcpAppResourceMeta(authCtx, meta),
@@ -651,7 +677,7 @@ function createServerForContext(
       compatApprovalCapability || compatEventActionCapability
         ? stripCapabilityCompatMeta(args)
         : args;
-    const callAuthCtx = {
+    let callAuthCtx = {
       ...forThisRequest(authCtx),
       mcpAppsSupported,
       mcpConversationId: hostConversationIdFromMeta(request.params._meta),
@@ -677,14 +703,33 @@ function createServerForContext(
     // than silently drop the downgrade. `memberRole` is resolved server-side
     // from the membership row and returned only to the caller it describes,
     // so it can be neither forged nor read cross-tenant. Computed once here,
-    // outside the try, so a thrown error carries the same viewer role as a
+    // outside the try (re-authored only when a per-call workspace pin below
+    // resolves), so a thrown error carries the same viewer role as a
     // successful result and the app can never hold onto a stale role after a
     // downgrade.
-    const uiMemberRoleMeta: { 'lobu/member-role': string | null } | undefined = tool?.mcpMeta?.ui
+    let uiMemberRoleMeta: { 'lobu/member-role': string | null } | undefined = tool?.mcpMeta?.ui
       ? { 'lobu/member-role': callAuthCtx.memberRole }
       : undefined;
     // Regular tool execution
     try {
+      if (request.params._meta && Object.hasOwn(request.params._meta, VIEW_WORKSPACE_META_KEY)) {
+        const target = request.params._meta[VIEW_WORKSPACE_META_KEY];
+        if (typeof target !== 'string' || !target.trim() || target.length > 256) {
+          throw new ToolUserError('View workspace must be a workspace slug or id.', 400, 'VALIDATION');
+        }
+        const workspace = await resolveViewWorkspace(toAccountToolContext(callAuthCtx), target);
+        // Pin only this invocation. Never mutate the reusable MCP session or
+        // widen its authority: explicit SDK/tool targets can select this one
+        // live grant, while an untagged caller retains its original context.
+        callAuthCtx = {
+          ...callAuthCtx,
+          organizationId: workspace.organizationId,
+          memberRole: workspace.memberRole,
+          grantedOrganizationIds: callAuthCtx.grantedOrganizationIds === null ? null : [workspace.organizationId],
+          directSearchFederation: false,
+        };
+        if (uiMemberRoleMeta) uiMemberRoleMeta = { 'lobu/member-role': workspace.memberRole };
+      }
       // The call ends when the client cancels it or its HTTP request closes.
       const httpSignal = mcpRequestContext.getStore()?.signal;
       const callerSignal = httpSignal ? AbortSignal.any([extra.signal, httpSignal]) : extra.signal;

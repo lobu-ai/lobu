@@ -439,15 +439,17 @@ const AGENT_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'open_view',
+    scope: 'account',
     description:
-      'Open a Lobu view. Frame-capable hosts render it inline as an MCP App; the result also carries a web URL that renders the same view with the same params for hosts that cannot show a frame.',
+      'Browse authorized workspaces and their workspace views, or open a specific Lobu view by key. Omit key to show the picker; pass organization to select an authorized workspace. Views for a record, collection, or event still require their scope. Frame-capable hosts render the UI; a keyed result also includes the matching web URL.',
     inputSchema: OpenViewSchema,
     outputSchema: OpenViewResultSchema,
-    annotations: { ...READ_ONLY, title: 'Open view' },
+    annotations: { ...READ_ONLY, title: 'Lobu' },
     authorizationReadOnly: true,
     securityScopes: ['mcp:read'],
     mcpMeta: {
       ui: { resourceUri: LOBU_VIEWS_RESOURCE_URI, visibility: ['model', 'app'] },
+      'openai/ui': { entrypoints: [{ type: 'global' }, { type: 'thread' }] },
       'openai/outputTemplate': LOBU_VIEWS_RESOURCE_URI,
       'openai/widgetAccessible': true,
       'openai/toolInvocation/invoking': 'Opening view',

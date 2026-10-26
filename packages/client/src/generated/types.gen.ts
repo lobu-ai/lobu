@@ -932,7 +932,11 @@ export type OpenViewData = {
     /**
      * View key, e.g. 'pipeline'.
      */
-    key: string;
+    key?: string;
+    /**
+     * Authorized workspace slug or id. Omit key to browse that workspace's views; omit both to open the workspace picker.
+     */
+    organization?: string;
     /**
      * Required unless the view is attached to the workspace. Pass scope.type, scope.entity, or scope.event to select its subject.
      */
@@ -1005,8 +1009,8 @@ export type OpenViewResponses = {
    * Successful response
    */
   200: {
-    view: string;
-    scope: {
+    view?: string;
+    scope?: {
       collection?: {
         search?: string;
         filters?: Array<
@@ -1027,17 +1031,30 @@ export type OpenViewResponses = {
       entity?: number;
       event?: number;
     };
-    params: {
+    params?: {
       [key: string]: unknown | string | number | boolean;
     };
     /**
      * Web URL rendering the same view with the same params.
      */
-    url: string;
+    url?: string;
     /**
      * MCP App resource uri a frame host renders.
      */
     resource: string;
+    organization?: string;
+    picker?: {
+      workspaces: Array<{
+        slug: string;
+        name: string;
+      }>;
+      organization?: string;
+      views: Array<{
+        key: string;
+        name: string;
+        description: string;
+      }>;
+    };
   };
 };
 

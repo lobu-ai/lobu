@@ -1,7 +1,7 @@
 /**
  * Hand-written MCP Apps guest transport for Lobu views.
  *
- * Zero dependencies on purpose: the spike measured zod + MCP SDK + ext-apps at
+ * No protocol SDK dependencies: the spike measured zod + MCP SDK + ext-apps at
  * 378 KB of a 577 KB view bundle, so the guest speaks the wire protocol
  * directly instead of importing `@modelcontextprotocol/ext-apps`. The method
  * names below mirror that SDK (protocol version `2026-01-26`): the host side
@@ -13,6 +13,8 @@
  * "2.0", method, params }`. Anything else in the inbox is ignored, exactly
  * like the SDK's transport.
  */
+
+import { VIEW_WORKSPACE_META_KEY } from "@lobu/core/contracts/tools/view-runtime";
 
 export interface ToolResult {
   isError?: boolean;
@@ -104,6 +106,7 @@ export class ViewBridge {
    *  before it (the host seeds scope + params there; anything read earlier
    *  runs against defaults and double-fetches). */
   private toolInputReceived = false;
+  private workspace: string | null = null;
   private hostContext: HostContext = {};
   private didConnect = false;
   private handoff: ViewHandoff | null = null;
@@ -224,6 +227,8 @@ export class ViewBridge {
     if (isRecord(h.toolInput)) {
       this.toolInputReceived = true;
       const args = h.toolInput;
+      this.workspace =
+        typeof args.organization === "string" ? args.organization : null;
       for (const listener of [...this.toolInputListeners]) listener(args);
     }
     if (Array.isArray(h.queue)) {
@@ -250,6 +255,9 @@ export class ViewBridge {
     return this.request("tools/call", {
       name,
       arguments: args,
+      ...(this.workspace
+        ? { _meta: { [VIEW_WORKSPACE_META_KEY]: this.workspace } }
+        : {}),
     }) as Promise<ToolResult>;
   }
 
@@ -408,6 +416,8 @@ export class ViewBridge {
       case "ui/notifications/tool-input": {
         this.toolInputReceived = true;
         const args = isRecord(params.arguments) ? params.arguments : {};
+        this.workspace =
+          typeof args.organization === "string" ? args.organization : null;
         for (const listener of [...this.toolInputListeners]) listener(args);
         break;
       }
