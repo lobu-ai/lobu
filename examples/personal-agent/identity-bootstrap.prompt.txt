@@ -1,19 +1,5 @@
-Build and maintain my personal identity layer using my authorized Lobu workspace.
+Set up my personal identity layer in Lobu using the connected tools. Read https://app.lobu.ai/api/skill/lobu and https://github.com/lobu-ai/lobu/blob/main/examples/personal-agent/docs/identity-bootstrap.txt. In ChatGPT, use the MCP path; no terminal or Bun installation is required.
 
-Discover the current SDK, workspace, schemas, connections, policies and existing feeds first. Reuse existing records and checkpoints. Keep my data within its authorized audience. Do not start hosted/product agents or send messages.
+Reuse my workspace, sources, records and checkpoints. Ask which missing sources I want. Process metadata in deterministic batches, not an LLM call per contact. Preserve account-scoped identifiers and evidence; group only proven aliases. Never create people from random emails or merge by name. Keep private information within its authorized audience and enrich lazily.
 
-Use deterministic bulk processing for collection, normalization, exact matching and imports. Do not call an LLM per message or contact. Start with already-retained structured data and existing directories; use bounded native reads only for missing evidence. Serialize reads sharing a browser account. Preserve each accepted chunk and continuation before advancing. Follow empty continuation pages. Distinguish accessible-history exhaustion from complete provider history.
-
-Keep source accounts, groups, mailboxes and unverified observations separate from verified people. Scope identifiers to their provider and account. Use stable native identifiers and the source item's native ID in provenance; stored event-version IDs are not durable source keys. Never create people merely because an email address, display name, group label or handle appeared.
-
-Group same-source aliases only with structural evidence: a provider ID and handle on the same source row, an explicitly observed provider redirect, or an account-bound phone/JID equivalence. Detect reuse, conflicting identifiers and cross-account collisions. A name match is never sufficient. Contact-field matches remain evidence links; ambiguous human matches require review. Preserve previous reviewed holds.
-
-Use existing tenant schemas, account-scoped resolution rules and identity relationships. Do not invent a new core/API/SDK/database contract. Retain original source records when grouping identities. Store minimal identifiers, classifications and source references, not message bodies, subjects or snippets. Enrich lazily when a task needs more context.
-
-Import in bounded SDK chunks with durable receipts. Check every result and its arity. Stop on transport, authorization, approval or validation failures. After an uncertain response, read back the exact intended record or relationship before retrying. Keep source metadata when updating large records; read-merge-write inside the SDK rather than sending an oversized payload.
-
-Verify the complete imported set, metadata equality, exact relationship set, both-alias lookup, preserved review decisions and a replay producing zero extra records or edges. When resolving a grouped contact, inspect identity.member_ids and the evidence links on every retained member; listLinks is record-specific. Traverse verified person identity groups separately from source-account groups.
-
-For ongoing work, expose metadata capture and independent read cursors to my external MCP clients. Polling must not start processing or acknowledge unrelated work. Use existing incremental connector checkpoints and only an explicitly chosen source-sync cadence; do not silently add push infrastructure. Classify known service, organization and shared-mailbox evidence explicitly; leave unsupported human identity or relationship claims unknown.
-
-Finish with one concise report: imported/grouped counts, actual cross-source lookup proofs, source coverage and continuations, review holds, configured update cadence and genuine authentication/device blockers. Do not call the entire graph complete or every record a human when the evidence does not support that.
+Verify lookup, replay and actual source coverage. Report remaining holds and blockers briefly. Ask before sending, publishing, granting new access, or enabling Automations or schedules.
