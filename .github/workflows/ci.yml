@@ -1865,11 +1865,12 @@ jobs:
   # drift that broke prod: the worker image shipped missing `COPY packages/core`,
   # so `@lobu/connector-sdk`'s transitive `@lobu/core` import dangled and every
   # feed sync crashed at runtime — yet CI was green because the workspace tests
-  # resolve `@lobu/core` and build-images.yml builds+pushes images but never RUNS
-  # them. This job RUNS the built artifact's self-check on BOTH surfaces (the
-  # worker image and the host CLI), which both call the SAME
+  # resolve `@lobu/core` and nothing RAN the built image. This job RUNS the
+  # built artifact's self-check on BOTH surfaces (the worker image on PR and
+  # manual runs, the host CLI always), which both call the SAME
   # runConnectorRuntimeSelfCheck() over the same compile + default
-  # SubprocessExecutor path.
+  # SubprocessExecutor path. On main pushes build-images.yml smokes the exact
+  # worker candidate digest instead, so the image is not built twice.
   connector-parity-smoke:
     needs: optional-smoke-filter
     if: needs.optional-smoke-filter.outputs.connector == 'true'

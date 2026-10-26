@@ -33,6 +33,7 @@ type Step = {
 type Job = {
   needs?: string | string[];
   if?: string;
+  "timeout-minutes"?: number;
   permissions?: Record<string, string>;
   steps?: Step[];
 };
@@ -243,6 +244,122 @@ describe("release-please only acts on a green main push", () => {
       expect(body, id).not.toMatch(/"\$current_sha" = /);
     }
   });
+});
+
+describe("release attestation tolerates images finishing before CI", () => {
+  const sha = "a".repeat(40);
+  const repo = "example/ci-fixture";
+
+  const waitForCi = (file: string, readyAt: number, runSha = sha) => {
+    const temp = mkdtempSync(join(tmpdir(), "release-ci-wait-"));
+    try {
+      // Execute the workflow's real polling and provenance selection, with
+      // only the remote API and elapsed time replaced. Attempt 21 represents
+      // CI completing just beyond the former 6m40s polling budget.
+      const body = shell(file, "attest");
+      const start = body.indexOf("ci_workflow_id=");
+      expect(start).toBeGreaterThan(0);
+      writeFileSync(
+        join(temp, "run.json"),
+        JSON.stringify({
+          workflow_runs: [
+            {
+              id: 123,
+              workflow_id: 456,
+              head_sha: runSha,
+              head_branch: "main",
+              event: "push",
+              status: "completed",
+              conclusion: "success",
+              repository: { full_name: repo },
+            },
+          ],
+        })
+      );
+      writeFileSync(
+        join(temp, "gh"),
+        `#!/bin/bash
+set -euo pipefail
+case "$*" in
+  *'/actions/workflows/ci.yml/runs?'*)
+    count=0
+    if [ -f "$CI_WAIT_FIXTURE/count" ]; then count=$(cat "$CI_WAIT_FIXTURE/count"); fi
+    count=$((count + 1))
+    echo "$count" > "$CI_WAIT_FIXTURE/count"
+    if [ "$count" -ge "$CI_READY_AT" ]; then
+      cat "$CI_WAIT_FIXTURE/run.json"
+    else
+      echo '{"workflow_runs":[]}'
+    fi
+    ;;
+  *'/actions/workflows/ci.yml'*) echo 456 ;;
+  *'/git/ref/heads/main'*) echo "$ATTESTED_SHA" ;;
+  *'/compare/'*) echo identical ;;
+  *) echo "Unexpected API request: $*" >&2; exit 1 ;;
+esac
+`,
+        { mode: 0o755 }
+      );
+      writeFileSync(
+        join(temp, "sleep"),
+        '#!/bin/bash\necho "$1" >> "$CI_WAIT_FIXTURE/sleeps"\n',
+        { mode: 0o755 }
+      );
+      const result = spawnSync(
+        "bash",
+        ["-euo", "pipefail", "-c", body.slice(start)],
+        {
+          cwd: root,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${temp}:${process.env.PATH}`,
+            REPOSITORY: repo,
+            ATTESTED_SHA: sha,
+            CI_WAIT_FIXTURE: temp,
+            CI_READY_AT: String(readyAt),
+          },
+          timeout: 20_000,
+        }
+      );
+      return {
+        ...result,
+        attempts: Number(readFileSync(join(temp, "count"), "utf8")),
+        waitedSeconds: readFileSync(join(temp, "sleeps"), "utf8")
+          .trim()
+          .split("\n")
+          .reduce((sum, seconds) => sum + Number(seconds), 0),
+      };
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  };
+
+  for (const file of ["release-please.yml", "publish-canary.yml"]) {
+    it(`${file} accepts the exact green CI run after the former wait limit`, () => {
+      const result = waitForCi(file, 21);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.attempts).toBe(21);
+      expect(result.stdout).toContain(`attested CI run for ${sha}: 123`);
+    }, 25_000);
+
+    it(`${file} still fails within a bounded wait if CI never succeeds`, () => {
+      const result = waitForCi(file, 1_000);
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain("not observed within the bounded wait");
+      expect(result.waitedSeconds).toBeGreaterThanOrEqual(20 * 60);
+      expect(result.waitedSeconds).toBeLessThan(
+        (job(file, "attest")["timeout-minutes"] ?? 0) * 60
+      );
+    }, 25_000);
+
+    it(`${file} never substitutes a green CI run for a different commit`, () => {
+      const result = waitForCi(file, 1, "b".repeat(40));
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain("not observed within the bounded wait");
+      expect(result.stdout).not.toContain("attested CI run for");
+    }, 25_000);
+  }
 });
 
 describe("the release is created bound to the attested commit", () => {
