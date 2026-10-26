@@ -1113,9 +1113,13 @@ export type ManageEntityData = {
          */
         action: "update";
         /**
-         * [get/update/delete/list_links] Entity ID to operate on
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
          */
-        entity_id: number;
+        entity_id: number | string;
+        /**
+         * Entity type as defined in your workspace
+         */
+        entity_type?: string;
         /**
          * [create/update] Entity name
          */
@@ -1229,9 +1233,13 @@ export type ManageEntityData = {
          */
         action: "get";
         /**
-         * [get/update/delete/list_links] Entity ID to operate on
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
          */
-        entity_id: number;
+        entity_id: number | string;
+        /**
+         * Entity type as defined in your workspace
+         */
+        entity_type?: string;
         /**
          * [get] Return the entity even if it is soft-deleted (deleted_at set). [list_links] Include soft-deleted relationships.
          */
@@ -1243,9 +1251,13 @@ export type ManageEntityData = {
          */
         action: "delete";
         /**
-         * [get/update/delete/list_links] Entity ID to operate on
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
          */
-        entity_id: number;
+        entity_id: number | string;
+        /**
+         * Entity type as defined in your workspace
+         */
+        entity_type?: string;
         /**
          * [delete] Hard delete entity and all descendants. Event history is never deleted (append-only) — event rows referencing the tree are detached instead.
          */
@@ -1278,13 +1290,21 @@ export type ManageEntityData = {
          */
         action: "link";
         /**
-         * [link/unlink/update_link] Source entity ID. For unlink/update_link, supply this triple instead of relationship_id to address the edge by its endpoints.
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
          */
-        from_entity_id: number;
+        from_entity_id: number | string;
         /**
-         * [link/unlink/update_link] Target entity ID
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
          */
-        to_entity_id: number;
+        to_entity_id: number | string;
+        /**
+         * Entity type as defined in your workspace
+         */
+        from_entity_type?: string;
+        /**
+         * Entity type as defined in your workspace
+         */
+        to_entity_type?: string;
         /**
          * [link/unlink/update_link/list_links] Relationship type slug
          */
@@ -1344,13 +1364,21 @@ export type ManageEntityData = {
          */
         relationship_id?: number;
         /**
-         * [link/unlink/update_link] Source entity ID. For unlink/update_link, supply this triple instead of relationship_id to address the edge by its endpoints.
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
          */
-        from_entity_id?: number;
+        from_entity_id?: number | string;
         /**
-         * [link/unlink/update_link] Target entity ID
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
          */
-        to_entity_id?: number;
+        to_entity_id?: number | string;
+        /**
+         * Entity type as defined in your workspace
+         */
+        from_entity_type?: string;
+        /**
+         * Entity type as defined in your workspace
+         */
+        to_entity_type?: string;
         /**
          * [link/unlink/update_link/list_links] Relationship type slug
          */
@@ -1366,13 +1394,21 @@ export type ManageEntityData = {
          */
         relationship_id?: number;
         /**
-         * [link/unlink/update_link] Source entity ID. For unlink/update_link, supply this triple instead of relationship_id to address the edge by its endpoints.
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
          */
-        from_entity_id?: number;
+        from_entity_id?: number | string;
         /**
-         * [link/unlink/update_link] Target entity ID
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
          */
-        to_entity_id?: number;
+        to_entity_id?: number | string;
+        /**
+         * Entity type as defined in your workspace
+         */
+        from_entity_type?: string;
+        /**
+         * Entity type as defined in your workspace
+         */
+        to_entity_type?: string;
         /**
          * [link/unlink/update_link/list_links] Relationship type slug
          */
@@ -1398,9 +1434,13 @@ export type ManageEntityData = {
          */
         action: "list_links";
         /**
-         * [get/update/delete/list_links] Entity ID to operate on
+         * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
          */
-        entity_id?: number;
+        entity_id?: number | string;
+        /**
+         * Entity type as defined in your workspace
+         */
+        entity_type?: string;
         /**
          * [list_links] A record of a source-backed entity type, instead of entity_id. Its relationships are read live from the event kinds that declare them; stores nothing.
          */
@@ -1437,7 +1477,7 @@ export type ManageEntityData = {
          */
         offset?: number;
         /**
-         * [list_links, record only] Omit or pass null for the first bounded page, then pass next_cursor until it is null. Stop automatic pagination on record_failures; the cursor retains failed sources for an explicit retry. Pages may be short or empty while next_cursor exists. Merge repeated links across pages by (relationship_type, direction, entity_type, key), keeping the newest occurred_at. Stored entity_id calls retain limit/offset pagination.
+         * [list_links, source records] Omit or pass null for the first bounded page, then pass next_cursor until it is null. Stop automatic pagination on record_failures; the cursor retains failed sources for an explicit retry. Pages may be short or empty while next_cursor exists. Merge repeated links across pages by (relationship_type, direction, entity_type, key), keeping the newest occurred_at. Numeric entity_id calls retain limit/offset pagination; source pages bound limit to 100. Authored relationships are permission checked at both endpoints. counts_by_type describes the visible page (counts_scope: page), not a global total. Source pages reject source, confidence_min and include_deleted filters, which cannot be applied to live links. Source reads share a 20 second page deadline. Unavailable endpoints are withheld with key-free relationship_failures; readable links remain available. Updating an edge still requires readable endpoints. Unlink by relationship_id remains available during outages.
          */
         cursor?: string | null;
         /**
@@ -1507,7 +1547,7 @@ export type ManageEntityResponses = {
     | {
         action: "create";
         entity?: {
-          id: number;
+          id: number | string | null;
           identity?: {
             root_id: number;
             member_ids: Array<number>;
@@ -1547,7 +1587,7 @@ export type ManageEntityResponses = {
     | {
         action: "update";
         entity: {
-          id: number;
+          id: number | string | null;
           identity?: {
             root_id: number;
             member_ids: Array<number>;
@@ -1586,7 +1626,7 @@ export type ManageEntityResponses = {
     | {
         action: "list";
         entities: Array<{
-          id: number;
+          id: number | string | null;
           identity?: {
             root_id: number;
             member_ids: Array<number>;
@@ -1636,7 +1676,7 @@ export type ManageEntityResponses = {
     | {
         action: "get";
         entity: {
-          id: number;
+          id: number | string | null;
           identity?: {
             root_id: number;
             member_ids: Array<number>;
@@ -1711,16 +1751,24 @@ export type ManageEntityResponses = {
         relationship: {
           id: number;
           organization_id: string;
-          from_entity_id: number;
-          to_entity_id: number;
+          /**
+           * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
+           */
+          from_entity_id: number | string;
+          /**
+           * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
+           */
+          to_entity_id: number | string;
           relationship_type_id: number;
           relationship_type_slug: string;
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
           from_entity_name?: string;
+          from_entity_slug?: string;
           from_entity_type?: string;
           to_entity_name?: string;
+          to_entity_slug?: string;
           to_entity_type?: string;
           metadata?: {
             [key: string]: unknown;
@@ -1739,16 +1787,24 @@ export type ManageEntityResponses = {
         relationship: {
           id: number;
           organization_id: string;
-          from_entity_id: number;
-          to_entity_id: number;
+          /**
+           * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
+           */
+          from_entity_id: number | string;
+          /**
+           * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
+           */
+          to_entity_id: number | string;
           relationship_type_id: number;
           relationship_type_slug: string;
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
           from_entity_name?: string;
+          from_entity_slug?: string;
           from_entity_type?: string;
           to_entity_name?: string;
+          to_entity_slug?: string;
           to_entity_type?: string;
           metadata?: {
             [key: string]: unknown;
@@ -1788,6 +1844,54 @@ export type ManageEntityResponses = {
       }
     | {
         action: "list_links";
+        relationships?: Array<{
+          id: number;
+          organization_id: string;
+          /**
+           * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
+           */
+          from_entity_id: number | string;
+          /**
+           * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
+           */
+          to_entity_id: number | string;
+          relationship_type_id: number;
+          relationship_type_slug: string;
+          relationship_type_name: string;
+          is_symmetric: boolean;
+          acl_managed: boolean;
+          from_entity_name?: string;
+          from_entity_slug?: string;
+          from_entity_type?: string;
+          to_entity_name?: string;
+          to_entity_slug?: string;
+          to_entity_type?: string;
+          metadata?: {
+            [key: string]: unknown;
+          } | null;
+          confidence: number;
+          source: string;
+          created_by?: string | null;
+          updated_by?: string | null;
+          created_at: string;
+          updated_at: string;
+          deleted_at?: string | null;
+        }>;
+        relationship_failures?: Array<{
+          relationship_id: number;
+          code: string;
+        }>;
+        counts_by_type?: Array<{
+          relationship_type_slug: string;
+          relationship_type_name: string;
+          count: number;
+        }>;
+        metadata?: {
+          limit: number;
+          offset: number;
+          has_more: boolean;
+          counts_scope: "page";
+        };
         record_links: Array<{
           relationship_type: string;
           direction: "outgoing" | "incoming";
@@ -1808,16 +1912,24 @@ export type ManageEntityResponses = {
         relationships: Array<{
           id: number;
           organization_id: string;
-          from_entity_id: number;
-          to_entity_id: number;
+          /**
+           * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
+           */
+          from_entity_id: number | string;
+          /**
+           * A stored integer ID, or a source key. String IDs require the accompanying entity_type; keys are case-sensitive and never coerced to integers.
+           */
+          to_entity_id: number | string;
           relationship_type_id: number;
           relationship_type_slug: string;
           relationship_type_name: string;
           is_symmetric: boolean;
           acl_managed: boolean;
           from_entity_name?: string;
+          from_entity_slug?: string;
           from_entity_type?: string;
           to_entity_name?: string;
+          to_entity_slug?: string;
           to_entity_type?: string;
           metadata?: {
             [key: string]: unknown;
@@ -1830,13 +1942,18 @@ export type ManageEntityResponses = {
           updated_at: string;
           deleted_at?: string | null;
         }>;
+        relationship_failures?: Array<{
+          relationship_id: number;
+          code: string;
+        }>;
         counts_by_type: Array<{
           relationship_type_slug: string;
           relationship_type_name: string;
           count: number;
         }>;
         metadata: {
-          total: number;
+          total?: number;
+          counts_scope?: "page";
           limit: number;
           offset: number;
           has_more: boolean;
@@ -1899,7 +2016,7 @@ export type ManageEntitySchemaData = {
      */
     description?: string;
     /**
-     * [create/update] JSON Schema for metadata validation. Entity property annotations: x-facet: true exposes scalar enum values as collection filters; x-sidebar: true also exposes those values as navigation shortcuts. x-enum-labels maps stringified enum values to display labels. x-table-label or title labels the attribute. These annotations do not grant access or define separate segments.
+     * [create/update] JSON Schema for metadata validation. Source-backed types declare a durable projected key with root x-lobu-record-key naming the key column; this enables string entity_id + entity_type addressing and authored links without storing source rows. A linked type cannot change its backing or key until its edges are unlinked. Entity property annotations: x-facet: true exposes scalar enum values as collection filters; x-sidebar: true also exposes those values as navigation shortcuts. x-enum-labels maps stringified enum values to display labels. x-table-label or title labels the attribute. These annotations do not grant access or define separate segments.
      */
     metadata_schema?: {
       [key: string]: unknown;
@@ -7272,14 +7389,14 @@ export type ResolvePathResponses = {
       slug: string;
     }>;
     path: Array<{
-      id: number;
+      id: number | string | null;
       entity_type: string;
       slug: string;
       name: string;
     }>;
     entity:
       | ({
-          id: number;
+          id: number | string | null;
           entity_type: string;
           slug: string;
           name: string;

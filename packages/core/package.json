@@ -284,6 +284,12 @@
       "bun": "./src/contracts/tools/source-files.ts",
       "import": "./dist/contracts/tools/source-files.js",
       "require": "./dist/contracts/tools/source-files.js"
+    },
+    "./contracts/entity-reference": {
+      "types": "./dist/contracts/entity-reference.d.ts",
+      "bun": "./src/contracts/entity-reference.ts",
+      "import": "./dist/contracts/entity-reference.js",
+      "require": "./dist/contracts/entity-reference.js"
     }
   },
   "scripts": {

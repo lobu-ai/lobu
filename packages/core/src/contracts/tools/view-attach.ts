@@ -28,7 +28,7 @@ export function matchesCollection(
 /** A card on the record's page: every record of the type, or one pinned id. */
 export function matchesRecord(
   attachment: ViewAttachment,
-  record: { type: string; id: number }
+  record: { type: string; id: number | string | null }
 ): boolean {
   return (
     "record" in attachment &&

@@ -83,15 +83,15 @@ describe("manage_entity union contract", () => {
 
 	it("rejects a field another action takes instead of ignoring it", () => {
 		const update = messageOf(() =>
-			validate({ action: "update", entity_id: 7, entity_type: "company", name: "Acme" }),
+			validate({ action: "update", entity_id: 7, search: "acme", name: "Acme" }),
 		);
-		expect(update).toMatch(/unknown argument\(s\): entity_type/);
-		expect(update).toMatch(/valid arguments for action 'update' are: action, entity_id, name/);
+		expect(update).toMatch(/unknown argument\(s\): search/);
+		expect(update).toMatch(/valid arguments for action 'update' are: action, entity_id, entity_type, name/);
 
 		const del = messageOf(() => validate({ action: "delete", entity_id: 7, name: "Acme" }));
 		expect(del).toMatch(/unknown argument\(s\): name/);
 		expect(del).toMatch(
-			/valid arguments for action 'delete' are: action, entity_id, force_delete_tree, dry_run, automation_source$/,
+			/valid arguments for action 'delete' are: action, entity_id, entity_type, force_delete_tree, dry_run, automation_source$/,
 		);
 
 		expect(

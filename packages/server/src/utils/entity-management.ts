@@ -7,6 +7,7 @@
  */
 
 import { deriveToolActorSource } from './apply-context';
+import { recordKey, recordKeyColumn } from '@lobu/core/contracts/entity-reference';
 import { isManualUserEdit } from '../auth/direct-user-context';
 import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
 import { attachEntityIdentities, identityMemberExistsSql, identityMemberIdsSql, identityRootSql } from './entity-identity';
@@ -117,7 +118,7 @@ export async function queryDerivedEntityView(
 	backingSource: string | undefined,
 	page: { limit: number; offset: number; search?: string; filters?: AttributeFilter[]; sort_by?: string; sort_order?: "asc" | "desc" },
 	ctx: ToolContext,
-	options?: { preservePageRows?: boolean; exactSlug?: string },
+	options?: { preservePageRows?: boolean; exactSlug?: string; keyColumn?: string },
 ): Promise<Awaited<ReturnType<typeof querySqlImpl>>> {
 	// External sources receive typed selection and own dialect-safe pushdown.
 	return querySqlImpl(
@@ -139,13 +140,13 @@ export async function queryDerivedEntityView(
 			// Record lookups remain bounded and carry no collection selection.
 			...(options?.exactSlug === undefined || page.search || page.filters?.length ? {
 				selection: { filters: page.filters, search: page.search },
-				stableIdentityColumns: [...DERIVED_SLUG_COLUMNS],
+				stableIdentityColumns: options?.keyColumn ? [options.keyColumn] : [...DERIVED_SLUG_COLUMNS],
 			} : {}),
 			...(options?.preservePageRows
 				? { maxSerializedResultBytes: Number.POSITIVE_INFINITY }
 				: {}),
 			...(options?.exactSlug !== undefined
-				? { exactMatch: { columns: [...DERIVED_SLUG_COLUMNS], value: options.exactSlug } }
+				? { exactMatch: { columns: options.keyColumn ? [options.keyColumn] : [...DERIVED_SLUG_COLUMNS], value: options.exactSlug } }
 				: {}),
 		},
 	);
@@ -356,6 +357,8 @@ export interface EntityData {
 
 export interface CreatedEntity {
   id: number;
+  /** Public source id, including null for an anonymous SQL view. Never a PG id. */
+  source_record_id?: string | null;
   identity?: EntityIdentity;
   /** Internal ownership projection used to avoid cross-org audit anchors. */
   organization_id?: string;
@@ -2338,6 +2341,7 @@ export async function listEntities(
 				(etRows[0]?.backing_source as string | null | undefined) ?? undefined,
 				{ limit, offset, search: filters.search, filters: filters.filters, sort_by: filters.sort_by, sort_order: filters.sort_order },
 				ctx,
+				recordKeyColumn(etRows[0]?.metadata_schema),
 			);
 		}
 	}
@@ -2642,6 +2646,7 @@ async function listDerivedEntities(
 	backingSource: string | undefined,
 	page: { limit: number; offset: number; search?: string; filters?: AttributeFilter[]; sort_by?: string; sort_order?: "asc" | "desc" },
 	ctx: ToolContext,
+	keyColumn: string | null,
 ): Promise<{
   entities: CreatedEntity[];
   hasMore: boolean;
@@ -2659,7 +2664,7 @@ async function listDerivedEntities(
 		// manage_entity transforms this already-limited page into entity rows.
 		// Preserve its cardinality so fixed-offset UI pagination cannot skip a
 		// byte-capped tail; per-cell text/JSON bounds still apply in querySqlImpl.
-		{ preservePageRows: true },
+		{ preservePageRows: true, keyColumn: keyColumn ?? undefined },
 	);
 	if (result.error) {
 		throw new ToolUserError(
@@ -2671,11 +2676,13 @@ async function listDerivedEntities(
 	const createdAt = new Date();
 	const entities: CreatedEntity[] = [];
 	result.rows.forEach((row, index) => {
-		const slug = derivedRowSlug(row);
+		const sourceKey = keyColumn ? recordKey(row, keyColumn) : null;
+		const slug = sourceKey ?? derivedRowSlug(row);
 		// Drop unroutable rows: without a slug/id the detail link goes nowhere.
 		if (!slug) return;
 		entities.push({
 			id: page.offset + index + 1,
+			source_record_id: sourceKey,
 			entity_type: entityType,
 			name: derivedRowName(row, slug),
 			slug,
@@ -2745,6 +2752,8 @@ export async function batchLoadRelationships(
     LEFT JOIN entity_types tet ON tet.id = te.entity_type_id
     WHERE r.organization_id = ${organizationId}
       AND r.deleted_at IS NULL
+      -- SQL-only table columns are stored endpoints; federated edges use list_links.
+      AND r.from_entity_id IS NOT NULL AND r.to_entity_id IS NOT NULL
       AND rt.slug = ANY(${typeSlugs}::text[])
       AND (r.from_entity_id = ANY(${idArray}::bigint[]) OR r.to_entity_id = ANY(${idArray}::bigint[]))
   `;

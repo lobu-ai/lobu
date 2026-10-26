@@ -120,7 +120,7 @@ describe('source-backed entity types store nothing', () => {
       {},
       ownerToolContext(orgId, userId)
     );
-    expect(result.entity).toMatchObject({ id: 0, name: 'Person 7', is_derived: true });
+    expect(result.entity).toMatchObject({ id: null, name: 'Person 7', is_derived: true });
     expect(await rowCounts()).toEqual({ entities: 0, identities: 0 });
   });
 });

@@ -146,7 +146,7 @@ export const ManageEntitySchemaSchema = Type.Object({
   metadata_schema: Type.Optional(
     Type.Record(Type.String(), Type.Unknown(), {
       description:
-        "[create/update] JSON Schema for metadata validation. Entity property annotations: x-facet: true exposes scalar enum values as collection filters; x-sidebar: true also exposes those values as navigation shortcuts. x-enum-labels maps stringified enum values to display labels. x-table-label or title labels the attribute. These annotations do not grant access or define separate segments.",
+        "[create/update] JSON Schema for metadata validation. Source-backed types declare a durable projected key with root x-lobu-record-key naming the key column; this enables string entity_id + entity_type addressing and authored links without storing source rows. A linked type cannot change its backing or key until its edges are unlinked. Entity property annotations: x-facet: true exposes scalar enum values as collection filters; x-sidebar: true also exposes those values as navigation shortcuts. x-enum-labels maps stringified enum values to display labels. x-table-label or title labels the attribute. These annotations do not grant access or define separate segments.",
     })
   ),
   list_scope: Type.Optional(

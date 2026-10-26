@@ -6,10 +6,8 @@
  * rules.
  */
 
-import { type DbClient, getDb } from '../db/client';
+import type { DbClient } from '../db/client';
 import { ToolUserError } from './errors';
-import type { Env } from '../index';
-import type { ToolContext } from '../tools/registry';
 
 /** Sources accepted from the manage_entity link/update_link surface. */
 const CALLER_SETTABLE_SOURCES = ['ui', 'llm', 'feed', 'api'] as const;
@@ -244,62 +242,6 @@ export function canonicalizeSymmetricEdge(
 }
 
 /**
- * Validate scope rule for a relationship.
- *
- * The from_entity must belong to the caller's organization (relationships are
- * always authored from the source's org). The to_entity may be either in the
- * same org or in a public-catalog org (`organization.visibility='public'`),
- * which lets a tenant's relationship reference canonical world entities like
- * HMRC or Barclays without copying them locally.
- *
- * Public → tenant references are forbidden — public catalogs never reach into
- * private orgs. The relationship row's organization_id always matches the
- * source's org (the caller's), keeping the assertion under the caller's
- * delete/visibility control.
- */
-export async function validateScopeRule(
-  fromEntityId: number,
-  toEntityId: number,
-  _env: Env,
-  ctx: ToolContext
-): Promise<void> {
-  const sql = getDb();
-
-  const rows = await sql`
-    SELECT e.id, e.organization_id, o.visibility
-    FROM entities e
-    LEFT JOIN organization o ON o.id = e.organization_id
-    WHERE e.id IN (${fromEntityId}, ${toEntityId})
-  `;
-
-  if (rows.length < 2) {
-    const foundIds = rows.map((r) => r.id);
-    const missingId = [fromEntityId, toEntityId].find((id) => !foundIds.includes(id));
-    throw new ToolUserError(`Entity ${missingId} not found`, 404);
-  }
-
-  const fromEntity = rows.find((r) => Number(r.id) === fromEntityId)!;
-  const toEntity = rows.find((r) => Number(r.id) === toEntityId)!;
-
-  // Source must always be in the caller's org — you can't author relationships
-  // *from* someone else's entity.
-  if (String(fromEntity.organization_id) !== ctx.organizationId) {
-    throw new ToolUserError(`Entity ${fromEntityId} does not belong to your organization`, 403);
-  }
-
-  // Target may be same-org OR a public-catalog entity. Anything else (a
-  // private org you don't control) is rejected.
-  const toOrgId = String(toEntity.organization_id);
-  const toVisibility = String(toEntity.visibility ?? 'private');
-  if (toOrgId !== ctx.organizationId && toVisibility !== 'public') {
-    throw new ToolUserError(
-      `Entity ${toEntityId} is in a private organization that does not belong to you. Cross-org references are only allowed to entities in public catalogs.`,
-      403
-    );
-  }
-}
-
-/**
  * Validate that the relationship type allows the given entity type pair.
  * For symmetric types, checks both directions.
  */
@@ -307,7 +249,8 @@ export async function validateTypeRule(
   relationshipTypeId: number,
   fromEntityId: number,
   toEntityId: number,
-  sql: DbClient
+  sql: DbClient,
+  resolvedTypes?: { from: string; to: string },
 ): Promise<void> {
   // Get the relationship type to check if it's symmetric
   const typeRows = await sql`
@@ -322,14 +265,14 @@ export async function validateTypeRule(
   const isSymmetric = Boolean(typeRows[0].is_symmetric);
 
   // Get entity types for both entities
-  const entityRows = await sql`
+  const entityRows = resolvedTypes ? [] : await sql`
     SELECT e.id, et.slug AS entity_type
     FROM entities e
     JOIN entity_types et ON et.id = e.entity_type_id
     WHERE e.id IN (${fromEntityId}, ${toEntityId})
   `;
-  const fromEntityType = String(entityRows.find((r) => Number(r.id) === fromEntityId)?.entity_type);
-  const toEntityType = String(entityRows.find((r) => Number(r.id) === toEntityId)?.entity_type);
+  const fromEntityType = resolvedTypes?.from ?? String(entityRows.find((r) => Number(r.id) === fromEntityId)?.entity_type);
+  const toEntityType = resolvedTypes?.to ?? String(entityRows.find((r) => Number(r.id) === toEntityId)?.entity_type);
 
   // Check if there are any rules for this relationship type
   const ruleRows = await sql`

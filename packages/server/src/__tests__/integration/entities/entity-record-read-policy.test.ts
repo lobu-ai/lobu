@@ -153,7 +153,7 @@ describe('per-record entity read envelope', () => {
     await getTestDb()`UPDATE entities SET metadata = ${getTestDb().json({ target: target.slug })} WHERE id = ${visible}`;
     const links = await h.agent.entities.listLinks({ entity_id: visible });
     expect(links.relationships).toEqual([]);
-    expect(links.metadata.total).toBe(0);
+    expect(links.metadata.counts_scope).toBe('page');
     expect(links.counts_by_type).toEqual([]);
     const page = await h.agent.entities.list({ entity_type: 'asset' });
     expect(page.entities).toHaveLength(1);

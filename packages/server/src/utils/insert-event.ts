@@ -1590,8 +1590,10 @@ interface EdgeFieldChange {
 export interface EdgeChangeEventParams {
   organizationId: string;
   relationshipId: number;
-  fromEntityId: number;
-  toEntityId: number;
+  fromEntityId: number | null;
+  toEntityId: number | null;
+  fromEntityTypeId?: number | null;
+  toEntityTypeId?: number | null;
   relationshipTypeId: number;
   relationshipTypeSlug: string | null;
   op: 'link' | 'unlink' | 'update_link';
@@ -1610,7 +1612,7 @@ export async function insertEdgeChangeEventInTransaction(
   return insertConnectionlessAuditEvent(
     {
       organizationId: params.organizationId,
-      entityIds: [params.fromEntityId, params.toEntityId],
+      entityIds: [params.fromEntityId, params.toEntityId].filter((id): id is number => id !== null),
       originId: `edge:${params.relationshipId}:${params.op}:${crypto.randomUUID()}`,
       semanticType: 'change',
       title: `Relationship ${verb}: ${params.relationshipTypeSlug ?? params.relationshipTypeId}`,
@@ -1619,8 +1621,12 @@ export async function insertEdgeChangeEventInTransaction(
         category: 'relationship',
         op: params.op,
         relationshipId: String(params.relationshipId),
-        fromEntityId: String(params.fromEntityId),
-        toEntityId: String(params.toEntityId),
+        // Source keys stay on the immutable edge, whose reads enforce live source
+        // permissions. Connectionless audit events must not copy them into org-wide history.
+        fromEntityId: params.fromEntityId === null ? null : String(params.fromEntityId),
+        toEntityId: params.toEntityId === null ? null : String(params.toEntityId),
+        ...(params.fromEntityTypeId ? { fromEntityTypeId: String(params.fromEntityTypeId) } : {}),
+        ...(params.toEntityTypeId ? { toEntityTypeId: String(params.toEntityTypeId) } : {}),
         relationshipTypeId: String(params.relationshipTypeId),
         relationshipTypeSlug: params.relationshipTypeSlug,
         changes: params.changes,

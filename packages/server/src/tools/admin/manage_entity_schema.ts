@@ -1,3 +1,4 @@
+import { recordKeyColumn } from "@lobu/core/contracts/entity-reference";
 import { lockIdentityOrganization } from "../../utils/relationship-validation";
 /**
  * Tool: manage_entity_schema
@@ -135,22 +136,37 @@ async function manageEntitySchemaImpl(
   env: Env,
   ctx: ToolContext
 ): Promise<ManageEntitySchemaResult> {
-	if (
-		(args.action === 'create' || args.action === 'update') &&
-		Object.hasOwn(args as object, 'properties')
-	) {
-		throw new ToolUserError(
-      '[invalid_schema] top-level properties is not supported; put JSON Schema fields under metadata_schema.properties',
-			422
-		);
-	}
-  if (args.schema_type === 'entity_type') {
-    if (args.purpose !== undefined) throw new ToolUserError('purpose is a relationship type field', 400);
-    if (isEntitySchemaMutation(args)) return governEntitySchemaMutation(args, ctx);
-    return runEntityTypeActions(args, env, ctx);
+  try {
+    if (
+      (args.action === 'create' || args.action === 'update') &&
+      Object.hasOwn(args as object, 'properties')
+    ) {
+      throw new ToolUserError(
+        '[invalid_schema] top-level properties is not supported; put JSON Schema fields under metadata_schema.properties',
+        422
+      );
+    }
+    if (args.schema_type === 'entity_type') {
+      if (args.purpose !== undefined) throw new ToolUserError('purpose is a relationship type field', 400);
+      if (isEntitySchemaMutation(args)) return await governEntitySchemaMutation(args, ctx);
+      return await runEntityTypeActions(args, env, ctx);
+    }
+    if (isEntitySchemaMutation(args)) return await governEntitySchemaMutation(args, ctx);
+    return await runRelationshipTypeActions(args, env, ctx);
+  } catch (error) {
+    // The lifecycle triggers raise check_violation with a named constraint so a
+    // live-edge conflict surfaces as a 409 instead of a generic database error.
+    throw sourceRelationshipContractError(error);
   }
-  if (isEntitySchemaMutation(args)) return governEntitySchemaMutation(args, ctx);
-  return runRelationshipTypeActions(args, env, ctx);
+}
+
+/** The trigger message includes a bounded, key-free unlink remedy for every writer. */
+function sourceRelationshipContractError(error: unknown): unknown {
+  const pg = error as { code?: string; constraint_name?: string; message?: string } | null;
+  if (pg?.code === '23514' && (pg.constraint_name === 'entity_types_source_relationship_contract' || pg.constraint_name === 'entity_relationship_types_source_endpoint_purpose')) {
+    return new ToolUserError(pg.message ?? 'Live source relationships must be unlinked before changing their contract', 409);
+  }
+  return error;
 }
 
 /** Pre-policy proposal shape written by the narrow MCP create gate in v15.8. */
@@ -254,7 +270,7 @@ export async function applyManageEntitySchemaProposal(
       mcpSessionId: null,
     },
     db
-  );
+  ).catch(error => { throw sourceRelationshipContractError(error); });
 }
 
 /**
@@ -1042,6 +1058,8 @@ function validateEntityMetadataSchemaConfig(
   if (!metadataSchema || typeof metadataSchema !== 'object' || Array.isArray(metadataSchema)) {
     return;
   }
+  try { recordKeyColumn(metadataSchema); }
+  catch (error) { throw invalidSchema(error instanceof Error ? error.message : String(error)); }
 
   if (metadataSchema['x-lobu-resolution'] !== undefined) {
     try {
@@ -1325,6 +1343,7 @@ async function prepareEntityTypeCreate(
 
   validateEntityMetadataSchemaConfig(args.metadata_schema);
   assertValidBacking(args.backing);
+  if (recordKeyColumn(args.metadata_schema) && !args.backing?.sql) throw invalidSchema('A stable source record key requires backing.sql');
 
   // metadata_schema is stored as the author sent it — measure/dimension roles for
   // a derived type are classified ON READ (see etHandleGet), never persisted.
@@ -1458,6 +1477,8 @@ async function etHandleUpdate(
   assertValidMetricsConfig(args.metrics_config);
   assertValidBacking(args.backing);
   assertEventKindsAvoidPlatformVocabulary(args.event_kinds);
+  if (recordKeyColumn(args.metadata_schema ?? current.metadata_schema) &&
+      !(args.backing === undefined ? current.backing_sql : args.backing?.sql)) throw invalidSchema('A stable source record key requires backing.sql');
   assertValidEventKindInteractions(args.event_kinds);
   // Converting a populated stored type to a derived (view-backed) type would
   // orphan its existing rows (the view ignores them). Reject it.
