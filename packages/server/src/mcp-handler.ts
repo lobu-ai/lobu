@@ -30,6 +30,7 @@ import {
 import type { Context } from 'hono';
 import { OAuthClientsStore } from './auth/oauth/clients';
 import { buildMcpBearerChallenge, publicMcpRequestUrl } from './auth/oauth/resource-indicator';
+import { DIRECTORY_MCP_INSTRUCTIONS, DIRECTORY_MCP_TOOL_DESCRIPTIONS, isDirectoryMcpRequest } from './mcp-surface';
 import {
   getRequiredAccessLevel,
   hasRequiredMcpScope,
@@ -460,6 +461,10 @@ function createServerForContext(
   authCtx: SessionAuthContext,
   mcpAppsSupported: boolean
 ): Server {
+  const directory = isDirectoryMcpRequest(authCtx.requestUrl);
+  const viewsLoaderMeta = directory
+    ? { ...VIEWS_LOADER_META, description: 'Open workspace views with open_view. Saved-workspace SQL and static views are supported; use the Lobu web URL for other reads and actions.' }
+    : VIEWS_LOADER_META;
   const server = new SessionServer(
     { name: 'lobu-mcp', version: '0.2.0' },
     {
@@ -485,6 +490,7 @@ function createServerForContext(
       maxAccessLevel,
       adminScopeEligible: effectiveCrossOrg || isAdminOrOwnerRole(authCtx.memberRole),
     })
+      .filter((t) => !directory || Object.hasOwn(DIRECTORY_MCP_TOOL_DESCRIPTIONS, t.name))
       .filter((t) => {
         const visibility = (t._meta?.ui as { visibility?: unknown } | undefined)?.visibility;
         return mcpAppsSupported || !(
@@ -509,8 +515,16 @@ function createServerForContext(
         // drive its own resolver).
         return {
           name: t.name,
-          description: t.description,
-          inputSchema: t.inputSchema,
+          description: directory ? DIRECTORY_MCP_TOOL_DESCRIPTIONS[t.name] : t.description,
+          inputSchema: directory && t.name === 'query_sql'
+            ? {
+                ...t.inputSchema,
+                properties: {
+                  ...Object.fromEntries(Object.entries(t.inputSchema.properties ?? {}).filter(([key]) => key !== 'connection')),
+                  org_slug: { ...t.inputSchema.properties?.org_slug, description: 'Select an authorized workspace by slug. Required on this connection.' },
+                },
+              }
+            : t.inputSchema,
           ...(t.annotations && { annotations: t.annotations }),
           ...(t.outputSchema && { outputSchema: t.outputSchema }),
           ...(securitySchemes && { securitySchemes }),
@@ -549,15 +563,14 @@ function createServerForContext(
       {
         uri: LOBU_VIEWS_RESOURCE_URI,
         name: 'Views',
-        description:
-          'Lobu views: React modules rendered in a sandboxed iframe. Open one with the open_view tool; actions use invoke_view_action.',
+        description: viewsLoaderMeta.description,
         mimeType: MCP_APP_MIME_TYPE,
-        _meta: mcpAppResourceMeta(authCtx, VIEWS_LOADER_META),
+        _meta: mcpAppResourceMeta(authCtx, viewsLoaderMeta),
       },
       ...Object.entries(MCP_SKILL_RESOURCES).map(([uri, meta]) => ({
         uri,
         name: meta.name,
-        description: meta.description,
+        description: directory ? 'Search saved workspace knowledge, save explicit notes, and open workspace views.' : meta.description,
         mimeType: 'text/markdown',
       })),
     ],
@@ -571,7 +584,7 @@ function createServerForContext(
     const skill = MCP_SKILL_RESOURCES[uri];
     if (skill) {
       return {
-        contents: [{ uri, mimeType: 'text/markdown', text: skill.text }],
+        contents: [{ uri, mimeType: 'text/markdown', text: directory ? DIRECTORY_MCP_INSTRUCTIONS : skill.text }],
       };
     }
     // Views: the generic loader is one stable id; per-view bundles resolve by
@@ -585,7 +598,7 @@ function createServerForContext(
             uri,
             mimeType: MCP_APP_MIME_TYPE,
             text: renderViewsLoaderShell(),
-            _meta: mcpAppResourceMeta(authCtx, VIEWS_LOADER_META),
+            _meta: mcpAppResourceMeta(authCtx, viewsLoaderMeta),
           },
         ],
       };
@@ -712,6 +725,12 @@ function createServerForContext(
       : undefined;
     // Regular tool execution
     try {
+      if (directory && !Object.hasOwn(DIRECTORY_MCP_TOOL_DESCRIPTIONS, name)) {
+        throw new ToolUserError('This tool is not available on the directory connection. Open Lobu to use the full workspace tools.', 403, 'PERMISSION');
+      }
+      if (directory && name === 'query_sql' && args && Object.hasOwn(args, 'connection')) {
+        throw new ToolUserError('This connection queries saved workspace data only; external database connections are unavailable.', 400, 'VALIDATION');
+      }
       if (request.params._meta && Object.hasOwn(request.params._meta, VIEW_WORKSPACE_META_KEY)) {
         const target = request.params._meta[VIEW_WORKSPACE_META_KEY];
         if (typeof target !== 'string' || !target.trim() || target.length > 256) {
@@ -1065,7 +1084,10 @@ async function buildSessionInstructions(authCtx: AuthContext): Promise<string | 
     authCtx.sourceContext != null || authCtx.actingAutomationId != null
       ? 'managed-agent'
       : 'direct-mcp';
-  const base = authCtx.organizationId
+  const directory = isDirectoryMcpRequest(authCtx.requestUrl);
+  const base = directory
+    ? DIRECTORY_MCP_INSTRUCTIONS
+    : authCtx.organizationId
     ? ((await buildWorkspaceInstructions(authCtx.organizationId, { audience })) ?? '')
     : DIRECT_MCP_INSTRUCTIONS;
   if (
@@ -1097,7 +1119,9 @@ async function buildSessionInstructions(authCtx: AuthContext): Promise<string | 
   const grantLine =
     `Granted workspaces: ${labels.join(', ')}. ` +
     (authCtx.directSearchFederation
-      ? 'Unqualified search searches all granted workspaces. Select each SDK target with await client.org(workspace). Pass org_slug to save_memory and query_sql, and organization to get_approval. Never infer a target from entity IDs or a previous call.'
+      ? directory
+        ? 'Unqualified search searches all granted workspaces. Pass workspace to narrow search_memory, org_slug to save_memory and query_sql, and organization to open_view. Never infer a target from entity IDs or a previous call.'
+        : 'Unqualified search searches all granted workspaces. Select each SDK target with await client.org(workspace). Pass org_slug to save_memory and query_sql, and organization to get_approval. Never infer a target from entity IDs or a previous call.'
       : 'This connection operates in its explicitly bound workspace.');
   return [base, grantLine].filter(Boolean).join('\n\n');
 }
@@ -1627,6 +1651,13 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
   const clientIP = getClientIP(c.req.raw, c.var.peerRemoteAddress);
   const sessionId = req.headers.get('mcp-session-id') ?? undefined;
   const requestAuth = extractAuthContext(c);
+  const directory = isDirectoryMcpRequest(req.url);
+  // Resource-bound OAuth is mandatory here. A directory token cannot be
+  // replayed on /mcp or REST, where the ordinary SDK tools remain available.
+  if (directory && (requestAuth.tokenType !== 'oauth' ||
+      c.var.mcpAuthInfo?.resource !== publicMcpRequestUrl(c.req.raw))) {
+    return buildUnauthorizedResponse(req, 'Authorize this directory MCP resource to connect.');
+  }
   if (requestAuth.tokenType === 'oauth' && !requestAuth.scopedToOrg &&
       requestAuth.tokenOrganizationId && !requestAuth.scopes?.includes('device_worker:run')) {
     return buildUnauthorizedResponse(req, 'This OAuth authorization uses a retired default workspace. Reauthorize the client to select workspace grants without a default target.');
@@ -1654,6 +1685,9 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
   // Existing session → reuse
   if (sessionId && sessions.has(sessionId)) {
     const session = sessions.get(sessionId)!;
+    if (isDirectoryMcpRequest(session.authCtx.requestUrl) !== directory) {
+      return buildJsonRpcErrorResponse('Session MCP surface changed. Re-initialize.', null, 400);
+    }
     session.lastAccessedAt = Date.now();
 
     // The transport session is routing state, not an OAuth credential. Require
