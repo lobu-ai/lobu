@@ -22,7 +22,7 @@ import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../../../../utils/run-sta
 import type { ToolContext } from '../../../registry';
 import type { ManageConnectionsResult, ConnectionsArgs } from '../schemas';
 import { callerIsAdmin as resolveCallerIsAdmin } from '../../helpers/db-helpers';
-import { issueOAuthReconnectLink } from '../../helpers/connection-helpers';
+import { issueOAuthReconnectLink, recoverUnfinishedOAuthConnection, withFailureCode } from '../../helpers/connection-helpers';
 
 // ============================================
 // handleReauthenticate
@@ -57,7 +57,7 @@ export async function handleReauthenticate(
   `;
 
   if (rows.length === 0) {
-    return { error: 'Connection not found' };
+    return withFailureCode({ error: 'Connection not found' }, 'NOT_FOUND');
   }
 
   const row = rows[0] as {
@@ -79,7 +79,15 @@ export async function handleReauthenticate(
   }
 
   if (!row.auth_profile_id) {
-    return { error: 'Connection does not have an auth profile' };
+    // A connection whose OAuth consent never completed has no profile to
+    // reconnect - hand back the connect action's pending-recovery contract
+    // (fresh connect token on the same connection) instead of dead-ending.
+    return recoverUnfinishedOAuthConnection({
+      connectionId: row.id,
+      connectorKey: row.connector_key,
+      ctx,
+      requestedScopes: args.requested_scopes,
+    });
   }
 
   if (row.profile_kind === 'oauth_account') {
@@ -196,7 +204,7 @@ export async function handleTest(
   `;
 
   if (rows.length === 0) {
-    return { error: 'Connection not found' };
+    return withFailureCode({ error: 'Connection not found' }, 'NOT_FOUND');
   }
 
   const conn = rows[0] as any;

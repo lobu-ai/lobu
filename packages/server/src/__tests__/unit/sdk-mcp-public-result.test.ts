@@ -10,6 +10,9 @@ import {
 	SdkScriptResultSchema,
 	toMcpPublicSdkScriptResult,
 } from "../../tools/sdk_run";
+import { ClientSdkActionError } from "../../sandbox/namespaces/action-call";
+import { withFailureCode } from "../../tools/admin/helpers/connection-helpers";
+import { ToolUserError } from "../../utils/errors";
 import { validateToolResult } from "../../tools/validate-args";
 
 describe("SDK MCP public result", () => {
@@ -229,6 +232,50 @@ describe("SDK MCP public result", () => {
 				message: "unexpected application failure",
 			}),
 		).toEqual({ code: "INTERNAL", retryable: false });
+	});
+
+	test("withFailureCode carries the code in-process but never on the wire", () => {
+		const record = withFailureCode({ error: "Connection not found" }, "NOT_FOUND");
+		// In-process property reads see the code (classifyClientSdkActionResult path)...
+		expect((record as Record<string, unknown>).error_code).toBe("NOT_FOUND");
+		// ...but every serialization/cloning boundary drops it: the public
+		// manage_connections output stays exactly { error }.
+		expect(JSON.stringify(record)).toBe('{"error":"Connection not found"}');
+		expect({ ...record }).toEqual({ error: "Connection not found" });
+		expect(structuredClone(record)).toEqual({ error: "Connection not found" });
+		expect(Object.keys(record)).toEqual(["error"]);
+	});
+	test("preserves the ClientSdkActionError classification supplied by the runtime", () => {
+		// runScript classifies the host error.result before returning this envelope.
+		// classifySdkScriptError never receives the raw host ClientSdkActionError.
+		expect(classifySdkScriptError({
+			name: "ClientSdkActionError",
+			message: "Connection not found",
+			code: "NOT_FOUND",
+		})).toEqual({ code: "NOT_FOUND", retryable: false });
+	});
+
+	test("does not treat an unclassified ClientSdkActionError's synthetic 400 as validation", () => {
+		const error = new ClientSdkActionError("get", "unexpected handler failure", {
+			error: "unexpected handler failure",
+		});
+		expect(error.httpStatus).toBe(400);
+		expect(classifySdkScriptError(error)).toEqual({ code: "INTERNAL", retryable: false });
+	});
+
+	test.each([
+		[400, "VALIDATION", false],
+		[403, "PERMISSION", false],
+		[404, "NOT_FOUND", false],
+		[429, "RATE_LIMITED", true],
+	] as const)("preserves a structured ToolUserError code with HTTP %s", (status, code, retryable) => {
+		expect(classifySdkScriptError(new ToolUserError("opaque business failure", status, code)))
+			.toEqual({ code, retryable });
+	});
+
+	test("keeps genuine unknown errors INTERNAL regardless of their message", () => {
+		expect(classifySdkScriptError(new Error("Connection not found")))
+			.toEqual({ code: "INTERNAL", retryable: false });
 	});
 
 	test("prefers structured classifications and ignores script-controlled markers", () => {

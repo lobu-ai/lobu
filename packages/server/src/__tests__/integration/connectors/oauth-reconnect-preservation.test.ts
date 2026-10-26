@@ -5,6 +5,7 @@ import type { Env } from '../../../index';
 import { buildConnectionsNamespace } from '../../../sandbox/namespaces/connections';
 import { manageAuthProfiles } from '../../../tools/admin/manage_auth_profiles';
 import { manageConnections } from '../../../tools/admin/manage_connections';
+import { querySdkScript } from '../../../tools/sdk_run';
 import { createAuthProfile, updateAuthProfile } from '../../../utils/auth-profiles';
 import { expireStaleConnectTokens } from '../../../utils/connect-tokens';
 import { syncOAuthConnectionsForAuthProfile } from '../../../utils/oauth-connection-state';
@@ -978,6 +979,133 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     expect(new URL(response.headers.get('location')!).searchParams.get('scope')?.split(' ')).toContain(EXTRA);
     const [row] = await getTestDb()`SELECT COUNT(*)::int AS count FROM connections WHERE organization_id = ${s.org.id} AND created_by = ${member.id}`;
     expect(row.count).toBe(1);
+  });
+
+  it.each(['pending_auth', 'revoked', 'paused'])('reauthenticates expired profile-less OAuth in %s state', async (status) => {
+    const s = await seed();
+    const member = await createTestUser({ name: 'Synthetic unfinished OAuth owner' });
+    await addUserToOrganization(member.id, s.org.id, 'member');
+    await getTestDb()`UPDATE auth_profiles SET is_default_for_connector = false WHERE organization_id = ${s.org.id}`;
+    await getTestDb()`UPDATE auth_profiles SET is_default_for_connector = true WHERE id = ${s.app.id}`;
+    const client = buildConnectionsNamespace({ ...s.ctx, userId: member.id, memberRole: 'member' }, {} as Env);
+    const first = await client.connect({ connector_key: KEY, app_auth_profile_slug: s.app.slug,
+      requested_scopes: [OLD] }) as { connection_id: number; connect_url: string };
+    expect(first).toMatchObject({ connection_id: expect.any(Number), connect_url: expect.any(String) });
+    const sql = getTestDb();
+    await sql`UPDATE connect_tokens SET expires_at = NOW() - INTERVAL '1 hour' WHERE connection_id = ${first.connection_id}`;
+    await expireStaleConnectTokens();
+    await sql`UPDATE connections SET status = ${status} WHERE id = ${first.connection_id}`;
+    const [before] = await sql`SELECT auth_profile_id FROM connections WHERE id = ${first.connection_id}`;
+    expect(before.auth_profile_id).toBeNull();
+
+    const next = await client.reauthenticate(first.connection_id, { requested_scopes: [EXTRA] }) as {
+      action: string; connection_id: number; status: string; connect_url: string; connect_token: string; expires_at: string;
+    };
+    // No auth profile exists to reference, so the recovery reuses the connect
+    // action's pending-recovery contract (action:'connect', pending_auth)
+    // instead of the reauthenticate shape (which requires auth_profile_slug).
+    expect(next).toMatchObject({ action: 'connect', connection_id: first.connection_id,
+      status: 'pending_auth', auth_type: 'oauth', connect_url: expect.any(String),
+      connect_token: expect.any(String), expires_at: expect.any(String) });
+    expect(next.connect_url).not.toBe(first.connect_url);
+    expect(Date.parse(next.expires_at)).toBeGreaterThan(Date.now());
+    const tokens = await sql`SELECT status, auth_profile_id, auth_config FROM connect_tokens
+      WHERE connection_id = ${first.connection_id} ORDER BY id`;
+    expect(tokens.map(token => token.status)).toEqual(['expired', 'pending']);
+    expect(tokens[1].auth_profile_id).toBeNull();
+    expect(tokens[1].auth_config.requestedScopes).toEqual(expect.arrayContaining([BASE, OLD, EXTRA]));
+    const [after] = await sql`SELECT status, error_message, auth_profile_id, app_auth_profile_id FROM connections WHERE id = ${first.connection_id}`;
+    expect(after).toMatchObject({ status: 'pending_auth', error_message: null, auth_profile_id: null,
+      app_auth_profile_id: s.app.id });
+    const started = await connectRoutes.request(new URL(next.connect_url).pathname.replace('/lobu/connect', ''), {}, {} as Env);
+    expect(started.status).toBe(302);
+    expect(new URL(started.headers.get('location')!).searchParams.get('client_id')).toBe('synthetic-selected-client');
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://provider.example/token') return Response.json({ access_token: 'synthetic-recovered-token', scope: [BASE, OLD, EXTRA].join(' ') });
+      if (url === 'https://provider.example/userinfo') return Response.json({ id: 'synthetic-recovered-user' });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const callback = await connectRoutes.request(`/oauth/callback?state=${next.connect_token}&code=synthetic-recovered-code`, {}, {} as Env);
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get('location')).not.toContain('auth_result=failed');
+    const [linked] = await sql`SELECT c.status, c.auth_profile_id, ap.profile_kind
+      FROM connections c LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
+      WHERE c.id = ${first.connection_id}`;
+    expect(linked.auth_profile_id).not.toBeNull();
+    expect(linked).toMatchObject({ status: 'active', profile_kind: 'oauth_account' });
+    const [count] = await sql`SELECT COUNT(*)::int AS count FROM connections WHERE organization_id = ${s.org.id} AND created_by = ${member.id}`;
+    expect(count.count).toBe(1);
+  });
+
+  it('issues only one pending connect token for concurrent profile-less reauthentication', async () => {
+    const s = await seed();
+    const sql = getTestDb();
+    const user = await createTestUser({ name: 'Synthetic concurrent reauthentication owner' });
+    await addUserToOrganization(user.id, s.org.id, 'owner');
+    const client = buildConnectionsNamespace({ ...s.ctx, userId: user.id }, {} as Env);
+    const first = await client.connect({ connector_key: KEY, app_auth_profile_slug: s.app.slug }) as {
+      connection_id: number; connect_url: string;
+    };
+    expect(await client.reauthenticate(first.connection_id)).toMatchObject({ connect_url: first.connect_url });
+    await sql`UPDATE connect_tokens SET expires_at = NOW() - INTERVAL '1 hour' WHERE connection_id = ${first.connection_id}`;
+    await expireStaleConnectTokens();
+    let release!: () => void;
+    let ready!: () => void;
+    const held = new Promise<void>(resolve => { ready = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const holder = sql.begin(async (tx: typeof sql) => {
+      await tx`SELECT id FROM connect_tokens WHERE connection_id = ${first.connection_id} FOR UPDATE`;
+      ready();
+      await gate;
+    });
+    await held;
+    const replies = Promise.allSettled([
+      client.reauthenticate(first.connection_id),
+      client.reauthenticate(first.connection_id),
+    ]);
+    try {
+      // Both requests must discover the expired token before either can renew it.
+      await waitForBlockedConnectTokens(2);
+    } finally {
+      release();
+      await Promise.allSettled([holder, replies]);
+    }
+    const [pending] = await sql`SELECT COUNT(*)::int AS count FROM connect_tokens
+      WHERE connection_id = ${first.connection_id} AND status = 'pending'`;
+    expect(pending.count).toBe(1);
+    const results = await replies;
+    const successful = results.filter(result => result.status === 'fulfilled');
+    expect(successful).toHaveLength(1);
+    expect(successful[0].value).toMatchObject({ action: 'connect', connection_id: first.connection_id, status: 'pending_auth' });
+    const rejected = results.find(result => result.status === 'rejected');
+    expect(rejected?.reason.message).toBe('Connection setup changed. Retry connecting this account.');
+    // Retrying after the competing request commits rediscovers its live link.
+    expect(await client.reauthenticate(first.connection_id)).toMatchObject(successful[0].value as object);
+  });
+
+  it('keeps a clear reauthentication error for a profile-less connector without OAuth', async () => {
+    const s = await seed();
+    const key = 'synthetic.no-oauth';
+    await createTestConnectorDefinition({ key, name: 'Synthetic no OAuth', organization_id: s.org.id,
+      auth_schema: { methods: [{ type: 'none' }] } });
+    const connection = await createTestConnection({ organization_id: s.org.id, connector_key: key,
+      created_by: s.user.id, createDefaultFeed: false });
+    await expect(s.client.reauthenticate(connection.id)).rejects.toThrow(/does not support OAuth reauthentication/);
+  });
+
+  it('surfaces get on a soft-deleted connection as a non-retryable user failure through query_sdk', async () => {
+    const s = await seed();
+    await getTestDb()`UPDATE connections SET status = 'paused', deleted_at = NOW() WHERE id = ${s.connection.id}`;
+    const raw = await manageConnections({ action: 'get', connection_id: s.connection.id }, {} as Env, s.ctx);
+    expect(JSON.parse(JSON.stringify(raw))).toEqual({ error: 'Connection not found' });
+    expect(JSON.stringify(raw)).toBe('{"error":"Connection not found"}');
+    const result = await querySdkScript({
+      script: `export default async (_ctx, client) => client.connections.get(${s.connection.id});`,
+    }, {} as Env, s.ctx);
+    expect(result).toMatchObject({ success: false, error: {
+      name: 'ClientSdkActionError', message: 'Connection not found', code: 'NOT_FOUND', retryable: false,
+    } });
   });
 
   it('retains a provider-wide app binding when its connector differs from the account connector', async () => {

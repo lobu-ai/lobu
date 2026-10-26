@@ -41,6 +41,7 @@ import {
   resolveConnectionAuthSelection,
   resolveConnectionDisplayName,
   resolveConnectionVisibility,
+  withFailureCode,
 } from "../../helpers/connection-helpers";
 import { assertEntityIdsInOrg } from "../../helpers/db-helpers";
 import {
@@ -266,7 +267,7 @@ async function handleConnectImpl(
       if (!token) return { error: 'Connection setup changed. Retry connecting this account.' };
       const [targetHint] = await tx`SELECT auth_profile_id FROM connections
         WHERE id = ${candidate.id} AND organization_id = ${organizationId} AND deleted_at IS NULL`;
-      if (!targetHint) return { error: 'Connection not found' };
+      if (!targetHint) return withFailureCode({ error: 'Connection not found' }, 'NOT_FOUND');
       const [profile] = targetHint.auth_profile_id ? await tx`
         SELECT ap.*, a.scope AS account_scope FROM auth_profiles ap
         LEFT JOIN account a ON a.id = ap.account_id
@@ -348,7 +349,7 @@ async function handleConnectImpl(
         WHERE id = ${token.id}`;
       return { token: token.token as string, expires_at: token.expires_at as Date, target };
     });
-    if (recovered.error) return { error: recovered.error, setup_url: setupUrl };
+    if (recovered.error) return Object.assign(recovered, { setup_url: setupUrl });
     if ('active' in recovered) return { action: 'connect', connection_id: recovered.target.id,
       slug: recovered.target.slug, status: 'active',
       message: 'This connection is already active. Check client.operations.listAvailable({ connection_id }) for the requested capabilities before resuming the original task.' };

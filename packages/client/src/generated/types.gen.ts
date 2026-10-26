@@ -2836,7 +2836,7 @@ export type ManageConnectionsData = {
          */
         action: "reauthenticate";
         /**
-         * Connection ID whose OAuth-account or interactive auth profile should be reauthenticated.
+         * Connection ID to reauthenticate. Unfinished OAuth setup without an account profile returns the pending-recovery shape (action 'connect', status 'pending_auth', fresh connect_url) instead of dead-ending.
          */
         connection_id: number;
         /**
