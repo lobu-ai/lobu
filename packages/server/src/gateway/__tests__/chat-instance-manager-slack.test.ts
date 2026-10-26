@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { createHmac } from "node:crypto";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
@@ -295,5 +296,155 @@ describe("ChatInstanceManager.handleWebhook (multi-replica)", () => {
       })
     );
     expect(response.status).toBe(404);
+  });
+});
+
+describe("ChatInstanceManager webhook ack vs. shutdown", () => {
+  const SIGNING_SECRET = "drain-test-signing-secret";
+
+  function signedDm(eventId: string, ts: string): Request {
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: eventId,
+      team_id: "T_DRAIN",
+      event: {
+        type: "message",
+        channel: "D_DRAIN",
+        channel_type: "im",
+        user: "U_SENDER",
+        text: "hello during a deploy",
+        ts,
+      },
+    });
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = `v0=${createHmac("sha256", SIGNING_SECRET)
+      .update(`v0:${timestamp}:${body}`)
+      .digest("hex")}`;
+    return new Request("https://gw.example.com/api/v1/webhooks/conn-drain", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": signature,
+      },
+      body,
+    });
+  }
+
+  // The Slack adapter acks 200 and dispatches the message in the background,
+  // so a pod that tears down right after the ack (SIGTERM on every rollout)
+  // must not cut the handler off before it has enqueued the turn: Slack got
+  // its 200, so we cannot rely on redelivery.
+  async function managerWithRealSlackChat(
+    onMessage: () => Promise<void>,
+  ): Promise<any> {
+    const { createSlackAdapter } = await import("@chat-adapter/slack");
+    const { Chat } = await import("chat");
+    const { createConnectedGatewayStateAdapter } = await import(
+      "../connections/state-adapter.js"
+    );
+    const adapter = createSlackAdapter({
+      signingSecret: SIGNING_SECRET,
+      botToken: "xoxb-drain-test",
+      botUserId: "U_DRAIN_BOT",
+      userName: "lobu",
+    });
+    (adapter as any).fetchMessages = mock(async () => ({ messages: [] }));
+    (adapter as any).startTyping = mock(async () => undefined);
+    (adapter as any).lookupUser = mock(async () => ({
+      displayName: "sender",
+      realName: "sender",
+    }));
+    const chat = new Chat({
+      userName: "lobu",
+      adapters: { slack: adapter },
+      state: await createConnectedGatewayStateAdapter(),
+      logger: "silent",
+    });
+    chat.onDirectMessage(onMessage);
+
+    const ChatInstanceManager = await loadChatInstanceManager();
+    const manager = new ChatInstanceManager() as any;
+    manager.resolveStored = async () => null;
+    manager.ensureConnectionRunning = async () => true;
+    manager.instances.set("conn-drain", {
+      connection: { id: "conn-drain", platform: "slack" },
+      chat,
+      cleanup: async () => chat.shutdown(),
+      rowVersion: 1,
+    });
+    return manager;
+  }
+
+  test("shutdown waits for a message the webhook already acked", async () => {
+    await resetTestDatabase();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const handlerStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let handled = false;
+    const manager = await managerWithRealSlackChat(async () => {
+      started();
+      await gate;
+      handled = true;
+    });
+
+    const response = await manager.handleWebhook(
+      "conn-drain",
+      signedDm("Ev_DRAIN_ACKED", "1793000000.000100"),
+    );
+    // The platform already has its 200 while the message is still in flight.
+    expect(response.status).toBe(200);
+    await handlerStarted;
+    expect(handled).toBe(false);
+
+    let shutDown = false;
+    const shutdown = manager.shutdown().then(() => {
+      shutDown = true;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(shutDown).toBe(false);
+    } finally {
+      release();
+      await shutdown;
+    }
+    expect(handled).toBe(true);
+  });
+
+  test("shutdown stops waiting for a stuck message after the drain budget", async () => {
+    await resetTestDatabase();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const handlerStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const manager = await managerWithRealSlackChat(async () => {
+      started();
+      await gate;
+    });
+    manager.webhookDrainTimeoutMs = 50;
+
+    const response = await manager.handleWebhook(
+      "conn-drain",
+      signedDm("Ev_DRAIN_STUCK", "1793000000.000200"),
+    );
+    expect(response.status).toBe(200);
+    await handlerStarted;
+    try {
+      const startedAt = Date.now();
+      await manager.shutdown();
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    } finally {
+      release();
+      await Promise.all(manager.webhookTasks);
+    }
   });
 });
