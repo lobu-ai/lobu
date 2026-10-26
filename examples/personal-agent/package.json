@@ -4,6 +4,10 @@
   "private": true,
   "description": "Lobu example: personal agent connectors (Revolut, Spotify, WhatsApp Web).",
   "type": "module",
+  "scripts": {
+    "identity": "bun identity-bootstrap.cli.ts",
+    "test:identity": "bun test __tests__/identity-bootstrap.test.ts __tests__/identity-bootstrap.config.test.ts"
+  },
   "devDependencies": {
     "@lobu/cli": "^21.2.1",
     "@lobu/connector-sdk": "^21.2.1"

@@ -1,0 +1,140 @@
+Personal identity layer: deterministic bootstrap, then lazy enrichment
+
+The recipe lives in examples/personal-agent. It uses existing Lobu SDK methods;
+no new database, API, model, credential, browser session or hosted agent is needed.
+Never run the synthetic example against a real workspace as contact data.
+Give your agent identity-bootstrap.prompt.txt as the setup instruction. The
+commands below perform normalization/import/replay without an LLM per row.
+
+1. Discover and authorize once
+
+Use the Lobu skill. Select the intended CLI context and workspace explicitly.
+Discover the installed connector versions, actual connections, feed keys, saved
+account bindings, policies and available operations using search_sdk. Reuse
+existing feeds and source checkpoints. Authorize any missing source normally.
+
+Start from retained structured metadata. For missing evidence, use bounded
+feeds.readMany reads and project only participant/contact fields BEFORE returning
+data to the collector. Serialize browser reads sharing an account. Save each
+accepted chunk and its actual continuation before advancing, including empty
+continuation pages. Verify the saved source account before and after collection.
+Neither an exhausted recent reader nor a provider list counter proves all history.
+
+The JSON input shape is demonstrated in identity/sample-observations.json.
+sources[].rows contains native participant metadata: WhatsApp sender_jid,
+sender_phone, push_name, chat_jid/is_group/from_me; X sender_id and sender_handle;
+LinkedIn sender_member_id and sender_slug. Sender IDs must be strings. Native
+origin_id and observed_at are mandatory: an events.id version is NOT origin_id.
+Gmail observations accept already-parsed mailbox addresses, not arbitrary raw
+RFC headers. Gmail message_references intentionally contains no addresses or
+bodies: use authorized minimal/header reads for correspondent discovery.
+
+Do not export bodies, subjects, snippets, attachments or transcripts. The
+extractor discards unrelated input fields and outgoing-message sender records.
+It never infers an outgoing peer, country code, first meeting, or human status.
+Display-name-only contacts stay unresolved outside the identity import.
+
+2. Install the data definitions, without enabling execution
+
+For a new workspace, from examples/personal-agent/identity:
+  LOBU_ORG=your-workspace lobu apply --dry-run
+  LOBU_ORG=your-workspace lobu apply
+
+Select the intended context with lobu context use before apply. This standalone
+config has no credentials, devices, connections, schedules or Automations. Both
+it and the full personal example use prune:false. On an existing workspace,
+review the diff and compose custom person fields/rules rather than replacing
+them. Person matching here is review-only; same_source_account auto-grouping
+requires the full provider/account_scope/canonical_source_account_key tuple.
+Contact-field evidence does not merge people. Existing reviewed holds remain.
+
+3. Prepare, import and verify from examples/personal-agent
+
+  bun run identity prepare --input /your/private/observations.json --output /your/private/manifest.json
+  bun run identity import --input /your/private/observations.json --org your-workspace --context your-context --receipts /your/private/import-receipts.json
+  bun run identity verify --input /your/private/observations.json --org your-workspace --context your-context --receipts /your/private/import-receipts.json
+
+prepare is offline. All paths, account scopes, source and person IDs are inputs;
+there are no live tenant defaults. The manifest contains only the allowlisted
+metadata. Preserve input/receipts privately. Use a new receipt file for a new input
+batch; replaying the same input rereads live state instead of trusting receipts.
+Only one writer may use a receipt file. After a process crash, confirm that no
+writer remains before removing its .lock file and resuming.
+Serialize imports and metadata edits for the same identities even with different
+receipt paths or clients: the local receipt lock does not coordinate those writers,
+and concurrent read-merge-write updates can overwrite each other's evidence.
+
+The importer creates contact-identity records only. Optional person_ids must name
+EXISTING people with an exact matching native metadata field; held:true suppresses
+those evidence links. It never creates a person or writes same_person. Same-row
+WA phone/JID and X native-ID/handle evidence can group source aliases. LinkedIn
+opaque/vanity grouping additionally requires an explicitly observed redirect in
+aliases[]; mere co-occurrence is retained as separate observations. Use the shared
+observationKey helper for alias endpoints. Conflicting or reused aliases halt.
+
+Records and provenance are retained when grouping. Slugs and import keys derive
+from one account-scoped generator. Raw-member lookup avoids losing grouped
+aliases on replay. Large evidence arrays are split into bounded payloads and
+merged inside the SDK. This bounds transport size, not stored metadata size:
+the existing metadata validation limits still apply to the full merged record.
+If a history exceeds those limits, import stops; a different evidence-storage
+design requires a separate decision before importing that history.
+Every write gets exact readback before receipt acceptance;
+short results, transport errors, missing IDs, approval gates, key conflicts and
+relationship mismatches stop with nonzero exit. Ambiguous responses are reconciled
+on the next run. Never retry by blindly creating another person or link.
+
+Run import again, then verify: replay must show changed_chunks:0/new_edges:0.
+Verify checks the intended records, full expected provenance and directed links,
+including both retained alias records reporting the same identity group. It does not
+declare unrelated concurrent workspace data invalid or delete extra records.
+
+4. Maintain through existing sources and external MCP clients
+
+Discover actual observer events and policy first. identity-capture.ts exports a
+captureDefinition factory: pass the selected owner principal, a dedicated slug,
+and discovered connector_key/connection_id/event_types to produce the existing
+automations.create input. Inspect existing Automations before create. Reuse only
+one with the same purpose; never replace unrelated triggers. The factory requests
+references-only capture, silent output, and an external executor; it does not
+trigger a run or start a hosted/device agent. Verify subscription, binding and
+durable checkpoint health after setup/rebind, plus zero processing runs.
+
+Two external clients can independently traverse knowledge.read(view:'changes')
+with their own cursors. Deduplicate observation IDs, handle scope-change cursor
+invalidation, and inspect operations.listActivity source_changes. Read/poll does
+not imply processing or completion. Only claim/complete a processing run when
+the external client actually chooses to execute it. Test independent traversal
+and durable source references before claiming continuous coverage.
+
+Read+sync sources (Gmail references, X notifications, Reddit inbox) use native
+checkpoints and an explicitly chosen sync cadence. They are NOT observer changes
+logs. Normal runless arrival-window reads return latest versions, not every
+immutable observation. No arbitrary five-minute default or push infrastructure is
+installed by this recipe. Preview before enabling a source schedule; prove empty
+bodies, stable native origins and replay. Keep legacy raw-body feeds unscheduled
+unless the owner separately chooses that retention.
+
+5. Use the graph lazily
+
+Use entities.list exact email/x_handle/linkedin_url filters, then entities.get and
+listLinks.relationships. For grouped source identities inspect identity.member_ids:
+listLinks is record-specific, not a union of every member's evidence. Traverse
+same_source_account separately from reviewed same_person. A matches_contact_field
+edge is contact evidence, not a verified human identity. For fields without list
+filters use a bounded governed query discovered through the SDK.
+
+Keep unsupported identities unknown and shared/business mailbox matches held.
+Derive relationship context only when a task needs it, with dated source evidence.
+Source citations do not inherit ACLs: prove the destination audience before saving
+private facts. Do not mirror private bodies into the graph.
+
+Tests:
+  bun run test:identity
+  cd ../../packages/server
+  bun run test -- run ../../examples/personal-agent/evals/identity-bootstrap.integration.ts
+
+The integration test uses a synthetic fresh PostgreSQL workspace and real SDK:
+schema/rule setup, interrupted import, grouping, exact evidence links, readback,
+replay and zero person creation. Live provider authentication/device/history
+coverage remains a separate per-workspace proof, never a mocked-test claim.
