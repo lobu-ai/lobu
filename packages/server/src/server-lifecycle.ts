@@ -22,7 +22,7 @@ import { closeDbSingleton } from "./db/client";
 import { mountViteDev } from "./dev-vite";
 import { markShuttingDown } from "./lifecycle-state";
 import type { Env } from "./index";
-import { app as mainApp } from "./index";
+import { isAuthorizationReadOnlyToolName, app as mainApp } from "./index";
 import {
 	getLobuCoreServices,
 	initLobuGateway,
@@ -331,7 +331,9 @@ export function createServerLifecycle(
 
 		// 3. Embedded Lobu gateway. Owns the public Agent API mounted at `/lobu`
 		// by `buildWrapperApp`.
-		const lobuApp = await initLobuGateway();
+		const lobuApp = await initLobuGateway({
+			isReadOnlyLobuTool: isAuthorizationReadOnlyToolName,
+		});
 
 		// 4. Task scheduler. Every periodic platform-internal job — token
 		// refresh, MCP DB cleanup, automation — runs as a row in

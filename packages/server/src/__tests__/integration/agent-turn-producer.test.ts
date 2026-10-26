@@ -37,15 +37,20 @@ import { createInteractionRoutes } from '../../gateway/routes/internal/interacti
 import { enqueueAgentTurn,
   cancelAgentTurn,
 } from '../../gateway/orchestration/agent-turn-producer';
-import { armTurnTimeout, failTurnIfPending } from '../../gateway/orchestration/turn-liveness';
+import { armTurnTimeout, failTurnIfPending, sweepExpiredTurns } from '../../gateway/orchestration/turn-liveness';
+import { generateDeploymentName } from '../../gateway/orchestration/deployment-identity';
+import { intervals } from '../../config/intervals';
 import { chatTurnAccessInstructions, chatTurnSender, chatTurnSenderContext, chatTurnUnlinkedSenderContext } from '../../gateway/orchestration/chat-turn-actor';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import { failClaimedWorkerRun } from '../../worker-api/poll';
+import { Hono } from 'hono';
+import { authenticateWorker } from '../../gateway/routes/internal/middleware';
+import { McpProxy } from '../../gateway/auth/mcp/proxy';
+import { isAuthorizationReadOnlyToolName } from '../../tools/registry';
 import type { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
 import type { ProviderCatalogService } from '../../gateway/auth/provider-catalog';
 import type { McpConfigService } from '../../gateway/auth/mcp/config-service';
-import type { McpProxy } from '../../gateway/auth/mcp/proxy';
 import type { ModelProviderModule } from '../../gateway/modules/module-system';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
@@ -268,15 +273,25 @@ async function postAsFleet(path: string, body: Record<string, unknown>) {
 }
 
 /** Enqueue a turn and claim it, as the fleet worker would. */
-async function claimedTurnRun(workerId: string): Promise<number> {
+async function claimedTurnRun(workerId: string, platform: 'api' | 'slack' = 'api', opts: { legacy?: boolean } = {}): Promise<number> {
   const org = await createTestOrganization();
-  await enqueueMessage(messageFor(org.id), {
+  await enqueueMessage({ ...messageFor(org.id), platform }, {
     agentSettings: settingsStore,
     catalog: catalogFor(claudeModule()),
     gatewayUrl: GATEWAY_URL,
   });
   const response = await pollFleet(workerId, { agent_turn: true });
   const body = await response.json();
+  // A current worker's first beat carries the credential it was claimed with,
+  // which is what makes its attempt eligible for a re-run. `legacy` is a
+  // worker binary that predates `turn_credential`.
+  // An empty tool-event list keeps the beat from publishing a status reply.
+  if (!opts.legacy) {
+    const beat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: body.run_id, worker_id: workerId, turn_credential: body.credentials.accessToken, turn_tool_events: [],
+    });
+    expect(beat.status).toBe(200);
+  }
   return body.run_id as number;
 }
 
@@ -294,6 +309,15 @@ async function runRow(runId: number) {
     action_input: { turn?: unknown; result?: Record<string, unknown> };
   }>;
   return row;
+}
+
+/**
+ * The turn already used its one re-run, so its next worker death is terminal.
+ * For tests about what the client is told when a turn ends on a dead worker.
+ */
+async function spendRerun(runId: number) {
+  const sql = getTestDb();
+  await sql`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"turn_requeue_count": 1}'::jsonb WHERE id = ${runId}`;
 }
 
 /** Native session fixture: entry IDs and parent links belong to Pi, not the gateway. */
@@ -326,6 +350,9 @@ describe('agent turn producer', () => {
       catalog: catalogFor(tokenEchoingModule()),
       gatewayUrl: GATEWAY_URL,
     });
+    // A worker holds the credential only once it claims the run; the gateway
+    // refuses a side-effecting call from an attempt that does not own it.
+    expect((await pollFleet('fleet-interaction', { agent_turn: true })).status).toBe(200);
     const [run] = await agentTurnRuns();
     const postLinkButton = vi.fn(async () => ({ id: 'synthetic-post' }));
     const app = createInteractionRoutes({ postLinkButton } as never);
@@ -2341,27 +2368,28 @@ describe('agent turn producer', () => {
     '%s releases only the next pending startup deadline', async (terminal) => {
       const { sql, owner, followers, body, first } = await inputScenario();
       await sql`UPDATE runs SET run_at = now() - interval '1 hour' WHERE id IN (${followers[0].id}, ${followers[1].id})`;
-      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0 });
+      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0, requeued: 0 });
       if (terminal === 'timeout') {
         await sql`UPDATE runs SET last_heartbeat_at = now() - interval '1 hour' WHERE id = ${owner.id}`;
+        await spendRerun(owner.id);
         // A reaped turn is the conversation's answer, so its error is
         // delivered rather than merely recorded on the run row.
-        expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 1 });
+        expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
       } else if (terminal === 'malformed') {
         await failClaimedWorkerRun({ runId: owner.id, workerId: body.worker_id, errorMessage: 'malformed envelope' });
       } else {
         if (terminal === 'cancelled') {
           await cancelAgentTurn(await admittedMessage({ ...first, messageId: 'cancel-head', messageText: '/cancel' }));
-          expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0 });
+          expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0, requeued: 0 });
         }
         await postAsFleet('/api/workers/complete-agent-turn', { ...body, status: terminal === 'failed' ? 'failed' : 'completed', consumed_inputs: [] });
       }
       const ready = await sql`SELECT id, run_at > now() - interval '10 seconds' AS fresh FROM runs
         WHERE id IN (${followers[0].id}, ${followers[1].id}) ORDER BY id`;
       expect(ready.map((row) => row.fresh)).toEqual([true, false]);
-      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0 });
+      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0, requeued: 0 });
       await sql`UPDATE runs SET run_at = now() - interval '1 hour' WHERE id = ${followers[0].id}`;
-      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 1 });
+      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
       expect((await (await pollFleet('fleet-released', { agent_turn: true })).json()).run_id).toBe(followers[1].id);
     },
   );
@@ -2373,7 +2401,7 @@ describe('agent turn producer', () => {
     const beat = await postAsFleet('/api/workers/heartbeat', { run_id: owner.id, worker_id: body.worker_id });
     expect(await beat.json()).toMatchObject({ continue: false, stop_reason: 'cancelled' });
     // The user asked to cancel, so they are told the turn ended that way.
-    expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 1 });
+    expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
     expect((await (await pollFleet('fleet-successor', { agent_turn: true })).json()).run_id).toBe(followers[0].id);
     const late = await postAsFleet('/api/workers/complete-agent-turn', body);
     expect(await late.json()).toEqual({ ok: true, status: 'cancelled', idempotent: true });
@@ -2411,7 +2439,7 @@ describe('agent turn producer', () => {
       return result;
     } });
     const spy = vi.spyOn(db, 'getDb').mockReturnValue(racingDb);
-    try { expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0 }); }
+    try { expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 0, delivered: 0, requeued: 0 }); }
     finally { spy.mockRestore(); }
     expect(refreshed).toBe(true);
     expect((await runRow(followers[0].id)).status).toBe('pending');
@@ -2895,7 +2923,7 @@ describe('agent turn producer', () => {
         WHERE id = ${first.id}
       `;
       expect((await (await pollFleet('fleet-before-reap', { agent_turn: true })).json()).run_id).toBeUndefined();
-      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 1 });
+      expect(await sweepStaleAgentTurnRuns(60)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
       expect((await runRow(first.id)).status).toBe('timeout');
       expect((await (await pollFleet('fleet-after-reap', { agent_turn: true })).json()).run_id).toBe(second.id);
     }
@@ -4494,13 +4522,14 @@ describe('agent turn reaper', () => {
   it('a crashed worker on an authoritative turn delivers the error instead of hanging the client', async () => {
     const runId = await claimedTurnRun('fleet-crashed');
     await loseHeartbeat(runId);
+    await spendRerun(runId);
 
     // Through the real reaper tick, so the lane is proven reachable from the
     // 30s interval and not just from its own helper.
     const result = await reapStaleRuns();
     expect(result.acquired).toBe(true);
     expect(result.reaped).toBe(1);
-    // A turn is never re-run behind the user's back.
+    // The turn already had its one re-run, and connector retries never apply.
     expect(result.retriesCreated).toBe(0);
 
     const row = await runRow(runId);
@@ -4543,7 +4572,7 @@ describe('agent turn reaper', () => {
 
     expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({
       reaped: 1,
-      delivered: 1,
+      delivered: 1, requeued: 0,
     });
     const row = await runRow(run.id);
     expect(row.status).toBe('timeout');
@@ -4563,11 +4592,12 @@ describe('agent turn reaper', () => {
     // why — while leaving the latter untouched.
     const stale = await claimedTurnRun('fleet-stale');
     await loseHeartbeat(stale);
+    await spendRerun(stale);
     const live = await claimedTurnRun('fleet-live');
 
     expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({
       reaped: 1,
-      delivered: 1,
+      delivered: 1, requeued: 0,
     });
     const staleRow = await runRow(stale);
     expect(staleRow.status).toBe('timeout');
@@ -4586,15 +4616,417 @@ describe('agent turn reaper', () => {
     // reaper has nowhere to deliver to, but the row must not wedge the lane.
     const runId = await claimedTurnRun('fleet-unaddressed');
     await loseHeartbeat(runId);
+    await spendRerun(runId);
     const sql = getTestDb();
     await sql`UPDATE runs SET action_input = action_input - 'reply' WHERE id = ${runId}`;
 
     expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({
       reaped: 1,
-      delivered: 0,
+      delivered: 0, requeued: 0,
     });
     expect((await runRow(runId)).status).toBe('timeout');
     expect(await threadResponses()).toHaveLength(0);
+  });
+
+  /** Arm the turn's liveness marker under the deployment the run derives. */
+  async function armMarkerFor(runId: number) {
+    const sql = getTestDb();
+    const [run] = (await sql`SELECT organization_id, action_input FROM runs WHERE id = ${runId}`) as unknown as Array<{
+      organization_id: string;
+      action_input: { turn: { agent_id: string; conversation_id: string; message_id: string }; reply: { user_id: string; platform: string; channel_id: string } };
+    }>;
+    const deploymentName = generateDeploymentName({
+      organizationId: run!.organization_id,
+      agentId: run!.action_input.turn.agent_id,
+      userId: run!.action_input.reply.user_id,
+      platform: run!.action_input.reply.platform,
+      channelId: run!.action_input.reply.channel_id,
+      conversationId: run!.action_input.turn.conversation_id,
+    });
+    const queue = {
+      createQueue: async () => {},
+      send: async (_q: string, body: unknown, opts?: { singletonKey?: string; delayMs?: number }) => {
+        await sql`
+          INSERT INTO runs (organization_id, run_type, queue_name, status, action_input, idempotency_key, run_at)
+          VALUES (${run!.organization_id}, 'internal', 'internal:turn_timeout', 'pending',
+                  ${sql.json(body as Record<string, unknown>)}, ${opts?.singletonKey ?? null},
+                  now() + ${Math.ceil((opts?.delayMs ?? 0) / 1000)} * interval '1 second')
+        `;
+      },
+    };
+    await armTurnTimeout(queue as never, {
+      messageId: run!.action_input.turn.message_id,
+      conversationId: run!.action_input.turn.conversation_id,
+      userId: run!.action_input.reply.user_id,
+      platform: run!.action_input.reply.platform,
+      channelId: run!.action_input.reply.channel_id,
+      deploymentName,
+      organizationId: run!.organization_id,
+    });
+  }
+
+  async function markerSecondsLeft(): Promise<number | null> {
+    const sql = getTestDb();
+    const [row] = (await sql`
+      SELECT EXTRACT(EPOCH FROM (run_at - now()))::int AS left FROM runs
+      WHERE queue_name = 'internal:turn_timeout' AND status = 'pending'
+    `) as unknown as Array<{ left: number }>;
+    return row ? Number(row.left) : null;
+  }
+
+  async function turnRow(runId: number) {
+    const sql = getTestDb();
+    const [row] = (await sql`
+      SELECT status, claimed_by, claimed_at, last_heartbeat_at, run_metadata, error_message
+      FROM runs WHERE id = ${runId}
+    `) as unknown as Array<{
+      status: string;
+      claimed_by: string | null;
+      claimed_at: Date | null;
+      last_heartbeat_at: Date | null;
+      run_metadata: Record<string, unknown> | null;
+      error_message: string | null;
+    }>;
+    return row!;
+  }
+
+  it.each(['api', 'slack'] as const)('re-runs a turn without a stored tool trace on %s', async (platform) => {
+    const workerId = 'fleet-died-early';
+    const runId = await claimedTurnRun(workerId, platform);
+    await armMarkerFor(runId);
+    // The dead attempt streamed part of an answer before it went silent.
+    const partial = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId, worker_id: workerId, turn_delta: { text: 'half an ans', sequence: 1 },
+    });
+    expect(await partial.json()).toMatchObject({ turn_delta_ack: { sequence: 1, published: true } });
+    await loseHeartbeat(runId);
+
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+
+    const requeued = await turnRow(runId);
+    expect(requeued.status).toBe('pending');
+    expect(requeued.claimed_by).toBeNull();
+    expect(requeued.claimed_at).toBeNull();
+    expect(requeued.last_heartbeat_at).toBeNull();
+    expect(requeued.run_metadata?.turn_requeue_count).toBe(1);
+    // The next attempt's worker numbers its deltas from 1 again.
+    expect(requeued.run_metadata?.turn_delta_sequence).toBeUndefined();
+    // No error reached the client: only the partial delta is on the wire.
+    const replies = await threadResponses();
+    expect(replies).toHaveLength(1);
+    expect(replies[0].action_input.error).toBeUndefined();
+    // The marker is back on the admission window, so the re-run waiting for a
+    // worker is not failed as WORKER_UNRESPONSIVE before it is claimed.
+    expect(await markerSecondsLeft()).toBeGreaterThan(intervals.runsReaperStaleAfterSeconds);
+
+    // Claimable again, by any fleet worker.
+    const again = await (await pollFleet('fleet-rerun', { agent_turn: true })).json();
+    expect(again.run_id).toBe(runId);
+
+    // Chat renderers replace the dead attempt's partial text. API clients only
+    // append output events, so their retry waits for the authoritative final.
+    for (const [sequence, text] of [[1, 'the whole'], [2, ' answer']] as const) {
+      const beat = await postAsFleet('/api/workers/heartbeat', {
+        run_id: runId, worker_id: 'fleet-rerun', turn_credential: again.credentials.accessToken, turn_delta: { text, sequence },
+      });
+      expect(await beat.json()).toMatchObject({ turn_delta_ack: { sequence, published: platform !== 'api' } });
+    }
+    const streamed = (await threadResponses()).slice(1).map((row) => row.action_input);
+    expect(streamed.map((row) => [row.delta, row.isFullReplacement])).toEqual(platform === 'api' ? [] : [
+      ['the whole', true],
+      [' answer', false],
+    ]);
+    const completed = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id: 'fleet-rerun', turn_credential: again.credentials.accessToken, status: 'completed',
+      session_jsonl: nativeSession(), text: 'the whole answer',
+    });
+    expect(completed.status).toBe(200);
+    expect((await threadResponses()).at(-1)?.action_input).toMatchObject({ finalText: 'the whole answer' });
+  });
+
+  it('terminalizes a dead turn that already ran a tool, as before', async () => {
+    const workerId = 'fleet-died-after-tool';
+    const runId = await claimedTurnRun(workerId);
+    const beat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId, worker_id: workerId,
+      turn_tool_events: [{ tool_call_id: 'call-1', name: 'search', is_error: false, output: 'ok' }],
+    });
+    expect(await beat.json()).toMatchObject({ turn_tool_ack: { received: 1 } });
+    await loseHeartbeat(runId);
+
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
+    const row = await turnRow(runId);
+    expect(row.status).toBe('timeout');
+    expect(row.error_message).toBe('worker_heartbeat_lost');
+    const errors = (await threadResponses()).filter((reply) => reply.action_input.error);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].action_input).toMatchObject({ errorCode: AgentErrorCode.WORKER_DIED });
+  });
+
+  it('re-runs a dead turn at most once', async () => {
+    const runId = await claimedTurnRun('fleet-first-death');
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+    expect((await (await pollFleet('fleet-second-attempt', { agent_turn: true })).json()).run_id).toBe(runId);
+    await loseHeartbeat(runId);
+
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
+    expect((await turnRow(runId)).status).toBe('timeout');
+    const [reply] = await threadResponses();
+    expect(reply!.action_input).toMatchObject({ errorCode: AgentErrorCode.WORKER_DIED });
+  });
+
+  it('ends a heartbeating turn that outlives the executor timeout, without re-running it', async () => {
+    const runId = await claimedTurnRun('fleet-wedged');
+    const sql = getTestDb();
+    // Heartbeat is fresh — the host interval keeps beating — but the attempt
+    // started longer ago than any healthy execution can last.
+    await sql`
+      UPDATE runs
+      SET claimed_at = now() - ${intervals.isolateTurnTimeoutMs / 1000 + STALE_THRESHOLD_SECONDS + 5} * interval '1 second',
+          last_heartbeat_at = now()
+      WHERE id = ${runId}
+    `;
+
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
+    const row = await turnRow(runId);
+    expect(row.status).toBe('timeout');
+    expect(row.error_message).toBe('turn_max_age_exceeded');
+    const [reply] = await threadResponses();
+    expect(reply!.action_input).toMatchObject({ errorCode: AgentErrorCode.WORKER_UNRESPONSIVE });
+  });
+
+  it('leaves a heartbeating turn inside the executor timeout alone', async () => {
+    const runId = await claimedTurnRun('fleet-slow');
+    const sql = getTestDb();
+    await sql`
+      UPDATE runs
+      SET claimed_at = now() - ${intervals.isolateTurnTimeoutMs / 1000 - 5} * interval '1 second',
+          last_heartbeat_at = now()
+      WHERE id = ${runId}
+    `;
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 0 });
+    expect((await turnRow(runId)).status).toBe('running');
+  });
+
+  /**
+   * The gateway routes a turn's tools reach, mounted as production mounts
+   * them: `authenticateWorker` in front of `/internal/*`, and the MCP proxy's
+   * REST tool route. `effects` counts calls that reached the handler.
+   */
+  function gatewayRoutes() {
+    const effects = vi.fn();
+    const app = new Hono();
+    app.post('/lobu/internal/effect', authenticateWorker, (c) => { effects(); return c.json({ ok: true }); });
+    app.get('/lobu/internal/read', authenticateWorker, (c) => { effects(); return c.json({ ok: true }); });
+    const proxy = new McpProxy({
+      getHttpServer: async (id: string) => ({ id, internal: id === 'lobu', upstreamUrl: 'http://127.0.0.1:9/unreachable' }),
+    } as never, { isReadOnlyLobuTool: isAuthorizationReadOnlyToolName });
+    app.route('/lobu/mcp', proxy.getApp());
+    return { app, effects };
+  }
+
+  async function credentialOf(runId: number): Promise<string> {
+    const sql = getTestDb();
+    const [run] = (await sql`SELECT action_input->>'credential' AS credential FROM runs WHERE id = ${runId}`) as unknown as Array<{ credential: string }>;
+    return run!.credential;
+  }
+
+  function call(app: Hono, method: 'GET' | 'POST', path: string, credential: string, body: unknown = {}) {
+    return app.fetch(new Request(`http://gateway.test${path}`, {
+      method,
+      headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+      ...(method === 'POST' ? { body: JSON.stringify(body) } : {}),
+    }));
+  }
+
+  it.each([
+    ['an internal route', '/lobu/internal/effect', {}],
+    ['an MCP tool', '/lobu/mcp/external/tools/mutate', {}],
+    ['an MCP JSON-RPC tool', '/lobu/mcp/external', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'mutate', arguments: {} } }],
+  ])('never re-runs an attempt whose call to %s reached the gateway but whose trace never arrived', async (_kind, path, body) => {
+    const runId = await claimedTurnRun('fleet-tool-in-flight');
+    const { app } = gatewayRoutes();
+    // The tool acted at the gateway; the worker died before reporting it.
+    await call(app, 'POST', path, await credentialOf(runId), body);
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(true);
+    await loseHeartbeat(runId);
+
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
+    expect((await turnRow(runId)).status).toBe('timeout');
+    const [reply] = await threadResponses();
+    expect(reply!.action_input).toMatchObject({ errorCode: AgentErrorCode.WORKER_DIED });
+  });
+
+  it.each([
+    ['a GET read', 'GET', '/lobu/internal/read'],
+    ['a read-only Lobu memory tool', 'POST', '/lobu/mcp/lobu/tools/search_memory'],
+  ] as const)('still re-runs an attempt that only made %s', async (_kind, method, path) => {
+    const runId = await claimedTurnRun('fleet-read-only');
+    const { app } = gatewayRoutes();
+    await call(app, method, path, await credentialOf(runId));
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+  });
+
+  it('refuses a side-effecting call from an attempt the reaper already re-queued', async () => {
+    const runId = await claimedTurnRun('fleet-zombie');
+    const oldCredential = await credentialOf(runId);
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+    const { app, effects } = gatewayRoutes();
+    // The "dead" worker was only stalled; it comes back and calls a tool while
+    // the re-run is waiting for a worker. Acting now would duplicate it.
+    const response = await call(app, 'POST', '/lobu/internal/effect', oldCredential);
+    expect(response.status).toBe(409);
+    expect(effects).not.toHaveBeenCalled();
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
+  });
+
+  it('fences the old credential after the retry is claimed, while letting the new attempt act', async () => {
+    const runId = await claimedTurnRun('fleet-zombie-after-claim');
+    const oldCredential = await credentialOf(runId);
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+    const retry = await (await pollFleet('fleet-retry-owner', { agent_turn: true })).json();
+    expect(retry.run_id).toBe(runId);
+    expect(retry.credentials.accessToken).not.toBe(oldCredential);
+    const { app, effects } = gatewayRoutes();
+    expect((await call(app, 'POST', '/lobu/internal/effect', oldCredential)).status).toBe(409);
+    expect(effects).not.toHaveBeenCalled();
+    expect((await turnRow(runId)).run_metadata?.turn_tool_started).toBe(false);
+    expect((await call(app, 'POST', '/lobu/internal/effect', retry.credentials.accessToken)).status).toBe(200);
+    expect(effects).toHaveBeenCalledTimes(1);
+  });
+
+  it('fences a stalled attempt\'s late heartbeat and completion after the same worker re-claims the re-run', async () => {
+    const worker_id = 'fleet-same-worker';
+    const runId = await claimedTurnRun(worker_id, 'slack');
+    const oldCredential = await credentialOf(runId);
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+    // The SAME worker id claims the re-run, so `claimed_by` alone cannot tell
+    // the stalled first attempt from the new one.
+    const retry = await (await pollFleet(worker_id, { agent_turn: true })).json();
+    expect(retry.run_id).toBe(runId);
+    const newCredential = retry.credentials.accessToken as string;
+    expect(newCredential).not.toBe(oldCredential);
+
+    const lateBeat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId, worker_id, turn_credential: oldCredential, turn_delta: { text: 'stale span', sequence: 1 },
+    });
+    expect(lateBeat.status).toBe(409);
+    const lateCompletion = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id, turn_credential: oldCredential, status: 'failed', error: 'stale attempt failed',
+    });
+    expect(lateCompletion.status).toBe(409);
+    expect((await turnRow(runId)).status).toBe('running');
+    expect(await threadResponses()).toHaveLength(0);
+
+    const beat = await postAsFleet('/api/workers/heartbeat', { run_id: runId, worker_id, turn_credential: newCredential });
+    expect(await beat.json()).toMatchObject({ continue: true });
+    const done = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id, turn_credential: newCredential, status: 'completed', text: 'the isolate answer', session_jsonl: nativeSession(),
+    });
+    expect(await done.json()).toMatchObject({ ok: true, status: 'completed' });
+    expect((await turnRow(runId)).status).toBe('completed');
+  });
+
+  /** Let the turn's liveness marker lapse, as the provider-failure clamp or an admission deadline would. */
+  async function lapseMarker(extra: Record<string, unknown> = {}) {
+    const sql = getTestDb();
+    await sql`UPDATE runs SET run_at = now() - interval '1 second', action_input = action_input || ${sql.json(extra)}::jsonb
+      WHERE queue_name = 'internal:turn_timeout' AND status = 'pending'`;
+  }
+
+  it('never re-runs a turn whose provider-failure error the marker already showed', async () => {
+    const worker_id = 'fleet-provider-failed';
+    const runId = await claimedTurnRun(worker_id);
+    await armMarkerFor(runId);
+    await lapseMarker({ providerFailed: true, providerFailedCode: AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED });
+    expect(await sweepExpiredTurns()).toBe(1);
+    // The user has been shown the error, so the turn is over: the reaper finds
+    // nothing to re-run even though no tool ran and the heartbeat is lost.
+    expect((await turnRow(runId)).status).toBe('timeout');
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 0 });
+    // A completion the worker sends afterwards is answered by the terminal
+    // handling, and publishes no second reply.
+    const late = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id, status: 'completed', text: 'too late', session_jsonl: nativeSession(),
+    });
+    expect(await late.json()).toMatchObject({ status: 'failed', idempotent: true });
+    const replies = await threadResponses();
+    expect(replies).toHaveLength(1);
+    expect(replies[0]!.action_input).toMatchObject({ errorCode: AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED, turnRunId: runId });
+  });
+
+  it('closes a turn whose admission deadline fired and releases the follower queued behind it', async () => {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id: ownerId } = await (await pollFleet('fleet-admission', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, messageId: 'queued-follower', messageText: 'next question' }, deps);
+    const follower = (await agentTurnRuns())[1]!;
+    expect((await (await pollFleet('fleet-other', { agent_turn: true })).json()).run_id).toBeUndefined();
+    await armMarkerFor(ownerId);
+    await lapseMarker();
+    expect(await sweepExpiredTurns()).toBe(1);
+    expect((await turnRow(ownerId)).status).toBe('timeout');
+    const replies = await threadResponses();
+    expect(replies).toHaveLength(1);
+    expect(replies[0]!.action_input).toMatchObject({ messageId: first.messageId, errorCode: AgentErrorCode.WORKER_UNRESPONSIVE, turnRunId: ownerId });
+    // The follower is claimable now, not stuck behind a turn nobody runs.
+    expect((await (await pollFleet('fleet-other', { agent_turn: true })).json()).run_id).toBe(follower.id);
+  });
+
+  it('never re-runs a turn whose worker never sent its attempt credential (an older worker binary)', async () => {
+    const runId = await claimedTurnRun('fleet-legacy', 'api', { legacy: true });
+    const beat = await postAsFleet('/api/workers/heartbeat', { run_id: runId, worker_id: 'fleet-legacy', turn_tool_events: [] });
+    expect(await beat.json()).toMatchObject({ continue: true });
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
+    expect((await turnRow(runId)).status).toBe('timeout');
+    const [reply] = await threadResponses();
+    expect(reply!.action_input).toMatchObject({ errorCode: AgentErrorCode.WORKER_DIED });
+  });
+
+  it('refuses a credential-less heartbeat and completion for a re-run turn, even from the same worker id', async () => {
+    const worker_id = 'fleet-mixed-version';
+    const runId = await claimedTurnRun(worker_id, 'slack');
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+    const retry = await (await pollFleet(worker_id, { agent_turn: true })).json();
+    expect(retry.run_id).toBe(runId);
+    // An older binary sharing the worker id cannot say which attempt it is.
+    const lateBeat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId, worker_id, turn_delta: { text: 'stale span', sequence: 1 },
+    });
+    expect(lateBeat.status).toBe(409);
+    const lateCompletion = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id, status: 'failed', error: 'stale attempt failed',
+    });
+    expect(lateCompletion.status).toBe(409);
+    expect((await turnRow(runId)).status).toBe('running');
+    expect(await threadResponses()).toHaveLength(0);
+    const done = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id, turn_credential: retry.credentials.accessToken, status: 'completed', text: 'the isolate answer', session_jsonl: nativeSession(),
+    });
+    expect(await done.json()).toMatchObject({ ok: true, status: 'completed' });
+  });
+
+  it('never re-runs a cancelled turn', async () => {
+    const runId = await claimedTurnRun('fleet-cancelled');
+    await loseHeartbeat(runId);
+    const sql = getTestDb();
+    await sql`UPDATE runs SET run_metadata = jsonb_set(run_metadata, '{cancel_requested_at}', to_jsonb(now() - interval '1 hour')) WHERE id = ${runId}`;
+
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
+    expect((await turnRow(runId)).status).toBe('cancelled');
+    const [reply] = await threadResponses();
+    expect(reply!.action_input).toMatchObject({ error: 'agent turn cancelled' });
   });
 
   it('a worker that completes between the candidate read and the timeout wins', async () => {
@@ -4615,7 +5047,7 @@ describe('agent turn reaper', () => {
 
     expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({
       reaped: 0,
-      delivered: 0,
+      delivered: 0, requeued: 0,
     });
     expect((await runRow(runId)).status).toBe('completed');
     // Exactly the reply the worker delivered, no timeout error beside it.

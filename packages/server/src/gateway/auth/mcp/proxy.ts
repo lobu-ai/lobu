@@ -55,6 +55,12 @@ export class McpProxy {
 	readonly agentSettingsStore?: AgentSettingsStore;
 	/** @internal Used by the route-handler modules (proxy-forward, proxy-rest-routes). */
 	readonly guardrailRegistry?: GuardrailRegistry;
+	/**
+	 * @internal The tool registry's authorization read-only classifier for the
+	 * embedded Lobu server, used by `recordAgentTurnToolCall`. Absent means no
+	 * exemption: every agent-turn tool call is recorded.
+	 */
+	readonly isReadOnlyLobuTool?: (toolName: string) => boolean;
 	/** @internal Upstream transport client (sessions, credentials, egress). */
 	readonly upstream: McpUpstreamClient;
 
@@ -66,8 +72,11 @@ export class McpProxy {
 			agentSettingsStore?: AgentSettingsStore;
 			/** Shared registry of guardrails; pre-tool stage entries are queried. */
 			guardrailRegistry?: GuardrailRegistry;
+			/** See `isReadOnlyLobuTool`. */
+			isReadOnlyLobuTool?: (toolName: string) => boolean;
 		},
 	) {
+		this.isReadOnlyLobuTool = options.isReadOnlyLobuTool;
 		this.toolCache = options.toolCache;
 		this.agentSettingsStore = options.agentSettingsStore;
 		this.guardrailRegistry = options.guardrailRegistry;

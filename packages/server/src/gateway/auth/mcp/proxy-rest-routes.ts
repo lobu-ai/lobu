@@ -13,6 +13,7 @@ import {
 	computeScopeKey,
 	getRequestBodyAsText,
 	type JsonRpcResponse,
+	recordAgentTurnToolCall,
 	runWithWorkerOrgContext,
 	upstreamJsonRpcRequest,
 } from "./proxy-shared.js";
@@ -150,6 +151,17 @@ async function handleCallToolAuthenticated(
 			content: [{ type: "text", text: "Tool call blocked by policy." }],
 			isError: true,
 		});
+	}
+	// Recorded before it can act, so a dead turn that made this call is never
+	// re-run (`recordAgentTurnToolCall`).
+	const refused = await recordAgentTurnToolCall(
+		auth.tokenData,
+		httpServer,
+		toolName,
+		proxy.isReadOnlyLobuTool,
+	);
+	if (refused) {
+		return c.json({ content: [], isError: true, error: refused.error }, refused.status);
 	}
 	try {
 		const sessionKey = buildSessionKey(agentId, mcpId, scopeKey);

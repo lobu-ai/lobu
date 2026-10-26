@@ -208,6 +208,8 @@ export class CoreServices {
 		secretStore?: SecretStoreRegistry;
 		providerCredentialResolver?: RuntimeProviderCredentialResolver;
 		stateAdapter?: import("chat").StateAdapter;
+		/** The tool registry's read-only classifier for `McpProxy`. */
+		isReadOnlyLobuTool?: (toolName: string) => boolean;
 	};
 
 	constructor(
@@ -219,6 +221,7 @@ export class CoreServices {
 			secretStore?: SecretStoreRegistry;
 			providerCredentialResolver?: RuntimeProviderCredentialResolver;
 			stateAdapter?: import("chat").StateAdapter;
+			isReadOnlyLobuTool?: (toolName: string) => boolean;
 		},
 	) {
 		this.options = options;
@@ -822,6 +825,7 @@ export class CoreServices {
 			toolCache: mcpToolCache,
 			agentSettingsStore: this.agentSettingsStore,
 			guardrailRegistry: this.guardrailRegistry,
+			isReadOnlyLobuTool: this.options?.isReadOnlyLobuTool,
 		});
 		logger.debug("MCP proxy initialized");
 

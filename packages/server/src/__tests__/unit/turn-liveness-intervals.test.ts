@@ -16,6 +16,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { intervals } from "../../config/intervals.js";
+import { reaperBackstopDeadlineMs } from "../../gateway/orchestration/turn-liveness.js";
 
 describe("turn-liveness intervals", () => {
 	test("the execution deadline clears three heartbeats", () => {
@@ -35,11 +36,20 @@ describe("turn-liveness intervals", () => {
 		);
 	});
 
+	test("an isolate turn's heartbeated marker outlasts the run reaper", () => {
+		// On the isolate lane the reaper decides a dead worker's turn — one
+		// re-run or WORKER_DIED — so the marker the heartbeat holds must not
+		// lapse before the reaper's threshold plus one of its ticks. Otherwise
+		// the client gets WORKER_UNRESPONSIVE for a turn about to run again.
+		expect(reaperBackstopDeadlineMs()).toBeGreaterThan(
+			intervals.runsReaperStaleAfterSeconds * 1000 + intervals.runsReaperTickMs
+		);
+	});
+
 	test("the run reaper does not fire before the turn deadline", () => {
-		// The reaper writes WORKER_DIED and the marker writes WORKER_UNRESPONSIVE.
-		// If the reaper could fire first the two codes would race for the same
-		// condition and the client's error would be arbitrary. Transitively this
-		// is also what keeps the reaper clear of three missed heartbeats.
+		// Lanes that extend on `turnDefaultDeadlineMs` keep the marker as the
+		// first detector. Transitively this is also what keeps the reaper clear
+		// of three missed heartbeats, so it never reaps a live isolate turn.
 		expect(intervals.runsReaperStaleAfterSeconds * 1000).toBeGreaterThan(
 			intervals.turnDefaultDeadlineMs
 		);

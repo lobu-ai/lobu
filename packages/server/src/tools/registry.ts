@@ -761,6 +761,12 @@ export function isAuthorizationReadOnly(tool: ToolDefinition | undefined): boole
   return tool?.authorizationReadOnly ?? (tool?.annotations?.readOnlyHint === true);
 }
 
+/** `isAuthorizationReadOnly` by name; false for a name the registry does not define. */
+export function isAuthorizationReadOnlyToolName(toolName: string): boolean {
+  const tool = getTool(toolName);
+  return tool !== undefined && isAuthorizationReadOnly(tool);
+}
+
 function filterSchemaForAccessLevel(
   toolName: string,
   schema: any,

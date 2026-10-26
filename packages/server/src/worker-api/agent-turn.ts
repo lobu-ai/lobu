@@ -8,15 +8,18 @@ import { logRunFailure } from "../runs/log-run-failure";
  * terminal transition.
  *
  * `sweepStaleAgentTurnRuns` covers the path that never reaches this route: a
- * worker that crashes mid-turn is terminalized by the reaper, which delivers
- * the error the completion route would have.
+ * worker that crashes mid-turn is re-run once if it recorded no tool activity,
+ * otherwise terminalized by the reaper, which delivers the error the
+ * completion route would have.
  */
 import {
 	AGENT_ERRORS,
 	AgentErrorCode,
 	classifyErrorMessage,
 	createLogger,
+	generateWorkerToken,
 	sanitizeSuggestionPrompts,
+	verifyWorkerToken,
 } from "@lobu/core";
 import {
 	type AgentTurnToolEvent,
@@ -37,9 +40,10 @@ import {
 import { MAX_SNAPSHOT_BYTES, transcriptText } from "../gateway/services/transcript-snapshot";
 import type { Env } from "../index";
 import { incrementCounter } from "../gateway/metrics/prometheus";
+import { intervals } from "../config/intervals";
 import { runLeaseFence } from "../runs/run-lease";
 import { classifyRunOutcome } from "../runs/run-outcome";
-import { insertAgentTurnResponse, agentTurnClaimEligible, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, type NativeTurnRun } from "../runs/agent-turn-inputs";
+import { AGENT_TURN_MAX_REQUEUES, insertAgentTurnResponse, agentTurnClaimEligible, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs, releaseNextAgentTurn, resetAgentTurnAdmission, type NativeTurnRun } from "../runs/agent-turn-inputs";
 import { errorMessage } from "../utils/errors";
 import { stripNul } from "../utils/strip-nul";
 import { authorizeRunForWorker } from "./shared";
@@ -228,12 +232,14 @@ type TurnDeltaOutcome = { published: boolean };
 async function publishTurnDelta(
 	runId: number,
 	workerId: string,
-	delta: { text: string; sequence: number }
+	delta: { text: string; sequence: number },
+	turnCredential?: string
 ): Promise<TurnDeltaOutcome> {
 	const sql = getDb();
 	const emitted = await sql.begin(async (tx) => {
 		const owner = await lockAgentTurnRun(tx, runId);
-		if (!owner || owner.run_metadata?.cancel_requested_at) return false;
+		if (!owner || owner.run_metadata?.cancel_requested_at
+			|| isStaleAgentTurnReport(owner, turnCredential)) return false;
 		// One statement, fenced on the lease, so a run cancelled or re-claimed
 		// between the read and the write cannot have a stale worker's text
 		// published into its conversation. The sequence is kept on the
@@ -269,6 +275,16 @@ async function publishTurnDelta(
 		const envelope = row.action_input ?? {};
 		const reply = envelope.reply;
 		if (!reply) return false;
+		// API output events only append; neither the renderer nor the SPA supports
+		// isFullReplacement. Retire retry deltas without publishing them and let
+		// the authoritative completion replace the dead attempt's partial text.
+		if (reply.platform === 'api' && (owner.run_metadata?.turn_requeue_count ?? 0) > 0) return false;
+		// The first span of a re-run (`sweepStaleAgentTurnRuns` put the turn back
+		// after its worker died) starts the reply over: the dead attempt's partial
+		// text is already on the wire, and appending to it would glue two answers
+		// together. Read off the row locked above, before this UPDATE moved it.
+		const restartsReply = (owner.run_metadata?.turn_requeue_count ?? 0) > 0
+			&& owner.run_metadata?.turn_delta_sequence === undefined;
 		await insertThreadResponseRow(
 			tx,
 			{
@@ -282,8 +298,8 @@ async function publishTurnDelta(
 				platformMetadata: reply.platform_metadata,
 				delta: delta.text,
 				// Incremental: this span CONTINUES the reply, it does not restate
-				// it. The renderers append.
-				isFullReplacement: false,
+				// it. The renderers append — except after a re-run's restart.
+				isFullReplacement: restartsReply,
 				timestamp: Date.now(),
 			},
 			row.organization_id
@@ -327,13 +343,15 @@ async function publishTurnDelta(
 async function publishTurnToolEvents(
 	runId: number,
 	workerId: string,
-	events: readonly AgentTurnToolEvent[]
+	events: readonly AgentTurnToolEvent[],
+	turnCredential?: string
 ): Promise<number> {
 	if (events.length === 0) return 0;
 	const sql = getDb();
 	const stored = await sql.begin(async (tx) => {
 		const owner = await lockAgentTurnRun(tx, runId);
-		if (!owner || owner.run_metadata?.cancel_requested_at) return 0;
+		if (!owner || owner.run_metadata?.cancel_requested_at
+			|| isStaleAgentTurnReport(owner, turnCredential)) return 0;
 		const rows = (await tx`
       SELECT action_input, organization_id
       FROM public.runs
@@ -360,13 +378,22 @@ async function publishTurnToolEvents(
 		const repliesByInputRunId = new Map<number, TurnReply>(
 			offered.map((input) => [input.run_id, { ...reply, message_id: input.message_id }]),
 		);
-		return insertTurnToolEventRows(tx, {
+		const stored = await insertTurnToolEventRows(tx, {
 			reply,
 			conversationId: String(envelope.turn?.conversation_id ?? ""),
 			organizationId: row.organization_id,
 			events,
 			repliesByInputRunId,
 		});
+		// Committed with the traces. The gateway already stamped this for any
+		// side-effecting call (`markAgentTurnToolStarted`); a stored trace is
+		// the same evidence for a tool that reached no gateway route.
+		if (stored > 0 && owner.run_metadata?.turn_tool_started !== true) {
+			await tx`UPDATE public.runs
+        SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"turn_tool_started": true}'::jsonb
+        WHERE id = ${runId}`;
+		}
+		return stored;
 	});
 	if (stored) await notifyThreadResponse();
 	return stored;
@@ -563,10 +590,11 @@ async function insertTurnToolEventRows(
 export async function publishTurnToolEventsBestEffort(
 	runId: number,
 	workerId: string,
-	events: readonly AgentTurnToolEvent[]
+	events: readonly AgentTurnToolEvent[],
+	turnCredential?: string
 ): Promise<number | undefined> {
 	try {
-		return await publishTurnToolEvents(runId, workerId, events);
+		return await publishTurnToolEvents(runId, workerId, events, turnCredential);
 	} catch (err) {
 		incrementCounter("lobu_turn_tool_event_publish_failed_total");
 		logger.debug(
@@ -604,10 +632,11 @@ let lastDeltaFailureLogAt = 0;
 export async function publishTurnDeltaBestEffort(
 	runId: number,
 	workerId: string,
-	delta: { text: string; sequence: number }
+	delta: { text: string; sequence: number },
+	turnCredential?: string
 ): Promise<TurnDeltaOutcome | undefined> {
 	try {
-		return await publishTurnDelta(runId, workerId, delta);
+		return await publishTurnDelta(runId, workerId, delta, turnCredential);
 	} catch (err) {
 		incrementCounter("lobu_turn_delta_publish_failed_total");
 		const now = Date.now();
@@ -644,12 +673,14 @@ export async function publishTurnDeltaBestEffort(
  */
 async function publishTurnStatus(
 	runId: number,
-	workerId: string
+	workerId: string,
+	turnCredential?: string
 ): Promise<void> {
 	const sql = getDb();
 	const emitted = await sql.begin(async (tx) => {
 		const owner = await lockAgentTurnRun(tx, runId);
-		if (!owner || owner.run_metadata?.cancel_requested_at) return false;
+		if (!owner || owner.run_metadata?.cancel_requested_at
+			|| isStaleAgentTurnReport(owner, turnCredential)) return false;
 		const rows = (await tx`
       SELECT action_input, organization_id, claimed_at
       FROM public.runs
@@ -699,10 +730,11 @@ async function publishTurnStatus(
 /** Never let a status publish fail the heartbeat that carried it. */
 export async function publishTurnStatusBestEffort(
 	runId: number,
-	workerId: string
+	workerId: string,
+	turnCredential?: string
 ): Promise<void> {
 	try {
-		await publishTurnStatus(runId, workerId);
+		await publishTurnStatus(runId, workerId, turnCredential);
 	} catch (err) {
 		incrementCounter("lobu_turn_status_publish_failed_total");
 		logger.debug(
@@ -853,6 +885,12 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     const run = await lockAgentTurnRun(tx, body.run_id, true);
     if (!run) return { error: 'Agent turn run not found', code: 404 as const };
     if (run.claimed_by !== body.worker_id) return { error: 'Run is not owned by this worker', code: 409 as const };
+    // Before the terminal checks: a stalled attempt's late report must not
+    // terminalize (or be acknowledged against) the attempt that re-claimed the
+    // run under the same worker id.
+    if (isStaleAgentTurnReport(run, body.turn_credential)) {
+      return { error: 'This agent turn attempt no longer owns the run', code: 409 as const };
+    }
     if (!['claimed', 'running', 'pending'].includes(run.status)) {
       const terminal = run.status === 'completed' ? 'completed' : run.status === 'cancelled' ? 'cancelled' : 'failed';
       // Exact-retry idempotence, checked BEFORE any new-write/seal work: the
@@ -1046,32 +1084,88 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
   return c.json({ ok: true, status: result.status, ...(result.idempotent ? { idempotent: true } : {}) });
 }
 
-/** Reap only ready startup work or expired owners; blocked followers have no startup deadline. */
-export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise<{ reaped: number; delivered: number }> {
+/**
+ * Reap only ready startup work or expired owners; blocked followers have no
+ * startup deadline.
+ *
+ * An owner expires three ways, each decided once here:
+ *  - a cancel the worker never acknowledged ends `cancelled`;
+ *  - an attempt still beating past the gateway's execution cap plus the
+ *    staleness threshold ends `timeout` / WORKER_UNRESPONSIVE. The worker's beat is a
+ *    host interval that keeps firing when the turn itself is wedged, so
+ *    heartbeat age alone never ends such a turn. This path is terminal;
+ *  - a lost heartbeat marks the worker stale. If that attempt recorded no tool
+ *    activity and the turn has not been re-run yet, it goes back to `pending`
+ *    for one fresh attempt instead of an error, starting from the same stored
+ *    snapshot. Gateway side-effect admission and worker receipts both count. Otherwise
+ *    `timeout` / WORKER_DIED as before.
+ */
+export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise<{ reaped: number; delivered: number; requeued: number }> {
   const sql = getDb();
+  const maxAgeSeconds = intervals.isolateTurnTimeoutMs / 1000 + thresholdSeconds;
+  const overAge = (tx: DbClient) => tx`r.claimed_at < now() - ${maxAgeSeconds} * interval '1 second'`;
+  const heartbeatLost = (tx: DbClient) => tx`COALESCE(r.last_heartbeat_at, r.claimed_at, r.created_at) < now() - ${thresholdSeconds} * interval '1 second'`;
   const stale = (tx: DbClient) => tx`r.run_type = 'agent_turn' AND (
     (r.status = 'pending' AND r.approval_status <> 'pending' AND ${agentTurnClaimEligible(tx)}
       AND r.run_at < now() - ${thresholdSeconds} * interval '1 second')
-    OR (r.status IN ('claimed', 'running') AND CASE
+    OR (r.status IN ('claimed', 'running') AND (CASE
       WHEN r.run_metadata->>'cancel_requested_at' IS NOT NULL
       THEN (r.run_metadata->>'cancel_requested_at')::timestamptz < now() - ${thresholdSeconds} * interval '1 second'
-      ELSE COALESCE(r.last_heartbeat_at, r.claimed_at, r.created_at) < now() - ${thresholdSeconds} * interval '1 second'
-    END)
+      ELSE ${heartbeatLost(tx)}
+    END OR ${overAge(tx)}))
   )`;
   const candidates = await sql<{ id: number }>`SELECT r.id FROM runs r WHERE ${stale(sql)} ORDER BY r.id LIMIT 100`;
   let reaped = 0;
   let delivered = 0;
+  let requeued = 0;
   for (const candidate of candidates) {
     const result = await sql.begin(async (tx) => {
       const run = await lockAgentTurnRun(tx, Number(candidate.id), true);
       if (!run) return null;
+      // Heartbeat loss takes precedence over age; only a turn still beating
+      // past the cap is classified as wedged.
+      const [state] = await tx<{ wedged: boolean }>`SELECT COALESCE(${overAge(tx)} AND NOT ${heartbeatLost(tx)}, false) AS wedged
+        FROM runs r WHERE r.id = ${run.id} AND ${stale(tx)}`;
+      if (!state) return null;
       const cancelled = !!run.run_metadata?.cancel_requested_at;
       const neverClaimed = run.status === 'pending';
-      const code = neverClaimed ? AgentErrorCode.WORKER_STARTUP_FAILED : AgentErrorCode.WORKER_DIED;
+      const wedged = !cancelled && !neverClaimed && state.wedged;
+      const claims = run.action_input?.credential ? verifyWorkerToken(run.action_input.credential) : null;
+      // The flag is stamped `false` at claim and `true` by the gateway before
+      // any side-effecting call this attempt made, and by a stored trace. An
+      // absent flag (claimed before it existed) is unknown and terminal.
+      // A worker that never sent its `turn_credential` (an older binary) cannot
+      // be fenced from the attempt that would replace it, so it is not re-run.
+      const rerun = !cancelled && !neverClaimed && !wedged
+        && run.run_metadata?.turn_tool_started === false
+        && run.run_metadata?.turn_credential_proven === true
+        && (run.run_metadata?.turn_requeue_count ?? 0) < AGENT_TURN_MAX_REQUEUES;
+      if (rerun && claims) {
+        // The run keeps its id, so it stays ahead of the followers queued
+        // behind it; nothing is released and nothing is delivered. Its worker
+        // numbers deltas from 1 again, so the delta fence is cleared too.
+        // A stalled old worker may resume even after the next claim. Rotate
+        // the signed identity atomically so its tools cannot act in that attempt.
+        const credential = generateWorkerToken(claims.userId, claims.conversationId, claims.deploymentName, claims);
+        const rows = await tx`UPDATE runs r SET status = 'pending', run_at = now(),
+            claimed_at = NULL, claimed_by = NULL, last_heartbeat_at = NULL,
+            action_input = jsonb_set(r.action_input, '{credential}', to_jsonb(${credential}::text)),
+            run_metadata = (COALESCE(r.run_metadata, '{}'::jsonb) - 'turn_delta_sequence')
+              || jsonb_build_object('turn_requeue_count', COALESCE((r.run_metadata->>'turn_requeue_count')::int, 0) + 1)
+          WHERE r.id = ${run.id} AND ${stale(tx)}
+            AND r.run_metadata->>'turn_tool_started' = 'false'
+            AND r.run_metadata->>'turn_credential_proven' = 'true' RETURNING r.id`;
+        if (!rows.length) return null;
+        await resetAgentTurnAdmission(tx, run);
+        return 'requeued' as const;
+      }
+      const code = neverClaimed ? AgentErrorCode.WORKER_STARTUP_FAILED
+        : wedged ? AgentErrorCode.WORKER_UNRESPONSIVE : AgentErrorCode.WORKER_DIED;
       const status = cancelled ? 'cancelled' : 'timeout';
       const rows = await tx`UPDATE runs r SET status = ${status}, completed_at = now(),
         outcome = ${classifyRunOutcome({ status })}, exit_reason = ${cancelled ? 'cancelled' : 'timeout'},
-        error_message = ${cancelled ? 'agent turn cancelled' : neverClaimed ? 'worker_claim_timeout' : 'worker_heartbeat_lost'}
+        error_message = ${cancelled ? 'agent turn cancelled' : neverClaimed ? 'worker_claim_timeout'
+          : wedged ? 'turn_max_age_exceeded' : 'worker_heartbeat_lost'}
         WHERE r.id = ${run.id} AND ${stale(tx)} RETURNING r.id`;
       if (!rows.length) return null;
       await releaseNextAgentTurn(tx, run);
@@ -1081,9 +1175,15 @@ export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise
       });
     });
     if (result === null) continue;
+    if (result === 'requeued') {
+      requeued++;
+      incrementCounter('lobu_agent_turn_requeued_total');
+      logger.warn({ runId: Number(candidate.id) }, 'Agent turn heartbeat lost without recorded tool activity; re-running the turn');
+      continue;
+    }
     reaped++;
     if (result) delivered++;
   }
   if (delivered) await notifyThreadResponse();
-  return { reaped, delivered };
+  return { reaped, delivered, requeued };
 }

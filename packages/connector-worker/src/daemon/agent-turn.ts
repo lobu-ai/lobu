@@ -29,7 +29,7 @@ import type {
 } from '../agent-turn/types.js';
 import { selectExecutor } from '../executor/select.js';
 import type { ExecutorConfig } from './executor.js';
-import { type ExecutorClient, trimTrailingSlashes } from './client.js';
+import { type ExecutorClient, trimTrailingSlashes, WorkerHttpError } from './client.js';
 import { log } from './log.js';
 import { completeAgentTurnOnce } from './terminal-delivery.js';
 
@@ -68,11 +68,16 @@ export async function executeAgentTurnRun(
   const runId = job.run_id;
   if (!runId) return { itemsCollected: 0, error: 'agent turn run missing its run id' };
 
+  // The attempt identity every report carries: the gateway refuses (409) a
+  // report whose credential no longer names the run's current attempt, which is
+  // how a stalled attempt learns the reaper re-queued its turn.
+  const turnCredential = job.credentials?.accessToken;
   const fail = async (error: string, trailing?: AgentTurnToolEvent[]) => {
     try {
       const receipt = await completeAgentTurnOnce(client, {
         run_id: runId,
         worker_id: client.id,
+        ...(turnCredential ? { turn_credential: turnCredential } : {}),
         status: 'failed',
         error,
         // Whatever evidence was retained rides the failure, so the server holds
@@ -188,7 +193,8 @@ export async function executeAgentTurnRun(
         { items_collected_so_far: deltaSequence },
         undefined,
         batch ?? undefined,
-        traces.length > 0 ? traces : undefined
+        traces.length > 0 ? traces : undefined,
+        turnCredential
       );
       // Retire the batch only on a positive ack for ITS sequence. `published:
       // false` is an ack too — an already-passed sequence is an answer, and
@@ -215,6 +221,7 @@ export async function executeAgentTurnRun(
       // Whatever is still queued when the turn ends rides the completion,
       // which is the one write that cannot lose the lease fence to itself.
       log.debug('[agent-turn] delta beat failed:', err);
+      stopIfSuperseded(err);
     } finally {
       // Anything this beat could not retire goes back to the front of the
       // queue: it is older than whatever arrived while the beat was in flight.
@@ -279,12 +286,15 @@ export async function executeAgentTurnRun(
   const heartbeat = setInterval(() => {
     if (sending || inFlight || pending || toolEvents.length > 0) return;
     void client
-      .heartbeat(runId, { items_collected_so_far: deltaSequence })
+      .heartbeat(runId, { items_collected_so_far: deltaSequence }, undefined, undefined, undefined, turnCredential)
       .then((ack) => {
         if (ack?.continue === false) stopTurn(ack.stop_reason);
         queueSteering(ack?.steer);
       })
-      .catch((err) => log.debug('[agent-turn] heartbeat failed:', err));
+      .catch((err) => {
+        log.debug('[agent-turn] heartbeat failed:', err);
+        stopIfSuperseded(err);
+      });
   }, cfg.heartbeatIntervalMs);
   // The heartbeat's answer is the gateway's only way to reach a turn in
   // flight. `continue: false` means the human cancelled: the guest is torn
@@ -311,6 +321,12 @@ export async function executeAgentTurnRun(
     if (cancel.signal.aborted) return;
     log.info(`[agent-turn] run ${runId} stopping: ${reason ?? 'the gateway said stop'}`);
     cancel.abort();
+  };
+  // A 409 on a beat means this attempt no longer owns the run: the reaper
+  // re-queued it, or another claim holds it. Spending the rest of the turn
+  // would only produce output the gateway refuses, so stop like a cancel.
+  const stopIfSuperseded = (err: unknown) => {
+    if (err instanceof WorkerHttpError && err.status === 409) stopTurn('this attempt no longer owns the run');
   };
   /**
    * Latch receipt-capacity overflow and stop the turn. The queue itself stays
@@ -602,6 +618,7 @@ export async function executeAgentTurnRun(
     const receipt = await completeAgentTurnOnce(client, {
       run_id: runId,
       worker_id: client.id,
+      ...(turnCredential ? { turn_credential: turnCredential } : {}),
       status: 'completed',
       text: result.turn.text,
       ...(trailingTraces.length ? { turn_tool_events: trailingTraces } : {}),

@@ -31,7 +31,7 @@ import {
   extendTurnDeadlines,
   hasLiveTurnForMessage,
 } from "../orchestration/turn-liveness.js";
-import { turnMarkerDeploymentFromClaims } from "../orchestration/deployment-identity.js";
+import { agentTurnRunIdFromClaims, turnMarkerDeploymentFromClaims } from "../orchestration/deployment-identity.js";
 import type { InstructionService } from "../services/instruction-service.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { createTranscriptRoutes } from "./transcript-routes.js";
@@ -655,7 +655,8 @@ export class WorkerGateway {
    * is the load-bearing invariant: it closes the cross-turn leak where a still-
    * valid token from a COMPLETED turn refreshes off a later, unrelated turn's
    * liveness on the same deployment. Expired (verifyWorkerToken) and jti-revoked
-   * tokens are rejected before the gate; the fresh token gets its own jti.
+   * tokens are rejected before the gate. Agent-turn tokens keep their attempt's
+   * jti across refresh; the reaper rotates it only when starting a new attempt.
    * Legacy direct-enqueue tokens (no runId/messageId → no marker) are denied.
    */
   private async handleTokenRefresh(c: Context): Promise<Response> {
@@ -706,8 +707,12 @@ export class WorkerGateway {
       return c.json({ error: "No live turn for token" }, 403);
     }
 
-    // Mint a fresh token with identical claims (fresh timestamp + new jti).
-    const refreshed = generateWorkerToken(
+    // An agent-turn jti identifies its attempt. Refresh must preserve it so
+    // tool admission still recognizes this worker, while an old attempt's
+    // refreshed token remains fenced out after the reaper rotates the identity.
+    const refreshed = agentTurnRunIdFromClaims(tokenData) !== undefined
+      ? encrypt(JSON.stringify({ ...tokenData, timestamp: Date.now() }))
+      : generateWorkerToken(
       tokenData.userId,
       tokenData.conversationId,
       tokenData.deploymentName,

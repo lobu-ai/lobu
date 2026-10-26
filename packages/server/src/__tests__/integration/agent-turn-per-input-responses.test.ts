@@ -145,7 +145,7 @@ async function inputScenario(): Promise<InputScenario> {
   await enqueueMessage(first);
   const [owner] = await agentTurnRuns();
   const worker_id = 'fleet-per-input';
-  await (await pollFleet(worker_id, { agent_turn: true })).json();
+  const claim = await (await pollFleet(worker_id, { agent_turn: true })).json();
   for (const [index, text] of ['same text', 'same text'].entries()) {
     await enqueueAgentTurn(await admittedMessage({ ...first, messageId: `input-${index}`, messageText: text }), deps);
   }
@@ -159,7 +159,7 @@ async function inputScenario(): Promise<InputScenario> {
     })),
   ];
   const body = {
-    run_id: owner.id, worker_id, status: 'completed',
+    run_id: owner.id, worker_id, turn_credential: claim.credentials.accessToken as string, status: 'completed',
     // Deliberately vague prose: the durable record must still carry the exact
     // connector error and the actual tool ledger, not the paraphrase.
     text: 'Owner answer with authorization issues.',
@@ -480,8 +480,10 @@ describe('agent turn per-input responses', () => {
 
   it('a reaped turn and a late completion produce exactly one terminal', async () => {
     const { body } = await inputScenario();
-    // The worker dies mid-turn; the stale sweep terminalizes the owner. A
-    // threshold of zero treats the just-claimed heartbeat as lapsed.
+    // The worker dies mid-turn after its one re-run; the stale sweep
+    // terminalizes the owner. A threshold of zero treats the just-claimed
+    // heartbeat as lapsed.
+    await getTestDb()`UPDATE runs SET run_metadata = run_metadata || '{"turn_requeue_count": 1}'::jsonb WHERE id = ${body.run_id}`;
     const swept = await sweepStaleAgentTurnRuns(0);
     expect(swept.reaped).toBeGreaterThanOrEqual(1);
     expect(await threadResponseRows()).toHaveLength(1);

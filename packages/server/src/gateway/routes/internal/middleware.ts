@@ -1,5 +1,6 @@
 import { verifyWorkerToken } from "@lobu/core";
 import { getRevokedTokenStore } from "../../auth/revoked-token-store.js";
+import { markAgentTurnToolStarted, StaleAgentTurnAttemptError } from "../../../runs/agent-turn-inputs.js";
 import {
   CHAT_SENDER_NOT_LINKED,
   isConfinedChatTurn,
@@ -39,6 +40,19 @@ export const authenticateWorker = async (
   // thread and nothing more (orchestration/chat-turn-actor.ts).
   if (CONFINED_CHAT_DENIED_ROUTES.has(route) && isConfinedChatTurn(tokenData)) {
     return c.json({ error: CHAT_SENDER_NOT_LINKED }, 403);
+  }
+  // An agent turn's side-effecting call is recorded before it can act, so the
+  // reaper never re-runs a dead attempt that made it (runs/agent-turn-inputs).
+  // Reads are GET; anything else may have an effect, unknown routes included.
+  if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+    try {
+      await markAgentTurnToolStarted(tokenData);
+    } catch (error) {
+      if (error instanceof StaleAgentTurnAttemptError) {
+        return c.json({ error: error.message }, 409);
+      }
+      return c.json({ error: "Could not record the tool call for this turn; it was not executed" }, 503);
+    }
   }
   c.set("worker", tokenData);
   await next();

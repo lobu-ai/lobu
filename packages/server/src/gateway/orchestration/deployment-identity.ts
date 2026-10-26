@@ -191,6 +191,29 @@ export function turnMarkerDeploymentFromClaims(
   });
 }
 
+/**
+ * The scope an agent turn's credential is minted under (`mintTurnToken`):
+ * per input message, never the conversation deployment.
+ */
+export function agentTurnTokenScope(messageId: string): string {
+  return `agent-turn:${messageId}`;
+}
+
+/**
+ * The `agent_turn` run a VERIFIED worker token is the credential of, or
+ * undefined for any other token. Only a token minted under its own message's
+ * {@link agentTurnTokenScope} names a turn; `runId` on any other token means
+ * something else (an Automation execution, a connector run).
+ */
+export function agentTurnRunIdFromClaims(
+  claims: Pick<WorkerTokenData, "deploymentName" | "messageId" | "runId">
+): number | undefined {
+  if (!claims.messageId || typeof claims.runId !== "number") return undefined;
+  return claims.deploymentName === agentTurnTokenScope(claims.messageId)
+    ? claims.runId
+    : undefined;
+}
+
 /** Check if an env var name looks like a secret (API key / token / secret / password). */
 export function isSecretEnvVar(
   name: string,

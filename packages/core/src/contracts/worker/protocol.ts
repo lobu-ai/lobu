@@ -1105,6 +1105,18 @@ export const AGENT_TURN_INPUT_MAX = 32;
 export const CompleteAgentTurnRequestSchema = Type.Object({
   run_id: Type.Integer(),
   worker_id: Type.String(),
+  /**
+   * The agent turn credential this attempt was claimed with (the poll's
+   * `credentials.accessToken`, or its refresh). The server accepts the report
+   * only while it names the run's current attempt (`isCurrentAgentTurnAttempt`
+   * in the server): after a requeue, a stalled attempt re-claimed under the
+   * same worker id is refused with 409 and must stop the turn. Once a turn
+   * has been re-run, a report without it is refused too, and an attempt whose
+   * heartbeats never carry it is not re-run when its worker dies.
+   */
+  turn_credential: Type.Optional(
+    Type.String({ minLength: 1, maxLength: 65_536 })
+  ),
   status: Type.Union([Type.Literal("completed"), Type.Literal("failed")]),
   text: Type.Optional(Type.String()),
   stop_reason: Type.Optional(Type.Union([Type.String(), Type.Null()])),
@@ -1277,6 +1289,18 @@ export const AGENT_TURN_BRIDGE_BYTES = 32 * 1024 * 1024;
 export const HeartbeatRequestSchema = Type.Object({
   run_id: Type.Integer(),
   worker_id: Type.String(),
+  /**
+   * The agent turn credential this attempt was claimed with (the poll's
+   * `credentials.accessToken`, or its refresh). The server accepts the report
+   * only while it names the run's current attempt (`isCurrentAgentTurnAttempt`
+   * in the server): after a requeue, a stalled attempt re-claimed under the
+   * same worker id is refused with 409 and must stop the turn. Once a turn
+   * has been re-run, a report without it is refused too, and an attempt whose
+   * heartbeats never carry it is not re-run when its worker dies.
+   */
+  turn_credential: Type.Optional(
+    Type.String({ minLength: 1, maxLength: 65_536 })
+  ),
   /** Durable checkpoint written before the first prompt in a new ACP session. */
   agent_session: Type.Optional(
     Type.Object({

@@ -19,6 +19,7 @@ import {
   generateWorkerToken,
   verifyWorkerToken,
 } from "@lobu/core";
+import { intervals } from "../../config/intervals.js";
 import { getDb } from "../../db/client.js";
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import {
@@ -506,6 +507,27 @@ describe("turn-liveness", () => {
     expect(rows[0]?.flag).toBe("true");
     expect(rows[0]?.code).toBe("PROVIDER_QUOTA_EXHAUSTED");
     expect(rows[0]?.reason).toBe("qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED");
+  });
+
+  test("PF5: a provider failure caps a longer backstop deadline at the execution window", async () => {
+    // The isolate lane's heartbeat keeps its marker on the long reaper-backstop
+    // deadline (`extendHeartbeatedTurnMarker`). A wedged provider-failed turn
+    // must still be told within one execution window, not that whole horizon.
+    await armTurnTimeout(queue, routing("dep-pf5", "m"));
+    await markTurnProviderFailed(
+      "dep-pf5",
+      AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED,
+      "qwen: HTTP 429 — PROVIDER_QUOTA_EXHAUSTED"
+    );
+    const rows = (await getDb()`
+      SELECT EXTRACT(EPOCH FROM (run_at - now()))::int AS left
+      FROM public.runs
+      WHERE queue_name = ${TURN_TIMEOUT_QUEUE}
+        AND action_input->>'deploymentName' = 'dep-pf5'
+    `) as Array<{ left: number }>;
+    expect(Number(rows[0]?.left)).toBeLessThanOrEqual(
+      Math.ceil(intervals.turnDefaultDeadlineMs / 1000)
+    );
   });
 
   test("marker key is globally unique: same messageId in two deployments is isolated", async () => {

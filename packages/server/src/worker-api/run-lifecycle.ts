@@ -7,7 +7,7 @@
  * poll-auth-signal.
  */
 
-import { extendHeartbeatedTurnMarker, lockAgentTurnRun, pendingAgentTurnInputs } from '../runs/agent-turn-inputs';
+import { extendHeartbeatedTurnMarker, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs, recordAgentTurnCredentialProven } from '../runs/agent-turn-inputs';
 import { isSourceFeedRead } from '../lib/device-feed-read-protocol';
 import type {
 	CompleteActionRequest,
@@ -289,7 +289,7 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 		// batch is re-sent instead of lost; `undefined` here (the publish threw)
 		// deliberately produces no ack.
 		const turnDeltaAck = turn_delta
-			? await publishTurnDeltaBestEffort(run_id, worker_id, turn_delta)
+			? await publishTurnDeltaBestEffort(run_id, worker_id, turn_delta, body.turn_credential)
 			: undefined;
 		// Tool traces ride the same beat. Unlike the liveness signal itself they
 		// ARE acknowledged: `turn_tool_ack.received` names how many of the sent
@@ -301,7 +301,8 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 			? await publishTurnToolEventsBestEffort(
 				run_id,
 				worker_id,
-				turn_tool_events
+				turn_tool_events,
+				body.turn_credential
 			)
 			: undefined;
 		const ackBody: Pick<HeartbeatResponse, "turn_delta_ack" | "turn_tool_ack"> =
@@ -355,7 +356,11 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 		if (!updated.length) {
 			({ updated, steer, cancelRequested } = await sql.begin(async (tx) => {
 				const nativeRun = await lockAgentTurnRun(tx, run_id);
-				const updated = nativeRun ? await updateHeartbeat(tx, false) : [];
+				// The reaper can rotate the credential after request admission. Check
+				// while holding its row lock, before writes or steering this attempt.
+				const current = nativeRun && !isStaleAgentTurnReport(nativeRun, body.turn_credential);
+				const updated = current ? await updateHeartbeat(tx, false) : [];
+				if (updated.length > 0 && nativeRun) await recordAgentTurnCredentialProven(tx, nativeRun, body.turn_credential);
 				const owned = updated.length > 0 && nativeRun;
 				const cancelRequested = !!owned && !!nativeRun.run_metadata?.cancel_requested_at;
 				return { updated, cancelRequested, steer: owned && !cancelRequested ? await pendingAgentTurnInputs(tx, nativeRun) : [] };
@@ -371,7 +376,7 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 		// isolate lane does not use. `extendTurnDeadlines` never throws and skips a
 		// provider-failed turn, so a wedged run still lapses into the backstop.
 		if (updated.some((row) => row.run_type === 'agent_turn')) {
-			void extendHeartbeatedTurnMarker(run_id);
+			void extendHeartbeatedTurnMarker(run_id, body.turn_credential);
 			// A beat carrying neither text nor a tool trace is the SILENT case —
 			// thinking, or a tool still running. That is most of a long turn, and
 			// with no signal at all it looks exactly like a dead worker to the
@@ -385,7 +390,7 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 			const beatWasSilent =
 				body.turn_delta === undefined && body.turn_tool_events === undefined;
 			if (beatWasSilent) {
-				void publishTurnStatusBestEffort(run_id, worker_id);
+				void publishTurnStatusBestEffort(run_id, worker_id, body.turn_credential);
 			}
 		}
 		if (updated.length === 0) {

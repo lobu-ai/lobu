@@ -147,6 +147,11 @@ function initializeMetrics() {
     "Agent-turn liveness-status publishes that failed on the worker heartbeat path",
     "counter"
   );
+  registerMetric(
+    "lobu_agent_turn_requeued_total",
+    "Agent turns re-run by the stale-run reaper without recorded tool activity",
+    "counter"
+  );
   // A conversation whose native session outgrew the snapshot cap. Trimmed to
   // its latest compaction when it has one (no context lost), reset otherwise.
   // Both rare by design; a rising rate says the cap or the tool-result sizes

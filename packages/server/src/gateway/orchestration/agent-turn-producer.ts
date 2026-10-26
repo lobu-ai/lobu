@@ -73,6 +73,7 @@ import {
   resolveChatTurnActor,
 } from "./chat-turn-actor.js";
 import { buildWorkerTokenClaims } from "./worker-token-claims.js";
+import { agentTurnTokenScope } from "./deployment-identity.js";
 
 const logger = createLogger("agent-turn-producer");
 
@@ -589,7 +590,7 @@ export async function mintTurnToken(data: MessagePayload, runId: number, runtime
   return generateWorkerToken(
     data.userId,
     data.conversationId,
-    `agent-turn:${data.messageId}`,
+    agentTurnTokenScope(data.messageId),
     {
       ...claims,
       ...(actor?.actorUserId ? { actorUserId: actor.actorUserId } : {}),

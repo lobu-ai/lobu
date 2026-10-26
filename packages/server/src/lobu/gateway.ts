@@ -339,7 +339,10 @@ export function createLobuOrgContextMiddleware() {
  * Initialize the embedded Lobu gateway.
  * Returns the Hono app to mount, or null if DATABASE_URL is not configured.
  */
-export async function initLobuGateway(): Promise<Hono | null> {
+export async function initLobuGateway(options?: {
+	/** See `GatewayOptions.isReadOnlyLobuTool`. */
+	isReadOnlyLobuTool?: (toolName: string) => boolean;
+}): Promise<Hono | null> {
 	if (!process.env.DATABASE_URL) {
 		logger.info("[Lobu] DATABASE_URL not set — embedded gateway disabled");
 		return null;
@@ -383,6 +386,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
 			configStore,
 			connectionStore,
 			secretStore,
+			isReadOnlyLobuTool: options?.isReadOnlyLobuTool,
 		});
 
 		// Register API platform
