@@ -5,7 +5,7 @@
  * derives the same way from its ToolContext — apply-id grouping, actor
  * source, user, client. Handlers state only WHAT changed; forgetting the
  * apply-id threading (which would silently ungroup a `lobu apply` run's
- * changes in the Deployments feed) stops being possible.
+ * changes in the Settings → Audit log feed) stops being possible.
  */
 
 import type { ConfigResourceKind } from '../../../utils/config-redaction';

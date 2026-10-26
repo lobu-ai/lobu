@@ -1733,13 +1733,13 @@ export interface WorkspaceChangeEventParams
  * Record a state mutation as a `semantic_type='change'` event with the full
  * redacted post-change state in `payload_data.state`. Config mutations use
  * `metadata.category='config'`, the settings audit trail behind the
- * Deployments feed; distinct from `category='lifecycle'` rows, which carry no
+ * Settings → Audit log feed; distinct from `category='lifecycle'` rows, which carry no
  * state and feed dashboard metric_series — handlers that emit lifecycle
  * events dual-write this one. Fire-and-forget, same retry/ERROR contract as
  * the writers above.
  *
  * Workspace identity mutations use `metadata.category='workspace'`, keeping
- * them out of the Deployments feed while still showing them in All activity.
+ * them out of the Settings → Audit log feed while still showing them in All activity.
  */
 function stateChangeMetadata(
   params: StateChangeEventParams<AuditResourceKind>,
