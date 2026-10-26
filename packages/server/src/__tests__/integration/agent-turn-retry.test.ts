@@ -20,6 +20,7 @@ import type { ModelProviderModule } from '../../gateway/modules/module-system';
 import { enqueueAgentTurn } from '../../gateway/orchestration/agent-turn-producer';
 import { retryInterruptedAgentTurn } from '../../gateway/orchestration/agent-turn-retry';
 import { authenticateWorker } from '../../gateway/routes/internal/middleware';
+import { AGENT_TURN_TOOL_LOG_MAX } from '../../runs/agent-turn-inputs';
 import { isAuthorizationReadOnlyToolName } from '../../tools/registry';
 import { agentTurnIdentityFromClaims, runTurnWriteOnce } from '../../tools/turn-write-idempotency';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
@@ -76,6 +77,7 @@ async function produce(message: MessagePayload, admittedRunId?: number) {
     VALUES (${message.organizationId}, 'chat_message', 'messages', 'completed', ${sql.json(message)}) RETURNING id
   `)[0]!.id);
   expect(await enqueueAgentTurn({ ...message, runId }, deps)).toBeUndefined();
+  await sql`UPDATE runs SET status = 'completed' WHERE id = ${runId}`;
   const [turn] = (await sql`
     SELECT id, action_input FROM runs WHERE run_type = 'agent_turn' AND parent_run_id = ${runId}
   `) as unknown as Array<{ id: number; action_input: { turn: Record<string, unknown>; credential: string } }>;
@@ -196,6 +198,49 @@ describe('retry of an interrupted agent turn', () => {
     const retry = await produce(admitted!.action_input, admitted!.id);
     expect(retry.action_input.turn.message_id).toBe(message.messageId);
     expect(String(retry.action_input.turn.ephemeral_context).startsWith(note!)).toBe(true);
+  });
+
+  it('rebuilds one note across repeated failures without losing the original context', async () => {
+    const org = await createTestOrganization();
+    const callerContext = 'Keep the original caller instructions.';
+    let message: MessagePayload = { ...messageFor(org.id), ephemeralContext: callerContext };
+    let admissionId: number | undefined;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const failed = await produce(message, admissionId);
+      const { runId } = await claim(`fleet-context-${attempt}`);
+      await getTestDb()`UPDATE runs SET run_metadata = run_metadata || ${getTestDb().json({
+        turn_tool_started: true, turn_started_tools: [`tool-${attempt}-${'x'.repeat(200)}`],
+      })}::jsonb WHERE id = ${runId}`;
+      await killWorker(runId);
+      const outcome = await retryInterruptedAgentTurn({ organizationId: org.id, turnRunId: failed.id, actorUserId: SENDER });
+      expect(outcome.status).toBe('started');
+      const admissions = await retryAdmissions();
+      const admitted = admissions.at(-1)!;
+      admissionId = admitted.id;
+      message = admitted.action_input;
+      expect(message.ephemeralContext?.split('A previous attempt').length).toBe(2);
+      if (attempt === 5) expect(message.ephemeralContext).toContain('Earlier or additional tool activity may be omitted');
+    }
+    const retry = await produce(message, admissionId);
+    expect(retry.action_input.turn.ephemeral_context).toContain(callerContext);
+  });
+
+  it.each([
+    { metadata: { turn_tool_started: true }, warning: 'details are unavailable' },
+    { metadata: { turn_tool_started: true, turn_tool_call_ids: ['missing-trace'] }, warning: 'details are unavailable' },
+    { metadata: { turn_tool_started: true, turn_started_tools: Array.from({ length: AGENT_TURN_TOOL_LOG_MAX }, (_, i) => `tool-${i}`) }, warning: 'may be omitted' },
+  ])('warns when recorded tool activity is incomplete: $warning', async ({ metadata, warning }) => {
+    const org = await createTestOrganization();
+    const failed = await produce(messageFor(org.id));
+    const { runId } = await claim('fleet-missing-trace');
+    await getTestDb()`UPDATE runs SET run_metadata = run_metadata || ${getTestDb().json(metadata)}::jsonb WHERE id = ${runId}`;
+    await killWorker(runId);
+
+    const outcome = await retryInterruptedAgentTurn({ organizationId: org.id, turnRunId: failed.id, actorUserId: SENDER });
+    expect(outcome).toMatchObject({ status: 'started', note: expect.stringContaining(warning) });
+    const [admitted] = await retryAdmissions();
+    const retry = await produce(admitted!.action_input, admitted!.id);
+    expect(retry.action_input.turn.ephemeral_context).toContain('check for effects before repeating it');
   });
 
   it('starts one new turn when Retry is pressed twice', async () => {

@@ -19,20 +19,14 @@ export function messagesJobOptions(
     expireInSeconds?: number;
   }
 ) {
-  // BullMQ interprets ':' in custom jobIds as an internal repeatable-job
-  // separator and rejects anything with more/fewer than 3 colon segments.
-  // Platform identifiers from the Chat SDK (e.g. Slack's
-  // `slack:C09EH3ASNQ1`, message timestamps like `1776219228.000100`
-  // that can embed colons in some paths) would all blow up enqueue.
-  // Sanitize the *entire* singletonKey — not just the messageId — so any
-  // platform's channelId/conversationId/messageId scheme is safe.
+  // Preserve the existing key normalization so retries collide with ordinary admissions.
   const rawSingletonKey = `message-${payload.platform}-${payload.channelId}-${payload.conversationId}-${payload.messageId || Date.now()}`;
   return {
     priority: options?.priority || 0,
     retryLimit: options?.retryLimit || 3,
     retryDelay: options?.retryDelay || 30,
-    expireInSeconds: options?.expireInSeconds || 300, // 5 minutes = 300 seconds
-    singletonKey: rawSingletonKey.replace(/:/g, "-"), // Prevent duplicates within canonical conversation identity
+    expireInSeconds: options?.expireInSeconds || 300,
+    singletonKey: rawSingletonKey.replace(/:/g, "-"),
   };
 }
 

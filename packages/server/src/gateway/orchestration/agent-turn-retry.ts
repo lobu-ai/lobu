@@ -19,6 +19,7 @@
 import { AgentErrorCode, type MessagePayload } from "@lobu/core";
 import { type DbClient, getDb, pgTextArray } from "../../db/client.js";
 import {
+  AGENT_TURN_TOOL_LOG_MAX,
   lockAgentTurnRun,
   type NativeTurnRun,
 } from "../../runs/agent-turn-inputs.js";
@@ -40,9 +41,12 @@ export function isRetryableTurnError(code: unknown): boolean {
 /**
  * The failed turn a retry admission answers, carried on the retried message's
  * `platformMetadata` (and so on its turn's reply envelope). A retry of a retry
- * walks this link back to every failed attempt at the same message.
+ * walks this link back through a bounded number of failed attempts at the
+ * same message.
  */
 const RETRY_OF_TURN_RUN_ID = "retryOfTurnRunId";
+// Strip the generated prefix before rebuilding it when a retry itself fails.
+const RETRY_NOTE_LENGTH = "retryNoteLength";
 
 /** Chat action id of the Retry button on a worker-failure error. */
 const TURN_RETRY_ACTION_PREFIX = "turn-retry:";
@@ -87,8 +91,8 @@ const RETRY_CHAIN_MAX = 4;
 const NOTE_LINE_CHARS = 240;
 /**
  * The note's whole budget. The turn's transient context is capped at
- * `CHAT_TURN_CONTEXT_CHARS` (2 KiB) and the note comes first, so this leaves
- * room for the sender line and any caller context behind it.
+ * `CHAT_TURN_CONTEXT_CHARS` (2,048 characters) and the note comes first, leaving
+ * room for the sender line and caller context behind it.
  */
 const NOTE_BUDGET_CHARS = 1_200;
 
@@ -140,8 +144,7 @@ function tracedLine(trace: StoredToolTrace): string {
 }
 
 /**
- * The note for a retry of `run`, or undefined when no failed attempt at this
- * message ran a tool.
+ * Summarize recorded tool activity for a retry, warning when history is incomplete.
  *
  * Per attempt, oldest first: its stored traces in the order they were stored,
  * then every call the gateway recorded as started that no trace accounts for
@@ -150,7 +153,13 @@ function tracedLine(trace: StoredToolTrace): string {
  */
 export async function buildInterruptedTurnNote(sql: DbClient, run: NativeTurnRun): Promise<string | undefined> {
   const lines: string[] = [];
-  for (const attempt of await failedAttempts(sql, run)) {
+  const attempts = await failedAttempts(sql, run);
+  if (retryOf(attempts[0]!) !== undefined || attempts.some((attempt) =>
+    (attempt.run_metadata?.turn_tool_call_ids?.length ?? 0) >= AGENT_TURN_TOOL_LOG_MAX
+    || (attempt.run_metadata?.turn_started_tools?.length ?? 0) >= AGENT_TURN_TOOL_LOG_MAX)) {
+    lines.push("- Earlier or additional tool activity may be omitted; check for effects before repeating it.");
+  }
+  for (const attempt of attempts) {
     const messageId = attempt.action_input?.reply?.message_id;
     const callIds = attempt.run_metadata?.turn_tool_call_ids ?? [];
     const keys = messageId
@@ -185,6 +194,10 @@ export async function buildInterruptedTurnNote(sql: DbClient, run: NativeTurnRun
       const left = unmatched.get(name) ?? 0;
       if (left > 0) unmatched.set(name, left - 1);
       else lines.push(clip(`- ${name}: started, outcome unknown`, NOTE_LINE_CHARS));
+    }
+    if (keys.length > traced.length || (attempt.run_metadata?.turn_tool_started === true
+      && !traced.length && !attempt.run_metadata.turn_started_tools?.length)) {
+      lines.push("- Tool activity was recorded, but its details are unavailable; check for effects before repeating it.");
     }
   }
   if (!lines.length) return undefined;
@@ -250,11 +263,18 @@ export async function retryInterruptedAgentTurn(input: {
     const original: MessagePayload = { ...source.action_input };
     delete original.runId;
     delete original.runJobToken;
-    const ephemeralContext = [note, original.ephemeralContext?.trim()].filter(Boolean).join("\n\n");
+    const priorNoteLength = original.platformMetadata?.[RETRY_NOTE_LENGTH];
+    const originalContext = retryOf(run) !== undefined && typeof priorNoteLength === "number"
+      ? original.ephemeralContext?.slice(priorNoteLength) : original.ephemeralContext;
+    const ephemeralContext = [note, originalContext?.trim()].filter(Boolean).join("\n\n");
     const payload: MessagePayload = {
       ...original,
-      ...(ephemeralContext ? { ephemeralContext } : {}),
-      platformMetadata: { ...original.platformMetadata, [RETRY_OF_TURN_RUN_ID]: Number(run.id) },
+      ephemeralContext: ephemeralContext || undefined,
+      platformMetadata: {
+        ...original.platformMetadata,
+        [RETRY_OF_TURN_RUN_ID]: Number(run.id),
+        [RETRY_NOTE_LENGTH]: note?.length ?? 0,
+      },
     };
     const admitted = Number(await insertQueueJob(tx, "messages", payload, messagesJobOptions(payload)));
     if (!Number.isSafeInteger(admitted) || admitted <= 0) {
