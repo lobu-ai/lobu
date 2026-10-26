@@ -341,7 +341,9 @@ describe('turn write receipts over the real media services', () => {
     ['generate_audio', '/internal/audio/synthesize', { text: 'hello there' }],
   ])('%s: a failure after the provider call keeps the claim, so the repeat is not re-billed', async (_name, path, body) => {
     const failed = await mediaCall(path, (await turn(`receipts-${path}-lost`)).token, body);
-    expect(failed.status, await failed.clone().text()).toBe(502);
+    // 500, not 502: the CDN replaces a 502 body, which would drop this error.
+    expect(failed.status, await failed.clone().text()).toBe(500);
+    expect((await failed.json()).error).toContain('connection reset');
     const repeat = await mediaCall(path, (await turn(`receipts-${path}-lost`)).token, body);
     expect(repeat.status).toBe(409);
     expect((await repeat.json()).error).toContain('already attempted');
