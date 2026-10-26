@@ -14,7 +14,7 @@
  * transaction open longer than 60s.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DbClient } from '../../../db/client';
 import { insertEvent } from '../../../utils/insert-event';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -140,7 +140,14 @@ describe('an Automation window and a writer still open across it', () => {
       // Not visible yet, so the first window cannot contain it...
       expect(first.context.content.map((r) => r.id)).not.toContain(rowId);
       await complete(first);
-      await expect(claim()).rejects.toThrow('nothing new to claim yet');
+      // pg_stat_activity can lag in exposing the open writer, briefly leaving
+      // the arrival horizon unclamped until the transaction becomes visible.
+      await vi.waitFor(
+        async () => {
+          await expect(claim()).rejects.toThrow(/nothing new to claim yet/);
+        },
+        { timeout: 2_500, interval: 50 }
+      );
     } finally {
       // Failed claims/assertions must not leave a writer blocking suite cleanup.
       release();
