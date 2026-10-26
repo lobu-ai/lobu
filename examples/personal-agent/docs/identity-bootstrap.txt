@@ -167,6 +167,37 @@ not imply processing or completion. Only claim/complete a processing run when
 the external client actually chooses to execute it. Test independent traversal
 and durable source references before claiming continuous coverage.
 
+For deterministic incremental identity maintenance, retrieve the complete asset:
+https://raw.githubusercontent.com/lobu-ai/lobu/main/examples/personal-agent/identity-incremental.mcp.js
+Append a default handler calling runIncrementalIdentity(client, request).
+Set workspace, a stable reader_id, the discovered automation_id, and sources[]:
+{provider, account_scope, connection_id, feed_id, source_scope}. Establish each
+saved account and captured source_scope first; neither is a guessed display name.
+This helper handles observer message references only, not an initial history scan.
+
+Call action:"poll" through query_sdk with your last returned state, if any. It
+reads at most ten new/retry references, resolves native messages serially, and
+projects participant fields. Persist the returned state atomically before any
+next step. If pending exists, call action:"advance" through run_sdk until import
+finishes, then query_sdk for the verify phase. Persist state after each response.
+The accepted source cursor advances only after exact import/readback verification.
+After timeout, replay the SAME prior state; never guess the next cursor.
+Only one writer may maintain a given identity/account scope, including bootstrap
+imports. Independent read cursors do not coordinate concurrent metadata writers.
+Use client storage or an existing authorized Lobu record for state: no local
+filesystem, Bun, mandatory worker, agent run or polling schedule is installed.
+
+Notifications create no identity. Outgoing senders are excluded. Missing native
+rows, unsupported participant metadata and source gaps remain explicitly pending
+in state, bounded to 64 references; they are not semantic work completions.
+Retries rotate through pending references. Changed request bindings or captured
+source scopes, feed configuration changes during a read, invalid cursors,
+authorization errors and a full pending buffer stop advancement. Feed snapshots
+are not retained between polls: re-establish the account/source binding after
+reconnecting or reconfiguring a source. Preserve old state and reconcile the
+scope instead of silently resetting.
+The helper cannot recover provider-deleted messages or prove all human identities.
+
 Read+sync sources (Gmail references, X notifications, Reddit inbox) use native
 checkpoints and an explicitly chosen sync cadence. They are NOT observer changes
 logs. Normal runless arrival-window reads return latest versions, not every
