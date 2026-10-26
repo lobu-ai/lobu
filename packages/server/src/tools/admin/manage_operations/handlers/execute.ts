@@ -65,6 +65,7 @@ import {
 	deriveSdkBrowserActionContext,
 } from "../../../../worker-api/browser-action-context";
 import { requestSourceAttribution } from "../../../../worker-api/device-source-attribution";
+import { operationTurnOrigin } from "../../../../operations/operation-outcome-followup";
 import { resolveRunInitiator } from "../../../initiator";
 import type { ToolContext } from "../../../registry";
 import { getOrgUrlContext } from "../../../view-urls";
@@ -754,10 +755,15 @@ export async function handleExecute(
 		mcpActivity: currentMcpActivityAttribution(ctx),
 		actionOrigin: await resolveActionOrigin(ctx),
 	};
+	// A chat turn's run remembers the conversation that asked, so an outcome
+	// that arrives after an approval wait can continue it
+	// (operations/operation-outcome-followup.ts).
+	const turnOrigin = await operationTurnOrigin(ctx);
 	runMetadata = {
 		...runMetadata,
 		approval_notification: notificationContext,
 		source_attribution: requestSourceAttribution(ctx),
+		...(turnOrigin ? { turn_origin: turnOrigin } : {}),
 	};
 	if (connection.connector_manifest_backed && connection.device_platform === 'chrome-extension') {
 		const control = await authorizeRecoveryAction({ scope: { ...authzScopeFromToolContext(ctx), principal: visibilityUserId },
