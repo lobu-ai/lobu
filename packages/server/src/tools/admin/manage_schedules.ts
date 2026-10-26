@@ -44,6 +44,7 @@ import {
 import { getDb, pgTextArray } from '../../db/client';
 import type { ToolContext } from '../registry';
 import { sourceToDeliveryContext } from './approval-delivery';
+import { chatTurnEvidenceOfRun } from '../../gateway/orchestration/chat-turn-actor';
 import logger from '../../utils/logger';
 import { nextRunAt as nextCronTickAt, validateTimezone } from '../../utils/cron';
 import { getErrorMessage } from "@lobu/core";
@@ -317,7 +318,13 @@ async function resolveTrustedDeliveryContext(
   if (!result.authorized) {
     return { context: null, error: DELIVERY_DENY_MESSAGE[result.reason] };
   }
-  return { context };
+  // The wake replies as this turn's sender, so it keeps the evidence their
+  // message carried (read off the signed turn run, never the model's args).
+  const senderEvidence = await chatTurnEvidenceOfRun(
+    ctx.organizationId,
+    ctx.sourceContext?.turnRunId,
+  );
+  return { context: senderEvidence ? { ...context, senderEvidence } : context };
 }
 
 function serializeSchedule(row: ScheduledJobRow) {

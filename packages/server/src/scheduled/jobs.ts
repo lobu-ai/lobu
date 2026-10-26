@@ -16,6 +16,10 @@ import {
   activateWorkspaceEventTask,
 } from '../automations/workspace-event';
 import type { WorkspaceEventActivationTaskPayload } from '../automations/workspace-event-contract';
+import {
+  CHAT_TURN_EVIDENCE_KEYS,
+  FOLLOWUP_SOURCE,
+} from '../gateway/orchestration/chat-turn-actor';
 import type { CoreServices } from '../gateway/services/core-services';
 import { getChatInstanceManager } from '../lobu/gateway';
 import { cleanupExpiredMcpSessions } from '../mcp-handler';
@@ -93,6 +97,14 @@ function asDeliveryContext(value: unknown): ScheduledDeliveryContext | null {
     teamId: typeof candidate.teamId === 'string' ? candidate.teamId : null,
     connectionId: candidate.connectionId,
     userId: typeof candidate.userId === 'string' ? candidate.userId : null,
+    ...(candidate.senderEvidence && typeof candidate.senderEvidence === 'object'
+      ? {
+          senderEvidence: {
+            isDirectMessage: candidate.senderEvidence.isDirectMessage === true,
+            senderVouched: candidate.senderEvidence.senderVouched === true,
+          },
+        }
+      : {}),
   };
 }
 
@@ -656,8 +668,9 @@ export interface WakeAgentTaskPayload {
 
 /**
  * Execute a `wake_agent` scheduled task: post the agent's reply back into the
- * originating chat channel when the ticker injected a trusted delivery context,
- * otherwise dispatch the unchanged api-platform message. Exported so the
+ * originating chat channel when the ticker injected a trusted delivery context.
+ * Invalid or revoked chat delivery fails; only a wake without a delivery
+ * context uses the api-platform path. Exported so the
  * fire-time delivery dispatch can be driven end-to-end in tests (the
  * registration above is a thin adapter over it).
  */
@@ -706,17 +719,20 @@ export async function runWakeAgentTask(
   // channel. User action_args never supply this value; the ticker injects it
   // from scheduled_jobs.delivery_context.
   const delivery = asDeliveryContext(p.__delivery_context);
-  if (
-    delivery &&
-    isDeliverableChatPlatform(delivery.platform) &&
-    (
-      await validateDeliveryAuthorization({
-        organizationId: orgId,
-        agentId: p.agent_id,
-        delivery,
-      })
-    ).authorized
-  ) {
+  if (p.__delivery_context != null) {
+    // Losing a chat destination must never promote the sender's follow-up
+    // into a headless API turn running with the agent owner's authority.
+    if (!delivery || !isDeliverableChatPlatform(delivery.platform)) {
+      throw new Error('Cannot dispatch scheduled chat delivery: invalid delivery context');
+    }
+    const authorization = await validateDeliveryAuthorization({
+      organizationId: orgId,
+      agentId: p.agent_id,
+      delivery,
+    });
+    if (!authorization.authorized) {
+      throw new Error(`Cannot dispatch scheduled chat delivery: ${authorization.reason}`);
+    }
     await queueProducer.enqueueMessage(
       buildMessagePayload({
         platform: delivery.platform,
@@ -737,7 +753,12 @@ export async function runWakeAgentTask(
           connectionId: delivery.connectionId,
           responseChannel: delivery.channelId,
           organizationId: orgId,
-          source: 'scheduled-job',
+          // Only a wake with a chat sender inherits chat authorization.
+          source: delivery.userId ? FOLLOWUP_SOURCE : 'scheduled-job',
+          [CHAT_TURN_EVIDENCE_KEYS.isDirectMessage]:
+            delivery.senderEvidence?.isDirectMessage === true,
+          [CHAT_TURN_EVIDENCE_KEYS.senderVouched]:
+            delivery.senderEvidence?.senderVouched === true,
         },
         agentOptions: automationModel ? { model: automationModel } : {},
       })

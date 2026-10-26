@@ -44,14 +44,18 @@ export const AUTOMATION_RUN_SOURCE = "automation-run";
  * `platformMetadata.source` values for turns dispatched server-side with no
  * human waiting on the reply and no SSE client on any pod. They bypass the API
  * owner-gate in routeToRenderer and are never offered follow-up chips.
- * Producers: routes/public/agent.ts (automation-run/direct-api from session
- * intent), services/agent-threads.ts (internal default), connectors/
- * scheduled/jobs.ts.
+ * Producers: routes/public/agent.ts (automation-run from session
+ * intent), services/agent-threads.ts (internal default),
+ * scheduled/jobs.ts (a wake with no chat sender).
  *
- * KEEP IN LOCKSTEP with `AUTONOMOUS_SOURCES` in authz/entity-policy.ts: every
- * headless (no-human) source here must also be treated as autonomous by the
- * write-gate resolver, or a server-dispatched turn would skip an agent's
- * autonomous-only restrictions.
+ * `FOLLOWUP_SOURCE` (chat-turn-actor.ts) is deliberately NOT here: a
+ * follow-up replies into the chat conversation that scheduled it, as the
+ * sender who asked, so it keeps chat-sender authorization and chat routing.
+ *
+ * This set controls reply routing and follow-up chips. Authorization is
+ * resolved separately from the acting principal: the old lockstep partner,
+ * `AUTONOMOUS_SOURCES` in authz/entity-policy.ts, went away with principal
+ * modes (#1891), so no source list there needs to mirror this one.
  */
 const HEADLESS_SOURCES: ReadonlySet<string> = new Set([
 	AUTOMATION_RUN_SOURCE,

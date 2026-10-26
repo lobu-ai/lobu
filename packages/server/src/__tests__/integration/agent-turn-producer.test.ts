@@ -40,7 +40,10 @@ import { enqueueAgentTurn,
 import { armTurnTimeout, failTurnIfPending, sweepExpiredTurns } from '../../gateway/orchestration/turn-liveness';
 import { generateDeploymentName } from '../../gateway/orchestration/deployment-identity';
 import { intervals } from '../../config/intervals';
-import { chatTurnAccessInstructions, chatTurnSender, chatTurnSenderContext, chatTurnUnlinkedSenderContext } from '../../gateway/orchestration/chat-turn-actor';
+import { chatTurnAccessInstructions, chatTurnAccessOf, chatTurnSender, chatTurnSenderContext, chatTurnUnlinkedSenderContext } from '../../gateway/orchestration/chat-turn-actor';
+import { decideDeviceAccess } from '../../authz/device-access';
+import { runWakeAgentTask } from '../../scheduled/jobs';
+import { manageSchedules } from '../../tools/admin/manage_schedules';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { sweepStaleAgentTurnRuns } from '../../worker-api/agent-turn';
 import { failClaimedWorkerRun } from '../../worker-api/poll';
@@ -5311,5 +5314,159 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
     expect(message?.platformMetadata?.senderVouched).toBeUndefined();
     await waitFor(() => expect(posts).toHaveBeenCalledTimes(1));
     expect(String(posts.mock.calls[0]?.[1])).toContain('Ask an admin of this workspace to invite you');
+  });
+});
+
+describe('chat follow-up turns run as the sender who asked', () => {
+  const CONNECTION = 'conn-followup';
+  const CHANNEL = 'C0FOLLOW';
+  const CONVERSATION = 'slack:C0FOLLOW:1700000000.000100';
+
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+    delete process.env.WORKER_API_TOKEN;
+  });
+
+  const deps = () => ({
+    agentSettings: settingsStore,
+    catalog: catalogFor(tokenEchoingModule()),
+    mcp: mcpFixture().mcp,
+    gatewayUrl: GATEWAY_URL,
+  });
+
+  /**
+   * Drive the real chain: a human chat message produces a turn; that turn
+   * schedules a follow-up through the same `manage_schedules` call the
+   * `schedule_followup` route makes; the wake fires through `runWakeAgentTask`;
+   * its message produces the follow-up turn. Returns both turns' claims.
+   */
+  async function followupClaims(params: {
+    role: 'member' | 'owner';
+    teamId: string;
+    senderId: string;
+    isDirect: boolean;
+  }) {
+    const org = await createTestOrganization();
+    const member = await createTestUser({ email: `${params.senderId.toLowerCase()}@example.test` });
+    await addUserToOrganization(member.id, org.id, params.role);
+    await linkChatIdentityInGraph({
+      organizationId: org.id, userId: member.id, platform: 'slack', teamId: params.teamId, platformUserId: params.senderId,
+    });
+    await createTestAgent({ organizationId: org.id, agentId: AGENT_ID, ownerUserId: member.id });
+    await insertChatConnectionRow({ id: CONNECTION, organizationId: org.id, agentId: AGENT_ID, platform: 'slack' });
+
+    await enqueueMessage({
+      ...messageFor(org.id),
+      userId: params.senderId,
+      platform: 'slack',
+      channelId: CHANNEL,
+      conversationId: CONVERSATION,
+      teamId: `slack:${params.teamId}`,
+      platformMetadata: { connectionId: CONNECTION, teamId: params.teamId, isDirect: params.isDirect },
+    }, deps());
+    const [origin] = await agentTurnRuns();
+
+    const scheduled = await manageSchedules(
+      {
+        action: 'create',
+        description: 'Follow up in slack conversation',
+        run_at: new Date(Date.now() + 60_000).toISOString(),
+        idempotency_key: `followup-${params.senderId}`,
+        source_thread_id: CONVERSATION,
+        payload: { type: 'wake_agent', agent_id: AGENT_ID, prompt: 'check back in' },
+      } as never,
+      {} as never,
+      {
+        organizationId: org.id,
+        userId: null,
+        memberRole: null,
+        agentId: AGENT_ID,
+        sourceContext: {
+          platform: 'slack',
+          connectionId: CONNECTION,
+          channelId: CHANNEL,
+          conversationId: CONVERSATION,
+          teamId: params.teamId,
+          userId: params.senderId,
+          turnRunId: Number(origin.id),
+        },
+        isAuthenticated: true,
+        clientId: 'lobu-worker',
+        scopes: null,
+        tokenType: 'session',
+        scopedToOrg: true,
+        allowCrossOrg: false,
+        grantedOrganizationIds: null,
+        directSearchFederation: false,
+      } as never,
+    ) as { error?: string };
+    expect(scheduled.error).toBeUndefined();
+    const [job] = await getTestDb()`
+      SELECT id, delivery_context, created_by_agent FROM scheduled_jobs WHERE organization_id = ${org.id}
+    `;
+
+    const enqueued: MessagePayload[] = [];
+    await runWakeAgentTask({
+      getQueueProducer: () => ({ enqueueMessage: async (payload: MessagePayload) => { enqueued.push(payload); return 'queued'; } }),
+      // Any touch of the API-thread path is a failure: a follow-up must reply in its chat.
+      getSessionManager: () => new Proxy({}, { get() { throw new Error('API_PATH_REACHED'); } }),
+    } as never, {
+      __organization_id: org.id,
+      __created_by_agent: job.created_by_agent,
+      __created_by_user: null,
+      __scheduled_job_id: job.id,
+      __delivery_context: job.delivery_context,
+      agent_id: AGENT_ID,
+      prompt: 'check back in',
+    });
+    expect(enqueued).toHaveLength(1);
+
+    // The originating turn has answered by the time its follow-up fires.
+    await getTestDb()`UPDATE runs SET status = 'completed', completed_at = now() WHERE id = ${origin.id}`;
+    // The harness has no org default model; the fixture message names one.
+    const produced = await enqueueMessage({ ...enqueued[0], agentOptions: messageFor(org.id).agentOptions }, deps());
+    expect(produced).toBeUndefined();
+    const turns = await agentTurnRuns();
+    expect(turns).toHaveLength(2);
+    const claimsOf = (run: (typeof turns)[number]) =>
+      verifyWorkerToken((run.action_input as { credential: string }).credential)!;
+    return { member, original: claimsOf(turns[0]), followup: claimsOf(turns[1]), wake: enqueued[0] };
+  }
+
+  it("runs a group member's follow-up with that member's org-shared access, so a device asks its owner", async () => {
+    const { member, original, followup, wake } = await followupClaims({
+      role: 'member', teamId: 'T0FOLLOWGROUP', senderId: 'U0FOLLOWGROUP', isDirect: false,
+    });
+    expect(original).toMatchObject({ chatAccess: 'org_shared', actorUserId: member.id });
+    expect(wake.platformMetadata).toMatchObject({ source: 'followup', isDirect: false, senderVouched: false });
+    expect(followup).toMatchObject({
+      userId: 'U0FOLLOWGROUP', chatAccess: 'org_shared', actorUserId: member.id, source: 'followup',
+    });
+    expect(decideDeviceAccess(chatTurnAccessOf(followup))).toBe('ask_owner');
+  });
+
+  it("keeps an owner's direct-message follow-up acting as that owner", async () => {
+    const { member, followup } = await followupClaims({
+      role: 'owner', teamId: 'T0FOLLOWOWNER', senderId: 'U0FOLLOWOWNER', isDirect: true,
+    });
+    expect(followup).toMatchObject({ chatAccess: 'member', actorUserId: member.id });
+    expect(decideDeviceAccess(chatTurnAccessOf(followup))).toBe('run');
+  });
+
+  it('keeps a scheduled job with no chat sender headless', async () => {
+    const org = await createTestOrganization();
+    await enqueueMessage({
+      ...messageFor(org.id),
+      userId: 'scheduled',
+      platform: 'slack',
+      channelId: CHANNEL,
+      conversationId: CONVERSATION,
+      platformMetadata: { connectionId: CONNECTION, source: 'scheduled-job' },
+    }, deps());
+    const [run] = await agentTurnRuns();
+    const claims = verifyWorkerToken((run.action_input as { credential: string }).credential)!;
+    expect(claims.source).toBe('scheduled-job');
+    expect(claims.chatAccess).toBeUndefined();
+    expect(chatTurnAccessOf(claims)).toBeNull();
   });
 });

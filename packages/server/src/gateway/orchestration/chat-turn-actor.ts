@@ -101,18 +101,55 @@ export function chatTurnEvidenceFrom(
 }
 
 /**
+ * The evidence the bridge recorded for the message that started a chat turn,
+ * read back off that turn's stored `agent_turn` run (`action_input.reply`).
+ * A follow-up scheduled from the turn stores this, so the later turn is
+ * decided from the same provider facts as the human message, never from
+ * anything the model supplied. Null when the run is not this organization's
+ * agent turn.
+ */
+export async function chatTurnEvidenceOfRun(
+  organizationId: string,
+  agentTurnRunId: number | undefined,
+): Promise<ChatTurnEvidence | null> {
+  if (!agentTurnRunId || !Number.isSafeInteger(agentTurnRunId)) return null;
+  const [run] = await getDb()<{ platform_metadata: Record<string, unknown> | null }>`
+    SELECT action_input->'reply'->'platform_metadata' AS platform_metadata
+    FROM runs
+    WHERE id = ${agentTurnRunId}
+      AND organization_id = ${organizationId}
+      AND run_type = 'agent_turn'
+    LIMIT 1
+  `;
+  return run ? chatTurnEvidenceFrom(run.platform_metadata ?? undefined) : null;
+}
+
+/**
+ * `source` of a follow-up turn a chat conversation scheduled for itself
+ * (`schedule_followup` or a chat-created wake schedule).
+ * Unlike the headless sources it keeps a chat sender: the turn is decided by
+ * {@link resolveChatTurnActor} from the original sender and their stored
+ * evidence, with membership re-evaluated when the follow-up fires.
+ */
+export const FOLLOWUP_SOURCE = "followup";
+
+/**
  * Whether a turn's authority must come from its chat sender.
  *
  * Every non-API turn is one, unless it carries a headless `source`
  * (Automation run, platform CLI, messaging API): those have no chat sender and
- * keep their existing principal. An explicit `api` platform exempts one.
+ * keep their existing principal. A follow-up ({@link FOLLOWUP_SOURCE}) is a
+ * chat-sender turn. An explicit `api` platform exempts one.
  */
 export function isChatSenderTurn(claims: {
   platform?: string;
   source?: string;
 }): boolean {
   if (claims.platform === "api") return false;
-  return !!claims.platform && claims.source === undefined;
+  return (
+    !!claims.platform &&
+    (claims.source === undefined || claims.source === FOLLOWUP_SOURCE)
+  );
 }
 
 export interface ChatTurnActor {

@@ -60,12 +60,13 @@ export interface WorkerTokenData {
   timestamp: number;
   platform?: string;
   /**
-   * Headless run origin (`platformMetadata.source`, e.g. automation-run /
+   * Turn origin (`platformMetadata.source`, e.g. automation-run /
    * scheduled-job / connector-repair / internal). Carried so interaction
    * cards emitted from a headless turn can be stamped headless and exempted
    * from the SSE-owner gate — no browser SSE connection exists on any pod for
    * a headless run, so an owner-gated card would dead-letter. Absent for
-   * interactive (browser-driven) runs.
+   * interactive (browser-driven) runs. `followup` marks a chat follow-up: not
+   * headless, and still decided by its chat sender.
    */
   source?: string;
   /**

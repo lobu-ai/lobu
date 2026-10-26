@@ -115,7 +115,11 @@ describe("runWakeAgentTask chat delivery dispatch", () => {
     expect(msg.teamId).toBeUndefined();
     expect(msg.platformMetadata.connectionId).toBe("conn-real");
     expect(msg.platformMetadata.teamId).toBeUndefined();
-    expect(msg.platformMetadata.source).toBe("scheduled-job");
+    // A chat-delivered wake is a follow-up decided by its sender; a context
+    // stored without sender evidence decides as "no evidence" (fails closed).
+    expect(msg.platformMetadata.source).toBe("followup");
+    expect(msg.platformMetadata.isDirect).toBe(false);
+    expect(msg.platformMetadata.senderVouched).toBe(false);
   });
 
   test("posts a one-shot wake back to Google Chat", async () => {
@@ -131,6 +135,7 @@ describe("runWakeAgentTask chat delivery dispatch", () => {
         conversationId: "gchat:spaces/AAAA-test:dm",
         teamId: null,
         userId: "users/clicker-a",
+        senderEvidence: { isDirectMessage: true, senderVouched: true },
       })
     );
 
@@ -145,7 +150,9 @@ describe("runWakeAgentTask chat delivery dispatch", () => {
     expect(enqueued[0].platformMetadata).toMatchObject({
       connectionId: "gchat-real",
       senderId: "users/clicker-a",
-      source: "scheduled-job",
+      source: "followup",
+      isDirect: true,
+      senderVouched: true,
     });
   });
 
@@ -213,13 +220,12 @@ describe("runWakeAgentTask chat delivery dispatch", () => {
     expect(enqueued[0].platformMetadata.teamId).toBe("T-real");
   });
 
-  test("falls through to the api path when the connection is no longer active", async () => {
+  test("rejects a follow-up when its connection is no longer active", async () => {
     await seedChatConnection({ id: "conn-real", status: "paused" });
     const enqueued: MessagePayload[] = [];
 
-    // Unauthorized delivery skips the channel dispatch and runs the api path,
-    // which touches the (throwing) session manager — proving no message was
-    // posted to the channel.
+    // A revoked chat target must not turn the sender's request into an
+    // owner-authorized API turn. The session manager throws if reached.
     await expect(
       runWakeAgentTask(
         fakeCoreServices(enqueued),
@@ -232,11 +238,11 @@ describe("runWakeAgentTask chat delivery dispatch", () => {
           userId: USER,
         })
       )
-    ).rejects.toThrow("API_PATH_REACHED");
+    ).rejects.toThrow("Cannot dispatch scheduled chat delivery: connection-inactive");
     expect(enqueued).toHaveLength(0);
   });
 
-  test("falls through to the api path for a non-deliverable platform", async () => {
+  test("rejects a follow-up for a non-deliverable platform", async () => {
     await seedChatConnection({ id: "conn-real", platform: "discord" });
     const enqueued: MessagePayload[] = [];
 
@@ -252,6 +258,38 @@ describe("runWakeAgentTask chat delivery dispatch", () => {
           userId: USER,
         })
       )
+    ).rejects.toThrow("Cannot dispatch scheduled chat delivery: invalid delivery context");
+    expect(enqueued).toHaveLength(0);
+  });
+
+  test("rejects malformed stored delivery instead of changing authority", async () => {
+    const enqueued: MessagePayload[] = [];
+    await expect(
+      runWakeAgentTask(fakeCoreServices(enqueued), payload({ userId: USER }))
+    ).rejects.toThrow("Cannot dispatch scheduled chat delivery: invalid delivery context");
+    expect(enqueued).toHaveLength(0);
+  });
+
+  test("keeps a chat delivery without a sender headless", async () => {
+    await seedChatConnection({ id: "conn-real" });
+    const enqueued: MessagePayload[] = [];
+    await runWakeAgentTask(
+      fakeCoreServices(enqueued),
+      payload({
+        platform: "slack",
+        connectionId: "conn-real",
+        channelId: "C-real",
+        conversationId: "slack:C-real:123",
+      })
+    );
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0].platformMetadata.source).toBe("scheduled-job");
+  });
+
+  test.each([null, undefined])("uses the API path when delivery context is %s", async (delivery) => {
+    const enqueued: MessagePayload[] = [];
+    await expect(
+      runWakeAgentTask(fakeCoreServices(enqueued), payload(delivery))
     ).rejects.toThrow("API_PATH_REACHED");
     expect(enqueued).toHaveLength(0);
   });

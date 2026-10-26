@@ -111,7 +111,7 @@ describe("active-conversation event tools", () => {
     const response = await post(
       router,
       "/conversations/schedule-followup",
-      token(),
+      token({ runId: 4242 }),
       {
         runAt,
         prompt: "Close event-backed poll entity 77.",
@@ -141,6 +141,8 @@ describe("active-conversation event tools", () => {
         channelId: "spaces/AAAA",
         conversationId: "gchat:spaces/AAAA:dm",
         userId: "users/owner",
+        // The signed turn run: the follow-up keeps this sender's evidence.
+        turnRunId: 4242,
       },
     });
 
