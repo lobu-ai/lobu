@@ -365,7 +365,7 @@ test("observation IDs are scoped to their source and checked against all saved u
     { ...reference, feed_id: 102, connection_id: 203 },
   ].map((row) => ({
     ...row,
-    metadata: { ...row.metadata, resource_type: "source_gap" },
+    semantic_type: "source.gap",
   }));
   f.setChanges({
     content: refs,
@@ -557,10 +557,10 @@ test("gap dispositions remain explicit and unresolved retries rotate within the 
   const f = fixture();
   const gap = (index: number) => ({
     ...reference,
+    semantic_type: "source.gap",
     metadata: {
       ...reference.metadata,
       observation_id: `gap-${index}`,
-      resource_type: "source_gap",
     },
   });
   f.setChanges({
@@ -647,4 +647,90 @@ test("published incremental asset runs without Node/Bun/filesystem and matches t
     })
   ).toMatchObject({ phase: "accepted", state: { cursor: "cursor-b" } });
   expect(bundled.entities.size).toBe(2);
+});
+
+function jsonbRoundTrip(value: unknown): any {
+  if (Array.isArray(value)) return value.map(jsonbRoundTrip);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([a], [b]) => a.length - b.length || a.localeCompare(b))
+      .map(([key, child]) => [key, jsonbRoundTrip(child)])
+  );
+}
+
+test("JSONB key ordering preserves import, lost-response replay and verification", async () => {
+  const f = fixture();
+  const prepared = await runIncrementalIdentity(f.client, {
+    ...request,
+    action: "poll",
+  });
+  const saved = jsonbRoundTrip(prepared.state);
+  expect(JSON.stringify(saved)).not.toBe(JSON.stringify(prepared.state));
+  const imported = await runIncrementalIdentity(f.client, {
+    ...request,
+    action: "advance",
+    state: saved,
+  });
+  const writes = f.counts().writes;
+  await runIncrementalIdentity(f.client, {
+    ...request,
+    action: "advance",
+    state: jsonbRoundTrip(saved),
+  });
+  expect(f.counts().writes).toBe(writes);
+  const verified = await runIncrementalIdentity(f.client, {
+    ...request,
+    action: "advance",
+    state: jsonbRoundTrip(imported.state),
+  });
+  expect(verified.phase).toBe("accepted");
+  expect(verified.state.cursor).toBe("cursor-b");
+  const reordered = jsonbRoundTrip(prepared.state);
+  reordered.pending.input.observations.reverse();
+  await expect(
+    runIncrementalIdentity(f.client, {
+      ...request,
+      action: "advance",
+      state: reordered,
+    })
+  ).rejects.toThrow("Pending batch changed");
+});
+
+test.each([
+  "notification",
+  "message",
+])("production source.gap on %s remains durable without a native read", async (resource_type) => {
+  const f = fixture();
+  const gap = {
+    ...reference,
+    semantic_type: "source.gap",
+    metadata: { ...reference.metadata, resource_type },
+  };
+  f.setChanges({
+    content: [gap],
+    page: { has_more: false },
+    resume_cursor: "cursor-b",
+  });
+  const result = await runIncrementalIdentity(f.client, {
+    ...request,
+    action: "poll",
+  });
+  expect(result.state.pending).toBeUndefined();
+  expect(result.state.unresolved).toHaveLength(1);
+  expect(result.state.unresolved[0].reference.semantic_type).toBe("source.gap");
+  expect(result.state.unresolved[0].status).toBe("source_gap_or_unsupported");
+  expect(f.counts()).toMatchObject({ writes: 0, sourceReads: 0 });
+  f.setChanges({
+    content: [],
+    page: { has_more: false },
+    resume_cursor: "cursor-c",
+  });
+  const replay = await runIncrementalIdentity(f.client, {
+    ...request,
+    action: "poll",
+    state: jsonbRoundTrip(result.state),
+  });
+  expect(replay.state.unresolved[0].reference.semantic_type).toBe("source.gap");
+  expect(f.counts()).toMatchObject({ writes: 0, sourceReads: 0 });
 });

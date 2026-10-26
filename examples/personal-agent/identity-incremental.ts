@@ -10,6 +10,7 @@ interface Binding extends ParticipantSource {
   source_scope: string;
 }
 interface Reference {
+  semantic_type?: string;
   connection_id: number;
   feed_id: number;
   created_at: string;
@@ -71,6 +72,8 @@ function reference(value: unknown): Reference {
     ![row.connection_id, row.feed_id].every(
       (id) => Number.isSafeInteger(id) && id > 0
     ) ||
+    (row.semantic_type !== undefined &&
+      (typeof row.semantic_type !== "string" || !row.semantic_type)) ||
     typeof row.created_at !== "string" ||
     !Number.isFinite(Date.parse(row.created_at)) ||
     ["observation_id", "resource_ref", "resource_type", "source_scope"].some(
@@ -79,6 +82,9 @@ function reference(value: unknown): Reference {
   )
     throw new Error("Malformed source reference");
   return {
+    ...(row.semantic_type !== undefined
+      ? { semantic_type: row.semantic_type }
+      : {}),
     connection_id: row.connection_id,
     feed_id: row.feed_id,
     created_at: row.created_at,
@@ -90,8 +96,20 @@ function reference(value: unknown): Reference {
     },
   };
 }
+// Caller state may round-trip through JSONB, whose object key order is not
+// insertion order. Normalize only this state checksum; identity keys retain
+// their existing hashes. Array order is part of the pending batch identity.
+function canonicalState(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalState);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, child]) => [key, canonicalState(child)])
+  );
+}
 function pendingDigest(pending: Omit<Pending, "digest">): string {
-  return identityDigest(pending);
+  return identityDigest(canonicalState(pending));
 }
 function referenceKey(ref: Reference): string {
   return JSON.stringify([
@@ -295,6 +313,10 @@ export async function runIncrementalIdentity(
       throw new Error(
         "Unbound or changed source scope; preserve the prior state"
       );
+    if (ref.semantic_type === "source.gap") {
+      unresolved.push({ reference: ref, status: "source_gap_or_unsupported" });
+      continue;
+    }
     if (type === "notification") continue; // no person/relationship claim
     if (type !== "message") {
       unresolved.push({ reference: ref, status: "source_gap_or_unsupported" });
