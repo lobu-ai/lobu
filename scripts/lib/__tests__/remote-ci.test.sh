@@ -183,10 +183,9 @@ optional_filter="$(workflow_job "$workflow" optional-smoke-filter)"
 if grep -q '^    needs:' <<<"$optional_filter"; then
   fail "optional smoke filter still waits for the merge graph"
 fi
-for mac_input in 'packages/cli/' 'config/macos/lobu-auth\.entitlements' 'build-mac-auth-cli'; do
-  grep -Fq "$mac_input" <<<"$optional_filter" ||
-    fail "optional Mac smoke filter omits auth-helper input: $mac_input"
-done
+# Input selection is exercised against real git histories in ci-efficiency.test.ts.
+grep -Fq 'node scripts/ci-paths.mjs smokes' <<<"$optional_filter" ||
+  fail "optional smoke filter does not execute the shared event-range helper"
 vitest_job="$(workflow_job "$workflow" server-integration-vitest)"
 grep -q -- '--shard=${{ matrix.shard }}/3' <<<"$vitest_job" ||
   fail "static isolated Vitest shard is missing"

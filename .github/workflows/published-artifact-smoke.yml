@@ -27,13 +27,9 @@ on:
         description: Exact npm version to smoke
         required: true
         type: string
-  # Every merge to main. The artifact on the registry is the PREVIOUS release,
-  # so this is a standing check that what users can install right now still
-  # works — it would have been red continuously through the __filename, glibc
-  # and uid-0 breakages instead of waiting for someone to file an issue.
-  push:
-    branches: [main]
-  # Daily canary. The registry can break without us pushing anything (a
+  # Daily canary. Main pushes publish no npm artifact, so a per-merge run would
+  # only re-test the previous release; the callers above cover each new
+  # version. The registry can still break without us pushing anything (a
   # dependency yanks a version, a transitive install changes), and a bad
   # release otherwise sits undetected until a user files an issue.
   schedule:
