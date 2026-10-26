@@ -1,13 +1,27 @@
-import type { ValidateFunction } from 'ajv';
+import type { Options, ValidateFunction } from 'ajv';
+import Ajv2020 from 'ajv/dist/2020';
+import addFormats from 'ajv-formats';
 import { createAjv, formatAjvError } from '@lobu/core/ajv';
 import type { OperationDescriptor } from './types';
 import { getErrorMessage } from '@lobu/core';
 
-const operationInputAjv = createAjv({
+// Fail-fast over untrusted caller input (see the `allErrors` note in
+// `@lobu/core/ajv`); both dialect instances share the same threat model.
+const operationInputAjvOptions: Options = {
   allErrors: false,
   strict: false,
   coerceTypes: false,
-});
+};
+
+const operationInputAjv = createAjv(operationInputAjvOptions);
+
+// MCP tools can declare JSON Schema 2020-12. The draft-07 instance above has
+// no meta-schema for that `$schema` and throws on compile, which rejected
+// every call to such a tool. Compile those with the 2020-12 validator so its
+// keywords (`prefixItems`, `items: false`, ...) stay enforced, while schemas
+// that don't declare it keep their draft-07 semantics.
+const operationInputAjv2020 = new Ajv2020(operationInputAjvOptions);
+addFormats(operationInputAjv2020);
 
 // `input_schema` objects are parsed fresh from the DB on each request (no
 // `$id`), so AJV can't dedupe them and `compile()` would add a new validator
@@ -29,7 +43,11 @@ export function validateOperationInput(
     const cacheKey = JSON.stringify(schema);
     let validate = validatorCache.get(cacheKey);
     if (!validate) {
-      validate = operationInputAjv.compile(schema);
+      const ajv = schema.$schema === 'https://json-schema.org/draft/2020-12/schema'
+        || schema.$schema === 'https://json-schema.org/draft/2020-12/schema#'
+        ? operationInputAjv2020
+        : operationInputAjv;
+      validate = ajv.compile(schema);
       validatorCache.set(cacheKey, validate);
     }
     if (validate(input)) return null;

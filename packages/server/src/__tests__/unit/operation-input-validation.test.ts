@@ -21,6 +21,58 @@ function operation(inputSchema?: Record<string, unknown>): OperationDescriptor {
 }
 
 describe('validateOperationInput', () => {
+  test('validates remote tools declaring JSON Schema 2020-12', () => {
+    const descriptor = operation({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: { code: { type: 'string' } },
+      required: ['code'],
+      additionalProperties: false,
+    });
+
+    expect(validateOperationInput(descriptor, { code: 'async () => []' })).toBeNull();
+    expect(validateOperationInput(descriptor, {})).toBe('missing required field: code');
+    const input = { code: 123 };
+    expect(validateOperationInput(descriptor, input)).toBe('code: must be string');
+    expect(input.code).toBe(123);
+  });
+
+  test('enforces 2020-12 tuple keywords rather than stripping the dialect', () => {
+    const descriptor = operation({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: {
+        values: {
+          type: 'array',
+          prefixItems: [{ type: 'string', format: 'email' }],
+          items: false,
+        },
+      },
+    });
+
+    expect(validateOperationInput(descriptor, { values: ['person@example.com'] })).toBeNull();
+    expect(validateOperationInput(descriptor, { values: ['invalid'] })).toContain('valid email');
+    expect(validateOperationInput(descriptor, { values: ['person@example.com', 'extra'] })).not.toBeNull();
+  });
+
+  test('preserves draft-07 tuple validation for existing operations', () => {
+    const descriptor = operation({
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        values: {
+          type: 'array',
+          items: [{ type: 'string' }],
+          additionalItems: false,
+        },
+      },
+    });
+
+    expect(validateOperationInput(descriptor, { values: ['value'] })).toBeNull();
+    expect(validateOperationInput(descriptor, { values: [123] })).not.toBeNull();
+    expect(validateOperationInput(descriptor, { values: ['value', 'extra'] })).not.toBeNull();
+  });
+
   test('accepts input matching the operation schema', () => {
     const error = validateOperationInput(
       operation({
