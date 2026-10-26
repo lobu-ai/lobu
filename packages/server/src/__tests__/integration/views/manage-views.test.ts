@@ -202,6 +202,13 @@ describe("manage_views", () => {
 			workspace: [{ workspace: true }],
 			event: [{ event: "deal.won", type: "deal" }],
 		};
+		// With realistic entity counts the planner ORs the id and slug indexes,
+		// computing both index keys for every pin, so a slug pin must never reach
+		// the id cast.
+		await sql`INSERT INTO entities (name, slug, entity_type_id, organization_id, created_by)
+			SELECT 'Filler ' || g, 'filler-' || g, d.entity_type_id, d.organization_id, d.created_by
+			FROM generate_series(1, 20000) g, (SELECT * FROM entities WHERE id = ${deal.id}) d`;
+		await sql`ANALYZE entities`;
 		await sql.unsafe(up);
 		expect(await read()).toEqual(expected);
 		await sql.unsafe(up);
