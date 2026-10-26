@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Value } from "@sinclair/typebox/value";
+import { recordKey } from "../contracts/entity-reference";
 import {
   GetEntityAction,
   LinkEntitiesAction,
@@ -48,5 +49,20 @@ describe("entity references", () => {
         relationship_type_slug: "related-to",
       })
     ).toBe(false);
+  });
+  it("only advertises keys that fit the resolver and relationship storage", () => {
+    for (const key of [" ", "007", "é".repeat(512), 0, 42]) {
+      expect(recordKey({ key }, "key")).toBe(String(key));
+    }
+    for (const key of [
+      "",
+      "a\0b",
+      "x".repeat(1025),
+      "é".repeat(513),
+      NaN,
+      Infinity,
+    ]) {
+      expect(recordKey({ key }, "key")).toBeNull();
+    }
   });
 });

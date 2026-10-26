@@ -75,11 +75,12 @@ describe('typed references and authored source relationships', () => {
         VALUES (${ws.org.id}, 'postgres', ${connection!}, 'Verbatim source', 'active', ${profile.id}, 'org', ${ws.users.owner.id})`;
     }
     await ws.owner.entity_schema.createType({ slug, name: 'Verbatim keys',
-      backing: { sql: "SELECT * FROM (VALUES ('padded-key', 'Plain'), (' padded-key ', 'Spaces'), (E'\\tpadded-key\\n', 'Controls'), ('　padded-key ', 'Unicode'), (' ', 'Space only')) AS items(id, name)", connection },
+      backing: { sql: "SELECT * FROM (VALUES ('padded-key', 'Plain'), (' padded-key ', 'Spaces'), (E'\\tpadded-key\\n', 'Controls'), ('　padded-key ', 'Unicode'), (' ', 'Space only'), (repeat('x', 1025), 'Oversized ASCII'), (repeat('é', 513), 'Oversized UTF8')) AS items(id, name)", connection },
       metadata_schema: { type: 'object', 'x-lobu-record-key': 'id' } });
     const listed = await ws.owner.entities.list({ entity_type: slug });
-    expect(listed.entities).toHaveLength(5);
-    for (const item of listed.entities) {
+    expect(listed.entities).toHaveLength(7);
+    expect(listed.entities.filter(item => item.id === null).map(item => item.name).sort()).toEqual(['Oversized ASCII', 'Oversized UTF8']);
+    for (const item of listed.entities.filter(item => item.id !== null)) {
       const got = await ws.owner.entities.get({ entity_id: String(item.id), entity_type: slug });
       expect(got.entity).toMatchObject({ id: item.id, name: item.name });
       const resolved = await resolvePath({ path: `/${ws.org.slug}/${slug}/${encodeURIComponent(String(item.id))}` }, {}, ownerToolContext(ws.org.id, ws.users.owner.id));

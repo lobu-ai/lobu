@@ -17,6 +17,11 @@ export function recordKey(
 ): string | null {
   const value = row[column];
   if (typeof value !== "string" && typeof value !== "number") return null;
+  if (typeof value === "number" && !Number.isFinite(value)) return null;
   const key = String(value);
-  return key.length > 0 && !key.includes("\0") ? key : null;
+  return key.length > 0 &&
+    !key.includes("\0") &&
+    new TextEncoder().encode(key).length <= 1024
+    ? key
+    : null;
 }

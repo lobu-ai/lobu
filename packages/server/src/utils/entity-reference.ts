@@ -55,7 +55,7 @@ export async function resolveEntityReference(
       entityType: String(row.entity_type), organizationId: String(row.organization_id), name: String(row.name),
       slug: String(row.slug), metadata: row.metadata ?? {} };
   }
-  if (typeof id !== 'string' || !id || id.includes('\0') || Buffer.byteLength(id, 'utf8') > 1024 || !entityType) {
+  if (typeof id !== 'string' || !entityType || recordKey({ key: id }, 'key') === null) {
     throw new ToolUserError('A string entity_id requires entity_type and a non-empty source key of at most 1024 UTF-8 bytes', 400);
   }
   const type = normalizeEntityTypeSlug(entityType);
