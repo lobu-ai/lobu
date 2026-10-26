@@ -18,6 +18,8 @@ import { createConversationsRoutes } from '../../gateway/routes/internal/convers
 import { createFileRoutes } from '../../gateway/routes/internal/files';
 import { createImageRoutes } from '../../gateway/routes/internal/images';
 import { createInteractionRoutes } from '../../gateway/routes/internal/interactions';
+import { ImageGenerationService } from '../../gateway/services/image-generation-service';
+import { TranscriptionService } from '../../gateway/services/transcription-service';
 import { __setChatInstanceManagerForTests } from '../../lobu/gateway';
 import { pruneTurnWriteReceipts } from '../../tools/turn-write-idempotency';
 import { createTestAutomationSubscription } from '../setup/automation-subscriptions';
@@ -266,5 +268,60 @@ describe('turn write receipts on entity create', () => {
     const first = await create('receipts-entity-6', 'Typeless Co', true, 'no_such_type');
     expect(first).toContain("Unknown entity type 'no_such_type'");
     expect(await create('receipts-entity-6', 'Typeless Co', true, 'no_such_type')).toEqual(first);
+  });
+});
+
+describe('turn write receipts over the real media services', () => {
+  // The provider answers 200 and then the body read fails: the image or audio
+  // may have been generated and billed, but nothing came back. A repeat of the
+  // same input must not call the provider again.
+  const provider = vi.fn(async () => new Response(new ReadableStream({ start: (stream) => stream.error(new Error('connection reset')) }), { status: 200 }));
+  let configured = true;
+  const source = async () => configured ? { apiKey: 'synthetic-key', baseUrl: 'https://provider.example.test/v1/endpoint', model: 'synthetic-model' } : null;
+  const profiles = { getBestProfile: async () => null } as never;
+  const media = new Hono();
+  media.route('/lobu', createImageRoutes(new ImageGenerationService(profiles, source as never)));
+  media.route('/lobu', createAudioRoutes(new TranscriptionService(profiles, undefined, source as never)));
+  const realFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    configured = true;
+    provider.mockClear();
+    globalThis.fetch = provider as unknown as typeof fetch;
+  });
+  afterAll(() => { globalThis.fetch = realFetch; });
+
+  function mediaCall(path: string, token: string, body: unknown) {
+    return media.request('/lobu' + path, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  }
+
+  it.each([
+    ['generate_image', '/internal/images/generate', { prompt: 'a lighthouse' }],
+    ['generate_audio', '/internal/audio/synthesize', { text: 'hello there' }],
+  ])('%s: a failure after the provider call keeps the claim, so the repeat is not re-billed', async (_name, path, body) => {
+    const failed = await mediaCall(path, (await turn(`receipts-${path}-lost`)).token, body);
+    expect(failed.status, await failed.clone().text()).toBe(502);
+    const repeat = await mediaCall(path, (await turn(`receipts-${path}-lost`)).token, body);
+    expect(repeat.status).toBe(409);
+    expect((await repeat.json()).error).toContain('already attempted');
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(await getTestDb()`SELECT state FROM turn_write_receipts WHERE surface = ${path.endsWith('generate') ? 'images.generate' : 'audio.synthesize'}`).toEqual([{ state: 'claimed' }]);
+  });
+
+  it.each([
+    ['generate_image', '/internal/images/generate', { prompt: 'a lighthouse' }],
+    ['generate_audio', '/internal/audio/synthesize', { text: 'hello there' }],
+  ])('%s: a refusal before the provider call releases the claim', async (_name, path, body) => {
+    configured = false;
+    const refused = await mediaCall(path, (await turn(`receipts-${path}-unconfigured`)).token, body);
+    expect(refused.status).toBe(400);
+    expect(await getTestDb()`SELECT 1 FROM turn_write_receipts`).toHaveLength(0);
+    configured = true;
+    provider.mockResolvedValueOnce(path.endsWith('generate')
+      ? Response.json({ data: [{ b64_json: 'AQID' }] })
+      : new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    const retry = await mediaCall(path, (await turn(`receipts-${path}-unconfigured`)).token, body);
+    expect(retry.status, await retry.clone().text()).toBe(200);
+    expect(provider).toHaveBeenCalledTimes(1);
   });
 });

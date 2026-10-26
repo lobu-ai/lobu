@@ -75,7 +75,9 @@ export function createImageRoutes(
               error: result.error,
               availableProviders: result.availableProviders,
             },
-            400
+            // 502 after a provider call: it may have produced (and billed)
+            // output, so the turn receipt keeps its claim. 400 = never sent.
+            result.dispatched ? 502 : 400
           );
         }
 

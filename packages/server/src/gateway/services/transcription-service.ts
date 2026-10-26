@@ -118,6 +118,12 @@ interface SynthesisSuccess {
 interface SynthesisError {
   error: string;
   availableProviders: TranscriptionProvider[];
+  /**
+   * The provider was called and the call failed: audio may have been
+   * synthesized (and billed) even though none came back. Absent when the
+   * request never left, e.g. no provider is configured.
+   */
+  dispatched?: true;
 }
 
 type SynthesisResult = SynthesisSuccess | SynthesisError;
@@ -523,6 +529,7 @@ export class TranscriptionService {
       return {
         error: `Synthesis failed with ${displayName(config.provider)}: ${errorMessage}`,
         availableProviders: [],
+        dispatched: true,
       };
     }
   }

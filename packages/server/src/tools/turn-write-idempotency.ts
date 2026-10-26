@@ -143,8 +143,12 @@ export function withTurnInputRun(
   return { ...agentTurn, inputRunId: canonical ? parsed : 0 };
 }
 
-/** A replayable result, or an explicit refusal before the effect took place. */
-type TurnWriteEffect<R> = { store: R } | { release: true };
+/**
+ * A replayable result; an explicit refusal before the effect took place
+ * (frees the claim); or a failure after it may have taken place (keeps the
+ * claim with no result, so a repeat answers "attempted").
+ */
+type TurnWriteEffect<R> = { store: R } | { release: true } | { retain: true };
 
 /** Outcome of `runTurnWriteOnce`: the effect ran now, an earlier one is replayed, or one was claimed and never finished. */
 type TurnWriteOutcome<R> =
@@ -214,6 +218,7 @@ export async function runTurnWriteOnce<R>(
     await release();
     return { kind: 'ran' };
   }
+  if ('retain' in outcome) return { kind: 'ran' };
   await sql`
     UPDATE turn_write_receipts
     SET state = 'done', result = ${sql.json(JSON.parse(JSON.stringify(outcome.store ?? null)))}
