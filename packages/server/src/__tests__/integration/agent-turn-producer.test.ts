@@ -273,7 +273,7 @@ async function postAsFleet(path: string, body: Record<string, unknown>) {
 }
 
 /** Enqueue a turn and claim it, as the fleet worker would. */
-async function claimedTurnRun(workerId: string, platform: 'api' | 'slack' = 'api'): Promise<number> {
+async function claimedTurnRun(workerId: string, platform: 'api' | 'slack' = 'api', opts: { legacy?: boolean } = {}): Promise<number> {
   const org = await createTestOrganization();
   await enqueueMessage({ ...messageFor(org.id), platform }, {
     agentSettings: settingsStore,
@@ -282,6 +282,16 @@ async function claimedTurnRun(workerId: string, platform: 'api' | 'slack' = 'api
   });
   const response = await pollFleet(workerId, { agent_turn: true });
   const body = await response.json();
+  // A current worker's first beat carries the credential it was claimed with,
+  // which is what makes its attempt eligible for a re-run. `legacy` is a
+  // worker binary that predates `turn_credential`.
+  // An empty tool-event list keeps the beat from publishing a status reply.
+  if (!opts.legacy) {
+    const beat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: body.run_id, worker_id: workerId, turn_credential: body.credentials.accessToken, turn_tool_events: [],
+    });
+    expect(beat.status).toBe(200);
+  }
   return body.run_id as number;
 }
 
@@ -4717,7 +4727,7 @@ describe('agent turn reaper', () => {
     // append output events, so their retry waits for the authoritative final.
     for (const [sequence, text] of [[1, 'the whole'], [2, ' answer']] as const) {
       const beat = await postAsFleet('/api/workers/heartbeat', {
-        run_id: runId, worker_id: 'fleet-rerun', turn_delta: { text, sequence },
+        run_id: runId, worker_id: 'fleet-rerun', turn_credential: again.credentials.accessToken, turn_delta: { text, sequence },
       });
       expect(await beat.json()).toMatchObject({ turn_delta_ack: { sequence, published: platform !== 'api' } });
     }
@@ -4727,7 +4737,7 @@ describe('agent turn reaper', () => {
       [' answer', false],
     ]);
     const completed = await postAsFleet('/api/workers/complete-agent-turn', {
-      run_id: runId, worker_id: 'fleet-rerun', status: 'completed',
+      run_id: runId, worker_id: 'fleet-rerun', turn_credential: again.credentials.accessToken, status: 'completed',
       session_jsonl: nativeSession(), text: 'the whole answer',
     });
     expect(completed.status).toBe(200);
@@ -4970,6 +4980,41 @@ describe('agent turn reaper', () => {
     expect(replies[0]!.action_input).toMatchObject({ messageId: first.messageId, errorCode: AgentErrorCode.WORKER_UNRESPONSIVE, turnRunId: ownerId });
     // The follower is claimable now, not stuck behind a turn nobody runs.
     expect((await (await pollFleet('fleet-other', { agent_turn: true })).json()).run_id).toBe(follower.id);
+  });
+
+  it('never re-runs a turn whose worker never sent its attempt credential (an older worker binary)', async () => {
+    const runId = await claimedTurnRun('fleet-legacy', 'api', { legacy: true });
+    const beat = await postAsFleet('/api/workers/heartbeat', { run_id: runId, worker_id: 'fleet-legacy', turn_tool_events: [] });
+    expect(await beat.json()).toMatchObject({ continue: true });
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 1, delivered: 1, requeued: 0 });
+    expect((await turnRow(runId)).status).toBe('timeout');
+    const [reply] = await threadResponses();
+    expect(reply!.action_input).toMatchObject({ errorCode: AgentErrorCode.WORKER_DIED });
+  });
+
+  it('refuses a credential-less heartbeat and completion for a re-run turn, even from the same worker id', async () => {
+    const worker_id = 'fleet-mixed-version';
+    const runId = await claimedTurnRun(worker_id, 'slack');
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 1 });
+    const retry = await (await pollFleet(worker_id, { agent_turn: true })).json();
+    expect(retry.run_id).toBe(runId);
+    // An older binary sharing the worker id cannot say which attempt it is.
+    const lateBeat = await postAsFleet('/api/workers/heartbeat', {
+      run_id: runId, worker_id, turn_delta: { text: 'stale span', sequence: 1 },
+    });
+    expect(lateBeat.status).toBe(409);
+    const lateCompletion = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id, status: 'failed', error: 'stale attempt failed',
+    });
+    expect(lateCompletion.status).toBe(409);
+    expect((await turnRow(runId)).status).toBe('running');
+    expect(await threadResponses()).toHaveLength(0);
+    const done = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id, turn_credential: retry.credentials.accessToken, status: 'completed', text: 'the isolate answer', session_jsonl: nativeSession(),
+    });
+    expect(await done.json()).toMatchObject({ ok: true, status: 'completed' });
   });
 
   it('never re-runs a cancelled turn', async () => {

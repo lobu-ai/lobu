@@ -239,7 +239,7 @@ async function publishTurnDelta(
 	const emitted = await sql.begin(async (tx) => {
 		const owner = await lockAgentTurnRun(tx, runId);
 		if (!owner || owner.run_metadata?.cancel_requested_at
-			|| isStaleAgentTurnReport('agent_turn', owner.action_input?.credential, turnCredential)) return false;
+			|| isStaleAgentTurnReport(owner, turnCredential)) return false;
 		// One statement, fenced on the lease, so a run cancelled or re-claimed
 		// between the read and the write cannot have a stale worker's text
 		// published into its conversation. The sequence is kept on the
@@ -351,7 +351,7 @@ async function publishTurnToolEvents(
 	const stored = await sql.begin(async (tx) => {
 		const owner = await lockAgentTurnRun(tx, runId);
 		if (!owner || owner.run_metadata?.cancel_requested_at
-			|| isStaleAgentTurnReport('agent_turn', owner.action_input?.credential, turnCredential)) return 0;
+			|| isStaleAgentTurnReport(owner, turnCredential)) return 0;
 		const rows = (await tx`
       SELECT action_input, organization_id
       FROM public.runs
@@ -680,7 +680,7 @@ async function publishTurnStatus(
 	const emitted = await sql.begin(async (tx) => {
 		const owner = await lockAgentTurnRun(tx, runId);
 		if (!owner || owner.run_metadata?.cancel_requested_at
-			|| isStaleAgentTurnReport('agent_turn', owner.action_input?.credential, turnCredential)) return false;
+			|| isStaleAgentTurnReport(owner, turnCredential)) return false;
 		const rows = (await tx`
       SELECT action_input, organization_id, claimed_at
       FROM public.runs
@@ -888,7 +888,7 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     // Before the terminal checks: a stalled attempt's late report must not
     // terminalize (or be acknowledged against) the attempt that re-claimed the
     // run under the same worker id.
-    if (isStaleAgentTurnReport('agent_turn', run.action_input?.credential, body.turn_credential)) {
+    if (isStaleAgentTurnReport(run, body.turn_credential)) {
       return { error: 'This agent turn attempt no longer owns the run', code: 409 as const };
     }
     if (!['claimed', 'running', 'pending'].includes(run.status)) {
@@ -1134,8 +1134,11 @@ export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise
       // The flag is stamped `false` at claim and `true` by the gateway before
       // any side-effecting call this attempt made, and by a stored trace. An
       // absent flag (claimed before it existed) is unknown and terminal.
+      // A worker that never sent its `turn_credential` (an older binary) cannot
+      // be fenced from the attempt that would replace it, so it is not re-run.
       const rerun = !cancelled && !neverClaimed && !wedged
         && run.run_metadata?.turn_tool_started === false
+        && run.run_metadata?.turn_credential_proven === true
         && (run.run_metadata?.turn_requeue_count ?? 0) < AGENT_TURN_MAX_REQUEUES;
       if (rerun && claims) {
         // The run keeps its id, so it stays ahead of the followers queued
@@ -1150,7 +1153,8 @@ export async function sweepStaleAgentTurnRuns(thresholdSeconds: number): Promise
             run_metadata = (COALESCE(r.run_metadata, '{}'::jsonb) - 'turn_delta_sequence')
               || jsonb_build_object('turn_requeue_count', COALESCE((r.run_metadata->>'turn_requeue_count')::int, 0) + 1)
           WHERE r.id = ${run.id} AND ${stale(tx)}
-            AND r.run_metadata->>'turn_tool_started' = 'false' RETURNING r.id`;
+            AND r.run_metadata->>'turn_tool_started' = 'false'
+            AND r.run_metadata->>'turn_credential_proven' = 'true' RETURNING r.id`;
         if (!rows.length) return null;
         await resetAgentTurnAdmission(tx, run);
         return 'requeued' as const;

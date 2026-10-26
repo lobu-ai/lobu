@@ -1178,9 +1178,11 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
             client: tx,
           });
           // A fresh attempt has started no tool yet. The reaper re-runs a dead
-          // attempt only on this explicit `false`, never on its absence.
+          // attempt only on this explicit `false`, never on its absence, and
+          // only once its worker proves on a heartbeat that it sends
+          // `turn_credential`.
           await tx`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb)
-            || ${tx.json({ ...nativeSessionBase(sessionJsonl ?? ''), turn_tool_started: false })}::jsonb WHERE id = ${runId}`;
+            || ${tx.json({ ...nativeSessionBase(sessionJsonl ?? ''), turn_tool_started: false, turn_credential_proven: false })}::jsonb WHERE id = ${runId}`;
           row.action_input = { ...input, turn: { ...turn, session_jsonl: sessionJsonl ?? '' } };
         }
       }

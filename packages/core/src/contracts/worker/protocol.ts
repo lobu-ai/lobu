@@ -1110,7 +1110,9 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
    * `credentials.accessToken`, or its refresh). The server accepts the report
    * only while it names the run's current attempt (`isCurrentAgentTurnAttempt`
    * in the server): after a requeue, a stalled attempt re-claimed under the
-   * same worker id is refused with 409 and must stop the turn.
+   * same worker id is refused with 409 and must stop the turn. Once a turn
+   * has been re-run, a report without it is refused too, and an attempt whose
+   * heartbeats never carry it is not re-run when its worker dies.
    */
   turn_credential: Type.Optional(
     Type.String({ minLength: 1, maxLength: 65_536 })
@@ -1292,7 +1294,9 @@ export const HeartbeatRequestSchema = Type.Object({
    * `credentials.accessToken`, or its refresh). The server accepts the report
    * only while it names the run's current attempt (`isCurrentAgentTurnAttempt`
    * in the server): after a requeue, a stalled attempt re-claimed under the
-   * same worker id is refused with 409 and must stop the turn.
+   * same worker id is refused with 409 and must stop the turn. Once a turn
+   * has been re-run, a report without it is refused too, and an attempt whose
+   * heartbeats never carry it is not re-run when its worker dies.
    */
   turn_credential: Type.Optional(
     Type.String({ minLength: 1, maxLength: 65_536 })

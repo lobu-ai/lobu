@@ -7,7 +7,7 @@
  * poll-auth-signal.
  */
 
-import { extendHeartbeatedTurnMarker, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs } from '../runs/agent-turn-inputs';
+import { extendHeartbeatedTurnMarker, isStaleAgentTurnReport, lockAgentTurnRun, pendingAgentTurnInputs, recordAgentTurnCredentialProven } from '../runs/agent-turn-inputs';
 import { isSourceFeedRead } from '../lib/device-feed-read-protocol';
 import type {
 	CompleteActionRequest,
@@ -358,8 +358,9 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
 				const nativeRun = await lockAgentTurnRun(tx, run_id);
 				// The reaper can rotate the credential after request admission. Check
 				// while holding its row lock, before writes or steering this attempt.
-				const current = nativeRun && !isStaleAgentTurnReport('agent_turn', nativeRun.action_input?.credential, body.turn_credential);
+				const current = nativeRun && !isStaleAgentTurnReport(nativeRun, body.turn_credential);
 				const updated = current ? await updateHeartbeat(tx, false) : [];
+				if (updated.length > 0 && nativeRun) await recordAgentTurnCredentialProven(tx, nativeRun, body.turn_credential);
 				const owned = updated.length > 0 && nativeRun;
 				const cancelRequested = !!owned && !!nativeRun.run_metadata?.cancel_requested_at;
 				return { updated, cancelRequested, steer: owned && !cancelRequested ? await pendingAgentTurnInputs(tx, nativeRun) : [] };

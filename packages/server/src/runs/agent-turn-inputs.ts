@@ -42,6 +42,12 @@ export interface NativeTurnRun {
     turn_tool_started?: boolean;
     /** How many times the reaper put this turn back after its worker died. */
     turn_requeue_count?: number;
+    /**
+     * Whether the current attempt's worker sent its `turn_credential` on a
+     * heartbeat. Stamped `false` at claim. Only a proven attempt is re-run:
+     * an older worker binary cannot be fenced from the attempt that replaces it.
+     */
+    turn_credential_proven?: boolean;
   } | null;
 }
 
@@ -91,15 +97,34 @@ export function isCurrentAgentTurnAttempt(runCredential: unknown, attemptJti: st
 }
 
 /**
- * True when a worker report (heartbeat or completion) carries a turn
- * credential that does not name the run's current attempt. A report with no
- * `turn_credential` retains the older `claimed_by` fence. That cannot
- * distinguish attempts when the same worker re-claims a run, so mixed-version
- * fleets do not have the attempt-level guarantee until every worker sends it.
+ * True when a worker report (heartbeat, delta, tool trace or completion) does
+ * not come from the run's current attempt. A report naming another attempt's
+ * credential is stale. A report with no `turn_credential` comes from a worker
+ * binary older than the attempt fence; it keeps the `claimed_by` fence until
+ * the turn has been re-run, after which `claimed_by` cannot tell the attempts
+ * apart, so it is stale too. The reaper only re-runs an attempt whose worker
+ * proved it sends the credential ({@link recordAgentTurnCredentialProven}).
  */
-export function isStaleAgentTurnReport(runType: string | null | undefined, runCredential: unknown, turnCredential: unknown): boolean {
-  if (turnCredential === undefined || runType !== 'agent_turn') return false;
-  return !isCurrentAgentTurnAttempt(runCredential, turnCredentialJti(turnCredential));
+export function isStaleAgentTurnReport(
+  run: Pick<NativeTurnRun, 'action_input' | 'run_metadata'>,
+  turnCredential: unknown
+): boolean {
+  if (turnCredential === undefined) return (run.run_metadata?.turn_requeue_count ?? 0) > 0;
+  return !isCurrentAgentTurnAttempt(run.action_input?.credential, turnCredentialJti(turnCredential));
+}
+
+/**
+ * Mark the current attempt as one whose worker sends `turn_credential`, so the
+ * reaper may re-run it if it dies. Called on a heartbeat that passed
+ * {@link isStaleAgentTurnReport} with a credential, inside the transaction
+ * holding the run lock. Claim resets it to `false` for each attempt.
+ */
+export async function recordAgentTurnCredentialProven(sql: DbClient, run: NativeTurnRun, turnCredential: unknown): Promise<void> {
+  if (turnCredential === undefined || run.run_metadata?.turn_credential_proven === true) return;
+  await sql`
+    UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"turn_credential_proven": true}'::jsonb
+    WHERE id = ${run.id}
+  `;
 }
 
 /**
@@ -382,10 +407,10 @@ export async function extendHeartbeatedTurnMarker(
     // beats extend anyway.
     const sql = getDb();
     const [run] = await sql<NativeTurnRun>`
-      SELECT id, organization_id, action_input
+      SELECT id, organization_id, action_input, run_metadata
       FROM runs WHERE id = ${runId} AND run_type = 'agent_turn'
     `;
-    if (!run || isStaleAgentTurnReport('agent_turn', run.action_input?.credential, turnCredential)) return;
+    if (!run || isStaleAgentTurnReport(run, turnCredential)) return;
     const deployment = turnMarkerDeployment(run);
     // The reaper-backstop deadline, not the shorter execution one: a dead
     // worker's turn is the run reaper's call (re-run or WORKER_DIED), so the

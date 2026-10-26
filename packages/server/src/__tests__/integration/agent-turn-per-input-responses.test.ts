@@ -145,7 +145,7 @@ async function inputScenario(): Promise<InputScenario> {
   await enqueueMessage(first);
   const [owner] = await agentTurnRuns();
   const worker_id = 'fleet-per-input';
-  await (await pollFleet(worker_id, { agent_turn: true })).json();
+  const claim = await (await pollFleet(worker_id, { agent_turn: true })).json();
   for (const [index, text] of ['same text', 'same text'].entries()) {
     await enqueueAgentTurn(await admittedMessage({ ...first, messageId: `input-${index}`, messageText: text }), deps);
   }
@@ -159,7 +159,7 @@ async function inputScenario(): Promise<InputScenario> {
     })),
   ];
   const body = {
-    run_id: owner.id, worker_id, status: 'completed',
+    run_id: owner.id, worker_id, turn_credential: claim.credentials.accessToken as string, status: 'completed',
     // Deliberately vague prose: the durable record must still carry the exact
     // connector error and the actual tool ledger, not the paraphrase.
     text: 'Owner answer with authorization issues.',
