@@ -83,7 +83,8 @@ jobs:
   # Decide which package/frontend suites must run. Same git-diff pattern as
   # optional-smoke-filter: a PR touching only workflows/docs skips the heavy
   # suites (they report "skipped", which satisfies branch protection), while
-  # any runtime change runs everything. On push/main (no base SHA) all run.
+  # any runtime change runs the package suites. Pushes use the full before/after
+  # range; unavailable history and manual dispatches conservatively run all.
   paths:
     runs-on: ubuntu-24.04
     outputs:
@@ -93,49 +94,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Need the PR base commit so we can diff against it. The default
-          # fetch-depth=1 only has HEAD.
+          # Need both event endpoints, including a push before-SHA or PR merge base.
           fetch-depth: 0
 
       - name: Decide which test suites to run
         id: filter
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "${BASE_SHA:-}" ]; then
-            echo "packages=true" >> "$GITHUB_OUTPUT"
-            echo "frontend=true" >> "$GITHUB_OUTPUT"
-            echo "chromeExt=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed=$(git diff --name-only "$BASE_SHA"...HEAD)
-          if echo "$changed" | grep -E '^(packages/|examples/|bun\.lock$|package\.json$|tsconfig\.json$|bunfig\.toml$|Makefile$|patches/|docker/|db/|scripts/|config/|\.github/workflows/ci\.yml$|\.github/actions/|\.gitmodules$)' >/dev/null; then
-            echo "packages=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "packages=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No runtime/test paths changed - skipping package suites."
-          fi
-          if echo "$changed" | grep -E '^(packages/owletto($|/)|\.gitmodules$|\.github/actions/setup-submodule/)' >/dev/null; then
-            echo "frontend=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "frontend=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No frontend paths changed - skipping frontend."
-          fi
-          # The extension smoke downloads a Playwright Chromium build, so it is
-          # gated separately from the rest of the frontend job (which runs for any
-          # `packages` change). `packages/owletto` is a submodule POINTER file, so
-          # a pointer bump shows up as that exact path with nothing under it —
-          # it can move apps/chrome and must run the smoke conservatively. The
-          # smoke drives the extension against a hand-written gateway fixture, so
-          # no `packages/server` change can affect it; what else can is how the
-          # smoke gets its Chromium and its submodule.
-          if echo "$changed" | grep -E '^(packages/owletto$|bun\.lock$|package\.json$|\.gitmodules$|\.github/actions/setup-submodule/|\.github/workflows/ci\.yml$)' >/dev/null; then
-            echo "chromeExt=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "chromeExt=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No Chrome extension paths changed - skipping the extension smoke."
-          fi
+          BEFORE_SHA: ${{ github.event.before }}
+        run: node scripts/ci-paths.mjs suites
 
   # Fast unit tests — no Postgres, no submodule needed for most.
   # Splits from `integration` so a unit failure surfaces in <2 min instead of
@@ -1760,7 +1728,7 @@ jobs:
   # just to evaluate the same PR diff.
   # `github.event.pull_request.changed_files` in the webhook payload is an
   # integer (the count of changed files), not a list — `contains()` over it
-  # never matches. On push events there is no PR base, so both smokes run.
+  # never matches. The shared helper uses the PR base or push before-SHA.
   optional-smoke-filter:
     runs-on: ${{ vars.CI_LINUX_RUNNER || 'ubuntu-24.04' }}
     outputs:
@@ -1769,34 +1737,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Need the PR base commit so we can diff against it. The default
-          # fetch-depth=1 only has HEAD.
+          # Need both event endpoints, including a push before-SHA or PR merge base.
           fetch-depth: 0
 
       - name: Decide which optional smokes to run
         id: filter
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "${BASE_SHA:-}" ]; then
-            echo "mac=true" >> "$GITHUB_OUTPUT"
-            echo "connector=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed=$(git diff --name-only "$BASE_SHA"...HEAD)
-          if echo "$changed" | grep -E '^(packages/owletto($|/)|packages/cli/|packages/connector-worker/|packages/core/|packages/device-connectors/|config/macos/lobu-auth\.entitlements$|scripts/__tests__/mac-app-codesign\.test\.ts$|scripts/(build-owletto-mac|verify-mac-app-entitlements|build-mac-auth-cli|build-mac-device-daemon|test-mac-device-daemon-package|test-mac-device-daemon-automation|check-mac-device-daemon-graph|verify-mac-device-daemon|with-owletto-mac-daemon)\.|package\.json$|bun\.lock$|\.github/workflows/mac-release\.yml$|\.github/workflows/ci\.yml$|\.github/actions/setup-submodule(/|$)|\.gitmodules$)' >/dev/null; then
-            echo "mac=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "mac=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No paths affecting the Mac build changed — skipping mac-build-smoke."
-          fi
-          if echo "$changed" | grep -E '^(docker/|packages/connector-worker/|packages/connector-sdk/|packages/connectors/|packages/core/|packages/embeddings/|packages/pgvector-embedded/|packages/cli/|scripts/(runtime-components\.mjs|pack-cli-smoke\.mjs|verify-cli-runtime\.mjs|daemon-mcp-smoke\.mjs|publish-packages\.mjs|canary-publish\.mjs|published-artifact-smoke\.sh)$|package\.json$|bun\.lock$|\.github/workflows/ci\.yml$|\.github/workflows/build-images\.yml$)' >/dev/null; then
-            echo "connector=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "connector=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No paths affecting the connector runtime changed — skipping connector-parity-smoke."
-          fi
+          BEFORE_SHA: ${{ github.event.before }}
+        run: node scripts/ci-paths.mjs smokes
 
   # Standalone Swift tests + a cheap end-to-end Xcode build for the Mac app.
   # `mac-release.yml` runs only for manual dispatches and published releases,
@@ -1936,14 +1886,16 @@ jobs:
         with:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       # Build the worker image for amd64 only (no QEMU/arm64 — this is a smoke
       # gate, not a release) and load it into the local daemon instead of
-      # pushing. Reuse the GHA buildx cache shared with build-images.yml so this
-      # leg doesn't pay a cold worker build.
+      # pushing. Main pushes use build-images.yml's exact candidate digest
+      # smoke; PR/manual runs read its cache without exporting duplicate layers.
+      - name: Set up Docker Buildx
+        if: github.event_name != 'push'
+        uses: docker/setup-buildx-action@v4
+
       - name: Build worker image (amd64, load, no push)
+        if: github.event_name != 'push'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -1953,11 +1905,11 @@ jobs:
           push: false
           tags: lobu-worker:parity-smoke
           cache-from: type=gha,scope=worker
-          cache-to: type=gha,mode=max,scope=worker
 
       # The real prod runtime contract: run the built image's self-check with NO
       # network, so a green result can't depend on reaching anything external.
       - name: Worker image self-check (docker run --network=none)
+        if: github.event_name != 'push'
         # The image runs under Node so the connector isolate lane (isolated-vm,
         # a V8 addon Bun cannot load) works in prod. A green self-check alone
         # does not prove that addon's native build, so assert the lane too: an

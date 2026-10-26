@@ -424,6 +424,7 @@ describe("deployment images are published only after the candidate passes", () =
       "build-app",
       "build-worker",
       "build-embeddings-service",
+      "connector-parity-smoke",
       "app-image-smoke",
     ]);
     expect(job(file, "promote-images").if).not.toMatch(/always\(|!cancelled\(/);
