@@ -609,8 +609,9 @@ async function fireTurnMarker(
       logger.error(`Dropping unroutable turn-timeout marker (${path})`);
       return false;
     }
-    await enqueueTerminalError(tx, routing, failureFor(deleted.action_input), run ? Number(run.id) : undefined);
-    if (run) await closeAgentTurnShownError(tx, run);
+    const failure = failureFor(deleted.action_input);
+    await enqueueTerminalError(tx, routing, failure, run ? Number(run.id) : undefined);
+    if (run) await closeAgentTurnShownError(tx, run, typeof failure === "string" ? failure : undefined);
     return true;
   });
 }

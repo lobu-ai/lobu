@@ -43,6 +43,11 @@ import {
 	parseTemplateEventActionId,
 } from "../../interactions/template-event-actions.js";
 import { ToolUserError } from "../../utils/errors.js";
+import {
+	parseTurnRetryActionId,
+	retryInterruptedAgentTurn,
+	turnRetryRefusal,
+} from "../orchestration/agent-turn-retry.js";
 
 const logger = createLogger("chat-interaction-bridge");
 
@@ -905,6 +910,42 @@ export function registerActionHandlers(
 							? error.message
 							: "I couldn’t record that interaction.",
 					);
+				} catch {
+					// best effort
+				}
+			}
+			return;
+		}
+
+		// Retry on a worker-failure error. Who may retry, which turns qualify and
+		// the once-per-failed-turn rule are all enforced by
+		// `retryInterruptedAgentTurn` against the stored run; the clicker is
+		// compared in the reply's own id space (the platform user who sent it).
+		const retryTurnRunId = parseTurnRetryActionId(actionId);
+		if (retryTurnRunId !== undefined) {
+			const organizationId = connection.organizationId;
+			const clicker = event.user?.userId;
+			if (!organizationId || typeof clicker !== "string" || !clicker) return;
+			let refusal: string | undefined;
+			try {
+				refusal = turnRetryRefusal(
+					await retryInterruptedAgentTurn({
+						organizationId,
+						turnRunId: retryTurnRunId,
+						actorUserId: clicker,
+						connectionId: connection.id,
+					}),
+				);
+			} catch (error) {
+				logger.error(
+					{ connectionId: connection.id, turnRunId: retryTurnRunId, error: String(error) },
+					"Turn retry failed",
+				);
+				refusal = "I couldn’t retry that message. Please try again.";
+			}
+			if (refusal) {
+				try {
+					await thread.post(refusal);
 				} catch {
 					// best effort
 				}

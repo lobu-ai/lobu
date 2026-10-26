@@ -280,7 +280,7 @@ export async function recordAgentTurnToolCall(
 		return null;
 	}
 	try {
-		await markAgentTurnToolStarted(tokenData);
+		await markAgentTurnToolStarted(tokenData, toolName);
 		return null;
 	} catch (error) {
 		if (error instanceof StaleAgentTurnAttemptError) return { status: 409, error: error.message };

@@ -48,8 +48,28 @@ export interface NativeTurnRun {
      * an older worker binary cannot be fenced from the attempt that replaces it.
      */
     turn_credential_proven?: boolean;
+    /**
+     * The tools the gateway recorded as started for the current attempt
+     * ({@link markAgentTurnToolStarted}), by name, in order. Bounded by
+     * {@link AGENT_TURN_TOOL_LOG_MAX}. Read by the retry note for calls whose
+     * trace never arrived.
+     */
+    turn_started_tools?: string[];
+    /**
+     * Tool call ids of the owner input's stored traces, in order, bounded by
+     * {@link AGENT_TURN_TOOL_LOG_MAX}. Each one names a `tool_use` row through
+     * `turnToolEventKey`, which is how the retry note reads them back.
+     */
+    turn_tool_call_ids?: string[];
+    /** The worker-failure code the user was shown when this turn was closed. */
+    turn_error_code?: string;
+    /** The `messages` run a Retry of this failed turn admitted, once. */
+    turn_retry_run_id?: number;
   } | null;
 }
+
+/** Most started tools and stored trace ids one turn keeps for its retry note. */
+export const AGENT_TURN_TOOL_LOG_MAX = 32;
 
 /** A turn whose worker died before any tool started is re-run at most this often. */
 export const AGENT_TURN_MAX_REQUEUES = 1;
@@ -145,6 +165,8 @@ export async function recordAgentTurnCredentialProven(sql: DbClient, run: Native
  */
 export async function markAgentTurnToolStarted(
   claims: Pick<WorkerTokenData, 'deploymentName' | 'messageId' | 'runId' | 'organizationId' | 'executionMode' | 'jti'>,
+  /** The tool's name as the model knows it, kept for a later retry note. */
+  toolName = 'unknown tool',
 ): Promise<void> {
   const runId = agentTurnRunIdFromClaims(claims);
   if (runId === undefined || claims.executionMode === 'capture') return;
@@ -158,7 +180,12 @@ export async function markAgentTurnToolStarted(
     if (!row || row.status !== 'running' || !isCurrentAgentTurnAttempt(row.credential, claims.jti)) {
       throw new StaleAgentTurnAttemptError();
     }
-    await tx`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"turn_tool_started": true}'::jsonb
+    await tx`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || jsonb_build_object(
+        'turn_tool_started', true,
+        'turn_started_tools', CASE
+          WHEN jsonb_array_length(COALESCE(run_metadata->'turn_started_tools', '[]'::jsonb)) < ${AGENT_TURN_TOOL_LOG_MAX}
+          THEN COALESCE(run_metadata->'turn_started_tools', '[]'::jsonb) || to_jsonb(${toolName.slice(0, 256)}::text)
+          ELSE run_metadata->'turn_started_tools' END)
       WHERE id = ${runId}`;
   });
 }
@@ -231,12 +258,13 @@ export async function lockAgentTurnForMarker(
  * as the reaper's terminal path does, unless the closed run was itself still
  * blocked behind an active owner.
  */
-export async function closeAgentTurnShownError(sql: DbClient, run: NativeTurnRun): Promise<void> {
+export async function closeAgentTurnShownError(sql: DbClient, run: NativeTurnRun, errorCode?: string): Promise<void> {
   const [state] = await sql<{ head: boolean }>`
     SELECT (r.status <> 'pending' OR ${agentTurnClaimEligible(sql)}) AS head FROM runs r WHERE r.id = ${run.id}`;
   await sql`UPDATE runs SET status = 'timeout', completed_at = now(),
       outcome = ${classifyRunOutcome({ status: 'timeout' })}, exit_reason = 'timeout',
-      error_message = 'turn_liveness_error_shown'
+      error_message = 'turn_liveness_error_shown',
+      run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${sql.json(errorCode ? { turn_error_code: errorCode } : {})}::jsonb
     WHERE id = ${run.id} AND status IN ('pending', 'claimed', 'running')`;
   if (state?.head) await releaseNextAgentTurn(sql, run);
 }
