@@ -36,9 +36,13 @@ Display-name-only contacts stay unresolved outside the identity import.
 
 2. Install the data definitions, without enabling execution
 
+From examples/personal-agent, run bun install (CLI and connector SDK >=24.1.1).
+Older CLI compilers can silently drop relationship purpose and fail to group
+identity aliases. Use the installed CLI via bun run --bun lobu below.
+
 For a new workspace, from examples/personal-agent/identity:
-  LOBU_ORG=your-workspace lobu apply --dry-run
-  LOBU_ORG=your-workspace lobu apply
+  LOBU_ORG=your-workspace bun run --bun lobu apply --dry-run
+  LOBU_ORG=your-workspace bun run --bun lobu apply
 
 Select the intended context with lobu context use before apply. This standalone
 config has no credentials, devices, connections, schedules or Automations. Both
