@@ -492,8 +492,8 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
             conversationId: worker.conversationId,
             teamId: worker.teamId,
             userId: worker.userId,
-            // The follow-up runs as this turn's sender; manage_schedules reads
-            // their stored evidence off the signed turn run.
+            source: worker.source,
+            // Resolve sender evidence from the signed turn, never caller input.
             ...(worker.runId ? { turnRunId: worker.runId } : {}),
           },
           isAuthenticated: true,

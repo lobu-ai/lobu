@@ -89,7 +89,7 @@ describe("runWakeAgentTask chat delivery dispatch", () => {
     await seedAgentRow(AGENT, { organizationId: ORG, ownerUserId: USER });
   }, 60_000);
 
-  test("posts back to the channel when delivery context is authorized", async () => {
+  test("posts back to the channel when delivery context is authorized (a pre-evidence chat row)", async () => {
     await seedChatConnection({ id: "conn-real" });
     const enqueued: MessagePayload[] = [];
 
@@ -268,6 +268,26 @@ describe("runWakeAgentTask chat delivery dispatch", () => {
       runWakeAgentTask(fakeCoreServices(enqueued), payload({ userId: USER }))
     ).rejects.toThrow("Cannot dispatch scheduled chat delivery: invalid delivery context");
     expect(enqueued).toHaveLength(0);
+  });
+
+  test("keeps a platform-CLI origin's wake headless, as before follow-ups carried a sender", async () => {
+    await seedChatConnection({ id: "conn-real" });
+    const enqueued: MessagePayload[] = [];
+    await runWakeAgentTask(
+      fakeCoreServices(enqueued),
+      payload({
+        platform: "slack",
+        connectionId: "conn-real",
+        channelId: "C-real",
+        conversationId: "slack:C-real:123",
+        teamId: null,
+        // A Lobu user id: the CLI speaks for the user, not a Slack sender.
+        userId: USER,
+        originSource: "platform-cli",
+      })
+    );
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0].platformMetadata.source).toBe("scheduled-job");
   });
 
   test("keeps a chat delivery without a sender headless", async () => {

@@ -19,6 +19,7 @@ import type { WorkspaceEventActivationTaskPayload } from '../automations/workspa
 import {
   CHAT_TURN_EVIDENCE_KEYS,
   FOLLOWUP_SOURCE,
+  isChatSenderTurn,
 } from '../gateway/orchestration/chat-turn-actor';
 import type { CoreServices } from '../gateway/services/core-services';
 import { getChatInstanceManager } from '../lobu/gateway';
@@ -97,6 +98,7 @@ function asDeliveryContext(value: unknown): ScheduledDeliveryContext | null {
     teamId: typeof candidate.teamId === 'string' ? candidate.teamId : null,
     connectionId: candidate.connectionId,
     userId: typeof candidate.userId === 'string' ? candidate.userId : null,
+    ...(typeof candidate.originSource === 'string' ? { originSource: candidate.originSource } : {}),
     ...(candidate.senderEvidence && typeof candidate.senderEvidence === 'object'
       ? {
           senderEvidence: {
@@ -753,8 +755,13 @@ export async function runWakeAgentTask(
           connectionId: delivery.connectionId,
           responseChannel: delivery.channelId,
           organizationId: orgId,
-          // Only a wake with a chat sender inherits chat authorization.
-          source: delivery.userId ? FOLLOWUP_SOURCE : 'scheduled-job',
+          // Only a wake scheduled by a chat sender's turn inherits chat
+          // authorization, decided by the producer's own predicate.
+          source:
+            delivery.userId &&
+            isChatSenderTurn({ platform: delivery.platform, source: delivery.originSource })
+              ? FOLLOWUP_SOURCE
+              : 'scheduled-job',
           [CHAT_TURN_EVIDENCE_KEYS.isDirectMessage]:
             delivery.senderEvidence?.isDirectMessage === true,
           [CHAT_TURN_EVIDENCE_KEYS.senderVouched]:

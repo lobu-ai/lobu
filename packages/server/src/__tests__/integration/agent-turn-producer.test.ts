@@ -5345,6 +5345,8 @@ describe('chat follow-up turns run as the sender who asked', () => {
     teamId: string;
     senderId: string;
     isDirect: boolean;
+    /** A platform-CLI turn speaks for a Lobu user, not a chat sender. */
+    cli?: boolean;
   }) {
     const org = await createTestOrganization();
     const member = await createTestUser({ email: `${params.senderId.toLowerCase()}@example.test` });
@@ -5355,14 +5357,21 @@ describe('chat follow-up turns run as the sender who asked', () => {
     await createTestAgent({ organizationId: org.id, agentId: AGENT_ID, ownerUserId: member.id });
     await insertChatConnectionRow({ id: CONNECTION, organizationId: org.id, agentId: AGENT_ID, platform: 'slack' });
 
+    // The CLI routes a message as the Lobu user (`routePlatformMessage`); a
+    // chat bridge routes it as the platform sender.
+    const originUserId = params.cli ? member.id : params.senderId;
+    const originSource = params.cli ? 'platform-cli' : undefined;
     await enqueueMessage({
       ...messageFor(org.id),
-      userId: params.senderId,
+      userId: originUserId,
       platform: 'slack',
       channelId: CHANNEL,
       conversationId: CONVERSATION,
       teamId: `slack:${params.teamId}`,
-      platformMetadata: { connectionId: CONNECTION, teamId: params.teamId, isDirect: params.isDirect },
+      platformMetadata: {
+        connectionId: CONNECTION, teamId: params.teamId, isDirect: params.isDirect,
+        ...(originSource ? { source: originSource } : {}),
+      },
     }, deps());
     const [origin] = await agentTurnRuns();
 
@@ -5387,7 +5396,8 @@ describe('chat follow-up turns run as the sender who asked', () => {
           channelId: CHANNEL,
           conversationId: CONVERSATION,
           teamId: params.teamId,
-          userId: params.senderId,
+          userId: originUserId,
+          ...(originSource ? { source: originSource } : {}),
           turnRunId: Number(origin.id),
         },
         isAuthenticated: true,
@@ -5451,6 +5461,18 @@ describe('chat follow-up turns run as the sender who asked', () => {
     });
     expect(followup).toMatchObject({ chatAccess: 'member', actorUserId: member.id });
     expect(decideDeviceAccess(chatTurnAccessOf(followup))).toBe('run');
+  });
+
+  it("keeps a platform-CLI turn's follow-up headless with its workspace tools", async () => {
+    const { member, original, followup, wake } = await followupClaims({
+      role: 'owner', teamId: 'T0FOLLOWCLI', senderId: 'U0FOLLOWCLI', isDirect: true, cli: true,
+    });
+    expect(original).toMatchObject({ userId: member.id, source: 'platform-cli' });
+    expect(chatTurnAccessOf(original)).toBeNull();
+    expect(wake.platformMetadata).toMatchObject({ source: 'scheduled-job' });
+    expect(followup).toMatchObject({ userId: member.id, source: 'scheduled-job' });
+    expect(followup.chatAccess).toBeUndefined();
+    expect(chatTurnAccessOf(followup)).toBeNull();
   });
 
   it('keeps a scheduled job with no chat sender headless', async () => {

@@ -39,6 +39,14 @@ export interface ScheduledDeliveryContext {
    * Absent evidence decides as "no" (fails closed).
    */
   senderEvidence?: ChatTurnEvidence;
+  /**
+   * The `source` claim of the turn that scheduled this wake, when it had one
+   * (a platform-CLI turn's `userId` is a Lobu user, not a chat sender). The
+   * wake decides whether it carries a chat sender from this origin with the
+   * producer's own `isChatSenderTurn`. Rows stored before this field decide
+   * as chat-sender origins with no evidence (fail closed).
+   */
+  originSource?: string;
 }
 
 /**
