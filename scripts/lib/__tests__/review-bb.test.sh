@@ -111,7 +111,7 @@ cat > "$FAKE_STATE/models-codex.json" <<'JSON'
 [{"id":"gpt-6-astra","model":"gpt-6-astra","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"xhigh"}]}]
 JSON
 cat > "$FAKE_STATE/models-claude-code.json" <<'JSON'
-[{"id":"claude-fable-5-1","model":"claude-fable-5-1","supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"xhigh"}]},{"id":"claude-opus-5-5","model":"claude-opus-5-5","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]
+[{"id":"claude-fable-5-1","model":"claude-fable-5-1","supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"xhigh"}]},{"id":"claude-opus-5-5","model":"claude-opus-5-5","supportedReasoningEfforts":[{"reasoningEffort":"high"}]},{"id":"claude-sonnet-5-5","model":"claude-sonnet-5-5","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]
 JSON
 printf '[]\n' > "$FAKE_STATE/list.json"
 printf '{"id":"thr_child9"}\n' > "$FAKE_STATE/spawn.json"
@@ -168,6 +168,13 @@ true
 [ "$(review_bb_model_for codex gpt-6-astra)" = "gpt-6-astra" ] || fail "codex model passthrough"
 [ "$(review_bb_model_for claude fable)" = "claude-fable-5-1" ] || fail "fable must resolve to the catalog id"
 [ "$(review_bb_model_for claude claude-opus-5-5)" = "claude-opus-5-5" ] || fail "literal claude model must pass through"
+# The Claude allowlist (review_validate_claude_model) applies BEFORE any
+# catalog lookup: a disallowed alias or literal fails even when the live
+# catalog lists that model.
+review_bb_model_for claude sonnet >/dev/null 2>&1 && fail "disallowed claude alias must fail"
+true
+review_bb_model_for claude claude-sonnet-5-5 >/dev/null 2>&1 && fail "disallowed claude literal must fail even when catalogued"
+true
 review_bb_model_for claude does-not-exist >/dev/null 2>&1 && fail "unknown model must fail explicitly"
 true
 review_bb_check_effort codex gpt-6-astra xhigh || fail "listed effort must pass"
@@ -330,6 +337,16 @@ signal_rc=0
 [ "$signal_rc" = 143 ] || fail "TERM must interrupt the asynchronous CLI wait"
 grep -q '^thread stop thr_signal1' "$FAKE_STATE/calls.log" || fail "TERM must stop the owned child"
 
+# 13b. A disallowed Claude model fails before any spawn (reviewer flow).
+printf '[]\n' > "$FAKE_STATE/list.json"
+reset_calls
+RAW=""; REVIEWER_EXIT=99
+review_bb_run_reviewer "$PROMPT" "$HEAD_SHA_SCRATCH" "origin/main" "abcdef123456" \
+  claude claude-sonnet-5-5 high '(.ok == true)' "/tmp/ci.txt" >/dev/null 2>&1
+[ "$REVIEWER_EXIT" = "1" ] || fail "disallowed reviewer model must fail closed"
+[ "$(spawn_calls)" = "0" ] || fail "disallowed reviewer model must never spawn"
+case "$RAW" in *could\ not\ resolve*|*invalid*|*allowlist*) ;; *) fail "failure must name the model policy, got: $RAW" ;; esac
+
 # 13. Wait timeout stops ONLY the owned child and fails.
 export BB_FAKE_WAIT_RC=1
 printf '{"ok":true}\n' > "$FAKE_STATE/output.txt"
@@ -426,6 +443,15 @@ fixer_env_ready
 printf 'diff --git a/other.txt b/other.txt\n--- /dev/null\n+++ b/other.txt\n@@ -0,0 +1 @@\n+sneaky commit\n' > "$FAKE_STATE/committed.patch"
 review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "committed-stack mismatch must fail explicitly"
 [ "$(cat file.txt)" = "one" ] || fail "committed-stack mismatch must leave the tree untouched"
+
+# 14e. A disallowed Claude fixer model fails before any spawn (fixer flow
+# shares the same resolver choke point as the reviewer flow).
+fixer_env_ready
+export FIXER_CLI=claude CLAUDE_REVIEW_MODEL=claude-sonnet-5-5
+review_bb_run_fixer "origin/main" >/dev/null 2>&1 && fail "disallowed fixer model must fail closed"
+unset FIXER_CLI CLAUDE_REVIEW_MODEL
+[ "$(spawn_calls)" = "0" ] || fail "disallowed fixer model must never spawn"
+[ "$(cat file.txt)" = "one" ] || fail "disallowed fixer model must leave the tree untouched"
 
 # 15. Concurrent driver edits abort the transfer; the tree is untouched.
 printf 'one\n' > file.txt

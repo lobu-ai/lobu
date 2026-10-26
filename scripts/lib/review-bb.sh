@@ -90,10 +90,12 @@ review_bb_provider_for() {
 }
 
 # review_bb_model_for <codex|claude> <model>: resolve the reviewer model to a
-# BB catalog model id. Codex ids pass through; Claude short names
-# (fable/opus, the only non-literal values review_validate_claude_model
-# allows) resolve against the live catalog so a renamed catalog fails
-# explicitly instead of spawning on the wrong model.
+# BB catalog model id. Codex ids pass through. Claude models must FIRST pass
+# the same allowlist the direct CLI path enforces (review_validate_claude_model:
+# fable, opus, or claude-opus-*); a disallowed literal such as a Sonnet id
+# fails here, before any spawn, even when the catalog lists it. Allowed values
+# then resolve against the live catalog so a renamed catalog fails explicitly
+# instead of spawning on the wrong model.
 review_bb_model_for() {
   local reviewer="$1" model="$2" provider catalog match
   provider="$(review_bb_provider_for "$reviewer")" || return 2
@@ -101,9 +103,7 @@ review_bb_model_for() {
     printf '%s\n' "$model"
     return 0
   fi
-  case "$model" in
-    claude-*) printf '%s\n' "$model"; return 0 ;;
-  esac
+  review_validate_claude_model "$model" || return $?
   catalog="$(review_bb_cli_invoke provider models "$provider" --json 2>/dev/null)" || {
     echo "review_bb_model_for: could not list models for provider '$provider'" >&2
     return 1

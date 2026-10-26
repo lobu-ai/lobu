@@ -1296,6 +1296,7 @@ jobs:
           bash scripts/lib/__tests__/review-commit-lock.test.sh
           bash scripts/lib/__tests__/review-process.test.sh
           bash scripts/lib/__tests__/review-reviewer.test.sh
+          bash scripts/lib/__tests__/review-bb.test.sh
           bash scripts/lib/__tests__/review-upstream-guard.test.sh
           bash scripts/lib/__tests__/review-skip.test.sh
           bash scripts/lib/__tests__/review-cache.test.sh
