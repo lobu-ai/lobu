@@ -72,10 +72,15 @@ describe('configuration state and audit share a commit', () => {
     await pin('second-app');
     const audits = await sql`SELECT metadata, payload_data FROM events WHERE organization_id = ${ctx.organizationId} AND metadata->>'resource_kind' = 'auth-profile' ORDER BY id`;
     expect(audits).toHaveLength(3);
-    expect(audits[1].payload_data.before.is_default_for_connector).toBe(true);
-    expect(audits[1].payload_data.state.is_default_for_connector).toBe(false);
-    expect(audits[2].payload_data.before.is_default_for_connector).toBe(false);
-    expect(audits[2].payload_data.state.is_default_for_connector).toBe(true);
+    expect(audits.map(({ metadata, payload_data }) => ({
+      slug: metadata.resource_id,
+      before: payload_data.before.is_default_for_connector,
+      after: payload_data.state.is_default_for_connector,
+    }))).toEqual(expect.arrayContaining([
+      { slug: 'first-app', before: false, after: true },
+      { slug: 'first-app', before: true, after: false },
+      { slug: 'second-app', before: false, after: true },
+    ]));
   });
   it('rolls back connector default configuration when its audit fails', async () => {
     const sql = getTestDb();
