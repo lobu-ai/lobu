@@ -31,6 +31,22 @@ describe('typed references and authored source relationships', () => {
     await expect(ws.owner.entities.update({ entity_id: '007', entity_type: type, name: 'No copy' })).rejects.toThrow(/read.only/i);
   });
 
+  it('normalizes a stored reference type consistently across get and list_links', async () => {
+    const got = await ws.owner.entities.get({ entity_id: stored, entity_type: 'Curated_Item' });
+    expect(got.entity.id).toBe(stored);
+    await expect(ws.owner.entities.listLinks({ entity_id: stored, entity_type: 'Curated_Item' })).resolves.toMatchObject({ action: 'list_links' });
+  });
+
+  it('keeps stored relationship listing scoped to the caller workspace', async () => {
+    const catalog = await TestWorkspace.create({ name: 'Public relationship fixture' });
+    await getTestDb()`UPDATE organization SET visibility = 'public' WHERE id = ${catalog.org.id}`;
+    await catalog.owner.entity_schema.createType({ slug: 'public-item', name: 'Public item' });
+    const created = await catalog.owner.entities.create({ entity_type: 'public-item', name: 'Public peer' });
+    const id = Number(created.entity.id);
+    await expect(ws.owner.entities.get({ entity_id: id })).resolves.toMatchObject({ entity: { id } });
+    await expect(ws.owner.entities.listLinks({ entity_id: id })).rejects.toMatchObject({ httpStatus: 404 });
+  });
+
   it('uses only the declared key across list, get and path resolution, and rejects duplicate keys', async () => {
     await ws.owner.entity_schema.createType({ slug: 'custom-key-items', name: 'Custom key items',
       backing: { sql: "SELECT '007' AS catalog_key, 'unstable-id' AS id, 'unstable-slug' AS slug, 'Stable item' AS name" },
@@ -78,6 +94,12 @@ describe('typed references and authored source relationships', () => {
       expect(result.relationship).toMatchObject({ from_entity_id: from, to_entity_id: to });
       const listed = await ws.owner.entities.listLinks({ entity_id: from, ...(typeof from === 'string' ? { entity_type: type } : {}) }) as { relationships: { id: number }[] };
       expect(listed.relationships.map(r => Number(r.id))).toContain(Number(result.relationship.id));
+      const outbound = await ws.owner.entities.listLinks({ entity_id: from, direction: 'outbound',
+        ...(typeof from === 'string' ? { entity_type: type } : {}) });
+      expect(outbound.relationships.map(r => Number(r.id))).toContain(Number(result.relationship.id));
+      const inbound = await ws.owner.entities.listLinks({ entity_id: to, direction: 'inbound',
+        ...(typeof to === 'string' ? { entity_type: type } : {}) });
+      expect(inbound.relationships.map(r => Number(r.id))).toContain(Number(result.relationship.id));
       await ws.owner.entities.updateLink({ ...address, confidence: 0.75 });
       await ws.owner.entities.unlink(address);
       const rows = await getTestDb()`SELECT deleted_at FROM entity_relationships WHERE id = ${result.relationship.id}`;

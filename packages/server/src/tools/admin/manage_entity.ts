@@ -18,7 +18,7 @@ import { decideIdentityAssociation, type IdentityAssociationInput } from "../../
  * - discover_duplicates: Page whole duplicate components across one entity type (read-only)
  */
 
-import { type EntityReadRestrictions, entityReadPolicySql, entityReadRestrictions, filterEntityReadRows } from "../../authz/entity-read-policy";
+import { type EntityReadRestrictions, entityReadRestrictions, filterEntityReadRows } from "../../authz/entity-read-policy";
 import { deriveToolActorSource } from '../../utils/apply-context';
 import { randomUUID } from "node:crypto";
 
@@ -37,8 +37,6 @@ import {
 	type ManageEntityResult,
 	ManageEntityResultSchema,
 	ManageEntitySchema,
-	type RelationshipCountByType,
-	type RelationshipReadFailure,
 	type RelationshipRow,
 	UnlinkEntitiesAction,
 	UpdateEntityAction,
@@ -63,7 +61,6 @@ import { resolveAutomationAttribution } from "../../automations/automation-sourc
 import {
 	type DbClient,
 	getDb,
-	pgBigintArray,
 	pgTextArray,
 } from "../../db/client";
 import { discoverWorkspaceResolutionPage } from "../../entity-resolution/discovery";
@@ -78,12 +75,21 @@ import {
 	type RelationshipColumnSpec,
 	updateEntity,
 } from "../../utils/entity-management";
-import { sourceReadScopeFromToolContext } from "../../authz/scope";
 import { ToolUserError } from "../../utils/errors";
 import { runTurnWriteOnce } from "../turn-write-idempotency";
 import { recordKeyColumn } from "@lobu/core/contracts/entity-reference";
-import { readSourceRecordLinks } from "../../utils/source-record-reads";
-import { compareEntityEndpoints, lockEndpointTypes, resolveEntityReference, type EntityEndpoint, type ResolvedEntityReference } from "../../utils/entity-reference";
+import { normalizeEntityTypeSlug } from "../../utils/reserved";
+import {
+  endpointPredicate,
+  nextRelationshipCursor,
+  parseRelationshipCursor,
+  readAuthoredRelationshipPage,
+  readableRelationships,
+  readNativeRelationshipPage,
+  RELATIONSHIP_JOINS,
+  RELATIONSHIP_SELECT,
+} from "../../utils/relationship-reads";
+import { compareEntityEndpoints, lockEndpointTypes, resolveEntityReference } from "../../utils/entity-reference";
 import {
 	EntityPolicyDenialError,
 	type EntityWriteDenialDescription,
@@ -96,7 +102,6 @@ import {
 } from "../../utils/insert-event";
 import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail } from "../../utils/member-entity-type";
 import {
-	ACL_MANAGED_TYPE_SQL,
 	assertNotAclManagedEdge,
 	validateConfidence,
 	validateReconciledEdgeUpdate,
@@ -1158,7 +1163,9 @@ async function handleGet(
 	if (!entity) {
 		throw new ToolUserError(`Entity with ID ${entityId} not found`, 404);
 	}
-	if (entityType !== undefined && entity.entity_type !== entityType) throw new ToolUserError('entity_type does not match entity_id', 400);
+	if (entityType !== undefined && entity.entity_type !== normalizeEntityTypeSlug(entityType)) {
+		throw new ToolUserError('entity_type does not match entity_id', 400);
+	}
 
 	await assertEntityReadAllowed(undefined, ctx, entity.entity_type);
 
@@ -1388,45 +1395,6 @@ async function handleDelete(
 }
 
 // ============================================
-// Relationship (Link) Helpers
-// ============================================
-
-const RELATIONSHIP_SELECT = `
-  r.id,
-  r.organization_id,
-  COALESCE(to_jsonb(r.from_entity_id), to_jsonb(r.from_source_key)) AS from_entity_id,
-  COALESCE(to_jsonb(r.to_entity_id), to_jsonb(r.to_source_key)) AS to_entity_id,
-  r.relationship_type_id,
-  rt.slug as relationship_type_slug,
-  rt.name as relationship_type_name,
-  rt.is_symmetric,
-  ${ACL_MANAGED_TYPE_SQL} as acl_managed,
-  COALESCE(fe.name, r.from_source_key) as from_entity_name,
-  fet.slug as from_entity_type,
-  COALESCE(fe.slug, r.from_source_key) as from_entity_slug,
-  COALESCE(te.name, r.to_source_key) as to_entity_name,
-  tet.slug as to_entity_type,
-  COALESCE(te.slug, r.to_source_key) as to_entity_slug,
-  NULLIF(r.metadata - '${RELATIONSHIP_CLAIMS_METADATA_KEY}', '{}'::jsonb) AS metadata,
-  r.confidence,
-  r.source,
-  r.created_by,
-  r.updated_by,
-  r.created_at,
-  r.updated_at,
-  r.deleted_at
-`;
-
-const RELATIONSHIP_JOINS = `
-  FROM entity_relationships r
-  JOIN entity_relationship_types rt ON r.relationship_type_id = rt.id
-  LEFT JOIN entities fe ON r.from_entity_id = fe.id
-  LEFT JOIN entity_types fet ON fet.id = COALESCE(fe.entity_type_id, r.from_entity_type_id)
-  LEFT JOIN entities te ON r.to_entity_id = te.id
-  LEFT JOIN entity_types tet ON tet.id = COALESCE(te.entity_type_id, r.to_entity_type_id)
-`;
-
-// ============================================
 // Relationship (Link) Action Handlers
 // ============================================
 
@@ -1623,27 +1591,19 @@ async function handleLink(
 /**
  * `unlink` and `update_link` accept either the `relationship_id` or the same
  * `{from, to, type}` triple `link` takes — which is the only addressing the SDK
- * signatures ever exposed. `idx_entity_relationships_live_triple` makes the
- * triple unique among live rows, so it names at most one edge.
+ * signatures ever exposed. `idx_entity_relationships_live_triple` (stored
+ * endpoints) and `idx_entity_relationships_live_source_pair` (source endpoints)
+ * make the triple unique among live rows, so it names at most one edge.
  *
  * A symmetric edge is stored in one orientation only — same-org pairs are
- * canonicalized by id at link time, cross-org pairs keep the caller's org as
- * `from` — and the caller has no way to know which. So for a symmetric type
- * either orientation of the endpoints resolves the same row.
+ * canonicalized by `compareEntityEndpoints` at link time, cross-org pairs keep
+ * the caller's org as `from` — and the caller has no way to know which. So for
+ * a symmetric type either orientation of the endpoints resolves the same row.
  *
  * This resolves an id and nothing more: the ACL, ownership, and org-scope
  * guards the by-id path already runs (`lockEdgeForMutation`,
  * `retractManualRelationshipClaim`) still run downstream, unchanged.
  */
-function endpointPredicate(side: 'from' | 'to', endpoint: EntityEndpoint, params: unknown[]): string {
-  if (endpoint.entityId !== null) {
-    params.push(endpoint.entityId);
-    return `r.${side}_entity_id = $${params.length}`;
-  }
-  params.push(endpoint.sourceTypeId, endpoint.sourceKey);
-  return `(r.${side}_entity_type_id = $${params.length - 1} AND r.${side}_source_key = $${params.length})`;
-}
-
 async function resolveRelationshipId(args: EdgeAddress, ctx: ToolContext, action: 'unlink' | 'update_link'): Promise<number> {
   const namedId = args.relationship_id;
   if (args.from_entity_id === undefined || args.to_entity_id === undefined || !args.relationship_type_slug) {
@@ -1831,151 +1791,98 @@ async function handleUpdateLink(
 	return { action: "update_link", relationship: updated };
 }
 
-/** Resolve source visibility in bounded batches; no cross-request cache can outlive a revocation. */
-async function readableRelationships(rows: RelationshipRow[], ctx: ToolContext, readRestrictions?: EntityReadRestrictions, failures?: RelationshipReadFailure[]): Promise<RelationshipRow[]> {
-  const sql = getDb();
-  const restrictions = readRestrictions ?? await entityReadRestrictions(sql, ctx);
+async function handleListLinks(
+  args: Static<typeof ListLinksAction>,
+  ctx: ToolContext,
+): Promise<ManageEntityResult> {
+  // One deadline for the whole page, including both authored and native links.
   const deadline = AbortSignal.timeout(20_000);
-  const signal = ctx.abortSignal ? AbortSignal.any([ctx.abortSignal, deadline]) : deadline;
-  const sourceContext = { ...ctx, abortSignal: signal };
-  const ids = [...new Set(rows.flatMap(row => [row.from_entity_id, row.to_entity_id]).filter((id): id is number => typeof id === 'number'))];
-  const stored = ids.length ? await sql<{ id: number }>`
-    SELECT e.id FROM entities e JOIN organization o ON o.id = e.organization_id
-    WHERE e.id = ANY(${pgBigintArray(ids)}::bigint[]) AND e.deleted_at IS NULL
-      AND (e.organization_id = ${ctx.organizationId} OR o.visibility = 'public')
-  ` : [];
-  const allowed = new Set((await filterEntityReadRows(sql, stored, restrictions)).map(row => Number(row.id)));
-  const pending = new Map<string, Promise<ResolvedEntityReference>>();
-  const resolve = (id: string, type: string | undefined) => {
-    const key = JSON.stringify([type, id]);
-    let result = pending.get(key);
-    if (!result) { result = resolveEntityReference(id, type, sourceContext, { restrictions }); pending.set(key, result); }
-    return result;
+  ctx = {
+    ...ctx,
+    abortSignal: ctx.abortSignal ? AbortSignal.any([ctx.abortSignal, deadline]) : deadline,
   };
-  const visible: RelationshipRow[] = [];
-  for (let offset = 0; offset < rows.length; offset += 4) {
-    const page = await Promise.all(rows.slice(offset, offset + 4).map(async row => {
-      if ((typeof row.from_entity_id === 'number' && !allowed.has(row.from_entity_id)) ||
-          (typeof row.to_entity_id === 'number' && !allowed.has(row.to_entity_id))) return null;
-      if ((row.from_entity_type === MEMBER_ENTITY_TYPE_SLUG || row.to_entity_type === MEMBER_ENTITY_TYPE_SLUG) && !canSeeMemberList(ctx.memberRole)) return null;
-      try {
-        const [from, to] = await Promise.all([
-          typeof row.from_entity_id === 'string' ? resolve(row.from_entity_id, row.from_entity_type) : null,
-          typeof row.to_entity_id === 'string' ? resolve(row.to_entity_id, row.to_entity_type) : null,
-        ]);
-        return { ...row, ...(from ? { from_entity_name: from.name } : {}), ...(to ? { to_entity_name: to.name } : {}) };
-      } catch (error) {
-        // Missing/hidden endpoints disclose neither keys nor failure IDs.
-        if (error instanceof ToolUserError && (error.httpStatus === 403 || error.httpStatus === 404)) return null;
-        if (failures && error instanceof ToolUserError && error.httpStatus >= 500) {
-          failures.push({ relationship_id: row.id, code: error.code ?? 'UPSTREAM_UNAVAILABLE' });
-          return null;
-        }
-        throw error;
-      }
-    }));
-    visible.push(...page.filter((row): row is RelationshipRow => row !== null));
-  }
-  return visible;
-}
-
-async function handleListLinks(args: Static<typeof ListLinksAction>, ctx: ToolContext): Promise<ManageEntityResult> {
-  // Bound the whole page, not each endpoint: a slow catalog must not multiply
-  // its timeout by the number of authored edges on this record.
-  const deadline = AbortSignal.timeout(20_000);
-  ctx = { ...ctx, abortSignal: ctx.abortSignal ? AbortSignal.any([ctx.abortSignal, deadline]) : deadline };
   const sql = getDb();
   let entityId = args.entity_id;
   let entityType = args.entity_type;
   if (args.record) {
-    if (entityId !== undefined || entityType !== undefined) throw new ToolUserError('Pass entity_id or record, not both', 400);
+    if (entityId !== undefined || entityType !== undefined) {
+      throw new ToolUserError('Pass entity_id or record, not both', 400);
+    }
     if (args.offset || args.include_deleted || args.source !== undefined || args.confidence_min !== undefined) {
       throw new ToolUserError('record cannot be combined with offset, include_deleted, source, or confidence_min', 400);
     }
     entityId = args.record.key;
     entityType = args.record.type;
-    // Older read-only views had no durable-key declaration. Preserve their
-    // existing source-native read contract; they cannot have authored edges.
-    const types = await sql`SELECT metadata_schema FROM entity_types WHERE slug = ${entityType} AND organization_id = ${ctx.organizationId} AND deleted_at IS NULL`;
-    if (!recordKeyColumn(types[0]?.metadata_schema)) {
+    const [type] = await sql`
+      SELECT metadata_schema FROM entity_types
+      WHERE slug = ${entityType} AND organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+    `;
+    // Undeclared views retain their read-only source-native adapter.
+    if (!recordKeyColumn(type?.metadata_schema)) {
       await assertEntityReadAllowed(args, ctx, entityType);
-      const result = await readSourceRecordLinks(sourceReadScopeFromToolContext(ctx), args.record, {
-        limit: Math.min(Math.max(args.limit ?? 100, 1), 500), cursor: args.cursor,
-        relationshipType: args.relationship_type_slug,
-        direction: args.direction === 'outbound' ? 'outgoing' : args.direction === 'inbound' ? 'incoming' : undefined,
-        signal: ctx.abortSignal, automationId: ctx.actingAutomationId,
-      });
-      return { action: 'list_links', record_links: result.links, record_failures: result.failures, next_cursor: result.next_cursor };
+      const native = await readNativeRelationshipPage(
+        args, args.record, ctx, Math.min(Math.max(args.limit ?? 100, 1), 500), args.cursor,
+      );
+      return {
+        action: 'list_links',
+        record_links: native.links,
+        record_failures: native.failures,
+        next_cursor: native.next_cursor,
+      };
     }
   }
   if (entityId === undefined) throw new ToolUserError('list_links needs entity_id', 400);
   const isSource = typeof entityId === 'string';
-  if (!isSource && args.cursor !== undefined) throw new ToolUserError('entity_id uses limit/offset; cursor requires a typed source key', 400);
+  if (!isSource && args.cursor !== undefined) {
+    throw new ToolUserError('entity_id uses limit/offset; cursor requires a typed source key', 400);
+  }
   if (isSource && args.offset) throw new ToolUserError('Source link pagination uses cursor', 400);
   if (isSource && (args.source !== undefined || args.confidence_min !== undefined || args.include_deleted)) {
     throw new ToolUserError('Source records do not support source, confidence_min, or include_deleted filters across live and authored links', 400);
   }
-  const restrictions = await entityReadRestrictions(sql, ctx, await actingPrincipalFor(args, ctx));
+  const principal = await actingPrincipalFor(args, ctx);
+  const restrictions = await entityReadRestrictions(sql, ctx, principal);
   const endpoint = await resolveEntityReference(entityId, entityType, ctx, { restrictions });
-  // Every source candidate costs a live read inside the page deadline, so source
-  // pages are bounded tighter than the stored limit/offset contract.
-  const limit = Math.min(Math.max(args.limit ?? 100, 1), isSource ? 100 : 500);
-  const offset = Math.max(args.offset ?? 0, 0);
-  const binding = JSON.stringify([ctx.organizationId, ctx.userId, ctx.agentId, ctx.actingAutomationId, entityType, entityId,
-    args.direction, args.relationship_type_slug, args.source, args.confidence_min, args.include_deleted]);
-  let after = 0;
-  let localDone = false;
-  let sourceDone = false;
-  let sourceCursor: string | null | undefined;
-  if (isSource && args.cursor) {
-    let decoded: Record<string, unknown>;
-    try { decoded = JSON.parse(Buffer.from(args.cursor, 'base64url').toString('utf8')); }
-    catch { throw new ToolUserError('Invalid relationship cursor', 400); }
-    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) throw new ToolUserError('Invalid relationship cursor', 400);
-    if (decoded.kind !== 'entity-links' || decoded.binding !== binding || !Number.isSafeInteger(decoded.after) || Number(decoded.after) < 0 ||
-        typeof decoded.localDone !== 'boolean' || typeof decoded.sourceDone !== 'boolean' ||
-        (decoded.sourceCursor !== null && typeof decoded.sourceCursor !== 'string')) throw new ToolUserError('Relationship cursor does not match this request', 400);
-    after = Number(decoded.after); localDone = decoded.localDone; sourceDone = decoded.sourceDone;
-    sourceCursor = decoded.sourceCursor as string | null;
+  if (endpoint.organizationId !== ctx.organizationId) {
+    throw new ToolUserError('Entity not found in this workspace', 404);
   }
-  const params: unknown[] = [ctx.organizationId];
-  const conditions = ['r.organization_id = $1'];
-  if (!args.include_deleted) conditions.push('r.deleted_at IS NULL');
-  const from = endpointPredicate('from', endpoint, params);
-  const to = endpointPredicate('to', endpoint, params);
-  conditions.push(args.direction === 'outbound' ? from : args.direction === 'inbound' ? to : `(${from} OR ${to})`);
-  if (args.relationship_type_slug) { params.push(args.relationship_type_slug); conditions.push(`rt.slug = $${params.length}`); }
-  if (args.source) { params.push(args.source); conditions.push(`r.source = $${params.length}`); }
-  if (args.confidence_min !== undefined) { params.push(args.confidence_min); conditions.push(`r.confidence >= $${params.length}`); }
-  if (isSource) { params.push(after); conditions.push(`r.id > $${params.length}`); }
-
-  conditions.push(`(r.from_entity_id IS NULL OR (${entityReadPolicySql(restrictions, 'fe', params)}))`,
-    `(r.to_entity_id IS NULL OR (${entityReadPolicySql(restrictions, 'te', params)}))`);
-  const raw = localDone ? [] : await sql.unsafe<RelationshipRow>(`SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS}
-    WHERE ${conditions.join(' AND ')} ORDER BY ${isSource ? 'r.id ASC' : 'r.created_at DESC'} LIMIT ${limit + 1} OFFSET ${isSource ? 0 : offset}`, params);
-  const moreLocal = raw.length > limit;
-  const candidates = raw.slice(0, limit);
-  const failures: RelationshipReadFailure[] = [];
-  const relationships = await readableRelationships(candidates, ctx, restrictions, failures);
-  const counts = new Map<string, RelationshipCountByType>();
-  for (const row of relationships) {
-    const count = counts.get(row.relationship_type_slug) ?? { relationship_type_slug: row.relationship_type_slug, relationship_type_name: row.relationship_type_name, count: 0 };
-    count.count++; counts.set(row.relationship_type_slug, count);
-  }
-  // Global counts would require source authorization of every endpoint, outside
-  // a bounded request. Counts describe this visible page, never hidden candidates.
-  const metadata = { limit, offset, has_more: moreLocal, counts_scope: 'page' as const };
-  if (!isSource) return { action: 'list_links', relationships, relationship_failures: failures, counts_by_type: [...counts.values()], metadata };
-  const native = sourceDone ? { links: [], failures: [], next_cursor: undefined } : await readSourceRecordLinks(
-    sourceReadScopeFromToolContext(ctx), { type: endpoint.entityType, key: String(entityId) }, {
-      limit, cursor: sourceCursor, relationshipType: args.relationship_type_slug,
-      direction: args.direction === 'outbound' ? 'outgoing' : args.direction === 'inbound' ? 'incoming' : undefined,
-      signal: ctx.abortSignal, automationId: ctx.actingAutomationId,
-    });
-  const next = moreLocal || native.next_cursor || native.failures.length ? Buffer.from(JSON.stringify({
-    kind: 'entity-links', binding, after: candidates.at(-1)?.id ?? after, localDone: !moreLocal,
-    sourceDone: !native.next_cursor && native.failures.length === 0, sourceCursor: native.next_cursor ?? null,
-  })).toString('base64url') : undefined;
-  return { action: 'list_links', relationships, relationship_failures: failures, counts_by_type: [...counts.values()], metadata,
-    record_links: native.links, record_failures: native.failures, next_cursor: next };
+  const binding = JSON.stringify([
+    ctx.organizationId,
+    ctx.userId,
+    ctx.agentId,
+    ctx.actingAutomationId,
+    entityType,
+    entityId,
+    args.direction,
+    args.relationship_type_slug,
+    args.source,
+    args.confidence_min,
+    args.include_deleted,
+  ]);
+  const cursor = parseRelationshipCursor(args.cursor, binding);
+  const authored = await readAuthoredRelationshipPage(args, endpoint, ctx, restrictions, cursor);
+  const result = {
+    action: 'list_links' as const,
+    relationships: authored.relationships,
+    relationship_failures: authored.failures,
+    counts_by_type: authored.counts,
+    metadata: {
+      limit: authored.limit,
+      offset: authored.offset,
+      has_more: authored.hasMore,
+      counts_scope: 'page' as const,
+    },
+  };
+  if (!isSource) return result;
+  const native = cursor.sourceDone
+    ? { links: [], failures: [], next_cursor: undefined }
+    : await readNativeRelationshipPage(
+      args, { type: endpoint.entityType, key: String(entityId) }, ctx, authored.limit, cursor.sourceCursor,
+    );
+  return {
+    ...result,
+    record_links: native.links,
+    record_failures: native.failures,
+    next_cursor: nextRelationshipCursor(cursor, authored, native),
+  };
 }
