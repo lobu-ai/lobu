@@ -22,11 +22,14 @@ import { ImageGenerationService } from '../../gateway/services/image-generation-
 import { TranscriptionService } from '../../gateway/services/transcription-service';
 import { __setChatInstanceManagerForTests } from '../../lobu/gateway';
 import { pruneTurnWriteReceipts } from '../../tools/turn-write-idempotency';
+import { initWorkspaceProvider } from '../../workspace';
+import { __setLocalFrontendForTests } from '../../utils/public-origin';
 import { createTestAutomationSubscription } from '../setup/automation-subscriptions';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
   addUserToOrganization,
   createTestAgent,
+  createTestEvent,
   createTestOrganization,
   createTestUser,
   insertAgentTurnRun,
@@ -97,6 +100,7 @@ const routes: Array<[string, string, () => unknown, () => ReturnType<typeof vi.f
 
 beforeAll(async () => {
   await cleanupTestDatabase();
+  await initWorkspaceProvider();
   await seedSystemEntityTypes();
   org = await createTestOrganization();
   const owner = await createTestUser();
@@ -193,6 +197,39 @@ describe('turn write receipts on the worker delivery routes', () => {
     const retry = await call('/internal/images/generate', (await turn('receipts-message-6')).token, { prompt: 'retry me' });
     expect(retry.status).toBe(200);
     expect(generate).toHaveBeenCalledTimes(2);
+  });
+
+  it('send: a refusal before posting releases its claim, so the retry after recovery delivers once', async () => {
+    __setChatInstanceManagerForTests(null);
+    try {
+      const refused = await call('/internal/conversations/send', (await turn('receipts-unavailable')).token, { target, text: 'later' });
+      expect(refused.status).toBe(503);
+    } finally {
+      __setChatInstanceManagerForTests({ postToConversation: posted });
+    }
+    const retry = await call('/internal/conversations/send', (await turn('receipts-unavailable')).token, { target, text: 'later' });
+    expect(retry.status, await retry.clone().text()).toBe(200);
+    expect(posted).toHaveBeenCalledTimes(1);
+  });
+
+  it('present-event: a refusal before posting releases its claim, so the retry after recovery delivers once', async () => {
+    const event = await createTestEvent({ organization_id: org.id, title: 'Presentable', content: 'body' });
+    // Permalinks resolve against the hosted UI only without a bundled frontend.
+    __setLocalFrontendForTests(false);
+    __setChatInstanceManagerForTests(null);
+    try {
+      const refused = await call('/internal/conversations/present-event', (await turn('receipts-present')).token, { eventId: Number(event.id) });
+      expect(refused.status, await refused.clone().text()).toBe(503);
+    } finally {
+      __setChatInstanceManagerForTests({ postToConversation: posted });
+    }
+    try {
+      const retry = await call('/internal/conversations/present-event', (await turn('receipts-present')).token, { eventId: Number(event.id) });
+      expect(retry.status, await retry.clone().text()).toBe(200);
+      expect(posted).toHaveBeenCalledTimes(1);
+    } finally {
+      __setLocalFrontendForTests(undefined);
+    }
   });
 
   it('a steered follow-up repeating an identical send delivers once more, and only once', async () => {

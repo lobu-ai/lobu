@@ -29,6 +29,7 @@ import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
 import { captureSideEffect } from "./capture-mode.js";
 import { sendOncePerTurnInput } from "./turn-write-once.js";
+import { ToolUserError } from "../../../utils/errors.js";
 
 const logger = createLogger("conversations-routes");
 
@@ -214,7 +215,9 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
       }, async () => {
         const manager = getChatInstanceManager();
         if (!manager?.postToConversation) {
-          return errorResponse(c, "Chat instance manager unavailable", 503);
+          // Refused before anything was posted: release the receipt so the
+          // same input can deliver once the gateway is back.
+          throw new ToolUserError("Chat instance manager unavailable", 503);
         }
         const sent = (await manager.postToConversation(target.connectionId, {
           platform: target.platform,
@@ -363,7 +366,8 @@ export function createConversationsRoutes(): Hono<WorkerContext> {
               422
             );
           }
-          return errorResponse(c, "Chat instance manager unavailable", 503);
+          // `gateway_unavailable`: no chat manager, so nothing was posted.
+          throw new ToolUserError("Chat instance manager unavailable", 503);
         }
 
         captureChannelMessage({
