@@ -37,7 +37,7 @@ import { createInteractionRoutes } from '../../gateway/routes/internal/interacti
 import { enqueueAgentTurn,
   cancelAgentTurn,
 } from '../../gateway/orchestration/agent-turn-producer';
-import { armTurnTimeout, failTurnIfPending } from '../../gateway/orchestration/turn-liveness';
+import { armTurnTimeout, failTurnIfPending, sweepExpiredTurns } from '../../gateway/orchestration/turn-liveness';
 import { generateDeploymentName } from '../../gateway/orchestration/deployment-identity';
 import { intervals } from '../../config/intervals';
 import { chatTurnAccessInstructions, chatTurnSender, chatTurnSenderContext, chatTurnUnlinkedSenderContext } from '../../gateway/orchestration/chat-turn-actor';
@@ -4921,6 +4921,55 @@ describe('agent turn reaper', () => {
     });
     expect(await done.json()).toMatchObject({ ok: true, status: 'completed' });
     expect((await turnRow(runId)).status).toBe('completed');
+  });
+
+  /** Let the turn's liveness marker lapse, as the provider-failure clamp or an admission deadline would. */
+  async function lapseMarker(extra: Record<string, unknown> = {}) {
+    const sql = getTestDb();
+    await sql`UPDATE runs SET run_at = now() - interval '1 second', action_input = action_input || ${sql.json(extra)}::jsonb
+      WHERE queue_name = 'internal:turn_timeout' AND status = 'pending'`;
+  }
+
+  it('never re-runs a turn whose provider-failure error the marker already showed', async () => {
+    const worker_id = 'fleet-provider-failed';
+    const runId = await claimedTurnRun(worker_id);
+    await armMarkerFor(runId);
+    await lapseMarker({ providerFailed: true, providerFailedCode: AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED });
+    expect(await sweepExpiredTurns()).toBe(1);
+    // The user has been shown the error, so the turn is over: the reaper finds
+    // nothing to re-run even though no tool ran and the heartbeat is lost.
+    expect((await turnRow(runId)).status).toBe('timeout');
+    await loseHeartbeat(runId);
+    expect(await sweepStaleAgentTurnRuns(STALE_THRESHOLD_SECONDS)).toEqual({ reaped: 0, delivered: 0, requeued: 0 });
+    // A completion the worker sends afterwards is answered by the terminal
+    // handling, and publishes no second reply.
+    const late = await postAsFleet('/api/workers/complete-agent-turn', {
+      run_id: runId, worker_id, status: 'completed', text: 'too late', session_jsonl: nativeSession(),
+    });
+    expect(await late.json()).toMatchObject({ status: 'failed', idempotent: true });
+    const replies = await threadResponses();
+    expect(replies).toHaveLength(1);
+    expect(replies[0]!.action_input).toMatchObject({ errorCode: AgentErrorCode.PROVIDER_QUOTA_EXHAUSTED, turnRunId: runId });
+  });
+
+  it('closes a turn whose admission deadline fired and releases the follower queued behind it', async () => {
+    const org = await createTestOrganization();
+    const first = messageFor(org.id);
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id: ownerId } = await (await pollFleet('fleet-admission', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, messageId: 'queued-follower', messageText: 'next question' }, deps);
+    const follower = (await agentTurnRuns())[1]!;
+    expect((await (await pollFleet('fleet-other', { agent_turn: true })).json()).run_id).toBeUndefined();
+    await armMarkerFor(ownerId);
+    await lapseMarker();
+    expect(await sweepExpiredTurns()).toBe(1);
+    expect((await turnRow(ownerId)).status).toBe('timeout');
+    const replies = await threadResponses();
+    expect(replies).toHaveLength(1);
+    expect(replies[0]!.action_input).toMatchObject({ messageId: first.messageId, errorCode: AgentErrorCode.WORKER_UNRESPONSIVE, turnRunId: ownerId });
+    // The follower is claimable now, not stuck behind a turn nobody runs.
+    expect((await (await pollFleet('fleet-other', { agent_turn: true })).json()).run_id).toBe(follower.id);
   });
 
   it('never re-runs a cancelled turn', async () => {

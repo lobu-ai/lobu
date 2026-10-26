@@ -3,6 +3,7 @@ import { decrypt, isExplicitCancelMessage, isSteerableHumanMessage, verifyWorker
 import { AGENT_TURN_INPUT_MAX, type AgentTurnPollPayload, type HeartbeatResponse } from '@lobu/core/contracts/worker/protocol';
 import { CURRENT_SESSION_VERSION } from '@mariozechner/pi-coding-agent';
 import { getDb, type DbClient } from '../db/client';
+import { classifyRunOutcome } from './run-outcome';
 import type { TurnReply } from '../gateway/orchestration/agent-turn-producer';
 import { dischargeTurnMarkers, extendTurnDeadlines, insertThreadResponseRow, reaperBackstopDeadlineMs, resetTurnAdmissionDeadline } from '../gateway/orchestration/turn-liveness';
 import { agentTurnRunIdFromClaims, agentTurnTokenScope, generateDeploymentName } from '../gateway/orchestration/deployment-identity';
@@ -166,6 +167,53 @@ export async function lockAgentTurnRun(sql: DbClient, runId: number, handoff = f
         AND action_input->'turn'->>'conversation_id' = ${scope.conversation_id} ORDER BY id LIMIT 1)))
     ORDER BY id FOR UPDATE`;
   return rows.find((row) => Number(row.id) === runId);
+}
+
+/**
+ * The agent turn a turn-liveness marker speaks for, locked exactly as the
+ * reaper locks it (`lockAgentTurnRun` with handoff: the conversation advisory
+ * lock, then the owner and next pending rows in id order). The marker fire
+ * calls this BEFORE it deletes the marker, so every writer takes the
+ * conversation lock first and the marker row after it.
+ *
+ * Matched on the marker's message id within its organization's active turns
+ * (the `idx_runs_agent_turn_conversation_active` partial index), and confirmed
+ * by deriving the marker's deployment name from the run with the same function
+ * the heartbeat uses. A subprocess-lane turn has no agent_turn run: undefined.
+ */
+export async function lockAgentTurnForMarker(
+  sql: DbClient,
+  marker: { organizationId?: string; messageId: string; deploymentName: string },
+): Promise<NativeTurnRun | undefined> {
+  if (!marker.organizationId) return undefined;
+  const candidates = await sql<Pick<NativeTurnRun, 'id' | 'organization_id' | 'action_input'>>`
+    SELECT id, organization_id, action_input FROM runs
+    WHERE run_type = 'agent_turn' AND status IN ('pending', 'claimed', 'running')
+      AND organization_id = ${marker.organizationId}
+      AND action_input->'turn'->>'message_id' = ${marker.messageId}`;
+  const match = candidates.find((run) => turnMarkerDeployment(run) === marker.deploymentName);
+  if (!match) return undefined;
+  const run = await lockAgentTurnRun(sql, Number(match.id), true);
+  return run && ['pending', 'claimed', 'running'].includes(run.status) ? run : undefined;
+}
+
+/**
+ * Close an agent turn whose liveness marker just showed the user its error, in
+ * the marker's transaction. Once the user has seen an error the turn is over:
+ * the reaper must never re-run it (`sweepStaleAgentTurnRuns` only considers
+ * active runs), and a late completion meets the terminal handling instead of
+ * publishing a second reply. The follower queued behind it is released exactly
+ * as the reaper's terminal path does, unless the closed run was itself still
+ * blocked behind an active owner.
+ */
+export async function closeAgentTurnShownError(sql: DbClient, run: NativeTurnRun): Promise<void> {
+  const [state] = await sql<{ head: boolean }>`
+    SELECT (r.status <> 'pending' OR ${agentTurnClaimEligible(sql)}) AS head FROM runs r WHERE r.id = ${run.id}`;
+  await sql`UPDATE runs SET status = 'timeout', completed_at = now(),
+      outcome = ${classifyRunOutcome({ status: 'timeout' })}, exit_reason = 'timeout',
+      error_message = 'turn_liveness_error_shown'
+    WHERE id = ${run.id} AND status IN ('pending', 'claimed', 'running')`;
+  if (state?.head) await releaseNextAgentTurn(sql, run);
 }
 
 /** Embed with the candidate aliased as r, including the final claim/timeout recheck. */

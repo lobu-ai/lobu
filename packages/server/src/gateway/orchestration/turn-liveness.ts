@@ -63,6 +63,7 @@ import { getDb, type DbClient } from "../../db/client.js";
 import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import { TERMINAL_DELIVERY_SEND_OPTS } from "../infrastructure/queue/index.js";
 import { completeAgentRunInputs } from "./agent-run-input.js";
+import { closeAgentTurnShownError, lockAgentTurnForMarker } from "../../runs/agent-turn-inputs.js";
 
 const logger = createLogger("turn-liveness");
 
@@ -533,42 +534,33 @@ export async function failTurnsForDeployment(
 ): Promise<number> {
   try {
     const sql = getDb();
-    const failed = await sql.begin(async (tx: DbClient) => {
-      const rows = await tx<{ action_input: unknown }>`
-        DELETE FROM public.runs
-        WHERE status = 'pending'
-          AND run_type = 'internal'
-          AND queue_name = ${TURN_TIMEOUT_QUEUE}
-          AND action_input->>'deploymentName' = ${deploymentName}
-        RETURNING action_input
-      `;
-      let emitted = 0;
-      for (const row of rows) {
-        const routing = asTurnRouting(row.action_input);
-        if (!routing) {
-          // Unreachable for markers we write (arm always supplies messageId +
-          // deploymentName). A row that fails this validation lacks the fields
-          // needed to route a terminal event, so it's undeliverable — deleting
-          // it (vs leaving it) is correct; leaving it would re-loop the sweep
-          // forever. Logged at error so a real schema drift is noticed.
-          logger.error("Dropping unroutable turn-timeout marker (fast path)");
-          continue;
-        }
-        // A marker flagged by the proxy knows WHICH provider failure ended
-        // this turn, so relay that instead of the generic worker verdict —
-        // "quota exhausted on qwen" is actionable, "worker unresponsive" sends
-        // the operator looking at the wrong subsystem. Falls back to `code`
-        // for a genuinely silent/dead worker, and for any unrecognised value
-        // (the column is data, never a code path).
-        await enqueueTerminalError(
-          tx,
-          routing,
-          providerFailureCode(row.action_input) ?? code
-        );
-        emitted += 1;
-      }
-      return emitted;
-    });
+    const markers = await sql<{ id: number; action_input: unknown }>`
+      SELECT id, action_input FROM public.runs
+      WHERE status = 'pending'
+        AND run_type = 'internal'
+        AND queue_name = ${TURN_TIMEOUT_QUEUE}
+        AND action_input->>'deploymentName' = ${deploymentName}
+    `;
+    let failed = 0;
+    for (const marker of markers) {
+      // A marker flagged by the proxy knows WHICH provider failure ended
+      // this turn, so relay that instead of the generic worker verdict —
+      // "quota exhausted on qwen" is actionable, "worker unresponsive" sends
+      // the operator looking at the wrong subsystem. Falls back to `code`
+      // for a genuinely silent/dead worker, and for any unrecognised value
+      // (the column is data, never a code path).
+      const fired = await fireTurnMarker(
+        marker.action_input,
+        (tx) => tx<{ action_input: unknown }>`
+          DELETE FROM public.runs
+          WHERE id = ${marker.id} AND status = 'pending' AND queue_name = ${TURN_TIMEOUT_QUEUE}
+          RETURNING action_input
+        `,
+        (input) => providerFailureCode(input) ?? code,
+        "fast path"
+      );
+      if (fired) failed += 1;
+    }
     if (failed > 0) {
       await notifyThreadResponse();
       logger.info(
@@ -587,8 +579,45 @@ export async function failTurnsForDeployment(
 }
 
 /**
+ * Fire ONE turn-liveness marker: win its delete, show the user the terminal
+ * error, and, for an isolate-lane turn, close the agent_turn run in the same
+ * transaction. Once the user has been shown an error the turn is terminal and
+ * never re-runs (`closeAgentTurnShownError`).
+ *
+ * Lock order is the reaper's: the agent turn's conversation lock and rows
+ * (`lockAgentTurnForMarker`) BEFORE the marker row, never the marker first.
+ * The marker is read unlocked to find its turn; the delete is the election, so
+ * a marker another replica fired, or a worker discharged, deletes nothing and
+ * emits nothing. An unroutable marker is deleted (keeping it would re-loop the
+ * sweep forever) but cannot be delivered.
+ */
+async function fireTurnMarker(
+  markerInput: unknown,
+  deleteMarker: (tx: DbClient) => Promise<Array<{ action_input: unknown }>>,
+  failureFor: (input: unknown) => TurnFailure,
+  path: string
+): Promise<boolean> {
+  const seen = asTurnRouting(markerInput);
+  return getDb().begin(async (tx: DbClient) => {
+    const run = seen ? await lockAgentTurnForMarker(tx, seen) : undefined;
+    const [deleted] = await deleteMarker(tx);
+    if (!deleted) return false;
+    const routing = asTurnRouting(deleted.action_input);
+    if (!routing) {
+      // Unreachable for markers we write (arm always supplies messageId +
+      // deploymentName). Logged at error so a real schema drift is noticed.
+      logger.error(`Dropping unroutable turn-timeout marker (${path})`);
+      return false;
+    }
+    await enqueueTerminalError(tx, routing, failureFor(deleted.action_input), run ? Number(run.id) : undefined);
+    if (run) await closeAgentTurnShownError(tx, run);
+    return true;
+  });
+}
+
+/**
  * Deadline backstop: fail markers whose deadline has lapsed. Runs on every
- * replica; `FOR UPDATE SKIP LOCKED` + `DELETE … RETURNING` make it exactly-once
+ * replica; the deadline recheck + `DELETE … RETURNING` make it exactly-once
  * across replicas. Covers a hung worker and a worker-pod death (the marker
  * outlives the pod that armed it).
  */
@@ -597,44 +626,37 @@ export async function sweepExpiredTurns(
 ): Promise<number> {
   try {
     const sql = getDb();
-    const failed = await sql.begin(async (tx: DbClient) => {
-      const rows = await tx.unsafe<{ action_input: TurnMarkerInput }>(
-        // status + run_type match the partial predicate and leading column of
-        // `runs_lobu_claim_idx`, so the inner SELECT is an index range scan
-        // (run_type, queue_name, …, run_at) — not a full scan of `runs` (which
-        // retains 30 days of completed rows).
-        `DELETE FROM public.runs
-         WHERE id IN (
-           SELECT id FROM public.runs
-           WHERE status = 'pending'
-             AND run_type = 'internal'
-             AND queue_name = 'internal:turn_timeout'
-             AND run_at < now()
-           FOR UPDATE SKIP LOCKED
-           LIMIT 200
-         )
-         RETURNING action_input`
+    // status + run_type match the partial predicate and leading column of
+    // `runs_lobu_claim_idx`, so this is an index range scan (run_type,
+    // queue_name, …, run_at) — not a full scan of `runs` (which retains 30
+    // days of completed rows). Read unlocked: each marker is fired in its own
+    // transaction, behind its turn's conversation lock (`fireTurnMarker`).
+    const markers = await sql<{ id: number; action_input: TurnMarkerInput }>`
+      SELECT id, action_input FROM public.runs
+      WHERE status = 'pending'
+        AND run_type = 'internal'
+        AND queue_name = 'internal:turn_timeout'
+        AND run_at < now()
+      LIMIT 200
+    `;
+    let failed = 0;
+    for (const marker of markers) {
+      // Same relay as the fast path: a marker the proxy flagged carries the
+      // classified provider failure, which is what actually ended this turn.
+      // The delete re-checks the deadline: a heartbeat may have extended it.
+      const fired = await fireTurnMarker(
+        marker.action_input,
+        (tx) => tx<{ action_input: unknown }>`
+          DELETE FROM public.runs
+          WHERE id = ${marker.id} AND status = 'pending'
+            AND queue_name = 'internal:turn_timeout' AND run_at < now()
+          RETURNING action_input
+        `,
+        (input) => providerFailureCode(input) ?? code,
+        "sweep"
       );
-      let emitted = 0;
-      for (const row of rows) {
-        const routing = asTurnRouting(row.action_input);
-        if (!routing) {
-          // See the fast-path note: unroutable (missing messageId/deployment),
-          // so undeliverable — deleting clears it; keeping would re-loop forever.
-          logger.error("Dropping unroutable turn-timeout marker (sweep)");
-          continue;
-        }
-        // Same relay as the fast path: a marker the proxy flagged carries the
-        // classified provider failure, which is what actually ended this turn.
-        await enqueueTerminalError(
-          tx,
-          routing,
-          providerFailureCode(row.action_input) ?? code
-        );
-        emitted += 1;
-      }
-      return emitted;
-    });
+      if (fired) failed += 1;
+    }
     if (failed > 0) {
       await notifyThreadResponse();
       logger.warn(
@@ -725,11 +747,17 @@ function buildTerminalErrorPayload(
 async function enqueueTerminalError(
   tx: DbClient,
   routing: TurnRouting,
-  failure: TurnFailure
+  failure: TurnFailure,
+  turnRunId?: number
 ): Promise<void> {
   await insertThreadResponseRow(
     tx,
-    buildTerminalErrorPayload(routing, failure),
+    {
+      ...buildTerminalErrorPayload(routing, failure),
+      // Retry replacement deltas are partial text. Preserve the native turn
+      // identity so the renderer still delivers this terminal error.
+      ...(turnRunId !== undefined ? { turnRunId } : {}),
+    },
     routing.organizationId ?? null
   );
   await completeAgentRunInputs(
@@ -763,20 +791,25 @@ export async function failTurnIfPending(
   failure: TurnFailure
 ): Promise<boolean> {
   const key = turnMarkerKey(deploymentName, messageId);
-  const sql = getDb();
-  const emitted = await sql.begin(async (tx: DbClient) => {
-    const rows = await tx<{ action_input: unknown }>`
+  const [marker] = await getDb()<{ action_input: unknown }>`
+    SELECT action_input FROM public.runs
+    WHERE idempotency_key = ${key}
+      AND status = 'pending'
+      AND queue_name = ${TURN_TIMEOUT_QUEUE}
+  `;
+  if (!marker) return false;
+  const emitted = await fireTurnMarker(
+    marker.action_input,
+    (tx) => tx<{ action_input: unknown }>`
       DELETE FROM public.runs
       WHERE idempotency_key = ${key}
         AND status = 'pending'
         AND queue_name = ${TURN_TIMEOUT_QUEUE}
       RETURNING action_input
-    `;
-    const routing = rows[0] ? asTurnRouting(rows[0].action_input) : null;
-    if (!routing) return false;
-    await enqueueTerminalError(tx, routing, failure);
-    return true;
-  });
+    `,
+    () => failure,
+    "single turn"
+  );
   if (emitted) await notifyThreadResponse();
   return emitted;
 }
