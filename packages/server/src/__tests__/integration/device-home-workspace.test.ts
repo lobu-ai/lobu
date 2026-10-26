@@ -11,8 +11,8 @@
  *   - a Devices-page move (`PATCH /api/me/devices/:id`) invalidates the old pin
  *     and the next poll wires the new home; page activation follows the move.
  *   - team work runs only on the device a connection is pinned to, and a
- *     device behind the workspace's version gets none of that version's work
- *     until it catches up; nothing is paused for it.
+ *     device behind the workspace's version keeps using its own retained,
+ *     validated contract; it never claims the newer contract's work.
  */
 
 import { Hono } from 'hono';
@@ -454,7 +454,7 @@ describe('device home workspace chosen at pairing', () => {
             active_feeds: number;
           }>,
         /** Runs the scheduler creates for Alice's due feed when her device polls. */
-        aliceScheduledRuns: async () => {
+        aliceScheduledRuns: async (expectedVersion: string) => {
           const device = await deviceRow(alice.userId, 'old-box');
           const [own] = await ctx.connectionsOf(alice.userId);
           await sql`
@@ -476,7 +476,13 @@ describe('device home workspace chosen at pairing', () => {
             workerSupportsHttpAuth: false,
             backendCapacity: { compiled_connector: 1 },
           };
-          return (await materializeDueFeeds({} as Env, sql, { claimContext })).runsCreated;
+          const { runsCreated } = await materializeDueFeeds({} as Env, sql, { claimContext });
+          const runs = await sql`
+            SELECT connector_version FROM runs WHERE connection_id = ${own.id}
+          `;
+          expect(runs).toHaveLength(1);
+          expect(runs[0].connector_version).toBe(expectedVersion);
+          return runsCreated;
         },
         /** What the Devices page lists as needing a Lobu update on Alice's device. */
         aliceUpdateRequired: async () =>
@@ -535,10 +541,10 @@ describe('device home workspace chosen at pairing', () => {
         },
       ],
       [
-        'row 2 then 4 — older first: a newer device advances it; the older device keeps its connection but its scheduled work waits',
+        'row 2 then 4 — older first: a newer device advances it; the older device keeps scheduling its retained contract',
         async (team) => {
           await team.aliceOldFeed();
-          expect(await team.aliceScheduledRuns()).toBe(1);
+          expect(await team.aliceScheduledRuns(OLD)).toBe(1);
           await team.bobNewFeed();
           expect(await team.installed()).toBe(NEW);
           expect(await team.connectionsOf(team.bob.userId)).toEqual([
@@ -549,23 +555,23 @@ describe('device home workspace chosen at pairing', () => {
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
             expect.objectContaining({ active_feeds: 1 }),
           ]);
-          expect(await team.aliceScheduledRuns()).toBe(0);
+          expect(await team.aliceScheduledRuns(OLD)).toBe(1);
         },
       ],
       [
-        'row 3 — the device reaches the installed version: the same connection runs again, nothing to clear',
+        'row 3 — the device reaches the installed version: the same connection adopts the new contract',
         async (team) => {
           await team.aliceOldFeed();
           await team.bobNewFeed();
           await team.aliceOldFeed();
           const [behind] = await team.connectionsOf(team.alice.userId);
-          expect(await team.aliceScheduledRuns()).toBe(0);
+          expect(await team.aliceScheduledRuns(OLD)).toBe(1);
           await team.aliceNewFeed();
           expect(await team.connectionsOf(team.alice.userId)).toEqual([
             expect.objectContaining({ id: behind.id, status: 'active', error_message: null, active_feeds: 1 }),
           ]);
           expect(await team.installed()).toBe(NEW);
-          expect(await team.aliceScheduledRuns()).toBe(1);
+          expect(await team.aliceScheduledRuns(NEW)).toBe(1);
         },
       ],
       [
