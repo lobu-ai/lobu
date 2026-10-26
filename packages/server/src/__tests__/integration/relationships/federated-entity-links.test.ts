@@ -65,6 +65,36 @@ describe('typed references and authored source relationships', () => {
     await expect(ws.owner.entities.get({ entity_id: 'same', entity_type: 'duplicate-key-items' })).rejects.toThrow(/not unique/);
   });
 
+  it.each([false, true])('round-trips verbatim keys without merging whitespace variants (external: %s)', async external => {
+    const slug = external ? 'verbatim-external' : 'verbatim-internal';
+    const connection = external ? 'verbatim-source' : undefined;
+    if (external) {
+      const profile = await createAuthProfile({ organizationId: ws.org.id, connectorKey: 'postgres', displayName: 'Verbatim fixture',
+        profileKind: 'env', authData: { DATABASE_URL: process.env.DATABASE_URL! } });
+      await getTestDb()`INSERT INTO connections(organization_id, connector_key, slug, display_name, status, auth_profile_id, visibility, created_by)
+        VALUES (${ws.org.id}, 'postgres', ${connection!}, 'Verbatim source', 'active', ${profile.id}, 'org', ${ws.users.owner.id})`;
+    }
+    await ws.owner.entity_schema.createType({ slug, name: 'Verbatim keys',
+      backing: { sql: "SELECT * FROM (VALUES ('padded-key', 'Plain'), (' padded-key ', 'Spaces'), (E'\\tpadded-key\\n', 'Controls'), ('　padded-key ', 'Unicode'), (' ', 'Space only')) AS items(id, name)", connection },
+      metadata_schema: { type: 'object', 'x-lobu-record-key': 'id' } });
+    const listed = await ws.owner.entities.list({ entity_type: slug });
+    expect(listed.entities).toHaveLength(5);
+    for (const item of listed.entities) {
+      const got = await ws.owner.entities.get({ entity_id: String(item.id), entity_type: slug });
+      expect(got.entity).toMatchObject({ id: item.id, name: item.name });
+      const resolved = await resolvePath({ path: `/${ws.org.slug}/${slug}/${encodeURIComponent(String(item.id))}` }, {}, ownerToolContext(ws.org.id, ws.users.owner.id));
+      expect(resolved.entity).toMatchObject({ id: item.id, name: item.name });
+      const edge = await ws.owner.entities.link({ from_entity_id: stored, to_entity_id: String(item.id),
+        to_entity_type: slug, relationship_type_slug: 'related-item' });
+      try {
+        const links = await ws.owner.entities.listLinks({ entity_id: String(item.id), entity_type: slug });
+        expect(links.relationships).toMatchObject([{ id: edge.relationship.id, to_entity_id: item.id, to_entity_name: item.name }]);
+      } finally {
+        await ws.owner.entities.unlink({ relationship_id: Number(edge.relationship.id) });
+      }
+    }
+  });
+
   it('paginates source edges by stable cursor and binds it to the exact request', async () => {
     const edges = [];
     for (const key of ['A:1/path', 'B']) {

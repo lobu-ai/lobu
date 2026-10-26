@@ -146,7 +146,8 @@ export async function queryDerivedEntityView(
 				? { maxSerializedResultBytes: Number.POSITIVE_INFINITY }
 				: {}),
 			...(options?.exactSlug !== undefined
-				? { exactMatch: { columns: options.keyColumn ? [options.keyColumn] : [...DERIVED_SLUG_COLUMNS], value: options.exactSlug } }
+				? { exactMatch: { columns: options.keyColumn ? [options.keyColumn] : [...DERIVED_SLUG_COLUMNS], value: options.exactSlug,
+					...(options.keyColumn ? { verbatim: true } : {}) } }
 				: {}),
 		},
 	);

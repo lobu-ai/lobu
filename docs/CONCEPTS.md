@@ -40,6 +40,11 @@ Its records use a verbatim string `entity_id` plus `entity_type`; even `"007"`
 stays a source key. Views without that declaration return `id: null` and remain
 read-only views. Reads never create stored rows.
 
+Declared keys use `exactMatch.verbatim: true` on connector queries. A connector
+must advertise both `queryCapabilities.exactMatch` and `queryCapabilities.verbatimExactMatch`;
+unsupported sources reject the lookup before executing it. Legacy view slugs
+retain trimmed matching.
+
 `get` and `listLinks` accept either reference. `link`, `unlink`, and `updateLink`
 accept `from_entity_id`/`to_entity_id`, with `from_entity_type`/`to_entity_type`
 required for strings. Ordinary relationships support every stored/source pair.

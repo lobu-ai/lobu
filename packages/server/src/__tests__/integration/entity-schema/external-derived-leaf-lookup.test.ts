@@ -230,22 +230,37 @@ describe('external derived record lookup', () => {
     } })).rejects.toMatchObject({ httpStatus: 400, message: 'Connector does not support exact-match queries' });
   });
 
-  it('functional connectors retain capability metadata and receive the exact filter', async () => {
+  it.each([undefined, false, true])('functional connectors retain capability metadata and receive the exact filter (verbatim: %s)', async verbatim => {
     const compiledCode = await createIsolateConnectorCompiler().compileConnectorForIsolateFromSource(`
       import { defineConnector } from '@lobu/connector-sdk';
       export default defineConnector({
         key: 'supported_exact', name: 'Supported exact', version: '0.0.1',
-        queryCapabilities: { exactMatch: true, selection: true },
+        queryCapabilities: { exactMatch: true, verbatimExactMatch: true, selection: true },
         query: async (ctx) => ({ rows: [{ filter: ctx.exactMatch, selection: ctx.selection, limit: ctx.limit, offset: ctx.offset }] })
       });
     `);
-    const exactMatch = { columns: ['slug', 'id'], value: 'source-id' };
+    const exactMatch = { columns: ['slug', 'id'], value: ' source-id ', ...(verbatim === undefined ? {} : { verbatim }) };
     const selection = { search: 'literal %', filters: [{ field: 'seats', op: 'gte' as const, value: 100 }] };
     const result = await executeCompiledConnector({ compiledCode, job: {
       mode: 'query', query: 'SELECT 1', exactMatch, selection,
       config: {}, credentials: null, sessionState: null, env: {}, limit: 1, offset: 0,
     } });
     expect(result).toMatchObject({ mode: 'query', rows: [{ filter: exactMatch, selection, limit: 1, offset: 0 }] });
+  });
+
+  it('rejects verbatim filters before calling a connector that only supports trimmed matches', async () => {
+    const compiledCode = await createIsolateConnectorCompiler().compileConnectorForIsolateFromSource(`
+      import { defineConnector } from '@lobu/connector-sdk';
+      export default defineConnector({
+        key: 'trimmed_exact', name: 'Trimmed exact', version: '0.0.1',
+        queryCapabilities: { exactMatch: true },
+        query: async () => { throw new Error('query handler must not run'); }
+      });
+    `);
+    await expect(executeCompiledConnector({ compiledCode, job: {
+      mode: 'query', query: 'SELECT 1', exactMatch: { columns: ['id'], value: ' padded ', verbatim: true },
+      config: {}, credentials: null, sessionState: null, env: {}, limit: 1,
+    } })).rejects.toMatchObject({ httpStatus: 400, message: 'Connector does not support verbatim exact-match queries' });
   });
 
   it('marks unfiltered collections for exact source totals without counting ordinary SQL reads', async () => {

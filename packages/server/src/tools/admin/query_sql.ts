@@ -353,7 +353,7 @@ export async function querySqlImpl(
     maxSerializedResultBytes?: number;
     /**
      * Internal-only exact-match filter (NOT on the agent-facing schema). Keeps
-     * the first non-null of `columns` on each row, trimmed, and compares it to
+     * the first non-null of `columns` on each row (trimmed unless verbatim), and compares it to
      * `value` as a bound parameter. Read via `to_jsonb(...)->>` so a column the
      * query doesn't project yields NULL and falls through instead of raising
      * `undefined column`. External sources receive the structured filter so
@@ -533,16 +533,14 @@ export async function querySqlImpl(
     whereClauses.push(`(${orClauses.join(' OR ')})`);
   }
   if (options?.exactMatch) {
-    const { columns, value } = options.exactMatch;
+    const { columns, value, verbatim } = options.exactMatch;
     const matchParamRef = `$${params.length + 1}`;
     params.push(value);
     const coalesced = columns.map((col) => `to_jsonb(_t)->>'${col}'`).join(', ');
-    // Trim the same character set JS `String.prototype.trim` strips, so a
-    // tab/newline-padded value still matches: bare `btrim` strips spaces only,
-    // which would 404 a row the in-memory match resolved. (JS also strips
-    // Unicode spaces such as U+00A0; a value padded with those falls through to
-    // the caller's `derivedRowSlug` confirm and 404s rather than mis-resolving.)
-    whereClauses.push(`btrim(COALESCE(${coalesced}), E' \\t\\n\\r\\f\\v') = ${matchParamRef}`);
+    // Preserve legacy slug normalization; declared record keys must not
+    // collapse whitespace variants into the same identity.
+    const scalar = `COALESCE(${coalesced})`;
+    whereClauses.push(`${verbatim ? scalar : `btrim(${scalar}, E' \\t\\n\\r\\f\\v')`} = ${matchParamRef}`);
   }
   whereClauses.push(...attributeFilterSql(options?.selection?.filters ?? [], 'to_jsonb(_t)', params));
   const searchWhere = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
