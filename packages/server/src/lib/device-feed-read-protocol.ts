@@ -32,6 +32,45 @@ export function isSourceFeedRead(metadata: Record<string, unknown> | null | unde
   return metadata?.[SOURCE_FEED_READ_METADATA_KEY] === true;
 }
 
+/** Payload assignments only; callers own terminal state, errors and row fences. */
+export function sourceReadScrubAssignments<T>(
+  sql: (strings: TemplateStringsArray, ...values: unknown[]) => T,
+  options: {
+    /** The caller's WHERE clause already restricts this write to source reads. */
+    sourceReadOnly?: boolean;
+    /** Policy rejection gates each CASE arm without changing non-blocked runs. */
+    guard?: boolean;
+    /** The read seam supplies its receipt from the requested feed key. */
+    nativeInput?: unknown;
+    metadataKey?: string;
+  } = {},
+): T {
+  const sourceRead = sql`run_metadata->>${options.metadataKey ?? SOURCE_FEED_READ_METADATA_KEY} = 'true'`;
+  const deviceRead = sql`action_key = ${DEVICE_FEED_READ_ACTION_KEY}`;
+  const guard = options.guard === undefined ? sql`` : sql`${options.guard} AND `;
+  // Native transport owns feed_key. Browser step arguments are opaque source
+  // input, even if they happen to use a protocol-looking key.
+  const nativeInput = options.nativeInput
+    ?? sql`jsonb_build_object('scrubbed', true, 'feed_key', action_input->>'feed_key')`;
+  const output = options.sourceReadOnly ? sql`NULL` : sql`CASE
+    WHEN ${guard}(${deviceRead} OR ${sourceRead}) THEN NULL
+    ELSE action_output END`;
+  const nativeBranch = options.sourceReadOnly ? sql`ELSE ${nativeInput}` : sql`
+    WHEN ${guard}${deviceRead} THEN ${nativeInput}
+    ELSE action_input`;
+  return sql`action_output = ${output},
+    action_input = CASE WHEN ${guard}${sourceRead} THEN '{"scrubbed":true}'::jsonb
+      ${nativeBranch} END`;
+}
+
+/** Raw SQL adapter for the reaper; preserves its existing positional bindings. */
+export function sourceReadScrubAssignmentsSql(metadataKeyPlaceholder: `$${number}`): string {
+  return sourceReadScrubAssignments(
+    (strings, ...values) => strings.reduce((text, part, index) => text + String(values[index - 1]) + part),
+    { sourceReadOnly: true, metadataKey: metadataKeyPlaceholder },
+  );
+}
+
 /**
  * How long a TERMINAL source-read run keeps its payload before the reaper sweeps
  * it, when the in-process cleanup never ran (gateway crash, pod eviction).

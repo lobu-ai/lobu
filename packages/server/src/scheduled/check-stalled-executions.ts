@@ -69,6 +69,7 @@ import {
   DEVICE_FEED_READ_ACTION_KEY,
   DEVICE_FEED_READ_SCRUB_GRACE_SECONDS,
   SOURCE_FEED_READ_METADATA_KEY,
+  sourceReadScrubAssignmentsSql,
 } from '../lib/device-feed-read-protocol';
 import { buildStaleRunWhereSql } from './stale-run-sweeper';
 import { sweepStaleAgentTurnRuns } from '../worker-api/agent-turn';
@@ -142,14 +143,7 @@ export async function sweepAbandonedDeviceFeedReadRuns(
 ): Promise<number> {
   const result = await sql.unsafe(
     `UPDATE runs
-     SET action_output = NULL,
-         -- Native transport owns feed_key. Browser step arguments are opaque
-         -- source input, even if they happen to use a protocol-looking key.
-         action_input = CASE WHEN run_metadata->>$5 = 'true' THEN '{"scrubbed":true}'::jsonb
-           ELSE jsonb_build_object(
-           'scrubbed', true,
-           'feed_key', action_input->>'feed_key'
-         ) END,
+     SET ${sourceReadScrubAssignmentsSql('$5')},
          status = CASE WHEN status IN ${FEED_READ_IN_FLIGHT_STATUSES}
                     THEN 'timeout' ELSE status END,
          outcome = CASE WHEN status IN ${FEED_READ_IN_FLIGHT_STATUSES}
