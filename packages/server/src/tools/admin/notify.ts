@@ -29,6 +29,7 @@ import { loadConfiguredAutomationDeliveryTarget } from '../../automations/delive
 import { normalizePageActivationUrl } from '../../runs/page-activation';
 import type { ToolContext } from '../registry';
 import { action, defineActionTool } from './action-tool';
+import { withTurnIdempotencyKey } from '../turn-write-idempotency';
 
 // ============================================
 // Schema
@@ -123,7 +124,10 @@ const SendAction = Type.Object({
 // ============================================
 
 const notifyTool = defineActionTool('notify', {
-  send: action(SendAction, handleSend),
+  // A turn repeating the same send for the same input message delivers once.
+  send: action(SendAction, async (args, ctx) =>
+    handleSend(await withTurnIdempotencyKey(ctx.agentTurn, 'notify.send', args), ctx)
+  ),
 });
 
 export const NotifySchema = notifyTool.schema;

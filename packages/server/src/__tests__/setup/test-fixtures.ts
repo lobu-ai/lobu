@@ -11,7 +11,7 @@ import { chatUserIdentityFor } from '../../lobu/stores/chat-identity-sources';
 import { serializeSigned } from 'hono/utils/cookie';
 import { hashClientSecret } from '../../auth/oauth/clients';
 import { NON_PUBLIC_OAUTH_SCOPES } from '../../auth/oauth/scopes';
-import { slugify } from '@lobu/core';
+import { slugify, type MessagePayload } from '@lobu/core';
 import { generateSecureToken, hashToken } from '../../auth/oauth/utils';
 import { pgBigintArray, pgTextArray } from '../../db/client';
 import { ensureUniqueConnectionSlug } from '../../utils/connections';
@@ -600,6 +600,24 @@ interface TestPAT {
   token: string;
   userId: string;
   organizationId: string;
+}
+
+/**
+ * The stored `agent_turn` run a turn credential names, as the producer
+ * publishes it. Mint the turn token with the returned id: a turn's writes
+ * derive their idempotency key from this row and refuse a credential whose
+ * run does not exist.
+ */
+export async function insertAgentTurnRun(message: Pick<MessagePayload, 'organizationId' | 'agentId' | 'conversationId' | 'messageId'>): Promise<number> {
+  const sql = getTestDb();
+  const [run] = await sql<{ id: number }>`
+    INSERT INTO runs (organization_id, run_type, status, action_input, created_at)
+    VALUES (${message.organizationId}, 'agent_turn', 'running', ${sql.json({
+      turn: { agent_id: message.agentId, conversation_id: message.conversationId, message_id: message.messageId },
+    })}, NOW())
+    RETURNING id
+  `;
+  return Number(run!.id);
 }
 
 export async function createTestPAT(

@@ -31,6 +31,7 @@ import {
   createTestUser,
   linkChatIdentityInGraph,
   seedSystemEntityTypes,
+  insertAgentTurnRun,
 } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
 
@@ -83,7 +84,8 @@ function slackChatMessage(organizationId: string, senderPlatformId: string, evid
 }
 
 async function turnToken(organizationId: string, senderPlatformId: string, evidence: Evidence): Promise<string> {
-  return mintTurnToken(slackChatMessage(organizationId, senderPlatformId, evidence), 1);
+  const message = slackChatMessage(organizationId, senderPlatformId, evidence);
+  return mintTurnToken(message, await insertAgentTurnRun(message));
 }
 
 async function gatewayToken(organizationId: string, senderPlatformId: string, evidence: Evidence): Promise<string> {

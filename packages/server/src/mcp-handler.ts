@@ -89,6 +89,8 @@ import logger from './utils/logger';
 import { getClientIP } from './utils/rate-limiter';
 import { organizationIdLiveSql } from './workspace/deletion-state';
 import { eventClientId } from './auth/event-client-id';
+import type { AgentTurnIdentity } from './tools/turn-write-idempotency';
+import { TURN_INPUT_RUN_HEADER } from '@lobu/core/agent-tooling';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -224,6 +226,12 @@ const mcpRequestContext = new AsyncLocalStorage<{
   signal: AbortSignal;
   /** This request's caller IP: a session can move between addresses. */
   clientIP: string;
+  /**
+   * The agent turn this request's verified credential names. Per request,
+   * never on the session: the gateway reuses one upstream MCP session across a
+   * user's turns, so a session copy would key a write to another turn.
+   */
+  agentTurn: AgentTurnIdentity | null;
   renewActivity?: () => Promise<boolean>;
 }>();
 
@@ -231,10 +239,12 @@ const mcpRequestContext = new AsyncLocalStorage<{
  * The session's auth context as of this request. Rate limits key on the
  * caller's address, and a session can move between addresses, so every path
  * that runs a tool takes this request's IP rather than the session's first.
+ * The agent turn is per request for the same reason.
  */
 function forThisRequest<T extends AuthContext>(authCtx: T): T {
-  const clientIP = mcpRequestContext.getStore()?.clientIP;
-  return clientIP ? { ...authCtx, clientIP } : authCtx;
+  const store = mcpRequestContext.getStore();
+  if (!store) return authCtx;
+  return { ...authCtx, ...(store.clientIP ? { clientIP: store.clientIP } : {}), agentTurn: store.agentTurn };
 }
 
 class SessionServer extends Server {
@@ -1410,16 +1420,30 @@ async function withRequestActivity<T>(signal: AbortSignal, handler: () => T | Pr
   }
 }
 
+/**
+ * The steered input a turn's call names, attached for verification by the
+ * write that keys on it. A malformed value is kept as an id no stored input can
+ * have, so the write fails closed instead of silently keying on the owner.
+ */
+function withTurnInputRun(agentTurn: AgentTurnIdentity | null, header: string | null): AgentTurnIdentity | null {
+  if (!agentTurn || header === null) return agentTurn;
+  const parsed = Number(header);
+  const canonical = Number.isSafeInteger(parsed) && parsed > 0 && String(parsed) === header;
+  return { ...agentTurn, inputRunId: canonical ? parsed : 0 };
+}
+
 // POST responses are JSON; only the standalone GET notification stream is SSE.
 async function handleTransportRequest(
   transport: WebStandardStreamableHTTPServerTransport,
   req: Request,
-  clientIP: string
+  clientIP: string,
+  agentTurn: AgentTurnIdentity | null
 ): Promise<Response> {
   const response = await mcpRequestContext.run({
     rawJson: req.headers.get('x-mcp-format')?.toLowerCase() === 'json',
     signal: req.signal,
     clientIP,
+    agentTurn: withTurnInputRun(agentTurn, req.headers.get(TURN_INPUT_RUN_HEADER)),
     // Initialization has no persisted row yet and must not create one here.
     renewActivity: req.method === 'POST' && transport.sessionId
       ? () => refreshTransportActivity(transport) : undefined,
@@ -1796,7 +1820,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       }
     }
 
-    return handleTransportRequest(session.transport, req, clientIP);
+    return handleTransportRequest(session.transport, req, clientIP, c.var.mcpAuthInfo?.agentTurn ?? null);
   }
 
   // Stale session ID with non-initialize request → require a fresh initialize.
@@ -1842,7 +1866,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
             );
           }
           await recordMcpClientActivity(c.env, recoveredAuthCtx, req);
-          return handleTransportRequest(transport, req, clientIP);
+          return handleTransportRequest(transport, req, clientIP, c.var.mcpAuthInfo?.agentTurn ?? null);
         }
 
         await deletePersistedSession(sessionId);
@@ -1908,7 +1932,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       () => randomUUID()
     );
     await server.connect(transport);
-    const response = await handleTransportRequest(transport, req, clientIP);
+    const response = await handleTransportRequest(transport, req, clientIP, c.var.mcpAuthInfo?.agentTurn ?? null);
     await persistSessionState(transport.sessionId, authCtx);
     return response;
   }

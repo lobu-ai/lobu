@@ -41,6 +41,7 @@ import { trackAutomationReaction } from '../utils/automation-reactions';
 import { isSystemContext } from './access-control';
 import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import type { ToolContext } from './registry';
+import { withTurnIdempotencyKey } from './turn-write-idempotency';
 import { withValidatedArgs } from './validate-args';
 import { buildEventViewUrl } from './view-urls';
 import { eventClientId } from '../auth/event-client-id';
@@ -202,10 +203,13 @@ interface SaveContentResult {
 export const saveContent = withValidatedArgs('save_memory', SaveContentSchema, saveContentImpl);
 
 async function saveContentImpl(
-  args: SaveContentArgs,
+  input: SaveContentArgs,
   _env: Env,
   ctx: ToolContext
 ): Promise<SaveContentResult> {
+  // A turn that repeats this save for the same input message (a re-run, a
+  // redelivered message) replays the first memory instead of storing a second.
+  const args = await withTurnIdempotencyKey(ctx.agentTurn, 'save_memory', input);
   // SDK delegates (`client.knowledge.save`) skip `checkToolAccess`, so apply
   // the same member+scope gate here. System contexts (userId=null + auth=true)
   // bypass — automation reactions don't carry a user identity.

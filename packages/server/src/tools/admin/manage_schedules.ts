@@ -28,6 +28,7 @@ import {
   UpdateAction,
 } from '@lobu/core/contracts/tools/manage-schedules';
 import { action, defineActionTool } from './action-tool';
+import { withTurnIdempotencyKey } from '../turn-write-idempotency';
 import {
   createScheduledJob,
   type DeliveryAuthzDenyReason,
@@ -59,7 +60,10 @@ interface ToolResult {
 }
 
 const manageSchedulesTool = defineActionTool('manage_schedules', {
-  create: action(CreateAction, handleCreate),
+  // A turn repeating the same create for the same input message schedules once.
+  create: action(CreateAction, async (args, ctx) =>
+    handleCreate(await withTurnIdempotencyKey(ctx.agentTurn, 'schedules.create', args), ctx)
+  ),
   list: action(ListAction, handleList),
   update: action(UpdateAction, handleUpdate),
   pause: action(PauseAction, handlePause),

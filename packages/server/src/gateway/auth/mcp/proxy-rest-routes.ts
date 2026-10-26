@@ -1,4 +1,5 @@
 import { createLogger } from "@lobu/core";
+import { TURN_INPUT_RUN_HEADER } from "@lobu/core/agent-tooling";
 import type { Context } from "hono";
 import {
 	McpTransportError,
@@ -174,9 +175,17 @@ async function handleCallToolAuthenticated(
 		// structured `result_summary` (event ids + snippet text) through the
 		// `tool_use` SSE event.
 		const callerFormat = c.req.header("x-mcp-format");
-		const extraHeaders = callerFormat
-			? { "x-mcp-format": callerFormat }
-			: undefined;
+		// The steered input a turn's call answers rides only to the embedded
+		// MCP, which verifies it against the turn's stored inputs. Never
+		// forwarded to a third-party server.
+		const turnInputRun = httpServer.internal ? c.req.header(TURN_INPUT_RUN_HEADER) : undefined;
+		const extraHeaders =
+			callerFormat || turnInputRun !== undefined
+				? {
+						...(callerFormat ? { "x-mcp-format": callerFormat } : {}),
+						...(turnInputRun !== undefined ? { [TURN_INPUT_RUN_HEADER]: turnInputRun } : {}),
+					}
+				: undefined;
 
 		let response = await proxy.upstream.sendUpstreamRequest(
 			httpServer,

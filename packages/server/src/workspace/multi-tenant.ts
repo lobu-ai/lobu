@@ -24,6 +24,7 @@ import {
 } from '../gateway/orchestration/chat-turn-actor';
 import { resolveRestToolGetRoute } from '../http/rest-tool-routes';
 import type { Env } from '../index';
+import { agentTurnIdentityFromClaims } from '../tools/turn-write-idempotency';
 import { checkApplyPause } from '../utils/deployment-pause';
 import logger from '../utils/logger';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
@@ -478,6 +479,9 @@ export class MultiTenantProvider implements WorkspaceProvider {
             conversationId: tokenData.conversationId, runId: tokenData.runId,
             automationRunId: tokenData.automationRunId,
           } : null,
+          // The turn this credential was minted for, so a turn's writes can
+          // derive a per-input-message idempotency key server-side.
+          agentTurn: agentTurnIdentityFromClaims(tokenData),
         },
         mcpIsAuthenticated: true,
         organizationId: requestedOrgId,
