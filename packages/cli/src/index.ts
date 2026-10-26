@@ -344,7 +344,7 @@ Memory:
     .command("rollback")
     .argument(
       "<applyId>",
-      "Deployment to restore (apl_… from Settings → Audit log)"
+      "Deployment to restore (apl_… from the Events page, Applies filter)"
     )
     .description(
       "Restore a previous deployment from its stored snapshot (pauses future applies until --resume)"

@@ -144,7 +144,7 @@ describe("Org OAuth: redirect_uri matches between authorize and exchange", () =>
 		authStash.mcpAuthInfo = null;
 
 		stack = await orgContext.run({ organizationId: ORG }, () =>
-			buildRealClaudeAuthStack(),
+			buildRealClaudeAuthStack({ durableSecrets: true }),
 		);
 		// Seed AFTER CoreServices.init — init reloads the OAuth registry from
 		// providers.json (or empties it when the path is missing in CI cwd).
@@ -272,6 +272,44 @@ describe("Org OAuth: redirect_uri matches between authorize and exchange", () =>
 			stack.authProfilesManager.getProviderProfiles(ORG_BUCKET, "claude", USER),
 		);
 		expect(removedProfiles).toHaveLength(0);
+	});
+
+	test("audit failure rolls back OAuth profile, secrets and visible provider together", async () => {
+		installTokenEndpointMock({});
+		const app = await importAgentRoutes();
+		const start = await app.request("/inference-providers/oauth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ providerId: "claude" }),
+		});
+		const state = new URL(
+			((await start.json()) as { authorizeUrl: string }).authorizeUrl,
+		).searchParams.get("state");
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		await sql.unsafe(
+			`CREATE OR REPLACE FUNCTION reject_oauth_config_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.metadata->>'category' = 'config' THEN RAISE EXCEPTION 'synthetic OAuth audit failure'; END IF; RETURN NEW; END $$`,
+		);
+		await sql.unsafe(
+			"CREATE TRIGGER reject_oauth_config_audit BEFORE INSERT ON events FOR EACH ROW EXECUTE FUNCTION reject_oauth_config_audit()",
+		);
+		try {
+			const response = await app.request("/inference-providers/oauth/complete", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ providerId: "claude", code: `fake-auth-code#${state}` }),
+			});
+			expect(response.status).toBe(400);
+			expect(await response.json()).toMatchObject({ error: "synthetic OAuth audit failure" });
+			expect(
+				await sql`SELECT user_id FROM user_auth_profiles WHERE user_id = ${USER} AND agent_id = ${ORG_BUCKET}`,
+			).toHaveLength(0);
+			expect(await sql`SELECT name FROM agent_secrets WHERE organization_id = ${ORG}`).toHaveLength(0);
+			expect(await sql`SELECT id FROM inference_providers WHERE organization_id = ${ORG}`).toHaveLength(0);
+		} finally {
+			await sql.unsafe("DROP TRIGGER reject_oauth_config_audit ON events");
+			await sql.unsafe("DROP FUNCTION reject_oauth_config_audit()");
+		}
 	});
 
 	test("headless (non-session) start hard-fails with a clear message", async () => {

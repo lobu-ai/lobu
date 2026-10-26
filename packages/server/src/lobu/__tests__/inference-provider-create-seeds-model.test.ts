@@ -176,6 +176,47 @@ describe("POST /inference-providers seeds a routable text model", () => {
 		expect(await readCapabilities("chatgpt")).toBeUndefined();
 	});
 
+	test("duplicate create remains a conflict without replacing state or audit", async () => {
+		const body = { slug: "duplicate", kind: "gemini", apiKey: "synthetic-original" };
+		expect((await createProvider(body)).status).toBe(201);
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const before = await sql`SELECT name, ciphertext FROM agent_secrets WHERE organization_id = ${ORG}`;
+		expect((await createProvider({ ...body, apiKey: "synthetic-replacement" })).status).toBe(409);
+		expect(await sql`SELECT name, ciphertext FROM agent_secrets WHERE organization_id = ${ORG}`).toEqual(before);
+		expect(await sql`SELECT id FROM inference_providers WHERE organization_id = ${ORG} AND deleted_at IS NULL`).toHaveLength(1);
+		expect(await sql`SELECT id FROM events WHERE organization_id = ${ORG} AND metadata->>'resource_kind' = 'inference-provider'`).toHaveLength(1);
+	});
+
+	test("concurrent creates serialize without a parent-lock upgrade deadlock", async () => {
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		let release!: () => void;
+		let acquired!: () => void;
+		const held = new Promise<void>(resolve => { release = resolve; });
+		const ready = new Promise<void>(resolve => { acquired = resolve; });
+		const blocker = sql.begin(async tx => {
+			await tx`SELECT id FROM organization WHERE id = ${ORG} FOR UPDATE`;
+			acquired();
+			await held;
+		});
+		await ready;
+		const requests = ["parallel-first", "parallel-second"].map(slug => createProvider({ slug, kind: "gemini", apiKey: "synthetic-key" }));
+		try {
+			const deadline = Date.now() + 5000;
+			while (true) {
+				const [row] = await sql`SELECT count(*)::int AS waiting FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM organization%'`;
+				if (Number(row.waiting) >= 2) break;
+				if (Date.now() >= deadline) throw new Error("provider requests never reached the lock barrier");
+				await Bun.sleep(10);
+			}
+		} finally { release(); await blocker; }
+		const results = await Promise.all(requests);
+		expect(results.map(result => result.status)).toEqual([201, 201]);
+		expect(await sql`SELECT id FROM inference_providers WHERE organization_id = ${ORG} AND is_default AND deleted_at IS NULL`).toHaveLength(1);
+		expect(await sql`SELECT id FROM events WHERE organization_id = ${ORG} AND metadata->>'resource_kind' = 'inference-provider'`).toHaveLength(2);
+	}, 10000);
+
 	test("a catalog provider created with NO capabilities gets the catalog default model", async () => {
 		const res = await createProvider({
 			slug: "gemini",

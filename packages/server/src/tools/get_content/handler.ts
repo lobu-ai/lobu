@@ -245,6 +245,15 @@ async function getContentImpl(
   const sql = getDb();
   const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
 
+  const resourceFiltered = args.resource_kind !== undefined || args.resource_id !== undefined;
+  const eventFiltered = resourceFiltered || args.event_category !== undefined;
+  if ((args.resource_kind === undefined) !== (args.resource_id === undefined)) {
+    throw new ToolUserError('resource_kind and resource_id must be supplied together.', 400);
+  }
+  if (eventFiltered && (args.record || args.automation_id || args.view)) {
+    throw new ToolUserError('Event resource filters require a stored workspace Events read.', 400);
+  }
+
   if (args.view === 'changes') {
     if (ctx.memberRole === null && !isInProcessSystemCall(ctx)) {
       throw new ToolUserError('Change reads require workspace membership.', 403);
@@ -680,6 +689,9 @@ async function getContentImpl(
         ...(args.classification_source && { classification_source: args.classification_source }),
         ...(args.semantic_type && { semantic_type: args.semantic_type }),
         ...(args.interaction_status && { interaction_status: args.interaction_status }),
+        ...(args.event_category && { event_category: args.event_category }),
+        ...(args.resource_kind && { resource_kind: args.resource_kind }),
+        ...(args.resource_id && { resource_id: args.resource_id }),
         ...(excludeWorkspaceAudit && {
           exclude_workspace_audit: true,
         }),
@@ -737,6 +749,9 @@ async function getContentImpl(
         classification_filters: classificationFilters,
         classification_source: args.classification_source,
         semantic_type: args.semantic_type,
+        event_category: args.event_category,
+        resource_kind: args.resource_kind,
+        resource_id: args.resource_id,
         entity_types: args.entity_types,
         interaction_status: args.interaction_status,
         // Keep the default non-owner/admin feed focused on content. This is

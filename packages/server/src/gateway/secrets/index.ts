@@ -268,7 +268,7 @@ export class SecretStoreRegistry implements WritableSecretStore {
    * so we walk every entry, split off the ref portion, and compare
    * canonically against the input.
    */
-  private invalidateCacheFor(nameOrRef: string): void {
+  invalidateCacheFor(nameOrRef: string): void {
     const canonical = canonicalSecretIdentity(nameOrRef);
     if (canonical === null) {
       // If we can't derive a canonical form, fall back to dropping every

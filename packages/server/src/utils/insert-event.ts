@@ -1733,13 +1733,13 @@ export interface WorkspaceChangeEventParams
  * Record a state mutation as a `semantic_type='change'` event with the full
  * redacted post-change state in `payload_data.state`. Config mutations use
  * `metadata.category='config'`, the settings audit trail behind the
- * Settings → Audit log feed; distinct from `category='lifecycle'` rows, which carry no
+ * Events page's Configuration filter; distinct from `category='lifecycle'` rows, which carry no
  * state and feed dashboard metric_series — handlers that emit lifecycle
  * events dual-write this one. Fire-and-forget, same retry/ERROR contract as
  * the writers above.
  *
  * Workspace identity mutations use `metadata.category='workspace'`, keeping
- * them out of the Settings → Audit log feed while still showing them in All activity.
+ * them out of the Events page's Configuration filter while still showing them in All activity.
  */
 function stateChangeMetadata(
   params: StateChangeEventParams<AuditResourceKind>,
@@ -1821,10 +1821,6 @@ function recordStateChangeEvent(
   });
 }
 
-export function recordConfigChangeEvent(params: ConfigChangeEventParams): void {
-  recordStateChangeEvent(params, 'config');
-}
-
 /**
  * Durable config audit seam for semantic mutations that already own a
  * transaction. The config event and any subscribed Automation activation task
@@ -1878,7 +1874,7 @@ export function recordWorkspaceChangeEvent(params: WorkspaceChangeEventParams): 
   recordStateChangeEvent(params, 'workspace');
 }
 
-export function recordLifecycleEvent(params: LifecycleEventParams): void {
+export function recordLifecycleEvent(params: LifecycleEventParams, sql?: DbClient): void | Promise<InsertedEvent> {
   // Include a random suffix so two same-entity/op lifecycle writes in the same
   // millisecond get distinct originIds (and distinct audit: idempotency keys).
   const externalId = `lifecycle_${params.entityType}_${params.op}_${params.entityId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1887,8 +1883,7 @@ export function recordLifecycleEvent(params: LifecycleEventParams): void {
   // reconcile so an ambiguous success cannot double-count. A doubly-failed
   // write is an ERROR — these rows feed the dashboard metric_series, and a
   // silent drop skews the cumulative counts forever.
-  retryWithBackoff(
-    () =>
+  const write = () =>
       insertConnectionlessAuditEvent({
         entityIds: [],
         organizationId: params.organizationId,
@@ -1905,7 +1900,10 @@ export function recordLifecycleEvent(params: LifecycleEventParams): void {
         },
         createdBy: params.createdBy ?? null,
       },
-      { subject: params.entityType, op: params.op }),
+      { subject: params.entityType, op: params.op }, sql ? { sql } : undefined);
+  if (sql) return write();
+  retryWithBackoff(
+    write,
     AUDIT_EVENT_RETRY
   ).catch((err) => {
     logger.error(

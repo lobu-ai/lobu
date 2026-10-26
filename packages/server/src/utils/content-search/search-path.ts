@@ -3,6 +3,7 @@
  */
 
 import postgres from 'postgres';
+import { buildEventResourceFilterClause } from './resource-filter';
 import type { Env } from '../../index';
 import { type DbClient, pgTextArray } from '../../db/client';
 import { incrementCounter } from '../../gateway/metrics/prometheus';
@@ -239,7 +240,8 @@ export async function searchContentBySingleQuery(
     // short-circuits when entity_id is absent.
     searchEntityLinkSql = entityLinkMatchSql('$2::bigint');
   }
-  const classificationParamIdx = entityLinkParamIdx + searchEntityLinkParams.length;
+  const resourceClause = buildEventResourceFilterClause(options, entityLinkParamIdx + searchEntityLinkParams.length);
+  const classificationParamIdx = entityLinkParamIdx + searchEntityLinkParams.length + resourceClause.params.length;
   let classificationClause: { sql: string; params: unknown[] } = { sql: '', params: [] };
   const classificationFilters = options.classification_filters ?? [];
   if (classificationFilters.length > 0) {
@@ -309,6 +311,7 @@ export async function searchContentBySingleQuery(
               : ''
           }
           ${classificationClause.sql}
+          ${resourceClause.sql}
           ${orgScopeSql}${entityTypesClause.sql}`;
   const standardFiltersSQL = standardFiltersFor(orgScope.sql);
 
@@ -729,6 +732,7 @@ export async function searchContentBySingleQuery(
     ...visibilityClause.params,
     ...entityTypesClause.params,
     ...searchEntityLinkParams,
+    ...resourceClause.params,
     ...classificationClause.params,
     ...(hasEmbedding ? [toVectorLiteral(queryEmbedding!), minSimilarity] : []),
     ...cursorClause.params,

@@ -23,7 +23,7 @@ import {
   resolveNewConnectionSlug,
 } from "../../../../utils/connections";
 import { recordLifecycleEvent } from "../../../../utils/insert-event";
-import { recordToolConfigChange } from "../../helpers/config-audit";
+import { insertToolConfigChange } from "../../helpers/config-audit";
 import logger from "../../../../utils/logger";
 import { ensureConnectorInstalled } from "../../../../utils/ensure-connector-installed";
 import {
@@ -712,11 +712,12 @@ async function handleConnectImpl(
 	if ("error" in connectSlugResult)
 		return { error: connectSlugResult.error, setup_url: setupUrl };
 
-	const insertConnection = (
+	const insertConnection = async (
 		db: DbClient,
 		authProfileId: number | null,
 		useSavepoint: boolean,
-	) =>
+	) => {
+    const rows = await
 		insertConnectionWithSlug({
       organizationId,
       connectorKey: args.connector_key,
@@ -748,6 +749,9 @@ async function handleConnectImpl(
 				return useSavepoint ? db.savepoint(insert) : insert();
 			},
     });
+    await insertToolConfigChange(ctx, { resourceKind: "connection", resourceId: Number(rows[0].id), op: "created", summary: `Connection '${connectDisplayName}' created`, before: null, state: rows[0] as Record<string, unknown> }, db);
+    return rows;
+  };
 
 	// Profile, connection, and auth run are one durable unit. A failed run
 	// creation rolls back both rows, so another replica can never observe an
@@ -801,13 +805,7 @@ async function handleConnectImpl(
 		},
   });
 
-  recordToolConfigChange(ctx, {
-		resourceKind: "connection",
-    resourceId: connection.id,
-		op: "created",
-    summary: `Connection '${connectDisplayName}' created`,
-    state: insertedConn[0] as Record<string, unknown>,
-  });
+
 
 	// Interactive pairing: the connection is pending_auth with a fresh
 	// interactive profile. Kick off the auth run (the lifecycle that emits QR /

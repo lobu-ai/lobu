@@ -295,6 +295,26 @@ export const GetContentSchema = Type.Object({
         'Filter by semantic type. Pass a single value (e.g. "note") or an array (e.g. ["note","summary"]) to match any. The reserved "notification" value matches events with notification targets, including kind-backed notifications whose stored semantic_type is their content kind.',
     })
   ),
+  event_category: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description:
+        "Exact event metadata category, such as config or deployment. Intersects all other filters.",
+    })
+  ),
+  resource_kind: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description: "Exact event resource kind. Requires resource_id.",
+    })
+  ),
+  resource_id: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description:
+        "Exact event resource identity within the selected workspace. Requires resource_kind.",
+    })
+  ),
   entity_types: Type.Optional(
     Type.Array(Type.String(), {
       description:

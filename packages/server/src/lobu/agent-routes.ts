@@ -22,8 +22,9 @@ import { Hono } from "hono";
 import { mcpAuth } from "../auth/middleware";
 import { resolveNewAgentProvisioningDefaults } from "../auth/system-provider-resolution";
 import { resolveAutomationTriggerWrite } from "../automations/triggers";
-import { getDb } from "../db/client";
+import { type DbClient, getDb } from "../db/client";
 import { grantStrategyFor } from "../gateway/auth/oauth/grant-strategy";
+import { UserAuthProfileStore } from "../gateway/auth/settings/user-auth-profile-store";
 import {
 	getOAuthProviderConfig,
 	getOAuthProviderConfigs,
@@ -46,9 +47,10 @@ import {
 } from "../gateway/services/provider-registry-service";
 import type { Env } from "../index";
 import { getApplyContext } from "../utils/apply-context";
-import { recordConfigChangeEvent } from "../utils/insert-event";
+import { insertConfigChangeEventInTransaction } from "../utils/insert-event";
 import logger from "../utils/logger";
 import { generateCodeVerifier } from "../utils/pkce";
+import { lockOrganizationForRelationshipClaims } from "../utils/relationship-claims";
 import { countRuntimeMessagingClientsByAgent } from "./client-routes";
 import { getLobuCoreServices } from "./gateway";
 import { orgContext } from "./stores/org-context";
@@ -56,8 +58,11 @@ import {
 	AGENT_ID_PATTERN,
 	createPostgresAgentConfigStore,
 } from "./stores/postgres-stores";
+import { PostgresSecretStore } from "./stores/postgres-secret-store";
 import {
 	createInferenceProvider,
+	getInferenceProviderBySlug,
+	lockInferenceProviderDefaults,
 	ensureOAuthInferenceProvider,
 	type InferenceCapabilities,
 	type InferenceCapabilityBlock,
@@ -266,29 +271,57 @@ export function requireManageAgentAccess(c: any): Response | null {
 
 /**
  * Emit a config-audit event for a mutation handled in this file. Thin wrapper
- * binding `recordConfigChangeEvent` (fire-and-forget, redacts internally) to
+ * binding the transactional, redacting writer to
  * the request's apply/actor context.
  */
 function emitConfigChange(
 	c: any,
 	params: {
-		resourceKind: Parameters<typeof recordConfigChangeEvent>[0]["resourceKind"];
+		resourceKind: Parameters<typeof insertConfigChangeEventInTransaction>[0]["resourceKind"];
 		resourceId: string | number;
 		op: "created" | "updated" | "deleted";
 		summary: string;
 		state: Record<string, unknown> | null;
 		changedFields?: string[];
-	}
-): void {
+		before?: Record<string, unknown> | null;
+	},
+  transaction: DbClient
+): Promise<unknown> {
 	const applyCtx = getApplyContext(c);
-	recordConfigChangeEvent({
+	const event = {
 		organizationId: c.get("organizationId") as string,
 		...params,
 		applyId: applyCtx.applyId,
 		actorSource: applyCtx.actorSource,
 		createdBy: applyCtx.createdBy,
 		clientId: applyCtx.clientId,
-	});
+	};
+  return insertConfigChangeEventInTransaction(event, transaction);
+}
+
+function providerAuditState(row: Pick<NonNullable<Awaited<ReturnType<typeof getInferenceProviderBySlug>>>, "slug" | "kind" | "displayName" | "capabilities" | "hasCustomUpstream" | "status" | "isDefault"> | null): Record<string, unknown> | null {
+  return row ? { slug: row.slug, kind: row.kind, displayName: row.displayName, capabilities: row.capabilities, hasCustomUpstream: row.hasCustomUpstream, status: row.status, isDefault: row.isDefault } : null;
+}
+
+function providerAuditTransaction<T>(c: any, orgId: string, slug: string, mutate: (tx: DbClient, before: Record<string, unknown> | null) => Promise<T>): Promise<T> {
+  return getDb().begin(async (tx) => {
+    await lockInferenceProviderDefaults(tx, orgId);
+    const before = providerAuditState(await getInferenceProviderBySlug(orgId, slug, tx));
+    const providersBefore = await listInferenceProviders(orgId, tx);
+    const result = await mutate(tx, before);
+    const providersAfter = await listInferenceProviders(orgId, tx);
+    for (const previous of providersBefore) {
+      if (previous.slug === slug) continue;
+      const next = providersAfter.find(provider => provider.slug === previous.slug);
+      if (!next || previous.isDefault === next.isDefault) continue;
+      await emitConfigChange(c, {
+        resourceKind: 'inference-provider', resourceId: next.slug, op: 'updated',
+        summary: `Inference provider '${next.slug}' ${next.isDefault ? 'promoted to' : 'cleared as'} org default`,
+        before: providerAuditState(previous), state: providerAuditState(next), changedFields: ['isDefault'],
+      }, tx);
+    }
+    return result;
+  });
 }
 
 /** Whitelist profile metadata down to the non-secret fields (email, expiresAt, accountId). */
@@ -549,7 +582,8 @@ routes.post("/", async (c) => {
 	// Seed provisioning defaults in the INSERT so concurrent idempotent creates
 	// cannot observe a partially initialized row or overwrite operator settings.
 	const provisioning = await resolveNewAgentProvisioningDefaults(orgId);
-	const inserted = await sql`
+	return sql.begin(async (tx) => {
+	const inserted = await tx`
     INSERT INTO agents (
       id, organization_id, name, description, owner_platform, owner_user_id,
       models, created_at, updated_at
@@ -557,7 +591,7 @@ routes.post("/", async (c) => {
     VALUES (
       ${agentId}, ${orgId}, ${name}, ${description ?? null},
       'lobu', ${user.id},
-      ${sql.json(provisioning.models)},
+      ${tx.json(provisioning.models)},
       ${now}, ${now}
     )
     ON CONFLICT (organization_id, id) DO NOTHING
@@ -582,15 +616,17 @@ routes.post("/", async (c) => {
 		);
 	}
 
-	emitConfigChange(c, {
+	await emitConfigChange(c, {
+    before: null,
 		resourceKind: "agent",
 		resourceId: agentId,
 		op: "created",
 		summary: `Agent '${name}' created`,
 		state: { agentId, name, description: description ?? null },
-	});
+	}, tx);
 
 	return c.json({ agentId, name, description }, 201);
+  });
 });
 
 // ── Org-scoped inference-provider routes ─────────────────────────────────────
@@ -833,6 +869,7 @@ routes.post("/inference-providers/oauth/complete", async (c) => {
 		// tokens refreshing (scanAllOAuth COALESCE + refreshForUserAgent branch);
 		// the profile's providerId must be the config id so the refresh job's
 		// `doRefresh` matches it to the right refresher.
+		await providerAuditTransaction(c, orgId, config.id, async (tx, before) => {
 		await authProfilesManager.upsertProfile({
 			agentId: bucketAgentId,
 			userId: user.id,
@@ -851,7 +888,7 @@ routes.post("/inference-providers/oauth/complete", async (c) => {
 			},
 			makePrimary: true,
 			organizationId: orgId,
-		});
+		}, { userAuthProfiles: new UserAuthProfileStore(new PostgresSecretStore(tx), tx) });
 
 		const provider = await ensureOAuthInferenceProvider({
 			organizationId: orgId,
@@ -860,11 +897,12 @@ routes.post("/inference-providers/oauth/complete", async (c) => {
 			displayName: config.name,
 			defaultModel: config.defaultModel,
 			createdBy: user.id,
-		});
-		emitConfigChange(c, {
+		}, tx);
+		await emitConfigChange(c, {
+      before,
 			resourceKind: "inference-provider",
 			resourceId: provider.slug,
-			op: "created",
+			op: before ? "updated" : "created",
 			summary: `Inference provider '${provider.slug}' connected`,
 			state: {
 				slug: provider.slug,
@@ -875,7 +913,8 @@ routes.post("/inference-providers/oauth/complete", async (c) => {
 				status: provider.status,
 				isDefault: provider.isDefault,
 			},
-		});
+		}, tx);
+    });
 
 		return c.json({ status: "success" });
 	} catch (error) {
@@ -1046,6 +1085,7 @@ routes.post("/inference-providers", async (c) => {
 		);
 	}
 
+	return providerAuditTransaction(c, orgId, slug, async (tx, before) => {
 	const result = await createInferenceProvider({
 		organizationId: orgId,
 		slug,
@@ -1054,14 +1094,15 @@ routes.post("/inference-providers", async (c) => {
 		apiKey,
 		capabilities,
 		createdBy,
-	});
+	}, tx);
 	if ("error" in result) {
 		return c.json(
 			{ error: `A provider with slug '${result.slug}' already exists` },
 			409
 		);
 	}
-	emitConfigChange(c, {
+	await emitConfigChange(c, {
+    before,
 		resourceKind: "inference-provider",
 		resourceId: result.slug,
 		op: "created",
@@ -1075,7 +1116,7 @@ routes.post("/inference-providers", async (c) => {
 			status: result.status,
 			isDefault: result.isDefault,
 		},
-	});
+	}, tx);
 
 	// Never echo the key or the api_key_ref back to the caller.
 	// `isDefault` is load-bearing: the first runnable provider is auto-promoted,
@@ -1096,6 +1137,7 @@ routes.post("/inference-providers", async (c) => {
 		},
 		201
 	);
+  });
 });
 
 // Edit a provider's core fields. Only displayName is mutable — slug (agents
@@ -1120,25 +1162,20 @@ routes.put("/inference-providers/:slug", async (c) => {
 	const rawName = typeof body.displayName === "string" ? body.displayName : "";
 	const displayName = rawName.trim() ? rawName.trim() : undefined;
 
+	return providerAuditTransaction(c, orgId, slug, async (tx, before) => {
 	const updated = await updateInferenceProviderCoreFields(orgId, slug, {
 		displayName,
-	});
+	}, tx);
 	if (!updated) return c.json({ error: "Provider not found" }, 404);
-	emitConfigChange(c, {
+	await emitConfigChange(c, {
+    before,
 		resourceKind: "inference-provider",
 		resourceId: updated.slug,
 		op: "updated",
 		summary: `Inference provider '${updated.slug}' renamed`,
-		state: {
-			slug: updated.slug,
-			kind: updated.kind,
-			displayName: updated.displayName,
-			capabilities: updated.capabilities,
-			hasCustomUpstream: updated.hasCustomUpstream,
-			status: updated.status,
-		},
+		state: providerAuditState(updated),
 		changedFields: ["displayName"],
-	});
+	}, tx);
 	return c.json({
 		provider: {
 			id: updated.id,
@@ -1151,6 +1188,7 @@ routes.put("/inference-providers/:slug", async (c) => {
 			createdAt: updated.createdAt,
 		},
 	});
+  });
 });
 
 // Mark one org inference provider as THE org default. Its `capabilities.text.model`
@@ -1164,7 +1202,8 @@ routes.put("/inference-providers/:slug/default", async (c) => {
 	if (typeof orgId !== "string") return orgId;
 	const { slug } = c.req.param();
 
-	const result = await setInferenceProviderDefault(orgId, slug);
+	return providerAuditTransaction(c, orgId, slug, async (tx, before) => {
+	const result = await setInferenceProviderDefault(orgId, slug, tx);
 	if (result === "not_found") {
 		return c.json({ error: "Provider not found" }, 404);
 	}
@@ -1193,15 +1232,17 @@ routes.put("/inference-providers/:slug/default", async (c) => {
 			400
 		);
 	}
-	emitConfigChange(c, {
+	await emitConfigChange(c, {
+    before,
 		resourceKind: "inference-provider",
 		resourceId: slug,
 		op: "updated",
 		summary: `Inference provider '${slug}' set as org default`,
-		state: { slug, isDefault: true },
+		state: providerAuditState(await getInferenceProviderBySlug(orgId, slug, tx)),
 		changedFields: ["isDefault"],
-	});
+	}, tx);
 	return c.json({ success: true, slug, isDefault: true });
+  });
 });
 
 routes.put("/inference-providers/:slug/capabilities/:modality", async (c) => {
@@ -1228,28 +1269,23 @@ routes.put("/inference-providers/:slug/capabilities/:modality", async (c) => {
 	const err = validateCapabilityBlock(modality, block);
 	if (err) return c.json({ error: err }, 400);
 
+	return providerAuditTransaction(c, orgId, slug, async (tx, before) => {
 	const updated = await updateInferenceProviderCapabilities(
 		orgId,
 		slug,
 		modality,
-		block as InferenceCapabilityBlock
+		block as InferenceCapabilityBlock, tx
 	);
 	if (!updated) return c.json({ error: "Provider not found" }, 404);
-	emitConfigChange(c, {
+	await emitConfigChange(c, {
+    before,
 		resourceKind: "inference-provider",
 		resourceId: updated.slug,
 		op: "updated",
 		summary: `Inference provider '${updated.slug}' ${modality} capabilities updated`,
-		state: {
-			slug: updated.slug,
-			kind: updated.kind,
-			displayName: updated.displayName,
-			capabilities: updated.capabilities,
-			hasCustomUpstream: updated.hasCustomUpstream,
-			status: updated.status,
-		},
+		state: providerAuditState(updated),
 		changedFields: [`capabilities.${modality}`],
-	});
+	}, tx);
 	return c.json({
 		provider: {
 			id: updated.id,
@@ -1262,6 +1298,7 @@ routes.put("/inference-providers/:slug/capabilities/:modality", async (c) => {
 			createdAt: updated.createdAt,
 		},
 	});
+  });
 });
 
 routes.put("/inference-providers/:slug/key", async (c) => {
@@ -1285,7 +1322,8 @@ routes.put("/inference-providers/:slug/key", async (c) => {
 		);
 	}
 
-	const outcome = await rotateInferenceProviderKey(orgId, slug, value);
+	return providerAuditTransaction(c, orgId, slug, async (tx, before) => {
+	const outcome = await rotateInferenceProviderKey(orgId, slug, value, tx);
 	if (outcome === "not_found") {
 		return c.json({ error: "Provider not found" }, 404);
 	}
@@ -1298,15 +1336,17 @@ routes.put("/inference-providers/:slug/key", async (c) => {
 		);
 	}
 	// Metadata-only: key rotations are audited but the value is never snapshotted.
-	emitConfigChange(c, {
+	await emitConfigChange(c, {
+    before,
 		resourceKind: "inference-provider",
 		resourceId: slug,
 		op: "updated",
 		summary: `Inference provider '${slug}' API key rotated`,
-		state: null,
+		state: providerAuditState(await getInferenceProviderBySlug(orgId, slug, tx)),
 		changedFields: ["apiKey"],
-	});
+	}, tx);
 	return c.json({ success: true });
+  });
 });
 
 routes.delete("/inference-providers/:slug", async (c) => {
@@ -1316,8 +1356,20 @@ routes.delete("/inference-providers/:slug", async (c) => {
 	if (typeof orgId !== "string") return orgId;
 	const { slug } = c.req.param();
 
-	const ok = await softDeleteInferenceProvider(orgId, slug);
-	if (!ok) return c.json({ error: "Provider not found" }, 404);
+	const deleted = await providerAuditTransaction(c, orgId, slug, async (tx, before) => {
+	const ok = await softDeleteInferenceProvider(orgId, slug, tx);
+	if (!ok) return false;
+	await emitConfigChange(c, {
+    before,
+		resourceKind: "inference-provider",
+		resourceId: slug,
+		op: "deleted",
+		summary: `Inference provider '${slug}' deleted`,
+		state: null,
+	}, tx);
+	return true;
+  });
+  if (!deleted) return c.json({ error: "Provider not found" }, 404);
 	const user = c.get("user") as { id: string } | undefined;
 	const oauthConfig = getOAuthProviderConfig(slug);
 	const authProfilesManager = getLobuCoreServices()?.getAuthProfilesManager?.();
@@ -1333,14 +1385,8 @@ routes.delete("/inference-providers/:slug", async (c) => {
 			)
 		);
 	}
-	emitConfigChange(c, {
-		resourceKind: "inference-provider",
-		resourceId: slug,
-		op: "deleted",
-		summary: `Inference provider '${slug}' deleted`,
-		state: null,
-	});
-	return c.json({ success: true });
+
+  return c.json({ success: true });
 });
 
 // ── Get agent detail ─────────────────────────────────────────────────────────
@@ -1391,18 +1437,27 @@ routes.patch("/:agentId", async (c) => {
 		return c.json({ error: "Agent not found" }, 404);
 	}
 
-	await configStore.updateMetadata(agentId, body);
+  return getDb().begin(async (tx) => {
+    const orgId = c.get("organizationId") as string;
+    await lockOrganizationForRelationshipClaims(tx, orgId);
+    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
+    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
+    const transactionStore = createPostgresAgentConfigStore(tx);
+    const before = await transactionStore.getMetadata(agentId);
+	await transactionStore.updateMetadata(agentId, body);
 	// Snapshot the row as stored (post-merge), not the request body.
-	const metadata = await configStore.getMetadata(agentId);
-	emitConfigChange(c, {
+	const metadata = await transactionStore.getMetadata(agentId);
+	await emitConfigChange(c, {
+    before: before ? { ...before } : null,
 		resourceKind: "agent",
 		resourceId: agentId,
 		op: "updated",
 		summary: `Agent '${metadata?.name ?? agentId}' metadata updated`,
 		state: metadata ? { ...metadata, agentId } : null,
 		changedFields: Object.keys(body),
-	});
+	}, tx);
 	return c.json({ success: true });
+  });
 });
 
 // ── Delete agent ─────────────────────────────────────────────────────────────
@@ -1416,16 +1471,25 @@ routes.delete("/:agentId", async (c) => {
 		return c.json({ error: "Agent not found" }, 404);
 	}
 
+  return getDb().begin(async (tx) => {
+    const orgId = c.get("organizationId") as string;
+    await lockOrganizationForRelationshipClaims(tx, orgId);
+    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
+    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
+    const transactionStore = createPostgresAgentConfigStore(tx);
+    const before = await transactionStore.getMetadata(agentId);
 	// Cascade handled by FK ON DELETE CASCADE
-	await configStore.deleteMetadata(agentId);
-	emitConfigChange(c, {
+	await transactionStore.deleteMetadata(agentId);
+	await emitConfigChange(c, {
+    before: before ? { ...before } : null,
 		resourceKind: "agent",
 		resourceId: agentId,
 		op: "deleted",
 		summary: `Agent '${agentId}' deleted`,
 		state: null,
-	});
+	}, tx);
 	return c.json({ success: true });
+  });
 });
 
 // ── Get agent config (settings) ──────────────────────────────────────────────
@@ -2238,19 +2302,28 @@ routes.patch("/:agentId/config", async (c) => {
 		}
 	}
 
-	await configStore.updateSettings(agentId, settingsUpdates);
+  return getDb().begin(async (tx) => {
+    const orgId = c.get("organizationId") as string;
+    await lockOrganizationForRelationshipClaims(tx, orgId);
+    const locked = await tx`SELECT id FROM agents WHERE organization_id = ${orgId} AND id = ${agentId} FOR UPDATE`;
+    if (!locked.length) return c.json({ error: "Agent not found" }, 404);
+    const transactionStore = createPostgresAgentConfigStore(tx);
+    const before = await transactionStore.getSettings(agentId);
+	await transactionStore.updateSettings(agentId, settingsUpdates);
 	// Snapshot the merged settings row as stored (the store merges partial
 	// patches server-side), so the audit state reflects what took effect.
-	const merged = await configStore.getSettings(agentId);
-	emitConfigChange(c, {
+	const merged = await transactionStore.getSettings(agentId);
+	await emitConfigChange(c, {
+    before: before ? { ...before } : null,
 		resourceKind: "agent-settings",
 		resourceId: agentId,
 		op: "updated",
 		summary: `Agent '${agentId}' settings updated`,
 		state: merged ? { ...merged } : null,
 		changedFields: Object.keys(settingsUpdates),
-	});
+	}, tx);
 	return c.json({ success: true });
+  });
 });
 
 // ============================================================

@@ -207,8 +207,8 @@ export const SANDBOX_PROVIDER_KEY_PREFIX = "sandbox-provider:";
  * Path segments under `/connectors/` reserved from connector keys:
  * `/connectors/device/{id}`, `/connectors/client/{id}`, `/connectors/app/{id}`,
  * plus the static `create` flow. `deployments` is no longer a route (the
- * audit feed moved to `/settings/audit` and its redirect was removed) but
- * stays reserved so a stale `/connectors/deployments` bookmark always lands
+ * audit feed now lives in the workspace Events page and the redirect was
+ * removed) but stays reserved so a stale `/connectors/deployments` bookmark always lands
  * on the not-installed fallback instead of a connector that took the name.
  *
  * Model providers and sandboxes are namespaced INTO the `$connectorKey` param

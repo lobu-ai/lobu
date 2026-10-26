@@ -10,7 +10,7 @@
  */
 
 import { COMPILE_CONFIG_HASH } from '@lobu/connector-worker/compile';
-import { getDb } from '../db/client';
+import { type DbClient, getDb } from '../db/client';
 import {
   bundledConnectorSourcePath,
   compileConnectorForIsolateFromFile,
@@ -270,6 +270,7 @@ async function recompileStoredConnectorVersion(
  * compile/extract/validate/write failure; callers decide how to handle it.
  */
 export async function upsertBundledConnectorForOrg(params: {
+  transaction?: DbClient;
   organizationId: string;
   connectorKey: string;
 }): Promise<ConnectorInstallResult | null> {
@@ -283,7 +284,7 @@ export async function upsertBundledConnectorForOrg(params: {
 
   const sourcePath = bundledConnectorSourcePath(filePath);
   const { updated } = await upsertConnectorDefinitionRecords({
-    sql: getDb(),
+    sql: params.transaction ?? getDb(),
     organizationId: params.organizationId,
     metadata,
     versionRecord: {

@@ -1,19 +1,19 @@
 /**
  * Config-audit emission for tool handlers (manage_* admin tools).
  *
- * Wraps `recordConfigChangeEvent` with the actor fields every tool call site
+ * Wraps the transactional config writer with the actor fields every tool call site
  * derives the same way from its ToolContext — apply-id grouping, actor
  * source, user, client. Handlers state only WHAT changed; forgetting the
  * apply-id threading (which would silently ungroup a `lobu apply` run's
- * changes in the Settings → Audit log feed) stops being possible.
+ * changes in the Events feed) stops being possible.
  */
 
 import type { ConfigResourceKind } from '../../../utils/config-redaction';
 import { deriveToolActorSource } from '../../../utils/apply-context';
-import type { DbClient } from '../../../db/client';
+import { type DbClient, getDb } from '../../../db/client';
+import { lockOrganizationForRelationshipClaims } from '../../../utils/relationship-claims';
 import {
   insertConfigChangeEventInTransaction,
-  recordConfigChangeEvent,
 } from '../../../utils/insert-event';
 import type { ToolContext } from '../../registry';
 import { eventClientId } from '../../../auth/event-client-id';
@@ -47,7 +47,7 @@ interface ToolConfigChangeParams {
 function toolConfigChangeEvent(
   ctx: ToolContext,
   params: ToolConfigChangeParams
-): Parameters<typeof recordConfigChangeEvent>[0] {
+): Parameters<typeof insertConfigChangeEventInTransaction>[0] {
   const approvalRunId = params.approvalRunId ?? ctx.approvalRunId ?? null;
   const requestedBy = params.requestedBy ?? ctx.approvalRequesterId ?? null;
   const approvedBy = params.approvedBy ?? (ctx as { approvalApproverId?: string | null }).approvalApproverId ?? null;
@@ -78,13 +78,6 @@ function toolConfigChangeEvent(
   };
 }
 
-export function recordToolConfigChange(
-  ctx: ToolContext,
-  params: ToolConfigChangeParams
-): void {
-  recordConfigChangeEvent(toolConfigChangeEvent(ctx, params));
-}
-
 /** Awaited variant for mutations whose state and audit must share a commit. */
 export async function insertToolConfigChange(
   ctx: ToolContext,
@@ -95,4 +88,23 @@ export async function insertToolConfigChange(
     toolConfigChangeEvent(ctx, params),
     sql
   );
+}
+
+class RejectedConfigMutation<T> {
+  constructor(readonly result: T) {}
+}
+
+/** Tool errors must roll back earlier writes while preserving the tool's error response. */
+export async function withToolConfigTransaction<T extends object>(ctx: ToolContext, mutate: (tx: DbClient) => Promise<T>): Promise<T> {
+  try {
+    return await getDb().begin(async (tx) => {
+      await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
+      const result = await mutate(tx);
+      if ('error' in result && result.error !== undefined) throw new RejectedConfigMutation(result);
+      return result;
+    });
+  } catch (error) {
+    if (error instanceof RejectedConfigMutation) return error.result as T;
+    throw error;
+  }
 }

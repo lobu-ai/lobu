@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { getErrorMessage } from "@lobu/core";
 import { getLoginProviderScopes } from "../auth/config";
-import { getDb } from "../db/client";
+import { type DbClient, getDb } from "../db/client";
 import { getLocalActionKind } from "../operations/connector-operations";
 import {
 	getMcpOAuthRequestedScopes,
@@ -159,10 +159,11 @@ export async function listScopedConnectorDefinitions(params: {
 }
 
 export async function getScopedConnectorDefinition(params: {
+	transaction?: DbClient;
 	organizationId: string;
 	connectorKey: string;
 }): Promise<ScopedConnectorDefinitionRow | null> {
-	const sql = getDb();
+	const sql = params.transaction ?? getDb();
 
 	const rows = await sql`
     SELECT *
@@ -189,6 +190,7 @@ function installsImageCopy(connectorKey: string): boolean {
 }
 
 export async function installConnectorDefinitionFromSource(params: {
+	transaction?: DbClient;
 	organizationId: string;
 	sourceUrl?: string;
 	sourceUri?: string;
@@ -198,7 +200,7 @@ export async function installConnectorDefinitionFromSource(params: {
 	sourceFiles?: SourceFiles;
 	dependencies?: SourceDependencies;
 }): Promise<ConnectorInstallResult> {
-	const sql = getDb();
+	const sql = params.transaction ?? getDb();
 	const resolved = await resolveConnectorInstallSource({
 		sourceUrl: params.sourceUrl,
 		sourceUri: params.sourceUri,
@@ -210,6 +212,7 @@ export async function installConnectorDefinitionFromSource(params: {
 	});
 	if (installsImageCopy(resolved.metadata.key)) {
 		const installed = await upsertBundledConnectorForOrg({
+			transaction: params.transaction,
 			organizationId: params.organizationId,
 			connectorKey: resolved.metadata.key,
 		});
@@ -259,6 +262,7 @@ export async function installConnectorDefinitionFromSource(params: {
 }
 
 export async function installCatalogConnectorDefinition(params: {
+	transaction?: DbClient;
 	organizationId: string;
 	connectorId: string;
 }): Promise<ConnectorInstallResult> {
@@ -272,6 +276,7 @@ export async function installCatalogConnectorDefinition(params: {
 	const availability = getCatalogConnectorInstallability(entry.id);
 	if (!availability.installable) throw new Error(availability.message);
 	const installed = await upsertBundledConnectorForOrg({
+			transaction: params.transaction,
 		organizationId: params.organizationId,
 		connectorKey: entry.id,
 	});
@@ -284,10 +289,11 @@ export async function installCatalogConnectorDefinition(params: {
 }
 
 export async function installConnectorFromMcpUrl(params: {
+	transaction?: DbClient;
 	organizationId: string;
 	mcpUrl: string;
 }): Promise<ConnectorInstallResult> {
-	const sql = getDb();
+	const sql = params.transaction ?? getDb();
 	const probed = await probeMcpServer(params.mcpUrl);
 
 	const serverName = probed.serverInfo.name || new URL(params.mcpUrl).hostname;
@@ -635,6 +641,7 @@ export type ConnectorVersionChange = {
  * stays retained for rollback).
  */
 export async function updateInstalledConnectorSource(params: {
+	transaction?: DbClient;
 	organizationId: string;
 	connectorKey: string;
 	sourceCode: string;
@@ -644,7 +651,7 @@ export async function updateInstalledConnectorSource(params: {
 	dependencies?: SourceDependencies;
 	expectedVersion?: string;
 }): Promise<ConnectorVersionChange> {
-	const sql = getDb();
+	const sql = params.transaction ?? getDb();
 	const def = await getScopedConnectorDefinition(params);
 	assertInstalled(def, params.connectorKey);
 
@@ -671,6 +678,7 @@ export async function updateInstalledConnectorSource(params: {
 
 	if (installsImageCopy(params.connectorKey)) {
 		const installed = await upsertBundledConnectorForOrg({
+			transaction: params.transaction,
 			organizationId: params.organizationId,
 			connectorKey: params.connectorKey,
 		});
@@ -765,11 +773,12 @@ export async function updateInstalledConnectorSource(params: {
  * upsert COALESCEs null fields).
  */
 export async function rollbackConnectorVersion(params: {
+	transaction?: DbClient;
 	organizationId: string;
 	connectorKey: string;
 	version: string;
 }): Promise<ConnectorVersionChange> {
-	const sql = getDb();
+	const sql = params.transaction ?? getDb();
 	const def = await getScopedConnectorDefinition(params);
 	assertInstalled(def, params.connectorKey);
 
@@ -856,10 +865,11 @@ export async function rollbackConnectorVersion(params: {
 }
 
 export async function uninstallConnectorDefinition(params: {
+	transaction?: DbClient;
 	organizationId: string;
 	connectorKey: string;
 }): Promise<boolean> {
-	const sql = getDb();
+	const sql = params.transaction ?? getDb();
 
 	// Block uninstall while ANY non-deleted connection references the connector.
 	// Filtering on `status = 'active'` alone let pending_auth connections slip
@@ -894,13 +904,15 @@ export async function uninstallConnectorDefinition(params: {
 }
 
 export async function toggleConnectorLoginEnabled(params: {
+	transaction?: DbClient;
 	organizationId: string;
 	connectorKey: string;
 	enabled: boolean;
 }): Promise<ScopedConnectorDefinitionRow | null> {
-	const sql = getDb();
+	const sql = params.transaction ?? getDb();
 
 	const connector = await getScopedConnectorDefinition({
+		transaction: params.transaction,
 		organizationId: params.organizationId,
 		connectorKey: params.connectorKey,
 	});

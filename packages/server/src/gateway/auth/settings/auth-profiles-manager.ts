@@ -611,7 +611,7 @@ export class AuthProfilesManager {
    * path. Runtime UI/sandbox agents that aren't owned by a single user
    * should pass a synthetic principal (`$ADMIN`) chosen by the caller.
    */
-  async upsertProfile(input: UpsertAuthProfileInput): Promise<AuthProfile> {
+  async upsertProfile(input: UpsertAuthProfileInput, persistence?: { userAuthProfiles: UserAuthProfileStore }): Promise<AuthProfile> {
     if (!input.userId) {
       throw new Error(
         "upsertProfile requires userId — declared agents cannot be mutated; " +
@@ -632,7 +632,7 @@ export class AuthProfilesManager {
       createdAt: Date.now(),
     };
 
-    const stored = await this.userAuthProfiles.upsert(
+    const stored = await (persistence?.userAuthProfiles ?? this.userAuthProfiles).upsert(
       input.userId,
       input.agentId,
       profile,

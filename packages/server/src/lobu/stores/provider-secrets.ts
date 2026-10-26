@@ -16,6 +16,8 @@
 
 import { createLogger, decrypt, encrypt, getErrorMessage } from "@lobu/core";
 import { getDb, type DbClient } from "../../db/client.js";
+import { isUniqueViolation } from "../../utils/pg-errors";
+import { withTransaction } from "../../db/transaction.js";
 
 const logger = createLogger("provider-secrets");
 
@@ -291,7 +293,7 @@ function mapRow(r: RawInferenceProviderRow): InferenceProviderRow {
  * provider rows, which the racing txn may be inserting) makes promotion
  * read-modify-write safe. Scoped per-org, so unrelated tenants never contend.
  */
-async function lockInferenceProviderDefaults(
+export async function lockInferenceProviderDefaults(
 	sql: DbClient,
 	organizationId: string,
 ): Promise<void> {
@@ -403,7 +405,7 @@ export async function createInferenceProvider(args: {
 	apiKey: string;
 	capabilities?: InferenceCapabilities;
 	createdBy?: string | null;
-}): Promise<InferenceProviderRow | InferenceProviderSlugConflict> {
+}, transaction?: DbClient): Promise<InferenceProviderRow | InferenceProviderSlugConflict> {
 	const {
 		organizationId,
 		slug,
@@ -414,11 +416,11 @@ export async function createInferenceProvider(args: {
 		createdBy = null,
 	} = args;
 
-	const sql = getDb();
+	const sql = transaction ?? getDb();
 	const ciphertext = encrypt(apiKey);
 
 	try {
-		return await sql.begin(async (tx) => {
+		const mutate = async (tx: DbClient) => {
 			await lockInferenceProviderDefaults(tx, organizationId);
 
 			// Mint the id up front so it can be embedded in api_key_ref BEFORE the
@@ -455,13 +457,12 @@ export async function createInferenceProvider(args: {
 			`;
 
 			return withPromotion(mapRow(rows[0]), promotedId);
-		});
+		};
+		return await (transaction ? transaction.savepoint(mutate) : withTransaction(undefined, mutate));
 	} catch (error) {
-		const msg = getErrorMessage(error);
 		// Live-slug unique index (inference_providers_org_slug_live).
 		if (
-			/inference_providers_org_slug_live/.test(msg) ||
-			/duplicate key/.test(msg)
+			isUniqueViolation(error, "inference_providers_org_slug_live")
 		) {
 			return { error: "slug_conflict", slug };
 		}
@@ -486,7 +487,7 @@ export async function ensureOAuthInferenceProvider(args: {
 	displayName?: string | null;
 	defaultModel?: string | null;
 	createdBy?: string | null;
-}): Promise<InferenceProviderRow> {
+}, transaction?: DbClient): Promise<InferenceProviderRow> {
 	const {
 		organizationId,
 		slug,
@@ -495,13 +496,13 @@ export async function ensureOAuthInferenceProvider(args: {
 		defaultModel = null,
 		createdBy = null,
 	} = args;
-	const sql = getDb();
+	const sql = transaction ?? getDb();
 	const oauthCapabilities: InferenceCapabilities = defaultModel
 		? { text: { model: defaultModel } }
 		: {};
 
 	try {
-		return await sql.begin(async (tx) => {
+		const mutate = async (tx: DbClient) => {
 			await lockInferenceProviderDefaults(tx, organizationId);
 
 			const existing = (await tx`
@@ -618,14 +619,13 @@ export async function ensureOAuthInferenceProvider(args: {
 				organizationId,
 			);
 			return withPromotion(mapRow(rows[0]), promotedId);
-		});
+		};
+		return await (transaction ? transaction.savepoint(mutate) : withTransaction(undefined, mutate));
 	} catch (error) {
-		const msg = getErrorMessage(error);
 		if (
-			/inference_providers_org_slug_live/.test(msg) ||
-			/duplicate key/.test(msg)
+			isUniqueViolation(error, "inference_providers_org_slug_live")
 		) {
-			return await ensureOAuthInferenceProvider(args);
+			return await ensureOAuthInferenceProvider(args, transaction);
 		}
 		throw error;
 	}
@@ -637,8 +637,9 @@ export async function ensureOAuthInferenceProvider(args: {
  */
 export async function listInferenceProviders(
 	organizationId: string,
+  transaction?: DbClient,
 ): Promise<InferenceProviderListItem[]> {
-	const sql = getDb();
+	const sql = transaction ?? getDb();
 	const rows = (await sql`
 		SELECT id, slug, kind, display_name, capabilities, has_custom_upstream,
 		       status, error_message, created_at, updated_at, is_default
@@ -884,9 +885,8 @@ export type SetInferenceProviderDefaultResult =
 export async function setInferenceProviderDefault(
 	organizationId: string,
 	slug: string,
-): Promise<SetInferenceProviderDefaultResult> {
-	const sql = getDb();
-	return await sql.begin(async (tx) => {
+	transaction?: DbClient): Promise<SetInferenceProviderDefaultResult> {
+	return await withTransaction(transaction, async (tx) => {
 		await lockInferenceProviderDefaults(tx, organizationId);
 
 		// Confirm the target exists BEFORE clearing the current default —
@@ -932,8 +932,9 @@ export async function setInferenceProviderDefault(
 export async function getInferenceProviderBySlug(
 	organizationId: string,
 	slug: string,
+	transaction?: DbClient,
 ): Promise<InferenceProviderRow | null> {
-	const sql = getDb();
+	const sql = transaction ?? getDb();
 	const rows = (await sql`
 		SELECT id, organization_id, slug, kind, display_name, api_key_ref,
 		       capabilities, has_custom_upstream, status, created_at, is_default
@@ -1088,8 +1089,8 @@ export async function updateInferenceProviderCapabilities(
 	slug: string,
 	modality: InferenceModality,
 	block: InferenceCapabilityBlock,
-): Promise<InferenceProviderRow | null> {
-	const sql = getDb();
+	transaction?: DbClient): Promise<InferenceProviderRow | null> {
+	const sql = transaction ?? getDb();
 	const canonical = canonicalizeCapabilityBlock(block);
 
 	// Merge (never clobber): `||` overlays only this modality's key, so a
@@ -1119,8 +1120,8 @@ export async function updateInferenceProviderCoreFields(
 	organizationId: string,
 	slug: string,
 	fields: { displayName?: string | null },
-): Promise<InferenceProviderRow | null> {
-	const sql = getDb();
+	transaction?: DbClient): Promise<InferenceProviderRow | null> {
+	const sql = transaction ?? getDb();
 	const rows = (await sql`
 		UPDATE inference_providers
 		SET display_name = COALESCE(${fields.displayName ?? null}, display_name),
@@ -1150,11 +1151,10 @@ export async function rotateInferenceProviderKey(
 	organizationId: string,
 	slug: string,
 	apiKey: string,
-): Promise<RotateInferenceProviderKeyResult> {
-	const sql = getDb();
+	transaction?: DbClient): Promise<RotateInferenceProviderKeyResult> {
 	const ciphertext = encrypt(apiKey);
 
-	return await sql.begin(async (tx) => {
+	return await withTransaction(transaction, async (tx) => {
 		const rows = (await tx`
 			SELECT id, api_key_ref
 			FROM inference_providers
@@ -1196,9 +1196,8 @@ export async function rotateInferenceProviderKey(
 export async function softDeleteInferenceProvider(
 	organizationId: string,
 	slug: string,
-): Promise<boolean> {
-	const sql = getDb();
-	return await sql.begin(async (tx) => {
+	transaction?: DbClient): Promise<boolean> {
+	return await withTransaction(transaction, async (tx) => {
 		await lockInferenceProviderDefaults(tx, organizationId);
 
 		const rows = (await tx`

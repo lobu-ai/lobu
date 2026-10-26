@@ -213,7 +213,7 @@ export async function ensurePersonalOrganization(
 	}
 
 	// Org + owner membership audit trail (workspace category: appears in All
-	// activity, not the Settings → Audit log feed). Emitted AFTER the transaction
+	// activity, not the Events page's Configuration filter). Emitted AFTER the transaction
 	// commits — the events FK references the organization row, so the insert
 	// must not race the commit.
 	if (finalResult.created) {

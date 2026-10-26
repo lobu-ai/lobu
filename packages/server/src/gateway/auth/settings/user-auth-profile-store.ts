@@ -81,11 +81,11 @@ interface UserAgentRef {
  * list is written to `public.user_auth_profiles`.
  */
 export class UserAuthProfileStore {
-  constructor(private readonly secretStore: WritableSecretStore) {}
+  constructor(private readonly secretStore: WritableSecretStore, private readonly transaction?: DbClient) {}
 
   async list(userId: string, agentId: string): Promise<AuthProfile[]> {
     if (!userId || !agentId) return [];
-    const sql = getDb();
+    const sql = this.transaction ?? getDb();
     try {
       const rows = await sql`
         SELECT profiles
@@ -97,6 +97,7 @@ export class UserAuthProfileStore {
       if (!Array.isArray(profiles)) return [];
       return profiles as AuthProfile[];
     } catch (error) {
+      if (this.transaction) throw error;
       logger.warn("Failed to read user auth profiles", {
         userId,
         agentId,
@@ -122,6 +123,11 @@ export class UserAuthProfileStore {
     profile: AuthProfile,
     options: { makePrimary?: boolean; organizationId?: string } = {}
   ): Promise<AuthProfile> {
+    if (this.transaction) {
+      // Initialize before locking so concurrent first writes serialize too.
+      await this.transaction`INSERT INTO user_auth_profiles (user_id, agent_id, profiles, organization_id, updated_at) VALUES (${userId}, ${agentId}, '[]'::jsonb, ${options.organizationId ?? null}, now()) ON CONFLICT (user_id, agent_id) DO NOTHING`;
+      await this.transaction`SELECT user_id FROM user_auth_profiles WHERE user_id = ${userId} AND agent_id = ${agentId} FOR UPDATE`;
+    }
     const persisted = await this.persistSecrets(userId, agentId, profile);
     const current = await this.list(userId, agentId);
 
@@ -163,7 +169,7 @@ export class UserAuthProfileStore {
     // derived via the agents join in `scanAllOAuth`. COALESCE keeps an already
     // stored org id if a later upsert omits it.
     const organizationId = options.organizationId ?? null;
-    const sql = getDb();
+    const sql = this.transaction ?? getDb();
     await sql`
       INSERT INTO user_auth_profiles (user_id, agent_id, profiles, organization_id, updated_at)
       VALUES (${userId}, ${agentId}, ${sql.json(ordered)}, ${organizationId}, now())
@@ -235,7 +241,7 @@ export class UserAuthProfileStore {
     });
     const remaining = current.filter((profile) => !removed.includes(profile));
 
-    const sql = getDb();
+    const sql = this.transaction ?? getDb();
     if (remaining.length > 0) {
       await sql`
         INSERT INTO user_auth_profiles (user_id, agent_id, profiles, updated_at)
@@ -267,7 +273,7 @@ export class UserAuthProfileStore {
    * Used when an agent is deleted entirely.
    */
   async dropAgent(userId: string, agentId: string): Promise<void> {
-    const sql = getDb();
+    const sql = this.transaction ?? getDb();
     await sql`
       DELETE FROM user_auth_profiles
       WHERE user_id = ${userId} AND agent_id = ${agentId}
@@ -292,7 +298,7 @@ export class UserAuthProfileStore {
    * deleted out from under a plain row with a NULL column) — those are skipped.
    */
   async *scanAllOAuth(): AsyncIterable<UserAgentRef> {
-    const sql = getDb();
+    const sql = this.transaction ?? getDb();
     const rows = await sql`
       SELECT uap.user_id,
              uap.agent_id,
@@ -321,7 +327,7 @@ export class UserAuthProfileStore {
     agentId: string
   ): Promise<string | null> {
     if (!userId || !agentId) return null;
-    const sql = getDb();
+    const sql = this.transaction ?? getDb();
     try {
       const rows = await sql`
         SELECT organization_id

@@ -197,6 +197,9 @@ export async function buildContentItems(opts: {
     .filter(
       (f) =>
         !f.client_name ||
+        (includePrivateAttribution && f.semantic_type === 'change' &&
+          ['config', 'deployment'].includes(String(parseJsonObject(f.metadata).category)) &&
+          !f.author_name?.trim()) ||
         (includePrivateAttribution &&
           (!f.connection_name ||
             !f.agent_id ||
@@ -217,6 +220,8 @@ export async function buildContentItems(opts: {
         SELECT
           e.id,
           e.client_id,
+          CASE WHEN e.semantic_type = 'change' AND e.metadata->>'category' IN ('config', 'deployment')
+            THEN COALESCE(NULLIF(creator.username, ''), NULLIF(creator.name, '')) END AS author_name,
           oc.client_name,
           COALESCE(direct_connection.display_name, metadata_connection.display_name)
             AS connection_name,
@@ -233,6 +238,7 @@ export async function buildContentItems(opts: {
           dw.platform AS device_platform
         FROM events e
         LEFT JOIN oauth_clients oc ON oc.id = e.client_id
+        LEFT JOIN "user" creator ON creator.id = e.created_by
         LEFT JOIN connections direct_connection
           ON direct_connection.id = e.connection_id
          AND direct_connection.organization_id = e.organization_id
@@ -318,7 +324,8 @@ export async function buildContentItems(opts: {
       attachments_truncated: f.attachments_truncated === true ? true : undefined,
       attachments_bytes:
         f.attachments_bytes == null ? undefined : Number(f.attachments_bytes),
-      author_name: f.author_name ?? null,
+      author_name: f.author_name?.trim() ? f.author_name :
+        (includePrivateAttribution ? attribution?.author_name ?? null : null),
       client_id: includePrivateAttribution
         ? (f.client_id ?? attribution?.client_id ?? null)
         : null,

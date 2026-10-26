@@ -723,3 +723,64 @@ describe("ChatInstanceManager — config change detection (finding #8)", () => {
     expect(restartFired).toBe(false);
   });
 });
+
+
+describe('chat config audit transaction boundary', () => {
+  test('failed audits roll back creation and rotation, and committed rotation invalidates cached refs', async () => {
+    const orgId = 'org-chat-audit';
+    const { manager, connectionStore, secretStore, orgContext } = await buildManager(orgId, 'chat-audit-agent');
+    const { createChatMutationPersistence } = await import('../connections/chat-connection-service.js');
+    const { insertConfigChangeEventInTransaction } = await import('../../utils/insert-event.js');
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    const persistence = createChatMutationPersistence({ organizationId: orgId, onPersist: async (tx, { before, after }) => {
+      await insertConfigChangeEventInTransaction({ organizationId: orgId, resourceKind: 'connection', resourceId: (after ?? before!).id, op: after ? before ? 'updated' : 'created' : 'deleted', summary: 'Synthetic chat change', before: before as unknown as Record<string, unknown> | null, state: after as unknown as Record<string, unknown> | null, actorSource: 'api' }, tx);
+    } }, manager);
+    const reject = async (run: () => Promise<unknown>) => {
+      await sql.unsafe(`CREATE OR REPLACE FUNCTION reject_chat_config_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.metadata->>'category' = 'config' THEN RAISE EXCEPTION 'synthetic chat audit failure'; END IF; RETURN NEW; END $$`);
+      await sql.unsafe('CREATE TRIGGER reject_chat_config_audit BEFORE INSERT ON events FOR EACH ROW EXECUTE FUNCTION reject_chat_config_audit()');
+      try { await expect(run()).rejects.toThrow('synthetic chat audit failure'); }
+      finally { await sql.unsafe('DROP TRIGGER reject_chat_config_audit ON events'); await sql.unsafe('DROP FUNCTION reject_chat_config_audit()'); }
+    };
+    const id = 'chat-audit-fixture';
+    const oldToken = 'synthetic-old-token-12345678901234567890';
+    const newToken = 'synthetic-new-token-12345678901234567890';
+    await orgContext.run({ organizationId: orgId }, async () => {
+      const create = () => manager.addConnection('webhook', undefined, { platform: 'webhook', token: oldToken }, undefined, {}, id, undefined, persistence);
+      await reject(create);
+      expect(await connectionStore.getConnection(id)).toBeNull();
+      expect(await sql`SELECT name FROM agent_secrets WHERE organization_id = ${orgId}`).toHaveLength(0);
+      await create();
+      const row = await connectionStore.getConnection(id);
+      const ref = row!.config.token;
+      expect(await secretStore.get(ref)).toBe(oldToken);
+      await reject(() => manager.updateConnection(id, { config: { platform: 'webhook', token: newToken } }, persistence));
+      expect(await secretStore.get(ref)).toBe(oldToken);
+      await manager.updateConnection(id, { config: { platform: 'webhook', token: newToken } }, persistence);
+      expect(await secretStore.get(ref)).toBe(newToken);
+      expect((await sql`SELECT count(*)::int AS count FROM events WHERE organization_id = ${orgId} AND metadata->>'category' = 'config'`)[0].count).toBe(2);
+    });
+  });
+});
+
+
+test('audited chat startup compensation commits a tombstone and preserves both history entries', async () => {
+  const orgId = 'org-chat-compensation';
+  const { manager, connectionStore, orgContext } = await buildManager(orgId, 'chat-compensation-agent');
+  const { createChatMutationPersistence } = await import('../connections/chat-connection-service.js');
+  const { insertConfigChangeEventInTransaction } = await import('../../utils/insert-event.js');
+  const { getDb } = await import('../../db/client.js');
+  const persistence = createChatMutationPersistence({ organizationId: orgId, onPersist: async (tx, { before, after }) => {
+    await insertConfigChangeEventInTransaction({ organizationId: orgId, resourceKind: 'connection', resourceId: (after ?? before!).id, op: after ? 'created' : 'deleted', summary: 'Synthetic startup compensation', before: before as unknown as Record<string, unknown> | null, state: after as unknown as Record<string, unknown> | null, actorSource: 'api' }, tx);
+  } }, manager);
+  manager.hydrateFromRow = async () => { throw new Error('synthetic startup failure'); };
+  await orgContext.run({ organizationId: orgId }, async () => {
+    await expect(manager.addConnection('discord', undefined, { platform: 'discord', botToken: 'synthetic-token', applicationId: 'synthetic-app', publicKey: 'synthetic-key' }, undefined, {}, 'compensated-chat', undefined, persistence)).rejects.toThrow('synthetic startup failure');
+    expect(await connectionStore.getConnection('compensated-chat')).toBeNull();
+    const sql = getDb();
+    expect(await sql`SELECT name FROM agent_secrets WHERE organization_id = ${orgId}`).toHaveLength(0);
+    const audits = await sql`SELECT metadata, payload_data FROM events WHERE organization_id = ${orgId} AND metadata->>'category' = 'config' ORDER BY id`;
+    expect(audits.map(row => row.metadata.op)).toEqual(['created', 'deleted']);
+    expect(audits[1].payload_data.state).toBeNull();
+  });
+});

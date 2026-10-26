@@ -30,6 +30,8 @@ import {
   deleteSecretsByPrefix,
   persistSecretValue,
   resolveSecretValue,
+  type WritableSecretStore,
+  SecretStoreRegistry,
 } from "../secrets/index.js";
 import { resolveAgentOptions } from "../services/platform-helpers.js";
 import { resolveChatUserIdentity } from "../../lobu/stores/chat-identity.js";
@@ -76,6 +78,28 @@ import {
 	prepareWebhookIngestConfig,
 	type WebhookIngestOverrides,
 } from "./webhook-ingest.js";
+
+export async function normalizeChatConfigForStorage(secretStore: WritableSecretStore, connectionId: string, config: PlatformAdapterConfig): Promise<PlatformAdapterConfig> {
+    const normalized = { ...config } as Record<string, unknown>;
+
+    for (const field of Object.keys(normalized)) {
+      const value = normalized[field];
+      if (!isSecretField(field) || typeof value !== "string") continue;
+      if (isSecretRef(value)) continue;
+      normalized[field] = await persistSecretValue(
+        secretStore,
+        `connections/${connectionId}/${field}`,
+				value,
+      );
+    }
+
+    return normalized as PlatformAdapterConfig;
+}
+
+export interface ChatMutationPersistence {
+  save(connection: PlatformConnection): Promise<void>;
+  compensateCreate(connection: PlatformConnection): Promise<void>;
+}
 
 const logger = createLogger("chat-instance-manager");
 
@@ -464,6 +488,7 @@ export class ChatInstanceManager {
     metadata: Record<string, any> = {},
 		stableId?: string,
     createdBy?: string,
+    persistence?: ChatMutationPersistence,
   ): Promise<PlatformConnection> {
     const descriptor = getPlatformDescriptor(platform);
     if (!descriptor && !isAdapterlessPlatform(platform)) {
@@ -525,7 +550,7 @@ export class ChatInstanceManager {
     // and a persist failure can't leave a half-baked entry. The instance is
     // then hydrated from the persisted row — the same path every replica
     // uses — so the memo key matches the row from the first start.
-    await this.persistConnection(connection);
+    await (persistence ? persistence.save(connection) : this.persistConnection(connection));
 
     const stored = await this.connectionStore.getConnection(id);
     if (!stored) {
@@ -556,6 +581,10 @@ export class ChatInstanceManager {
     try {
       await this.hydrateFromRow(stored);
     } catch (error) {
+      if (persistence) {
+        await persistence.compensateCreate(connection);
+        throw error;
+      }
       // Roll back in the safe order: secrets first, then the row that
       // anchors them. If secret cleanup throws, the row stays so an
       // operator can retry deletion via the same code path; the
@@ -746,6 +775,7 @@ export class ChatInstanceManager {
       settings?: ConnectionSettings;
       metadata?: Record<string, any>;
 		},
+    persistence?: ChatMutationPersistence,
   ): Promise<PlatformConnection> {
     const stored = await this.connectionStore.getConnection(id);
     if (!stored) throw new Error(`Connection ${id} not found`);
@@ -820,10 +850,11 @@ export class ChatInstanceManager {
     // replica converges on. Starting before persisting would stamp the
     // instance with a pre-write version and force a spurious re-hydrate on
     // the next inbound request.
-    await this.persistConnection(connection);
+    await (persistence ? persistence.save(connection) : this.persistConnection(connection));
     const reread = await this.connectionStore.getConnection(id);
     if (!reread) throw new Error(`Connection ${id} disappeared during update`);
     connection.updatedAt = reread.updatedAt;
+    connection.status = reread.status;
 
     if (
       needsRestart &&
@@ -2525,15 +2556,22 @@ export class ChatInstanceManager {
     return result;
   }
 
+  invalidateConfigSecretCache(connection: PlatformConnection): void {
+    const store = this.services.getSecretStore();
+    if (!(store instanceof SecretStoreRegistry)) return;
+    for (const field of Object.keys(connection.config)) {
+      if (isSecretField(field)) store.invalidateCacheFor(`connections/${connection.id}/${field}`);
+    }
+  }
+
   private async persistConnection(
 		connection: PlatformConnection,
   ): Promise<void> {
     // Move plaintext secrets into the SecretStoreRegistry and store only
     // the returned `secret://` refs in the row's config JSON. Idempotent
     // — already-ref values pass through untouched.
-    const persistedConfig = await this.normalizeConfigForStorage(
-      connection.id,
-			connection.config,
+    const persistedConfig = await normalizeChatConfigForStorage(
+      this.services.getSecretStore(), connection.id, connection.config,
     );
     await this.connectionStore.saveConnection({
       ...connection,
@@ -2546,26 +2584,6 @@ export class ChatInstanceManager {
    * persisting it via the secret store. Already-ref values are left as-is
    * so re-saving an unchanged config is a no-op.
    */
-  private async normalizeConfigForStorage(
-    connectionId: string,
-		config: PlatformAdapterConfig,
-  ): Promise<PlatformAdapterConfig> {
-    const normalized = { ...config } as Record<string, unknown>;
-    const secretStore = this.services.getSecretStore();
-
-    for (const field of Object.keys(normalized)) {
-      const value = normalized[field];
-      if (!isSecretField(field) || typeof value !== "string") continue;
-      if (isSecretRef(value)) continue;
-      normalized[field] = await persistSecretValue(
-        secretStore,
-        `connections/${connectionId}/${field}`,
-				value,
-      );
-    }
-
-    return normalized as PlatformAdapterConfig;
-  }
 
   /**
    * Resolve every `secret://` ref in a connection's config back to its
