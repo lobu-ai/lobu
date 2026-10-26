@@ -47,6 +47,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/review-reviewer.sh"
 # shellcheck source=scripts/lib/review-upstream-guard.sh
 . "$SCRIPT_DIR/lib/review-upstream-guard.sh"
+# shellcheck source=scripts/lib/review-bb.sh
+. "$SCRIPT_DIR/lib/review-bb.sh"
 # shellcheck source=scripts/lib/review-skip.sh
 . "$SCRIPT_DIR/lib/review-skip.sh"
 # shellcheck source=scripts/lib/review-cache.sh
@@ -223,6 +225,14 @@ review_persist_inline_output() {
 run_reviewer_inline() {
   local prompt_file="$1"
   local raw_file diagnostic_file
+  if review_bb_wants_run; then
+    review_bb_run_reviewer "$prompt_file" "$HEAD_SHA" "$BASE_BRANCH" "$DIFF_HASH" \
+      "$REVIEWER_CLI_SELECTED" \
+      "$(if [ "$REVIEWER_CLI_SELECTED" = "claude" ]; then printf '%s' "$CLAUDE_REVIEW_MODEL"; else printf '%s' "$CODEX_REVIEW_MODEL"; fi)" \
+      "$(if [ "$REVIEWER_CLI_SELECTED" = "claude" ]; then printf '%s' "$CLAUDE_REVIEW_EFFORT"; else printf '%s' "$CODEX_REVIEW_EFFORT"; fi)" \
+      "$SCHEMA_JQ" "$CI_CHECKS_FILE"
+    return
+  fi
   raw_file="$(mktemp /tmp/lobu-review-"${REVIEWER_CLI_SELECTED}"-inline.XXXXXX)"
   diagnostic_file="${raw_file}.stderr"
   REVIEW_INLINE_RAW_FILE="$raw_file"
@@ -366,6 +376,7 @@ review_exit_cleanup() {
   local ec=$? post_failure_status=0
   trap - EXIT INT TERM HUP
   stop_active_review_child
+  review_bb_cancel_owned
   review_process_abort_inline
   if [ "$ec" -ne 0 ] && \
      [ "$REVIEW_STATUS_STARTED" = "1" ] && [ "$REVIEW_STATUS_FINALIZED" != "1" ]; then
@@ -473,7 +484,11 @@ fi
 
 REVIEW_STATUS_STARTED=0
 if [ "$CACHE_HIT" != "1" ]; then
-  review_require_reviewer
+  if review_bb_wants_run; then
+    echo ">> BB context detected ($BB_THREAD_ID): routing the review through a visible BB child thread"
+  else
+    review_require_reviewer
+  fi
   REVIEW_STATUS_STARTED=1
   post_review_status pending "$REVIEWER_CLI_SELECTED review running"
 fi
