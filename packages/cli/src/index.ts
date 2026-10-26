@@ -527,9 +527,13 @@ Memory:
   context
     .command("list")
     .description("List configured contexts")
-    .action(async () => {
+    .option(
+      "--json",
+      "Print JSON: each context's name, URL, and whether credentials are stored"
+    )
+    .action(async (options: { json?: boolean }) => {
       const { contextListCommand } = await import("./commands/context.js");
-      await contextListCommand();
+      await contextListCommand(options);
     });
 
   context
