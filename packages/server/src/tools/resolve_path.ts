@@ -784,7 +784,7 @@ async function resolveDerivedLeaf(
   const exact = await queryDerivedEntityView(
     backingSql,
     backingSource,
-    { limit: 1, offset: 0 },
+    { limit: keyColumn ? 2 : 1, offset: 0 },
     ctx,
     { preservePageRows: true, exactSlug: segment.slug, keyColumn: keyColumn ?? undefined }
   );
@@ -793,8 +793,11 @@ async function resolveDerivedLeaf(
     throw new ToolUserError(exact.error, toolErrorHttpStatus(code), code);
   }
   // Confirm canonical identity even when a connector implements the filter.
-  const row = exact.rows.find((r) => (keyColumn ? recordKey(r, keyColumn) : derivedRowSlug(r)) === segment.slug);
-  return row ? buildDerivedLeaf(row, measures, segment, keyColumn) : null;
+  const matches = exact.rows.filter((r) => (keyColumn ? recordKey(r, keyColumn) : derivedRowSlug(r)) === segment.slug);
+  if (keyColumn && matches.length > 1) {
+    throw new ToolUserError('The declared record key is not unique', 409);
+  }
+  return matches[0] ? buildDerivedLeaf(matches[0], measures, segment, keyColumn) : null;
 }
 
 /** Shape one derived row into the read-only entity both lookup paths return. */

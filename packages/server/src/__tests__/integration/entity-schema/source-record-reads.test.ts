@@ -29,6 +29,12 @@ const CONNECTOR_KEY = 'record_source_test';
 const SOURCE = `
   import { defineConnector } from '@lobu/connector-sdk';
   const ROWS = [
+    { origin_id: 'w3', origin_type: 'role', occurred_at: '2026-02-03T00:00:00.000Z',
+      metadata: { company_id: ' padded-company ', person_id: ' padded-person ' } },
+    { origin_id: 'w2', origin_type: 'role', occurred_at: '2026-02-02T00:00:00.000Z',
+      metadata: { company_id: ' padded-company ', person_id: 'padded-person' } },
+    { origin_id: 'w1', origin_type: 'role', occurred_at: '2026-02-01T00:00:00.000Z',
+      metadata: { company_id: 'plain-company', person_id: ' padded-person ' } },
     { origin_id: 'e4', origin_type: 'role', title: 'Pat joined Acme', occurred_at: '2026-01-04T00:00:00.000Z',
       semantic_type: 'summary', payload_type: 'json_template', payload_data: { summary: 'Role summary' },
       payload_template: { type: 'div', children: '{{summary}}' },
@@ -239,6 +245,39 @@ describe('source-backed record reads', () => {
     expect(personLinks).toMatchObject({
       record_links: [{ relationship_type: 'works_at', direction: 'outgoing', entity_type: 'company', key: 'c1', name: 'Acme' }],
     });
+  }, 60_000);
+
+  it('preserves declared anchor and peer keys through native links and their cursors', async () => {
+    const sql = getTestDb();
+    const before = await counts();
+    const backing = "SELECT * FROM (VALUES (' padded-company '), ('plain-company'), (' padded-person '), ('padded-person')) AS records(id)";
+    await sql`UPDATE entity_types SET backing_sql = ${backing}, metadata_schema = ${sql.json({ type: 'object', 'x-lobu-record-key': 'id' })}
+      WHERE organization_id = ${orgId} AND slug IN ('company', 'person')`;
+    try {
+      const entities = buildEntitiesNamespace(owner, {} as Env);
+      const first = await entities.listLinks({ entity_id: ' padded-company ', entity_type: 'company', limit: 1 });
+      expect(first).toMatchObject({ record_links: [{ key: ' padded-person ' }], record_failures: [] });
+      const second = await entities.listLinks({ entity_id: ' padded-company ', entity_type: 'company', limit: 1, cursor: first.next_cursor });
+      expect(second).toMatchObject({ record_links: [{ key: 'padded-person' }], record_failures: [] });
+      const reverse = await entities.listLinks({ entity_id: ' padded-person ', entity_type: 'person' });
+      expect(reverse.record_links?.map(link => link.key)).toEqual([' padded-company ', 'plain-company']);
+      const activity = await getContent({ record: { type: 'company', key: ' padded-company ' } }, {} as Env, owner);
+      expect(activity.content.map(item => (item as { origin_id: string }).origin_id)).toEqual(['w3', 'w2']);
+      await sql`UPDATE entity_types SET metadata_schema = '{}'::jsonb WHERE organization_id = ${orgId} AND slug = 'person'`;
+      await expect(entities.listLinks({ entity_id: ' padded-company ', entity_type: 'company', limit: 1, cursor: first.next_cursor })).rejects.toThrow(/cursor/i);
+      await sql`UPDATE entity_types SET metadata_schema = ${sql.json({ type: 'object', 'x-lobu-record-key': 'id' })} WHERE organization_id = ${orgId} AND slug = 'person'`;
+      // Peer semantics come from the peer's declaration, independently of the anchor.
+      await sql`UPDATE entity_types SET metadata_schema = '{}'::jsonb WHERE organization_id = ${orgId} AND slug = 'company'`;
+      const mixed = await entities.listLinks({ record: { type: 'company', key: 'plain-company' } });
+      expect(mixed).toMatchObject({ record_links: [{ key: ' padded-person ' }] });
+      await sql`UPDATE entity_types SET metadata_schema = '{}'::jsonb WHERE organization_id = ${orgId} AND slug = 'person'`;
+      const legacy = await entities.listLinks({ record: { type: 'company', key: 'plain-company' } });
+      expect(legacy).toMatchObject({ record_links: [{ key: 'padded-person' }] });
+      expect(await counts()).toEqual(before);
+    } finally {
+      await sql`UPDATE entity_types SET backing_sql = ${"SELECT 'x' AS slug"}, metadata_schema = '{}'::jsonb
+        WHERE organization_id = ${orgId} AND slug IN ('company', 'person')`;
+    }
   }, 60_000);
 
   it.each([undefined, null])('starts public relationship pagination with cursor %s without persisting source records', async (cursor) => {

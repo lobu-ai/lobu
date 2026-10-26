@@ -63,6 +63,8 @@ describe('typed references and authored source relationships', () => {
       backing: { sql: "SELECT 'same' AS id, 'One' AS name UNION ALL SELECT 'same' AS id, 'Two' AS name" },
       metadata_schema: { type: 'object', 'x-lobu-record-key': 'id' } });
     await expect(ws.owner.entities.get({ entity_id: 'same', entity_type: 'duplicate-key-items' })).rejects.toThrow(/not unique/);
+    await expect(resolvePath({ path: `/${ws.org.slug}/duplicate-key-items/same` }, {}, context))
+      .rejects.toMatchObject({ httpStatus: 409, message: 'The declared record key is not unique' });
   });
 
   it.each([false, true])('round-trips verbatim keys without merging whitespace variants (external: %s)', async external => {
@@ -123,7 +125,7 @@ describe('typed references and authored source relationships', () => {
     for (const [from, to] of [[stored, local.entity.id], [stored, '007'], ['007', stored], ['007', 'B']] as const) {
       const address = { from_entity_id: from, to_entity_id: to, relationship_type_slug: 'related-item',
         ...(typeof from === 'string' ? { from_entity_type: type } : {}), ...(typeof to === 'string' ? { to_entity_type: type } : {}) };
-      const result = await ws.owner.entities.link(address) as { relationship: { id: number; from_entity_id: number | string; to_entity_id: number | string } };
+      const result = await ws.owner.entities.link(address) as { relationship: { id: number; from_entity_id: number | string; to_entity_id: number | string; from_entity_name: string; to_entity_name: string } };
       expect(result.relationship).toMatchObject({ from_entity_id: from, to_entity_id: to });
       const listed = await ws.owner.entities.listLinks({ entity_id: from, ...(typeof from === 'string' ? { entity_type: type } : {}) }) as { relationships: { id: number }[] };
       expect(listed.relationships.map(r => Number(r.id))).toContain(Number(result.relationship.id));
@@ -133,7 +135,8 @@ describe('typed references and authored source relationships', () => {
       const inbound = await ws.owner.entities.listLinks({ entity_id: to, direction: 'inbound',
         ...(typeof to === 'string' ? { entity_type: type } : {}) });
       expect(inbound.relationships.map(r => Number(r.id))).toContain(Number(result.relationship.id));
-      await ws.owner.entities.updateLink({ ...address, confidence: 0.75 });
+      const updated = await ws.owner.entities.updateLink({ ...address, confidence: 0.75 });
+      expect(updated.relationship).toMatchObject({ from_entity_name: result.relationship.from_entity_name, to_entity_name: result.relationship.to_entity_name });
       await ws.owner.entities.unlink(address);
       const rows = await getTestDb()`SELECT deleted_at FROM entity_relationships WHERE id = ${result.relationship.id}`;
       expect(rows[0].deleted_at).not.toBeNull();
@@ -159,6 +162,31 @@ describe('typed references and authored source relationships', () => {
     expect(JSON.stringify(events)).not.toContain('A:1/path');
     await ws.owner.entities.unlink({ relationship_id: linked.relationship.id });
     await ws.owner.entity_schema.updateType({ slug: type, backing: { sql: sourceSql } });
+  });
+
+  it.each(['deleted', 'key-removed', 'backing-removed', 'slug-reused'])('withholds obsolete source history after its type is %s', async state => {
+    const slug = `history-${state}`;
+    await ws.owner.entity_schema.createType({ slug, name: 'Historical source', backing: { sql: "SELECT 'historical-key' AS id" },
+      metadata_schema: { type: 'object', 'x-lobu-record-key': 'id' } });
+    const edge = await ws.owner.entities.link({ from_entity_id: stored, to_entity_id: 'historical-key', to_entity_type: slug, relationship_type_slug: 'related-item' });
+    await ws.owner.entities.unlink({ relationship_id: Number(edge.relationship.id) });
+    const peer = await ws.owner.entities.create({ entity_type: 'curated-item', name: `History peer ${state}` });
+    const healthy = await ws.owner.entities.link({ from_entity_id: stored, to_entity_id: Number(peer.entity.id), relationship_type_slug: 'related-item' });
+    await ws.owner.entities.unlink({ relationship_id: Number(healthy.relationship.id) });
+    if (state === 'deleted' || state === 'slug-reused') {
+      await ws.owner.entity_schema.manage({ schema_type: 'entity_type', action: 'delete', slug });
+      await expect(ws.owner.entities.get({ entity_id: 'historical-key', entity_type: slug })).rejects.toMatchObject({ httpStatus: 404 });
+      if (state === 'slug-reused') {
+        await ws.owner.entity_schema.createType({ slug, name: 'Different source', backing: { sql: "SELECT 'historical-key' AS id" },
+          metadata_schema: { type: 'object', 'x-lobu-record-key': 'id' } });
+      }
+    } else {
+      await ws.owner.entity_schema.updateType({ slug, ...(state === 'key-removed' ? { metadata_schema: { type: 'object' } } : { backing: null, metadata_schema: { type: 'object' } }) });
+    }
+    const history = await ws.owner.entities.listLinks({ entity_id: stored, include_deleted: true });
+    expect(history.relationships.map(row => Number(row.id))).toContain(Number(healthy.relationship.id));
+    expect(history.relationships.map(row => Number(row.id))).not.toContain(Number(edge.relationship.id));
+    expect(JSON.stringify(history)).not.toContain('historical-key');
   });
 
   it('rejects identity source edges even through SQL', async () => {

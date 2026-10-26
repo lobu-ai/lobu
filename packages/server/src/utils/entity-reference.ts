@@ -68,7 +68,8 @@ export async function resolveEntityReference(
     WHERE organization_id = ${ctx.organizationId} AND slug = ${type} AND deleted_at IS NULL
   `;
   const row = rows[0];
-  if (!row?.backing_sql) throw new ToolUserError('String entity_id requires a source-backed entity type', 400);
+  if (!row) throw new ToolUserError('Entity type not found or not readable', 404);
+  if (!row.backing_sql) throw new ToolUserError('String entity_id requires a source-backed entity type', 400);
   const keyColumn = recordKeyColumn(row.metadata_schema);
   if (!keyColumn) throw new ToolUserError('This type has no declared stable record key (metadata_schema.x-lobu-record-key)', 400);
   const ref: ResolvedEntityReference = { id, entityId: null, sourceTypeId: Number(row.id), sourceKey: id,

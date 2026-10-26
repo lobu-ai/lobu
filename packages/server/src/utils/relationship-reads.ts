@@ -204,6 +204,13 @@ export async function readAuthoredRelationshipPage(
   const offset = Math.max(args.offset ?? 0, 0);
   const params: unknown[] = [ctx.organizationId];
   const conditions = ['r.organization_id = $1'];
+  // Unlinked history can outlive its source type or addressing contract. Use
+  // the persisted type IDs, so slug reuse cannot retarget a historical edge.
+  for (const [side, alias] of [['from', 'fet'], ['to', 'tet']]) {
+    conditions.push(`(r.${side}_entity_type_id IS NULL OR (${alias}.deleted_at IS NULL
+      AND ${alias}.backing_sql IS NOT NULL
+      AND jsonb_typeof(${alias}.metadata_schema -> 'x-lobu-record-key') = 'string'))`);
+  }
   if (!args.include_deleted) conditions.push('r.deleted_at IS NULL');
   if (args.direction === 'outbound') {
     conditions.push(endpointPredicate('from', endpoint, params));

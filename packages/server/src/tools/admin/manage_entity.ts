@@ -1701,7 +1701,8 @@ async function handleUpdateLink(
 	// Authorize the exact response before mutating. Unlink by id deliberately
 	// remains available without reading a disconnected source.
 	const readable = await getDb().unsafe<RelationshipRow>(`SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1 AND r.organization_id = $2 AND r.deleted_at IS NULL`, [relationshipId, ctx.organizationId]);
-	if (!(await readableRelationships(readable, ctx, await entityReadRestrictions(getDb(), ctx))).length) throw new ToolUserError('Relationship not found or not readable', 404);
+	const [authorized] = await readableRelationships(readable, ctx, await entityReadRestrictions(getDb(), ctx));
+	if (!authorized) throw new ToolUserError('Relationship not found or not readable', 404);
 
   const sql = getDb();
 
@@ -1788,7 +1789,11 @@ async function handleUpdateLink(
 		return relationship[0];
 	});
 
-	return { action: "update_link", relationship: updated };
+	return { action: "update_link", relationship: {
+		...updated,
+		...(typeof updated.from_entity_id === 'string' ? { from_entity_name: authorized.from_entity_name } : {}),
+		...(typeof updated.to_entity_id === 'string' ? { to_entity_name: authorized.to_entity_name } : {}),
+	} };
 }
 
 async function handleListLinks(
