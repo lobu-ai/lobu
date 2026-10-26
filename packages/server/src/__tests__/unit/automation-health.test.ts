@@ -4,6 +4,34 @@ import { computeAutomationHealth } from "../../automations/automation-health";
 const NOW = 1_700_000_000_000;
 
 describe("computeAutomationHealth", () => {
+	it("does not require a dispatch from an external reference-capture subscription", () => {
+		const input = {
+			status: "active", nextRunAt: null, externalExecutor: true,
+			triggers: [{ kind: "event" as const, connector_key: "synthetic.source",
+				event_types: ["message.created"], capture: "references" as const }],
+		};
+		expect(computeAutomationHealth(input, NOW)).toMatchObject({ health: "healthy", reasons: [] });
+		// Native subscribers still dispatch, even when they also retain references.
+		expect(computeAutomationHealth({ ...input, externalExecutor: false }, NOW).reasons)
+			.toContain("event trigger configured, but no dispatch observed yet");
+		// Capture does not hide an actual execution failure or circuit breaker.
+		expect(computeAutomationHealth({ ...input, latestRunStatus: "failed" }, NOW).health).toBe("degraded");
+		expect(computeAutomationHealth({ ...input, scheduleAutoPausedAt: new Date(NOW) }, NOW).health).toBe("degraded");
+	});
+
+	it("does not exempt dispatching triggers merely because capture or an external executor exists", () => {
+		const capture = { kind: "event" as const, connector_key: "synthetic.source",
+			event_types: ["message.created"], capture: "references" as const };
+		for (const trigger of [
+			{ kind: "event" as const, connector_key: "synthetic.source", event_types: ["message.created"] },
+			{ kind: "event" as const, source: "workspace" as const, event_types: ["summary.created"] },
+		]) {
+			expect(computeAutomationHealth({ status: "active", nextRunAt: null,
+				externalExecutor: true, triggers: [capture, trigger] }, NOW).reasons)
+				.toContain("event trigger configured, but no dispatch observed yet");
+		}
+	});
+
 	it("does not mistake externally due work for a missed native dispatch, but surfaces failure", () => {
 		const input = { status: "active", nextRunAt: new Date(NOW - 3600_000), externalExecutor: true };
 		expect(computeAutomationHealth(input, NOW).health).toBe("healthy");

@@ -126,6 +126,10 @@ describe('source feed notifications', () => {
     expect(beforeResponse).toMatchObject({ success: true });
     const before = beforeResponse.return_value;
     expect(before.content).toEqual([]);
+    const initialHealth = await api.automations.get({ automation_id: created.automation_id });
+    expect(initialHealth.automation?.health).toBe('healthy');
+    const initialList = await api.automations.list({});
+    expect(initialList.automations.find(item => item.automation_id === created.automation_id)?.health).toBe('healthy');
     await receiveFeedNotifications(sql, [{ ...notice, subscription: referenceDelivery() }], device.id, [org.id]);
     await sql`SELECT pg_sleep(0.003)`;
     const afterResponse = await mcp.querySdk<any>(`export default async (_ctx, client) => client.knowledge.read({automation_id:${Number(created.automation_id)},view:"changes",cursor:${JSON.stringify(before.resume_cursor)}});`);
@@ -134,6 +138,8 @@ describe('source feed notifications', () => {
     expect(after.content).toHaveLength(1);
     expect(after.content[0].metadata.observation_id).toBe('message-1');
     expect(after).not.toHaveProperty('window_token');
+    const retainedHealth = await api.automations.get({ automation_id: created.automation_id });
+    expect(retainedHealth.automation?.health).toBe('healthy');
     expect(await sql`SELECT id FROM runs WHERE run_type = 'automation'`).toHaveLength(0);
   });
 
