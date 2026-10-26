@@ -6264,6 +6264,18 @@ export type ReadKnowledgeData = {
      */
     semantic_type?: string | Array<string>;
     /**
+     * Exact event metadata category, such as config or deployment. Intersects all other filters.
+     */
+    event_category?: string;
+    /**
+     * Exact event resource kind. Requires resource_id.
+     */
+    resource_kind?: string;
+    /**
+     * Exact event resource identity within the selected workspace. Requires resource_kind.
+     */
+    resource_id?: string;
+    /**
      * Org-wide filter: limit to events linked to entities whose type slug is in this list. Ignored when entity_id is set.
      */
     entity_types?: Array<string>;
