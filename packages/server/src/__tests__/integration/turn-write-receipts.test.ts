@@ -72,7 +72,11 @@ function message(messageId: string): MessagePayload {
 async function turn(messageId: string): Promise<{ token: string; runId: number }> {
   const payload = message(messageId);
   const runId = await insertAgentTurnRun(payload);
-  return { token: await mintTurnToken(payload, runId), runId };
+  const token = await mintTurnToken(payload, runId);
+  // The gateway admits a turn's side-effecting call only from the attempt
+  // that holds the run, named by the credential the run stores.
+  await getTestDb()`UPDATE runs SET action_input = action_input || ${getTestDb().json({ credential: token })}::jsonb WHERE id = ${runId}`;
+  return { token, runId };
 }
 
 function call(path: string, token: string, body: unknown, headers: Record<string, string> = {}) {
