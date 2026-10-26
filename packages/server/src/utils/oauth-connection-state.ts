@@ -2,6 +2,7 @@ import { getDb, type DbClient } from '../db/client';
 import { oauthAccountOwnershipError } from '../authz/oauth-account-ownership';
 import { getAuthProfileById, updateAuthProfile } from './auth-profiles';
 import { getOAuthAuthMethods, normalizeConnectorAuthSchema } from './connector-auth';
+import logger from './logger';
 import {
   declaredOAuthScopes,
   getFeedRequiredScopes,
@@ -28,20 +29,32 @@ export async function lockOAuthAccountBinding(
   },
 ): Promise<boolean> {
   const { organizationId, authProfileId, appAuthProfileId, ownerUserId, reservePending = false } = binding;
+  const refuse = (reason:
+    | 'missing_account_profile'
+    | 'profile_owner'
+    | 'backing_account_absent'
+    | 'backing_account_owner'
+    | 'stored_app_mismatch'
+    | 'live_connection_app_mismatch'
+  ): false => {
+    logger.warn({ reason, authProfileId, appAuthProfileId }, 'OAuth account binding refused');
+    return false;
+  };
   const [profile] = await tx`
     SELECT auth_data, account_id, profile_kind, created_by FROM auth_profiles
     WHERE organization_id = ${organizationId} AND id = ${authProfileId}
       AND profile_kind = 'oauth_account'
     FOR UPDATE
   `;
-  if (!profile) return false;
-  if (oauthAccountOwnershipError(profile as { profile_kind: string; created_by: string | null }, ownerUserId)) return false;
+  if (!profile) return refuse('missing_account_profile');
+  if (oauthAccountOwnershipError(profile as { profile_kind: string; created_by: string | null }, ownerUserId)) return refuse('profile_owner');
   if (profile.account_id) {
     const [account] = await tx`SELECT "userId" FROM account WHERE id = ${profile.account_id}`;
-    if (!account || account.userId !== ownerUserId) return false;
+    if (!account) return refuse('backing_account_absent');
+    if (account.userId !== ownerUserId) return refuse('backing_account_owner');
   }
   const stored = profile.auth_data?.app_auth_profile_id;
-  if (typeof stored === 'number' && stored !== appAuthProfileId) return false;
+  if (typeof stored === 'number' && stored !== appAuthProfileId) return refuse('stored_app_mismatch');
   const conflicts = await tx`
     SELECT 1 FROM connections
     WHERE organization_id = ${organizationId} AND auth_profile_id = ${authProfileId}
@@ -49,7 +62,7 @@ export async function lockOAuthAccountBinding(
       AND app_auth_profile_id IS DISTINCT FROM ${appAuthProfileId}::bigint
     LIMIT 1
   `;
-  if (conflicts.length > 0) return false;
+  if (conflicts.length > 0) return refuse('live_connection_app_mismatch');
   // Reserve the selected app on a pending account, so same-apply connection
   // creation and repeated consent links use it. Usable grants stay untouched.
   if (reservePending && !profile.account_id && appAuthProfileId !== null) {

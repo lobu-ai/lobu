@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "identity": "bun identity-bootstrap.cli.ts",
-    "test:identity": "bun test __tests__/identity-bootstrap.test.ts __tests__/identity-bootstrap.config.test.ts __tests__/identity-mcp.test.ts",
+    "test:identity": "bun test __tests__/identity-bootstrap.test.ts __tests__/identity-bootstrap.config.test.ts __tests__/identity-mcp.test.ts __tests__/identity-incremental.test.ts",
     "build:identity-mcp": "bun scripts/build-identity-mcp.ts"
   },
   "devDependencies": {
