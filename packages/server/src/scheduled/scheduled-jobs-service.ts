@@ -18,6 +18,7 @@
 
 import { getDb } from '../db/client';
 import type { ChatTurnEvidence } from '../gateway/orchestration/chat-turn-actor';
+import { resolveBoundChannelRows, stripPlatformPrefix } from '../gateway/channels/bound-channels';
 import { runtimeConnectionIdToSlug } from '../lobu/stores/connections-projection';
 import { nextRunAt as nextCronTickAt } from '../utils/cron';
 import logger from '../utils/logger';
@@ -103,7 +104,26 @@ export async function validateDeliveryAuthorization(params: {
     status: string;
   }>;
   const connection = connectionRows[0];
-  if (!connection) return { authorized: false, reason: 'connection-missing' };
+  if (!connection) {
+    // A hosted-preview connection lives in the HOST organization, so the
+    // org-scoped lookup above cannot see it. The tenant's own binding through
+    // it is what authorizes the agent; resolve it through the same boundary
+    // approval delivery and the conversation tools use.
+    const bindings = await resolveBoundChannelRows(sql, {
+      organizationId,
+      agentId,
+      connectionId: delivery.connectionId,
+    });
+    const channel = stripPlatformPrefix(delivery.platform, delivery.channelId);
+    const deliveryTeamId = delivery.teamId ?? null;
+    const bound = bindings.some(
+      (binding) =>
+        binding.platform === delivery.platform &&
+        stripPlatformPrefix(binding.platform, binding.channel_id) === channel &&
+        (deliveryTeamId === null || binding.team_id === null || binding.team_id === deliveryTeamId)
+    );
+    return bound ? { authorized: true } : { authorized: false, reason: 'connection-missing' };
+  }
   if (connection.connector_key !== delivery.platform) {
     return { authorized: false, reason: 'platform-changed' };
   }

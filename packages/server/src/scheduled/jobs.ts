@@ -658,8 +658,9 @@ export interface WakeAgentTaskPayload {
   __delivery_context?: unknown;
   /**
    * Stable chat message id for a wake enqueued by the platform (an operation
-   * outcome), so a retried task collapses onto the same message. Only server
-   * code sets `__` keys; schedule payloads are rebuilt from an allowlist.
+   * outcome), so the queue can deduplicate a retry while the message is still
+   * active. Only server code sets `__` keys; schedule payloads are rebuilt
+   * from an allowlist.
    */
   __message_id?: string;
   organization_id?: string;

@@ -10,7 +10,8 @@
  * card write calls {@link queueOperationOutcomeFollowup}, which enqueues one
  * `wake_agent` task into the originating conversation — the same handler and
  * message path a `schedule_followup` wake uses, so the follow-up queues behind
- * a running turn exactly like any other chat message.
+ * a running turn exactly like any other chat message, and runs as the sender
+ * who asked (`FOLLOWUP_SOURCE`) with the evidence their message carried.
  *
  * Only runs created by a chat turn carry a `turn_origin` (stamped at creation
  * from the verified worker source context). Humans, external MCP clients and
@@ -19,6 +20,10 @@
  */
 
 import type { DbClient } from "../db/client";
+import {
+	chatTurnEvidenceOfRun,
+	isChatSenderTurn,
+} from "../gateway/orchestration/chat-turn-actor";
 import type { WakeAgentTaskPayload } from "../scheduled/jobs";
 import type { ScheduledDeliveryContext } from "../scheduled/scheduled-jobs-service";
 import { WAKE_AGENT_TASK } from "../scheduled/task-definitions";
@@ -37,15 +42,28 @@ interface OperationTurnOrigin {
 
 /**
  * The originating chat turn of a tool call, or null when the caller is not one.
- * Requires the signed agent plus a deliverable chat conversation, and excludes
- * Automation-driven sessions, which have their own reaction tracking.
+ * Requires the signed agent, chat sender and a deliverable conversation.
+ * The sender's evidence comes off the signed turn run; current membership
+ * determines their authority when the follow-up runs (`FOLLOWUP_SOURCE`).
  */
-export function operationTurnOrigin(
-	ctx: Pick<ToolContext, "agentId" | "actingAutomationId" | "sourceContext">,
-): OperationTurnOrigin | null {
+export async function operationTurnOrigin(
+	ctx: Pick<
+		ToolContext,
+		"organizationId" | "agentId" | "actingAutomationId" | "sourceContext"
+	>,
+): Promise<OperationTurnOrigin | null> {
 	if (!ctx.agentId || ctx.actingAutomationId != null) return null;
+	if (!ctx.sourceContext?.userId || !isChatSenderTurn(ctx.sourceContext)) return null;
 	const delivery = sourceToDeliveryContext(ctx.sourceContext);
-	return delivery ? { agent_id: ctx.agentId, delivery } : null;
+	if (!delivery) return null;
+	const senderEvidence = await chatTurnEvidenceOfRun(
+		ctx.organizationId,
+		ctx.sourceContext?.turnRunId,
+	);
+	return {
+		agent_id: ctx.agentId,
+		delivery: senderEvidence ? { ...delivery, senderEvidence } : delivery,
+	};
 }
 
 /** Card statuses that end an operation run. */

@@ -758,7 +758,7 @@ export async function handleExecute(
 	// A chat turn's run remembers the conversation that asked, so an outcome
 	// that arrives after an approval wait can continue it
 	// (operations/operation-outcome-followup.ts).
-	const turnOrigin = operationTurnOrigin(ctx);
+	const turnOrigin = await operationTurnOrigin(ctx);
 	runMetadata = {
 		...runMetadata,
 		approval_notification: notificationContext,

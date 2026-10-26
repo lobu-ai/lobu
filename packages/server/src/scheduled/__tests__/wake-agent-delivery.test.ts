@@ -122,7 +122,7 @@ describe("runWakeAgentTask chat delivery dispatch", () => {
     expect(msg.platformMetadata.senderVouched).toBe(false);
   });
 
-  test("keeps a platform-supplied message id so a retried wake collapses onto it", async () => {
+  test("preserves a platform message id and generates one for a scheduled wake", async () => {
     await seedChatConnection({ id: "conn-real" });
     const enqueued: MessagePayload[] = [];
     const delivery = {

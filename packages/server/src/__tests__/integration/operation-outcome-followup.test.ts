@@ -8,7 +8,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
 import type { Env } from "../../index";
-import { operationOutcomeFollowupKey } from "../../operations/operation-outcome-followup";
+import {
+	operationOutcomeFollowupKey,
+	operationTurnOrigin,
+} from "../../operations/operation-outcome-followup";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import type { ToolContext } from "../../tools/registry";
 import { initWorkspaceProvider } from "../../workspace";
@@ -81,12 +84,19 @@ describe("operation outcome follow-up turn", () => {
 			agentId: AGENT,
 			ownerUserId: userId,
 		});
+		// The turn that asked: a direct message, as the bridge recorded it.
+		const [originTurn] = await getTestDb()`
+			INSERT INTO runs (organization_id, run_type, status, approval_status, action_input)
+			VALUES (${orgId}, 'agent_turn', 'completed', 'auto',
+				${getTestDb().json({ reply: { platform_metadata: { isDirect: true } } })})
+			RETURNING id
+		`;
 		// The verified context a chat turn's tool call carries.
 		turnCtx = {
 			...ctx,
 			agentId: AGENT,
 			clientId: "lobu-worker",
-			sourceContext: { ...DELIVERY },
+			sourceContext: { ...DELIVERY, turnRunId: Number(originTurn.id) },
 		};
 
 		await createTestConnectorDefinition({
@@ -209,6 +219,33 @@ describe("operation outcome follow-up turn", () => {
 		expect(await claim(workerId)).toBe(runId);
 	}
 
+	it.each(["messaging-api", "platform-cli", "scheduled-job", "automation-run"])(
+		"does not reinterpret a %s turn as a chat sender",
+		async (source) => {
+			expect(await operationTurnOrigin({
+				...turnCtx,
+				sourceContext: { ...turnCtx.sourceContext, source },
+			})).toBeNull();
+		},
+	);
+
+	it("does not create a headless wake when the originating sender is missing", async () => {
+		expect(await operationTurnOrigin({
+			...turnCtx,
+			sourceContext: { ...turnCtx.sourceContext, userId: undefined },
+		})).toBeNull();
+	});
+
+	it("keeps the sender on a follow-up turn that requests another approval", async () => {
+		expect(await operationTurnOrigin({
+			...turnCtx,
+			sourceContext: { ...turnCtx.sourceContext, source: "followup" },
+		})).toMatchObject({
+			agent_id: AGENT,
+			delivery: { ...DELIVERY, senderEvidence: { isDirectMessage: true, senderVouched: false } },
+		});
+	});
+
 	it("continues the conversation once with the result when an approved operation completes", async () => {
 		const { runId, workerId } = await queueGated(turnCtx, "hello");
 		await approveAndClaim(runId, workerId);
@@ -225,7 +262,11 @@ describe("operation outcome follow-up turn", () => {
 		expect(tasks[0].action_input.name).toBe("wake_agent");
 		expect(payload.agent_id).toBe(AGENT);
 		expect(payload.__created_by_agent).toBe(AGENT);
-		expect(payload.__delivery_context).toEqual({ ...DELIVERY });
+		// The wake replies as the sender who asked, with their message's evidence.
+		expect(payload.__delivery_context).toEqual({
+			...DELIVERY,
+			senderEvidence: { isDirectMessage: true, senderVouched: false },
+		});
 		expect(payload.__message_id).toBe(`operation-outcome-${runId}`);
 		expect(payload.prompt).toContain('"Echo"');
 		expect(payload.prompt).toContain("was approved and completed");
