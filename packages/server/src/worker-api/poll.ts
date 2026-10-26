@@ -6,7 +6,7 @@
  */
 
 import { validateRecoveryDispatch } from '../lib/browser-recovery';
-import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY } from '../lib/device-feed-read-protocol';
+import { sourceReadScrubAssignments } from '../lib/device-feed-read-protocol';
 import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, connectionBrowserGrant } from '../connectors/browser-resource';
 import { authorizeCapabilities, isKnownPlatform } from '@lobu/core';
 import { Value } from '@sinclair/typebox/value';
@@ -133,17 +133,7 @@ export async function failClaimedWorkerRun(params: {
           outcome = ${nativeRun?.run_metadata?.cancel_requested_at ? null : DISPATCH_FAILURE_OUTCOME},
           completed_at = current_timestamp,
           error_message = ${params.errorMessage},
-          action_output = CASE
-            WHEN action_key = ${DEVICE_FEED_READ_ACTION_KEY}
-              OR run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true'
-              THEN NULL
-            ELSE action_output END,
-          action_input = CASE
-            WHEN run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true'
-              THEN '{"scrubbed":true}'::jsonb
-            WHEN action_key = ${DEVICE_FEED_READ_ACTION_KEY}
-              THEN jsonb_build_object('scrubbed', true, 'feed_key', action_input->>'feed_key')
-            ELSE action_input END
+          ${sourceReadScrubAssignments(tx)}
       WHERE id = ${params.runId}
         ${runLeaseFence(tx, params.workerId)}
       RETURNING organization_id, run_type, approval_status, action_key, feed_id, dry_run

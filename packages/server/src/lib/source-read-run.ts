@@ -1,7 +1,7 @@
 import { getDb, pgTextArray } from '../db/client';
 import { classifyRunOutcome } from '../runs/run-outcome';
 import logger from '../utils/logger';
-import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY } from './device-feed-read-protocol';
+import { DEVICE_FEED_READ_ACTION_KEY, SOURCE_FEED_READ_METADATA_KEY, sourceReadOnlyScrubAssignments } from './device-feed-read-protocol';
 
 /** Terminalize and scrub atomically, so late claims/completions cannot restore payloads. */
 export async function scrubSourceReadRun(
@@ -15,10 +15,9 @@ export async function scrubSourceReadRun(
   try {
     await sql`
       UPDATE runs
-      SET action_output = NULL,
-          action_input = CASE WHEN run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true'
-            THEN '{"scrubbed":true}'::jsonb
-            ELSE ${sql.json({ scrubbed: true, ...(feedKey ? { feed_key: feedKey } : {}) })} END,
+      SET ${sourceReadOnlyScrubAssignments(sql,
+            sql.json({ scrubbed: true, ...(feedKey ? { feed_key: feedKey } : {}) }),
+          )},
           status = CASE WHEN status = ANY(${inFlight}::text[]) THEN ${status} ELSE status END,
           outcome = CASE WHEN status = ANY(${inFlight}::text[])
             THEN ${classifyRunOutcome({ status })} ELSE outcome END,

@@ -10,10 +10,7 @@
 
 import { DEVICE_ACTION_QUEUE_BUDGET_MS } from '../../config/intervals';
 import { type DbClient, getDb } from '../../db/client';
-import {
-  DEVICE_FEED_READ_ACTION_KEY,
-  SOURCE_FEED_READ_METADATA_KEY,
-} from '../../lib/device-feed-read-protocol';
+import { sourceReadScrubAssignments } from '../../lib/device-feed-read-protocol';
 import { classifyRunOutcome } from '../../runs/run-outcome';
 import { supersedeActionEvent } from './approval-events';
 import {
@@ -412,17 +409,7 @@ export async function waitForDeviceActionRunWithOptions(
           outcome = ${classifyRunOutcome({ status: 'timeout' })},
           completed_at = current_timestamp,
           error_message = ${timeoutMessage},
-          action_output = CASE
-            WHEN action_key = ${DEVICE_FEED_READ_ACTION_KEY}
-              OR run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true'
-              THEN NULL
-            ELSE action_output END,
-          action_input = CASE
-            WHEN run_metadata->>${SOURCE_FEED_READ_METADATA_KEY} = 'true'
-              THEN '{"scrubbed":true}'::jsonb
-            WHEN action_key = ${DEVICE_FEED_READ_ACTION_KEY}
-              THEN jsonb_build_object('scrubbed', true, 'feed_key', action_input->>'feed_key')
-            ELSE action_input END
+          ${sourceReadScrubAssignments(tx)}
       WHERE id = ${runId}
         AND organization_id = ${organizationId}
         AND status IN ('pending', 'running')
